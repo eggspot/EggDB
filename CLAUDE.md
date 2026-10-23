@@ -163,7 +163,7 @@ Check each task against these before starting and again before opening the PR.
     - more NoSQL and graph APIs: DynamoDB, Firestore, Bigtable, Cosmos DB, memcached, FoundationDB-style
       key-value, CouchDB, Bolt, Gremlin (D48);
     - KQL, SPL, Excel, Dataverse and mainframe data (D49);
-    - finance and industry standards (D50);
+    - finance and industry standards, with X12 waiting for its paid license (D50);
     - catalog, lineage, master data and quality (D51);
     - sharing, clean rooms and privacy technology (D52);
     - legal hold, WORM retention and sovereignty (D53);

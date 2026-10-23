@@ -1147,7 +1147,8 @@ More dialects, each as itself (D10):
 
 **Cloud warehouses**
 - GoogleSQL (BigQuery, Spanner);
-- Snowflake SQL;
+- Snowflake SQL, through Snowflake's documented SQL REST API (its driver wire protocol isn't
+  documented);
 - Databricks/Spark SQL, through the HiveServer2 Thrift protocol and the Statement Execution REST
   API.
 
@@ -1158,11 +1159,20 @@ More dialects, each as itself (D10):
 **IBM and SAP**
 - IBM Db2 SQL and SQL PL, through DRDA (an Open Group standard), which also reaches Informix and
   Db2 for z/OS;
-- Sybase/SAP ASE, through the published TDS 5.0.
+- Sybase/SAP ASE: its SQL, reached through the PostgreSQL protocol and through TDS 7+ (MS-TDS).
+  TDS 5.0 itself is implemented only if a lawful public specification is found, as D10 handles
+  Oracle's protocol.
 
 **Reached through the PostgreSQL protocol**
 - Redshift, Vertica and Greenplum;
-- Teradata and SAP HANA SQL, whose own wire protocols aren't public (D1, D10).
+- Teradata SQL, whose own wire protocol isn't public (D1, D10).
+
+**SAP HANA.** SAP publishes the HANA SQL Command Network Protocol reference, so HANA's own protocol is
+implemented from it, after D34's legal check.
+
+**Vendor drivers.** Teradata's and Vertica's own vendor drivers won't connect over the PostgreSQL
+protocol. Users of those reach EggDB through PostgreSQL drivers, or through EggDB's own drivers
+(D16).
 
 The order follows use, decided by research. Each dialect has its pass rate tracked (D45).
 
@@ -1170,7 +1180,7 @@ The order follows use, decided by research. Each dialect has its pass rate track
 **Cloud NoSQL APIs**
 - the DynamoDB JSON API with PartiQL;
 - Firestore, Bigtable and HBase, and Spanner's API, from their public protocol definitions;
-- Cosmos DB's NoSQL, Gremlin and Table APIs.
+- Cosmos DB's NoSQL, Gremlin and Table APIs, in the documented gateway mode.
 
 **Key-value**
 - the memcached protocol;
@@ -1179,12 +1189,13 @@ The order follows use, decided by research. Each dialect has its pass rate track
 
 **Replication and graph**
 - CouchDB replication;
-- Couchbase SQL++;
+- Couchbase SQL++, from its documentation only, since Couchbase is under BSL (D1);
 - Neo4j's Bolt protocol, alongside Cypher (D10);
 - Apache TinkerPop Gremlin.
 
-FoundationDB's and CloudKit's own wire protocols aren't implemented; their data comes in through
-documented exports (D13).
+FoundationDB's own wire protocol and Apple's CloudKit aren't implemented: CloudKit is a hosted Apple
+service with no public server protocol. Their data comes in through documented exports (D13). Core
+Data's stores are SQLite files, which EggDB already opens (D5).
 
 ## D49 Microsoft, Splunk and legacy sources — Decided by research (third gap review, 2026-10-24); under D46
 **Query languages and ingest**
@@ -1214,17 +1225,19 @@ own export, ODBC or JDBC.
 **Industry formats for ingest and export**
 - FIX and ISO 20022 (finance);
 - FHIR and HL7 v2 (healthcare);
-- X12 and EDIFACT (trade);
+- EDIFACT (trade);
 - DICOM (medical imaging).
 
-All of these are built from their public standards. Formal certifications (SWIFT membership, FHIR
-conformance, DICOM conformance statements) wait for the owner (D46).
+All of these are built from their freely available standards. ASC X12 needs a paid license to
+use its specifications, so X12 support waits for the owner (D46). Formal certifications (SWIFT
+membership, FHIR conformance, DICOM conformance statements) wait for the owner too.
 
 ## D51 Data catalog, lineage, master data and quality — Decided by research (third gap review, 2026-10-24); extends D42 under D46
 **Catalog and lineage**
 - a data catalog with a business glossary and stewardship;
 - lineage through OpenLineage;
-- the Apache Atlas and OpenMetadata APIs, so Purview and similar tools connect.
+- the Apache Atlas and OpenMetadata APIs, so tools built on them connect. Microsoft Purview reaches
+  EggDB through its own scanners and connectors (D46), not through an Atlas server.
 
 **Contracts**
 - a schema registry and data contracts.
@@ -1272,6 +1285,11 @@ conformance, DICOM conformance statements) wait for the owner (D46).
 - customer-held keys kept in-country;
 - limits on operator access;
 - logs of cross-border transfers.
+
+**WORM retention and erasure.** Data under a WORM retention period can't be altered, even by
+erasure. A GDPR erasure request on it is recorded and carried out when the retention period ends,
+the same as under a legal hold. The retention rules say which law takes precedence; that is the
+deploying organization's legal call.
 
 **Compliance claims** (SEC 17a-4, FINRA, HIPAA, national sovereignty laws) need counsel and paid
 assessments, so they stay with the owner. EggDB provides the controls (D26).
@@ -1330,7 +1348,7 @@ Media codecs are our own (D1), and only royalty-free ones.
 - SQL/MDA (ISO 9075-15);
 - Zarr, HDF5 and NetCDF.
 
-**GIS at PostGIS parity**
+**GIS at PostGIS parity**, from PostGIS's and pgRouting's documentation only, since both are GPL (D1)
 - raster, topology and routing;
 - GeoTIFF and Cloud-Optimized GeoTIFF;
 - the OGC APIs;
@@ -1348,7 +1366,8 @@ Map and coordinate datasets are used only under compatible licenses (D30's rule)
 - OPC UA, Modbus and Sparkplug ingest.
 
 ## D58 Hyperscale operations — Decided by research (third gap review, 2026-10-24); extends D25 and D44 under D46
-**Fleet control plane** for thousands of clusters
+**Fleet control plane** for thousands of clusters. This is software operators run themselves, not
+a hosted service (D45)
 - inventory;
 - upgrades in canary waves;
 - placement by hardware class.
@@ -1362,7 +1381,15 @@ Map and coordinate datasets are used only under compatible licenses (D30's rule)
 - MPP distributed analytics with workload queues;
 - resumable petabyte-scale migrations with verified differences.
 
-**Owner items from this review** (D46): legal checks of API compatibility with Google's, Amazon's
-and Snowflake's services, and of the relevant patents. Also paid cloud accounts and hardware for
-compatibility testing (free official emulators run from outside the repo), and push-notification
-credentials. Also marketplace listings, and country-level legal opinions.
+**Owner items from this review** (D46):
+- **Legal checks:** before building, D34's and D43's legal and patent checks cover API
+  compatibility with every outside vendor's service named in D47–D57, with unclear results going
+  to the owner. That means Google, Amazon, Snowflake, Databricks, Microsoft (Cosmos DB, Dataverse,
+  Kusto, the MS-XLS, MS-ADTS and PST formats, DTDL), Splunk, SAP and IBM.
+- **Licenses:** ASC X12's paid license (D50).
+- **Accounts and money:**
+  - paid cloud accounts and hardware for compatibility testing (free official emulators run from
+    outside the repo);
+  - push-notification credentials;
+  - marketplace listings;
+  - country-level legal opinions.
