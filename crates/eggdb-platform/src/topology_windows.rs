@@ -7,6 +7,7 @@ const RELATION_PROCESSOR_CORE: u32 = 0;
 const RELATION_NUMA_NODE: u32 = 1;
 const RELATION_CACHE: u32 = 2;
 const RELATION_PROCESSOR_PACKAGE: u32 = 3;
+const RELATION_NUMA_NODE_EX: u32 = 6;
 const CACHE_UNIFIED: u32 = 0;
 const CACHE_DATA: u32 = 2;
 const HEADER_SIZE: usize = 8;
@@ -86,7 +87,7 @@ fn parse_records(mut buffer: &[u8], layout: AffinityLayout) -> Option<Records> {
                 PROCESSOR_MASKS,
                 layout,
             )?),
-            RELATION_NUMA_NODE => {
+            RELATION_NUMA_NODE | RELATION_NUMA_NODE_EX => {
                 let node = NumaNodeId::new(u32::from_le_bytes(field(record, NUMA_NODE_NUMBER)?));
                 let cpus = masks(record, PROCESSOR_GROUP_COUNT, PROCESSOR_MASKS, layout)?;
                 for cpu in cpus.iter() {
@@ -278,6 +279,17 @@ mod tests {
             buffer.extend(node);
             assert_eq!(parse(&buffer, layout).numa_nodes(), [NumaNodeId::new(0)]);
         }
+    }
+
+    #[test]
+    fn extended_numa_records_count_as_numa_records() {
+        let layout = AffinityLayout::Wide;
+        let mut buffer = processor(0, 0b11, layout);
+        let mut extended = numa_node(2, &[(0, 0b11)], layout);
+        extended[0..4].copy_from_slice(&6_u32.to_le_bytes());
+        buffer.extend(numa_node(2, &[(0, 0b11)], layout));
+        buffer.extend(extended);
+        assert_eq!(parse(&buffer, layout).numa_nodes(), [NumaNodeId::new(2)]);
     }
 
     #[test]

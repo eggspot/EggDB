@@ -103,17 +103,16 @@ fn grouped(
 ) -> Option<BTreeMap<CpuId, u32>> {
     let mut groups: HashSet<CpuSet> = HashSet::new();
     for cpu in online.iter() {
-        let group = group_of(cpu)?;
+        let group: CpuSet = group_of(cpu)?
+            .iter()
+            .filter(|member| online.contains(*member))
+            .collect();
         if !group.contains(cpu) {
             return None;
         }
         groups.insert(group);
     }
-    let within_online = groups
-        .into_iter()
-        .map(|group| group.iter().filter(|cpu| online.contains(*cpu)).collect())
-        .collect();
-    number_groups(within_online)
+    number_groups(groups.into_iter().collect())
 }
 
 fn topology_file(cpu: CpuId, name: &str) -> String {
@@ -242,6 +241,14 @@ mod tests {
             topology.core_cpus(seventh),
             CpuSet::parse_list("7").unwrap()
         );
+    }
+
+    #[test]
+    fn lists_that_differ_only_in_offline_cpus_name_one_group() {
+        let mut files = two_packages_of_two_cores_with_two_threads();
+        files.insert("cpu/online".into(), "0-7".into());
+        files.insert("cpu/cpu0/topology/core_cpus_list".into(), "0,4,8".into());
+        assert_eq!(read_files(&files), two_by_two_by_two());
     }
 
     #[test]

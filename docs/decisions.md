@@ -1683,6 +1683,8 @@ designs. It returns a `CpuTopology`:
     - CPUs are grouped by these lists, never by `core_id` and `physical_package_id`.
     - No `node` directory (a kernel without NUMA, common on Android) means NUMA is unknown,
       not node 0.
+    - Lists are cut down to online CPUs before CPUs are grouped, so lists that differ only in
+      offline CPUs name one group.
     - The reader takes a file-reading function, so its tests run on every OS against a fake
       tree.
   - Windows: one `GetLogicalProcessorInformationEx(RelationAll)` call, retried while it answers
@@ -1690,6 +1692,7 @@ designs. It returns a `CpuTopology`:
     processor group since Windows Server 2022.
     - The records are parsed as bytes, with explicit offsets for both the 64-bit and the 32-bit
       `GROUP_AFFINITY` layouts. A group count of 0 (before Windows 10 20H2) means one mask.
+      Records of the newer NUMA kind (`RelationNumaNodeEx`, 6) are read as NUMA records.
     - A 32-bit process on a machine with more than 32 processors in a group gets an unknown
       topology, since its masks fold processors onto each other.
   - macOS and iOS: `sysctlbyname` for `hw.physicalcpu`, `hw.logicalcpu`, `hw.packages` and
