@@ -28,6 +28,8 @@ pub enum ErrorKind {
     StaleHandle,
     /// The simulation injected this failure on purpose.
     InjectedFault,
+    /// A queue already holds as many operations as it may.
+    QueueFull,
     /// Any other failure reported by the operating system.
     Other,
 }
@@ -45,6 +47,7 @@ impl ErrorKind {
             Self::OutOfMemory => "out of memory",
             Self::StaleHandle => "handle opened before a simulated crash",
             Self::InjectedFault => "injected fault",
+            Self::QueueFull => "queue full",
             Self::Other => "operating system error",
         }
     }
