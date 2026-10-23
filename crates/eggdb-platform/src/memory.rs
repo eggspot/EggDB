@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, ErrorKind, Result};
 use std::alloc::{self, Layout};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
@@ -125,7 +125,6 @@ impl MemoryRegion {
         mode: PageMode,
         accounting: Option<Arc<Accounting>>,
     ) -> Result<Self> {
-        use crate::error::{Error, ErrorKind};
         let layout = Layout::from_size_align(len, alignment)
             .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
         if layout.size() == 0 {
@@ -200,7 +199,6 @@ impl fmt::Debug for MemoryRegion {
 }
 
 pub(crate) fn check_len(len: usize, granularity: usize) -> Result<()> {
-    use crate::error::{Error, ErrorKind};
     if len == 0 || !len.is_multiple_of(granularity) {
         return Err(Error::new(ErrorKind::InvalidInput));
     }
