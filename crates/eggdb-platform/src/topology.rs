@@ -354,6 +354,7 @@ fn check_cache_line(size: Option<NonZeroUsize>) -> Result<()> {
 pub(crate) fn number_groups(mut groups: Vec<CpuSet>) -> Option<BTreeMap<CpuId, u32>> {
     groups.retain(|group| !group.is_empty());
     groups.sort_by_key(|group| group.iter().next());
+    groups.dedup();
     let mut numbers = BTreeMap::new();
     for (number, group) in groups.iter().enumerate() {
         let number = u32::try_from(number).ok()?;
@@ -364,6 +365,31 @@ pub(crate) fn number_groups(mut groups: Vec<CpuSet>) -> Option<BTreeMap<CpuId, u
         }
     }
     Some(numbers)
+}
+
+#[cfg(test)]
+pub(crate) fn assert_numbered_densely(topology: &CpuTopology) {
+    let distinct = |id: fn(&CpuLocation) -> Option<u32>| -> Vec<u32> {
+        let mut ids: Vec<u32> = topology.locations().iter().filter_map(id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    for ids in [
+        distinct(|location| location.core().map(CoreId::index)),
+        distinct(|location| location.package().map(PackageId::index)),
+        distinct(|location| location.last_level_cache().map(CacheId::index)),
+    ] {
+        assert!(ids.iter().copied().eq(0..ids.len() as u32), "{ids:?}");
+    }
+    let cores = distinct(|location| location.core().map(CoreId::index)).len();
+    let packages = distinct(|location| location.package().map(PackageId::index)).len();
+    if let Some(counted) = topology.physical_cores() {
+        assert_eq!(counted.get(), cores);
+    }
+    if let Some(counted) = topology.packages() {
+        assert_eq!(counted.get(), packages);
+    }
 }
 
 #[cfg(any(test, target_os = "linux", target_os = "android", windows))]

@@ -127,6 +127,7 @@ fn list(file: &dyn Fn(&str) -> Option<String>, path: &str) -> Option<CpuSet> {
 mod tests {
     use super::read;
     use crate::rng::SplitMix64;
+    use crate::topology::assert_numbered_densely;
     use crate::{CpuId, CpuSet, CpuTopology, NumaNodeId, SiblingNumbering};
     use std::collections::HashMap;
     use std::num::NonZeroUsize;
@@ -376,6 +377,7 @@ mod tests {
             let topology = read_files(&files);
             let placed = topology.logical_cpus().map_or(0, NonZeroUsize::get);
             assert_eq!(topology.cpus().len(), placed);
+            assert_numbered_densely(&topology);
         }
     }
 }
