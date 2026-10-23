@@ -13,7 +13,12 @@ refine it through research, recorded in docs/decisions.md.
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6); the first release binary with its download and install times measured (D14) | |
 | M5 | SQL: parser, planner, optimizer and executor; SQLite-compatible embedded SQL and the SQLite file format; the stable C API and the first official drivers (Rust, C#, Java, Node.js, Python, Go) in embedded mode (D16); the `eggdb` CLI client (D15) | |
-| M6 | Server and the PostgreSQL wire protocol and SQL dialect; authentication, TLS, roles and row-level security (D22, D23); metrics, logs, slow queries and `EXPLAIN ANALYZE` (D25); the official drivers over the network and their main ORMs (D16); the first GUI client screens on the desktop and in the browser, designed by Claude Fable (D15); the built-in MCP server, with schema discovery, querying and agent permissions (D11); PostgreSQL tools (psql, pgAdmin, DBeaver, the main drivers and ORMs) working (D12); restoring plain-SQL `pg_dump` output (D13) | |
+| M6a | Server and the PostgreSQL wire protocol and SQL dialect, with authentication (SCRAM), TLS and roles from the start, since the server never listens without authentication (D22, D23, D45); PostgreSQL tools (psql, pgAdmin, DBeaver) working (D12); restoring plain-SQL `pg_dump` output (D13) | |
+| M6b | The rest of security: LDAP, Kerberos, OpenID Connect, client certificates, row- and column-level security, masking (D22) | |
+| M6c | Operations: metrics, logs, slow queries, statement statistics, `EXPLAIN ANALYZE` (D25) | |
+| M6d | The built-in MCP server: schema discovery, querying, agent permissions, prompt-injection safety (D11, D45) | |
+| M6e | The first GUI client screens on the desktop and in the browser, designed by Claude Fable (D15) | |
+| M6f | The official drivers over the network and their main ORMs (D16, D17) | |
 | M7 | Caching: in-memory tables with expiry and eviction, pub/sub, streams; Redis RESP | |
 | M8 | Full-text search: analyzers, inverted indexes, BM25 ranking; Elasticsearch/OpenSearch REST | |
 | M9 | Documents and JSON; the MongoDB wire protocol | |
@@ -61,8 +66,7 @@ More tracks that run alongside the milestones, each starting where its dependenc
   conformance list.
 
 From the second gap review (D37–D45):
-- **M6 is split** into the server and the PostgreSQL protocol, security, operations, MCP, the first GUI
-  screens and the network drivers, shipped in that order (D45).
+- **M6 is split** into M6a to M6f (table above), with security in the first piece (D45).
 - **Generated APIs and realtime (D37)** follow the server.
 - **The extra models (D38)** follow the SQL dialects.
 - **Observability storage (D39)** follows time series (M11).

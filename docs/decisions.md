@@ -905,7 +905,7 @@ password, magic link, social login and OpenID Connect. Users get JWT sessions th
 row-level security, so an app can talk to EggDB directly and safely.
 
 **Files** stored in EggDB's object storage (D2) can be transformed on request (resize, crop,
-convert) through sandboxed WebAssembly extensions (D27). Every API is permission-checked by D22 and
+convert) through sandboxed WebAssembly extensions (D27). The image codecs are our own code (D1). Every API is permission-checked by D22 and
 rate-limited by D25.
 
 ## D38 The remaining data models and their query languages — Decided by research (second gap review, 2026-10-23); refines D2 and D10
@@ -920,8 +920,14 @@ These close "every kind of database":
 - **Key-value with secondary indexes:** this comes from the relational core, and is stated here so
   key-value users find it.
 
-Each is a front-end over the one core (D2, D10), and each is proven by its standard's own test
-suites where they can lawfully be run.
+Each is a front-end over the one core (D2, D10). Each is proven by its standard's own test suites
+where they exist and can lawfully be run (the W3C SPARQL and XQuery suites, for example). Otherwise
+it is proven by our own tests built from the public documentation and its examples. That is the
+case for DAX, which has no public suite.
+
+**MDX, DAX and XMLA** are implemented from Microsoft's public documentation, which D1 allows. Before
+their milestone they get D34's legal check and D43's patent check, with anything unclear going to
+the owner.
 
 ## D39 Observability data: metrics, logs and traces as a store — Decided by research (second gap review, 2026-10-23)
 D25 covers EggDB's own telemetry. EggDB is also a store for everyone else's, so Grafana (D12) can
@@ -934,7 +940,9 @@ use it in place of Prometheus, Loki and Tempo.
 - syslog;
 - Jaeger and Zipkin traces.
 
-**Query:** PromQL, LogQL, TraceQL and SQL, all over the same data. Retention, downsampling and tiered
+**Query:** PromQL, LogQL, TraceQL and SQL, all over the same data. EggDB also serves the Prometheus,
+Loki and Tempo query HTTP APIs that Grafana uses. Loki and Tempo are AGPL, so their APIs and
+behavior come from their public documentation only, never their source (D1). Retention, downsampling and tiered
 storage (D18) keep it cheap.
 
 ## D40 Engine internals, stated — Decided by research (second gap review, 2026-10-23); refines D7
@@ -944,7 +952,9 @@ re-planning during execution.
 **Execution:** vectorized, with SIMD chosen at runtime for the machine. A query compiler is added
 later where it pays.
 
-**I/O:** asynchronous, through io_uring, IOCP and kqueue in the platform layer (M1).
+**I/O:** asynchronous, through io_uring and IOCP in the platform layer (M1). There is an epoll path
+where io_uring is unavailable, and kqueue for network I/O with a thread pool for files on the BSDs
+and macOS, since kqueue has no asynchronous file I/O.
 
 **Approximate answers:** `TABLESAMPLE`, sketches (HyperLogLog, t-digest) and `APPROX_*` functions.
 
@@ -969,8 +979,9 @@ never required (D6, D34).
 - browser persistence through the Origin Private File System.
 
 **Better than SQLite, defined and published:**
-- smaller and faster on SQLite's own workloads;
-- branch coverage at least as high as SQLite's;
+- smaller and faster on SQLite's own workloads (its `speedtest1` and the standard embedded
+  benchmarks), measured on the `embedded` profile (D34);
+- a published branch-coverage target for the core, rising every release toward SQLite's;
 - a promise that today's files stay readable for decades (D20).
 
 ## D42 Beyond the client: admin console, notebooks and onboarding — Decided by research (second gap review, 2026-10-23); extends D15 and D32
@@ -987,10 +998,11 @@ The GUI and documentation are **localized**, including right-to-left scripts. On
 - step-by-step tutorials.
 
 ## D43 Legal, export and privacy — Decided by research (second gap review, 2026-10-23); refines D34
-- **Cryptography export:** the cryptography is our own (D35), so the publicly available source
-  carries the required US and EU export notices before the first release.
-- **Patents:** the clean room (D1) covers copyright, not patents. Apache-2.0's grant (D36) protects
-  users from our contributors. Research checks known patents before building patent-heavy features,
+- **Cryptography export:** the cryptography is our own (D35), so before the first release research
+  records what export rules call for, for publicly available encryption source (for example the US
+  rules for publicly available source code). Any filing or notification is the owner's to make.
+- **Patents:** the clean room (D1) covers copyright, not patents. Users who choose the Apache-2.0
+  option (D36) get its patent grant from our contributors; the MIT option has none. Research checks known patents before building patent-heavy features,
   and records the result here.
 - **Benchmark clauses:** some commercial databases' licenses (Oracle, SQL Server and others)
   restrict publishing benchmark results. Before D32's dashboards name such a product, research checks
@@ -1008,19 +1020,23 @@ The GUI and documentation are **localized**, including right-to-left scripts. On
 
 **Cost and energy:**
 - a metering API (usage per tenant, database and query) with hooks for anyone's billing;
-- energy in the lightweight budgets (D6): joules per query and idle wake-ups.
+- energy in the lightweight budgets (D6): joules per query and idle wake-ups. These are reported
+  first, and gated once a repeatable measurement method is fixed and recorded here.
 
 **Community:** on GitHub Discussions, with a release blog and public roadmap voting. Anything that
 needs an account elsewhere is the owner's call.
 
 ## D45 Fixes to weak spots — Decided by research (second gap review, 2026-10-23)
-**Split M6.** The roadmap splits M6 into smaller milestones:
-- the server and the PostgreSQL protocol;
-- security;
-- operations;
-- MCP;
-- the first GUI screens;
-- the network drivers.
+**Split M6.** The roadmap splits M6 into M6a to M6f, in order:
+- **M6a:** the server and the PostgreSQL protocol. Authentication, TLS and roles ship in this first
+  piece, because the server never listens without authentication (D22).
+- **M6b:** the rest of security: more authentication methods, and row and column security.
+- **M6c:** operations.
+- **M6d:** MCP.
+- **M6e:** the first GUI screens.
+- **M6f:** the network drivers and their ORMs.
+
+"M6" elsewhere means all six.
 
 **Order of our own foundations.** Being our own (D1) has no fallback, so the order goes by need:
 1. the file format (D20);
