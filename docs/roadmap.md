@@ -59,3 +59,15 @@ More tracks that run alongside the milestones, each starting where its dependenc
 - **AI (D31):** after vectors (M12) and the MCP server (M6).
 - **Relational completeness and multi-tenancy (D32):** across the SQL milestones, tracked as a
   conformance list.
+
+From the second gap review (D37–D45):
+- **M6 is split** into the server and the PostgreSQL protocol, security, operations, MCP, the first GUI
+  screens and the network drivers, shipped in that order (D45).
+- **Generated APIs and realtime (D37)** follow the server.
+- **The extra models (D38)** follow the SQL dialects.
+- **Observability storage (D39)** follows time series (M11).
+- **Engine internals (D40)** run from M1 (I/O) and M5 (the optimizer).
+- **Embedded detail (D41)** runs from M4.
+- **The console and notebooks (D42)** run with the client track.
+- **Legal checks (D43)** come before each release.
+- **Public proof (D44)** runs from the first benchmarks.

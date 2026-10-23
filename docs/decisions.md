@@ -888,3 +888,158 @@ sign-off (D21). The owner applied the same change to the other eggspot open-sour
 There is no paid external security audit and no formal FIPS 140 validation. The project's
 cryptography and security code is reviewed in the open, and by the stricter automated checks of
 D35. A finding from anyone is handled through SECURITY.md.
+
+## D37 Auto-APIs, realtime and the app backend — Decided by research (second gap review, 2026-10-23)
+Most new applications reach their database through generated APIs, not drivers. EggDB generates
+them from the schema, with no code to write:
+- **REST**, in the style of PostgREST;
+- **GraphQL**, in the style of Hasura;
+- **gRPC** and **OData**, the last for Excel, Power BI and SAP;
+- **realtime:** WebSocket and Server-Sent Events subscriptions on live queries, for changes to rows
+  and query results;
+- **a client sync API** for apps, built on D18's offline-first sync.
+
+**End-user authentication for applications**, distinct from database roles (D22): sign-up,
+password, magic link, social login and OpenID Connect. Users get JWT sessions that map onto
+row-level security, so an app can talk to EggDB directly and safely.
+
+**Files** stored in EggDB's object storage (D2) can be transformed on request (resize, crop,
+convert) through sandboxed WebAssembly extensions (D27). Every API is permission-checked by D22 and
+rate-limited by D25.
+
+## D38 The remaining data models and their query languages — Decided by research (second gap review, 2026-10-23); refines D2 and D10
+These close "every kind of database":
+- **Ledger tables:** append-only, tamper-evident history with Merkle proofs that a row was or wasn't
+  changed. It is not a blockchain and has no consensus among strangers.
+- **RDF** triples and quads, with **SPARQL** 1.1.
+- **XML documents**, with **XPath** and **XQuery** (D19 has the type).
+- **OLAP cubes** and semantic models, with **MDX**, **DAX** and **XMLA**, since Excel and Power BI
+  speak them.
+- **Spreadsheet-style tables:** formula columns, and a grid view in the client (D15).
+- **Key-value with secondary indexes:** this comes from the relational core, and is stated here so
+  key-value users find it.
+
+Each is a front-end over the one core (D2, D10), and each is proven by its standard's own test
+suites where they can lawfully be run.
+
+## D39 Observability data: metrics, logs and traces as a store — Decided by research (second gap review, 2026-10-23)
+D25 covers EggDB's own telemetry. EggDB is also a store for everyone else's, so Grafana (D12) can
+use it in place of Prometheus, Loki and Tempo.
+
+**Ingest:**
+- the OpenTelemetry protocol (OTLP) for metrics, logs and traces;
+- Prometheus remote write;
+- Loki's push API;
+- syslog;
+- Jaeger and Zipkin traces.
+
+**Query:** PromQL, LogQL, TraceQL and SQL, all over the same data. Retention, downsampling and tiered
+storage (D18) keep it cheap.
+
+## D40 Engine internals, stated — Decided by research (second gap review, 2026-10-23); refines D7
+**Planning:** a cost-based optimizer with statistics, histograms and correlation, and adaptive
+re-planning during execution.
+
+**Execution:** vectorized, with SIMD chosen at runtime for the machine. A query compiler is added
+later where it pays.
+
+**I/O:** asynchronous, through io_uring, IOCP and kqueue in the platform layer (M1).
+
+**Approximate answers:** `TABLESAMPLE`, sketches (HyperLogLog, t-digest) and `APPROX_*` functions.
+
+**Indexes and storage:** adaptive and learned indexes where benchmarks justify them, and
+compression chosen per column and page.
+
+**Accelerators:** GPUs, persistent memory and CXL memory are optional, behind build features, and
+never required (D6, D34).
+
+## D41 Embedded and edge, in detail — Decided by research (second gap review, 2026-10-23); refines D3, D4 and D6
+**Small devices:**
+- a published memory floor for `no_std` builds;
+- a fixed-memory mode that never allocates beyond a set budget.
+
+**Flash and power:**
+- write-amplification and flash-wear budgets;
+- power-loss safety on raw flash;
+- battery-aware background work: few wake-ups, deferred maintenance.
+
+**Phones and browsers:**
+- correct behavior under iOS background limits and Android Doze;
+- browser persistence through the Origin Private File System.
+
+**Better than SQLite, defined and published:**
+- smaller and faster on SQLite's own workloads;
+- branch coverage at least as high as SQLite's;
+- a promise that today's files stay readable for decades (D20).
+
+## D42 Beyond the client: admin console, notebooks and onboarding — Decided by research (second gap review, 2026-10-23); extends D15 and D32
+Alongside the client (D15), designed by Claude Fable like every visual surface:
+- an **admin web console** served by the server;
+- **SQL notebooks** with charts;
+- a **visual query builder** and **ER diagrams**;
+- **import wizards**;
+- **data profiling and data-quality rules**.
+
+The GUI and documentation are **localized**, including right-to-left scripts. Onboarding includes:
+- a migration guide per source database (D13);
+- sample datasets;
+- step-by-step tutorials.
+
+## D43 Legal, export and privacy — Decided by research (second gap review, 2026-10-23); refines D34
+- **Cryptography export:** the cryptography is our own (D35), so the publicly available source
+  carries the required US and EU export notices before the first release.
+- **Patents:** the clean room (D1) covers copyright, not patents. Apache-2.0's grant (D36) protects
+  users from our contributors. Research checks known patents before building patent-heavy features,
+  and records the result here.
+- **Benchmark clauses:** some commercial databases' licenses (Oracle, SQL Server and others)
+  restrict publishing benchmark results. Before D32's dashboards name such a product, research checks
+  the clause and records what may be published.
+- **Privacy:** the project's own sites and services publish a privacy statement. Telemetry stays
+  off (D21).
+
+## D44 Public proof, community, cost and energy — Decided by research (second gap review, 2026-10-23); extends D7, D21 and D32
+**Public proof:**
+- a reproducible benchmark repository that anyone can rerun: scripts, data and pinned hardware
+  descriptions;
+- a compatibility farm that runs every supported tool, driver and ORM version (D12, D16) weekly
+  and publishes the matrix;
+- chaos testing for clusters (D18).
+
+**Cost and energy:**
+- a metering API (usage per tenant, database and query) with hooks for anyone's billing;
+- energy in the lightweight budgets (D6): joules per query and idle wake-ups.
+
+**Community:** on GitHub Discussions, with a release blog and public roadmap voting. Anything that
+needs an account elsewhere is the owner's call.
+
+## D45 Fixes to weak spots — Decided by research (second gap review, 2026-10-23)
+**Split M6.** The roadmap splits M6 into smaller milestones:
+- the server and the PostgreSQL protocol;
+- security;
+- operations;
+- MCP;
+- the first GUI screens;
+- the network drivers.
+
+**Order of our own foundations.** Being our own (D1) has no fallback, so the order goes by need:
+1. the file format (D20);
+2. TLS and cryptography (D23), in step with the server;
+3. the WebAssembly runtime (D27), before functions and extensions;
+4. the GUI toolkit (D15), its own track;
+5. the operator and the Terraform provider (D25), after the server is stable.
+
+**Compatibility thresholds.** Each protocol and dialect publishes the pass rate of the original's
+test suites, which must not fall between releases. Its first release needs a stated minimum pass
+rate, recorded here.
+
+**Prompt injection (D11).** Data returned to agents through MCP is marked as data, never
+instructions. Agent-readable errors never echo raw stored text as if it were guidance. Tools that
+write or delete stay behind D11's permissions and confirmation.
+
+**Limits for functions and extensions (D27).** Every WebAssembly function and extension runs with CPU,
+memory, time and output limits, set per role.
+
+**SECURITY.md** gains:
+- the scope: denial of service from hostile input, sandbox escapes, protocol attacks;
+- the release signing key, once releases exist;
+- the supported-versions policy after 1.0.
