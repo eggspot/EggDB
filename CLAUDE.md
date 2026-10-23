@@ -85,17 +85,16 @@ Check each task against these before starting and again before opening the PR.
     shrink. (D14)
 14. **A SQL client people love, designed by Claude Fable.** EggDB ships its own client for working
     with data: a GUI that runs as a desktop app on every OS and in the browser, from one Rust
-    codebase on our own GUI toolkit (the desktop GUI is a must-have, built from the start), and
-    a CLI. Any
-    task that designs something a user sees (layouts, flows, the design system, icons, motion,
-    the query editor, result grids, schema browser, explain views) gets its design from Claude
-    Fable: delegate it to an agent on the `fable` model (Agent tool, `model: "fable"`), record
-    the design in `docs/ux/`, then implement it. Next to EggDB's own design, the client offers
-    familiar layouts that work like the clients people already know (SQL Server Management
-    Studio, pgAdmin, DBeaver, DataGrip, MySQL Workbench, MongoDB Compass, Redis Insight), so
-    nobody has to relearn their habits. Familiar means the same layout, shortcuts and workflows,
-    never their code, artwork, icons or screenshots. A layout may be labelled "works like
-    <product>", with a trademark note. (D15)
+    codebase on our own GUI toolkit (the desktop GUI is a must-have, built from the start), and a
+    CLI. Any task that designs something a user sees (layouts, flows, the design system, icons,
+    motion, the query editor, result grids, schema browser, explain views) gets its design from
+    Claude Fable: delegate it to an agent on the `fable` model (Agent tool, `model: "fable"`),
+    record the design in `docs/ux/`, then implement it. Next to EggDB's own design, the client
+    offers familiar layouts that work like the clients people already know (SQL Server Management
+    Studio, pgAdmin, DBeaver, DataGrip, MySQL Workbench, MongoDB Compass, Redis Insight), so nobody
+    has to relearn their habits. Familiar means the same layout, shortcuts and workflows, never
+    their code, artwork, icons or screenshots. A layout may be labelled "works like <product>", with
+    a trademark note. (D15)
 15. **Connectors for every language, working with their ORMs.** Official EggDB drivers for C#/.NET,
     Java and Kotlin, Node.js and TypeScript, Python, Go, Rust, PHP, Ruby, Swift, Dart, C and C++
     (and more as people ask), each fitting its language's standard database interface and its
