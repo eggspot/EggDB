@@ -183,6 +183,10 @@ The owner doesn't merge PRs by hand. After opening a PR, in the same session:
    (`gh pr merge <n> --squash --delete-branch`), then confirm every workflow the merge started
    succeeded.
 
+Security-critical PRs (cryptography, authentication and authorization, the file format) merge the
+same way, but need a second independent review focused only on security, plus test vectors,
+fuzzing and the format compatibility tests in CI (D35).
+
 An open question is never a reason to leave a PR unmerged: answer it with a research subagent,
 record the answer in the PR under "Decided by research" (and in docs/decisions.md for architecture),
 and merge. Only credentials, money, new accounts and going against an owner rule wait for the owner.
@@ -196,5 +200,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D34). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D35). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.
