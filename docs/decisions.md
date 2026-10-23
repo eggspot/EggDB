@@ -849,7 +849,8 @@ gap is roadmap work, tracked on the benchmark dashboard (D32).
 **Legal checks.** Protocol compatibility with products under non-permissive or restrictive terms gets
 a research check of the law and public case history before each protocol milestone, recorded here.
 That includes Redis's recent versions, MongoDB's SSPL, Elasticsearch's licenses, RabbitMQ's MPL,
-EMQX's BSL, and the AWS terms behind the SQS API. Anything unclear goes to the owner.
+EMQX's BSL, the AWS terms behind the SQS API, and Microsoft's Analysis Services languages (MDX,
+DAX, XMLA, D38). Anything unclear goes to the owner.
 
 **CI.** EggDB is a public repository, so the global CI rule's build-time aim applies: parallel jobs
 are fine (CLAUDE.md, "Commands").
