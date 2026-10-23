@@ -43,7 +43,7 @@ impl OsIoQueue {
     pub(crate) fn new(options: IoQueueOptions) -> Result<Self> {
         let (capacity, threads) = options.validated()?;
         let backend = if threads == 0 {
-            Backend::Inline(VecDeque::with_capacity(capacity))
+            Backend::Inline(VecDeque::new())
         } else {
             Backend::Pool(Pool::start(threads)?)
         };

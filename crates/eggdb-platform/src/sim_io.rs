@@ -43,8 +43,8 @@ impl SimIoQueue {
         let (capacity, _) = options.validated()?;
         Ok(Self {
             capacity,
-            pending: Vec::with_capacity(capacity),
-            done: VecDeque::with_capacity(capacity),
+            pending: Vec::new(),
+            done: VecDeque::new(),
             rng: SplitMix64::new(seed),
             short_transfers_per_million: 0,
         })

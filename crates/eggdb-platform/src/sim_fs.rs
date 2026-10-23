@@ -131,8 +131,9 @@ impl SimFileSystem {
     }
 
     /// Seeds the completion orders and short transfers of the queues
-    /// [`FileSystem::io_queue`] creates from now on; each queue mixes in its creation number,
-    /// counted from zero, so two queues of one run differ. The seed is 0 until it is set.
+    /// [`FileSystem::io_queue`] creates from now on. Each queue also mixes in how many queues
+    /// were created before it since the seed was last set, so two queues of one run differ.
+    /// The seed is 0 until it is set.
     pub fn seed_io_queues(&self, seed: u64) {
         let mut state = lock(&self.shared);
         state.io_seed = seed;
