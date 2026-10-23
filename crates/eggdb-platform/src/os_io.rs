@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 /// For now every operating system runs the operations on a pool of worker threads named
 /// `eggdb-io-<n>`, which stays the path for files on macOS and the BSDs, whose kqueue has no
 /// asynchronous file I/O. With no threads, the operations run on the caller's thread inside
-/// [`IoQueue::reap`], in the order they were submitted. An operation that panics on a worker
-/// completes with [`ErrorKind::Other`] instead of leaving its completion missing.
+/// [`IoQueue::reap`], in the order they were submitted. Where panics unwind (release builds
+/// abort instead), an operation that panics on a worker completes with [`ErrorKind::Other`]
+/// instead of leaving its completion missing.
 #[derive(Debug)]
 pub struct OsIoQueue {
     capacity: usize,

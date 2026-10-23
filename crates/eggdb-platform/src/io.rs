@@ -180,10 +180,10 @@ impl<F: fmt::Debug> std::error::Error for RejectedOp<F> {
 ///
 /// Operations in flight are not ordered against each other. A sync is only guaranteed to cover
 /// the writes whose successful completions were reaped before the sync was submitted, so the
-/// engine waits for a write's completion before submitting the sync that must make it durable. Overlapping
-/// writes, or a read and a write of the same range, are never in flight at once, and a failed
-/// write leaves its range unknown. Dropping a queue waits for every operation in flight, since
-/// the operating system may still be using their buffers.
+/// engine waits for a write's completion before submitting the sync that must make it durable.
+/// Overlapping writes, or a read and a write of the same range, are never in flight at once,
+/// and a failed write leaves its range unknown. Dropping a queue waits for every operation in
+/// flight, since the operating system may still be using their buffers.
 pub trait IoQueue: Send + fmt::Debug {
     /// The file handle type the operations use.
     type File: File;
