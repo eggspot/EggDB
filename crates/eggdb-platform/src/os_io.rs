@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 /// [`OsFileSystem::io_queue`](crate::FileSystem::io_queue).
 ///
 /// Unless [`IoQueueOptions::backend`] asks for one, it takes io_uring on Linux and Android
-/// (kernel 5.6 or later) and falls back when the kernel refuses it, as seccomp filters,
+/// (kernel 5.6 or later, on x86_64, x86, aarch64, arm, riscv64, powerpc64, s390x and
+/// loongarch64) and falls back when the kernel refuses it, as seccomp filters,
 /// `kernel.io_uring_disabled` and older kernels do. Elsewhere, and after a refusal, it runs the
 /// operations on a pool of worker threads named `eggdb-io-<n>`, which stays the path for files
 /// on macOS and the BSDs, whose kqueue has no asynchronous file I/O; with no threads they run
