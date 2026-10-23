@@ -25,7 +25,7 @@ impl FileSystem for OsFileSystem {
     fn open(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
         let file = open_options(mode)
             .open(path)
-            .map_err(|error| open_error(path, mode, error))?;
+            .map_err(|error| open_error(path, mode, error, Error::from))?;
         refuse_directory(&file)?;
         Ok(OsFile::new(file, mode, false))
     }
@@ -35,10 +35,7 @@ impl FileSystem for OsFileSystem {
         uncached::request(&mut options)?;
         let opened = options
             .open(path)
-            .map_err(|error| match directory_error(path, mode) {
-                Some(kind) => Error::from(error).with_kind(kind),
-                None => uncached::open_error(error),
-            })
+            .map_err(|error| open_error(path, mode, error, uncached::open_error))
             .and_then(|file| refuse_directory(&file).map(|()| file))
             .and_then(|file| uncached::apply(&file).map(|()| file));
         match opened {
@@ -111,21 +108,20 @@ fn is_directory(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
-fn directory_error(path: &Path, mode: OpenMode) -> Option<ErrorKind> {
-    match mode {
-        _ if !is_directory(path) => None,
-        OpenMode::CreateNew => Some(ErrorKind::AlreadyExists),
-        OpenMode::Read | OpenMode::ReadWrite | OpenMode::Create => Some(ErrorKind::InvalidInput),
+fn open_error(
+    path: &Path,
+    mode: OpenMode,
+    error: io::Error,
+    convert: fn(io::Error) -> Error,
+) -> Error {
+    if !is_directory(path) {
+        return convert(error);
     }
-}
-
-fn open_error(path: &Path, mode: OpenMode, error: io::Error) -> Error {
-    let kind = directory_error(path, mode);
-    let error = Error::from(error);
-    match kind {
-        Some(kind) => error.with_kind(kind),
-        None => error,
-    }
+    let kind = match mode {
+        OpenMode::CreateNew => ErrorKind::AlreadyExists,
+        OpenMode::Read | OpenMode::ReadWrite | OpenMode::Create => ErrorKind::InvalidInput,
+    };
+    Error::from(error).with_kind(kind)
 }
 
 fn directory_given(path: &Path, error: io::Error) -> Error {
@@ -145,6 +141,16 @@ fn refuse_directory(file: &fs::File) -> Result<()> {
 }
 
 #[cfg(any(unix, windows))]
+fn file_given(path: &Path, error: io::Error) -> Error {
+    let error = Error::from(error);
+    if fs::metadata(path).is_ok_and(|metadata| !metadata.is_dir()) {
+        error.with_kind(ErrorKind::InvalidInput)
+    } else {
+        error
+    }
+}
+
+#[cfg(any(unix, windows))]
 fn require_directory(directory: &fs::File) -> Result<()> {
     if directory.metadata()?.is_dir() {
         Ok(())
@@ -155,7 +161,7 @@ fn require_directory(directory: &fs::File) -> Result<()> {
 
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
-    let directory = fs::File::open(path)?;
+    let directory = fs::File::open(path).map_err(|error| file_given(path, error))?;
     require_directory(&directory)?;
     Ok(directory.sync_all()?)
 }
@@ -168,7 +174,8 @@ fn sync_directory(path: &Path) -> Result<()> {
         .read(true)
         .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
+        .open(path)
+        .map_err(|error| file_given(path, error))?;
     require_directory(&directory)?;
     Ok(directory.sync_all()?)
 }
@@ -308,5 +315,21 @@ impl OsFile {
         let mut file = &self.file;
         file.seek(SeekFrom::Start(offset))?;
         Ok(file.write(buf)?)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use crate::{ErrorKind, FileSystem, OsFileSystem};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn syncing_an_unreadable_regular_file_as_a_directory_is_invalid() {
+        let path = std::env::temp_dir().join(format!("eggdb-unreadable-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let synced = OsFileSystem::new().sync_dir(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(synced.unwrap_err().kind(), ErrorKind::InvalidInput);
     }
 }
