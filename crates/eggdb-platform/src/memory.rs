@@ -13,9 +13,10 @@ pub enum PageMode {
     /// The operating system's normal pages, [`Memory::page_size`] bytes each. Where the system
     /// turns transparent huge pages on for everything, these may still end up on huge pages.
     Normal,
-    /// Explicit huge pages, [`Memory::huge_page_size`] bytes each, reserved by the administrator
-    /// (Linux `MAP_HUGETLB`, Windows `MEM_LARGE_PAGES` with the lock-memory privilege). They cut
-    /// the cost of translating addresses for large buffer pools and are never swapped out.
+    /// Explicit huge pages, [`Memory::huge_page_size`] bytes each: Linux `MAP_HUGETLB` from the
+    /// pool the administrator reserved, Windows `MEM_LARGE_PAGES`, which needs the lock-memory
+    /// privilege. They cut the cost of translating addresses for large buffer pools and are
+    /// never swapped out.
     Huge,
     /// Normal pages that the kernel is asked to back with transparent huge pages when it can
     /// (Linux `madvise(MADV_HUGEPAGE)`). The region starts on a huge page boundary; whether the
