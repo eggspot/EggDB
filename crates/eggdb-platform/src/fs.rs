@@ -42,7 +42,9 @@ pub trait FileSystem: Send + Sync {
     /// [`AlignedBuffer`](crate::AlignedBuffer) and whole pages. Bypassing the cache does not
     /// make writes durable, so [`File::sync_data`] is still required. Fails with
     /// [`ErrorKind::Unsupported`] when the platform or the file system refuses, and leaves the
-    /// choice of falling back to [`FileSystem::open`] to the caller.
+    /// choice of falling back to [`FileSystem::open`] to the caller. A refused
+    /// [`OpenMode::CreateNew`] leaves no file behind; a refused [`OpenMode::Create`] may leave
+    /// an empty one, as the operating system creates the file before refusing.
     fn open_uncached(&self, path: &Path, mode: OpenMode) -> Result<Self::File>;
 
     /// Removes the file at `path`. Open handles keep working until they are dropped.

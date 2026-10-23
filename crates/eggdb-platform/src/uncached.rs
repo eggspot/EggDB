@@ -1,5 +1,6 @@
 use crate::error::{Error, ErrorKind, Result};
 use std::fs;
+use std::io;
 
 pub(crate) fn request(options: &mut fs::OpenOptions) -> Result<()> {
     platform::request(options)
@@ -9,10 +10,13 @@ pub(crate) fn apply(file: &fs::File) -> Result<()> {
     platform::apply(file)
 }
 
-pub(crate) fn refused(error: Error) -> Error {
-    match error.kind() {
-        ErrorKind::InvalidInput => error.with_kind(ErrorKind::Unsupported),
-        _ => error,
+pub(crate) fn open_error(error: io::Error) -> Error {
+    let refused = platform::is_refusal(&error);
+    let error = Error::from(error);
+    if refused {
+        error.with_kind(ErrorKind::Unsupported)
+    } else {
+        error
     }
 }
 
@@ -49,6 +53,12 @@ mod platform {
     )))]
     const O_DIRECT: Option<i32> = None;
 
+    const EINVAL: i32 = 22;
+
+    pub(super) fn is_refusal(error: &std::io::Error) -> bool {
+        error.raw_os_error() == Some(EINVAL)
+    }
+
     pub(super) fn request(options: &mut fs::OpenOptions) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         let flag = O_DIRECT.ok_or_else(|| Error::new(ErrorKind::Unsupported))?;
@@ -63,7 +73,7 @@ mod platform {
 
 #[cfg(target_vendor = "apple")]
 mod platform {
-    use super::{Result, fs};
+    use super::{Error, ErrorKind, Result, fs};
     use std::ffi::c_int;
     use std::io;
     use std::os::fd::AsRawFd;
@@ -72,6 +82,10 @@ mod platform {
 
     unsafe extern "C" {
         fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    }
+
+    pub(super) fn is_refusal(_error: &io::Error) -> bool {
+        false
     }
 
     pub(super) fn request(_options: &mut fs::OpenOptions) -> Result<()> {
@@ -83,7 +97,7 @@ mod platform {
         // takes one integer argument, passed through the variadic declaration as C expects.
         let result = unsafe { fcntl(file.as_raw_fd(), F_NOCACHE, 1 as c_int) };
         if result == -1 {
-            return Err(io::Error::last_os_error().into());
+            return Err(Error::from(io::Error::last_os_error()).with_kind(ErrorKind::Unsupported));
         }
         Ok(())
     }
@@ -94,6 +108,10 @@ mod platform {
     use super::{Result, fs};
 
     const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
+
+    pub(super) fn is_refusal(_error: &std::io::Error) -> bool {
+        false
+    }
 
     pub(super) fn request(options: &mut fs::OpenOptions) -> Result<()> {
         use std::os::windows::fs::OpenOptionsExt;
@@ -114,6 +132,10 @@ mod platform {
 )))]
 mod platform {
     use super::{Error, ErrorKind, Result, fs};
+
+    pub(super) fn is_refusal(_error: &std::io::Error) -> bool {
+        false
+    }
 
     pub(super) fn request(_options: &mut fs::OpenOptions) -> Result<()> {
         Err(Error::new(ErrorKind::Unsupported))

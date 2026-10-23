@@ -1441,7 +1441,7 @@ operating system's cache: `FileSystem::open_uncached`, used with `AlignedBuffer`
 **How each OS does it:**
 - Linux and Android: `O_DIRECT` through std's `custom_flags`. Its value differs by architecture
   (from the kernel's uapi `fcntl.h` headers): `0o40000` on x86, x86_64, riscv64, s390x and
-  loongarch64; `0o200000` on arm and aarch64; `0o400000` on powerpc; `0x8000` on mips. Any other
+  loongarch64; `0o200000` on arm and aarch64; `0o400000` on powerpc and powerpc64; `0x8000` on mips. Any other
   architecture answers `Unsupported` rather than risk a wrong flag, so the build still works
   everywhere (D8).
 - macOS and iOS: `fcntl(F_NOCACHE = 48, 1)` right after open, through our own variadic
@@ -1452,7 +1452,11 @@ operating system's cache: `FileSystem::open_uncached`, used with `AlignedBuffer`
 
 **It fails instead of silently falling back.** When the platform or file system refuses (for
 example `EINVAL` from a file system without `O_DIRECT`), `open_uncached` returns
-`ErrorKind::Unsupported`. That matches the public documentation of databases that rely on direct
+`ErrorKind::Unsupported`. Only a refusal counts: a raw `EINVAL` from the open on Linux, or a
+failed `F_NOCACHE` on Apple; other errors keep their kind. The operating system creates the file
+before refusing, so a refused `CreateNew` removes the file it just made, so that falling back to
+`open(CreateNew)` works, and a refused `Create` may leave an empty file; the simulator does the
+same. That matches the public documentation of databases that rely on direct
 I/O: TigerBeetle refuses to start without it outside a development flag; ScyllaDB checks at
 startup; RocksDB's `use_direct_reads` makes the open fail. Falling back is the engine's choice,
 made later as a setting (`auto`, `required`, `off`), so the speed trade-off stays visible (D7)

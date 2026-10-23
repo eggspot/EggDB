@@ -119,12 +119,10 @@ impl SimFileSystem {
 impl SimFileSystem {
     fn open_handle(&self, path: &Path, mode: OpenMode, uncached: bool) -> Result<SimFile> {
         let mut state = begin(&self.shared)?;
-        if uncached && state.refuse_uncached {
-            return Err(Error::new(ErrorKind::Unsupported));
-        }
         if state.dirs.contains(path) || is_root(path) {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
+        let created = !state.names.contains_key(path);
         let inode = match (state.names.get(path).copied(), mode) {
             (Some(_), OpenMode::CreateNew) => return Err(Error::new(ErrorKind::AlreadyExists)),
             (Some(inode), _) => inode,
@@ -142,6 +140,13 @@ impl SimFileSystem {
                 inode
             }
         };
+        if uncached && state.refuse_uncached {
+            if created && mode == OpenMode::CreateNew {
+                state.names.remove(path);
+                state.free_unreachable_inodes();
+            }
+            return Err(Error::new(ErrorKind::Unsupported));
+        }
         if let Some(open) = state.inodes.get_mut(&inode) {
             open.open_handles += 1;
         }
@@ -741,17 +746,42 @@ mod tests {
     }
 
     #[test]
-    fn uncached_opens_can_be_refused_like_a_file_system_without_direct_io() {
+    fn a_refused_uncached_create_new_leaves_no_file_for_the_fallback() {
+        let fs = SimFileSystem::new();
+        fs.refuse_uncached(true);
+        let error = fs
+            .open_uncached(Path::new("pages"), OpenMode::CreateNew)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(!fs.exists(Path::new("pages")).unwrap());
+        fs.open(Path::new("pages"), OpenMode::CreateNew).unwrap();
+    }
+
+    #[test]
+    fn a_refused_uncached_create_may_leave_an_empty_file_like_the_os() {
         let fs = SimFileSystem::new();
         fs.refuse_uncached(true);
         let error = fs
             .open_uncached(Path::new("pages"), OpenMode::Create)
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
-        assert!(!fs.exists(Path::new("pages")).unwrap());
+        let fallback = fs.open(Path::new("pages"), OpenMode::Create).unwrap();
+        assert_eq!(fallback.size().unwrap(), 0);
         fs.refuse_uncached(false);
-        fs.open_uncached(Path::new("pages"), OpenMode::Create)
-            .unwrap();
+        assert!(
+            fs.open_uncached(Path::new("pages"), OpenMode::Create)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn missing_paths_are_reported_before_a_refusal() {
+        let fs = SimFileSystem::new();
+        fs.refuse_uncached(true);
+        let error = fs
+            .open_uncached(Path::new("missing"), OpenMode::Read)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound);
     }
 
     #[test]

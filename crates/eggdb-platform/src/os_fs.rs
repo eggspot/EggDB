@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{ErrorKind, Result};
 use crate::fs::{File, FileSystem, OpenMode};
 use crate::uncached;
 use std::fs;
@@ -25,11 +25,19 @@ impl FileSystem for OsFileSystem {
     fn open_uncached(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
         let mut options = open_options(mode);
         uncached::request(&mut options)?;
-        let file = options
+        let opened = options
             .open(path)
-            .map_err(|error| uncached::refused(error.into()))?;
-        uncached::apply(&file).map_err(uncached::refused)?;
-        Ok(OsFile::new(file, true))
+            .map_err(uncached::open_error)
+            .and_then(|file| uncached::apply(&file).map(|()| file));
+        match opened {
+            Ok(file) => Ok(OsFile::new(file, true)),
+            Err(error) => {
+                if mode == OpenMode::CreateNew && error.kind() == ErrorKind::Unsupported {
+                    let _ = fs::remove_file(path);
+                }
+                Err(error)
+            }
+        }
     }
 
     fn remove_file(&self, path: &Path) -> Result<()> {
