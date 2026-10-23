@@ -98,11 +98,15 @@ Check each task against these before starting and again before opening the PR.
     (and more as people ask), each fitting its language's standard database interface and its
     popular ORMs. That covers ADO.NET and EF Core, JDBC and Hibernate, Prisma, TypeORM, Drizzle
     and Sequelize, DB-API, SQLAlchemy and Django, `database/sql` and GORM, PDO with Laravel and
-    Doctrine, and ActiveRecord. They work both against a server and in embedded mode. Existing
-    drivers keep working too, through the protocols EggDB speaks (D12). (D16)
+    Doctrine, and ActiveRecord. They work both against a server and in embedded mode. The engine
+    and one client core are Rust. Each language's driver and ORM provider (an EF Core provider is
+    C#, a Hibernate dialect is Java) is a thin layer in that language calling the Rust core
+    through the C API, with no protocol or storage logic of its own. Existing drivers keep
+    working too, through the protocols EggDB speaks (D12). (D16)
 
 ## Code
-- **Everything written by us, in Rust, from scratch.** No code from other databases (SQLite,
+- **Everything written by us, in Rust, from scratch** (the per-language driver layers are the one
+  exception: they're written in their own language, D16). No code from other databases (SQLite,
   PostgreSQL, RocksDB, Redis, Lucene and so on). Implement from public specifications, papers and
   protocol documentation (clean room), and never read the source of copyleft or source-available
   databases (MySQL, MariaDB, MongoDB and others) while working on EggDB. No third-party crates in

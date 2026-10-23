@@ -296,7 +296,21 @@ More languages follow as people ask for them.
 **How they work.** Every driver works both against a server and in embedded mode (D3), and exposes
 every data model and dialect (D2, D10). One Rust client core does the protocol, pooling, types and
 embedded engine. Each language's driver is a thin, idiomatic layer over it through the C API, so
-behavior and speed are the same everywhere. A language or runtime that can't load native code (the
+behavior and speed are the same everywhere.
+
+**What is Rust and what isn't.** The database, the client core and everything performance-critical
+are Rust (D1). The per-language layer is written in that language, because a framework can only
+load code in its own language. An EF Core provider is a .NET assembly that implements EF Core's
+interfaces in C#: its type mappings, its translation of LINQ into EggDB SQL and its migrations SQL
+generator. A JDBC driver or Hibernate dialect is Java, and a SQLAlchemy dialect is Python. These
+layers hold no protocol or storage logic. They call the Rust core through the C API (P/Invoke in
+.NET, the Foreign Function and Memory API in Java, N-API in Node.js, the CPython C API in Python),
+and keep crossings into it few and batched so the binding never becomes the bottleneck. They are
+written by us, clean room (D1), and follow each language's conventions and the no-comments rule
+(public API doc comments such as C# XML docs are kept). From day one, the existing PostgreSQL
+drivers and ORM providers (for example Npgsql with its EF Core provider) already work against
+EggDB's PostgreSQL protocol (D12). The official drivers add embedded mode, every model and the
+dialects beyond PostgreSQL. A language or runtime that can't load native code (the
 browser, for example) gets the same core compiled to WebAssembly, or a pure implementation of the
 protocol when that is the only way.
 
