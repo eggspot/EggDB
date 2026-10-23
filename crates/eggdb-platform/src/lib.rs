@@ -10,7 +10,8 @@
 //! - [`Memory`]: the operating system's page sizes, and zeroed page-aligned [`MemoryRegion`]s
 //!   on normal, huge or transparent huge pages ([`PageMode`]);
 //! - [`Cpus`]: the [`CpuSet`] a process may run on, how many threads can run at once, and
-//!   pinning threads to CPUs; with [`CachePadded`] against false sharing.
+//!   pinning threads to CPUs; with [`ThreadOptions`] to start named, pinned threads and
+//!   [`CachePadded`] against false sharing.
 //!
 //! Each trait has an implementation backed by the operating system ([`OsFileSystem`],
 //! [`SystemClock`], [`OsMemory`], [`OsCpus`]) and a deterministic simulation
@@ -31,6 +32,7 @@ mod rng;
 mod sim_cpus;
 mod sim_fs;
 mod sim_memory;
+mod threads;
 mod uncached;
 
 pub use aligned::AlignedBuffer;
@@ -46,3 +48,4 @@ pub use os_memory::OsMemory;
 pub use sim_cpus::SimCpus;
 pub use sim_fs::{CrashMode, SimFile, SimFileSystem};
 pub use sim_memory::SimMemory;
+pub use threads::{SpawnedThread, ThreadOptions};
