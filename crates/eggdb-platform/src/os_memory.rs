@@ -437,15 +437,22 @@ mod platform {
     }
 
     fn lock_memory_privilege() -> Result<()> {
+        static ENABLED: OnceLock<()> = OnceLock::new();
         static REFUSED: OnceLock<i32> = OnceLock::new();
         let refusal = |code: i32| {
             Error::from(io::Error::from_raw_os_error(code)).with_kind(ErrorKind::Unsupported)
         };
+        if ENABLED.get().is_some() {
+            return Ok(());
+        }
         if let Some(&code) = REFUSED.get() {
             return Err(refusal(code));
         }
         match enable_lock_memory_privilege() {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let _ = ENABLED.set(());
+                Ok(())
+            }
             Err(error) if error.raw_os_error() == Some(ERROR_NOT_ALL_ASSIGNED) => {
                 Err(refusal(*REFUSED.get_or_init(|| ERROR_NOT_ALL_ASSIGNED)))
             }
@@ -521,6 +528,20 @@ mod platform {
 mod platform {
     use super::{Error, ErrorKind, MemoryRegion, NonNull, PageMode, Result};
 
+    #[cfg(unix)]
+    pub(super) fn page_size() -> usize {
+        unsafe extern "C" {
+            fn getpagesize() -> std::ffi::c_int;
+        }
+        // SAFETY: `getpagesize` takes no arguments and only reads a constant of the process.
+        let size = unsafe { getpagesize() };
+        usize::try_from(size)
+            .ok()
+            .and_then(super::checked_power_of_two)
+            .unwrap_or(4096)
+    }
+
+    #[cfg(not(unix))]
     pub(super) fn page_size() -> usize {
         if cfg!(target_family = "wasm") {
             65536

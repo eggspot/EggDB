@@ -3,7 +3,7 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::fs::{File, FileSystem, OpenMode, advance};
 use crate::rng::SplitMix64;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// What a simulated crash does to the writes that were not yet synced.
@@ -48,6 +48,7 @@ struct State {
     failing_operations: BTreeSet<u64>,
     random_failures: Option<RandomFailures>,
     refuse_uncached: bool,
+    unsynced_limit: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -61,7 +62,10 @@ struct Inode {
     contents: Vec<u8>,
     durable: Vec<u8>,
     unsynced: Vec<Change>,
+    unsynced_bytes: u64,
     open_handles: usize,
+    names: usize,
+    durable_names: usize,
 }
 
 #[derive(Debug)]
@@ -74,6 +78,12 @@ impl SimFileSystem {
     /// The largest file the simulation holds; larger writes and sizes fail with
     /// [`ErrorKind::InvalidInput`] instead of exhausting memory.
     pub const MAX_FILE_SIZE: u64 = 1 << 30;
+
+    /// The most bytes of unsynced writes and size changes one file keeps for a later crash to
+    /// tear; a write or size change beyond it fails with [`ErrorKind::InvalidInput`] until the
+    /// file is synced, so that overwriting the same bytes again and again cannot exhaust memory
+    /// either.
+    pub const MAX_UNSYNCED_BYTES: u64 = 1 << 30;
 
     /// The unit in which [`CrashMode::Torn`] keeps or loses the parts of an unsynced write.
     pub const TORN_WRITE_SECTOR_SIZE: u64 = 512;
@@ -108,6 +118,12 @@ impl SimFileSystem {
         lock(&self.shared).refuse_uncached = refuse;
     }
 
+    /// Lowers the most bytes of unsynced writes and size changes one file keeps, at most
+    /// [`SimFileSystem::MAX_UNSYNCED_BYTES`], so a test reaches the limit cheaply.
+    pub fn limit_unsynced_bytes(&self, bytes: u64) {
+        lock(&self.shared).unsynced_limit = Some(bytes.min(Self::MAX_UNSYNCED_BYTES));
+    }
+
     /// Simulates a power loss followed by a restart. Afterwards the file system holds only what
     /// was durable, plus whatever `mode` lets survive, and every handle opened before the crash
     /// fails with [`ErrorKind::StaleHandle`].
@@ -118,6 +134,7 @@ impl SimFileSystem {
 
 impl SimFileSystem {
     fn open_handle(&self, path: &Path, mode: OpenMode, uncached: bool) -> Result<SimFile> {
+        let path = &normalized(path);
         let mut state = begin(&self.shared)?;
         if state.dirs.contains(path) || is_root(path) {
             return Err(Error::new(ErrorKind::InvalidInput));
@@ -136,14 +153,13 @@ impl SimFileSystem {
                 let inode = state.next_inode;
                 state.next_inode += 1;
                 state.inodes.insert(inode, Inode::default());
-                state.names.insert(path.to_path_buf(), inode);
+                state.link(path.to_path_buf(), inode);
                 inode
             }
         };
         if uncached && state.refuse_uncached {
             if created && mode == OpenMode::CreateNew {
-                state.names.remove(path);
-                state.free_unreachable_inodes();
+                state.unlink(path);
             }
             return Err(Error::new(ErrorKind::Unsupported));
         }
@@ -172,16 +188,17 @@ impl FileSystem for SimFileSystem {
     }
 
     fn remove_file(&self, path: &Path) -> Result<()> {
+        let path = &normalized(path);
         let mut state = begin(&self.shared)?;
-        state
-            .names
-            .remove(path)
-            .ok_or_else(|| Error::new(ErrorKind::NotFound))?;
-        state.free_unreachable_inodes();
+        if !state.names.contains_key(path) {
+            return Err(Error::new(ErrorKind::NotFound));
+        }
+        state.unlink(path);
         Ok(())
     }
 
     fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        let (from, to) = (&normalized(from), &normalized(to));
         let mut state = begin(&self.shared)?;
         if !state.names.contains_key(from) || !state.dir_exists(parent(to)) {
             return Err(Error::new(ErrorKind::NotFound));
@@ -189,14 +206,17 @@ impl FileSystem for SimFileSystem {
         if state.dirs.contains(to) {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
-        if let Some(inode) = state.names.remove(from) {
-            state.names.insert(to.to_path_buf(), inode);
+        if let Some(&inode) = state.names.get(from)
+            && from != to
+        {
+            state.link(to.to_path_buf(), inode);
+            state.unlink(from);
         }
-        state.free_unreachable_inodes();
         Ok(())
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<()> {
+        let path = &normalized(path);
         let mut state = begin(&self.shared)?;
         let missing: Vec<&Path> = path
             .ancestors()
@@ -212,16 +232,17 @@ impl FileSystem for SimFileSystem {
     }
 
     fn sync_dir(&self, path: &Path) -> Result<()> {
+        let path = &normalized(path);
         let mut state = begin(&self.shared)?;
         if !state.dir_exists(path) {
             return Err(Error::new(ErrorKind::NotFound));
         }
         state.sync_dir(path);
-        state.free_unreachable_inodes();
         Ok(())
     }
 
     fn exists(&self, path: &Path) -> Result<bool> {
+        let path = &normalized(path);
         let state = begin(&self.shared)?;
         Ok(state.names.contains_key(path) || state.dir_exists(path))
     }
@@ -238,16 +259,19 @@ pub struct SimFile {
 }
 
 impl SimFile {
-    fn with_inode<T>(&self, operation: impl FnOnce(&mut Inode) -> Result<T>) -> Result<T> {
+    fn with_inode<T>(&self, operation: impl FnOnce(&mut Inode, u64) -> Result<T>) -> Result<T> {
         let mut state = begin(&self.shared)?;
         if state.generation != self.generation {
             return Err(Error::new(ErrorKind::StaleHandle));
         }
+        let unsynced_limit = state
+            .unsynced_limit
+            .unwrap_or(SimFileSystem::MAX_UNSYNCED_BYTES);
         let inode = state
             .inodes
             .get_mut(&self.inode)
             .ok_or_else(|| Error::new(ErrorKind::StaleHandle))?;
-        operation(inode)
+        operation(inode, unsynced_limit)
     }
 
     fn require_alignment(&self, buf: &[u8], offset: u64) -> Result<()> {
@@ -255,7 +279,8 @@ impl SimFile {
         let aligned = buf.is_empty()
             || (buf.as_ptr().addr().is_multiple_of(alignment)
                 && buf.len().is_multiple_of(alignment)
-                && usize::try_from(offset).is_ok_and(|offset| offset.is_multiple_of(alignment)));
+                && u64::try_from(alignment)
+                    .is_ok_and(|alignment| offset.is_multiple_of(alignment)));
         if self.uncached && !aligned {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
@@ -280,13 +305,13 @@ impl Drop for SimFile {
         if let Some(inode) = state.inodes.get_mut(&self.inode) {
             inode.open_handles = inode.open_handles.saturating_sub(1);
         }
-        state.free_unreachable_inodes();
+        state.free_if_unreachable(self.inode);
     }
 }
 
 impl File for SimFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-        self.with_inode(|inode| {
+        self.with_inode(|inode, _| {
             self.require_alignment(buf, offset)?;
             let Some(available) = usize::try_from(offset)
                 .ok()
@@ -301,14 +326,15 @@ impl File for SimFile {
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
-        self.with_inode(|inode| {
+        self.with_inode(|inode, unsynced_limit| {
             self.require_writable()?;
             self.require_alignment(buf, offset)?;
-            let start = checked_size(offset)?;
-            checked_size(advance(offset, buf.len())?)?;
             if buf.is_empty() {
                 return Ok(0);
             }
+            let start = checked_size(offset)?;
+            checked_size(advance(offset, buf.len())?)?;
+            inode.charge_unsynced(buf.len(), unsynced_limit)?;
             write_into(&mut inode.contents, start, buf);
             inode.unsynced.push(Change::Write {
                 offset,
@@ -319,13 +345,14 @@ impl File for SimFile {
     }
 
     fn size(&self) -> Result<u64> {
-        self.with_inode(|inode| advance(0, inode.contents.len()))
+        self.with_inode(|inode, _| advance(0, inode.contents.len()))
     }
 
     fn set_size(&self, size: u64) -> Result<()> {
-        self.with_inode(|inode| {
+        self.with_inode(|inode, unsynced_limit| {
             self.require_writable()?;
             let new_len = checked_size(size)?;
+            inode.charge_unsynced(size_of::<Change>(), unsynced_limit)?;
             inode.contents.resize(new_len, 0);
             inode.unsynced.push(Change::Resize(size));
             Ok(())
@@ -337,7 +364,8 @@ impl File for SimFile {
     }
 
     fn sync_data(&self) -> Result<()> {
-        self.with_inode(|inode| {
+        self.with_inode(|inode, _| {
+            self.require_writable()?;
             inode.make_durable();
             Ok(())
         })
@@ -350,8 +378,29 @@ impl File for SimFile {
 
 impl Inode {
     fn make_durable(&mut self) {
-        self.durable.clone_from(&self.contents);
+        let replayed = advance(0, self.contents.len()).is_ok_and(|len| self.unsynced_bytes < len)
+            && self
+                .unsynced
+                .iter()
+                .all(|change| change.apply(&mut self.durable));
+        if !replayed {
+            self.durable.clone_from(&self.contents);
+        }
         self.unsynced.clear();
+        self.unsynced_bytes = 0;
+    }
+
+    fn charge_unsynced(&mut self, bytes: usize, limit: u64) -> Result<()> {
+        let total = advance(self.unsynced_bytes, bytes)?;
+        if total > limit {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        self.unsynced_bytes = total;
+        Ok(())
+    }
+
+    fn is_unreachable(&self) -> bool {
+        self.open_handles == 0 && self.names == 0 && self.durable_names == 0
     }
 
     fn crash(&mut self, rng: Option<&mut SplitMix64>) {
@@ -361,8 +410,10 @@ impl Inode {
                 apply_torn(&mut survived, change, rng);
             }
         }
+        self.durable.clone_from(&survived);
         self.contents = survived;
-        self.make_durable();
+        self.unsynced.clear();
+        self.unsynced_bytes = 0;
         self.open_handles = 0;
     }
 }
@@ -372,14 +423,55 @@ impl State {
         is_root(path) || self.dirs.contains(path)
     }
 
+    fn link(&mut self, name: PathBuf, inode: u64) {
+        if let Some(linked) = self.inodes.get_mut(&inode) {
+            linked.names += 1;
+        }
+        if let Some(replaced) = self.names.insert(name, inode) {
+            self.drop_name(replaced);
+        }
+    }
+
+    fn unlink(&mut self, name: &Path) {
+        if let Some(inode) = self.names.remove(name) {
+            self.drop_name(inode);
+        }
+    }
+
+    fn drop_name(&mut self, inode: u64) {
+        if let Some(unlinked) = self.inodes.get_mut(&inode) {
+            unlinked.names = unlinked.names.saturating_sub(1);
+        }
+        self.free_if_unreachable(inode);
+    }
+
     fn sync_dir(&mut self, dir: &Path) {
-        self.durable_names.retain(|name, _| parent(name) != dir);
-        let synced_names = self
+        let mut forgotten = Vec::new();
+        self.durable_names.retain(|name, inode| {
+            let kept = parent(name) != dir;
+            if !kept {
+                forgotten.push(*inode);
+            }
+            kept
+        });
+        let synced: Vec<(PathBuf, u64)> = self
             .names
             .iter()
             .filter(|(name, _)| parent(name) == dir)
-            .map(|(name, inode)| (name.clone(), *inode));
-        self.durable_names.extend(synced_names);
+            .map(|(name, inode)| (name.clone(), *inode))
+            .collect();
+        for (name, inode) in synced {
+            if let Some(durable) = self.inodes.get_mut(&inode) {
+                durable.durable_names += 1;
+            }
+            self.durable_names.insert(name, inode);
+        }
+        for inode in forgotten {
+            if let Some(durable) = self.inodes.get_mut(&inode) {
+                durable.durable_names = durable.durable_names.saturating_sub(1);
+            }
+            self.free_if_unreachable(inode);
+        }
         self.durable_dirs.retain(|child| parent(child) != dir);
         let synced_dirs = self
             .dirs
@@ -409,23 +501,82 @@ impl State {
         self.names.clone_from(&self.durable_names);
         self.dirs.clone_from(&surviving_dirs);
         self.durable_dirs = surviving_dirs;
-        self.free_unreachable_inodes();
+        self.recount_names();
+        self.inodes.retain(|_, inode| !inode.is_unreachable());
     }
 
-    fn free_unreachable_inodes(&mut self) {
-        let named: BTreeSet<u64> = self
-            .names
-            .values()
-            .chain(self.durable_names.values())
-            .copied()
-            .collect();
-        self.inodes
-            .retain(|id, inode| inode.open_handles > 0 || named.contains(id));
+    fn recount_names(&mut self) {
+        for inode in self.inodes.values_mut() {
+            inode.names = 0;
+            inode.durable_names = 0;
+        }
+        for inode in self.names.values() {
+            if let Some(named) = self.inodes.get_mut(inode) {
+                named.names += 1;
+            }
+        }
+        for inode in self.durable_names.values() {
+            if let Some(named) = self.inodes.get_mut(inode) {
+                named.durable_names += 1;
+            }
+        }
+    }
+
+    fn free_if_unreachable(&mut self, inode: u64) {
+        if self.inodes.get(&inode).is_some_and(Inode::is_unreachable) {
+            self.inodes.remove(&inode);
+        }
     }
 
     #[cfg(test)]
     fn inode_count(&self) -> usize {
         self.inodes.len()
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> String {
+        let inodes: Vec<_> = self
+            .inodes
+            .iter()
+            .map(|(id, inode)| {
+                (
+                    id,
+                    &inode.contents,
+                    &inode.durable,
+                    inode.unsynced.len(),
+                    inode.unsynced_bytes,
+                    inode.open_handles,
+                )
+            })
+            .collect();
+        format!(
+            "{:?} {:?} {:?} {:?} {inodes:?}",
+            self.names, self.durable_names, self.dirs, self.durable_dirs
+        )
+    }
+
+    #[cfg(test)]
+    fn assert_names_counted(&self) {
+        for (id, inode) in &self.inodes {
+            let names = self.names.values().filter(|named| *named == id).count();
+            let durable = self
+                .durable_names
+                .values()
+                .filter(|named| *named == id)
+                .count();
+            assert_eq!(
+                (inode.names, inode.durable_names),
+                (names, durable),
+                "inode {id}"
+            );
+            assert!(!inode.is_unreachable(), "inode {id} should have been freed");
+        }
+        for id in self.names.values().chain(self.durable_names.values()) {
+            assert!(
+                self.inodes.contains_key(id),
+                "name points at freed inode {id}"
+            );
+        }
     }
 
     fn next_operation_fails(&mut self) -> bool {
@@ -437,6 +588,19 @@ impl State {
             .as_mut()
             .is_some_and(|failures| failures.rng.one_in_million(failures.per_million));
         chosen || random
+    }
+}
+
+impl Change {
+    fn apply(&self, contents: &mut Vec<u8>) -> bool {
+        match self {
+            Change::Write { offset, bytes } => usize::try_from(*offset)
+                .map(|start| write_into(contents, start, bytes))
+                .is_ok(),
+            Change::Resize(size) => usize::try_from(*size)
+                .map(|size| contents.resize(size, 0))
+                .is_ok(),
+        }
     }
 }
 
@@ -490,6 +654,12 @@ fn checked_size(size: u64) -> Result<usize> {
     usize::try_from(size).map_err(|_| Error::new(ErrorKind::InvalidInput))
 }
 
+fn normalized(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|component| *component != Component::CurDir)
+        .collect()
+}
+
 fn parent(path: &Path) -> &Path {
     path.parent().unwrap_or(Path::new(""))
 }
@@ -512,8 +682,9 @@ fn begin(shared: &Mutex<State>) -> Result<MutexGuard<'_, State>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CrashMode, SimFileSystem, sector_pieces};
-    use crate::{AlignedBuffer, ErrorKind, File, FileSystem, OpenMode};
+    use super::{CrashMode, SimFile, SimFileSystem, lock, sector_pieces};
+    use crate::rng::SplitMix64;
+    use crate::{AlignedBuffer, ErrorKind, File, FileSystem, OpenMode, Result};
     use std::path::Path;
 
     fn read_all(file: &impl File) -> Vec<u8> {
@@ -825,5 +996,170 @@ mod tests {
         fs.open(Path::new("file"), OpenMode::CreateNew).unwrap();
         let error = fs.create_dir_all(Path::new("file/sub")).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn unsynced_writes_stop_at_the_limit_until_the_file_is_synced() {
+        let fs = SimFileSystem::new();
+        fs.limit_unsynced_bytes(1024);
+        let file = fs.open(Path::new("f"), OpenMode::CreateNew).unwrap();
+        file.write_all_at(&[7; 512], 0).unwrap();
+        file.write_all_at(&[7; 512], 0).unwrap();
+        let error = file.write_at(&[8], 0).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        let error = file.set_size(0).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(read_all(&file), vec![7; 512]);
+        file.sync_data().unwrap();
+        file.write_all_at(&[8], 0).unwrap();
+        file.set_size(1).unwrap();
+        assert_eq!(read_all(&file), [8]);
+    }
+
+    #[test]
+    fn syncs_make_exactly_the_written_contents_durable() {
+        let mut rng = SplitMix64::new(5);
+        let fs = SimFileSystem::new();
+        let file = fs.open(Path::new("f"), OpenMode::CreateNew).unwrap();
+        let mut model: Vec<u8> = Vec::new();
+        for step in 0..3000 {
+            match rng.next_u64() % 8 {
+                0 => {
+                    file.sync_data().unwrap();
+                    let state = lock(&fs.shared);
+                    assert_eq!(state.inodes[&file.inode].durable, model, "step {step}");
+                }
+                1 => {
+                    let size = rng.next_u64() % 6000;
+                    file.set_size(size).unwrap();
+                    model.resize(usize::try_from(size).unwrap(), 0);
+                }
+                _ => {
+                    let offset = usize::try_from(rng.next_u64() % 5000).unwrap();
+                    let len = usize::try_from(rng.next_u64() % 300 + 1).unwrap();
+                    let bytes = vec![rng.next_u64().to_le_bytes()[0]; len];
+                    file.write_all_at(&bytes, u64::try_from(offset).unwrap())
+                        .unwrap();
+                    if model.len() < offset + len {
+                        model.resize(offset + len, 0);
+                    }
+                    model[offset..offset + len].copy_from_slice(&bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_failed_operation_changes_nothing() {
+        type Step = fn(&SimFileSystem, &mut Vec<SimFile>) -> Result<()>;
+        let steps: [Step; 16] = [
+            |fs, _| fs.create_dir_all(Path::new("d/e")),
+            |fs, _| fs.sync_dir(Path::new("")),
+            |fs, files| {
+                fs.open(Path::new("d/a"), OpenMode::CreateNew)
+                    .map(|file| files.push(file))
+            },
+            |_, files| with_file(files, 0, |file| file.write_all_at(b"hello", 0)),
+            |_, files| with_file(files, 0, File::sync_data),
+            |fs, _| fs.sync_dir(Path::new("d")),
+            |fs, _| fs.rename(Path::new("d/a"), Path::new("d/e/b")),
+            |fs, files| {
+                fs.open(Path::new("d/c"), OpenMode::Create)
+                    .map(|file| files.push(file))
+            },
+            |_, files| with_file(files, 1, |file| file.set_size(10)),
+            |fs, _| fs.rename(Path::new("d/c"), Path::new("d/e/b")),
+            |fs, _| fs.sync_dir(Path::new("d/e")),
+            |fs, _| fs.remove_file(Path::new("d/e/b")),
+            |_, files| {
+                files.clear();
+                Ok(())
+            },
+            |fs, _| fs.sync_dir(Path::new("d")),
+            |fs, _| fs.exists(Path::new("d/a")).map(|_| ()),
+            |fs, files| {
+                fs.open_uncached(Path::new("d/u"), OpenMode::CreateNew)
+                    .map(|file| files.push(file))
+            },
+        ];
+        for failing in 0..steps.len() {
+            let fs = SimFileSystem::new();
+            let mut files = Vec::new();
+            for (index, step) in steps.iter().enumerate() {
+                let operations = fs.operation_count();
+                if index == failing {
+                    fs.fail_operation(operations);
+                }
+                let before = lock(&fs.shared).snapshot();
+                let result = step(&fs, &mut files);
+                if index == failing && fs.operation_count() > operations {
+                    assert_eq!(result.unwrap_err().kind(), ErrorKind::InjectedFault);
+                    assert_eq!(lock(&fs.shared).snapshot(), before, "step {index}");
+                }
+                lock(&fs.shared).assert_names_counted();
+            }
+            fs.crash(CrashMode::Torn { seed: 3 });
+            lock(&fs.shared).assert_names_counted();
+        }
+    }
+
+    fn with_file(
+        files: &[SimFile],
+        index: usize,
+        operation: impl FnOnce(&SimFile) -> Result<()>,
+    ) -> Result<()> {
+        files
+            .get(index)
+            .map_or(Err(crate::Error::new(ErrorKind::NotFound)), operation)
+    }
+
+    #[test]
+    fn a_rename_across_directories_needs_both_directories_synced() {
+        let setup = || {
+            let fs = SimFileSystem::new();
+            fs.create_dir_all(Path::new("a")).unwrap();
+            fs.create_dir_all(Path::new("b")).unwrap();
+            fs.sync_dir(Path::new("")).unwrap();
+            create_durable(&fs, "a/x", b"moved");
+            fs.rename(Path::new("a/x"), Path::new("b/x")).unwrap();
+            fs
+        };
+        let fs = setup();
+        fs.sync_dir(Path::new("b")).unwrap();
+        fs.crash(CrashMode::DropUnsynced);
+        assert_eq!(reopen(&fs, "a/x"), b"moved");
+        assert_eq!(reopen(&fs, "b/x"), b"moved");
+        let through_a = fs.open(Path::new("a/x"), OpenMode::ReadWrite).unwrap();
+        through_a.write_all_at(b"M", 0).unwrap();
+        assert_eq!(reopen(&fs, "b/x"), b"Moved");
+        let fs = setup();
+        fs.sync_dir(Path::new("a")).unwrap();
+        fs.crash(CrashMode::DropUnsynced);
+        assert!(!fs.exists(Path::new("a/x")).unwrap());
+        assert!(!fs.exists(Path::new("b/x")).unwrap());
+    }
+
+    #[test]
+    fn torn_crashes_keep_or_lose_each_size_change_and_sector() {
+        let mut sizes = std::collections::BTreeSet::new();
+        for seed in 0..64 {
+            let fs = SimFileSystem::new();
+            create_durable(&fs, "f", b"12345678");
+            let file = fs.open(Path::new("f"), OpenMode::ReadWrite).unwrap();
+            file.write_all_at(&[9; 1024], 8).unwrap();
+            file.set_size(4).unwrap();
+            fs.crash(CrashMode::Torn { seed });
+            let contents = reopen(&fs, "f");
+            assert!(contents.starts_with(b"1234"), "seed {seed}");
+            if contents.len() > 4 {
+                assert!(contents.starts_with(b"12345678"), "seed {seed}");
+            }
+            sizes.insert(contents.len());
+        }
+        assert!(
+            sizes.is_subset(&[4, 8, 512, 1024, 1032].into()),
+            "{sizes:?}"
+        );
+        assert!(sizes.contains(&4) && sizes.contains(&1032), "{sizes:?}");
     }
 }
