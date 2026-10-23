@@ -577,9 +577,9 @@ and reproducible builds.
 
 **Owner items.** These wait for the owner, and the build loop lists them in its report:
 - trademark and naming policy, and any bug bounty (money);
-- who answers security reports, and the response time SECURITY.md promises;
-- whether security-critical code (cryptography, authentication, the file format) needs a human
-  approval before merge.
+- who answers security reports, and the response time SECURITY.md promises.
+
+Security-critical code merges like everything else (D35).
 
 ## D22 Security model: authentication, authorization, row and column security — Decided by research (gap review, 2026-10-23)
 **Authentication:**
@@ -608,7 +608,7 @@ D11's agent permissions sit on this same model.
 privilege. A server without this can't hold real data, so authentication, TLS and roles ship with the
 server (M6).
 
-## D23 Cryptography, TLS and key management — Decided by research (gap review, 2026-10-23); an exception to D1 is an owner question
+## D23 Cryptography, TLS and key management — Decided by research (gap review, 2026-10-23); the library question answered by the owner in D35
 **What we need:**
 - TLS 1.3 (1.2 for older clients);
 - encryption at rest: per page, per column, and with per-tenant keys;
@@ -620,14 +620,10 @@ server (M6).
 against standard test vectors (Wycheproof and the NIST vectors), fuzzed, and audited externally
 before any production release.
 
-**Owner questions.** Writing TLS and cryptography from scratch is the highest-risk part of D1. These
-are the owner's to decide:
-- whether to allow one audited cryptography library as an exception to D1;
-- paying for the external audit;
-- paying for formal FIPS 140 validation, which only a validated module can claim.
-
-Until the owner decides otherwise, D1 applies: the build loop writes our own cryptography under the
-rules above and lists these questions in its report. Nothing waits for the answer.
+**Owner decision (D35).** All cryptography is our own; no library exception. Still the owner's,
+because they cost money:
+- the external audit;
+- formal FIPS 140 validation.
 
 ## D24 Backup, point-in-time recovery and verified restores — Decided by research (gap review, 2026-10-23); complements D13
 EggDB's own backups:
@@ -859,3 +855,23 @@ EMQX's BSL, and the AWS terms behind the SQS API. Anything unclear goes to the o
 
 **CI.** EggDB is a public repository, so the global CI rule's build-time aim applies: parallel jobs
 are fine (CLAUDE.md, "Commands").
+
+## D35 Owner answers: our own cryptography, and security-critical code merges itself — Decided (owner, 2026-10-23)
+The owner answered two questions from the gap review:
+
+1. **All cryptography is written by us** (D1, D23): TLS, the ciphers and hashes, key exchange,
+   signatures and encryption at rest. There is no exception for an outside library.
+2. **Security-critical changes merge themselves**, like every other change: cryptography,
+   authentication and authorization, and the file format. No human approval is needed. Because
+   nothing stops them, the automated checks are stricter for these changes:
+   - **Two independent reviews instead of one:** the usual independent review, plus a second
+     review focused only on security (side channels and constant-time behavior, memory safety,
+     input handling, protocol downgrade, key handling).
+   - **Test vectors, fuzzing and differential tests** in CI for every change: the standard vectors
+     (Wycheproof, NIST), a fuzz run, and comparison against a reference implementation used in the
+     test environment only (D1).
+   - **A format or compatibility test:** a file-format change passes the upgrade, downgrade and
+     mixed-version tests of D20 before merging.
+
+Still open for the owner, since they cost money: the external cryptography audit, formal FIPS 140
+validation, any bug bounty, and registering a trademark (D21, D23).
