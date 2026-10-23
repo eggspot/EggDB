@@ -103,9 +103,10 @@ Check each task against these before starting and again before opening the PR.
     Doctrine, and ActiveRecord. They work both against a server and in embedded mode. The engine
     and one client core are Rust. Each language's driver and ORM provider (an EF Core provider is
     C#, a Hibernate dialect is Java) is a thin layer in that language calling the Rust core
-    through the C API, with no protocol or storage logic of its own. Crossings are batched,
-    never per value. Every driver is benchmarked against the best driver in its language
-    (server mode) and against SQLite's binding (embedded mode), and is gated in CI. (D17) Existing drivers keep
+    through the C API, with no protocol or storage logic of its own (the two exceptions are in
+    D16 and D17). Crossings are batched, never per value. Every driver is benchmarked against
+    SQLite's binding in its language (embedded mode, from M5) and against the best driver in its
+    language (server mode, from M6), and is gated in CI. (D17) Existing drivers keep
     working too, through the protocols EggDB speaks (D12). (D16)
 
 ## Code
