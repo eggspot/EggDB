@@ -28,9 +28,9 @@ use std::collections::VecDeque;
 /// The simulation also checks the rule every queue states and no operating system enforces: a
 /// write may not be in flight in the queue at once with a read or another write of an
 /// overlapping range of the same file, through any handle opened since the last crash. An
-/// operation performed but not yet reaped is still in flight. `submit` refuses such an operation with
-/// [`ErrorKind::InvalidInput`] and hands it back, so engine code that breaks the rule fails in
-/// tests instead of racing on a machine.
+/// operation performed but not yet reaped is still in flight. `submit` refuses such an
+/// operation with [`ErrorKind::InvalidInput`] and hands it back, so engine code that breaks the
+/// rule fails in tests instead of racing on a machine.
 #[derive(Debug)]
 pub struct SimIoQueue {
     capacity: usize,
