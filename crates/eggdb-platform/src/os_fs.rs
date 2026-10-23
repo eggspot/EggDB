@@ -4,6 +4,7 @@ use crate::io::IoQueueOptions;
 use crate::os_io::OsIoQueue;
 use crate::uncached;
 use std::fs;
+use std::io;
 use std::path::Path;
 
 /// The operating system's file system.
@@ -22,7 +23,11 @@ impl FileSystem for OsFileSystem {
     type IoQueue = OsIoQueue;
 
     fn open(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
-        Ok(OsFile::new(open_options(mode).open(path)?, mode, false))
+        let file = open_options(mode)
+            .open(path)
+            .map_err(|error| open_error(path, mode, error))?;
+        refuse_directory(&file)?;
+        Ok(OsFile::new(file, mode, false))
     }
 
     fn open_uncached(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
@@ -30,7 +35,11 @@ impl FileSystem for OsFileSystem {
         uncached::request(&mut options)?;
         let opened = options
             .open(path)
-            .map_err(uncached::open_error)
+            .map_err(|error| match directory_error(path, mode) {
+                Some(kind) => Error::from(error).with_kind(kind),
+                None => uncached::open_error(error),
+            })
+            .and_then(|file| refuse_directory(&file).map(|()| file))
             .and_then(|file| uncached::apply(&file).map(|()| file));
         match opened {
             Ok(file) => Ok(OsFile::new(file, mode, true)),
@@ -44,15 +53,26 @@ impl FileSystem for OsFileSystem {
     }
 
     fn remove_file(&self, path: &Path) -> Result<()> {
-        Ok(fs::remove_file(path)?)
+        fs::remove_file(path).map_err(|error| directory_given(path, error))
     }
 
     fn rename(&self, from: &Path, to: &Path) -> Result<()> {
-        Ok(fs::rename(from, to)?)
+        if fs::symlink_metadata(from).is_ok_and(|metadata| metadata.is_dir()) {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        fs::rename(from, to).map_err(|error| directory_given(to, error))
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<()> {
-        Ok(fs::create_dir_all(path)?)
+        fs::create_dir_all(path).map_err(|error| {
+            let through_a_file = error.kind() == io::ErrorKind::NotADirectory;
+            let error = Error::from(error);
+            if through_a_file {
+                error.with_kind(ErrorKind::AlreadyExists)
+            } else {
+                error
+            }
+        })
     }
 
     fn sync_dir(&self, path: &Path) -> Result<()> {
@@ -60,7 +80,11 @@ impl FileSystem for OsFileSystem {
     }
 
     fn exists(&self, path: &Path) -> Result<bool> {
-        Ok(path.try_exists()?)
+        match path.try_exists() {
+            Ok(exists) => Ok(exists),
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn io_queue(&self, options: IoQueueOptions) -> Result<OsIoQueue> {
@@ -83,9 +107,56 @@ fn open_options(mode: OpenMode) -> fs::OpenOptions {
     options
 }
 
+fn is_directory(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+fn directory_error(path: &Path, mode: OpenMode) -> Option<ErrorKind> {
+    match mode {
+        _ if !is_directory(path) => None,
+        OpenMode::CreateNew => Some(ErrorKind::AlreadyExists),
+        OpenMode::Read | OpenMode::ReadWrite | OpenMode::Create => Some(ErrorKind::InvalidInput),
+    }
+}
+
+fn open_error(path: &Path, mode: OpenMode, error: io::Error) -> Error {
+    let kind = directory_error(path, mode);
+    let error = Error::from(error);
+    match kind {
+        Some(kind) => error.with_kind(kind),
+        None => error,
+    }
+}
+
+fn directory_given(path: &Path, error: io::Error) -> Error {
+    let error = Error::from(error);
+    if is_directory(path) {
+        error.with_kind(ErrorKind::InvalidInput)
+    } else {
+        error
+    }
+}
+
+fn refuse_directory(file: &fs::File) -> Result<()> {
+    if file.metadata()?.is_dir() {
+        return Err(Error::new(ErrorKind::InvalidInput));
+    }
+    Ok(())
+}
+
+fn require_directory(directory: &fs::File) -> Result<()> {
+    if directory.metadata()?.is_dir() {
+        Ok(())
+    } else {
+        Err(Error::new(ErrorKind::InvalidInput))
+    }
+}
+
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
-    Ok(fs::File::open(path)?.sync_all()?)
+    let directory = fs::File::open(path)?;
+    require_directory(&directory)?;
+    Ok(directory.sync_all()?)
 }
 
 #[cfg(windows)]
@@ -97,13 +168,17 @@ fn sync_directory(path: &Path) -> Result<()> {
         .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
+    require_directory(&directory)?;
     Ok(directory.sync_all()?)
 }
 
 #[cfg(not(any(unix, windows)))]
 fn sync_directory(path: &Path) -> Result<()> {
-    fs::metadata(path)?;
-    Ok(())
+    if fs::metadata(path)?.is_dir() {
+        Ok(())
+    } else {
+        Err(Error::new(ErrorKind::InvalidInput))
+    }
 }
 
 /// A file opened through [`OsFileSystem`].

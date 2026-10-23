@@ -152,8 +152,12 @@ impl SimFileSystem {
     fn open_handle(&self, path: &Path, mode: OpenMode, uncached: bool) -> Result<SimFile> {
         let path = &normalized(path);
         let mut state = begin(&self.shared)?;
-        if state.dirs.contains(path) || is_root(path) {
-            return Err(Error::new(ErrorKind::InvalidInput));
+        if state.dir_exists(path) {
+            let kind = match mode {
+                OpenMode::CreateNew => ErrorKind::AlreadyExists,
+                OpenMode::Read | OpenMode::ReadWrite | OpenMode::Create => ErrorKind::InvalidInput,
+            };
+            return Err(Error::new(kind));
         }
         let created = !state.names.contains_key(path);
         let inode = match (state.names.get(path).copied(), mode) {
@@ -207,6 +211,9 @@ impl FileSystem for SimFileSystem {
     fn remove_file(&self, path: &Path) -> Result<()> {
         let path = &normalized(path);
         let mut state = begin(&self.shared)?;
+        if state.dir_exists(path) {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
         if !state.names.contains_key(path) {
             return Err(Error::new(ErrorKind::NotFound));
         }
@@ -217,6 +224,9 @@ impl FileSystem for SimFileSystem {
     fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         let (from, to) = (&normalized(from), &normalized(to));
         let mut state = begin(&self.shared)?;
+        if state.dir_exists(from) {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
         if !state.names.contains_key(from) || !state.dir_exists(parent(to)) {
             return Err(Error::new(ErrorKind::NotFound));
         }
@@ -251,6 +261,9 @@ impl FileSystem for SimFileSystem {
     fn sync_dir(&self, path: &Path) -> Result<()> {
         let path = &normalized(path);
         let mut state = begin(&self.shared)?;
+        if state.names.contains_key(path) {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
         if !state.dir_exists(path) {
             return Err(Error::new(ErrorKind::NotFound));
         }

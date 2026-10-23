@@ -264,3 +264,92 @@ contract!(dot_components_name_the_same_file, |fs, path| {
     let file = fs.open(&path("./dir/data"), OpenMode::Read).unwrap();
     assert_eq!(read_all(&file), b"here");
 });
+
+contract!(a_path_through_a_regular_file_is_not_found, |fs, path| {
+    fs.open(&path("f"), OpenMode::CreateNew).unwrap();
+    let through = path("f/x");
+    assert!(!fs.exists(&through).unwrap());
+    for mode in [
+        OpenMode::Read,
+        OpenMode::ReadWrite,
+        OpenMode::Create,
+        OpenMode::CreateNew,
+    ] {
+        assert_eq!(
+            fs.open(&through, mode).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+    }
+    let kinds = [
+        fs.remove_file(&through).unwrap_err().kind(),
+        fs.rename(&through, &path("g")).unwrap_err().kind(),
+        fs.rename(&path("f"), &through).unwrap_err().kind(),
+        fs.sync_dir(&through).unwrap_err().kind(),
+    ];
+    assert_eq!(kinds, [ErrorKind::NotFound; 4]);
+    assert!(fs.exists(&path("f")).unwrap());
+});
+
+contract!(
+    creating_a_directory_where_a_file_is_already_exists,
+    |fs, path| {
+        fs.open(&path("f"), OpenMode::CreateNew).unwrap();
+        for dir in ["f", "f/sub", "f/sub/deeper"] {
+            assert_eq!(
+                fs.create_dir_all(&path(dir)).unwrap_err().kind(),
+                ErrorKind::AlreadyExists
+            );
+        }
+    }
+);
+
+contract!(
+    syncing_a_regular_file_as_a_directory_is_invalid,
+    |fs, path| {
+        fs.open(&path("f"), OpenMode::CreateNew).unwrap();
+        assert_eq!(
+            fs.sync_dir(&path("f")).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+);
+
+contract!(
+    a_directory_is_never_opened_removed_or_renamed_as_a_file,
+    |fs, path| {
+        let dir = path("d");
+        fs.create_dir_all(&dir).unwrap();
+        fs.open(&path("f"), OpenMode::CreateNew).unwrap();
+        for mode in [OpenMode::Read, OpenMode::ReadWrite, OpenMode::Create] {
+            assert_eq!(
+                fs.open(&dir, mode).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(
+            fs.open(&dir, OpenMode::CreateNew).unwrap_err().kind(),
+            ErrorKind::AlreadyExists
+        );
+        for mode in [OpenMode::Read, OpenMode::ReadWrite, OpenMode::Create] {
+            assert_eq!(
+                fs.open_uncached(&dir, mode).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(
+            fs.open_uncached(&dir, OpenMode::CreateNew)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::AlreadyExists
+        );
+        let kinds = [
+            fs.remove_file(&dir).unwrap_err().kind(),
+            fs.rename(&dir, &path("e")).unwrap_err().kind(),
+            fs.rename(&path("f"), &dir).unwrap_err().kind(),
+        ];
+        assert_eq!(kinds, [ErrorKind::InvalidInput; 3]);
+        assert!(fs.exists(&dir).unwrap());
+        assert!(fs.exists(&path("f")).unwrap());
+        assert!(!fs.exists(&path("e")).unwrap());
+    }
+);
