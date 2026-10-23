@@ -28,6 +28,11 @@ impl OpenMode {
 /// Creating, renaming and removing a file only become durable once the parent directory is
 /// synced with [`FileSystem::sync_dir`], as on POSIX systems; code that must survive a crash
 /// syncs the directory after changing its entries.
+///
+/// Every file system answers a wrong path the same way: a path that runs through a regular
+/// file (`file/x`) is [`ErrorKind::NotFound`], a directory given where a file is needed, or a
+/// file where a directory is needed, is [`ErrorKind::InvalidInput`], and creating a name that
+/// is taken is [`ErrorKind::AlreadyExists`].
 pub trait FileSystem: Send + Sync {
     /// The handle type for open files.
     type File: File;
@@ -35,7 +40,8 @@ pub trait FileSystem: Send + Sync {
     /// The queue type for asynchronous operations on those files.
     type IoQueue: IoQueue<File = Self::File>;
 
-    /// Opens the file at `path`.
+    /// Opens the file at `path`. A directory is refused with [`ErrorKind::InvalidInput`], or
+    /// with [`ErrorKind::AlreadyExists`] for [`OpenMode::CreateNew`].
     fn open(&self, path: &Path, mode: OpenMode) -> Result<Self::File>;
 
     /// Opens the file at `path` so that its reads and writes bypass the operating system's
@@ -51,21 +57,25 @@ pub trait FileSystem: Send + Sync {
     /// an empty one, as the operating system creates the file before refusing.
     fn open_uncached(&self, path: &Path, mode: OpenMode) -> Result<Self::File>;
 
-    /// Removes the file at `path`. Open handles keep working until they are dropped.
+    /// Removes the file at `path`. Open handles keep working until they are dropped. A
+    /// directory is refused with [`ErrorKind::InvalidInput`].
     fn remove_file(&self, path: &Path) -> Result<()>;
 
-    /// Renames the file `from` to `to`, replacing the file at `to` if there is one.
+    /// Renames the file `from` to `to`, replacing the file at `to` if there is one. A directory
+    /// at either end is refused with [`ErrorKind::InvalidInput`].
     fn rename(&self, from: &Path, to: &Path) -> Result<()>;
 
-    /// Creates the directory at `path` and every missing parent.
+    /// Creates the directory at `path` and every missing parent. Fails with
+    /// [`ErrorKind::AlreadyExists`] when `path` or one of its parents is a regular file.
     fn create_dir_all(&self, path: &Path) -> Result<()>;
 
     /// Makes the entries of the directory at `path` durable. On targets that offer no way to
     /// flush a directory (neither Unix nor Windows, such as WASI), it only checks that the
-    /// directory exists.
+    /// directory exists. A regular file is refused with [`ErrorKind::InvalidInput`].
     fn sync_dir(&self, path: &Path) -> Result<()>;
 
-    /// Whether a file or directory exists at `path`.
+    /// Whether a file or directory exists at `path`; a path that runs through a regular file
+    /// does not exist.
     fn exists(&self, path: &Path) -> Result<bool>;
 
     /// Creates a queue for asynchronous reads, writes and syncs of this file system's files.

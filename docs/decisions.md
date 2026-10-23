@@ -1847,3 +1847,57 @@ runners allow io_uring. A test-only switch refuses the setup to check the automa
 and buffers; `IORING_SETUP_SINGLE_ISSUER` and `DEFER_TASKRUN` for thread-per-core rings; IOCP on
 Windows; measuring io_uring against the pool on Linux with a committed baseline once the storage
 engine's benchmarks exist.
+
+## D68 Second platform review: wrong paths answered alike, overlapping operations refused in simulation, Windows topology grouped as Linux does — Decided by research (build loop, 2026-10-24); refines D64, D65 and D66
+The build loop's second review of M1 covered what merged after D64 (D65–D67) and closed two of
+their follow-ups.
+
+**Wrong paths, one answer everywhere (closes D64's follow-up).** Decided by research, with no new
+`ErrorKind` (one can still be added, since the enum is `#[non_exhaustive]`):
+- **A path that runs through a regular file (`f/x`) is `NotFound`**: POSIX says such a path
+  cannot be resolved, Windows already answers `ERROR_PATH_NOT_FOUND`, and Python, Java and
+  Rust's `Path::exists` treat it as missing. `ENOTDIR` (Rust's `NotADirectory`) now maps to
+  `NotFound`, and `exists("f/x")` is `Ok(false)` instead of an error on Unix.
+- **A directory where a file is needed, or a file where a directory is needed, is
+  `InvalidInput`**, as D64 already said for a rename onto a directory: opening a directory
+  (which Unix allows read-only, so `OsFileSystem` checks the opened handle with one `fstat`),
+  removing or renaming one, and `sync_dir` on a regular file (Unix and Windows would sync the
+  file and succeed). `EISDIR` maps to `InvalidInput`.
+- **Creating a name that is taken stays `AlreadyExists`**: `CreateNew` on a directory, and
+  `create_dir_all` when the path or a parent is a regular file.
+- The extra checks run at `open` (one `fstat`), on `rename`'s source (one `stat`) and in
+  `sync_dir` (one `fstat` beside an `fsync`), and otherwise only on error paths: Windows
+  answers a rename onto `f/x` with an error Rust reads as `InvalidInput`, so a failed rename
+  looks at the ancestors of both paths and calls one that runs through a file `NotFound`.
+  Reads and writes are untouched.
+  Telling a missing database from a corrupt layout needs only `NotFound` against the rest, and
+  initialising over a stray file still stops at `AlreadyExists`.
+
+**The simulator checks the engine's I/O rule (closes D66's last follow-up).** `SimIoQueue`
+refuses, with `InvalidInput`, a submit whose read or write overlaps a write still in flight in
+the same queue on the same file, through any handle opened since the last crash (or a write
+overlapping a read or write in flight); a completion that was performed but not yet reaped is
+still in flight. Empty transfers overlap nothing. No operating system enforces the rule, so
+engine code that breaks it now fails in tests instead of racing on a machine. The check scans
+the queue's operations in flight on each submit, which is cheap at the default capacity of 128;
+an interval index replaces it if simulations run full queues of thousands. Overlaps between two
+queues (two shards writing one file) are not caught yet.
+
+**Windows topology grouped as Linux does (refines D65).** The Windows parser now cuts package
+and cache groups down to the CPUs the core records place before numbering them, so identifiers
+stay dense, and drops repeated identical groups (in `number_groups`, shared with Linux), so a
+repeated record no longer makes a kind unknown. Each CPU's last-level cache is the
+highest-level data or unified cache that contains it, as on Linux, instead of the machine's
+highest level: on a chip whose small cores have no L3, those cores keep their L2 group, and a
+CPU with no cache at all makes the kind unknown on both systems. Both parsers' random-input
+tests now check that every kind is numbered from 0 without gaps and that the counts match.
+
+**Reviewed and found sound:** the io_uring ring (slots freed only on completion, the tail
+rolled back only when the kernel did not consume the entry, the completion ring never
+overfilled, `Drop` waiting or leaking), the thread pool's shutdown, and the parsers' bounds
+against huge ranges and malformed records.
+
+**Still open:** catching overlapping operations across queues in the simulator; the largest
+reported data cache line can exceed `CACHE_LINE_PADDING` on arm64 chips with 256-byte lines
+(Fujitsu A64FX), as on 32-bit arm (D65); and `sync_dir` in the simulator still scans every name
+(D64).

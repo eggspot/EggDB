@@ -117,24 +117,38 @@ fn build(records: Records) -> CpuTopology {
     if cpus.is_empty() {
         return CpuTopology::unknown();
     }
-    let last_level = records.caches.iter().map(|(level, _)| *level).max();
     let every_cpu_has_a_node = cpus.iter().all(|cpu| records.numa_nodes.contains_key(&cpu));
+    let placed = |groups: &[CpuSet]| -> Vec<CpuSet> {
+        groups
+            .iter()
+            .map(|group| placed_cpus(group, &cpus))
+            .collect()
+    };
     TopologyReport {
-        cpus,
-        cores: number_groups(records.cores),
-        packages: number_groups(records.packages),
+        cores: number_groups(records.cores.clone()),
+        packages: number_groups(placed(&records.packages)),
         numa_nodes: (!records.numa_conflict && every_cpu_has_a_node).then_some(records.numa_nodes),
-        last_level_caches: number_groups(
-            records
-                .caches
-                .into_iter()
-                .filter(|(level, _)| Some(*level) == last_level)
-                .map(|(_, cpus)| cpus)
-                .collect(),
-        ),
+        last_level_caches: last_level_caches(&records.caches, &cpus).and_then(number_groups),
         cache_line_size: records.cache_line_size,
+        cpus,
     }
     .into_topology()
+}
+
+fn placed_cpus(group: &CpuSet, cpus: &CpuSet) -> CpuSet {
+    group.iter().filter(|cpu| cpus.contains(*cpu)).collect()
+}
+
+fn last_level_caches(caches: &[(u8, CpuSet)], cpus: &CpuSet) -> Option<Vec<CpuSet>> {
+    cpus.iter()
+        .map(|cpu| {
+            caches
+                .iter()
+                .filter(|(_, sharing)| sharing.contains(cpu))
+                .max_by_key(|(level, _)| *level)
+                .map(|(_, sharing)| placed_cpus(sharing, cpus))
+        })
+        .collect()
 }
 
 fn masks(
@@ -170,7 +184,8 @@ fn field<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
 mod tests {
     use super::{AffinityLayout, parse};
     use crate::rng::SplitMix64;
-    use crate::{CpuId, CpuSet, CpuTopology, NumaNodeId, SiblingNumbering};
+    use crate::topology::assert_numbered_densely;
+    use crate::{CacheId, CpuId, CpuSet, CpuTopology, NumaNodeId, PackageId, SiblingNumbering};
     use std::num::NonZeroUsize;
 
     const LAYOUTS: [AffinityLayout; 2] = [AffinityLayout::Wide, AffinityLayout::Narrow];
@@ -358,7 +373,79 @@ mod tests {
                 let topology = parse(&buffer[..cut], layout);
                 let placed = topology.logical_cpus().map_or(0, NonZeroUsize::get);
                 assert_eq!(topology.cpus().len(), placed);
+                assert_numbered_densely(&topology);
             }
         }
+    }
+
+    #[test]
+    fn packages_are_numbered_by_the_cpus_placed_in_them() {
+        for layout in LAYOUTS {
+            let mut buffer = processor(3, 0x0F, layout);
+            buffer.extend(processor(3, 0xF0, layout));
+            buffer.extend(processor(0, 0x30, layout));
+            buffer.extend(processor(0, 0xC0, layout));
+            let topology = parse(&buffer, layout);
+            assert_eq!(topology.packages(), NonZeroUsize::new(1));
+            assert!(
+                topology
+                    .locations()
+                    .iter()
+                    .all(|location| location.package() == Some(PackageId::new(0)))
+            );
+            assert_numbered_densely(&topology);
+        }
+    }
+
+    #[test]
+    fn a_record_repeated_is_one_group() {
+        for layout in LAYOUTS {
+            let mut buffer = processor(0, 0b11, layout);
+            buffer.extend(processor(3, 0b11, layout));
+            buffer.extend(processor(3, 0b11, layout));
+            buffer.extend(cache(3, 0, 0b11, layout));
+            buffer.extend(cache(3, 0, 0b11, layout));
+            let topology = parse(&buffer, layout);
+            assert_eq!(topology.packages(), NonZeroUsize::new(1));
+            let cache = topology.location(CpuId::new(1).unwrap()).unwrap();
+            assert_eq!(cache.last_level_cache(), Some(CacheId::new(0)));
+        }
+    }
+
+    #[test]
+    fn each_cpu_takes_the_last_cache_level_it_has() {
+        for layout in LAYOUTS {
+            let mut buffer = processor(0, 0b11, layout);
+            buffer.extend(processor(0, 0b1100, layout));
+            buffer.extend(cache(2, 0, 0b11, layout));
+            buffer.extend(cache(3, 0, 0b11, layout));
+            buffer.extend(cache(2, 0, 0b1100, layout));
+            let topology = parse(&buffer, layout);
+            let caches: Vec<Option<CacheId>> = topology
+                .locations()
+                .iter()
+                .map(|location| location.last_level_cache())
+                .collect();
+            let (big, little) = (Some(CacheId::new(0)), Some(CacheId::new(1)));
+            assert_eq!(caches, [big, big, little, little]);
+        }
+    }
+
+    #[test]
+    fn a_cpu_in_two_numa_nodes_leaves_numa_unknown() {
+        let layout = AffinityLayout::Wide;
+        let mut buffer = processor(0, 0b11, layout);
+        buffer.extend(numa_node(0, &[(0, 0b11)], layout));
+        buffer.extend(numa_node(1, &[(0, 0b10)], layout));
+        let topology = parse(&buffer, layout);
+        assert!(topology.numa_nodes().is_empty());
+        assert_eq!(topology.physical_cores(), NonZeroUsize::new(1));
+    }
+
+    #[test]
+    fn a_cpu_beyond_the_largest_group_makes_the_topology_unknown() {
+        let layout = AffinityLayout::Wide;
+        let buffer = record(0, &[], 30, &[(1024, 0b1)], layout);
+        assert_eq!(parse(&buffer, layout), CpuTopology::unknown());
     }
 }

@@ -99,7 +99,8 @@ impl std::error::Error for Error {
 impl From<io::Error> for Error {
     fn from(os_error: io::Error) -> Self {
         let kind = match os_error.kind() {
-            io::ErrorKind::NotFound => ErrorKind::NotFound,
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => ErrorKind::NotFound,
+            io::ErrorKind::IsADirectory => ErrorKind::InvalidInput,
             io::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
             io::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
             io::ErrorKind::UnexpectedEof => ErrorKind::UnexpectedEof,
