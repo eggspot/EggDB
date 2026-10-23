@@ -1,8 +1,9 @@
-//! The behavior every `IoQueue` shares, checked against the operating system's thread pool,
-//! its inline queue without threads, and the simulation.
+//! The behavior every `IoQueue` shares, checked against each backend of the operating system's
+//! queue (the automatic choice, inline, the thread pool, and io_uring on Linux) and the
+//! simulation.
 
 use eggdb_platform::{
-    AlignedBuffer, ErrorKind, File, FileSystem, IoBuffer, IoCompletion, IoOp, IoQueue,
+    AlignedBuffer, ErrorKind, File, FileSystem, IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue,
     IoQueueOptions, OpenMode, OsFileSystem, SimFileSystem,
 };
 use std::path::{Path, PathBuf};
@@ -40,9 +41,8 @@ macro_rules! contract {
                 $path: &dyn Fn(&str) -> PathBuf,
                 $options: IoQueueOptions,
             ) $body
-            for threads in [4, 0] {
+            for options in os_backends() {
                 let dir = TestDir::new();
-                let options = IoQueueOptions::new().threads(threads);
                 run(&OsFileSystem::new(), &|name| dir.0.join(name), options);
             }
             for seed in 0..8 {
@@ -52,6 +52,36 @@ macro_rules! contract {
             }
         }
     };
+}
+
+fn io_uring_is_built() -> bool {
+    cfg!(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "riscv64",
+            target_arch = "powerpc64",
+            target_arch = "s390x",
+            target_arch = "loongarch64"
+        ),
+        not(all(target_arch = "x86_64", target_pointer_width = "32"))
+    ))
+}
+
+fn os_backends() -> Vec<IoQueueOptions> {
+    let mut backends = vec![
+        IoQueueOptions::new(),
+        IoQueueOptions::new().threads(0),
+        IoQueueOptions::new().backend(IoBackend::Inline),
+        IoQueueOptions::new().backend(IoBackend::ThreadPool),
+    ];
+    if io_uring_is_built() {
+        backends.push(IoQueueOptions::new().backend(IoBackend::IoUring));
+    }
+    backends
 }
 
 fn reap_all<Q: IoQueue>(queue: &mut Q) -> Vec<IoCompletion<Q::File>> {
@@ -268,3 +298,57 @@ contract!(queues_without_capacity_are_refused, |fs, path, options| {
     let error = fs.io_queue(options.capacity(0)).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
 });
+
+#[test]
+fn an_asked_for_backend_is_given_or_refused() {
+    let fs = OsFileSystem::new();
+    let pool = fs
+        .io_queue(IoQueueOptions::new().backend(IoBackend::ThreadPool))
+        .unwrap();
+    assert_eq!(pool.backend(), IoBackend::ThreadPool);
+    let inline = fs
+        .io_queue(IoQueueOptions::new().backend(IoBackend::Inline))
+        .unwrap();
+    assert_eq!(inline.backend(), IoBackend::Inline);
+    let error = fs
+        .io_queue(
+            IoQueueOptions::new()
+                .backend(IoBackend::ThreadPool)
+                .threads(0),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    let error = fs
+        .io_queue(IoQueueOptions::new().backend(IoBackend::Iocp))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    let uring = fs.io_queue(IoQueueOptions::new().backend(IoBackend::IoUring));
+    if io_uring_is_built() {
+        assert_eq!(uring.unwrap().backend(), IoBackend::IoUring);
+    } else {
+        assert_eq!(uring.unwrap_err().kind(), ErrorKind::Unsupported);
+    }
+}
+
+#[test]
+fn the_automatic_choice_is_io_uring_where_it_is_built_and_the_pool_elsewhere() {
+    let fs = OsFileSystem::new();
+    let queue = fs.io_queue(IoQueueOptions::new()).unwrap();
+    let without_threads = fs.io_queue(IoQueueOptions::new().threads(0)).unwrap();
+    if io_uring_is_built() {
+        assert_eq!(queue.backend(), IoBackend::IoUring);
+        assert_eq!(without_threads.backend(), IoBackend::IoUring);
+    } else {
+        assert_eq!(queue.backend(), IoBackend::ThreadPool);
+        assert_eq!(without_threads.backend(), IoBackend::Inline);
+    }
+}
+
+#[test]
+fn the_simulation_checks_but_ignores_the_backend() {
+    let fs = SimFileSystem::new();
+    assert!(
+        fs.io_queue(IoQueueOptions::new().backend(IoBackend::IoUring))
+            .is_ok()
+    );
+}

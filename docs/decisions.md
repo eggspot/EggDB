@@ -1788,3 +1788,53 @@ ring layout and a run-time probe that falls back to the pool; IOCP on Windows (s
 the pool, as `FlushFileBuffers` has no overlapped form); registered files and buffers; an epoll
 path for networking where io_uring is missing; and the simulator refusing overlapping writes in
 flight, so the engine's rule above is checked rather than trusted.
+
+## D67 io_uring behind the queue, and choosing a backend: automatic by default, given or refused when asked — Decided by research (build loop, 2026-10-24); refines D60, D61 and D66
+`OsIoQueue` now runs on io_uring on Linux and Android, through our own declarations of
+`io_uring_setup` and `io_uring_enter` (system calls 425 and 426 on every architecture in the
+allowlist: x86_64, x86, aarch64, arm, riscv64, powerpc64, s390x and loongarch64; not x32) and of
+the ring layout from io_uring(7) and io_uring_setup(2). The ring is mapped once
+(`IORING_FEAT_SINGLE_MMAP`), and the kernel must report `IORING_FEAT_RW_CUR_POS`, which arrived
+with `IORING_OP_READ` and `IORING_OP_WRITE` in Linux 5.6; an older kernel is a refusal. Syncs use
+`IORING_OP_FSYNC`, with `IORING_FSYNC_DATASYNC` for `SyncData`.
+
+**Decided by research, on choosing a backend:**
+- **Automatic by default, as D66 said.** Without a request, a queue takes io_uring where it is
+  built and falls back on any refusal (`ENOSYS` from an old kernel or a seccomp filter such as
+  Docker's default, `EPERM` from `kernel.io_uring_disabled`, missing features) to the thread
+  pool, or to running inline with `threads(0)`. The engine never has to pick.
+- **An explicit request is given or refused, never substituted (as D60 and D61).**
+  `IoQueueOptions::backend(IoBackend)` asks for `Inline`, `ThreadPool`, `IoUring` or `Iocp`. A
+  refused io_uring is `Unsupported` with the kernel's error, except `ENOMEM` (the locked-memory
+  limit on kernels before 5.12), which is `OutOfMemory`. `Iocp` is refused until it is built,
+  and `ThreadPool` with no threads is `InvalidInput`. This matches PostgreSQL's
+  `huge_pages = try | on`; PostgreSQL 18's `io_method` defaults to its worker processes, and
+  TigerBeetle refuses to start without io_uring, so both choices exist in practice, and the
+  explicit request serves the engine setting that will come later.
+- **The queue reports what it got**: `OsIoQueue::backend()`, using the same `IoBackend` enum,
+  for logs and the operations views (D25). The simulator has no backend; it checks the request
+  and runs every operation its own way.
+- **`threads` only sizes the pool.** io_uring starts no threads of ours, so `threads(0)` still
+  takes io_uring where it is offered; running inline in submission order is
+  `backend(IoBackend::Inline)`.
+
+**What the io_uring backend answers itself, to behave as `OsFile` does:** writes and syncs
+through a read-only handle are `PermissionDenied` (D64; the kernel would say `EBADF`), an empty
+write is 0 without the kernel, and offsets beyond `i64::MAX` are `InvalidInput`, since io_uring
+reads an offset of -1 as "the file's current position". Transfers are capped at Linux's
+0x7fff_f000 bytes and reported as short.
+
+**Safety of the buffers.** Each operation in the kernel keeps its file and buffer in a slot of
+the ring until its completion is read, the completion ring is twice the submission ring and
+never holds more than the queue's capacity, and dropping the ring waits for every operation in
+the kernel. If waiting fails, the ring leaks its buffers and mappings rather than free memory the
+kernel may still write.
+
+**Tests.** The contract tests run on every backend the machine has, with io_uring requested
+explicitly on Linux so a broken probe fails instead of quietly using the pool; GitHub's Ubuntu
+runners allow io_uring. A test-only switch refuses the setup to check the automatic fallback.
+
+**Follow-ups:** batching submissions (one `io_uring_enter` per submit today); registered files
+and buffers; `IORING_SETUP_SINGLE_ISSUER` and `DEFER_TASKRUN` for thread-per-core rings; IOCP on
+Windows; measuring io_uring against the pool on Linux with a committed baseline once the storage
+engine's benchmarks exist.
