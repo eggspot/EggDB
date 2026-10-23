@@ -34,18 +34,14 @@ Check each task against these before starting and again before opening the PR.
    concludes the cost is the unavoidable, minimised price of correctness or security (D7).
 6. **Every scale.** From a microcontroller and a single small file (smaller and faster than SQLite)
    to a distributed cluster of many machines across regions holding billions of billions of rows
-   (exabytes). Every way of scaling, not only a primary with replicas:
-   - scaling up across all cores;
-   - read replicas;
-   - multi-primary;
-   - leaderless quorums;
-   - sharding by hash, range or region;
-   - distributed SQL with consensus;
-   - storage separated from compute;
-   - serverless scale-to-zero;
-   - tiered storage;
-   - edge copies;
-   - offline-first sync.
+   (exabytes). Every way of scaling, not only a primary with replicas; D18 has the full list:
+   - scaling up and partitioning;
+   - replicas and standbys;
+   - multi-primary and leaderless quorums;
+   - sharding and distributed SQL;
+   - storage separated from compute, and serverless;
+   - tiered storage, geo pinning and edge copies;
+   - offline-first sync, federation and analytical replicas.
 
    Each deployment picks the ones it needs, and can change without exporting data. The same engine
    and the same data format at every size; never write code that assumes one size or one topology.

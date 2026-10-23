@@ -458,17 +458,33 @@ them, and changes them later without exporting data or stopping:
   cluster when connected (D3, D4).
 - **Federation:** one query across separate EggDB clusters, and across other databases through the
   protocols EggDB speaks.
+- **Partitioning within one node:** by range, list, hash or time, with partition pruning, distinct
+  from sharding across nodes.
+- **Logical replication and change data capture:** to other EggDB clusters (including across
+  versions, for upgrades without downtime) and to other systems.
+- **Standby and disaster recovery:** log shipping and asynchronous standbys in another region, with
+  planned switchover and failover.
+- **Analytical replicas (HTAP):** columnar copies kept in step with transactional data (M11), so
+  analytics never slow down transactions.
+- **Tenancy at scale:** many tenants per cluster, from shared tables to a database per tenant, moved
+  and rebalanced online.
 
-**Consistency per request.** Consistency is chosen per database, table or request, from
-linearizable and serializable down to bounded staleness and eventual. The trade-off is explicit, and
-the default is the safe end.
+**Consistency per request.** Consistency has two axes, and both are chosen per database, table or
+request:
+- **Transaction isolation:** strict serializable, serializable, snapshot, repeatable read, read
+  committed.
+- **Replica freshness:** linearizable reads, read-your-writes, causal, bounded staleness, eventual.
+
+The trade-off is explicit, and the defaults are the safe ends: serializable isolation and reads
+that see the latest committed data.
 
 **Proof.** Every way of scaling is proven like crash safety (D9): deterministic simulation of
 partitions, clock skew and node failures, Jepsen-style consistency checks, and benchmarks at scale.
-The roadmap brings them in order of use: replicas and high availability first, then sharding and
-distributed SQL, then the rest (M14, M15, M18).
+The roadmap brings them in order of use: partitioning with the storage engine, replicas,
+standbys and high availability (M14), then sharding and distributed SQL (M15), then the rest
+(M18, which builds on M15's consensus and M17's platforms for offline-first sync).
 
-## D19 Every data type, with each database's exact behavior — Decided (owner, 2026-10-23)
+## D19 Every data type, with each database's exact behavior — Decided (owner, 2026-10-23); refines D10
 EggDB supports every data type of every database it is compatible with (D5, D10). Each type keeps
 the behavior it has in its home database: precision, range, overflow, rounding, string collation,
 time-zone handling, comparison and sort order, and conversions. That includes:
@@ -482,13 +498,19 @@ time-zone handling, comparison and sort order, and conversions. That includes:
   `hierarchyid`, `sql_variant`, `geography`/`geometry`, `rowversion`, `xml`, `nvarchar(max)` and the
   rest.
 - **MySQL and MariaDB:** unsigned integers, `ENUM`, `SET`, `YEAR`, `BIT`, spatial types, `JSON`.
-- **Oracle:** `NUMBER`, `VARCHAR2`/`NVARCHAR2`, `DATE`, `TIMESTAMP WITH (LOCAL) TIME ZONE`, the
-  `INTERVAL` types, `CLOB`/`BLOB`/`RAW`, `ROWID`, object types, `VARRAY` and nested tables.
+- **Oracle:** `NUMBER`, `BINARY_FLOAT`/`BINARY_DOUBLE`, `VARCHAR2`/`NVARCHAR2`, `DATE`,
+  `TIMESTAMP WITH (LOCAL) TIME ZONE`, the `INTERVAL` types, `CLOB`/`BLOB`/`RAW`/`BFILE`,
+  `ROWID`/`UROWID`, `JSON`, `XMLType`, object types, `VARRAY` and nested tables.
 - **SQLite:** dynamic typing with type affinity.
 - **Redis:** strings, lists, sets, sorted sets, hashes, streams, bitmaps, HyperLogLog, geo.
 - **MongoDB:** BSON's types (ObjectId, Decimal128, dates, binary subtypes, regular expressions).
-- **Elasticsearch:** field types.
-- **Cassandra:** CQL collections, tuples, user-defined types and counters.
+- **Elasticsearch and OpenSearch:** `text` and `keyword`, numeric, date and `date_nanos`, `boolean`,
+  `ip`, `geo_point` and `geo_shape`, `nested` and `object`, `flattened`, `dense_vector`,
+  `sparse_vector`, `completion`.
+- **Cassandra:** scalars (`varint`, `decimal`, `timeuuid`, `duration`, `inet` and the rest), the
+  collections, tuples, user-defined types and counters.
+- **The other models of M16:** InfluxDB line-protocol fields and tags, Kafka records (key, value,
+  headers, timestamp), S3 objects and their metadata.
 - **Across models:** vectors (dense float32/float16/int8/binary, sparse), geospatial (OGC simple
   features, geography on the sphere), time series, graph nodes and edges, arbitrary-precision
   decimals, and large objects.
@@ -499,5 +521,7 @@ is a precise mapping onto it, not an approximation, so a value written through o
 back exactly through another where both can represent it. Where they can't, the conversion is
 explicit and documented, never silently lossy.
 
-**Proof.** Each type is proven by the original database's own type tests, where they can lawfully be
-run (D1, D10), and by our round-trip and comparison tests across protocols.
+**Proof and progress.** Each type is proven by the original database's own type tests, where they can
+lawfully be run (D1, D10), and by our round-trip and comparison tests across protocols. A type is
+done when those pass. The roadmap's support matrix tracks the done types per dialect and model, as a
+coverage figure alongside D10's.
