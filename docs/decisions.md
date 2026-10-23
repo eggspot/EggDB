@@ -1790,18 +1790,21 @@ path for networking where io_uring is missing; and the simulator refusing overla
 flight, so the engine's rule above is checked rather than trusted.
 
 ## D67 io_uring behind the queue, and choosing a backend: automatic by default, given or refused when asked — Decided by research (build loop, 2026-10-24); refines D60, D61 and D66
-`OsIoQueue` now runs on io_uring on Linux and Android, through our own declarations of
+`OsIoQueue` now runs on io_uring on Linux, through our own declarations of
 `io_uring_setup` and `io_uring_enter` (system calls 425 and 426 on every architecture in the
 allowlist: x86_64, x86, aarch64, arm, riscv64, powerpc64, s390x and loongarch64; not x32) and of
 the ring layout from io_uring(7) and io_uring_setup(2). The ring is mapped once
 (`IORING_FEAT_SINGLE_MMAP`), and the kernel must report `IORING_FEAT_RW_CUR_POS`, which arrived
 with `IORING_OP_READ` and `IORING_OP_WRITE` in Linux 5.6; an older kernel is a refusal. Syncs use
-`IORING_OP_FSYNC`, with `IORING_FSYNC_DATASYNC` for `SyncData`.
+`IORING_OP_FSYNC`, with `IORING_FSYNC_DATASYNC` for `SyncData`. Android is left out for now:
+apps run under bionic's seccomp allowlist, and where `io_uring_setup` is not on it the filter
+may kill the process with `SIGSYS` instead of returning an error, so an automatic probe there is
+unsafe until the allowlist is checked per Android version.
 
 **Decided by research, on choosing a backend:**
 - **Automatic by default, as D66 said.** Without a request, a queue takes io_uring where it is
-  built and falls back on any refusal (`ENOSYS` from an old kernel or a seccomp filter such as
-  Docker's default, `EPERM` from `kernel.io_uring_disabled`, missing features) to the thread
+  built and falls back on any refusal (`ENOSYS` from an old kernel, `EPERM` from a seccomp
+  filter such as Docker's default or from `kernel.io_uring_disabled`, missing features) to the thread
   pool, or to running inline with `threads(0)`. The engine never has to pick.
 - **An explicit request is given or refused, never substituted (as D60 and D61).**
   `IoQueueOptions::backend(IoBackend)` asks for `Inline`, `ThreadPool`, `IoUring` or `Iocp`. A
@@ -1812,8 +1815,10 @@ with `IORING_OP_READ` and `IORING_OP_WRITE` in Linux 5.6; an older kernel is a r
   TigerBeetle refuses to start without io_uring, so both choices exist in practice, and the
   explicit request serves the engine setting that will come later.
 - **The queue reports what it got**: `OsIoQueue::backend()`, using the same `IoBackend` enum,
-  for logs and the operations views (D25). The simulator has no backend; it checks the request
-  and runs every operation its own way.
+  for logs and the operations views (D25). The simulator has no backend: it refuses what every
+  machine refuses (`Iocp` until it is built, `ThreadPool` with no threads), so code that passes
+  in simulation does not fail on a real machine for those, and runs every operation its own
+  way.
 - **`threads` only sizes the pool.** io_uring starts no threads of ours, so `threads(0)` still
   takes io_uring where it is offered; running inline in submission order is
   `backend(IoBackend::Inline)`.
@@ -1823,6 +1828,10 @@ through a read-only handle are `PermissionDenied` (D64; the kernel would say `EB
 write is 0 without the kernel, and offsets beyond `i64::MAX` are `InvalidInput`, since io_uring
 reads an offset of -1 as "the file's current position". Transfers are capped at Linux's
 0x7fff_f000 bytes and reported as short.
+
+**One thread per queue.** Linux cancels the io_uring operations of a thread that exits
+(`ECANCELED`), so a queue is submitted to and reaped from by one thread that outlives its
+operations, as a per-core event loop is.
 
 **Safety of the buffers.** Each operation in the kernel keeps its file and buffer in a slot of
 the ring until its completion is read, the completion ring is twice the submission ring and

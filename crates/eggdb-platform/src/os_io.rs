@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 /// The operating system's asynchronous file I/O, made by
 /// [`OsFileSystem::io_queue`](crate::FileSystem::io_queue).
 ///
-/// Unless [`IoQueueOptions::backend`] asks for one, it takes io_uring on Linux and Android
-/// (kernel 5.6 or later, on x86_64, x86, aarch64, arm, riscv64, powerpc64, s390x and
-/// loongarch64) and falls back when the kernel refuses it, as seccomp filters,
+/// Unless [`IoQueueOptions::backend`] asks for one, it takes io_uring on Linux (kernel 5.6 or
+/// later, on x86_64, x86, aarch64, arm, riscv64, powerpc64, s390x and loongarch64) and falls
+/// back when the kernel refuses it, as seccomp filters,
 /// `kernel.io_uring_disabled` and older kernels do. Elsewhere, and after a refusal, it runs the
 /// operations on a pool of worker threads named `eggdb-io-<n>`, which stays the path for files
 /// on macOS and the BSDs, whose kqueue has no asynchronous file I/O; with no threads they run
@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 ///
 /// On io_uring, writes and syncs through a read-only handle, empty writes and offsets beyond
 /// `i64::MAX` are answered without the kernel, as [`OsFile`] answers them, and each submit
-/// enters the kernel once.
+/// enters the kernel once. Linux cancels the io_uring operations of a thread that exits, so a
+/// queue is submitted to and reaped from by one thread that outlives its operations.
 #[derive(Debug)]
 pub struct OsIoQueue {
     capacity: usize,
@@ -65,9 +66,6 @@ impl OsIoQueue {
                 Err(_) => Backend::Pool(Pool::start(threads)?),
             },
             Some(IoBackend::Inline) => Backend::Inline(VecDeque::new()),
-            Some(IoBackend::ThreadPool) if threads == 0 => {
-                return Err(Error::new(ErrorKind::InvalidInput));
-            }
             Some(IoBackend::ThreadPool) => Backend::Pool(Pool::start(threads)?),
             Some(IoBackend::IoUring) => Backend::Uring(Ring::new(capacity)?),
             Some(IoBackend::Iocp) => return Err(Error::new(ErrorKind::Unsupported)),
@@ -303,7 +301,10 @@ mod tests {
     #[test]
     fn a_refused_io_uring_falls_back_to_the_pool_unless_it_was_asked_for() {
         use crate::ErrorKind;
-        use crate::os_io_uring::REFUSE_SETUP;
+        use crate::os_io_uring::{BUILT, REFUSE_SETUP};
+        if !BUILT {
+            return;
+        }
         REFUSE_SETUP.with(|refuse| refuse.set(true));
         let fs = OsFileSystem::new();
         let automatic = fs.io_queue(IoQueueOptions::new()).unwrap();
@@ -319,6 +320,9 @@ mod tests {
     #[test]
     fn io_uring_refuses_offsets_the_kernel_would_read_as_the_file_position() {
         use crate::ErrorKind;
+        if !crate::os_io_uring::BUILT {
+            return;
+        }
         let path = std::env::temp_dir().join(format!("eggdb-io-offset-{}", std::process::id()));
         let fs = OsFileSystem::new();
         let file = Arc::new(fs.open(&path, OpenMode::Create).unwrap());

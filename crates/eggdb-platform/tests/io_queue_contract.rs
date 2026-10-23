@@ -345,10 +345,17 @@ fn the_automatic_choice_is_io_uring_where_it_is_built_and_the_pool_elsewhere() {
 }
 
 #[test]
-fn the_simulation_checks_but_ignores_the_backend() {
+fn the_simulation_refuses_what_every_machine_refuses_and_ignores_the_rest() {
     let fs = SimFileSystem::new();
-    assert!(
-        fs.io_queue(IoQueueOptions::new().backend(IoBackend::IoUring))
-            .is_ok()
+    let iocp = fs.io_queue(IoQueueOptions::new().backend(IoBackend::Iocp));
+    assert_eq!(iocp.unwrap_err().kind(), ErrorKind::Unsupported);
+    let no_pool = fs.io_queue(
+        IoQueueOptions::new()
+            .backend(IoBackend::ThreadPool)
+            .threads(0),
     );
+    assert_eq!(no_pool.unwrap_err().kind(), ErrorKind::InvalidInput);
+    for backend in [IoBackend::Inline, IoBackend::ThreadPool, IoBackend::IoUring] {
+        assert!(fs.io_queue(IoQueueOptions::new().backend(backend)).is_ok());
+    }
 }

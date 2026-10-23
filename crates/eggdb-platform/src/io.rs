@@ -272,9 +272,8 @@ impl IoQueueOptions {
 
     /// Sets how many worker threads an [`IoBackend::ThreadPool`] starts. When no backend is
     /// asked for and the queue has no asynchronous file I/O from the operating system
-    /// (everywhere but Linux and Android for now, or after io_uring was refused), 0 runs the
-    /// operations [`IoBackend::Inline`]. A count above the
-    /// capacity is lowered to it.
+    /// (everywhere but Linux for now, or after io_uring was refused), 0 runs the operations
+    /// [`IoBackend::Inline`]. A count above the capacity is lowered to it.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self
@@ -283,7 +282,10 @@ impl IoQueueOptions {
     /// Asks for one backend, given or refused: the queue never falls back to another. Without
     /// it, the queue takes the operating system's asynchronous file I/O where it is offered
     /// and otherwise the thread pool, or runs inline when [`IoQueueOptions::threads`] is 0.
-    /// The simulation checks the request but runs every operation its own way.
+    /// Every queue, the simulation's too, refuses [`IoBackend::Iocp`] with
+    /// [`ErrorKind::Unsupported`] until it is built, and [`IoBackend::ThreadPool`] with no
+    /// threads with [`ErrorKind::InvalidInput`]; the simulation then runs every operation its
+    /// own way, whatever was asked for.
     pub fn backend(mut self, backend: IoBackend) -> Self {
         self.backend = Some(backend);
         self
@@ -299,6 +301,13 @@ impl IoQueueOptions {
             || self.threads > Self::MAX_THREADS
         {
             return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        match self.backend {
+            Some(IoBackend::Iocp) => return Err(Error::new(ErrorKind::Unsupported)),
+            Some(IoBackend::ThreadPool) if self.threads == 0 => {
+                return Err(Error::new(ErrorKind::InvalidInput));
+            }
+            _ => {}
         }
         Ok((self.capacity, self.threads.min(self.capacity)))
     }

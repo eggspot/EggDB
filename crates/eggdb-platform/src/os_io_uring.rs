@@ -4,7 +4,7 @@ thread_local! {
 }
 
 #[cfg(all(
-    any(target_os = "linux", target_os = "android"),
+    target_os = "linux",
     any(
         target_arch = "x86_64",
         target_arch = "x86",
@@ -17,10 +17,10 @@ thread_local! {
     ),
     not(all(target_arch = "x86_64", target_pointer_width = "32"))
 ))]
-pub(crate) use ring::Ring;
+pub(crate) use ring::*;
 
 #[cfg(not(all(
-    any(target_os = "linux", target_os = "android"),
+    target_os = "linux",
     any(
         target_arch = "x86_64",
         target_arch = "x86",
@@ -33,10 +33,10 @@ pub(crate) use ring::Ring;
     ),
     not(all(target_arch = "x86_64", target_pointer_width = "32"))
 )))]
-pub(crate) use unsupported::Ring;
+pub(crate) use unsupported::*;
 
 #[cfg(all(
-    any(target_os = "linux", target_os = "android"),
+    target_os = "linux",
     any(
         target_arch = "x86_64",
         target_arch = "x86",
@@ -59,6 +59,9 @@ mod ring {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) const BUILT: bool = true;
 
     const SYS_IO_URING_SETUP: c_long = 425;
     const SYS_IO_URING_ENTER: c_long = 426;
@@ -236,6 +239,7 @@ mod ring {
         cq_tail: *const AtomicU32,
         cq_mask: u32,
         cqes: *const Completion,
+        sqes: *mut Submission,
         submissions: Option<Mapping>,
         rings: Option<Mapping>,
         fd: OwnedFd,
@@ -306,6 +310,7 @@ mod ring {
                 cq_tail: rings.at(params.cq_off.tail),
                 cq_mask,
                 cqes: rings.at(params.cq_off.cqes),
+                sqes: submissions.at(0),
                 submissions: Some(submissions),
                 rings: Some(rings),
                 fd,
@@ -330,18 +335,15 @@ mod ring {
             if slot == self.slots.len() {
                 self.slots.push(None);
             }
-            let submission = describe(&mut op, slot as u64);
-            // SAFETY: the kernel publishes the submission ring's tail only to us; we are its only
-            // writer, so a relaxed load reads our own last store.
+            let submission = submission_for(&mut op, slot as u64);
+            // SAFETY: the tail lies in the ring mapping, which lives as long as `self`; we are
+            // its only writer, so a relaxed load reads our own last store.
             let tail = unsafe { &*self.sq_tail }.load(Ordering::Relaxed);
             let index = tail & self.sq_mask;
-            let entries = self
-                .submissions
-                .as_ref()
-                .map_or(ptr::null_mut(), |map| map.ptr.as_ptr().cast::<Submission>());
             // SAFETY: `index` is masked to the ring's size, so the entry lies inside the mapping of
-            // submission entries, which the kernel reads only after the tail moves past it.
-            unsafe { entries.wrapping_add(index as usize).write(submission) };
+            // submission entries, which lives as long as `self` and which the kernel reads only
+            // after the tail moves past the entry.
+            unsafe { self.sqes.wrapping_add(index as usize).write(submission) };
             // SAFETY: the index array has one `u32` per entry, and `index` is masked to it.
             unsafe { self.sq_array.wrapping_add(index as usize).write(index) };
             // SAFETY: the tail lies in the ring mapping; the release store publishes the entry.
@@ -352,7 +354,9 @@ mod ring {
                 self.in_kernel += 1;
                 return Ok(());
             }
-            // SAFETY: the kernel did not consume the entry, so taking it back is safe.
+            // SAFETY: the tail lies in the ring mapping, which lives as long as `self`. The
+            // kernel did not consume the entry and reads the ring only inside io_uring_enter, so
+            // moving the tail back withdraws it.
             unsafe { &*self.sq_tail }.store(tail, Ordering::Release);
             self.free_slots.push(slot);
             let error = entered
@@ -475,7 +479,7 @@ mod ring {
         }
     }
 
-    fn describe(op: &mut IoOp<OsFile>, user_data: u64) -> Submission {
+    fn submission_for(op: &mut IoOp<OsFile>, user_data: u64) -> Submission {
         let mut submission = Submission {
             fd: op.file().as_raw_fd(),
             user_data,
@@ -516,7 +520,7 @@ mod ring {
 }
 
 #[cfg(not(all(
-    any(target_os = "linux", target_os = "android"),
+    target_os = "linux",
     any(
         target_arch = "x86_64",
         target_arch = "x86",
@@ -534,6 +538,9 @@ mod unsupported {
     use crate::io::{IoCompletion, IoOp, RejectedOp};
     use crate::os_fs::OsFile;
     use std::convert::Infallible;
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) const BUILT: bool = false;
 
     #[derive(Debug)]
     pub(crate) struct Ring(Infallible);
