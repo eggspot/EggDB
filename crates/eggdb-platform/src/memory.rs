@@ -101,10 +101,6 @@ impl Accounting {
 }
 
 impl MemoryRegion {
-    /// # Safety
-    ///
-    /// `ptr` must point to `len` zeroed, writable bytes that nothing else uses, and `release`
-    /// must say how they were obtained, so that dropping the region returns them correctly.
     pub(crate) unsafe fn from_raw(
         ptr: NonNull<u8>,
         len: usize,
@@ -126,7 +122,7 @@ impl MemoryRegion {
         accounting: Option<Arc<Accounting>>,
     ) -> Result<Self> {
         let layout = Layout::from_size_align(len, alignment)
-            .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
+            .map_err(|_| Error::new(ErrorKind::OutOfMemory))?;
         if layout.size() == 0 {
             return Err(Error::new(ErrorKind::InvalidInput));
         }

@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// transparent huge pages can each be switched off to test the engine's path without them.
 ///
 /// Every allocation is numbered from zero, and any of them can be made to fail with
-/// [`ErrorKind::InjectedFault`], either by number or at random from a seed. Clones share the
-/// same state.
+/// [`ErrorKind::InjectedFault`], either by number or at random from a seed. An injected failure
+/// comes before any other check, so it hides an invalid length too. Clones share the same state.
 #[derive(Debug, Clone)]
 pub struct SimMemory {
     shared: Arc<Mutex<State>>,
@@ -27,7 +27,7 @@ pub struct SimMemory {
 struct State {
     page_size: usize,
     huge_page_size: Option<usize>,
-    transparent_huge_pages: bool,
+    refuse_transparent_huge_pages: bool,
     budget: usize,
     huge_page_pool: usize,
     allocations: u64,
@@ -60,7 +60,7 @@ impl SimMemory {
             shared: Arc::new(Mutex::new(State {
                 page_size: Self::DEFAULT_PAGE_SIZE,
                 huge_page_size: Some(Self::DEFAULT_HUGE_PAGE_SIZE),
-                transparent_huge_pages: true,
+                refuse_transparent_huge_pages: false,
                 budget: Self::MAX_BUDGET,
                 huge_page_pool: Self::MAX_BUDGET,
                 allocations: 0,
@@ -129,8 +129,8 @@ impl SimMemory {
 
     /// Makes [`PageMode::TransparentHuge`] fail with [`ErrorKind::Unsupported`], as a kernel
     /// built without transparent huge pages does, or lets it succeed again.
-    pub fn set_transparent_huge_pages(&self, available: bool) {
-        lock(&self.shared).transparent_huge_pages = available;
+    pub fn refuse_transparent_huge_pages(&self, refuse: bool) {
+        lock(&self.shared).refuse_transparent_huge_pages = refuse;
     }
 
     /// Makes the allocation numbered `index` fail.
@@ -199,7 +199,7 @@ impl State {
         match mode {
             PageMode::Normal => Ok(self.page_size),
             PageMode::Huge => self.huge_page_size.ok_or_else(unsupported),
-            PageMode::TransparentHuge if self.transparent_huge_pages => {
+            PageMode::TransparentHuge if !self.refuse_transparent_huge_pages => {
                 self.huge_page_size.ok_or_else(unsupported)
             }
             PageMode::TransparentHuge => Err(unsupported()),
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn huge_pages_can_be_switched_off() {
         let memory = SimMemory::new();
-        memory.set_transparent_huge_pages(false);
+        memory.refuse_transparent_huge_pages(true);
         let error = memory
             .allocate(HUGE, PageMode::TransparentHuge)
             .unwrap_err();

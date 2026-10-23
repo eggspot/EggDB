@@ -269,9 +269,12 @@ mod platform {
             // nothing else refers to; the advice only changes how the kernel backs it.
             let advised = unsafe { madvise(start.cast::<c_void>(), len, MADV_HUGEPAGE) };
             if advised == -1 {
-                let error = io::Error::last_os_error();
+                let error = Error::from(io::Error::last_os_error());
                 unmap(start, len);
-                return Err(Error::from(error).with_kind(ErrorKind::Unsupported));
+                if error.kind() == ErrorKind::OutOfMemory {
+                    return Err(error);
+                }
+                return Err(error.with_kind(ErrorKind::Unsupported));
             }
             NonNull::new(start).ok_or_else(|| Error::new(ErrorKind::OutOfMemory))
         }
@@ -434,14 +437,20 @@ mod platform {
     }
 
     fn lock_memory_privilege() -> Result<()> {
-        static ENABLED: OnceLock<core::result::Result<(), i32>> = OnceLock::new();
-        ENABLED
-            .get_or_init(|| {
-                enable_lock_memory_privilege().map_err(|error| error.raw_os_error().unwrap_or(0))
-            })
-            .map_err(|code| {
-                Error::from(io::Error::from_raw_os_error(code)).with_kind(ErrorKind::Unsupported)
-            })
+        static REFUSED: OnceLock<i32> = OnceLock::new();
+        let refusal = |code: i32| {
+            Error::from(io::Error::from_raw_os_error(code)).with_kind(ErrorKind::Unsupported)
+        };
+        if let Some(&code) = REFUSED.get() {
+            return Err(refusal(code));
+        }
+        match enable_lock_memory_privilege() {
+            Ok(()) => Ok(()),
+            Err(error) if error.raw_os_error() == Some(ERROR_NOT_ALL_ASSIGNED) => {
+                Err(refusal(*REFUSED.get_or_init(|| ERROR_NOT_ALL_ASSIGNED)))
+            }
+            Err(error) => Err(Error::from(error).with_kind(ErrorKind::Unsupported)),
+        }
     }
 
     fn enable_lock_memory_privilege() -> io::Result<()> {

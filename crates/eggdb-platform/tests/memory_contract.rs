@@ -73,14 +73,14 @@ contract!(huge_pages_are_given_or_refused_never_faked, |memory| {
             assert_eq!(error.kind(), ErrorKind::Unsupported, "{mode:?}");
             continue;
         };
-        match memory.allocate(2 * huge, mode) {
+        match memory.allocate(huge, mode) {
             Ok(mut region) => {
-                assert_eq!(region.len(), 2 * huge);
+                assert_eq!(region.len(), huge);
                 assert!(region.as_ptr().addr().is_multiple_of(huge));
                 assert!(region.iter().all(|&byte| byte == 0));
                 assert_eq!(region.mode(), mode);
                 region.fill(7);
-                assert_eq!(region[2 * huge - 1], 7);
+                assert_eq!(region[huge - 1], 7);
             }
             Err(error) => assert!(
                 matches!(

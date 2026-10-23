@@ -1546,4 +1546,6 @@ pages on for everything (RHEL's default), even `Normal` regions may land on huge
 address space and committing it later; returning memory (`MADV_DONTNEED`, `MADV_FREE`,
 `MEM_RESET`); keeping data pages out of core dumps (`MADV_DONTDUMP`); huge pages other than the
 default size (`MAP_HUGE_1GB`); sizing the buffer pool from cgroup v2's `memory.max`; one
-operation counter shared by every simulator component.
+operation counter shared by every simulator component; taking the transparent huge page size
+from `/sys/kernel/mm/transparent_hugepage/hpage_pmd_size`, which can differ from the explicit
+default (`default_hugepagesz=1G`) or exist without it.
