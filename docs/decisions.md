@@ -232,3 +232,78 @@ Every release measures and publishes:
 The numbers may only go down, like D6. The target is about one second to download and one second
 to install; concrete budgets are set from measurements once the first release ships. Package
 registries that need accounts or tokens wait for the owner (CLAUDE.md, "Releases").
+
+## D15 The EggDB client: our own design by Claude Fable, plus familiar layouts — Decided (owner, 2026-10-23)
+EggDB ships a client with excellent UI and UX for everyone who works with the data:
+- a **GUI**, written in Rust, that runs as a desktop app on every OS (D8) and in the browser
+  (WebAssembly, also served by the EggDB server);
+- a **CLI** that is at least as good as psql, sqlcmd and mysql.
+
+It covers the whole job:
+- connections;
+- schema and object browsing for every data model (D2);
+- a query editor for every dialect (D10), with completion, formatting and error help;
+- result grids that stay fast on huge results;
+- editing data;
+- explain plans shown visually;
+- import, export, backup and restore (D13);
+- users and permissions;
+- monitoring;
+- AI help through the built-in MCP server (D11).
+
+**Our own design.** The client's main design is EggDB's own, created by Claude Fable: every visual
+design task (layouts, flows, the design system, icons, motion, each screen) goes to an agent on the
+`fable` model. The design is recorded in `docs/ux/` and then implemented.
+
+**Familiar layouts.** Beside our own design, the client offers layouts that work like the clients
+people already use:
+- SQL Server Management Studio;
+- pgAdmin;
+- DBeaver;
+- DataGrip;
+- MySQL Workbench;
+- Oracle SQL Developer;
+- MongoDB Compass;
+- Redis Insight.
+
+Each one keeps that client's arrangement, shortcuts and workflows, so someone switching keeps their
+habits. These are clean-room (D1): we match layout, behavior and shortcuts, and never copy another
+product's code, artwork, icons, names or trademarks.
+
+**Usable by everyone.** The client follows accessibility standards (keyboard-first, screen readers,
+contrast) and works on small screens. Its speed is measured like the engine's (D7): opening a
+database, running a query and scrolling a large result.
+
+## D16 Official connectors for every language, working with existing ORMs — Decided (owner, 2026-10-23)
+EggDB has official drivers for every widely used language. Each one fits that language's standard
+database interface and its popular ORMs and frameworks:
+
+| Language | Standard interface | ORMs and frameworks |
+|---|---|---|
+| C# / .NET | ADO.NET | EF Core, Dapper, NHibernate |
+| Java, Kotlin | JDBC, R2DBC | Hibernate/JPA, jOOQ, Spring Data, Exposed |
+| Node.js, TypeScript | | Prisma, TypeORM, Drizzle, Sequelize, Knex |
+| Python | DB-API | SQLAlchemy, Django ORM, asyncio |
+| Go | `database/sql` | GORM, sqlc |
+| Rust | the native crate | |
+| PHP | PDO | Laravel/Eloquent, Doctrine |
+| Ruby | | ActiveRecord, Sequel |
+| Swift, Dart/Flutter | | the mobile frameworks |
+| C, C++ | a stable C API | |
+
+More languages follow as people ask for them.
+
+**How they work.** Every driver works both against a server and in embedded mode (D3), and exposes
+every data model and dialect (D2, D10). One Rust client core does the protocol, pooling, types and
+embedded engine. Each language's driver is a thin, idiomatic layer over it through the C API, so
+behavior and speed are the same everywhere. A language or runtime that can't load native code (the
+browser, for example) gets the same core compiled to WebAssembly, or a pure implementation of the
+protocol when that is the only way.
+
+Existing drivers for the databases EggDB is compatible with keep working too (D12). The official
+drivers add what only EggDB has: embedded mode, every model and the MCP tools.
+
+**Proof and publishing.** Each driver is proven by its ORM's own test suite or official provider
+tests running against EggDB in CI. Publishing to the package registries (NuGet, Maven Central, npm,
+PyPI, crates.io, Packagist, RubyGems, pub.dev and others) needs accounts and tokens, which wait for
+the owner.
