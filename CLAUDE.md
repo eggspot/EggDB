@@ -13,7 +13,13 @@ Check each task against these before starting and again before opening the PR.
    search, documents and JSON, time series, columnar analytics, graphs, vectors for AI, geospatial,
    wide-column, blobs and objects. They share one storage engine, one transaction system and one
    query layer, so a single query or transaction can span models. Never build a model as a
-   separate database bolted on the side. (D2)
+   separate database bolted on the side. **Nothing missing:** when a capability people need from a
+   data platform is missing, add it to the roadmap and build it ourselves, without asking the
+   owner. That includes our own BI application, ETL pipelines and big-data connectors, and our own
+   EggDB connector for every existing tool's plugin system (Power BI, Tableau, Grafana, dbt,
+   Airbyte, Spark, Trino and the rest), so users keep the tools they have. What still
+   goes to the owner: money, accounts and license changes, unsettled legal or patent findings, and
+   D45's "not planned" list. (D2, D46)
 2. **We support everything people already use.** Applications switch to EggDB without code
    changes: EggDB speaks the existing wire protocols and query languages (PostgreSQL and MySQL
    protocols and SQL, Redis RESP, MongoDB, Elasticsearch/OpenSearch, Cassandra CQL, InfluxDB line
@@ -141,6 +147,17 @@ Check each task against these before starting and again before opening the PR.
     - messaging and queues: RabbitMQ (AMQP), MQTT, NATS, SQS and Kafka (D33).
 
     Build profiles and per-workload targets keep all of it lightweight and fast (D34).
+18. **And the rest of what applications need** (D37–D45):
+    - generated REST, GraphQL, gRPC and OData APIs, realtime subscriptions and end-user auth for apps
+      (D37);
+    - ledger, RDF/SPARQL, XML/XQuery, OLAP (MDX, DAX) and spreadsheet-style data (D38);
+    - metrics, logs and traces as a store with PromQL, LogQL and TraceQL (D39);
+    - the engine internals stated (D40);
+    - embedded and edge in detail (D41);
+    - an admin console, notebooks and onboarding (D42);
+    - legal, export and privacy (D43);
+    - public proof, community, metering and energy (D44);
+    - the weak-spot fixes, including prompt-injection safety and limits for functions (D45).
 
 ## Code
 - **Everything written by us, in Rust, from scratch.** The only exceptions are the per-language
@@ -200,5 +217,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D36). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D46). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.

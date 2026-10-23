@@ -18,6 +18,8 @@ One database for every kind of data, written from scratch in Rust.
   familiar layouts for people coming from other database clients.
 - **Drivers for every language:** C#, Java, Node.js, Python, Go, Rust, PHP, Ruby and more, working
   with each language's ORMs.
+- **BI and pipelines built in:** our own dashboards, reports and ETL, plus Spark, Iceberg and Trino
+  compatibility for big data.
 - **AI-native:** a built-in MCP server lets any AI agent discover, query and manage data safely.
 - **Single:** one binary, which is both the server and an embeddable library.
 - **Lightweight and the fastest:** measured against the best database for each workload, every

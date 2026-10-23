@@ -849,7 +849,8 @@ gap is roadmap work, tracked on the benchmark dashboard (D32).
 **Legal checks.** Protocol compatibility with products under non-permissive or restrictive terms gets
 a research check of the law and public case history before each protocol milestone, recorded here.
 That includes Redis's recent versions, MongoDB's SSPL, Elasticsearch's licenses, RabbitMQ's MPL,
-EMQX's BSL, and the AWS terms behind the SQS API. Anything unclear goes to the owner.
+EMQX's BSL, the AWS terms behind the SQS API, and Microsoft's Analysis Services languages (MDX,
+DAX, XMLA, D38). Anything unclear goes to the owner.
 
 **CI.** EggDB is a public repository, so the global CI rule's build-time aim applies: parallel jobs
 are fine (CLAUDE.md, "Commands").
@@ -888,3 +889,255 @@ sign-off (D21). The owner applied the same change to the other eggspot open-sour
 There is no paid external security audit and no formal FIPS 140 validation. The project's
 cryptography and security code is reviewed in the open, and by the stricter automated checks of
 D35. A finding from anyone is handled through SECURITY.md.
+
+## D37 Auto-APIs, realtime and the app backend — Decided by research (second gap review, 2026-10-23)
+Most new applications reach their database through generated APIs, not drivers. EggDB generates
+them from the schema, with no code to write:
+- **REST**, in the style of PostgREST;
+- **GraphQL**, in the style of Hasura;
+- **gRPC** and **OData**, the last for Excel, Power BI and SAP;
+- **realtime:** WebSocket and Server-Sent Events subscriptions on live queries, for changes to rows
+  and query results;
+- **a client sync API** for apps, built on D18's offline-first sync.
+
+**End-user authentication for applications**, distinct from database roles (D22): sign-up,
+password, magic link, social login and OpenID Connect. Users get JWT sessions that map onto
+row-level security, so an app can talk to EggDB directly and safely.
+
+**Files** stored in EggDB's object storage (D2) can be transformed on request (resize, crop,
+convert) through sandboxed WebAssembly extensions (D27). The image codecs are our own code (D1). Every API is permission-checked by D22 and
+rate-limited by D25.
+
+## D38 The remaining data models and their query languages — Decided by research (second gap review, 2026-10-23); refines D2 and D10
+These close "every kind of database":
+- **Ledger tables:** append-only, tamper-evident history with Merkle proofs that a row was or wasn't
+  changed. It is not a blockchain and has no consensus among strangers.
+- **RDF** triples and quads, with **SPARQL** 1.1.
+- **XML documents**, with **XPath** and **XQuery** (D19 has the type).
+- **OLAP cubes** and semantic models, with **MDX**, **DAX** and **XMLA**, since Excel and Power BI
+  speak them.
+- **Spreadsheet-style tables:** formula columns, and a grid view in the client (D15).
+- **Key-value with secondary indexes:** this comes from the relational core, and is stated here so
+  key-value users find it.
+
+Each is a front-end over the one core (D2, D10). Each is proven by its standard's own test suites
+where they exist and can lawfully be run (the W3C SPARQL and XQuery suites, for example). Otherwise
+it is proven by our own tests built from the public documentation and its examples. That is the
+case for DAX, which has no public suite.
+
+**MDX, DAX and XMLA** are implemented from Microsoft's public documentation, which D1 allows. Before
+their milestone they get D34's legal check and D43's patent check, with anything unclear going to
+the owner.
+
+## D39 Observability data: metrics, logs and traces as a store — Decided by research (second gap review, 2026-10-23)
+D25 covers EggDB's own telemetry. EggDB is also a store for everyone else's, so Grafana (D12) can
+use it in place of Prometheus, Loki and Tempo.
+
+**Ingest:**
+- the OpenTelemetry protocol (OTLP) for metrics, logs and traces;
+- Prometheus remote write;
+- Loki's push API;
+- syslog;
+- Jaeger and Zipkin traces.
+
+**Query:** PromQL, LogQL, TraceQL and SQL, all over the same data. EggDB also serves the Prometheus,
+Loki and Tempo query HTTP APIs that Grafana uses. Loki and Tempo are AGPL, so their APIs and
+behavior come from their public documentation only, never their source (D1). Retention, downsampling and tiered
+storage (D18) keep it cheap.
+
+## D40 Engine internals, stated — Decided by research (second gap review, 2026-10-23); refines D7
+**Planning:** a cost-based optimizer with statistics, histograms and correlation, and adaptive
+re-planning during execution.
+
+**Execution:** vectorized, with SIMD chosen at runtime for the machine. A query compiler is added
+later where it pays.
+
+**I/O:** asynchronous, through io_uring and IOCP in the platform layer (M1). There is an epoll path
+where io_uring is unavailable, and kqueue for network I/O with a thread pool for files on the BSDs
+and macOS, since kqueue has no asynchronous file I/O.
+
+**Approximate answers:** `TABLESAMPLE`, sketches (HyperLogLog, t-digest) and `APPROX_*` functions.
+
+**Indexes and storage:** adaptive and learned indexes where benchmarks justify them, and
+compression chosen per column and page.
+
+**Accelerators:** GPUs, persistent memory and CXL memory are optional, behind build features, and
+never required (D6, D34).
+
+## D41 Embedded and edge, in detail — Decided by research (second gap review, 2026-10-23); refines D3, D4 and D6
+**Small devices:**
+- a published memory floor for `no_std` builds;
+- a fixed-memory mode that never allocates beyond a set budget.
+
+**Flash and power:**
+- write-amplification and flash-wear budgets;
+- power-loss safety on raw flash;
+- battery-aware background work: few wake-ups, deferred maintenance.
+
+**Phones and browsers:**
+- correct behavior under iOS background limits and Android Doze;
+- browser persistence through the Origin Private File System.
+
+**Better than SQLite, defined and published:**
+- smaller and faster on SQLite's own workloads (its `speedtest1` and the standard embedded
+  benchmarks), measured on the `embedded` profile (D34);
+- a published branch-coverage target for the core, rising every release toward SQLite's;
+- a promise that today's files stay readable for decades (D20).
+
+## D42 Beyond the client: admin console, notebooks and onboarding — Decided by research (second gap review, 2026-10-23); extends D15 and D32
+Alongside the client (D15), designed by Claude Fable like every visual surface:
+- an **admin web console** served by the server;
+- **SQL notebooks** with charts;
+- a **visual query builder** and **ER diagrams**;
+- **import wizards**;
+- **data profiling and data-quality rules**.
+
+The GUI and documentation are **localized**, including right-to-left scripts. Onboarding includes:
+- a migration guide per source database (D13);
+- sample datasets;
+- step-by-step tutorials.
+
+## D43 Legal, export and privacy — Decided by research (second gap review, 2026-10-23); refines D34
+- **Cryptography export:** the cryptography is our own (D35), so before the first release research
+  records what export rules call for, for publicly available encryption source (for example the US
+  rules for publicly available source code). Any filing or notification is the owner's to make.
+- **Patents:** the clean room (D1) covers copyright, not patents. Users who choose the Apache-2.0
+  option (D36) get its patent grant from our contributors; the MIT option has none. Research checks known patents before building patent-heavy features,
+  and records the result here.
+- **Benchmark clauses:** some commercial databases' licenses (Oracle, SQL Server and others)
+  restrict publishing benchmark results. Before D32's dashboards name such a product, research checks
+  the clause and records what may be published.
+- **Privacy:** the project's own sites and services publish a privacy statement. Telemetry stays
+  off (D21).
+
+## D44 Public proof, community, cost and energy — Decided by research (second gap review, 2026-10-23); extends D7, D21 and D32
+**Public proof:**
+- a reproducible benchmark repository that anyone can rerun: scripts, data and pinned hardware
+  descriptions;
+- a compatibility farm that runs every supported tool, driver and ORM version (D12, D16) weekly
+  and publishes the matrix;
+- chaos testing for clusters (D18).
+
+**Cost and energy:**
+- a metering API (usage per tenant, database and query) with hooks for anyone's billing;
+- energy in the lightweight budgets (D6): joules per query and idle wake-ups. These are reported
+  first, and gated once a repeatable measurement method is fixed and recorded here.
+
+**Community:** on GitHub Discussions, with a release blog and public roadmap voting. Anything that
+needs an account elsewhere is the owner's call.
+
+## D45 Fixes to weak spots — Decided by research (second gap review, 2026-10-23)
+**Split M6.** The roadmap splits M6 into M6a to M6f, in order:
+- **M6a:** the server and the PostgreSQL protocol. Authentication, TLS and roles ship in this first
+  piece, because the server never listens without authentication (D22).
+- **M6b:** the rest of security: more authentication methods, and row and column security.
+- **M6c:** operations.
+- **M6d:** MCP.
+- **M6e:** the first GUI screens.
+- **M6f:** the network drivers and their ORMs.
+
+"M6" elsewhere means all six.
+
+**Order of our own foundations.** Being our own (D1) has no fallback, so the order goes by need:
+1. the file format (D20);
+2. TLS and cryptography (D23), in step with the server;
+3. the WebAssembly runtime (D27), before functions and extensions;
+4. the GUI toolkit (D15), its own track;
+5. the operator and the Terraform provider (D25), after the server is stable.
+
+**Compatibility thresholds.** Each protocol and dialect publishes the pass rate of the original's
+test suites, which must not fall between releases. Its first release needs a stated minimum pass
+rate, recorded here.
+
+**Prompt injection (D11).** Data returned to agents through MCP is marked as data, never
+instructions. Agent-readable errors never echo raw stored text as if it were guidance. Tools that
+write or delete stay behind D11's permissions and confirmation.
+
+**Limits for functions and extensions (D27).** Every WebAssembly function and extension runs with CPU,
+memory, time and output limits, set per role.
+
+**SECURITY.md** gains:
+- the scope: denial of service from hostile input, sandbox escapes, protocol attacks;
+- the release signing key, once releases exist;
+- the supported-versions policy after 1.0.
+
+**Not planned without the owner.** These are business decisions or against the goals:
+- a managed cloud service, billing and paid certification (D44's metering hooks are ready if the
+  owner wants them);
+- a bug bounty;
+- accounts on proprietary community platforms;
+- reverse-engineered formats or protocols (D10, D13);
+- blockchain consensus (D38's ledger is tamper-evident tables only);
+- any hard dependency on a GPU or vendor SDK (D40).
+
+## D46 Nothing missing: we build every missing piece ourselves, without asking — Decided (owner, 2026-10-24); strengthens D2
+The owner: *"we are all in one, everything missing we will build our own, don't need to ask me. It's
+our important point."*
+
+**The standing rule.** When a capability people need from a data platform is missing from EggDB, the
+build loop and every session add it to the roadmap and build it ourselves (D1). They don't ask the
+owner first. Research decides how and in what order, and records it here. The things that still
+go to the owner are:
+- anything that needs money, accounts or a license change (D21);
+- legal and patent findings that research can't settle, and any legal filing (D34, D38, D43);
+- the items on D45's "not planned without the owner" list.
+
+**Added now under this rule:**
+
+**Business intelligence**, our own complete application, not only connectors to others' (D12).
+It is designed by Claude Fable (D15) and runs in the client and the admin console (D42). It
+provides:
+- drag-and-drop dashboards and charts;
+- interactive reports with filters and drill-down;
+- a semantic layer of metrics and dimensions defined once and reused everywhere, which also serves
+  D38's OLAP cubes;
+- scheduled and emailed reports (sent through the operator's own mail server), sharing, embedding
+  in other applications, and alerts;
+- row-level security inherited from D22.
+
+It competes with Power BI, Tableau, Looker, Metabase and Superset.
+
+**ETL and ELT pipelines**, our own tool:
+- connectors to read from and write to other databases, files, object storage, APIs and the
+  messaging protocols (D29, D33);
+- transformations in SQL and in any language through WebAssembly (D27), with models, tests and
+  lineage in the style of dbt;
+- orchestration: schedules, dependencies, retries, backfills, monitoring (D25);
+- change data capture in and out (D18, D28).
+
+It competes with Airflow, dbt, Fivetran and Airbyte.
+
+**Big-data ecosystem compatibility:**
+- a Spark connector, which is a Java driver layer under D16: a thin JVM data source over the Rust
+  core, with no database logic of its own;
+- an Apache Iceberg REST catalog, so Spark, Trino, Flink, DuckDB and Snowflake can use EggDB's
+  lakehouse tables (D29);
+- federated SQL over many sources, in the style of Trino and Presto (D29);
+- Kafka Connect compatibility (D33): EggDB implements the Connect REST and worker protocol in Rust,
+  so existing Connect deployments and tools work with it. Our connectors are Rust.
+
+**Our own connector for every ecosystem** (owner, 2026-10-24): *"when it comes to any kind of
+existing connector or things we need to support, we build our own support too, so users can use them
+as they want."* Wherever an existing tool has its own plugin or connector system, we write and
+maintain an EggDB connector for it, so people keep using the tools they have:
+- **BI:** Power BI and Tableau connectors, Excel, Looker, Superset, Metabase and Grafana data
+  source plugins;
+- **pipelines:** a dbt adapter, Airbyte and Fivetran sources and destinations, a Debezium connector,
+  Airflow operators;
+- **big data:** Spark, Flink, Trino and Presto connectors, an Iceberg REST catalog;
+- **infrastructure:** a Terraform provider (D25), Kubernetes and Helm (D25);
+- **the drivers:** JDBC, ODBC, ADO.NET and the other drivers (D16, D17);
+- **anything else people ask for.**
+
+Each connector is our own code. Where the host tool requires another language, the connector is a
+thin layer in that language over the Rust core, under D16's rules, holding no database logic. Each
+one is tested against the host tool's own connector test suite or certification kit where one
+exists and can be run, and is tracked in the compatibility farm (D44). Publishing or certifying them
+in marketplaces and registries (Microsoft's and Tableau's connector programs, the Grafana plugin
+catalog, package registries) needs accounts, so that waits for the owner (D16, D46). The connectors
+work without it.
+
+**Order.** They follow their foundations:
+- BI after the console and analytics (M11, D42);
+- ETL after the messaging, interchange and change-stream work (D28, D29, D33);
+- the big-data pieces after the lakehouse tables (D29).
