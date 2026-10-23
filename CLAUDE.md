@@ -61,6 +61,28 @@ Check each task against these before starting and again before opening the PR.
     read-only by default, revocable). Destructive actions need confirmation, and every agent
     action is logged where the owner can see it. It must work well with any agent, framework and
     model, not one vendor's. (D11)
+11. **Works with every tool people already use.** Drivers, ORMs, GUI clients, admin, BI, backup and
+    monitoring tools built for other databases work with EggDB unchanged. That includes JDBC,
+    ODBC, ADO.NET, libpq, EF Core, Hibernate, Prisma, SQLAlchemy, pgAdmin, DBeaver, DataGrip,
+    SQL Server Management Studio, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana,
+    Grafana and Metabase. Each one's catalog queries, metadata calls and protocol details are
+    answered the way it expects. (D12)
+12. **Migrating is restoring a backup.** Moving to EggDB means pointing it at the backup or dump
+    the old database already makes. EggDB restores formats with a public specification directly:
+    - SQL dumps from any of the dialects, including `pg_dump` plain format and `mysqldump`;
+    - SQLite files;
+    - `mongodump` BSON;
+    - Redis AOF, and Redis RDB where its format is publicly documented.
+
+    Formats without one (SQL Server `.bak`, `pg_dump`'s custom format, `pg_basebackup`,
+    Elasticsearch snapshots, Oracle Data Pump) go through the source's own documented export or
+    its replication feed, and are never reverse-engineered. EggDB can also follow a live database
+    through its replication or change stream for a switch with no downtime. (D13)
+13. **One second to download, one second to install.** EggDB is one small, self-contained file
+    with no dependencies. Installing it means downloading that file (a one-line command or the
+    usual package manager) and it runs; the first start takes well under a second. Download
+    size, install time and first-start time are measured for every release and may only
+    shrink. (D14)
 
 ## Code
 - **Everything written by us, in Rust, from scratch.** No code from other databases (SQLite,
@@ -115,5 +137,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D11). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D14). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.

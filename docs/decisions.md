@@ -170,3 +170,65 @@ models as well as people: precise, structured and with the fix when there is one
 table, read-only by default and revocable. Destructive actions need confirmation, and every agent
 action is logged where the owner can see it. It is vendor-neutral, with no dependence on one
 model provider.
+
+## D12 Works with every tool people already use — Decided (owner, 2026-10-23)
+EggDB is compatible with the query languages (D10) and also with the tools built around other
+databases. They work against EggDB without changes:
+- **drivers and connectors:** JDBC, ODBC, ADO.NET, libpq, and each language's native clients;
+- **ORMs:** EF Core, Hibernate, Prisma, SQLAlchemy, Django, ActiveRecord, GORM, TypeORM;
+- **GUI and admin clients:** pgAdmin, DBeaver, DataGrip, SQL Server Management Studio, Azure
+  Data Studio, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana;
+- **BI and monitoring tools:** Grafana, Metabase, Power BI, Tableau, Superset;
+- **migration and schema tools:** Flyway, Liquibase, Alembic.
+
+That means answering each tool's catalog and metadata queries (`information_schema`, `pg_catalog`,
+`sys.*`, MySQL's `SHOW` commands, the Redis `INFO` and `CLIENT` commands, and so on) the way it
+expects. The proof is each tool connecting, browsing and running its usual workflows in our
+compatibility tests. Coverage is tracked per tool alongside the dialect coverage (D10).
+
+## D13 Migrating from another database is restoring its backup — Decided (owner, 2026-10-23)
+Moving to EggDB means restoring the backup or dump the old database already produces. Every format
+is handled from public specifications and documentation only (D1), so each one is in one of two
+groups.
+
+**Restored directly**, because the format is publicly specified:
+- plain SQL dumps from every dialect (D10), including `pg_dump`'s plain format, `mysqldump` and
+  SQL Server's generated scripts;
+- SQLite database files, opened as they are (the file format is published);
+- MongoDB `mongodump` output (BSON, with its published specification);
+- Redis AOF (RESP commands), and Redis RDB from its published format description.
+
+**Through a documented route**, because there is no public specification of the format:
+- SQL Server `.bak` (only its outer tape container is published);
+- `pg_dump`'s custom, directory and tar formats;
+- `pg_basebackup` archives;
+- Elasticsearch and OpenSearch snapshots;
+- Oracle Data Pump.
+
+The documented route is the source's own export to a documented format (plain SQL, CSV, `bcp`, the
+`_bulk` format), or the live replication feed below. These formats are never reverse-engineered, and
+nobody reads the source database's code to learn them. A research subagent may move a format to
+the first group only when it finds a lawful public specification, recorded here.
+
+For a switch with no downtime, EggDB can also follow a running database through its documented
+replication or change stream (PostgreSQL logical replication, the MySQL binlog, SQL Server change
+data capture, MongoDB change streams, Redis replication), then take over. Each restored or
+followed source is tested by restoring real backups made by the original and comparing every row,
+index and object.
+
+## D14 One second to download, one second to install — Decided (owner, 2026-10-23)
+EggDB is one small, self-contained file with no runtime dependencies, so getting it is as fast as
+downloading that file:
+- a one-line install command, and the usual package managers (Homebrew, apt, dnf, winget,
+  Chocolatey, Docker, crates.io), each shipping that same binary in its own package format;
+- no installer wizard, no service to configure first, sensible defaults;
+- the first start takes well under a second.
+
+Every release measures and publishes:
+- the download size;
+- the time from starting the download to a running database on a typical connection and machine;
+- the first-start time.
+
+The numbers may only go down, like D6. The target is about one second to download and one second
+to install; concrete budgets are set from measurements once the first release ships. Package
+registries that need accounts or tokens wait for the owner (CLAUDE.md, "Releases").

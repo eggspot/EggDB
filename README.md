@@ -8,6 +8,10 @@ One database for every kind of data, written from scratch in Rust.
   more, so applications switch without code changes.
 - **Every query language:** PostgreSQL, SQL Server (T-SQL), MySQL, Oracle and SQLite SQL, each as
   itself, plus Redis, MongoDB, Elasticsearch, CQL and graph queries, all on the same data.
+- **Works with your tools:** drivers, ORMs, GUI clients and BI tools made for other databases.
+- **Migrating is restoring a backup:** point EggDB at your SQL dumps, SQLite files or Redis and
+  MongoDB backups, or let it follow your running database and switch over.
+- **About a second to download and a second to install:** one small file, no dependencies.
 - **AI-native:** a built-in MCP server lets any AI agent discover, query and manage data safely.
 - **Single:** one binary, which is both the server and an embeddable library.
 - **Lightweight and the fastest:** measured against the best database for each workload, every
