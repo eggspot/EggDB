@@ -2,13 +2,24 @@
 
 Numbered, append-only. A later decision may supersede an earlier one; say so in both entries.
 Status is **Decided** (owner), **Decided by research**, or **Decided by the build loop** (engineering).
+The owner's decisions fix the goal. The concrete lists inside them (protocol order, benchmark names,
+budgets, permission details) were filled in when the project was set up, and research may refine
+them with a new entry.
 
 ## D1 Everything written by us, in Rust, from scratch — Decided (owner, 2026-10-23)
 EggDB is our own code in Rust. No code from other databases: we implement storage, transactions,
 query processing and every protocol from public specifications, papers and documentation (clean
-room). What we ship has no third-party crates; permissive crates may be used for tests, benchmarks
-and build tooling only, when a research subagent approves them. Licensed MIT; no copyleft code
-(GPL, AGPL, SSPL, BSL) ever.
+room). What we ship has no third-party crates; Rust's standard library and our own declarations of
+operating-system APIs are fine. Permissive crates (MIT, Apache-2.0, BSD) may be used for tests,
+benchmarks and build tooling only, when a research subagent approves them. Licensed MIT; no
+copyleft or source-available code ever: GPL, LGPL, AGPL, MPL, SSPL, BSL and the like.
+
+Clean room includes not reading the source of copyleft or source-available databases (MySQL, MariaDB,
+MongoDB, and any other under those licenses) while working on EggDB. Their public documentation,
+protocol specifications and published papers are fine. Test suites under those licenses may be
+run against EggDB from outside the repo, but are never copied into it. Product names such as
+PostgreSQL, Oracle, SQL Server, MySQL, Redis, MongoDB and Elasticsearch are their owners'
+trademarks; we say "compatible with", never imply endorsement.
 
 ## D2 All in one: every kind of database in one engine — Decided (owner, 2026-10-23)
 One engine covers every kind of database in use today:
@@ -39,14 +50,14 @@ cluster without an export.
 ## D5 We support everything people already use — Decided (owner, 2026-10-23); order decided by research
 Applications switch to EggDB without code changes, because EggDB speaks the wire protocols and
 query languages they already use. The order below follows what most applications use and what
-reuses the most of the core, and a research subagent may refine it:
+reuses the most of the core (the roadmap follows the same order), and a research subagent may
+refine it:
 1. SQLite's embedded API and file format, and PostgreSQL's wire protocol and SQL;
-   then the other SQL databases' protocols as their dialects land (D10): MySQL, Microsoft SQL
-   Server's TDS and Oracle's;
 2. Redis RESP, for caching;
-3. MySQL's protocol and SQL;
-4. Elasticsearch/OpenSearch REST, for search;
-5. MongoDB's wire protocol;
+3. Elasticsearch/OpenSearch REST, for search;
+4. MongoDB's wire protocol;
+5. the other SQL dialects (D10): MySQL's protocol and SQL, Microsoft SQL Server's TDS protocol
+   (publicly documented as MS-TDS) and T-SQL, and Oracle's SQL and PL/SQL;
 6. then Cassandra CQL, InfluxDB line protocol, Kafka, S3 and others.
 
 "Supported" means the original's own client libraries and conformance or regression tests pass
@@ -126,8 +137,15 @@ A session chooses its dialect by wire protocol, connection setting or per statem
 reads and writes the same data in the same transactions (D2). Dialects are front-ends over one
 query core (one logical plan, one optimizer, one executor), never separate engines.
 
-Proof of support is the original's own regression and conformance tests where they are public
-(PostgreSQL's regression suite, sqllogictest, MySQL's test suite), plus our tests for the rest.
+Proof of support is the original's own regression and conformance tests where they can lawfully
+be run (PostgreSQL's regression suite, sqllogictest; MySQL's GPL test suite only from outside the
+repo, D1), plus our own tests. Support is tracked per dialect as a coverage figure that grows every
+release, with the parts that can't be matched recorded and explained, so no dialect blocks the
+others while it is incomplete.
+
+Oracle's own wire protocol (Oracle Net / TNS) has no lawful public specification. Until one exists,
+Oracle SQL and PL/SQL are reached over our PostgreSQL and TDS protocols (and the embedded API), and
+the Oracle protocol itself is not implemented.
 
 ## D11 AI-native, with a built-in MCP server — Decided (owner, 2026-10-23)
 Any AI agent, framework or model can use EggDB as easily as a person can.

@@ -18,7 +18,9 @@ Check each task against these before starting and again before opening the PR.
    changes: EggDB speaks the existing wire protocols and query languages (PostgreSQL and MySQL
    protocols and SQL, Redis RESP, MongoDB, Elasticsearch/OpenSearch, Cassandra CQL, InfluxDB line
    protocol, Kafka, S3, SQLite's embedded API and file format, and more; order in D5). Behavior
-   matches the original closely enough that its own client libraries and test suites pass. (D5)
+   matches the original closely enough that its own client libraries and test suites pass;
+   coverage is tracked per protocol and dialect and grows every release. Oracle's own wire
+   protocol is not implemented until a lawful public specification exists (D10). (D5)
 3. **Single.** One binary that is both the server and an embeddable library (in-process, like
    SQLite). One process, one data directory (or one file when embedded), one config, one backup.
    No helper services to install. (D3)
@@ -63,14 +65,20 @@ Check each task against these before starting and again before opening the PR.
 ## Code
 - **Everything written by us, in Rust, from scratch.** No code from other databases (SQLite,
   PostgreSQL, RocksDB, Redis, Lucene and so on). Implement from public specifications, papers and
-  protocol documentation (clean room). No third-party crates in what we ship; a research subagent may
-  approve a permissive (MIT, Apache-2.0, BSD) crate for tests, benchmarks or build tooling only.
-  Never add GPL, AGPL, SSPL or other copyleft code. (D1)
+  protocol documentation (clean room), and never read the source of copyleft or source-available
+  databases (MySQL, MariaDB, MongoDB and others) while working on EggDB. No third-party crates in
+  what we ship (Rust's standard library and our own OS API declarations are fine); a research
+  subagent may approve a permissive (MIT, Apache-2.0, BSD) crate for tests, benchmarks or build
+  tooling only. Never add copyleft or source-available code (GPL, LGPL, AGPL, MPL, SSPL, BSL).
+  Other products' names are trademarks: say "compatible with". (D1)
+- **No panics on input.** Release builds abort on panic for speed, so nothing a client, a file or
+  the network sends may reach a panic: parsing and validation return errors as values, and fuzzing
+  checks it (D9).
 - `unsafe` only where unavoidable, each block with a `// SAFETY:` comment explaining why it is
   sound (clippy denies undocumented unsafe blocks). One unsafe operation per block.
 - **No other comments in code.** Public items get rustdoc (`///`, `//!`), which `cargo doc` builds
-  in CI. Everything else is explained by names, small functions, types and tests (global rule
-  "Code comments: none, the code explains itself").
+  in CI. Everything else is explained by names, small functions, types and tests. When you change
+  a file, remove the comments it has that this rule doesn't allow.
 - Release builds are what we measure and ship (LTO, one codegen unit).
 
 ## Layout
@@ -82,7 +90,9 @@ Check each task against these before starting and again before opening the PR.
 ## Commands
 - `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
   `cargo doc --workspace --no-deps`. CI runs exactly these (job `check`, the required status check).
-- EggDB is public, so CI goes for build time, not billed minutes (global CI rule).
+- EggDB is public, so standard GitHub runners are free: CI aims for the shortest time from push to
+  the first failure and to a green run (parallel jobs are fine when they shorten it), with no larger
+  runners, superseded PR runs cancelled, and a timeout on every job.
 
 ## Pull requests: merge them yourself
 The owner doesn't merge PRs by hand. After opening a PR, in the same session:
