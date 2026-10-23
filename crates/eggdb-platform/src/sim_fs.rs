@@ -264,6 +264,9 @@ impl File for SimFile {
             self.require_writable()?;
             let start = checked_size(offset)?;
             checked_size(advance(offset, buf.len())?)?;
+            if buf.is_empty() {
+                return Ok(0);
+            }
             write_into(&mut inode.contents, start, buf);
             inode.unsynced.push(Change::Write {
                 offset,

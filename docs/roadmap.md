@@ -38,10 +38,10 @@ of the platform layer exist; there is no storage engine, transaction system or q
 
 | Area | Status | Missing |
 |------|--------|---------|
-| Platform layer (M1) | files with positional I/O, directory sync, clocks, deterministic crash and fault simulation | direct and async I/O, memory, threads, networking, Windows directory flush |
+| Platform layer (M1) | files with positional I/O, directory sync, clocks, deterministic crash and fault simulation | direct and async I/O, memory, threads, networking |
 | Storage and transactions (M2, M3) | not started | everything |
 | Models (D2) | none | key-value, relational, search, documents, time series, columnar, graphs, vectors, geospatial, wide-column, objects, queues |
-| SQL dialects (D10) | none (0%) | PostgreSQL, SQLite, MySQL/MariaDB, T-SQL, Oracle |
+| SQL dialects (D10, D47) | none (0%) | PostgreSQL, SQLite, MySQL/MariaDB, T-SQL, Oracle, then GoogleSQL, Snowflake, Spark, ClickHouse, Trino, Db2, Sybase |
 | Protocols (D5) | none (0%) | PostgreSQL, RESP, MongoDB, Elasticsearch, CQL, Kafka, AMQP, MQTT, S3 and the rest |
 | Platforms (D8) | Linux, macOS and Windows built and tested in CI; WASI type-checked locally | BSDs, Android, iOS, EggOS, browser WebAssembly, `no_std` |
 | Scale (D4, D18) | none | a single file first (M4), then replicas, sharding and the rest of D18 |

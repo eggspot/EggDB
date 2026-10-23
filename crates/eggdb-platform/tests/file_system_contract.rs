@@ -166,3 +166,35 @@ contract!(one_handle_is_shared_between_threads, |fs, path| {
         assert!(chunk.iter().all(|&byte| usize::from(byte) == writer));
     }
 });
+
+contract!(an_empty_write_past_the_end_changes_nothing, |fs, path| {
+    let file = fs.open(&path("data"), OpenMode::CreateNew).unwrap();
+    assert_eq!(file.write_at(&[], 100).unwrap(), 0);
+    assert_eq!(file.size().unwrap(), 0);
+});
+
+contract!(
+    a_removed_file_stays_readable_through_an_open_handle,
+    |fs, path| {
+        let file = fs.open(&path("segment"), OpenMode::CreateNew).unwrap();
+        file.write_all_at(b"old log", 0).unwrap();
+        fs.remove_file(&path("segment")).unwrap();
+        assert!(!fs.exists(&path("segment")).unwrap());
+        assert_eq!(read_all(&file), b"old log");
+    }
+);
+
+contract!(
+    renaming_over_an_open_file_keeps_its_handle_readable,
+    |fs, path| {
+        let current = fs.open(&path("current"), OpenMode::CreateNew).unwrap();
+        current.write_all_at(b"v1", 0).unwrap();
+        let next = fs.open(&path("next"), OpenMode::CreateNew).unwrap();
+        next.write_all_at(b"v2", 0).unwrap();
+        drop(next);
+        fs.rename(&path("next"), &path("current")).unwrap();
+        assert_eq!(read_all(&current), b"v1");
+        let reopened = fs.open(&path("current"), OpenMode::Read).unwrap();
+        assert_eq!(read_all(&reopened), b"v2");
+    }
+);

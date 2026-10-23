@@ -109,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn the_system_wall_clock_is_after_2026() {
+    fn the_system_wall_clock_is_after_october_2026() {
         let first_of_october_2026 = 1_790_812_800_000_000_000;
         assert!(SystemClock::new().unix_time_nanos() > first_of_october_2026);
     }

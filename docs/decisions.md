@@ -1409,9 +1409,11 @@ The engine sees traits, never an OS API:
 
 **Durability follows POSIX's weakest promise.** File contents are durable only after
 `sync_data`/`sync_all`; creating, renaming and removing a file only after the parent directory is
-synced. Engine code is written against that rule on every OS. On Windows, `sync_dir` checks the
-directory exists and relies on NTFS's metadata journal until the platform layer declares the
-Win32 calls to flush a directory handle (M1 follow-up).
+synced. Engine code is written against that rule on every OS. Windows flushes the directory
+through a handle opened with backup semantics; targets with no way to flush a directory (WASI)
+only check that it exists. A rename across directories is durable only once both directories
+are synced, and the simulator lets either half survive alone, which is stricter than journaling
+file systems.
 
 **A sync failure is fatal to the file.** After a failed `fsync` some kernels drop the dirty pages
 and report success on the next try (PostgreSQL's 2018 "fsyncgate"). So the engine never retries a

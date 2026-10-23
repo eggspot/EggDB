@@ -58,7 +58,19 @@ fn sync_directory(path: &Path) -> Result<()> {
     Ok(fs::File::open(path)?.sync_all()?)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    Ok(directory.sync_all()?)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sync_directory(path: &Path) -> Result<()> {
     fs::metadata(path)?;
     Ok(())

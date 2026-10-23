@@ -43,7 +43,9 @@ pub trait FileSystem: Send + Sync {
     /// Creates the directory at `path` and every missing parent.
     fn create_dir_all(&self, path: &Path) -> Result<()>;
 
-    /// Makes the entries of the directory at `path` durable.
+    /// Makes the entries of the directory at `path` durable. On targets that offer no way to
+    /// flush a directory (neither Unix nor Windows, such as WASI), it only checks that the
+    /// directory exists.
     fn sync_dir(&self, path: &Path) -> Result<()>;
 
     /// Whether a file or directory exists at `path`.
@@ -61,7 +63,8 @@ pub trait File: Send + Sync + std::fmt::Debug {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
 
     /// Writes from `buf` starting at `offset` and returns how many bytes were written. Writing
-    /// past the end extends the file, filling any gap with zeros.
+    /// past the end extends the file, filling any gap with zeros; an empty `buf` changes
+    /// nothing.
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize>;
 
     /// The size of the file in bytes.
