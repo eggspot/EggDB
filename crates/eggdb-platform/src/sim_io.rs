@@ -1,5 +1,5 @@
 use crate::aligned::AlignedBuffer;
-use crate::error::Result;
+use crate::error::{Error, ErrorKind, Result};
 use crate::fs::File;
 use crate::io::{IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp, check_reap, queue_full};
 use crate::rng::SplitMix64;
@@ -24,6 +24,12 @@ use std::collections::VecDeque;
 /// or with [`ErrorKind::InjectedFault`](crate::ErrorKind::InjectedFault) when the file system
 /// injects one first. Dropping the queue performs the pending operations, as an operating
 /// system finishes them. The thread count of [`IoQueueOptions`] is checked but not used.
+///
+/// The simulation also checks the rule every queue states and no operating system enforces: a
+/// write may not be in flight at once with a read or another write of an overlapping range of
+/// the same file, through any handle. `submit` refuses such an operation with
+/// [`ErrorKind::InvalidInput`] and hands it back, so engine code that breaks the rule fails in
+/// tests instead of racing on a machine.
 #[derive(Debug)]
 pub struct SimIoQueue {
     capacity: usize,
@@ -102,6 +108,14 @@ impl SimIoQueue {
         (1 + self.draw_below(units - 1)) * unit
     }
 
+    fn overlaps_in_flight(&self, op: &IoOp<SimFile>) -> bool {
+        self.pending
+            .iter()
+            .map(|pending| &pending.op)
+            .chain(self.done.iter().map(|done| &done.op))
+            .any(|in_flight| conflict(op, in_flight))
+    }
+
     fn draw_below(&mut self, bound: usize) -> usize {
         match u64::try_from(bound) {
             Ok(0) | Err(_) => 0,
@@ -120,6 +134,12 @@ impl IoQueue for SimIoQueue {
     ) -> core::result::Result<(), RejectedOp<SimFile>> {
         if self.in_flight() >= self.capacity {
             return Err(queue_full(op));
+        }
+        if self.overlaps_in_flight(&op) {
+            return Err(RejectedOp {
+                error: Error::new(ErrorKind::InvalidInput),
+                op,
+            });
         }
         self.pending.push(Pending { op, user_data });
         self.perform_some();
@@ -152,6 +172,25 @@ impl Drop for SimIoQueue {
             self.perform_one();
         }
     }
+}
+
+fn conflict(op: &IoOp<SimFile>, other: &IoOp<SimFile>) -> bool {
+    let (Some(range), Some(other_range)) = (transfer_range(op), transfer_range(other)) else {
+        return false;
+    };
+    let writes = matches!(op, IoOp::Write { .. }) || matches!(other, IoOp::Write { .. });
+    writes
+        && op.file().is_same_file(other.file())
+        && range.0 < other_range.1
+        && other_range.0 < range.1
+}
+
+fn transfer_range(op: &IoOp<SimFile>) -> Option<(u64, u64)> {
+    let (IoOp::Read { offset, buffer, .. } | IoOp::Write { offset, buffer, .. }) = op else {
+        return None;
+    };
+    let len = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
+    (len > 0).then(|| (*offset, offset.saturating_add(len)))
 }
 
 #[cfg(test)]
@@ -320,5 +359,73 @@ mod tests {
             ErrorKind::InjectedFault
         );
         assert_eq!(data.size().unwrap(), 0);
+    }
+
+    fn read(file: &Arc<SimFile>, offset: u64, len: usize) -> IoOp<SimFile> {
+        IoOp::Read {
+            file: Arc::clone(file),
+            offset,
+            buffer: vec![0; len].into(),
+        }
+    }
+
+    fn refused(queue: &mut SimIoQueue, op: IoOp<SimFile>) -> bool {
+        match queue.submit(op, 9) {
+            Ok(()) => false,
+            Err(rejected) => {
+                assert_eq!(rejected.error.kind(), ErrorKind::InvalidInput);
+                true
+            }
+        }
+    }
+
+    #[test]
+    fn a_write_overlapping_an_operation_in_flight_is_refused() {
+        let fs = SimFileSystem::new();
+        let data = file(&fs, "data");
+        let same = Arc::new(fs.open(Path::new("data"), OpenMode::ReadWrite).unwrap());
+        let mut queue = queue(&fs);
+        submit(&mut queue, write(&data, 100, &[1; 100]), 0);
+        assert!(refused(&mut queue, write(&data, 199, &[2])));
+        assert!(refused(&mut queue, write(&same, 50, &[2; 51])));
+        assert!(refused(&mut queue, read(&data, 150, 10)));
+        assert!(refused(&mut queue, read(&same, 0, 1000)));
+        assert_eq!(queue.in_flight(), 1);
+    }
+
+    #[test]
+    fn operations_that_cannot_race_are_accepted() {
+        let fs = SimFileSystem::new();
+        let data = file(&fs, "data");
+        let other = file(&fs, "other");
+        let mut queue = queue(&fs);
+        submit(&mut queue, write(&data, 100, &[1; 100]), 0);
+        submit(&mut queue, write(&data, 200, &[2; 10]), 1);
+        submit(&mut queue, write(&data, 90, &[3; 10]), 2);
+        submit(&mut queue, write(&data, 150, &[]), 3);
+        submit(&mut queue, write(&other, 100, &[4; 100]), 4);
+        submit(&mut queue, read(&data, 0, 90), 5);
+        submit(&mut queue, read(&other, 210, 10), 6);
+        submit(&mut queue, read(&other, 210, 10), 7);
+        submit(
+            &mut queue,
+            IoOp::SyncData {
+                file: Arc::clone(&data),
+            },
+            8,
+        );
+        submit(&mut queue, write(&data, u64::MAX - 1, &[5; 4]), 9);
+        assert_eq!(reap_all(&mut queue).len(), 10);
+    }
+
+    #[test]
+    fn a_range_is_free_again_once_its_completion_is_reaped() {
+        let fs = SimFileSystem::new();
+        let data = file(&fs, "data");
+        let mut queue = queue(&fs);
+        submit(&mut queue, write(&data, 0, &[1; 8]), 0);
+        let mut completions = Vec::new();
+        queue.reap(&mut completions, 1).unwrap();
+        assert!(!refused(&mut queue, write(&data, 0, &[2; 8])));
     }
 }

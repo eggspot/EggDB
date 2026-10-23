@@ -286,6 +286,10 @@ pub struct SimFile {
 }
 
 impl SimFile {
+    pub(crate) fn is_same_file(&self, other: &SimFile) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared) && self.inode == other.inode
+    }
+
     fn with_inode<T>(&self, operation: impl FnOnce(&mut Inode, u64) -> Result<T>) -> Result<T> {
         let mut state = begin(&self.shared)?;
         if state.generation != self.generation {
