@@ -215,12 +215,29 @@ pub trait IoQueue: Send + fmt::Debug {
     fn capacity(&self) -> usize;
 }
 
+/// How an [`OsIoQueue`](crate::OsIoQueue) runs its operations, as asked for with
+/// [`IoQueueOptions::backend`] and reported by [`OsIoQueue::backend`](crate::OsIoQueue::backend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum IoBackend {
+    /// On the caller's thread inside [`IoQueue::reap`], in the order they were submitted.
+    Inline,
+    /// On a pool of worker threads running positional reads, writes and syncs.
+    ThreadPool,
+    /// Through Linux's io_uring, from kernel 5.6.
+    IoUring,
+    /// Through Windows' I/O completion ports; not built yet, so asking for it is refused.
+    Iocp,
+}
+
 /// How [`FileSystem::io_queue`](crate::FileSystem::io_queue) builds a queue: how many
-/// operations it holds and how many threads it may use.
+/// operations it holds, how many threads it may use and, when the caller asks, which
+/// [`IoBackend`] runs them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoQueueOptions {
     capacity: usize,
     threads: usize,
+    backend: Option<IoBackend>,
 }
 
 impl IoQueueOptions {
@@ -243,6 +260,7 @@ impl IoQueueOptions {
         Self {
             capacity: Self::DEFAULT_CAPACITY,
             threads: Self::DEFAULT_THREADS,
+            backend: None,
         }
     }
 
@@ -252,12 +270,29 @@ impl IoQueueOptions {
         self
     }
 
-    /// Sets how many threads may run operations where the queue has no asynchronous file I/O
-    /// from the operating system, which for now is everywhere. With 0, operations run on the
-    /// caller's thread inside [`IoQueue::reap`]. A count above the capacity is lowered to it.
+    /// Sets how many worker threads an [`IoBackend::ThreadPool`] starts. When no backend is
+    /// asked for and the queue has no asynchronous file I/O from the operating system
+    /// (everywhere but Linux for now, or after io_uring was refused), 0 runs the operations
+    /// [`IoBackend::Inline`]. A count above the capacity is lowered to it.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self
+    }
+
+    /// Asks for one backend, given or refused: the queue never falls back to another. Without
+    /// it, the queue takes the operating system's asynchronous file I/O where it is offered
+    /// and otherwise the thread pool, or runs inline when [`IoQueueOptions::threads`] is 0.
+    /// Every queue, the simulation's too, refuses [`IoBackend::Iocp`] with
+    /// [`ErrorKind::Unsupported`] until it is built, and [`IoBackend::ThreadPool`] with no
+    /// threads with [`ErrorKind::InvalidInput`]; the simulation then runs every operation its
+    /// own way, whatever was asked for.
+    pub fn backend(mut self, backend: IoBackend) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    pub(crate) fn requested_backend(self) -> Option<IoBackend> {
+        self.backend
     }
 
     pub(crate) fn validated(self) -> Result<(usize, usize)> {
@@ -266,6 +301,13 @@ impl IoQueueOptions {
             || self.threads > Self::MAX_THREADS
         {
             return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        match self.backend {
+            Some(IoBackend::Iocp) => return Err(Error::new(ErrorKind::Unsupported)),
+            Some(IoBackend::ThreadPool) if self.threads == 0 => {
+                return Err(Error::new(ErrorKind::InvalidInput));
+            }
+            _ => {}
         }
         Ok((self.capacity, self.threads.min(self.capacity)))
     }

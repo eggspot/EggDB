@@ -116,9 +116,20 @@ pub struct OsFile {
     cursor: std::sync::Mutex<()>,
 }
 
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for OsFile {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
 impl OsFile {
+    pub(crate) fn is_writable(&self) -> bool {
+        self.writable
+    }
+
     fn require_writable(&self) -> Result<()> {
-        if self.writable {
+        if self.is_writable() {
             Ok(())
         } else {
             Err(Error::new(ErrorKind::PermissionDenied))

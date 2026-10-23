@@ -1,7 +1,10 @@
 use crate::error::{Error, ErrorKind, Result};
-use crate::io::{IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp, check_reap, queue_full};
+use crate::io::{
+    IoBackend, IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp, check_reap, queue_full,
+};
 use crate::os_cpus::OsCpus;
 use crate::os_fs::OsFile;
+use crate::os_io_uring::Ring;
 use crate::threads::{SpawnedThread, ThreadOptions};
 use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
@@ -10,12 +13,20 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 /// The operating system's asynchronous file I/O, made by
 /// [`OsFileSystem::io_queue`](crate::FileSystem::io_queue).
 ///
-/// For now every operating system runs the operations on a pool of worker threads named
-/// `eggdb-io-<n>`, which stays the path for files on macOS and the BSDs, whose kqueue has no
-/// asynchronous file I/O. With no threads, the operations run on the caller's thread inside
-/// [`IoQueue::reap`], in the order they were submitted. Where panics unwind (release builds
-/// abort instead), an operation that panics on a worker completes with [`ErrorKind::Other`]
-/// instead of leaving its completion missing.
+/// Unless [`IoQueueOptions::backend`] asks for one, it takes io_uring on Linux (kernel 5.6 or
+/// later, on x86_64, x86, aarch64, arm, riscv64, powerpc64, s390x and loongarch64) and falls
+/// back when the kernel refuses it, as seccomp filters,
+/// `kernel.io_uring_disabled` and older kernels do. Elsewhere, and after a refusal, it runs the
+/// operations on a pool of worker threads named `eggdb-io-<n>`, which stays the path for files
+/// on macOS and the BSDs, whose kqueue has no asynchronous file I/O; with no threads they run
+/// on the caller's thread inside [`IoQueue::reap`]. [`OsIoQueue::backend`] says which one it
+/// got. Where panics unwind (release builds abort instead), an operation that panics on a
+/// worker completes with [`ErrorKind::Other`] instead of leaving its completion missing.
+///
+/// On io_uring, writes and syncs through a read-only handle, empty writes and offsets beyond
+/// `i64::MAX` are answered without the kernel, as [`OsFile`] answers them, and each submit
+/// enters the kernel once. Linux cancels the io_uring operations of a thread that exits, so a
+/// queue is submitted to and reaped from by one thread that outlives its operations.
 #[derive(Debug)]
 pub struct OsIoQueue {
     capacity: usize,
@@ -27,6 +38,7 @@ pub struct OsIoQueue {
 enum Backend {
     Inline(VecDeque<Job>),
     Pool(Pool),
+    Uring(Ring),
 }
 
 #[derive(Debug)]
@@ -47,16 +59,33 @@ impl OsIoQueue {
 
     pub(crate) fn new(options: IoQueueOptions) -> Result<Self> {
         let (capacity, threads) = options.validated()?;
-        let backend = if threads == 0 {
-            Backend::Inline(VecDeque::new())
-        } else {
-            Backend::Pool(Pool::start(threads)?)
+        let backend = match options.requested_backend() {
+            None => match Ring::new(capacity) {
+                Ok(ring) => Backend::Uring(ring),
+                Err(_) if threads == 0 => Backend::Inline(VecDeque::new()),
+                Err(_) => Backend::Pool(Pool::start(threads)?),
+            },
+            Some(IoBackend::Inline) => Backend::Inline(VecDeque::new()),
+            Some(IoBackend::ThreadPool) => Backend::Pool(Pool::start(threads)?),
+            Some(IoBackend::IoUring) => Backend::Uring(Ring::new(capacity)?),
+            Some(IoBackend::Iocp) => return Err(Error::new(ErrorKind::Unsupported)),
         };
         Ok(Self {
             capacity,
             in_flight: 0,
             backend,
         })
+    }
+}
+
+impl OsIoQueue {
+    /// Which backend runs this queue's operations.
+    pub fn backend(&self) -> IoBackend {
+        match self.backend {
+            Backend::Inline(_) => IoBackend::Inline,
+            Backend::Pool(_) => IoBackend::ThreadPool,
+            Backend::Uring(_) => IoBackend::IoUring,
+        }
     }
 }
 
@@ -75,6 +104,7 @@ impl IoQueue for OsIoQueue {
         match &mut self.backend {
             Backend::Inline(pending) => pending.push_back(job),
             Backend::Pool(pool) => pool.send(job)?,
+            Backend::Uring(ring) => ring.submit(job.op, job.user_data)?,
         }
         self.in_flight += 1;
         Ok(())
@@ -89,6 +119,7 @@ impl IoQueue for OsIoQueue {
                 Ok(())
             }
             Backend::Pool(pool) => pool.receive(completions, min),
+            Backend::Uring(ring) => ring.reap(completions, min),
         };
         let reaped = completions.len() - before;
         self.in_flight -= reaped;
@@ -206,7 +237,7 @@ fn stopped(op: IoOp<OsFile>) -> RejectedOp<OsFile> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{FileSystem, IoOp, IoQueue, IoQueueOptions, OpenMode, OsFileSystem};
+    use crate::{FileSystem, IoBackend, IoOp, IoQueue, IoQueueOptions, OpenMode, OsFileSystem};
     use std::sync::Arc;
 
     #[test]
@@ -214,7 +245,9 @@ mod tests {
         let path = std::env::temp_dir().join(format!("eggdb-io-inline-{}", std::process::id()));
         let fs = OsFileSystem::new();
         let file = Arc::new(fs.open(&path, OpenMode::Create).unwrap());
-        let mut queue = fs.io_queue(IoQueueOptions::new().threads(0)).unwrap();
+        let mut queue = fs
+            .io_queue(IoQueueOptions::new().backend(IoBackend::Inline))
+            .unwrap();
         for tag in 0..8_u8 {
             let op = IoOp::Write {
                 file: Arc::clone(&file),
@@ -239,7 +272,13 @@ mod tests {
         let path = std::env::temp_dir().join(format!("eggdb-io-partial-{}", std::process::id()));
         let fs = OsFileSystem::new();
         let file = Arc::new(fs.open(&path, OpenMode::Create).unwrap());
-        let mut queue = fs.io_queue(IoQueueOptions::new().threads(2)).unwrap();
+        let mut queue = fs
+            .io_queue(
+                IoQueueOptions::new()
+                    .backend(IoBackend::ThreadPool)
+                    .threads(2),
+            )
+            .unwrap();
         for tag in 0..6 {
             let op = IoOp::SyncData {
                 file: Arc::clone(&file),
@@ -254,6 +293,65 @@ mod tests {
         queue.reap(&mut completions, rest).unwrap();
         assert_eq!(completions.len(), 6);
         assert!(completions.iter().all(|done| done.result.is_ok()));
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_io_uring_falls_back_to_the_pool_unless_it_was_asked_for() {
+        use crate::ErrorKind;
+        use crate::os_io_uring::{BUILT, REFUSE_SETUP};
+        if !BUILT {
+            return;
+        }
+        REFUSE_SETUP.with(|refuse| refuse.set(true));
+        let fs = OsFileSystem::new();
+        let automatic = fs.io_queue(IoQueueOptions::new()).unwrap();
+        let without_threads = fs.io_queue(IoQueueOptions::new().threads(0)).unwrap();
+        let asked = fs.io_queue(IoQueueOptions::new().backend(IoBackend::IoUring));
+        REFUSE_SETUP.with(|refuse| refuse.set(false));
+        assert_eq!(automatic.backend(), IoBackend::ThreadPool);
+        assert_eq!(without_threads.backend(), IoBackend::Inline);
+        assert_eq!(asked.unwrap_err().kind(), ErrorKind::Unsupported);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn io_uring_refuses_offsets_the_kernel_would_read_as_the_file_position() {
+        use crate::ErrorKind;
+        if !crate::os_io_uring::BUILT {
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("eggdb-io-offset-{}", std::process::id()));
+        let fs = OsFileSystem::new();
+        let file = Arc::new(fs.open(&path, OpenMode::Create).unwrap());
+        let mut queue = fs
+            .io_queue(IoQueueOptions::new().backend(IoBackend::IoUring))
+            .unwrap();
+        for offset in [u64::MAX, 1 << 63] {
+            let read = IoOp::Read {
+                file: Arc::clone(&file),
+                offset,
+                buffer: vec![0; 4].into(),
+            };
+            let write = IoOp::Write {
+                file: Arc::clone(&file),
+                offset,
+                buffer: vec![1; 4].into(),
+            };
+            assert!(queue.submit(read, 0).is_ok());
+            assert!(queue.submit(write, 1).is_ok());
+        }
+        let mut completions = Vec::new();
+        queue.reap(&mut completions, 4).unwrap();
+        for completion in completions {
+            assert_eq!(
+                completion.result.unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(crate::File::size(&*file).unwrap(), 0);
         drop(file);
         std::fs::remove_file(&path).unwrap();
     }
