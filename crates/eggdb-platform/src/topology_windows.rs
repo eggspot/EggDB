@@ -118,11 +118,12 @@ fn build(records: Records) -> CpuTopology {
         return CpuTopology::unknown();
     }
     let last_level = records.caches.iter().map(|(level, _)| *level).max();
+    let every_cpu_has_a_node = cpus.iter().all(|cpu| records.numa_nodes.contains_key(&cpu));
     TopologyReport {
         cpus,
         cores: number_groups(records.cores),
         packages: number_groups(records.packages),
-        numa_nodes: (!records.numa_conflict).then_some(records.numa_nodes),
+        numa_nodes: (!records.numa_conflict && every_cpu_has_a_node).then_some(records.numa_nodes),
         last_level_caches: number_groups(
             records
                 .caches
@@ -279,6 +280,15 @@ mod tests {
             buffer.extend(node);
             assert_eq!(parse(&buffer, layout).numa_nodes(), [NumaNodeId::new(0)]);
         }
+    }
+
+    #[test]
+    fn numa_nodes_that_miss_a_cpu_are_unknown() {
+        let layout = AffinityLayout::Wide;
+        let mut buffer = processor(0, 0b11, layout);
+        buffer.extend(processor(0, 0b1100, layout));
+        buffer.extend(numa_node(0, &[(0, 0b11)], layout));
+        assert!(parse(&buffer, layout).numa_nodes().is_empty());
     }
 
     #[test]

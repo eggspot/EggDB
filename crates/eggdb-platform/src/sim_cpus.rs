@@ -63,8 +63,8 @@ impl SimCpus {
 
     /// Sets the CPUs the process may run on, as an affinity mask or a cgroup cpuset would.
     /// Fails with [`ErrorKind::InvalidInput`] for an empty set, one smaller than the
-    /// parallelism set with [`SimCpus::set_parallelism`], or one with a CPU the topology set
-    /// with [`SimCpus::set_topology`] does not place.
+    /// parallelism set with [`SimCpus::set_parallelism`], or one the topology set with
+    /// [`SimCpus::set_topology`] does not place or count.
     pub fn set_available(&self, cpus: CpuSet) -> Result<()> {
         let mut state = lock(&self.shared);
         if cpus.is_empty()
@@ -93,8 +93,8 @@ impl SimCpus {
 
     /// Sets the machine's topology, for example one made with
     /// [`CpuTopology::symmetric`]. Fails with [`ErrorKind::InvalidInput`] when the topology
-    /// places CPUs but not every available one; a topology known only by its counts is always
-    /// accepted.
+    /// places CPUs but not every available one, or counts fewer logical CPUs than are
+    /// available.
     pub fn set_topology(&self, topology: CpuTopology) -> Result<()> {
         let mut state = lock(&self.shared);
         if !places_all(&topology, &state.available) {
@@ -187,7 +187,13 @@ impl State {
 }
 
 fn places_all(topology: &CpuTopology, cpus: &CpuSet) -> bool {
-    topology.locations().is_empty() || cpus.is_subset(&topology.cpus())
+    if topology.locations().is_empty() {
+        topology
+            .logical_cpus()
+            .is_none_or(|count| count.get() >= cpus.len())
+    } else {
+        cpus.is_subset(&topology.cpus())
+    }
 }
 
 fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -310,5 +316,7 @@ mod tests {
         let counts = CpuTopology::from_counts(Some(one), Some(two), None, None).unwrap();
         cpus.set_topology(counts).unwrap();
         cpus.set_available(set("3-4")).unwrap();
+        let error = cpus.set_available(set("3-5")).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 }

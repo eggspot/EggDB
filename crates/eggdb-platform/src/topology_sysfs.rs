@@ -323,6 +323,28 @@ mod tests {
     }
 
     #[test]
+    fn memory_only_numa_nodes_hold_no_cpus() {
+        let mut files = two_packages_of_two_cores_with_two_threads();
+        files.insert("node/online".into(), "0-2".into());
+        files.insert("node/node2/cpulist".into(), "\n".into());
+        assert_eq!(read_files(&files), two_by_two_by_two());
+    }
+
+    #[test]
+    fn last_level_caches_at_different_levels_are_unknown() {
+        let mut files = two_packages_of_two_cores_with_two_threads();
+        files.retain(|path, _| !path.starts_with("cpu/cpu0/cache/index3/"));
+        let topology = read_files(&files);
+        assert!(
+            topology
+                .locations()
+                .iter()
+                .all(|location| location.last_level_cache().is_none())
+        );
+        assert_eq!(topology.packages(), NonZeroUsize::new(2));
+    }
+
+    #[test]
     fn without_an_online_list_nothing_is_known() {
         let mut files = two_packages_of_two_cores_with_two_threads();
         files.remove("cpu/online");

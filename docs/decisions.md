@@ -1702,6 +1702,7 @@ designs. It returns a `CpuTopology`:
   - Everything else: unknown.
 - **Contradictions are dropped, never guessed.**
   - A CPU listed in two groups (cores, packages, caches or NUMA nodes) makes that kind unknown.
+  - NUMA nodes that leave an online CPU out are unknown, on Linux and Windows alike.
   - A core whose CPUs disagree about their package, node or cache keeps only the cores.
   - A cache line that is not a power of two is unknown.
   - A malformed or truncated record or file makes the field, or the whole topology, unknown.
@@ -1717,4 +1718,6 @@ designs. It returns a `CpuTopology`:
 **Follow-ups:** performance and efficiency cores (Windows `EfficiencyClass`, Linux
 `cpu_capacity`, Apple's `hw.perflevelN`); dies and clusters; NUMA distances and memory-only
 nodes; FreeBSD's `kern.sched.topology_spec`; the BSDs and WebAssembly; re-reading after a CPU is
-hot-plugged; and using the processor-group masks for Windows' `available()` (D64).
+hot-plugged; using the processor-group masks for Windows' `available()` (D64); dropping only the
+contradicting kind instead of every group kind; and `CACHE_LINE_PADDING` on 32-bit arm, which is
+32 bytes although Cortex-A cores running AArch32 report 64-byte lines.
