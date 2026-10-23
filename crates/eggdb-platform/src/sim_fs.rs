@@ -79,9 +79,10 @@ impl SimFileSystem {
     /// [`ErrorKind::InvalidInput`] instead of exhausting memory.
     pub const MAX_FILE_SIZE: u64 = 1 << 30;
 
-    /// The most bytes of unsynced writes and size changes one file keeps for a later crash to
-    /// tear; a write or size change beyond it fails with [`ErrorKind::InvalidInput`] until the
-    /// file is synced, so that overwriting the same bytes again and again cannot exhaust memory
+    /// The most memory one file's unsynced writes and size changes may hold for a later crash
+    /// to tear, counting each change's bookkeeping as well as its bytes; a write or size change
+    /// beyond it fails with [`ErrorKind::InvalidInput`] until the file is synced, so that
+    /// overwriting the same bytes again and again, in pieces of any size, cannot exhaust memory
     /// either.
     pub const MAX_UNSYNCED_BYTES: u64 = 1 << 30;
 
@@ -118,7 +119,7 @@ impl SimFileSystem {
         lock(&self.shared).refuse_uncached = refuse;
     }
 
-    /// Sets the most bytes of unsynced writes and size changes one file keeps, capped at
+    /// Sets the most memory one file's unsynced writes and size changes may hold, capped at
     /// [`SimFileSystem::MAX_UNSYNCED_BYTES`], so a test reaches the limit cheaply.
     pub fn limit_unsynced_bytes(&self, bytes: u64) {
         lock(&self.shared).unsynced_limit = Some(bytes.min(Self::MAX_UNSYNCED_BYTES));
@@ -203,11 +204,11 @@ impl FileSystem for SimFileSystem {
         if !state.names.contains_key(from) || !state.dir_exists(parent(to)) {
             return Err(Error::new(ErrorKind::NotFound));
         }
-        if state.dirs.contains(to) {
+        if state.dirs.contains(to) || is_root(to) {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
         if let Some(&inode) = state.names.get(from)
-            && from != to
+            && state.names.get(to) != Some(&inode)
         {
             state.link(to.to_path_buf(), inode);
             state.unlink(from);
@@ -334,7 +335,7 @@ impl File for SimFile {
             }
             let start = checked_size(offset)?;
             checked_size(advance(offset, buf.len())?)?;
-            inode.charge_unsynced(buf.len(), unsynced_limit)?;
+            inode.charge_unsynced(size_of::<Change>() + buf.len(), unsynced_limit)?;
             write_into(&mut inode.contents, start, buf);
             inode.unsynced.push(Change::Write {
                 offset,
@@ -1001,11 +1002,11 @@ mod tests {
     #[test]
     fn unsynced_writes_stop_at_the_limit_until_the_file_is_synced() {
         let fs = SimFileSystem::new();
-        fs.limit_unsynced_bytes(1024);
+        fs.limit_unsynced_bytes(1100);
         let file = fs.open(Path::new("f"), OpenMode::CreateNew).unwrap();
         file.write_all_at(&[7; 512], 0).unwrap();
         file.write_all_at(&[7; 512], 0).unwrap();
-        let error = file.write_at(&[8], 0).unwrap_err();
+        let error = file.write_at(&[8; 200], 0).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         let error = file.set_size(0).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
@@ -1014,6 +1015,44 @@ mod tests {
         file.write_all_at(&[8], 0).unwrap();
         file.set_size(1).unwrap();
         assert_eq!(read_all(&file), [8]);
+    }
+
+    #[test]
+    fn tiny_unsynced_writes_count_their_bookkeeping_against_the_limit() {
+        let fs = SimFileSystem::new();
+        fs.limit_unsynced_bytes(64 * 1024);
+        let file = fs.open(Path::new("f"), OpenMode::CreateNew).unwrap();
+        let accepted = (0..10_000)
+            .take_while(|_| file.write_at(&[1], 0).is_ok())
+            .count();
+        assert!((1..64 * 1024 / 32).contains(&accepted), "{accepted}");
+    }
+
+    #[test]
+    fn renaming_onto_another_name_of_the_same_file_changes_nothing() {
+        let fs = SimFileSystem::new();
+        fs.create_dir_all(Path::new("a")).unwrap();
+        fs.create_dir_all(Path::new("b")).unwrap();
+        fs.sync_dir(Path::new("")).unwrap();
+        create_durable(&fs, "a/x", b"one file");
+        fs.rename(Path::new("a/x"), Path::new("b/x")).unwrap();
+        fs.sync_dir(Path::new("b")).unwrap();
+        fs.crash(CrashMode::DropUnsynced);
+        fs.rename(Path::new("a/x"), Path::new("b/x")).unwrap();
+        assert_eq!(reopen(&fs, "a/x"), b"one file");
+        assert_eq!(reopen(&fs, "b/x"), b"one file");
+        lock(&fs.shared).assert_names_counted();
+    }
+
+    #[test]
+    fn files_cannot_be_renamed_onto_the_root() {
+        let fs = SimFileSystem::new();
+        fs.open(Path::new("f"), OpenMode::CreateNew).unwrap();
+        for root in ["", "."] {
+            let error = fs.rename(Path::new("f"), Path::new(root)).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        }
+        assert!(fs.exists(Path::new("f")).unwrap());
     }
 
     #[test]

@@ -1618,22 +1618,26 @@ The build loop's first review of M1 (D59–D63) fixed what it found and settled 
 - **An empty write changes nothing, at any offset.** `OsFile` returns 0 without calling the
   operating system (Windows leaves a zero-length write's effect to the file system), and the
   simulator no longer rejects an empty write beyond its largest file size.
-- **The simulator's memory is bounded by unsynced bytes too.** Each file keeps at most
-  `SimFileSystem::MAX_UNSYNCED_BYTES` (1 GiB) of unsynced writes and size changes for a later
-  torn crash, and a write past it fails with `InvalidInput` until the file is synced, as D59's
-  1 GiB file limit does. Before, overwriting one page without syncing grew memory without limit,
+- **The simulator's memory is bounded by unsynced changes too.** Each file's unsynced writes
+  and size changes, kept for a later torn crash, may hold at most
+  `SimFileSystem::MAX_UNSYNCED_BYTES` (1 GiB), counting each change's bookkeeping as well as its
+  bytes so that tiny writes are bounded too, and a write past it fails with `InvalidInput` until
+  the file is synced, as D59's 1 GiB file limit does. Before, overwriting one page without syncing grew memory without limit,
   which a fuzz target could hit. `limit_unsynced_bytes` lowers it for tests.
 - **The simulator's cost follows the work, not the data it holds.** A sync replays only the
   changes since the last one (a full copy only when they add up to more than the file), and a
   file is freed by keeping counts of its visible and durable names instead of rebuilding a set
-  of every name on each close, removal, rename and directory sync. On the reviewer's probe, 4,000
-  appends of 4 KiB with a sync after each went from about 505 ms to about 6 ms, and 20,000
-  open-and-close cycles among 20,000 files from about 15 s to about 17 ms (release builds).
+  of every name on each close, removal, rename and directory sync. On one probe in release
+  builds, 4,000 appends of 4 KiB with a sync after each went from 509 ms to 5.7 ms, and 20,000
+  open-and-drop cycles among 20,000 files from 15.0 s to 17 ms.
 - **Paths are compared without `.` components**, so `./dir/f` and `dir/f` are one file in the
-  simulator as on the operating system. Renaming a file onto itself changes nothing.
+  simulator as on the operating system. Renaming a file onto itself, or onto another name of
+  the same file, changes nothing, as POSIX says; renaming onto the root is `InvalidInput`.
 - **A rename across directories with only the target synced survives under both names**, which
   then share one file; with only the source synced it survives under neither. This is the
-  "either half survives alone" of D59, now pinned by a test.
+  "either half survives alone" of D59, now pinned by a test. It is the simulator's deliberately
+  pessimistic choice, not what a journaling file system does (none turns a rename into a hard
+  link), so engine code must not depend on either outcome.
 - **A refused uncached `CreateNew` keeps its own error.** Removing the file it may have created
   is best effort: if the operating system refused before creating it, the removal's `NotFound`
   no longer replaces `Unsupported`. Between the refusal and the removal another process could
@@ -1641,7 +1645,8 @@ The build loop's first review of M1 (D59–D63) fixed what it found and settled 
   that race needs a second writer there, which the single-process rule (D3) already excludes.
 - `OsCpus` never reports a parallelism above the number of available CPUs; Windows enables the
   lock-memory privilege once per process, as D61 says; and the other Unix systems (illumos,
-  Haiku, AIX, Hurd) ask `getpagesize()` instead of assuming 4 KiB.
+  Haiku, AIX, Hurd, Solaris) ask `getpagesize()` instead of assuming 4 KiB; targets built on
+  newlib (ESP-IDF, Horizon, Vita) may not export it and keep 4 KiB.
 
 **Still open, as follow-ups:** the error kinds for a path that runs through a regular file
 (`create_dir_all("file/sub")`, `exists("file/x")`, `sync_dir` on a file) differ between the

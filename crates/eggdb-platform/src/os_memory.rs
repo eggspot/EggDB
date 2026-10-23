@@ -528,7 +528,13 @@ mod platform {
 mod platform {
     use super::{Error, ErrorKind, MemoryRegion, NonNull, PageMode, Result};
 
-    #[cfg(unix)]
+    #[cfg(any(
+        target_os = "illumos",
+        target_os = "solaris",
+        target_os = "haiku",
+        target_os = "aix",
+        target_os = "hurd"
+    ))]
     pub(super) fn page_size() -> usize {
         unsafe extern "C" {
             fn getpagesize() -> std::ffi::c_int;
@@ -541,7 +547,13 @@ mod platform {
             .unwrap_or(4096)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(
+        target_os = "illumos",
+        target_os = "solaris",
+        target_os = "haiku",
+        target_os = "aix",
+        target_os = "hurd"
+    )))]
     pub(super) fn page_size() -> usize {
         if cfg!(target_family = "wasm") {
             65536
