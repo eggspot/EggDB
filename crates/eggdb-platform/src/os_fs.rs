@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::fs::{File, FileSystem, OpenMode};
+use crate::uncached;
 use std::fs;
 use std::path::Path;
 
@@ -18,18 +19,17 @@ impl FileSystem for OsFileSystem {
     type File = OsFile;
 
     fn open(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(mode.is_writable());
-        match mode {
-            OpenMode::Read | OpenMode::ReadWrite => {}
-            OpenMode::Create => {
-                options.create(true);
-            }
-            OpenMode::CreateNew => {
-                options.create_new(true);
-            }
-        }
-        Ok(OsFile::new(options.open(path)?))
+        Ok(OsFile::new(open_options(mode).open(path)?, false))
+    }
+
+    fn open_uncached(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
+        let mut options = open_options(mode);
+        uncached::request(&mut options)?;
+        let file = options
+            .open(path)
+            .map_err(|error| uncached::refused(error.into()))?;
+        uncached::apply(&file).map_err(uncached::refused)?;
+        Ok(OsFile::new(file, true))
     }
 
     fn remove_file(&self, path: &Path) -> Result<()> {
@@ -51,6 +51,21 @@ impl FileSystem for OsFileSystem {
     fn exists(&self, path: &Path) -> Result<bool> {
         Ok(path.try_exists()?)
     }
+}
+
+fn open_options(mode: OpenMode) -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(mode.is_writable());
+    match mode {
+        OpenMode::Read | OpenMode::ReadWrite => {}
+        OpenMode::Create => {
+            options.create(true);
+        }
+        OpenMode::CreateNew => {
+            options.create_new(true);
+        }
+    }
+    options
 }
 
 #[cfg(unix)]
@@ -80,14 +95,16 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[derive(Debug)]
 pub struct OsFile {
     file: fs::File,
+    uncached: bool,
     #[cfg(not(any(unix, windows)))]
     cursor: std::sync::Mutex<()>,
 }
 
 impl OsFile {
-    fn new(file: fs::File) -> Self {
+    fn new(file: fs::File, uncached: bool) -> Self {
         Self {
             file,
+            uncached,
             #[cfg(not(any(unix, windows)))]
             cursor: std::sync::Mutex::new(()),
         }
@@ -109,6 +126,10 @@ impl File for OsFile {
 
     fn set_size(&self, size: u64) -> Result<()> {
         Ok(self.file.set_len(size)?)
+    }
+
+    fn is_uncached(&self) -> bool {
+        self.uncached
     }
 
     fn sync_data(&self) -> Result<()> {
