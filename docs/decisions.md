@@ -1060,3 +1060,12 @@ memory, time and output limits, set per role.
 - the scope: denial of service from hostile input, sandbox escapes, protocol attacks;
 - the release signing key, once releases exist;
 - the supported-versions policy after 1.0.
+
+**Not planned without the owner.** These are business decisions or against the goals:
+- a managed cloud service, billing and paid certification (D44's metering hooks are ready if the
+  owner wants them);
+- a bug bounty;
+- accounts on proprietary community platforms;
+- reverse-engineered formats or protocols (D10, D13);
+- blockchain consensus (D38's ledger is tamper-evident tables only);
+- any hard dependency on a GPU or vendor SDK (D40).
