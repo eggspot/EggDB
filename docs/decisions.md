@@ -1141,3 +1141,228 @@ work without it.
 - BI after the console and analytics (M11, D42);
 - ETL after the messaging, interchange and change-stream work (D28, D29, D33);
 - the big-data pieces after the lakehouse tables (D29).
+
+## D47 More SQL dialects and analytics protocols — Decided by research (third gap review, 2026-10-24); extends D10 under D46
+More dialects, each as itself (D10):
+
+**Cloud warehouses**
+- GoogleSQL (BigQuery, Spanner);
+- Snowflake SQL;
+- Databricks/Spark SQL, through the HiveServer2 Thrift protocol and the Statement Execution REST
+  API.
+
+**Other analytics engines**
+- ClickHouse SQL, through its HTTP and native protocols;
+- Trino/Presto SQL, through the Trino client REST protocol.
+
+**IBM and SAP**
+- IBM Db2 SQL and SQL PL, through DRDA (an Open Group standard), which also reaches Informix and
+  Db2 for z/OS;
+- Sybase/SAP ASE, through the published TDS 5.0.
+
+**Reached through the PostgreSQL protocol**
+- Redshift, Vertica and Greenplum;
+- Teradata and SAP HANA SQL, whose own wire protocols aren't public (D1, D10).
+
+The order follows use, decided by research. Each dialect has its pass rate tracked (D45).
+
+## D48 Other NoSQL, key-value and graph APIs — Decided by research (third gap review, 2026-10-24); extends D5 under D46
+**Cloud NoSQL APIs**
+- the DynamoDB JSON API with PartiQL;
+- Firestore, Bigtable and HBase, and Spanner's API, from their public protocol definitions;
+- Cosmos DB's NoSQL, Gremlin and Table APIs.
+
+**Key-value**
+- the memcached protocol;
+- an ordered, transactional key-value API in the style of FoundationDB, LevelDB and RocksDB;
+- an IndexedDB-compatible API for the browser build.
+
+**Replication and graph**
+- CouchDB replication;
+- Couchbase SQL++;
+- Neo4j's Bolt protocol, alongside Cypher (D10);
+- Apache TinkerPop Gremlin.
+
+FoundationDB's and CloudKit's own wire protocols aren't implemented; their data comes in through
+documented exports (D13).
+
+## D49 Microsoft, Splunk and legacy sources — Decided by research (third gap review, 2026-10-24); under D46
+**Query languages and ingest**
+- KQL, with the Kusto REST API, for Azure Data Explorer and Sentinel-style queries;
+- Splunk's SPL, with its HTTP Event Collector ingest.
+
+**Microsoft business data**
+- Dataverse's Web API and SharePoint lists, as sources and targets;
+- Excel files, read and written as tables (`.xlsx` from the OOXML standard, `.xls` from the
+  published MS-XLS specification).
+
+**Legacy and mainframe**
+- mainframe data loaders: COBOL copybooks, EBCDIC, packed decimal;
+- dBase, ISAM and Btrieve readers where public specifications exist.
+
+**Documented routes only** (D1, D13): Access `.accdb`/`.mdb`, FileMaker and IMS go through the vendor's
+own export, ODBC or JDBC.
+
+## D50 Finance and industry standards — Decided by research (third gap review, 2026-10-24); under D46
+**Financial tick data** (the kdb+ use case)
+- ASOF and window joins;
+- bitemporal tables;
+- order-book primitives;
+- double-entry ledger primitives;
+- microsecond tail-latency targets in D7's benchmarks.
+
+**Industry formats for ingest and export**
+- FIX and ISO 20022 (finance);
+- FHIR and HL7 v2 (healthcare);
+- X12 and EDIFACT (trade);
+- DICOM (medical imaging).
+
+All of these are built from their public standards. Formal certifications (SWIFT membership, FHIR
+conformance, DICOM conformance statements) wait for the owner (D46).
+
+## D51 Data catalog, lineage, master data and quality — Decided by research (third gap review, 2026-10-24); extends D42 under D46
+**Catalog and lineage**
+- a data catalog with a business glossary and stewardship;
+- lineage through OpenLineage;
+- the Apache Atlas and OpenMetadata APIs, so Purview and similar tools connect.
+
+**Contracts**
+- a schema registry and data contracts.
+
+**Master data management**
+- entity resolution;
+- match and merge;
+- golden records.
+
+**Data quality**
+- rules at scale, built on D42's profiling.
+
+## D52 Data sharing, clean rooms and privacy technology — Decided by research (third gap review, 2026-10-24); under D46
+**Sharing**
+- a Delta Sharing server and client;
+- zero-copy sharing between organizations, through D28's branches, with entitlements;
+- marketplace listings, with no payments (payments are the owner's, D45).
+
+**Clean rooms**
+- query-output policies;
+- private set intersection.
+
+**Privacy technology**
+- differential privacy and k-anonymity checks;
+- tokenization and format-preserving encryption (NIST FF1);
+- blind-index search on encrypted columns;
+- synthetic data, and masked copies for non-production use.
+
+**Not required, not committed**
+- confidential computing: optional attestation only, never required (D45);
+- homomorphic encryption and multi-party computation: a research track only.
+
+## D53 Retention, legal hold, WORM and sovereignty — Decided by research (third gap review, 2026-10-24); refines D26 under D46
+**Legal hold**
+- a legal hold overrides D26's crypto-shredding: erasure requests for held data wait until the
+  hold is lifted, and are recorded.
+
+**Retention and records**
+- immutable (WORM) retention and backups that ransomware can't alter;
+- records-management schedules;
+- eDiscovery export in the EDRM style.
+
+**Sovereignty**
+- residency policies per row;
+- customer-held keys kept in-country;
+- limits on operator access;
+- logs of cross-border transfers.
+
+**Compliance claims** (SEC 17a-4, FINRA, HIPAA, national sovereignty laws) need counsel and paid
+assessments, so they stay with the owner. EggDB provides the controls (D26).
+
+## D54 Coordination, configuration, secrets and directory — Decided by research (third gap review, 2026-10-24); under D46
+**Coordination**
+- distributed locks and leases with fencing tokens;
+- leader election;
+- watches and service discovery;
+- the etcd v3 and ZooKeeper protocols.
+
+**Configuration and secrets**
+- a configuration store with OpenFeature feature flags;
+- a secrets store with dynamic, short-lived credentials, in the style of Vault. Vault and Consul are
+  under BUSL, so their APIs come from their documentation only (D1).
+
+**Directory**
+- an LDAP v3 server and SCIM;
+- the published Active Directory protocol specifications (MS-ADTS).
+
+**App sign-in**
+- WebAuthn and passkeys for D37's end-user authentication.
+
+## D55 Real-time decisioning: streams, events and graph algorithms — Decided by research (third gap review, 2026-10-24); under D46
+**Streaming SQL in the style of Flink**
+- event time and watermarks;
+- tumbling, hopping and session windows;
+- stream-stream joins and late data;
+- `MATCH_RECOGNIZE` for complex event processing.
+
+**Graph algorithms** for fraud detection and recommendations
+- PageRank;
+- community detection;
+- paths, similarity and the rest.
+
+**Online feature serving**
+- low latency, for D31's feature store.
+
+## D56 Content and collaboration — Decided by research (third gap review, 2026-10-24); under D46
+**Text extraction for search**
+- from OOXML, ODF, PDF and PST files;
+- OCR through ONNX models (D31).
+
+**Email, calendar and file stores**
+- email stores with IMAP, JMAP and SMTP;
+- CalDAV, CardDAV and WebDAV.
+
+**Assets and search**
+- digital asset management: EXIF and XMP metadata, renditions;
+- enterprise search that respects each user's permissions (D22).
+
+Media codecs are our own (D1), and only royalty-free ones.
+
+## D57 Science, geo and IoT — Decided by research (third gap review, 2026-10-24); extends D19 under D46
+**Arrays**
+- SQL/MDA (ISO 9075-15);
+- Zarr, HDF5 and NetCDF.
+
+**GIS at PostGIS parity**
+- raster, topology and routing;
+- GeoTIFF and Cloud-Optimized GeoTIFF;
+- the OGC APIs;
+- vector tiles;
+- H3 and S2 indexes.
+
+Map and coordinate datasets are used only under compatible licenses (D30's rule).
+
+**Genomics**
+- VCF, BAM and CRAM;
+- htsget.
+
+**IoT and digital twins**
+- DTDL and W3C Web of Things models;
+- OPC UA, Modbus and Sparkplug ingest.
+
+## D58 Hyperscale operations — Decided by research (third gap review, 2026-10-24); extends D25 and D44 under D46
+**Fleet control plane** for thousands of clusters
+- inventory;
+- upgrades in canary waves;
+- placement by hardware class.
+
+**Cost and tenancy**
+- chargeback and showback, built on D44's metering;
+- tenant lifecycle APIs;
+- databases per user at millions of tenants.
+
+**Analytics and migration**
+- MPP distributed analytics with workload queues;
+- resumable petabyte-scale migrations with verified differences.
+
+**Owner items from this review** (D46): legal checks of API compatibility with Google's, Amazon's
+and Snowflake's services, and of the relevant patents. Also paid cloud accounts and hardware for
+compatibility testing (free official emulators run from outside the repo), and push-notification
+credentials. Also marketplace listings, and country-level legal opinions.

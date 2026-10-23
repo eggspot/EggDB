@@ -158,6 +158,20 @@ Check each task against these before starting and again before opening the PR.
     - legal, export and privacy (D43);
     - public proof, community, metering and energy (D44);
     - the weak-spot fixes, including prompt-injection safety and limits for functions (D45).
+19. **Everything a large company runs on data** (D47–D58):
+    - more SQL dialects: GoogleSQL, Snowflake, Spark, ClickHouse, Trino, Db2 and Sybase (D47);
+    - more NoSQL and graph APIs: DynamoDB, Firestore, Bigtable, Cosmos DB, memcached, FoundationDB-style
+      key-value, CouchDB, Bolt, Gremlin (D48);
+    - KQL, SPL, Excel, Dataverse and mainframe data (D49);
+    - finance and industry standards (D50);
+    - catalog, lineage, master data and quality (D51);
+    - sharing, clean rooms and privacy technology (D52);
+    - legal hold, WORM retention and sovereignty (D53);
+    - coordination, configuration, secrets and directory, with etcd, ZooKeeper and LDAP (D54);
+    - streaming SQL and graph algorithms (D55);
+    - content, email and enterprise search (D56);
+    - science, GIS and IoT (D57);
+    - hyperscale operations (D58).
 
 ## Code
 - **Everything written by us, in Rust, from scratch.** The only exceptions are the per-language
@@ -217,5 +231,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D46). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D58). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.
