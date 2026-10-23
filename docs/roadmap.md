@@ -8,7 +8,7 @@ refine it through research, recorded in docs/decisions.md.
 | # | Milestone | Status |
 |---|-----------|--------|
 | M0 | Repo skeleton: workspace, pinned toolchain, CI, docs | **done** |
-| M1 | Platform layer: files, direct and async I/O, memory, threads, clocks, behind one interface (D8) | **in progress**: files, clocks, the crash simulator (D59), direct I/O with aligned buffers (D60), memory with huge pages and its simulator (D61), CPU sets, pinning and cache padding (D62), and named, pinned thread starts (D63) done; next CPU topology, async I/O, networking |
+| M1 | Platform layer: files, direct and async I/O, memory, threads, clocks, behind one interface (D8) | **in progress**: files, clocks, the crash simulator (D59), direct I/O with aligned buffers (D60), memory with huge pages and its simulator (D61), CPU sets, pinning and cache padding (D62), named, pinned thread starts (D63) and the first review (D64) done; next CPU topology, async I/O, networking |
 | M2 | Storage engine: our own versioned, checksummed page format, buffer management, write-ahead log ready to become a consensus log, hybrid logical clock timestamps, tenant and shard keys in the key layout (D20), checkpoints, crash recovery, partitioning; the B-tree/LSM/hybrid choice made by research with benchmarks | |
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6); the first release binary with its download and install times measured (D14) | |

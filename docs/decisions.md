@@ -1604,3 +1604,44 @@ never runs, the thread ends, and `spawn` returns the pin's error: a shard never 
 did not ask for without knowing it, in the spirit of D60–D62's "given or refused, never faked".
 With `SimCpus` the pin is recorded, so tests can check where each thread was meant to run. A
 thread name with a NUL byte, on which std would panic, is `InvalidInput` (D9).
+
+## D64 First platform review: syncs need a writable handle, the simulator stays bounded and fast — Decided by the build loop (2026-10-24); refines D59, D61 and D62
+The build loop's first review of M1 (D59–D63) fixed what it found and settled these rules:
+- **Syncing needs a writable handle, on every OS.** Windows' `FlushFileBuffers` refuses a
+  handle without write access, while Linux and macOS accept one. So `sync_data` and `sync_all`
+  fail with `PermissionDenied` through an `OpenMode::Read` handle everywhere, and the simulator
+  does the same, so recovery code that syncs a file it opened read-only fails on every machine,
+  not only on Windows.
+- **An empty write changes nothing, at any offset.** `OsFile` returns 0 without calling the
+  operating system (Windows leaves a zero-length write's effect to the file system), and the
+  simulator no longer rejects an empty write beyond its largest file size.
+- **The simulator's memory is bounded by unsynced bytes too.** Each file keeps at most
+  `SimFileSystem::MAX_UNSYNCED_BYTES` (1 GiB) of unsynced writes and size changes for a later
+  torn crash, and a write past it fails with `InvalidInput` until the file is synced, as D59's
+  1 GiB file limit does. Before, overwriting one page without syncing grew memory without limit,
+  which a fuzz target could hit. `limit_unsynced_bytes` lowers it for tests.
+- **The simulator's cost follows the work, not the data it holds.** A sync replays only the
+  changes since the last one (a full copy only when they add up to more than the file), and a
+  file is freed by keeping counts of its visible and durable names instead of rebuilding a set
+  of every name on each close, removal, rename and directory sync. On the reviewer's probe, 4,000
+  appends of 4 KiB with a sync after each went from about 505 ms to about 6 ms, and 20,000
+  open-and-close cycles among 20,000 files from about 14 s to about 17 ms.
+- **Paths are compared without `.` components**, so `./dir/f` and `dir/f` are one file in the
+  simulator as on the operating system. Renaming a file onto itself changes nothing.
+- **A rename across directories with only the target synced survives under both names**, which
+  then share one file; with only the source synced it survives under neither. This is the
+  "either half survives alone" of D59, now pinned by a test.
+- **A refused uncached `CreateNew` keeps its own error.** Removing the file it may have created
+  is best effort: if the operating system refused before creating it, the removal's `NotFound`
+  no longer replaces `Unsupported`. Between the refusal and the removal another process could
+  create the same name and lose it; the engine opens its files in its own data directory, so
+  that race needs a second writer there, which the single-process rule (D3) already excludes.
+- `OsCpus` never reports a parallelism above the number of available CPUs; Windows enables the
+  lock-memory privilege once per process, as D61 says; and the other Unix systems (illumos,
+  Haiku, AIX, Hurd) ask `getpagesize()` instead of assuming 4 KiB.
+
+**Still open, as follow-ups:** the error kinds for a path that runs through a regular file
+(`create_dir_all("file/sub")`, `exists("file/x")`, `sync_dir` on a file) differ between the
+operating system and the simulator and need one decided kind each; `sync_dir` still scans every
+name; Windows reports active processors as the low bits of each group, which the topology work
+replaces with the group masks.
