@@ -123,6 +123,24 @@ Check each task against these before starting and again before opening the PR.
     covers every SQL dialect's types (D10), the types of Redis, MongoDB, Elasticsearch and
     Cassandra, vectors, geospatial, time series, graphs, and user-defined types. One type
     system underneath stores and indexes them all. (D19)
+17. **Everything a production database needs, from the start.** That means:
+    - our own versioned, checksummed file format with online upgrades, designed for distribution
+      from day one (D20);
+    - a public security policy and stability promise (D21);
+    - authentication, roles, and row and column security on by default (D22);
+    - cryptography and key management (D23);
+    - backups with point-in-time recovery (D24);
+    - observability and operations (D25);
+    - audit and compliance (D26);
+    - procedures, triggers, functions, extensions and jobs (D27);
+    - time travel, branching and change streams (D28);
+    - Parquet, Arrow and lakehouse tables (D29);
+    - every language's text (D30);
+    - AI in the database (D31);
+    - the full relational feature set and multi-tenancy (D32);
+    - messaging and queues: RabbitMQ (AMQP), MQTT, NATS, SQS and Kafka (D33).
+
+    Build profiles and per-workload targets keep all of it lightweight and fast (D34).
 
 ## Code
 - **Everything written by us, in Rust, from scratch.** The only exceptions are the per-language
@@ -178,5 +196,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D19). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D34). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.

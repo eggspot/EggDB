@@ -525,3 +525,337 @@ explicit and documented, never silently lossy.
 lawfully be run (D1, D10), and by our round-trip and comparison tests across protocols. A type is
 done when those pass. The roadmap's support matrix tracks the done types per dialect and model, as a
 coverage figure alongside D10's.
+
+## D20 Our own file format: versioned, checksummed, ready for scale and upgrades — Decided by research (gap review, 2026-10-23); refines D4 and D5
+**The format.** EggDB stores data in its own format, never in another database's. SQLite files are a
+compatibility format: EggDB opens, attaches, imports and exports them (D5, D13), but its native
+storage is its own, because SQLite's layout can't hold MVCC, columnar or vector data.
+
+**Properties.** Every page, log record and file:
+- is checksummed;
+- carries a format version;
+- is readable by every later release (backward compatible), and by the previous release where a
+  rolling upgrade needs it.
+
+**Upgrades and schema changes.** Upgrades run online:
+- one node at a time in a cluster, with mixed versions working together during the upgrade;
+- a tested downgrade path to the previous minor version.
+
+Schema changes and reindexing run online too, without blocking reads or writes.
+
+**Built for distribution from the start.** The core is designed for distribution from M2 and M3,
+not retrofitted at M14:
+- hybrid logical clock timestamps on every commit;
+- a write-ahead log that can become a consensus-replicated log;
+- tenant and shard keys in the key layout, costing zero bytes when unused, so a small embedded
+  database stays smaller than SQLite (D4, D6).
+
+That way, scaling (D18) never forces a format break.
+
+## D21 Project governance, security policy and stability promise — Decided by research (gap review, 2026-10-23)
+**The project files.** The repo gets:
+- CONTRIBUTING.md, with the clean-room rules (D1) and the Developer Certificate of Origin (sign-off
+  on every commit, no CLA);
+- CODE_OF_CONDUCT.md (the Contributor Covenant);
+- SECURITY.md: private reports through GitHub's private vulnerability reporting, a response
+  target, coordinated disclosure, and CVEs for confirmed issues;
+- a short governance note: the owner decides, and the decision log is public.
+
+**A stability promise, in semantic versioning, for:**
+- the C API and the language drivers;
+- the wire protocols and SQL;
+- the file format (D20);
+- configuration.
+
+Deprecations are announced one minor release ahead and removed only in a major release. After
+1.0, there are release channels (stable, beta, nightly) and an LTS line.
+
+**Telemetry is off.** EggDB sends nothing anywhere unless the user turns it on.
+
+**Supply chain.** Releases are signed, with a software bill of materials, build provenance (SLSA)
+and reproducible builds.
+
+**Owner items.** These wait for the owner, and the build loop lists them in its report:
+- trademark and naming policy, and any bug bounty (money);
+- who answers security reports, and the response time SECURITY.md promises;
+- whether security-critical code (cryptography, authentication, the file format) needs a human
+  approval before merge.
+
+## D22 Security model: authentication, authorization, row and column security — Decided by research (gap review, 2026-10-23)
+**Authentication:**
+- password (SCRAM-SHA-256), TLS client certificates;
+- LDAP, Kerberos/GSSAPI, OpenID Connect/JWT, SAML;
+- API keys, and multi-factor for interactive tools.
+
+**Authorization.** One role-based and attribute-based model underneath. Every protocol's own
+permission system maps onto it:
+- PostgreSQL and SQL Server roles and grants;
+- MySQL privileges;
+- Redis ACLs;
+- MongoDB roles;
+- Elasticsearch roles.
+
+So a user's rights are the same whichever protocol they use.
+
+**Finer control:**
+- row-level security;
+- column permissions;
+- dynamic data masking.
+
+D11's agent permissions sit on this same model.
+
+**Defaults.** Secure by default: no open network listener without authentication, TLS on, least
+privilege. A server without this can't hold real data, so authentication, TLS and roles ship with the
+server (M6).
+
+## D23 Cryptography, TLS and key management — Decided by research (gap review, 2026-10-23); an exception to D1 is an owner question
+**What we need:**
+- TLS 1.3 (1.2 for older clients);
+- encryption at rest: per page, per column, and with per-tenant keys;
+- key management with rotation, through external KMS, HSM and Vault integration;
+- a mode that uses FIPS-approved algorithms only;
+- a path to post-quantum key exchange.
+
+**How it's built, under D1.** All cryptography is our own code, written in constant time, checked
+against standard test vectors (Wycheproof and the NIST vectors), fuzzed, and audited externally
+before any production release.
+
+**Owner questions.** Writing TLS and cryptography from scratch is the highest-risk part of D1. These
+are the owner's to decide:
+- whether to allow one audited cryptography library as an exception to D1;
+- paying for the external audit;
+- paying for formal FIPS 140 validation, which only a validated module can claim.
+
+Until the owner decides otherwise, D1 applies: the build loop writes our own cryptography under the
+rules above and lists these questions in its report. Nothing waits for the answer.
+
+## D24 Backup, point-in-time recovery and verified restores — Decided by research (gap review, 2026-10-23); complements D13
+EggDB's own backups:
+- continuous log archiving to local disk or object storage (S3-compatible);
+- point-in-time recovery to any moment;
+- instant snapshots and copy-on-write clones;
+- incremental and parallel backups, encrypted with D23's keys;
+- `eggdb dump` and `eggdb restore` for logical exports in EggDB's format and in the plain-SQL dumps of
+  every dialect (D13 is the import side).
+
+Every backup kind is proven by automated restore tests that restore and compare. A backup is only
+counted when it has been restored.
+
+## D25 Observability and operations — Decided by research (gap review, 2026-10-23)
+**What to see:**
+- metrics, logs and traces through OpenTelemetry, plus a Prometheus endpoint;
+- a slow-query log;
+- statement statistics (a `pg_stat_statements` equivalent, in every dialect's own views);
+- wait events, live activity and locks;
+- `EXPLAIN ANALYZE` in every dialect.
+
+**What to control:**
+- resource governance: memory, CPU and I/O limits per user, role, tenant and query;
+- quotas, admission control and query timeouts;
+- an index and plan advisor.
+
+**How to run it:**
+- an admin API (and MCP tools, D11);
+- a Kubernetes operator, written in Rust, with its Helm chart and manifests (YAML configuration,
+  not code);
+- a Terraform provider in Rust, speaking Terraform's published plugin protocol;
+- the GUI's monitoring screens (D15).
+
+If a Rust Terraform provider proves impractical, writing it in Go is an exception to D1, and that
+is the owner's decision.
+
+## D26 Audit, compliance and data governance — Decided by research (gap review, 2026-10-23)
+**Audit.** A tamper-evident audit log of logins, permission changes, schema changes and chosen data
+access.
+
+**Data governance:**
+- classification and tagging of personal data;
+- retention policies;
+- verified erasure for GDPR and similar laws, reaching history, time travel and backups (D24, D28)
+  through crypto-shredding: data under per-subject keys that are destroyed on request;
+- data residency through geo pinning (D18).
+
+**Compliance.** Built-in reports give the evidence SOC 2, HIPAA and PCI DSS audits ask for. Being
+certified is the deploying organization's job, and EggDB provides the controls and evidence. The
+FIPS mode is covered in D23.
+
+## D27 Programmability: procedures, functions, triggers, extensions, jobs, events — Decided by research (gap review, 2026-10-23)
+**Each dialect's own procedural language runs as itself (D10):**
+- PL/pgSQL;
+- T-SQL;
+- MySQL stored programs;
+- PL/SQL;
+- Redis Lua and Functions;
+- MongoDB server-side expressions.
+
+**User-defined functions in any language** run sandboxed in WebAssembly inside the engine: one safe,
+fast route for C, Rust, Go, C#, JavaScript, Python and more.
+- **The runtime is ours.** It is our own Rust code (D1): an interpreter first, a compiler for speed
+  later.
+- **Compilers stay outside.** The compilers and language runtimes that users compile their
+  functions with stay outside EggDB's binary.
+
+**Extensions.** An extension API for new types, index methods, functions and protocols. It is the
+role PostGIS or pgvector play for PostgreSQL. Extensions are loaded as sandboxed WebAssembly or as
+our own optional built-in modules, and cost nothing when unused (D6).
+
+**Also:**
+- triggers and event triggers;
+- scheduled jobs (`pg_cron` and SQL Server Agent equivalents);
+- notifications (`LISTEN`/`NOTIFY` and its equivalents).
+
+## D28 Time travel, branching, derived data and change streams out — Decided by research (gap review, 2026-10-23)
+**History and branching:**
+- system-versioned temporal tables (SQL:2011) and `AS OF` queries over history;
+- copy-on-write branches and clones of a whole database, for development, testing and safe
+  migrations.
+
+**Derived data:**
+- incrementally maintained materialized views;
+- continuous queries.
+
+**Change streams out** (D18 covers change streams in):
+- a change feed in a Debezium-compatible format to Kafka and the messaging protocols of D33;
+- webhooks;
+- the transactional outbox pattern, built in.
+
+## D29 Data interchange, lakehouse tables and external data — Decided by research (gap review, 2026-10-23)
+**Bulk paths:** fast bulk load and export (`COPY` and every dialect's equivalent).
+
+**Formats:**
+- CSV;
+- NDJSON;
+- Parquet, ORC and Avro;
+- Apache Arrow, with Arrow Flight SQL and ADBC for zero-copy results.
+
+**Lakehouse:** read and write Apache Iceberg, Delta Lake and Hudi tables.
+
+**External data** (the role of foreign data wrappers), queried in place and joined with local data:
+- tables over files;
+- object storage;
+- HTTP;
+- other databases.
+
+Every format comes from its public specification (D1).
+
+## D30 Text, locales and internationalization — Decided by research (gap review, 2026-10-23)
+**Text handling:**
+- Unicode collation (the Unicode Collation Algorithm and CLDR-based locale tailorings);
+- normalization;
+- every legacy encoding the supported databases accept;
+- the IANA time zone database, updated with each release.
+
+**Full-text search in every major language:**
+- stemmers;
+- word segmentation for Chinese, Japanese, Korean and Thai;
+- synonyms, stop words, fuzzy and phonetic matching.
+
+**Built ourselves (D1).** We build these from the published Unicode, CLDR and IANA data, our own
+code reading the public data files, without ICU's code. Their correctness is checked against each
+dialect's collation behavior (D19).
+
+**Data licences.** Only data under permissive terms is used (the Unicode license, IANA's public
+domain, or our own). Word lists and dictionaries for segmentation and stemming must be permissive
+too. Where none exist for a language, we build our own, never using share-alike or restricted ones.
+"Every legacy encoding" means the encodings the supported databases themselves accept, listed per
+dialect.
+
+## D31 AI and machine learning in the database — Decided by research (gap review, 2026-10-23); extends D11
+Beyond vectors and MCP:
+- embedding generation and model inference from SQL (ONNX models, and local or remote language
+  models through any provider);
+- hybrid search that combines vector, full-text and filters, with reranking;
+- semantic caching;
+- agent memory as a built-in model;
+- in-database training for common models;
+- a feature store;
+- text-to-SQL in every dialect;
+- automatic tuning (indexes, configuration).
+
+It stays vendor-neutral (D11): no dependence on one model provider. Remote calls are off by default
+and permission-checked (D22).
+
+## D32 Relational completeness and multi-tenancy — Decided by research (gap review, 2026-10-23)
+**Relational features.** The full relational feature set of the supported dialects:
+- every index type (B-tree, hash, GIN, GiST, SP-GiST, BRIN, bitmap, partial, expression,
+  covering);
+- declarative partitioning (D18);
+- two-phase commit and XA;
+- advisory locks, sequences and identity, generated columns;
+- cursors, savepoints, window functions, recursive queries;
+- the SQL:2023 features, tracked as a conformance list.
+
+**Multi-tenancy:**
+- isolation by row, schema or database;
+- per-tenant quotas (D25) and keys (D23);
+- moving tenants online (D18).
+
+**For developers:**
+- a documentation site, generated as static pages by our own Rust tool;
+- a browser playground (WebAssembly, D8, with D16's minimal loader);
+- migration tooling;
+- public conformance and benchmark dashboards for every dialect, protocol, type and driver.
+
+## D33 Messaging and queues: RabbitMQ, MQTT, NATS, SQS and Kafka — Decided (owner, 2026-10-23); protocol list and order by research; refines D2 and D5
+D2 promised queues and streams, and D5 named Kafka. EggDB also speaks the messaging protocols
+applications use. Each is implemented from its public specification or documentation (D1):
+- **AMQP 0-9-1**, RabbitMQ's protocol: exchanges (direct, topic, fanout, headers), bindings, routing
+  keys, acknowledgements, prefetch and priorities. Also RabbitMQ's documented extensions to it:
+  dead-letter exchanges, message and queue TTL, delayed messages, publisher confirms, and
+  replicated (quorum-style) queues;
+- **AMQP 1.0**, the OASIS standard, which also serves JMS clients and Azure Service Bus-style use;
+- **MQTT 3.1.1 and 5**, for IoT devices: QoS 0, 1 and 2, retained messages, last will, and MQTT 5's
+  shared subscriptions, message expiry and reason codes;
+- **STOMP**;
+- the **NATS** protocol, with JetStream-style persistence;
+- the **Amazon SQS** API (standard and FIFO queues);
+- the **Kafka** protocol (D5): topics, partitions, consumer groups, compaction, transactions;
+- **Redis** lists, pub/sub and streams (D2).
+
+**Why in a database.** Queues live in the same storage and transactions as the data (D2). An
+application can update rows and publish or consume messages in one transaction: the outbox and
+inbox patterns built in, with exactly-once processing within EggDB. The same scaling (D18), security
+(D22) and observability (D25) cover messaging.
+
+**Order.** The protocols come in order of use:
+1. Kafka;
+2. AMQP 0-9-1 (RabbitMQ);
+3. MQTT;
+4. the SQS API;
+5. NATS;
+6. AMQP 1.0;
+7. STOMP.
+
+Research may refine the order.
+
+**Proof.** Each protocol is proven by its clients' own test suites and conformance tools where they
+can lawfully be run, and benchmarked against RabbitMQ, Mosquitto/EMQX, NATS and Kafka (D7).
+
+## D34 Engineering guardrails: build profiles, performance targets, legal checks — Decided by research (gap review, 2026-10-23); refines D6 and D7
+**Build profiles.** "All in one" and "lightweight" are reconciled by compile-time build profiles:
+- `embedded`: the core and the embedded API;
+- `server`: adds protocols, security and operations;
+- `full`: adds every model, protocol, the GUI and MCP.
+
+Each profile is still one binary (D3). D6's and D14's budgets are measured per profile:
+- the headline numbers (about one second to download and to install, the SQLite comparison) are
+  for `embedded` and `server`;
+- `full` is measured and kept as small as possible.
+
+Unused features cost nothing at runtime in any profile.
+
+**Shared foundations, all our own Rust (D1):** compression codecs, HTTP/1.1 and HTTP/2, gRPC, QUIC,
+and the TLS of D23. Each is built once in the core and used by every protocol that needs it.
+
+**Performance targets per workload.** D7 is applied per workload, with a target (the best existing
+database for that workload) and a measured gap. The CI gate is the committed baseline: a PR that
+makes any workload slower than its baseline is blocked (D7's rule). A workload that hasn't reached its target yet doesn't block unrelated work; closing the
+gap is roadmap work, tracked on the benchmark dashboard (D32).
+
+**Legal checks.** Protocol compatibility with products under non-permissive or restrictive terms gets
+a research check of the law and public case history before each protocol milestone, recorded here.
+That includes Redis's recent versions, MongoDB's SSPL, Elasticsearch's licenses, RabbitMQ's MPL,
+EMQX's BSL, and the AWS terms behind the SQS API. Anything unclear goes to the owner.
+
+**CI.** EggDB is a public repository, so the global CI rule's build-time aim applies: parallel jobs
+are fine (CLAUDE.md, "Commands").
