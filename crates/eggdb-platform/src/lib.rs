@@ -22,4 +22,4 @@ pub use clock::{Clock, SimClock, SystemClock};
 pub use error::{Error, ErrorKind, Result};
 pub use fs::{File, FileSystem, OpenMode};
 pub use os_fs::{OsFile, OsFileSystem};
-pub use sim_fs::{CrashMode, SimFile, SimFileSystem, TORN_WRITE_SECTOR_SIZE};
+pub use sim_fs::{CrashMode, SimFile, SimFileSystem};

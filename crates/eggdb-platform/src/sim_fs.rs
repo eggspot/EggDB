@@ -5,16 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-/// The unit in which [`CrashMode::Torn`] keeps or loses the parts of an unsynced write.
-pub const TORN_WRITE_SECTOR_SIZE: u64 = 512;
-
 /// What a simulated crash does to the writes that were not yet synced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CrashMode {
     /// Every unsynced write and size change is lost.
     DropUnsynced,
-    /// Each unsynced size change, and each [`TORN_WRITE_SECTOR_SIZE`]-aligned piece of each
-    /// unsynced write, independently survives or is lost, chosen by a generator seeded with
+    /// Each unsynced size change, and each
+    /// [`SimFileSystem::TORN_WRITE_SECTOR_SIZE`]-aligned piece of each unsynced write, independently survives or is lost, chosen by a generator seeded with
     /// `seed`. Models torn and reordered writes.
     Torn {
         /// The seed that decides which pieces survive.
@@ -74,6 +71,9 @@ impl SimFileSystem {
     /// The largest file the simulation holds; larger writes and sizes fail with
     /// [`ErrorKind::InvalidInput`] instead of exhausting memory.
     pub const MAX_FILE_SIZE: u64 = 1 << 30;
+
+    /// The unit in which [`CrashMode::Torn`] keeps or loses the parts of an unsynced write.
+    pub const TORN_WRITE_SECTOR_SIZE: u64 = 512;
 
     /// Creates an empty file system.
     pub fn new() -> Self {
@@ -240,10 +240,10 @@ impl File for SimFile {
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
-        self.require_writable()?;
-        let start = checked_size(offset)?;
-        checked_size(advance(offset, buf.len())?)?;
         self.with_inode(|inode| {
+            self.require_writable()?;
+            let start = checked_size(offset)?;
+            checked_size(advance(offset, buf.len())?)?;
             write_into(&mut inode.contents, start, buf);
             inode.unsynced.push(Change::Write {
                 offset,
@@ -258,9 +258,9 @@ impl File for SimFile {
     }
 
     fn set_size(&self, size: u64) -> Result<()> {
-        self.require_writable()?;
-        let new_len = checked_size(size)?;
         self.with_inode(|inode| {
+            self.require_writable()?;
+            let new_len = checked_size(size)?;
             inode.contents.resize(new_len, 0);
             inode.unsynced.push(Change::Resize(size));
             Ok(())
@@ -379,7 +379,8 @@ fn apply_torn(contents: &mut Vec<u8>, change: &Change, rng: &mut SplitMix64) {
 fn sector_pieces(mut offset: u64, mut bytes: &[u8]) -> Vec<(u64, &[u8])> {
     let mut pieces = Vec::new();
     while !bytes.is_empty() {
-        let to_boundary = TORN_WRITE_SECTOR_SIZE - offset % TORN_WRITE_SECTOR_SIZE;
+        let to_boundary =
+            SimFileSystem::TORN_WRITE_SECTOR_SIZE - offset % SimFileSystem::TORN_WRITE_SECTOR_SIZE;
         let len = usize::try_from(to_boundary).map_or(bytes.len(), |len| len.min(bytes.len()));
         let (piece, rest) = bytes.split_at(len);
         pieces.push((offset, piece));
@@ -426,7 +427,7 @@ fn begin(shared: &Mutex<State>) -> Result<MutexGuard<'_, State>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CrashMode, SimFileSystem, TORN_WRITE_SECTOR_SIZE, sector_pieces};
+    use super::{CrashMode, SimFileSystem, sector_pieces};
     use crate::{ErrorKind, File, FileSystem, OpenMode};
     use std::path::Path;
 
@@ -545,7 +546,7 @@ mod tests {
         let torn = outcome(42);
         assert_eq!(torn, outcome(42));
         assert_eq!(torn.len(), 4096);
-        let sector = usize::try_from(TORN_WRITE_SECTOR_SIZE).unwrap();
+        let sector = usize::try_from(SimFileSystem::TORN_WRITE_SECTOR_SIZE).unwrap();
         for piece in torn.chunks(sector) {
             assert!(piece.iter().all(|&byte| byte == piece[0]));
         }
@@ -575,6 +576,32 @@ mod tests {
         assert_eq!(file.size().unwrap(), 0);
         file.write_all_at(b"kept", 0).unwrap();
         assert_eq!(read_all(&file), b"kept");
+    }
+
+    #[test]
+    fn a_failed_sync_makes_nothing_durable() {
+        let fs = SimFileSystem::new();
+        create_durable(&fs, "wal", b"old");
+        let file = fs.open(Path::new("wal"), OpenMode::ReadWrite).unwrap();
+        file.write_all_at(b"new", 0).unwrap();
+        fs.fail_operation(fs.operation_count());
+        assert_eq!(
+            file.sync_data().unwrap_err().kind(),
+            ErrorKind::InjectedFault
+        );
+        fs.crash(CrashMode::DropUnsynced);
+        assert_eq!(reopen(&fs, "wal"), b"old");
+    }
+
+    #[test]
+    fn writes_through_a_read_only_handle_are_numbered_operations() {
+        let fs = SimFileSystem::new();
+        create_durable(&fs, "f", b"x");
+        let file = fs.open(Path::new("f"), OpenMode::Read).unwrap();
+        let before = fs.operation_count();
+        let error = file.write_at(b"y", 0).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs.operation_count(), before + 1);
     }
 
     #[test]
