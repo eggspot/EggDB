@@ -1116,6 +1116,24 @@ It competes with Airflow, dbt, Fivetran and Airbyte.
 - Kafka Connect compatibility (D33): EggDB implements the Connect REST and worker protocol in Rust,
   so existing Connect deployments and tools work with it. Our connectors are Rust.
 
+**Our own connector for every ecosystem** (owner, 2026-10-24): *"when it comes to any kind of
+existing connector or things we need to support, we build our own support too, so users can use them
+as they want."* Wherever an existing tool has its own plugin or connector system, we write and
+maintain an EggDB connector for it, so people keep using the tools they have:
+- **BI:** Power BI and Tableau connectors, Excel, Looker, Superset, Metabase and Grafana data
+  source plugins;
+- **pipelines:** a dbt adapter, Airbyte and Fivetran sources and destinations, a Debezium connector,
+  Airflow operators;
+- **big data:** Spark, Flink, Trino and Presto connectors, an Iceberg REST catalog;
+- **infrastructure:** a Terraform provider (D25), Kubernetes and Helm (D25);
+- **the drivers:** JDBC, ODBC, ADO.NET and the other drivers (D16, D17);
+- **anything else people ask for.**
+
+Each connector is our own code. Where the host tool requires another language, the connector is a
+thin layer in that language over the Rust core, under D16's rules, holding no database logic. Each
+one is tested against the host tool's own connector test suite or certification kit where one
+exists and can be run, and is tracked in the compatibility farm (D44).
+
 **Order.** They follow their foundations:
 - BI after the console and analytics (M11, D42);
 - ETL after the messaging, interchange and change-stream work (D28, D29, D33);

@@ -15,7 +15,9 @@ Check each task against these before starting and again before opening the PR.
    query layer, so a single query or transaction can span models. Never build a model as a
    separate database bolted on the side. **Nothing missing:** when a capability people need from a
    data platform is missing, add it to the roadmap and build it ourselves, without asking the
-   owner. That includes our own BI application, ETL pipelines and big-data connectors. What still
+   owner. That includes our own BI application, ETL pipelines and big-data connectors, and our own
+   EggDB connector for every existing tool's plugin system (Power BI, Tableau, Grafana, dbt,
+   Airbyte, Spark, Trino and the rest), so users keep the tools they have. What still
    goes to the owner: money, accounts and license changes, unsettled legal or patent findings, and
    D45's "not planned" list. (D2, D46)
 2. **We support everything people already use.** Applications switch to EggDB without code
