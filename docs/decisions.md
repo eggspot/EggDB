@@ -1594,3 +1594,13 @@ line, from sysfs, `GetLogicalProcessorInformationEx` and `sysctlbyname`, with ev
 quality of service; performance and efficiency cores; pinning on FreeBSD (`cpuset_setaffinity`);
 Windows CPU Sets and sets across groups; the process affinity mask on Windows; interrupt affinity;
 and a real fuzz harness for every parser, decided once for the whole project.
+
+## D63 Starting threads: pinned before the work runs, a refused pin is a spawn error — Decided by the build loop (2026-10-24); refines D62
+Engine threads start through `ThreadOptions` (name, stack size, CPUs) and its `spawn`, never
+`std::thread` directly, so every shard thread is named for debuggers and profilers and pinned the
+same way on every OS. The new thread pins itself through `Cpus::pin_current_thread` and reports
+the outcome to `spawn` before it runs any of the caller's code. When the pin is refused, the work
+never runs, the thread ends, and `spawn` returns the pin's error: a shard never runs on CPUs it
+did not ask for without knowing it, in the spirit of D60–D62's "given or refused, never faked".
+With `SimCpus` the pin is recorded, so tests can check where each thread was meant to run. A
+thread name with a NUL byte, on which std would panic, is `InvalidInput` (D9).
