@@ -4,7 +4,7 @@ EggDB is one database for every kind of data, written from scratch in Rust: cach
 full-text search and every other kind of database people run today, in a single lightweight engine.
 It is the fastest and the lightest, it scales from a tiny embedded file (better than SQLite) to an
 enterprise cluster with billions of billions of rows, and it runs on every OS, every CPU and every
-cloud. Open source under MIT (public repo `eggspot/EggDB`), a sibling of EggOS.
+cloud. Open source under MIT OR Apache-2.0 (public repo `eggspot/EggDB`), a sibling of EggOS.
 
 ## IMPORTANT: notes for every task
 Check each task against these before starting and again before opening the PR.
@@ -190,7 +190,7 @@ fuzzing and the format compatibility tests in CI (D35).
 An open question is never a reason to leave a PR unmerged: answer it with a research subagent,
 record the answer in the PR under "Decided by research" (and in docs/decisions.md for architecture),
 and merge. Only credentials, money, new accounts and going against an owner rule wait for the owner.
-A PR that changes the license is never merged.
+A PR that changes the license is merged only on the owner's explicit instruction (D36).
 
 ## Releases
 Semantic versioning, tags `vMAJOR.MINOR.PATCH`. Until 1.0, each finished milestone bumps MINOR and
@@ -200,5 +200,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D35). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D36). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.
