@@ -7,8 +7,8 @@
 //!   operating system's cache, used with [`AlignedBuffer`];
 //! - [`Clock`]: a monotonic clock for timeouts and a wall clock for hybrid logical clock
 //!   timestamps (D20);
-//! - [`Memory`]: the page size, and zeroed page-aligned [`MemoryRegion`]s on normal or huge
-//!   [`Pages`].
+//! - [`Memory`]: the operating system's page sizes, and zeroed page-aligned [`MemoryRegion`]s
+//!   on normal, huge or transparent huge pages ([`PageMode`]).
 //!
 //! Each trait has an implementation backed by the operating system ([`OsFileSystem`],
 //! [`SystemClock`], [`OsMemory`]) and a deterministic simulation ([`SimFileSystem`],
@@ -31,7 +31,7 @@ pub use aligned::AlignedBuffer;
 pub use clock::{Clock, SimClock, SystemClock};
 pub use error::{Error, ErrorKind, Result};
 pub use fs::{File, FileSystem, OpenMode};
-pub use memory::{Memory, MemoryRegion, Pages};
+pub use memory::{Memory, MemoryRegion, PageMode};
 pub use os_fs::{OsFile, OsFileSystem};
 pub use os_memory::OsMemory;
 pub use sim_fs::{CrashMode, SimFile, SimFileSystem};

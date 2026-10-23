@@ -36,7 +36,12 @@ mod platform {
     const O_DIRECT: Option<i32> = Some(0o200000);
     #[cfg(any(target_arch = "powerpc", target_arch = "powerpc64"))]
     const O_DIRECT: Option<i32> = Some(0o400000);
-    #[cfg(any(target_arch = "mips", target_arch = "mips64"))]
+    #[cfg(any(
+        target_arch = "mips",
+        target_arch = "mips64",
+        target_arch = "mips32r6",
+        target_arch = "mips64r6"
+    ))]
     const O_DIRECT: Option<i32> = Some(0x8000);
     #[cfg(not(any(
         target_arch = "x86_64",
@@ -49,7 +54,9 @@ mod platform {
         target_arch = "powerpc",
         target_arch = "powerpc64",
         target_arch = "mips",
-        target_arch = "mips64"
+        target_arch = "mips64",
+        target_arch = "mips32r6",
+        target_arch = "mips64r6"
     )))]
     const O_DIRECT: Option<i32> = None;
 
