@@ -576,7 +576,7 @@ Deprecations are announced one minor release ahead and removed only in a major r
 and reproducible builds.
 
 **Owner items.** These wait for the owner, and the build loop lists them in its report:
-- trademark and naming policy, and any bug bounty (money);
+- any bug bounty (money); the name needs no policy (D35);
 - who answers security reports, and the response time SECURITY.md promises.
 
 Security-critical code merges like everything else (D35).
@@ -856,8 +856,8 @@ EMQX's BSL, and the AWS terms behind the SQS API. Anything unclear goes to the o
 **CI.** EggDB is a public repository, so the global CI rule's build-time aim applies: parallel jobs
 are fine (CLAUDE.md, "Commands").
 
-## D35 Owner answers: our own cryptography, and security-critical code merges itself — Decided (owner, 2026-10-23)
-The owner answered two questions from the gap review:
+## D35 Owner answers: our own cryptography, security-critical code merges itself, the name is open — Decided (owner, 2026-10-23)
+The owner answered three questions from the gap review:
 
 1. **All cryptography is written by us** (D1, D23): TLS, the ciphers and hashes, key exchange,
    signatures and encryption at rest. There is no exception for an outside library.
@@ -873,5 +873,9 @@ The owner answered two questions from the gap review:
    - **A format or compatibility test:** a file-format change passes the upgrade, downgrade and
      mixed-version tests of D20 before merging.
 
+3. **The name is as open as the code.** There is no trademark policy and no registration. Anyone may
+   use the name EggDB however they want, including forks and products built on it. We still say
+   "compatible with" for other products' names (D1).
+
 Still open for the owner, since they cost money: the external cryptography audit, formal FIPS 140
-validation, any bug bounty, and registering a trademark (D21, D23).
+validation, and any bug bounty (D21, D23).
