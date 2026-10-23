@@ -1,3 +1,4 @@
+use crate::aligned::AlignedBuffer;
 use crate::error::{Error, ErrorKind, Result};
 use crate::fs::{File, FileSystem, OpenMode, advance};
 use crate::rng::SplitMix64;
@@ -46,6 +47,7 @@ struct State {
     operations: u64,
     failing_operations: BTreeSet<u64>,
     random_failures: Option<RandomFailures>,
+    refuse_uncached: bool,
 }
 
 #[derive(Debug)]
@@ -100,6 +102,12 @@ impl SimFileSystem {
         });
     }
 
+    /// Makes [`FileSystem::open_uncached`] fail with [`ErrorKind::Unsupported`], as a file
+    /// system that cannot bypass its cache does, or lets it succeed again.
+    pub fn refuse_uncached(&self, refuse: bool) {
+        lock(&self.shared).refuse_uncached = refuse;
+    }
+
     /// Simulates a power loss followed by a restart. Afterwards the file system holds only what
     /// was durable, plus whatever `mode` lets survive, and every handle opened before the crash
     /// fails with [`ErrorKind::StaleHandle`].
@@ -108,14 +116,13 @@ impl SimFileSystem {
     }
 }
 
-impl FileSystem for SimFileSystem {
-    type File = SimFile;
-
-    fn open(&self, path: &Path, mode: OpenMode) -> Result<SimFile> {
+impl SimFileSystem {
+    fn open_handle(&self, path: &Path, mode: OpenMode, uncached: bool) -> Result<SimFile> {
         let mut state = begin(&self.shared)?;
         if state.dirs.contains(path) || is_root(path) {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
+        let created = !state.names.contains_key(path);
         let inode = match (state.names.get(path).copied(), mode) {
             (Some(_), OpenMode::CreateNew) => return Err(Error::new(ErrorKind::AlreadyExists)),
             (Some(inode), _) => inode,
@@ -133,6 +140,13 @@ impl FileSystem for SimFileSystem {
                 inode
             }
         };
+        if uncached && state.refuse_uncached {
+            if created && mode == OpenMode::CreateNew {
+                state.names.remove(path);
+                state.free_unreachable_inodes();
+            }
+            return Err(Error::new(ErrorKind::Unsupported));
+        }
         if let Some(open) = state.inodes.get_mut(&inode) {
             open.open_handles += 1;
         }
@@ -141,7 +155,20 @@ impl FileSystem for SimFileSystem {
             inode,
             generation: state.generation,
             writable: mode.is_writable(),
+            uncached,
         })
+    }
+}
+
+impl FileSystem for SimFileSystem {
+    type File = SimFile;
+
+    fn open(&self, path: &Path, mode: OpenMode) -> Result<SimFile> {
+        self.open_handle(path, mode, false)
+    }
+
+    fn open_uncached(&self, path: &Path, mode: OpenMode) -> Result<SimFile> {
+        self.open_handle(path, mode, true)
     }
 
     fn remove_file(&self, path: &Path) -> Result<()> {
@@ -207,6 +234,7 @@ pub struct SimFile {
     inode: u64,
     generation: u64,
     writable: bool,
+    uncached: bool,
 }
 
 impl SimFile {
@@ -220,6 +248,18 @@ impl SimFile {
             .get_mut(&self.inode)
             .ok_or_else(|| Error::new(ErrorKind::StaleHandle))?;
         operation(inode)
+    }
+
+    fn require_alignment(&self, buf: &[u8], offset: u64) -> Result<()> {
+        let alignment = AlignedBuffer::ALIGNMENT;
+        let aligned = buf.is_empty()
+            || (buf.as_ptr().addr().is_multiple_of(alignment)
+                && buf.len().is_multiple_of(alignment)
+                && usize::try_from(offset).is_ok_and(|offset| offset.is_multiple_of(alignment)));
+        if self.uncached && !aligned {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        Ok(())
     }
 
     fn require_writable(&self) -> Result<()> {
@@ -247,6 +287,7 @@ impl Drop for SimFile {
 impl File for SimFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
         self.with_inode(|inode| {
+            self.require_alignment(buf, offset)?;
             let Some(available) = usize::try_from(offset)
                 .ok()
                 .and_then(|start| inode.contents.get(start..))
@@ -262,6 +303,7 @@ impl File for SimFile {
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
         self.with_inode(|inode| {
             self.require_writable()?;
+            self.require_alignment(buf, offset)?;
             let start = checked_size(offset)?;
             checked_size(advance(offset, buf.len())?)?;
             if buf.is_empty() {
@@ -288,6 +330,10 @@ impl File for SimFile {
             inode.unsynced.push(Change::Resize(size));
             Ok(())
         })
+    }
+
+    fn is_uncached(&self) -> bool {
+        self.uncached
     }
 
     fn sync_data(&self) -> Result<()> {
@@ -467,7 +513,7 @@ fn begin(shared: &Mutex<State>) -> Result<MutexGuard<'_, State>> {
 #[cfg(test)]
 mod tests {
     use super::{CrashMode, SimFileSystem, sector_pieces};
-    use crate::{ErrorKind, File, FileSystem, OpenMode};
+    use crate::{AlignedBuffer, ErrorKind, File, FileSystem, OpenMode};
     use std::path::Path;
 
     fn read_all(file: &impl File) -> Vec<u8> {
@@ -664,6 +710,79 @@ mod tests {
         assert_eq!(super::lock(&fs.shared).inode_count(), 1);
         fs.crash(CrashMode::DropUnsynced);
         assert_eq!(reopen(&fs, "segment"), b"old log");
+    }
+
+    #[test]
+    fn uncached_handles_reject_unaligned_buffers_offsets_and_lengths() {
+        let fs = SimFileSystem::new();
+        let file = fs
+            .open_uncached(Path::new("pages"), OpenMode::CreateNew)
+            .unwrap();
+        assert!(file.is_uncached());
+        let page = AlignedBuffer::zeroed(AlignedBuffer::ALIGNMENT).unwrap();
+        let unaligned_offset = file.write_at(&page, 512).unwrap_err();
+        let short_length = file.write_at(&page[..512], 0).unwrap_err();
+        let shifted_address = file.write_at(&page[1..], 0).unwrap_err();
+        let mut small = [0; 16];
+        let unaligned_read = file.read_at(&mut small, 0).unwrap_err();
+        for error in [
+            unaligned_offset,
+            short_length,
+            shifted_address,
+            unaligned_read,
+        ] {
+            assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        }
+        file.write_all_at(&page, 4096).unwrap();
+        assert_eq!(file.size().unwrap(), 8192);
+    }
+
+    #[test]
+    fn cached_handles_accept_any_alignment() {
+        let fs = SimFileSystem::new();
+        let file = fs.open(Path::new("log"), OpenMode::CreateNew).unwrap();
+        assert!(!file.is_uncached());
+        file.write_all_at(b"abc", 3).unwrap();
+    }
+
+    #[test]
+    fn a_refused_uncached_create_new_leaves_no_file_for_the_fallback() {
+        let fs = SimFileSystem::new();
+        fs.refuse_uncached(true);
+        let error = fs
+            .open_uncached(Path::new("pages"), OpenMode::CreateNew)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(!fs.exists(Path::new("pages")).unwrap());
+        fs.open(Path::new("pages"), OpenMode::CreateNew).unwrap();
+    }
+
+    #[test]
+    fn a_refused_uncached_create_may_leave_an_empty_file_like_the_os() {
+        let fs = SimFileSystem::new();
+        fs.refuse_uncached(true);
+        let error = fs
+            .open_uncached(Path::new("pages"), OpenMode::Create)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(fs.exists(Path::new("pages")).unwrap());
+        let fallback = fs.open(Path::new("pages"), OpenMode::Create).unwrap();
+        assert_eq!(fallback.size().unwrap(), 0);
+        fs.refuse_uncached(false);
+        assert!(
+            fs.open_uncached(Path::new("pages"), OpenMode::Create)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn missing_paths_are_reported_before_a_refusal() {
+        let fs = SimFileSystem::new();
+        fs.refuse_uncached(true);
+        let error = fs
+            .open_uncached(Path::new("missing"), OpenMode::Read)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound);
     }
 
     #[test]

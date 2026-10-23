@@ -1433,3 +1433,54 @@ with an error rather than exhausting memory, so fuzz targets can drive the simul
 `FILE_FLAG_NO_BUFFERING`) with aligned buffers; asynchronous I/O as D40 sets it (io_uring and IOCP, an epoll path, a file thread pool where kqueue has no file I/O) behind the
 same traits; memory (page size, aligned and huge-page allocation); threads and CPU topology; and
 networking. Each needs our own OS API declarations (D1), and each gets the same simulated twin.
+
+## D60 Direct I/O: an explicit uncached open that fails instead of falling back — Decided by research (build loop, 2026-10-24); refines D59
+The engine caches pages itself (D40), so the platform layer can open a file that bypasses the
+operating system's cache: `FileSystem::open_uncached`, used with `AlignedBuffer`.
+
+**How each OS does it:**
+- Linux and Android: `O_DIRECT` through std's `custom_flags`. Its value differs by architecture
+  (from the kernel's uapi `fcntl.h` headers): `0o40000` on x86, x86_64, riscv64, s390x and
+  loongarch64; `0o200000` on arm and aarch64; `0o400000` on powerpc and powerpc64; `0x8000` on
+  mips. Any other
+  architecture answers `Unsupported` rather than risk a wrong flag, so the build still works
+  everywhere (D8).
+- macOS and iOS: `fcntl(F_NOCACHE = 48, 1)` right after open, through our own variadic
+  declaration of `fcntl`; on Apple arm64 a fixed-argument declaration of a variadic function is
+  undefined behaviour.
+- Windows: `FILE_FLAG_NO_BUFFERING` (`0x20000000`) through std's `custom_flags`.
+- Everything else: `Unsupported`.
+
+**It fails instead of silently falling back.** When the platform or file system refuses (for
+example `EINVAL` from a file system without `O_DIRECT`), `open_uncached` returns
+`ErrorKind::Unsupported`. Only a refusal counts: a raw `EINVAL` from the open on Linux, or a
+failed `F_NOCACHE` on Apple; other errors keep their kind. The operating system creates the file
+before refusing, so a refused `CreateNew` removes the file it just made, so that falling back to
+`open(CreateNew)` works, and a refused `Create` may leave an empty file; the simulator does the
+same. That matches the public documentation of databases that rely on direct
+I/O: TigerBeetle refuses to start without it outside a development flag; ScyllaDB checks at
+startup; RocksDB's `use_direct_reads` makes the open fail. Falling back is the engine's choice,
+made later as a setting (`auto`, `required`, `off`), so the speed trade-off stays visible (D7)
+and the platform layer stays honest (D9). There is no "really bypasses the cache" query, because
+nobody can know: older ZFS accepts `O_DIRECT` and still caches, NFS treats it as a hint, and
+macOS's `F_NOCACHE` is a hint. A handle reports only what was asked for (`File::is_uncached`).
+
+**Alignment is a fixed 4096 bytes for now**, for buffer addresses, offsets and lengths. That is the
+largest logical block size common devices need (Linux requires the device's logical block size,
+usually 512 or 4096; Windows requires the volume's sector size). Asking the device (`statx` with
+`STATX_DIOALIGN` on Linux 6.1+, `FileStorageInfo` on Windows) to raise the alignment where needed
+is an M1 follow-up. `AlignedBuffer` gives zeroed memory, so padding never leaks old bytes.
+
+**The simulator enforces the rules.** Uncached simulated handles reject unaligned buffers, offsets
+and lengths with `InvalidInput`, so a mistake that would be `EINVAL` on Linux or Windows shows up on
+every OS, including macOS, where misaligned I/O quietly goes through the cache.
+`SimFileSystem::refuse_uncached` makes the open fail, to test the engine's fallback.
+
+**Rules for the engine:**
+- Direct I/O is not durable by itself: the drive's write cache and the file's size and extents
+  still need `sync_data` (D59's rule is unchanged).
+- Don't mix cached and uncached handles, or memory maps, on the same file.
+- Never change a buffer while I/O on it is in flight.
+- Preallocate files instead of growing them write by write.
+- Read and write whole pages. The default `read_exact_at` loop is only safe at page boundaries:
+  after a short read inside the file, the next offset is unaligned and fails.

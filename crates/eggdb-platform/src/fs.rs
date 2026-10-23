@@ -34,6 +34,19 @@ pub trait FileSystem: Send + Sync {
     /// Opens the file at `path`.
     fn open(&self, path: &Path, mode: OpenMode) -> Result<Self::File>;
 
+    /// Opens the file at `path` so that its reads and writes bypass the operating system's
+    /// cache, for an engine that caches pages itself.
+    ///
+    /// Every buffer address, offset and length used with the handle must be a multiple of
+    /// [`AlignedBuffer::ALIGNMENT`](crate::AlignedBuffer::ALIGNMENT): use
+    /// [`AlignedBuffer`](crate::AlignedBuffer) and whole pages. Bypassing the cache does not
+    /// make writes durable, so [`File::sync_data`] is still required. Fails with
+    /// [`ErrorKind::Unsupported`] when the platform or the file system refuses, and leaves the
+    /// choice of falling back to [`FileSystem::open`] to the caller. A refused
+    /// [`OpenMode::CreateNew`] leaves no file behind; a refused [`OpenMode::Create`] may leave
+    /// an empty one, as the operating system creates the file before refusing.
+    fn open_uncached(&self, path: &Path, mode: OpenMode) -> Result<Self::File>;
+
     /// Removes the file at `path`. Open handles keep working until they are dropped.
     fn remove_file(&self, path: &Path) -> Result<()>;
 
@@ -72,6 +85,10 @@ pub trait File: Send + Sync + std::fmt::Debug {
 
     /// Truncates or extends the file to `size` bytes, filling any extension with zeros.
     fn set_size(&self, size: u64) -> Result<()>;
+
+    /// Whether the handle was opened with [`FileSystem::open_uncached`] and so requires
+    /// aligned buffers, offsets and lengths.
+    fn is_uncached(&self) -> bool;
 
     /// Makes the file's contents and size durable.
     fn sync_data(&self) -> Result<()>;

@@ -20,6 +20,10 @@ pub enum ErrorKind {
     WriteZero,
     /// An argument was invalid, for example an offset beyond the largest file size.
     InvalidInput,
+    /// The platform or file system cannot do what was asked, for example bypass its cache.
+    Unsupported,
+    /// Memory for the operation could not be allocated.
+    OutOfMemory,
     /// The handle was opened before a simulated crash and no longer refers to a live file.
     StaleHandle,
     /// The simulation injected this failure on purpose.
@@ -37,6 +41,8 @@ impl ErrorKind {
             Self::UnexpectedEof => "unexpected end of file",
             Self::WriteZero => "write made no progress",
             Self::InvalidInput => "invalid input",
+            Self::Unsupported => "not supported here",
+            Self::OutOfMemory => "out of memory",
             Self::StaleHandle => "handle opened before a simulated crash",
             Self::InjectedFault => "injected fault",
             Self::Other => "operating system error",
@@ -58,6 +64,10 @@ impl Error {
             kind,
             os_error: None,
         }
+    }
+
+    pub(crate) fn with_kind(self, kind: ErrorKind) -> Self {
+        Self { kind, ..self }
     }
 
     /// The kind of failure.
@@ -92,6 +102,8 @@ impl From<io::Error> for Error {
             io::ErrorKind::UnexpectedEof => ErrorKind::UnexpectedEof,
             io::ErrorKind::WriteZero => ErrorKind::WriteZero,
             io::ErrorKind::InvalidInput => ErrorKind::InvalidInput,
+            io::ErrorKind::OutOfMemory => ErrorKind::OutOfMemory,
+            io::ErrorKind::Unsupported => ErrorKind::Unsupported,
             _ => ErrorKind::Other,
         };
         Self {

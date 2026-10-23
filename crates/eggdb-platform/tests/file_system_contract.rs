@@ -1,6 +1,8 @@
 //! The behavior every `FileSystem` shares, checked against the operating system and the simulation.
 
-use eggdb_platform::{ErrorKind, File, FileSystem, OpenMode, OsFileSystem, SimFileSystem};
+use eggdb_platform::{
+    AlignedBuffer, ErrorKind, File, FileSystem, OpenMode, OsFileSystem, SimFileSystem,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -196,5 +198,28 @@ contract!(
         assert_eq!(read_all(&current), b"v1");
         let reopened = fs.open(&path("current"), OpenMode::Read).unwrap();
         assert_eq!(read_all(&reopened), b"v2");
+    }
+);
+
+contract!(
+    uncached_handles_read_back_whole_aligned_pages,
+    |fs, path| {
+        let file = match fs.open_uncached(&path("pages"), OpenMode::CreateNew) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::Unsupported => return,
+            Err(error) => panic!("open_uncached failed: {error}"),
+        };
+        assert!(file.is_uncached());
+        let page = AlignedBuffer::ALIGNMENT;
+        let mut written = AlignedBuffer::zeroed(2 * page).unwrap();
+        for (index, byte) in written.iter_mut().enumerate() {
+            *byte = u8::try_from(index % 251).unwrap();
+        }
+        file.write_all_at(&written, 0).unwrap();
+        file.sync_data().unwrap();
+        let mut read = AlignedBuffer::zeroed(page).unwrap();
+        file.read_exact_at(&mut read, 4096).unwrap();
+        assert_eq!(&read[..], &written[page..]);
+        assert_eq!(file.size().unwrap(), 8192);
     }
 );
