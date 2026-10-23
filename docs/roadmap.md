@@ -13,7 +13,7 @@ refine it through research, recorded in docs/decisions.md.
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6); the first release binary with its download and install times measured (D14) | |
 | M5 | SQL: parser, planner, optimizer and executor; SQLite-compatible embedded SQL and the SQLite file format | |
-| M6 | Server and the PostgreSQL wire protocol and SQL dialect; the built-in MCP server, with schema discovery, querying and agent permissions (D11); PostgreSQL tools (psql, pgAdmin, DBeaver, the main drivers and ORMs) working (D12); restoring `pg_dump` output (D13) | |
+| M6 | Server and the PostgreSQL wire protocol and SQL dialect; the built-in MCP server, with schema discovery, querying and agent permissions (D11); PostgreSQL tools (psql, pgAdmin, DBeaver, the main drivers and ORMs) working (D12); restoring plain-SQL `pg_dump` output (D13) | |
 | M7 | Caching: in-memory tables with expiry and eviction, pub/sub, streams; Redis RESP | |
 | M8 | Full-text search: analyzers, inverted indexes, BM25 ranking; Elasticsearch/OpenSearch REST | |
 | M9 | Documents and JSON; the MongoDB wire protocol | |
