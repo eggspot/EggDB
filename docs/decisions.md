@@ -1874,11 +1874,14 @@ their follow-ups.
   initialising over a stray file still stops at `AlreadyExists`.
 
 **The simulator checks the engine's I/O rule (closes D66's last follow-up).** `SimIoQueue`
-refuses, with `InvalidInput`, a submit whose read or write overlaps a write still in flight on
-the same file through any handle (or a write overlapping a read or write in flight); a
-completion that was performed but not yet reaped is still in flight. Empty transfers overlap
-nothing. No operating system enforces the rule, so engine code that breaks it now fails in tests
-instead of racing on a machine.
+refuses, with `InvalidInput`, a submit whose read or write overlaps a write still in flight in
+the same queue on the same file, through any handle opened since the last crash (or a write
+overlapping a read or write in flight); a completion that was performed but not yet reaped is
+still in flight. Empty transfers overlap nothing. No operating system enforces the rule, so
+engine code that breaks it now fails in tests instead of racing on a machine. The check scans
+the queue's operations in flight on each submit, which is cheap at the default capacity of 128;
+an interval index replaces it if simulations run full queues of thousands. Overlaps between two
+queues (two shards writing one file) are not caught yet.
 
 **Windows topology grouped as Linux does (refines D65).** The Windows parser now cuts package
 and cache groups down to the CPUs the core records place before numbering them, so identifiers
@@ -1894,6 +1897,7 @@ rolled back only when the kernel did not consume the entry, the completion ring 
 overfilled, `Drop` waiting or leaking), the thread pool's shutdown, and the parsers' bounds
 against huge ranges and malformed records.
 
-**Still open:** the largest reported data cache line can exceed `CACHE_LINE_PADDING` on arm64
-chips with 256-byte lines (Fujitsu A64FX), as on 32-bit arm (D65); and `sync_dir` in the
-simulator still scans every name (D64).
+**Still open:** catching overlapping operations across queues in the simulator; the largest
+reported data cache line can exceed `CACHE_LINE_PADDING` on arm64 chips with 256-byte lines
+(Fujitsu A64FX), as on 32-bit arm (D65); and `sync_dir` in the simulator still scans every name
+(D64).

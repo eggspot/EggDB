@@ -26,8 +26,9 @@ use std::collections::VecDeque;
 /// system finishes them. The thread count of [`IoQueueOptions`] is checked but not used.
 ///
 /// The simulation also checks the rule every queue states and no operating system enforces: a
-/// write may not be in flight at once with a read or another write of an overlapping range of
-/// the same file, through any handle. `submit` refuses such an operation with
+/// write may not be in flight in the queue at once with a read or another write of an
+/// overlapping range of the same file, through any handle opened since the last crash. An
+/// operation performed but not yet reaped is still in flight. `submit` refuses such an operation with
 /// [`ErrorKind::InvalidInput`] and hands it back, so engine code that breaks the rule fails in
 /// tests instead of racing on a machine.
 #[derive(Debug)]
@@ -427,5 +428,31 @@ mod tests {
         let mut completions = Vec::new();
         queue.reap(&mut completions, 1).unwrap();
         assert!(!refused(&mut queue, write(&data, 0, &[2; 8])));
+    }
+
+    #[test]
+    fn a_performed_operation_stays_in_flight_until_it_is_reaped() {
+        let fs = SimFileSystem::new();
+        let data = file(&fs, "data");
+        let mut queue = queue(&fs);
+        submit(&mut queue, write(&data, 0, &[1; 8]), 0);
+        while queue.done.is_empty() {
+            queue.perform_one();
+        }
+        assert!(refused(&mut queue, read(&data, 4, 1)));
+    }
+
+    #[test]
+    fn operations_from_before_a_crash_race_with_nothing_after_it() {
+        let fs = SimFileSystem::new();
+        let data = file(&fs, "data");
+        fs.sync_dir(Path::new("")).unwrap();
+        data.sync_all().unwrap();
+        let mut queue = queue(&fs);
+        submit(&mut queue, write(&data, 0, &[1; 8]), 0);
+        fs.crash(CrashMode::DropUnsynced);
+        let reopened = file(&fs, "data");
+        submit(&mut queue, write(&reopened, 0, &[2; 8]), 1);
+        assert_eq!(reap_all(&mut queue).len(), 2);
     }
 }

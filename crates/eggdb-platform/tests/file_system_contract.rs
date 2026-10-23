@@ -348,6 +348,10 @@ contract!(
             fs.rename(&path("f"), &dir).unwrap_err().kind(),
         ];
         assert_eq!(kinds, [ErrorKind::InvalidInput; 3]);
+        assert_eq!(
+            fs.rename(&path("missing"), &dir).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
         assert!(fs.exists(&dir).unwrap());
         assert!(fs.exists(&path("f")).unwrap());
         assert!(!fs.exists(&path("e")).unwrap());

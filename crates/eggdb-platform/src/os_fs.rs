@@ -58,7 +58,10 @@ impl FileSystem for OsFileSystem {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
         fs::rename(from, to).map_err(|error| {
-            if runs_through_a_file(from) || runs_through_a_file(to) {
+            if error.kind() == io::ErrorKind::NotFound
+                || runs_through_a_file(from)
+                || runs_through_a_file(to)
+            {
                 Error::from(error).with_kind(ErrorKind::NotFound)
             } else {
                 directory_given(to, error)
