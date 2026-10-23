@@ -1,5 +1,7 @@
 use crate::error::{Error, ErrorKind, Result};
 use crate::fs::{File, FileSystem, OpenMode};
+use crate::io::IoQueueOptions;
+use crate::os_io::OsIoQueue;
 use crate::uncached;
 use std::fs;
 use std::path::Path;
@@ -17,6 +19,7 @@ impl OsFileSystem {
 
 impl FileSystem for OsFileSystem {
     type File = OsFile;
+    type IoQueue = OsIoQueue;
 
     fn open(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
         Ok(OsFile::new(open_options(mode).open(path)?, mode, false))
@@ -58,6 +61,10 @@ impl FileSystem for OsFileSystem {
 
     fn exists(&self, path: &Path) -> Result<bool> {
         Ok(path.try_exists()?)
+    }
+
+    fn io_queue(&self, options: IoQueueOptions) -> Result<OsIoQueue> {
+        OsIoQueue::new(options)
     }
 }
 

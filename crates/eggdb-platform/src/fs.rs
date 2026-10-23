@@ -1,4 +1,5 @@
 use crate::error::{Error, ErrorKind, Result};
+use crate::io::{IoQueue, IoQueueOptions};
 use std::path::Path;
 
 /// How [`FileSystem::open`] opens a file.
@@ -30,6 +31,9 @@ impl OpenMode {
 pub trait FileSystem: Send + Sync {
     /// The handle type for open files.
     type File: File;
+
+    /// The queue type for asynchronous operations on those files.
+    type IoQueue: IoQueue<File = Self::File>;
 
     /// Opens the file at `path`.
     fn open(&self, path: &Path, mode: OpenMode) -> Result<Self::File>;
@@ -63,6 +67,13 @@ pub trait FileSystem: Send + Sync {
 
     /// Whether a file or directory exists at `path`.
     fn exists(&self, path: &Path) -> Result<bool>;
+
+    /// Creates a queue for asynchronous reads, writes and syncs of this file system's files.
+    /// Fails with [`ErrorKind::InvalidInput`] when the options ask for no capacity, more than
+    /// [`IoQueueOptions::MAX_CAPACITY`] operations or more than
+    /// [`IoQueueOptions::MAX_THREADS`] threads, and with the operating system's error when a
+    /// thread cannot be started.
+    fn io_queue(&self, options: IoQueueOptions) -> Result<Self::IoQueue>;
 }
 
 /// An open file with positional reads and writes.

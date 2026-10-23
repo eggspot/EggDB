@@ -1,7 +1,9 @@
 use crate::aligned::AlignedBuffer;
 use crate::error::{Error, ErrorKind, Result};
 use crate::fs::{File, FileSystem, OpenMode, advance};
+use crate::io::IoQueueOptions;
 use crate::rng::SplitMix64;
+use crate::sim_io::SimIoQueue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -49,6 +51,8 @@ struct State {
     random_failures: Option<RandomFailures>,
     refuse_uncached: bool,
     unsynced_limit: Option<u64>,
+    io_seed: u64,
+    io_queues: u64,
 }
 
 #[derive(Debug)]
@@ -126,6 +130,16 @@ impl SimFileSystem {
         lock(&self.shared).unsynced_limit = Some(bytes.min(Self::MAX_UNSYNCED_BYTES));
     }
 
+    /// Seeds the completion orders and short transfers of the queues
+    /// [`FileSystem::io_queue`] creates from now on. Each queue also mixes in how many queues
+    /// were created before it since the seed was last set, so two queues of one run differ.
+    /// The seed is 0 until it is set.
+    pub fn seed_io_queues(&self, seed: u64) {
+        let mut state = lock(&self.shared);
+        state.io_seed = seed;
+        state.io_queues = 0;
+    }
+
     /// Simulates a power loss followed by a restart. Afterwards the file system holds only what
     /// was durable, plus whatever `mode` lets survive, and every handle opened before the crash
     /// fails with [`ErrorKind::StaleHandle`].
@@ -180,6 +194,7 @@ impl SimFileSystem {
 
 impl FileSystem for SimFileSystem {
     type File = SimFile;
+    type IoQueue = SimIoQueue;
 
     fn open(&self, path: &Path, mode: OpenMode) -> Result<SimFile> {
         self.open_handle(path, mode, false)
@@ -247,6 +262,16 @@ impl FileSystem for SimFileSystem {
         let path = &normalized(path);
         let state = begin(&self.shared)?;
         Ok(state.names.contains_key(path) || state.dir_exists(path))
+    }
+
+    fn io_queue(&self, options: IoQueueOptions) -> Result<SimIoQueue> {
+        let seed = {
+            let mut state = lock(&self.shared);
+            let number = state.io_queues;
+            state.io_queues = number.wrapping_add(1);
+            SplitMix64::new(state.io_seed).next_u64() ^ number
+        };
+        SimIoQueue::new(options, seed)
     }
 }
 
