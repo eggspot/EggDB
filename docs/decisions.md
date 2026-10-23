@@ -1602,4 +1602,5 @@ same way on every OS. The new thread pins itself through `Cpus::pin_current_thre
 the outcome to `spawn` before it runs any of the caller's code. When the pin is refused, the work
 never runs, the thread ends, and `spawn` returns the pin's error: a shard never runs on CPUs it
 did not ask for without knowing it, in the spirit of D60–D62's "given or refused, never faked".
-With `SimCpus` the pin is recorded, so tests can check where each thread was meant to run.
+With `SimCpus` the pin is recorded, so tests can check where each thread was meant to run. A
+thread name with a NUL byte, on which std would panic, is `InvalidInput` (D9).

@@ -43,7 +43,8 @@ impl ThreadOptions {
     /// Starts a thread that runs `work`. Fails with [`ErrorKind::InvalidInput`] when the name
     /// contains a NUL byte, with the operating system's error when the thread cannot be
     /// created, and with the error of [`Cpus::pin_current_thread`] when the pin is refused, in
-    /// which case `work` never runs and the thread has already ended.
+    /// which case `work` is dropped on the new thread without running and the thread has
+    /// already ended. A pin that panics is [`ErrorKind::Other`].
     pub fn spawn<C, F, T>(self, cpus: &C, work: F) -> Result<SpawnedThread<T>>
     where
         C: Cpus + Clone + 'static,
@@ -75,15 +76,25 @@ impl ThreadOptions {
                 let _ = handle.join();
                 Err(error)
             }
-            Err(_) => Err(Error::new(ErrorKind::Other)),
+            Err(_) => {
+                let _ = handle.join();
+                Err(Error::new(ErrorKind::Other))
+            }
         }
     }
 }
 
 /// A thread started by [`ThreadOptions::spawn`].
-#[derive(Debug)]
 pub struct SpawnedThread<T> {
     handle: thread::JoinHandle<Option<T>>,
+}
+
+impl<T> std::fmt::Debug for SpawnedThread<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnedThread")
+            .field("thread", self.handle.thread())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> SpawnedThread<T> {
@@ -174,6 +185,25 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind(), ErrorKind::InvalidInput);
         }
+    }
+
+    #[test]
+    fn an_injected_pin_failure_is_a_spawn_error() {
+        let cpus = SimCpus::new();
+        cpus.fail_pin(0);
+        let error = ThreadOptions::new()
+            .pin(set("0"))
+            .spawn(&cpus, || ())
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InjectedFault);
+    }
+
+    #[test]
+    fn an_impossible_stack_size_is_an_error_not_a_panic() {
+        let result = ThreadOptions::new()
+            .stack_size(usize::MAX)
+            .spawn(&SimCpus::new(), || ());
+        assert!(result.is_err());
     }
 
     #[test]
