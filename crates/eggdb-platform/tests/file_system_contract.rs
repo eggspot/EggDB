@@ -107,8 +107,13 @@ contract!(open_modes_require_or_forbid_an_existing_file, |fs, path| {
 contract!(read_only_handles_refuse_writes, |fs, path| {
     fs.open(&path("data"), OpenMode::CreateNew).unwrap();
     let file = fs.open(&path("data"), OpenMode::Read).unwrap();
-    assert!(file.write_at(b"x", 0).is_err());
-    assert!(file.set_size(10).is_err());
+    for result in [
+        file.write_at(b"x", 0).map(drop),
+        file.write_at(&[], 0).map(drop),
+        file.set_size(10),
+    ] {
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    }
     assert_eq!(file.size().unwrap(), 0);
 });
 

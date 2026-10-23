@@ -64,8 +64,8 @@ struct Inode {
     unsynced: Vec<Change>,
     unsynced_bytes: u64,
     open_handles: usize,
-    names: usize,
-    durable_names: usize,
+    name_count: usize,
+    durable_name_count: usize,
 }
 
 #[derive(Debug)]
@@ -118,7 +118,7 @@ impl SimFileSystem {
         lock(&self.shared).refuse_uncached = refuse;
     }
 
-    /// Lowers the most bytes of unsynced writes and size changes one file keeps, at most
+    /// Sets the most bytes of unsynced writes and size changes one file keeps, capped at
     /// [`SimFileSystem::MAX_UNSYNCED_BYTES`], so a test reaches the limit cheaply.
     pub fn limit_unsynced_bytes(&self, bytes: u64) {
         lock(&self.shared).unsynced_limit = Some(bytes.min(Self::MAX_UNSYNCED_BYTES));
@@ -400,7 +400,7 @@ impl Inode {
     }
 
     fn is_unreachable(&self) -> bool {
-        self.open_handles == 0 && self.names == 0 && self.durable_names == 0
+        self.open_handles == 0 && self.name_count == 0 && self.durable_name_count == 0
     }
 
     fn crash(&mut self, rng: Option<&mut SplitMix64>) {
@@ -425,7 +425,7 @@ impl State {
 
     fn link(&mut self, name: PathBuf, inode: u64) {
         if let Some(linked) = self.inodes.get_mut(&inode) {
-            linked.names += 1;
+            linked.name_count += 1;
         }
         if let Some(replaced) = self.names.insert(name, inode) {
             self.drop_name(replaced);
@@ -440,7 +440,7 @@ impl State {
 
     fn drop_name(&mut self, inode: u64) {
         if let Some(unlinked) = self.inodes.get_mut(&inode) {
-            unlinked.names = unlinked.names.saturating_sub(1);
+            unlinked.name_count = unlinked.name_count.saturating_sub(1);
         }
         self.free_if_unreachable(inode);
     }
@@ -462,13 +462,13 @@ impl State {
             .collect();
         for (name, inode) in synced {
             if let Some(durable) = self.inodes.get_mut(&inode) {
-                durable.durable_names += 1;
+                durable.durable_name_count += 1;
             }
             self.durable_names.insert(name, inode);
         }
         for inode in forgotten {
             if let Some(durable) = self.inodes.get_mut(&inode) {
-                durable.durable_names = durable.durable_names.saturating_sub(1);
+                durable.durable_name_count = durable.durable_name_count.saturating_sub(1);
             }
             self.free_if_unreachable(inode);
         }
@@ -507,17 +507,17 @@ impl State {
 
     fn recount_names(&mut self) {
         for inode in self.inodes.values_mut() {
-            inode.names = 0;
-            inode.durable_names = 0;
+            inode.name_count = 0;
+            inode.durable_name_count = 0;
         }
         for inode in self.names.values() {
             if let Some(named) = self.inodes.get_mut(inode) {
-                named.names += 1;
+                named.name_count += 1;
             }
         }
         for inode in self.durable_names.values() {
             if let Some(named) = self.inodes.get_mut(inode) {
-                named.durable_names += 1;
+                named.durable_name_count += 1;
             }
         }
     }
@@ -565,7 +565,7 @@ impl State {
                 .filter(|named| *named == id)
                 .count();
             assert_eq!(
-                (inode.names, inode.durable_names),
+                (inode.name_count, inode.durable_name_count),
                 (names, durable),
                 "inode {id}"
             );

@@ -1612,6 +1612,9 @@ The build loop's first review of M1 (D59–D63) fixed what it found and settled 
   fail with `PermissionDenied` through an `OpenMode::Read` handle everywhere, and the simulator
   does the same, so recovery code that syncs a file it opened read-only fails on every machine,
   not only on Windows.
+- **Writes, size changes and syncs through a read-only handle are `PermissionDenied`** on the
+  operating system as in the simulator; before, the operating system's `EBADF` arrived as
+  `Other`.
 - **An empty write changes nothing, at any offset.** `OsFile` returns 0 without calling the
   operating system (Windows leaves a zero-length write's effect to the file system), and the
   simulator no longer rejects an empty write beyond its largest file size.

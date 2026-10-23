@@ -135,6 +135,7 @@ impl File for OsFile {
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
+        self.require_writable()?;
         if buf.is_empty() {
             return Ok(0);
         }
@@ -146,6 +147,7 @@ impl File for OsFile {
     }
 
     fn set_size(&self, size: u64) -> Result<()> {
+        self.require_writable()?;
         Ok(self.file.set_len(size)?)
     }
 
