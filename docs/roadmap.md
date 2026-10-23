@@ -8,7 +8,7 @@ refine it through research, recorded in docs/decisions.md.
 | # | Milestone | Status |
 |---|-----------|--------|
 | M0 | Repo skeleton: workspace, pinned toolchain, CI, docs | **done** |
-| M1 | Platform layer: files, direct and async I/O, memory, threads, clocks, behind one interface (D8) | |
+| M1 | Platform layer: files, direct and async I/O, memory, threads, clocks, behind one interface (D8) | **in progress**: files, clocks and the crash simulator done (D59); next direct I/O, async I/O, memory, threads, networking |
 | M2 | Storage engine: our own versioned, checksummed page format, buffer management, write-ahead log ready to become a consensus log, hybrid logical clock timestamps, tenant and shard keys in the key layout (D20), checkpoints, crash recovery, partitioning; the B-tree/LSM/hybrid choice made by research with benchmarks | |
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6); the first release binary with its download and install times measured (D14) | |
@@ -31,6 +31,20 @@ refine it through research, recorded in docs/decisions.md.
 | M16 | Messaging and queues (D33), in order: Kafka, AMQP 0-9-1 (RabbitMQ), MQTT, SQS, NATS, AMQP 1.0, STOMP, with transactional outbox and inbox; wide-column (CQL), objects (S3), InfluxDB line protocol | |
 | M17 | Every platform: Windows, macOS, BSDs, Android, iOS, EggOS, WebAssembly, `no_std` (D8); packages and cloud deployments | |
 | M18 | The other ways of scaling (D18): multi-primary, leaderless quorums, storage separated from compute, serverless, tiered storage, edge copies, offline-first sync, federation | |
+
+## Where we are
+Rough progress toward the whole goal: **about 1%**. The skeleton, the decisions and the first piece
+of the platform layer exist; there is no storage engine, transaction system or query layer yet.
+
+| Area | Status | Missing |
+|------|--------|---------|
+| Platform layer (M1) | files with positional I/O, directory sync, clocks, deterministic crash and fault simulation | direct and async I/O, memory, threads, networking, Windows directory flush |
+| Storage and transactions (M2, M3) | not started | everything |
+| Models (D2) | none | key-value, relational, search, documents, time series, columnar, graphs, vectors, geospatial, wide-column, objects, queues |
+| SQL dialects (D10) | none (0%) | PostgreSQL, SQLite, MySQL/MariaDB, T-SQL, Oracle |
+| Protocols (D5) | none (0%) | PostgreSQL, RESP, MongoDB, Elasticsearch, CQL, Kafka, AMQP, MQTT, S3 and the rest |
+| Platforms (D8) | Linux, macOS and Windows built and tested in CI; WASI type-checked locally | BSDs, Android, iOS, EggOS, browser WebAssembly, `no_std` |
+| Scale (D4, D18) | none | a single file first (M4), then replicas, sharding and the rest of D18 |
 
 Every protocol milestone also covers that database's tools (D12) and its backups and dumps (D13):
 an application's whole toolchain and its data move over together.

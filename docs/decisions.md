@@ -1393,3 +1393,41 @@ a hosted service (D45)
   - push-notification credentials;
   - marketplace listings;
   - country-level legal opinions.
+
+## D59 The platform layer's first shape: files, clocks and a crash simulator — Decided by the build loop (2026-10-24); refines D8 and D9
+**One crate, std only.** `crates/eggdb-platform` holds every operating-system call the engine makes.
+The engine sees traits, never an OS API:
+- `FileSystem` (open, remove, rename, create directories, sync a directory, exists) and `File`
+  (positional `read_at`/`write_at`, `size`, `set_size`, `sync_data`, `sync_all`). Positional I/O
+  needs no cursor, so one handle is shared between threads. Unix uses `pread`/`pwrite` through
+  std, Windows uses `seek_read`/`seek_write`, and any other target falls back to seek and read
+  under a lock.
+- `Clock`: a monotonic clock for timeouts and a wall clock in Unix nanoseconds for hybrid logical
+  clocks (D20), which may jump in either direction.
+- Its own `Error` with an `ErrorKind`, so the engine never matches on `std::io::ErrorKind` and a
+  later `no_std` build (D8) can keep the same interface.
+
+**Durability follows POSIX's weakest promise.** File contents are durable only after
+`sync_data`/`sync_all`; creating, renaming and removing a file only after the parent directory is
+synced. Engine code is written against that rule on every OS. On Windows, `sync_dir` checks the
+directory exists and relies on NTFS's metadata journal until the platform layer declares the
+Win32 calls to flush a directory handle (M1 follow-up).
+
+**A sync failure is fatal to the file.** After a failed `fsync` some kernels drop the dirty pages
+and report success on the next try (PostgreSQL's 2018 "fsyncgate"). So the engine never retries a
+failed sync: it stops using the file and recovers from the last durable state. The simulator
+therefore does not need to model retries after a failed sync.
+
+**Deterministic simulation from day one (D9).** `SimFileSystem` keeps what the program sees and
+what would survive a power loss. `crash(DropUnsynced)` keeps only the durable state;
+`crash(Torn { seed })` lets each 512-byte piece of each unsynced write, and each unsynced size
+change, survive or not, which models torn and reordered writes. Every operation is numbered, and
+any of them can fail on purpose, by number or at a seeded random rate. A failed operation changes
+nothing, so a test can walk every crash and failure point of a protocol reproducibly. `SimClock`
+moves only when a test moves it, and its wall clock can jump back. Files above 1 GiB are refused
+with an error rather than exhausting memory, so fuzz targets can drive the simulator safely.
+
+**Still to come in M1:** direct I/O that bypasses the page cache (`O_DIRECT`, `F_NOCACHE`,
+`FILE_FLAG_NO_BUFFERING`) with aligned buffers; asynchronous I/O as D40 sets it (io_uring and IOCP, an epoll path, a file thread pool where kqueue has no file I/O) behind the
+same traits; memory (page size, aligned and huge-page allocation); threads and CPU topology; and
+networking. Each needs our own OS API declarations (D1), and each gets the same simulated twin.
