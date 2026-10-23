@@ -6,6 +6,8 @@ One database for every kind of data, written from scratch in Rust.
   graphs, vectors, geospatial, wide-column and objects, in one engine with one transaction system.
 - **Speaks what you already use:** PostgreSQL, MySQL, SQLite, Redis, MongoDB, Elasticsearch and
   more, so applications switch without code changes.
+- **Messaging and queues built in:** RabbitMQ (AMQP), MQTT, NATS, SQS and Kafka, in the same
+  transactions as your data.
 - **Every query language:** PostgreSQL, SQL Server (T-SQL), MySQL, Oracle and SQLite SQL, each as
   itself, plus Redis, MongoDB, Elasticsearch, CQL and graph queries, all on the same data.
 - **Works with your tools:** drivers, ORMs, GUI clients and BI tools made for other databases.

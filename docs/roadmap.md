@@ -9,11 +9,11 @@ refine it through research, recorded in docs/decisions.md.
 |---|-----------|--------|
 | M0 | Repo skeleton: workspace, pinned toolchain, CI, docs | **done** |
 | M1 | Platform layer: files, direct and async I/O, memory, threads, clocks, behind one interface (D8) | |
-| M2 | Storage engine: page format, buffer management, write-ahead log, checkpoints, crash recovery; the B-tree/LSM/hybrid choice made by research with benchmarks | |
+| M2 | Storage engine: our own versioned, checksummed page format, buffer management, write-ahead log ready to become a consensus log, hybrid logical clock timestamps, tenant and shard keys in the key layout (D20), checkpoints, crash recovery, partitioning; the B-tree/LSM/hybrid choice made by research with benchmarks | |
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6); the first release binary with its download and install times measured (D14) | |
 | M5 | SQL: parser, planner, optimizer and executor; SQLite-compatible embedded SQL and the SQLite file format; the stable C API and the first official drivers (Rust, C#, Java, Node.js, Python, Go) in embedded mode (D16); the `eggdb` CLI client (D15) | |
-| M6 | Server and the PostgreSQL wire protocol and SQL dialect; the official drivers over the network and their main ORMs (D16); the first GUI client screens on the desktop and in the browser, designed by Claude Fable (D15); the built-in MCP server, with schema discovery, querying and agent permissions (D11); PostgreSQL tools (psql, pgAdmin, DBeaver, the main drivers and ORMs) working (D12); restoring plain-SQL `pg_dump` output (D13) | |
+| M6 | Server and the PostgreSQL wire protocol and SQL dialect; authentication, TLS, roles and row-level security (D22, with D23's cryptography owner question settled first); metrics, logs, slow queries and `EXPLAIN ANALYZE` (D25); the official drivers over the network and their main ORMs (D16); the first GUI client screens on the desktop and in the browser, designed by Claude Fable (D15); the built-in MCP server, with schema discovery, querying and agent permissions (D11); PostgreSQL tools (psql, pgAdmin, DBeaver, the main drivers and ORMs) working (D12); restoring plain-SQL `pg_dump` output (D13) | |
 | M7 | Caching: in-memory tables with expiry and eviction, pub/sub, streams; Redis RESP | |
 | M8 | Full-text search: analyzers, inverted indexes, BM25 ranking; Elasticsearch/OpenSearch REST | |
 | M9 | Documents and JSON; the MongoDB wire protocol | |
@@ -21,16 +21,16 @@ refine it through research, recorded in docs/decisions.md.
 | M11 | Columnar storage and analytics; time series | |
 | M12 | Vectors (approximate nearest neighbours) and geospatial | |
 | M13 | Graphs | |
-| M14 | Replication and high availability: read replicas (synchronous, asynchronous, cascading), failover, consistency per request (D18) | |
+| M14 | Backup, point-in-time recovery and verified restores (D24); replication and high availability: read replicas (synchronous, asynchronous, cascading), failover, consistency per request (D18) | |
 | M15 | Sharding (hash, range, time, region) with online resharding, distributed SQL with consensus and serializable distributed transactions, multi-region clusters (D4, D18) | |
-| M16 | Wide-column (CQL), queues and streams (Kafka), objects (S3), InfluxDB line protocol | |
+| M16 | Messaging and queues (D33): AMQP 0-9-1 (RabbitMQ), AMQP 1.0, MQTT, STOMP, NATS, SQS and Kafka, with transactional outbox and inbox; wide-column (CQL), objects (S3), InfluxDB line protocol | |
 | M17 | Every platform: Windows, macOS, BSDs, Android, iOS, EggOS, WebAssembly, `no_std` (D8); packages and cloud deployments | |
 | M18 | The other ways of scaling (D18): multi-primary, leaderless quorums, storage separated from compute, serverless, tiered storage, edge copies, offline-first sync, federation | |
 
 Every protocol milestone also covers that database's tools (D12) and its backups and dumps (D13):
 an application's whole toolchain and its data move over together.
 
-Two tracks run alongside the milestones:
+Tracks that run alongside the milestones:
 - **The client (D15).** It starts now, not at M5:
   - our own Rust GUI toolkit, for the desktop and the browser from one codebase;
   - Claude Fable's design in `docs/ux/`;
@@ -43,3 +43,19 @@ Two tracks run alongside the milestones:
 
 Every milestone that adds a model or dialect also brings all of its data types, with their exact
 behavior (D19).
+
+More tracks that run alongside the milestones, each starting where its dependencies land:
+- **The project (D21):** contributing guide, code of conduct, security policy, the stability
+  promise, and signed and reproducible releases.
+- **Security and compliance (D22, D23, D26):** with the server first, deepened every release.
+- **Operations (D24, D25):** backups and monitoring as soon as there is data to protect and a
+  server to watch.
+- **Programmability (D27):** each dialect's procedural language with that dialect, WebAssembly
+  functions and extensions after the server.
+- **Time travel, derived data and change streams (D28):** after transactions (M3) and the server
+  (M6).
+- **Interchange and lakehouse (D29):** after columnar storage (M11).
+- **Text and locales (D30):** collation with SQL (M5), analyzers with full-text search (M8).
+- **AI (D31):** after vectors (M12) and the MCP server (M6).
+- **Relational completeness and multi-tenancy (D32):** across the SQL milestones, tracked as a
+  conformance list.
