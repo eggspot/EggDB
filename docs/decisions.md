@@ -43,7 +43,7 @@ EggDB is one binary that runs as a server and is also a library linked into an a
 (in-process, like SQLite). One process, one data directory, or one file when embedded, one config,
 one backup, no helper services.
 
-## D4 Every scale, one engine — Decided (owner, 2026-10-23)
+## D4 Every scale, one engine — Decided (owner, 2026-10-23); the ways of scaling listed in D18
 EggDB runs from a microcontroller and a single small file (smaller and faster than SQLite) to a
 distributed cluster holding billions of billions of rows across many machines and regions. The
 cluster side covers replication, sharding, distributed transactions and online growth. It is the
@@ -434,3 +434,94 @@ built without cgo. The path is bounded:
 
 Embedded mode always uses the Rust core, since only the core can run the database inside the
 application. For Go, that means embedded mode needs cgo, and cgo-free builds get server mode only.
+
+## D18 Every way of scaling, not only a primary with replicas — Decided (owner, 2026-10-23); refines D4
+EggDB supports every way people scale databases. A deployment picks the ones it needs, combines
+them, and changes them later without exporting data or stopping:
+- **Up:** one machine used fully. Every core, NUMA-aware memory, fast storage and large memory,
+  with no global locks on hot paths.
+- **Read replicas:** synchronous or asynchronous, cascading, delayed.
+- **Multi-primary (active-active):** writes accepted in several places, with conflict handling
+  chosen per table: last writer wins, application rules, or CRDT types.
+- **Leaderless quorums:** Dynamo-style reads and writes with tunable consistency per request.
+- **Sharding:** by hash, range, time or region, with online resharding and rebalancing.
+- **Distributed SQL:** consensus-replicated ranges (Raft, Paxos), serializable distributed
+  transactions, and global indexes.
+- **Storage separated from compute:** stateless compute nodes over shared or object storage, which
+  scale independently.
+- **Serverless:** scale to zero and back on demand.
+- **Tiered storage:** hot, warm and cold data across memory, local disk and object storage
+  (S3-compatible), queried the same way.
+- **Geo and edge:** data pinned to regions for latency and data-residency laws, and read copies at
+  the edge.
+- **Offline-first sync:** embedded EggDB on phones, browsers and devices, syncing with a server or
+  cluster when connected (D3, D4).
+- **Federation:** one query across separate EggDB clusters, and across other databases through the
+  protocols EggDB speaks.
+- **Partitioning within one node:** by range, list, hash or time, with partition pruning, distinct
+  from sharding across nodes.
+- **Logical replication and change data capture:** to other EggDB clusters (including across
+  versions, for upgrades without downtime) and to other systems.
+- **Standby and disaster recovery:** log shipping and asynchronous standbys in another region, with
+  planned switchover and failover.
+- **Analytical replicas (HTAP):** columnar copies kept in step with transactional data (M11), so
+  analytics never slow down transactions.
+- **Tenancy at scale:** many tenants per cluster, from shared tables to a database per tenant, moved
+  and rebalanced online.
+
+**Consistency per request.** Consistency has two axes, and both are chosen per database, table or
+request:
+- **Transaction isolation:** strict serializable, serializable, snapshot, repeatable read, read
+  committed.
+- **Replica freshness:** linearizable reads, read-your-writes, causal, bounded staleness, eventual.
+
+The trade-off is explicit, and the defaults are the safe ends: serializable isolation and reads
+that see the latest committed data.
+
+**Proof.** Every way of scaling is proven like crash safety (D9): deterministic simulation of
+partitions, clock skew and node failures, Jepsen-style consistency checks, and benchmarks at scale.
+The roadmap brings them in order of use: partitioning with the storage engine, replicas,
+standbys and high availability (M14), then sharding and distributed SQL (M15), then the rest
+(M18, which builds on M15's consensus and M17's platforms for offline-first sync).
+
+## D19 Every data type, with each database's exact behavior — Decided (owner, 2026-10-23); refines D10
+EggDB supports every data type of every database it is compatible with (D5, D10). Each type keeps
+the behavior it has in its home database: precision, range, overflow, rounding, string collation,
+time-zone handling, comparison and sort order, and conversions. That includes:
+
+- **PostgreSQL:**
+  - the numeric, character, binary, date/time and interval types;
+  - boolean, enums, arrays, ranges and multiranges, composite types and domains;
+  - JSON and JSONB, XML, UUID, money;
+  - network addresses, geometric types, bit strings, full-text `tsvector`/`tsquery`.
+- **SQL Server:** `datetimeoffset`, `datetime2`, `smalldatetime`, `money`, `uniqueidentifier`,
+  `hierarchyid`, `sql_variant`, `geography`/`geometry`, `rowversion`, `xml`, `nvarchar(max)` and the
+  rest.
+- **MySQL and MariaDB:** unsigned integers, `ENUM`, `SET`, `YEAR`, `BIT`, spatial types, `JSON`.
+- **Oracle:** `NUMBER`, `BINARY_FLOAT`/`BINARY_DOUBLE`, `VARCHAR2`/`NVARCHAR2`, `DATE`,
+  `TIMESTAMP WITH (LOCAL) TIME ZONE`, the `INTERVAL` types, `CLOB`/`BLOB`/`RAW`/`BFILE`,
+  `ROWID`/`UROWID`, `JSON`, `XMLType`, object types, `VARRAY` and nested tables.
+- **SQLite:** dynamic typing with type affinity.
+- **Redis:** strings, lists, sets, sorted sets, hashes, streams, bitmaps, HyperLogLog, geo.
+- **MongoDB:** BSON's types (ObjectId, Decimal128, dates, binary subtypes, regular expressions).
+- **Elasticsearch and OpenSearch:** `text` and `keyword`, numeric, date and `date_nanos`, `boolean`,
+  `ip`, `geo_point` and `geo_shape`, `nested` and `object`, `flattened`, `dense_vector`,
+  `sparse_vector`, `completion`.
+- **Cassandra:** scalars (`varint`, `decimal`, `timeuuid`, `duration`, `inet` and the rest), the
+  collections, tuples, user-defined types and counters.
+- **The other models of M16:** InfluxDB line-protocol fields and tags, Kafka records (key, value,
+  headers, timestamp), S3 objects and their metadata.
+- **Across models:** vectors (dense float32/float16/int8/binary, sparse), geospatial (OGC simple
+  features, geography on the sphere), time series, graph nodes and edges, arbitrary-precision
+  decimals, and large objects.
+- **User-defined types:** user-defined types, domains and casts.
+
+**One type system underneath.** It stores, indexes and compares all of these. Each dialect's type
+is a precise mapping onto it, not an approximation, so a value written through one protocol reads
+back exactly through another where both can represent it. Where they can't, the conversion is
+explicit and documented, never silently lossy.
+
+**Proof and progress.** Each type is proven by the original database's own type tests, where they can
+lawfully be run (D1, D10), and by our round-trip and comparison tests across protocols. A type is
+done when those pass. The roadmap's support matrix tracks the done types per dialect and model, as a
+coverage figure alongside D10's.

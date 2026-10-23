@@ -21,10 +21,11 @@ refine it through research, recorded in docs/decisions.md.
 | M11 | Columnar storage and analytics; time series | |
 | M12 | Vectors (approximate nearest neighbours) and geospatial | |
 | M13 | Graphs | |
-| M14 | Replication and high availability | |
-| M15 | Sharding, distributed transactions and multi-region clusters (D4) | |
+| M14 | Replication and high availability: read replicas (synchronous, asynchronous, cascading), failover, consistency per request (D18) | |
+| M15 | Sharding (hash, range, time, region) with online resharding, distributed SQL with consensus and serializable distributed transactions, multi-region clusters (D4, D18) | |
 | M16 | Wide-column (CQL), queues and streams (Kafka), objects (S3), InfluxDB line protocol | |
 | M17 | Every platform: Windows, macOS, BSDs, Android, iOS, EggOS, WebAssembly, `no_std` (D8); packages and cloud deployments | |
+| M18 | The other ways of scaling (D18): multi-primary, leaderless quorums, storage separated from compute, serverless, tiered storage, edge copies, offline-first sync, federation | |
 
 Every protocol milestone also covers that database's tools (D12) and its backups and dumps (D13):
 an application's whole toolchain and its data move over together.
@@ -39,3 +40,6 @@ Two tracks run alongside the milestones:
 
   The desktop GUI is a must-have.
 - **The drivers (D16):** each language and ORM added and proven by its own test suite.
+
+Every milestone that adds a model or dialect also brings all of its data types, with their exact
+behavior (D19).

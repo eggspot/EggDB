@@ -34,8 +34,18 @@ Check each task against these before starting and again before opening the PR.
    concludes the cost is the unavoidable, minimised price of correctness or security (D7).
 6. **Every scale.** From a microcontroller and a single small file (smaller and faster than SQLite)
    to a distributed cluster of many machines across regions holding billions of billions of rows
-   (exabytes), with replication, sharding, distributed transactions and online growth. The same
-   engine and the same data format at every size; never write code that assumes one size. (D4)
+   (exabytes). Every way of scaling, not only a primary with replicas; D18 has the full list:
+   - scaling up and partitioning;
+   - replicas and standbys;
+   - multi-primary and leaderless quorums;
+   - sharding and distributed SQL;
+   - storage separated from compute, and serverless;
+   - tiered storage, geo pinning and edge copies;
+   - offline-first sync, federation and analytical replicas.
+
+   Each deployment picks the ones it needs, and can change without exporting data. The same engine
+   and the same data format at every size; never write code that assumes one size or one topology.
+   (D4, D18)
 7. **Everywhere.** Every OS (Linux, Windows, macOS, the BSDs, Android, iOS, EggOS, the browser
    through WebAssembly, `no_std` embedded), every CPU architecture, every cloud (AWS, Azure, Google
    Cloud and the rest), Kubernetes, containers and bare metal. Platform code lives behind one
@@ -108,6 +118,11 @@ Check each task against these before starting and again before opening the PR.
     SQLite's binding in its language (embedded mode, from M5) and against the best driver in its
     language (server mode, from M6), and is gated in CI. (D17) Existing drivers keep
     working too, through the protocols EggDB speaks (D12). (D16)
+16. **Every data type.** Every data type of every database EggDB is compatible with, with its exact
+    behavior: precision, range, overflow, rounding, collation, time zones and comparison. That
+    covers every SQL dialect's types (D10), the types of Redis, MongoDB, Elasticsearch and
+    Cassandra, vectors, geospatial, time series, graphs, and user-defined types. One type
+    system underneath stores and indexes them all. (D19)
 
 ## Code
 - **Everything written by us, in Rust, from scratch.** The only exceptions are the per-language
@@ -163,5 +178,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D17). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D19). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.
