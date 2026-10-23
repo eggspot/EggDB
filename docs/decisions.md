@@ -337,7 +337,8 @@ no-comments rule (public API doc comments such as C# XML docs are kept).
 
 **The exceptions, named.**
 - A runtime that can load neither native code nor WebAssembly may get a protocol implementation
-  written in its own language. It is the only place protocol logic lives outside Rust, and it must
+  written in its own language. D17 adds a second case: a pure-language server-mode path, when
+  benchmarks show it is needed. It is the only place protocol logic lives outside Rust, and it must
   pass the same protocol test suite as the Rust core.
 - The browser build is loaded by the minimal HTML and JavaScript a browser requires, and nothing
   more.
@@ -361,3 +362,59 @@ mode, every model, every dialect and the MCP tools.
 tests running against EggDB in CI. Publishing to the package registries (NuGet, Maven Central, npm,
 PyPI, crates.io, Packagist, RubyGems, pub.dev and others) needs accounts and tokens, which wait for
 the owner.
+
+## D17 Driver speed: batched crossings and benchmarks in every language — Decided (owner, 2026-10-23); refines D16
+Every official driver (D16) must be at least as fast as the best existing driver in its language.
+The rules below apply to every language, not one.
+
+**Crossing between a language and the Rust core is batched, never per value.** A call from another
+language into Rust costs from about ten nanoseconds (.NET, Java's FFM API) up to about a hundred
+(Go's cgo, Java's JNI). Creating values in the host language (JavaScript, Python objects) costs
+more than the call itself. So the C API and every driver follow these rules:
+1. **One call per operation**: open, prepare, execute, fetch the next batch, close. There are no
+   per-value calls like `get_int(row, column)`.
+2. **Results in batches, in shared memory.** The Rust core writes thousands of rows at a time
+   into a buffer with a compact binary layout. The language reads values straight from that memory
+   without copying, and releases the whole batch with one call. The tools are `Span<T>` and
+   pointers in .NET, `MemorySegment` in Java 22+ (a direct `ByteBuffer` with JNI on older Java),
+   an external `ArrayBuffer` with `DataView` in Node.js, the buffer protocol (`memoryview`) in
+   Python, and unsafe slices in Go.
+3. **Lazy values.** Text stays UTF-8 in the buffer. A host-language string or object is created
+   only when the application reads that value, with the platform's fast decoder (.NET's UTF-8
+   decoding, `TextDecoder`, CPython's UTF-8 decoder). Bulk APIs (`fetchall`, data frames, Arrow,
+   `DbDataReader` streaming) take the whole batch at once.
+4. **Parameters in one buffer.** All of a command's parameters are packed into one buffer and
+   passed with the execute call.
+5. **Prepared statements are handles.** SQL text crosses once. After that, only a small handle and
+   the parameter buffer cross.
+6. **Async without blocked threads.** Network waiting happens in the Rust core. Completion comes
+   back through one callback per batch, which completes the language's own task or promise:
+   `[UnmanagedCallersOnly]` in .NET, an upcall stub in Java, a thread-safe function in Node.js, an
+   event-loop callback in Python. Tiny hot calls skip the runtime's thread-state switch where the
+   runtime allows it (`SuppressGCTransition` in .NET, critical downcalls in Java).
+7. **Measured, and gated in CI** (below).
+
+**Benchmarks per language, in both modes.** Each driver runs the same workload: many small queries,
+large result sets, bulk inserts, prepared statements and concurrent connections. It is compared in
+two modes.
+- **Server mode:** against the best existing driver in its language, connected to the same EggDB
+  server through the protocol it speaks (D12). The baselines are Npgsql (.NET), PgJDBC (Java),
+  `pg` and `postgres` (Node.js), psycopg (Python), pgx (Go), `tokio-postgres` (Rust) and PDO pgsql
+  (PHP), with the other languages' best drivers as they're added.
+- **Embedded mode:** against SQLite's binding in that language (`Microsoft.Data.Sqlite`, the
+  SQLite JDBC driver, `better-sqlite3`, Python's `sqlite3`, Go's SQLite drivers and so on), on the
+  same data.
+
+The numbers are committed as baselines and gated in CI like every other benchmark (D7). A slower
+driver is a performance regression.
+
+**If the Rust core is slower over the network in some language**, a research subagent decides,
+with benchmarks, whether that language gets a server-mode path that speaks EggDB's protocol in the
+language itself. Pure-language drivers are popular for exactly this (pgx in Go, Npgsql in .NET), and
+some ecosystems prefer them: many Go programs are built without cgo. Such a path:
+- is our own clean-room code;
+- passes the same protocol test suite as the Rust core;
+- is recorded here.
+
+Embedded mode always uses the Rust core, since only the core can run the database inside the
+application.
