@@ -92,7 +92,8 @@ Check each task against these before starting and again before opening the PR.
     familiar layouts that work like the clients people already know (SQL Server Management
     Studio, pgAdmin, DBeaver, DataGrip, MySQL Workbench, MongoDB Compass, Redis Insight), so
     nobody has to relearn their habits. Familiar means the same layout, shortcuts and workflows,
-    never their artwork, icons or names. (D15)
+    never their code, artwork, icons or screenshots. A layout may be labelled "works like
+    <product>", with a trademark note. (D15)
 15. **Connectors for every language, working with their ORMs.** Official EggDB drivers for C#/.NET,
     Java and Kotlin, Node.js and TypeScript, Python, Go, Rust, PHP, Ruby, Swift, Dart, C and C++
     (and more as people ask), each fitting its language's standard database interface and its
@@ -105,8 +106,8 @@ Check each task against these before starting and again before opening the PR.
     working too, through the protocols EggDB speaks (D12). (D16)
 
 ## Code
-- **Everything written by us, in Rust, from scratch** (the per-language driver layers are the one
-  exception: they're written in their own language, D16). No code from other databases (SQLite,
+- **Everything written by us, in Rust, from scratch.** The only exceptions are the per-language
+  driver and ORM layers and the minimal HTML/JS that loads the browser build (D16). No code from other databases (SQLite,
   PostgreSQL, RocksDB, Redis, Lucene and so on). Implement from public specifications, papers and
   protocol documentation (clean room), and never read the source of copyleft or source-available
   databases (MySQL, MariaDB, MongoDB and others) while working on EggDB. No third-party crates in
