@@ -1,4 +1,5 @@
 use crate::error::{Error, ErrorKind, Result};
+use crate::topology::CpuTopology;
 use std::fmt;
 use std::num::NonZeroUsize;
 
@@ -223,6 +224,13 @@ pub trait Cpus: Send + Sync {
     /// container limits the process's CPU time. The engine sizes its thread-per-core shards
     /// from this.
     fn parallelism(&self) -> NonZeroUsize;
+
+    /// Where each online CPU sits: its core, package, NUMA node and last-level cache, and the
+    /// cache line size, as far as the operating system reports them; anything it does not report
+    /// is `None`. It covers every online CPU, including ones outside [`Cpus::available`], so the
+    /// engine can see a sibling hardware thread it may not use. Linux and Android read sysfs,
+    /// Windows `GetLogicalProcessorInformationEx`, and Apple's systems report counts only.
+    fn topology(&self) -> CpuTopology;
 
     /// Restricts the calling thread to `cpus`. Pinning is given or refused, never faked: it
     /// fails with [`ErrorKind::Unsupported`] where the platform can only hint (Apple's systems)

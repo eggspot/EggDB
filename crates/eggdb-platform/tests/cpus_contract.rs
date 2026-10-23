@@ -1,6 +1,6 @@
 //! The behavior every `Cpus` shares, checked against the operating system and the simulation.
 
-use eggdb_platform::{CpuId, CpuSet, Cpus, ErrorKind, OsCpus, SimCpus};
+use eggdb_platform::{CACHE_LINE_PADDING, CpuId, CpuSet, Cpus, ErrorKind, OsCpus, SimCpus};
 
 macro_rules! contract {
     ($name:ident, |$cpus:ident| $body:block) => {
@@ -41,4 +41,19 @@ contract!(a_thread_is_pinned_or_refused_never_faked, |cpus| {
     })
     .join()
     .unwrap();
+});
+
+contract!(the_topology_agrees_with_the_available_cpus, |cpus| {
+    let topology = cpus.topology();
+    let available = cpus.available();
+    if !topology.locations().is_empty() {
+        assert!(available.is_subset(&topology.cpus()), "{topology:?}");
+    }
+    if let Some(logical) = topology.logical_cpus() {
+        assert!(logical.get() >= available.len(), "{topology:?}");
+    }
+    if let Some(line) = topology.cache_line_size() {
+        assert!(line.get() <= CACHE_LINE_PADDING, "{topology:?}");
+    }
+    assert_eq!(cpus.topology(), topology);
 });

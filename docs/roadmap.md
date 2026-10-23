@@ -8,7 +8,7 @@ refine it through research, recorded in docs/decisions.md.
 | # | Milestone | Status |
 |---|-----------|--------|
 | M0 | Repo skeleton: workspace, pinned toolchain, CI, docs | **done** |
-| M1 | Platform layer: files, direct and async I/O, memory, threads, clocks, behind one interface (D8) | **in progress**: files, clocks, the crash simulator (D59), direct I/O with aligned buffers (D60), memory with huge pages and its simulator (D61), CPU sets, pinning and cache padding (D62), named, pinned thread starts (D63) and the first review (D64) done; next CPU topology, async I/O, networking |
+| M1 | Platform layer: files, direct and async I/O, memory, threads, clocks, behind one interface (D8) | **in progress**: files, clocks, the crash simulator (D59), direct I/O with aligned buffers (D60), memory with huge pages and its simulator (D61), CPU sets, pinning and cache padding (D62), named, pinned thread starts (D63), the first review (D64) and the CPU topology (D65) done; next async I/O, networking |
 | M2 | Storage engine: our own versioned, checksummed page format, buffer management, write-ahead log ready to become a consensus log, hybrid logical clock timestamps, tenant and shard keys in the key layout (D20), checkpoints, crash recovery, partitioning; the B-tree/LSM/hybrid choice made by research with benchmarks | |
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6); the first release binary with its download and install times measured (D14) | |
@@ -38,7 +38,7 @@ of the platform layer exist; there is no storage engine, transaction system or q
 
 | Area | Status | Missing |
 |------|--------|---------|
-| Platform layer (M1) | files with positional and direct I/O, aligned buffers, directory sync, clocks, memory (page sizes, explicit and transparent huge pages), CPU sets, thread pinning on Linux and Windows and pinned thread starts, cache padding, deterministic crash, fault, memory and CPU simulation | CPU topology, async I/O, networking, per-device alignment, NUMA and locked memory, pinning on the BSDs |
+| Platform layer (M1) | files with positional and direct I/O, aligned buffers, directory sync, clocks, memory (page sizes, explicit and transparent huge pages), CPU sets, thread pinning on Linux and Windows and pinned thread starts, cache padding, CPU topology (cores, packages, NUMA nodes, last-level caches) on Linux, Android and Windows with counts on Apple's systems, deterministic crash, fault, memory and CPU simulation | async I/O, networking, per-device alignment, NUMA memory placement and locked memory, performance and efficiency cores, pinning and topology on the BSDs |
 | Storage and transactions (M2, M3) | not started | everything |
 | Models (D2) | none | key-value, relational, search, documents, time series, columnar, graphs, vectors, geospatial, wide-column, objects, queues |
 | SQL dialects (D10, D47) | none (0%) | PostgreSQL, SQLite, MySQL/MariaDB, T-SQL, Oracle, then GoogleSQL, Snowflake, Spark, ClickHouse, Trino, Db2, Sybase |
