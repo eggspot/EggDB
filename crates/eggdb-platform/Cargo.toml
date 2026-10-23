@@ -1,6 +1,6 @@
 [package]
 name = "eggdb-platform"
-description = "EggDB's platform layer: files, clocks, memory and the deterministic simulation used to test them."
+description = "EggDB's platform layer: files, clocks, memory, CPUs and the deterministic simulation used to test them."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
