@@ -35,4 +35,4 @@ Status: early. See [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](do
 cargo run
 ```
 
-Licensed under the [MIT License](LICENSE).
+Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.

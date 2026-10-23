@@ -14,7 +14,7 @@ EggDB is our own code in Rust. The only code in other languages is listed in D16
 No code from other databases: we implement storage, transactions, query processing and every
 protocol from public specifications, papers and documentation (clean room). What we ship has no third-party crates; Rust's standard library and our own declarations of
 operating-system APIs are fine. Permissive crates (MIT, Apache-2.0, BSD) may be used for tests,
-benchmarks and build tooling only, when a research subagent approves them. Licensed MIT; no
+benchmarks and build tooling only, when a research subagent approves them. Licensed MIT OR Apache-2.0 (D36); no
 copyleft or source-available code ever: GPL, LGPL, AGPL, MPL, SSPL, BSL and the like.
 
 Clean room includes not reading the source of copyleft or source-available databases (MySQL, MariaDB,
@@ -345,7 +345,7 @@ no-comments rule (public API doc comments such as C# XML docs are kept).
 
 **Frameworks are dependencies, never part of what we ship.** An ORM framework (EF Core, Hibernate,
 SQLAlchemy and the others) is a dependency the user's application already has, declared in the
-package metadata. We never copy, bundle or modify it. Our provider is our own MIT code that
+package metadata. We never copy, bundle or modify it. Our provider is our own MIT OR Apache-2.0 code that
 implements the framework's public interfaces, whatever the framework's own license (Hibernate's
 LGPL included).
 
@@ -617,13 +617,11 @@ server (M6).
 - a path to post-quantum key exchange.
 
 **How it's built, under D1.** All cryptography is our own code, written in constant time, checked
-against standard test vectors (Wycheproof and the NIST vectors), fuzzed, and audited externally
-before any production release.
+against standard test vectors (Wycheproof and the NIST vectors), and fuzzed.
 
-**Owner decision (D35).** All cryptography is our own; no library exception. Still the owner's,
-because they cost money:
-- the external audit;
-- formal FIPS 140 validation.
+**Owner decision (D35, D36).** All cryptography is our own; no library exception, no paid external
+audit and no formal FIPS 140 validation. The code is reviewed in the open, by the stricter
+automated checks of D35 and by anyone who reads it.
 
 ## D24 Backup, point-in-time recovery and verified restores — Decided by research (gap review, 2026-10-23); complements D13
 EggDB's own backups:
@@ -877,5 +875,16 @@ The owner answered three questions from the gap review:
    use the name EggDB however they want, including forks and products built on it. We still say
    "compatible with" for other products' names (D1).
 
-Still open for the owner, since they cost money: the external cryptography audit, formal FIPS 140
-validation, and any bug bounty (D21, D23).
+Still open for the owner, since it costs money: any bug bounty (D21). The external audit and FIPS
+validation were answered in D36.
+
+## D36 License MIT OR Apache-2.0; no paid external audit — Decided (owner, 2026-10-23); refines D1, D23 and D35
+EggDB is licensed under either the MIT License or the Apache License 2.0, at the user's option
+(`LICENSE-MIT`, `LICENSE-APACHE`). This is the same as Rust and most of its ecosystem. It is free
+forever under both: anyone may use, change, sell and ship it. MIT keeps it simple, and Apache-2.0
+adds an express patent grant. Contributions are accepted under the same terms, with the DCO
+sign-off (D21). The owner applied the same change to the other eggspot open-source projects.
+
+There is no paid external security audit and no formal FIPS 140 validation. The project's
+cryptography and security code is reviewed in the open, and by the stricter automated checks of
+D35. A finding from anyone is handled through SECURITY.md.
