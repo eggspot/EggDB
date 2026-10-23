@@ -1625,7 +1625,7 @@ The build loop's first review of M1 (D59–D63) fixed what it found and settled 
   file is freed by keeping counts of its visible and durable names instead of rebuilding a set
   of every name on each close, removal, rename and directory sync. On the reviewer's probe, 4,000
   appends of 4 KiB with a sync after each went from about 505 ms to about 6 ms, and 20,000
-  open-and-close cycles among 20,000 files from about 14 s to about 17 ms.
+  open-and-close cycles among 20,000 files from about 15 s to about 17 ms (release builds).
 - **Paths are compared without `.` components**, so `./dir/f` and `dir/f` are one file in the
   simulator as on the operating system. Renaming a file onto itself changes nothing.
 - **A rename across directories with only the target synced survives under both names**, which
