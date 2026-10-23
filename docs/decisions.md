@@ -617,8 +617,7 @@ server (M6).
 - a path to post-quantum key exchange.
 
 **How it's built, under D1.** All cryptography is our own code, written in constant time, checked
-against standard test vectors (Wycheproof and the NIST vectors), fuzzed, and audited externally
-before any production release.
+against standard test vectors (Wycheproof and the NIST vectors), and fuzzed.
 
 **Owner decision (D35, D36).** All cryptography is our own; no library exception, no paid external
 audit and no formal FIPS 140 validation. The code is reviewed in the open, by the stricter
