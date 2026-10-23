@@ -337,8 +337,9 @@ no-comments rule (public API doc comments such as C# XML docs are kept).
 
 **The exceptions, named.**
 - A runtime that can load neither native code nor WebAssembly may get a protocol implementation
-  written in its own language. It is the only place protocol logic lives outside Rust, and it must
-  pass the same protocol test suite as the Rust core.
+  written in its own language. D17 adds the second and last case: a pure-language server-mode
+  path, when benchmarks show it is needed. These two are the only places protocol logic lives
+  outside Rust, and both must pass the same protocol test suite as the Rust core.
 - The browser build is loaded by the minimal HTML and JavaScript a browser requires, and nothing
   more.
 
@@ -361,3 +362,75 @@ mode, every model, every dialect and the MCP tools.
 tests running against EggDB in CI. Publishing to the package registries (NuGet, Maven Central, npm,
 PyPI, crates.io, Packagist, RubyGems, pub.dev and others) needs accounts and tokens, which wait for
 the owner.
+
+## D17 Driver speed: batched crossings and benchmarks in every language — Decided (owner, 2026-10-23); refines D16
+Every official driver (D16) must be at least as fast as the best existing driver in its language,
+and should beat it (D7). The rules below apply to every language, not one.
+
+**Crossing between a language and the Rust core is batched, never per value.** A call from another
+language into Rust costs roughly ten nanoseconds (.NET P/Invoke, Java's FFM API) to tens of
+nanoseconds (Java's JNI, Node.js N-API, Go's cgo, which also ties up an OS thread). Creating values
+in the host language (JavaScript, Python objects) often costs more than the call itself. So the C
+API and every driver follow these rules:
+1. **No per-value crossings.** Language bindings make one call per operation: open, prepare,
+   execute, fetch the next batch, close. C and C++ users, who call the C API directly, get
+   inline accessors that read values from the batch in their own memory, with no call per value.
+2. **Results in batches, in shared memory.** The Rust core writes thousands of rows at a time
+   into a buffer with a compact binary layout. The language reads values straight from that memory
+   without copying, and releases the whole batch with one call. The tools are `Span<T>` and
+   pointers in .NET, `MemorySegment` in Java 22+ (a direct `ByteBuffer` with JNI on older Java),
+   an external `ArrayBuffer` with `DataView` in Node.js (one copy per batch where external buffers
+   aren't allowed, as in Electron), the buffer protocol (`memoryview`) in Python, and unsafe slices
+   in Go.
+3. **Lazy values.** Text stays UTF-8 in the buffer. A host-language string or object is created
+   only when the application reads that value, with the platform's fast decoder. Bulk APIs
+   (`fetchall`, data frames, Arrow, streaming readers) take the whole batch at once.
+4. **Parameters in one buffer.** All of a command's parameters are packed into one buffer and
+   passed with the execute call.
+5. **Prepared statements are handles.** SQL text crosses once. After that, only a small handle and
+   the parameter buffer cross.
+6. **Async without blocked threads, where the language has async.** Network waiting happens in the
+   Rust core. Completion comes back through one callback per batch, which completes the language's
+   own task or promise: `[UnmanagedCallersOnly]` in .NET, an upcall stub in Java, a thread-safe
+   function in Node.js, an event-loop callback in Python. Languages without async (PHP, for
+   example) and Go's cgo calls block one thread per call in progress, and the batching keeps
+   those calls few. Tiny hot calls skip the runtime's thread-state switch where the runtime
+   supports it (`SuppressGCTransition` in .NET, the FFM linker's critical option on recent Java).
+7. **Measured, and gated** (below).
+
+**Benchmarks per language, in both modes.** Each driver runs the same workload: many small queries,
+large result sets, bulk inserts, prepared statements and concurrent connections.
+
+- **Embedded mode, gated from the first driver (M5).** Compared against SQLite's binding in that
+  language, on the same data:
+  - `Microsoft.Data.Sqlite` (.NET), the SQLite JDBC driver (Java), `better-sqlite3` (Node.js);
+  - Python's `sqlite3`, Go's SQLite drivers, `rusqlite` (Rust), SQLite's own C API (C, C++).
+- **Server mode, gated once EggDB's PostgreSQL protocol lands (M6).** Compared against the best
+  existing driver in that language, connected to the same EggDB server over the PostgreSQL
+  protocol:
+  - Npgsql (.NET), PgJDBC (Java), `pg` and `postgres` (Node.js), psycopg and asyncpg (Python);
+  - pgx (Go), `tokio-postgres` (Rust), PDO pgsql (PHP), libpq (C, C++), the `pg` gem (Ruby);
+  - PostgresNIO (Swift), `postgres` (Dart).
+
+  The official driver uses whichever protocol it ships with. A research subagent decides at M6
+  whether that is the PostgreSQL protocol or an EggDB-native one, and records it here.
+
+**How the comparison is run.** Baseline drivers are installed in the benchmark environment only,
+never vendored or shipped, whatever their license (D1). Each comparison is a ratio:
+- our driver's throughput, and its p50 and p99 latency;
+- against the baseline driver on the same runner in the same job.
+
+A ratio worse than the baseline by more than D7's noise threshold is a performance regression. The
+full suites run on main and on a schedule; pull requests run a short version (CI rules).
+
+**If the Rust core is slower over the network in some language,** by that ratio, after the
+batching rules above have been applied, a research subagent decides with benchmarks whether that
+language gets a server-mode path in the language itself. Pure-language drivers are popular for
+exactly this (pgx in Go, Npgsql in .NET), and some ecosystems prefer them: many Go programs are
+built without cgo. The path is bounded:
+- it covers the client side of server mode only: connection, protocol and results;
+- it is our own clean-room code and passes the same protocol test suite as the Rust core;
+- it is recorded here, and retired if the Rust core later matches it.
+
+Embedded mode always uses the Rust core, since only the core can run the database inside the
+application. For Go, that means embedded mode needs cgo, and cgo-free builds get server mode only.
