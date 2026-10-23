@@ -1,6 +1,7 @@
 use crate::cpus::{CpuSet, Cpus};
 use crate::error::{Error, ErrorKind, Result};
 use crate::rng::SplitMix64;
+use crate::topology::CpuTopology;
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -13,8 +14,9 @@ use std::thread::ThreadId;
 /// [`Cpus::available`] fails with [`ErrorKind::InvalidInput`], and pinning can be refused with
 /// [`ErrorKind::Unsupported`], as on Apple's systems. Every pin request is numbered from zero,
 /// and any of them can be made to fail with [`ErrorKind::InjectedFault`], either by number or
-/// at random from a seed; an injected failure comes before any other check. Clones share the
-/// same state.
+/// at random from a seed; an injected failure comes before any other check. The topology is
+/// unknown until a test sets one with [`SimCpus::set_topology`], so engine code meets the
+/// `None` answers it must handle. Clones share the same state.
 #[derive(Debug, Clone)]
 pub struct SimCpus {
     shared: Arc<Mutex<State>>,
@@ -24,6 +26,7 @@ pub struct SimCpus {
 struct State {
     available: CpuSet,
     parallelism: Option<NonZeroUsize>,
+    topology: CpuTopology,
     refuse_pinning: bool,
     pins: HashMap<ThreadId, CpuSet>,
     pin_requests: u64,
@@ -48,6 +51,7 @@ impl SimCpus {
             shared: Arc::new(Mutex::new(State {
                 available: CpuSet::first(Self::DEFAULT_CPUS).unwrap_or_default(),
                 parallelism: None,
+                topology: CpuTopology::unknown(),
                 refuse_pinning: false,
                 pins: HashMap::new(),
                 pin_requests: 0,
@@ -58,14 +62,16 @@ impl SimCpus {
     }
 
     /// Sets the CPUs the process may run on, as an affinity mask or a cgroup cpuset would.
-    /// Fails with [`ErrorKind::InvalidInput`] for an empty set, or one smaller than the
-    /// parallelism set with [`SimCpus::set_parallelism`].
+    /// Fails with [`ErrorKind::InvalidInput`] for an empty set, one smaller than the
+    /// parallelism set with [`SimCpus::set_parallelism`], or one with a CPU the topology set
+    /// with [`SimCpus::set_topology`] does not place.
     pub fn set_available(&self, cpus: CpuSet) -> Result<()> {
         let mut state = lock(&self.shared);
         if cpus.is_empty()
             || state
                 .parallelism
                 .is_some_and(|count| count.get() > cpus.len())
+            || !places_all(&state.topology, &cpus)
         {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
@@ -82,6 +88,19 @@ impl SimCpus {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
         state.parallelism = parallelism;
+        Ok(())
+    }
+
+    /// Sets the machine's topology, for example one made with
+    /// [`CpuTopology::symmetric`]. Fails with [`ErrorKind::InvalidInput`] when the topology
+    /// places CPUs but not every available one; a topology known only by its counts is always
+    /// accepted.
+    pub fn set_topology(&self, topology: CpuTopology) -> Result<()> {
+        let mut state = lock(&self.shared);
+        if !places_all(&topology, &state.available) {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        state.topology = topology;
         Ok(())
     }
 
@@ -134,6 +153,10 @@ impl Cpus for SimCpus {
         })
     }
 
+    fn topology(&self) -> CpuTopology {
+        lock(&self.shared).topology.clone()
+    }
+
     fn pin_current_thread(&self, cpus: &CpuSet) -> Result<()> {
         let mut state = lock(&self.shared);
         if state.next_pin_fails() {
@@ -163,6 +186,10 @@ impl State {
     }
 }
 
+fn places_all(topology: &CpuTopology, cpus: &CpuSet) -> bool {
+    topology.locations().is_empty() || cpus.is_subset(&topology.cpus())
+}
+
 fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -170,7 +197,7 @@ fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
 #[cfg(test)]
 mod tests {
     use super::SimCpus;
-    use crate::{CpuSet, Cpus, ErrorKind};
+    use crate::{CpuSet, CpuTopology, Cpus, ErrorKind, SiblingNumbering};
     use std::num::NonZeroUsize;
 
     fn set(list: &str) -> CpuSet {
@@ -251,5 +278,37 @@ mod tests {
         assert_eq!(outcomes(3), outcomes(3));
         assert!(outcomes(3).contains(&false));
         assert!(outcomes(3).contains(&true));
+    }
+
+    #[test]
+    fn the_topology_is_unknown_until_a_test_sets_one() {
+        let cpus = SimCpus::new();
+        assert_eq!(cpus.topology(), CpuTopology::unknown());
+        let two = NonZeroUsize::new(2).unwrap();
+        let machine = CpuTopology::symmetric(two, two, two, SiblingNumbering::Spread).unwrap();
+        cpus.set_topology(machine.clone()).unwrap();
+        assert_eq!(cpus.topology(), machine);
+        assert_eq!(
+            machine.one_cpu_per_core(&cpus.available()),
+            Some(set("0-3"))
+        );
+    }
+
+    #[test]
+    fn the_topology_must_place_every_available_cpu() {
+        let cpus = SimCpus::new();
+        cpus.set_available(set("0-5")).unwrap();
+        let one = NonZeroUsize::new(1).unwrap();
+        let two = NonZeroUsize::new(2).unwrap();
+        let small = CpuTopology::symmetric(one, two, two, SiblingNumbering::Adjacent).unwrap();
+        let error = cpus.set_topology(small.clone()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        cpus.set_available(set("1-2")).unwrap();
+        cpus.set_topology(small).unwrap();
+        let error = cpus.set_available(set("3-4")).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        let counts = CpuTopology::from_counts(Some(one), Some(two), None, None).unwrap();
+        cpus.set_topology(counts).unwrap();
+        cpus.set_available(set("3-4")).unwrap();
     }
 }

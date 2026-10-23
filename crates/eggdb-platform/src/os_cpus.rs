@@ -1,12 +1,17 @@
 use crate::cpus::{CpuSet, Cpus};
 use crate::error::{Error, ErrorKind, Result};
+use crate::topology::CpuTopology;
 use std::num::NonZeroUsize;
+use std::sync::{Arc, OnceLock};
 
-/// The machine's processors, read when the value is created, before any thread is pinned.
+/// The machine's processors. The available CPUs and the parallelism are read when the value is
+/// created, before any thread is pinned; the topology is read once, on first use, and shared by
+/// clones, so a program that never asks for it never pays for reading it.
 #[derive(Debug, Clone)]
 pub struct OsCpus {
     available: CpuSet,
     parallelism: NonZeroUsize,
+    topology: Arc<OnceLock<CpuTopology>>,
 }
 
 impl OsCpus {
@@ -19,6 +24,7 @@ impl OsCpus {
         Self {
             parallelism: at_most_one_per_cpu(reported, &available),
             available,
+            topology: Arc::default(),
         }
     }
 }
@@ -36,6 +42,10 @@ impl Cpus for OsCpus {
 
     fn parallelism(&self) -> NonZeroUsize {
         self.parallelism
+    }
+
+    fn topology(&self) -> CpuTopology {
+        self.topology.get_or_init(platform::topology).clone()
     }
 
     fn pin_current_thread(&self, cpus: &CpuSet) -> Result<()> {
@@ -56,7 +66,7 @@ fn at_most_one_per_cpu(parallelism: NonZeroUsize, available: &CpuSet) -> NonZero
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod platform {
-    use super::{CpuSet, Error, Result};
+    use super::{CpuSet, CpuTopology, Error, Result};
     use crate::cpus::CpuId;
     use std::ffi::{c_int, c_ulong};
     use std::io;
@@ -86,6 +96,12 @@ mod platform {
             }
             words *= 2;
         }
+    }
+
+    pub(super) fn topology() -> CpuTopology {
+        crate::topology_sysfs::read(&|path| {
+            std::fs::read_to_string(format!("/sys/devices/system/{path}")).ok()
+        })
     }
 
     pub(super) fn pin_current_thread(cpus: &CpuSet) -> Result<()> {
@@ -137,12 +153,17 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use super::{CpuSet, Error, ErrorKind, Result};
+    use super::{CpuSet, CpuTopology, Error, ErrorKind, Result};
     use crate::cpus::CpuId;
+    use crate::topology_windows::{self, AffinityLayout};
     use std::ffi::c_void;
     use std::io;
 
     const GROUP_WIDTH: u32 = 64;
+    const NARROW_GROUP_WIDTH: u32 = 32;
+    const RELATION_ALL: u32 = 0xFFFF;
+    const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
+    const ATTEMPTS: usize = 4;
 
     #[repr(C)]
     struct GroupAffinity {
@@ -156,6 +177,11 @@ mod platform {
         fn GetActiveProcessorGroupCount() -> u16;
         fn GetActiveProcessorCount(group: u16) -> u32;
         fn GetCurrentThread() -> *mut c_void;
+        fn GetLogicalProcessorInformationEx(
+            relationship: u32,
+            buffer: *mut u64,
+            returned_length: *mut u32,
+        ) -> i32;
         fn SetThreadGroupAffinity(
             thread: *mut c_void,
             affinity: *const GroupAffinity,
@@ -176,6 +202,56 @@ mod platform {
             }
         }
         Some(set)
+    }
+
+    pub(super) fn topology() -> CpuTopology {
+        if AffinityLayout::NATIVE == AffinityLayout::Narrow && groups_wider_than_narrow_masks() {
+            return CpuTopology::unknown();
+        }
+        let mut words: Vec<u64> = Vec::new();
+        let mut length = 0_u32;
+        for _ in 0..ATTEMPTS {
+            let buffer = if words.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                words.as_mut_ptr()
+            };
+            // SAFETY: `buffer` is null while `length` is zero, or points at `words`, whose
+            // `length` bytes are writable and aligned for the records; `length` is a live
+            // in-out pointer.
+            let done =
+                unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, buffer, &mut length) };
+            let Ok(bytes) = usize::try_from(length) else {
+                return CpuTopology::unknown();
+            };
+            if done != 0 {
+                let mut records: Vec<u8> =
+                    words.iter().flat_map(|word| word.to_ne_bytes()).collect();
+                records.truncate(bytes);
+                return topology_windows::parse(&records, AffinityLayout::NATIVE);
+            }
+            if io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER) {
+                return CpuTopology::unknown();
+            }
+            let needed_words = bytes.div_ceil(size_of::<u64>());
+            words.resize(needed_words, 0);
+            let Ok(capacity) = u32::try_from(needed_words * size_of::<u64>()) else {
+                return CpuTopology::unknown();
+            };
+            length = capacity;
+        }
+        CpuTopology::unknown()
+    }
+
+    fn groups_wider_than_narrow_masks() -> bool {
+        // SAFETY: `GetActiveProcessorGroupCount` takes no arguments and only reads system state.
+        let groups = unsafe { GetActiveProcessorGroupCount() };
+        (0..groups).any(|group| {
+            // SAFETY: `GetActiveProcessorCount` takes a group number by value and returns 0
+            // for a group that does not exist.
+            let count = unsafe { GetActiveProcessorCount(group) };
+            count > NARROW_GROUP_WIDTH
+        })
     }
 
     pub(super) fn pin_current_thread(cpus: &CpuSet) -> Result<()> {
@@ -210,10 +286,64 @@ mod platform {
 
 #[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
 mod platform {
-    use super::{CpuSet, Error, ErrorKind, Result};
+    use super::{CpuSet, CpuTopology, Error, ErrorKind, Result};
 
     pub(super) fn available() -> Option<CpuSet> {
         None
+    }
+
+    #[cfg(target_vendor = "apple")]
+    pub(super) fn topology() -> CpuTopology {
+        use std::ffi::{CStr, c_char, c_int, c_void};
+        use std::num::NonZeroUsize;
+
+        unsafe extern "C" {
+            fn sysctlbyname(
+                name: *const c_char,
+                old: *mut c_void,
+                old_length: *mut usize,
+                new: *mut c_void,
+                new_length: usize,
+            ) -> c_int;
+        }
+
+        fn number(name: &CStr) -> Option<NonZeroUsize> {
+            let mut value = [0_u8; 8];
+            let mut length = value.len();
+            // SAFETY: `name` is NUL-terminated, `value` has `length` writable bytes, and a null
+            // new value with length 0 sets nothing.
+            let result = unsafe {
+                sysctlbyname(
+                    name.as_ptr(),
+                    value.as_mut_ptr().cast(),
+                    &mut length,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if result != 0 {
+                return None;
+            }
+            let number = match length {
+                4 => u64::from(u32::from_ne_bytes([value[0], value[1], value[2], value[3]])),
+                8 => u64::from_ne_bytes(value),
+                _ => return None,
+            };
+            usize::try_from(number).ok().and_then(NonZeroUsize::new)
+        }
+
+        CpuTopology::from_counts(
+            number(c"hw.physicalcpu"),
+            number(c"hw.logicalcpu"),
+            number(c"hw.packages"),
+            number(c"hw.cachelinesize").filter(|size| size.is_power_of_two()),
+        )
+        .unwrap_or_default()
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    pub(super) fn topology() -> CpuTopology {
+        CpuTopology::unknown()
     }
 
     pub(super) fn pin_current_thread(_cpus: &CpuSet) -> Result<()> {
