@@ -75,3 +75,11 @@ From the second gap review (D37–D45):
 - **The console and notebooks (D42)** run with the client track.
 - **Legal checks (D43)** come before each release.
 - **Public proof (D44)** runs from the first benchmarks.
+
+More tracks (D46), and any further missing capability is added here without asking the owner:
+- **Business intelligence:** our own dashboards, reports, semantic layer, scheduling, sharing and
+  embedding.
+- **ETL and ELT pipelines:** our own connectors, transformations, orchestration and change data
+  capture.
+- **Big-data compatibility:** a Spark connector, an Iceberg REST catalog, federated SQL and Kafka
+  Connect.

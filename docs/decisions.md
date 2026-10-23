@@ -1069,3 +1069,49 @@ memory, time and output limits, set per role.
 - reverse-engineered formats or protocols (D10, D13);
 - blockchain consensus (D38's ledger is tamper-evident tables only);
 - any hard dependency on a GPU or vendor SDK (D40).
+
+## D46 Nothing missing: we build every missing piece ourselves, without asking — Decided (owner, 2026-10-24); strengthens D2
+The owner: *"we are all in one, everything missing we will build our own, don't need to ask me. It's
+our important point."*
+
+**The standing rule.** When a capability people need from a data platform is missing from EggDB, the
+build loop and every session add it to the roadmap and build it ourselves (D1). They don't ask the
+owner first. Research decides how and in what order, and records it here. The only things that
+still go to the owner are those that need money, accounts or a license change (D21, D45's "not
+planned without the owner" list).
+
+**Added now under this rule:**
+
+**Business intelligence**, our own complete application, not only connectors to others' (D12).
+It is designed by Claude Fable (D15) and runs in the client and the admin console (D42). It
+provides:
+- drag-and-drop dashboards and charts;
+- interactive reports with filters and drill-down;
+- a semantic layer of metrics and dimensions defined once and reused everywhere, which also serves
+  D38's OLAP cubes;
+- scheduled and emailed reports, sharing, embedding in other applications, and alerts;
+- row-level security inherited from D22.
+
+It competes with Power BI, Tableau, Looker, Metabase and Superset.
+
+**ETL and ELT pipelines**, our own tool:
+- connectors to read from and write to other databases, files, object storage, APIs and the
+  messaging protocols (D29, D33);
+- transformations in SQL and in any language through WebAssembly (D27), with models, tests and
+  lineage in the style of dbt;
+- orchestration: schedules, dependencies, retries, backfills, monitoring (D25);
+- change data capture in and out (D18, D28).
+
+It competes with Airflow, dbt, Fivetran and Airbyte.
+
+**Big-data ecosystem compatibility:**
+- a Spark connector;
+- an Apache Iceberg REST catalog, so Spark, Trino, Flink, DuckDB and Snowflake can use EggDB's
+  lakehouse tables (D29);
+- federated SQL over many sources, in the style of Trino and Presto (D29);
+- Kafka Connect-compatible connectors (D33).
+
+**Order.** They follow their foundations:
+- BI after the console and analytics (M11, D42);
+- ETL after the messaging, interchange and change-stream work (D28, D29, D33);
+- the big-data pieces after the lakehouse tables (D29).
