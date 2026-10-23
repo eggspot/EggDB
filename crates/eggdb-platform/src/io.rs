@@ -178,9 +178,9 @@ impl<F: fmt::Debug> std::error::Error for RejectedOp<F> {
 /// A queue of asynchronous file operations, owned by one thread: operations are submitted with
 /// a tag and their completions are reaped later, in any order.
 ///
-/// Operations in flight are not ordered against each other. A sync covers exactly the writes
-/// whose successful completions were reaped before the sync was submitted, so the engine waits
-/// for a write's completion before submitting the sync that must make it durable. Overlapping
+/// Operations in flight are not ordered against each other. A sync is only guaranteed to cover
+/// the writes whose successful completions were reaped before the sync was submitted, so the
+/// engine waits for a write's completion before submitting the sync that must make it durable. Overlapping
 /// writes, or a read and a write of the same range, are never in flight at once, and a failed
 /// write leaves its range unknown. Dropping a queue waits for every operation in flight, since
 /// the operating system may still be using their buffers.
@@ -200,7 +200,8 @@ pub trait IoQueue: Send + fmt::Debug {
     /// Appends the completions of finished operations to `completions`, first waiting until
     /// at least `min` have finished, and returns how many it appended. Fails with
     /// [`ErrorKind::InvalidInput`] when `min` is more than [`IoQueue::in_flight`], since that
-    /// wait would never end.
+    /// wait would never end. When it fails while waiting, the completions it already appended
+    /// stay in `completions` and are no longer in flight.
     fn reap(
         &mut self,
         completions: &mut Vec<IoCompletion<Self::File>>,
@@ -251,9 +252,9 @@ impl IoQueueOptions {
         self
     }
 
-    /// Sets how many threads may run operations where the operating system has no
-    /// asynchronous file I/O. With 0, operations run on the caller's thread inside
-    /// [`IoQueue::reap`]. A count above the capacity is lowered to it.
+    /// Sets how many threads may run operations where the queue has no asynchronous file I/O
+    /// from the operating system, which for now is everywhere. With 0, operations run on the
+    /// caller's thread inside [`IoQueue::reap`]. A count above the capacity is lowered to it.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self

@@ -20,9 +20,10 @@ use std::collections::VecDeque;
 /// any other operation of the file system. Across [`SimFileSystem::crash`](crate::SimFileSystem::crash),
 /// a done write is an unsynced change that the crash mode keeps or loses, a done sync made its
 /// writes durable even though nobody reaped it, and a pending operation never happened: it is
-/// performed after the crash and completes with [`ErrorKind::StaleHandle`](crate::ErrorKind::StaleHandle).
-/// Dropping the queue performs the pending operations, as an operating system finishes them.
-/// The thread count of [`IoQueueOptions`] is ignored.
+/// performed after the crash and completes with [`ErrorKind::StaleHandle`](crate::ErrorKind::StaleHandle),
+/// or with [`ErrorKind::InjectedFault`](crate::ErrorKind::InjectedFault) when the file system
+/// injects one first. Dropping the queue performs the pending operations, as an operating
+/// system finishes them. The thread count of [`IoQueueOptions`] is checked but not used.
 #[derive(Debug)]
 pub struct SimIoQueue {
     capacity: usize,

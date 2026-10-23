@@ -4,6 +4,7 @@ use crate::os_cpus::OsCpus;
 use crate::os_fs::OsFile;
 use crate::threads::{SpawnedThread, ThreadOptions};
 use std::collections::VecDeque;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 /// The operating system's asynchronous file I/O, made by
@@ -12,7 +13,8 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 /// For now every operating system runs the operations on a pool of worker threads named
 /// `eggdb-io-<n>`, which stays the path for files on macOS and the BSDs, whose kqueue has no
 /// asynchronous file I/O. With no threads, the operations run on the caller's thread inside
-/// [`IoQueue::reap`], in the order they were submitted.
+/// [`IoQueue::reap`], in the order they were submitted. An operation that panics on a worker
+/// completes with [`ErrorKind::Other`] instead of leaving its completion missing.
 #[derive(Debug)]
 pub struct OsIoQueue {
     capacity: usize,
@@ -40,6 +42,8 @@ struct Pool {
 }
 
 impl OsIoQueue {
+    const WORKER_STACK_SIZE: usize = 64 * 1024;
+
     pub(crate) fn new(options: IoQueueOptions) -> Result<Self> {
         let (capacity, threads) = options.validated()?;
         let backend = if threads == 0 {
@@ -118,6 +122,18 @@ impl Job {
     }
 }
 
+impl Job {
+    fn run_catching_panics(mut self) -> IoCompletion<OsFile> {
+        let result = panic::catch_unwind(AssertUnwindSafe(|| self.op.perform()))
+            .unwrap_or_else(|_| Err(Error::new(ErrorKind::Other)));
+        IoCompletion {
+            user_data: self.user_data,
+            result,
+            op: self.op,
+        }
+    }
+}
+
 impl Pool {
     fn start(threads: usize) -> Result<Self> {
         let (jobs, queued) = mpsc::channel::<Job>();
@@ -134,6 +150,7 @@ impl Pool {
             let finished = finished.clone();
             let worker = ThreadOptions::new()
                 .name(format!("eggdb-io-{number}"))
+                .stack_size(OsIoQueue::WORKER_STACK_SIZE)
                 .spawn(&cpus, move || work(&queued, &finished))?;
             pool.workers.push(worker);
         }
@@ -175,7 +192,7 @@ fn work(queued: &Mutex<mpsc::Receiver<Job>>, finished: &mpsc::Sender<IoCompletio
         let Ok(job) = next else {
             return;
         };
-        let _ = finished.send(job.run());
+        let _ = finished.send(job.run_catching_panics());
     }
 }
 
@@ -183,5 +200,60 @@ fn stopped(op: IoOp<OsFile>) -> RejectedOp<OsFile> {
     RejectedOp {
         error: Error::new(ErrorKind::Other),
         op,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{FileSystem, IoOp, IoQueue, IoQueueOptions, OpenMode, OsFileSystem};
+    use std::sync::Arc;
+
+    #[test]
+    fn a_queue_without_threads_runs_operations_in_submission_order() {
+        let path = std::env::temp_dir().join(format!("eggdb-io-inline-{}", std::process::id()));
+        let fs = OsFileSystem::new();
+        let file = Arc::new(fs.open(&path, OpenMode::Create).unwrap());
+        let mut queue = fs.io_queue(IoQueueOptions::new().threads(0)).unwrap();
+        for tag in 0..8_u8 {
+            let op = IoOp::Write {
+                file: Arc::clone(&file),
+                offset: 0,
+                buffer: vec![tag].into(),
+            };
+            assert!(queue.submit(op, u64::from(tag)).is_ok());
+        }
+        let mut completions = Vec::new();
+        assert_eq!(queue.reap(&mut completions, 0).unwrap(), 8);
+        let tags: Vec<u64> = completions.iter().map(|done| done.user_data).collect();
+        assert_eq!(tags, (0..8).collect::<Vec<u64>>());
+        let mut last = [0];
+        crate::File::read_exact_at(&*file, &mut last, 0).unwrap();
+        assert_eq!(last, [7]);
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_pool_reaps_at_least_what_it_waits_for() {
+        let path = std::env::temp_dir().join(format!("eggdb-io-partial-{}", std::process::id()));
+        let fs = OsFileSystem::new();
+        let file = Arc::new(fs.open(&path, OpenMode::Create).unwrap());
+        let mut queue = fs.io_queue(IoQueueOptions::new().threads(2)).unwrap();
+        for tag in 0..6 {
+            let op = IoOp::SyncData {
+                file: Arc::clone(&file),
+            };
+            assert!(queue.submit(op, tag).is_ok());
+        }
+        let mut completions = Vec::new();
+        let reaped = queue.reap(&mut completions, 2).unwrap();
+        assert!(reaped >= 2 && reaped == completions.len());
+        assert_eq!(queue.in_flight(), 6 - reaped);
+        let rest = queue.in_flight();
+        queue.reap(&mut completions, rest).unwrap();
+        assert_eq!(completions.len(), 6);
+        assert!(completions.iter().all(|done| done.result.is_ok()));
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
     }
 }

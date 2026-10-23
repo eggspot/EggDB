@@ -1746,6 +1746,9 @@ tests.
   overflows. A submit beyond it fails at once with the new `ErrorKind::QueueFull` and hands the
   operation back in a `RejectedOp`. Waiting for more completions than are in flight is
   `InvalidInput` instead of a wait that never ends.
+- **Workers are small and never lose a completion.** Each pool thread has a 64 KiB stack, and an
+  operation that panics on one (release builds abort instead) completes with `Other`, so a
+  `reap` never waits for a completion that cannot come.
 - **Dropping a queue waits for every operation in flight**, since the operating system may still
   be reading or writing their buffers (Microsoft documents that an `OVERLAPPED` is in use until
   its I/O completes, even after `CancelIoEx`).
@@ -1762,11 +1765,12 @@ tests.
 
 **The durability rule for the engine.** No backend orders operations in flight: io_uring_enter(2)
 says completions are unordered and a queued fsync need not cover a write queued beside it. So a
-sync covers exactly the writes whose successful completions were reaped before the sync was
-submitted. Overlapping writes, or a read and a write of the same range, are never in flight at
-once; a failed write leaves its range unknown; and a failed sync is still fatal to the file
-(D59). io_uring's links and drains stay out of the interface, since the pool and IOCP cannot honour
-them; an explicit ordering flag may come later if benchmarks justify it.
+sync is only guaranteed to cover the writes whose successful completions were reaped before the
+sync was submitted; it may cover more, but nothing else is promised. Overlapping writes, or a
+read and a write of the same range, are never in flight at once; a failed write leaves its range
+unknown; and a failed sync is still fatal to the file (D59). io_uring's links and drains stay out
+of the interface, since the pool and IOCP cannot honour them; an explicit ordering flag may come
+later if benchmarks justify it.
 
 **The simulator (D9).** `SimIoQueue` runs no threads. Each operation is pending until the
 simulation performs it on its `SimFile`, then done until it is reaped. Every submit and reap
