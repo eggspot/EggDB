@@ -83,3 +83,15 @@ More tracks (D46), and any further missing capability is added here without aski
   capture.
 - **Big-data compatibility:** a Spark connector, an Iceberg REST catalog, federated SQL and Kafka
   Connect.
+
+From the third gap review (D47–D58), each after its foundations:
+- **Dialects and APIs (D47–D49)** follow the SQL and protocol milestones.
+- **Industry standards (D50)** follow the messaging work.
+- **Catalog and master data (D51)** follow the console.
+- **Sharing and privacy (D52)** follow branching (D28).
+- **Retention and sovereignty (D53)** follow backups and compliance.
+- **Coordination (D54)** follows consensus (M15).
+- **Streaming (D55)** follows the messaging work (M16).
+- **Content (D56)** follows full-text search.
+- **Science and GIS (D57)** follow analytics.
+- **Hyperscale operations (D58)** follow clusters.
