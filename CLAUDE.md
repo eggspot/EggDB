@@ -41,6 +41,24 @@ Check each task against these before starting and again before opening the PR.
 8. **Correct and safe first, then fast.** Data is never lost or corrupted: crash safety is tested,
    not assumed (fault injection, deterministic simulation, fuzzing every parser and wire
    protocol), and hostile input never crashes or hangs the server. (D9)
+9. **Every query language and concept.** Each SQL dialect runs as itself: PostgreSQL, Microsoft SQL
+   Server (T-SQL), MySQL/MariaDB, Oracle (SQL and PL/SQL) and SQLite. That covers their data
+   types, functions, procedural languages, system catalogs and quirks, so a query written for one
+   of them runs on EggDB unchanged. Next to SQL come the other ways people query data: the
+   Redis, MongoDB, Elasticsearch and CQL query languages, graph queries (SQL/PGQ, GQL, Cypher),
+   vector and full-text search, and time-series queries. A session picks its dialect (by protocol,
+   connection setting or per statement), and every dialect works on the same data. (D10)
+10. **AI-native, with MCP built in.** Any AI agent can use EggDB as easily as a person:
+    - a built-in MCP server (Model Context Protocol, implemented by us from the public spec)
+      exposes schema discovery, querying in any dialect, safe writes, explain plans, data
+      sampling, backups and administration as MCP tools and resources;
+    - errors and explain output are written to be read by models as well as people;
+    - vector search and embeddings are first-class (D2).
+
+    Agents act only with the permissions they are granted (per agent, per database and table,
+    read-only by default, revocable). Destructive actions need confirmation, and every agent
+    action is logged where the owner can see it. It must work well with any agent, framework and
+    model, not one vendor's. (D11)
 
 ## Code
 - **Everything written by us, in Rust, from scratch.** No code from other databases (SQLite,
@@ -87,5 +105,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D9). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D11). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.

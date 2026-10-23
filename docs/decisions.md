@@ -41,6 +41,8 @@ Applications switch to EggDB without code changes, because EggDB speaks the wire
 query languages they already use. The order below follows what most applications use and what
 reuses the most of the core, and a research subagent may refine it:
 1. SQLite's embedded API and file format, and PostgreSQL's wire protocol and SQL;
+   then the other SQL databases' protocols as their dialects land (D10): MySQL, Microsoft SQL
+   Server's TDS and Oracle's;
 2. Redis RESP, for caching;
 3. MySQL's protocol and SQL;
 4. Elasticsearch/OpenSearch REST, for search;
@@ -99,3 +101,54 @@ Committed data is never lost or corrupted. Crash safety, recovery and replicatio
 continuously: fault injection, deterministic simulation of disks, networks and clocks, and
 fuzzing of every parser, file format and wire protocol. Hostile input never crashes or hangs the
 server, and every resource a client can make it use has a limit.
+
+## D10 Every query language and concept, each SQL dialect as itself — Decided (owner, 2026-10-23)
+EggDB runs each SQL dialect as itself:
+- PostgreSQL;
+- Microsoft SQL Server (T-SQL);
+- MySQL and MariaDB;
+- Oracle (SQL and PL/SQL);
+- SQLite.
+
+Each comes with its data types, built-in functions, procedural language, system catalogs and
+behavior, so a query or stored procedure written for one of them runs on EggDB unchanged.
+
+The other query languages people use sit beside SQL:
+- Redis commands;
+- the MongoDB query language;
+- the Elasticsearch query DSL;
+- CQL;
+- graph queries (SQL/PGQ, GQL, Cypher);
+- vector and full-text search;
+- time-series queries.
+
+A session chooses its dialect by wire protocol, connection setting or per statement. Every dialect
+reads and writes the same data in the same transactions (D2). Dialects are front-ends over one
+query core (one logical plan, one optimizer, one executor), never separate engines.
+
+Proof of support is the original's own regression and conformance tests where they are public
+(PostgreSQL's regression suite, sqllogictest, MySQL's test suite), plus our tests for the rest.
+
+## D11 AI-native, with a built-in MCP server — Decided (owner, 2026-10-23)
+Any AI agent, framework or model can use EggDB as easily as a person can.
+
+**The MCP server.** EggDB includes an MCP server (Model Context Protocol, implemented by us from
+the public spec, over stdio for embedded use and over the network for the server). Its tools and
+resources cover:
+- schema and data discovery;
+- queries in any dialect;
+- safe writes;
+- explain plans;
+- sampling;
+- backups and restores;
+- administration.
+
+**Readable by models.** Error messages, explain output and metadata are written to be read by
+models as well as people: precise, structured and with the fix when there is one.
+
+**Vectors and embeddings** are first-class (D2), so retrieval for AI needs no second database.
+
+**Permissions.** Agents act only with what they are granted: per agent, per database and per
+table, read-only by default and revocable. Destructive actions need confirmation, and every agent
+action is logged where the owner can see it. It is vendor-neutral, with no dependence on one
+model provider.

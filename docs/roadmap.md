@@ -13,11 +13,11 @@ refine it through research, recorded in docs/decisions.md.
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6) | |
 | M5 | SQL: parser, planner, optimizer and executor; SQLite-compatible embedded SQL and the SQLite file format | |
-| M6 | Server and the PostgreSQL wire protocol and SQL dialect | |
+| M6 | Server and the PostgreSQL wire protocol and SQL dialect; the built-in MCP server, with schema discovery, querying and agent permissions (D11) | |
 | M7 | Caching: in-memory tables with expiry and eviction, pub/sub, streams; Redis RESP | |
 | M8 | Full-text search: analyzers, inverted indexes, BM25 ranking; Elasticsearch/OpenSearch REST | |
 | M9 | Documents and JSON; the MongoDB wire protocol | |
-| M10 | MySQL protocol and SQL dialect | |
+| M10 | The other SQL dialects, each as itself (D10): MySQL/MariaDB, Microsoft SQL Server (T-SQL, TDS) and Oracle (SQL, PL/SQL) | |
 | M11 | Columnar storage and analytics; time series | |
 | M12 | Vectors (approximate nearest neighbours) and geospatial | |
 | M13 | Graphs | |
