@@ -1132,7 +1132,10 @@ maintain an EggDB connector for it, so people keep using the tools they have:
 Each connector is our own code. Where the host tool requires another language, the connector is a
 thin layer in that language over the Rust core, under D16's rules, holding no database logic. Each
 one is tested against the host tool's own connector test suite or certification kit where one
-exists and can be run, and is tracked in the compatibility farm (D44).
+exists and can be run, and is tracked in the compatibility farm (D44). Publishing or certifying them
+in marketplaces and registries (Microsoft's and Tableau's connector programs, the Grafana plugin
+catalog, package registries) needs accounts, so that waits for the owner (D16, D46). The connectors
+work without it.
 
 **Order.** They follow their foundations:
 - BI after the console and analytics (M11, D42);
