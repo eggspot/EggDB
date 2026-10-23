@@ -1441,7 +1441,8 @@ operating system's cache: `FileSystem::open_uncached`, used with `AlignedBuffer`
 **How each OS does it:**
 - Linux and Android: `O_DIRECT` through std's `custom_flags`. Its value differs by architecture
   (from the kernel's uapi `fcntl.h` headers): `0o40000` on x86, x86_64, riscv64, s390x and
-  loongarch64; `0o200000` on arm and aarch64; `0o400000` on powerpc and powerpc64; `0x8000` on mips. Any other
+  loongarch64; `0o200000` on arm and aarch64; `0o400000` on powerpc and powerpc64; `0x8000` on
+  mips. Any other
   architecture answers `Unsupported` rather than risk a wrong flag, so the build still works
   everywhere (D8).
 - macOS and iOS: `fcntl(F_NOCACHE = 48, 1)` right after open, through our own variadic

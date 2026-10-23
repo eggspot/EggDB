@@ -33,7 +33,7 @@ impl FileSystem for OsFileSystem {
             Ok(file) => Ok(OsFile::new(file, true)),
             Err(error) => {
                 if mode == OpenMode::CreateNew && error.kind() == ErrorKind::Unsupported {
-                    let _ = fs::remove_file(path);
+                    fs::remove_file(path)?;
                 }
                 Err(error)
             }

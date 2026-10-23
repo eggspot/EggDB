@@ -765,6 +765,7 @@ mod tests {
             .open_uncached(Path::new("pages"), OpenMode::Create)
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(fs.exists(Path::new("pages")).unwrap());
         let fallback = fs.open(Path::new("pages"), OpenMode::Create).unwrap();
         assert_eq!(fallback.size().unwrap(), 0);
         fs.refuse_uncached(false);
