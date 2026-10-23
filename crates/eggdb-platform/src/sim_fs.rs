@@ -79,8 +79,9 @@ impl SimFileSystem {
     /// [`ErrorKind::InvalidInput`] instead of exhausting memory.
     pub const MAX_FILE_SIZE: u64 = 1 << 30;
 
-    /// The most memory one file's unsynced writes and size changes may hold for a later crash
-    /// to tear, counting each change's bookkeeping as well as its bytes; a write or size change
+    /// About the most memory, within a small constant factor for allocator overhead, that one
+    /// file's unsynced writes and size changes may hold for a later crash to tear, counting each
+    /// change's bookkeeping as well as its bytes; a write or size change
     /// beyond it fails with [`ErrorKind::InvalidInput`] until the file is synced, so that
     /// overwriting the same bytes again and again, in pieces of any size, cannot exhaust memory
     /// either.
@@ -119,7 +120,7 @@ impl SimFileSystem {
         lock(&self.shared).refuse_uncached = refuse;
     }
 
-    /// Sets the most memory one file's unsynced writes and size changes may hold, capped at
+    /// Sets about the most memory one file's unsynced writes and size changes may hold, capped at
     /// [`SimFileSystem::MAX_UNSYNCED_BYTES`], so a test reaches the limit cheaply.
     pub fn limit_unsynced_bytes(&self, bytes: u64) {
         lock(&self.shared).unsynced_limit = Some(bytes.min(Self::MAX_UNSYNCED_BYTES));

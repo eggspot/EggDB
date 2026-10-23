@@ -1622,8 +1622,9 @@ The build loop's first review of M1 (D59–D63) fixed what it found and settled 
   and size changes, kept for a later torn crash, may hold at most
   `SimFileSystem::MAX_UNSYNCED_BYTES` (1 GiB), counting each change's bookkeeping as well as its
   bytes so that tiny writes are bounded too, and a write past it fails with `InvalidInput` until
-  the file is synced, as D59's 1 GiB file limit does. Before, overwriting one page without syncing grew memory without limit,
-  which a fuzz target could hit. `limit_unsynced_bytes` lowers it for tests.
+  the file is synced, as D59's 1 GiB file limit does. Before, overwriting one page without
+  syncing grew memory without limit, which a fuzz target could hit. `limit_unsynced_bytes`
+  lowers it for tests.
 - **The simulator's cost follows the work, not the data it holds.** A sync replays only the
   changes since the last one (a full copy only when they add up to more than the file), and a
   file is freed by keeping counts of its visible and durable names instead of rebuilding a set
