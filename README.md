@@ -20,8 +20,11 @@ One database for every kind of data, written from scratch in Rust.
 - **Single:** one binary, which is both the server and an embeddable library.
 - **Lightweight and the fastest:** measured against the best database for each workload, every
   release.
-- **Every scale:** from a single small file on a microcontroller to a cluster holding billions of
-  billions of rows.
+- **Every scale, every way of scaling:** from a single small file on a microcontroller to a cluster
+  holding billions of billions of rows. Replicas, multi-primary, sharding, distributed SQL,
+  serverless, tiered storage, edge copies and offline sync.
+- **Every data type:** every type of PostgreSQL, SQL Server, MySQL, Oracle, SQLite, Redis, MongoDB and
+  more, with each one's exact behavior.
 - **Everywhere:** every OS, every CPU and every cloud.
 
 Status: early. See [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
