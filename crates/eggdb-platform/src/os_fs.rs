@@ -57,7 +57,13 @@ impl FileSystem for OsFileSystem {
         if fs::symlink_metadata(from).is_ok_and(|metadata| metadata.is_dir()) {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
-        fs::rename(from, to).map_err(|error| directory_given(to, error))
+        fs::rename(from, to).map_err(|error| {
+            if runs_through_a_file(from) || runs_through_a_file(to) {
+                Error::from(error).with_kind(ErrorKind::NotFound)
+            } else {
+                directory_given(to, error)
+            }
+        })
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<()> {
@@ -102,6 +108,13 @@ fn open_options(mode: OpenMode) -> fs::OpenOptions {
         }
     }
     options
+}
+
+fn runs_through_a_file(path: &Path) -> bool {
+    path.ancestors()
+        .skip(1)
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .any(|ancestor| fs::metadata(ancestor).is_ok_and(|metadata| metadata.is_file()))
 }
 
 fn is_directory(path: &Path) -> bool {
