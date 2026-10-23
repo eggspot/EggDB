@@ -144,6 +144,7 @@ fn refuse_directory(file: &fs::File) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(unix, windows))]
 fn require_directory(directory: &fs::File) -> Result<()> {
     if directory.metadata()?.is_dir() {
         Ok(())
