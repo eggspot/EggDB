@@ -1865,8 +1865,11 @@ their follow-ups.
   file and succeed). `EISDIR` maps to `InvalidInput`.
 - **Creating a name that is taken stays `AlreadyExists`**: `CreateNew` on a directory, and
   `create_dir_all` when the path or a parent is a regular file.
-- The extra checks run only on error paths, at `open` (one `fstat`), on `rename`'s source (one
-  `stat`) and in `sync_dir` (one `fstat` beside an `fsync`); reads and writes are untouched.
+- The extra checks run at `open` (one `fstat`), on `rename`'s source (one `stat`) and in
+  `sync_dir` (one `fstat` beside an `fsync`), and otherwise only on error paths: Windows
+  answers a rename onto `f/x` with `ERROR_INVALID_PARAMETER`, so a failed rename looks at the
+  ancestors of both paths and calls one that runs through a file `NotFound`. Reads and writes
+  are untouched.
   Telling a missing database from a corrupt layout needs only `NotFound` against the rest, and
   initialising over a stray file still stops at `AlreadyExists`.
 
