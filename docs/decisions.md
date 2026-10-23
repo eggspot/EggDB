@@ -187,21 +187,28 @@ expects. The proof is each tool connecting, browsing and running its usual workf
 compatibility tests. Coverage is tracked per tool alongside the dialect coverage (D10).
 
 ## D13 Migrating from another database is restoring its backup — Decided (owner, 2026-10-23)
-Moving to EggDB means restoring the backup or dump the old database already produces, directly,
-with no conversion step:
-- SQL dumps;
-- PostgreSQL's `pg_dump` formats and `pg_basebackup` archives;
-- `mysqldump` output;
-- SQL Server `.bak` files;
-- SQLite database files, which EggDB opens as they are;
-- Redis RDB and AOF;
-- MongoDB `mongodump` BSON;
-- Elasticsearch/OpenSearch snapshots.
+Moving to EggDB means restoring the backup or dump the old database already produces. Every format
+is handled from public specifications and documentation only (D1), so each one is in one of two
+groups.
 
-Formats come from public specifications and documentation (D1). A format with no lawful public
-specification is handled through the source database's own export of a documented format instead,
-and recorded here. Oracle's Data Pump files are the likely case: their export to SQL or CSV is the
-route.
+**Restored directly**, because the format is publicly specified:
+- plain SQL dumps from every dialect (D10), including `pg_dump`'s plain format, `mysqldump` and
+  SQL Server's generated scripts;
+- SQLite database files, opened as they are (the file format is published);
+- MongoDB `mongodump` output (BSON, with its published specification);
+- Redis AOF (RESP commands), and Redis RDB from its published format description.
+
+**Through a documented route**, because there is no public specification of the format:
+- SQL Server `.bak` (only its outer tape container is published);
+- `pg_dump`'s custom, directory and tar formats;
+- `pg_basebackup` archives;
+- Elasticsearch and OpenSearch snapshots;
+- Oracle Data Pump.
+
+The documented route is the source's own export to a documented format (plain SQL, CSV, `bcp`, the
+`_bulk` format), or the live replication feed below. These formats are never reverse-engineered, and
+nobody reads the source database's code to learn them. A research subagent may move a format to
+the first group only when it finds a lawful public specification, recorded here.
 
 For a switch with no downtime, EggDB can also follow a running database through its documented
 replication or change stream (PostgreSQL logical replication, the MySQL binlog, SQL Server change
@@ -213,7 +220,7 @@ index and object.
 EggDB is one small, self-contained file with no runtime dependencies, so getting it is as fast as
 downloading that file:
 - a one-line install command, and the usual package managers (Homebrew, apt, dnf, winget,
-  Chocolatey, Docker, crates.io), all fetching the same file;
+  Chocolatey, Docker, crates.io), each shipping that same binary in its own package format;
 - no installer wizard, no service to configure first, sensible defaults;
 - the first start takes well under a second.
 

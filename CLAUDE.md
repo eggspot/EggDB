@@ -68,10 +68,16 @@ Check each task against these before starting and again before opening the PR.
     Grafana and Metabase. Each one's catalog queries, metadata calls and protocol details are
     answered the way it expects. (D12)
 12. **Migrating is restoring a backup.** Moving to EggDB means pointing it at the backup or dump
-    the old database already makes: SQL dumps, `pg_dump`/`pg_basebackup` archives, `mysqldump`,
-    SQL Server `.bak`, SQLite files, Redis RDB/AOF, `mongodump` BSON, Elasticsearch snapshots,
-    and so on. EggDB restores them directly, with no conversion tool, and can also follow a live
-    database through its replication or change stream for a switch with no downtime. (D13)
+    the old database already makes. EggDB restores formats with a public specification directly:
+    - SQL dumps from any of the dialects, including `pg_dump` plain format and `mysqldump`;
+    - SQLite files;
+    - `mongodump` BSON;
+    - Redis AOF, and Redis RDB where its format is publicly documented.
+
+    Formats without one (SQL Server `.bak`, `pg_dump`'s custom format, `pg_basebackup`,
+    Elasticsearch snapshots, Oracle Data Pump) go through the source's own documented export or
+    its replication feed, and are never reverse-engineered. EggDB can also follow a live database
+    through its replication or change stream for a switch with no downtime. (D13)
 13. **One second to download, one second to install.** EggDB is one small, self-contained file
     with no dependencies. Installing it means downloading that file (a one-line command or the
     usual package manager) and it runs; the first start takes well under a second. Download
