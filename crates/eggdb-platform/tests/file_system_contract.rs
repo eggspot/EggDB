@@ -107,8 +107,13 @@ contract!(open_modes_require_or_forbid_an_existing_file, |fs, path| {
 contract!(read_only_handles_refuse_writes, |fs, path| {
     fs.open(&path("data"), OpenMode::CreateNew).unwrap();
     let file = fs.open(&path("data"), OpenMode::Read).unwrap();
-    assert!(file.write_at(b"x", 0).is_err());
-    assert!(file.set_size(10).is_err());
+    for result in [
+        file.write_at(b"x", 0).map(drop),
+        file.write_at(&[], 0).map(drop),
+        file.set_size(10),
+    ] {
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    }
     assert_eq!(file.size().unwrap(), 0);
 });
 
@@ -223,3 +228,39 @@ contract!(
         assert_eq!(file.size().unwrap(), 8192);
     }
 );
+
+contract!(syncing_needs_a_writable_handle, |fs, path| {
+    let file = fs.open(&path("data"), OpenMode::CreateNew).unwrap();
+    file.write_all_at(b"x", 0).unwrap();
+    file.sync_all().unwrap();
+    let reader = fs.open(&path("data"), OpenMode::Read).unwrap();
+    for result in [reader.sync_data(), reader.sync_all()] {
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    }
+});
+
+contract!(an_empty_write_changes_nothing_at_any_offset, |fs, path| {
+    let file = fs.open(&path("data"), OpenMode::CreateNew).unwrap();
+    assert_eq!(file.write_at(&[], 1 << 40).unwrap(), 0);
+    assert_eq!(file.size().unwrap(), 0);
+});
+
+contract!(renaming_a_file_onto_itself_changes_nothing, |fs, path| {
+    let file = fs.open(&path("data"), OpenMode::CreateNew).unwrap();
+    file.write_all_at(b"kept", 0).unwrap();
+    drop(file);
+    fs.rename(&path("data"), &path("data")).unwrap();
+    let file = fs.open(&path("data"), OpenMode::Read).unwrap();
+    assert_eq!(read_all(&file), b"kept");
+});
+
+contract!(dot_components_name_the_same_file, |fs, path| {
+    fs.create_dir_all(&path("./dir")).unwrap();
+    let file = fs.open(&path("dir/./data"), OpenMode::CreateNew).unwrap();
+    file.write_all_at(b"here", 0).unwrap();
+    drop(file);
+    assert!(fs.exists(&path("dir/data")).unwrap());
+    fs.sync_dir(&path("./dir")).unwrap();
+    let file = fs.open(&path("./dir/data"), OpenMode::Read).unwrap();
+    assert_eq!(read_all(&file), b"here");
+});

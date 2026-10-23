@@ -12,13 +12,13 @@ pub struct OsCpus {
 impl OsCpus {
     /// Reads the CPUs this process may run on and how many threads can run at once.
     pub fn new() -> Self {
-        let parallelism = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+        let reported = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
         let available = platform::available()
             .filter(|set| !set.is_empty())
-            .unwrap_or_else(|| first(parallelism));
+            .unwrap_or_else(|| first(reported));
         Self {
+            parallelism: at_most_one_per_cpu(reported, &available),
             available,
-            parallelism,
         }
     }
 }
@@ -48,6 +48,10 @@ impl Cpus for OsCpus {
 
 fn first(count: NonZeroUsize) -> CpuSet {
     CpuSet::first(count.get().min(CpuSet::MAX_CPUS)).unwrap_or_default()
+}
+
+fn at_most_one_per_cpu(parallelism: NonZeroUsize, available: &CpuSet) -> NonZeroUsize {
+    NonZeroUsize::new(available.len()).map_or(parallelism, |cpus| parallelism.min(cpus))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -214,5 +218,20 @@ mod platform {
 
     pub(super) fn pin_current_thread(_cpus: &CpuSet) -> Result<()> {
         Err(Error::new(ErrorKind::Unsupported))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CpuSet, at_most_one_per_cpu};
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn parallelism_never_exceeds_the_available_cpus() {
+        let two = CpuSet::parse_list("4-5").unwrap();
+        let count = |n| NonZeroUsize::new(n).unwrap();
+        assert_eq!(at_most_one_per_cpu(count(8), &two), count(2));
+        assert_eq!(at_most_one_per_cpu(count(1), &two), count(1));
+        assert_eq!(at_most_one_per_cpu(count(3), &CpuSet::new()), count(3));
     }
 }

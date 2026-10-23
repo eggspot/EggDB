@@ -1,4 +1,4 @@
-use crate::error::{ErrorKind, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::fs::{File, FileSystem, OpenMode};
 use crate::uncached;
 use std::fs;
@@ -19,7 +19,7 @@ impl FileSystem for OsFileSystem {
     type File = OsFile;
 
     fn open(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
-        Ok(OsFile::new(open_options(mode).open(path)?, false))
+        Ok(OsFile::new(open_options(mode).open(path)?, mode, false))
     }
 
     fn open_uncached(&self, path: &Path, mode: OpenMode) -> Result<OsFile> {
@@ -30,10 +30,10 @@ impl FileSystem for OsFileSystem {
             .map_err(uncached::open_error)
             .and_then(|file| uncached::apply(&file).map(|()| file));
         match opened {
-            Ok(file) => Ok(OsFile::new(file, true)),
+            Ok(file) => Ok(OsFile::new(file, mode, true)),
             Err(error) => {
                 if mode == OpenMode::CreateNew && error.kind() == ErrorKind::Unsupported {
-                    fs::remove_file(path)?;
+                    let _ = fs::remove_file(path);
                 }
                 Err(error)
             }
@@ -103,15 +103,25 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[derive(Debug)]
 pub struct OsFile {
     file: fs::File,
+    writable: bool,
     uncached: bool,
     #[cfg(not(any(unix, windows)))]
     cursor: std::sync::Mutex<()>,
 }
 
 impl OsFile {
-    fn new(file: fs::File, uncached: bool) -> Self {
+    fn require_writable(&self) -> Result<()> {
+        if self.writable {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::PermissionDenied))
+        }
+    }
+
+    fn new(file: fs::File, mode: OpenMode, uncached: bool) -> Self {
         Self {
             file,
+            writable: mode.is_writable(),
             uncached,
             #[cfg(not(any(unix, windows)))]
             cursor: std::sync::Mutex::new(()),
@@ -125,6 +135,10 @@ impl File for OsFile {
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
+        self.require_writable()?;
+        if buf.is_empty() {
+            return Ok(0);
+        }
         self.positioned_write(buf, offset)
     }
 
@@ -133,6 +147,7 @@ impl File for OsFile {
     }
 
     fn set_size(&self, size: u64) -> Result<()> {
+        self.require_writable()?;
         Ok(self.file.set_len(size)?)
     }
 
@@ -141,10 +156,12 @@ impl File for OsFile {
     }
 
     fn sync_data(&self) -> Result<()> {
+        self.require_writable()?;
         Ok(self.file.sync_data()?)
     }
 
     fn sync_all(&self) -> Result<()> {
+        self.require_writable()?;
         Ok(self.file.sync_all()?)
     }
 }

@@ -77,23 +77,28 @@ pub trait File: Send + Sync + std::fmt::Debug {
 
     /// Writes from `buf` starting at `offset` and returns how many bytes were written. Writing
     /// past the end extends the file, filling any gap with zeros; an empty `buf` changes
-    /// nothing.
+    /// nothing. Fails with [`ErrorKind::PermissionDenied`] through a handle opened with
+    /// [`OpenMode::Read`], as [`File::set_size`] does.
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize>;
 
     /// The size of the file in bytes.
     fn size(&self) -> Result<u64>;
 
-    /// Truncates or extends the file to `size` bytes, filling any extension with zeros.
+    /// Truncates or extends the file to `size` bytes, filling any extension with zeros. Fails
+    /// with [`ErrorKind::PermissionDenied`] through a read-only handle.
     fn set_size(&self, size: u64) -> Result<()>;
 
     /// Whether the handle was opened with [`FileSystem::open_uncached`] and so requires
     /// aligned buffers, offsets and lengths.
     fn is_uncached(&self) -> bool;
 
-    /// Makes the file's contents and size durable.
+    /// Makes the file's contents and size durable. Fails with
+    /// [`ErrorKind::PermissionDenied`] through a handle opened with [`OpenMode::Read`] on every
+    /// operating system, as Windows cannot flush a file it may not write.
     fn sync_data(&self) -> Result<()>;
 
-    /// Makes the file's contents, size and other metadata durable.
+    /// Makes the file's contents, size and other metadata durable. Fails like
+    /// [`File::sync_data`] through a read-only handle.
     fn sync_all(&self) -> Result<()>;
 
     /// Fills `buf` from `offset`, failing with [`ErrorKind::UnexpectedEof`] if the file ends
