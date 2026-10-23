@@ -1076,9 +1076,11 @@ our important point."*
 
 **The standing rule.** When a capability people need from a data platform is missing from EggDB, the
 build loop and every session add it to the roadmap and build it ourselves (D1). They don't ask the
-owner first. Research decides how and in what order, and records it here. The only things that
-still go to the owner are those that need money, accounts or a license change (D21, D45's "not
-planned without the owner" list).
+owner first. Research decides how and in what order, and records it here. The things that still
+go to the owner are:
+- anything that needs money, accounts or a license change (D21);
+- legal and patent findings that research can't settle, and any legal filing (D34, D38, D43);
+- the items on D45's "not planned without the owner" list.
 
 **Added now under this rule:**
 
@@ -1089,7 +1091,8 @@ provides:
 - interactive reports with filters and drill-down;
 - a semantic layer of metrics and dimensions defined once and reused everywhere, which also serves
   D38's OLAP cubes;
-- scheduled and emailed reports, sharing, embedding in other applications, and alerts;
+- scheduled and emailed reports (sent through the operator's own mail server), sharing, embedding
+  in other applications, and alerts;
 - row-level security inherited from D22.
 
 It competes with Power BI, Tableau, Looker, Metabase and Superset.
@@ -1105,11 +1108,13 @@ It competes with Power BI, Tableau, Looker, Metabase and Superset.
 It competes with Airflow, dbt, Fivetran and Airbyte.
 
 **Big-data ecosystem compatibility:**
-- a Spark connector;
+- a Spark connector, which is a Java driver layer under D16: a thin JVM data source over the Rust
+  core, with no database logic of its own;
 - an Apache Iceberg REST catalog, so Spark, Trino, Flink, DuckDB and Snowflake can use EggDB's
   lakehouse tables (D29);
 - federated SQL over many sources, in the style of Trino and Presto (D29);
-- Kafka Connect-compatible connectors (D33).
+- Kafka Connect compatibility (D33): EggDB implements the Connect REST and worker protocol in Rust,
+  so existing Connect deployments and tools work with it. Our connectors are Rust.
 
 **Order.** They follow their foundations:
 - BI after the console and analytics (M11, D42);
