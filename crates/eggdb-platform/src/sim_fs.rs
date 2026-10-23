@@ -59,6 +59,7 @@ struct Inode {
     contents: Vec<u8>,
     durable: Vec<u8>,
     unsynced: Vec<Change>,
+    open_handles: usize,
 }
 
 #[derive(Debug)]
@@ -132,6 +133,9 @@ impl FileSystem for SimFileSystem {
                 inode
             }
         };
+        if let Some(open) = state.inodes.get_mut(&inode) {
+            open.open_handles += 1;
+        }
         Ok(SimFile {
             shared: Arc::clone(&self.shared),
             inode,
@@ -145,8 +149,9 @@ impl FileSystem for SimFileSystem {
         state
             .names
             .remove(path)
-            .map(|_| ())
-            .ok_or_else(|| Error::new(ErrorKind::NotFound))
+            .ok_or_else(|| Error::new(ErrorKind::NotFound))?;
+        state.free_unreachable_inodes();
+        Ok(())
     }
 
     fn rename(&self, from: &Path, to: &Path) -> Result<()> {
@@ -160,6 +165,7 @@ impl FileSystem for SimFileSystem {
         if let Some(inode) = state.names.remove(from) {
             state.names.insert(to.to_path_buf(), inode);
         }
+        state.free_unreachable_inodes();
         Ok(())
     }
 
@@ -184,6 +190,7 @@ impl FileSystem for SimFileSystem {
             return Err(Error::new(ErrorKind::NotFound));
         }
         state.sync_dir(path);
+        state.free_unreachable_inodes();
         Ok(())
     }
 
@@ -221,6 +228,19 @@ impl SimFile {
         } else {
             Err(Error::new(ErrorKind::PermissionDenied))
         }
+    }
+}
+
+impl Drop for SimFile {
+    fn drop(&mut self) {
+        let mut state = lock(&self.shared);
+        if state.generation != self.generation {
+            return;
+        }
+        if let Some(inode) = state.inodes.get_mut(&self.inode) {
+            inode.open_handles = inode.open_handles.saturating_sub(1);
+        }
+        state.free_unreachable_inodes();
     }
 }
 
@@ -294,6 +314,7 @@ impl Inode {
         }
         self.contents = survived;
         self.make_durable();
+        self.open_handles = 0;
     }
 }
 
@@ -339,8 +360,23 @@ impl State {
         self.names.clone_from(&self.durable_names);
         self.dirs.clone_from(&surviving_dirs);
         self.durable_dirs = surviving_dirs;
-        let referenced: BTreeSet<u64> = self.names.values().copied().collect();
-        self.inodes.retain(|inode, _| referenced.contains(inode));
+        self.free_unreachable_inodes();
+    }
+
+    fn free_unreachable_inodes(&mut self) {
+        let named: BTreeSet<u64> = self
+            .names
+            .values()
+            .chain(self.durable_names.values())
+            .copied()
+            .collect();
+        self.inodes
+            .retain(|id, inode| inode.open_handles > 0 || named.contains(id));
+    }
+
+    #[cfg(test)]
+    fn inode_count(&self) -> usize {
+        self.inodes.len()
     }
 
     fn next_operation_fails(&mut self) -> bool {
@@ -602,6 +638,29 @@ mod tests {
         let error = file.write_at(b"y", 0).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert_eq!(fs.operation_count(), before + 1);
+    }
+
+    #[test]
+    fn a_removed_file_is_freed_once_unnamed_and_closed() {
+        let fs = SimFileSystem::new();
+        create_durable(&fs, "segment", b"old log");
+        let file = fs.open(Path::new("segment"), OpenMode::Read).unwrap();
+        fs.remove_file(Path::new("segment")).unwrap();
+        fs.sync_dir(Path::new("")).unwrap();
+        assert_eq!(read_all(&file), b"old log");
+        assert_eq!(super::lock(&fs.shared).inode_count(), 1);
+        drop(file);
+        assert_eq!(super::lock(&fs.shared).inode_count(), 0);
+    }
+
+    #[test]
+    fn a_removed_file_stays_until_the_removal_is_durable() {
+        let fs = SimFileSystem::new();
+        create_durable(&fs, "segment", b"old log");
+        fs.remove_file(Path::new("segment")).unwrap();
+        assert_eq!(super::lock(&fs.shared).inode_count(), 1);
+        fs.crash(CrashMode::DropUnsynced);
+        assert_eq!(reopen(&fs, "segment"), b"old log");
     }
 
     #[test]

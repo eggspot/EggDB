@@ -37,7 +37,7 @@ pub trait FileSystem: Send + Sync {
     /// Removes the file at `path`. Open handles keep working until they are dropped.
     fn remove_file(&self, path: &Path) -> Result<()>;
 
-    /// Renames `from` to `to`, replacing `to` if it exists.
+    /// Renames the file `from` to `to`, replacing the file at `to` if there is one.
     fn rename(&self, from: &Path, to: &Path) -> Result<()>;
 
     /// Creates the directory at `path` and every missing parent.
