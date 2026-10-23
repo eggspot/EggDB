@@ -284,10 +284,16 @@ them.
 contrast) and works on small screens. Its speed is measured like the engine's (D7): opening a
 database, running a query and scrolling a large result.
 
-**Built from scratch.** A GUI toolkit written from scratch in Rust, with no third-party crates
-(D1), is a large piece of work. The roadmap treats it as its own track, starting with the CLI and
-the browser client, and a research subagent decides how much rendering, text layout and
-accessibility to build first.
+**The desktop GUI is a must-have, from the start.** It is not a later add-on to the CLI or the browser
+client. One UI codebase in Rust draws the same screens both ways:
+- natively on the desktop (Windows, macOS, Linux and the rest of D8), GPU-accelerated;
+- in the browser through WebAssembly.
+
+The GUI toolkit is our own (D1): rendering, text layout and shaping, input, accessibility and
+platform windows. That is a large piece of work, so it is its own track. It starts now, alongside
+the engine, and doesn't wait for the server. A research subagent orders its steps, but never drops
+the desktop. EggOS also builds its own Rust GUI (its D16), so research checks whether the two can
+share one toolkit, and records the answer here.
 
 ## D16 Official connectors for every language, working with existing ORMs — Decided (owner, 2026-10-23)
 EggDB has official drivers for every widely used language. Each one fits that language's standard

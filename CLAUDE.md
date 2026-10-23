@@ -84,7 +84,9 @@ Check each task against these before starting and again before opening the PR.
     size, install time and first-start time are measured for every release and may only
     shrink. (D14)
 14. **A SQL client people love, designed by Claude Fable.** EggDB ships its own client for working
-    with data: a GUI that runs as a desktop app on every OS and in the browser, and a CLI. Any
+    with data: a GUI that runs as a desktop app on every OS and in the browser, from one Rust
+    codebase on our own GUI toolkit (the desktop GUI is a must-have, built from the start), and
+    a CLI. Any
     task that designs something a user sees (layouts, flows, the design system, icons, motion,
     the query editor, result grids, schema browser, explain views) gets its design from Claude
     Fable: delegate it to an agent on the `fable` model (Agent tool, `model: "fable"`), record
