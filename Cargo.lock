@@ -5,3 +5,7 @@ version = 4
 [[package]]
 name = "eggdb"
 version = "0.0.0"
+
+[[package]]
+name = "eggdb-platform"
+version = "0.0.0"

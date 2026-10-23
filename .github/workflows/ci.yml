@@ -41,3 +41,31 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace

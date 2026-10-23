@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-platform"
+description = "EggDB's platform layer: files, clocks and the deterministic simulation used to test them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
