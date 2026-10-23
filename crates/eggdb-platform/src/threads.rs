@@ -40,9 +40,10 @@ impl ThreadOptions {
         self
     }
 
-    /// Starts a thread that runs `work`. Fails with the operating system's error when the
-    /// thread cannot be created, and with the error of [`Cpus::pin_current_thread`] when the
-    /// pin is refused, in which case `work` never runs and the thread has already ended.
+    /// Starts a thread that runs `work`. Fails with [`ErrorKind::InvalidInput`] when the name
+    /// contains a NUL byte, with the operating system's error when the thread cannot be
+    /// created, and with the error of [`Cpus::pin_current_thread`] when the pin is refused, in
+    /// which case `work` never runs and the thread has already ended.
     pub fn spawn<C, F, T>(self, cpus: &C, work: F) -> Result<SpawnedThread<T>>
     where
         C: Cpus + Clone + 'static,
@@ -51,6 +52,9 @@ impl ThreadOptions {
     {
         let mut builder = thread::Builder::new();
         if let Some(name) = self.name {
+            if name.contains('\0') {
+                return Err(Error::new(ErrorKind::InvalidInput));
+            }
             builder = builder.name(name);
         }
         if let Some(bytes) = self.stack_size {
@@ -124,6 +128,15 @@ mod tests {
             .unwrap();
         assert_eq!(thread.thread().name(), Some("shard-3"));
         assert_eq!(thread.join().unwrap().as_deref(), Some("shard-3"));
+    }
+
+    #[test]
+    fn names_with_nul_bytes_are_invalid_input() {
+        let error = ThreadOptions::new()
+            .name("shard\0")
+            .spawn(&SimCpus::new(), || ())
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]
