@@ -9,9 +9,10 @@ them with a new entry.
 ## D1 Everything written by us, in Rust, from scratch — Decided (owner, 2026-10-23); per-language driver layers excepted by D16
 EggDB is our own code in Rust. The only code in other languages is listed in D16:
 - the per-language driver and ORM layers;
-- the minimal HTML and JavaScript that loads the browser build. No code from other databases: we implement storage, transactions,
-query processing and every protocol from public specifications, papers and documentation (clean
-room). What we ship has no third-party crates; Rust's standard library and our own declarations of
+- the minimal HTML and JavaScript that loads the browser build.
+
+No code from other databases: we implement storage, transactions, query processing and every
+protocol from public specifications, papers and documentation (clean room). What we ship has no third-party crates; Rust's standard library and our own declarations of
 operating-system APIs are fine. Permissive crates (MIT, Apache-2.0, BSD) may be used for tests,
 benchmarks and build tooling only, when a research subagent approves them. Licensed MIT; no
 copyleft or source-available code ever: GPL, LGPL, AGPL, MPL, SSPL, BSL and the like.
