@@ -58,19 +58,31 @@ impl SimCpus {
     }
 
     /// Sets the CPUs the process may run on, as an affinity mask or a cgroup cpuset would.
-    /// Fails with [`ErrorKind::InvalidInput`] for an empty set.
+    /// Fails with [`ErrorKind::InvalidInput`] for an empty set, or one smaller than the
+    /// parallelism set with [`SimCpus::set_parallelism`].
     pub fn set_available(&self, cpus: CpuSet) -> Result<()> {
-        if cpus.is_empty() {
+        let mut state = lock(&self.shared);
+        if cpus.is_empty()
+            || state
+                .parallelism
+                .is_some_and(|count| count.get() > cpus.len())
+        {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
-        lock(&self.shared).available = cpus;
+        state.available = cpus;
         Ok(())
     }
 
     /// Sets how many threads can run at once, as a container's CPU quota would, or `None` for
-    /// one per available CPU.
-    pub fn set_parallelism(&self, parallelism: Option<NonZeroUsize>) {
-        lock(&self.shared).parallelism = parallelism;
+    /// one per available CPU. Fails with [`ErrorKind::InvalidInput`] above the number of
+    /// available CPUs.
+    pub fn set_parallelism(&self, parallelism: Option<NonZeroUsize>) -> Result<()> {
+        let mut state = lock(&self.shared);
+        if parallelism.is_some_and(|count| count.get() > state.available.len()) {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        state.parallelism = parallelism;
+        Ok(())
     }
 
     /// Makes pinning fail with [`ErrorKind::Unsupported`], as on a platform that cannot pin
@@ -193,8 +205,12 @@ mod tests {
         let cpus = SimCpus::new();
         cpus.set_available(set("8-15,32")).unwrap();
         assert_eq!(cpus.parallelism().get(), 9);
-        cpus.set_parallelism(NonZeroUsize::new(2));
+        cpus.set_parallelism(NonZeroUsize::new(2)).unwrap();
         assert_eq!(cpus.parallelism().get(), 2);
+        let error = cpus.set_parallelism(NonZeroUsize::new(10)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        let error = cpus.set_available(set("0")).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
         let error = cpus.pin_current_thread(&set("0")).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         cpus.pin_current_thread(&set("32")).unwrap();

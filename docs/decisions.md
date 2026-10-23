@@ -1571,7 +1571,7 @@ trait: `OsCpus` for the machine, `SimCpus` for tests.
   on Windows (`SetThreadAffinityMask` reaches only the primary group). An empty set, one outside
   `available()` (the kernel would silently narrow it to the cpuset), or one spanning several
   Windows groups is `InvalidInput`.
-- `CachePadded<T>` and `CACHE_LINE_PADDING`: 128 bytes on x86_64, aarch64 and powerpc64 (adjacent
+- `CachePadded<T>` and `CACHE_LINE_PADDING`: 128 bytes on x86_64, aarch64, arm64ec and powerpc64 (adjacent
   lines are fetched in pairs on x86; Apple's aarch64 lines are 128 bytes), 256 on s390x, 32 on
   arm and mips, 64 elsewhere. It is a constant because a layout cannot depend on a value read at
   run time.

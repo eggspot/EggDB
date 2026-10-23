@@ -3,8 +3,9 @@ use std::ops::{Deref, DerefMut};
 
 /// The alignment and smallest size of [`CachePadded`]: the target architecture's cache line,
 /// doubled where the hardware fetches lines in pairs (x86_64) or has 128-byte lines (Apple's
-/// aarch64): 128 bytes on x86_64, aarch64 and powerpc64, 256 on s390x, 32 on arm and mips, and
-/// 64 elsewhere. A constant, because a struct's layout cannot depend on a value read at run time.
+/// aarch64): 128 bytes on x86_64, aarch64, arm64ec and powerpc64, 256 on s390x, 32 on arm and
+/// mips, and 64 elsewhere. A constant, because a struct's layout cannot depend on a value read
+/// at run time.
 pub const CACHE_LINE_PADDING: usize = std::mem::align_of::<CachePadded<u8>>();
 
 /// A value aligned and padded to [`CACHE_LINE_PADDING`], so that values written by different
@@ -14,6 +15,7 @@ pub const CACHE_LINE_PADDING: usize = std::mem::align_of::<CachePadded<u8>>();
     any(
         target_arch = "x86_64",
         target_arch = "aarch64",
+        target_arch = "arm64ec",
         target_arch = "powerpc64"
     ),
     repr(align(128))
@@ -33,6 +35,7 @@ pub const CACHE_LINE_PADDING: usize = std::mem::align_of::<CachePadded<u8>>();
     not(any(
         target_arch = "x86_64",
         target_arch = "aarch64",
+        target_arch = "arm64ec",
         target_arch = "powerpc64",
         target_arch = "s390x",
         target_arch = "arm",

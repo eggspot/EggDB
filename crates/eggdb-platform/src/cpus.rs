@@ -213,8 +213,10 @@ fn parse_index(text: &str) -> Result<usize> {
 
 /// The processors a process runs on.
 pub trait Cpus: Send + Sync {
-    /// The CPUs this process may run on, as they were when the value was created: the
-    /// affinity mask and cgroup cpuset on Linux, every active processor elsewhere.
+    /// The CPUs this process may run on, as they were when the value was created: on Linux and
+    /// Android the affinity mask of the thread that created it, which includes the cgroup
+    /// cpuset; on Windows every active processor in every group, without narrowing by a process
+    /// affinity mask or job object; elsewhere the first [`Cpus::parallelism`] CPUs.
     fn available(&self) -> CpuSet;
 
     /// How many threads can run at once, which can be fewer than [`Cpus::available`] when a
