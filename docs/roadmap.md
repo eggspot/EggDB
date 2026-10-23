@@ -12,8 +12,8 @@ refine it through research, recorded in docs/decisions.md.
 | M2 | Storage engine: page format, buffer management, write-ahead log, checkpoints, crash recovery; the B-tree/LSM/hybrid choice made by research with benchmarks | |
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6); the first release binary with its download and install times measured (D14) | |
-| M5 | SQL: parser, planner, optimizer and executor; SQLite-compatible embedded SQL and the SQLite file format | |
-| M6 | Server and the PostgreSQL wire protocol and SQL dialect; the built-in MCP server, with schema discovery, querying and agent permissions (D11); PostgreSQL tools (psql, pgAdmin, DBeaver, the main drivers and ORMs) working (D12); restoring plain-SQL `pg_dump` output (D13) | |
+| M5 | SQL: parser, planner, optimizer and executor; SQLite-compatible embedded SQL and the SQLite file format; the stable C API and the first official drivers (Rust, C#, Java, Node.js, Python, Go) in embedded mode (D16); the `eggdb` CLI client (D15) | |
+| M6 | Server and the PostgreSQL wire protocol and SQL dialect; the official drivers over the network and their main ORMs (D16); the first GUI client screens on the desktop and in the browser, designed by Claude Fable (D15); the built-in MCP server, with schema discovery, querying and agent permissions (D11); PostgreSQL tools (psql, pgAdmin, DBeaver, the main drivers and ORMs) working (D12); restoring plain-SQL `pg_dump` output (D13) | |
 | M7 | Caching: in-memory tables with expiry and eviction, pub/sub, streams; Redis RESP | |
 | M8 | Full-text search: analyzers, inverted indexes, BM25 ranking; Elasticsearch/OpenSearch REST | |
 | M9 | Documents and JSON; the MongoDB wire protocol | |
@@ -28,3 +28,14 @@ refine it through research, recorded in docs/decisions.md.
 
 Every protocol milestone also covers that database's tools (D12) and its backups and dumps (D13):
 an application's whole toolchain and its data move over together.
+
+Two tracks run alongside the milestones:
+- **The client (D15).** It starts now, not at M5:
+  - our own Rust GUI toolkit, for the desktop and the browser from one codebase;
+  - Claude Fable's design in `docs/ux/`;
+  - the CLI;
+  - the familiar layouts;
+  - each new model and dialect added to the GUI and CLI as it lands.
+
+  The desktop GUI is a must-have.
+- **The drivers (D16):** each language and ORM added and proven by its own test suite.

@@ -83,9 +83,32 @@ Check each task against these before starting and again before opening the PR.
     usual package manager) and it runs; the first start takes well under a second. Download
     size, install time and first-start time are measured for every release and may only
     shrink. (D14)
+14. **A SQL client people love, designed by Claude Fable.** EggDB ships its own client for working
+    with data: a GUI that runs as a desktop app on every OS and in the browser, from one Rust
+    codebase on our own GUI toolkit (the desktop GUI is a must-have, built from the start), and a
+    CLI. Any task that designs something a user sees (layouts, flows, the design system, icons,
+    motion, the query editor, result grids, schema browser, explain views) gets its design from
+    Claude Fable: delegate it to an agent on the `fable` model (Agent tool, `model: "fable"`),
+    record the design in `docs/ux/`, then implement it. Next to EggDB's own design, the client
+    offers familiar layouts that work like the clients people already know (SQL Server Management
+    Studio, pgAdmin, DBeaver, DataGrip, MySQL Workbench, MongoDB Compass, Redis Insight), so nobody
+    has to relearn their habits. Familiar means the same layout, shortcuts and workflows, never
+    their code, artwork, icons or screenshots. A layout may be labelled "works like <product>", with
+    a trademark note. (D15)
+15. **Connectors for every language, working with their ORMs.** Official EggDB drivers for C#/.NET,
+    Java and Kotlin, Node.js and TypeScript, Python, Go, Rust, PHP, Ruby, Swift, Dart, C and C++
+    (and more as people ask), each fitting its language's standard database interface and its
+    popular ORMs. That covers ADO.NET and EF Core, JDBC and Hibernate, Prisma, TypeORM, Drizzle
+    and Sequelize, DB-API, SQLAlchemy and Django, `database/sql` and GORM, PDO with Laravel and
+    Doctrine, and ActiveRecord. They work both against a server and in embedded mode. The engine
+    and one client core are Rust. Each language's driver and ORM provider (an EF Core provider is
+    C#, a Hibernate dialect is Java) is a thin layer in that language calling the Rust core
+    through the C API, with no protocol or storage logic of its own. Existing drivers keep
+    working too, through the protocols EggDB speaks (D12). (D16)
 
 ## Code
-- **Everything written by us, in Rust, from scratch.** No code from other databases (SQLite,
+- **Everything written by us, in Rust, from scratch.** The only exceptions are the per-language
+  driver and ORM layers and the minimal HTML/JS that loads the browser build (D16). No code from other databases (SQLite,
   PostgreSQL, RocksDB, Redis, Lucene and so on). Implement from public specifications, papers and
   protocol documentation (clean room), and never read the source of copyleft or source-available
   databases (MySQL, MariaDB, MongoDB and others) while working on EggDB. No third-party crates in
@@ -137,5 +160,5 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D14). Record every further
+The decisions above are recorded in docs/decisions.md (D1 to D16). Record every further
 architecture decision there as a numbered entry; a later entry may supersede an earlier one.

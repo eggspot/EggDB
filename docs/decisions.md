@@ -6,10 +6,13 @@ The owner's decisions fix the goal. The concrete lists inside them (protocol ord
 budgets, permission details) were filled in when the project was set up, and research may refine
 them with a new entry.
 
-## D1 Everything written by us, in Rust, from scratch — Decided (owner, 2026-10-23)
-EggDB is our own code in Rust. No code from other databases: we implement storage, transactions,
-query processing and every protocol from public specifications, papers and documentation (clean
-room). What we ship has no third-party crates; Rust's standard library and our own declarations of
+## D1 Everything written by us, in Rust, from scratch — Decided (owner, 2026-10-23); per-language driver layers excepted by D16
+EggDB is our own code in Rust. The only code in other languages is listed in D16:
+- the per-language driver and ORM layers;
+- the minimal HTML and JavaScript that loads the browser build.
+
+No code from other databases: we implement storage, transactions, query processing and every
+protocol from public specifications, papers and documentation (clean room). What we ship has no third-party crates; Rust's standard library and our own declarations of
 operating-system APIs are fine. Permissive crates (MIT, Apache-2.0, BSD) may be used for tests,
 benchmarks and build tooling only, when a research subagent approves them. Licensed MIT; no
 copyleft or source-available code ever: GPL, LGPL, AGPL, MPL, SSPL, BSL and the like.
@@ -232,3 +235,129 @@ Every release measures and publishes:
 The numbers may only go down, like D6. The target is about one second to download and one second
 to install; concrete budgets are set from measurements once the first release ships. Package
 registries that need accounts or tokens wait for the owner (CLAUDE.md, "Releases").
+
+## D15 The EggDB client: our own design by Claude Fable, plus familiar layouts — Decided (owner, 2026-10-23)
+EggDB ships a client with excellent UI and UX for everyone who works with the data:
+- a **GUI**, written in Rust, that runs as a desktop app on every OS (D8) and in the browser
+  (WebAssembly, also served by the EggDB server);
+- a **CLI** that is at least as good as psql, sqlcmd and mysql.
+
+It covers the whole job:
+- connections;
+- schema and object browsing for every data model (D2);
+- a query editor for every dialect (D10), with completion, formatting and error help;
+- result grids that stay fast on huge results;
+- editing data;
+- explain plans shown visually;
+- import, export, backup and restore (D13);
+- users and permissions;
+- monitoring;
+- AI help through the built-in MCP server (D11).
+
+**Our own design.** The client's main design is EggDB's own, created by Claude Fable: every visual
+design task (layouts, flows, the design system, icons, motion, each screen) goes to an agent on the
+`fable` model. The design is recorded in `docs/ux/` and then implemented.
+
+**Familiar layouts.** Beside our own design, the client offers layouts that work like the clients
+people already use:
+- SQL Server Management Studio;
+- pgAdmin;
+- DBeaver;
+- DataGrip;
+- MySQL Workbench;
+- Oracle SQL Developer;
+- MongoDB Compass;
+- Redis Insight.
+
+Each one keeps that client's arrangement, shortcuts and workflows, so someone switching keeps their
+habits.
+
+They are clean-room (D1). We match layout, behavior and shortcuts from using the products and from
+their public documentation. We never copy another product's code, artwork, icons, screenshots or
+documentation images. We don't read the source of the ones that are source-available. A layout may
+be labelled by the product it resembles ("works like SQL Server Management Studio"), with a note
+that the names are their owners' trademarks and imply no endorsement. Each layout has a
+specification in `docs/ux/` with the shortcuts and workflows it must match, and tests that check
+them.
+
+**Usable by everyone.** The client follows accessibility standards (keyboard-first, screen readers,
+contrast) and works on small screens. Its speed is measured like the engine's (D7): opening a
+database, running a query and scrolling a large result.
+
+**The desktop GUI is a must-have, from the start.** It is not a later add-on to the CLI or the browser
+client. One UI codebase in Rust draws the same screens both ways:
+- natively on the desktop (Windows, macOS, Linux and the rest of D8), GPU-accelerated;
+- in the browser through WebAssembly.
+
+The GUI toolkit is our own (D1): rendering, text layout and shaping, input, accessibility and
+platform windows. That is a large piece of work, so it is its own track. It starts now, alongside
+the engine, and doesn't wait for the server. A research subagent orders its steps, but never drops
+the desktop. EggOS also builds its own Rust GUI (its D16), so research checks whether the two can
+share one toolkit, and records the answer here.
+
+## D16 Official connectors for every language, working with existing ORMs — Decided (owner, 2026-10-23)
+EggDB has official drivers for every widely used language. Each one fits that language's standard
+database interface and its popular ORMs and frameworks:
+
+| Language | Standard interface | ORMs and frameworks |
+|---|---|---|
+| C# / .NET | ADO.NET | EF Core, Dapper, NHibernate |
+| Java, Kotlin | JDBC, R2DBC | Hibernate/JPA, jOOQ, Spring Data, Exposed |
+| Node.js, TypeScript | | Prisma, TypeORM, Drizzle, Sequelize, Knex |
+| Python | DB-API | SQLAlchemy, Django ORM, asyncio |
+| Go | `database/sql` | GORM, sqlc |
+| Rust | the native crate | |
+| PHP | PDO | Laravel/Eloquent, Doctrine |
+| Ruby | | ActiveRecord, Sequel |
+| Swift, Dart/Flutter | | the mobile frameworks |
+| C, C++ | a stable C API | |
+
+More languages follow as people ask for them.
+
+**How they work.** Every driver works both against a server and in embedded mode (D3), and exposes
+every data model and dialect (D2, D10). One Rust client core does the protocol, pooling, types and
+embedded engine. Each language's driver is a thin, idiomatic layer over it through the C API, so
+behavior and speed are the same everywhere. A runtime that can't load native code (the browser,
+for example) gets the same core compiled to WebAssembly.
+
+**What is Rust and what isn't.** The database, the client core and everything performance-critical
+are Rust (D1). The per-language layer is written in that language, because a framework can only
+load code in its own language. An EF Core provider is a .NET assembly that implements EF Core's
+interfaces in C#: its type mappings, its translation of LINQ into EggDB SQL and its migrations SQL
+generator. A JDBC driver or Hibernate dialect is Java, and a SQLAlchemy dialect is Python. These
+layers hold no protocol or storage logic. They call the Rust core through the C API:
+- P/Invoke in .NET;
+- the Foreign Function and Memory API in Java 22 and later, with a JNI binding for older Java;
+- N-API in Node.js;
+- the CPython C API in Python.
+
+They keep crossings into the core few and batched, so the binding never becomes the bottleneck.
+They are written by us, clean room (D1), and follow each language's conventions and the
+no-comments rule (public API doc comments such as C# XML docs are kept).
+
+**The exceptions, named.**
+- A runtime that can load neither native code nor WebAssembly may get a protocol implementation
+  written in its own language. It is the only place protocol logic lives outside Rust, and it must
+  pass the same protocol test suite as the Rust core.
+- The browser build is loaded by the minimal HTML and JavaScript a browser requires, and nothing
+  more.
+
+**Frameworks are dependencies, never part of what we ship.** An ORM framework (EF Core, Hibernate,
+SQLAlchemy and the others) is a dependency the user's application already has, declared in the
+package metadata. We never copy, bundle or modify it. Our provider is our own MIT code that
+implements the framework's public interfaces, whatever the framework's own license (Hibernate's
+LGPL included).
+
+**Packaging.** Each language package carries the native library for every platform it supports (D8):
+runtime-specific assets in NuGet, classifier JARs in Maven, prebuilt binaries in npm, wheels on PyPI.
+Installing the driver is all the user does.
+
+**Existing drivers.** Once EggDB's PostgreSQL protocol lands (M6), the existing PostgreSQL drivers and
+ORM providers (for example Npgsql with its EF Core provider) work against it, and later the other
+compatible databases' drivers too (D12). The official drivers add what only EggDB has: embedded
+mode, every model, every dialect and the MCP tools.
+
+**Proof and publishing.** Each driver is proven by its ORM's own test suite or official provider
+tests running against EggDB in CI. Publishing to the package registries (NuGet, Maven Central, npm,
+PyPI, crates.io, Packagist, RubyGems, pub.dev and others) needs accounts and tokens, which wait for
+the owner.
