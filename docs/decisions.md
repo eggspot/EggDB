@@ -2139,3 +2139,40 @@ bandwidth, and timed reaps and cancel on the file I/O queue (D66).
 **Review fix (D71 follow-up):** the network contract tests now run once per operating-system
 backend (the portable poller and the system's own) instead of only the automatic one, and half
 of the simulated seeds run with latency.
+
+## D73 `poll(2)` for the network queue on the BSDs and illumos, with blocking connects there for now — Decided by research (build loop, 2026-10-25); refines D71
+`NetBackend::Poll` waits for readiness in `poll(2)`. It is the automatic backend on FreeBSD,
+NetBSD, illumos and Solaris, which had only the portable poller, and can be requested on Linux,
+Android and Apple's systems, where CI runs the contract tests on it. It shares the readiness
+queue with epoll and kqueue: a selector enum picks the system's own selector or `poll`, and the
+queue's interest tracking (interest only while an operation waits, D71) is unchanged.
+
+- **Why `poll(2)` and not each BSD's kqueue or illumos's event ports:** `struct pollfd` and the
+  `POLL*` values are the same on every Unix, so one small declaration serves them all, while
+  `struct kevent` differs on FreeBSD, NetBSD and OpenBSD and event ports are illumos-only. Each
+  wait hands the kernel every waiting socket, so it costs O(sockets) per wait; native selectors
+  per OS can follow when a workload needs them.
+- **Verified from the public headers (FreeBSD and NetBSD under BSD, illumos under CDDL):**
+  `pollfd` is `{int fd; short events; short revents}`, `POLLIN` 0x1, `POLLOUT` 0x4, `POLLERR`
+  0x8, `POLLHUP` 0x10, `POLLNVAL` 0x20 and `EINTR` 4 everywhere; `nfds_t` is `unsigned long` on
+  Linux, illumos and Solaris and `unsigned int` on Apple's systems, FreeBSD and NetBSD; `poll`
+  is not a versioned symbol on NetBSD (only `pollts` is).
+- **Connects still block on FreeBSD, NetBSD, illumos and Solaris.** A non-blocking connect needs
+  our own `socket` and `connect` declarations with constants that differ in ways nothing would
+  catch without a runner: `SOCK_STREAM` is 2 and `EINPROGRESS` 150 on illumos, whose
+  `sockaddr_in6` is 32 bytes; `AF_INET6` is 28, 24 and 26; the BSDs' sockaddrs start with a
+  length byte; NetBSD's `socket` is the symbol `__socket30`. Correctness first (D9): the poll
+  backend uses std's blocking connect there, as the portable poller already did, and
+  non-blocking connect follows once a VM runner (FreeBSD, NetBSD, OmniOS) tests it. On Linux and
+  Apple's systems the poll backend connects without blocking, through the same code as epoll
+  and kqueue.
+- **CI:** a new `cross` job lints the platform layer for FreeBSD, NetBSD, illumos, Solaris,
+  aarch64 Linux, iOS and WebAssembly, which catches type and `cfg` errors though not wrong
+  constants or link errors. It runs beside the other jobs, so the time to a green run is
+  unchanged.
+- **Measured:** on a loopback ping-pong of 8-byte messages through one queue (Apple M-series,
+  release build), a round trip took 14.9 µs with `poll`, 13.5 µs with kqueue (13 µs before this
+  change) and 70.7 µs with the portable poller, which those systems ran until now.
+
+**Not yet:** OpenBSD and DragonFly (tier 3 targets, which cannot be linted here) still run the
+portable poller; non-blocking connects and runners on the BSDs and illumos.
