@@ -28,13 +28,13 @@ mod epoll;
     ),
     not(all(target_arch = "x86_64", target_pointer_width = "32"))
 ))]
-use epoll::{BACKEND, Selector, connect_without_waiting};
+use epoll as native;
 
 #[cfg(target_vendor = "apple")]
 mod kqueue;
 
 #[cfg(target_vendor = "apple")]
-use kqueue::{BACKEND, Selector, connect_without_waiting};
+use kqueue as native;
 
 #[cfg(target_vendor = "apple")]
 pub(crate) use kqueue::suppress_sigpipe;
@@ -43,6 +43,22 @@ pub(crate) use kqueue::suppress_sigpipe;
 pub(crate) fn suppress_sigpipe(_: &std::net::TcpStream) -> std::io::Result<()> {
     Ok(())
 }
+
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "illumos",
+    target_os = "solaris"
+))]
+mod plain_unix;
+
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "illumos",
+    target_os = "solaris"
+))]
+use plain_unix as native;
 
 #[cfg(any(
     all(
@@ -59,7 +75,38 @@ pub(crate) fn suppress_sigpipe(_: &std::net::TcpStream) -> std::io::Result<()> {
         ),
         not(all(target_arch = "x86_64", target_pointer_width = "32"))
     ),
-    target_vendor = "apple"
+    target_vendor = "apple",
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos",
+        target_os = "solaris"
+    )
+))]
+mod poll;
+
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "riscv64",
+            target_arch = "powerpc64",
+            target_arch = "s390x",
+            target_arch = "loongarch64"
+        ),
+        not(all(target_arch = "x86_64", target_pointer_width = "32"))
+    ),
+    target_vendor = "apple",
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos",
+        target_os = "solaris"
+    )
 ))]
 mod queue;
 
@@ -78,9 +125,40 @@ mod queue;
         ),
         not(all(target_arch = "x86_64", target_pointer_width = "32"))
     ),
-    target_vendor = "apple"
+    target_vendor = "apple",
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos",
+        target_os = "solaris"
+    )
 ))]
-pub(crate) use queue::{NATIVE, ReadinessQueue};
+mod selector;
+
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "riscv64",
+            target_arch = "powerpc64",
+            target_arch = "s390x",
+            target_arch = "loongarch64"
+        ),
+        not(all(target_arch = "x86_64", target_pointer_width = "32"))
+    ),
+    target_vendor = "apple",
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos",
+        target_os = "solaris"
+    )
+))]
+pub(crate) use queue::{NATIVE, ReadinessQueue, supports};
 
 #[cfg(not(any(
     all(
@@ -97,9 +175,15 @@ pub(crate) use queue::{NATIVE, ReadinessQueue};
         ),
         not(all(target_arch = "x86_64", target_pointer_width = "32"))
     ),
-    target_vendor = "apple"
+    target_vendor = "apple",
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos",
+        target_os = "solaris"
+    )
 )))]
-pub(crate) use unsupported::{NATIVE, ReadinessQueue};
+pub(crate) use unsupported::{NATIVE, ReadinessQueue, supports};
 
 #[cfg(not(any(
     all(
@@ -116,7 +200,13 @@ pub(crate) use unsupported::{NATIVE, ReadinessQueue};
         ),
         not(all(target_arch = "x86_64", target_pointer_width = "32"))
     ),
-    target_vendor = "apple"
+    target_vendor = "apple",
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos",
+        target_os = "solaris"
+    )
 )))]
 mod unsupported {
     use crate::error::{Error, ErrorKind, Result};
@@ -125,11 +215,15 @@ mod unsupported {
 
     pub(crate) const NATIVE: Option<NetBackend> = None;
 
+    pub(crate) fn supports(_: NetBackend) -> bool {
+        false
+    }
+
     #[derive(Debug)]
     pub(crate) enum ReadinessQueue {}
 
     impl ReadinessQueue {
-        pub(crate) fn new(_: usize) -> Result<Self> {
+        pub(crate) fn new(_: usize, _: NetBackend) -> Result<Self> {
             Err(Error::new(ErrorKind::Unsupported))
         }
 

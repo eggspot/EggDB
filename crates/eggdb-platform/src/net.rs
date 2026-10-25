@@ -255,6 +255,12 @@ pub enum NetBackend {
     Epoll,
     /// Waits for readiness in the kqueue of Apple's systems, inside [`NetQueue::reap`].
     Kqueue,
+    /// Waits for readiness in `poll(2)`, inside [`NetQueue::reap`]: the automatic choice on
+    /// FreeBSD, NetBSD, illumos and Solaris, where connects still block, and available on
+    /// request wherever [`NetBackend::Epoll`] or [`NetBackend::Kqueue`] is, and connects there
+    /// never block. Each wait hands the kernel every socket an operation waits on, so it suits
+    /// fewer connections than epoll or kqueue.
+    Poll,
 }
 
 /// How [`Network::net_queue`] builds a queue.
@@ -288,9 +294,10 @@ impl NetQueueOptions {
     /// Asks for one backend, given or refused: the queue never falls back to another. Without
     /// it, the queue waits in epoll on Linux and Android on the architectures whose system
     /// constants EggDB declares (x86, x86_64, arm, aarch64, riscv64, powerpc64, s390x and
-    /// loongarch64), in kqueue on Apple's systems, and
-    /// polls elsewhere. A machine refuses a backend it lacks with [`ErrorKind::Unsupported`];
-    /// the simulation accepts every request and runs every operation its own way.
+    /// loongarch64), in kqueue on Apple's systems, in `poll(2)` on FreeBSD, NetBSD, illumos and
+    /// Solaris, and polls elsewhere. A machine refuses a backend it lacks with
+    /// [`ErrorKind::Unsupported`]; the simulation accepts every request and runs every operation
+    /// its own way.
     pub fn backend(mut self, backend: NetBackend) -> Self {
         self.backend = Some(backend);
         self
