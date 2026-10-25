@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/release.yml', 'docs/releases/**']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            runs_here: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            runs_here: true
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            runs_here: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            runs_here: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            runs_here: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            runs_here: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            runs_here: true
+            exe: .exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            runs_here: false
+            exe: .exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      EXE: ${{ matrix.exe }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain and the target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Read the version
+        run: |
+          version="v$(cargo pkgid -p eggdb | sed 's/.*[#@]//')"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "PACKAGE=eggdb-$version-$TARGET" >> "$GITHUB_ENV"
+      - name: Check the tag names the version being built
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [ "$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $VERSION"
+            exit 1
+          fi
+      - name: Check the shipped binary depends only on our own crates
+        run: |
+          foreign=$(cargo tree -p eggdb -e normal,build --prefix none --target "$TARGET" \
+            | grep -v -E ' \((/|[A-Za-z]:)' || true)
+          if [ -n "$foreign" ]; then
+            echo "::error::third-party crates in the shipped binary (D1): $foreign"
+            exit 1
+          fi
+      - name: Build
+        run: cargo build --release --locked -p eggdb --target "$TARGET"
+      - name: Run the built binary
+        if: matrix.runs_here
+        run: |
+          output=$("target/$TARGET/release/eggdb$EXE")
+          echo "$output"
+          [ "$output" = "EggDB ${VERSION#v}" ]
+      - name: Package
+        run: |
+          mkdir -p "dist/$PACKAGE"
+          cp "target/$TARGET/release/eggdb$EXE" LICENSE-MIT LICENSE-APACHE README.md "dist/$PACKAGE/"
+          cd dist
+          if [ -n "$EXE" ]; then
+            archive="$PACKAGE.zip"
+            7z a -tzip -mx=9 "$archive" "$PACKAGE" > /dev/null
+          else
+            archive="$PACKAGE.tar.gz"
+            tar -czf "$archive" "$PACKAGE"
+          fi
+          binary_bytes=$(wc -c < "$PACKAGE/eggdb$EXE" | tr -d ' ')
+          archive_bytes=$(wc -c < "$archive" | tr -d ' ')
+          printf '| `%s` | %s | %s |\n' "$TARGET" "$binary_bytes" "$archive_bytes" > "$PACKAGE.size"
+          rm -r "$PACKAGE"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PACKAGE }}
+          path: dist/
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: eggdb-*
+          path: dist
+          merge-multiple: true
+      - name: Write the checksums and the release notes
+        run: |
+          cd dist
+          sha256sum eggdb-*.tar.gz eggdb-*.zip > SHA256SUMS
+          {
+            cat "../docs/releases/$GITHUB_REF_NAME.md"
+            echo
+            echo '## Sizes'
+            echo
+            echo '| Target | Binary (bytes) | Download (bytes) |'
+            echo '|--------|----------------|------------------|'
+            sort ./*.size
+            echo
+            echo 'Each archive is checked by `SHA256SUMS` and carries a signed build provenance'
+            echo 'attestation: `gh attestation verify <archive> -R eggspot/EggDB`.'
+          } > ../release-notes.md
+          rm ./*.size
+      - uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --title "EggDB $GITHUB_REF_NAME" --notes-file release-notes.md

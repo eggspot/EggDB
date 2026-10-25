@@ -2254,3 +2254,43 @@ the operating system's limit, not the queue's.
 no change call at all but needs per-change errors (`EV_ERROR` events or `EV_RECEIPT`); measuring
 on Linux.
 
+## D75 Releases: v0.1.0 first, built and published by a tag-triggered workflow, static Linux binaries by default — Decided by research (build loop, 2026-10-26); refines D6, D14, D21 and D43
+**Numbering:** M0 was never tagged, so M1 is the first release, v0.1.0, and each later milestone
+bumps MINOR from there. No tag is added retroactively for M0: it would publish a release with no
+binary behind it.
+
+**How a release is cut:** a pull request bumps the workspace version and adds
+`docs/releases/vX.Y.Z.md`; after it merges and `main` is green, the tag `vX.Y.Z` is pushed.
+`.github/workflows/release.yml` then:
+- refuses a tag that doesn't name the workspace version;
+- refuses a shipped binary that depends on any crate but our own (D1);
+- builds `eggdb` for each target, runs it where the runner can, and packs it with the licenses
+  and the README (`.tar.gz`, `.zip` on Windows);
+- writes `SHA256SUMS`, attests build provenance for every file (signed through GitHub's
+  Sigstore-backed attestations, verifiable with `gh attestation verify`), and publishes the
+  GitHub Release with the notes file plus a table of binary and download sizes, the first
+  numbers D6 and D14 track.
+
+Pull requests that change the workflow or the notes run the builds without publishing, so the
+pipeline is tested before a tag depends on it.
+
+**Targets:** Linux on x86-64 and AArch64 twice: static `-linux-musl` builds, the default
+download because only they are one self-contained file with no dependencies on every
+distribution (D14), and `-linux-gnu` builds made on Ubuntu 22.04 so they need only glibc 2.35.
+The glibc builds stay because musl's allocator is markedly slower under many threads, which D7
+can't accept; a memory allocator of our own, now on the roadmap, is what closes that gap later.
+macOS on Apple silicon and Intel, Windows on x86-64 and AArch64. A CI job runs the whole test
+suite against musl so a release is never the first musl build.
+
+**Stripped:** release builds strip symbols (`strip = true`), which took the binary from 375 KB to
+302 KB on macOS. The cost is unnamed frames in a backtrace printed before an abort; crash
+reports are symbolized from the build instead, once releases are reproducible.
+
+**Legal check before v0.1.0 (D43):** the release contains no cryptography, so there is no
+export classification to make yet; that research is due before the first release that ships
+D23's cryptography. The shipped binary has no third-party code, and the workflow checks it.
+
+**Not yet:** signing beyond the provenance attestation, a software bill of materials (empty
+while nothing third-party ships), reproducible builds, package managers and registries (they
+need the owner's accounts), and the startup, idle-memory and install-time measurements, which
+start with the first build that serves data (M4).

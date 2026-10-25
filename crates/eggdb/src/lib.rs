@@ -9,6 +9,6 @@ mod tests {
 
     #[test]
     fn version_matches_the_package() {
-        assert_eq!(VERSION, "0.0.0");
+        assert_eq!(VERSION, "0.1.0");
     }
 }

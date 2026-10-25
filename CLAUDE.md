@@ -225,8 +225,10 @@ A PR that changes the license is merged only on the owner's explicit instruction
 
 ## Releases
 Semantic versioning, tags `vMAJOR.MINOR.PATCH`. Until 1.0, each finished milestone bumps MINOR and
-fixes in between bump PATCH. Cut the release as soon as a milestone is merged and `main` is green:
-version bump PR, tag, and a GitHub Release with notes and binaries for the platforms that build.
+fixes in between bump PATCH; M1 is the first release, v0.1.0 (M0 was never released). Cut the
+release as soon as a milestone is merged and `main` is green: a version bump PR with
+`docs/releases/vX.Y.Z.md`, then push the tag; `.github/workflows/release.yml` builds the binaries
+and publishes the GitHub Release (D75).
 Publishing to package registries (crates.io and others) needs accounts and tokens, so the owner sets
 those up first.
 

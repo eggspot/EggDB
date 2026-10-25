@@ -363,3 +363,84 @@ contract!(
         assert_eq!(received, b"still here");
     }
 );
+
+fn receive_one<N: Network>(
+    queue: &mut N::Queue,
+    stream: &Arc<N::Stream>,
+    capacity: usize,
+) -> Completion<N> {
+    let op = NetOp::Receive {
+        stream: Arc::clone(stream),
+        buffer: vec![0; capacity].into(),
+    };
+    submit(queue, op, 0);
+    reap::<N>(queue, 1).pop().unwrap()
+}
+
+contract!(sending_after_shutting_down_writes_is_a_reset, |net| {
+    let listener = Arc::new(net.listen(any_port()).unwrap());
+    let mut queue = net.net_queue(NetQueueOptions::new()).unwrap();
+    let (client, _server) = connect::<N>(&mut queue, &listener);
+    client.shutdown_write().unwrap();
+    let send = NetOp::Send {
+        stream: Arc::clone(&client),
+        buffer: b"late".to_vec().into(),
+    };
+    submit(&mut queue, send, 0);
+    let completion = reap::<N>(&mut queue, 1).pop().unwrap();
+    assert_eq!(
+        completion.result.unwrap_err().kind(),
+        ErrorKind::ConnectionReset
+    );
+});
+
+contract!(
+    dropping_a_listener_resets_the_connections_it_never_accepted,
+    |net| {
+        let listener = net.listen(any_port()).unwrap();
+        let mut queue = net.net_queue(NetQueueOptions::new()).unwrap();
+        let address = listener.local_address().unwrap();
+        submit(&mut queue, NetOp::Connect { address }, 0);
+        let client = Arc::new(
+            reap::<N>(&mut queue, 1)
+                .pop()
+                .unwrap()
+                .result
+                .unwrap()
+                .into_stream()
+                .unwrap(),
+        );
+        drop(listener);
+        let completion = receive_one::<N>(&mut queue, &client, 8);
+        assert_eq!(
+            completion.result.unwrap_err().kind(),
+            ErrorKind::ConnectionReset
+        );
+    }
+);
+
+#[test]
+fn dropping_an_end_with_unread_bytes_resets_its_peer_on_the_machine() {
+    fn run<N: Network>(net: &N) {
+        let listener = Arc::new(net.listen(any_port()).unwrap());
+        let mut queue = net.net_queue(NetQueueOptions::new()).unwrap();
+        let (client, server) = connect::<N>(&mut queue, &listener);
+        let send = NetOp::Send {
+            stream: Arc::clone(&client),
+            buffer: b"ab".to_vec().into(),
+        };
+        submit(&mut queue, send, 0);
+        reap::<N>(&mut queue, 1);
+        let first = receive_one::<N>(&mut queue, &server, 1).result.unwrap();
+        assert_eq!(first.transferred(), Some(1));
+        drop(server);
+        let completion = receive_one::<N>(&mut queue, &client, 8);
+        assert_eq!(
+            completion.result.unwrap_err().kind(),
+            ErrorKind::ConnectionReset
+        );
+    }
+    for backend in os_backends() {
+        run(&OsBackend(backend));
+    }
+}
