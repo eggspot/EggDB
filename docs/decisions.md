@@ -2198,8 +2198,9 @@ before the wait and a deregister after it woke. The readiness queue now asks the
 - **Descriptors are closed and reused behind the queue's back:** users hold the sockets and may
   drop them at any time. The selector remembers per descriptor what it has armed. Interest is
   armed only while an operation waits, and that operation holds the socket open, so an armed
-  descriptor cannot be closed and reused. A cancel that leaves no waiter disarms at once (one
-  call, off the hot path). What may be stale is only epoll's "already in the set" hint for a
+  descriptor cannot be closed and reused. A cancel that leaves no waiter disarms at the next
+  reap, before that reap hands the canceled operation back, so the socket is still open when it
+  is disarmed (one call, off the hot path). What may be stale is only epoll's "already in the set" hint for a
   closed descriptor; a re-arm that gets `ENOENT` adds instead, and an add that gets `EEXIST`
   modifies. So the first wait on a socket that reuses an old descriptor number costs two calls
   (the failed modify and the add), as every wait did before, and each later wait one. A test cancels, drops and reconnects so descriptors are reused, and fails when a
@@ -2233,8 +2234,8 @@ Now it takes `socket`, `connect`, `epoll_ctl`, `epoll_wait`, `getsockopt`, `getp
 queue retries them one at a time in submission order and stops at the first that would block,
 which puts the rest back in front without a call. Before, every waiting accept tried and all
 but one got `EAGAIN`. A level-triggered listener reports readiness again for the next
-connection, so stopping loses nothing. Only accepts can share a direction of one socket, as D70
-refuses a second receive or send on a stream.
+connection, so stopping loses nothing. Only accepts share a direction of one socket in
+practice, as D70 allows at most one receive and one send in flight per stream.
 
 **Platform `cfg` lists:** the readiness module now chooses its backends with `cfg_select!`
 (stable in the pinned toolchain) instead of repeating the list of platforms six times, without
