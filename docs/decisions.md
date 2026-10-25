@@ -1936,7 +1936,7 @@ through our own declarations of `CreateIoCompletionPort`, `ReOpenFile`,
   from its packet, and one that fails at once completes with that error and no packet;
   `ERROR_INVALID_USER_BUFFER` and `ERROR_NOT_ENOUGH_MEMORY`, documented as too many requests
   outstanding, hand the operation back with `QueueFull` while the port has operations in flight
-(otherwise they complete with that error, since reaping would free nothing). A Windows test submits refused
+  (otherwise they complete with that error, since reaping would free nothing). A Windows test submits refused
   operations between good ones to pin that no stray packet arrives.
 - **Answered without the system, as `OsFile` and io_uring answer them:** empty reads and writes
   transfer 0, writes through a read-only handle are `PermissionDenied`, and offsets beyond
