@@ -2175,4 +2175,7 @@ queue's interest tracking (interest only while an operation waits, D71) is uncha
   change) and 70.7 µs with the portable poller, which those systems ran until now.
 
 **Not yet:** OpenBSD and DragonFly (tier 3 targets, which cannot be linted here) still run the
-portable poller; non-blocking connects and runners on the BSDs and illumos.
+portable poller; non-blocking connects and runners on the BSDs and illumos. On Solaris a send
+to a peer that went away may still raise `SIGPIPE`, as std sends with `MSG_NOSIGNAL` on Linux,
+the BSDs and illumos but not there, and the portable poller had the same gap; it needs
+`SO_NOSIGPIPE`-like handling once Solaris has a runner.

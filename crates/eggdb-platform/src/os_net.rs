@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 /// systems ([`NetBackend::Kqueue`]), blocking inside `reap` until enough operations finish,
 /// and connect without blocking. On FreeBSD, NetBSD, illumos and Solaris they wait in
 /// `poll(2)` ([`NetBackend::Poll`]), and a connect still waits for the operating system inside
-/// `reap`. Elsewhere they run [`NetBackend::Portable`]: `reap` retries
-/// the operations that would block, backing off between rounds, and a connect waits for the
-/// operating system inside `reap`. [`OsNetQueue::backend`] says which one a queue runs.
+/// `reap`. Elsewhere they run [`NetBackend::Portable`]: `reap` retries the operations that
+/// would block, backing off between rounds, and a connect waits for the operating system inside
+/// `reap`. [`OsNetQueue::backend`] says which one a queue runs.
 /// Connections have Nagle's algorithm turned off, as database protocols send small requests
 /// and answers, and never raise `SIGPIPE`, so a process embedding EggDB is not stopped by a
 /// peer that went away.
