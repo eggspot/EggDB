@@ -257,7 +257,7 @@ pub enum NetBackend {
     Kqueue,
     /// Waits for readiness in `poll(2)`, inside [`NetQueue::reap`]: the automatic choice on
     /// FreeBSD, NetBSD, illumos and Solaris, where connects still block, and available on
-    /// request on Linux, Android and Apple's systems, where they do not. Each wait hands the
+    /// request wherever [`NetBackend::Epoll`] or [`NetBackend::Kqueue`] is, where they do not. Each wait hands the
     /// kernel every socket an operation waits on, so it suits fewer connections than epoll or
     /// kqueue.
     Poll,

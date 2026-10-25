@@ -12,20 +12,10 @@ const POLLHUP: c_short = 0x10;
 const POLLNVAL: c_short = 0x20;
 const EINTR: i32 = 4;
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "illumos",
-    target_os = "solaris"
-))]
+#[cfg(any(target_os = "linux", target_os = "illumos", target_os = "solaris"))]
 type Nfds = std::ffi::c_ulong;
 
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "illumos",
-    target_os = "solaris"
-)))]
+#[cfg(not(any(target_os = "linux", target_os = "illumos", target_os = "solaris")))]
 type Nfds = std::ffi::c_uint;
 
 unsafe extern "C" {

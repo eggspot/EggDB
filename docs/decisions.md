@@ -2142,8 +2142,9 @@ of the simulated seeds run with latency.
 
 ## D73 `poll(2)` for the network queue on the BSDs and illumos, with blocking connects there for now — Decided by research (build loop, 2026-10-25); refines D71
 `NetBackend::Poll` waits for readiness in `poll(2)`. It is the automatic backend on FreeBSD,
-NetBSD, illumos and Solaris, which had only the portable poller, and can be requested on Linux,
-Android and Apple's systems, where CI runs the contract tests on it. It shares the readiness
+NetBSD, illumos and Solaris, which had only the portable poller, and can be requested wherever
+epoll or kqueue is available (Linux, Android and Apple's systems); CI runs the contract tests on
+it on Linux and macOS. It shares the readiness
 queue with epoll and kqueue: a selector enum picks the system's own selector or `poll`, and the
 queue's interest tracking (interest only while an operation waits, D71) is unchanged.
 
@@ -2155,7 +2156,8 @@ queue's interest tracking (interest only while an operation waits, D71) is uncha
 - **Verified from the public headers (FreeBSD and NetBSD under BSD, illumos under CDDL):**
   `pollfd` is `{int fd; short events; short revents}`, `POLLIN` 0x1, `POLLOUT` 0x4, `POLLERR`
   0x8, `POLLHUP` 0x10, `POLLNVAL` 0x20 and `EINTR` 4 everywhere; `nfds_t` is `unsigned long` on
-  Linux, illumos and Solaris and `unsigned int` on Apple's systems, FreeBSD and NetBSD; `poll`
+  Linux (glibc and musl), illumos and Solaris and `unsigned int` on Android (bionic), Apple's
+  systems, FreeBSD and NetBSD; `poll`
   is not a versioned symbol on NetBSD (only `pollts` is).
 - **Connects still block on FreeBSD, NetBSD, illumos and Solaris.** A non-blocking connect needs
   our own `socket` and `connect` declarations with constants that differ in ways nothing would
@@ -2167,7 +2169,7 @@ queue's interest tracking (interest only while an operation waits, D71) is uncha
   Apple's systems the poll backend connects without blocking, through the same code as epoll
   and kqueue.
 - **CI:** a new `cross` job lints the platform layer for FreeBSD, NetBSD, illumos, Solaris,
-  aarch64 Linux, iOS and WebAssembly, which catches type and `cfg` errors though not wrong
+  aarch64 Linux, Android, iOS and WebAssembly, which catches type and `cfg` errors though not wrong
   constants or link errors. It runs beside the other jobs, so the time to a green run is
   unchanged.
 - **Measured:** on a loopback ping-pong of 8-byte messages through one queue (Apple M-series,
