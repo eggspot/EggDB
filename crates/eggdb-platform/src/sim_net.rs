@@ -21,7 +21,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// Connecting where nothing listens is [`ErrorKind::ConnectionRefused`]. Dropping a connection
 /// with bytes still owed to it resets it, so its peer's operations fail with
 /// [`ErrorKind::ConnectionReset`]; dropping it otherwise ends its sending, as
-/// [`NetStream::shutdown_write`] does. Every listen and every operation that completes is
+/// [`NetStream::shutdown_write`] does, and the peer's later sends fail with
+/// [`ErrorKind::ConnectionReset`] at once. Every listen and every operation that completes is
 /// numbered from zero, and any of them can be made to fail with [`ErrorKind::InjectedFault`],
 /// by number or at random from a seed, changing nothing. Clones share the same network.
 #[derive(Debug, Clone, Default)]
@@ -69,7 +70,7 @@ impl Flow {
         self.in_transit.len() + self.arrived.len()
     }
 
-    fn moving(&self) -> bool {
+    fn in_transit(&self) -> bool {
         !self.in_transit.is_empty() || (self.ended && !self.end_arrived)
     }
 }
@@ -296,7 +297,7 @@ impl SimNetQueue {
     fn perform(&mut self, world: &mut World, completions: &mut Vec<Completion>) -> usize {
         let mut order: Vec<usize> = (0..self.waiting.len()).collect();
         for at in (1..order.len()).rev() {
-            let other = world.below(at + 1);
+            let other = world.random_below(at + 1);
             order.swap(at, other);
         }
         let mut finished = Vec::new();
@@ -355,7 +356,7 @@ impl NetQueue for SimNetQueue {
                 break;
             }
             if done == 0 {
-                if !world.moving() {
+                if !world.anything_in_transit() {
                     self.in_flight -= reaped;
                     return Err(Error::new(ErrorKind::Stalled));
                 }
@@ -376,7 +377,7 @@ impl NetQueue for SimNetQueue {
 }
 
 impl World {
-    fn below(&mut self, bound: usize) -> usize {
+    fn random_below(&mut self, bound: usize) -> usize {
         usize::try_from(self.rng.next_u64() % bound as u64).unwrap_or(0)
     }
 
@@ -421,10 +422,10 @@ impl World {
         }
     }
 
-    fn moving(&self) -> bool {
+    fn anything_in_transit(&self) -> bool {
         self.connections
             .values()
-            .any(|connection| connection.flows.iter().any(Flow::moving))
+            .any(|connection| connection.flows.iter().any(Flow::in_transit))
     }
 
     fn deliver_some(&mut self) {
@@ -462,7 +463,7 @@ impl World {
 
     fn transfer_size(&mut self, most: usize) -> usize {
         if self.short_transfers && most > 1 && self.rng.coin() {
-            1 + self.below(most)
+            1 + self.random_below(most)
         } else {
             most
         }
