@@ -116,6 +116,12 @@ mod port {
         user_data: u64,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Started {
+        InFlight,
+        Finished,
+    }
+
     #[derive(Debug)]
     struct PortHandle(OwnedHandle);
 
@@ -269,11 +275,11 @@ mod port {
             // from the port.
             let started = unsafe { begin(pending) };
             match started {
-                Ok(true) => {
+                Ok(Started::InFlight) => {
                     self.in_port += 1;
                     Ok(())
                 }
-                Ok(false) => {
+                Ok(Started::Finished) => {
                     // SAFETY: the operation finished at once, and with
                     // `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` no packet will name `pending`, so
                     // this is its only owner.
@@ -286,10 +292,12 @@ mod port {
                     // packet for it and holds no pointer into it.
                     let pending = unsafe { Box::from_raw(pending) };
                     let code = error.raw_os_error();
-                    if matches!(
-                        code,
-                        Some(ERROR_INVALID_USER_BUFFER | ERROR_NOT_ENOUGH_MEMORY)
-                    ) {
+                    if self.in_port > 0
+                        && matches!(
+                            code,
+                            Some(ERROR_INVALID_USER_BUFFER | ERROR_NOT_ENOUGH_MEMORY)
+                        )
+                    {
                         return Err(RejectedOp {
                             error: Error::from(error).with_kind(ErrorKind::QueueFull),
                             op: pending.op,
@@ -401,10 +409,10 @@ mod port {
     fn answered_without_the_kernel(op: &IoOp<OsFile>) -> Option<Result<usize>> {
         let refused = |kind| Some(Err(Error::new(kind)));
         match op {
-            IoOp::Read { buffer, .. } if buffer.is_empty() => Some(Ok(0)),
             IoOp::Read { offset, .. } if *offset > LARGEST_OFFSET => {
                 refused(ErrorKind::InvalidInput)
             }
+            IoOp::Read { buffer, .. } if buffer.is_empty() => Some(Ok(0)),
             IoOp::Write { file, .. } if !file.is_writable() => refused(ErrorKind::PermissionDenied),
             IoOp::Write { buffer, .. } if buffer.is_empty() => Some(Ok(0)),
             IoOp::Write { offset, .. } if *offset > LARGEST_OFFSET => {
@@ -478,14 +486,7 @@ mod port {
         }
     }
 
-    /// Starts the read or write of `pending`: `Ok(true)` when it is in flight and its packet
-    /// will arrive on the port, `Ok(false)` when it already finished.
-    ///
-    /// # Safety
-    /// `pending` must point to a live `Pending` holding a read or a write, which stays in place
-    /// and untouched until its packet is read from the port or, when this returns `Ok(false)`
-    /// or an error, until the caller takes it back.
-    unsafe fn begin(pending: *mut Pending) -> io::Result<bool> {
+    unsafe fn begin(pending: *mut Pending) -> io::Result<Started> {
         // SAFETY: the caller guarantees `pending` is live and ours.
         let handle = unsafe { (*pending).handle };
         // SAFETY: as above; the reference ends before the system is handed any pointer into it.
@@ -515,11 +516,11 @@ mod port {
             unsafe { ReadFile(handle, buffer, len, ptr::null_mut(), overlapped) }
         };
         if done != 0 {
-            return Ok(false);
+            return Ok(Started::Finished);
         }
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(ERROR_IO_PENDING) {
-            Ok(true)
+            Ok(Started::InFlight)
         } else {
             Err(error)
         }
@@ -662,6 +663,13 @@ mod tests {
         };
         assert!(queue.submit(op, 0).is_ok());
         assert_eq!(reap_all(&mut queue)[0].result.as_ref().unwrap(), &0);
+        let write = IoOp::Write {
+            file: Arc::clone(&file),
+            offset: 0,
+            buffer: page_of(6).into(),
+        };
+        assert!(queue.submit(write, 1).is_ok());
+        assert_eq!(reap_all(&mut queue)[0].result.as_ref().unwrap(), &PAGE);
     }
 
     #[test]

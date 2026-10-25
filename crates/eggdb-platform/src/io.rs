@@ -272,10 +272,9 @@ impl IoQueueOptions {
         self
     }
 
-    /// Sets how many worker threads an [`IoBackend::ThreadPool`] or an [`IoBackend::Iocp`]
-    /// starts. When no backend is
-    /// asked for and the queue has no asynchronous file I/O from the operating system
-    /// (everywhere but Linux for now, or after io_uring was refused), 0 runs the operations
+    /// Sets how many worker threads an [`IoBackend::ThreadPool`] or an [`IoBackend::Iocp`] starts.
+    /// When no backend is asked for and the queue has no asynchronous file I/O from the operating
+    /// system (everywhere but Linux for now, or after io_uring was refused), 0 runs the operations
     /// [`IoBackend::Inline`]. A count above the capacity is lowered to it.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = threads;

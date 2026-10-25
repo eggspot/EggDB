@@ -1935,7 +1935,8 @@ through our own declarations of `CreateIoCompletionPort`, `ReOpenFile`,
   from its own structure (the skip flag means no packet follows), one that is pending completes
   from its packet, and one that fails at once completes with that error and no packet;
   `ERROR_INVALID_USER_BUFFER` and `ERROR_NOT_ENOUGH_MEMORY`, documented as too many requests
-  outstanding, hand the operation back with `QueueFull`. A Windows test submits refused
+  outstanding, hand the operation back with `QueueFull` while the port has operations in flight
+(otherwise they complete with that error, since reaping would free nothing). A Windows test submits refused
   operations between good ones to pin that no stray packet arrives.
 - **Answered without the system, as `OsFile` and io_uring answer them:** empty reads and writes
   transfer 0, writes through a read-only handle are `PermissionDenied`, and offsets beyond
@@ -1958,7 +1959,11 @@ The completion key is the queue's number; packets are read 64 at a time with
 Every wait that returns a full batch is followed by another without waiting, so wake packets
 whose completions were already taken from the workers never pile up beyond one queue's worth.
 
-**Follow-ups:** measuring the port against the pool on Windows once the storage engine's
+**Follow-ups:** guarding `OsFile`'s own positional reads and writes on Windows against offsets
+beyond `i64::MAX`, which the workers' path still passes to the system; checking that every file
+system the engine runs on honours `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` (network redirectors in
+particular), since a packet after an immediate success would name freed memory; measuring the
+port against the pool on Windows once the storage engine's
 benchmarks exist, then deciding the automatic choice; Windows 11's `IoRing` API; registered
 buffers (`SetFileIoOverlappedRange`); and D67's one-thread-per-queue rule checked against how
 Windows treats I/O issued by a thread that exits.
