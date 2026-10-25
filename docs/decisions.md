@@ -1955,6 +1955,8 @@ file and buffer; it is freed only when its packet is read, or at once when no pa
 The completion key is the queue's number; packets are read 64 at a time with
 `GetQueuedCompletionStatusEx`. While workers have operations, `reap` waits on the port at most
 10 ms at a time and then checks them, so a wake packet the system failed to post cannot hang it.
+Every wait that returns a full batch is followed by another without waiting, so wake packets
+whose completions were already taken from the workers never pile up beyond one queue's worth.
 
 **Follow-ups:** measuring the port against the pool on Windows once the storage engine's
 benchmarks exist, then deciding the automatic choice; Windows 11's `IoRing` API; registered

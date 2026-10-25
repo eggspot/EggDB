@@ -315,6 +315,24 @@ mod port {
             completions: &mut Vec<IoCompletion<OsFile>>,
             milliseconds: u32,
         ) -> Result<()> {
+            let mut wait = milliseconds;
+            while self.in_port > 0 || self.at_workers > 0 {
+                if self.dequeue(completions, wait)? < ENTRIES_PER_WAIT {
+                    break;
+                }
+                wait = 0;
+            }
+            if let Some(workers) = &self.workers {
+                self.at_workers -= workers.receive_finished(completions);
+            }
+            Ok(())
+        }
+
+        fn dequeue(
+            &mut self,
+            completions: &mut Vec<IoCompletion<OsFile>>,
+            milliseconds: u32,
+        ) -> Result<usize> {
             let mut entries = [OverlappedEntry {
                 completion_key: 0,
                 overlapped: ptr::null_mut(),
@@ -322,28 +340,27 @@ mod port {
                 transferred: 0,
             }; ENTRIES_PER_WAIT];
             let mut removed = 0_u32;
-            if self.in_port > 0 || self.at_workers > 0 {
-                // SAFETY: the entry array lives for the whole call and holds `ENTRIES_PER_WAIT`
-                // entries, the count the call is given.
-                let dequeued = unsafe {
-                    GetQueuedCompletionStatusEx(
-                        self.port.0.as_raw_handle(),
-                        entries.as_mut_ptr(),
-                        ENTRIES_PER_WAIT as u32,
-                        &raw mut removed,
-                        milliseconds,
-                        0,
-                    )
-                };
-                if dequeued == 0 {
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() != Some(WAIT_TIMEOUT) {
-                        return Err(error.into());
-                    }
-                    removed = 0;
+            // SAFETY: the entry array lives for the whole call and holds `ENTRIES_PER_WAIT`
+            // entries, the count the call is given.
+            let dequeued = unsafe {
+                GetQueuedCompletionStatusEx(
+                    self.port.0.as_raw_handle(),
+                    entries.as_mut_ptr(),
+                    ENTRIES_PER_WAIT as u32,
+                    &raw mut removed,
+                    milliseconds,
+                    0,
+                )
+            };
+            if dequeued == 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(WAIT_TIMEOUT) {
+                    return Ok(0);
                 }
+                return Err(error.into());
             }
-            for entry in &entries[..removed as usize] {
+            let removed = (removed as usize).min(ENTRIES_PER_WAIT);
+            for entry in &entries[..removed] {
                 if entry.overlapped.is_null() {
                     continue;
                 }
@@ -354,10 +371,7 @@ mod port {
                 self.in_port -= 1;
                 completions.push(finish(*pending));
             }
-            if let Some(workers) = &self.workers {
-                self.at_workers -= workers.receive_finished(completions);
-            }
-            Ok(())
+            Ok(removed)
         }
     }
 
@@ -715,6 +729,37 @@ mod tests {
         assert_eq!(file.overlapped_handle_count(), 1);
         drop(second);
         assert_eq!(file.overlapped_handle_count(), 0);
+    }
+
+    #[test]
+    fn bursts_of_cached_operations_larger_than_one_batch_all_complete() {
+        let path = std::env::temp_dir().join(format!("eggdb-iocp-burst-{}", std::process::id()));
+        let fs = OsFileSystem::new();
+        let file = Arc::new(fs.open(&path, OpenMode::Create).unwrap());
+        let mut queue = fs
+            .io_queue(
+                IoQueueOptions::new()
+                    .backend(IoBackend::Iocp)
+                    .capacity(512)
+                    .threads(4),
+            )
+            .unwrap();
+        for _ in 0..4 {
+            for tag in 0..300_u64 {
+                let op = IoOp::Write {
+                    file: Arc::clone(&file),
+                    offset: tag,
+                    buffer: vec![1].into(),
+                };
+                assert!(queue.submit(op, tag).is_ok());
+            }
+            let completions = reap_all(&mut queue);
+            assert_eq!(completions.len(), 300);
+            assert!(completions.iter().all(|done| done.result.is_ok()));
+        }
+        drop(queue);
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
