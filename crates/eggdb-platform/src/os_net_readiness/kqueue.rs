@@ -1,8 +1,10 @@
 use super::queue::{Connecting, Interest, Readiness};
 use crate::net::NetBackend;
+use crate::os_net::OsStream;
+use std::collections::HashMap;
 use std::ffi::{c_int, c_long, c_void};
 use std::io;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::time::Duration;
@@ -15,12 +17,15 @@ const EVFILT_READ: i16 = -1;
 const EVFILT_WRITE: i16 = -2;
 const EV_ADD: u16 = 0x1;
 const EV_DELETE: u16 = 0x2;
+const EV_ONESHOT: u16 = 0x10;
 
 const AF_INET: c_int = 2;
 const AF_INET6: c_int = 30;
 const SOCK_STREAM: c_int = 1;
 const SOL_SOCKET: c_int = 0xffff;
 const SO_NOSIGPIPE: c_int = 0x1022;
+const IPPROTO_TCP: c_int = 6;
+const TCP_NODELAY: c_int = 1;
 const F_SETFD: c_int = 2;
 const FD_CLOEXEC: c_int = 1;
 const EINPROGRESS: i32 = 36;
@@ -43,6 +48,14 @@ unsafe extern "C" {
     fn connect(fd: c_int, address: *const c_void, length: u32) -> c_int;
     fn setsockopt(fd: c_int, level: c_int, name: c_int, value: *const c_void, length: u32)
     -> c_int;
+    #[cfg(test)]
+    fn getsockopt(
+        fd: c_int,
+        level: c_int,
+        name: c_int,
+        value: *mut c_void,
+        length: *mut u32,
+    ) -> c_int;
 }
 
 #[repr(C)]
@@ -68,6 +81,7 @@ const _: () = assert!(size_of::<Kevent>() == 3 * size_of::<usize>() + 8);
 pub(super) struct Selector {
     kqueue: OwnedFd,
     events: Vec<Kevent>,
+    armed: HashMap<RawFd, Interest>,
 }
 
 impl Selector {
@@ -83,19 +97,27 @@ impl Selector {
         Ok(Self {
             kqueue,
             events: vec![Kevent::default(); capacity.clamp(1, MOST_EVENTS)],
+            armed: HashMap::new(),
         })
     }
 
-    pub(super) fn change(&self, fd: RawFd, from: Interest, to: Interest) -> io::Result<()> {
+    pub(super) fn want(&mut self, fd: RawFd, wanted: Interest) -> io::Result<()> {
+        let mut armed = self.armed.remove(&fd).unwrap_or(Interest::NONE);
         let mut outcome = Ok(());
-        for (filter, was, wanted) in [
-            (EVFILT_READ, from.read, to.read),
-            (EVFILT_WRITE, from.write, to.write),
+        for (filter, now, wanted) in [
+            (EVFILT_READ, &mut armed.read, wanted.read),
+            (EVFILT_WRITE, &mut armed.write, wanted.write),
         ] {
-            if was != wanted {
+            if *now != wanted {
                 let changed = self.change_filter(fd, filter, wanted);
+                if changed.is_ok() || !wanted {
+                    *now = wanted;
+                }
                 outcome = outcome.and(changed);
             }
+        }
+        if armed != Interest::NONE {
+            self.armed.insert(fd, armed);
         }
         outcome
     }
@@ -104,7 +126,7 @@ impl Selector {
         let change = Kevent {
             ident: fd.unsigned_abs() as usize,
             filter,
-            flags: if wanted { EV_ADD } else { EV_DELETE },
+            flags: if wanted { EV_ADD | EV_ONESHOT } else { EV_DELETE },
             ..Kevent::default()
         };
         // SAFETY: change is a valid kevent read during the call; no events are asked for, so
@@ -159,11 +181,21 @@ impl Selector {
             return Err(error);
         }
         let count = count.unsigned_abs() as usize;
-        ready.extend(self.events.iter().take(count).map(|event| Readiness {
-            fd: RawFd::try_from(event.ident).unwrap_or(RawFd::MAX),
-            read: event.filter == EVFILT_READ,
-            write: event.filter == EVFILT_WRITE,
-        }));
+        for event in self.events.iter().take(count) {
+            let readiness = Readiness {
+                fd: RawFd::try_from(event.ident).unwrap_or(RawFd::MAX),
+                read: event.filter == EVFILT_READ,
+                write: event.filter == EVFILT_WRITE,
+            };
+            if let Some(armed) = self.armed.get_mut(&readiness.fd) {
+                armed.read &= !readiness.read;
+                armed.write &= !readiness.write;
+                if *armed == Interest::NONE {
+                    self.armed.remove(&readiness.fd);
+                }
+            }
+            ready.push(readiness);
+        }
         Ok(())
     }
 }
@@ -178,13 +210,49 @@ fn close_on_exec(fd: RawFd) -> io::Result<()> {
 }
 
 pub(crate) fn suppress_sigpipe(socket: &TcpStream) -> io::Result<()> {
+    turn_on(socket.as_raw_fd(), SOL_SOCKET, SO_NOSIGPIPE)
+}
+
+pub(crate) fn prepare_listener(listener: &TcpListener) -> io::Result<()> {
+    turn_on(listener.as_raw_fd(), SOL_SOCKET, SO_NOSIGPIPE)?;
+    turn_on(listener.as_raw_fd(), IPPROTO_TCP, TCP_NODELAY)
+}
+
+pub(crate) fn accept(listener: &TcpListener) -> io::Result<OsStream> {
+    listener
+        .accept()
+        .map(|(stream, _)| OsStream::inherited_from_listener(stream))
+}
+
+#[cfg(test)]
+pub(crate) fn sigpipe_suppressed(socket: &TcpStream) -> io::Result<bool> {
+    let mut value: c_int = 0;
+    let mut length = size_of::<c_int>() as u32;
+    // SAFETY: value and length are an int and its size that outlive the call, which writes at
+    // most length bytes into value.
+    let result = unsafe {
+        getsockopt(
+            socket.as_raw_fd(),
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            (&mut value as *mut c_int).cast(),
+            &mut length,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(value != 0)
+}
+
+fn turn_on(fd: RawFd, level: c_int, option: c_int) -> io::Result<()> {
     let on: c_int = 1;
     // SAFETY: on is an int that outlives the call, which only reads it.
     let result = unsafe {
         setsockopt(
-            socket.as_raw_fd(),
-            SOL_SOCKET,
-            SO_NOSIGPIPE,
+            fd,
+            level,
+            option,
             (&on as *const c_int).cast(),
             size_of::<c_int>() as u32,
         )

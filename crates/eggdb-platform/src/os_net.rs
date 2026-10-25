@@ -3,7 +3,9 @@ use crate::net::{
     Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
     NetStream, Network, RejectedNetOp, answered_at_once, net_queue_full,
 };
-use crate::os_net_readiness::{NATIVE, ReadinessQueue, supports, suppress_sigpipe};
+use crate::os_net_readiness::{
+    NATIVE, ReadinessQueue, accept, prepare_listener, supports, suppress_sigpipe,
+};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
@@ -40,6 +42,7 @@ impl Network for OsNetwork {
         let Address::Tcp(address) = address;
         let listener = TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
+        prepare_listener(&listener)?;
         Ok(OsListener { listener })
     }
 
@@ -80,11 +83,20 @@ pub struct OsStream {
 }
 
 impl OsStream {
-    pub(crate) fn new(stream: TcpStream) -> Result<Self> {
+    pub(crate) fn set_up(stream: TcpStream) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
         suppress_sigpipe(&stream)?;
+        Ok(Self::set_up_non_blocking(stream))
+    }
+
+    pub(crate) fn set_up_non_blocking(stream: TcpStream) -> Self {
         let _ = stream.set_nodelay(true);
-        Ok(Self { stream })
+        Self { stream }
+    }
+
+    #[cfg_attr(not(target_vendor = "apple"), expect(dead_code))]
+    pub(crate) fn inherited_from_listener(stream: TcpStream) -> Self {
+        Self { stream }
     }
 }
 
@@ -292,14 +304,10 @@ pub(crate) fn attempt(
         return Some(answer);
     }
     match op {
-        NetOp::Accept { listener } => match listener.listener.accept() {
+        NetOp::Accept { listener } => match accept(&listener.listener) {
             Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => None,
-            accepted => finished(accepted).map(|accepted| {
-                accepted
-                    .map_err(Error::from)
-                    .and_then(|(stream, _)| OsStream::new(stream))
-                    .map(NetOutput::Connected)
-            }),
+            accepted => finished(accepted)
+                .map(|accepted| accepted.map(NetOutput::Connected).map_err(Error::from)),
         },
         NetOp::Connect { address } => {
             let Address::Tcp(address) = *address;
@@ -313,12 +321,8 @@ pub(crate) fn attempt(
 }
 
 fn connect_blocking(address: SocketAddr) -> Option<Result<NetOutput<OsStream>>> {
-    finished(TcpStream::connect(address)).map(|connected| {
-        connected
-            .map_err(Error::from)
-            .and_then(OsStream::new)
-            .map(NetOutput::Connected)
-    })
+    finished(TcpStream::connect(address).and_then(OsStream::set_up))
+        .map(|connected| connected.map(NetOutput::Connected).map_err(Error::from))
 }
 
 fn finished<T>(outcome: io::Result<T>) -> Option<io::Result<T>> {
@@ -337,10 +341,11 @@ fn finished<T>(outcome: io::Result<T>) -> Option<io::Result<T>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NATIVE, OsNetwork, supports};
+    use super::{NATIVE, OsListener, OsNetQueue, OsNetwork, OsStream, supports};
     use crate::{
         Address, ErrorKind, NetBackend, NetListener, NetOp, NetQueue, NetQueueOptions, Network,
     };
+    use std::io::{self, Read};
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -360,6 +365,147 @@ mod tests {
 
     fn any_port() -> Address {
         Address::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+    }
+
+    fn connected_pair(queue: &mut OsNetQueue, listener: &Arc<OsListener>) -> (OsStream, OsStream) {
+        let address = listener.local_address().unwrap();
+        let accept = NetOp::Accept {
+            listener: Arc::clone(listener),
+        };
+        queue.submit(accept, 0).unwrap();
+        queue.submit(NetOp::Connect { address }, 1).unwrap();
+        let mut completions = Vec::new();
+        while completions.len() < 2 {
+            queue.reap(&mut completions, 1).unwrap();
+        }
+        completions.sort_by_key(|completion| completion.user_data);
+        let mut streams = completions
+            .into_iter()
+            .map(|completion| completion.result.unwrap().into_stream().unwrap());
+        (streams.next().unwrap(), streams.next().unwrap())
+    }
+
+    fn receive_one_byte(
+        queue: &mut OsNetQueue,
+        from: &Arc<OsStream>,
+        to: &Arc<OsStream>,
+    ) -> Option<u8> {
+        let receive = NetOp::Receive {
+            stream: Arc::clone(to),
+            buffer: vec![0; 1].into(),
+        };
+        queue.submit(receive, 0).unwrap();
+        let mut completions = Vec::new();
+        queue.reap(&mut completions, 0).unwrap();
+        let send = NetOp::Send {
+            stream: Arc::clone(from),
+            buffer: vec![9; 1].into(),
+        };
+        queue.submit(send, 1).unwrap();
+        while completions.len() < 2 {
+            let before = completions.len();
+            queue
+                .reap_timeout(&mut completions, 1, Duration::from_secs(5))
+                .unwrap();
+            if completions.len() == before {
+                return None;
+            }
+        }
+        completions
+            .into_iter()
+            .find(|completion| completion.user_data == 0)
+            .and_then(|completion| completion.op.into_buffer())
+            .map(|buffer| buffer[0])
+    }
+
+    #[test]
+    fn queue_made_connections_are_non_blocking_without_nagle_or_sigpipe() {
+        for backend in backends() {
+            let network = OsNetwork::new();
+            let listener = Arc::new(network.listen(any_port()).unwrap());
+            let mut queue = network.net_queue(options(backend)).unwrap();
+            let (server, client) = connected_pair(&mut queue, &listener);
+            for stream in [&server, &client] {
+                assert!(stream.stream.nodelay().unwrap(), "{backend:?}");
+                let idle = (&stream.stream).read(&mut [0]).unwrap_err();
+                assert_eq!(idle.kind(), io::ErrorKind::WouldBlock, "{backend:?}");
+                #[cfg(target_vendor = "apple")]
+                assert!(
+                    crate::os_net_readiness::sigpipe_suppressed(&stream.stream).unwrap(),
+                    "{backend:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reused_descriptor_is_woken_after_its_last_wait_was_canceled() {
+        for backend in backends() {
+            let network = OsNetwork::new();
+            let listener = Arc::new(network.listen(any_port()).unwrap());
+            let mut queue = network.net_queue(options(backend)).unwrap();
+            for round in 0..16 {
+                let (server, client) = connected_pair(&mut queue, &listener);
+                let (server, client) = (Arc::new(server), Arc::new(client));
+                if round % 2 == 0 {
+                    let receive = NetOp::Receive {
+                        stream: Arc::clone(&server),
+                        buffer: vec![0; 1].into(),
+                    };
+                    queue.submit(receive, 7).unwrap();
+                    let mut completions = Vec::new();
+                    queue.reap(&mut completions, 0).unwrap();
+                    queue.cancel(7).unwrap();
+                    queue.reap(&mut completions, 1).unwrap();
+                    assert_eq!(completions.len(), 1, "{backend:?}");
+                } else {
+                    let received = receive_one_byte(&mut queue, &client, &server);
+                    assert_eq!(received, Some(9), "{backend:?} round {round}");
+                }
+                drop(server);
+                drop(client);
+                let (server, client) = connected_pair(&mut queue, &listener);
+                let (server, client) = (Arc::new(server), Arc::new(client));
+                let received = receive_one_byte(&mut queue, &client, &server);
+                assert_eq!(received, Some(9), "{backend:?} round {round}");
+            }
+        }
+    }
+
+    #[test]
+    fn one_connection_wakes_one_waiting_accept_in_submission_order() {
+        for backend in backends() {
+            let network = OsNetwork::new();
+            let listener = Arc::new(network.listen(any_port()).unwrap());
+            let address = listener.local_address().unwrap();
+            let mut queue = network.net_queue(options(backend)).unwrap();
+            for user_data in 0..4 {
+                let accept = NetOp::Accept {
+                    listener: Arc::clone(&listener),
+                };
+                queue.submit(accept, user_data).unwrap();
+            }
+            let mut completions = Vec::new();
+            queue.reap(&mut completions, 0).unwrap();
+            let mut accepted = Vec::new();
+            for _ in 0..4 {
+                queue.submit(NetOp::Connect { address }, 100).unwrap();
+                while completions.len() < 2 {
+                    queue.reap(&mut completions, 1).unwrap();
+                }
+                for completion in completions.drain(..) {
+                    assert!(completion.result.is_ok(), "{backend:?}");
+                    if completion.user_data < 100 {
+                        accepted.push(completion.user_data);
+                    }
+                }
+                assert_eq!(queue.in_flight(), 4 - accepted.len(), "{backend:?}");
+            }
+            if backend == NetBackend::Portable {
+                accepted.sort_unstable();
+            }
+            assert_eq!(accepted, [0, 1, 2, 3], "{backend:?}");
+        }
     }
 
     #[test]

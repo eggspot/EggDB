@@ -69,7 +69,6 @@ struct Waiting {
 struct Waiters {
     readers: Vec<usize>,
     writers: Vec<usize>,
-    registered: Interest,
 }
 
 impl Waiters {
@@ -199,27 +198,43 @@ impl ReadinessQueue {
     }
 
     fn wake(&mut self, readiness: Readiness, completions: &mut Vec<Completion>) {
-        let Some(waiters) = self.waiters.get_mut(&readiness.fd) else {
+        if !self.waiters.contains_key(&readiness.fd) {
             return;
-        };
-        let mut woken = std::mem::take(&mut self.woken);
-        if readiness.read {
-            woken.append(&mut waiters.readers);
-        }
-        if readiness.write {
-            woken.append(&mut waiters.writers);
         }
         self.touched.push(readiness.fd);
-        for &slot in &woken {
-            self.advance(slot, completions);
+        if readiness.read {
+            self.wake_until_one_waits(readiness.fd, |waiters| &mut waiters.readers, completions);
+        }
+        if readiness.write {
+            self.wake_until_one_waits(readiness.fd, |waiters| &mut waiters.writers, completions);
+        }
+    }
+
+    fn wake_until_one_waits(
+        &mut self,
+        fd: RawFd,
+        direction: fn(&mut Waiters) -> &mut Vec<usize>,
+        completions: &mut Vec<Completion>,
+    ) {
+        let mut woken = std::mem::take(&mut self.woken);
+        if let Some(waiters) = self.waiters.get_mut(&fd) {
+            woken.append(direction(waiters));
+        }
+        for (at, &slot) in woken.iter().enumerate() {
+            if self.advance(slot, completions) {
+                if let Some(waiters) = self.waiters.get_mut(&fd) {
+                    direction(waiters).extend_from_slice(&woken[at + 1..]);
+                }
+                break;
+            }
         }
         woken.clear();
         self.woken = woken;
     }
 
-    fn advance(&mut self, slot: usize, completions: &mut Vec<Completion>) {
+    fn advance(&mut self, slot: usize, completions: &mut Vec<Completion>) -> bool {
         let step = match self.slots.get_mut(slot).and_then(Option::as_mut) {
-            None => return,
+            None => return false,
             Some(waiting) => match try_once(waiting) {
                 Some(result) => Step::Done(result),
                 None => wait_on(waiting).map_or(
@@ -237,8 +252,12 @@ impl ReadinessQueue {
                     waiters.writers.push(slot);
                 }
                 self.touched.push(fd);
+                true
             }
-            Step::Done(result) => self.complete(slot, result, completions),
+            Step::Done(result) => {
+                self.complete(slot, result, completions);
+                false
+            }
         }
     }
 
@@ -278,38 +297,24 @@ impl ReadinessQueue {
     }
 
     fn settle_one(&mut self, fd: RawFd, completions: &mut Vec<Completion>) {
-        let Some(waiters) = self.waiters.get_mut(&fd) else {
-            return;
-        };
-        let wanted = waiters.wanted();
-        if wanted == waiters.registered {
-            if wanted == Interest::NONE {
-                self.waiters.remove(&fd);
-            }
-            return;
-        }
-        let changed = self.selector.change(fd, waiters.registered, wanted);
+        let wanted = self
+            .waiters
+            .get(&fd)
+            .map_or(Interest::NONE, Waiters::wanted);
+        let changed = self.selector.want(fd, wanted);
         if wanted == Interest::NONE {
             self.waiters.remove(&fd);
             return;
         }
-        match changed {
-            Ok(()) => waiters.registered = wanted,
-            Err(error) => {
-                let failed: Vec<usize> = waiters
-                    .readers
-                    .drain(..)
-                    .chain(waiters.writers.drain(..))
-                    .collect();
-                let either = Interest {
-                    read: waiters.registered.read || wanted.read,
-                    write: waiters.registered.write || wanted.write,
-                };
-                let _ = self.selector.change(fd, either, Interest::NONE);
-                self.waiters.remove(&fd);
-                for slot in failed {
-                    self.complete(slot, Err(copy_of(&error)), completions);
-                }
+        if let Err(error) = changed {
+            let _ = self.selector.want(fd, Interest::NONE);
+            let failed: Vec<usize> = self
+                .waiters
+                .remove(&fd)
+                .map(|waiters| waiters.readers.into_iter().chain(waiters.writers).collect())
+                .unwrap_or_default();
+            for slot in failed {
+                self.complete(slot, Err(copy_of(&error)), completions);
             }
         }
     }
@@ -348,7 +353,7 @@ fn try_once(waiting: &mut Waiting) -> Option<Result<NetOutput<OsStream>>> {
 }
 
 fn connected(socket: TcpStream) -> Result<NetOutput<OsStream>> {
-    OsStream::new(socket).map(NetOutput::Connected)
+    Ok(NetOutput::Connected(OsStream::set_up_non_blocking(socket)))
 }
 
 fn finished_connecting(socket: &TcpStream) -> io::Result<bool> {

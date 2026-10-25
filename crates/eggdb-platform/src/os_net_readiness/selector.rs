@@ -27,10 +27,10 @@ impl Selector {
         }
     }
 
-    pub(super) fn change(&mut self, fd: RawFd, from: Interest, to: Interest) -> io::Result<()> {
+    pub(super) fn want(&mut self, fd: RawFd, wanted: Interest) -> io::Result<()> {
         match self {
-            Self::Native(selector) => selector.change(fd, from, to),
-            Self::Poll(selector) => selector.change(fd, to),
+            Self::Native(selector) => selector.want(fd, wanted),
+            Self::Poll(selector) => selector.want(fd, wanted),
         }
     }
 
