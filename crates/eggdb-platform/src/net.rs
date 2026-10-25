@@ -216,7 +216,8 @@ pub trait NetQueue: Send + fmt::Debug {
 
     /// Like [`NetQueue::reap`], but waits at most `timeout`: when it runs out first, it
     /// returns the fewer than `min` completions it appended, which may be none, and the other
-    /// operations stay in flight. A zero timeout only collects what has already finished. In a
+    /// operations stay in flight. A zero timeout only collects what has already finished, and one
+    /// too long for the clock to count, such as [`Duration::MAX`], waits as `reap` does. In a
     /// simulation, the wait is on the simulated clock, and running out of time is the answer
     /// instead of [`ErrorKind::Stalled`].
     fn reap_timeout(
@@ -229,8 +230,10 @@ pub trait NetQueue: Send + fmt::Debug {
     /// Gives up the operations in flight tagged `user_data`: each still completes exactly once
     /// through a later reap, with [`ErrorKind::Canceled`] and its listener, connection and
     /// buffer, and stays counted in [`NetQueue::in_flight`] until then. An operation that
-    /// finished first completes with its own result instead; one that completes with
-    /// [`ErrorKind::Canceled`] transferred nothing. Fails with [`ErrorKind::NotFound`] when no operation in flight has that tag.
+    /// finished first completes with its own result instead; a receive or send that completes
+    /// with [`ErrorKind::Canceled`] moved no bytes of its buffer, while a canceled connect may
+    /// already have reached the peer, whose accept then sees a connection that closes at once.
+    /// Fails with [`ErrorKind::NotFound`] when no operation in flight has that tag.
     fn cancel(&mut self, user_data: u64) -> Result<()>;
 
     /// How many operations were submitted and not yet reaped.

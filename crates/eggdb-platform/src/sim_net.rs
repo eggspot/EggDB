@@ -565,7 +565,15 @@ impl SimNetQueue {
                     world.advance_to(deadline);
                     break Ok(());
                 }
-                (Some(at), _) => world.advance_to(at),
+                (Some(at), _) => {
+                    world.advance_to(at);
+                    if world.now() < at {
+                        break match deadline {
+                            Some(_) => Ok(()),
+                            None => Err(Error::new(ErrorKind::Stalled)),
+                        };
+                    }
+                }
                 (None, Some(deadline)) => {
                     world.advance_to(deadline);
                     break Ok(());
@@ -623,8 +631,8 @@ impl NetQueue for SimNetQueue {
         min: usize,
         timeout: Duration,
     ) -> Result<usize> {
-        let deadline = lock(&self.network.shared).now().saturating_add(timeout);
-        self.reap_until(completions, min, Some(deadline))
+        let deadline = lock(&self.network.shared).now().checked_add(timeout);
+        self.reap_until(completions, min, deadline)
     }
 
     fn cancel(&mut self, user_data: u64) -> Result<()> {
@@ -679,6 +687,9 @@ impl World {
     }
 
     fn end_flow(&mut self, id: u64, side: usize) {
+        if !self.connections.contains_key(&id) {
+            return;
+        }
         let at = self.now().saturating_add(self.delay());
         if let Some(connection) = self.connections.get_mut(&id) {
             connection.flows[side].end(at);
@@ -1031,6 +1042,10 @@ mod tests {
             self.network.clock().monotonic()
         }
 
+        fn clock_at_its_limit(&self) {
+            self.network.clock().advance(Duration::MAX);
+        }
+
         fn connect_op(&self) -> NetOp<SimListener, SimStream> {
             NetOp::Connect {
                 address: self.listener.local_address().unwrap(),
@@ -1244,6 +1259,33 @@ mod tests {
         assert!(queue.submit(connect_across_cut, 0).is_ok());
         assert_eq!(queue.reap_timeout(&mut completions, 1, timeout).unwrap(), 0);
         assert_eq!(clock.monotonic(), timeout);
+    }
+
+    #[test]
+    fn waits_at_the_end_of_simulated_time_return_instead_of_spinning() {
+        let mut pair = Pair::new(15);
+        pair.network
+            .latency(Duration::from_secs(1), Duration::from_secs(2));
+        let (client, server) = pair.connect();
+        pair.clock_at_its_limit();
+        assert!(pair.reap_for(0, Duration::MAX).is_empty());
+        pair.send(&client, b"late", 0);
+        pair.reap(1);
+        pair.receive(&server, 4, 1);
+        let mut completions = Vec::new();
+        let error = pair.queue.reap(&mut completions, 1).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
+        assert!(pair.reap_for(1, Duration::from_secs(5)).is_empty());
+        pair.network.partition(CLIENT, SERVER);
+        let op = pair.connect_op();
+        pair.submit(op, 2);
+        let error = pair.queue.reap(&mut completions, 1).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
+        let error = pair
+            .queue
+            .reap_timeout(&mut completions, 1, Duration::MAX)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
     }
 
     #[test]
