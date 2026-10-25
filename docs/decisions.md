@@ -2022,3 +2022,62 @@ options (std cannot set them before `bind`, so they need our own socket declarat
 and kqueue backends, then sockets on io_uring and IOCP and the decision on one queue per
 core; Unix-domain sockets; UDP (then QUIC, built by us); a resolver; TLS above `NetStream`
 (D23).
+
+## D71 Readiness backends for the network queue: epoll and kqueue, interest only while an operation waits — Decided by research (build loop, 2026-10-25); refines D67 and D70
+`OsNetwork`'s queues now wait in the kernel instead of sleeping: `NetBackend::Epoll` on Linux and
+Android, `NetBackend::Kqueue` on Apple's systems, and `NetBackend::Portable` (D70's poller)
+elsewhere. `NetQueueOptions::backend` asks for one, given or refused with `Unsupported`, never
+falling back, as D67 does for files; `OsNetQueue::backend` says which one runs. On a loopback
+ping-pong of 8-byte messages through one queue on an Apple M-series Mac (release build), a round
+trip took 13 µs with kqueue against 65 µs with the portable poller, which also burns its back-off
+sleeps.
+
+**Decided by research:**
+- **Interest only while an operation waits, level-triggered.** Each operation is tried once when
+  `reap` starts it; only one that would block registers its socket's direction (accept and
+  receive read, connect and send write), and the registration is removed before the operation's
+  completion leaves the queue; a failed connect's socket is closed only after that. The queue holds the socket's `Arc` while it is registered, so the
+  descriptor can neither close nor be reused under it, and one socket may be used from several
+  queues, each with its own epoll or kqueue. Edge-triggered registration for a socket's life
+  (mio's way) needs the socket to deregister itself on drop and needs draining to `EAGAIN`, which
+  one transfer per operation does not do. Most sends finish on the first try, so the extra
+  `epoll_ctl` calls are paid only by operations that wait.
+- **kqueue uses the same level-triggered `EV_ADD`/`EV_DELETE` path as epoll**, applied at once.
+  Research preferred `EV_ONESHOT` with the changes passed in the waiting `kevent` call (one system
+  call per round, as TigerBeetle does); sharing one interest-tracking path with epoll was chosen
+  for now, and batching the changes into the wait is a later optimisation measured on its own.
+- **Apple only for kqueue.** `struct kevent` differs on FreeBSD (`ext[4]`, versioned symbols),
+  NetBSD and OpenBSD, and CI has no BSD runner; the BSDs and other Unixes keep the portable
+  poller until a `poll(2)` backend, whose `struct pollfd` is the same everywhere.
+- **Epoll only on the architectures io_uring already lists** (x86, x86_64, arm, aarch64,
+  riscv64, powerpc64, s390x, loongarch64): socket and descriptor constants differ on mips, sparc
+  and alpha, and `epoll_event` is packed on x86_64 only, which a compile-time size check pins.
+- **Connects never block.** Readiness backends create the socket with our own `socket`
+  declaration (close-on-exec), connect it non-blocking, treat `EINPROGRESS` or `EINTR` as
+  pending, wait for it to become writable and then read `SO_ERROR` (std's `take_error`) and the
+  peer address. The portable poller still connects with a blocking call, so on Windows a
+  connect that gets no answer holds that queue until it times out, until IOCP sockets land.
+- **No `SIGPIPE`.** std sends with `MSG_NOSIGNAL` on Linux, but on Apple's systems it sets
+  `SO_NOSIGPIPE` only on sockets it creates itself, not on accepted ones, and a process that
+  embeds EggDB (D3) has not ignored `SIGPIPE` as Rust programs do, so every stream sets
+  `SO_NOSIGPIPE` there.
+- **Errors:** `EINTR` from a wait is retried; an accept that finds the connection already
+  aborted keeps waiting; `EPOLLERR` and `EPOLLHUP` wake both directions, and the operation itself
+  reports the real outcome; a registration the kernel refuses (`ENOSPC`, `ENOMEM`) fails the
+  operations waiting on that socket, not the queue. Each wait returns at most
+  min(capacity, 1024) events, from a buffer allocated once.
+
+**Review fixes in the simulation (D9):** a queue refuses a second send or a second receive on one
+end of a connection while the first is in flight (`InvalidInput`), so a caller that breaks D70's
+rule is caught in tests; the first send after the peer closed cleanly succeeds and resets the
+connection, as over TCP, instead of failing at once; and empty sends and receives are numbered
+for fault injection like every other operation. Refusing a host's queue the sockets of another
+host is left for later: the simulation's own tests drive both ends of a connection from one
+queue.
+
+**Follow-ups, in order:** time in the simulation with timeouts, partitions and latency (D70);
+`poll(2)` for the BSDs and other Unixes; non-blocking connect in the portable poller on Unix;
+sockets on io_uring and IOCP, and one queue per core; batching kqueue changes into the wait;
+the contract tests run once per backend; fewer system calls per connection (`SOCK_NONBLOCK` on
+Linux, no second non-blocking and no-`SIGPIPE` call on sockets the queue created, waking one
+pending accept per ready connection instead of all).
