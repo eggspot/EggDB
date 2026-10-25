@@ -46,7 +46,7 @@ impl Network for OsNetwork {
         let engine = match options.requested_backend().or(NATIVE) {
             Some(NetBackend::Portable) | None => Engine::Portable(Vec::new()),
             Some(backend) if Some(backend) == NATIVE => {
-                Engine::Readiness(ReadinessQueue::new(capacity)?)
+                Engine::Readiness(Box::new(ReadinessQueue::new(capacity)?))
             }
             Some(_) => return Err(Error::new(ErrorKind::Unsupported)),
         };
@@ -119,7 +119,7 @@ pub struct OsNetQueue {
 #[derive(Debug)]
 enum Engine {
     Portable(Vec<Waiting>),
-    Readiness(ReadinessQueue),
+    Readiness(Box<ReadinessQueue>),
 }
 
 impl OsNetQueue {

@@ -2036,7 +2036,7 @@ sleeps.
 - **Interest only while an operation waits, level-triggered.** Each operation is tried once when
   `reap` starts it; only one that would block registers its socket's direction (accept and
   receive read, connect and send write), and the registration is removed before the operation's
-  completion leaves the queue. The queue holds the socket's `Arc` while it is registered, so the
+  completion leaves the queue; a failed connect's socket is closed only after that. The queue holds the socket's `Arc` while it is registered, so the
   descriptor can neither close nor be reused under it, and one socket may be used from several
   queues, each with its own epoll or kqueue. Edge-triggered registration for a socket's life
   (mio's way) needs the socket to deregister itself on drop and needs draining to `EAGAIN`, which
@@ -2077,4 +2077,7 @@ queue.
 
 **Follow-ups, in order:** time in the simulation with timeouts, partitions and latency (D70);
 `poll(2)` for the BSDs and other Unixes; non-blocking connect in the portable poller on Unix;
-sockets on io_uring and IOCP, and one queue per core; batching kqueue changes into the wait.
+sockets on io_uring and IOCP, and one queue per core; batching kqueue changes into the wait;
+the contract tests run once per backend; fewer system calls per connection (`SOCK_NONBLOCK` on
+Linux, no second non-blocking and no-`SIGPIPE` call on sockets the queue created, waking one
+pending accept per ready connection instead of all).

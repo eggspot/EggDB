@@ -29,7 +29,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// [`ErrorKind::ConnectionReset`]; dropping it otherwise ends its sending, as
 /// [`NetStream::shutdown_write`] does. As over TCP, the peer's first send after that succeeds
 /// and its bytes are lost, and it resets the connection, so the operations after it fail with
-/// [`ErrorKind::ConnectionReset`]. Every listen and every operation that completes is
+/// [`ErrorKind::ConnectionReset`]; bytes that had already arrived are lost too, as on Windows,
+/// which is stricter than Linux. Every listen and every operation that completes is
 /// numbered from zero, empty receives and sends too, and any of them can be made to fail with
 /// [`ErrorKind::InjectedFault`], by number or at random from a seed, changing nothing. Clones
 /// share the same network.

@@ -259,7 +259,9 @@ impl NetQueueOptions {
     }
 
     /// Asks for one backend, given or refused: the queue never falls back to another. Without
-    /// it, the queue waits in epoll on Linux and Android, in kqueue on Apple's systems, and
+    /// it, the queue waits in epoll on Linux and Android on the architectures whose system
+    /// constants EggDB declares (x86, x86_64, arm, aarch64, riscv64, powerpc64, s390x and
+    /// loongarch64), in kqueue on Apple's systems, and
     /// polls elsewhere. A machine refuses a backend it lacks with [`ErrorKind::Unsupported`];
     /// the simulation accepts every request and runs every operation its own way.
     pub fn backend(mut self, backend: NetBackend) -> Self {

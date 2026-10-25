@@ -75,6 +75,7 @@ pub(crate) struct ReadinessQueue {
     ready: Vec<Readiness>,
     woken: Vec<usize>,
     touched: Vec<RawFd>,
+    closing: Vec<TcpStream>,
 }
 
 impl ReadinessQueue {
@@ -88,6 +89,7 @@ impl ReadinessQueue {
             ready: Vec::new(),
             woken: Vec::new(),
             touched: Vec::new(),
+            closing: Vec::new(),
         })
     }
 
@@ -193,10 +195,15 @@ impl ReadinessQueue {
         result: Result<NetOutput<OsStream>>,
         completions: &mut Vec<Completion>,
     ) {
-        let Some(Waiting { op, user_data, .. }) = self.slots.get_mut(slot).and_then(Option::take)
+        let Some(Waiting {
+            op,
+            user_data,
+            connecting,
+        }) = self.slots.get_mut(slot).and_then(Option::take)
         else {
             return;
         };
+        self.closing.extend(connecting);
         self.free.push(slot);
         completions.push(NetCompletion {
             user_data,
@@ -214,6 +221,7 @@ impl ReadinessQueue {
         }
         touched.clear();
         self.touched = touched;
+        self.closing.clear();
     }
 
     fn settle_one(&mut self, fd: RawFd, completions: &mut Vec<Completion>) {
@@ -240,7 +248,11 @@ impl ReadinessQueue {
                     .drain(..)
                     .chain(waiters.writers.drain(..))
                     .collect();
-                let _ = self.selector.change(fd, waiters.registered, Interest::NONE);
+                let either = Interest {
+                    read: waiters.registered.read || wanted.read,
+                    write: waiters.registered.write || wanted.write,
+                };
+                let _ = self.selector.change(fd, either, Interest::NONE);
                 self.waiters.remove(&fd);
                 for slot in failed {
                     self.complete(slot, Err(copy_of(&error)), completions);
@@ -274,7 +286,10 @@ fn try_once(waiting: &mut Waiting) -> Option<Result<NetOutput<OsStream>>> {
                 *connecting = Some(socket);
                 None
             }
-            Err(error) => Some(Err(error.into())),
+            Err(error) => {
+                *connecting = Some(socket);
+                Some(Err(error.into()))
+            }
         },
     })
 }
