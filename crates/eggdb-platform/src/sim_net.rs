@@ -19,9 +19,9 @@ use std::time::Duration;
 /// amount at a time, so connections advance in a different order on every seed while each
 /// stays in order. A queue performs its operations only inside `reap`, in a seeded order, and
 /// fails with [`ErrorKind::Stalled`] instead of waiting when its operations cannot finish
-/// unless another queue acts first, so a test that drives several queues reaps them in turn.
-/// A queue refuses, with [`ErrorKind::InvalidInput`], a connection or listener of another
-/// `SimNetwork`.
+/// unless another queue acts first and nothing is on its way, so a test that drives several
+/// queues reaps them in turn. A queue refuses, with [`ErrorKind::InvalidInput`], a connection or
+/// listener of another `SimNetwork`.
 ///
 /// A queue also refuses a second send, or a second receive, on one end of a connection while
 /// the first is in flight, since the two could interleave.
@@ -666,7 +666,7 @@ impl World {
         if spread == 0 {
             return least;
         }
-        let extra = self.rng.next_u64() % spread.saturating_add(1).max(1);
+        let extra = self.rng.next_u64() % spread.saturating_add(1);
         least.saturating_add(Duration::from_nanos(extra))
     }
 
@@ -1237,11 +1237,11 @@ mod tests {
         let timeout = Duration::from_millis(7);
         assert_eq!(queue.reap_timeout(&mut completions, 0, timeout).unwrap(), 0);
         assert_eq!(clock.monotonic(), Duration::ZERO);
-        let accept_nothing = NetOp::Connect {
+        let connect_across_cut = NetOp::Connect {
             address: Address::Tcp(SocketAddr::new(SERVER, 1)),
         };
         network.partition(CLIENT, SERVER);
-        assert!(queue.submit(accept_nothing, 0).is_ok());
+        assert!(queue.submit(connect_across_cut, 0).is_ok());
         assert_eq!(queue.reap_timeout(&mut completions, 1, timeout).unwrap(), 0);
         assert_eq!(clock.monotonic(), timeout);
     }
