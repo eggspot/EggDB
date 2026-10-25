@@ -5,6 +5,9 @@ use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
+use std::time::Duration;
+
+const LONGEST_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub(super) const BACKEND: NetBackend = NetBackend::Kqueue;
 
@@ -122,34 +125,40 @@ impl Selector {
         Ok(())
     }
 
-    pub(super) fn wait(&mut self, block: bool, ready: &mut Vec<Readiness>) -> io::Result<()> {
+    pub(super) fn wait(
+        &mut self,
+        timeout: Option<Duration>,
+        ready: &mut Vec<Readiness>,
+    ) -> io::Result<()> {
         let room = c_int::try_from(self.events.len()).unwrap_or(c_int::MAX);
-        let at_once = Timespec {
-            seconds: 0,
-            nanoseconds: 0,
-        };
-        let timeout: *const Timespec = if block { ptr::null() } else { &at_once };
-        let count = loop {
-            // SAFETY: events holds room initialised kevents the kernel may overwrite, and
-            // timeout is null or points at at_once, which outlives the call.
-            let count = unsafe {
-                kevent(
-                    self.kqueue.as_raw_fd(),
-                    ptr::null(),
-                    0,
-                    self.events.as_mut_ptr(),
-                    room,
-                    timeout,
-                )
-            };
-            if count >= 0 {
-                break count.unsigned_abs() as usize;
+        let timespec = timeout.map(|timeout| {
+            let timeout = timeout.min(LONGEST_WAIT);
+            Timespec {
+                seconds: c_long::try_from(timeout.as_secs()).unwrap_or(c_long::MAX),
+                nanoseconds: c_long::from(timeout.subsec_nanos()),
             }
+        });
+        let limit: *const Timespec = timespec.as_ref().map_or(ptr::null(), ptr::from_ref);
+        // SAFETY: events holds room initialised kevents the kernel may overwrite, and limit is
+        // null or points at timespec, which outlives the call.
+        let count = unsafe {
+            kevent(
+                self.kqueue.as_raw_fd(),
+                ptr::null(),
+                0,
+                self.events.as_mut_ptr(),
+                room,
+                limit,
+            )
+        };
+        if count < 0 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(EINTR) {
-                return Err(error);
+            if error.raw_os_error() == Some(EINTR) {
+                return Ok(());
             }
-        };
+            return Err(error);
+        }
+        let count = count.unsigned_abs() as usize;
         ready.extend(self.events.iter().take(count).map(|event| Readiness {
             fd: RawFd::try_from(event.ident).unwrap_or(RawFd::MAX),
             read: event.filter == EVFILT_READ,

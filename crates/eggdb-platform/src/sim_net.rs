@@ -1,3 +1,4 @@
+use crate::clock::{Clock, SimClock};
 use crate::error::{Error, ErrorKind, Result};
 use crate::net::{
     Address, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions, NetStream,
@@ -8,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 /// A deterministic simulation of a network of hosts, for tests (D9).
 ///
@@ -17,9 +19,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// amount at a time, so connections advance in a different order on every seed while each
 /// stays in order. A queue performs its operations only inside `reap`, in a seeded order, and
 /// fails with [`ErrorKind::Stalled`] instead of waiting when its operations cannot finish
-/// unless another queue acts first, so a test that drives several queues reaps them in turn.
-/// A queue refuses, with [`ErrorKind::InvalidInput`], a connection or listener of another
-/// `SimNetwork`.
+/// unless another queue acts first and nothing is on its way, so a test that drives several
+/// queues reaps them in turn. A queue refuses, with [`ErrorKind::InvalidInput`], a connection or
+/// listener of another `SimNetwork`.
 ///
 /// A queue also refuses a second send, or a second receive, on one end of a connection while
 /// the first is in flight, since the two could interleave.
@@ -34,6 +36,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// numbered from zero, empty receives and sends too, and any of them can be made to fail with
 /// [`ErrorKind::InjectedFault`], by number or at random from a seed, changing nothing. Clones
 /// share the same network.
+///
+/// Time is a [`SimClock`] that moves only inside `reap`: when no operation can finish and
+/// nothing is due, the queue moves the clock to the next thing that will happen, such as bytes
+/// arriving after the latency set with [`SimNetwork::latency`], or to the end of
+/// [`NetQueue::reap_timeout`]'s wait, whichever comes first. [`SimNetwork::partition`] cuts two
+/// hosts apart: bytes between them stay in transit until [`SimNetwork::heal`], and a connect
+/// across the cut fails with [`ErrorKind::TimedOut`] after [`SimNetwork::CONNECT_TIMEOUT`], as
+/// an unanswered TCP handshake does. A receive across the cut waits until the cut heals or the
+/// operation is canceled.
 #[derive(Debug, Clone, Default)]
 pub struct SimNetwork {
     shared: Arc<Mutex<World>>,
@@ -50,6 +61,9 @@ struct World {
     bound: BTreeSet<SocketAddr>,
     connections: BTreeMap<u64, Connection>,
     next_connection: u64,
+    clock: Arc<SimClock>,
+    latency: [Duration; 2],
+    partitions: BTreeSet<[IpAddr; 2]>,
 }
 
 #[derive(Debug)]
@@ -69,9 +83,17 @@ struct Connection {
 #[derive(Debug, Default)]
 struct Flow {
     in_transit: VecDeque<u8>,
+    arrivals: VecDeque<Arrival>,
     arrived: VecDeque<u8>,
     ended: bool,
+    end_at: Duration,
     end_arrived: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Arrival {
+    at: Duration,
+    bytes: usize,
 }
 
 impl Flow {
@@ -79,8 +101,70 @@ impl Flow {
         self.in_transit.len() + self.arrived.len()
     }
 
-    fn in_transit(&self) -> bool {
-        !self.in_transit.is_empty() || (self.ended && !self.end_arrived)
+    fn last_arrival(&self) -> Duration {
+        self.arrivals
+            .back()
+            .map_or(Duration::ZERO, |arrival| arrival.at)
+    }
+
+    fn due(&self, now: Duration) -> usize {
+        self.arrivals
+            .iter()
+            .take_while(|arrival| arrival.at <= now)
+            .map(|arrival| arrival.bytes)
+            .sum()
+    }
+
+    fn end_due(&self, now: Duration) -> bool {
+        self.ended && !self.end_arrived && self.in_transit.is_empty() && self.end_at <= now
+    }
+
+    fn next_event(&self) -> Option<Duration> {
+        match self.arrivals.front() {
+            Some(arrival) => Some(arrival.at),
+            None => (self.ended && !self.end_arrived).then_some(self.end_at),
+        }
+    }
+
+    fn send(&mut self, bytes: &[u8], at: Duration) {
+        let at = at.max(self.last_arrival());
+        self.in_transit.extend(bytes);
+        match self.arrivals.back_mut() {
+            Some(last) if last.at == at => last.bytes += bytes.len(),
+            _ => self.arrivals.push_back(Arrival {
+                at,
+                bytes: bytes.len(),
+            }),
+        }
+    }
+
+    fn end(&mut self, at: Duration) {
+        if !self.ended {
+            self.ended = true;
+            self.end_at = at.max(self.last_arrival());
+        }
+    }
+
+    fn deliver(&mut self, mut count: usize) {
+        let bytes: Vec<u8> = self.in_transit.drain(..count).collect();
+        self.arrived.extend(bytes);
+        while count > 0 {
+            let Some(front) = self.arrivals.front_mut() else {
+                return;
+            };
+            let taken = front.bytes.min(count);
+            front.bytes -= taken;
+            count -= taken;
+            if front.bytes == 0 {
+                self.arrivals.pop_front();
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.in_transit.clear();
+        self.arrivals.clear();
+        self.arrived.clear();
     }
 }
 
@@ -102,9 +186,51 @@ impl SimNetwork {
     /// The ports given out for port 0 and for the local end of a connect.
     pub const EPHEMERAL_PORTS: std::ops::RangeInclusive<u16> = 49_152..=65_535;
 
-    /// Creates an empty network, seeded with 0.
+    /// How long a connect across a partition waits before failing with
+    /// [`ErrorKind::TimedOut`]: Linux's default of six handshake retries, doubling from one
+    /// second.
+    pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(127);
+
+    /// Creates an empty network, seeded with 0, with its own clock at zero and no latency.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an empty network that keeps time on `clock`, so other simulators can share it.
+    pub fn with_clock(clock: Arc<SimClock>) -> Self {
+        let network = Self::new();
+        lock(&network.shared).clock = clock;
+        network
+    }
+
+    /// The clock this network keeps time on.
+    pub fn clock(&self) -> Arc<SimClock> {
+        Arc::clone(&lock(&self.shared).clock)
+    }
+
+    /// Makes bytes, ends of sending and connection handshakes take between `least` and `most`
+    /// to cross the network one way, drawn from the seed for each send; bytes still arrive in
+    /// order. Both zero, the default, makes them due at once. Swapped bounds are put in order.
+    pub fn latency(&self, least: Duration, most: Duration) {
+        lock(&self.shared).latency = [least.min(most), least.max(most)];
+    }
+
+    /// Cuts hosts `a` and `b` apart until [`SimNetwork::heal`]. Cutting a host from itself
+    /// does nothing.
+    pub fn partition(&self, a: IpAddr, b: IpAddr) {
+        if a != b {
+            lock(&self.shared).partitions.insert(ordered(a, b));
+        }
+    }
+
+    /// Joins hosts `a` and `b` again: bytes held at the cut become due.
+    pub fn heal(&self, a: IpAddr, b: IpAddr) {
+        lock(&self.shared).partitions.remove(&ordered(a, b));
+    }
+
+    /// Joins every pair of hosts cut apart.
+    pub fn heal_all(&self) {
+        lock(&self.shared).partitions.clear();
     }
 
     /// The host with IP address `ip`.
@@ -274,11 +400,10 @@ impl NetStream for SimStream {
 
     fn shutdown_write(&self) -> Result<()> {
         let mut world = lock(&self.network.shared);
-        let connection = world
-            .connections
-            .get_mut(&self.connection)
-            .ok_or_else(|| Error::new(ErrorKind::NotConnected))?;
-        connection.flows[self.side].ended = true;
+        if !world.connections.contains_key(&self.connection) {
+            return Err(Error::new(ErrorKind::NotConnected));
+        }
+        world.end_flow(self.connection, self.side);
         Ok(())
     }
 }
@@ -292,8 +417,8 @@ impl Drop for SimStream {
             .is_some_and(|connection| connection.flows[1 - self.side].buffered() > 0);
         if owed {
             world.reset(self.connection);
-        } else if let Some(connection) = world.connections.get_mut(&self.connection) {
-            connection.flows[self.side].ended = true;
+        } else {
+            world.end_flow(self.connection, self.side);
         }
         world.close(self.connection, self.side);
     }
@@ -306,6 +431,9 @@ type Completion = NetCompletion<SimListener, SimStream>;
 struct Waiting {
     op: Op,
     user_data: u64,
+    since: Duration,
+    handshake_done_at: Option<Duration>,
+    canceled: bool,
 }
 
 /// The queue of a [`SimHost`].
@@ -363,7 +491,12 @@ impl SimNetQueue {
         let mut finished = Vec::new();
         for index in order {
             let waiting = &mut self.waiting[index];
-            if let Some(result) = world.attempt(&self.network, self.ip, &mut waiting.op) {
+            let result = if waiting.canceled {
+                Some(Err(Error::new(ErrorKind::Canceled)))
+            } else {
+                world.attempt(&self.network, self.ip, waiting)
+            };
+            if let Some(result) = result {
                 finished.push((index, result));
             }
         }
@@ -371,7 +504,7 @@ impl SimNetQueue {
         finished.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
         let mut done = Vec::with_capacity(count);
         for (index, result) in finished {
-            let Waiting { op, user_data } = self.waiting.swap_remove(index);
+            let Waiting { op, user_data, .. } = self.waiting.swap_remove(index);
             if let Some(transfer) = Transfer::of(&op) {
                 self.transferring.remove(&transfer);
             }
@@ -384,6 +517,72 @@ impl SimNetQueue {
         done.reverse();
         completions.extend(done);
         count
+    }
+
+    fn next_event(&self, world: &World) -> Option<Duration> {
+        let connects = self.waiting.iter().filter_map(|waiting| {
+            let NetOp::Connect { address } = &waiting.op else {
+                return None;
+            };
+            let Address::Tcp(address) = address;
+            if world.cut(self.ip, address.ip()) {
+                Some(waiting.since.saturating_add(SimNetwork::CONNECT_TIMEOUT))
+            } else {
+                waiting.handshake_done_at
+            }
+        });
+        let now = world.now();
+        connects
+            .chain(world.next_event())
+            .filter(|&at| at > now)
+            .min()
+    }
+
+    fn reap_until(
+        &mut self,
+        completions: &mut Vec<Completion>,
+        min: usize,
+        deadline: Option<Duration>,
+    ) -> Result<usize> {
+        if min > self.in_flight {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        let network = self.network.clone();
+        let mut world = lock(&network.shared);
+        let mut reaped = 0;
+        let outcome = loop {
+            world.deliver_some();
+            let done = self.perform(&mut world, completions);
+            reaped += done;
+            if reaped >= min {
+                break Ok(());
+            }
+            if done > 0 || world.deliver_due() {
+                continue;
+            }
+            match (self.next_event(&world), deadline) {
+                (Some(at), Some(deadline)) if at > deadline => {
+                    world.advance_to(deadline);
+                    break Ok(());
+                }
+                (Some(at), _) => {
+                    world.advance_to(at);
+                    if world.now() < at {
+                        break match deadline {
+                            Some(_) => Ok(()),
+                            None => Err(Error::new(ErrorKind::Stalled)),
+                        };
+                    }
+                }
+                (None, Some(deadline)) => {
+                    world.advance_to(deadline);
+                    break Ok(());
+                }
+                (None, None) => break Err(Error::new(ErrorKind::Stalled)),
+            }
+        };
+        self.in_flight -= reaped;
+        outcome.map(|()| reaped)
     }
 }
 
@@ -410,35 +609,49 @@ impl NetQueue for SimNetQueue {
         if let Some(transfer) = transfer {
             self.transferring.insert(transfer);
         }
-        self.waiting.push(Waiting { op, user_data });
+        let since = lock(&self.network.shared).now();
+        self.waiting.push(Waiting {
+            op,
+            user_data,
+            since,
+            handshake_done_at: None,
+            canceled: false,
+        });
         self.in_flight += 1;
         Ok(())
     }
 
     fn reap(&mut self, completions: &mut Vec<Completion>, min: usize) -> Result<usize> {
-        if min > self.in_flight {
-            return Err(Error::new(ErrorKind::InvalidInput));
-        }
-        let network = self.network.clone();
-        let mut world = lock(&network.shared);
-        let mut reaped = 0;
-        loop {
-            world.deliver_some();
-            let done = self.perform(&mut world, completions);
-            reaped += done;
-            if reaped >= min {
-                break;
+        self.reap_until(completions, min, None)
+    }
+
+    fn reap_timeout(
+        &mut self,
+        completions: &mut Vec<Completion>,
+        min: usize,
+        timeout: Duration,
+    ) -> Result<usize> {
+        let end_of_time = Duration::from_nanos(u64::MAX);
+        let deadline = lock(&self.network.shared)
+            .now()
+            .checked_add(timeout)
+            .filter(|&deadline| deadline <= end_of_time);
+        self.reap_until(completions, min, deadline)
+    }
+
+    fn cancel(&mut self, user_data: u64) -> Result<()> {
+        let mut found = false;
+        for waiting in &mut self.waiting {
+            if waiting.user_data == user_data {
+                waiting.canceled = true;
+                found = true;
             }
-            if done == 0 {
-                if !world.anything_in_transit() {
-                    self.in_flight -= reaped;
-                    return Err(Error::new(ErrorKind::Stalled));
-                }
-                world.deliver_all();
-            }
         }
-        self.in_flight -= reaped;
-        Ok(reaped)
+        if found {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::NotFound))
+        }
     }
 
     fn in_flight(&self) -> usize {
@@ -451,6 +664,50 @@ impl NetQueue for SimNetQueue {
 }
 
 impl World {
+    fn now(&self) -> Duration {
+        self.clock.monotonic()
+    }
+
+    fn advance_to(&self, at: Duration) {
+        self.clock.advance(at.saturating_sub(self.now()));
+    }
+
+    fn delay(&mut self) -> Duration {
+        let [least, most] = self.latency;
+        let spread = u64::try_from((most - least).as_nanos()).unwrap_or(u64::MAX);
+        if spread == 0 {
+            return least;
+        }
+        let extra = self.rng.next_u64() % spread.saturating_add(1);
+        least.saturating_add(Duration::from_nanos(extra))
+    }
+
+    fn cut(&self, a: IpAddr, b: IpAddr) -> bool {
+        a != b && self.partitions.contains(&ordered(a, b))
+    }
+
+    fn connection_cut(&self, connection: &Connection) -> bool {
+        self.cut(connection.ends[CLIENT].ip(), connection.ends[SERVER].ip())
+    }
+
+    fn end_flow(&mut self, id: u64, side: usize) {
+        if !self.connections.contains_key(&id) {
+            return;
+        }
+        let at = self.now().saturating_add(self.delay());
+        if let Some(connection) = self.connections.get_mut(&id) {
+            connection.flows[side].end(at);
+        }
+    }
+
+    fn next_event(&self) -> Option<Duration> {
+        self.connections
+            .values()
+            .filter(|connection| !self.connection_cut(connection))
+            .flat_map(|connection| connection.flows.iter().filter_map(Flow::next_event))
+            .min()
+    }
+
     fn random_below(&mut self, bound: usize) -> usize {
         usize::try_from(self.rng.next_u64() % bound as u64).unwrap_or(0)
     }
@@ -478,8 +735,7 @@ impl World {
         if let Some(connection) = self.connections.get_mut(&connection) {
             connection.reset = true;
             for flow in &mut connection.flows {
-                flow.in_transit.clear();
-                flow.arrived.clear();
+                flow.clear();
             }
         }
     }
@@ -496,43 +752,58 @@ impl World {
         }
     }
 
-    fn anything_in_transit(&self) -> bool {
-        self.connections
-            .values()
-            .any(|connection| connection.flows.iter().any(Flow::in_transit))
-    }
-
     fn deliver_some(&mut self) {
+        let now = self.now();
+        let partitions = std::mem::take(&mut self.partitions);
         let mut rng = std::mem::take(&mut self.rng);
         for connection in self.connections.values_mut() {
+            let [client, server] = connection.ends.map(|end| end.ip());
+            if client != server && partitions.contains(&ordered(client, server)) {
+                continue;
+            }
             for flow in &mut connection.flows {
                 if !rng.coin() {
                     continue;
                 }
-                let pending = flow.in_transit.len();
-                if pending > 0 {
-                    let arriving =
-                        1 + usize::try_from(rng.next_u64() % pending as u64).unwrap_or(0);
-                    let bytes: Vec<u8> = flow.in_transit.drain(..arriving).collect();
-                    flow.arrived.extend(bytes);
-                } else if flow.ended {
+                let due = flow.due(now);
+                if due > 0 {
+                    let arriving = 1 + usize::try_from(rng.next_u64() % due as u64).unwrap_or(0);
+                    flow.deliver(arriving);
+                } else if flow.end_due(now) {
                     flow.end_arrived = true;
                 }
             }
         }
         self.rng = rng;
+        self.partitions = partitions;
     }
 
-    fn deliver_all(&mut self) {
-        for connection in self.connections.values_mut() {
+    fn deliver_due(&mut self) -> bool {
+        let now = self.now();
+        let mut delivered = false;
+        let ids: Vec<u64> = self
+            .connections
+            .iter()
+            .filter(|(_, connection)| !self.connection_cut(connection))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in ids {
+            let Some(connection) = self.connections.get_mut(&id) else {
+                continue;
+            };
             for flow in &mut connection.flows {
-                let bytes: Vec<u8> = flow.in_transit.drain(..).collect();
-                flow.arrived.extend(bytes);
-                if flow.ended {
+                let due = flow.due(now);
+                if due > 0 {
+                    flow.deliver(due);
+                    delivered = true;
+                }
+                if flow.end_due(now) {
                     flow.end_arrived = true;
+                    delivered = true;
                 }
             }
         }
+        delivered
     }
 
     fn transfer_size(&mut self, most: usize) -> usize {
@@ -547,16 +818,17 @@ impl World {
         &mut self,
         network: &SimNetwork,
         ip: IpAddr,
-        op: &mut Op,
+        waiting: &mut Waiting,
     ) -> Option<Result<NetOutput<SimStream>>> {
-        if let Some(answer) = answered_at_once(op) {
+        if let Some(answer) = answered_at_once(&waiting.op) {
             return Some(self.next_operation().and(answer));
         }
-        match op {
+        match &mut waiting.op {
             NetOp::Accept { listener } => self.accept(network, listener.address),
             NetOp::Connect { address } => {
                 let Address::Tcp(address) = *address;
-                self.connect(network, ip, address)
+                let since = waiting.since;
+                self.connect(network, ip, address, since, &mut waiting.handshake_done_at)
             }
             NetOp::Receive { stream, buffer } => self.receive(stream, buffer),
             NetOp::Send { stream, buffer } => self.send(stream, buffer),
@@ -587,7 +859,31 @@ impl World {
         network: &SimNetwork,
         ip: IpAddr,
         address: SocketAddr,
+        since: Duration,
+        handshake_done_at: &mut Option<Duration>,
     ) -> Option<Result<NetOutput<SimStream>>> {
+        let now = self.now();
+        if self.cut(ip, address.ip()) {
+            if now < since.saturating_add(SimNetwork::CONNECT_TIMEOUT) {
+                return None;
+            }
+            return Some(
+                self.next_operation()
+                    .and(Err(Error::new(ErrorKind::TimedOut))),
+            );
+        }
+        let done_at = match *handshake_done_at {
+            Some(at) => at,
+            None => {
+                let round_trip = self.delay().saturating_add(self.delay());
+                let at = now.saturating_add(round_trip);
+                *handshake_done_at = Some(at);
+                at
+            }
+        };
+        if done_at > now {
+            return None;
+        }
         let Some(backlog) = self.listeners.get(&address) else {
             return Some(
                 self.next_operation()
@@ -674,10 +970,15 @@ impl World {
             return Some(Ok(NetOutput::Transferred(count)));
         }
         let count = self.transfer_size(room);
+        let at = self.now().saturating_add(self.delay());
         let flow = &mut self.connections.get_mut(&stream.connection)?.flows[stream.side];
-        flow.in_transit.extend(&buffer[..count]);
+        flow.send(&buffer[..count], at);
         Some(Ok(NetOutput::Transferred(count)))
     }
+}
+
+fn ordered(a: IpAddr, b: IpAddr) -> [IpAddr; 2] {
+    [a.min(b), a.max(b)]
 }
 
 fn lock(shared: &Mutex<World>) -> MutexGuard<'_, World> {
@@ -688,11 +989,12 @@ fn lock(shared: &Mutex<World>) -> MutexGuard<'_, World> {
 mod tests {
     use super::SimNetwork;
     use crate::{
-        Address, ErrorKind, NetCompletion, NetListener, NetOp, NetQueue, NetQueueOptions,
-        NetStream, Network, SimListener, SimNetQueue, SimStream,
+        Address, Clock, ErrorKind, NetCompletion, NetListener, NetOp, NetQueue, NetQueueOptions,
+        NetStream, Network, SimClock, SimListener, SimNetQueue, SimStream,
     };
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
+    use std::time::Duration;
 
     const SERVER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     const CLIENT: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -730,6 +1032,28 @@ mod tests {
             let mut completions = Vec::new();
             self.queue.reap(&mut completions, min).unwrap();
             completions
+        }
+
+        fn reap_for(&mut self, min: usize, timeout: Duration) -> Vec<Completion> {
+            let mut completions = Vec::new();
+            self.queue
+                .reap_timeout(&mut completions, min, timeout)
+                .unwrap();
+            completions
+        }
+
+        fn now(&self) -> Duration {
+            self.network.clock().monotonic()
+        }
+
+        fn clock_at_its_limit(&self) {
+            self.network.clock().advance(Duration::MAX);
+        }
+
+        fn connect_op(&self) -> NetOp<SimListener, SimStream> {
+            NetOp::Connect {
+                address: self.listener.local_address().unwrap(),
+            }
         }
 
         fn connect(&mut self) -> (Arc<SimStream>, Arc<SimStream>) {
@@ -774,6 +1098,10 @@ mod tests {
     fn trace(seed: u64) -> Vec<(u64, usize)> {
         let mut pair = Pair::new(seed);
         pair.network.short_transfers(true);
+        if seed % 2 == 1 {
+            pair.network
+                .latency(Duration::from_micros(10), Duration::from_millis(5));
+        }
         let (first, first_server) = pair.connect();
         let (second, second_server) = pair.connect();
         let mut trace = Vec::new();
@@ -794,6 +1122,192 @@ mod tests {
     fn a_seed_repeats_exactly_and_different_seeds_differ() {
         assert_eq!(trace(3), trace(3));
         assert!((0..8).any(|seed| trace(seed) != trace(3)));
+    }
+
+    #[test]
+    fn latency_delays_bytes_and_moves_the_clock_only_as_far_as_needed() {
+        let mut pair = Pair::new(8);
+        let one_way = Duration::from_millis(10);
+        pair.network.latency(one_way, one_way);
+        let (client, server) = pair.connect();
+        assert_eq!(pair.now(), 2 * one_way);
+        pair.send(&client, b"hello", 0);
+        pair.reap(1);
+        pair.receive(&server, 5, 1);
+        let mut completions = Vec::new();
+        let early = pair.queue.reap_timeout(&mut completions, 1, one_way / 2);
+        assert_eq!(early.unwrap(), 0);
+        assert_eq!(pair.now(), 2 * one_way + one_way / 2);
+        let completion = pair.reap(1).pop().unwrap();
+        let count = completion.result.unwrap().transferred().unwrap();
+        assert!(count > 0);
+        assert_eq!(
+            completion.op.into_buffer().unwrap()[..count],
+            b"hello"[..count]
+        );
+        assert_eq!(pair.now(), 3 * one_way);
+    }
+
+    #[test]
+    fn bytes_sent_later_never_overtake_bytes_sent_earlier() {
+        let mut pair = Pair::new(9);
+        pair.network
+            .latency(Duration::from_millis(1), Duration::from_millis(50));
+        let (client, server) = pair.connect();
+        let mut expected = Vec::new();
+        for round in 0..20u8 {
+            pair.send(&client, &[round; 3], u64::from(round));
+            pair.reap(1);
+            expected.extend([round; 3]);
+        }
+        let mut received = Vec::new();
+        while received.len() < expected.len() {
+            pair.receive(&server, 64, 100);
+            let completion = pair.reap(1).pop().unwrap();
+            let count = completion.result.unwrap().transferred().unwrap();
+            received.extend_from_slice(&completion.op.into_buffer().unwrap()[..count]);
+        }
+        assert_eq!(received, expected);
+    }
+
+    #[test]
+    fn a_connect_across_a_partition_times_out_like_an_unanswered_handshake() {
+        let mut pair = Pair::new(10);
+        pair.network.partition(CLIENT, SERVER);
+        let op = pair.connect_op();
+        pair.submit(op, 0);
+        assert!(pair.reap_for(1, Duration::from_secs(5)).is_empty());
+        assert_eq!(pair.now(), Duration::from_secs(5));
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        assert_eq!(pair.now(), SimNetwork::CONNECT_TIMEOUT);
+        assert_eq!(pair.network.connection_count(), 0);
+    }
+
+    #[test]
+    fn a_connect_finishes_once_the_partition_heals_in_time() {
+        let mut pair = Pair::new(11);
+        pair.network.partition(SERVER, CLIENT);
+        let op = pair.connect_op();
+        pair.submit(op, 0);
+        assert!(pair.reap_for(1, Duration::from_secs(30)).is_empty());
+        pair.network.heal(CLIENT, SERVER);
+        let completion = pair.reap(1).pop().unwrap();
+        assert!(completion.result.unwrap().into_stream().is_some());
+        assert_eq!(pair.now(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn bytes_wait_at_a_partition_until_it_heals() {
+        let mut pair = Pair::new(12);
+        let (client, server) = pair.connect();
+        pair.network.partition(CLIENT, SERVER);
+        pair.send(&client, b"held", 0);
+        pair.reap(1);
+        pair.receive(&server, 8, 1);
+        let mut completions = Vec::new();
+        let error = pair.queue.reap(&mut completions, 1).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
+        assert!(pair.reap_for(1, Duration::from_secs(600)).is_empty());
+        assert_eq!(pair.now(), Duration::from_secs(600));
+        pair.network.heal_all();
+        let completion = pair.reap(1).pop().unwrap();
+        assert!(completion.result.unwrap().transferred() > Some(0));
+    }
+
+    #[test]
+    fn partitions_only_cut_the_hosts_named() {
+        let mut pair = Pair::new(13);
+        pair.network
+            .partition(SERVER, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
+        pair.network.partition(CLIENT, CLIENT);
+        let (client, server) = pair.connect();
+        pair.send(&client, b"free", 0);
+        pair.receive(&server, 4, 1);
+        assert_eq!(pair.reap(2).len(), 2);
+        assert_eq!(pair.now(), Duration::ZERO);
+    }
+
+    #[test]
+    fn canceled_operations_come_back_unnumbered_with_their_buffers() {
+        let mut pair = Pair::new(14);
+        let (_client, server) = pair.connect();
+        pair.receive(&server, 32, 5);
+        let before = pair.network.operation_count();
+        pair.queue.cancel(5).unwrap();
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::Canceled);
+        assert_eq!(completion.op.into_buffer().unwrap().len(), 32);
+        assert_eq!(pair.network.operation_count(), before);
+        pair.receive(&server, 32, 6);
+        assert_eq!(pair.queue.in_flight(), 1);
+    }
+
+    #[test]
+    fn a_shared_clock_carries_the_networks_time() {
+        let clock = Arc::new(SimClock::new(0));
+        let network = SimNetwork::with_clock(Arc::clone(&clock));
+        assert!(Arc::ptr_eq(&network.clock(), &clock));
+        let mut queue = network
+            .host(CLIENT)
+            .net_queue(NetQueueOptions::new())
+            .unwrap();
+        let mut completions = Vec::new();
+        let timeout = Duration::from_millis(7);
+        assert_eq!(queue.reap_timeout(&mut completions, 0, timeout).unwrap(), 0);
+        assert_eq!(clock.monotonic(), Duration::ZERO);
+        let connect_across_cut = NetOp::Connect {
+            address: Address::Tcp(SocketAddr::new(SERVER, 1)),
+        };
+        network.partition(CLIENT, SERVER);
+        assert!(queue.submit(connect_across_cut, 0).is_ok());
+        assert_eq!(queue.reap_timeout(&mut completions, 1, timeout).unwrap(), 0);
+        assert_eq!(clock.monotonic(), timeout);
+    }
+
+    #[test]
+    fn a_timeout_beyond_the_end_of_simulated_time_waits_as_reap_does() {
+        let mut pair = Pair::new(16);
+        let (_client, server) = pair.connect();
+        pair.receive(&server, 4, 0);
+        let mut completions = Vec::new();
+        let error = pair
+            .queue
+            .reap_timeout(&mut completions, 1, Duration::MAX)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
+        assert_eq!(pair.now(), Duration::ZERO);
+    }
+
+    #[test]
+    fn waits_at_the_end_of_simulated_time_return_instead_of_spinning() {
+        let mut pair = Pair::new(15);
+        pair.network
+            .latency(Duration::from_secs(1), Duration::from_secs(2));
+        let (client, server) = pair.connect();
+        pair.clock_at_its_limit();
+        assert!(pair.reap_for(0, Duration::MAX).is_empty());
+        pair.send(&client, b"late", 0);
+        pair.reap(1);
+        pair.receive(&server, 4, 1);
+        let mut completions = Vec::new();
+        let error = pair.queue.reap(&mut completions, 1).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
+        let error = pair
+            .queue
+            .reap_timeout(&mut completions, 1, Duration::from_secs(5))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
+        pair.network.partition(CLIENT, SERVER);
+        let op = pair.connect_op();
+        pair.submit(op, 2);
+        let error = pair.queue.reap(&mut completions, 1).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
+        let error = pair
+            .queue
+            .reap_timeout(&mut completions, 1, Duration::MAX)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
     }
 
     #[test]
@@ -973,9 +1487,13 @@ mod tests {
             let mut pair = Pair::new(seed);
             pair.network.short_transfers(seed % 2 == 0);
             pair.network.fail_randomly(seed, 50_000);
+            if seed % 4 >= 2 {
+                pair.network
+                    .latency(Duration::ZERO, Duration::from_millis(20));
+            }
             let mut streams: Vec<Arc<SimStream>> = Vec::new();
             for step in 0..300 {
-                let choice = rng.next_u64() % 6;
+                let choice = rng.next_u64() % 9;
                 let pick = |rng: &mut crate::rng::SplitMix64, streams: &[Arc<SimStream>]| {
                     (!streams.is_empty())
                         .then(|| Arc::clone(&streams[(rng.next_u64() as usize) % streams.len()]))
@@ -1000,6 +1518,18 @@ mod tests {
                         let _ = streams[at].shutdown_write();
                         None
                     }
+                    6 => {
+                        if rng.coin() {
+                            pair.network.partition(CLIENT, SERVER);
+                        } else {
+                            pair.network.heal(CLIENT, SERVER);
+                        }
+                        None
+                    }
+                    7 => {
+                        let _ = pair.queue.cancel(rng.next_u64() % (step + 1));
+                        None
+                    }
                     _ => {
                         if !streams.is_empty() {
                             let at = (rng.next_u64() as usize) % streams.len();
@@ -1012,7 +1542,13 @@ mod tests {
                     let _ = pair.queue.submit(op, step);
                 }
                 let mut completions = Vec::new();
-                let _ = pair.queue.reap(&mut completions, 0);
+                if choice == 8 {
+                    let timeout = Duration::from_millis(rng.next_u64() % 200);
+                    let wanted = pair.queue.in_flight().min(1);
+                    let _ = pair.queue.reap_timeout(&mut completions, wanted, timeout);
+                } else {
+                    let _ = pair.queue.reap(&mut completions, 0);
+                }
                 for completion in completions {
                     if let Ok(output) = completion.result {
                         streams.extend(output.into_stream().map(Arc::new));

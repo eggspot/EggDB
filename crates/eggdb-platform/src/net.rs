@@ -3,6 +3,7 @@ use crate::io::IoBuffer;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Where a listener listens or a connection goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -183,6 +184,9 @@ impl<L: fmt::Debug, S: fmt::Debug> std::error::Error for RejectedNetOp<L, S> {
 /// connections complete in any order, and two sends on one connection in flight at once may
 /// interleave, so a connection has at most one send and one receive in flight. Dropping a
 /// queue abandons its operations in flight: a send may or may not have happened.
+///
+/// Timeouts are built above the queue: [`NetQueue::reap_timeout`] bounds a wait, and
+/// [`NetQueue::cancel`] gives up an operation whose time ran out and hands back its buffer.
 pub trait NetQueue: Send + fmt::Debug {
     /// The listener type accepts use.
     type Listener: NetListener;
@@ -210,6 +214,28 @@ pub trait NetQueue: Send + fmt::Debug {
         min: usize,
     ) -> Result<usize>;
 
+    /// Like [`NetQueue::reap`], but waits at most `timeout`: when it runs out first, it
+    /// returns the fewer than `min` completions it appended, which may be none, and the other
+    /// operations stay in flight. A zero timeout only collects what has already finished, and one
+    /// too long for the clock to count, such as [`Duration::MAX`], waits as `reap` does. In a
+    /// simulation, the wait is on the simulated clock, and running out of time is the answer
+    /// instead of [`ErrorKind::Stalled`].
+    fn reap_timeout(
+        &mut self,
+        completions: &mut Vec<NetCompletion<Self::Listener, Self::Stream>>,
+        min: usize,
+        timeout: Duration,
+    ) -> Result<usize>;
+
+    /// Gives up the operations in flight tagged `user_data`: each still completes exactly once
+    /// through a later reap, with [`ErrorKind::Canceled`] and its listener, connection and
+    /// buffer, and stays counted in [`NetQueue::in_flight`] until then. An operation that
+    /// finished first completes with its own result instead; a receive or send that completes
+    /// with [`ErrorKind::Canceled`] moved no bytes of its buffer, while a canceled connect may
+    /// already have reached the peer, whose accept then sees a connection that closes at once.
+    /// Fails with [`ErrorKind::NotFound`] when no operation in flight has that tag.
+    fn cancel(&mut self, user_data: u64) -> Result<()>;
+
     /// How many operations were submitted and not yet reaped.
     fn in_flight(&self) -> usize;
 
@@ -222,7 +248,8 @@ pub trait NetQueue: Send + fmt::Debug {
 #[non_exhaustive]
 pub enum NetBackend {
     /// Retries the operations that would block inside [`NetQueue::reap`], sleeping between
-    /// rounds, and connects with a blocking call: correct wherever std has sockets, never fast.
+    /// rounds, and connects with a blocking call, which a [`NetQueue::reap_timeout`] cannot cut
+    /// short: correct wherever std has sockets, never fast.
     Portable,
     /// Waits for readiness in Linux's epoll, inside [`NetQueue::reap`].
     Epoll,

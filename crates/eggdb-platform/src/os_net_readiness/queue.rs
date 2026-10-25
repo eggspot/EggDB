@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::io;
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, RawFd};
+use std::time::Duration;
+use std::time::Instant;
 
 pub(crate) const NATIVE: Option<NetBackend> = Some(BACKEND);
 
@@ -118,7 +120,12 @@ impl ReadinessQueue {
         self.fresh.push(slot);
     }
 
-    pub(crate) fn reap(&mut self, completions: &mut Vec<Completion>, min: usize) -> Result<()> {
+    pub(crate) fn reap(
+        &mut self,
+        completions: &mut Vec<Completion>,
+        min: usize,
+        deadline: Option<Instant>,
+    ) -> Result<()> {
         let before = completions.len();
         let fresh = std::mem::take(&mut self.fresh);
         for &slot in &fresh {
@@ -133,7 +140,18 @@ impl ReadinessQueue {
             if self.waiters.is_empty() || (polled && !short) {
                 return Ok(());
             }
-            self.selector.wait(short, &mut self.ready)?;
+            let timeout = match (short, deadline) {
+                (false, _) => Some(Duration::ZERO),
+                (true, None) => None,
+                (true, Some(deadline)) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if polled && left.is_zero() {
+                        return Ok(());
+                    }
+                    Some(left)
+                }
+            };
+            self.selector.wait(timeout, &mut self.ready)?;
             polled = true;
             let ready = std::mem::take(&mut self.ready);
             for readiness in &ready {
@@ -142,6 +160,27 @@ impl ReadinessQueue {
             self.ready = ready;
             self.ready.clear();
             self.settle(completions);
+        }
+    }
+
+    pub(crate) fn cancel(&mut self, user_data: u64, canceled: &mut Vec<Completion>) {
+        let tagged: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, waiting)| waiting.as_ref().is_some_and(|w| w.user_data == user_data))
+            .map(|(slot, _)| slot)
+            .collect();
+        for slot in tagged {
+            self.fresh.retain(|&fresh| fresh != slot);
+            if let Some((fd, _)) = self.slots[slot].as_ref().and_then(wait_on) {
+                if let Some(waiters) = self.waiters.get_mut(&fd) {
+                    waiters.readers.retain(|&reader| reader != slot);
+                    waiters.writers.retain(|&writer| writer != slot);
+                }
+                self.touched.push(fd);
+            }
+            self.complete(slot, Err(Error::new(ErrorKind::Canceled)), canceled);
         }
     }
 

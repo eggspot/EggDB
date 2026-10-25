@@ -6,7 +6,7 @@ use crate::net::{
 use crate::os_net_readiness::{NATIVE, ReadinessQueue, suppress_sigpipe};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The operating system's network.
 ///
@@ -54,6 +54,7 @@ impl Network for OsNetwork {
             capacity,
             in_flight: 0,
             engine,
+            canceled: Vec::new(),
         })
     }
 }
@@ -114,6 +115,7 @@ pub struct OsNetQueue {
     capacity: usize,
     in_flight: usize,
     engine: Engine,
+    canceled: Vec<Completion>,
 }
 
 #[derive(Debug)]
@@ -153,14 +155,50 @@ impl OsNetQueue {
         completions.len() - before
     }
 
-    fn poll_until(waiting: &mut Vec<Waiting>, completions: &mut Vec<Completion>, min: usize) {
+    fn poll_until(
+        waiting: &mut Vec<Waiting>,
+        completions: &mut Vec<Completion>,
+        min: usize,
+        deadline: Option<Instant>,
+    ) {
         let mut reaped = Self::poll(waiting, completions);
         let mut backoff = Self::FIRST_BACKOFF;
         while reaped < min {
-            std::thread::sleep(backoff);
+            let nap = match deadline {
+                None => backoff,
+                Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
+                    Some(left) if !left.is_zero() => backoff.min(left),
+                    _ => return,
+                },
+            };
+            std::thread::sleep(nap);
             backoff = (backoff * 2).min(Self::LONGEST_BACKOFF);
             reaped += Self::poll(waiting, completions);
         }
+    }
+
+    fn reap_until(
+        &mut self,
+        completions: &mut Vec<Completion>,
+        min: usize,
+        deadline: Option<Instant>,
+    ) -> Result<usize> {
+        if min > self.in_flight {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        let before = completions.len();
+        completions.append(&mut self.canceled);
+        let left = min.saturating_sub(completions.len() - before);
+        let outcome = match &mut self.engine {
+            Engine::Portable(waiting) => {
+                Self::poll_until(waiting, completions, left, deadline);
+                Ok(())
+            }
+            Engine::Readiness(queue) => queue.reap(completions, left, deadline),
+        };
+        let reaped = completions.len() - before;
+        self.in_flight -= reaped;
+        outcome.map(|()| reaped)
     }
 }
 
@@ -185,20 +223,52 @@ impl NetQueue for OsNetQueue {
     }
 
     fn reap(&mut self, completions: &mut Vec<Completion>, min: usize) -> Result<usize> {
-        if min > self.in_flight {
-            return Err(Error::new(ErrorKind::InvalidInput));
+        self.reap_until(completions, min, None)
+    }
+
+    fn reap_timeout(
+        &mut self,
+        completions: &mut Vec<Completion>,
+        min: usize,
+        timeout: Duration,
+    ) -> Result<usize> {
+        let deadline = Instant::now().checked_add(timeout);
+        match deadline {
+            Some(deadline) => self.reap_until(completions, min, Some(deadline)),
+            None => self.reap_until(completions, min, None),
         }
-        let before = completions.len();
-        let outcome = match &mut self.engine {
+    }
+
+    fn cancel(&mut self, user_data: u64) -> Result<()> {
+        let before = self.canceled.len();
+        match &mut self.engine {
             Engine::Portable(waiting) => {
-                Self::poll_until(waiting, completions, min);
-                Ok(())
+                let mut index = 0;
+                while let Some(next) = waiting.get(index) {
+                    if next.user_data == user_data {
+                        let Waiting { op, user_data } = waiting.swap_remove(index);
+                        self.canceled.push(NetCompletion {
+                            user_data,
+                            result: Err(Error::new(ErrorKind::Canceled)),
+                            op,
+                        });
+                    } else {
+                        index += 1;
+                    }
+                }
             }
-            Engine::Readiness(queue) => queue.reap(completions, min),
-        };
-        let reaped = completions.len() - before;
-        self.in_flight -= reaped;
-        outcome.map(|()| reaped)
+            Engine::Readiness(queue) => queue.cancel(user_data, &mut self.canceled),
+        }
+        if self.canceled.len() > before
+            || self
+                .canceled
+                .iter()
+                .any(|completion| completion.user_data == user_data)
+        {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::NotFound))
+        }
     }
 
     fn in_flight(&self) -> usize {

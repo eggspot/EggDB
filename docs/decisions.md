@@ -2081,3 +2081,61 @@ sockets on io_uring and IOCP, and one queue per core; batching kqueue changes in
 the contract tests run once per backend; fewer system calls per connection (`SOCK_NONBLOCK` on
 Linux, no second non-blocking and no-`SIGPIPE` call on sockets the queue created, waking one
 pending accept per ready connection instead of all).
+
+## D72 Timeouts in the network queue: a timed reap and cancel, with simulated time, latency and partitions — Decided by research (build loop, 2026-10-25); refines D70 and D71
+A caller can now bound a wait and give up an operation. `NetQueue::reap_timeout(completions, min,
+timeout)` waits at most `timeout` and, when time runs out first, returns the fewer than `min`
+completions it appended (possibly none) as `Ok`, leaving the rest in flight; a zero timeout only
+collects what has finished. `NetQueue::cancel(user_data)` gives up the operations in flight with
+that tag: each still completes exactly once through a later reap, with the new
+`ErrorKind::Canceled` and its listener, connection and buffer, and stays counted in `in_flight`
+until then; an unknown tag is `NotFound`.
+
+- **Why not a deadline inside each operation:** only io_uring has a per-operation timeout
+  (`IORING_OP_LINK_TIMEOUT`); IOCP and the readiness backends would each need their own timer plus
+  an internal cancel, and it would put timeout policy (connect, idle, request deadlines) in the
+  platform layer when the engine needs one timer wheel across files, network and queries.
+  FoundationDB and TigerBeetle both keep timeouts above the I/O layer. Cancel maps onto every
+  backend: `IORING_OP_ASYNC_CANCEL`, `CancelIoEx`, deregistering in epoll and kqueue, and the
+  simulator; it is also the only way to get an owned buffer (D66) back early.
+- **Why `Ok` with fewer completions, not `Err(TimedOut)`:** running out of time is a normal
+  outcome, and epoll, kqueue and `GetQueuedCompletionStatusEx` all report it as fewer events.
+  `Err` stays for real failures.
+- **Why a relative `Duration`, not a deadline on a `Clock`:** every backend's wait takes a
+  relative timeout, absolute io_uring timers need Linux 6.12, and a deadline on a clock other
+  than the queue's would be a silent bug. Each backend turns it into a deadline once, so an
+  interrupted wait does not start over.
+- **Spelling:** `Canceled`, as the repository writes American English and `ECANCELED` does.
+- **OS backends:** epoll waits with the remaining time rounded up to a millisecond, kqueue with a
+  `timespec`; an interrupted wait (`EINTR`) now returns to the queue's loop, which recomputes the
+  time left. The portable poller sleeps at most the time left; its blocking connect can still
+  overrun a timeout (D71). Cancel in the readiness queue drops the operation's interest, and a
+  pending connect's socket is closed only after the kernel forgets it.
+
+**Simulated time (D9).** `SimNetwork` keeps time on a `SimClock` (its own, or one shared through
+`SimNetwork::with_clock`), which moves only inside `reap`: when no operation can finish and
+nothing is due, the queue moves the clock to the next event (bytes or an end of sending arriving,
+a handshake finishing, a connect timing out), or to the end of a timed reap's wait, whichever is
+first. A plain `reap` fails with `Stalled` only when no event is left, as before. This is
+FoundationDB's discrete-event approach: the same seed gives the same schedule and the same clock
+readings.
+
+- **Latency:** `SimNetwork::latency(least, most)` draws each send's one-way delay from the seed;
+  bytes keep their order (a later send never arrives before an earlier one), an end of sending
+  arrives after the bytes before it, and a connect takes a round trip. Zero, the default, draws
+  nothing, so earlier seeded schedules are unchanged.
+- **Partitions:** `SimNetwork::partition(a, b)` cuts two hosts apart until `heal(a, b)` or
+  `heal_all()`. Bytes between them stay in transit, so receives wait; a connect across the cut
+  fails with `TimedOut` after `SimNetwork::CONNECT_TIMEOUT` (127 s, Linux's six handshake retries
+  doubling from one second), and one that heals in time completes. Connections already open are
+  not reset by a cut, as TCP survives a short outage.
+- Canceled operations are not numbered for fault injection, since they are not network
+  operations that completed.
+
+**Not yet:** a retransmission timeout that fails a connection whose bytes stay unacknowledged
+across a long cut (Linux's `tcp_retries2`, about 15 minutes), one-way cuts, per-host latency and
+bandwidth, and timed reaps and cancel on the file I/O queue (D66).
+
+**Review fix (D71 follow-up):** the network contract tests now run once per operating-system
+backend (the portable poller and the system's own) instead of only the automatic one, and half
+of the simulated seeds run with latency.
