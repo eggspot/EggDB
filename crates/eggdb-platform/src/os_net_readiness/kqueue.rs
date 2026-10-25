@@ -215,7 +215,8 @@ pub(crate) fn suppress_sigpipe(socket: &TcpStream) -> io::Result<()> {
 
 pub(crate) fn prepare_listener(listener: &TcpListener) -> io::Result<()> {
     turn_on(listener.as_raw_fd(), SOL_SOCKET, SO_NOSIGPIPE)?;
-    turn_on(listener.as_raw_fd(), IPPROTO_TCP, TCP_NODELAY)
+    let _ = turn_on(listener.as_raw_fd(), IPPROTO_TCP, TCP_NODELAY);
+    Ok(())
 }
 
 pub(crate) fn accept(listener: &TcpListener) -> io::Result<OsStream> {

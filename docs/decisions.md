@@ -2201,7 +2201,8 @@ before the wait and a deregister after it woke. The readiness queue now asks the
   descriptor cannot be closed and reused. A cancel that leaves no waiter disarms at once (one
   call, off the hot path). What may be stale is only epoll's "already in the set" hint for a
   closed descriptor; a re-arm that gets `ENOENT` adds instead, and an add that gets `EEXIST`
-  modifies. A test cancels, drops and reconnects so descriptors are reused, and fails when a
+  modifies. So the first wait on a socket that reuses an old descriptor number costs two calls
+  (the failed modify and the add), as every wait did before, and each later wait one. A test cancels, drops and reconnects so descriptors are reused, and fails when a
   cancel leaves interest armed.
 - **Why not keep interest for the socket's lifetime (research's option B, as libuv does) or
   edge-triggered registration (mio):** with level-triggered interest that outlives its waiter,
