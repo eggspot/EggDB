@@ -1967,3 +1967,58 @@ port against the pool on Windows once the storage engine's
 benchmarks exist, then deciding the automatic choice; Windows 11's `IoRing` API; registered
 buffers (`SetFileIoOverlappedRange`); and D67's one-thread-per-queue rule checked against how
 Windows treats I/O issued by a thread that exits.
+
+## D70 Networking: a completion queue of accepts, connects, receives and sends, a portable poller first, a simulated network — Decided by research (build loop, 2026-10-25); refines D40, D59 and D66
+The platform layer now has a `Network` (`OsNetwork`, and `SimNetwork`'s `SimHost`s) with TCP
+listeners and connections, and a `NetQueue` of `NetOp`s (`Accept`, `Connect`, `Receive`,
+`Send`) reaped as `NetCompletion`s, each operation owning its listener, connection and
+`IoBuffer` until it completes.
+
+**Decided by research:**
+- **The completion shape, not blocking calls or a readiness poller.** D66's reasons hold for
+  sockets too: a single-threaded simulator can only make a completion queue deterministic (a
+  blocking receive would deadlock it, and `WouldBlock` without a poller is unusable),
+  io_uring and IOCP both do sockets as completions, and TigerBeetle's I/O layer does accept,
+  connect, receive and send the same way over io_uring, kqueue and IOCP. A readiness poller
+  (epoll, kqueue) is an implementation detail inside a backend, not the interface.
+- **A sibling queue for now.** `IoOp` is generic over a file and the simulated file queue is
+  tied to `SimFileSystem`, so sockets get their own `NetQueue` with the same contract: a tag, a
+  bounded capacity with `QueueFull` and `RejectedNetOp`, `reap(min)` refusing `min` above what
+  is in flight, short transfers reported. Merging file and socket operations into one queue
+  per core is decided when io_uring and IOCP get their socket backends.
+- **`Address` is a non-exhaustive enum** with only `Tcp(SocketAddr)`, so Unix-domain sockets
+  and others are added without breaking the traits.
+- **A receive of 0 bytes means the peer ended its sending**, as in POSIX, so a receive into an
+  empty buffer is `InvalidInput`; an empty send transfers 0 without the system. A connection
+  has at most one send and one receive in flight, since two sends may interleave.
+- **New error kinds**, mapped from the operating system's: `ConnectionRefused`,
+  `ConnectionReset` (also for aborted connections and broken pipes, so the machine and the
+  simulation report one set), `TimedOut`, `AddrInUse`, `AddrNotAvailable`, `NotConnected`,
+  `HostUnreachable` (also for unreachable networks), and `Stalled` for the simulation.
+- **The first OS backend is a portable poller** over std's non-blocking sockets: `reap` retries
+  the operations that would block, backing off from 20 µs to 2 ms between rounds, and a
+  connect waits inside `reap` (std has no non-blocking connect). It is correct everywhere std
+  has sockets and is never the performance path; epoll, kqueue, io_uring and IOCP backends
+  follow, each with its own decision. Connections turn Nagle's algorithm off, as PostgreSQL
+  and Redis do for their small requests and answers.
+- **The simulation (D9)**, modelled on FoundationDB's simulated network: one `SimNetwork`
+  holds every host; each direction of a connection is an ordered byte stream through a bounded
+  buffer (64 KiB); sent bytes are in transit and arrive a seeded amount at a time, so
+  connections advance in a different order on every seed while each stays in order. Queues
+  perform their operations only inside `reap`, in a seeded order, and when nothing left could
+  finish what `reap` waits for, it fails with `Stalled` instead of hanging, as asking for more
+  than is in flight is `InvalidInput`. Dropping a connection with bytes owed to it resets it;
+  dropping it otherwise ends its sending; dropping a listener resets the connections it did not
+  accept. Every listen and completed operation is numbered and can fail with `InjectedFault`
+  by number or at random, changing nothing. Connections (16,384), backlogs (128 per listener),
+  buffers and queues are bounded; a connect takes the lowest free ephemeral port, and maps are
+  ordered, so a seed repeats exactly. `Stalled` looks at the queue being reaped only: a
+  simulation that drives several queues reaps each with a `min` its own operations can meet, or
+  0, in turn. A connection or listener from another `SimNetwork` is refused at submit.
+
+**Follow-ups, in order:** time in the simulation, with timeouts on operations, partitions,
+clogging and latency, so a stalled connect becomes `TimedOut`; `SO_REUSEPORT` and listen
+options (std cannot set them before `bind`, so they need our own socket declarations); epoll
+and kqueue backends, then sockets on io_uring and IOCP and the decision on one queue per
+core; Unix-domain sockets; UDP (then QUIC, built by us); a resolver; TLS above `NetStream`
+(D23).
