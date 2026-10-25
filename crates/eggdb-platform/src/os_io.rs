@@ -5,6 +5,7 @@ use crate::io::{
 use crate::os_cpus::OsCpus;
 use crate::os_fs::OsFile;
 use crate::os_io_uring::Ring;
+use crate::os_iocp::Port;
 use crate::threads::{SpawnedThread, ThreadOptions};
 use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
@@ -23,6 +24,11 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 /// got. Where panics unwind (release builds abort instead), an operation that panics on a
 /// worker completes with [`ErrorKind::Other`] instead of leaving its completion missing.
 ///
+/// [`IoBackend::Iocp`], on request on Windows, sends reads and writes of uncached files through
+/// an I/O completion port, on a second handle of each file that the queue opens for overlapped
+/// I/O on first use and closes when it is dropped; cached files and syncs (which have no
+/// overlapped form) go to its worker threads, or run inline without threads.
+///
 /// On io_uring, writes and syncs through a read-only handle, empty writes and offsets beyond
 /// `i64::MAX` are answered without the kernel, as [`OsFile`] answers them, and each submit
 /// enters the kernel once. Linux cancels the io_uring operations of a thread that exits, so a
@@ -39,16 +45,19 @@ enum Backend {
     Inline(VecDeque<Job>),
     Pool(Pool),
     Uring(Ring),
+    Port(Port),
 }
 
 #[derive(Debug)]
-struct Job {
-    op: IoOp<OsFile>,
-    user_data: u64,
+pub(crate) struct Job {
+    pub(crate) op: IoOp<OsFile>,
+    pub(crate) user_data: u64,
 }
 
+pub(crate) type Wake = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Debug)]
-struct Pool {
+pub(crate) struct Pool {
     jobs: Option<mpsc::Sender<Job>>,
     completions: mpsc::Receiver<IoCompletion<OsFile>>,
     workers: Vec<SpawnedThread<()>>,
@@ -63,12 +72,12 @@ impl OsIoQueue {
             None => match Ring::new(capacity) {
                 Ok(ring) => Backend::Uring(ring),
                 Err(_) if threads == 0 => Backend::Inline(VecDeque::new()),
-                Err(_) => Backend::Pool(Pool::start(threads)?),
+                Err(_) => Backend::Pool(Pool::start(threads, Pool::no_wake())?),
             },
             Some(IoBackend::Inline) => Backend::Inline(VecDeque::new()),
-            Some(IoBackend::ThreadPool) => Backend::Pool(Pool::start(threads)?),
+            Some(IoBackend::ThreadPool) => Backend::Pool(Pool::start(threads, Pool::no_wake())?),
             Some(IoBackend::IoUring) => Backend::Uring(Ring::new(capacity)?),
-            Some(IoBackend::Iocp) => return Err(Error::new(ErrorKind::Unsupported)),
+            Some(IoBackend::Iocp) => Backend::Port(Port::new(threads)?),
         };
         Ok(Self {
             capacity,
@@ -85,6 +94,7 @@ impl OsIoQueue {
             Backend::Inline(_) => IoBackend::Inline,
             Backend::Pool(_) => IoBackend::ThreadPool,
             Backend::Uring(_) => IoBackend::IoUring,
+            Backend::Port(_) => IoBackend::Iocp,
         }
     }
 }
@@ -105,6 +115,7 @@ impl IoQueue for OsIoQueue {
             Backend::Inline(pending) => pending.push_back(job),
             Backend::Pool(pool) => pool.send(job)?,
             Backend::Uring(ring) => ring.submit(job.op, job.user_data)?,
+            Backend::Port(port) => port.submit(job)?,
         }
         self.in_flight += 1;
         Ok(())
@@ -120,6 +131,7 @@ impl IoQueue for OsIoQueue {
             }
             Backend::Pool(pool) => pool.receive(completions, min),
             Backend::Uring(ring) => ring.reap(completions, min),
+            Backend::Port(port) => port.reap(completions, min),
         };
         let reaped = completions.len() - before;
         self.in_flight -= reaped;
@@ -144,7 +156,7 @@ impl Drop for OsIoQueue {
 }
 
 impl Job {
-    fn run(mut self) -> IoCompletion<OsFile> {
+    pub(crate) fn run(mut self) -> IoCompletion<OsFile> {
         let result = self.op.perform();
         IoCompletion {
             user_data: self.user_data,
@@ -167,7 +179,11 @@ impl Job {
 }
 
 impl Pool {
-    fn start(threads: usize) -> Result<Self> {
+    pub(crate) fn no_wake() -> Wake {
+        Arc::new(|| {})
+    }
+
+    pub(crate) fn start(threads: usize, wake: Wake) -> Result<Self> {
         let (jobs, queued) = mpsc::channel::<Job>();
         let (finished, completions) = mpsc::channel();
         let queued = Arc::new(Mutex::new(queued));
@@ -180,16 +196,17 @@ impl Pool {
         for number in 0..threads {
             let queued = Arc::clone(&queued);
             let finished = finished.clone();
+            let wake = Arc::clone(&wake);
             let worker = ThreadOptions::new()
                 .name(format!("eggdb-io-{number}"))
                 .stack_size(OsIoQueue::WORKER_STACK_SIZE)
-                .spawn(&cpus, move || work(&queued, &finished))?;
+                .spawn(&cpus, move || work(&queued, &finished, &*wake))?;
             pool.workers.push(worker);
         }
         Ok(pool)
     }
 
-    fn send(&self, job: Job) -> core::result::Result<(), RejectedOp<OsFile>> {
+    pub(crate) fn send(&self, job: Job) -> core::result::Result<(), RejectedOp<OsFile>> {
         let Some(jobs) = &self.jobs else {
             return Err(stopped(job.op));
         };
@@ -207,6 +224,13 @@ impl Pool {
         completions.extend(self.completions.try_iter());
         Ok(())
     }
+
+    #[cfg(windows)]
+    pub(crate) fn receive_finished(&self, completions: &mut Vec<IoCompletion<OsFile>>) -> usize {
+        let before = completions.len();
+        completions.extend(self.completions.try_iter());
+        completions.len() - before
+    }
 }
 
 impl Drop for Pool {
@@ -218,13 +242,19 @@ impl Drop for Pool {
     }
 }
 
-fn work(queued: &Mutex<mpsc::Receiver<Job>>, finished: &mpsc::Sender<IoCompletion<OsFile>>) {
+fn work(
+    queued: &Mutex<mpsc::Receiver<Job>>,
+    finished: &mpsc::Sender<IoCompletion<OsFile>>,
+    wake: &(dyn Fn() + Send + Sync),
+) {
     loop {
         let next = queued.lock().unwrap_or_else(PoisonError::into_inner).recv();
         let Ok(job) = next else {
             return;
         };
-        let _ = finished.send(job.run_catching_panics());
+        if finished.send(job.run_catching_panics()).is_ok() {
+            wake();
+        }
     }
 }
 
