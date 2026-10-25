@@ -217,10 +217,24 @@ pub trait NetQueue: Send + fmt::Debug {
     fn capacity(&self) -> usize;
 }
 
+/// What runs the operations of an [`OsNetwork`](crate::OsNetwork) queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NetBackend {
+    /// Retries the operations that would block inside [`NetQueue::reap`], sleeping between
+    /// rounds, and connects with a blocking call: correct wherever std has sockets, never fast.
+    Portable,
+    /// Waits for readiness in Linux's epoll, inside [`NetQueue::reap`].
+    Epoll,
+    /// Waits for readiness in the kqueue of Apple's systems, inside [`NetQueue::reap`].
+    Kqueue,
+}
+
 /// How [`Network::net_queue`] builds a queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetQueueOptions {
     capacity: usize,
+    backend: Option<NetBackend>,
 }
 
 impl NetQueueOptions {
@@ -234,6 +248,7 @@ impl NetQueueOptions {
     pub fn new() -> Self {
         Self {
             capacity: Self::DEFAULT_CAPACITY,
+            backend: None,
         }
     }
 
@@ -241,6 +256,19 @@ impl NetQueueOptions {
     pub fn capacity(mut self, operations: usize) -> Self {
         self.capacity = operations;
         self
+    }
+
+    /// Asks for one backend, given or refused: the queue never falls back to another. Without
+    /// it, the queue waits in epoll on Linux and Android, in kqueue on Apple's systems, and
+    /// polls elsewhere. A machine refuses a backend it lacks with [`ErrorKind::Unsupported`];
+    /// the simulation accepts every request and runs every operation its own way.
+    pub fn backend(mut self, backend: NetBackend) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    pub(crate) fn requested_backend(self) -> Option<NetBackend> {
+        self.backend
     }
 
     pub(crate) fn validated(self) -> Result<usize> {

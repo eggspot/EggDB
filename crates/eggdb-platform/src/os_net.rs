@@ -1,19 +1,24 @@
 use crate::error::{Error, ErrorKind, Result};
 use crate::net::{
-    Address, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions, NetStream,
-    Network, RejectedNetOp, answered_at_once, net_queue_full,
+    Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
+    NetStream, Network, RejectedNetOp, answered_at_once, net_queue_full,
 };
+use crate::os_net_readiness::{NATIVE, ReadinessQueue, suppress_sigpipe};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 /// The operating system's network.
 ///
-/// Its queue is a portable poller over non-blocking sockets: `reap` retries the operations
-/// that would block, backing off between rounds, and a connect waits for the operating system
-/// inside `reap`. It works wherever std has sockets; epoll, kqueue, io_uring and I/O
-/// completion ports follow behind the same queue. Connections have Nagle's algorithm turned
-/// off, as database protocols send small requests and answers.
+/// Unless [`NetQueueOptions::backend`] asks for one, its queues wait for sockets to become
+/// ready in epoll on Linux and Android ([`NetBackend::Epoll`]) and in kqueue on Apple's
+/// systems ([`NetBackend::Kqueue`]), blocking inside `reap` until enough operations finish,
+/// and connect without blocking. Elsewhere they run [`NetBackend::Portable`]: `reap` retries
+/// the operations that would block, backing off between rounds, and a connect waits for the
+/// operating system inside `reap`. [`OsNetQueue::backend`] says which one a queue runs.
+/// Connections have Nagle's algorithm turned off, as database protocols send small requests
+/// and answers, and never raise `SIGPIPE`, so a process embedding EggDB is not stopped by a
+/// peer that went away.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsNetwork;
 
@@ -37,10 +42,18 @@ impl Network for OsNetwork {
     }
 
     fn net_queue(&self, options: NetQueueOptions) -> Result<OsNetQueue> {
+        let capacity = options.validated()?;
+        let engine = match options.requested_backend().or(NATIVE) {
+            Some(NetBackend::Portable) | None => Engine::Portable(Vec::new()),
+            Some(backend) if Some(backend) == NATIVE => {
+                Engine::Readiness(ReadinessQueue::new(capacity)?)
+            }
+            Some(_) => return Err(Error::new(ErrorKind::Unsupported)),
+        };
         Ok(OsNetQueue {
-            capacity: options.validated()?,
+            capacity,
             in_flight: 0,
-            waiting: Vec::new(),
+            engine,
         })
     }
 }
@@ -48,7 +61,7 @@ impl Network for OsNetwork {
 /// A listener made by [`OsNetwork`].
 #[derive(Debug)]
 pub struct OsListener {
-    listener: TcpListener,
+    pub(crate) listener: TcpListener,
 }
 
 impl NetListener for OsListener {
@@ -60,12 +73,13 @@ impl NetListener for OsListener {
 /// A connection made by [`OsNetwork`].
 #[derive(Debug)]
 pub struct OsStream {
-    stream: TcpStream,
+    pub(crate) stream: TcpStream,
 }
 
 impl OsStream {
-    fn new(stream: TcpStream) -> Result<Self> {
+    pub(crate) fn new(stream: TcpStream) -> Result<Self> {
         stream.set_nonblocking(true)?;
+        suppress_sigpipe(&stream)?;
         let _ = stream.set_nodelay(true);
         Ok(Self { stream })
     }
@@ -99,20 +113,34 @@ struct Waiting {
 pub struct OsNetQueue {
     capacity: usize,
     in_flight: usize,
-    waiting: Vec<Waiting>,
+    engine: Engine,
+}
+
+#[derive(Debug)]
+enum Engine {
+    Portable(Vec<Waiting>),
+    Readiness(ReadinessQueue),
 }
 
 impl OsNetQueue {
     const FIRST_BACKOFF: Duration = Duration::from_micros(20);
     const LONGEST_BACKOFF: Duration = Duration::from_millis(2);
 
-    fn poll(&mut self, completions: &mut Vec<Completion>) -> usize {
+    /// Which backend runs this queue's operations.
+    pub fn backend(&self) -> NetBackend {
+        match &self.engine {
+            Engine::Portable(_) => NetBackend::Portable,
+            Engine::Readiness(queue) => queue.backend(),
+        }
+    }
+
+    fn poll(waiting: &mut Vec<Waiting>, completions: &mut Vec<Completion>) -> usize {
         let before = completions.len();
         let mut index = 0;
-        while index < self.waiting.len() {
-            match attempt(&mut self.waiting[index].op) {
+        while let Some(next) = waiting.get_mut(index) {
+            match attempt(&mut next.op, &mut connect_blocking) {
                 Some(result) => {
-                    let Waiting { op, user_data } = self.waiting.swap_remove(index);
+                    let Waiting { op, user_data } = waiting.swap_remove(index);
                     completions.push(NetCompletion {
                         user_data,
                         result,
@@ -123,6 +151,16 @@ impl OsNetQueue {
             }
         }
         completions.len() - before
+    }
+
+    fn poll_until(waiting: &mut Vec<Waiting>, completions: &mut Vec<Completion>, min: usize) {
+        let mut reaped = Self::poll(waiting, completions);
+        let mut backoff = Self::FIRST_BACKOFF;
+        while reaped < min {
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Self::LONGEST_BACKOFF);
+            reaped += Self::poll(waiting, completions);
+        }
     }
 }
 
@@ -138,7 +176,10 @@ impl NetQueue for OsNetQueue {
         if self.in_flight >= self.capacity {
             return Err(net_queue_full(op));
         }
-        self.waiting.push(Waiting { op, user_data });
+        match &mut self.engine {
+            Engine::Portable(waiting) => waiting.push(Waiting { op, user_data }),
+            Engine::Readiness(queue) => queue.submit(op, user_data),
+        }
         self.in_flight += 1;
         Ok(())
     }
@@ -147,15 +188,17 @@ impl NetQueue for OsNetQueue {
         if min > self.in_flight {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
-        let mut reaped = self.poll(completions);
-        let mut backoff = Self::FIRST_BACKOFF;
-        while reaped < min {
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(Self::LONGEST_BACKOFF);
-            reaped += self.poll(completions);
-        }
+        let before = completions.len();
+        let outcome = match &mut self.engine {
+            Engine::Portable(waiting) => {
+                Self::poll_until(waiting, completions, min);
+                Ok(())
+            }
+            Engine::Readiness(queue) => queue.reap(completions, min),
+        };
+        let reaped = completions.len() - before;
         self.in_flight -= reaped;
-        Ok(reaped)
+        outcome.map(|()| reaped)
     }
 
     fn in_flight(&self) -> usize {
@@ -167,31 +210,43 @@ impl NetQueue for OsNetQueue {
     }
 }
 
-fn attempt(op: &mut Op) -> Option<Result<NetOutput<OsStream>>> {
+type Connector<'a> = dyn FnMut(SocketAddr) -> Option<Result<NetOutput<OsStream>>> + 'a;
+
+pub(crate) fn attempt(
+    op: &mut Op,
+    connect: &mut Connector<'_>,
+) -> Option<Result<NetOutput<OsStream>>> {
     if let Some(answer) = answered_at_once(op) {
         return Some(answer);
     }
     match op {
-        NetOp::Accept { listener } => finished(listener.listener.accept()).map(|accepted| {
-            accepted
-                .map_err(Error::from)
-                .and_then(|(stream, _)| OsStream::new(stream))
-                .map(NetOutput::Connected)
-        }),
+        NetOp::Accept { listener } => match listener.listener.accept() {
+            Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => None,
+            accepted => finished(accepted).map(|accepted| {
+                accepted
+                    .map_err(Error::from)
+                    .and_then(|(stream, _)| OsStream::new(stream))
+                    .map(NetOutput::Connected)
+            }),
+        },
         NetOp::Connect { address } => {
             let Address::Tcp(address) = *address;
-            finished(TcpStream::connect(address)).map(|connected| {
-                connected
-                    .map_err(Error::from)
-                    .and_then(OsStream::new)
-                    .map(NetOutput::Connected)
-            })
+            connect(address)
         }
         NetOp::Receive { stream, buffer } => finished((&stream.stream).read(buffer))
             .map(|received| received.map(NetOutput::Transferred).map_err(Error::from)),
         NetOp::Send { stream, buffer } => finished((&stream.stream).write(buffer))
             .map(|sent| sent.map(NetOutput::Transferred).map_err(Error::from)),
     }
+}
+
+fn connect_blocking(address: SocketAddr) -> Option<Result<NetOutput<OsStream>>> {
+    finished(TcpStream::connect(address)).map(|connected| {
+        connected
+            .map_err(Error::from)
+            .and_then(OsStream::new)
+            .map(NetOutput::Connected)
+    })
 }
 
 fn finished<T>(outcome: io::Result<T>) -> Option<io::Result<T>> {
@@ -205,5 +260,128 @@ fn finished<T>(outcome: io::Result<T>) -> Option<io::Result<T>> {
             None
         }
         outcome => Some(outcome),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NATIVE, OsNetwork};
+    use crate::{
+        Address, ErrorKind, NetBackend, NetListener, NetOp, NetQueue, NetQueueOptions, Network,
+    };
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn backends() -> Vec<NetBackend> {
+        let mut backends = vec![NetBackend::Portable];
+        backends.extend(NATIVE);
+        backends
+    }
+
+    fn options(backend: NetBackend) -> NetQueueOptions {
+        NetQueueOptions::new().backend(backend)
+    }
+
+    fn any_port() -> Address {
+        Address::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+    }
+
+    #[test]
+    fn the_automatic_choice_is_the_systems_readiness_backend() {
+        let queue = OsNetwork::new().net_queue(NetQueueOptions::new()).unwrap();
+        assert_eq!(queue.backend(), NATIVE.unwrap_or(NetBackend::Portable));
+        for backend in backends() {
+            let queue = OsNetwork::new().net_queue(options(backend)).unwrap();
+            assert_eq!(queue.backend(), backend);
+        }
+    }
+
+    #[test]
+    fn a_backend_the_system_lacks_is_refused() {
+        for backend in [NetBackend::Epoll, NetBackend::Kqueue] {
+            if NATIVE != Some(backend) {
+                let error = OsNetwork::new().net_queue(options(backend)).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported);
+            }
+        }
+    }
+
+    #[test]
+    fn reaping_nothing_returns_at_once_while_operations_wait() {
+        for backend in backends() {
+            let network = OsNetwork::new();
+            let listener = Arc::new(network.listen(any_port()).unwrap());
+            let mut queue = network.net_queue(options(backend)).unwrap();
+            for user_data in 0..4 {
+                let accept = NetOp::Accept {
+                    listener: Arc::clone(&listener),
+                };
+                queue.submit(accept, user_data).unwrap();
+            }
+            let started = Instant::now();
+            let mut completions = Vec::new();
+            assert_eq!(queue.reap(&mut completions, 0).unwrap(), 0);
+            assert!(started.elapsed() < Duration::from_secs(1), "{backend:?}");
+            assert_eq!(queue.in_flight(), 4);
+        }
+    }
+
+    #[test]
+    fn many_connections_exchange_bytes_at_once() {
+        const CONNECTIONS: u64 = 48;
+        for backend in backends() {
+            let network = OsNetwork::new();
+            let listener = Arc::new(network.listen(any_port()).unwrap());
+            let address = listener.local_address().unwrap();
+            let mut queue = network.net_queue(options(backend)).unwrap();
+            for at in 0..CONNECTIONS {
+                let accept = NetOp::Accept {
+                    listener: Arc::clone(&listener),
+                };
+                queue.submit(accept, at).unwrap();
+                queue
+                    .submit(NetOp::Connect { address }, CONNECTIONS + at)
+                    .unwrap();
+            }
+            let mut completions = Vec::new();
+            while completions.len() < 2 * CONNECTIONS as usize {
+                queue.reap(&mut completions, 1).unwrap();
+            }
+            let mut servers = Vec::new();
+            let mut clients = Vec::new();
+            for completion in completions.drain(..) {
+                let stream = Arc::new(completion.result.unwrap().into_stream().unwrap());
+                if completion.user_data < CONNECTIONS {
+                    servers.push(stream);
+                } else {
+                    clients.push(stream);
+                }
+            }
+            for (at, server) in servers.iter().enumerate() {
+                let receive = NetOp::Receive {
+                    stream: Arc::clone(server),
+                    buffer: vec![0; 1].into(),
+                };
+                queue.submit(receive, at as u64).unwrap();
+            }
+            for (at, client) in clients.iter().enumerate() {
+                let send = NetOp::Send {
+                    stream: Arc::clone(client),
+                    buffer: vec![7; 1].into(),
+                };
+                queue.submit(send, CONNECTIONS + at as u64).unwrap();
+            }
+            while completions.len() < 2 * CONNECTIONS as usize {
+                queue.reap(&mut completions, 1).unwrap();
+            }
+            for completion in completions.drain(..) {
+                assert_eq!(completion.result.unwrap().transferred(), Some(1));
+                if completion.user_data < CONNECTIONS {
+                    assert_eq!(completion.op.into_buffer().unwrap()[0], 7);
+                }
+            }
+            assert_eq!(queue.in_flight(), 0);
+        }
     }
 }

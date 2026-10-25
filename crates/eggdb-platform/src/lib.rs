@@ -41,6 +41,7 @@ mod os_io_uring;
 mod os_iocp;
 mod os_memory;
 mod os_net;
+mod os_net_readiness;
 mod rng;
 mod sim_cpus;
 mod sim_fs;
@@ -64,8 +65,8 @@ pub use fs::{File, FileSystem, OpenMode};
 pub use io::{IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp};
 pub use memory::{Memory, MemoryRegion, PageMode};
 pub use net::{
-    Address, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions, NetStream,
-    Network, RejectedNetOp,
+    Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
+    NetStream, Network, RejectedNetOp,
 };
 pub use os_cpus::OsCpus;
 pub use os_fs::{OsFile, OsFileSystem};
