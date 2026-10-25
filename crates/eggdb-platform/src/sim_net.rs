@@ -21,13 +21,18 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// A queue refuses, with [`ErrorKind::InvalidInput`], a connection or listener of another
 /// `SimNetwork`.
 ///
+/// A queue also refuses a second send, or a second receive, on one end of a connection while
+/// the first is in flight, since the two could interleave.
+///
 /// Connecting where nothing listens is [`ErrorKind::ConnectionRefused`]. Dropping a connection
 /// with bytes still owed to it resets it, so its peer's operations fail with
 /// [`ErrorKind::ConnectionReset`]; dropping it otherwise ends its sending, as
-/// [`NetStream::shutdown_write`] does, and the peer's later sends fail with
-/// [`ErrorKind::ConnectionReset`] at once. Every listen and every operation that completes is
-/// numbered from zero, and any of them can be made to fail with [`ErrorKind::InjectedFault`],
-/// by number or at random from a seed, changing nothing. Clones share the same network.
+/// [`NetStream::shutdown_write`] does. As over TCP, the peer's first send after that succeeds
+/// and its bytes are lost, and it resets the connection, so the operations after it fail with
+/// [`ErrorKind::ConnectionReset`]. Every listen and every operation that completes is
+/// numbered from zero, empty receives and sends too, and any of them can be made to fail with
+/// [`ErrorKind::InjectedFault`], by number or at random from a seed, changing nothing. Clones
+/// share the same network.
 #[derive(Debug, Clone, Default)]
 pub struct SimNetwork {
     shared: Arc<Mutex<World>>,
@@ -194,6 +199,7 @@ impl Network for SimHost {
             capacity: options.validated()?,
             in_flight: 0,
             waiting: Vec::new(),
+            transferring: BTreeSet::new(),
         })
     }
 }
@@ -309,6 +315,32 @@ pub struct SimNetQueue {
     capacity: usize,
     in_flight: usize,
     waiting: Vec<Waiting>,
+    transferring: BTreeSet<Transfer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Transfer {
+    connection: u64,
+    side: usize,
+    sending: bool,
+}
+
+impl Transfer {
+    fn of(op: &Op) -> Option<Self> {
+        match op {
+            NetOp::Receive { stream, .. } => Some(Self {
+                connection: stream.connection,
+                side: stream.side,
+                sending: false,
+            }),
+            NetOp::Send { stream, .. } => Some(Self {
+                connection: stream.connection,
+                side: stream.side,
+                sending: true,
+            }),
+            NetOp::Accept { .. } | NetOp::Connect { .. } => None,
+        }
+    }
 }
 
 impl SimNetQueue {
@@ -339,6 +371,9 @@ impl SimNetQueue {
         let mut done = Vec::with_capacity(count);
         for (index, result) in finished {
             let Waiting { op, user_data } = self.waiting.swap_remove(index);
+            if let Some(transfer) = Transfer::of(&op) {
+                self.transferring.remove(&transfer);
+            }
             done.push(NetCompletion {
                 user_data,
                 result,
@@ -363,11 +398,16 @@ impl NetQueue for SimNetQueue {
         if self.in_flight >= self.capacity {
             return Err(net_queue_full(op));
         }
-        if !self.owns(&op) {
+        let transfer = Transfer::of(&op);
+        let overlapping = transfer.is_some_and(|transfer| self.transferring.contains(&transfer));
+        if overlapping || !self.owns(&op) {
             return Err(RejectedNetOp {
                 error: Error::new(ErrorKind::InvalidInput),
                 op,
             });
+        }
+        if let Some(transfer) = transfer {
+            self.transferring.insert(transfer);
         }
         self.waiting.push(Waiting { op, user_data });
         self.in_flight += 1;
@@ -509,7 +549,7 @@ impl World {
         op: &mut Op,
     ) -> Option<Result<NetOutput<SimStream>>> {
         if let Some(answer) = answered_at_once(op) {
-            return Some(answer);
+            return Some(self.next_operation().and(answer));
         }
         match op {
             NetOp::Accept { listener } => self.accept(network, listener.address),
@@ -613,13 +653,12 @@ impl World {
 
     fn send(&mut self, stream: &SimStream, buffer: &[u8]) -> Option<Result<NetOutput<SimStream>>> {
         let connection = self.connections.get(&stream.connection)?;
-        let refused = connection.reset
-            || connection.flows[stream.side].ended
-            || !connection.open[1 - stream.side];
+        let refused = connection.reset || connection.flows[stream.side].ended;
+        let peer_gone = !connection.open[1 - stream.side];
         let room = SimNetwork::BUFFER_BYTES
             .saturating_sub(connection.flows[stream.side].buffered())
             .min(buffer.len());
-        if !refused && room == 0 {
+        if !refused && !peer_gone && room == 0 {
             return None;
         }
         if let Err(error) = self.next_operation() {
@@ -627,6 +666,11 @@ impl World {
         }
         if refused {
             return Some(Err(Error::new(ErrorKind::ConnectionReset)));
+        }
+        if peer_gone {
+            let count = self.transfer_size(buffer.len().min(SimNetwork::BUFFER_BYTES));
+            self.reset(stream.connection);
+            return Some(Ok(NetOutput::Transferred(count)));
         }
         let count = self.transfer_size(room);
         let flow = &mut self.connections.get_mut(&stream.connection)?.flows[stream.side];
@@ -791,6 +835,50 @@ mod tests {
         pair.receive(&server, 8, 0);
         let completion = pair.reap(1).pop().unwrap();
         assert_eq!(completion.result.unwrap().transferred(), Some(0));
+    }
+
+    #[test]
+    fn the_first_send_after_the_peer_left_succeeds_and_resets_the_connection() {
+        let mut pair = Pair::new(4);
+        let (client, server) = pair.connect();
+        drop(server);
+        pair.send(&client, b"lost", 0);
+        let completion = pair.reap(1).pop().unwrap();
+        assert!(completion.result.unwrap().transferred().unwrap() > 0);
+        pair.send(&client, b"refused", 1);
+        pair.receive(&client, 8, 2);
+        for completion in pair.reap(2) {
+            assert_eq!(
+                completion.result.unwrap_err().kind(),
+                ErrorKind::ConnectionReset
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_send_or_receive_on_one_end_is_refused_while_the_first_is_in_flight() {
+        let mut pair = Pair::new(5);
+        let (client, server) = pair.connect();
+        pair.send(&client, b"first", 0);
+        pair.receive(&server, 8, 1);
+        for op in [
+            NetOp::Send {
+                stream: Arc::clone(&client),
+                buffer: b"second".to_vec().into(),
+            },
+            NetOp::Receive {
+                stream: Arc::clone(&server),
+                buffer: vec![0; 8].into(),
+            },
+        ] {
+            let rejected = pair.queue.submit(op, 2).unwrap_err();
+            assert_eq!(rejected.error.kind(), ErrorKind::InvalidInput);
+        }
+        pair.send(&server, b"other way", 3);
+        pair.receive(&client, 16, 4);
+        pair.reap(4);
+        pair.send(&client, b"again", 5);
+        pair.reap(1);
     }
 
     #[test]

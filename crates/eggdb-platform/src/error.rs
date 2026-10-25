@@ -174,6 +174,30 @@ mod tests {
     }
 
     #[test]
+    fn network_errors_map_to_one_set_of_kinds() {
+        for (os, kind) in [
+            (
+                io::ErrorKind::ConnectionRefused,
+                ErrorKind::ConnectionRefused,
+            ),
+            (io::ErrorKind::ConnectionReset, ErrorKind::ConnectionReset),
+            (io::ErrorKind::ConnectionAborted, ErrorKind::ConnectionReset),
+            (io::ErrorKind::BrokenPipe, ErrorKind::ConnectionReset),
+            (io::ErrorKind::TimedOut, ErrorKind::TimedOut),
+            (io::ErrorKind::AddrInUse, ErrorKind::AddrInUse),
+            (io::ErrorKind::AddrNotAvailable, ErrorKind::AddrNotAvailable),
+            (io::ErrorKind::NotConnected, ErrorKind::NotConnected),
+            (io::ErrorKind::HostUnreachable, ErrorKind::HostUnreachable),
+            (
+                io::ErrorKind::NetworkUnreachable,
+                ErrorKind::HostUnreachable,
+            ),
+        ] {
+            assert_eq!(Error::from(io::Error::from(os)).kind(), kind, "{os:?}");
+        }
+    }
+
+    #[test]
     fn errors_without_an_os_cause_describe_their_kind() {
         let error = Error::new(ErrorKind::InjectedFault);
         assert!(error.source().is_none());
