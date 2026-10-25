@@ -36,6 +36,8 @@ pub enum ErrorKind {
     ConnectionReset,
     /// The operation gave up waiting.
     TimedOut,
+    /// The operation was canceled before it finished.
+    Canceled,
     /// Something already listens at the address.
     AddrInUse,
     /// The address does not belong to this host, or no local port is left for it.
@@ -68,6 +70,7 @@ impl ErrorKind {
             Self::ConnectionRefused => "connection refused",
             Self::ConnectionReset => "connection reset",
             Self::TimedOut => "timed out",
+            Self::Canceled => "canceled",
             Self::AddrInUse => "address in use",
             Self::AddrNotAvailable => "address not available",
             Self::NotConnected => "not connected",

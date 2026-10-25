@@ -4,6 +4,7 @@ use std::ffi::{c_int, c_void};
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::time::Duration;
 
 pub(super) const BACKEND: NetBackend = NetBackend::Epoll;
 
@@ -94,26 +95,32 @@ impl Selector {
         Ok(())
     }
 
-    pub(super) fn wait(&mut self, block: bool, ready: &mut Vec<Readiness>) -> io::Result<()> {
+    pub(super) fn wait(
+        &mut self,
+        timeout: Option<Duration>,
+        ready: &mut Vec<Readiness>,
+    ) -> io::Result<()> {
         let room = c_int::try_from(self.events.len()).unwrap_or(c_int::MAX);
-        let count = loop {
-            // SAFETY: events holds room initialised epoll_events the kernel may overwrite.
-            let count = unsafe {
-                epoll_wait(
-                    self.epoll.as_raw_fd(),
-                    self.events.as_mut_ptr(),
-                    room,
-                    if block { -1 } else { 0 },
-                )
-            };
-            if count >= 0 {
-                break count.unsigned_abs() as usize;
-            }
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(EINTR) {
-                return Err(error);
-            }
+        let milliseconds = timeout.map_or(-1, |timeout| {
+            c_int::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(c_int::MAX)
+        });
+        // SAFETY: events holds room initialised epoll_events the kernel may overwrite.
+        let count = unsafe {
+            epoll_wait(
+                self.epoll.as_raw_fd(),
+                self.events.as_mut_ptr(),
+                room,
+                milliseconds,
+            )
         };
+        if count < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(EINTR) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        let count = count.unsigned_abs() as usize;
         ready.extend(self.events.iter().take(count).map(|event| {
             let EpollEvent { events, data } = *event;
             let failed = events & (EPOLLERR | EPOLLHUP) != 0;

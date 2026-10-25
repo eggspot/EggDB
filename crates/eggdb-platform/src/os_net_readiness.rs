@@ -145,7 +145,12 @@ mod unsupported {
             &mut self,
             _: &mut Vec<NetCompletion<OsListener, OsStream>>,
             _: usize,
+            _: Option<std::time::Instant>,
         ) -> Result<()> {
+            match *self {}
+        }
+
+        pub(crate) fn cancel(&mut self, _: u64, _: &mut Vec<NetCompletion<OsListener, OsStream>>) {
             match *self {}
         }
     }
