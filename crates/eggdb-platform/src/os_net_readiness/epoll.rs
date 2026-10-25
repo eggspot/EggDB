@@ -1,8 +1,10 @@
 use super::queue::{Connecting, Interest, Readiness};
 use crate::net::NetBackend;
+use crate::os_net::OsStream;
+use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::io;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
@@ -16,13 +18,17 @@ const EPOLLIN: u32 = 0x1;
 const EPOLLOUT: u32 = 0x4;
 const EPOLLERR: u32 = 0x8;
 const EPOLLHUP: u32 = 0x10;
+const EPOLLONESHOT: u32 = 1 << 30;
 
 const AF_INET: c_int = 2;
 const AF_INET6: c_int = 10;
 const SOCK_STREAM: c_int = 1;
 const SOCK_CLOEXEC: c_int = 0x8_0000;
+const SOCK_NONBLOCK: c_int = 0x800;
 const EINPROGRESS: i32 = 115;
 const EINTR: i32 = 4;
+const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
 
 const MOST_EVENTS: usize = 1024;
 
@@ -32,6 +38,7 @@ unsafe extern "C" {
     fn epoll_wait(epfd: c_int, events: *mut EpollEvent, maxevents: c_int, timeout: c_int) -> c_int;
     fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
     fn connect(fd: c_int, address: *const c_void, length: u32) -> c_int;
+    fn accept4(fd: c_int, address: *mut c_void, length: *mut u32, flags: c_int) -> c_int;
 }
 
 #[cfg_attr(target_arch = "x86_64", repr(C, packed))]
@@ -55,6 +62,7 @@ const _: () = assert!(
 pub(super) struct Selector {
     epoll: OwnedFd,
     events: Vec<EpollEvent>,
+    armed: HashMap<RawFd, Interest>,
 }
 
 impl Selector {
@@ -69,22 +77,38 @@ impl Selector {
         Ok(Self {
             epoll,
             events: vec![EpollEvent::default(); capacity.clamp(1, MOST_EVENTS)],
+            armed: HashMap::new(),
         })
     }
 
-    pub(super) fn change(&self, fd: RawFd, from: Interest, to: Interest) -> io::Result<()> {
-        if from == to {
+    pub(super) fn want(&mut self, fd: RawFd, wanted: Interest) -> io::Result<()> {
+        let known = self.armed.get(&fd).copied();
+        if known.unwrap_or(Interest::NONE) == wanted {
             return Ok(());
         }
-        let op = if from == Interest::NONE {
-            EPOLL_CTL_ADD
-        } else if to == Interest::NONE {
-            EPOLL_CTL_DEL
-        } else {
-            EPOLL_CTL_MOD
+        if wanted == Interest::NONE {
+            self.armed.remove(&fd);
+            return self.control(EPOLL_CTL_DEL, fd, wanted);
+        }
+        let (first, fallback, missing) = match known {
+            Some(_) => (EPOLL_CTL_MOD, EPOLL_CTL_ADD, ENOENT),
+            None => (EPOLL_CTL_ADD, EPOLL_CTL_MOD, EEXIST),
         };
+        match self.control(first, fd, wanted) {
+            Err(error) if error.raw_os_error() == Some(missing) => {
+                self.control(fallback, fd, wanted)?;
+            }
+            outcome => outcome?,
+        }
+        self.armed.insert(fd, wanted);
+        Ok(())
+    }
+
+    fn control(&self, op: c_int, fd: RawFd, interest: Interest) -> io::Result<()> {
         let mut event = EpollEvent {
-            events: if to.read { EPOLLIN } else { 0 } | if to.write { EPOLLOUT } else { 0 },
+            events: EPOLLONESHOT
+                | if interest.read { EPOLLIN } else { 0 }
+                | if interest.write { EPOLLOUT } else { 0 },
             data: u64::from(fd.unsigned_abs()),
         };
         // SAFETY: event is a valid epoll_event that outlives the call, which only reads it.
@@ -121,15 +145,19 @@ impl Selector {
             return Err(error);
         }
         let count = count.unsigned_abs() as usize;
-        ready.extend(self.events.iter().take(count).map(|event| {
+        for event in self.events.iter().take(count) {
             let EpollEvent { events, data } = *event;
+            let fd = RawFd::try_from(data).unwrap_or(RawFd::MAX);
+            if let Some(armed) = self.armed.get_mut(&fd) {
+                *armed = Interest::NONE;
+            }
             let failed = events & (EPOLLERR | EPOLLHUP) != 0;
-            Readiness {
-                fd: RawFd::try_from(data).unwrap_or(RawFd::MAX),
+            ready.push(Readiness {
+                fd,
                 read: failed || events & EPOLLIN != 0,
                 write: failed || events & EPOLLOUT != 0,
-            }
-        }));
+            });
+        }
         Ok(())
     }
 }
@@ -156,13 +184,12 @@ const _: () = assert!(size_of::<SockaddrIn>() == 16 && size_of::<SockaddrIn6>() 
 pub(super) fn connect_without_waiting(address: SocketAddr) -> io::Result<Connecting> {
     let domain = if address.is_ipv4() { AF_INET } else { AF_INET6 };
     // SAFETY: socket takes no pointers; a negative result is reported as an error.
-    let fd = unsafe { socket(domain, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+    let fd = unsafe { socket(domain, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: fd is a new socket that nothing else owns.
     let socket = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    socket.set_nonblocking(true)?;
     let result = match address {
         SocketAddr::V4(address) => {
             let raw = SockaddrIn {
@@ -194,4 +221,30 @@ pub(super) fn connect_without_waiting(address: SocketAddr) -> io::Result<Connect
         Some(EINPROGRESS | EINTR) => Ok(Connecting::Pending(socket)),
         _ => Err(error),
     }
+}
+
+pub(crate) fn accept(listener: &TcpListener) -> io::Result<OsStream> {
+    // SAFETY: null address and length pointers ask accept4 not to report the peer's address.
+    let fd = unsafe {
+        accept4(
+            listener.as_raw_fd(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            SOCK_CLOEXEC | SOCK_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd is a new connection that nothing else owns.
+    let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    Ok(OsStream::set_up_non_blocking(stream))
+}
+
+pub(crate) fn prepare_listener(_: &TcpListener) -> io::Result<()> {
+    Ok(())
+}
+
+pub(crate) fn suppress_sigpipe(_: &TcpStream) -> io::Result<()> {
+    Ok(())
 }

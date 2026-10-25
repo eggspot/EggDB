@@ -15,7 +15,7 @@ impl Selector {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
-    pub(super) fn change(&mut self, _: RawFd, _: Interest, _: Interest) -> io::Result<()> {
+    pub(super) fn want(&mut self, _: RawFd, _: Interest) -> io::Result<()> {
         match *self {}
     }
 
@@ -25,5 +25,7 @@ impl Selector {
 }
 
 pub(super) fn connect_without_waiting(address: SocketAddr) -> io::Result<Connecting> {
-    TcpStream::connect(address).map(Connecting::Connected)
+    let socket = TcpStream::connect(address)?;
+    socket.set_nonblocking(true)?;
+    Ok(Connecting::Connected(socket))
 }

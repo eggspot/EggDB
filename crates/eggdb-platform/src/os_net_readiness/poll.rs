@@ -43,7 +43,7 @@ impl Selector {
         Self::default()
     }
 
-    pub(super) fn change(&mut self, fd: RawFd, to: Interest) -> io::Result<()> {
+    pub(super) fn want(&mut self, fd: RawFd, to: Interest) -> io::Result<()> {
         let events = if to.read { POLLIN } else { 0 } | if to.write { POLLOUT } else { 0 };
         match (self.slots.get(&fd).copied(), events) {
             (Some(slot), 0) => {
