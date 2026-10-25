@@ -84,34 +84,33 @@ impl Selector {
     }
 
     pub(super) fn change(&self, fd: RawFd, from: Interest, to: Interest) -> io::Result<()> {
-        let mut changes = [Kevent::default(); 2];
-        let mut count: c_int = 0;
+        let mut outcome = Ok(());
         for (filter, was, wanted) in [
             (EVFILT_READ, from.read, to.read),
             (EVFILT_WRITE, from.write, to.write),
         ] {
-            if was != wanted
-                && let Some(change) = changes.get_mut(count.unsigned_abs() as usize)
-            {
-                *change = Kevent {
-                    ident: fd.unsigned_abs() as usize,
-                    filter,
-                    flags: if wanted { EV_ADD } else { EV_DELETE },
-                    ..Kevent::default()
-                };
-                count += 1;
+            if was != wanted {
+                let changed = self.change_filter(fd, filter, wanted);
+                outcome = outcome.and(changed);
             }
         }
-        if count == 0 {
-            return Ok(());
-        }
-        // SAFETY: changes holds count valid kevents read during the call; no events are
-        // asked for, so the call returns at once without writing through a null pointer.
+        outcome
+    }
+
+    fn change_filter(&self, fd: RawFd, filter: i16, wanted: bool) -> io::Result<()> {
+        let change = Kevent {
+            ident: fd.unsigned_abs() as usize,
+            filter,
+            flags: if wanted { EV_ADD } else { EV_DELETE },
+            ..Kevent::default()
+        };
+        // SAFETY: change is a valid kevent read during the call; no events are asked for, so
+        // the call returns at once without writing through a null pointer.
         let result = unsafe {
             kevent(
                 self.kqueue.as_raw_fd(),
-                changes.as_ptr(),
-                count,
+                &change,
+                1,
                 ptr::null_mut(),
                 0,
                 ptr::null(),
