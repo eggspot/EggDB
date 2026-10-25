@@ -5,6 +5,7 @@ use crate::net::{
 };
 use crate::rng::SplitMix64;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -15,8 +16,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// [`SimNetwork::BUFFER_BYTES`]. Bytes sent are first in transit and arrive later, a seeded
 /// amount at a time, so connections advance in a different order on every seed while each
 /// stays in order. A queue performs its operations only inside `reap`, in a seeded order, and
-/// fails with [`ErrorKind::Stalled`] instead of waiting when nothing left could finish the
-/// operations it waits for.
+/// fails with [`ErrorKind::Stalled`] instead of waiting when its operations cannot finish
+/// unless another queue acts first, so a test that drives several queues reaps them in turn.
+/// A queue refuses, with [`ErrorKind::InvalidInput`], a connection or listener of another
+/// `SimNetwork`.
 ///
 /// Connecting where nothing listens is [`ErrorKind::ConnectionRefused`]. Dropping a connection
 /// with bytes still owed to it resets it, so its peer's operations fail with
@@ -196,10 +199,17 @@ impl Network for SimHost {
 }
 
 /// A listener of a [`SimHost`]. Dropping it resets the connections it has not accepted.
-#[derive(Debug)]
 pub struct SimListener {
     network: SimNetwork,
     address: SocketAddr,
+}
+
+impl fmt::Debug for SimListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SimListener")
+            .field("address", &self.address)
+            .finish_non_exhaustive()
+    }
 }
 
 impl NetListener for SimListener {
@@ -221,11 +231,19 @@ impl Drop for SimListener {
 }
 
 /// A connection of a [`SimHost`].
-#[derive(Debug)]
 pub struct SimStream {
     network: SimNetwork,
     connection: u64,
     side: usize,
+}
+
+impl fmt::Debug for SimStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SimStream")
+            .field("connection", &self.connection)
+            .field("side", &self.side)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SimStream {
@@ -294,6 +312,15 @@ pub struct SimNetQueue {
 }
 
 impl SimNetQueue {
+    fn owns(&self, op: &Op) -> bool {
+        let network = match op {
+            NetOp::Accept { listener } => &listener.network,
+            NetOp::Receive { stream, .. } | NetOp::Send { stream, .. } => &stream.network,
+            NetOp::Connect { .. } => return true,
+        };
+        Arc::ptr_eq(&network.shared, &self.network.shared)
+    }
+
     fn perform(&mut self, world: &mut World, completions: &mut Vec<Completion>) -> usize {
         let mut order: Vec<usize> = (0..self.waiting.len()).collect();
         for at in (1..order.len()).rev() {
@@ -335,6 +362,12 @@ impl NetQueue for SimNetQueue {
     ) -> core::result::Result<(), RejectedNetOp<SimListener, SimStream>> {
         if self.in_flight >= self.capacity {
             return Err(net_queue_full(op));
+        }
+        if !self.owns(&op) {
+            return Err(RejectedNetOp {
+                error: Error::new(ErrorKind::InvalidInput),
+                op,
+            });
         }
         self.waiting.push(Waiting { op, user_data });
         self.in_flight += 1;
@@ -907,6 +940,25 @@ mod tests {
             drop(listener);
             assert_eq!(network.connection_count(), 0, "seed {seed}");
         }
+    }
+
+    #[test]
+    fn a_queue_refuses_connections_of_another_network() {
+        let mut first = Pair::new(7);
+        let (client, _server) = first.connect();
+        let mut other = Pair::new(7);
+        let op = NetOp::Receive {
+            stream: Arc::clone(&client),
+            buffer: vec![0; 4].into(),
+        };
+        let rejected = other.queue.submit(op, 0).unwrap_err();
+        assert_eq!(rejected.error.kind(), ErrorKind::InvalidInput);
+        let accept = NetOp::Accept {
+            listener: Arc::clone(&first.listener),
+        };
+        let rejected = other.queue.submit(accept, 1).unwrap_err();
+        assert_eq!(rejected.error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(other.queue.in_flight(), 0);
     }
 
     #[test]

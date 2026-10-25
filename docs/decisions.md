@@ -2011,8 +2011,10 @@ listeners and connections, and a `NetQueue` of `NetOp`s (`Accept`, `Connect`, `R
   dropping it otherwise ends its sending; dropping a listener resets the connections it did not
   accept. Every listen and completed operation is numbered and can fail with `InjectedFault`
   by number or at random, changing nothing. Connections (16,384), backlogs (128 per listener),
-  buffers and queues are bounded; ephemeral ports come from a counter, and maps are ordered, so
-  a seed repeats exactly.
+  buffers and queues are bounded; a connect takes the lowest free ephemeral port, and maps are
+  ordered, so a seed repeats exactly. `Stalled` looks at the queue being reaped only: a
+  simulation that drives several queues reaps each with a `min` its own operations can meet, or
+  0, in turn. A connection or listener from another `SimNetwork` is refused at submit.
 
 **Follow-ups, in order:** time in the simulation, with timeouts on operations, partitions,
 clogging and latency, so a stalled connect becomes `TimedOut`; `SO_REUSEPORT` and listen

@@ -73,7 +73,10 @@ pub enum NetOp<L, S> {
         listener: Arc<L>,
     },
     /// Connects to `address` and completes with [`NetOutput::Connected`]. Fails with
-    /// [`ErrorKind::ConnectionRefused`] when nothing listens there.
+    /// [`ErrorKind::ConnectionRefused`] when nothing listens there. [`OsNetwork`]'s poller
+    /// waits for the connection inside `reap`.
+    ///
+    /// [`OsNetwork`]: crate::OsNetwork
     Connect {
         /// Where to connect.
         address: Address,
@@ -198,7 +201,8 @@ pub trait NetQueue: Send + fmt::Debug {
     /// Appends the completions of finished operations to `completions`, first waiting until
     /// at least `min` have finished, and returns how many it appended. Fails with
     /// [`ErrorKind::InvalidInput`] when `min` is more than [`NetQueue::in_flight`]; in a
-    /// simulation, with [`ErrorKind::Stalled`] when nothing left could finish them. When it
+    /// simulation, with [`ErrorKind::Stalled`] when this queue's operations cannot finish
+    /// unless another queue acts first. When it
     /// fails while waiting, the completions it already appended stay in `completions`.
     fn reap(
         &mut self,

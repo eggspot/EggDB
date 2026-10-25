@@ -66,7 +66,7 @@ pub struct OsStream {
 impl OsStream {
     fn new(stream: TcpStream) -> Result<Self> {
         stream.set_nonblocking(true)?;
-        stream.set_nodelay(true)?;
+        let _ = stream.set_nodelay(true);
         Ok(Self { stream })
     }
 }

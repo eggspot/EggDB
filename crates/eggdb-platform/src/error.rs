@@ -44,7 +44,8 @@ pub enum ErrorKind {
     NotConnected,
     /// No route leads to the host or its network.
     HostUnreachable,
-    /// The simulation has nothing left that could complete the operations waited for.
+    /// In a simulation, nothing could complete the operations a queue waits for unless another
+    /// queue acts first.
     Stalled,
     /// Any other failure reported by the operating system.
     Other,
