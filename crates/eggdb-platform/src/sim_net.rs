@@ -180,13 +180,15 @@ impl SimNetwork {
     /// [`ErrorKind::AddrNotAvailable`].
     pub const MAX_CONNECTIONS: usize = 16_384;
 
-    /// The most connections waiting to be accepted on one listener; connects beyond it wait.
+    /// The most connections waiting to be accepted on one listener. Connects beyond it wait for
+    /// an accept to make room, and fail with [`ErrorKind::TimedOut`] after
+    /// [`SimNetwork::CONNECT_TIMEOUT`], as a handshake whose every attempt the server drops does.
     pub const MAX_BACKLOG: usize = 128;
 
     /// The ports given out for port 0 and for the local end of a connect.
     pub const EPHEMERAL_PORTS: std::ops::RangeInclusive<u16> = 49_152..=65_535;
 
-    /// How long a connect across a partition waits before failing with
+    /// How long a connect across a partition, or to a full backlog, waits before failing with
     /// [`ErrorKind::TimedOut`]: Linux's default of six handshake retries, doubling from one
     /// second.
     pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(127);
@@ -520,18 +522,22 @@ impl SimNetQueue {
     }
 
     fn next_event(&self, world: &World) -> Option<Duration> {
+        let now = world.now();
         let connects = self.waiting.iter().filter_map(|waiting| {
             let NetOp::Connect { address } = &waiting.op else {
                 return None;
             };
             let Address::Tcp(address) = address;
+            let gives_up_at = waiting.since.saturating_add(SimNetwork::CONNECT_TIMEOUT);
             if world.cut(self.ip, address.ip()) {
-                Some(waiting.since.saturating_add(SimNetwork::CONNECT_TIMEOUT))
+                Some(gives_up_at)
+            } else if world.backlog_is_full(address) {
+                let handshake = waiting.handshake_done_at.filter(|&at| at > now);
+                Some(handshake.unwrap_or(gives_up_at))
             } else {
                 waiting.handshake_done_at
             }
         });
-        let now = world.now();
         connects
             .chain(world.next_event())
             .filter(|&at| at > now)
@@ -680,6 +686,12 @@ impl World {
         }
         let extra = self.rng.next_u64() % spread.saturating_add(1);
         least.saturating_add(Duration::from_nanos(extra))
+    }
+
+    fn backlog_is_full(&self, address: &SocketAddr) -> bool {
+        self.listeners
+            .get(address)
+            .is_some_and(|backlog| backlog.len() >= SimNetwork::MAX_BACKLOG)
     }
 
     fn cut(&self, a: IpAddr, b: IpAddr) -> bool {
@@ -891,7 +903,13 @@ impl World {
             );
         };
         if backlog.len() >= SimNetwork::MAX_BACKLOG {
-            return None;
+            if now < since.saturating_add(SimNetwork::CONNECT_TIMEOUT) {
+                return None;
+            }
+            return Some(
+                self.next_operation()
+                    .and(Err(Error::new(ErrorKind::TimedOut))),
+            );
         }
         if let Err(error) = self.next_operation() {
             return Some(Err(error));
@@ -1182,6 +1200,50 @@ mod tests {
         assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
         assert_eq!(pair.now(), SimNetwork::CONNECT_TIMEOUT);
         assert_eq!(pair.network.connection_count(), 0);
+    }
+
+    fn fill_the_backlog(pair: &mut Pair) {
+        for user_data in 0..SimNetwork::MAX_BACKLOG {
+            let op = pair.connect_op();
+            pair.submit(op, user_data as u64);
+            let completion = pair.reap(1).pop().unwrap();
+            assert!(completion.result.is_ok());
+        }
+    }
+
+    #[test]
+    fn a_connect_to_a_full_backlog_times_out_like_a_dropped_handshake() {
+        let mut pair = Pair::new(12);
+        fill_the_backlog(&mut pair);
+        let op = pair.connect_op();
+        pair.submit(op, 0);
+        assert!(pair.reap_for(1, Duration::from_secs(5)).is_empty());
+        let started = pair.now() - Duration::from_secs(5);
+        let completion = pair.reap(1).pop().unwrap();
+        assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+        assert_eq!(pair.now(), started + SimNetwork::CONNECT_TIMEOUT);
+    }
+
+    #[test]
+    fn a_connect_to_a_full_backlog_finishes_once_an_accept_makes_room() {
+        let mut pair = Pair::new(13);
+        fill_the_backlog(&mut pair);
+        let op = pair.connect_op();
+        pair.submit(op, 1);
+        assert!(pair.reap_for(1, Duration::from_secs(5)).is_empty());
+        pair.submit(
+            NetOp::Accept {
+                listener: Arc::clone(&pair.listener),
+            },
+            2,
+        );
+        let completions = pair.reap(2);
+        assert!(
+            completions
+                .iter()
+                .all(|completion| completion.result.is_ok())
+        );
+        assert!(pair.now() < SimNetwork::CONNECT_TIMEOUT);
     }
 
     #[test]
