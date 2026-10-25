@@ -226,7 +226,9 @@ pub enum IoBackend {
     ThreadPool,
     /// Through Linux's io_uring, from kernel 5.6.
     IoUring,
-    /// Through Windows' I/O completion ports; not built yet, so asking for it is refused.
+    /// Through Windows' I/O completion ports, for reads and writes of uncached files; cached
+    /// files and syncs go to the queue's worker threads, or run inline without threads. Only
+    /// on request: the automatic choice on Windows is still the thread pool.
     Iocp,
 }
 
@@ -270,7 +272,8 @@ impl IoQueueOptions {
         self
     }
 
-    /// Sets how many worker threads an [`IoBackend::ThreadPool`] starts. When no backend is
+    /// Sets how many worker threads an [`IoBackend::ThreadPool`] or an [`IoBackend::Iocp`]
+    /// starts. When no backend is
     /// asked for and the queue has no asynchronous file I/O from the operating system
     /// (everywhere but Linux for now, or after io_uring was refused), 0 runs the operations
     /// [`IoBackend::Inline`]. A count above the capacity is lowered to it.
@@ -282,10 +285,10 @@ impl IoQueueOptions {
     /// Asks for one backend, given or refused: the queue never falls back to another. Without
     /// it, the queue takes the operating system's asynchronous file I/O where it is offered
     /// and otherwise the thread pool, or runs inline when [`IoQueueOptions::threads`] is 0.
-    /// Every queue, the simulation's too, refuses [`IoBackend::Iocp`] with
-    /// [`ErrorKind::Unsupported`] until it is built, and [`IoBackend::ThreadPool`] with no
-    /// threads with [`ErrorKind::InvalidInput`]; the simulation then runs every operation its
-    /// own way, whatever was asked for.
+    /// Every queue, the simulation's too, refuses [`IoBackend::ThreadPool`] with no threads
+    /// with [`ErrorKind::InvalidInput`]. A machine refuses a backend it lacks with
+    /// [`ErrorKind::Unsupported`]; the simulation accepts every other request and runs every
+    /// operation its own way, whatever was asked for.
     pub fn backend(mut self, backend: IoBackend) -> Self {
         self.backend = Some(backend);
         self
@@ -302,12 +305,8 @@ impl IoQueueOptions {
         {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
-        match self.backend {
-            Some(IoBackend::Iocp) => return Err(Error::new(ErrorKind::Unsupported)),
-            Some(IoBackend::ThreadPool) if self.threads == 0 => {
-                return Err(Error::new(ErrorKind::InvalidInput));
-            }
-            _ => {}
+        if self.backend == Some(IoBackend::ThreadPool) && self.threads == 0 {
+            return Err(Error::new(ErrorKind::InvalidInput));
         }
         Ok((self.capacity, self.threads.min(self.capacity)))
     }

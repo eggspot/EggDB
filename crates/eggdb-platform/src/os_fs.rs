@@ -211,6 +211,8 @@ pub struct OsFile {
     file: fs::File,
     writable: bool,
     uncached: bool,
+    #[cfg(windows)]
+    overlapped: std::sync::Mutex<Vec<(u64, std::os::windows::io::OwnedHandle)>>,
     #[cfg(not(any(unix, windows)))]
     cursor: std::sync::Mutex<()>,
 }
@@ -240,6 +242,8 @@ impl OsFile {
             file,
             writable: mode.is_writable(),
             uncached,
+            #[cfg(windows)]
+            overlapped: std::sync::Mutex::new(Vec::new()),
             #[cfg(not(any(unix, windows)))]
             cursor: std::sync::Mutex::new(()),
         }
@@ -306,6 +310,43 @@ impl OsFile {
     fn positioned_write(&self, buf: &[u8], offset: u64) -> Result<usize> {
         use std::os::windows::fs::FileExt;
         Ok(self.file.seek_write(buf, offset)?)
+    }
+}
+
+#[cfg(windows)]
+impl OsFile {
+    pub(crate) fn overlapped_handle(
+        &self,
+        queue: u64,
+        reopen: impl FnOnce(&fs::File) -> Result<std::os::windows::io::OwnedHandle>,
+    ) -> Result<(std::os::windows::io::RawHandle, bool)> {
+        use std::os::windows::io::AsRawHandle;
+        let mut handles = self
+            .overlapped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, handle)) = handles.iter().find(|(owner, _)| *owner == queue) {
+            return Ok((handle.as_raw_handle(), false));
+        }
+        let handle = reopen(&self.file)?;
+        let raw = handle.as_raw_handle();
+        handles.push((queue, handle));
+        Ok((raw, true))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn overlapped_handle_count(&self) -> usize {
+        self.overlapped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    pub(crate) fn close_overlapped_handle(&self, queue: u64) {
+        self.overlapped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(owner, _)| *owner != queue);
     }
 }
 

@@ -1901,3 +1901,62 @@ against huge ranges and malformed records.
 reported data cache line can exceed `CACHE_LINE_PADDING` on arm64 chips with 256-byte lines
 (Fujitsu A64FX), as on 32-bit arm (D65); and `sync_dir` in the simulator still scans every name
 (D64).
+
+## D69 IOCP behind the queue: a second overlapped handle per queue, uncached files through the port, on request only — Decided by research (build loop, 2026-10-25); refines D66 and D67
+`OsIoQueue` now runs on Windows' I/O completion ports when `IoBackend::Iocp` is asked for,
+through our own declarations of `CreateIoCompletionPort`, `ReOpenFile`,
+`SetFileCompletionNotificationModes`, `ReadFile`, `WriteFile`, `GetOverlappedResult`,
+`GetQueuedCompletionStatusEx` and `PostQueuedCompletionStatus`.
+
+**Decided by research:**
+- **`OsFile` stays synchronous; each queue reopens the file for itself.** A handle opened with
+  `FILE_FLAG_OVERLAPPED` cannot go through std's positional reads and writes (std waits on the
+  handle and aborts if the I/O is still pending), and a file object joins one completion port
+  for its whole life, while one `Arc<OsFile>` may be used by several queues (one per core). So
+  the first time a queue starts a read or write of a file, it calls `ReOpenFile` (same access,
+  sharing read, write and delete, `FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING`), which makes
+  a new file object, binds it to its own port and sets `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS |
+  FILE_SKIP_SET_EVENT_ON_HANDLE`. The file keeps those handles in a small list keyed by the
+  queue's number (from a counter, never reused), so a handle closes with its file at the
+  latest, and a closed file's handle can never be matched to another file, which keying by the
+  `Arc`'s address would allow. A queue remembers the files it bound weakly and closes its
+  handles when it is dropped, after its operations finished.
+- **Only uncached files go through the port.** Microsoft documents that cached reads that hit
+  the cache, writes that extend a file, and compressed or encrypted files complete
+  synchronously, and that `FILE_FLAG_NO_BUFFERING` is the way to get truly asynchronous
+  requests; a cached read that misses can block the caller's thread. Reads and writes of cached
+  files therefore go to the queue's worker threads, as do all syncs, since `FlushFileBuffers`
+  has no overlapped form. Workers wake the port with an empty packet, so `reap` waits in one
+  place; with `threads(0)` those operations run inline inside `reap`.
+- **On request only.** The automatic choice on Windows stays the thread pool until a committed
+  Windows benchmark (D7) shows the port is no slower; an explicit `Iocp` is given on Windows and
+  refused with `Unsupported` elsewhere. The simulation accepts it, as it accepts `IoUring`.
+- **One packet per operation that started.** An operation that finishes at once is completed
+  from its own structure (the skip flag means no packet follows), one that is pending completes
+  from its packet, and one that fails at once completes with that error and no packet;
+  `ERROR_INVALID_USER_BUFFER` and `ERROR_NOT_ENOUGH_MEMORY`, documented as too many requests
+  outstanding, hand the operation back with `QueueFull`. A Windows test submits refused
+  operations between good ones to pin that no stray packet arrives.
+- **Answered without the system, as `OsFile` and io_uring answer them:** empty reads and writes
+  transfer 0, writes through a read-only handle are `PermissionDenied`, and offsets beyond
+  `i64::MAX` are `InvalidInput`, since Windows reads the top offsets as "append" and "current
+  position". Transfers are capped at 1 GiB (sector-aligned, under `ReadFile`'s 32-bit length)
+  and reported as short; a read at the end of the file (`ERROR_HANDLE_EOF`) transfers 0.
+- **Refusals.** A port the system will not make is `Unsupported` (`OutOfMemory` for
+  `ERROR_NOT_ENOUGH_MEMORY`); a file `ReOpenFile` or the binding refuses hands the operation
+  back with `Unsupported` for `ERROR_INVALID_PARAMETER`, `ERROR_NOT_SUPPORTED` and
+  `ERROR_INVALID_FUNCTION`, and the system's own kind otherwise.
+- **Dropping a queue waits without cancelling.** `CancelIoEx` could tear a page that was half
+  written, so the queue waits for every packet; if waiting fails it leaks the operations' memory
+  rather than free what the system may still write, as D67's ring does.
+
+Each operation in flight is a heap allocation that begins with its `OVERLAPPED` and owns its
+file and buffer; it is freed only when its packet is read, or at once when no packet will come.
+The completion key is the queue's number; packets are read 64 at a time with
+`GetQueuedCompletionStatusEx`. While workers have operations, `reap` waits on the port at most
+10 ms at a time and then checks them, so a wake packet the system failed to post cannot hang it.
+
+**Follow-ups:** measuring the port against the pool on Windows once the storage engine's
+benchmarks exist, then deciding the automatic choice; Windows 11's `IoRing` API; registered
+buffers (`SetFileIoOverlappedRange`); and D67's one-thread-per-queue rule checked against how
+Windows treats I/O issued by a thread that exits.

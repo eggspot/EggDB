@@ -1,6 +1,6 @@
 //! The behavior every `IoQueue` shares, checked against each backend of the operating system's
-//! queue (the automatic choice, inline, the thread pool, and io_uring on Linux) and the
-//! simulation.
+//! queue (the automatic choice, inline, the thread pool, io_uring on Linux and I/O completion
+//! ports on Windows) and the simulation.
 
 use eggdb_platform::{
     AlignedBuffer, ErrorKind, File, FileSystem, IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue,
@@ -80,6 +80,10 @@ fn os_backends() -> Vec<IoQueueOptions> {
     ];
     if io_uring_is_built() {
         backends.push(IoQueueOptions::new().backend(IoBackend::IoUring));
+    }
+    if cfg!(windows) {
+        backends.push(IoQueueOptions::new().backend(IoBackend::Iocp));
+        backends.push(IoQueueOptions::new().backend(IoBackend::Iocp).threads(0));
     }
     backends
 }
@@ -318,10 +322,12 @@ fn an_asked_for_backend_is_given_or_refused() {
         )
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
-    let error = fs
-        .io_queue(IoQueueOptions::new().backend(IoBackend::Iocp))
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    let iocp = fs.io_queue(IoQueueOptions::new().backend(IoBackend::Iocp));
+    if cfg!(windows) {
+        assert_eq!(iocp.unwrap().backend(), IoBackend::Iocp);
+    } else {
+        assert_eq!(iocp.unwrap_err().kind(), ErrorKind::Unsupported);
+    }
     let uring = fs.io_queue(IoQueueOptions::new().backend(IoBackend::IoUring));
     if io_uring_is_built() {
         assert_eq!(uring.unwrap().backend(), IoBackend::IoUring);
@@ -347,15 +353,18 @@ fn the_automatic_choice_is_io_uring_where_it_is_built_and_the_pool_elsewhere() {
 #[test]
 fn the_simulation_refuses_what_every_machine_refuses_and_ignores_the_rest() {
     let fs = SimFileSystem::new();
-    let iocp = fs.io_queue(IoQueueOptions::new().backend(IoBackend::Iocp));
-    assert_eq!(iocp.unwrap_err().kind(), ErrorKind::Unsupported);
     let no_pool = fs.io_queue(
         IoQueueOptions::new()
             .backend(IoBackend::ThreadPool)
             .threads(0),
     );
     assert_eq!(no_pool.unwrap_err().kind(), ErrorKind::InvalidInput);
-    for backend in [IoBackend::Inline, IoBackend::ThreadPool, IoBackend::IoUring] {
+    for backend in [
+        IoBackend::Inline,
+        IoBackend::ThreadPool,
+        IoBackend::IoUring,
+        IoBackend::Iocp,
+    ] {
         assert!(fs.io_queue(IoQueueOptions::new().backend(backend)).is_ok());
     }
 }

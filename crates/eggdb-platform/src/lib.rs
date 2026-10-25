@@ -34,6 +34,7 @@ mod os_cpus;
 mod os_fs;
 mod os_io;
 mod os_io_uring;
+mod os_iocp;
 mod os_memory;
 mod rng;
 mod sim_cpus;
