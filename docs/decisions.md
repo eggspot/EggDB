@@ -2254,7 +2254,6 @@ the operating system's limit, not the queue's.
 no change call at all but needs per-change errors (`EV_ERROR` events or `EV_RECEIPT`); measuring
 on Linux.
 
-
 ## D75 Releases: v0.1.0 first, built and published by a tag-triggered workflow, static Linux binaries by default — Decided by research (build loop, 2026-10-26); refines D6, D14, D21 and D43
 **Numbering:** M0 was never tagged, so M1 is the first release, v0.1.0, and each later milestone
 bumps MINOR from there. No tag is added retroactively for M0: it would publish a release with no
@@ -2279,12 +2278,13 @@ pipeline is tested before a tag depends on it.
 download because only they are one self-contained file with no dependencies on every
 distribution (D14), and `-linux-gnu` builds made on Ubuntu 22.04 so they need only glibc 2.35.
 The glibc builds stay because musl's allocator is markedly slower under many threads, which D7
-can't accept; a memory allocator of our own, now on the roadmap, is what closes that gap later. macOS on Apple silicon and
-Intel, Windows on x86-64 and AArch64. A CI job runs the whole test suite against musl so a
-release is never the first musl build.
+can't accept; a memory allocator of our own, now on the roadmap, is what closes that gap later.
+macOS on Apple silicon and Intel, Windows on x86-64 and AArch64. A CI job runs the whole test
+suite against musl so a release is never the first musl build.
 
 **Stripped:** release builds strip symbols (`strip = true`), which took the binary from 375 KB to
-302 KB on macOS. Release builds abort on panic, so the symbols bought no backtraces.
+302 KB on macOS. The cost is unnamed frames in a backtrace printed before an abort; crash
+reports are symbolized from the build instead, once releases are reproducible.
 
 **Legal check before v0.1.0 (D43):** the release contains no cryptography, so there is no
 export classification to make yet; that research is due before the first release that ships

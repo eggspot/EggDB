@@ -44,7 +44,7 @@ query layer yet.
 | Models (D2) | none | key-value, relational, search, documents, time series, columnar, graphs, vectors, geospatial, wide-column, objects, queues |
 | SQL dialects (D10, D47) | none (0%) | PostgreSQL, SQLite, MySQL/MariaDB, T-SQL, Oracle, then GoogleSQL, Snowflake, Spark, ClickHouse, Trino, Db2, Sybase |
 | Protocols (D5) | none (0%) | PostgreSQL, RESP, MongoDB, Elasticsearch, CQL, Kafka, AMQP, MQTT, S3 and the rest |
-| Platforms (D8) | Linux (glibc and musl), macOS and Windows built and tested in CI, with release binaries for x86-64 and AArch64 on each (D75); the BSDs, illumos, Solaris, Android, iOS and WASI type-checked in CI | BSDs, Android, iOS, EggOS, browser WebAssembly, `no_std` |
+| Platforms (D8) | Linux (glibc, and musl on x86-64), macOS and Windows built and tested in CI, and release builds for x86-64 and AArch64 on each, run where the runner can (D75); the BSDs, illumos, Solaris, Android, iOS and WASI type-checked in CI | BSDs, Android, iOS, EggOS, browser WebAssembly, `no_std` |
 | Scale (D4, D18) | none | a single file first (M4), then replicas, sharding and the rest of D18 |
 
 Every protocol milestone also covers that database's tools (D12) and its backups and dumps (D13):

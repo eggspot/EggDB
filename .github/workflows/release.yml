@@ -78,7 +78,7 @@ jobs:
       - name: Check the shipped binary depends only on our own crates
         run: |
           foreign=$(cargo tree -p eggdb -e normal,build --prefix none --target "$TARGET" \
-            | grep -v '^eggdb' || true)
+            | grep -v -E ' \((/|[A-Za-z]:)' || true)
           if [ -n "$foreign" ]; then
             echo "::error::third-party crates in the shipped binary (D1): $foreign"
             exit 1
