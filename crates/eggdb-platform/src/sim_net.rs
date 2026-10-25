@@ -1293,7 +1293,11 @@ mod tests {
         let mut completions = Vec::new();
         let error = pair.queue.reap(&mut completions, 1).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Stalled);
-        assert!(pair.reap_for(1, Duration::from_secs(5)).is_empty());
+        let error = pair
+            .queue
+            .reap_timeout(&mut completions, 1, Duration::from_secs(5))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
         pair.network.partition(CLIENT, SERVER);
         let op = pair.connect_op();
         pair.submit(op, 2);
