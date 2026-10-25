@@ -1,4 +1,5 @@
-use super::{BACKEND, Selector, connect_without_waiting};
+use super::native::{self, connect_without_waiting};
+use super::selector::Selector;
 use crate::error::{Error, ErrorKind, Result};
 use crate::net::{NetBackend, NetCompletion, NetOp, NetOutput};
 use crate::os_net::{OsListener, OsStream, attempt};
@@ -9,7 +10,11 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
 use std::time::Instant;
 
-pub(crate) const NATIVE: Option<NetBackend> = Some(BACKEND);
+pub(crate) const NATIVE: Option<NetBackend> = Some(native::BACKEND);
+
+pub(crate) fn supports(backend: NetBackend) -> bool {
+    backend == NetBackend::Poll || Some(backend) == NATIVE
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct Interest {
@@ -33,6 +38,15 @@ pub(super) struct Readiness {
 
 pub(super) enum Connecting {
     Connected(TcpStream),
+    #[cfg_attr(
+        any(
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "illumos",
+            target_os = "solaris"
+        ),
+        expect(dead_code)
+    )]
     Pending(TcpStream),
 }
 
@@ -81,9 +95,9 @@ pub(crate) struct ReadinessQueue {
 }
 
 impl ReadinessQueue {
-    pub(crate) fn new(capacity: usize) -> Result<Self> {
+    pub(crate) fn new(capacity: usize, backend: NetBackend) -> Result<Self> {
         Ok(Self {
-            selector: Selector::new(capacity)?,
+            selector: Selector::new(backend, capacity)?,
             slots: Vec::new(),
             free: Vec::new(),
             fresh: Vec::new(),
@@ -96,7 +110,7 @@ impl ReadinessQueue {
     }
 
     pub(crate) fn backend(&self) -> NetBackend {
-        BACKEND
+        self.selector.backend()
     }
 
     pub(crate) fn submit(&mut self, op: Op, user_data: u64) {

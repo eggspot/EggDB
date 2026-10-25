@@ -3,7 +3,7 @@ use crate::net::{
     Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
     NetStream, Network, RejectedNetOp, answered_at_once, net_queue_full,
 };
-use crate::os_net_readiness::{NATIVE, ReadinessQueue, suppress_sigpipe};
+use crate::os_net_readiness::{NATIVE, ReadinessQueue, supports, suppress_sigpipe};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 /// Unless [`NetQueueOptions::backend`] asks for one, its queues wait for sockets to become
 /// ready in epoll on Linux and Android ([`NetBackend::Epoll`]) and in kqueue on Apple's
 /// systems ([`NetBackend::Kqueue`]), blocking inside `reap` until enough operations finish,
-/// and connect without blocking. Elsewhere they run [`NetBackend::Portable`]: `reap` retries
+/// and connect without blocking. On FreeBSD, NetBSD, illumos and Solaris they wait in
+/// `poll(2)` ([`NetBackend::Poll`]), and a connect still waits for the operating system inside
+/// `reap`. Elsewhere they run [`NetBackend::Portable`]: `reap` retries
 /// the operations that would block, backing off between rounds, and a connect waits for the
 /// operating system inside `reap`. [`OsNetQueue::backend`] says which one a queue runs.
 /// Connections have Nagle's algorithm turned off, as database protocols send small requests
@@ -45,8 +47,8 @@ impl Network for OsNetwork {
         let capacity = options.validated()?;
         let engine = match options.requested_backend().or(NATIVE) {
             Some(NetBackend::Portable) | None => Engine::Portable(Vec::new()),
-            Some(backend) if Some(backend) == NATIVE => {
-                Engine::Readiness(Box::new(ReadinessQueue::new(capacity)?))
+            Some(backend) if supports(backend) => {
+                Engine::Readiness(Box::new(ReadinessQueue::new(capacity, backend)?))
             }
             Some(_) => return Err(Error::new(ErrorKind::Unsupported)),
         };
@@ -335,7 +337,7 @@ fn finished<T>(outcome: io::Result<T>) -> Option<io::Result<T>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NATIVE, OsNetwork};
+    use super::{NATIVE, OsNetwork, supports};
     use crate::{
         Address, ErrorKind, NetBackend, NetListener, NetOp, NetQueue, NetQueueOptions, Network,
     };
@@ -346,6 +348,9 @@ mod tests {
     fn backends() -> Vec<NetBackend> {
         let mut backends = vec![NetBackend::Portable];
         backends.extend(NATIVE);
+        if supports(NetBackend::Poll) && NATIVE != Some(NetBackend::Poll) {
+            backends.push(NetBackend::Poll);
+        }
         backends
     }
 
@@ -369,8 +374,8 @@ mod tests {
 
     #[test]
     fn a_backend_the_system_lacks_is_refused() {
-        for backend in [NetBackend::Epoll, NetBackend::Kqueue] {
-            if NATIVE != Some(backend) {
+        for backend in [NetBackend::Epoll, NetBackend::Kqueue, NetBackend::Poll] {
+            if !supports(backend) {
                 let error = OsNetwork::new().net_queue(options(backend)).unwrap_err();
                 assert_eq!(error.kind(), ErrorKind::Unsupported);
             }

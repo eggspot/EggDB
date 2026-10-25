@@ -1,5 +1,5 @@
 //! The behavior every `Network` shares, checked against the operating system's network on the
-//! loopback interface with the portable backend and the system's own, and against the
+//! loopback interface with the portable backend, the system's own and `poll(2)`, and against the
 //! simulation on several seeds, with and without short transfers and latency.
 
 use eggdb_platform::{
@@ -58,6 +58,10 @@ fn os_backends() -> Vec<NetBackend> {
     let mut backends = vec![NetBackend::Portable];
     if automatic != NetBackend::Portable {
         backends.push(automatic);
+    }
+    let poll = NetQueueOptions::new().backend(NetBackend::Poll);
+    if automatic != NetBackend::Poll && OsNetwork::new().net_queue(poll).is_ok() {
+        backends.push(NetBackend::Poll);
     }
     backends
 }
