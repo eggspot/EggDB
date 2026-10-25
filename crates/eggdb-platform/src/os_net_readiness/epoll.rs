@@ -72,6 +72,9 @@ impl Selector {
     }
 
     pub(super) fn change(&self, fd: RawFd, from: Interest, to: Interest) -> io::Result<()> {
+        if from == to {
+            return Ok(());
+        }
         let op = if from == Interest::NONE {
             EPOLL_CTL_ADD
         } else if to == Interest::NONE {

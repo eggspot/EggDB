@@ -65,10 +65,6 @@ impl Waiters {
     }
 }
 
-/// The queue behind [`NetBackend::Epoll`] and [`NetBackend::Kqueue`]: each operation is tried
-/// once when `reap` starts it, and an operation that would block registers its socket's
-/// direction with the selector until it completes, so no socket stays registered after the
-/// operation that needed it has left the queue.
 #[derive(Debug)]
 pub(crate) struct ReadinessQueue {
     selector: Selector,
