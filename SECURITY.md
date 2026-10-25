@@ -12,5 +12,6 @@ disclosure, and publish an advisory with a CVE once a fix is released.
 
 ## Supported versions
 
-EggDB has not had its first release yet. Until 1.0, only the latest release and `main` receive
-security fixes.
+Until 1.0, only the latest release and `main` receive security fixes. Each release's archives
+carry SHA-256 checksums and a signed build provenance attestation
+(`gh attestation verify <archive> -R eggspot/EggDB`).

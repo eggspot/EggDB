@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/eggdb", "crates/eggdb-platform"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/eggspot/EggDB"
@@ -21,3 +21,4 @@ multiple_unsafe_ops_per_block = "deny"
 lto = true
 codegen-units = 1
 panic = "abort"
+strip = true

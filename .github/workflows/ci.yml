@@ -70,6 +70,27 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  musl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain and the musl target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-linux-musl
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-musl-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Test against musl, as the default Linux release is built
+        run: cargo test --workspace --target x86_64-unknown-linux-musl
+
   cross:
     runs-on: ubuntu-latest
     timeout-minutes: 15
