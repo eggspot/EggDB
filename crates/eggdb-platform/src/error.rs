@@ -30,6 +30,22 @@ pub enum ErrorKind {
     InjectedFault,
     /// A queue already holds as many operations as it may.
     QueueFull,
+    /// Nothing listens at the address a connection went to.
+    ConnectionRefused,
+    /// The connection was reset, aborted or closed by the peer while data was still owed.
+    ConnectionReset,
+    /// The operation gave up waiting.
+    TimedOut,
+    /// Something already listens at the address.
+    AddrInUse,
+    /// The address does not belong to this host, or no local port is left for it.
+    AddrNotAvailable,
+    /// The socket is not connected.
+    NotConnected,
+    /// No route leads to the host or its network.
+    HostUnreachable,
+    /// The simulation has nothing left that could complete the operations waited for.
+    Stalled,
     /// Any other failure reported by the operating system.
     Other,
 }
@@ -48,6 +64,14 @@ impl ErrorKind {
             Self::StaleHandle => "handle opened before a simulated crash",
             Self::InjectedFault => "injected fault",
             Self::QueueFull => "queue full",
+            Self::ConnectionRefused => "connection refused",
+            Self::ConnectionReset => "connection reset",
+            Self::TimedOut => "timed out",
+            Self::AddrInUse => "address in use",
+            Self::AddrNotAvailable => "address not available",
+            Self::NotConnected => "not connected",
+            Self::HostUnreachable => "host unreachable",
+            Self::Stalled => "simulation stalled",
             Self::Other => "operating system error",
         }
     }
@@ -108,6 +132,17 @@ impl From<io::Error> for Error {
             io::ErrorKind::InvalidInput => ErrorKind::InvalidInput,
             io::ErrorKind::OutOfMemory => ErrorKind::OutOfMemory,
             io::ErrorKind::Unsupported => ErrorKind::Unsupported,
+            io::ErrorKind::ConnectionRefused => ErrorKind::ConnectionRefused,
+            io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe => ErrorKind::ConnectionReset,
+            io::ErrorKind::TimedOut => ErrorKind::TimedOut,
+            io::ErrorKind::AddrInUse => ErrorKind::AddrInUse,
+            io::ErrorKind::AddrNotAvailable => ErrorKind::AddrNotAvailable,
+            io::ErrorKind::NotConnected => ErrorKind::NotConnected,
+            io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable => {
+                ErrorKind::HostUnreachable
+            }
             _ => ErrorKind::Other,
         };
         Self {
