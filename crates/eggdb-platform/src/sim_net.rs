@@ -631,7 +631,11 @@ impl NetQueue for SimNetQueue {
         min: usize,
         timeout: Duration,
     ) -> Result<usize> {
-        let deadline = lock(&self.network.shared).now().checked_add(timeout);
+        let end_of_time = Duration::from_nanos(u64::MAX);
+        let deadline = lock(&self.network.shared)
+            .now()
+            .checked_add(timeout)
+            .filter(|&deadline| deadline <= end_of_time);
         self.reap_until(completions, min, deadline)
     }
 
@@ -1259,6 +1263,20 @@ mod tests {
         assert!(queue.submit(connect_across_cut, 0).is_ok());
         assert_eq!(queue.reap_timeout(&mut completions, 1, timeout).unwrap(), 0);
         assert_eq!(clock.monotonic(), timeout);
+    }
+
+    #[test]
+    fn a_timeout_beyond_the_end_of_simulated_time_waits_as_reap_does() {
+        let mut pair = Pair::new(16);
+        let (_client, server) = pair.connect();
+        pair.receive(&server, 4, 0);
+        let mut completions = Vec::new();
+        let error = pair
+            .queue
+            .reap_timeout(&mut completions, 1, Duration::MAX)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Stalled);
+        assert_eq!(pair.now(), Duration::ZERO);
     }
 
     #[test]
