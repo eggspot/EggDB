@@ -19,7 +19,7 @@ const FREE_LIST_COUNT_AT: usize = PAGE_HEADER_SIZE + 8;
 const FREE_LIST_ENTRIES_AT: usize = PAGE_HEADER_SIZE + 16;
 const NORMAL_UNWRITTEN_PAGES: usize = 1024;
 const NORMAL_UNSYNCED_LOG_BYTES: u64 = 1 << 20;
-const NO_STAMP: u64 = 0;
+pub(crate) const NO_STAMP: u64 = 0;
 
 /// How [`PageFile::create`] sets up a new file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -598,7 +598,7 @@ impl<F: File> PageFile<F> {
     /// checkpoint that fails there leaves the commit made: it still returns `Ok`, and the file
     /// refuses every later change with [`StorageError::NeedsReopen`].
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
-        let prepared = self.prepare_commit(update)?;
+        let prepared = self.prepare_commit(NO_STAMP, update)?;
         let mut staged = std::mem::take(&mut self.staged);
         for (&page_id, (header, page)) in staged.iter_mut() {
             if let Err(error) = self.log_page(page_id, page, header) {
@@ -616,6 +616,7 @@ impl<F: File> PageFile<F> {
 
     pub(crate) fn prepare_commit(
         &mut self,
+        stamp: u64,
         update: impl FnOnce(&mut Superblock),
     ) -> Result<PreparedCommit, StorageError> {
         self.ensure_log()?;
@@ -642,6 +643,8 @@ impl<F: File> PageFile<F> {
         next.recycled_segments = committed.recycled_segments;
         next.log_sequence_reserved = committed.log_sequence_reserved;
         next.page_count = page_count;
+        next.free_list_head = committed.free_list_head;
+        next.free_page_count = committed.free_page_count;
         if let Some(entries) = &entries {
             next.free_list_head = list_pages.first().copied().unwrap_or(NO_PAGE);
             next.free_page_count = (entries.len() + list_pages.len()) as u64;
@@ -673,6 +676,7 @@ impl<F: File> PageFile<F> {
         }
         self.page_count_before_commit = Some(before);
         Ok(PreparedCommit {
+            stamp,
             superblock: next,
             entries,
             list_pages,
@@ -717,6 +721,7 @@ impl<F: File> PageFile<F> {
             mut superblock,
             entries,
             list_pages,
+            ..
         } = prepared;
         superblock.page_count = self.page_count;
         self.superblock = superblock;
@@ -749,7 +754,7 @@ impl<F: File> PageFile<F> {
         log.reserve(COMMIT_PAYLOAD, &mut self.page_count)?;
         let mut next = prepared.superblock;
         next.page_count = self.page_count;
-        log.put_commit(&CommitFields::of(&next, NO_STAMP));
+        log.put_commit(&CommitFields::of(&next, prepared.stamp));
         log.seal(&mut self.page_count)
     }
 
@@ -1253,6 +1258,13 @@ impl<F: File> PageFile<F> {
         }
     }
 
+    pub(crate) fn freed_committed_pages(&self) -> impl Iterator<Item = u64> + '_ {
+        self.freed
+            .iter()
+            .copied()
+            .filter(|&page| page < self.superblock.page_count && !self.reused.contains(&page))
+    }
+
     pub(crate) fn has_failed(&self) -> bool {
         self.failed
     }
@@ -1284,6 +1296,7 @@ fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
 
 #[derive(Debug)]
 pub(crate) struct PreparedCommit {
+    stamp: u64,
     superblock: Superblock,
     entries: Option<BTreeSet<u64>>,
     list_pages: Vec<u64>,
@@ -1439,6 +1452,33 @@ mod tests {
         (0..file.available_pages())
             .map(|_| file.allocate().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn an_update_of_the_free_list_fields_is_undone_when_the_list_is_unchanged() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let pages: Vec<u64> = (0..3).map(|_| file.allocate().unwrap()).collect();
+        for &page in &pages {
+            write_filled(&mut file, page, 1);
+        }
+        file.commit(|_| {}).unwrap();
+        file.free(pages[2]).unwrap();
+        file.commit(|_| {}).unwrap();
+        let listed = *file.superblock();
+        assert_ne!(listed.free_list_head, NO_PAGE);
+        write_filled(&mut file, pages[0], 2);
+        file.commit(|superblock| {
+            superblock.free_list_head = NO_PAGE;
+            superblock.free_page_count = 0;
+        })
+        .unwrap();
+        assert_eq!(file.superblock().free_list_head, listed.free_list_head);
+        assert_eq!(file.superblock().free_page_count, listed.free_page_count);
+        drop(file);
+        let file = open(&fs, Access::ReadWrite).unwrap();
+        assert_eq!(file.available_pages(), listed.free_page_count - 1);
+        assert_eq!(read_fill(&file, pages[0]).unwrap(), 2);
     }
 
     #[test]

@@ -5,11 +5,15 @@ use crate::format::{Access, FileId, PageSize};
 use crate::log::Durability;
 use crate::page_cache::{CacheSize, PageCache};
 use crate::page_file::{CreateOptions, PageFile};
+use crate::store::{Store, WriteTransaction};
 use crate::test_rng::TestRng;
-use eggdb_platform::{CrashMode, File, FileSystem, OpenMode, SimFile, SimFileSystem, SimMemory};
+use eggdb_platform::{
+    CrashMode, File, FileSystem, OpenMode, SimClock, SimFile, SimFileSystem, SimMemory,
+};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::Path;
+use std::sync::Arc;
 
 const DB: &str = "db";
 const FILE_ID: FileId = FileId(*b"crash-sweep-file");
@@ -535,6 +539,163 @@ fn sweep(durability: Durability, seed: u64, transactions: usize) -> (u64, u64) {
         "{durability:?}: {operations} operations, {crash_points} crash points, {recovery_points} crashes during recovery"
     );
     (crash_points, recovery_points)
+}
+
+fn created_store(fs: &SimFileSystem, durability: Durability) -> (Store<SimFile>, BTree) {
+    let (mut cache, tree) = created_tree(fs);
+    cache.set_durability(durability).unwrap();
+    cache.set_auto_checkpoint_bytes(Some(AUTO_CHECKPOINT_BYTES));
+    let store = Store::new(cache, Arc::new(SimClock::new(0)));
+    store
+        .set_snapshot_memory(CacheSize::Pages(1 << 16))
+        .unwrap();
+    (store, tree)
+}
+
+fn apply_in(
+    tree: &BTree,
+    write: &mut WriteTransaction<'_, SimFile>,
+    changes: &[Change],
+) -> Result<(), StorageError> {
+    for change in changes {
+        match change {
+            Change::Put(key, value) => write.put(tree, key, value)?,
+            Change::Delete(key) => {
+                write.delete(tree, key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn first_key(changes: &[Change]) -> &[u8] {
+    match &changes[0] {
+        Change::Put(key, _) | Change::Delete(key) => key,
+    }
+}
+
+fn run_transactions(
+    fs: &SimFileSystem,
+    store: &Store<SimFile>,
+    tree: &BTree,
+    workload: &Workload,
+    context: &str,
+) -> Outcome {
+    let mut outcome = Outcome::default();
+    let mut acknowledged_at_syncs = Vec::new();
+    for step in &workload.steps {
+        let result = match step {
+            Step::Commit(changes) => {
+                let reader = store.begin_read();
+                let applied = store
+                    .begin_write()
+                    .and_then(|mut write| apply_in(tree, &mut write, changes).map(|()| write));
+                let write = match (reader, applied) {
+                    (Ok(reader), Ok(write)) => (reader, write),
+                    (Err(error), _) | (_, Err(error)) => {
+                        outcome.failed = Some(error);
+                        break;
+                    }
+                };
+                let (reader, write) = write;
+                outcome.attempted += 1;
+                let committed = write.commit();
+                if let Ok(stamp) = committed {
+                    assert_eq!(stamp.bits(), outcome.attempted as u64, "{context}");
+                    outcome.acknowledged += 1;
+                    acknowledged_at_syncs.push(fs.sync_count());
+                }
+                let key = first_key(changes);
+                let seen = workload.history[outcome.attempted - 1].get(key);
+                match reader.get(tree, key) {
+                    Ok(found) if committed.is_ok() => assert_eq!(found.as_ref(), seen, "{context}"),
+                    Ok(_) | Err(_) => {}
+                }
+                committed.map(|_| ())
+            }
+            Step::RolledBack(changes) => {
+                let applied = store
+                    .begin_write()
+                    .and_then(|mut write| apply_in(tree, &mut write, changes));
+                if let Err(error) = applied {
+                    outcome.failed = Some(error);
+                    break;
+                }
+                Ok(())
+            }
+            Step::Checkpoint => store.checkpoint(),
+            Step::Sync => store.sync(),
+        };
+        if let Err(error) = result {
+            outcome.failed = Some(error);
+            assert!(
+                matches!(store.begin_write(), Err(StorageError::NeedsReopen)),
+                "{context}: a writer after a failed write must need a reopen"
+            );
+            assert!(
+                store.sync().is_err(),
+                "{context}: a sync after a failed write"
+            );
+            break;
+        }
+    }
+    let syncs = fs.sync_count();
+    outcome.synced_through = acknowledged_at_syncs
+        .iter()
+        .rposition(|&at| at < syncs)
+        .map_or(0, |index| index + 1);
+    outcome
+}
+
+fn transaction_sweep(durability: Durability, seed: u64, transactions: usize) -> u64 {
+    let options = Sweep::from_environment();
+    let workload = workload(durability, seed, transactions, &Model::new());
+    let operations = {
+        let fs = SimFileSystem::new();
+        let (store, tree) = created_store(&fs, durability);
+        let start = fs.operation_count();
+        let outcome = run_transactions(&fs, &store, &tree, &workload, "clean run");
+        assert!(outcome.failed.is_none(), "{outcome:?}");
+        assert_eq!(outcome.acknowledged, workload.history.len() - 1);
+        assert!(store.log_stats().unwrap().checkpoints >= 3);
+        fs.operation_count() - start
+    };
+    let mut crash_points = 0;
+    for step in 0..operations {
+        for ending in options.endings_at(step) {
+            let context = format!(
+                "transactions, {durability:?}, seed {seed}, step {step}/{operations}, {ending:?}"
+            );
+            let fs = SimFileSystem::new();
+            let (store, tree) = created_store(&fs, durability);
+            fs.fail_operation(fs.operation_count() + step);
+            let outcome = run_transactions(&fs, &store, &tree, &workload, &context);
+            assert!(
+                outcome.failed.is_some(),
+                "{context}: the injected fault was never reported"
+            );
+            drop(store);
+            end(&fs, ending);
+            let commit = recovered_commit(&fs, &workload.history, 0, &context);
+            assert_promised(durability, &outcome, ending, commit, &context);
+            crash_points += 1;
+        }
+    }
+    eprintln!("transactions, {durability:?}: {operations} operations, {crash_points} crash points");
+    crash_points
+}
+
+#[test]
+fn a_crash_at_any_operation_of_a_transaction_workload_with_readers_recovers_exactly_one_commit() {
+    let crash_points = transaction_sweep(Durability::Full, 4, 80);
+    assert!(crash_points > 600, "{crash_points}");
+}
+
+#[test]
+fn a_crash_at_any_operation_of_a_normal_durability_transaction_workload_keeps_every_synced_commit()
+{
+    let crash_points = transaction_sweep(Durability::Normal, 5, 60);
+    assert!(crash_points > 400, "{crash_points}");
 }
 
 #[test]

@@ -1,12 +1,13 @@
+use crate::before_images::{BeforeImages, PageImage};
 use crate::cells;
 use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageSize, PageType, Superblock};
 use crate::frames::{FrameMut, FrameRef, Frames};
 use crate::log::{Durability, LogStats};
-use crate::page_file::PageFile;
+use crate::page_file::{NO_STAMP, PageFile};
 use crate::page_table::PageTable;
 use eggdb_platform::{File, Memory};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
@@ -15,6 +16,7 @@ pub(crate) const MAX_FRAMES: u32 = u32::MAX;
 const REFERENCED: u8 = 1;
 const DIRTY: u8 = 2;
 const CONTENTS_CHECKED: u8 = 4;
+const ALLOCATED: u8 = 8;
 
 const EMPTY_FRAME_HEADER: PageHeader = PageHeader {
     page_type: PageType::FreeList,
@@ -60,6 +62,9 @@ pub struct CacheStats {
     pub evictions: u64,
     /// Pages logged and written to the file by commits.
     pub pages_written: u64,
+    /// Committed images of pages changed since read transactions began, kept in memory for
+    /// those transactions.
+    pub before_images: usize,
 }
 
 /// The pages of a [`PageFile`] kept in a fixed amount of memory (D77): the buffer manager that
@@ -98,6 +103,7 @@ pub struct PageCache<F: File> {
     pages_written: Cell<u64>,
     dirty_frames: RefCell<Vec<usize>>,
     commit_order: Vec<usize>,
+    images: RefCell<BeforeImages>,
 }
 
 impl<F: File> PageCache<F> {
@@ -131,6 +137,7 @@ impl<F: File> PageCache<F> {
             pages_written: Cell::new(0),
             dirty_frames: RefCell::new(cells::reserved(frames)?),
             commit_order: cells::reserved(frames)?,
+            images: RefCell::new(BeforeImages::new(frames)),
         })
     }
 
@@ -197,6 +204,7 @@ impl<F: File> PageCache<F> {
             misses: self.misses.get(),
             evictions: self.evictions.get(),
             pages_written: self.pages_written.get(),
+            before_images: self.images.borrow().len(),
         }
     }
 
@@ -213,32 +221,47 @@ impl<F: File> PageCache<F> {
             .read(frame)
             .ok_or(StorageError::PageBorrowed { page: page_id })?;
         Ok(PageRef {
-            bytes,
+            pinned: Pinned::Frame {
+                bytes,
+                header: &self.headers[frame],
+                state: &self.states[frame],
+            },
             page_id,
-            header: &self.headers[frame],
-            state: &self.states[frame],
         })
     }
 
     /// Pins data page `page_id` for changing, reading it in as [`PageCache::read`] does. The
     /// change stays in memory until the next commit. The page must be in use, as for
     /// [`PageFile::write_page`].
+    ///
+    /// The page counts as unchecked afterwards (see [`PageRef::contents_checked`]): bytes
+    /// written through the handle are checked again, by the structure that owns the page,
+    /// before it trusts them.
     pub fn write(&self, page_id: u64) -> Result<PageMut<'_>, StorageError> {
+        let page = self.write_keeping_check(page_id)?;
+        page.state.set(page.state.get() & !CONTENTS_CHECKED);
+        Ok(page)
+    }
+
+    pub(crate) fn write_keeping_check(&self, page_id: u64) -> Result<PageMut<'_>, StorageError> {
         self.file.borrow().check_writable()?;
-        let frame = match self.table.get(page_id) {
+        let (frame, first_change) = match self.table.get(page_id) {
             Some(frame) if self.is_dirty(frame as usize) => {
                 self.hit(frame as usize);
-                frame as usize
+                (frame as usize, false)
             }
             _ => {
                 self.file.borrow().check_page_writable(page_id)?;
-                self.locate(page_id)?
+                (self.locate(page_id)?, true)
             }
         };
         let bytes = self
             .frames
             .write(frame)
             .ok_or(StorageError::PageBorrowed { page: page_id })?;
+        if first_change {
+            self.keep_before_image(page_id, frame, &bytes)?;
+        }
         self.mark_dirty(frame);
         Ok(PageMut {
             bytes,
@@ -256,7 +279,7 @@ impl<F: File> PageCache<F> {
         let (frame, mut bytes) = self.claim_frame()?;
         let page_id = self.file.borrow_mut().allocate()?;
         bytes.fill(0);
-        self.install(frame, page_id, header, REFERENCED);
+        self.install(frame, page_id, header, REFERENCED | ALLOCATED);
         self.mark_dirty(frame);
         Ok(PageMut {
             bytes,
@@ -274,10 +297,14 @@ impl<F: File> PageCache<F> {
             return Err(StorageError::PageBorrowed { page: page_id });
         }
         self.file.borrow_mut().free(page_id)?;
+        let kept = match cached {
+            Some(frame) if self.states[frame].get() & ALLOCATED != 0 => Ok(()),
+            _ => self.keep_freed_page(page_id, cached),
+        };
         if let Some(frame) = cached {
             self.discard(frame);
         }
-        Ok(())
+        kept
     }
 
     /// Commits every changed page, in page order, through the [`PageFile`]'s write-ahead log
@@ -290,6 +317,14 @@ impl<F: File> PageCache<F> {
     /// in memory, to commit again or roll back. A failed write or sync leaves the file refusing
     /// changes until it is opened again (D59).
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
+        self.commit_stamped(NO_STAMP, update)
+    }
+
+    pub(crate) fn commit_stamped(
+        &mut self,
+        stamp: u64,
+        update: impl FnOnce(&mut Superblock),
+    ) -> Result<(), StorageError> {
         let mut order = std::mem::take(&mut self.commit_order);
         order.clear();
         let states = &self.states;
@@ -302,12 +337,15 @@ impl<F: File> PageCache<F> {
         );
         order.sort_unstable_by_key(|&frame| (self.pages[frame].get(), frame));
         order.dedup();
-        let committed = self.write_and_commit(&order, update);
+        let committed = self.write_and_commit(&order, stamp, update);
+        if committed.is_ok() {
+            self.images.get_mut().commit();
+        }
         if committed.is_ok() && self.file.get_mut().has_failed() {
             self.drop_every_page();
         } else if committed.is_ok() {
             for &frame in &order {
-                self.states[frame].set(self.states[frame].get() & !DIRTY);
+                self.states[frame].set(self.states[frame].get() & !(DIRTY | ALLOCATED));
             }
             self.dirty_pages.set(0);
             self.dirty_frames.get_mut().clear();
@@ -326,7 +364,117 @@ impl<F: File> PageCache<F> {
     /// commit.
     pub fn rollback(&mut self) -> Result<(), StorageError> {
         self.drop_changes();
+        self.images.get_mut().discard_pending();
         self.file.get_mut().rollback()
+    }
+
+    pub(crate) fn has_failed(&self) -> bool {
+        self.file.borrow().has_failed()
+    }
+
+    pub(crate) fn set_before_image_budget(&mut self, pages: usize) {
+        self.images.get_mut().set_budget(pages);
+    }
+
+    pub(crate) fn begin_snapshot(&self) -> Result<u64, StorageError> {
+        let mut images = self
+            .images
+            .try_borrow_mut()
+            .map_err(|_| StorageError::PageBorrowed { page: NO_PAGE })?;
+        let version = images.register_reader()?;
+        if let Err(error) = self.keep_uncaptured_changes(&mut images) {
+            images.release_reader(version);
+            return Err(error);
+        }
+        Ok(version)
+    }
+
+    pub(crate) fn end_snapshot(&self, version: u64) {
+        if let Ok(mut images) = self.images.try_borrow_mut() {
+            images.release_reader(version);
+        }
+    }
+
+    pub(crate) fn read_at(&self, page_id: u64, version: u64) -> Result<PageRef<'_>, StorageError> {
+        if self.file.borrow().has_failed() {
+            return Err(StorageError::NeedsReopen);
+        }
+        let images = self
+            .images
+            .try_borrow()
+            .map_err(|_| StorageError::PageBorrowed { page: page_id })?;
+        images.check_live(version)?;
+        match Ref::filter_map(images, |images| images.image_for(page_id, version)) {
+            Ok(image) => Ok(PageRef {
+                pinned: Pinned::Image(image),
+                page_id,
+            }),
+            Err(_) => self.read(page_id),
+        }
+    }
+
+    fn keep_before_image(
+        &self,
+        page_id: u64,
+        frame: usize,
+        page: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut images = self
+            .images
+            .try_borrow_mut()
+            .map_err(|_| StorageError::PageBorrowed { page: page_id })?;
+        if !images.wants_images() {
+            return Ok(());
+        }
+        let checked = self.states[frame].get() & CONTENTS_CHECKED != 0;
+        images.keep_pending(page_id, self.headers[frame].get(), checked, page)
+    }
+
+    fn keep_freed_page(&self, page_id: u64, cached: Option<usize>) -> Result<(), StorageError> {
+        let mut images = self
+            .images
+            .try_borrow_mut()
+            .map_err(|_| StorageError::PageBorrowed { page: page_id })?;
+        if !images.wants_images() || images.has_pending_image(page_id) {
+            return Ok(());
+        }
+        if let Some(frame) = cached.filter(|&frame| !self.is_dirty(frame)) {
+            let bytes = self
+                .frames
+                .read(frame)
+                .ok_or(StorageError::PageBorrowed { page: page_id })?;
+            let checked = self.states[frame].get() & CONTENTS_CHECKED != 0;
+            return images.keep_pending(page_id, self.headers[frame].get(), checked, &bytes);
+        }
+        self.keep_committed_image(&mut images, page_id)
+    }
+
+    fn keep_uncaptured_changes(&self, images: &mut BeforeImages) -> Result<(), StorageError> {
+        let dirty_frames = self.dirty_frames.borrow();
+        for &frame in dirty_frames.iter() {
+            let state = self.states[frame].get();
+            let page_id = self.pages[frame].get();
+            if state & DIRTY != 0 && state & ALLOCATED == 0 && !images.has_pending_image(page_id) {
+                self.keep_committed_image(images, page_id)?;
+            }
+        }
+        let freed: Vec<u64> = self.file.borrow().freed_committed_pages().collect();
+        for page_id in freed {
+            if !images.has_pending_image(page_id) {
+                self.keep_committed_image(images, page_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn keep_committed_image(
+        &self,
+        images: &mut BeforeImages,
+        page_id: u64,
+    ) -> Result<(), StorageError> {
+        let mut page = vec![0u8; self.page_size().bytes()];
+        let header = self.file.borrow().read_page(page_id, &mut page)?;
+        images.keep_pending(page_id, header, false, &page)
     }
 
     fn drop_every_page(&mut self) {
@@ -336,6 +484,7 @@ impl<F: File> PageCache<F> {
             }
         }
         self.dirty_frames.get_mut().clear();
+        self.images.get_mut().discard_all();
     }
 
     fn drop_changes(&mut self) {
@@ -352,10 +501,11 @@ impl<F: File> PageCache<F> {
     fn write_and_commit(
         &mut self,
         order: &[usize],
+        stamp: u64,
         update: impl FnOnce(&mut Superblock),
     ) -> Result<(), StorageError> {
         self.check_frames_writable(order)?;
-        let prepared = self.file.get_mut().prepare_commit(update)?;
+        let prepared = self.file.get_mut().prepare_commit(stamp, update)?;
         if let Err(error) = self.log_frames(order) {
             self.file.get_mut().abort_commit();
             return Err(error);
@@ -510,6 +660,28 @@ impl<F: File> fmt::Debug for PageCache<F> {
     }
 }
 
+pub(crate) trait PageSource {
+    fn page(&self, page_id: u64) -> Result<PageRef<'_>, StorageError>;
+}
+
+impl<F: File> PageSource for PageCache<F> {
+    #[inline(always)]
+    fn page(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
+        self.read(page_id)
+    }
+}
+
+pub(crate) struct Snapshot<'a, F: File> {
+    pub(crate) cache: &'a PageCache<F>,
+    pub(crate) version: u64,
+}
+
+impl<F: File> PageSource for Snapshot<'_, F> {
+    fn page(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
+        self.cache.read_at(page_id, self.version)
+    }
+}
+
 fn check_header(header: &PageHeader) -> Result<(), StorageError> {
     if header.flags != 0 {
         return Err(FormatError::InvalidField { field: "flags" }.into());
@@ -521,10 +693,18 @@ fn check_header(header: &PageHeader) -> Result<(), StorageError> {
 /// dropped. It dereferences to the page's contents after its header.
 #[derive(Debug)]
 pub struct PageRef<'a> {
-    bytes: FrameRef<'a>,
+    pinned: Pinned<'a>,
     page_id: u64,
-    header: &'a Cell<PageHeader>,
-    state: &'a Cell<u8>,
+}
+
+#[derive(Debug)]
+enum Pinned<'a> {
+    Frame {
+        bytes: FrameRef<'a>,
+        header: &'a Cell<PageHeader>,
+        state: &'a Cell<u8>,
+    },
+    Image(Ref<'a, PageImage>),
 }
 
 impl PageRef<'_> {
@@ -535,26 +715,40 @@ impl PageRef<'_> {
 
     /// The page's header.
     pub fn header(&self) -> PageHeader {
-        self.header.get()
+        match &self.pinned {
+            Pinned::Frame { header, .. } => header.get(),
+            Pinned::Image(image) => image.header,
+        }
     }
 
     /// Whether the structure that owns the page has checked its contents since the cache last
-    /// read it from the file. The cache clears this whenever it reads a page in, so a structure
-    /// checks each page once per read from the file instead of on every use (D9).
+    /// read it from the file. The cache clears this whenever it reads a page in, and
+    /// [`PageCache::write`] clears it too, so a structure checks each page once per read from
+    /// the file, or after a change it did not make itself, instead of on every use (D9).
     pub fn contents_checked(&self) -> bool {
-        self.state.get() & CONTENTS_CHECKED != 0
+        match &self.pinned {
+            Pinned::Frame { state, .. } => state.get() & CONTENTS_CHECKED != 0,
+            Pinned::Image(image) => image.checked.get(),
+        }
     }
 
     pub(crate) fn set_contents_checked(&self) {
-        self.state.set(self.state.get() | CONTENTS_CHECKED);
+        match &self.pinned {
+            Pinned::Frame { state, .. } => state.set(state.get() | CONTENTS_CHECKED),
+            Pinned::Image(image) => image.checked.set(true),
+        }
     }
 }
 
 impl Deref for PageRef<'_> {
     type Target = [u8];
 
+    #[inline(always)]
     fn deref(&self) -> &[u8] {
-        &self.bytes[PAGE_HEADER_SIZE..]
+        match &self.pinned {
+            Pinned::Frame { bytes, .. } => &bytes[PAGE_HEADER_SIZE..],
+            Pinned::Image(image) => &image.bytes[PAGE_HEADER_SIZE..],
+        }
     }
 }
 
@@ -923,6 +1117,23 @@ mod tests {
             cache.read(pages[0]),
             Err(StorageError::PageNotInUse { .. })
         ));
+    }
+
+    #[test]
+    fn a_write_through_a_handle_clears_the_contents_checked_bit_and_the_owners_write_keeps_it() {
+        let fs = SimFileSystem::new();
+        let pages = committed_pages(&fs, 1, 4);
+        let cache = open(&fs, Access::ReadWrite, 4);
+        cache.read(pages[0]).unwrap().set_contents_checked();
+        assert!(cache.read(pages[0]).unwrap().contents_checked());
+        assert!(
+            cache
+                .write_keeping_check(pages[0])
+                .unwrap()
+                .contents_checked()
+        );
+        assert!(!cache.write(pages[0]).unwrap().contents_checked());
+        assert!(!cache.read(pages[0]).unwrap().contents_checked());
     }
 
     #[test]

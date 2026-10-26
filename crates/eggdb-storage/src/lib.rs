@@ -20,8 +20,13 @@
 //! - [`BTree`], a B+tree of byte-string keys and values in the cache's pages, with fence keys,
 //!   prefix truncation, splits up to the root, deletes that merge under-filled pages, a
 //!   [`Cursor`] for range, prefix and reverse scans in a [`ScanOrder`], and [`BTree::check`],
-//!   which checks a whole tree and returns a [`TreeReport`].
+//!   which checks a whole tree and returns a [`TreeReport`];
+//! - [`Store`], transactions over the cache: one [`WriteTransaction`] at a time, committed
+//!   atomically or rolled back, any number of [`ReadTransaction`]s reading snapshots kept
+//!   consistent by before-images of the pages the writer changes, and a hybrid-clock
+//!   [`CommitStamp`] for every commit.
 
+mod before_images;
 mod btree;
 #[cfg(test)]
 mod btree_delete_tests;
@@ -38,10 +43,14 @@ mod cursor;
 mod error;
 mod format;
 mod frames;
+mod hybrid_clock;
 mod log;
 mod page_cache;
 mod page_file;
 mod page_table;
+mod store;
+#[cfg(test)]
+mod store_tests;
 #[cfg(test)]
 mod test_rng;
 mod tree_page;
@@ -55,6 +64,8 @@ pub use format::{
     MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader,
     PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };
+pub use hybrid_clock::CommitStamp;
 pub use log::{Durability, LogStats};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
 pub use page_file::{CreateOptions, PageFile};
+pub use store::{ReadTransaction, Store, WriteTransaction};

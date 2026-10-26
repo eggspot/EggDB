@@ -1,6 +1,6 @@
 use crate::btree::{expect_level, shape_of_ref};
 use crate::error::StorageError;
-use crate::page_cache::{PageCache, PageRef};
+use crate::page_cache::{PageCache, PageRef, PageSource};
 use crate::tree_page::Shape;
 use eggdb_platform::File;
 use std::ops::Bound;
@@ -40,7 +40,8 @@ pub struct Cursor {
     position: usize,
 }
 
-type KeyAndValue<'a> = (&'a [u8], &'a [u8]);
+pub(crate) type KeyAndValue<'a> = (&'a [u8], &'a [u8]);
+type Fence<'a> = (&'a [u8], &'a [u8]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Seek {
@@ -100,6 +101,13 @@ impl Cursor {
         &mut self,
         cache: &PageCache<F>,
     ) -> Result<Option<KeyAndValue<'_>>, StorageError> {
+        self.next_in(cache)
+    }
+
+    pub(crate) fn next_in(
+        &mut self,
+        pages: &impl PageSource,
+    ) -> Result<Option<KeyAndValue<'_>>, StorageError> {
         while self.position == self.entries.len() {
             if self.seek == Seek::Done {
                 return Ok(None);
@@ -107,7 +115,7 @@ impl Cursor {
             self.bytes.clear();
             self.entries.clear();
             self.position = 0;
-            if let Err(error) = self.read_leaf(cache) {
+            if let Err(error) = self.read_leaf(pages) {
                 self.bytes.clear();
                 self.entries.clear();
                 return Err(error);
@@ -121,8 +129,8 @@ impl Cursor {
         )))
     }
 
-    fn read_leaf<F: File>(&mut self, cache: &PageCache<F>) -> Result<(), StorageError> {
-        let leaf = self.find_leaf(cache)?;
+    fn read_leaf(&mut self, pages: &impl PageSource) -> Result<(), StorageError> {
+        let leaf = self.find_leaf(pages)?;
         let shape = shape_of_ref(&leaf)?;
         let position = self.position_in(&shape, &leaf)?;
         let finished = match self.order {
@@ -159,13 +167,17 @@ impl Cursor {
         Ok(())
     }
 
-    fn find_leaf<'c, F: File>(&self, cache: &'c PageCache<F>) -> Result<PageRef<'c>, StorageError> {
+    fn find_leaf<'c>(&self, pages: &'c impl PageSource) -> Result<PageRef<'c>, StorageError> {
         let mut page_id = self.root;
         let mut level = None;
+        let mut parent: Option<(PageRef<'c>, Shape, usize)> = None;
         loop {
-            let page = cache.read(page_id)?;
+            let page = pages.page(page_id)?;
             let shape = shape_of_ref(&page)?;
             expect_level(&shape, level)?;
+            if let Some((parent_page, parent_shape, child)) = parent.take() {
+                expect_bounds(&parent_shape, &parent_page, child, &shape, &page)?;
+            }
             let child = match self.seek {
                 Seek::Before => {
                     let suffix = shape.suffix_below(&page, &self.seek_key)?;
@@ -195,6 +207,7 @@ impl Cursor {
             };
             page_id = shape.child_at(&page, child)?;
             level = Some(shape.level - 1);
+            parent = Some((page, shape, child));
         }
     }
 
@@ -268,6 +281,45 @@ impl Cursor {
         });
         Ok(true)
     }
+}
+
+fn expect_bounds(
+    parent: &Shape,
+    parent_page: &[u8],
+    child: usize,
+    shape: &Shape,
+    page: &[u8],
+) -> Result<(), StorageError> {
+    let prefix = parent.prefix(parent_page);
+    let low = if child == 0 {
+        (prefix, parent.low_suffix(parent_page))
+    } else {
+        (prefix, parent.cell_at(parent_page, child - 1)?.key)
+    };
+    let high = if child == parent.count {
+        parent.high_suffix(parent_page).map(|high| (prefix, high))
+    } else {
+        Some((prefix, parent.cell_at(parent_page, child)?.key))
+    };
+    let own_prefix = shape.prefix(page);
+    let own_low = (own_prefix, shape.low_suffix(page));
+    let own_high = shape.high_suffix(page).map(|high| (own_prefix, high));
+    let same_high = match (high, own_high) {
+        (Some(given), Some(own)) => same_key(given, own),
+        (None, None) => true,
+        _ => false,
+    };
+    if !same_key(low, own_low) || !same_high {
+        return Err(shape
+            .corrupt("the fence keys differ from the bounds the parent gives")
+            .into());
+    }
+    Ok(())
+}
+
+fn same_key(a: Fence<'_>, b: Fence<'_>) -> bool {
+    a.0.len() + a.1.len() == b.0.len() + b.1.len()
+        && a.0.iter().chain(a.1).eq(b.0.iter().chain(b.1))
 }
 
 fn above_end(end: &Bound<Vec<u8>>, key: &[u8]) -> bool {
