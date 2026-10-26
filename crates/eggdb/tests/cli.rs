@@ -1,26 +1,14 @@
 //! The `eggdb` command, run as a real process: every command, every exit code, the formats a
 //! pipe gets, byte arguments, large values, export and import, a closed pipe, damaged files, the
 //! help text, and random arguments. A busy file has a test binary of its own, `cli_busy.rs`.
-//!
-//! A child process started while this process has a database file open could hold that file's
-//! lock for a moment, so starting a child and opening a database take turns.
 
 use eggdb::Database;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
-static OPEN_FILES: Mutex<()> = Mutex::new(());
-
-fn spawn(command: &mut Command) -> std::process::Child {
-    let _no_database_open = OPEN_FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    command.spawn().unwrap()
-}
 
 struct TempDirectory {
     path: PathBuf,
@@ -46,12 +34,13 @@ impl TempDirectory {
     }
 
     fn eggdb_with_stdin(&self, args: &[&str], stdin: &[u8]) -> Output {
-        let mut child = spawn(
-            self.command(args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-        );
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         let mut input = child.stdin.take().unwrap();
         let stdin = stdin.to_vec();
         let writer = std::thread::spawn(move || {
@@ -74,9 +63,6 @@ impl TempDirectory {
 
     fn database_with(&self, name: &str, entries: &[(&[u8], &[u8])]) -> PathBuf {
         let path = self.path.join(name);
-        let _no_spawn = OPEN_FILES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let db = Database::open(&path).unwrap();
         db.write(|tx| {
             for (key, value) in entries {
@@ -559,12 +545,13 @@ fn a_closed_pipe_ends_the_scan_quietly() {
         .map(|(key, value)| (key.as_slice(), value.as_slice()))
         .collect();
     dir.database_with("app.db", &borrowed);
-    let mut child = spawn(
-        dir.command(&["scan", "app.db", "-F", "text"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    );
+    let mut child = dir
+        .command(&["scan", "app.db", "-F", "text"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut first = [0u8; 16];
     child
         .stdout

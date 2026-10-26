@@ -1,5 +1,4 @@
-//! The `eggdb` command against a file another process has open, in a test binary of its own,
-//! so that no other test's child process can hold this file's lock.
+//! The `eggdb` command against a file another process has open.
 
 use eggdb::{Database, Options};
 use std::process::{Command, Output};

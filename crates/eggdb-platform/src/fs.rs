@@ -127,7 +127,9 @@ pub trait File: Send + Sync + std::fmt::Debug {
     ///
     /// The lock is advisory: it stops other locks, not reads or writes. It is held until the
     /// handle is dropped, or until a crash in a simulation, and the operating system releases
-    /// it when the process ends, so it never outlives its owner. A handle takes one lock for
+    /// it when the process ends, so it never outlives its owner. Dropping the handle releases it
+    /// at once, even while a child process started meanwhile still has a copy of the handle
+    /// because it has not yet started its own program. A handle takes one lock for
     /// its life; a second call fails with [`ErrorKind::InvalidInput`]. Fails with
     /// [`ErrorKind::Unsupported`] on targets without file locks.
     fn try_lock(&self, lock: FileLock) -> Result<()>;
