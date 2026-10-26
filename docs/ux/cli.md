@@ -365,7 +365,7 @@ Examples:
 | key not found (`get`, text, stderr) | `key not found: {key}` |
 | `del` of absent key (text, stderr) | `nothing to delete: {key} is not in {file}` |
 | value missing on a terminal | `put needs a value: give it as an argument, as @file, or pipe it to stdin` |
-| unknown command | `unknown command '{name}'. Commands: create, put, get, del, scan, check, stats, help, version.` |
+| unknown command | `unknown command '{name}'. Commands: create, put, get, del, scan, check, stats, ui, help, version.` |
 | reserved command | `eggdb {name} is not in this release yet; see docs/roadmap.md` |
 | unknown option | `unknown option '{opt}' for eggdb {command}` + `  try: eggdb help {command}` |
 | bad format | `--format must be text, json, hex or raw, not '{value}'` |
