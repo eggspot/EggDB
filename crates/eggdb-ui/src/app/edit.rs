@@ -104,6 +104,10 @@ impl<S: Source> Ui<S> {
         let value_bytes = viewer.value_bytes;
         let bytes = match viewer.bytes.as_deref() {
             Some(bytes) if bytes.len() <= LONGEST_TEXT => bytes,
+            None if value_bytes <= LONGEST_TEXT as u64 => {
+                self.info("The value could not be read; press r to re-read");
+                return;
+            }
             _ => {
                 self.too_large_to_edit(value_bytes);
                 return;

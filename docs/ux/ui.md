@@ -552,8 +552,9 @@ simplest consistent option (D92):
    `\r`, `\\`); a backslash must start one of these, or confirming reports `Bad escape`. A paste
    is taken literally: its backslashes, tabs, carriage returns, controls and invisible
    characters are spelled as escapes on the way in, so the value gets exactly the pasted bytes
-   (pasted JSON keeps its `\n`). Typed invisible characters (a bidi override from an input
-   method) are spelled too, so the editor never shows one raw. `Tab` types `\t`.
+   (pasted JSON keeps its `\n`); a paste into the prefix filter is taken literally too. Typed
+   invisible characters (a bidi override from an input method) are spelled too, so the editor
+   never shows one raw. `Tab` types `\t`.
 2. **Keys that type.** In an editor every printable key types, `?` and `q` included; `F1`
    opens the help screen at its Editing section, and `Ctrl-C` is the quit key that asks before
    discarding an unsaved edit (a second `Ctrl-C` quits). `Esc` on a changed value asks

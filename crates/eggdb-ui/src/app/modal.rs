@@ -1,5 +1,5 @@
 use super::edit::is_text;
-use super::{Hint, Mode, Pane, ToastKind, Ui};
+use super::{Hint, Mode, ToastKind, Ui};
 use crate::frame::Frame;
 use crate::source::{Change, ErrorKind, Source, SourceError, WriterBusy};
 use crate::terminal::{KeyCode, KeyEvent};
@@ -394,9 +394,6 @@ impl<S: Source> Ui<S> {
     pub(super) fn close_edit(&mut self) {
         if let Some(focus) = self.edit.take().map(|edit| edit.return_focus()) {
             self.focus = focus;
-        }
-        if !self.two_panes() && self.rows.is_empty() {
-            self.focus = Pane::Keys;
         }
     }
 
