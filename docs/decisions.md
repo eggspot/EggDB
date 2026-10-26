@@ -3913,3 +3913,74 @@ release notes: the promises, the test behind each, the platforms CI runs, and wh
 (real power loss on hardware, a real process killed mid-commit, more than one writer, `Off` after
 a power loss, an outside audit, network file systems, large files and long runs, CPUs outside
 CI).
+
+## D97 A flush longer than the recycled log segments ends in one of them, and the checkpoint after it cuts its new segments off the file — Decided (build loop, 2026-10-27; the `Normal` remainder decided by research); closes issues #52 and #44, refines D7, D81, D84, D89 and D94
+**What was slow.** In `sqlite_compare.batch_put` (D94) each commit overwrites 1,000 random keys
+of a 100,000-row table and logs about 700 page images, 2.8 MB, while the log keeps seven
+recycled segments of 64 KiB, 448 KiB. The flush took the recycled segments first and then new
+segments at the end of the file; the checkpoint right after it kept the seven lowest as recycled
+and gave the others, the new ones, to the free list. Data pages reuse free pages and the log
+never does, so every such commit grew the file by about its log (a 4 MB table reached 856 MB
+after 300 commits) and the free list grew with it, and each commit and checkpoint rebuilt that
+list in full (`plan_free_list` copies it twice, and every list page was logged). Profiling showed
+this, not page images, CRCs or syncs, to be the gap: with log segments large enough to hold one
+commit, the same build took 1.42 µs per put against SQLite's 2.2.
+
+**The fix, without changing what readers accept.** The format already lets a link name either an
+unused recycled segment or a new segment at the end of the file, in any order, and it already
+lets a checkpoint's superblock carry any page count its free list and log fit in. So:
+- The log writer is told, when a flush begins, how many records it will write (one per page
+  image, one per free-list page, the commit record). When it needs another segment, it takes a
+  recycled one only if the records still to come fit in the unused recycled segments, counted
+  conservatively (whole page records, each with a skipped block tail, after a batch and before
+  a link record); otherwise it takes a new segment at the end. A flush that fits in the recycled
+  segments behaves exactly as before; a longer one takes its new segments first and ends in a
+  recycled one.
+- A checkpoint whose segments beyond the seven recycled ones are exactly the last pages of the
+  file cuts them off: the next superblock's `page_count` ends before them, and it is written to
+  both header slots like a freeing checkpoint's, so no slot names a log through pages that are
+  no longer the log's (D89). Any other set of extra segments is still given to the free list,
+  as before.
+- The file keeps its length after a cut. The pages after `page_count` hold nothing the header
+  names, so the next long flush takes its new segments in that space without growing the file
+  (a sequence never used twice keeps their old records from passing a check, as in a recycled
+  segment, D84), and the next open for writing shortens the file to `page_count`, as it already
+  did after a crash. Shortening the file at every cut and growing it again at the next long
+  commit cost about 10% of the batched put on this Mac (0.76 against 0.69 of SQLite's time),
+  and SQLite keeps its write-ahead log at its longest size the same way.
+
+The file now stays at its data, eight segments and the space of its longest flush beyond the
+recycled segments, instead of growing by every long commit (issue #44 for steady workloads; a
+long commit when no recycled segment is left can still end at the end of the file, and its
+checkpoint gives the new segments to the free list, which data reuses). The format's
+version, the sample files of D96 and the hostile-file checks are unchanged, since readers accept
+exactly what they accepted before; format.md now says which kind of segment the writer takes,
+and that a checkpoint may cut segments off.
+
+**Results** (medians; macOS on an Apple-silicon Mac, Linux on GitHub's `ubuntu-latest`
+runners, see [benchmarks.md](benchmarks.md)): `sqlite_compare.batch_put` went from 1.35 to
+0.69 on macOS (1.58 against 2.28 µs per put) and from 1.09 to 0.61 on Linux, and
+its baseline lines are lowered to those values. No `eggdb-bench` line moved. Tests: a checkpoint
+after a long flush cuts its segments off, the file reopens with every page and an open for
+writing shortens it (`checkpoint_tests`); 40 long commits keep the page count, the free pages and
+the file's length constant in every durability mode; a crash at every operation of a long flush
+keeps exactly one whole commit; the crash sweeps over every operation of a checkpoint now cover
+a cutting checkpoint (`Full` and `Normal`) as well as a freeing one; and a crash between a
+cutting checkpoint's two header writes, followed by damage to the newest slot, opens the newest
+commit or is refused, before and after the next long commit reuses the cut space. The tests that need a freeing checkpoint now build one from two
+long commits with a data page between them.
+
+**`batch_put_normal` stays about 1.1 (decided by research, D7).** The `Normal` line is
+reported, not gated (D94): 1.13 on this Mac (1.18 before), and a median of 1.07 on the Linux runners, where five runs gave 0.94 to 1.82 (1.09 before, D94). It is set by syncs: EggDB syncs four times for each of these commits
+and SQLite twice. Two of EggDB's are the ones SQLite also pays: the log before pages are
+written in place, and those pages before the checkpoint is recorded. The other two are the new
+header slot, durable before any recycled segment is reused (D84), and its copy in the other slot,
+so no slot names a log running through pages now free or cut off (D89, issue #39). SQLite needs
+neither, because its WAL has no header to move and tells stale frames apart by salts and
+checksums, and it keeps no fallback copy of its database header. Merging or deferring any of the
+four would break torn-page protection, safe reuse of segments or the damaged-newest-slot
+guarantee, so the remaining cost is the price of correctness. A checkpoint that restarts the
+log through a segment header alone could drop the two header syncs; it changes the format, so
+it is a candidate for after v0.2.0. The research also rejected larger default segments (seven
+of about 1 MiB would hold this commit's log), which would add megabytes to every small file
+(D6, D14) to fit one benchmark's commit size.

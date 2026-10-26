@@ -306,7 +306,9 @@ impl<F: File> PageFile<F> {
     /// Writes a checkpoint, so that opening the file replays only the log written after it:
     /// makes the log durable, writes every committed page still only in the log to its place,
     /// syncs, and then writes the next header, which starts the log at the current position
-    /// and keeps the log's earlier segments for reuse (`docs/format.md`, "Checkpoints"). A crash
+    /// and keeps the log's earlier segments for reuse; segments a flush longer than the reused
+    /// ones added at the end of the file are cut off the page count, and the file keeps their
+    /// space for the next growth (`docs/format.md`, "Checkpoints"). A crash
     /// at any point leaves the file opening at its last durable commit. Under
     /// [`Durability::Off`] nothing is synced.
     ///
@@ -378,7 +380,7 @@ impl<F: File> PageFile<F> {
         self.sync_unless_off()?;
         let previous_reservation = self.header.log_sequence_reserved;
         self.write_header(plan.superblock)?;
-        if plan.free_entries.is_some() {
+        if plan.free_entries.is_some() || plan.cuts_segments_off {
             let mut copy = plan.superblock;
             copy.generation = self.next_generation()?;
             self.write_header(copy)?;
@@ -415,7 +417,7 @@ impl<F: File> PageFile<F> {
             .copied()
             .filter(|&first| first != current.first_page)
             .collect();
-        let extra = reusable.split_off(reusable.len().min(RECYCLED_SEGMENTS));
+        let mut extra = reusable.split_off(reusable.len().min(RECYCLED_SEGMENTS));
         let mut recycled: RecycledSegments = [NO_PAGE; RECYCLED_SEGMENTS];
         recycled[..reusable.len()].copy_from_slice(&reusable);
         let mut next = self.superblock;
@@ -431,6 +433,11 @@ impl<F: File> PageFile<F> {
             .saturating_add(SEQUENCE_RESERVATION);
         let segment_pages = u64::from(next.log_segment_pages);
         let mut page_count = next.page_count;
+        if let Some(end) = page_count_without_segments_at_the_end(&extra, segment_pages, page_count)
+        {
+            page_count = end;
+            extra.clear();
+        }
         let (free_entries, list_pages) = if extra.is_empty() {
             (None, Vec::new())
         } else {
@@ -451,6 +458,7 @@ impl<F: File> PageFile<F> {
             })?,
         }
         Ok(CheckpointPlan {
+            cuts_segments_off: next.page_count < self.superblock.page_count,
             superblock: next,
             free_entries,
             list_pages,
@@ -606,7 +614,7 @@ impl<F: File> PageFile<F> {
     /// checkpoint that fails there leaves the commit made: it still returns `Ok`, and the file
     /// refuses every later change with [`StorageError::NeedsReopen`].
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
-        let prepared = self.prepare_commit(NO_STAMP, update)?;
+        let prepared = self.prepare_commit(NO_STAMP, self.staged.len(), update)?;
         let mut staged = std::mem::take(&mut self.staged);
         for (&page_id, (header, page)) in staged.iter_mut() {
             if let Err(error) = self.log_page(page_id, page, header) {
@@ -625,6 +633,7 @@ impl<F: File> PageFile<F> {
     pub(crate) fn prepare_commit(
         &mut self,
         stamp: u64,
+        images: usize,
         update: impl FnOnce(&mut Superblock),
     ) -> Result<PreparedCommit, StorageError> {
         self.ensure_log()?;
@@ -677,6 +686,7 @@ impl<F: File> PageFile<F> {
         let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
         let before = self.page_count;
         self.page_count = page_count;
+        log.expect_records((images + list_pages.len() + 1) as u64);
         if let Err(error) = log.begin(&mut self.page_count) {
             log.abort();
             self.page_count = before;
@@ -1390,8 +1400,23 @@ struct ResumedLog {
     file_bytes: u64,
 }
 
+fn page_count_without_segments_at_the_end(
+    segments: &[u64],
+    segment_pages: u64,
+    page_count: u64,
+) -> Option<u64> {
+    let first = *segments.first()?;
+    let contiguous_to_the_end = segments
+        .iter()
+        .enumerate()
+        .all(|(index, &segment)| segment == first + index as u64 * segment_pages)
+        && first + segments.len() as u64 * segment_pages == page_count;
+    contiguous_to_the_end.then_some(first)
+}
+
 #[derive(Debug)]
 struct CheckpointPlan {
+    cuts_segments_off: bool,
     superblock: Superblock,
     free_entries: Option<BTreeSet<u64>>,
     list_pages: Vec<u64>,

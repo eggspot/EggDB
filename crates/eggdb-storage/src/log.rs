@@ -350,6 +350,7 @@ pub(crate) struct LogWriter {
     images: Vec<StagedImage>,
     new_segments: Vec<Segment>,
     mark: Option<Mark>,
+    records_left: u64,
 }
 
 impl LogWriter {
@@ -367,6 +368,7 @@ impl LogWriter {
             images: Vec::new(),
             new_segments: Vec::new(),
             mark: None,
+            records_left: 0,
         }
     }
 
@@ -424,6 +426,10 @@ impl LogWriter {
         &self.new_segments
     }
 
+    pub(crate) fn expect_records(&mut self, records: u64) {
+        self.records_left = records;
+    }
+
     pub(crate) fn begin(&mut self, page_count: &mut u64) -> Result<(), StorageError> {
         self.buffer.clear();
         self.runs.clear();
@@ -457,6 +463,7 @@ impl LogWriter {
         self.buffer.clear();
         self.runs.clear();
         self.images.clear();
+        self.records_left = 0;
     }
 
     pub(crate) fn reserve(
@@ -477,6 +484,7 @@ impl LogWriter {
         let record_start = self.buffer.len();
         let file_offset = self.file_offset_of(record_start) + (RECORD_HEADER + 8) as u64;
         self.put(RecordType::PageImage, &[&page_id.to_le_bytes(), page]);
+        self.records_left = self.records_left.saturating_sub(1);
         self.images.push(StagedImage {
             page_id,
             buffer_start: record_start + RECORD_HEADER + 8,
@@ -486,6 +494,7 @@ impl LogWriter {
 
     pub(crate) fn put_commit(&mut self, fields: &CommitFields) {
         self.put(RecordType::Commit, &[&fields.encode()]);
+        self.records_left = 0;
     }
 
     pub(crate) fn seal(&mut self, page_count: &mut u64) -> Result<(), StorageError> {
@@ -568,7 +577,11 @@ impl LogWriter {
             .start_lsn
             .checked_add(self.geometry.capacity())
             .ok_or(StorageError::FileFull)?;
-        let recycled = self.recycled.iter().position(|&first| first != NO_PAGE);
+        let recycled = self
+            .recycled
+            .iter()
+            .position(|&first| first != NO_PAGE)
+            .filter(|_| self.rest_of_the_flush_fits_in_the_recycled_segments());
         let (first_page, linked_page_count) = match recycled {
             Some(index) => (std::mem::replace(&mut self.recycled[index], NO_PAGE), 0),
             None => {
@@ -605,6 +618,14 @@ impl LogWriter {
         self.offset = LOG_BLOCK;
         self.new_segments.push(next);
         Ok(())
+    }
+
+    fn rest_of_the_flush_fits_in_the_recycled_segments(&self) -> bool {
+        let page_record = RECORD_HEADER + IMAGE_PAGE_AT + self.geometry.page_size.bytes();
+        let record_with_skipped_block_tail = (page_record + RECORD_HEADER - 1) as u64;
+        let room = self.geometry.capacity() - (RECORD_HEADER + BATCH_PAYLOAD + LINK_RECORD) as u64;
+        let records_per_segment = room / record_with_skipped_block_tail;
+        self.records_left <= self.unused_recycled_segments() as u64 * records_per_segment
     }
 
     fn put(&mut self, kind: RecordType, parts: &[&[u8]]) {

@@ -285,34 +285,59 @@ fn a_log_without_automatic_checkpoints_grows_and_replays_whole() {
     );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastCommits {
+    Short,
+    OneLongEndingTheFile,
+    TwoLongWithAPageBetween,
+}
+
+fn rewrite_every_page(cache: &mut PageCache<SimFile>, model: &mut Model, fill: u8) {
+    for (&page, value) in model.iter_mut() {
+        cache.write(page).unwrap().fill(fill);
+        *value = fill;
+    }
+    cache.commit(|_| {}).unwrap();
+}
+
 fn before_checkpoint(
     fs: &SimFileSystem,
     durability: Durability,
-    big_commit: bool,
+    last_commits: LastCommits,
 ) -> (PageCache<SimFile>, Model) {
     let mut cache = create(fs, 256);
     cache.set_auto_checkpoint_bytes(None);
-    let mut model = allocated(&mut cache, if big_commit { 150 } else { 12 });
+    let pages = match last_commits {
+        LastCommits::Short => 12,
+        _ => 150,
+    };
+    let mut model = allocated(&mut cache, pages);
     cache.set_durability(durability).unwrap();
     let mut rng = TestRng::new(5);
     rounds(&mut cache, &mut model, &mut rng, 20);
     cache.checkpoint().unwrap();
     rounds(&mut cache, &mut model, &mut rng, 30);
-    if big_commit {
-        for (&page, fill) in model.iter_mut() {
-            cache.write(page).unwrap().fill(200);
-            *fill = 200;
+    match last_commits {
+        LastCommits::Short => {}
+        LastCommits::OneLongEndingTheFile => rewrite_every_page(&mut cache, &mut model, 200),
+        LastCommits::TwoLongWithAPageBetween => {
+            rewrite_every_page(&mut cache, &mut model, 200);
+            let mut page = cache.allocate(leaf()).unwrap();
+            page.fill(201);
+            model.insert(page.page_id(), 201);
+            drop(page);
+            cache.commit(|_| {}).unwrap();
+            rewrite_every_page(&mut cache, &mut model, 202);
         }
-        cache.commit(|_| {}).unwrap();
     }
     cache.sync().unwrap();
     (cache, model)
 }
 
-fn crash_at_every_operation_of_a_checkpoint(durability: Durability, big_commit: bool) {
+fn crash_at_every_operation_of_a_checkpoint(durability: Durability, last_commits: LastCommits) {
     let operations = {
         let fs = SimFileSystem::new();
-        let (mut cache, model) = before_checkpoint(&fs, durability, big_commit);
+        let (mut cache, model) = before_checkpoint(&fs, durability, last_commits);
         let start = fs.operation_count();
         cache.checkpoint().unwrap();
         let operations = fs.operation_count() - start;
@@ -325,9 +350,9 @@ fn crash_at_every_operation_of_a_checkpoint(durability: Durability, big_commit: 
     assert!(operations >= 3, "{operations}");
     for step in 0..operations {
         for seed in 0..4 {
-            let context = format!("{durability:?}, big {big_commit}, step {step}, seed {seed}");
+            let context = format!("{durability:?}, {last_commits:?}, step {step}, seed {seed}");
             let fs = SimFileSystem::new();
-            let (mut cache, mut model) = before_checkpoint(&fs, durability, big_commit);
+            let (mut cache, mut model) = before_checkpoint(&fs, durability, last_commits);
             fs.fail_operation(fs.operation_count() + step);
             assert!(cache.checkpoint().is_err(), "{context}");
             assert!(matches!(
@@ -361,19 +386,200 @@ fn crash_at_every_operation_of_a_checkpoint(durability: Durability, big_commit: 
 
 #[test]
 fn a_crash_at_any_operation_of_a_checkpoint_keeps_every_commit() {
-    crash_at_every_operation_of_a_checkpoint(Durability::Full, false);
-    crash_at_every_operation_of_a_checkpoint(Durability::Normal, false);
+    crash_at_every_operation_of_a_checkpoint(Durability::Full, LastCommits::Short);
+    crash_at_every_operation_of_a_checkpoint(Durability::Normal, LastCommits::Short);
 }
 
 #[test]
 fn a_crash_at_any_operation_of_a_checkpoint_that_frees_extra_segments_keeps_every_commit() {
-    crash_at_every_operation_of_a_checkpoint(Durability::Full, true);
+    crash_at_every_operation_of_a_checkpoint(
+        Durability::Full,
+        LastCommits::TwoLongWithAPageBetween,
+    );
+}
+
+#[test]
+fn a_crash_at_any_operation_of_a_checkpoint_that_cuts_segments_off_the_file_keeps_every_commit() {
+    crash_at_every_operation_of_a_checkpoint(Durability::Full, LastCommits::OneLongEndingTheFile);
+    crash_at_every_operation_of_a_checkpoint(Durability::Normal, LastCommits::OneLongEndingTheFile);
+}
+
+#[test]
+fn a_checkpoint_after_a_flush_longer_than_the_recycled_segments_cuts_its_new_segments_off_the_file()
+{
+    let fs = SimFileSystem::new();
+    let (mut cache, model) =
+        before_checkpoint(&fs, Durability::Full, LastCommits::OneLongEndingTheFile);
+    let before = cache.superblock();
+    cache.checkpoint().unwrap();
+    let after = cache.superblock();
+    assert!(
+        after.page_count + 2 * SEGMENT_PAGES <= before.page_count,
+        "{} pages before, {} after",
+        before.page_count,
+        after.page_count
+    );
+    assert_eq!(after.free_page_count, before.free_page_count);
+    assert_eq!(raw(&fs).size().unwrap(), before.page_count * PAGE);
+    assert!(after.log_head_page + SEGMENT_PAGES <= after.page_count);
+    assert_eq!(
+        after
+            .recycled_segments
+            .iter()
+            .filter(|&&first| first != NO_PAGE)
+            .count(),
+        RECYCLED_SEGMENTS
+    );
+    assert_older_slot_is_a_copy(&fs, "after cutting segments off");
+    drop(cache);
+    let cache = open(&fs, Access::ReadOnly).unwrap();
+    assert_eq!(cache.superblock().page_count, after.page_count);
+    assert_model(&cache, &model, "after cutting segments off");
+    drop(cache);
+    drop(open(&fs, Access::ReadWrite).unwrap());
+    assert_eq!(raw(&fs).size().unwrap(), after.page_count * PAGE);
+}
+
+#[test]
+fn commits_longer_than_the_recycled_segments_keep_the_file_from_growing() {
+    for durability in [Durability::Full, Durability::Normal, Durability::Off] {
+        let fs = SimFileSystem::new();
+        let mut cache = create(&fs, 256);
+        let mut model = allocated(&mut cache, 150);
+        cache.set_durability(durability).unwrap();
+        let mut sizes = Vec::new();
+        for round in 0..40 {
+            rewrite_every_page(&mut cache, &mut model, round + 1);
+            let superblock = cache.superblock();
+            let file_bytes = raw(&fs).size().unwrap();
+            sizes.push((
+                superblock.page_count,
+                superblock.free_page_count,
+                file_bytes,
+            ));
+        }
+        assert!(cache.log_stats().checkpoints >= 39, "{durability:?}");
+        assert!(
+            sizes[2..].iter().all(|&size| size == sizes[2]),
+            "{durability:?}: {sizes:?}"
+        );
+        drop(cache);
+        let cache = open(&fs, Access::ReadOnly).unwrap();
+        assert_model(&cache, &model, &format!("{durability:?}"));
+    }
+}
+
+fn with_recycled_segments(fs: &SimFileSystem) -> (PageCache<SimFile>, Model) {
+    let mut cache = create(fs, 256);
+    let mut model = allocated(&mut cache, 150);
+    rewrite_every_page(&mut cache, &mut model, 1);
+    let mut rng = TestRng::new(9);
+    rounds(&mut cache, &mut model, &mut rng, 40);
+    cache.checkpoint().unwrap();
+    (cache, model)
+}
+
+#[test]
+fn a_crash_at_any_operation_of_a_flush_longer_than_the_recycled_segments_keeps_one_whole_commit() {
+    let operations = {
+        let fs = SimFileSystem::new();
+        let (mut cache, mut model) = with_recycled_segments(&fs);
+        assert!(cache.superblock().recycled_segments[0] != NO_PAGE);
+        let pages_before = cache.superblock().page_count;
+        let checkpoints = cache.log_stats().checkpoints;
+        let start = fs.operation_count();
+        rewrite_every_page(&mut cache, &mut model, 200);
+        assert_eq!(cache.log_stats().checkpoints, checkpoints + 1);
+        assert_eq!(cache.superblock().page_count, pages_before);
+        fs.operation_count() - start
+    };
+    for step in 0..operations {
+        for mode in [CrashMode::DropUnsynced, CrashMode::Torn { seed: step }] {
+            let context = format!("step {step}, {mode:?}");
+            let fs = SimFileSystem::new();
+            let (mut cache, old) = with_recycled_segments(&fs);
+            let new: Model = old.keys().map(|&page| (page, 200)).collect();
+            fs.fail_operation(fs.operation_count() + step);
+            for &page in new.keys() {
+                cache.write(page).unwrap().fill(200);
+            }
+            let committed = cache.commit(|_| {}).is_ok();
+            drop(cache);
+            fs.crash(mode);
+            let cache = open(&fs, Access::ReadOnly).unwrap();
+            let first = *old.keys().next().unwrap();
+            let expected = if fill_of(&cache, first) == 200 {
+                &new
+            } else {
+                &old
+            };
+            assert!(
+                !committed || expected == &new,
+                "{context}: an acknowledged commit was lost"
+            );
+            assert_model(&cache, expected, &context);
+        }
+    }
+}
+
+#[test]
+fn a_crash_between_a_shrinking_checkpoint_s_header_writes_never_opens_a_mixed_state_after_the_newest_slot_is_damaged()
+ {
+    let setup = |fs: &SimFileSystem| {
+        before_checkpoint(fs, Durability::Full, LastCommits::OneLongEndingTheFile)
+    };
+    let operations = {
+        let fs = SimFileSystem::new();
+        let (mut cache, mut model) = setup(&fs);
+        let start = fs.operation_count();
+        cache.checkpoint().unwrap();
+        let operations = fs.operation_count() - start;
+        rewrite_every_page(&mut cache, &mut model, 220);
+        drop(cache);
+        assert!(assert_refused_or_latest(
+            &file_bytes(&fs),
+            &model,
+            "no crash"
+        ));
+        operations
+    };
+    let mut windows = 0;
+    for step in 0..operations {
+        for mode in [CrashMode::DropUnsynced, CrashMode::Torn { seed: step }] {
+            let context = format!("step {step}, {mode:?}");
+            let fs = SimFileSystem::new();
+            let (mut cache, mut model) = setup(&fs);
+            let pages_before = cache.superblock().page_count;
+            fs.fail_operation(fs.operation_count() + step);
+            assert!(cache.checkpoint().is_err(), "{context}");
+            drop(cache);
+            fs.crash(mode);
+            let (newest, older) = header_slots(&fs);
+            let older = older.unwrap_or(newest);
+            windows += u64::from(
+                older.log_head_page != newest.log_head_page && newest.page_count < pages_before,
+            );
+            let file = PageFile::open(&fs, Path::new(DB), Access::ReadWrite).unwrap();
+            let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(256)).unwrap();
+            assert_older_slot_is_a_copy(&fs, &context);
+            assert!(
+                assert_refused_or_latest(&file_bytes(&fs), &model, &context),
+                "{context}: the copy in the older slot must open the same state"
+            );
+            cache.set_auto_checkpoint_bytes(None);
+            rewrite_every_page(&mut cache, &mut model, 230);
+            drop(cache);
+            assert_refused_or_latest(&file_bytes(&fs), &model, &context);
+        }
+    }
+    assert!(windows > 0, "no crash fell between the two header writes");
 }
 
 #[test]
 fn extra_segments_freed_by_a_checkpoint_are_handed_out_as_pages() {
     let fs = SimFileSystem::new();
-    let (mut cache, model) = before_checkpoint(&fs, Durability::Full, true);
+    let (mut cache, model) =
+        before_checkpoint(&fs, Durability::Full, LastCommits::TwoLongWithAPageBetween);
     let free_before = cache.superblock().free_page_count;
     cache.checkpoint().unwrap();
     let superblock = cache.superblock();
@@ -1203,7 +1409,8 @@ fn a_damaged_newest_header_slot_never_opens_a_state_that_never_existed() {
 #[test]
 fn a_damaged_newest_header_slot_after_freeing_extra_segments_never_opens_a_mixed_state() {
     let fs = SimFileSystem::new();
-    let (mut cache, model) = before_checkpoint(&fs, Durability::Full, true);
+    let (mut cache, model) =
+        before_checkpoint(&fs, Durability::Full, LastCommits::TwoLongWithAPageBetween);
     let older_head = cache.superblock().log_head_page;
     let free_before = cache.superblock().free_page_count;
     cache.checkpoint().unwrap();
@@ -1380,7 +1587,8 @@ fn a_crash_between_a_freeing_checkpoint_s_header_writes_never_opens_a_mixed_stat
  {
     let operations = {
         let fs = SimFileSystem::new();
-        let (mut cache, _) = before_checkpoint(&fs, Durability::Full, true);
+        let (mut cache, _) =
+            before_checkpoint(&fs, Durability::Full, LastCommits::TwoLongWithAPageBetween);
         let start = fs.operation_count();
         cache.checkpoint().unwrap();
         fs.operation_count() - start
@@ -1390,7 +1598,8 @@ fn a_crash_between_a_freeing_checkpoint_s_header_writes_never_opens_a_mixed_stat
         for mode in [CrashMode::DropUnsynced, CrashMode::Torn { seed: step }] {
             let context = format!("step {step}, {mode:?}");
             let fs = SimFileSystem::new();
-            let (mut cache, model) = before_checkpoint(&fs, Durability::Full, true);
+            let (mut cache, model) =
+                before_checkpoint(&fs, Durability::Full, LastCommits::TwoLongWithAPageBetween);
             let free_before = cache.superblock().free_page_count;
             fs.fail_operation(fs.operation_count() + step);
             assert!(cache.checkpoint().is_err(), "{context}");
