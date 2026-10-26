@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-bench"
+description = "EggDB's benchmarks: hot paths measured against a committed baseline that CI gates (D7)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+eggdb-platform = { path = "../eggdb-platform" }
+eggdb-storage = { path = "../eggdb-storage" }
+
+[lints]
+workspace = true
