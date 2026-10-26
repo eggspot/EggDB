@@ -167,7 +167,8 @@ impl<F: File> PageFile<F> {
         let choice = Superblock::choose(slot0, slot1)?;
         let superblock = choice.superblock;
         let older_slot = if superblock.slot() == 0 { slot1 } else { slot0 };
-        let older_slot_is_a_copy = superblock.is_copied_in(older_slot);
+        let older_slot_is_a_copy =
+            access == Access::ReadOnly || superblock.is_copied_in(older_slot);
         superblock.features.check(access)?;
         let expected_bytes = superblock
             .page_count
