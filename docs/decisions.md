@@ -2778,11 +2778,14 @@ to their places, syncs, and writes the next superblock with `checkpoint_lsn` at 
 current append position and `log_head_page` at the current segment, then syncs. It writes no
 log record and no new segment. Every earlier segment of the log, and every unused recycled one,
 becomes reusable: the seven with the lowest page numbers go to `recycled_segments`, and any
-others join the free list. The pages in the page cache stay valid, since a checkpoint writes
-committed pages unchanged. Changes not yet committed refuse it with `UncommittedChanges`.
+others join the free list; a checkpoint that frees segments that way writes its superblock to
+both header slots. The pages in the page cache stay valid, since a checkpoint writes committed
+pages unchanged. Changes not yet committed refuse it with `UncommittedChanges`, and a commit
+whose catalog root or free-list head would be a page of the log is refused before anything is
+written (a later checkpoint could not write such a header).
 
 **Automatic checkpoints.** After a commit, a checkpoint runs once the log since the last one
-reaches `auto_checkpoint` bytes (1 MiB by default, `None` turns it off) or goes through more
+reaches `auto_checkpoint_bytes` (1 MiB by default, `None` turns it off) or goes through more
 segments than `recycled_segments` holds. The second rule keeps the file from growing in steady
 state: with seven recycled slots, a log that never needs an eighth segment always finds one.
 
@@ -2819,6 +2822,25 @@ state: with seven recycled slots, a log that never needs an eighth segment alway
    start of the next commit was rejected (it charges an unrelated commit and leaves the log
    long while idle), and so was leaving triggering to the caller.
 
+5. *A damaged newest header slot* (raised by the security review of PR 38). Recycling
+   overwrites the log an older slot would replay, so falling back to the older slot after the
+   newest was damaged could open a state that never existed. Two rules close it: after a
+   checkpoint the writer starts above the previous header's reservation, and the checkpoint
+   reserves from the larger of the old reservation and the highest sequence used, so any
+   segment reused afterwards carries a sequence the older slot never reserved and its open is
+   refused; and a checkpoint that gives segments to the free list writes its superblock to both
+   slots, so no slot names a log running through pages that may become data. The alternative,
+   keeping released segments out of reuse until the next checkpoint, needed state the header
+   has no room for. A test damages the newest slot after every third commit of a workload with
+   checkpoints, reuse and freed segments, and another after freed segments are overwritten;
+   each open is refused or shows the latest commit. One gap remains (format.md, "Damage to the
+   newest header slot"): a crash between the two writes, then later damage to the newest slot
+   after the freed segments were reused (issue #39).
+6. *Recovery writes nothing before the free list is checked* (raised by the general review of
+   PR 38). Opening now checks the replayed free list, reading replayed pages from the log,
+   before it resizes the file, syncs or writes any page in place, so a forged log naming a data
+   page as the free-list head is refused with the file unchanged.
+
 **Hostile logs.** A link must name a sequence above its segment's and at most the reservation,
 and either an unused entry of `recycled_segments` (page count 0) or a new segment at or past the
 header's page count that ends at the page count it names and overlaps no recycled segment. A
@@ -2827,12 +2849,11 @@ open, since only a header older than the log can produce one. Replayed images ma
 the log's segments or any recycled segment. The superblock refuses overlapping log segments and
 a reservation below `log_head_sequence`.
 
-**Known limit.** Recycling overwrites the log an older header slot would replay. If the newest
-slot is damaged after it was synced, the older slot is chosen (D77): the open is refused when
-the older head segment has since been reused or the log reaches a sequence above the older
-reservation, but otherwise it opens the state of the older checkpoint and reports the damaged
-slot. That is the class of damage after a sync that Alagappan et al. (FAST'18) describe;
-detection is best-effort.
+**Known limit.** If the newest slot is damaged after it was synced, the older slot is chosen
+(D77) and replays its own log as far as that log links, which can run past its checkpoint up
+to the newest commit. The rules in item 5 make that open either reach the newest commit or be
+refused, except after the double fault item 5 names. That is the class of damage after a sync
+that Alagappan et al. (FAST'18) describe; detection beyond it is best-effort.
 
 **Cost.** A checkpoint under `Full` is three file operations and two syncs (benchmark
 `log.checkpoint`). Opening a file after 1,000 one-page commits takes 148 file operations and
@@ -2840,10 +2861,16 @@ replays 8.8 MB of log at 1.8 times the cost of computing CRC-32C over it; after 
 the same open takes 10 operations and replays nothing (about 85 µs against 1.5 ms on this Mac,
 `log.recovery`). Commits pay for checkpoints: per 1,000 one-page commits, `Full` syncs 1,040
 times instead of 1,000 and `Normal` 60 instead of 8, since `Normal` now syncs at checkpoints as
-D77 planned; file operations fall because recycled segments need no file growth. Larger
+D77 planned; file operations fall because recycled segments need no file growth.
+`page_cache.commit` (100 new pages after a reopen) rises from 110 to 115 operations: the first
+segment after the reopen raises the reservation (a header write and a sync) and the commit's
+eight segments trigger an automatic checkpoint (a sync, a header write and a sync). A checkpoint
+that frees segments to the free list costs one more header write and sync. Larger
 segments or more recycled slots would space checkpoints out under `Normal`, and wait for a
 benchmark that needs it.
 
 **Review fixes** (from a review of the code merged since the last one): a leaf page's values
 are no longer readable or writable as child pointers, which a short value could turn into a
-panic, and a leaf split allocates its right page before overwriting the left one.
+panic, and a leaf split allocates its right page before overwriting the left one. After a
+commit whose automatic checkpoint failed, the page cache drops its pages, so every later read
+is refused with `NeedsReopen` as after a failed commit.

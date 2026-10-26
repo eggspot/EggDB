@@ -98,8 +98,9 @@ written as zero and ignored on read, so a later version can use them behind a fe
 4. Check the feature flags against the access asked for.
 5. If the other slot has the magic but fails its checksum, report it. A crash during a header
    update looks like that, and so does damage to a synced slot. In the second case the chosen
-   superblock is older than the file. Recovery catches that case: it refuses the file when the
-   segment at `log_head_page` doesn't carry `log_head_sequence`.
+   superblock is older than the file. Recovery then either replays that older header's log all
+   the way to the newest commit, or refuses the file, as "Damage to the newest header slot"
+   below says, with the one exception it names.
 
 A crash while a slot is being written leaves that slot torn and the other one intact, so the
 file opens in the old state or the new one. The superblock fits in the first 512 bytes, one
@@ -287,11 +288,25 @@ under the segment's new sequence (D84):
   it may have been written before a crash.
 - Before it writes anything that uses a sequence above `log_sequence_reserved`, a link
   included, it writes the next superblock with only `generation` raised and
-  `log_sequence_reserved` set to that sequence plus 65,536, and syncs. Checkpoints raise it
-  the same way.
+  `log_sequence_reserved` set to that sequence plus 65,536, and syncs.
+- A checkpoint sets `log_sequence_reserved` to the larger of the old value and the highest
+  sequence used so far, plus 65,536, and after it the writer continues above the old value. So
+  every segment started after a header update carries a sequence the header before it never
+  reserved.
 - So every sequence in the file is at most the newest durable header's `log_sequence_reserved`,
   and a link or segment header above the header's value shows that the header is older than
   the log: the newer slot was damaged after it was synced. The open is refused.
+
+**Damage to the newest header slot.** If the newest slot is damaged after it was synced, the
+older slot is chosen (see "Opening a file"). Its log was not overwritten by anything it cannot
+detect: a recycled segment reused since then, its own head included, carries a sequence above
+its reservation or not its head sequence, and segments a checkpoint gave to the free list are
+never left in an older slot's log, because such a checkpoint writes its superblock to both
+slots (step 4 below). So the open either replays that log through to the newest commit, or is
+refused. The exception is a crash between those two writes followed, later, by damage to the
+newest slot after the freed segments were reused: the older slot can then open a mix of older
+and newer pages. Checksums can't tell damage after a sync from a crash (Alagappan et al.,
+FAST'18); detection beyond this is best-effort (issue #39 tracks closing the exception).
 
 ## Checkpoints (item 7)
 A checkpoint bounds what recovery replays and lets the log's segments be reused. It needs no
@@ -308,8 +323,10 @@ this order:
 3. Sync, so every page in place, and the new list, is durable.
 4. Write the next superblock: the committed state's fields (and the new free list, if any),
    `checkpoint_lsn` at the log's current append position, `log_head_page` and
-   `log_head_sequence` naming the current segment, the new `recycled_segments` and a raised
-   `log_sequence_reserved`. Sync.
+   `log_head_sequence` naming the current segment, the new `recycled_segments` and
+   `log_sequence_reserved` as "Segment sequences" says. Sync. When step 2 gave segments to the
+   free list, write the same superblock again with `generation` raised by one, to the other
+   slot, and sync, so no header slot names a log that runs through pages now free.
 
 The checkpoint position is where the next flush starts. It is usually at a block boundary, but
 right after a recovery that found the records of a cut-off flush it is where the last commit
@@ -333,7 +350,8 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   whole commit; the images of committed transactions are written in place (or served from the
   log when the file is opened read-only) and the last commit record's fields replace the
   header's. Every page of the log and of the recycled segments is off limits to images.
-  Recovery holds two segment buffers and one entry per replayed image, and writes nothing
+  Recovery holds two segment buffers and one entry per replayed image, checks the free list
+  of the replayed state (reading replayed pages from the log), and writes nothing
   before the replayed state passes every check, so a crash during recovery leaves the same
   log to replay again.
 - **A checkpoint** writes the changed pages, syncs, and then writes the next superblock (see
