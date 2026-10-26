@@ -379,12 +379,12 @@ impl<F: File> PageFile<F> {
         self.sync_unless_off()?;
         let previous_reservation = self.header.log_sequence_reserved;
         self.write_header(plan.superblock)?;
-        if plan.free_entries.is_some() || plan.shrinks_the_file {
+        if plan.free_entries.is_some() || plan.cuts_segments_off {
             let mut copy = plan.superblock;
             copy.generation = self.next_generation()?;
             self.write_header(copy)?;
         }
-        if plan.shrinks_the_file {
+        if plan.cuts_segments_off {
             self.file.set_size(wanted)?;
             self.file_bytes = wanted;
         }
@@ -436,7 +436,8 @@ impl<F: File> PageFile<F> {
             .saturating_add(SEQUENCE_RESERVATION);
         let segment_pages = u64::from(next.log_segment_pages);
         let mut page_count = next.page_count;
-        if let Some(end) = end_of_the_file_without(&extra, segment_pages, page_count) {
+        if let Some(end) = page_count_without_segments_at_the_end(&extra, segment_pages, page_count)
+        {
             page_count = end;
             extra.clear();
         }
@@ -460,7 +461,7 @@ impl<F: File> PageFile<F> {
             })?,
         }
         Ok(CheckpointPlan {
-            shrinks_the_file: next.page_count < self.superblock.page_count,
+            cuts_segments_off: next.page_count < self.superblock.page_count,
             superblock: next,
             free_entries,
             list_pages,
@@ -1402,7 +1403,11 @@ struct ResumedLog {
     file_bytes: u64,
 }
 
-fn end_of_the_file_without(segments: &[u64], segment_pages: u64, page_count: u64) -> Option<u64> {
+fn page_count_without_segments_at_the_end(
+    segments: &[u64],
+    segment_pages: u64,
+    page_count: u64,
+) -> Option<u64> {
     let first = *segments.first()?;
     let contiguous_to_the_end = segments
         .iter()
@@ -1414,7 +1419,7 @@ fn end_of_the_file_without(segments: &[u64], segment_pages: u64, page_count: u64
 
 #[derive(Debug)]
 struct CheckpointPlan {
-    shrinks_the_file: bool,
+    cuts_segments_off: bool,
     superblock: Superblock,
     free_entries: Option<BTreeSet<u64>>,
     list_pages: Vec<u64>,

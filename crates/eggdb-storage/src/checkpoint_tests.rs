@@ -466,6 +466,59 @@ fn commits_longer_than_the_recycled_segments_keep_the_file_from_growing() {
     }
 }
 
+fn with_recycled_segments(fs: &SimFileSystem) -> (PageCache<SimFile>, Model) {
+    let mut cache = create(fs, 256);
+    let mut model = allocated(&mut cache, 150);
+    rewrite_every_page(&mut cache, &mut model, 1);
+    let mut rng = TestRng::new(9);
+    rounds(&mut cache, &mut model, &mut rng, 40);
+    cache.checkpoint().unwrap();
+    (cache, model)
+}
+
+#[test]
+fn a_crash_at_any_operation_of_a_flush_longer_than_the_recycled_segments_keeps_one_whole_commit() {
+    let operations = {
+        let fs = SimFileSystem::new();
+        let (mut cache, mut model) = with_recycled_segments(&fs);
+        assert!(cache.superblock().recycled_segments[0] != NO_PAGE);
+        let pages_before = cache.superblock().page_count;
+        let checkpoints = cache.log_stats().checkpoints;
+        let start = fs.operation_count();
+        rewrite_every_page(&mut cache, &mut model, 200);
+        assert_eq!(cache.log_stats().checkpoints, checkpoints + 1);
+        assert_eq!(cache.superblock().page_count, pages_before);
+        fs.operation_count() - start
+    };
+    for step in 0..operations {
+        for mode in [CrashMode::DropUnsynced, CrashMode::Torn { seed: step }] {
+            let context = format!("step {step}, {mode:?}");
+            let fs = SimFileSystem::new();
+            let (mut cache, old) = with_recycled_segments(&fs);
+            let new: Model = old.keys().map(|&page| (page, 200)).collect();
+            fs.fail_operation(fs.operation_count() + step);
+            for &page in new.keys() {
+                cache.write(page).unwrap().fill(200);
+            }
+            let committed = cache.commit(|_| {}).is_ok();
+            drop(cache);
+            fs.crash(mode);
+            let cache = open(&fs, Access::ReadOnly).unwrap();
+            let first = *old.keys().next().unwrap();
+            let expected = if fill_of(&cache, first) == 200 {
+                &new
+            } else {
+                &old
+            };
+            assert!(
+                !committed || expected == &new,
+                "{context}: an acknowledged commit was lost"
+            );
+            assert_model(&cache, expected, &context);
+        }
+    }
+}
+
 #[test]
 fn a_crash_between_a_shrinking_checkpoint_s_header_writes_never_opens_a_mixed_state_after_the_newest_slot_is_damaged()
  {
