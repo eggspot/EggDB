@@ -202,6 +202,10 @@ Check each task against these before starting and again before opening the PR.
 ## Commands
 - `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
   `cargo doc --workspace --no-deps`. CI runs exactly these (job `check`, the required status check).
+- `scripts/smoke-test.sh target/debug/eggdb` runs a built binary through every command, the
+  sample files in `crates/eggdb/tests/data` and a scripted `eggdb ui`; CI runs it on Linux, macOS
+  and Windows, and the release workflow on every release binary its runner can execute (D96).
+  The sample files are never regenerated after their release's tag (D96).
 - `cargo run --release -p eggdb-bench` runs the benchmarks against `benchmarks/baseline.txt`
   (`-- --update` rewrites this system's lines); CI's `bench` job gates on it (D80).
   `cargo run --release --manifest-path crates/eggdb-sqlite-compare/Cargo.toml` compares EggDB with

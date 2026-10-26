@@ -3863,3 +3863,53 @@ race. The lock contract (`File::try_lock`) now says so, and a test forks a child
 before starting its program while the handle drops, at the platform layer and through
 `Database::open`, both failing before the fix. The tests' workaround, `tests/cli.rs` taking turns
 between starting a child and opening a database, is removed.
+
+## D96 Release engineering for v0.2.0: a smoke test of every release binary, sample files frozen at the tag, guides checked by the tests — Decided (build loop, 2026-10-27; the sample-file rule decided by research); completes v0.2.0 item 18, refines D9, D20, D75 and D76
+**The smoke test is a shell script run against the shipped binary.** `scripts/smoke-test.sh
+<binary>` drives a built `eggdb` through every command, a 3 MB value, an export and import round
+trip, the sample files, `eggdb ui --help` and the refusal without a terminal. Bash is on every
+runner, Git Bash included, and the script tests the exact file that is packaged, which a Rust
+integration test (built for the host, in debug) would not. The release workflow runs it on each
+target its runner can execute (six of eight; `x86_64-apple-darwin` and `aarch64-pc-windows-msvc`
+are built only), and CI runs it against the debug binary on Linux, macOS and Windows. The
+release workflow's old check expected `eggdb` alone to print `EggDB <version>`, which stopped
+being true when the command landed (D90, it prints the help), so the first tag would have
+failed; it now checks `eggdb version`.
+
+**`eggdb ui` in a real terminal through `script(1)`.** Where `script` gives the binary a
+pseudo-terminal (util-linux on Linux, BSD on macOS; `stty` sets 80 × 24 inside it), the smoke
+test types keys with pauses longer than the confirmation guard (D92): move down, delete with the
+confirmation, quit; the file must then lack the key and pass `check`. Windows runners have no
+such tool, and driving a console pseudo-terminal (ConPTY) would need Windows code of our own in
+the platform layer, so on Windows the UI is covered by its fake-terminal tests and the refusal
+without a terminal; a ConPTY driver is a later item.
+
+**Sample files, frozen at the tag (decided by research).** `crates/eggdb/tests/data` holds
+`v0.2.0.db` (checkpointed, made with the `eggdb` command), `v0.2.0-log-to-replay.db` (three
+commits left in the log, made through the embedded API by an ignored test that refuses to
+overwrite it) and `v0.2.0.jsonl` (its export); [testing.md](testing.md) lists how each was made.
+`sample_files.rs` pins each by its size and an FNV-1a fingerprint and checks that it opens
+read-only and for writing, holds exactly the expected entries, passes `check` with the expected
+counts, replays its log, takes commits, reopens, reads through the command and imports. The rule:
+the v0.2.0 samples are frozen at the v0.2.0 tag, not before. Until the tag, a change to what the
+engine writes on disk (issue #52's fix could be one) may replace them only with a numbered
+decision approving it, regenerated the documented way in the same pull request with their pinned
+sizes and fingerprints updated. From the tag on they are never regenerated or edited; a later
+format change adds samples beside them, and every later release must still read them. *Why:*
+D20's promise is about what v0.2.0 writes, so samples that a pre-release format change made stale
+would guard nothing, while freezing them today would force such a change into a format bump for
+files nobody has. `.gitattributes` keeps the samples byte-exact and the script's line endings LF
+on Windows checkouts.
+
+**The guides are checked by the tests.** The Rust examples of `docs/embedded.md` and the README
+are complete programs compiled as `no_run` doctests (`EmbeddedGuide` and `Readme`, which exist
+only under `cfg(doctest)` in `crates/eggdb/src/lib.rs`); they open `app.db` in the working
+directory, which a test must not litter, so they compile without running, and the behaviour
+they show is tested elsewhere. The UI screens in `docs/cli.md` must equal the fake terminal's
+golden frames (`the_cli_guide_shows_the_screens_as_the_ui_draws_them`).
+
+**The correctness statement** is [correctness.md](correctness.md), linked from the README and the
+release notes: the promises, the test behind each, the platforms CI runs, and what is not tested
+(real power loss on hardware, a real process killed mid-commit, more than one writer, `Off` after
+a power loss, an outside audit, network file systems, large files and long runs, CPUs outside
+CI).

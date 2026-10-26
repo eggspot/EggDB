@@ -5,6 +5,7 @@ store, read and remove values, list entries in key order, check the file's healt
 statistics, and export it to a text file that another database imports. It opens the file in
 its own process, like `sqlite3`: there is no server. The design behind every choice here is
 [ux/cli.md](ux/cli.md) (D15, D90, D93); the embedded Rust API is [embedded.md](embedded.md).
+Installing it is downloading one file: see the README, "Install".
 
 ## Quickstart
 
@@ -182,9 +183,11 @@ Opens the file full screen: the keys in order on the left, the selected key's va
 right, and editors that change one key per confirmed commit. `--read-only` opens the file
 read-only, which refuses every change and works beside another reader; without it the file is
 open for writing, so no other program can open it meanwhile. The design is
-[ux/ui.md](ux/ui.md). A screen at 80 × 24, captured from the test terminal:
+[ux/ui.md](ux/ui.md). The screens below are the UI's own frames at 80 × 24, drawn into the
+fake terminal of its tests (`crates/eggdb-ui/tests/screens/`); a test fails when this page
+differs from them. The main screen, with a JSON value selected:
 
-```
+```text
  EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
  Keys                1–20 of 24 │ Value  json (auto) · 87 B        line 1–10/10
   bin                         40│ doc:json
@@ -280,6 +283,66 @@ edit is not committed).
   box lines and arrows, and `TERM=dumb` or `--mono --ascii` draws no styles at all, which also
   suits screen readers. The terminal is put back as it was on quit, on a panic, and on
   `SIGTERM`, `SIGHUP` and `SIGQUIT` (on Windows when the console closes).
+
+### More screens
+
+`d` on `user:1` asks before it deletes anything:
+
+```text
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
+ Keys                1–20 of 24 │ Value  text (auto) · 41 B          line 1–3/3
+  bin                         40│ user:1
+  doc:json                    87│───────────────────────────────────────────────
+  empty                        0│ User 1
+  large                   14.0 K│ user1@example.com
+> user:1                      41│ born 1801-12-10
+  ┌ Delete key ──────────────────────────────────────────────────────────────┐
+  │ Key    user:1 (6 B)                                                      │
+  │ Value  41 B, text: User 1                                                │
+  │                                                                          │
+  │ Deletes this one key in one commit, written to disk before you continue. │
+  │ There is no undo.                                                        │
+  │                                                                          │
+  │                          d delete     Esc keep                           │
+  └──────────────────────────────────────────────────────────────────────────┘
+  user:19                     43│
+  user:2                      41│
+  user:20                     43│
+  user:3                      41│
+  user:4                      41│
+  user:5                      41│
+
+ d delete  Esc keep
+```
+
+`c` checks the whole file on a worker thread and then shows the report:
+
+```text
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
+
+  Stats (from the header, read without touching a page)
+    page size 4.0 KiB · 312 pages · 18 free · file 1.2 MiB
+    last commit 2026-10-26 09:14:03.512000 UTC (stamp 1793005243512000.0001)
+    cache 16.0 MiB, 211 pages held, 98.2% hits · log since checkpoint 24.0 KiB
+
+  Check  OK — every page accounted for, 0.0 s
+    24 keys · keys 152 B · values 15.0 KiB
+    tree height 2, 9 pages · 1 large values on 4 overflow pages
+    18 free pages · 30 log pages · 0 leaked pages
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter back  q quit
+```
 
 ## `export` and `import`
 

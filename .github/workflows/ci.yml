@@ -51,6 +51,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Smoke test the eggdb command
+        run: cargo build -p eggdb && scripts/smoke-test.sh target/debug/eggdb
       - name: Docs
         run: cargo doc --workspace --no-deps
         env:
@@ -83,6 +85,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Smoke test the eggdb command
+        run: |
+          exe=""
+          if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+          cargo build -p eggdb
+          scripts/smoke-test.sh "target/debug/eggdb$exe"
 
   musl:
     runs-on: ubuntu-latest
