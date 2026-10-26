@@ -29,7 +29,7 @@ fn failed(what: &str) -> impl Fn(StorageError) -> String + '_ {
     move |error| format!("{what}: {error}")
 }
 
-fn key(index: u64) -> [u8; 16] {
+pub(crate) fn key(index: u64) -> [u8; 16] {
     let mut state = index.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut mixed = [0u8; 16];
     for half in mixed.as_chunks_mut::<8>().0 {
@@ -41,7 +41,7 @@ fn key(index: u64) -> [u8; 16] {
     mixed
 }
 
-fn value(index: u64) -> [u8; 16] {
+pub(crate) fn value(index: u64) -> [u8; 16] {
     let mut value = [0u8; 16];
     value[..8].copy_from_slice(&index.to_le_bytes());
     value

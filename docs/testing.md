@@ -35,7 +35,15 @@ Two more checks run from a sample of those crash points:
 - **Writing after recovery.** More transactions, a checkpoint and a commit run on the recovered
   file, then a torn power loss; the last commit must be there.
 
-CI gives every operation one ending, rotating through the four, and runs in about 15 seconds of a
+**Transactions (D86).** The same workloads also run through `Store` in `Full` and `Normal`: each
+commit is a write transaction, each rolled-back step a dropped one, and a read transaction begun
+before every commit must still read that commit's predecessor after it. Every I/O operation is
+failed in turn with the rotating endings, and the reopened file must hold exactly one commit, with
+the same floors as above; a failed commit, checkpoint or sync must leave the store refusing a new
+writer with `NeedsReopen`. The commit stamps run from a simulated clock set before 2026, so each
+stamp is its commit's number and the recovered stamp names the commit exactly.
+
+CI gives every operation one ending, rotating through the four, and runs in about 20 seconds of a
 debug build. Setting `EGGDB_CRASH_SWEEP=1` gives every operation every ending; the counts of the
 last exhaustive run are in D85.
 
@@ -52,12 +60,20 @@ last exhaustive run are in D85.
 - **Page cache:** eviction, pinning, refusing every read and change after a failed commit, and a
   crash at every operation of a commit (`page_cache.rs`).
 - **B+tree:** splits, deletes, merges, cursors and `check` against a model, and crafted pages that
-  must fail `check` (`btree_tests.rs`, `btree_delete_tests.rs`).
+  must fail `check`, including a leaf whose fence keys differ from its parent's bounds, which
+  scans refuse instead of skipping entries (`btree_tests.rs`, `btree_delete_tests.rs`).
+- **Transactions:** one writer at a time; rollback, explicit and on drop; a put that fails in the
+  middle of a split rolls the whole transaction back; snapshot readers against a model while a
+  writer commits and rolls back hundreds of times, in `Full` and `Normal`, through checkpoints,
+  recycled segments and reused pages; readers begun inside a write transaction; readers on other
+  threads; snapshots that expire when their memory runs out; commit stamps that never go back,
+  across a wall clock set back and a reopen (`store_tests.rs`, `hybrid_clock.rs`).
 
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.
-- Several writers, snapshot readers and transactions larger than the cache (roadmap row 9).
+- Several writers (M3) and transactions larger than the cache, which fail with `CacheFull` until
+  M3.
 - Damage to bytes after they were synced, beyond the header-slot and crafted-log tests: the
   limits are in format.md, "Damage to the newest header slot" (issue #39).
 - A fuzzer for hostile files (roadmap row 12) and real disks: the simulator's model of a

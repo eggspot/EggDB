@@ -776,3 +776,62 @@ fn random_overwrites_and_deletes_keep_values_as_long_as_the_model() {
         }
     }
 }
+
+fn decoded(cache: &PageCache<SimFile>, page_id: u64) -> Node {
+    let page = cache.read(page_id).unwrap();
+    let shape = Shape::parse(page_id, page.header(), &page).unwrap();
+    Node::decode(&shape, &page).unwrap()
+}
+
+#[test]
+fn a_leaf_whose_fence_keys_differ_from_its_parent_s_bounds_fails_scans_instead_of_skipping_entries()
+{
+    for order in [ScanOrder::Ascending, ScanOrder::Descending] {
+        let fs = SimFileSystem::new();
+        tree_with_entries(&fs, 6, 400);
+        let (leaves, neighbour) = {
+            let cache = open(&fs, Access::ReadOnly, 64);
+            let leaves = leaf_pages(&stored_tree(&cache), &cache);
+            let neighbour = decoded(&cache, leaves[1]);
+            (leaves, neighbour)
+        };
+        match order {
+            ScanOrder::Ascending => rewrite_page(&fs, Some(leaves[0]), |node| {
+                node.high = neighbour.high.clone();
+            }),
+            ScanOrder::Descending => rewrite_page(&fs, Some(leaves[2]), |node| {
+                node.low = neighbour.low.clone();
+            }),
+        }
+        let cache = open(&fs, Access::ReadOnly, 64);
+        let tree = stored_tree(&cache);
+        let error =
+            collect(tree.scan(Bound::Unbounded, Bound::Unbounded, order), &cache).unwrap_err();
+        assert!(is_corrupt_tree(&error), "{order:?}: {error}");
+        assert!(
+            tree.check(&cache)
+                .is_err_and(|error| is_corrupt_tree(&error))
+        );
+    }
+}
+
+#[test]
+fn bytes_written_through_a_page_handle_are_checked_again_before_the_tree_trusts_them() {
+    let fs = SimFileSystem::new();
+    let model = tree_with_entries(&fs, 6, 400);
+    let cache = open(&fs, Access::ReadWrite, 64);
+    let tree = stored_tree(&cache);
+    assert_matches(&tree, &cache, &model);
+    let leaf = leaf_pages(&tree, &cache)[0];
+    let mut node = decoded(&cache, leaf);
+    node.keys.swap(0, 1);
+    {
+        let mut page = cache.write(leaf).unwrap();
+        let mut body = page.to_vec();
+        node.encode(leaf, &mut body).unwrap();
+        page.copy_from_slice(&body);
+    }
+    let first = model.keys().next().unwrap();
+    let error = tree.get(&cache, first).unwrap_err();
+    assert!(is_corrupt_tree(&error), "{error}");
+}

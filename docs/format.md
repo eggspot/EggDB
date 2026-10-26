@@ -68,7 +68,7 @@ slot 1. A superblock found in the other slot is refused.
 | 96 | 8 | `checkpoint_lsn` | the log position recovery replays from |
 | 104 | 8 | `log_head_page` | first page of the oldest live log segment, or 0 |
 | 112 | 8 | `log_head_sequence` | sequence number of that segment |
-| 120 | 8 | `clock_high_water` | the highest hybrid-clock stamp handed out before the last checkpoint |
+| 120 | 8 | `clock_high_water` | the highest hybrid-clock stamp handed out as of this header; every commit record carries it too, so after replay it is the last commit's stamp |
 | 128 | 4 | `log_segment_pages` | pages per log segment: at least 1, at most 64 MiB of pages, and at least one page plus 8 KiB once the file has a log (default: 64 KiB of pages, at least two) |
 | 132 | 4 | reserved | written as zero |
 | 136 | 56 | `recycled_segments` | seven first pages of log segments emptied by checkpoints, kept for reuse before the file grows. 0 marks an unused entry. |
@@ -228,7 +228,7 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
 | 1 | batch | `durable_lsn` (8): the LSN up to which the log was known to be synced when this flush was written |
 | 2 | pad | zeros up to the end of the 4 KiB block |
 | 3 | page image | the page number (8) and the whole page as it is written in place, its own checksum included |
-| 4 | commit | the commit stamp (8, 0 until item 9), then `page_count`, `free_list_head`, `free_page_count`, `catalog_root`, `clock_high_water` and the three feature sets (8 each) |
+| 4 | commit | the commit stamp (8; 0 for a commit made below the transaction layer), then `page_count`, `free_list_head`, `free_page_count`, `catalog_root`, `clock_high_water` and the three feature sets (8 each) |
 | 5 | link | the next segment's first page (8), the page count once it exists, or 0 for a recycled segment (8), and the next segment's sequence (8) |
 
 - A record never spans segments, and never starts in the last 9 bytes of a 4 KiB block; those
@@ -460,6 +460,12 @@ page to its end, in any order. A cell stores its key without the page's prefix:
 - Stamp 0 means "none".
 - The stamp never goes backwards: each new stamp is above the last one handed out and above
   `clock_high_water`, whatever the wall clock does (Kulkarni et al., "Logical Physical Clocks").
+- A new stamp is the larger of the wall clock's stamp (counter 0) and the last stamp plus one, so
+  more than 4,096 commits within one microsecond carry into the microseconds, and a wall clock
+  that is set back, or reads before 2026, only counts up from the last stamp. A wall clock past
+  the year 2168 saturates the physical part. The stamp after `2^64 − 1` is refused.
+- A commit writes its stamp both as the commit record's stamp and as its `clock_high_water`, so
+  the next writer to open the file starts above it with no extra write (D86).
 
 ## Durability modes (item 4)
 | Mode | A commit returns after | A power loss can |

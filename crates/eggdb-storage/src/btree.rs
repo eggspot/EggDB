@@ -1,7 +1,7 @@
 use crate::cursor::{Cursor, ScanOrder};
 use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PageSize};
-use crate::page_cache::{PageCache, PageMut, PageRef};
+use crate::page_cache::{PageCache, PageMut, PageSource, TreePage};
 use crate::tree_page::{self, MAX_HEIGHT, Node, Shape};
 use eggdb_platform::File;
 use std::ops::Bound;
@@ -60,6 +60,10 @@ impl BTree {
 
     /// Opens the tree whose root is page `root`, checking that the page is a tree root.
     pub fn open<F: File>(cache: &PageCache<F>, root: u64) -> Result<Self, StorageError> {
+        Self::open_in(cache, root)
+    }
+
+    pub(crate) fn open_in(pages: &impl PageSource, root: u64) -> Result<Self, StorageError> {
         if root == NO_PAGE {
             return Err(FormatError::CorruptTree {
                 page: root,
@@ -67,7 +71,7 @@ impl BTree {
             }
             .into());
         }
-        let page = cache.read(root)?;
+        let page = pages.page(root)?;
         expect_level(&shape_of_ref(&page)?, None)?;
         Ok(Self { root })
     }
@@ -107,10 +111,19 @@ impl BTree {
         key: &[u8],
         read: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>, StorageError> {
+        self.get_in(cache, key, read)
+    }
+
+    pub(crate) fn get_in<R>(
+        &self,
+        pages: &impl PageSource,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> R,
+    ) -> Result<Option<R>, StorageError> {
         let mut page_id = self.root;
         let mut level = None;
         loop {
-            let page = cache.read(page_id)?;
+            let page = pages.page(page_id)?;
             let shape = shape_of_ref(&page)?;
             expect_level(&shape, level)?;
             let suffix = shape.key_suffix(&page, key)?;
@@ -132,7 +145,8 @@ impl BTree {
     /// and a key and value longer together than [`BTree::max_entry_bytes`] with
     /// [`StorageError::EntryTooLarge`], before anything changes. Any other error, such as
     /// [`StorageError::CacheFull`] in the middle of a split, can leave the transaction's
-    /// changes half made: roll the transaction back.
+    /// changes half made: roll the transaction back, as
+    /// [`WriteTransaction::put`](crate::WriteTransaction::put) does by itself.
     pub fn put<F: File>(
         &self,
         cache: &PageCache<F>,
@@ -171,7 +185,7 @@ impl BTree {
             level = Some(shape.level - 1);
             depth += 1;
         }
-        let mut page = cache.write(page_id)?;
+        let mut page = cache.write_keeping_check(page_id)?;
         let mut shape = shape_of_mut(&page)?;
         let suffix = shape.key_suffix(&page, key)?;
         let index = match shape.search(&page, suffix)? {
@@ -204,7 +218,8 @@ impl BTree {
     /// A root left with a single child takes that child's entries, so the tree gets shorter.
     /// A delete never allocates a page and never splits one. As with [`BTree::put`], an error
     /// such as [`StorageError::CacheFull`] in the middle of a merge can leave the
-    /// transaction's changes half made: roll the transaction back.
+    /// transaction's changes half made: roll the transaction back, as
+    /// [`WriteTransaction::delete`](crate::WriteTransaction::delete) does by itself.
     pub fn delete<F: File>(&self, cache: &PageCache<F>, key: &[u8]) -> Result<bool, StorageError> {
         if key.len() > Self::max_key_bytes(cache.page_size()) {
             return Ok(false);
@@ -234,7 +249,7 @@ impl BTree {
             depth += 1;
         }
         {
-            let mut page = cache.write(page_id)?;
+            let mut page = cache.write_keeping_check(page_id)?;
             let mut shape = shape_of_mut(&page)?;
             let suffix = shape.key_suffix(&page, key)?;
             let Ok(index) = shape.search(&page, suffix)? else {
@@ -408,9 +423,9 @@ fn merge_children<F: File>(
     if merged.size() > page_size {
         return Ok(None);
     }
-    merged.encode(right_id, &mut cache.write(right_id)?)?;
+    merged.encode(right_id, &mut cache.write_keeping_check(right_id)?)?;
     {
-        let mut parent = cache.write(parent_id)?;
+        let mut parent = cache.write_keeping_check(parent_id)?;
         let mut shape = shape_of_mut(&parent)?;
         shape.remove(&mut parent, separator)?;
     }
@@ -437,7 +452,7 @@ fn collapse_root<F: File>(cache: &PageCache<F>, root: u64) -> Result<(), Storage
             .into());
         }
         {
-            let mut page = cache.write(root)?;
+            let mut page = cache.write_keeping_check(root)?;
             let lsn = page.header().lsn;
             page.set_header(tree_page::header_for(node.level, lsn))?;
             node.encode(root, &mut page)?;
@@ -453,7 +468,7 @@ fn read_node<F: File>(cache: &PageCache<F>, page_id: u64, level: u8) -> Result<N
     Ok(Node::decode(&shape, &page)?)
 }
 
-pub(crate) fn shape_of_ref(page: &PageRef<'_>) -> Result<Shape, StorageError> {
+pub(crate) fn shape_of_ref(page: &impl TreePage) -> Result<Shape, StorageError> {
     let shape = Shape::parse(page.page_id(), page.header(), page)?;
     if !page.contents_checked() {
         shape.validate(page)?;
@@ -515,7 +530,7 @@ fn store<F: File>(
     let right_id = new_page(cache, &split.right)?;
     split.left.encode(page_id, &mut page)?;
     drop(page);
-    let mut parent = cache.write(parent_id)?;
+    let mut parent = cache.write_keeping_check(parent_id)?;
     let mut shape = shape_of_mut(&parent)?;
     let suffix = shape.key_suffix(&parent, &split.separator)?;
     let index = match shape.search(&parent, suffix)? {

@@ -230,6 +230,18 @@ pub enum StorageError {
         /// The most allowed.
         max: usize,
     },
+    /// A write transaction was asked for while another one is open: a store has one writer at
+    /// a time, and a second one fails at once rather than waiting.
+    WriterActive,
+    /// The write transaction failed earlier and was rolled back then, so it takes no more
+    /// work; begin a new one.
+    TransactionFailed,
+    /// The read transaction's snapshot is older than the store of before-images can still
+    /// serve, because the writer changed more pages since it began than the store holds.
+    SnapshotTooOld,
+    /// Every commit stamp has been handed out: the hybrid clock's high-water mark is at the
+    /// largest stamp there is.
+    ClockExhausted,
 }
 
 impl From<eggdb_platform::Error> for StorageError {
@@ -306,6 +318,18 @@ impl fmt::Display for StorageError {
             Self::EntryTooLarge { bytes, max } => write!(
                 f,
                 "a key and value of {bytes} bytes together are longer than the {max} bytes an entry may have with this page size; values stored outside the tree come later"
+            ),
+            Self::WriterActive => f.write_str(
+                "another write transaction is open; one writer at a time: commit or roll it back first",
+            ),
+            Self::TransactionFailed => f.write_str(
+                "this write transaction failed earlier and was rolled back; begin a new one",
+            ),
+            Self::SnapshotTooOld => f.write_str(
+                "this read transaction's snapshot is too old: the writer changed more pages since it began than the snapshot memory holds; begin a new read transaction, or give snapshots more memory",
+            ),
+            Self::ClockExhausted => f.write_str(
+                "every commit stamp has been handed out: the file's clock high-water mark is at its largest value",
             ),
         }
     }
