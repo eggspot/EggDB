@@ -474,5 +474,6 @@ as written, it did this, and the sections above were updated where they changed:
     when the import succeeded. Their errors read `eggdb: cannot import <in>: line <n>: <what is
     wrong>. <what the failure left>`, for example `… Nothing was imported.`; a key already there
     adds `Choose what happens to keys already there: --on-conflict overwrite or --on-conflict
-    skip`. Progress (`imported 1,204,000 entries…`) is redrawn on stderr once a second, only on
-    a terminal.
+    skip`; the empty key appears as `""`, and a key longer than 64 bytes is cut with its length.
+    Progress (`imported 1,204,000 entries…`) is redrawn on stderr once a second, only on a
+    terminal.

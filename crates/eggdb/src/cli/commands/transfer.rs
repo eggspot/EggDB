@@ -172,7 +172,8 @@ impl Session<'_> {
             source_shown: source_shown.clone(),
             policy: self.request.on_conflict,
             cache_bytes: self.request.cache_bytes,
-            page_size: self.request.page_size,
+            requested_page_size: self.request.page_size,
+            staging_opened: false,
             messages: &mut self.messages,
             progress: Progress::new(
                 self.stderr_is_terminal,
@@ -313,7 +314,7 @@ enum Decision {
 }
 
 enum KeyLimit {
-    Of(usize),
+    Known(usize),
     FromHeader,
 }
 
@@ -324,7 +325,7 @@ struct KeyOrder {
     started: bool,
 }
 
-struct Writing {
+struct WriteState {
     cache: usize,
     max_key: usize,
     check_existing: bool,
@@ -338,7 +339,7 @@ struct Batch {
     bytes: usize,
 }
 
-enum Batches {
+enum WriteOutcome {
     Finished,
     NeedsCache(usize),
 }
@@ -350,7 +351,8 @@ struct Import<'s, 'a> {
     source_shown: String,
     policy: ConflictPolicy,
     cache_bytes: Option<usize>,
-    page_size: Option<usize>,
+    requested_page_size: Option<usize>,
+    staging_opened: bool,
     messages: &'s mut Output<'a>,
     progress: Progress,
     tally: Tally,
@@ -370,7 +372,7 @@ impl Import<'_, '_> {
             open_failure(self.file, self.file_display, &error, Access::ReadOnly)
         })?;
         let view = self.view_if_not_empty(&db)?;
-        self.check_pass(input, KeyLimit::Of(db.max_key_bytes()), view.as_ref())?;
+        self.check_pass(input, KeyLimit::Known(db.max_key_bytes()), view.as_ref())?;
         Ok(())
     }
 
@@ -390,7 +392,7 @@ impl Import<'_, '_> {
             } else {
                 None
             };
-            let checked = self.check_pass(input, KeyLimit::Of(max_key), view.as_ref());
+            let checked = self.check_pass(input, KeyLimit::Known(max_key), view.as_ref());
             drop(view);
             if let Err(failure) = checked {
                 let _ = db.close();
@@ -451,12 +453,15 @@ impl Import<'_, '_> {
                 .map_err(|error| import.read_failure(error))?;
             let page_size = import.new_page_size(&header);
             let db = import.open(&staging, cache, Some(page_size))?;
+            import.staging_opened = true;
             import.tally.created_page_size = Some(page_size);
             let max_key = db.max_key_bytes();
             import.write_pass(reader, &staging, db, cache, max_key, false)
         });
         if let Err(failure) = written {
-            let _ = std::fs::remove_file(&staging);
+            if self.staging_opened {
+                let _ = std::fs::remove_file(&staging);
+            }
             return Err(with_note(failure, &not_created));
         }
         self.move_into_place(&staging, &staging_shown)
@@ -536,7 +541,7 @@ impl Import<'_, '_> {
                 .read_header()
                 .map_err(|error| import.read_failure(error))?;
             let max_key = match limit {
-                KeyLimit::Of(max_key) => max_key,
+                KeyLimit::Known(max_key) => max_key,
                 KeyLimit::FromHeader => {
                     let page_size = import.new_page_size(&header);
                     import.tally.created_page_size = Some(page_size);
@@ -576,7 +581,7 @@ impl Import<'_, '_> {
         max_key: usize,
         check_existing: bool,
     ) -> Result<(), Failure> {
-        let mut writing = Writing {
+        let mut state = WriteState {
             cache,
             max_key,
             check_existing,
@@ -584,11 +589,11 @@ impl Import<'_, '_> {
             pending: false,
         };
         loop {
-            match self.write_batches(reader, &db, &mut writing) {
-                Ok(Batches::Finished) => return self.close(db),
-                Ok(Batches::NeedsCache(needed)) => {
+            match self.write_batches(reader, &db, &mut state) {
+                Ok(WriteOutcome::Finished) => return self.close(db),
+                Ok(WriteOutcome::NeedsCache(needed)) => {
                     self.close(db)?;
-                    writing.cache = needed;
+                    state.cache = needed;
                     db = self.open(path, needed, None)?;
                 }
                 Err(failure) => {
@@ -603,29 +608,29 @@ impl Import<'_, '_> {
         &mut self,
         reader: &mut ExportReader<'_>,
         db: &Database,
-        writing: &mut Writing,
-    ) -> Result<Batches, Failure> {
+        state: &mut WriteState,
+    ) -> Result<WriteOutcome, Failure> {
         let fixed_cache = self.cache_bytes.is_some();
         let batch_entries = (BATCH_PAGE_BYTES / db.page_size()).max(1) as u64;
         let mut transaction: Option<WriteTransaction<'_>> = None;
         let mut batch = Batch::default();
         loop {
-            if !writing.pending {
+            if !state.pending {
                 if !reader
                     .read_entry()
                     .map_err(|error| self.read_failure(error))?
                 {
                     break;
                 }
-                writing.pending = true;
+                state.pending = true;
             }
             let (key, value) = reader.current_entry();
             let line = reader.line();
             let entry_bytes = key.len().saturating_add(value.len());
             let needed = cache_for_entry(entry_bytes);
-            if !fixed_cache && needed > writing.cache {
+            if !fixed_cache && needed > state.cache {
                 self.commit(transaction.take(), &mut batch)?;
-                return Ok(Batches::NeedsCache(needed));
+                return Ok(WriteOutcome::NeedsCache(needed));
             }
             let batch_full = batch.entries >= batch_entries
                 || batch.bytes.saturating_add(entry_bytes) > BATCH_BYTES;
@@ -639,8 +644,8 @@ impl Import<'_, '_> {
                     .map_err(|error| self.database_failure(&error))?,
             };
             let open = transaction.insert(began);
-            let decision = self.decide(line, key, writing.max_key, &mut writing.order, || {
-                if writing.check_existing {
+            let decision = self.decide(line, key, state.max_key, &mut state.order, || {
+                if state.check_existing {
                     contains(open.scan(key..=key))
                 } else {
                     Ok(false)
@@ -662,7 +667,7 @@ impl Import<'_, '_> {
                 batch.bytes = batch.bytes.saturating_add(entry_bytes);
             }
             self.count(decision);
-            writing.pending = false;
+            state.pending = false;
             self.tally.entries = reader.entries();
             self.progress.tick(self.messages, self.tally.imported);
             if batch.bytes >= BATCH_BYTES {
@@ -670,7 +675,7 @@ impl Import<'_, '_> {
             }
         }
         self.commit(transaction.take(), &mut batch)?;
-        Ok(Batches::Finished)
+        Ok(WriteOutcome::Finished)
     }
 
     fn commit(
@@ -743,6 +748,9 @@ impl Import<'_, '_> {
         order.previous.extend_from_slice(key);
         order.previous_line = line;
         order.started = true;
+        if self.policy == ConflictPolicy::Overwrite {
+            return Ok(Decision::Write);
+        }
         let exists = exists().map_err(|error| self.database_failure(&error))?;
         if !exists {
             return Ok(Decision::Write);
@@ -769,7 +777,7 @@ impl Import<'_, '_> {
     }
 
     fn new_page_size(&self, header: &Header) -> usize {
-        self.page_size
+        self.requested_page_size
             .or(header.page_size)
             .unwrap_or(PageSize::DEFAULT.bytes())
     }
@@ -921,6 +929,9 @@ fn staging_path(target: &Path) -> PathBuf {
 }
 
 fn shown_key(key: &[u8]) -> String {
+    if key.is_empty() {
+        return "\"\"".to_owned();
+    }
     match render::text_cut(key, SHOWN_KEY_BYTES) {
         Some(cut) => format!("{cut}… ({} bytes)", render::count(key.len() as u64)),
         None => render::text(key),

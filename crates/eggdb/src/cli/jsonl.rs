@@ -2,8 +2,8 @@ use super::render::{self, JsonObject, LineBreaks};
 use eggdb_storage::{BTree, PageSize};
 use std::io::{self, Read, Write};
 
-pub(crate) const FORMAT_NAME: &str = "eggdb-jsonl";
-pub(crate) const FORMAT_VERSION: u64 = 1;
+const FORMAT_NAME: &str = "eggdb-jsonl";
+const FORMAT_VERSION: u64 = 1;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const HEX_CHUNK_BYTES: usize = 8 * 1024;
 const LINE_SLACK_BYTES: u64 = 64 * 1024;
@@ -24,12 +24,12 @@ pub(crate) fn largest_key_bytes() -> usize {
     )
 }
 
-pub(crate) fn longest_line_bytes() -> u64 {
+fn longest_line_bytes() -> u64 {
     let entry = largest_key_bytes().saturating_add(BTree::MAX_VALUE_BYTES) as u64;
     entry.saturating_mul(2).saturating_add(LINE_SLACK_BYTES)
 }
 
-pub(crate) fn is_page_size(bytes: u64) -> bool {
+fn is_page_size(bytes: u64) -> bool {
     bytes.is_power_of_two()
         && ((1u64 << PageSize::MIN_LOG2)..=(1u64 << PageSize::MAX_LOG2)).contains(&bytes)
 }

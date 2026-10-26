@@ -322,7 +322,7 @@ until you remove it.
 **Memory.** Neither command holds the export in memory: `export` streams from one read
 transaction, and `import` decodes each line straight into its key and value. The largest entry
 needs its size in memory, and `import` sizes its page cache to it (32 MiB by default, more for an
-entry above about 31 MiB), as `put` does.
+entry above about 30 MiB), as `put` does.
 
 **Progress.** On a terminal, both show `imported 1,204,000 entries…` on stderr, redrawn once a
 second, and erase it when they end.

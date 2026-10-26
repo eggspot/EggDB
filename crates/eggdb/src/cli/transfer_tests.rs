@@ -52,6 +52,10 @@ fn export_bytes(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
     out
 }
 
+fn json(path: &str) -> String {
+    path.replace('\\', "\\\\")
+}
+
 fn exists(path: &str) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
@@ -83,14 +87,20 @@ fn every_kind_of_entry_round_trips_through_a_file_and_through_a_pipe() {
     let exported = ok(&["export", &source, &export]);
     assert_eq!(
         stdout(&exported),
-        format!("{{\"file\":\"{source}\",\"out\":\"{export}\",\"entries\":7}}\n")
+        format!(
+            "{{\"file\":\"{}\",\"out\":\"{}\",\"entries\":7}}\n",
+            json(&source),
+            json(&export)
+        )
     );
     let copy = directory.file("copy.db");
     let imported = ok(&["import", "--create", &copy, &export]);
     assert_eq!(
         stdout(&imported),
         format!(
-            "{{\"file\":\"{copy}\",\"from\":\"{export}\",\"entries\":7,\"imported\":7,\"skipped\":0,\"created\":true,\"dry_run\":false}}\n"
+            "{{\"file\":\"{}\",\"from\":\"{}\",\"entries\":7,\"imported\":7,\"skipped\":0,\"created\":true,\"dry_run\":false}}\n",
+            json(&copy),
+            json(&export)
         )
     );
     assert_eq!(scan(&copy), scan(&source));
@@ -351,6 +361,26 @@ fn long_keys_keep_the_exported_page_size() {
 }
 
 #[test]
+fn a_key_of_a_mebibyte_is_refused_with_a_readable_error() {
+    let directory = TempDirectory::new("huge-key");
+    let mut export = Vec::new();
+    jsonl::write_header(&mut export, &Header::default()).unwrap();
+    export.extend_from_slice(b"{\"key\":\"");
+    export.extend(std::iter::repeat_n(b'k', 1 << 20));
+    export.extend_from_slice(b"\",\"value\":\"v\"}\n{\"entries\":1}\n");
+    let new = directory.file("new.db");
+    let ran = run_with(&["import", "--create", &new], &export, pipe());
+    assert_eq!(ran.exit, 3);
+    assert_eq!(
+        stderr(&ran),
+        format!(
+            "eggdb: cannot import stdin: line 2: the key is longer than 8,192 bytes, the longest key any EggDB database stores. Nothing was imported and {new} was not created.\n"
+        )
+    );
+    assert!(!exists(&new) && !exists(&staging(&new)));
+}
+
+#[test]
 fn a_dry_run_writes_nothing() {
     let directory = TempDirectory::new("dry-run");
     let target = directory.file("app.db");
@@ -369,7 +399,9 @@ fn a_dry_run_writes_nothing() {
     assert_eq!(
         stdout(&ran),
         format!(
-            "{{\"file\":\"{target}\",\"from\":\"{export}\",\"entries\":2,\"imported\":1,\"skipped\":1,\"created\":false,\"dry_run\":true}}\n"
+            "{{\"file\":\"{}\",\"from\":\"{}\",\"entries\":2,\"imported\":1,\"skipped\":1,\"created\":false,\"dry_run\":true}}\n",
+            json(&target),
+            json(&export)
         )
     );
     assert_eq!(std::fs::read(&target).unwrap(), before);
@@ -518,7 +550,11 @@ fn hostile_imports_exit_cleanly_and_leave_every_file_consistent() {
     let target = directory.file("target.db");
     database_with(&target, &[(b"m", b"middle")]);
     let export = directory.file("hostile.jsonl");
-    let mut rng = Rng(0x0dd5_eed5_0f1e_5501);
+    let seed = std::env::var("EGGDB_FUZZ_SEED")
+        .ok()
+        .and_then(|seed| seed.parse::<u64>().ok())
+        .unwrap_or(0x0dd5_eed5_0f1e_5501);
+    let mut rng = Rng(seed | 1);
     let mut expected = scan(&target);
     let cases = std::env::var("EGGDB_FUZZ_CASES")
         .ok()
@@ -553,7 +589,7 @@ fn hostile_imports_exit_cleanly_and_leave_every_file_consistent() {
         let created = run(&["import", "--create", &new, &export, "--on-conflict", policy]);
         assert!(
             [0, 3].contains(&created.exit),
-            "case {case}: exit {}: {}",
+            "seed {seed} case {case}: exit {}: {}",
             created.exit,
             stderr(&created)
         );
@@ -575,7 +611,7 @@ fn hostile_imports_exit_cleanly_and_leave_every_file_consistent() {
         };
         assert!(
             [0, 3].contains(&into_existing.exit),
-            "case {case}: exit {}: {}",
+            "seed {seed} case {case}: exit {}: {}",
             into_existing.exit,
             stderr(&into_existing)
         );
