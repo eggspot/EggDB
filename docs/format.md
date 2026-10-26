@@ -89,9 +89,9 @@ written as zero and ignored on read, so a later version can use them behind a fe
    refuse the file. If neither is intact, the error is "not a database" when neither slot has
    the magic, and "no valid header" otherwise.
 3. Check that slot fully: version, page size, slot parity and pointers. A slot that is intact
-   but refused (a newer version, or a superblock in the wrong slot) refuses the whole file. The reader never falls back to
-   the older slot, because that would silently open an older state of a file a newer release
-   wrote.
+   but refused (a newer version, or a superblock in the wrong slot) refuses the whole file.
+   The reader never falls back to the older slot, because that would silently open an older
+   state of a file a newer release wrote.
 4. Check the feature flags against the access asked for.
 5. If the other slot has the magic but fails its checksum, report it. A crash during a header
    update looks like that, and so does damage to a synced slot. In the second case the chosen

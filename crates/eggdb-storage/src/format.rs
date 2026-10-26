@@ -686,12 +686,8 @@ mod tests {
     #[test]
     fn two_slots_with_the_same_generation_refuse_the_file() {
         let slot = superblock(4).encode().unwrap();
-        let mut copy = slot.clone();
-        copy[8..12].fill(0);
-        let checksum = super::superblock_checksum(&copy);
-        copy[8..12].copy_from_slice(&checksum.to_le_bytes());
         assert_eq!(
-            Superblock::choose(&slot, &copy),
+            Superblock::choose(&slot, &slot),
             Err(FormatError::InvalidField {
                 field: "generation"
             })
