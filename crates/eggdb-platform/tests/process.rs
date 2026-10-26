@@ -40,21 +40,18 @@ fn exits_with_three_when_run_as_a_child() {
 
 #[test]
 fn a_child_reports_its_exit_code_and_a_peak_above_zero() {
-    let exit = run_with_peak_memory(
-        this_test_as_a_child("exits_with_three_when_run_as_a_child").env(TOUCH_BYTES_VARIABLE, "0"),
-    )
-    .unwrap();
+    let mut child = this_test_as_a_child("exits_with_three_when_run_as_a_child");
+    child.env(TOUCH_BYTES_VARIABLE, "0");
+    let exit = run_with_peak_memory(child).unwrap();
     assert_eq!(exit.code, Some(3));
     assert!(exit.peak_resident_bytes > 0);
 }
 
 #[test]
 fn a_child_that_touches_64_mib_reports_a_peak_of_at_least_that() {
-    let exit = run_with_peak_memory(
-        this_test_as_a_child("touches_memory_when_run_as_a_child")
-            .env(TOUCH_BYTES_VARIABLE, TOUCHED_BYTES.to_string()),
-    )
-    .unwrap();
+    let mut child = this_test_as_a_child("touches_memory_when_run_as_a_child");
+    child.env(TOUCH_BYTES_VARIABLE, TOUCHED_BYTES.to_string());
+    let exit = run_with_peak_memory(child).unwrap();
     assert_eq!(exit.code, Some(0));
     assert!(
         exit.peak_resident_bytes >= TOUCHED_BYTES as u64,
@@ -71,10 +68,9 @@ fn a_child_started_by_a_large_parent_reports_only_its_own_peak() {
         *byte = 1;
     }
     std::hint::black_box(&parent_memory);
-    let exit = run_with_peak_memory(
-        this_test_as_a_child("touches_memory_when_run_as_a_child").env(TOUCH_BYTES_VARIABLE, "0"),
-    )
-    .unwrap();
+    let mut child = this_test_as_a_child("touches_memory_when_run_as_a_child");
+    child.env(TOUCH_BYTES_VARIABLE, "0");
+    let exit = run_with_peak_memory(child).unwrap();
     drop(parent_memory);
     assert_eq!(exit.code, Some(0));
     assert!(

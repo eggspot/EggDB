@@ -33,7 +33,7 @@ unsafe extern "C" {
     fn wait4(pid: c_int, status: *mut c_int, options: c_int, usage: *mut ResourceUsage) -> c_int;
 }
 
-pub(crate) fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
+pub(crate) fn run_with_peak_memory(mut command: Command) -> Result<ChildExit> {
     let child = command.spawn()?;
     let pid =
         c_int::try_from(child.id()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;

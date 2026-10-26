@@ -144,7 +144,7 @@ fn run_against_reference(subject: &mut dyn FnMut() -> Command) -> Result<Runs, S
         let subject_ns = timed_run(&mut subject())?;
         ns.push(subject_ns);
         ratios.push(subject_ns / reference_ns);
-        peaks.push(peak_resident_bytes(&mut subject())? as f64);
+        peaks.push(peak_resident_bytes(subject())? as f64);
     }
     Ok(Runs {
         ns: median(&mut ns),
@@ -173,8 +173,8 @@ fn timed_run(command: &mut Command) -> Result<f64, String> {
     Ok(ns)
 }
 
-fn peak_resident_bytes(command: &mut Command) -> Result<u64, String> {
-    let (command, program) = quiet(command);
+fn peak_resident_bytes(mut command: Command) -> Result<u64, String> {
+    let program = quiet(&mut command).1;
     let exit = run_with_peak_memory(command).map_err(failed(&program))?;
     if exit.code != Some(0) {
         return Err(format!("{program} exited with {:?}", exit.code));

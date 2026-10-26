@@ -29,7 +29,7 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-pub(crate) fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
+pub(crate) fn run_with_peak_memory(mut command: Command) -> Result<ChildExit> {
     let mut child = command.spawn()?;
     let status = child.wait()?;
     let size = u32::try_from(size_of::<ProcessMemoryCounters>())

@@ -67,7 +67,7 @@ fn parse_peak(status: &str) -> Option<u64> {
     kibibytes.parse::<u64>().ok()?.checked_mul(1024)
 }
 
-pub(crate) fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
+pub(crate) fn run_with_peak_memory(mut command: Command) -> Result<ChildExit> {
     // SAFETY: the closure runs in the child between fork and exec and makes one system call,
     // which is async-signal-safe and touches no memory shared with the parent.
     let command = unsafe { command.pre_exec(trace_me) };
@@ -79,7 +79,7 @@ pub(crate) fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
     loop {
         match wait_for(pid)? {
             WaitStatus::Stopped { event, .. } if event == PTRACE_EVENT_EXIT => {
-                peak = Some(peak_resident_bytes(pid)?);
+                peak = Some(peak_resident_bytes(pid));
                 request(PTRACE_CONT, pid, 0)?;
             }
             WaitStatus::Stopped { signal, .. } if signal == SIGTRAP && !traced_exit => {
@@ -98,7 +98,7 @@ pub(crate) fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
                 drop(child);
                 return Ok(ChildExit {
                     code: exit.exit_code(),
-                    peak_resident_bytes: peak.ok_or_else(|| Error::new(ErrorKind::Other))?,
+                    peak_resident_bytes: peak.ok_or_else(|| Error::new(ErrorKind::Other))??,
                 });
             }
         }

@@ -13,7 +13,8 @@ pub struct ChildExit {
     pub peak_resident_bytes: u64,
 }
 
-/// Runs `command` to its end, then returns its exit code and the most memory it held.
+/// Runs `command` to its end, then returns its exit code and the most memory it held. The
+/// command is consumed, since on Linux and Android it gains a step that runs before `exec`.
 ///
 /// The peak is the child's own: on Linux and Android its `VmHWM` read when it exits, which a
 /// parent's memory never inflates, through `ptrace` (so a tracer such as a debugger must not
@@ -26,7 +27,7 @@ pub struct ChildExit {
 /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) where the operating system does
 /// not report a child's peak memory (after the child has ended); and the operating system's
 /// error when waiting for the child or tracing it fails.
-pub fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
+pub fn run_with_peak_memory(command: Command) -> Result<ChildExit> {
     imp::run_with_peak_memory(command)
 }
 
@@ -68,7 +69,7 @@ mod imp {
     use crate::error::{Error, ErrorKind, Result};
     use std::process::Command;
 
-    pub(crate) fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
+    pub(crate) fn run_with_peak_memory(mut command: Command) -> Result<ChildExit> {
         command.status()?;
         Err(Error::new(ErrorKind::Unsupported))
     }
