@@ -16,6 +16,7 @@ mod allocations;
 mod baseline;
 mod btree;
 mod checkpoint;
+mod database;
 mod log;
 mod measure;
 mod page_cache;
@@ -32,7 +33,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
 type Benchmark = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 
-const BENCHMARKS: [(&str, Benchmark); 15] = [
+const BENCHMARKS: [(&str, Benchmark); 18] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -48,6 +49,9 @@ const BENCHMARKS: [(&str, Benchmark); 15] = [
     (btree::SCAN_REVERSE, btree::scan_descending),
     (transaction::READ, transaction::read),
     (transaction::WRITE, transaction::write),
+    (database::OPEN, database::open),
+    (database::READ, database::read),
+    (database::WRITE, database::write),
 ];
 
 const OS: &str = std::env::consts::OS;
