@@ -1,11 +1,12 @@
 use crate::error::{Error, ErrorKind, Result};
-use crate::fs::{File, FileSystem, OpenMode};
+use crate::fs::{File, FileLock, FileSystem, OpenMode};
 use crate::io::IoQueueOptions;
 use crate::os_io::OsIoQueue;
 use crate::uncached;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The operating system's file system.
 #[derive(Debug, Clone, Copy, Default)]
@@ -211,6 +212,7 @@ pub struct OsFile {
     file: fs::File,
     writable: bool,
     uncached: bool,
+    locked: AtomicBool,
     #[cfg(windows)]
     overlapped: std::sync::Mutex<Vec<(u64, std::os::windows::io::OwnedHandle)>>,
     #[cfg(not(any(unix, windows)))]
@@ -242,6 +244,7 @@ impl OsFile {
             file,
             writable: mode.is_writable(),
             uncached,
+            locked: AtomicBool::new(false),
             #[cfg(windows)]
             overlapped: std::sync::Mutex::new(Vec::new()),
             #[cfg(not(any(unix, windows)))]
@@ -274,6 +277,17 @@ impl File for OsFile {
 
     fn is_uncached(&self) -> bool {
         self.uncached
+    }
+
+    fn try_lock(&self, lock: FileLock) -> Result<()> {
+        if self.locked.swap(true, Ordering::AcqRel) {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        let locked = lock_file(&self.file, lock);
+        if locked.is_err() {
+            self.locked.store(false, Ordering::Release);
+        }
+        locked
     }
 
     fn sync_data(&self) -> Result<()> {
@@ -372,6 +386,75 @@ impl OsFile {
         let mut file = &self.file;
         file.seek(SeekFrom::Start(offset))?;
         Ok(file.write(buf)?)
+    }
+}
+
+#[cfg(not(windows))]
+fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
+    let locked = match lock {
+        FileLock::Shared => file.try_lock_shared(),
+        FileLock::Exclusive => file.try_lock(),
+    };
+    locked.map_err(|error| match error {
+        fs::TryLockError::WouldBlock => Error::new(ErrorKind::Locked),
+        fs::TryLockError::Error(error) => Error::from(error),
+    })
+}
+
+#[cfg(windows)]
+fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::io::{AsRawHandle, RawHandle};
+
+    const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
+    const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const LOCKED_BYTE: u64 = 1 << 62;
+
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        event: *mut c_void,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LockFileEx(
+            file: RawHandle,
+            flags: u32,
+            reserved: u32,
+            bytes_low: u32,
+            bytes_high: u32,
+            overlapped: *mut Overlapped,
+        ) -> i32;
+    }
+
+    let flags = match lock {
+        FileLock::Shared => LOCKFILE_FAIL_IMMEDIATELY,
+        FileLock::Exclusive => LOCKFILE_FAIL_IMMEDIATELY | LOCKFILE_EXCLUSIVE_LOCK,
+    };
+    let mut overlapped = Overlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: LOCKED_BYTE as u32,
+        offset_high: (LOCKED_BYTE >> 32) as u32,
+        event: std::ptr::null_mut(),
+    };
+    // SAFETY: the handle is open for the duration of the call, the file was opened for
+    // synchronous I/O so LockFileEx finishes before returning, and `overlapped` lives on this
+    // stack frame until then.
+    let locked = unsafe { LockFileEx(file.as_raw_handle(), flags, 0, 1, 0, &mut overlapped) };
+    if locked != 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION) {
+        Err(Error::from(error).with_kind(ErrorKind::Locked))
+    } else {
+        Err(Error::from(error))
     }
 }
 

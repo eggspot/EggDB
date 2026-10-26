@@ -4,7 +4,8 @@
 //! traits in this crate, so the engine never calls an OS API itself:
 //! - [`FileSystem`] and [`File`]: positional reads and writes, durability barriers and the
 //!   namespace operations a write-ahead log and a page store need, and handles that bypass the
-//!   operating system's cache, used with [`AlignedBuffer`];
+//!   operating system's cache, used with [`AlignedBuffer`], and a [`FileLock`] that keeps a
+//!   second user away from a file;
 //! - [`IoQueue`]: asynchronous reads, writes and syncs of those files, submitted with a tag
 //!   and reaped as [`IoCompletion`]s in any order, each [`IoOp`] owning its [`IoBuffer`] while
 //!   it is in flight;
@@ -61,7 +62,7 @@ pub use cache::{CACHE_LINE_PADDING, CachePadded};
 pub use clock::{Clock, SimClock, SystemClock};
 pub use cpus::{CpuId, CpuSet, Cpus};
 pub use error::{Error, ErrorKind, Result};
-pub use fs::{File, FileSystem, OpenMode};
+pub use fs::{File, FileLock, FileSystem, OpenMode};
 pub use io::{IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp};
 pub use memory::{Memory, MemoryRegion, PageMode};
 pub use net::{

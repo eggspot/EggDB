@@ -191,6 +191,19 @@ impl Features {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileId(pub [u8; 16]);
 
+impl FileId {
+    /// A new identity drawn from the operating system's randomness, through the seeds of the
+    /// standard library's hash maps.
+    pub fn random() -> Self {
+        use std::hash::{BuildHasher, RandomState};
+        let mut bytes = [0u8; 16];
+        let state = RandomState::new();
+        bytes[..8].copy_from_slice(&state.hash_one(0u8).to_le_bytes());
+        bytes[8..].copy_from_slice(&state.hash_one(1u8).to_le_bytes());
+        Self(bytes)
+    }
+}
+
 /// The contents of one header slot: where everything else in the file starts.
 ///
 /// The file keeps two slots, at byte 0 and byte [`HEADER_SLOT_SIZE`]. Each update writes the

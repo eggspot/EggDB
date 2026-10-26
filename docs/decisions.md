@@ -2422,3 +2422,49 @@ incompatible feature flag. Prefix truncation makes them cost about nothing per e
 
 **Fuzzing:** our own deterministic, seeded fuzz loops run inside `cargo test`, with no crate.
 Every decoder of file bytes returns errors as values.
+
+## D78 The page file: commits that never overwrite committed pages, and file locks through the platform layer — Decided by the build loop (2026-10-26); refines D59 and D77
+`eggdb-storage`'s `PageFile` is the database file seen as checksummed pages. Every later item
+writes through it.
+
+**Commits.** Changes become durable only at a commit:
+1. Write the new free list.
+2. Sync the file.
+3. Write the next superblock to the slot the current one isn't in.
+4. Sync again.
+
+Until the log exists (item 4), a commit is the only way to make anything durable. Two rules
+mean the committed state is never overwritten before the new superblock is durable:
+- a page freed since the last commit is handed out only after the commit that frees it;
+- the new free list goes to pages that are free in the committed state, or to new pages, never
+  over the committed list.
+
+A crash at any operation of a commit, under torn writes, opens the old state or the new one.
+The simulator checks every operation with four torn-write seeds each. The cost is that a
+commit with no free page grows the file by the pages its list needs. The log and checkpoints
+(items 4 and 7) replace this with logged allocation.
+
+**A failed write or sync** stops the file taking changes until it is opened again (D59).
+
+**Opening checks before trusting the file:**
+- the file's real length against `page_count`;
+- the free list: every entry in range and listed once, no loops, and the count matches.
+
+A damaged list refuses the open with a readable error. A seeded test rewrites list pages with
+valid checksums and checks this.
+
+**File locks.** `File::try_lock` takes a shared or exclusive lock without waiting:
+- **Unix:** through the standard library's `flock`-based locks, whose locks belong to the open
+  file description, as D77 asks.
+- **Windows:** our own `LockFileEx` on one byte at offset 2^62, past any data. The standard
+  library's whole-file lock is mandatory on Windows: it would block reads through the second,
+  overlapped handle the I/O completion port uses (D69), and backup tools.
+- **Simulator:** shared and exclusive counts per file, released when a handle drops or the
+  machine crashes.
+
+A handle takes one lock for its life, and a writer opens with an exclusive lock, so a second
+writer anywhere is refused with "locked".
+
+**File identity.** A new file's 16-byte identity comes from the standard library's randomly
+seeded hasher (`RandomState`), which draws on the operating system's randomness. That needs no
+cryptography: the identity only has to differ between files, not resist guessing.

@@ -23,6 +23,15 @@ impl OpenMode {
     }
 }
 
+/// The lock [`File::try_lock`] takes on a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileLock {
+    /// Shared with other shared locks, refused while an exclusive lock is held.
+    Shared,
+    /// Held by one handle only, refused while any other lock is held.
+    Exclusive,
+}
+
 /// The namespace operations of a file system.
 ///
 /// Creating, renaming and removing a file only become durable once the parent directory is
@@ -112,6 +121,16 @@ pub trait File: Send + Sync + std::fmt::Debug {
     /// Whether the handle was opened with [`FileSystem::open_uncached`] and so requires
     /// aligned buffers, offsets and lengths.
     fn is_uncached(&self) -> bool;
+
+    /// Locks the file for this handle without waiting, failing with [`ErrorKind::Locked`] when
+    /// another handle, in this process or another, holds a lock that conflicts with `lock`.
+    ///
+    /// The lock is advisory: it stops other locks, not reads or writes. It is held until the
+    /// handle is dropped, or until a crash in a simulation, and the operating system releases
+    /// it when the process ends, so it never outlives its owner. A handle takes one lock for
+    /// its life; a second call fails with [`ErrorKind::InvalidInput`]. Fails with
+    /// [`ErrorKind::Unsupported`] on targets without file locks.
+    fn try_lock(&self, lock: FileLock) -> Result<()>;
 
     /// Makes the file's contents and size durable. Fails with
     /// [`ErrorKind::PermissionDenied`] through a handle opened with [`OpenMode::Read`] on every
