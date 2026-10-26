@@ -1731,11 +1731,11 @@ mod tests {
     fn a_failed_group_sync_under_normal_never_serves_the_failed_commit() {
         let (sync_round, _) = normal_rounds_until_a_sync(&SimFileSystem::new(), None);
         assert!(sync_round > 100);
-        for offset in [1, 2] {
+        for (offset, served) in [(1, sync_round - 1), (2, sync_round)] {
             let fs = SimFileSystem::new();
             let (round, fill) = normal_rounds_until_a_sync(&fs, Some((sync_round, offset)));
             assert_eq!(round, sync_round);
-            assert_eq!(fill, u64::from(sync_round - 1), "offset {offset}");
+            assert_eq!(fill, u64::from(served), "offset {offset}");
         }
     }
 

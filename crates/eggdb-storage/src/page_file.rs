@@ -534,10 +534,9 @@ impl<F: File> PageFile<F> {
                     let lsn = log.lsn();
                     log.sync_to(&self.file, lsn)?;
                     for image in log.images() {
-                        self.unwritten.remove(&image.page_id);
+                        self.unwritten.insert(image.page_id, image.file_offset);
                     }
-                    self.drain_unwritten()?;
-                    return self.write_logged_pages_in_place();
+                    return self.drain_unwritten();
                 }
                 for image in log.images() {
                     self.unwritten.insert(image.page_id, image.file_offset);
