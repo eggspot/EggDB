@@ -1366,6 +1366,40 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_at_any_operation_while_the_log_is_created_leaves_a_usable_file() {
+        let operations_for = |fail_at: Option<u64>| {
+            let fs = SimFileSystem::new();
+            let cache = create(&fs);
+            let start = fs.operation_count();
+            if let Some(offset) = fail_at {
+                fs.fail_operation(start + offset);
+            }
+            let allocated = cache.allocate(leaf()).map(|page| page.page_id());
+            assert_eq!(allocated.is_ok(), fail_at.is_none());
+            (fs, start)
+        };
+        let (fs, start) = operations_for(None);
+        let operations = fs.operation_count() - start;
+        for step in 0..operations {
+            for seed in 0..4 {
+                let (fs, _) = operations_for(Some(step));
+                fs.crash(CrashMode::Torn { seed });
+                let mut cache = open(&fs, Access::ReadWrite).unwrap();
+                let page = allocate(&cache, 6);
+                cache.commit(|_| {}).unwrap();
+                drop(cache);
+                fs.crash(CrashMode::Torn { seed: seed + 50 });
+                let cache = open(&fs, Access::ReadOnly).unwrap();
+                assert_eq!(
+                    fill_of(&cache, page).unwrap(),
+                    6,
+                    "step {step}, seed {seed}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pages_committed_under_normal_are_read_back_from_the_log_after_eviction() {
         let fs = SimFileSystem::new();
         let file = PageFile::create(&fs, Path::new(DB), options(PageSize::DEFAULT)).unwrap();
