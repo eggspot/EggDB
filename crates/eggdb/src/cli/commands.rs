@@ -6,6 +6,7 @@ use super::output::{Output, Style};
 use super::render::{self, JsonObject, LineBreaks};
 use super::reports::{self, Damage};
 use eggdb::{Database, Error, ErrorKind, Options};
+use eggdb_storage::{BTree, PageSize, StorageError};
 use std::io::Read;
 use std::ops::Bound;
 
@@ -22,6 +23,7 @@ enum Access {
 struct Session<'a> {
     request: Request,
     file: String,
+    file_display: String,
     format: Format,
     out: Output<'a>,
     messages: Output<'a>,
@@ -53,8 +55,10 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
         .unwrap_or_else(|| default_format(request.command, terminal.stdout));
     let stdout_color = format == Format::Text && uses_color(request.color, terminal.stdout_color);
     let stderr_color = uses_color(request.color, terminal.stderr_color);
+    let file_display = request.file.display().to_string();
     let mut session = Session {
-        file: request.file.display().to_string(),
+        file: render::text(file_display.as_bytes()),
+        file_display,
         request,
         format,
         out: Output::new(&mut *console.stdout, stdout_color),
@@ -96,7 +100,7 @@ impl Session<'_> {
         match self.format {
             Format::Json => self.out.text(
                 &JsonObject::new()
-                    .string("file", &self.file)
+                    .string("file", &self.file_display)
                     .number("page_size", page_size as u64)
                     .line(),
             ),
@@ -122,6 +126,9 @@ impl Session<'_> {
             None => ByteArgument::Stdin,
         };
         let value = self.resolve(Some(value))?;
+        if self.request.create && std::fs::symlink_metadata(&self.request.file).is_err() {
+            self.refuse_what_a_new_file_cannot_store(&key, &value)?;
+        }
         let cache = cache_for_value(value.len());
         let db = self.open(
             Access::Write {
@@ -145,6 +152,31 @@ impl Session<'_> {
             );
         }
         Ok(Exit::Done)
+    }
+
+    fn refuse_what_a_new_file_cannot_store(&self, key: &[u8], value: &[u8]) -> Result<(), Failure> {
+        let max_key = BTree::max_key_bytes(PageSize::DEFAULT);
+        let refusal = if key.len() > max_key {
+            StorageError::KeyTooLarge {
+                bytes: key.len(),
+                max: max_key,
+            }
+        } else if value.len() > BTree::MAX_VALUE_BYTES {
+            StorageError::ValueTooLarge {
+                bytes: value.len(),
+                max: BTree::MAX_VALUE_BYTES,
+            }
+        } else {
+            return Ok(());
+        };
+        Err(Failure::database(
+            format!(
+                "cannot store {} in {}: {refusal}",
+                render::text(key),
+                self.file
+            ),
+            Exit::DatabaseError,
+        ))
     }
 
     fn get(&mut self) -> Result<Exit, Failure> {
@@ -338,18 +370,20 @@ impl Session<'_> {
             }
         };
         match self.format {
-            Format::Json => self
-                .out
-                .text(&reports::check_json(&self.file, &stats, &report)),
+            Format::Json => {
+                self.out
+                    .text(&reports::check_json(&self.file_display, &stats, &report))
+            }
             _ => reports::check_text(&mut self.out, &self.file, &stats, &report),
         }
         Ok(Exit::Done)
     }
 
     fn damaged(&mut self, checked_commit: Option<eggdb::CommitStamp>, error: &Error) -> Exit {
-        let problem = damage_problem(error, &self.file);
+        let problem = damage_problem(error, &self.file_display);
         let damage = Damage {
             file: &self.file,
+            file_display: &self.file_display,
             checked_commit,
             problem: &problem,
         };
@@ -366,7 +400,9 @@ impl Session<'_> {
             operation_failure(&error, &format!("cannot read the stats of {}", self.file))
         })?;
         match self.format {
-            Format::Json => self.out.text(&reports::stats_json(&self.file, &stats)),
+            Format::Json => self
+                .out
+                .text(&reports::stats_json(&self.file_display, &stats)),
             _ => reports::stats_text(&mut self.out, &self.file, &stats),
         }
         Ok(Exit::Done)
@@ -462,14 +498,14 @@ impl Session<'_> {
             ErrorKind::Incompatible => Failure::database(
                 format!(
                     "cannot open {file}: it was written by a newer EggDB ({}). Upgrade eggdb from https://github.com/eggspot/EggDB/releases.",
-                    incompatibility(error, file)
+                    incompatibility(error, &self.file_display)
                 ),
                 Exit::DatabaseError,
             ),
             kind => Failure::database(
                 format!(
                     "cannot open {file}: {}",
-                    without_open_prefix(&error.to_string(), file)
+                    without_open_prefix(&error.to_string(), &self.file_display)
                 ),
                 Exit::for_error(kind),
             ),

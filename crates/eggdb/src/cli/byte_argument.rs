@@ -70,7 +70,7 @@ fn read_bounded(input: impl Read) -> std::io::Result<Vec<u8>> {
 }
 
 fn parse_hex(digits: &[u8], whole: &[u8]) -> Result<Vec<u8>, String> {
-    let shown = String::from_utf8_lossy(whole);
+    let shown = super::render::text(whole);
     if let Some(&bad) = digits.iter().find(|digit| hex_value(**digit).is_none()) {
         let bad = match bad {
             0x20..=0x7e => char::from(bad).to_string(),

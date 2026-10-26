@@ -3415,9 +3415,11 @@ formats, reports, help text) for about 83 KB. Startup for `eggdb stats` is under
 
 Decided by research (a Sonnet research subagent, 2026-10-26), where the design could not be
 built as written or was silent:
-- *Ctrl-C:* keep the operating system's default (shells report 130) and write output in whole
-  entries, rather than install a signal handler per OS: `put` is atomic, `check` cannot stop
-  half-way, and a handler would buy nothing until `eggdb ui` needs signals anyway.
+- *Ctrl-C:* keep the operating system's default (shells report 130) rather than install a
+  signal handler per OS: `put` is atomic, `check` cannot stop half-way, and a handler would buy
+  nothing until `eggdb ui` needs signals anyway. Output goes out in blocks of 64 KiB and more,
+  which a pipe does not take atomically, so a killed `scan` can leave a partial last line;
+  scripts that read a stopped scan drop a final line without a newline.
 - *The damaged report's "what was checked" line:* the library reports no progress, and a B+tree
   check is not a left-to-right prefix, so the line says that every page read before the damage
   passed and the check stopped there; damage found while opening says so, with no commit. The

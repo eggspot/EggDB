@@ -1,5 +1,6 @@
 use super::byte_argument::ByteArgument;
 use super::failure::Failure;
+use super::render;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
@@ -223,7 +224,8 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     let has = |name| tokens.options.iter().any(|option| option.name == name);
     if has(OptionName::Help) {
         return match first {
-            Some(name) if command.is_none() && is_reserved(name) => Err(unavailable(name)),
+            Some(b"help" | b"version") | None => Ok(Invocation::Help(None)),
+            Some(name) if command.is_none() => Err(unknown_command(name)),
             _ => Ok(Invocation::Help(command)),
         };
     }
@@ -277,7 +279,7 @@ fn tokenize(args: &[OsString]) -> Tokens<'_> {
             continue;
         }
         let (name, attached) = split_option(arg);
-        let spelled = String::from_utf8_lossy(name.as_encoded_bytes()).into_owned();
+        let spelled = render::text(name.as_encoded_bytes());
         let known = match name.as_encoded_bytes() {
             [b'-', b'-', long @ ..] => OptionName::from_long(long),
             [b'-', letter] => OptionName::from_short(*letter),
@@ -431,13 +433,17 @@ fn missing_arguments(command: CommandName, given: usize) -> String {
 fn too_many_arguments(extra: &[&OsStr], command: Option<CommandName>) -> Failure {
     let shown = extra
         .iter()
-        .map(|argument| format!("'{}'", argument.to_string_lossy()))
+        .map(|argument| format!("'{}'", shown(argument)))
         .collect::<Vec<_>>()
         .join(" ");
     let what = command.map_or("eggdb".to_owned(), |command| {
         format!("eggdb {}", command.name())
     });
     Failure::usage(format!("too many arguments for {what}: {shown}"), command)
+}
+
+fn shown(argument: &OsStr) -> String {
+    render::text(argument.as_encoded_bytes())
 }
 
 fn is_reserved(name: &[u8]) -> bool {
@@ -450,7 +456,7 @@ fn unavailable(name: &[u8]) -> Failure {
     Failure::Unavailable {
         message: format!(
             "eggdb {} is not in this release yet; see docs/roadmap.md",
-            String::from_utf8_lossy(name)
+            render::text(name)
         ),
     }
 }
@@ -462,7 +468,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     Failure::usage(
         format!(
             "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, help, version.",
-            String::from_utf8_lossy(name)
+            render::text(name)
         ),
         None,
     )
@@ -483,7 +489,7 @@ fn parse_format(value: &OsStr) -> Result<Format, String> {
         b"raw" => Ok(Format::Raw),
         _ => Err(format!(
             "--format must be text, json, hex or raw, not '{}'",
-            value.to_string_lossy()
+            shown(value)
         )),
     }
 }
@@ -495,7 +501,7 @@ fn parse_color(value: &OsStr) -> Result<ColorChoice, String> {
         b"never" => Ok(ColorChoice::Never),
         _ => Err(format!(
             "--color must be auto, always or never, not '{}'",
-            value.to_string_lossy()
+            shown(value)
         )),
     }
 }
@@ -504,7 +510,7 @@ fn parse_size(option: &str, value: &OsStr) -> Result<usize, String> {
     let refused = || {
         format!(
             "{option} needs a size such as 4096, 64k, 16m or 1g, not '{}'",
-            value.to_string_lossy()
+            shown(value)
         )
     };
     let bytes = value.as_encoded_bytes();
@@ -526,17 +532,13 @@ fn parse_page_size(option: &str, value: &OsStr) -> Result<usize, String> {
     }
     Err(format!(
         "{option} must be a power of two from 4096 to 65536, not '{}'",
-        value.to_string_lossy()
+        shown(value)
     ))
 }
 
 fn parse_limit(option: &str, value: &OsStr) -> Result<u64, String> {
-    parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
-        format!(
-            "{option} needs a whole number, not '{}'",
-            value.to_string_lossy()
-        )
-    })
+    parse_whole_number(value.as_encoded_bytes())
+        .ok_or_else(|| format!("{option} needs a whole number, not '{}'", shown(value)))
 }
 
 fn parse_whole_number(digits: &[u8]) -> Option<u64> {
@@ -698,6 +700,31 @@ mod tests {
         assert_eq!(
             usage_message("scan a --reverse=yes"),
             "unknown option '--reverse=...' for eggdb scan"
+        );
+    }
+
+    #[test]
+    fn help_for_an_unknown_command_is_the_unknown_command_error() {
+        assert_eq!(
+            usage_message("frob --help"),
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, help, version."
+        );
+        assert_eq!(
+            usage_message("ui -h"),
+            "eggdb ui is not in this release yet; see docs/roadmap.md"
+        );
+        assert_eq!(parse_words("version --help"), Ok(Invocation::Help(None)));
+    }
+
+    #[test]
+    fn control_characters_in_quoted_arguments_are_shown_as_hex() {
+        assert_eq!(
+            usage_message("fr\u{1b}[31mob"),
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, help, version."
+        );
+        assert_eq!(
+            usage_message("scan a -F j\u{7}"),
+            "--format must be text, json, hex or raw, not '0x6a07'"
         );
     }
 

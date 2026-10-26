@@ -175,8 +175,9 @@ app.db
 | 5 | busy: another program has the file open |
 
 Ctrl-C stops the command the way the operating system stops any program: shells report 130.
-A `put` either committed or did not; output is written in whole lines, so a stopped `scan`
-leaves no half line unless one entry is longer than a pipe takes at once (4 KiB). Writing to a
+A `put` either committed or did not. A stopped `scan` can leave its last line cut off, since
+output goes out in blocks of 64 KiB and more, so a script that reads a stopped scan should drop a
+final line without a newline. Writing to a
 closed pipe (`eggdb scan app.db | head`) ends the command quietly with exit 0.
 
 Errors go to stderr as `eggdb: <what happened>: <why>. <what to do>`, never as a Rust debug dump,

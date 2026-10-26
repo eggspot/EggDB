@@ -8,6 +8,7 @@ const REPAIR_ISSUES: &str = "https://github.com/eggspot/EggDB/issues";
 
 pub(crate) struct Damage<'a> {
     pub(crate) file: &'a str,
+    pub(crate) file_display: &'a str,
     pub(crate) checked_commit: Option<CommitStamp>,
     pub(crate) problem: &'a str,
 }
@@ -135,13 +136,16 @@ pub(crate) fn damage_text(out: &mut Output<'_>, damage: &Damage<'_>) {
 pub(crate) fn damage_json(damage: &Damage<'_>) -> String {
     let mut object = JsonObject::new()
         .boolean("ok", false)
-        .string("file", damage.file)
+        .string("file", damage.file_display)
         .string("problem", damage.problem);
     if let Some(page) = page_named_in(damage.problem) {
         object = object.number("page", page);
     }
     object
-        .string("what_to_do", &what_to_do_lines(damage.file).join(" "))
+        .string(
+            "what_to_do",
+            &what_to_do_lines(damage.file_display).join(" "),
+        )
         .line()
 }
 

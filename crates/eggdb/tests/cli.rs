@@ -503,6 +503,22 @@ fn every_exit_code_and_its_message() {
     let too_long = dir.eggdb(&["put", "app.db", &long_key, "v"]);
     assert_exit(&too_long, 3);
     assert!(stderr(&too_long).contains("a key of 600 bytes is longer than the 512 bytes"));
+    let too_long_new = dir.eggdb(&["put", "--create", "new.db", &long_key, "v"]);
+    assert_exit(&too_long_new, 3);
+    assert_eq!(
+        stderr(&too_long_new),
+        format!(
+            "eggdb: cannot store {long_key} in new.db: a key of 600 bytes is longer than the 512 bytes a key may have with this page size\n"
+        )
+    );
+    assert!(
+        !dir.path().join("new.db").exists(),
+        "a refused put must not create a file"
+    );
+    let help_unknown = dir.eggdb(&["frob", "--help"]);
+    assert_exit(&help_unknown, 2);
+    assert!(stderr(&help_unknown).starts_with("eggdb: unknown command 'frob'. "));
+    assert!(help_unknown.stdout.is_empty());
     for output in [&exists, &missing_read, &not_database, &too_long] {
         assert!(!stderr(output).contains("Error {"), "{}", stderr(output));
     }

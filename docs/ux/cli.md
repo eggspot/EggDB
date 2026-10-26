@@ -184,7 +184,7 @@ with `ok:` or `damaged:`.
 
 **`check`, healthy** (exit 0):
 ```
-checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1761470047123456.0003)
+checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
   file            2.0 MiB, 512 pages of 4 KiB
   entries         12,480
   key bytes       198.2 KiB
@@ -204,14 +204,14 @@ ok: every page passed its checksum, every key is in order, and 3 pages are in us
 **`check`, damaged** (exit 4). The library's `Corrupt` message names the page and the problem;
 the CLI adds what was checked and what to do, as fixed lines:
 ```
-checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1761470047123456.0003)
+checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
 damaged: the B+tree page 77 is damaged: a key is out of order
   what was checked  every page read before the damage passed its checksum; the check stopped at the damage
   what to do        EggDB does not repair files yet. Restore app.db from your latest backup.
                     Keep the damaged file unchanged: `eggdb scan` may still read part of the data,
                     and an issue at https://github.com/eggspot/EggDB/issues with this output helps us.
 ```
-`check` JSON: `{"ok":true,"file":"app.db","commit_stamp":"1761470047123456.0003",
+`check` JSON: `{"ok":true,"file":"app.db","commit_stamp":"1793006047123456.0003",
 "commit_time":"2026-10-26T09:14:07.123456Z","page_size":4096,"pages":512,"file_bytes":2097152,
 "entries":12480,"key_bytes":202957,"value_bytes":1677722,"tree_height":3,"tree_pages":441,
 "overflow_values":3,"overflow_pages":12,"free_pages":40,"log_pages":16,"leaked_pages":0}`, and
@@ -224,7 +224,7 @@ app.db
   page size       4 KiB
   pages           512 (40 free)
   file size       2.0 MiB
-  last commit     2026-10-26 09:14:07.123456 UTC (stamp 1761470047123456.0003)
+  last commit     2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
   log since checkpoint  0 B (the next open replays nothing)
 ```
 A never-written file shows `last commit     none`. Stamps are shown as UTC time plus the raw
@@ -267,9 +267,10 @@ the first busy line; a `put`/`del` blocked by any open gets the second.
 
 Interrupt handling: the CLI keeps the operating system's default for Ctrl-C, so the process
 ends at once with the shell's interrupted status (130 on POSIX shells; 0xC000013A on Windows).
-Every line or entry is written whole and output is flushed only between entries, so a kill
-leaves no partial line in `json` or `hex` modes for lines under 4 KiB (one pipe write). A `put`
-is atomic in the engine, so an interrupt either committed it or did not. Writing to a closed pipe
+Output goes out in blocks of 64 KiB and more, which a pipe does not take atomically, so a
+killed `scan` can leave a partial last line in any format: a script that reads a stopped scan
+should drop a final line without a newline. A `put` is atomic in the engine, so an interrupt
+either committed it or did not. Writing to a closed pipe
 (`scan | head`) exits 0 quietly, never with a broken-pipe panic.
 
 ## 8. Colour
@@ -422,7 +423,8 @@ eggdb stats app.db
 The implementation follows this document; where it was silent or a detail could not be built
 as written, it did this, and the sections above were updated where they changed:
 
-1. **Ctrl-C** keeps the operating system's default (section 7), decided by research: a handler
+1. **Ctrl-C** keeps the operating system's default (section 7), decided by research, so a
+   killed `scan` can leave a partial last line, unlike the design's first wish: a handler
    would add signal code per OS and buy nothing, since `put` is atomic and `check` cannot stop
    half-way. `eggdb ui` brings signal handling with its terminal layer.
 2. **The damaged `check` report** says `every page read before the damage passed its checksum;
@@ -454,5 +456,12 @@ as written, it did this, and the sections above were updated where they changed:
     U+0000 to U+001F and U+007F (Rust's `char::is_control`), since some terminals act on C1
     codes such as U+009B: bytes holding one are shown as `0x` hex, so stored data can never
     drive the terminal.
-13. **Help for each command** follows the `scan` pattern of section 9: usage, a paragraph,
+13. **Every placeholder from the user**, the file name, an unknown command or option and a
+    refused option value included, is rendered by the `text` rules of section 4 in messages,
+    so a name with control characters appears as `0x…`. JSON keeps the file name as given.
+14. **`--help` after an unknown command** (`eggdb frob --help`) is the unknown-command error,
+    exit 2, not the main help.
+15. **`put --create` on a missing file** refuses a key or value too long for a new file before it
+    creates the file, so a refused put leaves no empty file behind.
+16. **Help for each command** follows the `scan` pattern of section 9: usage, a paragraph,
     options, examples.

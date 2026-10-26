@@ -279,3 +279,14 @@ fn a_value_is_required_when_stdin_is_a_terminal() {
     let get = run_with(&["get", &database, "k"], b"", Terminal::default());
     assert_eq!(get.stdout, b"from stdin");
 }
+
+#[test]
+fn a_file_name_with_control_characters_is_shown_as_hex() {
+    let directory = TempDirectory::new("control-name");
+    let file = directory.file("a\u{1b}[31m.db");
+    let ran = run_with(&["get", &file, "k"], b"", Terminal::default());
+    assert_eq!(ran.exit, 3);
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    assert!(!stderr.contains('\u{1b}'), "{stderr}");
+    assert!(stderr.starts_with("eggdb: cannot open 0x"), "{stderr}");
+}
