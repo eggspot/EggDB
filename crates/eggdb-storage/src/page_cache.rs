@@ -281,6 +281,8 @@ impl<F: File> PageCache<F> {
             self.dirty_frames.get_mut().clear();
             self.pages_written
                 .set(self.pages_written.get() + order.len() as u64);
+        } else if self.file.get_mut().has_failed() {
+            self.drop_every_page();
         }
         self.commit_order = order;
         committed
@@ -288,8 +290,23 @@ impl<F: File> PageCache<F> {
 
     /// Drops every change since the last commit: changed pages leave memory, and pages
     /// allocated or freed since are as the last commit left them (see [`PageFile::rollback`]).
+    /// The changed pages leave memory even when the file refuses, such as after a failed
+    /// commit.
     pub fn rollback(&mut self) -> Result<(), StorageError> {
-        self.file.get_mut().rollback()?;
+        self.drop_changes();
+        self.file.get_mut().rollback()
+    }
+
+    fn drop_every_page(&mut self) {
+        for frame in 0..self.frames.count() {
+            if self.pages[frame].get() != NO_PAGE {
+                self.discard(frame);
+            }
+        }
+        self.dirty_frames.get_mut().clear();
+    }
+
+    fn drop_changes(&mut self) {
         let dirty_frames = std::mem::take(self.dirty_frames.get_mut());
         for &frame in &dirty_frames {
             if self.is_dirty(frame) {
@@ -298,7 +315,6 @@ impl<F: File> PageCache<F> {
         }
         *self.dirty_frames.get_mut() = dirty_frames;
         self.dirty_frames.get_mut().clear();
-        Ok(())
     }
 
     fn write_and_commit(
@@ -360,7 +376,12 @@ impl<F: File> PageCache<F> {
     }
 
     fn load(&self, page_id: u64) -> Result<usize, StorageError> {
-        self.file.borrow().check_page_in_use(page_id)?;
+        let file = self.file.borrow();
+        if file.has_failed() {
+            return Err(StorageError::NeedsReopen);
+        }
+        file.check_page_in_use(page_id)?;
+        drop(file);
         let (frame, mut bytes) = self.claim_frame()?;
         self.misses.set(self.misses.get() + 1);
         let header = self.file.borrow().read_page(page_id, &mut bytes)?;
@@ -916,6 +937,36 @@ mod tests {
         );
         assert_eq!(cache.stats().cached_pages, 0);
         assert_eq!(fill_of(&cache, pages[0]), 0);
+    }
+
+    #[test]
+    fn after_a_failed_commit_every_read_and_change_is_refused_until_a_reopen() {
+        let mut failed = 0;
+        for offset in 0..12 {
+            let fs = SimFileSystem::new();
+            let pages = committed_pages(&fs, 2, 4);
+            let mut cache = open(&fs, Access::ReadWrite, 4);
+            cache.write(pages[0]).unwrap().fill(7);
+            cache.write(pages[1]).unwrap().fill(8);
+            assert_eq!(fill_of(&cache, pages[0]), 7);
+            fs.fail_operation(fs.operation_count() + offset);
+            if cache.commit(|_| {}).is_ok() {
+                continue;
+            }
+            failed += 1;
+            assert_eq!(cache.stats().dirty_pages, 0, "offset {offset}");
+            assert_eq!(cache.stats().cached_pages, 0, "offset {offset}");
+            for &page in &pages {
+                assert!(matches!(cache.read(page), Err(StorageError::NeedsReopen)));
+            }
+            assert!(matches!(cache.rollback(), Err(StorageError::NeedsReopen)));
+            assert!(matches!(
+                cache.write(pages[0]),
+                Err(StorageError::NeedsReopen)
+            ));
+            assert_eq!(cache.stats().dirty_pages, 0);
+        }
+        assert!(failed >= 3, "{failed}");
     }
 
     #[test]

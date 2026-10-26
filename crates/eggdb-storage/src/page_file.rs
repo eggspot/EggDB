@@ -916,6 +916,10 @@ impl<F: File> PageFile<F> {
         }
     }
 
+    pub(crate) fn has_failed(&self) -> bool {
+        self.failed
+    }
+
     pub(crate) fn check_writable(&self) -> Result<(), StorageError> {
         if self.access == Access::ReadOnly {
             return Err(StorageError::ReadOnly);
