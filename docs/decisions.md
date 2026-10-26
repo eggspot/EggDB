@@ -3357,7 +3357,10 @@ never run that code) read 1.38 to 1.39 in six CI runs on one kind of Linux runne
 the other, while `main` read 1.007 to 1.017 on both; a branch with only `page_file.rs` and
 `format.rs` taken back from `main` read 1.017. The cause is code generation, not work: both opens
 run the same steps. The check and the copy now live in two `#[inline(never)]` helpers, so
-`open`'s own code is as on `main`, and the ratio reads 0.934 on the slow kind of runner.
+`open`'s own code is as on `main`. On the slow kind of runner the ratio then read 0.73 to 0.93
+in three runs, with `Database` opens back at `main`'s 36 to 42 µs and the bench's own `Store`
+open reading 45 to 57 µs: this ratio is sensitive to code layout on that kind of runner, in
+either direction, and a later change to the open path may need the same care.
 
 Decided by research (a Sonnet research subagent, 2026-10-26), since it is a cost-against-safety
 choice the owner would otherwise make:
