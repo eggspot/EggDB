@@ -2,19 +2,28 @@ use crate::allocations::CountingAllocator;
 use crate::baseline::Metric;
 use crate::measure;
 use eggdb_platform::{File, OsMemory, SimFileSystem};
-use eggdb_storage::{Access, BTree, CacheSize, CreateOptions, PageCache, PageFile, StorageError};
+use eggdb_storage::{
+    Access, BTree, CacheSize, CreateOptions, PageCache, PageFile, ScanOrder, StorageError,
+};
 use std::collections::BTreeMap;
 use std::hint::black_box;
+use std::ops::Bound;
 use std::path::Path;
+use std::time::Instant;
 
 const GET_ENTRIES: u64 = 100_000;
 const COUNTED_GETS: u64 = 100_000;
 const COUNTED_PUTS: u64 = 100_000;
+const COUNTED_DELETES: u64 = 100_000;
+const SCANNED_ENTRIES: u64 = 100_000;
 const FRAMES: usize = 32_768;
 const SIM_PATH: &str = "bench-btree.db";
 
 pub(crate) const GET: &str = "btree.get";
 pub(crate) const PUT: &str = "btree.put";
+pub(crate) const DELETE: &str = "btree.delete";
+pub(crate) const SCAN: &str = "btree.scan";
+pub(crate) const SCAN_REVERSE: &str = "btree.scan_reverse";
 
 fn failed(what: &str) -> impl Fn(StorageError) -> String + '_ {
     move |error| format!("{what}: {error}")
@@ -163,4 +172,180 @@ pub(crate) fn put(allocator: &CountingAllocator) -> Result<Vec<Metric>, String> 
         Metric::reported(PUT, "ns_per_op", measured.subject_ns),
         Metric::reported(PUT, "reference_ns_per_op", measured.reference_ns),
     ])
+}
+
+fn delete_range<F: File>(
+    cache: &PageCache<F>,
+    tree: &BTree,
+    range: std::ops::Range<u64>,
+) -> Result<(), String> {
+    for index in range {
+        if !tree.delete(cache, &key(index)).map_err(failed("delete"))? {
+            return Err("a stored key was not deleted".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn delete(allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
+    let fs = SimFileSystem::new();
+    let (mut cache, tree) = new_tree(&fs)?;
+    put_range(&cache, &tree, 0..COUNTED_DELETES)?;
+    cache.commit(|_| {}).map_err(failed("commit"))?;
+    let operations = fs.operation_count();
+    let allocations = allocator.count();
+    delete_range(&cache, &tree, 0..COUNTED_DELETES)?;
+    let allocations = allocator.count() - allocations;
+    let operations = fs.operation_count() - operations;
+    let report = tree.check(&cache).map_err(failed("check"))?;
+    let pages_left = report.leaf_pages + report.inner_pages;
+
+    let measured = measure::paired_timed(
+        &mut |iterations| {
+            let fs = SimFileSystem::new();
+            let (cache, tree) = new_tree(&fs)?;
+            put_range(&cache, &tree, 0..iterations)?;
+            let start = Instant::now();
+            delete_range(&cache, &tree, 0..iterations)?;
+            Ok(start.elapsed())
+        },
+        &mut |iterations| {
+            let mut reference: BTreeMap<Vec<u8>, Vec<u8>> = (0..iterations)
+                .map(|index| (key(index).to_vec(), value(index).to_vec()))
+                .collect();
+            let start = Instant::now();
+            for index in 0..iterations {
+                reference
+                    .remove(&key(black_box(index))[..])
+                    .ok_or("the reference lost a key")?;
+            }
+            let elapsed = start.elapsed();
+            black_box(reference);
+            Ok(elapsed)
+        },
+    )?;
+    Ok(vec![
+        Metric::exact(DELETE, "allocations_per_100000_deletes", allocations as f64),
+        Metric::exact(
+            DELETE,
+            "file_operations_per_100000_deletes",
+            operations as f64,
+        ),
+        Metric::exact(
+            DELETE,
+            "tree_pages_left_after_deleting_all",
+            pages_left as f64,
+        ),
+        Metric::ratio(DELETE, "ratio_to_std_btreemap", measured.ratio),
+        Metric::reported(DELETE, "ns_per_op", measured.subject_ns),
+        Metric::reported(DELETE, "reference_ns_per_op", measured.reference_ns),
+    ])
+}
+
+fn scan_entries<F: File>(
+    cache: &PageCache<F>,
+    tree: &BTree,
+    order: ScanOrder,
+    count: u64,
+) -> Result<u8, String> {
+    let mut folded = 0u8;
+    let mut left = count;
+    while left > 0 {
+        let mut cursor = tree.scan(Bound::Unbounded, Bound::Unbounded, order);
+        let before = left;
+        while left > 0 {
+            let Some((key, value)) = cursor.next(cache).map_err(failed("scan"))? else {
+                break;
+            };
+            folded ^= key[0] ^ value[0];
+            left -= 1;
+        }
+        if left == before {
+            return Err("a scan of a full tree returned nothing".into());
+        }
+    }
+    Ok(folded)
+}
+
+fn reference_scan(reference: &BTreeMap<Vec<u8>, Vec<u8>>, order: ScanOrder, count: u64) -> u8 {
+    let mut folded = 0u8;
+    let mut left = count;
+    while left > 0 {
+        let entries: Box<dyn Iterator<Item = (&Vec<u8>, &Vec<u8>)>> = match order {
+            ScanOrder::Ascending => Box::new(reference.iter()),
+            ScanOrder::Descending => Box::new(reference.iter().rev()),
+        };
+        for (key, value) in entries.take(left.min(usize::MAX as u64) as usize) {
+            folded ^= key[0] ^ value[0];
+            left -= 1;
+        }
+    }
+    folded
+}
+
+fn scan(allocator: &CountingAllocator, order: ScanOrder) -> Result<Vec<Metric>, String> {
+    let name = match order {
+        ScanOrder::Ascending => SCAN,
+        ScanOrder::Descending => SCAN_REVERSE,
+    };
+    let fs = SimFileSystem::new();
+    {
+        let (mut cache, tree) = new_tree(&fs)?;
+        put_range(&cache, &tree, 0..GET_ENTRIES)?;
+        cache.commit(|_| {}).map_err(failed("commit"))?;
+    }
+    let file =
+        PageFile::open(&fs, Path::new(SIM_PATH), Access::ReadOnly).map_err(failed("open"))?;
+    let cache = PageCache::new(file, &OsMemory::new(), CacheSize::Pages(FRAMES))
+        .map_err(failed("cache"))?;
+    let tree = BTree::open(&cache, cache.superblock().catalog_root).map_err(failed("open tree"))?;
+    black_box(scan_entries(&cache, &tree, order, SCANNED_ENTRIES)?);
+    let before = cache.stats();
+    let operations = fs.operation_count();
+    let allocations = allocator.count();
+    black_box(scan_entries(&cache, &tree, order, SCANNED_ENTRIES)?);
+    let allocations = allocator.count() - allocations;
+    let operations = fs.operation_count() - operations;
+    let after = cache.stats();
+    if after.misses != before.misses {
+        return Err(format!("{name}: a page read missed the cache"));
+    }
+
+    let reference: BTreeMap<Vec<u8>, Vec<u8>> = (0..GET_ENTRIES)
+        .map(|index| (key(index).to_vec(), value(index).to_vec()))
+        .collect();
+    let measured = measure::paired(
+        &mut |iterations| {
+            black_box(scan_entries(&cache, &tree, order, iterations)?);
+            Ok(())
+        },
+        &mut |iterations| {
+            black_box(reference_scan(&reference, order, black_box(iterations)));
+            Ok(())
+        },
+    )?;
+    Ok(vec![
+        Metric::exact(
+            name,
+            "page_reads_per_100000_entries",
+            (after.hits - before.hits) as f64,
+        ),
+        Metric::exact(name, "allocations_per_100000_entries", allocations as f64),
+        Metric::exact(
+            name,
+            "file_operations_per_100000_entries",
+            operations as f64,
+        ),
+        Metric::ratio(name, "ratio_to_std_btreemap", measured.ratio),
+        Metric::reported(name, "ns_per_op", measured.subject_ns),
+        Metric::reported(name, "reference_ns_per_op", measured.reference_ns),
+    ])
+}
+
+pub(crate) fn scan_ascending(allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
+    scan(allocator, ScanOrder::Ascending)
+}
+
+pub(crate) fn scan_descending(allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
+    scan(allocator, ScanOrder::Descending)
 }

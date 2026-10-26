@@ -30,7 +30,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
 type Benchmark = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 
-const BENCHMARKS: [(&str, Benchmark); 8] = [
+const BENCHMARKS: [(&str, Benchmark); 11] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -39,6 +39,9 @@ const BENCHMARKS: [(&str, Benchmark); 8] = [
     (log::COMMIT_OFF, log::commit_off),
     (btree::GET, btree::get),
     (btree::PUT, btree::put),
+    (btree::DELETE, btree::delete),
+    (btree::SCAN, btree::scan_ascending),
+    (btree::SCAN_REVERSE, btree::scan_descending),
 ];
 
 const OS: &str = std::env::consts::OS;

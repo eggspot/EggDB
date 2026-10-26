@@ -1,8 +1,10 @@
+use crate::cursor::{Cursor, ScanOrder};
 use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PageSize};
 use crate::page_cache::{PageCache, PageMut, PageRef};
 use crate::tree_page::{self, MAX_HEIGHT, Node, Shape};
 use eggdb_platform::File;
+use std::ops::Bound;
 
 /// A B+tree of byte-string keys and values in the pages of a [`PageCache`] (D77, format.md
 /// "B+tree pages").
@@ -11,7 +13,9 @@ use eggdb_platform::File;
 /// two-byte slots at the front, searched by binary search, points at cells packed from the
 /// back. Each page keeps a low and a high fence key bounding the keys it may hold, and stores
 /// the prefix the two share only once, so its keys are stored without it. Leaf splits choose
-/// the shortest separator between the halves.
+/// the shortest separator between the halves, and deletes merge pages left less than a quarter
+/// full with the page beside them (D83). Leaves have no sibling pointers: a [`Cursor`] moves
+/// between them through the tree, using their fence keys.
 ///
 /// The root page stays the same for the tree's life: a root split moves its entries into two
 /// new pages and turns the root into an inner page one level up. So the page that names the
@@ -191,6 +195,82 @@ impl BTree {
         store(cache, &path[..=depth], page, node, index)
     }
 
+    /// Removes `key` and its value, and returns whether the key was there. A key that is not
+    /// there changes nothing.
+    ///
+    /// A page left less than a quarter full is merged with the page beside it under the same
+    /// parent, the left one first, when the two fit in one page; the emptied page goes back to
+    /// the file's free list, and merges go on up the tree while parents are left under-filled.
+    /// A root left with a single child takes that child's entries, so the tree gets shorter.
+    /// A delete never allocates a page and never splits one. As with [`BTree::put`], an error
+    /// such as [`StorageError::CacheFull`] in the middle of a merge can leave the
+    /// transaction's changes half made: roll the transaction back.
+    pub fn delete<F: File>(&self, cache: &PageCache<F>, key: &[u8]) -> Result<bool, StorageError> {
+        if key.len() > Self::max_key_bytes(cache.page_size()) {
+            return Ok(false);
+        }
+        let mut path = [Step::default(); MAX_HEIGHT as usize];
+        let mut depth = 0;
+        let mut page_id = self.root;
+        let mut level = None;
+        loop {
+            let page = cache.read(page_id)?;
+            let shape = shape_of_ref(&page)?;
+            expect_level(&shape, level)?;
+            let suffix = shape.key_suffix(&page, key)?;
+            if shape.is_leaf() {
+                if shape.search(&page, suffix)?.is_err() {
+                    return Ok(false);
+                }
+                break;
+            }
+            let child = shape.child_index_for(&page, suffix)?;
+            path[depth] = Step {
+                page: page_id,
+                child,
+            };
+            page_id = shape.child_at(&page, child)?;
+            level = Some(shape.level - 1);
+            depth += 1;
+        }
+        {
+            let mut page = cache.write(page_id)?;
+            let mut shape = shape_of_mut(&page)?;
+            let suffix = shape.key_suffix(&page, key)?;
+            let Ok(index) = shape.search(&page, suffix)? else {
+                return Err(shape
+                    .corrupt("a key found in a leaf is gone when the leaf is changed")
+                    .into());
+            };
+            shape.remove(&mut page, index)?;
+        }
+        rebalance(cache, &path[..depth], page_id)?;
+        Ok(true)
+    }
+
+    /// A cursor over the entries with keys from `start` to `end`, in `order`. It reads the
+    /// tree as [`Cursor::next`] is called, and holds no page between calls. A range with
+    /// `start` above `end` holds no entries.
+    pub fn scan(&self, start: Bound<&[u8]>, end: Bound<&[u8]>, order: ScanOrder) -> Cursor {
+        Cursor::new(
+            self.root,
+            start.map(<[u8]>::to_vec),
+            end.map(<[u8]>::to_vec),
+            order,
+        )
+    }
+
+    /// A cursor over the entries whose keys start with `prefix`, in `order`. The empty prefix
+    /// scans the whole tree.
+    pub fn scan_prefix(&self, prefix: &[u8], order: ScanOrder) -> Cursor {
+        Cursor::new(
+            self.root,
+            Bound::Included(prefix.to_vec()),
+            keys_after_prefix(prefix),
+            order,
+        )
+    }
+
     /// Checks every page of the tree and how they fit together, and counts what it holds.
     /// This is what `eggdb check` runs for each tree.
     ///
@@ -217,7 +297,163 @@ struct Bounds {
     high: Option<Vec<u8>>,
 }
 
-fn shape_of_ref(page: &PageRef<'_>) -> Result<Shape, StorageError> {
+#[derive(Debug, Clone, Copy, Default)]
+struct Step {
+    page: u64,
+    child: usize,
+}
+
+const UNDER_FILLED_DIVISOR: usize = 4;
+
+fn keys_after_prefix(prefix: &[u8]) -> Bound<Vec<u8>> {
+    let Some(last) = prefix.iter().rposition(|&byte| byte != 0xFF) else {
+        return Bound::Unbounded;
+    };
+    let mut end = prefix[..=last].to_vec();
+    end[last] += 1;
+    Bound::Excluded(end)
+}
+
+fn rebalance<F: File>(
+    cache: &PageCache<F>,
+    parents: &[Step],
+    changed: u64,
+) -> Result<(), StorageError> {
+    let under_filled = cache.page_size().bytes() / UNDER_FILLED_DIVISOR;
+    let mut page_id = changed;
+    for &step in parents.iter().rev() {
+        let mut child = step.child;
+        let mut merged = false;
+        while used_bytes(cache, page_id)? < under_filled {
+            let Some((index, page)) = merge_with_a_sibling(cache, step.page, child)? else {
+                break;
+            };
+            (child, page_id, merged) = (index, page, true);
+        }
+        if !merged {
+            return Ok(());
+        }
+        page_id = step.page;
+    }
+    collapse_root(cache, page_id)
+}
+
+fn used_bytes<F: File>(cache: &PageCache<F>, page_id: u64) -> Result<usize, StorageError> {
+    let page = cache.read(page_id)?;
+    Ok(shape_of_ref(&page)?.used_bytes())
+}
+
+fn merge_with_a_sibling<F: File>(
+    cache: &PageCache<F>,
+    parent: u64,
+    child: usize,
+) -> Result<Option<(usize, u64)>, StorageError> {
+    let separators = {
+        let page = cache.read(parent)?;
+        shape_of_ref(&page)?.count
+    };
+    if child > 0
+        && let Some(merged) = merge_children(cache, parent, child - 1)?
+    {
+        return Ok(Some((child - 1, merged)));
+    }
+    if child < separators
+        && let Some(merged) = merge_children(cache, parent, child)?
+    {
+        return Ok(Some((child, merged)));
+    }
+    Ok(None)
+}
+
+fn merge_children<F: File>(
+    cache: &PageCache<F>,
+    parent_id: u64,
+    separator: usize,
+) -> Result<Option<u64>, StorageError> {
+    let (level, key, left_id, right_id) = {
+        let parent = cache.read(parent_id)?;
+        let shape = shape_of_ref(&parent)?;
+        let key = [
+            shape.prefix(&parent),
+            shape.cell_at(&parent, separator)?.key,
+        ]
+        .concat();
+        let left = shape.child_at(&parent, separator)?;
+        let right = shape.child_at(&parent, separator + 1)?;
+        (shape.level - 1, key, left, right)
+    };
+    let page_size = cache.page_size().bytes();
+    let fits = {
+        let left = cache.read(left_id)?;
+        let left_shape = shape_of_ref(&left)?;
+        expect_level(&left_shape, Some(level))?;
+        let right = cache.read(right_id)?;
+        let right_shape = shape_of_ref(&right)?;
+        expect_level(&right_shape, Some(level))?;
+        left_shape.merged_size(&left, &key, &right_shape, &right) <= page_size
+    };
+    if !fits {
+        return Ok(None);
+    }
+    let left = read_node(cache, left_id, level)?;
+    let right = read_node(cache, right_id, level)?;
+    if left.high.as_deref() != Some(&key[..]) || right.low != key {
+        return Err(FormatError::CorruptTree {
+            page: parent_id,
+            problem: "a separator differs from the fence keys of the pages beside it",
+        }
+        .into());
+    }
+    let merged = left.merge(key, right);
+    if merged.size() > page_size {
+        return Ok(None);
+    }
+    merged.encode(right_id, &mut cache.write(right_id)?)?;
+    {
+        let mut parent = cache.write(parent_id)?;
+        let mut shape = shape_of_mut(&parent)?;
+        shape.remove(&mut parent, separator)?;
+    }
+    cache.free(left_id)?;
+    Ok(Some(right_id))
+}
+
+fn collapse_root<F: File>(cache: &PageCache<F>, root: u64) -> Result<(), StorageError> {
+    loop {
+        let (child, level) = {
+            let page = cache.read(root)?;
+            let shape = shape_of_ref(&page)?;
+            if shape.is_leaf() || shape.count > 0 {
+                return Ok(());
+            }
+            (shape.child_at(&page, 0)?, shape.level - 1)
+        };
+        let node = read_node(cache, child, level)?;
+        if !node.low.is_empty() || node.high.is_some() {
+            return Err(FormatError::CorruptTree {
+                page: child,
+                problem: "the only child of the root has fence keys",
+            }
+            .into());
+        }
+        {
+            let mut page = cache.write(root)?;
+            let lsn = page.header().lsn;
+            page.set_header(tree_page::header_for(node.level, lsn))?;
+            node.encode(root, &mut page)?;
+        }
+        cache.free(child)?;
+    }
+}
+
+fn read_node<F: File>(cache: &PageCache<F>, page_id: u64, level: u8) -> Result<Node, StorageError> {
+    let page = cache.read(page_id)?;
+    let shape = shape_of_ref(&page)?;
+    expect_level(&shape, Some(level))?;
+    Ok(Node::decode(&shape, &page)?)
+}
+
+pub(crate) fn shape_of_ref(page: &PageRef<'_>) -> Result<Shape, StorageError> {
     let shape = Shape::parse(page.page_id(), page.header(), page)?;
     if !page.contents_checked() {
         shape.validate(page)?;
@@ -235,7 +471,7 @@ fn shape_of_mut(page: &PageMut<'_>) -> Result<Shape, StorageError> {
     Ok(shape)
 }
 
-fn expect_level(shape: &Shape, level: Option<u8>) -> Result<(), StorageError> {
+pub(crate) fn expect_level(shape: &Shape, level: Option<u8>) -> Result<(), StorageError> {
     match level {
         None if shape.has_fences() => Err(shape.corrupt("the root page has fence keys").into()),
         Some(level) if shape.level != level => Err(shape
@@ -365,6 +601,9 @@ fn check_page<F: File>(
         ));
     }
     if level.is_none() {
+        if node.level != 0 && node.keys.is_empty() {
+            return Err(corrupt("the root is an inner page with a single child"));
+        }
         report.height = u32::from(node.level) + 1;
     }
     if node.level == 0 {

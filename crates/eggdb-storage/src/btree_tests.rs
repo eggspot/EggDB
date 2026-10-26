@@ -9,11 +9,11 @@ use eggdb_platform::{CrashMode, SimFile, SimFileSystem, SimMemory};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const DB: &str = "db";
+pub(crate) const DB: &str = "db";
 
-type Model = BTreeMap<Vec<u8>, Vec<u8>>;
+pub(crate) type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
-fn create(fs: &SimFileSystem, page_size: PageSize, frames: usize) -> PageCache<SimFile> {
+pub(crate) fn create(fs: &SimFileSystem, page_size: PageSize, frames: usize) -> PageCache<SimFile> {
     let options = CreateOptions {
         page_size,
         file_id: FileId(*b"b+tree-tests-id!"),
@@ -22,12 +22,12 @@ fn create(fs: &SimFileSystem, page_size: PageSize, frames: usize) -> PageCache<S
     PageCache::new(file, &SimMemory::new(), CacheSize::Pages(frames)).unwrap()
 }
 
-fn open(fs: &SimFileSystem, access: Access, frames: usize) -> PageCache<SimFile> {
+pub(crate) fn open(fs: &SimFileSystem, access: Access, frames: usize) -> PageCache<SimFile> {
     let file = PageFile::open(fs, Path::new(DB), access).unwrap();
     PageCache::new(file, &SimMemory::new(), CacheSize::Pages(frames)).unwrap()
 }
 
-fn new_tree(cache: &mut PageCache<SimFile>) -> BTree {
+pub(crate) fn new_tree(cache: &mut PageCache<SimFile>) -> BTree {
     let tree = BTree::create(cache).unwrap();
     cache
         .commit(|superblock| superblock.catalog_root = tree.root())
@@ -35,11 +35,11 @@ fn new_tree(cache: &mut PageCache<SimFile>) -> BTree {
     tree
 }
 
-fn stored_tree(cache: &PageCache<SimFile>) -> BTree {
+pub(crate) fn stored_tree(cache: &PageCache<SimFile>) -> BTree {
     BTree::open(cache, cache.superblock().catalog_root).unwrap()
 }
 
-fn assert_matches(tree: &BTree, cache: &PageCache<SimFile>, model: &Model) {
+pub(crate) fn assert_matches(tree: &BTree, cache: &PageCache<SimFile>, model: &Model) {
     let report = tree.check(cache).unwrap();
     assert_eq!(report.entries, model.len() as u64);
     assert_eq!(
@@ -55,12 +55,12 @@ fn assert_matches(tree: &BTree, cache: &PageCache<SimFile>, model: &Model) {
     }
 }
 
-fn bytes_up_to(rng: &mut TestRng, least: usize, extra: usize) -> Vec<u8> {
+pub(crate) fn bytes_up_to(rng: &mut TestRng, least: usize, extra: usize) -> Vec<u8> {
     let len = least + rng.below(extra);
     rng.bytes(len)
 }
 
-fn random_entry(rng: &mut TestRng, page_size: PageSize) -> (Vec<u8>, Vec<u8>) {
+pub(crate) fn random_entry(rng: &mut TestRng, page_size: PageSize) -> (Vec<u8>, Vec<u8>) {
     let max_key = BTree::max_key_bytes(page_size);
     let max_entry = BTree::max_entry_bytes(page_size);
     let key_len = match rng.below(10) {
@@ -306,7 +306,7 @@ fn separators_are_the_shortest_key_between_the_halves() {
     assert_eq!(shortest_separator(b"apple", b"banana"), b"b");
 }
 
-fn tree_with_entries(fs: &SimFileSystem, seed: u64, count: usize) -> Model {
+pub(crate) fn tree_with_entries(fs: &SimFileSystem, seed: u64, count: usize) -> Model {
     let mut cache = create(fs, PageSize::DEFAULT, 512);
     let tree = new_tree(&mut cache);
     let mut rng = TestRng::new(seed);
@@ -340,7 +340,7 @@ fn grow(fs: &SimFileSystem, model: &mut Model, puts: usize, fail_at: Option<u64>
     fs.operation_count() - start
 }
 
-fn committed_report(fs: &SimFileSystem) -> TreeReport {
+pub(crate) fn committed_report(fs: &SimFileSystem) -> TreeReport {
     let cache = open(fs, Access::ReadOnly, 64);
     stored_tree(&cache).check(&cache).unwrap()
 }
@@ -389,7 +389,7 @@ fn a_crash_at_any_operation_of_a_commit_that_splits_the_root_leaves_the_old_or_t
     assert_eq!((before.height, after.height), (1, 2), "{after:?}");
 }
 
-fn tree_pages(cache: &PageCache<SimFile>) -> Vec<u64> {
+pub(crate) fn tree_pages(cache: &PageCache<SimFile>) -> Vec<u64> {
     let first = cache.page_size().first_data_page();
     (first..cache.superblock().page_count)
         .filter(|&page| {
@@ -403,7 +403,7 @@ fn tree_pages(cache: &PageCache<SimFile>) -> Vec<u64> {
         .collect()
 }
 
-fn mutate(rng: &mut TestRng, header: &mut PageHeader, body: &mut [u8]) {
+pub(crate) fn mutate(rng: &mut TestRng, header: &mut PageHeader, body: &mut [u8]) {
     for _ in 0..1 + rng.below(3) {
         match rng.below(6) {
             0 => {
