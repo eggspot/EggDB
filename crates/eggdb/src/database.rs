@@ -76,8 +76,8 @@ pub struct Database {
 pub struct Stats {
     /// The page size, in bytes.
     pub page_size: usize,
-    /// The pages in the file as of the last commit, the two header slots and the log's
-    /// pages included.
+    /// The pages in the file as of the last commit, the header's and the log's pages
+    /// included.
     pub page_count: u64,
     /// Pages in the file that are free for later commits to reuse.
     pub free_pages: u64,
@@ -382,7 +382,7 @@ impl Database {
 
     /// Closes the database: writes a checkpoint, so the next open replays nothing, and closes
     /// the file, which lets other opens of it in. The file is closed even when the checkpoint
-    /// fails; the error says why, and every commit that returned is still in the file. A
+    /// fails, and the error says why; the next open then recovers the file as after a crash. A
     /// read-only database just closes. Dropping the database closes it without the checkpoint.
     pub fn close(self) -> Result<()> {
         if self.read_only {

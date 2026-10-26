@@ -80,9 +80,13 @@ pub enum ErrorKind {
 /// type is not part of this crate's stable API: match on [`Error::kind`] instead.
 pub struct Error {
     kind: ErrorKind,
-    message: Option<Box<str>>,
-    source: Option<StorageError>,
+    detail: Detail,
     path: Option<Box<Path>>,
+}
+
+enum Detail {
+    Storage(StorageError),
+    Message(Box<str>, Option<StorageError>),
 }
 
 impl Error {
@@ -94,8 +98,7 @@ impl Error {
     pub(crate) fn storage(error: StorageError) -> Self {
         Self {
             kind: kind_of(&error),
-            message: None,
-            source: Some(error),
+            detail: Detail::Storage(error),
             path: None,
         }
     }
@@ -103,20 +106,32 @@ impl Error {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<Box<str>>) -> Self {
         Self {
             kind,
-            message: Some(message.into()),
-            source: None,
+            detail: Detail::Message(message.into(), None),
             path: None,
         }
     }
 
-    pub(crate) fn explained(mut self, message: impl Into<Box<str>>) -> Self {
-        self.message = Some(message.into());
-        self
+    pub(crate) fn explained(self, message: impl Into<Box<str>>) -> Self {
+        let source = match self.detail {
+            Detail::Storage(source) | Detail::Message(_, Some(source)) => Some(source),
+            Detail::Message(_, None) => None,
+        };
+        Self {
+            detail: Detail::Message(message.into(), source),
+            ..self
+        }
     }
 
     pub(crate) fn opening(mut self, path: &Path) -> Self {
         self.path = Some(path.into());
         self
+    }
+
+    fn storage_source(&self) -> Option<&StorageError> {
+        match &self.detail {
+            Detail::Storage(source) | Detail::Message(_, Some(source)) => Some(source),
+            Detail::Message(_, None) => None,
+        }
     }
 }
 
@@ -166,20 +181,22 @@ impl fmt::Display for Error {
         if let Some(path) = &self.path {
             write!(f, "cannot open the database {}: ", path.display())?;
         }
-        match (&self.message, &self.source) {
-            (Some(message), _) => f.write_str(message),
-            (None, Some(source)) => source.fmt(f),
-            (None, None) => f.write_str("an unexplained failure"),
+        match &self.detail {
+            Detail::Storage(source) => source.fmt(f),
+            Detail::Message(message, _) => f.write_str(message),
         }
     }
 }
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Error")
-            .field("kind", &self.kind)
-            .field("message", &self.message)
-            .field("source", &self.source)
+        let mut debug = f.debug_struct("Error");
+        debug.field("kind", &self.kind);
+        if let Detail::Message(message, _) = &self.detail {
+            debug.field("message", message);
+        }
+        debug
+            .field("source", &self.storage_source())
             .field("path", &self.path)
             .finish()
     }
@@ -187,8 +204,7 @@ impl fmt::Debug for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_ref()
+        self.storage_source()
             .map(|source| source as &(dyn std::error::Error + 'static))
     }
 }
