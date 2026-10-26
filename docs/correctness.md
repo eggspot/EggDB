@@ -11,9 +11,10 @@ stops. The details of every test are in [testing.md](testing.md); this page is t
   `eggdb` command uses): a crash of the process or a power loss after that loses nothing.
   `Normal` can lose the latest commits on a power loss but never corrupts the file, and `Off`
   promises nothing after a power loss ([embedded.md](embedded.md), "Durability").
-- **Damage is found, never served.** Every page and every log record carries a CRC-32C checksum
-  that is checked when it is read; a damaged page is an error (`Corrupt`, exit 4), never wrong
-  data. `eggdb check` and `Database::check` read every page and account for every page of the
+- **Damage is reported, not served.** Every page and every log record carries a CRC-32C
+  checksum that is checked when it is read; a page that fails it is an error (`Corrupt`, exit
+  4), never data. A checksum catches every damage of a few bits and all but about one in four
+  billion of the rest. `eggdb check` and `Database::check` read every page and account for every page of the
   file.
 - **Hostile input never crashes or hangs EggDB.** A damaged or crafted file, a hostile export
   and any command-line argument produce an error, not a panic or a hang, and a hostile file
@@ -32,7 +33,7 @@ stops. The details of every test are in [testing.md](testing.md); this page is t
 | `check` finds damage | Crafted pages and chains that must fail `check`, and a check after every case of the tests above. | testing.md |
 | Files from v0.2.0 stay readable | Two sample files written by v0.2.0, one checkpointed and one with three commits still in its log, and a v0.2.0 export, are committed and pinned by their bytes. CI opens, reads, scans, checks, replays, writes to and imports them on every change. | `crates/eggdb/tests/sample_files.rs`, testing.md, "Files from released versions" (D96) |
 | The released binaries work | A smoke test runs every command, an export and import round trip, the sample files and a scripted `eggdb ui` session in a pseudo-terminal against each release binary on its own platform. | `scripts/smoke-test.sh`, testing.md "The release smoke test" (D96) |
-| One writer, locked files | Two processes opening one file, a busy file for every command, and locks released when a handle closes. | `crates/eggdb/tests/lock_across_processes.rs`, `cli_busy.rs` (D95) |
+| One writer, locked files | Two processes opening one file; `get` and `put` refused with exit 5 while another program has the file open for writing, and `get` working beside a reader; locks released when a handle closes, even while a child process starts. | `crates/eggdb/tests/lock_across_processes.rs`, `cli_busy.rs` (D95) |
 
 ## Where it runs in CI
 - **Every test** runs on Linux x86-64 (glibc and musl), macOS on Apple silicon and Windows
