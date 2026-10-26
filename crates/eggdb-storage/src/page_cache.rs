@@ -778,6 +778,9 @@ mod tests {
             cache.allocate(leaf()),
             Err(StorageError::ReadOnly)
         ));
+        let mut cache = cache;
+        assert!(matches!(cache.rollback(), Err(StorageError::ReadOnly)));
+        assert!(matches!(cache.commit(|_| {}), Err(StorageError::ReadOnly)));
         drop(cache);
         let cache = open(&fs, Access::ReadWrite, 2);
         let flagged = PageHeader { flags: 1, ..leaf() };

@@ -2546,7 +2546,8 @@ published. `cargo run --release -p eggdb-bench` runs every benchmark and checks 
   run in the same process. Fifteen samples of at least 20 ms each alternate between the two,
   and the gate is the median ratio. It fails more than 30% above the line for this system,
   after one retry of that benchmark. The page-cache hit's reference is a standard `HashMap`
-  lookup plus a byte read from a frame-sized array. A reference made only of CRC-32C would
+  lookup plus a byte read from an
+  array of page-sized frames. A reference made only of CRC-32C would
   track the processor's CRC instructions, not memory and hashing. A missing ratio line only
   warns and prints the line to add, so a new system's line can be committed from its first CI
   run.
