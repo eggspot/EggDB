@@ -32,6 +32,10 @@ any page_cache.miss allocations_per_op 0
 any page_cache.miss evictions_per_op 1
 any page_cache.miss file_operations_per_op 1
 any page_cache.miss misses_per_op 1
+any transaction.read allocations_per_op 0
+any transaction.read file_operations_per_op 0
+any transaction.write file_operations_per_1000_commits 3203
+any transaction.write syncs_per_1000_commits 1040
 linux btree.delete ratio_to_std_btreemap 2.008
 linux btree.get ratio_to_std_btreemap 1.85
 linux btree.put ratio_to_std_btreemap 2.574
@@ -46,3 +50,5 @@ macos btree.scan ratio_to_std_btreemap 5.059
 macos btree.scan_reverse ratio_to_std_btreemap 7.586
 macos log.recovery ratio_to_crc32c_of_the_replayed_log 1.827
 macos page_cache.hit ratio_to_reference 0.375
+macos transaction.read ratio_to_btree_get 1.0
+macos transaction.write ratio_to_page_cache_commit 1.035
