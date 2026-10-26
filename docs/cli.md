@@ -238,11 +238,14 @@ edit is not committed).
   byte, `\u{202e}` a character, `\n`, `\t`, `\r` and `\\` what they are in Rust; a backslash
   that starts nothing else is refused with `Bad escape at column 12: expected two hex digits
   after \x` and the cursor on it. A paste is taken literally, so pasted bytes are stored as
-  they are. Confirming shows the key and the sizes (`58 B → 61 B`); `Enter` (for a delete,
-  `d` again) then runs one write transaction (put or delete, commit) that is on disk before the
-  screen redraws, and the status line says `Committed user:1 (61 B) at 09:14:03Z`. No transaction is open while an
-  editor is. The editor takes values up to 4 MiB of text; store larger ones with
-  `eggdb put <file> <key> @file`.
+  they are, except that its line breaks, which terminals send as `\r` or `\r\n`, are stored as
+  `\n`; a paste larger than 1 MiB is refused whole with a message, never cut. Confirming shows
+  the key with its length and the value's sizes (`58 B → 61 B`); `Enter` (for a delete, `d`
+  again) then runs one write transaction (put or delete, commit) that is on disk before the
+  screen redraws, and the status line says `Committed user:1 (61 B) at 09:14:03Z`. A
+  confirmation takes keys only once it is on the screen, so keys typed or pasted ahead of it
+  cannot answer it. No transaction is open while an editor is. The editor takes values up to
+  4 MiB of text; store larger ones with `eggdb put <file> <key> @file`.
 - **When a change fails**, nothing is committed and the editor keeps its text. Errors read
   `Error (<Kind>): <message>` with the engine's kind and message: `TooLarge` (one commit's
   pages must fit in the page cache, so a larger `--cache` helps), `WriterActive` (`r` waits up
@@ -251,7 +254,8 @@ edit is not committed).
   shows it in full. Messages clear at the next key or after 8 s.
 - **Check.** `c` shows the header's stats at once and runs `Database::check` on a worker
   thread, then the report (`Check  OK — every page accounted for`) or `Check  FAILED` with the
-  damage; `Enter` goes back.
+  damage; `Enter` goes back. Quitting while a check runs leaves the file closed without a
+  checkpoint, which loses no commit; the next open replays the short log.
 - **Any size.** The list is a window over a scan, so it moves as fast over a billion keys as
   over twenty; the key count runs in steps between key presses (`1,204+ keys` until it is done).
   A value is read whole when it is selected, except above 64 MiB, which waits for `Enter`.

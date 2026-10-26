@@ -550,11 +550,16 @@ Where the design above was silent, or could not be built as written, the build c
 simplest consistent option (D92):
 1. **Typing and pasting.** Typed text is the escape spelling (`\xNN`, `\u{..}`, `\n`, `\t`,
    `\r`, `\\`); a backslash must start one of these, or confirming reports `Bad escape`. A paste
-   is taken literally: its backslashes, tabs, carriage returns, controls and invisible
-   characters are spelled as escapes on the way in, so the value gets exactly the pasted bytes
-   (pasted JSON keeps its `\n`); a paste into the prefix filter is taken literally too. Typed
-   invisible characters (a bidi override from an input method) are spelled too, so the editor
-   never shows one raw. `Tab` types `\t`.
+   is taken literally: its backslashes, tabs, controls and invisible characters are spelled as
+   escapes on the way in, so the value gets the pasted bytes; a paste into the prefix filter
+   is taken literally too. The one change is line breaks: terminals send a pasted line break
+   as `\r` (xterm, VTE, Windows Terminal) or `\r\n`, so in a paste `\r\n` and a lone `\r`
+   become `\n` (a line break in the multi-line editor, the escape `\n` in the key line), and a
+   carriage return byte is entered by typing `\r`. Pasted JSON keeps its line breaks and the
+   `\n` inside its strings. A paste larger than 1 MiB never arrives: the input layer drops it
+   whole and the UI says `The paste was larger than 1 MiB and was dropped`. Typed invisible
+   characters (a bidi override from an input method) are spelled too, so the editor never
+   shows one raw. `Tab` types `\t`.
 2. **Keys that type.** In an editor every printable key types, `?` and `q` included; `F1`
    opens the help screen at its Editing section, and `Ctrl-C` is the quit key that asks before
    discarding an unsaved edit (a second `Ctrl-C` quits). `Esc` on a changed value asks
@@ -562,8 +567,10 @@ simplest consistent option (D92):
 3. **Which editor.** A text value with a line break, or any value of 1 KiB or more, opens in
    the multi-line editor; a binary value always keeps its line breaks as `\n`. The cursor starts
    at the beginning of the value. The editor holds at most 4 MiB of text: a larger value is
-   refused at `e` with a toast pointing to `eggdb put <file> <key> @file`, and typing or
-   pasting past the bound is refused with a toast.
+   refused at `e` with a toast pointing to `eggdb put <file> <key> @file` (also a smaller
+   binary value whose escaped spelling is longer than 4 MiB, and the toast says so), and typing
+   or pasting past the bound is refused with a toast. Undo and redo keep the newest 16 MiB of
+   changes; older ones are forgotten.
 4. **The editor's title** is ` Edit  <view> · <old> → <new>  <key>`, with the key last so the
    sizes survive a narrow pane (the key is also on the row below). A new key's title starts
    with `Add` and its old size is `new`.
@@ -578,7 +585,8 @@ simplest consistent option (D92):
    an `Arc`; the UI calls nothing else on the database until it ends, so its own reads never
    wait behind it. There is no progress callback, so the screen shows the elapsed seconds and a
    spinner (`| / - \`). `q` and `Ctrl-C` quit at any time (a running check is left to the
-   process exit, and the file is then closed without a checkpoint, which loses nothing).
+   process exit, and the file is then closed without a checkpoint, which loses nothing); with
+   an unsaved edit both ask first, as everywhere else.
 8. **Counts after a commit.** A commit adjusts a finished key count by ±1; while the count is
    still running it starts over. A new key outside the window moves the window to it, and the
    position shows `?–?` until a `Home` or the count makes it known again.
@@ -590,3 +598,9 @@ simplest consistent option (D92):
     expose, and the engine's `TooLarge` message names the pages and frames when it is exceeded.
 12. **Modals** are as wide as their longest line, up to the screen's width less 8 columns of
     text, and wrap longer lines.
+13. **A question waits to be seen.** A modal ignores every key until a frame showing it has
+    been presented (`Ui::presented`, called by the run loop after each frame). Keys that were
+    already queued, typed ahead or pasted by a terminal without bracketed paste (`dd`,
+    `x` Enter Enter), can open a confirmation but never answer it. The Key line of a
+    confirmation shows the key's length and wraps at any character, so two keys that differ
+    only in spaces never look alike.

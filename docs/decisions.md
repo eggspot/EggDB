@@ -3531,9 +3531,18 @@ loses nothing (D87). The key count, by contrast, stays in steps on the UI thread
 **Bounded editing (D9).** The editor holds at most 4 MiB of text, so a value above that (or
 one the viewer did not load, above 64 MiB) is refused at `e` with a pointer to
 `eggdb put <file> <key> @file`; typing and pasting past the bound are refused. Typed text is
-the escape spelling and decodes strictly, a bad escape refused at the cursor; a paste (already
-capped at 1 MiB by the input decoder) is taken literally, its invisible and control characters
-spelled as escapes, so neither path can put a raw bidi override or control on the screen.
+the escape spelling and decodes strictly, a bad escape refused at the cursor; a paste is taken
+literally, its invisible and control characters spelled as escapes, so neither path can put a
+raw bidi override or control on the screen. Pasted line breaks (`\r\n` or a lone `\r`, as
+terminals send them) are stored as `\n`. A paste larger than 1 MiB is never cut: the input
+decoder turns it into one `Event::PasteTooLarge` and drops its bytes, and the UI refuses it
+with a message. Undo and redo keep the newest 16 MiB of changes.
+
+**A confirmation is answered only once it is seen.** The run loop handles every queued event
+before it draws, so a burst of keys (typed ahead, or a paste in a terminal without bracketed
+paste) could open a confirmation and answer it unseen. Every modal therefore ignores keys until
+`Ui::presented` reports a frame showing it was presented; `run` and `Ui::process` call it after
+each `present`. `Ctrl-C` is not affected: it never confirms a change, only quits.
 
 **Toasts and messages.** A toast clears at the next key or after 8 s (`Ui::tick_at` takes the
 time so tests can expire one); a cut or multi-line toast ends with `(m)`, and `m` opens the last
