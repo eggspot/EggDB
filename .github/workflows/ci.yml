@@ -118,3 +118,22 @@ jobs:
           for target in $TARGETS; do
             cargo clippy -p eggdb-platform -p eggdb-storage --all-targets --target "$target" -- -D warnings
           done
+
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-bench-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Benchmarks against the committed baseline
+        run: cargo run --release -p eggdb-bench

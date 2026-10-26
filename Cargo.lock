@@ -7,6 +7,14 @@ name = "eggdb"
 version = "0.1.0"
 
 [[package]]
+name = "eggdb-bench"
+version = "0.1.0"
+dependencies = [
+ "eggdb-platform",
+ "eggdb-storage",
+]
+
+[[package]]
 name = "eggdb-platform"
 version = "0.1.0"
 

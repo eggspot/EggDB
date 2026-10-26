@@ -162,6 +162,29 @@ pub enum StorageError {
     NeedsReopen,
     /// The file holds as many pages as page numbers allow.
     FileFull,
+    /// The page cache has no frame to give: every frame holds a page that is pinned by an open
+    /// page handle, or changed by the uncommitted transaction, which stays in memory until its
+    /// commit.
+    CacheFull {
+        /// How many frames the cache has.
+        frames: usize,
+        /// How many of them are pinned.
+        pinned: usize,
+        /// How many of them hold changes not yet committed.
+        dirty: usize,
+    },
+    /// The page is held by another handle in a way that excludes this one: a page being
+    /// written can't be read, written or freed through a second handle until the first is
+    /// dropped, and a page being read can't be written or freed.
+    PageBorrowed {
+        /// The page.
+        page: u64,
+    },
+    /// The page cache was asked for a size outside the pages it can hold.
+    InvalidCacheSize {
+        /// The number of pages the size works out to.
+        pages: usize,
+    },
 }
 
 impl From<eggdb_platform::Error> for StorageError {
@@ -211,6 +234,23 @@ impl fmt::Display for StorageError {
                 "an earlier write or sync failed; reopen the database to recover its last durable state",
             ),
             Self::FileFull => f.write_str("the file holds as many pages as page numbers allow"),
+            Self::CacheFull {
+                frames,
+                pinned,
+                dirty,
+            } => write!(
+                f,
+                "all {frames} frames of the page cache are taken: {pinned} pinned by open page handles, {dirty} changed by the uncommitted transaction; drop page handles, commit smaller transactions, or open with a larger cache"
+            ),
+            Self::PageBorrowed { page } => write!(
+                f,
+                "page {page} is held by another handle: a page being written allows no other handle, and a page being read allows only readers"
+            ),
+            Self::InvalidCacheSize { pages } => write!(
+                f,
+                "a page cache of {pages} pages is outside the allowed range of 1 to {} pages",
+                crate::page_cache::MAX_FRAMES
+            ),
         }
     }
 }

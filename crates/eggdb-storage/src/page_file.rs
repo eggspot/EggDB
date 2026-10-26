@@ -6,6 +6,7 @@ use crate::format::{
 };
 use eggdb_platform::{ErrorKind, File, FileLock, FileSystem, OpenMode};
 use std::collections::BTreeSet;
+use std::ops::Range;
 use std::path::Path;
 
 const FREE_LIST_LAYOUT: u8 = 1;
@@ -66,6 +67,7 @@ pub struct PageFile<F: File> {
     checksums: PageChecksum,
     page_count: u64,
     available: BTreeSet<u64>,
+    reused: Vec<u64>,
     freed: BTreeSet<u64>,
     free_list_pages: BTreeSet<u64>,
     damaged_header_slot: Option<usize>,
@@ -155,6 +157,7 @@ impl<F: File> PageFile<F> {
             page_count: superblock.page_count,
             superblock,
             available: BTreeSet::new(),
+            reused: Vec::new(),
             freed: BTreeSet::new(),
             free_list_pages: BTreeSet::new(),
             damaged_header_slot: None,
@@ -207,14 +210,7 @@ impl<F: File> PageFile<F> {
         page: &mut [u8],
         header: &PageHeader,
     ) -> Result<(), StorageError> {
-        self.check_writable()?;
-        self.check_data_page(page_id)?;
-        if self.available.contains(&page_id)
-            || self.freed.contains(&page_id)
-            || self.free_list_pages.contains(&page_id)
-        {
-            return Err(StorageError::PageNotInUse { page: page_id });
-        }
+        self.check_page_writable(page_id)?;
         self.checksums.write(page, page_id, header)?;
         let written = self
             .file
@@ -228,6 +224,7 @@ impl<F: File> PageFile<F> {
     pub fn allocate(&mut self) -> Result<u64, StorageError> {
         self.check_writable()?;
         if let Some(page) = self.available.pop_first() {
+            self.reused.push(page);
             return Ok(page);
         }
         self.grow()
@@ -248,6 +245,21 @@ impl<F: File> PageFile<F> {
         Ok(())
     }
 
+    /// Drops every allocation and free since the last commit, so the free pages and the page
+    /// count are the committed state's again, and the pages allocated since can be handed out
+    /// again.
+    ///
+    /// Pages written through [`PageFile::write_page`] since the last commit are not restored:
+    /// a caller that may roll back keeps its changes in memory until the commit, as
+    /// [`PageCache`](crate::PageCache) does.
+    pub fn rollback(&mut self) -> Result<(), StorageError> {
+        self.check_writable()?;
+        self.available.extend(self.reused.drain(..));
+        self.freed.clear();
+        self.page_count = self.superblock.page_count;
+        Ok(())
+    }
+
     /// Makes every change since the last commit durable: writes the new free list, syncs the
     /// file, writes the next superblock with `update` applied to it, and syncs again.
     ///
@@ -257,30 +269,34 @@ impl<F: File> PageFile<F> {
     ///
     /// The free list is written to pages that are free in the committed state, or to new pages
     /// at the end, never over the pages of the committed list, so a crash before the new
-    /// superblock is durable leaves the old state whole.
+    /// superblock is durable leaves the old state whole. A commit that can't be made, such as
+    /// one whose catalog root or log segments would be free pages, which the file could not be
+    /// opened with again, is refused with [`FormatError::InvalidField`] before anything is
+    /// written, and leaves the changes since the last commit in place.
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
-        self.check_writable()?;
-        let committed = self.write_free_list_and_superblock(update);
-        self.fail_on_error(committed)
+        let prepared = self.prepare_commit(update)?;
+        self.finish_commit(prepared)
     }
 
-    fn write_free_list_and_superblock(
-        &mut self,
+    pub(crate) fn prepare_commit(
+        &self,
         update: impl FnOnce(&mut Superblock),
-    ) -> Result<(), StorageError> {
+    ) -> Result<PreparedCommit, StorageError> {
+        self.check_writable()?;
         let capacity = self.free_list_capacity();
         let mut entries: BTreeSet<u64> = self.available.clone();
         entries.extend(self.freed.iter().copied());
         entries.extend(self.free_list_pages.iter().copied());
         let mut list_pages = Vec::new();
         let mut reusable = self.available.clone();
+        let mut page_count = self.page_count;
         while list_pages.len() * capacity < entries.len() {
             let page = match reusable.pop_first() {
                 Some(page) => {
                     entries.remove(&page);
                     page
                 }
-                None => self.grow()?,
+                None => grow(&mut page_count)?,
             };
             list_pages.push(page);
         }
@@ -295,11 +311,36 @@ impl<F: File> PageFile<F> {
                 .ok_or(FormatError::InvalidField {
                     field: "generation",
                 })?;
-        next.page_count = self.page_count;
+        next.page_count = page_count;
         next.free_list_head = list_pages.first().copied().unwrap_or(NO_PAGE);
         next.free_page_count = (entries.len() + list_pages.len()) as u64;
         let slot = next.encode()?;
+        check_not_listed(&next, &entries, &list_pages)?;
+        Ok(PreparedCommit {
+            superblock: next,
+            slot,
+            entries,
+            list_pages,
+        })
+    }
 
+    pub(crate) fn finish_commit(&mut self, prepared: PreparedCommit) -> Result<(), StorageError> {
+        self.check_writable()?;
+        let written = self.write_free_list_and_superblock(prepared);
+        self.fail_on_error(written)
+    }
+
+    fn write_free_list_and_superblock(
+        &mut self,
+        prepared: PreparedCommit,
+    ) -> Result<(), StorageError> {
+        let PreparedCommit {
+            superblock,
+            slot,
+            entries,
+            list_pages,
+        } = prepared;
+        self.page_count = superblock.page_count;
         self.write_free_list(&list_pages, &entries)?;
         let bytes = self.page_count * self.page_size().bytes() as u64;
         if self.file.size()? < bytes {
@@ -307,23 +348,19 @@ impl<F: File> PageFile<F> {
         }
         self.file.sync_data()?;
         self.file
-            .write_all_at(&slot, (next.slot() * HEADER_SLOT_SIZE) as u64)?;
+            .write_all_at(&slot, (superblock.slot() * HEADER_SLOT_SIZE) as u64)?;
         self.file.sync_data()?;
 
-        self.superblock = next;
+        self.superblock = superblock;
         self.available = entries;
+        self.reused.clear();
         self.freed.clear();
         self.free_list_pages = list_pages.iter().copied().collect();
         Ok(())
     }
 
     fn grow(&mut self) -> Result<u64, StorageError> {
-        let page = self.page_count;
-        if (page + 1) & PAGE_VOLUME_MASK != 0 {
-            return Err(StorageError::FileFull);
-        }
-        self.page_count += 1;
-        Ok(page)
+        grow(&mut self.page_count)
     }
 
     fn write_free_list(
@@ -403,17 +440,7 @@ impl<F: File> PageFile<F> {
     }
 
     fn is_in_use(&self, page_id: u64) -> bool {
-        let superblock = &self.superblock;
-        let in_segment = |first: u64| {
-            first != NO_PAGE
-                && (first..first + u64::from(superblock.log_segment_pages)).contains(&page_id)
-        };
-        page_id == superblock.catalog_root
-            || in_segment(superblock.log_head_page)
-            || superblock
-                .recycled_segments
-                .iter()
-                .any(|&first| in_segment(first))
+        pages_in_use_by(&self.superblock).any(|(_, pages)| pages.contains(&page_id))
     }
 
     fn free_list_capacity(&self) -> usize {
@@ -422,6 +449,22 @@ impl<F: File> PageFile<F> {
 
     fn offset(&self, page_id: u64) -> u64 {
         page_id * self.page_size().bytes() as u64
+    }
+
+    pub(crate) fn check_page_writable(&self, page_id: u64) -> Result<(), StorageError> {
+        self.check_writable()?;
+        self.check_page_in_use(page_id)
+    }
+
+    pub(crate) fn check_page_in_use(&self, page_id: u64) -> Result<(), StorageError> {
+        self.check_data_page(page_id)?;
+        if self.available.contains(&page_id)
+            || self.freed.contains(&page_id)
+            || self.free_list_pages.contains(&page_id)
+        {
+            return Err(StorageError::PageNotInUse { page: page_id });
+        }
+        Ok(())
     }
 
     fn check_data_page(&self, page_id: u64) -> Result<(), StorageError> {
@@ -447,7 +490,7 @@ impl<F: File> PageFile<F> {
         }
     }
 
-    fn check_writable(&self) -> Result<(), StorageError> {
+    pub(crate) fn check_writable(&self) -> Result<(), StorageError> {
         if self.access == Access::ReadOnly {
             return Err(StorageError::ReadOnly);
         }
@@ -470,6 +513,55 @@ fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
         Err(error) if cfg!(target_os = "wasi") && error.kind() == ErrorKind::Unsupported => Ok(()),
         locked => Ok(locked?),
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedCommit {
+    superblock: Superblock,
+    slot: Vec<u8>,
+    entries: BTreeSet<u64>,
+    list_pages: Vec<u64>,
+}
+
+fn grow(page_count: &mut u64) -> Result<u64, StorageError> {
+    let page = *page_count;
+    if (page + 1) & PAGE_VOLUME_MASK != 0 {
+        return Err(StorageError::FileFull);
+    }
+    *page_count += 1;
+    Ok(page)
+}
+
+fn pages_in_use_by(
+    superblock: &Superblock,
+) -> impl Iterator<Item = (&'static str, Range<u64>)> + '_ {
+    let segment = |first: u64| first..first + u64::from(superblock.log_segment_pages);
+    let catalog_root = superblock.catalog_root;
+    let catalog =
+        (catalog_root != NO_PAGE).then(|| ("catalog_root", catalog_root..catalog_root + 1));
+    let log_head = (superblock.log_head_page != NO_PAGE)
+        .then(|| ("log_head_page", segment(superblock.log_head_page)));
+    let recycled = superblock
+        .recycled_segments
+        .iter()
+        .filter(|&&first| first != NO_PAGE)
+        .map(move |&first| ("recycled_segments", segment(first)));
+    catalog.into_iter().chain(log_head).chain(recycled)
+}
+
+fn check_not_listed(
+    superblock: &Superblock,
+    entries: &BTreeSet<u64>,
+    list_pages: &[u64],
+) -> Result<(), FormatError> {
+    for (field, pages) in pages_in_use_by(superblock) {
+        let listed = entries.range(pages.clone()).next().is_some()
+            || list_pages.iter().any(|page| pages.contains(page));
+        if listed {
+            return Err(FormatError::InvalidField { field });
+        }
+    }
+    Ok(())
 }
 
 fn corrupt_free_list(page: u64) -> StorageError {
@@ -783,17 +875,19 @@ mod tests {
     }
 
     #[test]
-    fn a_crafted_generation_at_its_limit_refuses_a_commit_instead_of_wrapping() {
+    fn a_crafted_generation_at_its_limit_refuses_a_commit_before_any_write() {
         let fs = SimFileSystem::new();
         let mut file = create(&fs);
         file.superblock.generation = u64::MAX;
+        let before = fs.operation_count();
         assert!(matches!(
             file.commit(|_| {}),
             Err(StorageError::Format(FormatError::InvalidField {
                 field: "generation"
             }))
         ));
-        assert!(matches!(file.allocate(), Err(StorageError::NeedsReopen)));
+        assert_eq!(fs.operation_count(), before);
+        assert!(file.allocate().is_ok());
     }
 
     #[test]
@@ -810,6 +904,76 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs.operation_count(), before);
+    }
+
+    #[test]
+    fn a_commit_that_would_list_the_catalog_root_as_free_is_refused_before_any_write() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let root = file.allocate().unwrap();
+        write_filled(&mut file, root, 4);
+        file.commit(|superblock| superblock.catalog_root = root)
+            .unwrap();
+        file.free(root).unwrap();
+        let before = fs.operation_count();
+        assert!(matches!(
+            file.commit(|_| {}),
+            Err(StorageError::Format(FormatError::InvalidField {
+                field: "catalog_root"
+            }))
+        ));
+        assert_eq!(fs.operation_count(), before);
+        file.rollback().unwrap();
+        file.commit(|_| {}).unwrap();
+        drop(file);
+        let file = open(&fs, Access::ReadWrite).unwrap();
+        assert_eq!(file.superblock().catalog_root, root);
+        assert_eq!(read_fill(&file, root).unwrap(), 4);
+    }
+
+    #[test]
+    fn a_commit_that_would_list_a_log_segment_as_free_is_refused() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let pages: Vec<u64> = (0..20).map(|_| file.allocate().unwrap()).collect();
+        file.commit(|superblock| superblock.log_head_page = pages[0])
+            .unwrap();
+        file.free(pages[5]).unwrap();
+        assert!(matches!(
+            file.commit(|_| {}),
+            Err(StorageError::Format(FormatError::InvalidField {
+                field: "log_head_page"
+            }))
+        ));
+    }
+
+    #[test]
+    fn a_rollback_restores_the_committed_free_pages_and_page_count() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let pages: Vec<u64> = (0..4).map(|_| file.allocate().unwrap()).collect();
+        for &page in &pages {
+            write_filled(&mut file, page, 1);
+        }
+        file.commit(|_| {}).unwrap();
+        file.free(pages[0]).unwrap();
+        file.commit(|_| {}).unwrap();
+        let committed_count = file.page_count();
+        let committed_free = file.available_pages();
+        let reused = file.allocate().unwrap();
+        let grown = file.allocate().unwrap();
+        file.free(pages[1]).unwrap();
+        write_filled(&mut file, grown, 2);
+        file.rollback().unwrap();
+        assert_eq!(file.page_count(), committed_count);
+        assert_eq!(file.available_pages(), committed_free);
+        assert_eq!(file.allocate().unwrap(), reused);
+        assert_eq!(file.allocate().unwrap(), grown);
+        file.free(pages[1]).unwrap();
+        file.commit(|_| {}).unwrap();
+        drop(file);
+        let file = open(&fs, Access::ReadOnly).unwrap();
+        assert_eq!(file.superblock().page_count, committed_count + 2);
     }
 
     #[test]
