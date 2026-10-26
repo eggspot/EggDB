@@ -4,7 +4,7 @@ use crate::format::{NO_PAGE, PageSize};
 use crate::overflow;
 use crate::page_cache::{PageCache, PageMut, PageSource, TreePage};
 use crate::page_set::PageSet;
-use crate::tree_page::{self, LeafValue, MAX_HEIGHT, Node, Shape, StoredValue};
+use crate::tree_page::{self, CellRef, LeafValue, MAX_HEIGHT, Node, Shape, StoredValue};
 use eggdb_platform::File;
 use std::ops::Bound;
 
@@ -210,11 +210,10 @@ impl BTree {
                     return Ok(None);
                 };
                 let cell = shape.cell_at(&page, index)?;
-                let Some(reference) = shape.overflow_reference(&cell)? else {
+                if !cell.overflow {
                     return Ok(Some(read(FoundValue::Borrowed(cell.payload))));
-                };
-                let mut value = Vec::new();
-                overflow::read_value(pages, &reference, &mut value)?;
+                }
+                let value = assembled_value(pages, &shape, &cell)?;
                 return Ok(Some(read(FoundValue::Assembled(value))));
             }
             page_id = shape.child_for(&page, suffix)?;
@@ -427,6 +426,20 @@ impl BTree {
         walk.check_page(self.root, None, &bounds)?;
         Ok(report)
     }
+}
+
+#[cold]
+#[inline(never)]
+fn assembled_value(
+    pages: &impl PageSource,
+    shape: &Shape,
+    cell: &CellRef<'_>,
+) -> Result<Vec<u8>, StorageError> {
+    let mut value = Vec::new();
+    if let Some(reference) = shape.overflow_reference(cell)? {
+        overflow::read_value(pages, &reference, &mut value)?;
+    }
+    Ok(value)
 }
 
 fn fits_inline(page_size: PageSize, key: &[u8], value: &[u8]) -> bool {

@@ -14,6 +14,12 @@ any btree.scan_reverse allocations_per_100000_entries 16
 any btree.scan_reverse file_operations_per_100000_entries 0
 any btree.scan_reverse page_reads_per_100000_entries 3993
 any database.read allocations_per_op 1
+any large_value.get allocations_per_get 1
+any large_value.put file_operations_per_100_puts 3299
+any large_value.put file_pages_after_500_puts 263
+any large_value.put leaked_pages_after_500_puts 0
+any large_value.put overflow_pages_per_value 26
+any large_value.put syncs_per_100_puts 166
 any log.checkpoint file_operations_per_checkpoint 3
 any log.checkpoint syncs_per_checkpoint 2
 any log.commit_full file_operations_per_1000_commits 3209
@@ -57,6 +63,8 @@ macos btree.scan_reverse ratio_to_std_btreemap 7.586
 macos database.open ratio_to_store_open 1.004
 macos database.read ratio_to_store_read 1.023
 macos database.write ratio_to_store_commit 1.009
+macos large_value.get ratio_to_copying_the_value 2.367
+macos large_value.put ratio_to_writing_the_value_twice 9.798
 macos log.recovery ratio_to_crc32c_of_the_replayed_log 1.827
 macos page_cache.hit ratio_to_reference 0.375
 macos transaction.read ratio_to_btree_get 1.0

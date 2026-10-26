@@ -2,7 +2,7 @@ use crate::btree::{expect_level, shape_of_ref};
 use crate::error::StorageError;
 use crate::overflow;
 use crate::page_cache::{PageCache, PageSource};
-use crate::tree_page::Shape;
+use crate::tree_page::{CellRef, Shape};
 use eggdb_platform::File;
 use std::ops::Bound;
 
@@ -323,15 +323,12 @@ impl Cursor {
             return Ok(Copied::OutOfRange);
         }
         let value_start = self.bytes.len();
-        let copied = match shape.overflow_reference(&cell)? {
-            None => {
-                self.bytes.extend_from_slice(cell.payload);
-                Copied::Inline
-            }
-            Some(reference) => {
-                overflow::read_value(pages, &reference, &mut self.bytes)?;
-                Copied::Overflow
-            }
+        let copied = if cell.overflow {
+            self.copy_large_value(pages, shape, &cell)?;
+            Copied::Overflow
+        } else {
+            self.bytes.extend_from_slice(cell.payload);
+            Copied::Inline
         };
         self.entries.push(Entry {
             key_start,
@@ -346,6 +343,22 @@ impl Cursor {
 impl Cursor {
     pub(crate) fn buffer_capacity(&self) -> usize {
         self.bytes.capacity()
+    }
+}
+
+impl Cursor {
+    #[cold]
+    #[inline(never)]
+    fn copy_large_value(
+        &mut self,
+        pages: &impl PageSource,
+        shape: &Shape,
+        cell: &CellRef<'_>,
+    ) -> Result<(), StorageError> {
+        if let Some(reference) = shape.overflow_reference(cell)? {
+            overflow::read_value(pages, &reference, &mut self.bytes)?;
+        }
+        Ok(())
     }
 }
 

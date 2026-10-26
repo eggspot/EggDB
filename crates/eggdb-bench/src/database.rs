@@ -22,12 +22,12 @@ pub(crate) const READ: &str = "database.read";
 pub(crate) const WRITE: &str = "database.write";
 pub(crate) const OPEN: &str = "database.open";
 
-struct BenchFile {
-    path: PathBuf,
+pub(crate) struct BenchFile {
+    pub(crate) path: PathBuf,
 }
 
 impl BenchFile {
-    fn new(name: &str) -> Result<Self, String> {
+    pub(crate) fn new(name: &str) -> Result<Self, String> {
         let file = format!("eggdb-bench-{name}-{}.db", std::process::id());
         let bench_file = Self {
             path: std::env::temp_dir().join(file),
@@ -52,7 +52,7 @@ impl Drop for BenchFile {
     }
 }
 
-fn failed<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> String + '_ {
+pub(crate) fn failed<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> String + '_ {
     move |error| format!("{what}: {error}")
 }
 
