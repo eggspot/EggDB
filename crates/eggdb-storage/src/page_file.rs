@@ -143,7 +143,10 @@ impl<F: File> PageFile<F> {
     /// [`FormatError::CorruptLog`]; a log that ends in records a crash cut off opens at its
     /// last whole commit. Opening for writing writes the replayed pages in place, after
     /// syncing the log, so later commits start from them; opening for reading serves them
-    /// from the log.
+    /// from the log. Opening a file with a log for writing also copies the current superblock
+    /// to the other header slot, under the next generation, unless that slot already holds a
+    /// copy, so later damage to either slot opens the same state (`docs/format.md`, "Damage to
+    /// the newest header slot").
     pub fn open<S: FileSystem<File = F>>(
         fs: &S,
         path: &Path,
@@ -163,6 +166,8 @@ impl<F: File> PageFile<F> {
         let (slot0, slot1) = slots.split_at(HEADER_SLOT_SIZE);
         let choice = Superblock::choose(slot0, slot1)?;
         let superblock = choice.superblock;
+        let older_slot_is_a_copy =
+            access == Access::ReadOnly || older_slot_holds_a_copy(&superblock, slot0, slot1);
         superblock.features.check(access)?;
         let expected_bytes = superblock
             .page_count
@@ -187,7 +192,7 @@ impl<F: File> PageFile<F> {
         page_file.superblock.features.check(access)?;
         page_file.load_free_list()?;
         if let Some(resumed) = resumed {
-            page_file.resume_log(resumed)?;
+            page_file.resume_log(resumed, older_slot_is_a_copy)?;
         }
         Ok(page_file)
     }
@@ -1129,14 +1134,37 @@ impl<F: File> PageFile<F> {
         }))
     }
 
-    fn resume_log(&mut self, resumed: ResumedLog) -> Result<(), StorageError> {
+    fn resume_log(
+        &mut self,
+        resumed: ResumedLog,
+        older_slot_is_a_copy: bool,
+    ) -> Result<(), StorageError> {
         if self.file_bytes != resumed.file_bytes {
             self.file.set_size(resumed.file_bytes)?;
             self.file_bytes = resumed.file_bytes;
         }
+        if !older_slot_is_a_copy {
+            self.copy_header_to_the_older_slot()?;
+        }
         self.file.sync_data()?;
         self.drain_unwritten()?;
         self.log = Some(LogWriter::new(resumed.geometry, resumed.start));
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn copy_header_to_the_older_slot(&mut self) -> Result<(), StorageError> {
+        let Ok(generation) = self.next_generation() else {
+            return Ok(());
+        };
+        let copy = Superblock {
+            generation,
+            ..self.header
+        };
+        self.file
+            .write_all_at(&copy.encode()?, (copy.slot() * HEADER_SLOT_SIZE) as u64)?;
+        self.header = copy;
+        self.adopt_header_fields();
         Ok(())
     }
 
@@ -1324,6 +1352,12 @@ impl<F: File> PageFile<F> {
         }
         result
     }
+}
+
+#[inline(never)]
+fn older_slot_holds_a_copy(newest: &Superblock, slot0: &[u8], slot1: &[u8]) -> bool {
+    let older_slot = if newest.slot() == 0 { slot1 } else { slot0 };
+    newest.is_copied_in(older_slot)
 }
 
 fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
@@ -1541,7 +1575,7 @@ mod tests {
             .unwrap();
         drop(file);
         let file = open(&fs, Access::ReadWrite).unwrap();
-        assert_eq!(file.superblock().generation, 1);
+        assert_eq!(file.superblock().generation, 2);
         assert_eq!(file.superblock().log_head_page, 2);
         assert_eq!(file.superblock().page_count, 21);
         assert_eq!(file.superblock().catalog_root, 19);

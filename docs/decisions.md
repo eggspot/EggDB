@@ -3295,3 +3295,83 @@ page.
 setting the clock's reference bit, so one scan doesn't flush the cache; coalescing consecutive
 page writes; an inline prefix for values just over the threshold; log segments from free space
 for commits longer than the recycled segments; shrinking the file when its last pages are free.
+
+## D89 A model test against an in-memory map, a seeded fuzzer for hostile files, and the older header slot made a copy when a file opens for writing — Decided by research (build loop, 2026-10-26); completes v0.2.0 item 12, refines D9, D84 and D85
+Item 12 tests the whole storage engine two more ways, and closes issue #39 on the way.
+
+**A model test** (`crates/eggdb-storage/src/model_tests.rs`). Seeded random steps drive a
+`Store` on the simulated file system and compare every read with a `BTreeMap` of the committed
+state: write transactions of up to forty puts and deletes with values from empty to sixteen
+overflow pages and keys from empty to the longest allowed, in-transaction gets and scans,
+commits, rollbacks, drops, transactions that fill the cache, a reader holding its snapshot
+across a commit, gets, full, range and prefix scans in both orders, `check` with its counts,
+checkpoints, syncs, reopens, read-only opens, power losses and injected I/O faults, some during
+recovery. After every reopen the store must hold exactly one commit at or after the last durable
+one, or the one whose commit reported a failure. The embedded API has a smaller twin on real
+files (`crates/eggdb/tests/model.rs`) with every range form and scans drained from both ends.
+CI runs 12 seeds of 250 steps; `EGGDB_MODEL_TEST=1` runs 256 seeds of 3,000 steps. The last long
+run, in 268 s of a release build on this Mac: 373,101 commits, 90,117 rollbacks, 15,948
+transactions that filled the cache, 45,950 reopens, 23,003 read-only opens, 35,097 power losses,
+38,539 injected faults, 25,615 commits lost as their durability mode allows, 165,857 checks and
+919,920 scans, with no difference from the model.
+
+**A fuzzer for hostile files** (`crates/eggdb-storage/tests/hostile_files.rs`). No outside fuzzing
+tool or crate (D1): a seeded generator damages five valid files with one to three of 22
+mutations (raw bit flips, truncation, extension, zeroed pages and ranges, swapped and copied
+pages, superblock fields with fixed checksums, tree, overflow and free-list pages and page
+headers rewritten with valid page checksums, log bytes and blocks), then opens each file
+read-only and for writing, reads, scans, checks, writes, commits, checkpoints and reopens.
+Errors are the expected outcome. A panic, a case over a minute, a scan longer than the file can
+hold, a single allocation over twice the file plus 16 MiB, or a file that passes `check` and then
+fails a read, a commit's check or a reopen, fails the test with the seed and case that reproduce
+it. It runs as an integration test so it can install its own global allocator, which records the
+largest allocation per thread; cases run on every core. CI runs 800 cases (about 27 s on a
+GitHub runner);
+`EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run campaigns. The last ones, in release builds on this
+Mac: 150,000 cases from seed 7 in 171 s (112,901 files opened, 60,825 passed the check) and
+40,000 from the default seed in 47 s, with no failure.
+
+What they found: nothing in the engine. The earlier layer-by-layer mutation tests (D82, D84,
+D88) had already made every decoder return errors; the failures while building the fuzzer were
+in the harness itself (mutations applied to a file another mutation had already truncated).
+
+**Issue #39: the older header slot.** Two double faults, each a crash and later damage to the
+newest header slot after it was synced, could open the older slot over pages newer than its log
+explains (format.md, "Damage to the newest header slot"): a crash between a freeing
+checkpoint's two superblock writes, and a crash in the first flush into a recycled segment.
+Opening a file that has a log for writing now writes the chosen superblock, with `generation`
+raised by one, to the other slot unless that slot already holds a copy (every field equal but
+`generation`). The write goes out before the sync recovery already does before it writes
+replayed pages in place, so it costs one write and no sync, only on a read-write open whose
+other slot differs (in practice the first open after a checkpoint or a crash); read-only opens,
+and so every gated benchmark count, are unchanged. A copy names exactly what the newest
+superblock names, all of it synced when that superblock was, so a torn copy only damages the
+older slot. New crash tests sweep every operation of a freeing checkpoint and of the first
+commit into a recycled segment, reopen for writing, damage the newest slot, and require the
+older slot to open the same state; without the fix the first one opens a mixed state. The first
+window is now closed; the second stays open from the crash to the next open for writing.
+
+**A benchmark finding.** With the comparison and the copy written inline in `PageFile::open`, the
+gated `database.open` ratio (a read-only `Database` open against a read-only `Store` open, which
+never run that code) read 1.38 to 1.39 in six CI runs on one kind of Linux runner and 1.007 on
+the other, while `main` read 1.007 to 1.017 on both; a branch with only `page_file.rs` and
+`format.rs` taken back from `main` read 1.017. The cause is code generation, not work: both opens
+run the same steps. The check and the copy now live in two `#[inline(never)]` helpers, so
+`open`'s own code is as on `main`. On the slow kind of runner the ratio then read 0.73 to 0.93
+in three runs, with `Database` opens back at `main`'s 36 to 42 µs and the bench's own `Store`
+open reading 45 to 57 µs: this ratio is sensitive to code layout on that kind of runner, in
+either direction, and a later change to the open path may need the same care.
+
+Decided by research (a Sonnet research subagent, 2026-10-26), since it is a cost-against-safety
+choice the owner would otherwise make:
+- *Which trigger?* Options were a copy whenever the older slot isn't one (as issue #39
+  proposed), a copy only on narrow signals (a damaged slot, a recovery scan that stopped at
+  non-zero bytes, a free list written by the newest checkpoint), or a copy deferred to the first
+  commit. Answer: whenever the older slot isn't a copy. The narrow signals rest on an argument
+  that they cover every state of both windows, and the scan's signal can miss a cut-off flush
+  whose link record was lost; the deferred copy leaves the second window open for a session
+  that opens for writing and never commits. With the write placed before the open's existing
+  sync, the cost is one file operation and no sync, which D6 accepts with this reason.
+
+Issue #44 (commits longer than the recycled segments grow the file) is not part of this item:
+each of its fixes changes the log and recovery and needs its own crash tests and review.

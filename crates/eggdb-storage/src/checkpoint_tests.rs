@@ -445,7 +445,7 @@ fn a_reopened_log_with_recycled_segments(fs: &SimFileSystem) -> (PageCache<SimFi
     drop(cache);
     let mut cache = open(fs, Access::ReadWrite).unwrap();
     cache.set_auto_checkpoint_bytes(None);
-    assert_eq!(cache.superblock().generation, generation);
+    assert_eq!(cache.superblock().generation, generation + 1);
     (cache, model)
 }
 
@@ -1328,4 +1328,159 @@ fn a_failed_automatic_checkpoint_keeps_the_commit_and_refuses_every_later_page()
     let cache = open(&fs, Access::ReadOnly).unwrap();
     assert_eq!(cache.superblock().clock_high_water, 6);
     assert_model(&cache, &model, "after the failed checkpoint");
+}
+
+fn header_slots(fs: &SimFileSystem) -> (Superblock, Result<Superblock, FormatError>) {
+    let bytes = file_bytes(fs);
+    let (slot0, slot1) = bytes[..2 * HEADER_SLOT_SIZE].split_at(HEADER_SLOT_SIZE);
+    let newest = Superblock::choose(slot0, slot1).unwrap().superblock;
+    let older = match newest.slot() {
+        0 => Superblock::decode(slot1, 1),
+        _ => Superblock::decode(slot0, 0),
+    };
+    (newest, older)
+}
+
+fn assert_older_slot_is_a_copy(fs: &SimFileSystem, context: &str) {
+    let (newest, older) = header_slots(fs);
+    let older = older.unwrap_or_else(|error| panic!("{context}: older slot: {error}"));
+    assert_eq!(older.generation + 1, newest.generation, "{context}");
+    assert_eq!(
+        Superblock {
+            generation: newest.generation,
+            ..older
+        },
+        newest,
+        "{context}"
+    );
+}
+
+fn reuse_free_pages_without_a_header_write(fs: &SimFileSystem, older: &Superblock) {
+    let mut file = PageFile::open(fs, Path::new(DB), Access::ReadWrite).unwrap();
+    file.set_auto_checkpoint_bytes(None);
+    let generation = file.superblock().generation;
+    let mut reused = Vec::new();
+    while file.available_pages() > 0 {
+        reused.push(file.allocate().unwrap());
+    }
+    file.commit(|_| {}).unwrap();
+    assert_eq!(file.superblock().generation, generation);
+    drop(file);
+    let raw = raw(fs);
+    let older_head = older.log_head_page..older.log_head_page + SEGMENT_PAGES;
+    let kept = |page: &u64| older_head.contains(page) || *page == older.free_list_head;
+    for page in reused.into_iter().filter(|page| !kept(page)) {
+        raw.write_all_at(&image_of(page), page * PAGE).unwrap();
+    }
+    raw.sync_all().unwrap();
+}
+
+#[test]
+fn a_crash_between_a_freeing_checkpoint_s_header_writes_never_opens_a_mixed_state_after_the_newest_slot_is_damaged()
+ {
+    let operations = {
+        let fs = SimFileSystem::new();
+        let (mut cache, _) = before_checkpoint(&fs, Durability::Full, true);
+        let start = fs.operation_count();
+        cache.checkpoint().unwrap();
+        fs.operation_count() - start
+    };
+    let mut windows = 0;
+    for step in 0..operations {
+        for mode in [CrashMode::DropUnsynced, CrashMode::Torn { seed: step }] {
+            let context = format!("step {step}, {mode:?}");
+            let fs = SimFileSystem::new();
+            let (mut cache, model) = before_checkpoint(&fs, Durability::Full, true);
+            let free_before = cache.superblock().free_page_count;
+            fs.fail_operation(fs.operation_count() + step);
+            assert!(cache.checkpoint().is_err(), "{context}");
+            drop(cache);
+            fs.crash(mode);
+            let (newest, older) = header_slots(&fs);
+            let older = older.unwrap_or(newest);
+            let in_the_window = older.log_head_page != newest.log_head_page
+                && newest.free_page_count > free_before + SEGMENT_PAGES;
+            windows += u64::from(in_the_window);
+            drop(open(&fs, Access::ReadWrite).unwrap());
+            assert_older_slot_is_a_copy(&fs, &context);
+            assert!(
+                assert_refused_or_latest(&file_bytes(&fs), &model, &context),
+                "{context}: the copy in the older slot must open the same state"
+            );
+            reuse_free_pages_without_a_header_write(&fs, &older);
+            assert_refused_or_latest(&file_bytes(&fs), &model, &context);
+        }
+    }
+    assert!(windows > 0, "no crash fell between the two header writes");
+}
+
+#[test]
+fn a_crash_in_the_first_flush_into_a_recycled_segment_never_opens_a_mixed_state_after_the_newest_slot_is_damaged()
+ {
+    let setup: Setup = a_log_with_recycled_segments;
+    let crossing = rounds_until_the_log_leaves_its_head(setup);
+    let (new, operations) = {
+        let fs = SimFileSystem::new();
+        let (_, _, new, operations) = up_to_the_crossing_commit(&fs, setup, crossing, None);
+        (new, operations)
+    };
+    let mut cut_off_flushes = 0;
+    for step in 0..operations {
+        for seed in 0..6 {
+            let context = format!("step {step}, seed {seed}");
+            let fs = SimFileSystem::new();
+            let (cache, old, _, _) = up_to_the_crossing_commit(&fs, setup, crossing, Some(step));
+            drop(cache);
+            fs.crash(CrashMode::Torn { seed });
+            let reopened = open(&fs, Access::ReadWrite).unwrap();
+            let is_new = reopened.superblock().clock_high_water == 101;
+            let model = if is_new { new.clone() } else { old };
+            cut_off_flushes += u64::from(reopened.log_stats().replayed_bytes > 0 || !is_new);
+            drop(reopened);
+            assert_older_slot_is_a_copy(&fs, &context);
+            assert!(
+                assert_refused_or_latest(&file_bytes(&fs), &model, &context),
+                "{context}: the copy in the older slot must open the same state"
+            );
+        }
+    }
+    assert!(cut_off_flushes > 0);
+}
+
+#[test]
+fn opening_for_writing_copies_the_newest_header_to_the_older_slot_once_and_reading_never_writes() {
+    let fs = SimFileSystem::new();
+    let (mut cache, model) = a_log_with_recycled_segments(&fs);
+    cache.checkpoint().unwrap();
+    drop(cache);
+    let (newest, older) = header_slots(&fs);
+    assert!(older.is_ok_and(|older| older.checkpoint_lsn != newest.checkpoint_lsn));
+    let before = file_bytes(&fs);
+    drop(open(&fs, Access::ReadOnly).unwrap());
+    assert_eq!(file_bytes(&fs), before);
+    let syncs = fs.sync_count();
+    drop(open(&fs, Access::ReadWrite).unwrap());
+    assert_eq!(
+        fs.sync_count(),
+        syncs + 1,
+        "the copy shares the open's sync"
+    );
+    assert_older_slot_is_a_copy(&fs, "first open for writing");
+    let copied = file_bytes(&fs);
+    drop(open(&fs, Access::ReadWrite).unwrap());
+    assert_eq!(
+        file_bytes(&fs)[..2 * HEADER_SLOT_SIZE],
+        copied[..2 * HEADER_SLOT_SIZE]
+    );
+    let damaged = with_newest_slot_damaged(&copied);
+    assert!(assert_refused_or_latest(&copied, &model, "copy"));
+    replace_file(&fs, &damaged);
+    drop(open(&fs, Access::ReadWrite).unwrap());
+    assert_older_slot_is_a_copy(&fs, "a damaged slot is written over");
+    let file = PageFile::open(&fs, Path::new(DB), Access::ReadOnly).unwrap();
+    assert_eq!(file.superblock().generation, newest.generation + 1);
+    assert_eq!(file.damaged_header_slot(), None);
+    drop(file);
+    let cache = open(&fs, Access::ReadOnly).unwrap();
+    assert_model(&cache, &model, "after the damaged slot was written over");
 }

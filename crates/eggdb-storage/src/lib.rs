@@ -47,6 +47,8 @@ mod format;
 mod frames;
 mod hybrid_clock;
 mod log;
+#[cfg(test)]
+mod model_tests;
 mod overflow;
 #[cfg(test)]
 mod overflow_mutation_tests;
