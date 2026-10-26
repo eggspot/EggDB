@@ -9,6 +9,7 @@ use std::hint::black_box;
 pub(crate) const GET: &str = "sqlite_compare.get";
 pub(crate) const SCAN: &str = "sqlite_compare.scan";
 pub(crate) const BATCH_PUT: &str = "sqlite_compare.batch_put";
+pub(crate) const BATCH_PUT_NORMAL: &str = "sqlite_compare.batch_put_normal";
 pub(crate) const DURABLE_COMMIT: &str = "sqlite_compare.durable_commit";
 
 pub(crate) const ENTRIES: u64 = 100_000;
@@ -234,7 +235,19 @@ impl<'c> SqliteWriter<'c> {
 }
 
 pub(crate) fn batch_put() -> Result<Vec<Metric>, String> {
-    let stores = Stores::open("batch-put", Durability::Normal, ENTRIES)?;
+    batch_put_with(BATCH_PUT, Durability::Off, RatioGate::Gated)
+}
+
+pub(crate) fn batch_put_normal() -> Result<Vec<Metric>, String> {
+    batch_put_with(BATCH_PUT_NORMAL, Durability::Normal, RatioGate::Reported)
+}
+
+fn batch_put_with(
+    benchmark: &'static str,
+    durability: Durability,
+    gate: RatioGate,
+) -> Result<Vec<Metric>, String> {
+    let stores = Stores::open(benchmark, durability, ENTRIES)?;
     let mut writer = SqliteWriter::new(&stores.sqlite)?;
     let (mut eggdb_next, mut sqlite_next) = (ENTRIES, ENTRIES);
     let per_batch = measure::paired_calibrated_from(
@@ -258,9 +271,9 @@ pub(crate) fn batch_put() -> Result<Vec<Metric>, String> {
         ratio: per_batch.ratio,
     };
     Ok(paired_metrics(
-        BATCH_PUT,
+        benchmark,
         per_put,
-        RatioGate::Gated,
+        gate,
         ["ns_per_put", "sqlite_ns_per_put"],
     ))
 }
