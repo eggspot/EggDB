@@ -297,12 +297,16 @@ impl BTree {
     /// fails that check, and the walk reads each page at most once. The first page that fails
     /// is reported as [`FormatError::CorruptTree`].
     pub fn check<F: File>(&self, cache: &PageCache<F>) -> Result<TreeReport, StorageError> {
+        self.check_in(cache)
+    }
+
+    pub(crate) fn check_in(&self, pages: &impl PageSource) -> Result<TreeReport, StorageError> {
         let mut report = TreeReport::default();
         let bounds = Bounds {
             low: Vec::new(),
             high: None,
         };
-        check_page(cache, self.root, None, &bounds, &mut report)?;
+        check_page(pages, self.root, None, &bounds, &mut report)?;
         Ok(report)
     }
 }
@@ -588,8 +592,8 @@ fn split_root<F: File>(
     Ok(())
 }
 
-fn check_page<F: File>(
-    cache: &PageCache<F>,
+fn check_page(
+    pages: &impl PageSource,
     page_id: u64,
     level: Option<u8>,
     bounds: &Bounds,
@@ -603,7 +607,7 @@ fn check_page<F: File>(
         .into()
     };
     let node = {
-        let page = cache.read(page_id)?;
+        let page = pages.page(page_id)?;
         let shape = Shape::parse(page_id, page.header(), &page)?;
         shape.validate(&page)?;
         page.set_contents_checked();
@@ -642,7 +646,7 @@ fn check_page<F: File>(
             },
             high: node.keys.get(index).cloned().or_else(|| node.high.clone()),
         };
-        check_page(cache, child, Some(node.level - 1), &child_bounds, report)?;
+        check_page(pages, child, Some(node.level - 1), &child_bounds, report)?;
     }
     Ok(())
 }
