@@ -3543,16 +3543,25 @@ inside a paste over ssh never turns its tail into keys, and a terminal that neve
 marker cannot swallow keys, `Ctrl-C` included, for longer than that second. Undo and redo keep
 the newest 16 MiB of changes.
 
-**A confirmation is answered only once it is seen.** A burst of keys (typed ahead, or a paste
-in a terminal without bracketed paste, which a pty delivers in many reads with tiny gaps) could
+**A confirmation is guarded by being seen and by quiet input.** A burst of keys (typed ahead,
+or a paste in a terminal without bracketed paste, which a pty delivers in many reads) could
 open a confirmation and answer it before anyone saw it. Every modal therefore takes keys only
 after `Ui::presented` reports a frame that shows it (not the too-small screen nor the help
 screen; a frame that hides it disarms it), followed by `Ui::input_quiet`: the run loop waits
-50 ms after that frame and calls it only when no input came. Keys arriving earlier are dropped
-and restart the wait, so padding can never arm a question, while a deliberate key after looking
-works. `Ui::process`, the tests' step, treats the end of its queued events as quiet. `Ctrl-C` is
-the one exception, handled before any modal: it never confirms a change; it quits at once, or,
-with an unsaved edit, asks first and quits on a second `Ctrl-C`.
+300 ms after that frame and calls it only when no input came and no bracketed paste is open
+(`Terminal::paste_open`). Keys arriving earlier are dropped and restart the wait; a deliberate
+key after reading the question works, and nobody reads one faster than 300 ms. `Ui::process`,
+the tests' step, treats the end of its queued events as quiet. `Ctrl-C` is the one exception,
+handled before any modal: it never confirms a change; it quits at once, or, with an unsaved
+edit, asks first and quits on a second `Ctrl-C`.
+
+What this guarantees, exactly: with bracketed paste (the normal case) pasted bytes are never
+keys, whatever pauses the paste has. Without it, a paste or typed-ahead keys cannot answer a
+question while they arrive less than 300 ms apart; a paste that pauses longer (a slow link
+delivering it in bursts), or one carrying a raw `ESC[201~` that the terminal passes through
+unsanitised, can still answer a question that appeared meanwhile. The two timeouts do not
+contradict each other: 1 s is how long a bracketed paste may pause before its missing end
+marker is given up, and the 300 ms window does not run at all while such a paste is open.
 
 **Toasts and messages.** A toast clears at the next key or after 8 s (`Ui::tick_at` takes the
 time so tests can expire one); a cut or multi-line toast ends with `(m)`, and `m` opens the last

@@ -1429,8 +1429,11 @@ fn quitting_from_the_check_screen_asks_about_an_unsaved_edit() {
 enum Input {
     Bytes(Vec<u8>),
     Resize(u16, u16),
-    Quiet,
+    Pause(Duration),
 }
+
+const QUIET: Input = Input::Pause(Duration::from_secs(10));
+const SILENCE_THAT_ENDS_A_PASTE: Duration = Duration::from_secs(1);
 
 struct SplitReads {
     size: Size,
@@ -1438,6 +1441,7 @@ struct SplitReads {
     decoder: eggdb_ui::InputDecoder,
     queue: std::collections::VecDeque<Event>,
     between_reads: bool,
+    silence: Duration,
 }
 
 impl SplitReads {
@@ -1448,6 +1452,7 @@ impl SplitReads {
             decoder: eggdb_ui::InputDecoder::new(),
             queue: std::collections::VecDeque::new(),
             between_reads: false,
+            silence: Duration::ZERO,
         }
     }
 }
@@ -1478,22 +1483,22 @@ impl Terminal for SplitReads {
                 Some(Input::Bytes(bytes)) => {
                     self.queue.extend(self.decoder.feed(&bytes));
                     self.between_reads = true;
+                    self.silence = Duration::ZERO;
                 }
                 Some(Input::Resize(cols, rows)) => {
                     self.size = Size { cols, rows };
                     return Ok(Some(Event::Resize(self.size)));
                 }
-                Some(Input::Quiet) if timeout.is_zero() => {
-                    self.inputs.push_front(Input::Quiet);
-                    return Ok(None);
-                }
-                Some(Input::Quiet) => {
-                    if self.decoder.in_paste() {
+                Some(Input::Pause(pause)) if pause > timeout => {
+                    self.inputs.push_front(Input::Pause(pause - timeout));
+                    self.silence += timeout;
+                    if self.decoder.in_paste() && self.silence >= SILENCE_THAT_ENDS_A_PASTE {
                         self.queue.extend(self.decoder.end_paste());
                         continue;
                     }
                     return Ok(None);
                 }
+                Some(Input::Pause(pause)) => self.silence += pause,
                 None => return Ok(Some(Event::Interrupt)),
             }
         }
@@ -1501,6 +1506,10 @@ impl Terminal for SplitReads {
 
     fn present(&mut self, _: &Frame) -> std::io::Result<()> {
         Ok(())
+    }
+
+    fn paste_open(&self) -> bool {
+        self.decoder.in_paste()
     }
 }
 
@@ -1542,7 +1551,7 @@ fn keys_split_across_reads_cannot_answer_a_question_before_the_input_goes_quiet(
     assert_eq!(ui.source().hooks.writes.get(), 0);
     let ui = run_split(vec![
         Input::Bytes(b"d".to_vec()),
-        Input::Quiet,
+        QUIET,
         Input::Bytes(b"d".to_vec()),
     ]);
     assert_eq!(ui.source().hooks.writes.get(), 1);
@@ -1554,7 +1563,7 @@ fn a_question_hidden_by_a_too_small_terminal_takes_no_key_until_it_is_seen() {
     let ui = run_split(vec![
         Input::Bytes(b"d".to_vec()),
         Input::Resize(30, 8),
-        Input::Quiet,
+        QUIET,
         Input::Resize(80, 24),
         Input::Bytes(b"d".to_vec()),
     ]);
@@ -1562,9 +1571,9 @@ fn a_question_hidden_by_a_too_small_terminal_takes_no_key_until_it_is_seen() {
     let ui = run_split(vec![
         Input::Bytes(b"d".to_vec()),
         Input::Resize(30, 8),
-        Input::Quiet,
+        QUIET,
         Input::Resize(80, 24),
-        Input::Quiet,
+        QUIET,
         Input::Bytes(b"d".to_vec()),
     ]);
     assert_eq!(ui.source().hooks.writes.get(), 1);
@@ -1601,4 +1610,36 @@ fn adding_a_key_whose_existence_cannot_be_read_shows_the_error() {
     assert!(!s.screen().contains("┌ "), "{}", s.screen());
     assert!(s.row(1).contains(" Add "), "{}", s.row(1));
     assert_eq!(s.hooks().writes.get(), 0);
+}
+
+#[test]
+fn a_pause_shorter_than_300_ms_inside_a_paste_cannot_answer_a_question() {
+    for gap in [45, 80, 150, 290] {
+        let ui = run_split(vec![
+            Input::Bytes(padded(b"d", b"")),
+            Input::Pause(Duration::from_millis(gap)),
+            Input::Bytes(padded(b"", b"d")),
+        ]);
+        assert_eq!(ui.source().hooks.writes.get(), 0, "gap {gap} ms");
+    }
+}
+
+#[test]
+fn a_pause_inside_an_open_bracketed_paste_is_not_quiet() {
+    let ui = run_split(vec![
+        Input::Bytes(b"d\x1b[200~abc".to_vec()),
+        Input::Pause(Duration::from_millis(800)),
+        Input::Bytes(b"d\x1b[201~d".to_vec()),
+    ]);
+    assert_eq!(ui.source().hooks.writes.get(), 0);
+}
+
+#[test]
+fn a_key_pressed_after_the_quiet_window_answers_the_question() {
+    let ui = run_split(vec![
+        Input::Bytes(b"d".to_vec()),
+        Input::Pause(Duration::from_millis(400)),
+        Input::Bytes(b"d".to_vec()),
+    ]);
+    assert_eq!(ui.source().hooks.writes.get(), 1);
 }

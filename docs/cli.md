@@ -244,10 +244,15 @@ edit is not committed).
   the key with its length and the value's sizes (`58 B → 61 B`); `Enter` (for a delete, `d`
   again) then runs one write transaction (put or delete, commit) that is on disk before the
   screen redraws, and the status line says `Committed user:1 (61 B) at 09:14:03Z`. A
-  confirmation takes keys only once it has been drawn and then 50 ms passed with no input;
-  keys arriving sooner (typed ahead, or a paste in a terminal without bracketed paste) are
-  dropped, so they can never answer it. `Ctrl-C` alone is handled first: it only ever quits. No transaction is open while an editor is. The editor takes values up to
-  4 MiB of text; store larger ones with `eggdb put <file> <key> @file`.
+  confirmation takes keys only once it has been drawn and then 300 ms passed with no input
+  (time inside an open bracketed paste does not count); keys arriving sooner are dropped. With
+  bracketed paste, pasted bytes are never keys. Without it, keys typed ahead or pasted cannot
+  answer a confirmation while they keep arriving within 300 ms of each other, but a paste that
+  pauses longer than that, or that carries a raw `ESC[201~` the terminal passes through, can:
+  the guard is seeing the question and 300 ms of quiet, not an absolute guarantee. `Ctrl-C` is
+  handled first and never confirms a change: it quits at once, or, with an unsaved edit, asks
+  first and quits on a second `Ctrl-C`. No transaction is open while an editor is. The editor
+  takes values up to 4 MiB of text; store larger ones with `eggdb put <file> <key> @file`.
 - **When a change fails**, nothing is committed and the editor keeps its text. Errors read
   `Error (<Kind>): <message>` with the engine's kind and message: `TooLarge` (one commit's
   pages must fit in the page cache, so a larger `--cache` helps), `WriterActive` (`r` waits up

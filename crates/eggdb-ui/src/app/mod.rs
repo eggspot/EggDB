@@ -260,7 +260,8 @@ impl<S: Source> Ui<S> {
     }
 
     /// Handles every event `terminal` has queued, finishes background work, then draws and
-    /// presents one frame. Tests drive the UI with this.
+    /// presents one frame, treating the end of the queued events as quiet input. It is for
+    /// tests, which drive the UI one step at a time; [`crate::run`] is the real loop.
     pub fn process<T: Terminal>(&mut self, terminal: &mut T, frame: &mut Frame) -> io::Result<()> {
         while let Some(event) = terminal.next_event(Duration::ZERO)? {
             self.handle(event);

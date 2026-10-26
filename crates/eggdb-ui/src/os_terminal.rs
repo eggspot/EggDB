@@ -151,6 +151,10 @@ impl Terminal for OsTerminal {
         }
     }
 
+    fn paste_open(&self) -> bool {
+        self.decoder.in_paste()
+    }
+
     fn present(&mut self, frame: &Frame) -> io::Result<()> {
         self.output.clear();
         self.renderer.render(frame, &mut self.output);

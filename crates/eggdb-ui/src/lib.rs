@@ -43,14 +43,14 @@ use std::io;
 use std::time::Duration;
 
 const IDLE_WAIT: Duration = Duration::from_millis(200);
-const QUIET_BEFORE_A_QUESTION: Duration = Duration::from_millis(50);
+const QUIET_BEFORE_A_QUESTION: Duration = Duration::from_millis(300);
 
 /// Runs the UI on `terminal` until the user quits: wait for an event, handle it, draw, present.
 /// Background steps (the key count, a write waiting for the writer) run whenever no event is
 /// waiting; otherwise the loop wakes every 200 ms to follow a running check and expire toasts.
-/// After presenting a frame that shows a question, the loop waits for 50 ms without input
-/// before the question takes keys; keys arriving sooner were typed or pasted before anyone
-/// could have read it, and are dropped.
+/// After presenting a frame that shows a question, the loop waits for 300 ms without input, and
+/// outside an open bracketed paste, before the question takes keys; keys arriving sooner were
+/// typed or pasted before anyone could have read it, and are dropped.
 pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Result<()> {
     let mut frame = Frame::new(terminal.size());
     let mut changed = true;
@@ -81,7 +81,9 @@ pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Resu
                 true
             }
             None if ui.awaits_quiet() => {
-                ui.input_quiet();
+                if !terminal.paste_open() {
+                    ui.input_quiet();
+                }
                 false
             }
             None => ui.tick(),

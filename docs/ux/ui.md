@@ -605,11 +605,20 @@ simplest consistent option (D92):
 13. **A question waits to be seen.** A modal (a confirmation, an error, a question) takes keys
     only after two things, in order: a frame that shows it was presented (a too-small screen or
     the help screen does not show it, and a frame that hides it takes back what it was given),
-    and then 50 ms passed with no input at all. Every key that arrives before that is dropped,
-    and each one starts the 50 ms over. So keys already on their way, typed ahead or pasted by
-    a terminal without bracketed paste (`dd`, `x` Enter Enter, padded and split across reads),
-    can open a confirmation but never answer it; a key pressed after looking at it works. The
-    one exception is `Ctrl-C`, which is handled before any modal: it never confirms a change; it
-    quits at once, or, with an unsaved edit, asks first and quits on a second `Ctrl-C`. The Key line of a
-    confirmation shows the key's length and wraps at any character, so two keys that differ
-    only in spaces never look alike.
+    and then 300 ms with no input, not counting time inside an open bracketed paste. Every key
+    that arrives before that is dropped, and each one starts the 300 ms over. A key pressed
+    after looking at the question works.
+
+    What that guarantees: with bracketed paste, which every terminal the UI targets turns on,
+    pasted bytes are never keys at all. Keys typed ahead, or a paste in a terminal without
+    bracketed paste, can open a confirmation but cannot answer it as long as they arrive with
+    gaps shorter than 300 ms. A paste without bracketed paste that pauses longer than that (a
+    slow link delivering it in bursts), or one whose text contains a raw end marker
+    (`ESC[201~`) that the terminal passes through, can still answer a question that appeared
+    meanwhile. So a delete or a commit is guarded by being shown and by 300 ms of quiet, not by
+    an absolute guarantee.
+
+    The one exception is `Ctrl-C`, which is handled before any modal: it never confirms a
+    change; it quits at once, or, with an unsaved edit, asks first and quits on a second
+    `Ctrl-C`. The Key line of a confirmation shows the key's length and wraps at any character,
+    so two keys that differ only in spaces never look alike.
