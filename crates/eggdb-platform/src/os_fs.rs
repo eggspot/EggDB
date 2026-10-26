@@ -390,6 +390,15 @@ impl OsFile {
 }
 
 #[cfg(not(windows))]
+impl Drop for OsFile {
+    fn drop(&mut self) {
+        if *self.locked.get_mut() {
+            let _ = self.file.unlock();
+        }
+    }
+}
+
+#[cfg(not(windows))]
 fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
     let locked = match lock {
         FileLock::Shared => file.try_lock_shared(),
@@ -499,8 +508,69 @@ fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use crate::{ErrorKind, FileSystem, OsFileSystem};
+    use crate::{ErrorKind, File, FileLock, FileSystem, OpenMode, OsFileSystem};
+    use std::io::{PipeWriter, Read, Write};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, ExitStatus};
+    use std::thread::JoinHandle;
+
+    struct ChildBeforeItsProgram {
+        start_program: PipeWriter,
+        spawning: Option<JoinHandle<std::io::Result<ExitStatus>>>,
+    }
+
+    impl ChildBeforeItsProgram {
+        fn fork() -> Self {
+            let (forked, forked_signal) = std::io::pipe().unwrap();
+            let (start_signal, start_program) = std::io::pipe().unwrap();
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exit 0"]);
+            // SAFETY: the closure runs in the forked child before its program starts and only
+            // writes one byte to a pipe and reads one byte from another, which neither allocate
+            // nor take locks.
+            unsafe {
+                command.pre_exec(move || {
+                    (&forked_signal).write_all(b"f")?;
+                    (&start_signal).read_exact(&mut [0])
+                })
+            };
+            let spawning = std::thread::spawn(move || command.status());
+            (&forked).read_exact(&mut [0]).unwrap();
+            Self {
+                start_program,
+                spawning: Some(spawning),
+            }
+        }
+    }
+
+    impl Drop for ChildBeforeItsProgram {
+        fn drop(&mut self) {
+            let _ = (&self.start_program).write_all(b"s");
+            let finished = self.spawning.take().map(JoinHandle::join);
+            if !std::thread::panicking() {
+                assert!(finished.unwrap().unwrap().unwrap().success());
+            }
+        }
+    }
+
+    #[test]
+    fn a_dropped_handle_releases_its_lock_while_a_forked_child_still_has_a_copy() {
+        let path = std::env::temp_dir().join(format!("eggdb-forked-lock-{}", std::process::id()));
+        let fs = OsFileSystem::new();
+        for lock in [FileLock::Exclusive, FileLock::Shared] {
+            let owner = fs.open(&path, OpenMode::Create).unwrap();
+            owner.try_lock(lock).unwrap();
+            let child = ChildBeforeItsProgram::fork();
+            drop(owner);
+            let reopened = fs.open(&path, OpenMode::ReadWrite).unwrap();
+            let relocked = reopened.try_lock(FileLock::Exclusive);
+            drop(reopened);
+            drop(child);
+            relocked.unwrap();
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
 
     #[test]
     fn syncing_an_unreadable_regular_file_as_a_directory_is_invalid() {
