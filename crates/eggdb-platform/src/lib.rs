@@ -21,7 +21,7 @@
 //!   [`CachePadded`] against false sharing;
 //! - [`terminal`]: whether a standard stream is a terminal, whether it takes colours, and a
 //!   [`terminal::RawTerminal`] for full-screen programs that restores the terminal on exit;
-//! - [`process`]: waiting for a child process and learning the most memory it held.
+//! - [`process`]: running a child process and learning the most memory it held.
 //!
 //! Each trait has an implementation backed by the operating system ([`OsFileSystem`],
 //! [`OsIoQueue`], [`OsNetwork`], [`SystemClock`], [`OsMemory`], [`OsCpus`]) and a
@@ -46,11 +46,11 @@ mod os_iocp;
 mod os_memory;
 mod os_net;
 mod os_net_readiness;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod os_process_linux;
 #[cfg(all(
     target_pointer_width = "64",
     any(
-        target_os = "linux",
-        target_os = "android",
         target_vendor = "apple",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -84,6 +84,21 @@ mod os_process_windows;
 mod os_terminal_unix;
 #[cfg(windows)]
 mod os_terminal_windows;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    all(
+        target_pointer_width = "64",
+        any(
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly"
+        )
+    )
+))]
+mod os_wait_status;
 pub mod process;
 mod rng;
 mod sim_cpus;

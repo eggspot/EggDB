@@ -3,7 +3,7 @@ use crate::process::ChildExit;
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::io::AsRawHandle;
-use std::process::Child;
+use std::process::Command;
 
 #[repr(C)]
 #[derive(Default)]
@@ -29,7 +29,8 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-pub(crate) fn wait_with_peak_memory(mut child: Child) -> Result<ChildExit> {
+pub(crate) fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
+    let mut child = command.spawn()?;
     let status = child.wait()?;
     let size = u32::try_from(size_of::<ProcessMemoryCounters>())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;

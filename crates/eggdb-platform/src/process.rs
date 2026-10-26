@@ -1,8 +1,8 @@
-//! Child processes: waiting for one and learning the most memory it held, which benchmarks
-//! use to measure a program's footprint from outside it.
+//! Child processes: running one and learning the most memory it held, which benchmarks use to
+//! measure a program's footprint from outside it.
 
 use crate::error::Result;
-use std::process::Child;
+use std::process::Command;
 
 /// How a child process ended, and the most memory it held at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,25 +13,29 @@ pub struct ChildExit {
     pub peak_resident_bytes: u64,
 }
 
-/// Waits for `child` to exit, then returns its exit code and the most memory it held.
+/// Runs `command` to its end, then returns its exit code and the most memory it held.
 ///
-/// `child` must not have been waited for already. The operating system reports the peak in
-/// whole pages or kibibytes, so it is a multiple of its unit.
+/// The peak is the child's own: on Linux and Android its `VmHWM` read when it exits, which a
+/// parent's memory never inflates, through `ptrace` (so a tracer such as a debugger must not
+/// hold the child); on Apple's systems and the BSDs the `ru_maxrss` of `wait4`; on Windows the
+/// peak working set. The operating system counts it in whole pages or kibibytes.
 ///
 /// # Errors
 ///
+/// The error `spawn` gives when the command cannot start;
 /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) where the operating system does
-/// not report a child's peak memory (after waiting for it), and the operating system's error
-/// when the wait fails.
-pub fn wait_with_peak_memory(child: Child) -> Result<ChildExit> {
-    imp::wait_with_peak_memory(child)
+/// not report a child's peak memory (after the child has ended); and the operating system's
+/// error when waiting for the child or tracing it fails.
+pub fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
+    imp::run_with_peak_memory(command)
 }
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::os_process_linux as imp;
 
 #[cfg(all(
     target_pointer_width = "64",
     any(
-        target_os = "linux",
-        target_os = "android",
         target_vendor = "apple",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -46,11 +50,11 @@ use crate::os_process_windows as imp;
 
 #[cfg(not(any(
     windows,
+    target_os = "linux",
+    target_os = "android",
     all(
         target_pointer_width = "64",
         any(
-            target_os = "linux",
-            target_os = "android",
             target_vendor = "apple",
             target_os = "freebsd",
             target_os = "netbsd",
@@ -62,10 +66,10 @@ use crate::os_process_windows as imp;
 mod imp {
     use super::ChildExit;
     use crate::error::{Error, ErrorKind, Result};
-    use std::process::Child;
+    use std::process::Command;
 
-    pub(crate) fn wait_with_peak_memory(mut child: Child) -> Result<ChildExit> {
-        child.wait()?;
+    pub(crate) fn run_with_peak_memory(command: &mut Command) -> Result<ChildExit> {
+        command.status()?;
         Err(Error::new(ErrorKind::Unsupported))
     }
 }

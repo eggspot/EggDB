@@ -3,7 +3,7 @@ use crate::bench_file::BenchFile;
 use crate::database::failed;
 use crate::measure::median;
 use eggdb::{Database, Options};
-use eggdb_platform::process::{ChildExit, wait_with_peak_memory};
+use eggdb_platform::process::run_with_peak_memory;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -140,11 +140,11 @@ fn run_against_reference(subject: &mut dyn FnMut() -> Command) -> Result<Runs, S
     let mut ratios = Vec::with_capacity(ROUNDS);
     let mut peaks = Vec::with_capacity(ROUNDS);
     for _ in 0..ROUNDS {
-        let (reference_ns, _) = timed_run(&mut reference())?;
-        let (subject_ns, exit) = timed_run(&mut subject())?;
+        let reference_ns = timed_run(&mut reference())?;
+        let subject_ns = timed_run(&mut subject())?;
         ns.push(subject_ns);
         ratios.push(subject_ns / reference_ns);
-        peaks.push(exit.peak_resident_bytes as f64);
+        peaks.push(peak_resident_bytes(&mut subject())? as f64);
     }
     Ok(Runs {
         ns: median(&mut ns),
@@ -153,19 +153,31 @@ fn run_against_reference(subject: &mut dyn FnMut() -> Command) -> Result<Runs, S
     })
 }
 
-fn timed_run(command: &mut Command) -> Result<(f64, ChildExit), String> {
+fn quiet(command: &mut Command) -> (&mut Command, String) {
     let program = command.get_program().to_string_lossy().into_owned();
-    let start = Instant::now();
-    let child = command
+    let command = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(failed(&program))?;
-    let exit = wait_with_peak_memory(child).map_err(failed(&program))?;
+        .stderr(Stdio::null());
+    (command, program)
+}
+
+fn timed_run(command: &mut Command) -> Result<f64, String> {
+    let (command, program) = quiet(command);
+    let start = Instant::now();
+    let status = command.status().map_err(failed(&program))?;
     let ns = start.elapsed().as_nanos() as f64;
+    if !status.success() {
+        return Err(format!("{program} failed: {status}"));
+    }
+    Ok(ns)
+}
+
+fn peak_resident_bytes(command: &mut Command) -> Result<u64, String> {
+    let (command, program) = quiet(command);
+    let exit = run_with_peak_memory(command).map_err(failed(&program))?;
     if exit.code != Some(0) {
         return Err(format!("{program} exited with {:?}", exit.code));
     }
-    Ok((ns, exit))
+    Ok(exit.peak_resident_bytes)
 }
