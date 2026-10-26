@@ -31,7 +31,11 @@ pub enum Durability {
     Full,
     /// A commit returns once its log records are written, without a sync; its pages reach
     /// their places in the file only after the next sync, so a power loss can lose the latest
-    /// commits but never corrupts the file.
+    /// commits but never corrupts the file. A sync happens when [`PageFile::sync`] is called,
+    /// when the durability changes, and once a megabyte of log or a thousand pages wait for
+    /// one.
+    ///
+    /// [`PageFile::sync`]: crate::PageFile::sync
     Normal,
     /// A commit writes its records and its pages and never syncs: a power loss can corrupt
     /// the file. For bulk loads and tests.
@@ -329,6 +333,10 @@ impl LogWriter {
 
     pub(crate) fn lsn(&self) -> u64 {
         self.geometry.lsn_at(&self.segment, self.offset)
+    }
+
+    pub(crate) fn unsynced_bytes(&self) -> u64 {
+        self.lsn().saturating_sub(self.durable_lsn)
     }
 
     pub(crate) fn images(&self) -> &[StagedImage] {

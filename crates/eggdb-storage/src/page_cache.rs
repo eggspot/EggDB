@@ -174,6 +174,7 @@ impl<F: File> PageCache<F> {
     /// Pins data page `page_id` for reading, reading it from the file and verifying its
     /// checksum if it is not in memory. A page that is free, outside the file or failing its
     /// checksum is refused, the last with [`FormatError::ChecksumMismatch`] naming it.
+    #[inline]
     pub fn read(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
         let frame = self.locate(page_id)?;
         let bytes = self
@@ -337,6 +338,7 @@ impl<F: File> PageCache<F> {
         Ok(())
     }
 
+    #[inline]
     fn locate(&self, page_id: u64) -> Result<usize, StorageError> {
         match self.table.get(page_id) {
             Some(frame) => {
@@ -347,6 +349,7 @@ impl<F: File> PageCache<F> {
         }
     }
 
+    #[inline]
     fn hit(&self, frame: usize) {
         self.hits.set(self.hits.get() + 1);
         self.states[frame].set(self.states[frame].get() | REFERENCED);

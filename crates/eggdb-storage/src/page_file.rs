@@ -17,6 +17,7 @@ const FREE_LIST_NEXT_AT: usize = PAGE_HEADER_SIZE;
 const FREE_LIST_COUNT_AT: usize = PAGE_HEADER_SIZE + 8;
 const FREE_LIST_ENTRIES_AT: usize = PAGE_HEADER_SIZE + 16;
 const NORMAL_UNWRITTEN_PAGES: usize = 1024;
+const NORMAL_UNSYNCED_LOG_BYTES: u64 = 1 << 20;
 const NO_STAMP: u64 = 0;
 
 /// How [`PageFile::create`] sets up a new file.
@@ -521,7 +522,9 @@ impl<F: File> PageFile<F> {
                 for image in log.images() {
                     self.unwritten.insert(image.page_id, image.file_offset);
                 }
-                if self.unwritten.len() > NORMAL_UNWRITTEN_PAGES {
+                if self.unwritten.len() > NORMAL_UNWRITTEN_PAGES
+                    || log.unsynced_bytes() >= NORMAL_UNSYNCED_LOG_BYTES
+                {
                     self.sync_log()?;
                 }
                 Ok(())
