@@ -113,10 +113,10 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-cross-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Lint the platform layer and the storage engine for each target
+      - name: Lint the platform layer, the storage engine and the embedded API for each target
         run: |
           for target in $TARGETS; do
-            cargo clippy -p eggdb-platform -p eggdb-storage --all-targets --target "$target" -- -D warnings
+            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb --all-targets --target "$target" -- -D warnings
           done
 
   bench:
