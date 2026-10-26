@@ -67,6 +67,7 @@ pub struct PageFile<F: File> {
     checksums: PageChecksum,
     page_count: u64,
     available: BTreeSet<u64>,
+    reused: Vec<u64>,
     freed: BTreeSet<u64>,
     free_list_pages: BTreeSet<u64>,
     damaged_header_slot: Option<usize>,
@@ -156,6 +157,7 @@ impl<F: File> PageFile<F> {
             page_count: superblock.page_count,
             superblock,
             available: BTreeSet::new(),
+            reused: Vec::new(),
             freed: BTreeSet::new(),
             free_list_pages: BTreeSet::new(),
             damaged_header_slot: None,
@@ -208,14 +210,7 @@ impl<F: File> PageFile<F> {
         page: &mut [u8],
         header: &PageHeader,
     ) -> Result<(), StorageError> {
-        self.check_writable()?;
-        self.check_data_page(page_id)?;
-        if self.available.contains(&page_id)
-            || self.freed.contains(&page_id)
-            || self.free_list_pages.contains(&page_id)
-        {
-            return Err(StorageError::PageNotInUse { page: page_id });
-        }
+        self.check_page_writable(page_id)?;
         self.checksums.write(page, page_id, header)?;
         let written = self
             .file
@@ -229,6 +224,7 @@ impl<F: File> PageFile<F> {
     pub fn allocate(&mut self) -> Result<u64, StorageError> {
         self.check_writable()?;
         if let Some(page) = self.available.pop_first() {
+            self.reused.push(page);
             return Ok(page);
         }
         self.grow()
@@ -246,6 +242,21 @@ impl<F: File> PageFile<F> {
             return Err(StorageError::DoubleFree { page: page_id });
         }
         self.freed.insert(page_id);
+        Ok(())
+    }
+
+    /// Drops every allocation and free since the last commit, so the free pages and the page
+    /// count are the committed state's again, and the pages allocated since can be handed out
+    /// again.
+    ///
+    /// Pages written through [`PageFile::write_page`] since the last commit are not restored:
+    /// a caller that may roll back keeps its changes in memory until the commit, as
+    /// [`PageCache`](crate::PageCache) does.
+    pub fn rollback(&mut self) -> Result<(), StorageError> {
+        self.check_writable()?;
+        self.available.extend(self.reused.drain(..));
+        self.freed.clear();
+        self.page_count = self.superblock.page_count;
         Ok(())
     }
 
@@ -316,6 +327,7 @@ impl<F: File> PageFile<F> {
 
         self.superblock = next;
         self.available = entries;
+        self.reused.clear();
         self.freed.clear();
         self.free_list_pages = list_pages.iter().copied().collect();
         Ok(())
@@ -418,6 +430,22 @@ impl<F: File> PageFile<F> {
         page_id * self.page_size().bytes() as u64
     }
 
+    pub(crate) fn check_page_writable(&self, page_id: u64) -> Result<(), StorageError> {
+        self.check_writable()?;
+        self.check_page_in_use(page_id)
+    }
+
+    pub(crate) fn check_page_in_use(&self, page_id: u64) -> Result<(), StorageError> {
+        self.check_data_page(page_id)?;
+        if self.available.contains(&page_id)
+            || self.freed.contains(&page_id)
+            || self.free_list_pages.contains(&page_id)
+        {
+            return Err(StorageError::PageNotInUse { page: page_id });
+        }
+        Ok(())
+    }
+
     fn check_data_page(&self, page_id: u64) -> Result<(), StorageError> {
         if page_id >= self.page_size().first_data_page() && page_id < self.page_count {
             Ok(())
@@ -441,7 +469,7 @@ impl<F: File> PageFile<F> {
         }
     }
 
-    fn check_writable(&self) -> Result<(), StorageError> {
+    pub(crate) fn check_writable(&self) -> Result<(), StorageError> {
         if self.access == Access::ReadOnly {
             return Err(StorageError::ReadOnly);
         }
@@ -875,6 +903,35 @@ mod tests {
                 field: "log_head_page"
             }))
         ));
+    }
+
+    #[test]
+    fn a_rollback_restores_the_committed_free_pages_and_page_count() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let pages: Vec<u64> = (0..4).map(|_| file.allocate().unwrap()).collect();
+        for &page in &pages {
+            write_filled(&mut file, page, 1);
+        }
+        file.commit(|_| {}).unwrap();
+        file.free(pages[0]).unwrap();
+        file.commit(|_| {}).unwrap();
+        let committed_count = file.page_count();
+        let committed_free = file.available_pages();
+        let reused = file.allocate().unwrap();
+        let grown = file.allocate().unwrap();
+        file.free(pages[1]).unwrap();
+        write_filled(&mut file, grown, 2);
+        file.rollback().unwrap();
+        assert_eq!(file.page_count(), committed_count);
+        assert_eq!(file.available_pages(), committed_free);
+        assert_eq!(file.allocate().unwrap(), reused);
+        assert_eq!(file.allocate().unwrap(), grown);
+        file.free(pages[1]).unwrap();
+        file.commit(|_| {}).unwrap();
+        drop(file);
+        let file = open(&fs, Access::ReadOnly).unwrap();
+        assert_eq!(file.superblock().page_count, committed_count + 2);
     }
 
     #[test]
