@@ -64,8 +64,8 @@ include.
 
 The band is wider than the 30% of EggDB's other ratios because two engines respond differently
 to each CI runner's processor: seven runs gave point gets from 0.60 to 0.83 and scans from 0.35
-to 0.52. Workloads that wait
-for the disk measure the disk more than either engine, so they are reported, not gated.
+to 0.52. Workloads that wait for the disk measure the disk more than either engine, so they are
+reported, not gated.
 
 ## The `eggdb` binary
 
@@ -98,16 +98,16 @@ of GitHub's `ubuntu-latest` x86-64 runners, whose hardware varies between runs.
 | | macOS | Linux |
 |-|-------|-------|
 | Binary size | 933,312 bytes | 1,133,296 bytes |
-| `eggdb --version` | 1.48 ms, 0.97 of an empty program | 0.78 ms, 1.02 of an empty program |
-| `eggdb get` on a 10,000-entry file | 1.28 ms, 1.05 of an empty program | 1.08 ms, 1.42 of an empty program |
+| `eggdb --version` | 1.48 ms, 0.97 × a program that exits at once | 0.78 ms, 1.02 × |
+| `eggdb get` on a 10,000-entry file | 1.28 ms, 1.05 × | 1.08 ms, 1.42 × |
 | Peak memory, `--version` | 1,654,784 bytes | 2,484,224 bytes |
 | Peak memory, `get` | 2,310,144 bytes | 5,103,616 bytes |
 
 EggDB is faster than SQLite on point gets and scans on both systems. **SQLite is faster on
 batched random overwrites**: EggDB takes about 1.35 times its time on this Mac without syncs and
-1.18 times in `Normal`, and about 1.09 times in both modes on Linux. Both log whole pages, so the gap is in
-EggDB's write path; making it faster is on the roadmap. A durable commit on either engine is one
-disk flush (`F_FULLFSYNC` on the Mac), which takes nearly all of its time.
+1.18 times in `Normal`, and about 1.09 times in both modes on Linux. Both log whole pages, so the
+gap is in EggDB's write path; making it faster is on the roadmap. A durable commit on either
+engine is one disk flush (`F_FULLFSYNC` on the Mac), which takes nearly all of its time.
 
 The binary is unchanged by this measurement; its growth since v0.1.0 (302,448 bytes on macOS,
 when it only printed its version) is the storage engine, the command-line tool, `eggdb ui` and
