@@ -4,8 +4,11 @@ use crate::format::{
     Access, FileId, HEADER_SLOT_SIZE, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum,
     PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, Superblock,
 };
+use crate::log::{
+    self, COMMIT_PAYLOAD, CommitFields, Durability, LOG_BLOCK, LogGeometry, LogWriter, Segment,
+};
 use eggdb_platform::{ErrorKind, File, FileLock, FileSystem, OpenMode};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::Path;
 
@@ -13,7 +16,9 @@ const FREE_LIST_LAYOUT: u8 = 1;
 const FREE_LIST_NEXT_AT: usize = PAGE_HEADER_SIZE;
 const FREE_LIST_COUNT_AT: usize = PAGE_HEADER_SIZE + 8;
 const FREE_LIST_ENTRIES_AT: usize = PAGE_HEADER_SIZE + 16;
-const DEFAULT_LOG_SEGMENT_BYTES: usize = 64 << 10;
+const NORMAL_UNWRITTEN_PAGES: usize = 1024;
+const NORMAL_UNSYNCED_LOG_BYTES: u64 = 1 << 20;
+const NO_STAMP: u64 = 0;
 
 /// How [`PageFile::create`] sets up a new file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,18 +46,19 @@ impl Default for CreateOptions {
 }
 
 /// A database file seen as numbered, checksummed pages: the two header slots, page reads and
-/// writes, growth, and a free list (`docs/format.md`).
+/// writes, growth, a free list and the write-ahead log (`docs/format.md`).
 ///
-/// Changes become durable only at [`PageFile::commit`], which syncs the pages and then writes
-/// the next superblock to the slot the current one is not in. A crash at any moment leaves the
-/// header, the page count and the free list as the last commit left them, and pages allocated
-/// since then unreachable. A page freed since the last commit is not handed out again until a
-/// commit has made the free durable, and writes to free pages are refused, so the page file
-/// itself never overwrites a page of the committed state.
+/// Changes become durable only at [`PageFile::commit`]. A commit appends a whole image of every
+/// page it writes, and a commit record holding the new page count, free list and catalog root,
+/// to the write-ahead log inside the file; with [`Durability::Full`] it then syncs the log, and
+/// only after that writes the pages in place. Opening the file replays every committed record
+/// since the last checkpoint, so a crash at any moment, even one that tears a page being
+/// overwritten in place, leaves exactly the commits whose records were durable. The header
+/// slots are written only when the log is created; checkpoints, which write them again and
+/// let the log be recycled, are item 7 of the v0.2.0 plan.
 ///
-/// Overwriting a page of the committed state in place, through [`PageFile::write_page`], is
-/// not undone by a crash: the write-ahead log makes such writes safe, by logging a change
-/// before its page is written and replaying it after a crash.
+/// A page freed since the last commit is not handed out again until a commit has made the
+/// free durable, and writes to free pages and to the log's pages are refused.
 ///
 /// Opening for writing takes an exclusive lock on the file and opening for reading a shared
 /// one, so a second writer, in this process or another, is refused with
@@ -63,20 +69,29 @@ impl Default for CreateOptions {
 pub struct PageFile<F: File> {
     file: F,
     access: Access,
+    header: Superblock,
     superblock: Superblock,
     checksums: PageChecksum,
     page_count: u64,
+    file_bytes: u64,
     available: BTreeSet<u64>,
     reused: Vec<u64>,
     freed: BTreeSet<u64>,
     free_list_pages: BTreeSet<u64>,
+    staged: BTreeMap<u64, (PageHeader, Vec<u8>)>,
+    log: Option<LogWriter>,
+    log_pages: BTreeMap<u64, u64>,
+    unwritten: BTreeMap<u64, u64>,
+    durability: Durability,
+    scratch: Vec<u8>,
+    page_count_before_commit: Option<u64>,
     damaged_header_slot: Option<usize>,
     failed: bool,
 }
 
 impl<F: File> PageFile<F> {
     /// Creates a new database file at `path`, refusing a path that already exists, and makes
-    /// the file and its directory entry durable.
+    /// the file and its directory entry durable. The log is created by the first change.
     pub fn create<S: FileSystem<File = F>>(
         fs: &S,
         path: &Path,
@@ -98,18 +113,31 @@ impl<F: File> PageFile<F> {
             log_head_page: NO_PAGE,
             log_head_sequence: 0,
             clock_high_water: 0,
-            log_segment_pages: (DEFAULT_LOG_SEGMENT_BYTES / page_size.bytes()).max(1) as u32,
+            log_segment_pages: log::default_segment_pages(page_size),
             recycled_segments: [NO_PAGE; RECYCLED_SEGMENTS],
         };
-        file.set_size(superblock.page_count * page_size.bytes() as u64)?;
+        let file_bytes = superblock.page_count * page_size.bytes() as u64;
+        file.set_size(file_bytes)?;
         file.write_all_at(&superblock.encode()?, 0)?;
         file.sync_all()?;
         fs.sync_dir(parent_directory(path))?;
-        Ok(Self::from_parts(file, Access::ReadWrite, superblock))
+        Ok(Self::from_parts(
+            file,
+            Access::ReadWrite,
+            superblock,
+            file_bytes,
+        ))
     }
 
-    /// Opens the database file at `path` for `access`, choosing its current superblock,
-    /// checking its features, its length and its free list.
+    /// Opens the database file at `path` for `access`: chooses its current superblock, checks
+    /// its features and length, replays the commits its log holds since the last checkpoint,
+    /// and checks its free list.
+    ///
+    /// A log damaged where it had been made durable refuses the open with
+    /// [`FormatError::CorruptLog`]; a log that ends in records a crash cut off opens at its
+    /// last whole commit. Opening for writing writes the replayed pages in place, after
+    /// syncing the log, so later commits start from them; opening for reading serves them
+    /// from the log.
     pub fn open<S: FileSystem<File = F>>(
         fs: &S,
         path: &Path,
@@ -143,29 +171,43 @@ impl<F: File> PageFile<F> {
                 actual_bytes,
             });
         }
-        let mut page_file = Self::from_parts(file, access, superblock);
+        let mut page_file = Self::from_parts(file, access, superblock, actual_bytes);
         page_file.damaged_header_slot = choice.damaged_slot;
+        if superblock.log_head_page != NO_PAGE {
+            page_file.recover()?;
+        }
+        page_file.superblock.features.check(access)?;
         page_file.load_free_list()?;
         Ok(page_file)
     }
 
-    fn from_parts(file: F, access: Access, superblock: Superblock) -> Self {
+    fn from_parts(file: F, access: Access, superblock: Superblock, file_bytes: u64) -> Self {
         Self {
             file,
             access,
             checksums: PageChecksum::new(superblock.file_id, superblock.page_size),
             page_count: superblock.page_count,
+            file_bytes,
+            header: superblock,
             superblock,
             available: BTreeSet::new(),
             reused: Vec::new(),
             freed: BTreeSet::new(),
             free_list_pages: BTreeSet::new(),
+            staged: BTreeMap::new(),
+            log: None,
+            log_pages: BTreeMap::new(),
+            unwritten: BTreeMap::new(),
+            durability: Durability::Full,
+            scratch: Vec::new(),
+            page_count_before_commit: None,
             damaged_header_slot: None,
             failed: false,
         }
     }
 
-    /// The superblock of the last commit.
+    /// The superblock as of the last commit: the header the file opened with, updated by every
+    /// commit since. Its generation and log fields are those of the header in the file.
     pub fn superblock(&self) -> &Superblock {
         &self.superblock
     }
@@ -192,49 +234,94 @@ impl<F: File> PageFile<F> {
         self.damaged_header_slot
     }
 
+    /// How commits wait for the disk; [`Durability::Full`] unless changed.
+    pub fn durability(&self) -> Durability {
+        self.durability
+    }
+
+    /// Sets how later commits wait for the disk. Leaving [`Durability::Normal`] first syncs
+    /// the commits it left unsynced, as [`PageFile::sync`] does.
+    pub fn set_durability(&mut self, durability: Durability) -> Result<(), StorageError> {
+        if self.durability == Durability::Normal && durability != Durability::Normal {
+            self.sync()?;
+        }
+        self.durability = durability;
+        Ok(())
+    }
+
+    /// Makes every commit so far durable with one sync of the log, and then writes the pages
+    /// of commits made under [`Durability::Normal`] in place. Commits made since the last sync
+    /// share it: this is group commit for a single writer. Does nothing when everything is
+    /// already durable or the file has no log yet.
+    pub fn sync(&mut self) -> Result<(), StorageError> {
+        self.check_writable()?;
+        let synced = self.sync_log();
+        self.fail_on_error(synced)
+    }
+
+    fn sync_log(&mut self) -> Result<(), StorageError> {
+        if let Some(log) = self.log.as_mut() {
+            let lsn = log.lsn();
+            log.sync_to(&self.file, lsn)?;
+        }
+        self.drain_unwritten()
+    }
+
     /// Reads data page `page_id` into `page`, which must be one page long, and checks it.
+    ///
+    /// A page changed through [`PageFile::write_page`] since the last commit reads as changed,
+    /// and a committed page whose image is still only in the log is read from there.
     pub fn read_page(&self, page_id: u64, page: &mut [u8]) -> Result<PageHeader, StorageError> {
         self.check_data_page(page_id)?;
         self.check_length(page)?;
-        self.file.read_exact_at(page, self.offset(page_id))?;
+        if let Some((_, staged)) = self.staged.get(&page_id) {
+            page.copy_from_slice(staged);
+        } else if let Some(&offset) = self.unwritten.get(&page_id) {
+            self.file.read_exact_at(page, offset)?;
+        } else {
+            self.file.read_exact_at(page, self.offset(page_id))?;
+        }
         Ok(self.checksums.verify(page, page_id)?)
     }
 
-    /// Writes `header` and the checksum into `page`, which must be one page long, and writes
-    /// it as data page `page_id`. The page must be in use: allocated, or part of the committed
-    /// state and not freed. A write to a free page, to a page freed since the last commit or to
-    /// a page of the free list is refused with [`StorageError::PageNotInUse`].
+    /// Writes `header` and the checksum into `page`, which must be one page long, and keeps a
+    /// copy of it as data page `page_id` until the next commit logs it and writes it in place,
+    /// or a rollback drops it. The page must be in use: allocated, or part of the committed
+    /// state and not freed. A write to a free page, to a page freed since the last commit, to
+    /// a page of the free list or to a page of the log is refused with
+    /// [`StorageError::PageNotInUse`].
     pub fn write_page(
         &mut self,
         page_id: u64,
         page: &mut [u8],
         header: &PageHeader,
     ) -> Result<(), StorageError> {
+        self.ensure_log()?;
         self.check_page_writable(page_id)?;
         self.checksums.write(page, page_id, header)?;
-        let written = self
-            .file
-            .write_all_at(page, self.offset(page_id))
-            .map_err(StorageError::from);
-        self.fail_on_error(written)
+        self.staged.insert(page_id, (*header, page.to_vec()));
+        Ok(())
     }
 
     /// Hands out a page to write: a free page of the committed state, or a new page at the end
     /// of the file.
     pub fn allocate(&mut self) -> Result<u64, StorageError> {
-        self.check_writable()?;
+        self.ensure_log()?;
         if let Some(page) = self.available.pop_first() {
             self.reused.push(page);
             return Ok(page);
         }
-        self.grow()
+        grow(&mut self.page_count)
     }
 
     /// Gives back a page that is no longer used. It becomes free at the next commit, and is
     /// handed out again only after it.
     pub fn free(&mut self, page_id: u64) -> Result<(), StorageError> {
-        self.check_writable()?;
+        self.ensure_log()?;
         self.check_data_page(page_id)?;
+        if self.is_log_page(page_id) {
+            return Err(StorageError::PageNotInUse { page: page_id });
+        }
         if self.available.contains(&page_id)
             || self.freed.contains(&page_id)
             || self.free_list_pages.contains(&page_id)
@@ -242,135 +329,283 @@ impl<F: File> PageFile<F> {
             return Err(StorageError::DoubleFree { page: page_id });
         }
         self.freed.insert(page_id);
+        self.staged.remove(&page_id);
         Ok(())
     }
 
-    /// Drops every allocation and free since the last commit, so the free pages and the page
-    /// count are the committed state's again, and the pages allocated since can be handed out
-    /// again.
-    ///
-    /// Pages written through [`PageFile::write_page`] since the last commit are not restored:
-    /// a caller that may roll back keeps its changes in memory until the commit, as
-    /// [`PageCache`](crate::PageCache) does.
+    /// Drops every change since the last commit: pages written through
+    /// [`PageFile::write_page`] are forgotten, and the free pages and the page count are the
+    /// committed state's again, so the pages allocated since can be handed out again.
     pub fn rollback(&mut self) -> Result<(), StorageError> {
         self.check_writable()?;
+        self.abort_commit();
+        self.staged.clear();
         self.available.extend(self.reused.drain(..));
         self.freed.clear();
         self.page_count = self.superblock.page_count;
         Ok(())
     }
 
-    /// Makes every change since the last commit durable: writes the new free list, syncs the
-    /// file, writes the next superblock with `update` applied to it, and syncs again.
+    /// Makes every change since the last commit durable: logs an image of each page written
+    /// since then and of the new free list, then a commit record with the superblock fields
+    /// `update` sets, and, under [`Durability::Full`], syncs the log before writing the pages
+    /// in place.
     ///
-    /// `update` sets the fields the page file doesn't own, such as the catalog root and the
-    /// log's position; the commit itself sets the page size, file identity, generation, page
-    /// count and free list, whatever `update` did to them.
+    /// `update` sets the fields the page file doesn't own: the catalog root, the clock's high
+    /// water mark and the feature flags. Whatever it does to the others (page size, identity,
+    /// generation, page count, free list and the log's fields) is undone.
     ///
     /// The free list is written to pages that are free in the committed state, or to new pages
-    /// at the end, never over the pages of the committed list, so a crash before the new
-    /// superblock is durable leaves the old state whole. A commit that can't be made, such as
-    /// one whose catalog root or log segments would be free pages, which the file could not be
-    /// opened with again, is refused with [`FormatError::InvalidField`] before anything is
-    /// written, and leaves the changes since the last commit in place.
+    /// at the end, never over the pages of the committed list, and only when it changed. A
+    /// commit that can't be made, such as one whose catalog root would be a free page, which
+    /// the file could not be opened with again, is refused with [`FormatError::InvalidField`]
+    /// before anything is written, and leaves the changes since the last commit in place.
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
         let prepared = self.prepare_commit(update)?;
-        self.finish_commit(prepared)
+        let mut staged = std::mem::take(&mut self.staged);
+        for (&page_id, (header, page)) in staged.iter_mut() {
+            if let Err(error) = self.log_page(page_id, page, header) {
+                self.abort_commit();
+                self.staged = staged;
+                return Err(error);
+            }
+        }
+        let finished = self.finish_commit(prepared);
+        if finished.is_err() && !self.failed {
+            self.staged = staged;
+        }
+        finished
     }
 
     pub(crate) fn prepare_commit(
-        &self,
+        &mut self,
         update: impl FnOnce(&mut Superblock),
     ) -> Result<PreparedCommit, StorageError> {
+        self.ensure_log()?;
         self.check_writable()?;
+        let list_changed = !self.reused.is_empty()
+            || !self.freed.is_empty()
+            || self.page_count != self.superblock.page_count;
+        let mut page_count = self.page_count;
+        let (entries, list_pages) = if list_changed {
+            self.next_free_list(&mut page_count)?
+        } else {
+            (None, Vec::new())
+        };
+        let mut next = self.superblock;
+        update(&mut next);
+        let committed = &self.superblock;
+        next.page_size = committed.page_size;
+        next.file_id = committed.file_id;
+        next.generation = committed.generation;
+        next.checkpoint_lsn = committed.checkpoint_lsn;
+        next.log_head_page = committed.log_head_page;
+        next.log_head_sequence = committed.log_head_sequence;
+        next.log_segment_pages = committed.log_segment_pages;
+        next.recycled_segments = committed.recycled_segments;
+        next.page_count = page_count;
+        if let Some(entries) = &entries {
+            next.free_list_head = list_pages.first().copied().unwrap_or(NO_PAGE);
+            next.free_page_count = (entries.len() + list_pages.len()) as u64;
+        }
+        next.check()?;
+        match &entries {
+            Some(entries) => check_not_listed(&next, entries, |pages| {
+                list_pages.iter().any(|page| pages.contains(page))
+            })?,
+            None => check_not_listed(&next, &self.available, |pages| {
+                self.free_list_pages.range(pages.clone()).next().is_some()
+            })?,
+        }
+        let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
+        let before = self.page_count;
+        self.page_count = page_count;
+        if let Err(error) = log.begin(&mut self.page_count) {
+            log.abort();
+            self.page_count = before;
+            return Err(error);
+        }
+        self.page_count_before_commit = Some(before);
+        Ok(PreparedCommit {
+            superblock: next,
+            entries,
+            list_pages,
+        })
+    }
+
+    pub(crate) fn log_page(
+        &mut self,
+        page_id: u64,
+        page: &mut [u8],
+        header: &PageHeader,
+    ) -> Result<u64, StorageError> {
+        self.check_page_in_use(page_id)?;
+        self.check_length(page)?;
+        let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
+        log.reserve(8 + page.len(), &mut self.page_count)?;
+        let lsn = log.lsn();
+        let header = PageHeader { lsn, ..*header };
+        self.checksums.write(page, page_id, &header)?;
+        log.put_image(page_id, page);
+        Ok(lsn)
+    }
+
+    pub(crate) fn abort_commit(&mut self) {
+        if let Some(before) = self.page_count_before_commit.take() {
+            self.page_count = before;
+            if let Some(log) = self.log.as_mut() {
+                log.abort();
+            }
+        }
+    }
+
+    pub(crate) fn finish_commit(&mut self, prepared: PreparedCommit) -> Result<(), StorageError> {
+        if let Err(error) = self.seal_commit(&prepared) {
+            self.abort_commit();
+            return Err(error);
+        }
+        self.page_count_before_commit = None;
+        let written = self.write_commit();
+        self.fail_on_error(written)?;
+        let PreparedCommit {
+            mut superblock,
+            entries,
+            list_pages,
+        } = prepared;
+        superblock.page_count = self.page_count;
+        self.superblock = superblock;
+        if let Some(entries) = entries {
+            self.available = entries;
+            self.free_list_pages = list_pages.into_iter().collect();
+        }
+        self.reused.clear();
+        self.freed.clear();
+        if let Some(log) = self.log.as_ref() {
+            let segment_pages = u64::from(self.superblock.log_segment_pages);
+            for segment in log.new_segments() {
+                self.log_pages
+                    .insert(segment.first_page, segment.first_page + segment_pages);
+            }
+        }
+        Ok(())
+    }
+
+    fn seal_commit(&mut self, prepared: &PreparedCommit) -> Result<(), StorageError> {
+        if let Some(entries) = &prepared.entries {
+            self.log_free_list(&prepared.list_pages, entries)?;
+        }
+        let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
+        log.reserve(COMMIT_PAYLOAD, &mut self.page_count)?;
+        let mut next = prepared.superblock;
+        next.page_count = self.page_count;
+        log.put_commit(&CommitFields::of(&next, NO_STAMP));
+        log.seal(&mut self.page_count)
+    }
+
+    fn write_commit(&mut self) -> Result<(), StorageError> {
+        let page_bytes = self.page_size().bytes() as u64;
+        let wanted = self.page_count * page_bytes;
+        let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
+        if self.file_bytes < wanted {
+            let grown_pages = (wanted - self.file_bytes) / page_bytes;
+            let segment_pages =
+                log.new_segments().len() as u64 * u64::from(self.superblock.log_segment_pages);
+            let unlogged_pages = grown_pages.saturating_sub(segment_pages);
+            self.file.set_size(wanted)?;
+            self.file_bytes = wanted;
+            if unlogged_pages > log.images().len() as u64 {
+                self.file.sync_data()?;
+            }
+        }
+        log.write(&self.file)?;
+        match self.durability {
+            Durability::Full => {
+                let lsn = log.lsn();
+                log.sync_to(&self.file, lsn)?;
+                self.drain_unwritten()?;
+                self.write_logged_pages_in_place()
+            }
+            Durability::Off => self.write_logged_pages_in_place(),
+            Durability::Normal => {
+                let waiting = self.unwritten.len() + log.images().len();
+                if waiting > NORMAL_UNWRITTEN_PAGES
+                    || log.unsynced_bytes() >= NORMAL_UNSYNCED_LOG_BYTES
+                {
+                    let lsn = log.lsn();
+                    log.sync_to(&self.file, lsn)?;
+                    for image in log.images() {
+                        self.unwritten.insert(image.page_id, image.file_offset);
+                    }
+                    return self.drain_unwritten();
+                }
+                for image in log.images() {
+                    self.unwritten.insert(image.page_id, image.file_offset);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn write_logged_pages_in_place(&self) -> Result<(), StorageError> {
+        let Some(log) = self.log.as_ref() else {
+            return Ok(());
+        };
+        let page_bytes = self.page_size().bytes();
+        for image in log.images() {
+            let bytes = &log.buffer()[image.buffer_start..image.buffer_start + page_bytes];
+            self.file.write_all_at(bytes, self.offset(image.page_id))?;
+        }
+        Ok(())
+    }
+
+    fn drain_unwritten(&mut self) -> Result<(), StorageError> {
+        if self.unwritten.is_empty() {
+            return Ok(());
+        }
+        let mut page = std::mem::take(&mut self.scratch);
+        page.resize(self.page_size().bytes(), 0);
+        for (&page_id, &offset) in &self.unwritten {
+            self.file.read_exact_at(&mut page, offset)?;
+            self.file.write_all_at(&page, self.offset(page_id))?;
+        }
+        self.unwritten.clear();
+        self.scratch = page;
+        Ok(())
+    }
+
+    fn next_free_list(
+        &self,
+        page_count: &mut u64,
+    ) -> Result<(Option<BTreeSet<u64>>, Vec<u64>), StorageError> {
         let capacity = self.free_list_capacity();
         let mut entries: BTreeSet<u64> = self.available.clone();
         entries.extend(self.freed.iter().copied());
         entries.extend(self.free_list_pages.iter().copied());
         let mut list_pages = Vec::new();
         let mut reusable = self.available.clone();
-        let mut page_count = self.page_count;
         while list_pages.len() * capacity < entries.len() {
             let page = match reusable.pop_first() {
                 Some(page) => {
                     entries.remove(&page);
                     page
                 }
-                None => grow(&mut page_count)?,
+                None => grow(page_count)?,
             };
             list_pages.push(page);
         }
-        let mut next = self.superblock;
-        update(&mut next);
-        next.page_size = self.superblock.page_size;
-        next.file_id = self.superblock.file_id;
-        next.generation =
-            self.superblock
-                .generation
-                .checked_add(1)
-                .ok_or(FormatError::InvalidField {
-                    field: "generation",
-                })?;
-        next.page_count = page_count;
-        next.free_list_head = list_pages.first().copied().unwrap_or(NO_PAGE);
-        next.free_page_count = (entries.len() + list_pages.len()) as u64;
-        let slot = next.encode()?;
-        check_not_listed(&next, &entries, &list_pages)?;
-        Ok(PreparedCommit {
-            superblock: next,
-            slot,
-            entries,
-            list_pages,
-        })
+        Ok((Some(entries), list_pages))
     }
 
-    pub(crate) fn finish_commit(&mut self, prepared: PreparedCommit) -> Result<(), StorageError> {
-        self.check_writable()?;
-        let written = self.write_free_list_and_superblock(prepared);
-        self.fail_on_error(written)
-    }
-
-    fn write_free_list_and_superblock(
-        &mut self,
-        prepared: PreparedCommit,
-    ) -> Result<(), StorageError> {
-        let PreparedCommit {
-            superblock,
-            slot,
-            entries,
-            list_pages,
-        } = prepared;
-        self.page_count = superblock.page_count;
-        self.write_free_list(&list_pages, &entries)?;
-        let bytes = self.page_count * self.page_size().bytes() as u64;
-        if self.file.size()? < bytes {
-            self.file.set_size(bytes)?;
-        }
-        self.file.sync_data()?;
-        self.file
-            .write_all_at(&slot, (superblock.slot() * HEADER_SLOT_SIZE) as u64)?;
-        self.file.sync_data()?;
-
-        self.superblock = superblock;
-        self.available = entries;
-        self.reused.clear();
-        self.freed.clear();
-        self.free_list_pages = list_pages.iter().copied().collect();
-        Ok(())
-    }
-
-    fn grow(&mut self) -> Result<u64, StorageError> {
-        grow(&mut self.page_count)
-    }
-
-    fn write_free_list(
+    fn log_free_list(
         &mut self,
         list_pages: &[u64],
         entries: &BTreeSet<u64>,
     ) -> Result<(), StorageError> {
         let capacity = self.free_list_capacity();
         let mut remaining = entries.iter().copied();
-        let mut page = vec![0u8; self.page_size().bytes()];
+        let mut page = std::mem::take(&mut self.scratch);
+        page.resize(self.page_size().bytes(), 0);
+        let mut logged = Ok(());
         for (index, &page_id) in list_pages.iter().enumerate() {
             page.fill(0);
             let next = list_pages.get(index + 1).copied().unwrap_or(NO_PAGE);
@@ -387,10 +622,189 @@ impl<F: File> PageFile<F> {
                 flags: 0,
                 lsn: 0,
             };
-            self.checksums.write(&mut page, page_id, &header)?;
-            self.file.write_all_at(&page, self.offset(page_id))?;
+            logged = self.log_list_page(page_id, &mut page, &header);
+            if logged.is_err() {
+                break;
+            }
         }
+        self.scratch = page;
+        logged
+    }
+
+    fn log_list_page(
+        &mut self,
+        page_id: u64,
+        page: &mut [u8],
+        header: &PageHeader,
+    ) -> Result<(), StorageError> {
+        let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
+        log.reserve(8 + page.len(), &mut self.page_count)?;
+        let header = PageHeader {
+            lsn: log.lsn(),
+            ..*header
+        };
+        self.checksums.write(page, page_id, &header)?;
+        log.put_image(page_id, page);
         Ok(())
+    }
+
+    fn geometry(&self, segment_pages: u32) -> LogGeometry {
+        LogGeometry::new(self.header.file_id, self.header.page_size, segment_pages)
+    }
+
+    fn ensure_log(&mut self) -> Result<(), StorageError> {
+        self.check_writable()?;
+        if self.log.is_some() {
+            return Ok(());
+        }
+        let page_size = self.page_size();
+        let segment_pages = if log::segment_holds_a_page(page_size, self.header.log_segment_pages) {
+            self.header.log_segment_pages
+        } else {
+            log::default_segment_pages(page_size)
+        };
+        let first_page = self.superblock.page_count;
+        let page_count = first_page
+            .checked_add(u64::from(segment_pages))
+            .filter(|&count| count & PAGE_VOLUME_MASK == 0)
+            .ok_or(StorageError::FileFull)?;
+        let segment = Segment {
+            first_page,
+            sequence: self.header.log_head_sequence.checked_add(1).ok_or(
+                FormatError::InvalidField {
+                    field: "log_head_sequence",
+                },
+            )?,
+            start_lsn: self.header.checkpoint_lsn,
+        };
+        let mut next = self.superblock;
+        next.generation =
+            self.header
+                .generation
+                .checked_add(1)
+                .ok_or(FormatError::InvalidField {
+                    field: "generation",
+                })?;
+        next.page_count = page_count;
+        next.log_head_page = first_page;
+        next.log_head_sequence = segment.sequence;
+        next.checkpoint_lsn = segment.start_lsn;
+        next.log_segment_pages = segment_pages;
+        let slot = next.encode()?;
+        let geometry = self.geometry(segment_pages);
+        let mut block = vec![0u8; LOG_BLOCK];
+        geometry.encode_segment_header(&segment, &mut block);
+        let created = self.write_new_log(&next, &slot, &block);
+        self.fail_on_error(created)?;
+        self.header = next;
+        self.superblock = next;
+        self.page_count = page_count;
+        self.log_pages.insert(first_page, page_count);
+        self.log = Some(LogWriter::new(
+            geometry,
+            segment,
+            LOG_BLOCK,
+            false,
+            segment.start_lsn,
+        ));
+        Ok(())
+    }
+
+    fn write_new_log(
+        &mut self,
+        next: &Superblock,
+        slot: &[u8],
+        block: &[u8],
+    ) -> Result<(), StorageError> {
+        let page_bytes = self.page_size().bytes() as u64;
+        let segment_start = next.log_head_page * page_bytes;
+        if self.file_bytes > segment_start {
+            self.file.set_size(segment_start)?;
+        }
+        self.file_bytes = next.page_count * page_bytes;
+        self.file.set_size(self.file_bytes)?;
+        self.file.write_all_at(block, segment_start)?;
+        self.file.sync_data()?;
+        self.file
+            .write_all_at(slot, (next.slot() * HEADER_SLOT_SIZE) as u64)?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    fn recover(&mut self) -> Result<(), StorageError> {
+        let geometry = self.geometry(self.header.log_segment_pages);
+        let scan = log::scan(&self.file, &geometry, &self.checksums, &self.header)?;
+        let damaged_commit = || -> StorageError {
+            match scan.commit_at {
+                Some((segment, offset)) => log::corrupt(&segment, offset),
+                None => FormatError::InvalidField {
+                    field: "page_count",
+                }
+                .into(),
+            }
+        };
+        let page_bytes = self.page_size().bytes() as u64;
+        let mut state = self.header;
+        if let Some(commit) = scan.commit {
+            let proven_pages =
+                (self.file_bytes / page_bytes).saturating_add(scan.images.len() as u64);
+            if commit.page_count < self.header.page_count || commit.page_count > proven_pages {
+                return Err(damaged_commit());
+            }
+            commit.apply(&mut state);
+        }
+        state.page_count = state.page_count.max(scan.linked_page_count);
+        state.check().map_err(|_| damaged_commit())?;
+        state.features.check(self.access)?;
+        let segment_pages = u64::from(geometry.segment_pages());
+        for segment in &scan.segments {
+            self.log_pages
+                .insert(segment.first_page, segment.first_page + segment_pages);
+        }
+        for image in &scan.images {
+            if image.page_id >= state.page_count || self.is_log_page(image.page_id) {
+                return Err(self.corrupt_log_at(image.file_offset));
+            }
+            self.unwritten.insert(image.page_id, image.file_offset);
+        }
+        self.superblock = state;
+        self.page_count = state.page_count;
+        if self.access == Access::ReadOnly {
+            return Ok(());
+        }
+        let wanted = state
+            .page_count
+            .checked_mul(page_bytes)
+            .ok_or_else(damaged_commit)?;
+        if self.file_bytes != wanted {
+            self.file.set_size(wanted)?;
+            self.file_bytes = wanted;
+        }
+        self.file.sync_data()?;
+        self.drain_unwritten()?;
+        self.log = Some(LogWriter::new(
+            geometry,
+            scan.tail,
+            scan.resume_offset,
+            scan.needs_fresh_segment,
+            scan.end_lsn,
+        ));
+        Ok(())
+    }
+
+    fn corrupt_log_at(&self, file_offset: u64) -> StorageError {
+        let page_bytes = self.page_size().bytes() as u64;
+        let page = file_offset / page_bytes;
+        let segment = self
+            .log_pages
+            .range(..=page)
+            .next_back()
+            .map_or(page, |(&first, _)| first);
+        FormatError::CorruptLog {
+            segment,
+            offset: file_offset - segment * page_bytes,
+        }
+        .into()
     }
 
     fn load_free_list(&mut self) -> Result<(), StorageError> {
@@ -440,7 +854,15 @@ impl<F: File> PageFile<F> {
     }
 
     fn is_in_use(&self, page_id: u64) -> bool {
-        pages_in_use_by(&self.superblock).any(|(_, pages)| pages.contains(&page_id))
+        self.is_log_page(page_id)
+            || pages_in_use_by(&self.superblock).any(|(_, pages)| pages.contains(&page_id))
+    }
+
+    fn is_log_page(&self, page_id: u64) -> bool {
+        self.log_pages
+            .range(..=page_id)
+            .next_back()
+            .is_some_and(|(_, &end)| page_id < end)
     }
 
     fn free_list_capacity(&self) -> usize {
@@ -461,6 +883,7 @@ impl<F: File> PageFile<F> {
         if self.available.contains(&page_id)
             || self.freed.contains(&page_id)
             || self.free_list_pages.contains(&page_id)
+            || self.is_log_page(page_id)
         {
             return Err(StorageError::PageNotInUse { page: page_id });
         }
@@ -518,8 +941,7 @@ fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
 #[derive(Debug)]
 pub(crate) struct PreparedCommit {
     superblock: Superblock,
-    slot: Vec<u8>,
-    entries: BTreeSet<u64>,
+    entries: Option<BTreeSet<u64>>,
     list_pages: Vec<u64>,
 }
 
@@ -552,11 +974,10 @@ fn pages_in_use_by(
 fn check_not_listed(
     superblock: &Superblock,
     entries: &BTreeSet<u64>,
-    list_pages: &[u64],
+    lists_a_page_of: impl Fn(&Range<u64>) -> bool,
 ) -> Result<(), FormatError> {
     for (field, pages) in pages_in_use_by(superblock) {
-        let listed = entries.range(pages.clone()).next().is_some()
-            || list_pages.iter().any(|page| pages.contains(page));
+        let listed = entries.range(pages.clone()).next().is_some() || lists_a_page_of(&pages);
         if listed {
             return Err(FormatError::InvalidField { field });
         }
@@ -590,7 +1011,9 @@ fn parent_directory(path: &Path) -> &Path {
 mod tests {
     use super::{CreateOptions, PageFile};
     use crate::error::{FormatError, StorageError};
-    use crate::format::{Access, FileId, PageChecksum, PageHeader, PageSize, PageType};
+    use crate::format::{
+        Access, FileId, HEADER_SLOT_SIZE, NO_PAGE, PageChecksum, PageHeader, PageSize, PageType,
+    };
     use crate::test_rng::TestRng;
     use eggdb_platform::{CrashMode, File, FileSystem, OpenMode, SimFile, SimFileSystem};
     use std::collections::BTreeSet;
@@ -630,7 +1053,7 @@ mod tests {
     fn read_fill(file: &PageFile<SimFile>, page_id: u64) -> Result<u8, StorageError> {
         let mut page = vec![0; file.page_size().bytes()];
         let header = file.read_page(page_id, &mut page)?;
-        assert_eq!(header, leaf(page_id));
+        assert_eq!(header.page_type, PageType::BTreeLeaf);
         Ok(page[100])
     }
 
@@ -645,17 +1068,18 @@ mod tests {
         let fs = SimFileSystem::new();
         let mut file = create(&fs);
         let pages: Vec<u64> = (0..3).map(|_| file.allocate().unwrap()).collect();
-        assert_eq!(pages, [2, 3, 4]);
+        assert_eq!(pages, [18, 19, 20]);
         for &page in &pages {
             write_filled(&mut file, page, page as u8);
         }
-        file.commit(|superblock| superblock.catalog_root = 3)
+        file.commit(|superblock| superblock.catalog_root = 19)
             .unwrap();
         drop(file);
         let file = open(&fs, Access::ReadWrite).unwrap();
         assert_eq!(file.superblock().generation, 1);
-        assert_eq!(file.superblock().page_count, 5);
-        assert_eq!(file.superblock().catalog_root, 3);
+        assert_eq!(file.superblock().log_head_page, 2);
+        assert_eq!(file.superblock().page_count, 21);
+        assert_eq!(file.superblock().catalog_root, 19);
         for &page in &pages {
             assert_eq!(read_fill(&file, page).unwrap(), page as u8);
         }
@@ -878,16 +1302,18 @@ mod tests {
     fn a_crafted_generation_at_its_limit_refuses_a_commit_before_any_write() {
         let fs = SimFileSystem::new();
         let mut file = create(&fs);
-        file.superblock.generation = u64::MAX;
+        file.header.generation = u64::MAX;
         let before = fs.operation_count();
-        assert!(matches!(
-            file.commit(|_| {}),
-            Err(StorageError::Format(FormatError::InvalidField {
-                field: "generation"
-            }))
-        ));
+        for _ in 0..2 {
+            assert!(matches!(
+                file.commit(|_| {}),
+                Err(StorageError::Format(FormatError::InvalidField {
+                    field: "generation"
+                }))
+            ));
+        }
+        assert!(file.allocate().is_err());
         assert_eq!(fs.operation_count(), before);
-        assert!(file.allocate().is_ok());
     }
 
     #[test]
@@ -932,19 +1358,27 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_that_would_list_a_log_segment_as_free_is_refused() {
+    fn the_log_s_pages_can_not_be_freed_written_or_moved_by_a_commit() {
         let fs = SimFileSystem::new();
         let mut file = create(&fs);
-        let pages: Vec<u64> = (0..20).map(|_| file.allocate().unwrap()).collect();
-        file.commit(|superblock| superblock.log_head_page = pages[0])
-            .unwrap();
-        file.free(pages[5]).unwrap();
+        file.allocate().unwrap();
+        let log_head = file.superblock().log_head_page;
         assert!(matches!(
-            file.commit(|_| {}),
-            Err(StorageError::Format(FormatError::InvalidField {
-                field: "log_head_page"
-            }))
+            file.free(log_head + 3),
+            Err(StorageError::PageNotInUse { .. })
         ));
+        let mut page = vec![0; 4096];
+        assert!(matches!(
+            file.write_page(log_head, &mut page, &leaf(log_head)),
+            Err(StorageError::PageNotInUse { .. })
+        ));
+        file.commit(|superblock| {
+            superblock.log_head_page = NO_PAGE;
+            superblock.checkpoint_lsn = 77;
+        })
+        .unwrap();
+        assert_eq!(file.superblock().log_head_page, log_head);
+        assert_eq!(file.superblock().checkpoint_lsn, 0);
     }
 
     #[test]
@@ -1008,7 +1442,7 @@ mod tests {
         assert!(matches!(
             open(&fs, Access::ReadOnly),
             Err(StorageError::Truncated {
-                expected_bytes: 12288,
+                expected_bytes: 73728,
                 actual_bytes: 8292
             })
         ));
@@ -1042,15 +1476,15 @@ mod tests {
         let fs = SimFileSystem::new();
         let mut file = create(&fs);
         file.commit(|_| {}).unwrap();
-        file.commit(|superblock| superblock.checkpoint_lsn = 9)
-            .unwrap();
         drop(file);
         let raw = fs.open(Path::new(DB), OpenMode::ReadWrite).unwrap();
-        raw.write_all_at(&[0xFF; 8], 100).unwrap();
+        raw.write_all_at(&[0xFF; 8], HEADER_SLOT_SIZE as u64 + 100)
+            .unwrap();
         drop(raw);
         let file = open(&fs, Access::ReadOnly).unwrap();
-        assert_eq!(file.superblock().generation, 1);
-        assert_eq!(file.damaged_header_slot(), Some(0));
+        assert_eq!(file.superblock().generation, 0);
+        assert_eq!(file.superblock().log_head_page, NO_PAGE);
+        assert_eq!(file.damaged_header_slot(), Some(1));
     }
 
     #[test]
@@ -1062,14 +1496,29 @@ mod tests {
         };
         let mut file = PageFile::create(&fs, Path::new(DB), options).unwrap();
         let page = file.allocate().unwrap();
-        assert_eq!(page, 1);
+        assert_eq!((file.superblock().log_head_page, page), (1, 3));
         write_filled(&mut file, page, 9);
         file.commit(|_| {}).unwrap();
         drop(file);
         let file = open(&fs, Access::ReadOnly).unwrap();
         assert_eq!(file.page_size().bytes(), 65536);
-        assert_eq!(read_fill(&file, 1).unwrap(), 9);
-        assert_eq!(file.superblock().log_segment_pages, 1);
+        assert_eq!(read_fill(&file, 3).unwrap(), 9);
+        assert_eq!(file.superblock().log_segment_pages, 2);
+    }
+
+    fn without_log(fs: &SimFileSystem) {
+        let file = open(fs, Access::ReadWrite).unwrap();
+        let mut legacy = *file.superblock();
+        legacy.generation = file.header.generation + 1;
+        legacy.log_head_page = NO_PAGE;
+        legacy.log_head_sequence = 0;
+        legacy.checkpoint_lsn = 0;
+        let slot = legacy.encode().unwrap();
+        file.file.sync_data().unwrap();
+        file.file
+            .write_all_at(&slot, (legacy.slot() * HEADER_SLOT_SIZE) as u64)
+            .unwrap();
+        file.file.sync_data().unwrap();
     }
 
     fn rewrite_checksum(raw: &SimFile, page_id: u64) {
@@ -1102,6 +1551,7 @@ mod tests {
                 file.page_count(),
             )
         };
+        without_log(&pristine);
         let image = {
             let raw = pristine.open(Path::new(DB), OpenMode::Read).unwrap();
             let mut bytes = vec![0u8; raw.size().unwrap() as usize];
@@ -1139,6 +1589,8 @@ mod tests {
                 Err(_) => {}
             }
             let start = target as usize * 4096;
+            raw.set_size(image.len() as u64).unwrap();
+            raw.write_all_at(&image[..2 * HEADER_SLOT_SIZE], 0).unwrap();
             raw.write_all_at(&image[start..start + 4096], target * 4096)
                 .unwrap();
             raw.sync_all().unwrap();

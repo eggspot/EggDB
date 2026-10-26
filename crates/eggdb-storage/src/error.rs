@@ -64,6 +64,16 @@ pub enum FormatError {
     },
     /// Neither header slot is valid, so the file cannot be opened.
     NoValidHeader,
+    /// The write-ahead log is damaged where it had already been made durable: a record that
+    /// fails its checks is followed by records proving it was synced, or a record names
+    /// something the file can't hold. A crash never causes this, so the file is refused
+    /// rather than silently losing commits.
+    CorruptLog {
+        /// The first page of the log segment holding the damage.
+        segment: u64,
+        /// The damaged record's byte offset from the start of that segment.
+        offset: u64,
+    },
 }
 
 impl fmt::Display for FormatError {
@@ -107,6 +117,10 @@ impl fmt::Display for FormatError {
             }
             Self::NoValidHeader => f.write_str(
                 "neither header slot is valid; the file is damaged or not an EggDB database",
+            ),
+            Self::CorruptLog { segment, offset } => write!(
+                f,
+                "the write-ahead log is damaged in the segment at page {segment}, at byte {offset}, after it was made durable; restore from a backup or run `eggdb check`"
             ),
         }
     }

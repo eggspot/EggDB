@@ -143,12 +143,12 @@ pub(crate) fn hit(allocator: &CountingAllocator) -> Result<Vec<Metric>, String> 
     ])
 }
 
-struct TemporaryFile {
-    path: PathBuf,
+pub(crate) struct TemporaryFile {
+    pub(crate) path: PathBuf,
 }
 
 impl TemporaryFile {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let name = format!("eggdb-bench-{}.db", std::process::id());
         let path = std::env::temp_dir().join(name);
         let _ = OsFileSystem::new().remove_file(&path);

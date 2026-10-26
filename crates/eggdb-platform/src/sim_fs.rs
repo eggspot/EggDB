@@ -48,6 +48,7 @@ struct State {
     dirs: BTreeSet<PathBuf>,
     durable_dirs: BTreeSet<PathBuf>,
     operations: u64,
+    syncs: u64,
     failing_operations: BTreeSet<u64>,
     random_failures: Option<RandomFailures>,
     refuse_uncached: bool,
@@ -105,6 +106,12 @@ impl SimFileSystem {
     /// How many operations have been attempted so far, including failed ones.
     pub fn operation_count(&self) -> u64 {
         lock(&self.shared).operations
+    }
+
+    /// How many syncs of file contents, through [`File::sync_data`] or [`File::sync_all`], have
+    /// succeeded so far.
+    pub fn sync_count(&self) -> u64 {
+        lock(&self.shared).syncs
     }
 
     /// Makes the operation numbered `index` fail.
@@ -449,7 +456,9 @@ impl File for SimFile {
             self.require_writable()?;
             inode.make_durable();
             Ok(())
-        })
+        })?;
+        lock(&self.shared).syncs += 1;
+        Ok(())
     }
 
     fn sync_all(&self) -> Result<()> {
@@ -808,6 +817,18 @@ mod tests {
 
     fn reopen(fs: &SimFileSystem, path: &str) -> Vec<u8> {
         read_all(&fs.open(Path::new(path), OpenMode::Read).unwrap())
+    }
+
+    #[test]
+    fn successful_syncs_are_counted_and_failed_ones_are_not() {
+        let fs = SimFileSystem::new();
+        let file = fs.open(Path::new("counted"), OpenMode::CreateNew).unwrap();
+        file.write_all_at(b"abc", 0).unwrap();
+        file.sync_data().unwrap();
+        file.sync_all().unwrap();
+        fs.fail_operation(fs.operation_count());
+        assert!(file.sync_data().is_err());
+        assert_eq!(fs.sync_count(), 2);
     }
 
     #[test]

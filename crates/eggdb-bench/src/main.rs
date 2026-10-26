@@ -14,6 +14,7 @@
 
 mod allocations;
 mod baseline;
+mod log;
 mod measure;
 mod page_cache;
 
@@ -28,10 +29,13 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
 type Benchmark = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 
-const BENCHMARKS: [(&str, Benchmark); 3] = [
+const BENCHMARKS: [(&str, Benchmark); 6] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
+    (log::COMMIT_FULL, log::commit_full),
+    (log::COMMIT_NORMAL, log::commit_normal),
+    (log::COMMIT_OFF, log::commit_off),
 ];
 
 const OS: &str = std::env::consts::OS;

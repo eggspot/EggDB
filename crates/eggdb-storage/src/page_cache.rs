@@ -2,6 +2,7 @@ use crate::cells;
 use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageSize, PageType, Superblock};
 use crate::frames::{FrameMut, FrameRef, Frames};
+use crate::log::Durability;
 use crate::page_file::PageFile;
 use crate::page_table::PageTable;
 use eggdb_platform::{File, Memory};
@@ -56,7 +57,7 @@ pub struct CacheStats {
     pub misses: u64,
     /// Pages dropped from memory to make room for others.
     pub evictions: u64,
-    /// Pages written to the file by commits.
+    /// Pages logged and written to the file by commits.
     pub pages_written: u64,
 }
 
@@ -71,8 +72,8 @@ pub struct CacheStats {
 /// frame is taken from a page that is neither pinned nor changed, and was not used since the
 /// clock hand last passed it.
 ///
-/// Changed pages stay in memory until [`PageCache::commit`] writes them through
-/// [`PageFile::commit`] (no-steal): nothing a transaction changes reaches the file before it
+/// Changed pages stay in memory until [`PageCache::commit`] logs them and writes them through
+/// the [`PageFile`] (no-steal): nothing a transaction changes reaches the file before it
 /// commits, and [`PageCache::rollback`] drops it all. A transaction that changes more pages
 /// than the cache holds, or a cache whose frames are all pinned, fails with
 /// [`StorageError::CacheFull`].
@@ -94,6 +95,7 @@ pub struct PageCache<F: File> {
     misses: Cell<u64>,
     evictions: Cell<u64>,
     pages_written: Cell<u64>,
+    dirty_frames: RefCell<Vec<usize>>,
     commit_order: Vec<usize>,
 }
 
@@ -126,6 +128,7 @@ impl<F: File> PageCache<F> {
             misses: Cell::new(0),
             evictions: Cell::new(0),
             pages_written: Cell::new(0),
+            dirty_frames: RefCell::new(cells::reserved(frames)?),
             commit_order: cells::reserved(frames)?,
         })
     }
@@ -138,6 +141,21 @@ impl<F: File> PageCache<F> {
     /// The superblock of the last commit.
     pub fn superblock(&self) -> Superblock {
         *self.file.borrow().superblock()
+    }
+
+    /// How commits wait for the disk (see [`PageFile::durability`]).
+    pub fn durability(&self) -> Durability {
+        self.file.borrow().durability()
+    }
+
+    /// Sets how later commits wait for the disk (see [`PageFile::set_durability`]).
+    pub fn set_durability(&mut self, durability: Durability) -> Result<(), StorageError> {
+        self.file.get_mut().set_durability(durability)
+    }
+
+    /// Makes every commit so far durable with one sync (see [`PageFile::sync`]).
+    pub fn sync(&mut self) -> Result<(), StorageError> {
+        self.file.get_mut().sync()
     }
 
     /// What the cache holds and has done.
@@ -156,6 +174,7 @@ impl<F: File> PageCache<F> {
     /// Pins data page `page_id` for reading, reading it from the file and verifying its
     /// checksum if it is not in memory. A page that is free, outside the file or failing its
     /// checksum is refused, the last with [`FormatError::ChecksumMismatch`] naming it.
+    #[inline]
     pub fn read(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
         let frame = self.locate(page_id)?;
         let bytes = self
@@ -204,8 +223,8 @@ impl<F: File> PageCache<F> {
         let (frame, mut bytes) = self.claim_frame()?;
         let page_id = self.file.borrow_mut().allocate()?;
         bytes.fill(0);
-        self.install(frame, page_id, header, REFERENCED | DIRTY);
-        self.dirty_pages.set(self.dirty_pages.get() + 1);
+        self.install(frame, page_id, header, REFERENCED);
+        self.mark_dirty(frame);
         Ok(PageMut {
             bytes,
             page_id,
@@ -227,8 +246,9 @@ impl<F: File> PageCache<F> {
         Ok(())
     }
 
-    /// Writes every changed page, in page order, and then commits the file through
-    /// [`PageFile::commit`] with `update`. The pages stay in memory, no longer changed.
+    /// Commits every changed page, in page order, through the [`PageFile`]'s write-ahead log
+    /// with `update` (see [`PageFile::commit`]): each page is logged whole, and written in
+    /// place once the log is durable. The pages stay in memory, no longer changed.
     ///
     /// Everything that can refuse the commit is checked before the first write: the update
     /// (see [`PageFile::commit`]), and that no changed page is still held by a handle, which
@@ -238,14 +258,23 @@ impl<F: File> PageCache<F> {
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
         let mut order = std::mem::take(&mut self.commit_order);
         order.clear();
-        order.extend((0..self.frames.count()).filter(|&frame| self.is_dirty(frame)));
-        order.sort_unstable_by_key(|&frame| self.pages[frame].get());
+        let states = &self.states;
+        order.extend(
+            self.dirty_frames
+                .get_mut()
+                .iter()
+                .copied()
+                .filter(|&frame| states[frame].get() & DIRTY != 0),
+        );
+        order.sort_unstable_by_key(|&frame| (self.pages[frame].get(), frame));
+        order.dedup();
         let committed = self.write_and_commit(&order, update);
         if committed.is_ok() {
             for &frame in &order {
                 self.states[frame].set(self.states[frame].get() & !DIRTY);
             }
             self.dirty_pages.set(0);
+            self.dirty_frames.get_mut().clear();
             self.pages_written
                 .set(self.pages_written.get() + order.len() as u64);
         }
@@ -257,11 +286,14 @@ impl<F: File> PageCache<F> {
     /// allocated or freed since are as the last commit left them (see [`PageFile::rollback`]).
     pub fn rollback(&mut self) -> Result<(), StorageError> {
         self.file.get_mut().rollback()?;
-        for frame in 0..self.frames.count() {
+        let dirty_frames = std::mem::take(self.dirty_frames.get_mut());
+        for &frame in &dirty_frames {
             if self.is_dirty(frame) {
                 self.discard(frame);
             }
         }
+        *self.dirty_frames.get_mut() = dirty_frames;
+        self.dirty_frames.get_mut().clear();
         Ok(())
     }
 
@@ -272,7 +304,10 @@ impl<F: File> PageCache<F> {
     ) -> Result<(), StorageError> {
         self.check_frames_writable(order)?;
         let prepared = self.file.get_mut().prepare_commit(update)?;
-        self.write_frames(order)?;
+        if let Err(error) = self.log_frames(order) {
+            self.file.get_mut().abort_commit();
+            return Err(error);
+        }
         self.file.get_mut().finish_commit(prepared)
     }
 
@@ -288,7 +323,7 @@ impl<F: File> PageCache<F> {
         Ok(())
     }
 
-    fn write_frames(&self, order: &[usize]) -> Result<(), StorageError> {
+    fn log_frames(&self, order: &[usize]) -> Result<(), StorageError> {
         let mut file = self.file.borrow_mut();
         for &frame in order {
             let page_id = self.pages[frame].get();
@@ -296,11 +331,14 @@ impl<F: File> PageCache<F> {
                 .frames
                 .write(frame)
                 .ok_or(StorageError::PageBorrowed { page: page_id })?;
-            file.write_page(page_id, &mut bytes, &self.headers[frame].get())?;
+            let header = self.headers[frame].get();
+            let lsn = file.log_page(page_id, &mut bytes, &header)?;
+            self.headers[frame].set(PageHeader { lsn, ..header });
         }
         Ok(())
     }
 
+    #[inline]
     fn locate(&self, page_id: u64) -> Result<usize, StorageError> {
         match self.table.get(page_id) {
             Some(frame) => {
@@ -311,6 +349,7 @@ impl<F: File> PageCache<F> {
         }
     }
 
+    #[inline]
     fn hit(&self, frame: usize) {
         self.hits.set(self.hits.get() + 1);
         self.states[frame].set(self.states[frame].get() | REFERENCED);
@@ -389,6 +428,13 @@ impl<F: File> PageCache<F> {
         if state & DIRTY == 0 {
             self.states[frame].set(state | DIRTY);
             self.dirty_pages.set(self.dirty_pages.get() + 1);
+            let mut dirty_frames = self.dirty_frames.borrow_mut();
+            if dirty_frames.len() == dirty_frames.capacity() {
+                dirty_frames.retain(|&listed| self.is_dirty(listed) && listed != frame);
+                dirty_frames.sort_unstable();
+                dirty_frames.dedup();
+            }
+            dirty_frames.push(frame);
         }
     }
 
@@ -567,8 +613,8 @@ mod tests {
         let pages = committed_pages(&fs, 6, 2);
         let cache = open(&fs, Access::ReadOnly, 2);
         let pinned = cache.read(pages[0]).unwrap();
-        for &page in &pages[1..] {
-            assert_eq!(fill_of(&cache, page), page as u8 - 2);
+        for (fill, &page) in pages.iter().enumerate().skip(1) {
+            assert_eq!(fill_of(&cache, page), fill as u8);
         }
         assert_eq!(pinned[0], 0);
         drop(pinned);
@@ -617,6 +663,7 @@ mod tests {
     fn changes_stay_in_memory_until_their_commit_and_beyond_the_budget_fail() {
         let fs = SimFileSystem::new();
         let mut cache = create(&fs, 3);
+        cache.commit(|_| {}).unwrap();
         let before = fs.operation_count();
         let pages: Vec<u64> = (0..3).map(|fill| allocate_filled(&cache, fill)).collect();
         assert_eq!(fs.operation_count(), before);
@@ -814,10 +861,10 @@ mod tests {
     fn a_damaged_page_fails_its_checksum_by_name_and_is_not_cached() {
         let fs = SimFileSystem::new();
         let pages = committed_pages(&fs, 2, 4);
+        let cache = open(&fs, Access::ReadWrite, 4);
         let raw = fs.open(Path::new(DB), OpenMode::ReadWrite).unwrap();
         raw.write_all_at(&[0xEE], pages[1] * 4096 + 1000).unwrap();
         drop(raw);
-        let cache = open(&fs, Access::ReadOnly, 4);
         let error = cache.read(pages[1]).unwrap_err();
         assert!(matches!(
             error,
@@ -941,7 +988,8 @@ mod tests {
                 page
             })
             .collect();
-        assert_eq!(pages, [1, 2, 3]);
+        assert_eq!(cache.superblock().log_segment_pages, 2);
+        assert!(pages.windows(2).all(|pair| pair[0] < pair[1]));
         for (fill, &page) in pages.iter().enumerate() {
             let bytes = cache.read(page).unwrap();
             assert_eq!(bytes.len(), 65536 - 16);
@@ -1054,7 +1102,7 @@ mod tests {
         fs.operation_count() - start
     }
 
-    fn reachable_state(fs: &SimFileSystem, pages: &[u64]) -> (u64, BTreeMap<u64, u8>) {
+    fn reachable_state(fs: &SimFileSystem, pages: &[u64]) -> (bool, BTreeMap<u64, u8>) {
         let cache = open(fs, Access::ReadOnly, 4);
         let superblock = cache.superblock();
         let in_use: BTreeSet<u64> = if superblock.catalog_root == pages[0] {
@@ -1067,7 +1115,7 @@ mod tests {
             .into_iter()
             .map(|page| (page, fill_of(&cache, page)))
             .collect();
-        (superblock.generation, fills)
+        (superblock.catalog_root != pages[0], fills)
     }
 
     #[test]
@@ -1077,21 +1125,21 @@ mod tests {
             let pages = first_commit(&fs);
             second_commit(&fs, &pages, None)
         };
-        let mut generations = BTreeSet::new();
+        let mut outcomes = BTreeSet::new();
         for step in 0..operations {
             for seed in 0..4 {
                 let fs = SimFileSystem::new();
                 let pages = first_commit(&fs);
                 second_commit(&fs, &pages, Some(step));
                 fs.crash(CrashMode::Torn { seed });
-                let (generation, fills) = reachable_state(&fs, &pages);
+                let (committed, fills) = reachable_state(&fs, &pages);
                 let expected_new = |page: &u64| if pages.contains(page) { 1 } else { 2 };
                 for (page, fill) in &fills {
                     assert_eq!(*fill, expected_new(page), "step {step}, page {page}");
                 }
-                generations.insert(generation);
+                outcomes.insert(committed);
             }
         }
-        assert_eq!(generations, BTreeSet::from([1, 2]));
+        assert_eq!(outcomes, BTreeSet::from([false, true]));
     }
 }
