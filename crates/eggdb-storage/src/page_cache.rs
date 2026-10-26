@@ -87,7 +87,9 @@ pub struct CacheStats {
 /// A page being written excludes every other handle to it, and a page being read excludes
 /// writers; a conflicting request fails with [`StorageError::PageBorrowed`] rather than
 /// waiting. The cache serves one thread; commits and rollbacks need it exclusively, so no page
-/// handle outlives them.
+/// handle outlives them. A [`Store`](crate::Store) puts it behind a lock and adds read
+/// transactions, for which the cache keeps the committed images of pages the writer changes
+/// (D86).
 pub struct PageCache<F: File> {
     file: RefCell<PageFile<F>>,
     frames: Frames,
@@ -366,8 +368,8 @@ impl<F: File> PageCache<F> {
         self.file.get_mut().rollback()
     }
 
-    pub(crate) fn has_failed(&self) -> bool {
-        self.file.borrow().has_failed()
+    pub(crate) fn check_writable(&self) -> Result<(), StorageError> {
+        self.file.borrow().check_writable()
     }
 
     pub(crate) fn set_before_image_budget(&mut self, pages: usize) {

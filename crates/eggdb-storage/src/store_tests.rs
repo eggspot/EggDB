@@ -613,6 +613,21 @@ fn an_exhausted_clock_refuses_the_commit_and_rolls_it_back() {
 }
 
 #[test]
+fn a_store_over_a_read_only_file_refuses_writers_and_serves_readers() {
+    let fs = SimFileSystem::new();
+    let (store, tree) = created(&fs, 32, &october_clock());
+    let model = fill(&store, &tree, 30, 10);
+    let last = store.last_commit().unwrap();
+    drop(store);
+    let file = PageFile::open(&fs, Path::new(DB), Access::ReadOnly).unwrap();
+    let cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(8)).unwrap();
+    let store = Store::new(cache, october_clock());
+    assert!(matches!(store.begin_write(), Err(StorageError::ReadOnly)));
+    assert_eq!(store.last_commit().unwrap(), last);
+    assert_eq!(committed(&store, &tree), model);
+}
+
+#[test]
 fn a_failed_commit_leaves_the_store_needing_a_reopen_for_writers_and_readers() {
     let fs = SimFileSystem::new();
     let (store, tree) = created(&fs, 32, &october_clock());

@@ -34,7 +34,7 @@ impl BeforeImages {
     }
 
     fn pending(&self) -> u64 {
-        self.committed + 1
+        self.committed.saturating_add(1)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -98,7 +98,7 @@ impl BeforeImages {
             return None;
         }
         self.images
-            .range((page_id, version + 1)..=(page_id, u64::MAX))
+            .range((page_id, version.saturating_add(1))..=(page_id, u64::MAX))
             .next()
             .map(|(_, image)| image)
     }
@@ -140,7 +140,7 @@ impl BeforeImages {
     }
 
     pub(crate) fn commit(&mut self) {
-        self.committed += 1;
+        self.committed = self.pending();
         self.prune();
     }
 
@@ -174,10 +174,7 @@ impl BeforeImages {
             .iter()
             .map(|&(version, _)| version)
             .find(|&version| version >= self.expired_below);
-        let needed_from = match oldest_live {
-            Some(version) => version + 1,
-            None => u64::MAX,
-        };
+        let needed_from = oldest_live.map_or(u64::MAX, |version| version.saturating_add(1));
         while let Some((&version, _)) = self.images_per_version.first_key_value() {
             if version >= needed_from {
                 break;

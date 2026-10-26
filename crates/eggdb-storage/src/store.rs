@@ -72,15 +72,15 @@ impl<F: File> Store<F> {
     }
 
     /// Begins the write transaction. While it is open, another fails with
-    /// [`StorageError::WriterActive`].
+    /// [`StorageError::WriterActive`]. A store over a file opened read-only refuses it with
+    /// [`StorageError::ReadOnly`], and one whose last write or sync failed with
+    /// [`StorageError::NeedsReopen`].
     pub fn begin_write(&self) -> Result<WriteTransaction<'_, F>, StorageError> {
         let mut state = self.lock()?;
         if state.writer_active {
             return Err(StorageError::WriterActive);
         }
-        if state.cache.has_failed() {
-            return Err(StorageError::NeedsReopen);
-        }
+        state.cache.check_writable()?;
         state.writer_active = true;
         Ok(WriteTransaction {
             store: self,
@@ -114,7 +114,9 @@ impl<F: File> Store<F> {
 
     /// Sets how much memory the before-images of read transactions' snapshots may take; the
     /// default is as many pages as the page cache holds. Lowering it below what is kept now
-    /// expires the oldest snapshots at once.
+    /// expires the oldest snapshots at once. While the open write transaction has changed more
+    /// pages than this holds, a read transaction that begins fails with
+    /// [`StorageError::SnapshotTooOld`] on its first read.
     pub fn set_snapshot_memory(&self, size: CacheSize) -> Result<(), StorageError> {
         let mut state = self.lock()?;
         let pages = size.pages(state.cache.page_size());
@@ -204,7 +206,7 @@ impl<F: File> ReadTransaction<'_, F> {
 
     /// Calls `read` with the value stored under `key` in `tree` as of the snapshot, and
     /// returns what it returns, or `None` when the key is absent. The store is held while
-    /// `read` runs.
+    /// `read` runs, so `read` must not use the store itself.
     pub fn get_with<R>(
         &self,
         tree: &BTree,
@@ -303,7 +305,8 @@ impl<F: File> WriteTransaction<'_, F> {
     }
 
     /// Calls `read` with the value stored under `key` in `tree`, this transaction's changes
-    /// included, and returns what it returns, or `None` when the key is absent.
+    /// included, and returns what it returns, or `None` when the key is absent. The store is
+    /// held while `read` runs, so `read` must not use the store itself.
     pub fn get_with<R>(
         &self,
         tree: &BTree,
