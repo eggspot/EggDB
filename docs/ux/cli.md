@@ -450,5 +450,9 @@ as written, it did this, and the sections above were updated where they changed:
 11. **`--page-size`** is checked by the CLI (a usage error): `--page-size must be a power of two
     from 4096 to 65536, not '<value>'`. `--limit` takes a whole number: `--limit needs a whole
     number, not '<value>'`. `--color` takes `auto`, `always` or `never`.
-12. **Help for each command** follows the `scan` pattern of section 9: usage, a paragraph,
+12. **Control characters in `text`** include the C1 range (U+0080 to U+009F) as well as
+    U+0000 to U+001F and U+007F (Rust's `char::is_control`), since some terminals act on C1
+    codes such as U+009B: bytes holding one are shown as `0x` hex, so stored data can never
+    drive the terminal.
+13. **Help for each command** follows the `scan` pattern of section 9: usage, a paragraph,
     options, examples.

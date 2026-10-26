@@ -386,10 +386,7 @@ impl Session<'_> {
     }
 
     fn error_message(&mut self, message: &str) {
-        self.messages.styled(Style::Red, "eggdb:");
-        self.messages.text(" ");
-        self.messages.text(message);
-        self.messages.text("\n");
+        super::error_line(&mut self.messages, message);
     }
 
     fn open(&self, access: Access, cache_for_command: Option<usize>) -> Result<Database, Failure> {

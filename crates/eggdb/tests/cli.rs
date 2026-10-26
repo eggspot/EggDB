@@ -532,7 +532,7 @@ fn a_closed_pipe_ends_the_scan_quietly() {
         .unwrap()
         .read_exact(&mut first)
         .unwrap();
-    drop(child.stdout.take());
+    child.stdout = None;
     let output = child.wait_with_output().unwrap();
     assert_exit(&output, 0);
     assert!(output.stderr.is_empty(), "{}", stderr(&output));

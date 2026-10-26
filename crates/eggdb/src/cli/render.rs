@@ -13,8 +13,7 @@ pub(crate) enum LineBreaks {
 pub(crate) fn as_plain_text(bytes: &[u8], line_breaks: LineBreaks) -> Option<&str> {
     let text = std::str::from_utf8(bytes).ok()?;
     let allowed = |c: char| {
-        line_breaks == LineBreaks::Allowed && matches!(c, '\n' | '\t' | '\r')
-            || !(c <= '\u{1f}' || c == '\u{7f}')
+        line_breaks == LineBreaks::Allowed && matches!(c, '\n' | '\t' | '\r') || !c.is_control()
     };
     text.chars().all(allowed).then_some(text)
 }
@@ -242,6 +241,7 @@ mod tests {
         assert_eq!(text(&[0x00, 0xff, 0x10]), "0x00ff10");
         assert_eq!(text(b"a\tb"), "0x610962");
         assert_eq!(text(b"del\x7f"), "0x64656c7f");
+        assert_eq!(text("csi\u{9b}".as_bytes()), "0x637369c29b");
     }
 
     #[test]

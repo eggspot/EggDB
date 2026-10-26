@@ -64,8 +64,9 @@ fn os_enable_escape_sequences(stream: StandardStream) -> bool {
     use windows_console::{ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, SetConsoleMode};
 
     let handle: RawHandle = match stream {
+        StandardStream::Input => return false,
+        StandardStream::Output => std::io::stdout().as_raw_handle(),
         StandardStream::Error => std::io::stderr().as_raw_handle(),
-        StandardStream::Input | StandardStream::Output => std::io::stdout().as_raw_handle(),
     };
     let mut mode = 0u32;
     // SAFETY: the handle belongs to this process's standard stream and stays open for the

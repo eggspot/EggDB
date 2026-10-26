@@ -97,7 +97,7 @@ fn report(failure: &Failure, console: &mut Console<'_>, color: args::ColorChoice
     failure.exit()
 }
 
-fn error_line(messages: &mut Output<'_>, message: &str) {
+pub(crate) fn error_line(messages: &mut Output<'_>, message: &str) {
     messages.styled(Style::Red, "eggdb:");
     messages.text(" ");
     messages.text(message);
