@@ -202,7 +202,8 @@ impl<S: Source> Ui<S> {
 
     fn list_cols(&self) -> u16 {
         if self.two_panes() {
-            (self.size.cols * 2 / 5).clamp(28, 60)
+            let two_fifths = u32::from(self.size.cols) * 2 / 5;
+            u16::try_from(two_fifths.clamp(28, 60)).unwrap_or(60)
         } else {
             self.size.cols
         }
@@ -505,9 +506,11 @@ impl<S: Source> Ui<S> {
         match event {
             Event::Interrupt => self.quit = true,
             Event::Resize(size) => {
+                let hex_per_row = self.hex_per_row();
                 self.size = size;
                 self.refit();
                 self.selection_changed();
+                self.keep_scrolls_in_range(hex_per_row);
             }
             Event::Paste(text) => {
                 if let Some(edit) = self.filter_edit.as_mut() {
@@ -517,6 +520,27 @@ impl<S: Source> Ui<S> {
             }
             Event::Key(key) => self.key(key),
         }
+    }
+
+    fn keep_scrolls_in_range(&mut self, previous_hex_per_row: usize) {
+        if let Some(scroll) = self.help {
+            let visible = usize::from(self.size.rows.saturating_sub(2));
+            self.help = Some(scroll.min(help_lines(self).len().saturating_sub(visible)));
+        }
+        let Some(mut viewer) = self.viewer.take() else {
+            return;
+        };
+        if viewer.mode == Mode::Hex {
+            let first_byte = viewer.scroll.saturating_mul(previous_hex_per_row);
+            viewer.scroll = first_byte / self.hex_per_row();
+        }
+        if !self.wraps(&viewer) {
+            let last_top = self
+                .viewer_lines(&viewer)
+                .saturating_sub(self.viewer_rows());
+            viewer.scroll = viewer.scroll.min(last_top);
+        }
+        self.viewer = Some(viewer);
     }
 
     fn key(&mut self, key: KeyEvent) {
@@ -1295,7 +1319,13 @@ impl<S: Source> Ui<S> {
             for c in text.chars() {
                 let width = crate::width::char_width(c);
                 if skip > 0 {
-                    skip = skip.saturating_sub(width.max(1));
+                    skip = skip.saturating_sub(width);
+                    continue;
+                }
+                if width == 0 {
+                    if at > col {
+                        frame.attach_mark(at - 1, row, c);
+                    }
                     continue;
                 }
                 if at + width as u16 > limit {

@@ -584,3 +584,55 @@ fn bidi_overrides_and_isolates_in_keys_and_values_show_as_code_points() {
     assert!(s.screen().contains("\"x\\u{202e}y\""), "{}", s.screen());
     assert!(!has_unprintable(&s.screen()));
 }
+
+#[test]
+fn combining_marks_in_a_value_stay_on_their_letter() {
+    let mut source = fixture();
+    source
+        .entries
+        .insert(b"aaa:accent".to_vec(), "cafe\u{301} ok".as_bytes().to_vec());
+    let s = Scenario::with(80, 24, Capabilities::FULL, source);
+    assert!(s.row(4).contains("cafe\u{301} ok"), "{:?}", s.row(4));
+}
+
+#[test]
+fn hex_keeps_its_first_byte_when_the_row_width_changes() {
+    let mut source = fixture();
+    source.entries.insert(
+        b"aaa:bytes".to_vec(),
+        (0..4096u32).map(|n| n as u8).collect(),
+    );
+    let mut s = Scenario::with(140, 24, Capabilities::FULL, source);
+    s.press(&["Tab"]);
+    for _ in 0..10 {
+        s.press(&["Down"]);
+    }
+    assert!(s.row(1).contains("bytes 160–"), "{}", s.row(1));
+    s.terminal.resize(80, 24);
+    s.step();
+    assert!(s.row(1).contains("bytes 160–"), "{}", s.row(1));
+    s.terminal.resize(140, 24);
+    s.step();
+    assert!(s.row(1).contains("bytes 160–"), "{}", s.row(1));
+}
+
+#[test]
+fn growing_the_screen_keeps_the_viewer_and_help_inside_their_text() {
+    let mut s = Scenario::new(80, 24);
+    s.press(&["Down", "Down", "Down", "Enter", "End"]);
+    assert!(s.row(1).contains("line 158–175/175"), "{}", s.row(1));
+    s.terminal.resize(80, 60);
+    s.step();
+    assert!(s.row(1).contains("line 122–175/175"), "{}", s.row(1));
+    s.press(&["?", "End"]);
+    s.terminal.resize(80, 200);
+    s.step();
+    assert!(s.row(0).contains(" 1–"), "{}", s.row(0));
+}
+
+#[test]
+fn the_widest_terminal_does_not_overflow_the_layout() {
+    let s = Scenario::new(u16::MAX, 12);
+    assert!(s.row(0).starts_with(" EggDB"), "{}", s.row(0));
+    assert!(s.row(2).starts_with("> bin"), "{}", s.row(2));
+}

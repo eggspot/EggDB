@@ -5,6 +5,7 @@ pub(crate) type Segment = (String, Role);
 
 const TAB_CELLS: usize = 4;
 pub(crate) const LONGEST_WALK: usize = 1 << 20;
+const MOST_UNITS_PER_CELL: usize = 4;
 
 enum Unit {
     Char(char),
@@ -67,15 +68,21 @@ pub(crate) fn segments(bytes: &[u8]) -> Vec<Segment> {
     prefix_segments(bytes, usize::MAX)
 }
 
+fn most_units(cells: usize) -> usize {
+    cells.saturating_add(1).saturating_mul(MOST_UNITS_PER_CELL)
+}
+
 pub(crate) fn prefix_segments(bytes: &[u8], cells: usize) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut at = 0;
     let mut used = 0;
-    while at < bytes.len() && used < cells {
+    let mut units_left = most_units(cells);
+    while at < bytes.len() && used < cells && units_left > 0 {
         let (length, unit) = unit_at(bytes, at);
         used += unit.width();
         unit.push(&mut out);
         at += length;
+        units_left -= 1;
     }
     out
 }
@@ -83,7 +90,8 @@ pub(crate) fn prefix_segments(bytes: &[u8], cells: usize) -> Vec<Segment> {
 pub(crate) fn row_end(line: &[u8], from: usize, room: usize) -> usize {
     let mut at = from;
     let mut used = 0;
-    while at < line.len() {
+    let mut units_left = most_units(room);
+    while at < line.len() && units_left > 0 {
         let (length, unit) = unit_at(line, at);
         let width = unit.width();
         if used + width > room && at > from {
@@ -91,6 +99,7 @@ pub(crate) fn row_end(line: &[u8], from: usize, room: usize) -> usize {
         }
         used += width;
         at += length;
+        units_left -= 1;
     }
     at
 }
@@ -150,6 +159,26 @@ mod tests {
         assert_eq!(row_start_before(line, 6, 3), 3);
         assert_eq!(row_start_before(line, 3, 3), 0);
         assert_eq!(row_end("日本語".as_bytes(), 0, 3), 3);
+    }
+
+    #[test]
+    fn a_long_run_of_zero_width_marks_is_walked_only_as_far_as_the_row_can_show() {
+        let marks = "\u{301}".repeat(4 << 20);
+        let line = format!("e{marks}x");
+        let shown = prefix_segments(line.as_bytes(), 30);
+        let shown_bytes: usize = shown.iter().map(|(text, _)| text.len()).sum();
+        assert!(
+            shown_bytes <= 31 * super::MOST_UNITS_PER_CELL * 2,
+            "{shown_bytes}"
+        );
+        let end = row_end(line.as_bytes(), 0, 40);
+        assert!(
+            end > 0 && end <= 41 * super::MOST_UNITS_PER_CELL * 2,
+            "{end}"
+        );
+        assert!(row_end(line.as_bytes(), end, 40) > end);
+        let start = row_start_before(line.as_bytes(), line.len(), 40);
+        assert!(start < line.len());
     }
 
     #[test]

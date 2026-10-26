@@ -163,7 +163,7 @@ contains a control byte other than `\t`, `\n`, `\r` → hex; if the first non-wh
 
 Scrolling in the viewer: `↑`/`↓`/`j`/`k` one line (one row of bytes in hex), `PgUp`/`PgDn` a
 pane, `Home`/`g` and `End`/`G` to the ends. The title's position always says where you are
-(`line 120–139/8,002`, `bytes 0x0000_1F00–0x0000_1FFF of 1,048,576`). Rendering is windowed: a
+(`line 120–139/8,002`, `bytes 7,936–8,191 of 1,048,576`, decimal like the other counts). Rendering is windowed: a
 1 GiB value is held once in memory and only the visible rows are formatted per frame.
 
 ## Keyboard map
