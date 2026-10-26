@@ -2456,8 +2456,9 @@ A damaged list refuses the open with a readable error. A seeded test rewrites li
 valid checksums and checks this.
 
 **File locks.** `File::try_lock` takes a shared or exclusive lock without waiting:
-- **Unix:** through the standard library's `flock`-based locks, whose locks belong to the open
-  file description, as D77 asks.
+- **Unix, Linux included:** through the standard library's `flock`-based locks. This refines
+  D77, which named open-file-description locks for Linux. Both kinds belong to the open file
+  description, and `flock` is what the standard library provides.
 - **Windows:** our own `LockFileEx` on one byte at offset 2^62, past any data. The standard
   library's whole-file lock is mandatory on Windows: it would block reads through the second,
   overlapped handle the I/O completion port uses (D69), and backup tools.
@@ -2465,9 +2466,20 @@ valid checksums and checks this.
   machine crashes.
 
 A handle takes one lock for its life, and a writer opens with an exclusive lock, so a second
-writer anywhere is refused with "locked". Where the platform has no file locks (WASI), the file
-opens unlocked: those targets run one process per file.
+writer anywhere is refused with "locked". Only on WASI, which has no file locks, does the file
+open unlocked. Anywhere else, a refused or unsupported lock refuses the open. That includes
+Solaris, where the standard library has no file locks yet: there a database can't be opened
+until the platform layer gets its own `fcntl` locks.
 
 **File identity.** A new file's 16-byte identity comes from the standard library's randomly
 seeded hasher (`RandomState`), which draws on the operating system's randomness. That needs no
-cryptography: the identity only has to differ between files, not resist guessing.
+cryptography: the identity only has to differ between files, not resist guessing. On targets
+without operating-system randomness the hasher's keys are predictable. Identities there may
+repeat between files, which weakens only the "page from another database" check, never
+correctness.
+
+**Review fixes before merge:**
+- A crafted generation of 2^64 − 1 refuses the commit instead of wrapping around and losing
+  every later commit.
+- A commit checks the new superblock before writing anything.
+- Free-list entries naming the catalog root or a log segment are refused.

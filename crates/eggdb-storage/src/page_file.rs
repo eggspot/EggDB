@@ -67,7 +67,7 @@ pub struct PageFile<F: File> {
     page_count: u64,
     available: BTreeSet<u64>,
     freed: BTreeSet<u64>,
-    free_list_pages: Vec<u64>,
+    free_list_pages: BTreeSet<u64>,
     damaged_header_slot: Option<usize>,
     failed: bool,
 }
@@ -156,7 +156,7 @@ impl<F: File> PageFile<F> {
             superblock,
             available: BTreeSet::new(),
             freed: BTreeSet::new(),
-            free_list_pages: Vec::new(),
+            free_list_pages: BTreeSet::new(),
             damaged_header_slot: None,
             failed: false,
         }
@@ -284,23 +284,28 @@ impl<F: File> PageFile<F> {
             };
             list_pages.push(page);
         }
-        let free_page_count = (entries.len() + list_pages.len()) as u64;
+        let mut next = self.superblock;
+        update(&mut next);
+        next.page_size = self.superblock.page_size;
+        next.file_id = self.superblock.file_id;
+        next.generation =
+            self.superblock
+                .generation
+                .checked_add(1)
+                .ok_or(FormatError::InvalidField {
+                    field: "generation",
+                })?;
+        next.page_count = self.page_count;
+        next.free_list_head = list_pages.first().copied().unwrap_or(NO_PAGE);
+        next.free_page_count = (entries.len() + list_pages.len()) as u64;
+        let slot = next.encode()?;
+
         self.write_free_list(&list_pages, &entries)?;
         let bytes = self.page_count * self.page_size().bytes() as u64;
         if self.file.size()? < bytes {
             self.file.set_size(bytes)?;
         }
         self.file.sync_data()?;
-
-        let mut next = self.superblock;
-        update(&mut next);
-        next.page_size = self.superblock.page_size;
-        next.file_id = self.superblock.file_id;
-        next.generation = self.superblock.generation + 1;
-        next.page_count = self.page_count;
-        next.free_list_head = list_pages.first().copied().unwrap_or(NO_PAGE);
-        next.free_page_count = free_page_count;
-        let slot = next.encode()?;
         self.file
             .write_all_at(&slot, (next.slot() * HEADER_SLOT_SIZE) as u64)?;
         self.file.sync_data()?;
@@ -308,7 +313,7 @@ impl<F: File> PageFile<F> {
         self.superblock = next;
         self.available = entries;
         self.freed.clear();
-        self.free_list_pages = list_pages;
+        self.free_list_pages = list_pages.iter().copied().collect();
         Ok(())
     }
 
@@ -354,13 +359,19 @@ impl<F: File> PageFile<F> {
     fn load_free_list(&mut self) -> Result<(), StorageError> {
         let capacity = self.free_list_capacity();
         let total = self.superblock.free_page_count;
-        let mut seen = BTreeSet::new();
         let mut entries = BTreeSet::new();
-        let mut list_pages = Vec::new();
+        let mut list_pages = BTreeSet::new();
         let mut next = self.superblock.free_list_head;
         let mut page = vec![0u8; self.page_size().bytes()];
+        let listed = |entries: &BTreeSet<u64>, list_pages: &BTreeSet<u64>| {
+            (entries.len() + list_pages.len()) as u64
+        };
         while next != NO_PAGE {
-            if !seen.insert(next) || seen.len() as u64 > total {
+            if self.check_data_page(next).is_err()
+                || entries.contains(&next)
+                || !list_pages.insert(next)
+                || self.is_in_use(next)
+            {
                 return Err(corrupt_free_list(next));
             }
             let header = self.read_page(next, &mut page)?;
@@ -368,28 +379,41 @@ impl<F: File> PageFile<F> {
                 return Err(corrupt_free_list(next));
             }
             let count = read_u32(&page, FREE_LIST_COUNT_AT) as usize;
-            if count > capacity {
+            if count > capacity || listed(&entries, &list_pages) + count as u64 > total {
                 return Err(corrupt_free_list(next));
             }
             for index in 0..count {
                 let entry = read_u64(&page, FREE_LIST_ENTRIES_AT + 8 * index);
-                if self.check_data_page(entry).is_err() || !seen.insert(entry) {
+                if self.check_data_page(entry).is_err()
+                    || self.is_in_use(entry)
+                    || list_pages.contains(&entry)
+                    || !entries.insert(entry)
+                {
                     return Err(corrupt_free_list(next));
                 }
-                entries.insert(entry);
             }
-            if seen.len() as u64 > total {
-                return Err(corrupt_free_list(next));
-            }
-            list_pages.push(next);
             next = read_u64(&page, FREE_LIST_NEXT_AT);
         }
-        if seen.len() as u64 != total {
+        if listed(&entries, &list_pages) != total {
             return Err(corrupt_free_list(self.superblock.free_list_head));
         }
         self.available = entries;
         self.free_list_pages = list_pages;
         Ok(())
+    }
+
+    fn is_in_use(&self, page_id: u64) -> bool {
+        let superblock = &self.superblock;
+        let in_segment = |first: u64| {
+            first != NO_PAGE
+                && (first..first + u64::from(superblock.log_segment_pages)).contains(&page_id)
+        };
+        page_id == superblock.catalog_root
+            || in_segment(superblock.log_head_page)
+            || superblock
+                .recycled_segments
+                .iter()
+                .any(|&first| in_segment(first))
     }
 
     fn free_list_capacity(&self) -> usize {
@@ -428,7 +452,7 @@ impl<F: File> PageFile<F> {
             return Err(StorageError::ReadOnly);
         }
         if self.failed {
-            return Err(StorageError::Failed);
+            return Err(StorageError::NeedsReopen);
         }
         Ok(())
     }
@@ -443,7 +467,7 @@ impl<F: File> PageFile<F> {
 
 fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
     match file.try_lock(kind) {
-        Err(error) if error.kind() == ErrorKind::Unsupported => Ok(()),
+        Err(error) if cfg!(target_os = "wasi") && error.kind() == ErrorKind::Unsupported => Ok(()),
         locked => Ok(locked?),
     }
 }
@@ -612,7 +636,7 @@ mod tests {
             file.write_page(a, &mut page, &leaf(a)),
             Err(StorageError::PageNotInUse { .. })
         ));
-        let list_page = file.free_list_pages[0];
+        let list_page = *file.free_list_pages.first().unwrap();
         assert!(matches!(
             file.write_page(list_page, &mut page, &leaf(list_page)),
             Err(StorageError::PageNotInUse { .. })
@@ -692,17 +716,22 @@ mod tests {
 
     fn first_commit(fs: &SimFileSystem) -> (PageFile<SimFile>, Vec<u64>) {
         let mut file = create(fs);
-        let pages: Vec<u64> = (0..700).map(|_| file.allocate().unwrap()).collect();
+        let pages: Vec<u64> = (0..1400).map(|_| file.allocate().unwrap()).collect();
         for &page in &pages {
             write_filled(&mut file, page, 1);
         }
         file.commit(|_| {}).unwrap();
+        for &page in &pages[..600] {
+            file.free(page).unwrap();
+        }
+        file.commit(|_| {}).unwrap();
+        assert!(file.available_pages() > 500 && file.free_list_pages.len() > 1);
         (file, pages)
     }
 
     fn second_commit(fs: &SimFileSystem, fail_at: Option<u64>) -> (Vec<u64>, u64) {
         let (mut file, pages) = first_commit(fs);
-        for &page in &pages[..600] {
+        for &page in &pages[600..1200] {
             file.free(page).unwrap();
         }
         let start = fs.operation_count();
@@ -751,6 +780,36 @@ mod tests {
             }
         }
         assert_eq!(outcomes, BTreeSet::from([false, true]));
+    }
+
+    #[test]
+    fn a_crafted_generation_at_its_limit_refuses_a_commit_instead_of_wrapping() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        file.superblock.generation = u64::MAX;
+        assert!(matches!(
+            file.commit(|_| {}),
+            Err(StorageError::Format(FormatError::InvalidField {
+                field: "generation"
+            }))
+        ));
+        assert!(matches!(file.allocate(), Err(StorageError::NeedsReopen)));
+    }
+
+    #[test]
+    fn an_invalid_update_writes_nothing() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let page = file.allocate().unwrap();
+        write_filled(&mut file, page, 1);
+        file.commit(|_| {}).unwrap();
+        file.free(page).unwrap();
+        let before = fs.operation_count();
+        assert!(
+            file.commit(|superblock| superblock.catalog_root = 999)
+                .is_err()
+        );
+        assert_eq!(fs.operation_count(), before);
     }
 
     #[test]
@@ -807,8 +866,11 @@ mod tests {
         fs.fail_randomly(1, 1_000_000);
         assert!(file.commit(|_| {}).is_err());
         fs.fail_randomly(1, 0);
-        assert!(matches!(file.allocate(), Err(StorageError::Failed)));
-        assert!(matches!(file.commit(|_| {}), Err(StorageError::Failed)));
+        assert!(matches!(file.allocate(), Err(StorageError::NeedsReopen)));
+        assert!(matches!(
+            file.commit(|_| {}),
+            Err(StorageError::NeedsReopen)
+        ));
     }
 
     #[test]
@@ -861,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn hostile_files_never_panic_and_damaged_free_lists_are_refused() {
+    fn hostile_files_never_panic_and_free_lists_never_hand_out_a_page_twice() {
         let pristine = SimFileSystem::new();
         let (list_pages, page_count) = {
             let mut file = create(&pristine);
@@ -871,7 +933,10 @@ mod tests {
                 file.free(page).unwrap();
             }
             file.commit(|_| {}).unwrap();
-            (file.free_list_pages.clone(), file.page_count())
+            (
+                file.free_list_pages.iter().copied().collect::<Vec<u64>>(),
+                file.page_count(),
+            )
         };
         let image = {
             let raw = pristine.open(Path::new(DB), OpenMode::Read).unwrap();

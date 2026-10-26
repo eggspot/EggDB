@@ -139,7 +139,7 @@ pub enum StorageError {
         /// How many pages the file holds.
         page_count: u64,
     },
-    /// A page that is free, or freed since the last commit, was written.
+    /// A page that is free, freed since the last commit, or part of the free list was written.
     PageNotInUse {
         /// The page.
         page: u64,
@@ -150,7 +150,7 @@ pub enum StorageError {
         page: u64,
     },
     /// The free list is damaged: a page of it loops, points outside the file, lists a page
-    /// twice, or disagrees with the superblock's count.
+    /// twice or a page in use, or disagrees with the superblock's count.
     CorruptFreeList {
         /// The free-list page where the damage was found.
         page: u64,
@@ -159,7 +159,7 @@ pub enum StorageError {
     ReadOnly,
     /// An earlier write or sync failed, so the file accepts no more changes until it is opened
     /// again and recovered from its durable state (D59).
-    Failed,
+    NeedsReopen,
     /// The file holds as many pages as page numbers allow.
     FileFull,
 }
@@ -186,7 +186,7 @@ impl fmt::Display for StorageError {
             Self::Io(error) => write!(f, "file system error: {error}"),
             Self::Format(error) => error.fmt(f),
             Self::Locked => f.write_str(
-                "the database is open elsewhere: close the other writer, or open it read-only",
+                "the database is open elsewhere: a writer excludes every other user, and readers exclude a writer",
             ),
             Self::Truncated {
                 expected_bytes,
@@ -207,7 +207,7 @@ impl fmt::Display for StorageError {
                 write!(f, "the free list is damaged at page {page}; run `eggdb check`")
             }
             Self::ReadOnly => f.write_str("the database was opened read-only"),
-            Self::Failed => f.write_str(
+            Self::NeedsReopen => f.write_str(
                 "an earlier write or sync failed; reopen the database to recover its last durable state",
             ),
             Self::FileFull => f.write_str("the file holds as many pages as page numbers allow"),
