@@ -51,7 +51,7 @@ pub struct CacheStats {
     pub dirty_pages: usize,
     /// Page lookups answered from memory.
     pub hits: u64,
-    /// Page lookups that read the page from the file.
+    /// Page lookups that read the page from the file, including reads that failed.
     pub misses: u64,
     /// Pages dropped from memory to make room for others.
     pub evictions: u64,
@@ -113,11 +113,10 @@ impl<F: File> PageCache<F> {
             return Err(invalid);
         }
         let table = PageTable::for_frames(frames).ok_or(invalid)?;
-        let cells = |value| (0..frames).map(|_| Cell::new(value)).collect();
         Ok(Self {
             frames: Frames::new(memory, frames, page_size.bytes())?,
             table,
-            pages: cells(NO_PAGE),
+            pages: (0..frames).map(|_| Cell::new(NO_PAGE)).collect(),
             headers: (0..frames).map(|_| Cell::new(EMPTY_FRAME_HEADER)).collect(),
             states: (0..frames).map(|_| Cell::new(0)).collect(),
             file: RefCell::new(file),
@@ -204,7 +203,6 @@ impl<F: File> PageCache<F> {
         self.file.borrow().check_writable()?;
         let (frame, mut bytes) = self.claim_frame()?;
         let page_id = self.file.borrow_mut().allocate()?;
-        self.forget(page_id)?;
         bytes.fill(0);
         self.install(frame, page_id, header, REFERENCED | DIRTY);
         self.dirty_pages.set(self.dirty_pages.get() + 1);
@@ -295,8 +293,8 @@ impl<F: File> PageCache<F> {
 
     fn load(&self, page_id: u64) -> Result<usize, StorageError> {
         self.file.borrow().check_page_in_use(page_id)?;
-        self.misses.set(self.misses.get() + 1);
         let (frame, mut bytes) = self.claim_frame()?;
+        self.misses.set(self.misses.get() + 1);
         let header = self.file.borrow().read_page(page_id, &mut bytes)?;
         drop(bytes);
         self.install(frame, page_id, header, REFERENCED);
@@ -344,19 +342,6 @@ impl<F: File> PageCache<F> {
         self.headers[frame].set(header);
         self.states[frame].set(state);
         self.table.insert(page_id, frame as u32);
-    }
-
-    fn forget(&self, page_id: u64) -> Result<(), StorageError> {
-        match self.table.get(page_id) {
-            Some(frame) if self.frames.is_latched(frame as usize) => {
-                Err(StorageError::PageBorrowed { page: page_id })
-            }
-            Some(frame) => {
-                self.discard(frame as usize);
-                Ok(())
-            }
-            None => Ok(()),
-        }
     }
 
     fn discard(&self, frame: usize) {
@@ -806,6 +791,37 @@ mod tests {
         assert!(page.set_header(flagged).is_err());
         page.set_header(PageHeader { lsn: 9, ..leaf() }).unwrap();
         assert_eq!(page.header().lsn, 9);
+    }
+
+    #[test]
+    fn the_cache_moves_between_threads_with_its_file() {
+        fn assert_send<T: Send>() {}
+        assert_send::<PageCache<SimFile>>();
+    }
+
+    #[test]
+    fn large_pages_fill_whole_frames() {
+        let fs = SimFileSystem::new();
+        let options = CreateOptions {
+            page_size: PageSize::from_log2(16).unwrap(),
+            file_id: FileId(*b"page-cache-tests"),
+        };
+        let file = PageFile::create(&fs, Path::new(DB), options).unwrap();
+        let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Bytes(1 << 17)).unwrap();
+        assert_eq!(cache.stats().frames, 2);
+        let pages: Vec<u64> = (0..3)
+            .map(|fill| {
+                let page = allocate_filled(&cache, fill);
+                cache.commit(|_| {}).unwrap();
+                page
+            })
+            .collect();
+        assert_eq!(pages, [1, 2, 3]);
+        for (fill, &page) in pages.iter().enumerate() {
+            let bytes = cache.read(page).unwrap();
+            assert_eq!(bytes.len(), 65536 - 16);
+            assert!(bytes.iter().all(|&byte| byte == fill as u8));
+        }
     }
 
     #[test]
