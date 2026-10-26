@@ -206,7 +206,7 @@ the CLI adds what was checked and what to do, as fixed lines:
 ```
 checked app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1761470047123456.0003)
 damaged: the B+tree page 77 is damaged: a key is out of order
-  what was checked  the header, the free list, and the tree down to page 77 passed
+  what was checked  every page read before the damage passed its checksum; the check stopped at the damage
   what to do        EggDB does not repair files yet. Restore app.db from your latest backup.
                     Keep the damaged file unchanged: `eggdb scan` may still read part of the data,
                     and an issue at https://github.com/eggspot/EggDB/issues with this output helps us.
@@ -265,10 +265,11 @@ eggdb: cannot open app.db: another program has it open. Close it before writing,
 The busy message names which side is blocked: a read-only command blocked by a writer gets
 the first busy line; a `put`/`del` blocked by any open gets the second.
 
-Interrupt handling: a Ctrl-C during a long `scan` or `check` stops the output cleanly (the
-process exits 130 and leaves no partial line in `json` or `hex` modes: the current line is
-finished or dropped whole). A `put` is atomic in the engine, so an interrupt either committed
-it or did not; the CLI needs nothing special beyond exiting 130. Writing to a closed pipe
+Interrupt handling: the CLI keeps the operating system's default for Ctrl-C, so the process
+ends at once with the shell's interrupted status (130 on POSIX shells; 0xC000013A on Windows).
+Every line or entry is written whole and output is flushed only between entries, so a kill
+leaves no partial line in `json` or `hex` modes for lines under 4 KiB (one pipe write). A `put`
+is atomic in the engine, so an interrupt either committed it or did not. Writing to a closed pipe
 (`scan | head`) exits 0 quietly, never with a broken-pipe panic.
 
 ## 8. Colour
@@ -289,9 +290,13 @@ CI logs. Plain 16-colour SGR only, no 256-colour or truecolor, so it reads in ev
 
 Never colour the data itself (values, hex): copy-paste must stay clean.
 
+On Windows, colour needs the console's virtual-terminal mode; eggdb turns it on for the stream
+and uses colour only if the console accepts it. `std::io::IsTerminal` decides what is a
+terminal. Both live in the platform layer (`eggdb_platform::terminal`).
+
 ## 9. Help and version: exact text
 
-`eggdb --version`, `-V`, `eggdb version`:
+`eggdb --version`, `-V`, `eggdb version` (the crate version at build time):
 ```
 eggdb 0.2.0
 ```
@@ -371,7 +376,7 @@ Examples:
 | `check` ok, leaked | `ok: every page passed its checksum, every key is in order, and {n} pages are in use by nothing.` |
 | `check` damaged | `damaged: {library message}` then the two `what was checked` / `what to do` lines of section 6 |
 | `create` done (text) | `created {file} ({page size} pages)` |
-| Ctrl-C | nothing printed; exit 130 |
+| Ctrl-C | nothing printed by eggdb; exit 130 (the signal's status, the OS default) |
 
 Message prefix on stderr is always `eggdb: ` for errors; informational lines (`{n} entries`,
 `created …`) have no prefix. Every placeholder is rendered by the `text` rules of section 4,
@@ -411,3 +416,39 @@ eggdb stats app.db
 10. `stats` omits the page-cache counters; `check` with leaked pages is still `ok` (exit 0).
 11. Reserved: `export`, `import`, `shell`, `backup`, `compact`, `ui`; they answer with the
     roadmap until they ship.
+
+## 13. As built in v0.2.0 (D90)
+
+The implementation follows this document; where it was silent or a detail could not be built
+as written, it did this, and the sections above were updated where they changed:
+
+1. **Ctrl-C** keeps the operating system's default (section 7), decided by research: a handler
+   would add signal code per OS and buy nothing, since `put` is atomic and `check` cannot stop
+   half-way. `eggdb ui` brings signal handling with its terminal layer.
+2. **The damaged `check` report** says `every page read before the damage passed its checksum;
+   the check stopped at the damage`: the library reports no progress, and a B+tree check is not
+   a left-to-right prefix, so "the tree down to page 77" could not be stated truthfully. Damage
+   found while the file opens prints `checked app.db` with no commit and `what was checked
+   opening the file read its header, free list and log; it stopped at the damage`. The
+   library's closing advice (restore from a backup, or run eggdb check) is removed from the
+   `damaged:` line and the JSON `problem`, since the `what to do` line replaces it.
+3. **`--version`** prints the crate version, so `eggdb 0.1.0` until the v0.2.0 bump.
+4. **`hex` and `raw`** are for `get` and `scan`; another command with them is a usage error:
+   `--format hex is for get and scan; eggdb check prints text or json`.
+5. **Usage errors** print `eggdb: <message>`, then `  usage: <the command's one-line usage>`
+   when a command is known, then `  try: eggdb help <command>` (or `  try: eggdb help`).
+6. **No arguments** prints the help to stderr, since it exits 2.
+7. **Not-found messages** (`key not found`, `nothing to delete`) go to stderr in `text`, `hex`
+   and `raw`; in `json` stdout carries the answer (`"deleted":false`) or nothing (`get`).
+8. **Byte arguments**: an unreadable `@file` is a usage error (exit 2), `cannot read @<path>:
+   <reason>`; stdin can be read once per command; the path after `@` must be valid Unicode.
+9. **Other errors** keep the library's message after a context the CLI adds:
+   `cannot open <file>: …`, `cannot store <key> in <file>: …`, `cannot read <key> from <file>: …`,
+   `cannot delete <key> from <file>: …`, `cannot scan <file>: …`.
+10. **Counts of one** read `1 page`, `1 overflow page`, `1 page is in use by nothing`; an empty
+    file's check reads `checked app.db as of commit none`.
+11. **`--page-size`** is checked by the CLI (a usage error): `--page-size must be a power of two
+    from 4096 to 65536, not '<value>'`. `--limit` takes a whole number: `--limit needs a whole
+    number, not '<value>'`. `--color` takes `auto`, `always` or `never`.
+12. **Help for each command** follows the `scan` pattern of section 9: usage, a paragraph,
+    options, examples.

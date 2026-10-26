@@ -32,10 +32,19 @@ One database for every kind of data, written from scratch in Rust.
 - **Everywhere:** every OS, every CPU and every cloud.
 
 Status: early. See [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
-To use EggDB as an embedded key-value store from Rust, see [docs/embedded.md](docs/embedded.md).
+To use EggDB as an embedded key-value store from Rust, see [docs/embedded.md](docs/embedded.md);
+from a shell or a script, the `eggdb` command ([docs/cli.md](docs/cli.md)):
 
 ```sh
-cargo run
+eggdb create app.db
+eggdb put app.db user:1 Ada
+eggdb get app.db user:1                      # Ada
+eggdb scan app.db --prefix user:             # user:1  Ada
+cat photo.jpg | eggdb put app.db photo       # any bytes, up to 1 GiB
+eggdb scan app.db --format json | jq .key    # for scripts and agents
+eggdb check app.db                           # "ok: every page passed its checksum …"
 ```
+
+Build it from source with `cargo build --release`; the binary is `target/release/eggdb`.
 
 Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.
