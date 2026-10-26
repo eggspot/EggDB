@@ -51,7 +51,8 @@ impl CommandName {
     fn takes(self, option: OptionName) -> bool {
         match option {
             OptionName::Cache | OptionName::Help | OptionName::Version => true,
-            OptionName::Format | OptionName::Color => self != Self::Ui,
+            OptionName::Color => true,
+            OptionName::Format => self != Self::Ui,
             OptionName::Mono | OptionName::Ascii => self == Self::Ui,
             OptionName::PageSize => self == Self::Create,
             OptionName::Create => self == Self::Put,

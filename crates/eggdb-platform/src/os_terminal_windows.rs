@@ -88,6 +88,13 @@ unsafe extern "system" {
         length: u32,
         read: *mut u32,
     ) -> i32;
+    fn WriteConsoleA(
+        console: Handle,
+        buffer: *const c_void,
+        length: u32,
+        written: *mut u32,
+        reserved: *mut c_void,
+    ) -> i32;
     fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
 }
 
@@ -294,9 +301,7 @@ fn restore() {
     if !ACTIVE.swap(false, Ordering::AcqRel) {
         return;
     }
-    let mut stdout = io::stdout();
-    let _ = stdout.write_all(crate::terminal::RESTORE_SEQUENCE);
-    let _ = stdout.flush();
+    write_unlocked(crate::terminal::RESTORE_SEQUENCE);
     set_console_mode(
         standard_handle(STD_INPUT_HANDLE),
         SAVED_INPUT_MODE.load(Ordering::Relaxed),
@@ -307,6 +312,24 @@ fn restore() {
     );
     // SAFETY: puts back the code page saved in `enter`.
     unsafe { SetConsoleOutputCP(SAVED_CODE_PAGE.load(Ordering::Relaxed)) };
+}
+
+fn write_unlocked(bytes: &[u8]) {
+    let output = standard_handle(STD_OUTPUT_HANDLE);
+    let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    let mut written = 0u32;
+    // SAFETY: the pointer and length describe `bytes` (ASCII escape sequences), `written` lives
+    // on this frame, and the reserved argument is null as required. It bypasses the standard
+    // library's stdout lock, which the control handler's thread could otherwise wait on forever.
+    let _ = unsafe {
+        WriteConsoleA(
+            output,
+            bytes.as_ptr().cast(),
+            length,
+            &mut written,
+            std::ptr::null_mut(),
+        )
+    };
 }
 
 extern "system" fn on_console_control(event: u32) -> i32 {

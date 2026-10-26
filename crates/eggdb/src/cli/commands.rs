@@ -436,7 +436,7 @@ impl Session<'_> {
     fn ui(&mut self) -> Result<Exit, Failure> {
         let db = self.open(Access::ReadOnly, None)?;
         let capabilities = eggdb_ui::detect_capabilities(eggdb_ui::Fallbacks {
-            mono: self.request.mono,
+            mono: self.request.mono || self.request.color == ColorChoice::Never,
             ascii: self.request.ascii,
         });
         let mut terminal = match eggdb_ui::OsTerminal::open(capabilities) {

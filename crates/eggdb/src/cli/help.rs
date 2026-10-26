@@ -158,7 +158,7 @@ prefix, v changes the view, Tab switches pane, ? shows every key, q quits. Needs
 on both stdin and stdout; in a script use eggdb get and eggdb scan.
 
 Options:
-  --mono    no colours (also when NO_COLOR is set)
+  --mono    no colours (also with --color never, or when NO_COLOR is set)
   --ascii   ASCII only, no box lines or arrows; with --mono, no styles at all
 
 Examples:
