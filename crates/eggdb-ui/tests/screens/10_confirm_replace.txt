@@ -7,7 +7,7 @@
   user:1                      41│
   user:10                     43│
   user:11     ┌ Replace value ───────────────────────────────────┐
-  user:12     │ Key    doc:json                                  │
+  user:12     │ Key    doc:json (8 B)                            │
   user:13     │ Value  87 B → 93 B, text                         │
   user:14     │                                                  │
   user:15     │ One commit, written to disk before you continue. │

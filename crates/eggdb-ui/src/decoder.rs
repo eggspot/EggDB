@@ -11,10 +11,10 @@ const LARGEST_PASTE: usize = 1 << 20;
 /// A lone `Esc` byte could start a sequence, so it stays pending until more bytes arrive or
 /// the caller decides none will (25 ms of quiet, in the real terminal) and calls
 /// [`InputDecoder::flush`]. Hostile or garbled input never panics; bytes that make no sense are
-/// dropped or shown as U+FFFD. A paste is cut at 1 MiB; the rest of it is dropped, never
-/// decoded as keys, up to its end marker or, if the marker never comes, up to the first pause
-/// in the input (the next [`InputDecoder::flush`]), so the keys after it (`q` among them) still
-/// arrive as keys.
+/// dropped or shown as U+FFFD. A paste larger than 1 MiB is never delivered: it becomes one
+/// [`Event::PasteTooLarge`], and its bytes are dropped, never decoded as keys, up to its end
+/// marker or, if the marker never comes, up to the first pause in the input (the next
+/// [`InputDecoder::flush`]), so the keys after it (`q` among them) still arrive as keys.
 #[derive(Debug, Default)]
 pub struct InputDecoder {
     pending: Vec<u8>,
@@ -95,10 +95,9 @@ impl InputDecoder {
                         paste.extend_from_slice(&rest[..take]);
                         at += take;
                         if paste.len() >= LARGEST_PASTE {
-                            let text = String::from_utf8_lossy(paste).into_owned();
                             self.paste = None;
                             self.dropping_paste = true;
-                            events.push(Event::Paste(text));
+                            events.push(Event::PasteTooLarge);
                             continue;
                         }
                         break;
@@ -460,7 +459,7 @@ mod tests {
         events.extend(decoder.feed(b"rq\x1b[20"));
         events.extend(decoder.feed(b"1~j"));
         assert_eq!(events.len(), 2, "{:?}", &events[1..events.len().min(4)]);
-        assert!(matches!(&events[0], Event::Paste(text) if text.len() == super::LARGEST_PASTE));
+        assert_eq!(events[0], Event::PasteTooLarge);
         assert_eq!(events[1], key(KeyCode::Char('j')));
         assert!(!decoder.has_pending());
     }
@@ -471,7 +470,7 @@ mod tests {
         let mut events = decoder.feed(b"\x1b[200~");
         events.extend(decoder.feed(&vec![b'x'; super::LARGEST_PASTE + 10]));
         events.extend(decoder.feed(b"rr\x1b[201"));
-        assert_eq!(events.len(), 1);
+        assert_eq!(events, [Event::PasteTooLarge]);
         assert!(decoder.has_pending());
         assert!(decoder.flush().is_empty());
         assert!(!decoder.has_pending());

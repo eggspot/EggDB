@@ -267,7 +267,18 @@ impl<S: Source> Ui<S> {
         }
         self.run_until_idle();
         self.draw(frame);
-        terminal.present(frame)
+        terminal.present(frame)?;
+        self.presented();
+        Ok(())
+    }
+
+    /// Tells the UI that the frame it last drew is on the screen. A question (a confirmation,
+    /// an error) takes no key until a frame showing it has been presented, so keys typed or
+    /// pasted ahead of it can never answer it unseen.
+    pub fn presented(&mut self) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.arm();
+        }
     }
 
     fn page(&self) -> usize {
@@ -615,6 +626,7 @@ impl<S: Source> Ui<S> {
                     self.apply_filter();
                 }
             }
+            Event::PasteTooLarge => self.paste_too_large(),
             Event::Key(key) => self.key(key),
         }
         self.follow_editor_cursor();
@@ -658,12 +670,12 @@ impl<S: Source> Ui<S> {
             self.help_key(key.code);
             return;
         }
-        if self.check.is_some() {
-            self.check_key(key.code);
-            return;
-        }
         if self.modal.is_some() {
             self.modal_key(key);
+            return;
+        }
+        if self.check.is_some() {
+            self.check_key(key.code);
             return;
         }
         if self.edit.is_some() {
@@ -902,6 +914,9 @@ impl<S: Source> Ui<S> {
             self.draw_check(frame, check);
             self.draw_status(frame);
             self.draw_hints(frame);
+            if let Some(modal) = &self.modal {
+                self.draw_modal(frame, modal);
+            }
             return;
         }
         let list_cols = self.list_cols();
@@ -1532,11 +1547,11 @@ impl<S: Source> Ui<S> {
         let up_down = self.theme.symbol(Symbol::UpDown);
         let left_right = self.theme.symbol(Symbol::LeftRight);
         let writable = !self.read_only();
-        if let Some(hints) = self.check_hints() {
-            return hints;
-        }
         if let Some(modal) = &self.modal {
             return modal.hints();
+        }
+        if let Some(hints) = self.check_hints() {
+            return hints;
         }
         if let Some(hints) = self.edit_hints() {
             return hints;

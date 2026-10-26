@@ -286,6 +286,17 @@ impl Scenario {
     fn press(&mut self, names: &[&str]) {
         for name in names {
             assert!(self.terminal.press(name), "unknown key name {name}");
+            self.step();
+        }
+    }
+
+    fn press_one(&mut self, name: &str) {
+        self.press(&[name]);
+    }
+
+    fn burst(&mut self, names: &[&str]) {
+        for name in names {
+            assert!(self.terminal.press(name), "unknown key name {name}");
         }
         self.step();
     }
@@ -1236,43 +1247,42 @@ fn scenario_24_random_edits_through_the_ui_agree_with_a_model() {
             .collect();
         let existing = model.contains_key(&key);
         let filter = |s: &mut Scenario, key: &[u8]| {
-            s.terminal.press("/");
-            s.terminal.type_str(&String::from_utf8_lossy(key));
-            s.terminal.press("Enter");
+            s.press_one("/");
+            s.type_str(&String::from_utf8_lossy(key));
+            s.press_one("Enter");
         };
         match random.below(10) {
             0..4 => {
-                s.terminal.press("a");
-                s.terminal.type_str(&String::from_utf8_lossy(&key));
-                s.terminal.press("Enter");
-                s.terminal.type_str(&spelled_as_escapes(&value));
-                s.terminal.press("Enter");
-                s.terminal.press("Enter");
+                s.press_one("a");
+                s.type_str(&String::from_utf8_lossy(&key));
+                s.press_one("Enter");
+                s.type_str(&spelled_as_escapes(&value));
+                s.press_one("Enter");
+                s.press_one("Enter");
                 model.insert(key, value);
             }
             4..7 if existing => {
                 filter(&mut s, &key);
                 for name in ["e", "Ctrl-A", "Ctrl-K"] {
-                    s.terminal.press(name);
+                    s.press_one(name);
                 }
-                s.terminal.type_str(&spelled_as_escapes(&value));
-                s.terminal.press("Enter");
-                s.terminal.press("Enter");
-                s.terminal.press("/");
-                s.terminal.press("Esc");
+                s.type_str(&spelled_as_escapes(&value));
+                s.press_one("Enter");
+                s.press_one("Enter");
+                s.press_one("/");
+                s.press_one("Esc");
                 model.insert(key, value);
             }
             _ if existing => {
                 filter(&mut s, &key);
-                s.terminal.press("d");
-                s.terminal.press("d");
-                s.terminal.press("/");
-                s.terminal.press("Esc");
+                s.press_one("d");
+                s.press_one("d");
+                s.press_one("/");
+                s.press_one("Esc");
                 model.remove(&key);
             }
             _ => continue,
         }
-        s.step();
     }
     assert_model(&s, &model);
     assert!(
@@ -1280,4 +1290,119 @@ fn scenario_24_random_edits_through_the_ui_agree_with_a_model() {
         "{}",
         s.row(0)
     );
+}
+
+#[test]
+fn keys_queued_before_a_question_is_shown_cannot_answer_it() {
+    let mut s = Scenario::new(80, 24);
+    s.burst(&["Down", "Down", "Down", "Down", "d", "d"]);
+    assert!(s.screen().contains("┌ Delete key"), "{}", s.screen());
+    assert_eq!(s.hooks().writes.get(), 0);
+    s.press(&["d"]);
+    assert_eq!(s.hooks().writes.get(), 1);
+    s.press(&["Home", "Down", "e", "End"]);
+    s.type_str("!");
+    s.burst(&["Enter", "Enter"]);
+    assert!(s.screen().contains("┌ Replace value"), "{}", s.screen());
+    assert_eq!(s.hooks().writes.get(), 1);
+    s.hooks().writer_held.set(true);
+    s.burst(&["Enter", "r"]);
+    assert!(s.screen().contains("┌ Writer busy"), "{}", s.screen());
+    assert!(s.screen().contains("r retry"), "{}", s.screen());
+    assert_eq!(s.hooks().writes.get(), 2);
+    s.hooks().writer_held.set(false);
+    s.press(&["r"]);
+    assert!(s.row(22).starts_with(" Committed"), "{}", s.row(22));
+}
+
+#[test]
+fn a_paste_without_bracketed_paste_cannot_confirm_through_the_run_loop() {
+    let source = fixture();
+    let hooks = Rc::clone(&source.hooks);
+    let mut terminal = FakeTerminal::new(80, 24, Capabilities::FULL);
+    let mut ui = Ui::new(
+        source,
+        UiOptions {
+            capabilities: Capabilities::FULL,
+        },
+        terminal.size(),
+    );
+    ui.run_until_idle();
+    let mut decoder = eggdb_ui::InputDecoder::new();
+    for event in decoder.feed(b"jedd\r\rdd") {
+        terminal.push(event);
+    }
+    terminal.press("Ctrl-C");
+    terminal.press("Ctrl-C");
+    if let Err(error) = eggdb_ui::run(&mut terminal, &mut ui) {
+        panic!("run: {error}");
+    }
+    assert!(ui.should_quit());
+    assert_eq!(hooks.writes.get(), 0);
+    assert!(ui.source().entries == fixture().entries);
+}
+
+fn paste_bytes(s: &mut Scenario, bytes: &[u8]) {
+    let mut decoder = eggdb_ui::InputDecoder::new();
+    let mut input = b"\x1b[200~".to_vec();
+    input.extend_from_slice(bytes);
+    input.extend_from_slice(b"\x1b[201~");
+    for event in decoder.feed(&input) {
+        s.terminal.push(event);
+    }
+    s.step();
+}
+
+#[test]
+fn pasted_line_breaks_are_stored_as_line_feeds() {
+    let mut s = Scenario::new(80, 24);
+    s.press(&["a"]);
+    s.type_str("pasted");
+    s.press(&["Enter"]);
+    paste_bytes(&mut s, b"{\r\n  \"a\": 1,\r  \"b\": \"x\\ny\"\n}");
+    assert!(s.row(23).contains("Ctrl-S confirm"), "{}", s.row(23));
+    s.press(&["Ctrl-S", "Enter"]);
+    assert_eq!(
+        s.entries().get(b"pasted".as_slice()).map(Vec::as_slice),
+        Some(b"{\n  \"a\": 1,\n  \"b\": \"x\\ny\"\n}".as_slice())
+    );
+    s.press(&["a"]);
+    paste_bytes(&mut s, b"two\r\nlines");
+    assert!(s.row(1).contains("Add key: two\\nlines"), "{}", s.row(1));
+}
+
+#[test]
+fn a_paste_larger_than_1_mib_is_refused_whole() {
+    let mut s = Scenario::new(80, 24);
+    s.press(&["Down", "e"]);
+    paste_bytes(&mut s, &vec![b'x'; (1 << 20) + 10]);
+    assert!(
+        s.row(22)
+            .starts_with(" The paste was larger than 1 MiB and was dropped"),
+        "{}",
+        s.row(22)
+    );
+    assert!(s.row(1).contains("87 B → 87 B"), "{}", s.row(1));
+    s.press(&["Enter", "Enter"]);
+    assert_model(&s, &fixture().entries);
+}
+
+#[test]
+fn quitting_from_the_check_screen_asks_about_an_unsaved_edit() {
+    let mut s = Scenario::new(80, 24);
+    s.hooks().next_write_error.replace(Some(SourceError::new(
+        ErrorKind::Corrupt,
+        "page 3 failed its checksum",
+    )));
+    s.press(&["Down", "e", "End"]);
+    s.type_str("!");
+    s.press(&["Enter", "Enter", "c"]);
+    assert!(s.screen().contains("Check  OK"), "{}", s.screen());
+    s.press(&["q"]);
+    assert!(!s.ui.should_quit());
+    assert!(s.screen().contains("┌ Quit"), "{}", s.screen());
+    s.press(&["Esc", "Ctrl-C"]);
+    assert!(s.screen().contains("┌ Quit"), "{}", s.screen());
+    s.press(&["Ctrl-C"]);
+    assert!(s.ui.should_quit());
 }

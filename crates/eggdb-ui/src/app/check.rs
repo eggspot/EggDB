@@ -1,4 +1,4 @@
-use super::modal::{error_line, wrap};
+use super::modal::{Modal, error_line, wrap};
 use super::{Hint, Ui};
 use crate::frame::Frame;
 use crate::source::{CheckSummary, ErrorKind, Source, SourceError, Summary};
@@ -80,6 +80,9 @@ impl<S: Source> Ui<S> {
 
     pub(super) fn check_key(&mut self, code: KeyCode) {
         match code {
+            KeyCode::Char('q') if self.has_unsaved_edit() => {
+                self.modal = Some(Modal::quit_question());
+            }
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Enter | KeyCode::Esc if !self.check_running() => {
                 self.check = None;

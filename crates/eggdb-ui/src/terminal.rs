@@ -47,6 +47,8 @@ pub enum Event {
     Key(KeyEvent),
     /// Text was pasted, line breaks included; it never triggers key bindings.
     Paste(String),
+    /// A paste larger than the input layer takes (1 MiB) was dropped whole; none of it arrives.
+    PasteTooLarge,
     /// The terminal changed size.
     Resize(Size),
     /// The terminal is going away; the program should end at once.

@@ -54,6 +54,7 @@ pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Resu
         if changed {
             ui.draw(&mut frame);
             terminal.present(&frame)?;
+            ui.presented();
         }
         if ui.should_quit() {
             return Ok(());

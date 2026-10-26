@@ -7,7 +7,7 @@
   user:1                      41│
   user:10                     43│
   user:11     ┌ Add key ─────────────────────────────────────────┐
-  user:12     │ Key    user:21                                   │
+  user:12     │ Key    user:21 (7 B)                             │
   user:13     │ Value  8 B, text                                 │
   user:14     │                                                  │
   user:15     │ One commit, written to disk before you continue. │

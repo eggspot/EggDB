@@ -332,6 +332,7 @@ mod tests {
     use std::ops::Bound;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
 
     struct TempFile(PathBuf);
 
@@ -399,11 +400,16 @@ mod tests {
         fn keys(&mut self, names: &[&str]) -> String {
             for name in names {
                 assert!(self.terminal.press(name), "unknown key {name}");
+                self.present();
             }
+            self.present();
+            self.terminal.screen()
+        }
+
+        fn present(&mut self) {
             self.ui
                 .process(&mut self.terminal, &mut self.frame)
                 .unwrap_or_else(|error| panic!("present: {error}"));
-            self.terminal.screen()
         }
 
         fn typed(&mut self, text: &str) -> String {
@@ -567,12 +573,11 @@ mod tests {
         let before = std::fs::read(&file.0).unwrap_or_else(|error| panic!("read: {error}"));
         let mut screen = Screen::new(source_at(&file.0, Options::new().read_only(true)));
         assert!(screen.keys(&[]).contains(" RO"));
-        for keys in [&["e"][..], &["a"], &["d"], &["Tab", "e"], &["Tab"]] {
+        for keys in [&["e"][..], &["a"], &["d"], &["Tab", "e"], &["Tab", "d"]] {
             let shown = screen.keys(keys);
             assert!(
-                shown.contains("Opened read-only; start without --read-only to edit")
-                    || !keys.contains(&"e") && !keys.contains(&"a") && !keys.contains(&"d"),
-                "{shown}"
+                shown.contains("Opened read-only; start without --read-only to edit"),
+                "{keys:?}: {shown}"
             );
         }
         screen.typed("vj/user:0");
@@ -613,10 +618,17 @@ mod tests {
         let shown = screen.keys(&["Enter", "Enter"]);
         assert!(shown.contains("Writer busy"), "{shown}");
         assert!(shown.contains("Error (WriterActive):"), "{shown}");
-        let _ = release.send(());
-        let _ = writer.join();
+        let held_for = Duration::from_millis(100);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(held_for);
+            let _ = release.send(());
+        });
+        let waited = Instant::now();
         let shown = screen.keys(&["r"]);
+        assert!(waited.elapsed() >= held_for, "{:?}", waited.elapsed());
         assert!(shown.contains("Committed doc (12 B)"), "{shown}");
+        let _ = releaser.join();
+        let _ = writer.join();
         screen.close();
     }
 
@@ -674,25 +686,21 @@ mod tests {
             let key_text = String::from_utf8_lossy(&key).into_owned();
             match random(10) {
                 0..5 => {
-                    screen.terminal.press("a");
-                    screen.terminal.type_str(&key_text);
-                    screen.terminal.press("Enter");
-                    screen.terminal.type_str(&spelled);
-                    screen.terminal.press("Enter");
-                    screen.terminal.press("Enter");
+                    screen.keys(&["a"]);
+                    screen.typed(&key_text);
+                    screen.keys(&["Enter"]);
+                    screen.typed(&spelled);
+                    screen.keys(&["Enter", "Enter"]);
                     model.insert(key, value);
                 }
                 _ if existing => {
-                    screen.terminal.press("/");
-                    screen.terminal.type_str(&key_text);
-                    for name in ["Enter", "d", "d", "/", "Esc"] {
-                        screen.terminal.press(name);
-                    }
+                    screen.keys(&["/"]);
+                    screen.typed(&key_text);
+                    screen.keys(&["Enter", "d", "d", "/", "Esc"]);
                     model.remove(&key);
                 }
                 _ => continue,
             }
-            screen.keys(&[]);
         }
         screen.close();
         let reopened = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));

@@ -3,6 +3,7 @@ use crate::text;
 use crate::width::{is_unprintable, text_width};
 
 pub(crate) const LONGEST_TEXT: usize = 4 << 20;
+const LONGEST_HISTORY: usize = 16 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Lines {
@@ -38,6 +39,7 @@ pub(crate) struct Editor {
     original: String,
     undo: Vec<Change>,
     redo: Vec<Change>,
+    history_bytes: usize,
     top: usize,
     pan: usize,
     goal_col: Option<usize>,
@@ -52,6 +54,7 @@ impl Editor {
             lines,
             undo: Vec::new(),
             redo: Vec::new(),
+            history_bytes: 0,
             top: 0,
             pan: 0,
             goal_col: None,
@@ -125,7 +128,7 @@ impl Editor {
     }
 
     pub(crate) fn paste(&mut self, pasted: &str) -> Outcome {
-        let spelled = text::literal(pasted);
+        let spelled = text::literal(&line_feeds(pasted));
         if spelled.contains('\n') {
             self.lines = Lines::Multi;
         }
@@ -133,7 +136,7 @@ impl Editor {
     }
 
     pub(crate) fn paste_on_one_line(&mut self, pasted: &str) -> Outcome {
-        self.insert(&text::escaped(pasted.as_bytes()), false)
+        self.insert(&text::escaped(line_feeds(pasted).as_bytes()), false)
     }
 
     pub(crate) fn key(&mut self, key: KeyEvent, page_rows: usize) -> Outcome {
@@ -260,7 +263,7 @@ impl Editor {
         let at = self.cursor;
         self.text.insert_str(at, inserted);
         self.cursor = at + inserted.len();
-        self.redo.clear();
+        self.clear_redo();
         if let Some(last) = self.undo.last_mut()
             && typing
             && last.typing
@@ -268,9 +271,11 @@ impl Editor {
             && last.at + last.inserted.len() == at
         {
             last.inserted.push_str(inserted);
+            self.history_bytes += inserted.len();
+            self.trim_history();
             return Outcome::Changed;
         }
-        self.undo.push(Change {
+        self.remember(Change {
             at,
             removed: String::new(),
             inserted: inserted.to_owned(),
@@ -280,20 +285,46 @@ impl Editor {
         Outcome::Changed
     }
 
+    fn remember(&mut self, change: Change) {
+        self.history_bytes += change.removed.len() + change.inserted.len();
+        self.undo.push(change);
+        self.trim_history();
+    }
+
+    fn trim_history(&mut self) {
+        let mut dropped = 0;
+        let mut oldest_kept = 0;
+        for change in &self.undo {
+            if self.history_bytes - dropped <= LONGEST_HISTORY {
+                break;
+            }
+            dropped += change.removed.len() + change.inserted.len();
+            oldest_kept += 1;
+        }
+        self.undo.drain(..oldest_kept);
+        self.history_bytes -= dropped;
+    }
+
+    fn clear_redo(&mut self) {
+        for change in self.redo.drain(..) {
+            self.history_bytes -= change.removed.len() + change.inserted.len();
+        }
+    }
+
     fn remove(&mut self, from: usize, to: usize) -> Outcome {
         if from >= to {
             return Outcome::Ignored;
         }
         let removed = self.text[from..to].to_owned();
         self.text.replace_range(from..to, "");
-        self.undo.push(Change {
+        self.clear_redo();
+        self.remember(Change {
             at: from,
             removed,
             inserted: String::new(),
             cursor_before: self.cursor,
             typing: false,
         });
-        self.redo.clear();
         self.cursor = from;
         Outcome::Changed
     }
@@ -328,9 +359,13 @@ impl Editor {
     }
 }
 
+fn line_feeds(pasted: &str) -> String {
+    pasted.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Editor, LONGEST_TEXT, Lines, Outcome};
+    use super::{Editor, LONGEST_HISTORY, LONGEST_TEXT, Lines, Outcome};
     use crate::terminal::{KeyCode, KeyEvent, Modifiers};
 
     fn plain(code: KeyCode) -> KeyEvent {
@@ -439,6 +474,39 @@ mod tests {
         editor.paste("x\ny");
         assert_eq!(editor.lines(), Lines::Multi);
         assert_eq!(editor.text(), "\\u{202e}\\ta\\\\bx\ny");
+    }
+
+    #[test]
+    fn pasted_line_breaks_become_line_feeds_whatever_the_terminal_sent() {
+        let mut editor = Editor::new(String::new(), Lines::Single);
+        editor.paste("{\r\n  \"a\": \"x\\ny\"\r}\n");
+        assert_eq!(editor.lines(), Lines::Multi);
+        assert_eq!(editor.text(), "{\n  \"a\": \"x\\\\ny\"\n}\n");
+        let mut key = Editor::new(String::new(), Lines::Single);
+        key.paste_on_one_line("a\r\nb\rc");
+        assert_eq!(key.lines(), Lines::Single);
+        assert_eq!(key.text(), "a\\nb\\nc");
+    }
+
+    #[test]
+    fn the_undo_history_keeps_only_the_newest_16_mib() {
+        let mut editor = Editor::new(String::new(), Lines::Single);
+        let chunk = "z".repeat(1 << 20);
+        for _ in 0..12 {
+            editor.paste(&chunk);
+            editor.key(ctrl('u'), 10);
+        }
+        assert!(editor.history_bytes <= LONGEST_HISTORY);
+        assert_eq!(editor.history_bytes, (16 << 20));
+        let mut undone = 0;
+        while editor.key(ctrl('z'), 10) == Outcome::Changed {
+            undone += 1;
+        }
+        assert_eq!(undone, 16);
+        assert_eq!(editor.text(), "");
+        editor.key(ctrl('y'), 10);
+        editor.paste("a");
+        assert_eq!(editor.history_bytes, (1 << 20) + 1);
     }
 
     #[test]

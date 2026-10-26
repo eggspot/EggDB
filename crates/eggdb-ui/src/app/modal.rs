@@ -34,9 +34,23 @@ pub(super) enum ModalKind {
 pub(super) struct Modal {
     pub(super) kind: ModalKind,
     title: String,
-    body: Vec<(String, Role)>,
+    body: Vec<BodyLine>,
     keys: Vec<(&'static str, &'static str)>,
     scroll: usize,
+    armed: bool,
+}
+
+#[derive(Debug)]
+struct BodyLine {
+    text: String,
+    role: Role,
+    wrap: Wrap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wrap {
+    AtSpaces,
+    AnyCharacter,
 }
 
 struct Layout {
@@ -56,16 +70,33 @@ impl Modal {
             body: Vec::new(),
             keys: Vec::new(),
             scroll: 0,
+            armed: false,
         }
     }
 
-    fn line(mut self, text: impl Into<String>) -> Self {
-        self.body.push((text.into(), Role::Plain));
-        self
+    fn line(self, text: impl Into<String>) -> Self {
+        self.styled(text, Role::Plain)
     }
 
     fn styled(mut self, text: impl Into<String>, role: Role) -> Self {
-        self.body.push((text.into(), role));
+        self.body.push(BodyLine {
+            text: text.into(),
+            role,
+            wrap: Wrap::AtSpaces,
+        });
+        self
+    }
+
+    fn key_line(mut self, key: &[u8]) -> Self {
+        self.body.push(BodyLine {
+            text: format!(
+                "Key    {} ({})",
+                text::escaped(key),
+                text::value_size(key.len() as u64)
+            ),
+            role: Role::Plain,
+            wrap: Wrap::AnyCharacter,
+        });
         self
     }
 
@@ -88,6 +119,10 @@ impl Modal {
             .key("Esc", "keep editing")
     }
 
+    pub(super) fn arm(&mut self) {
+        self.armed = true;
+    }
+
     pub(super) fn asks_to_quit(&self) -> bool {
         matches!(self.kind, ModalKind::QuitWithEdit)
     }
@@ -106,6 +141,24 @@ impl Modal {
 
 pub(super) fn error_line(error: &SourceError) -> String {
     format!("Error ({}): {}", error.kind.name(), error.message)
+}
+
+fn wrap_characters(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = vec![String::new()];
+    let mut used = 0;
+    for c in text.chars() {
+        let c_width = char_width(c);
+        if used + c_width > width && used > 0 {
+            lines.push(String::new());
+            used = 0;
+        }
+        if let Some(line) = lines.last_mut() {
+            line.push(c);
+        }
+        used += c_width;
+    }
+    lines
 }
 
 pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -150,6 +203,7 @@ impl<S: Source> Ui<S> {
         let Change::Put { key, value } = &pending.change else {
             return;
         };
+        let key = key.clone();
         let new_size = text::value_size(value.len() as u64);
         let kind = value_kind(value);
         let (title, value_line) = match (pending.replaced_bytes, self.adding()) {
@@ -171,10 +225,9 @@ impl<S: Source> Ui<S> {
                 ),
             ),
         };
-        let key_line = format!("Key    {}", text::escaped(key));
         self.modal = Some(
             Modal::new(ModalKind::ConfirmPut(pending), title)
-                .line(key_line)
+                .key_line(&key)
                 .line(value_line)
                 .line("")
                 .line("One commit, written to disk before you continue.")
@@ -200,7 +253,7 @@ impl<S: Source> Ui<S> {
         };
         self.modal = Some(
             Modal::new(ModalKind::ConfirmDelete(pending), "Delete key")
-                .line(format!("Key    {}", text::escaped(&key)))
+                .key_line(&key)
                 .line(value_line)
                 .line("")
                 .line("Deletes this one key in one commit, written to disk before you continue. There is no undo.")
@@ -314,7 +367,7 @@ impl<S: Source> Ui<S> {
         let Some(mut modal) = self.modal.take() else {
             return;
         };
-        if modal.is_waiting() || self.scroll_modal(&mut modal, key.code) {
+        if !modal.armed || modal.is_waiting() || self.scroll_modal(&mut modal, key.code) {
             self.modal = Some(modal);
             return;
         }
@@ -329,15 +382,12 @@ impl<S: Source> Ui<S> {
                     pending,
                     waiting: true,
                 };
-                modal.body.push((String::new(), Role::Plain));
-                modal.body.push((
-                    format!(
-                        "Waiting up to {} for the other write transaction{}",
-                        self.write_timeout_text(),
-                        self.theme.symbol(Symbol::Ellipsis)
-                    ),
-                    Role::Warning,
-                ));
+                let waiting = format!(
+                    "Waiting up to {} for the other write transaction{}",
+                    self.write_timeout_text(),
+                    self.theme.symbol(Symbol::Ellipsis)
+                );
+                let mut modal = modal.line("").styled(waiting, Role::Warning);
                 modal.keys.clear();
                 self.modal = Some(modal);
             }
@@ -433,7 +483,7 @@ impl<S: Source> Ui<S> {
         let widest = modal
             .body
             .iter()
-            .map(|(line, _)| text_width(line))
+            .map(|line| text_width(&line.text))
             .chain([
                 text_width(&self.keys_text(modal)),
                 text_width(&modal.title) + 2,
@@ -445,10 +495,12 @@ impl<S: Source> Ui<S> {
         let lines: Vec<(String, Role)> = modal
             .body
             .iter()
-            .flat_map(|(line, role)| {
-                wrap(line, text_width)
-                    .into_iter()
-                    .map(move |wrapped| (wrapped, *role))
+            .flat_map(|line| {
+                let wrapped = match line.wrap {
+                    Wrap::AtSpaces => wrap(&line.text, text_width),
+                    Wrap::AnyCharacter => wrap_characters(&line.text, text_width),
+                };
+                wrapped.into_iter().map(move |text| (text, line.role))
             })
             .collect();
         let chrome = if modal.keys.is_empty() { 2 } else { 4 };
@@ -537,7 +589,7 @@ impl<S: Source> Ui<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap;
+    use super::{wrap, wrap_characters};
 
     #[test]
     fn wrapping_breaks_at_spaces_and_inside_long_words() {
@@ -545,5 +597,7 @@ mod tests {
         assert_eq!(wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
         assert_eq!(wrap("a\n\nb", 10), ["a", "", "b"]);
         assert_eq!(wrap("", 10), [""]);
+        assert_eq!(wrap_characters("ab cd", 3), ["ab ", "cd"]);
+        assert_eq!(wrap_characters("", 3), [""]);
     }
 }

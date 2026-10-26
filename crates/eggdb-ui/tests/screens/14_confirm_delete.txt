@@ -6,7 +6,7 @@
   large                   14.0 K│ user1@example.com
 > user:1                      41│ born 1801-12-10
   ┌ Delete key ──────────────────────────────────────────────────────────────┐
-  │ Key    user:1                                                            │
+  │ Key    user:1 (6 B)                                                      │
   │ Value  41 B, text: User 1                                                │
   │                                                                          │
   │ Deletes this one key in one commit, written to disk before you continue. │

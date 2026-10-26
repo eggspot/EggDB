@@ -2,7 +2,7 @@ use super::modal::{Modal, Pending};
 use super::{Hint, Pane, ToastKind, Ui, help_editing_line};
 use crate::editor::{Editor, LONGEST_TEXT, Lines, Outcome};
 use crate::frame::Frame;
-use crate::source::{Change, Source, Start, WriterBusy};
+use crate::source::{Change, Source, SourceError, Start, WriterBusy};
 use crate::terminal::KeyEvent;
 use crate::text::{self, LineBreaks};
 use crate::theme::{Role, Symbol};
@@ -92,6 +92,18 @@ impl<S: Source> Ui<S> {
         );
     }
 
+    fn spelling_too_long(&mut self, value_bytes: u64, spelled_bytes: usize) {
+        self.toast(
+            ToastKind::Error,
+            format!(
+                "Value is {}, but spelled with escapes it is {} of text; the editor holds up to {}. Store it with eggdb put <file> <key> @file",
+                text::short_size(value_bytes),
+                text::file_size(spelled_bytes as u64),
+                text::file_size(LONGEST_TEXT as u64)
+            ),
+        );
+    }
+
     pub(super) fn start_edit(&mut self) {
         let Some(viewer) = &self.viewer else {
             self.info("No key selected; a adds one");
@@ -125,7 +137,7 @@ impl<S: Source> Ui<S> {
             text::escaped(bytes)
         };
         if spelled.len() > LONGEST_TEXT {
-            self.too_large_to_edit(value_bytes);
+            self.spelling_too_long(value_bytes, spelled.len());
             return;
         }
         let mut editor = Editor::new(spelled, lines);
@@ -171,6 +183,20 @@ impl<S: Source> Ui<S> {
             None => return,
         };
         self.after_edit(outcome);
+    }
+
+    pub(super) fn paste_too_large(&mut self) {
+        let name = self
+            .summary
+            .as_ref()
+            .map(|summary| summary.name.clone())
+            .unwrap_or_default();
+        self.toast(
+            ToastKind::Error,
+            format!(
+                "The paste was larger than 1 MiB and was dropped; nothing was inserted. Store large values with eggdb put {name} <key> @file"
+            ),
+        );
     }
 
     pub(super) fn edit_key(&mut self, key: KeyEvent) {
@@ -263,7 +289,14 @@ impl<S: Source> Ui<S> {
                 }
                 Ok(value) => {
                     let replaced_bytes = if edit.adding {
-                        self.stored_size(&edit.key)
+                        match self.stored_size(&edit.key) {
+                            Ok(size) => size,
+                            Err(error) => {
+                                self.edit = Some(Edit::Value(edit));
+                                self.error(error);
+                                return;
+                            }
+                        }
                     } else {
                         edit.stored_bytes
                     };
@@ -282,17 +315,12 @@ impl<S: Source> Ui<S> {
         }
     }
 
-    fn stored_size(&mut self, key: &[u8]) -> Option<u64> {
-        match self.source.keys(key, Start::AtOrAfter(key), 1) {
-            Ok(rows) => rows
-                .into_iter()
-                .find(|row| row.key == key)
-                .map(|row| row.value_bytes),
-            Err(error) => {
-                self.error(error);
-                None
-            }
-        }
+    fn stored_size(&self, key: &[u8]) -> Result<Option<u64>, SourceError> {
+        let rows = self.source.keys(key, Start::AtOrAfter(key), 1)?;
+        Ok(rows
+            .into_iter()
+            .find(|row| row.key == key)
+            .map(|row| row.value_bytes))
     }
 
     pub(super) fn commit(&mut self, pending: Pending, busy: WriterBusy) {
