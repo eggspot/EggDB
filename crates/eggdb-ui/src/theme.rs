@@ -14,6 +14,8 @@ pub(crate) enum Role {
     JsonLiteral,
     Dim,
     Error,
+    Warning,
+    Success,
     HexOffset,
 }
 
@@ -40,6 +42,10 @@ impl Theme {
 
     pub(crate) fn plain(&self) -> bool {
         !self.capabilities.attributes
+    }
+
+    pub(crate) fn shows_dim(&self) -> bool {
+        self.capabilities.attributes && self.capabilities.colors == Colors::Ansi16
     }
 
     pub(crate) fn style(&self, role: Role) -> Style {
@@ -97,6 +103,16 @@ impl Theme {
                 bold: true,
                 ..Style::default()
             },
+            Role::Warning => Style {
+                fg: fg(YELLOW),
+                bold: true,
+                ..Style::default()
+            },
+            Role::Success => Style {
+                fg: fg(GREEN),
+                bold: true,
+                ..Style::default()
+            },
         }
     }
 
@@ -122,6 +138,12 @@ pub(crate) enum Symbol {
     MiddleDot,
     UpDown,
     LeftRight,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    EmDash,
+    RightArrow,
 }
 
 impl Symbol {
@@ -134,6 +156,12 @@ impl Symbol {
             Self::MiddleDot => ("·", "|"),
             Self::UpDown => ("↑↓", "Up/Down"),
             Self::LeftRight => ("←→", "Left/Right"),
+            Self::TopLeft => ("┌", "+"),
+            Self::TopRight => ("┐", "+"),
+            Self::BottomLeft => ("└", "+"),
+            Self::BottomRight => ("┘", "+"),
+            Self::EmDash => ("—", "-"),
+            Self::RightArrow => ("→", "->"),
         };
         if unicode { fancy } else { ascii }
     }
@@ -155,6 +183,12 @@ mod tests {
             Symbol::MiddleDot,
             Symbol::UpDown,
             Symbol::LeftRight,
+            Symbol::TopLeft,
+            Symbol::TopRight,
+            Symbol::BottomLeft,
+            Symbol::BottomRight,
+            Symbol::EmDash,
+            Symbol::RightArrow,
         ] {
             assert!(symbol.spelling(false).is_ascii(), "{symbol:?}");
             assert!(!symbol.spelling(true).is_empty());

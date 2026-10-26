@@ -1,4 +1,4 @@
- EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RO
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
  Keys                1–20 of 24 │ Value  text (auto) · 14.0 K  line 167–175/175
   bin                         40│ large
   doc:json                    87│───────────────────────────────────────────────
@@ -21,4 +21,4 @@
   user:4                      41│ line 0175: the quick brown fox jumps over the
   user:5                      41│ lazy dog, again and again and again
 
- ↑↓ scroll  ←→ pan  v view  w wrap  Esc keys  ? help  q quit
+ ↑↓ scroll  ←→ pan  v view  w wrap  e edit  Esc keys  ? help  q quit

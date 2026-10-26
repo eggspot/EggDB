@@ -1,4 +1,4 @@
- EggDB  app.db                    1.2 MiB | 312 pages | 24 keys | 09:14:03Z  RO
+ EggDB  app.db                    1.2 MiB | 312 pages | 24 keys | 09:14:03Z  RW
  Keys                1-20 of 24 | Value  hex (auto) | 40 B     bytes 0-39 of 40
 > bin                         40| bin
   doc:json                    87|-----------------------------------------------
@@ -20,5 +20,5 @@
   user:3                      41|
   user:4                      41|
   user:5                      41|
-
- Up/Down move  Enter open  / filter  v view  r re-read  ? help  q quit
+ Opened app.db read-write
+ Up/Down move  Enter open  / filter  e edit  a add  d delete  ? help  q quit

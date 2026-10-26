@@ -1,4 +1,4 @@
- EggDB  app.db                                  24 keys  RO
+ EggDB  app.db                                  24 keys  RW
  Keys                                            1–16 of 24
   bin                                                     40
   doc:json                                                87
@@ -17,4 +17,4 @@
   user:19                                                 43
   user:2                                                  41
 
- ↑↓ move  Enter open  / filter  v view  ? help  q quit
+ ↑↓ move  Enter open  / filter  e edit  ? help  q quit

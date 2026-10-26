@@ -1,0 +1,24 @@
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
+ Keys                1–20 of 24 │ Edit  json · 87 B → 87 B  doc:json ln 1 col 1
+  bin                         40│ doc:json
+> doc:json                    87│───────────────────────────────────────────────
+  empty                        0│ {"name":"Ada Lovelace","born":1815,"tags":["m…
+  large                   14.0 K│
+  user:1                      41│
+  user:10                     43│
+  user:11                     43│
+  user:12                     43│
+  user:13                     43│
+  user:14                     43│
+  user:15                     43│
+  user:16                     43│
+  user:17                     43│
+  user:18                     43│
+  user:19                     43│
+  user:2                      41│
+  user:20                     43│
+  user:3                      41│
+  user:4                      41│
+  user:5                      41│
+
+ Enter confirm  Alt-Enter new line  Esc cancel  \xNN a byte  F1 help

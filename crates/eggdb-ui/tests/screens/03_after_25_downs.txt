@@ -1,4 +1,4 @@
- EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RO
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
  Keys                5–24 of 24 │ Value  text (auto) · 41 B          line 1–3/3
   user:1                      41│ user:9
   user:10                     43│───────────────────────────────────────────────
@@ -21,4 +21,4 @@
   user:8                      41│
 > user:9                      41│
 
- ↑↓ move  Enter open  / filter  v view  r re-read  ? help  q quit
+ ↑↓ move  Enter open  / filter  e edit  a add  d delete  c check  ? help  q quit

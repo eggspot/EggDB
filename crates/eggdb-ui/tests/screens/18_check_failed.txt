@@ -1,0 +1,24 @@
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
+
+  Stats (from the header, read without touching a page)
+    page size 4.0 KiB · 312 pages · 18 free · file 1.2 MiB
+    last commit 2026-10-26 09:14:03.512000 UTC (stamp 1793005243512000.0001)
+    cache 16.0 MiB, 211 pages held, 98.2% hits · log since checkpoint 24.0 KiB
+
+  Check  FAILED
+    Error (Corrupt): page 7 failed its checksum: expected 0x1234abcd, found
+    0x00000000
+    Try: eggdb check app.db for the same report on the command line; restore
+    the file from a backup
+
+
+
+
+
+
+
+
+
+
+
+ Enter back  q quit

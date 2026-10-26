@@ -1,8 +1,9 @@
 //! EggDB's terminal user interface, `eggdb ui`: one database file full screen in any terminal,
-//! with a key list and a value viewer (text, JSON and hex). The design is `docs/ux/ui.md`.
+//! with a key list, a value viewer (text, JSON and hex), editors that change keys in one
+//! confirmed commit each, and a check screen. The design is `docs/ux/ui.md`.
 //!
-//! The UI never talks to the operating system itself. It reads the database through a
-//! [`Source`] and draws on a [`Terminal`]: [`OsTerminal`] for the real one (raw mode and
+//! The UI never talks to the operating system itself. It reads and writes the database
+//! through a [`Source`] and draws on a [`Terminal`]: [`OsTerminal`] for the real one (raw mode and
 //! restore come from the platform layer), [`FakeTerminal`] for tests, which compare its
 //! [`FakeTerminal::screen`] with golden text files.
 //!
@@ -32,7 +33,10 @@ pub use fake::FakeTerminal;
 pub use frame::{Cell, CellText, Color, Frame, Style};
 pub use os_terminal::{Fallbacks, OsTerminal, detect_capabilities};
 pub use render::Renderer;
-pub use source::{CountStep, KeyRow, Source, Start, Summary};
+pub use source::{
+    Change, CheckSummary, CountStep, ErrorKind, KeyRow, Source, SourceError, Start, Summary,
+    WriterBusy,
+};
 pub use terminal::{Capabilities, Colors, Event, KeyCode, KeyEvent, Modifiers, Size, Terminal};
 
 use std::io;
@@ -40,8 +44,9 @@ use std::time::Duration;
 
 const IDLE_WAIT: Duration = Duration::from_millis(200);
 
-/// Runs the UI on `terminal` until the user quits: wait for an event, handle it, draw, present;
-/// background work (the key count) runs in steps whenever no event is waiting.
+/// Runs the UI on `terminal` until the user quits: wait for an event, handle it, draw, present.
+/// Background steps (the key count, a write waiting for the writer) run whenever no event is
+/// waiting; otherwise the loop wakes every 200 ms to follow a running check and expire toasts.
 pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Result<()> {
     let mut frame = Frame::new(terminal.size());
     let mut changed = true;
@@ -53,10 +58,10 @@ pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Resu
         if ui.should_quit() {
             return Ok(());
         }
-        let wait = if ui.is_idle() {
-            IDLE_WAIT
-        } else {
+        let wait = if ui.has_steps() {
             Duration::ZERO
+        } else {
+            IDLE_WAIT
         };
         changed = match terminal.next_event(wait)? {
             Some(event) => {
@@ -68,11 +73,7 @@ pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Resu
                 }
                 true
             }
-            None if ui.is_idle() => false,
-            None => {
-                ui.tick();
-                true
-            }
+            None => ui.tick(),
         };
     }
 }
@@ -81,7 +82,10 @@ pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Resu
 mod tests {
     use super::{Capabilities, Event, FakeTerminal, KeyCode, KeyEvent, Ui, UiOptions, run};
     use crate::frame::Frame;
-    use crate::source::{CountStep, KeyRow, Source, Start, Summary};
+    use crate::source::{
+        Change, CheckSummary, CountStep, ErrorKind, KeyRow, Source, SourceError, Start, Summary,
+        WriterBusy,
+    };
     use crate::terminal::{Size, Terminal};
     use std::io;
     use std::time::Duration;
@@ -89,20 +93,32 @@ mod tests {
     struct Empty;
 
     impl Source for Empty {
-        fn summary(&self) -> Result<Summary, String> {
+        fn summary(&self) -> Result<Summary, SourceError> {
             Ok(Summary::default())
         }
-        fn keys(&self, _: &[u8], _: Start<'_>, _: usize) -> Result<Vec<KeyRow>, String> {
+        fn keys(&self, _: &[u8], _: Start<'_>, _: usize) -> Result<Vec<KeyRow>, SourceError> {
             Ok(Vec::new())
         }
-        fn value(&self, _: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        fn value(&self, _: &[u8]) -> Result<Option<Vec<u8>>, SourceError> {
             Ok(None)
         }
-        fn count(&self, _: &[u8], _: Option<&[u8]>, _: u64) -> Result<CountStep, String> {
+        fn count(&self, _: &[u8], _: Option<&[u8]>, _: u64) -> Result<CountStep, SourceError> {
             Ok(CountStep {
                 counted: 0,
                 resume_after: None,
             })
+        }
+        fn write(&mut self, _: &Change, _: WriterBusy) -> Result<String, SourceError> {
+            Err(SourceError::new(ErrorKind::ReadOnly, "empty"))
+        }
+        fn start_check(&mut self) -> Result<(), SourceError> {
+            Ok(())
+        }
+        fn check_outcome(&mut self) -> Option<Result<CheckSummary, SourceError>> {
+            Some(Ok(CheckSummary::default()))
+        }
+        fn reopen(&mut self) -> Result<(), SourceError> {
+            Ok(())
         }
     }
 
