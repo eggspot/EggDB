@@ -38,7 +38,10 @@ however it stopped. Values outside what EggDB accepts fail the open with
 
 **One file, one user.** An open for writing locks the file against every other open, in this
 process or another; a read-only open locks out writers only. The second open fails at once with
-`ErrorKind::Locked`. Within a process, share one `Database` between threads instead.
+`ErrorKind::Locked`. Within a process, share one `Database` between threads instead. A child
+process shares its parent's open files until it starts its own program, so a database closed
+while another thread starts a child can stay locked for that moment, and reopening it at once
+can fail with `Locked`.
 
 ## Transactions
 - **Read transactions** (`db.begin_read()`) see a snapshot: the last commit before they began,

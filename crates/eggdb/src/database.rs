@@ -35,7 +35,7 @@ use std::time::Duration;
 /// anything: no commit is lost by a drop, and the next open replays the log written since
 /// the last checkpoint, at most about a megabyte by default. Under
 /// [`Durability::Normal`](crate::Durability::Normal), commits since the last sync stay
-/// exposed to a power loss until then, as that mode allows.
+/// exposed to a power loss until the next open syncs them, as that mode allows.
 ///
 /// ```
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -163,9 +163,12 @@ impl Database {
     }
 
     fn open_file(path: &Path, options: &Options) -> Result<Self> {
-        let page_size = options.page_size()?;
-        let file = open_or_create(path, options, page_size).map_err(Error::storage)?;
+        let new_file_page_size = options.new_file_page_size()?;
+        options.check_cache_holds(new_file_page_size)?;
+        let file = open_or_create(path, options, new_file_page_size)
+            .map_err(|error| explain_open_error(error, options))?;
         let page_size = file.page_size();
+        options.check_cache_holds(page_size)?;
         let cache = PageCache::new(
             file,
             &OsMemory::new(),
@@ -318,8 +321,8 @@ impl Database {
 
     /// Checks every page of the database's B+tree as of the last commit, and how the pages fit
     /// together, and counts what it holds. A damaged page fails with
-    /// [`ErrorKind::Corrupt`](crate::ErrorKind::Corrupt), naming the page and the rule it
-    /// breaks. The free list was checked when the database was opened.
+    /// [`ErrorKind::Corrupt`](crate::ErrorKind::Corrupt), with a message that says what
+    /// is damaged. The free list was checked when the database was opened.
     ///
     /// The check reads the whole tree and holds the database while it does: other
     /// transactions' operations wait until it ends.
@@ -469,6 +472,22 @@ fn open_or_create(
         return PageFile::open(&fs, path, access);
     }
     created
+}
+
+fn explain_open_error(error: StorageError, options: &Options) -> Error {
+    let missing =
+        matches!(&error, StorageError::Io(io) if io.kind() == eggdb_platform::ErrorKind::NotFound);
+    let error = Error::storage(error);
+    if !missing {
+        return error;
+    }
+    error.explained(if options.creates_if_missing() {
+        "its directory does not exist, so the file can't be created there"
+    } else if options.read_only {
+        "the file does not exist, and a read-only open never creates one"
+    } else {
+        "the file does not exist; open it with `Options::create_if_missing(true)` to create it"
+    })
 }
 
 fn is_kind<T>(

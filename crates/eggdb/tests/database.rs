@@ -5,10 +5,7 @@ mod common;
 use common::TempPath;
 use eggdb::{CommitStamp, Database, Durability, ErrorKind, Options};
 use std::error::Error as _;
-use std::process::Command;
 use std::time::Duration;
-
-const LOCK_PROBE: &str = "EGGDB_TEST_LOCK_PROBE";
 
 #[test]
 fn open_creates_a_missing_file_and_a_reopen_keeps_every_commit() {
@@ -70,7 +67,14 @@ fn a_missing_file_is_not_created_when_the_options_say_so() {
 
     let error = Database::open_with(file.path(), Options::new().read_only(true)).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert!(error.to_string().contains("read-only"), "{error}");
     assert!(!file.path().exists());
+
+    let in_missing_directory = file.path().with_extension("missing").join("db");
+    let error = Database::open(&in_missing_directory).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert!(error.to_string().contains("directory"), "{error}");
+    assert!(error.source().is_some());
 }
 
 #[test]
@@ -101,33 +105,6 @@ fn a_second_open_of_the_same_file_is_refused_while_the_first_is_open() {
     assert_eq!(error.kind(), ErrorKind::Locked, "{error}");
     drop(db);
     Database::open(file.path()).unwrap();
-}
-
-#[test]
-fn another_process_cannot_open_a_file_this_process_has_open() {
-    let file = TempPath::new("locked-process");
-    let _db = Database::open(file.path()).unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "lock_probe_from_another_process", "--nocapture"])
-        .env(LOCK_PROBE, file.path())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(stdout.contains("1 passed"), "{stdout}");
-}
-
-#[test]
-fn lock_probe_from_another_process() {
-    let Some(path) = std::env::var_os(LOCK_PROBE) else {
-        return;
-    };
-    let error = Database::open(&path).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Locked, "{error}");
 }
 
 #[test]

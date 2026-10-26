@@ -166,24 +166,27 @@ impl Options {
         self.snapshot_memory_bytes.unwrap_or(self.cache_bytes)
     }
 
-    pub(crate) fn page_size(&self) -> Result<PageSize> {
+    pub(crate) fn new_file_page_size(&self) -> Result<PageSize> {
         let bytes = self.page_size_bytes;
         let log2 = u8::try_from(bytes.trailing_zeros()).ok();
-        let page_size = match log2.filter(|_| bytes.is_power_of_two()) {
-            Some(log2) => PageSize::from_log2(log2).map_err(|_| invalid_page_size(bytes))?,
-            None => return Err(invalid_page_size(bytes)),
-        };
-        if self.cache_bytes < page_size.bytes() {
-            return Err(Error::new(
-                ErrorKind::InvalidOption,
-                format!(
-                    "a page cache of {} bytes holds no page of {} bytes; give it at least one page",
-                    self.cache_bytes,
-                    page_size.bytes()
-                ),
-            ));
+        match log2.filter(|_| bytes.is_power_of_two()) {
+            Some(log2) => PageSize::from_log2(log2).map_err(|_| invalid_page_size(bytes)),
+            None => Err(invalid_page_size(bytes)),
         }
-        Ok(page_size)
+    }
+
+    pub(crate) fn check_cache_holds(&self, page_size: PageSize) -> Result<()> {
+        if self.cache_bytes >= page_size.bytes() {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorKind::InvalidOption,
+            format!(
+                "a page cache of {} bytes holds no page of {} bytes; give it at least one page",
+                self.cache_bytes,
+                page_size.bytes()
+            ),
+        ))
     }
 }
 

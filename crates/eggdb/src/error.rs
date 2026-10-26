@@ -80,13 +80,9 @@ pub enum ErrorKind {
 /// type is not part of this crate's stable API: match on [`Error::kind`] instead.
 pub struct Error {
     kind: ErrorKind,
-    detail: Detail,
+    message: Option<Box<str>>,
+    source: Option<StorageError>,
     path: Option<Box<Path>>,
-}
-
-enum Detail {
-    Storage(StorageError),
-    Message(Box<str>),
 }
 
 impl Error {
@@ -98,7 +94,8 @@ impl Error {
     pub(crate) fn storage(error: StorageError) -> Self {
         Self {
             kind: kind_of(&error),
-            detail: Detail::Storage(error),
+            message: None,
+            source: Some(error),
             path: None,
         }
     }
@@ -106,9 +103,15 @@ impl Error {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<Box<str>>) -> Self {
         Self {
             kind,
-            detail: Detail::Message(message.into()),
+            message: Some(message.into()),
+            source: None,
             path: None,
         }
+    }
+
+    pub(crate) fn explained(mut self, message: impl Into<Box<str>>) -> Self {
+        self.message = Some(message.into());
+        self
     }
 
     pub(crate) fn opening(mut self, path: &Path) -> Self {
@@ -163,44 +166,30 @@ impl fmt::Display for Error {
         if let Some(path) = &self.path {
             write!(f, "cannot open the database {}: ", path.display())?;
         }
-        match &self.detail {
-            Detail::Storage(StorageError::Io(error))
-                if error.kind() == eggdb_platform::ErrorKind::NotFound && self.path.is_some() =>
-            {
-                f.write_str(
-                    "the file does not exist; open it with `create_if_missing(true)` to create it",
-                )
-            }
-            Detail::Storage(StorageError::Format(FormatError::NotADatabase)) => f.write_str(
-                "the file is not an EggDB database: it does not start with EggDB's magic bytes",
-            ),
-            Detail::Storage(error) => error.fmt(f),
-            Detail::Message(message) => f.write_str(message),
+        match (&self.message, &self.source) {
+            (Some(message), _) => f.write_str(message),
+            (None, Some(source)) => source.fmt(f),
+            (None, None) => f.write_str("an unexplained failure"),
         }
     }
 }
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut debug = f.debug_struct("Error");
-        debug.field("kind", &self.kind);
-        if let Some(path) = &self.path {
-            debug.field("path", path);
-        }
-        match &self.detail {
-            Detail::Storage(error) => debug.field("source", error),
-            Detail::Message(message) => debug.field("message", message),
-        };
-        debug.finish()
+        f.debug_struct("Error")
+            .field("kind", &self.kind)
+            .field("message", &self.message)
+            .field("source", &self.source)
+            .field("path", &self.path)
+            .finish()
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.detail {
-            Detail::Storage(error) => Some(error),
-            Detail::Message(_) => None,
-        }
+        self.source
+            .as_ref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
     }
 }
 

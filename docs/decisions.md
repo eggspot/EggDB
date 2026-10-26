@@ -3130,6 +3130,12 @@ returned value, as for the store); `database.write`, a one-put write transaction
 1.004, about 33 µs on this Mac (D14's start-up time). The write benchmark uses `Off` so that it
 measures the layer and not the disk.
 
+**Known limit.** The lock belongs to the open file, and a child process shares its parent's open
+files until it starts its own program, so while another thread starts a child, a database just
+closed can stay locked for that moment (the tests met it: the cross-process lock test runs in a
+binary of its own). Avoiding it needs the application to start its child processes without
+inheriting the file, which the platform layer does not offer yet.
+
 **Left for later:** a lending scan in both directions, a writer wait with a fairness order,
 collections, an in-memory database, values larger than a page (item 11), and the `eggdb` crate's
 publication to crates.io, which needs the owner's account (CLAUDE.md, "Releases").
