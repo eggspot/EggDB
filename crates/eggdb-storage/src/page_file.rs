@@ -6,6 +6,7 @@ use crate::format::{
 };
 use eggdb_platform::{ErrorKind, File, FileLock, FileSystem, OpenMode};
 use std::collections::BTreeSet;
+use std::ops::Range;
 use std::path::Path;
 
 const FREE_LIST_LAYOUT: u8 = 1;
@@ -257,7 +258,9 @@ impl<F: File> PageFile<F> {
     ///
     /// The free list is written to pages that are free in the committed state, or to new pages
     /// at the end, never over the pages of the committed list, so a crash before the new
-    /// superblock is durable leaves the old state whole.
+    /// superblock is durable leaves the old state whole. An update whose catalog root or log
+    /// segments would be free pages is refused with [`FormatError::InvalidField`] before
+    /// anything is written, since the file could not be opened again.
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
         self.check_writable()?;
         let committed = self.write_free_list_and_superblock(update);
@@ -299,6 +302,7 @@ impl<F: File> PageFile<F> {
         next.free_list_head = list_pages.first().copied().unwrap_or(NO_PAGE);
         next.free_page_count = (entries.len() + list_pages.len()) as u64;
         let slot = next.encode()?;
+        check_not_listed(&next, &entries, &list_pages)?;
 
         self.write_free_list(&list_pages, &entries)?;
         let bytes = self.page_count * self.page_size().bytes() as u64;
@@ -403,17 +407,7 @@ impl<F: File> PageFile<F> {
     }
 
     fn is_in_use(&self, page_id: u64) -> bool {
-        let superblock = &self.superblock;
-        let in_segment = |first: u64| {
-            first != NO_PAGE
-                && (first..first + u64::from(superblock.log_segment_pages)).contains(&page_id)
-        };
-        page_id == superblock.catalog_root
-            || in_segment(superblock.log_head_page)
-            || superblock
-                .recycled_segments
-                .iter()
-                .any(|&first| in_segment(first))
+        pages_in_use_by(&self.superblock).any(|(_, pages)| pages.contains(&page_id))
     }
 
     fn free_list_capacity(&self) -> usize {
@@ -470,6 +464,38 @@ fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
         Err(error) if cfg!(target_os = "wasi") && error.kind() == ErrorKind::Unsupported => Ok(()),
         locked => Ok(locked?),
     }
+}
+
+fn pages_in_use_by(
+    superblock: &Superblock,
+) -> impl Iterator<Item = (&'static str, Range<u64>)> + '_ {
+    let segment = |first: u64| first..first + u64::from(superblock.log_segment_pages);
+    let catalog_root = superblock.catalog_root;
+    let catalog =
+        (catalog_root != NO_PAGE).then(|| ("catalog_root", catalog_root..catalog_root + 1));
+    let log_head = (superblock.log_head_page != NO_PAGE)
+        .then(|| ("log_head_page", segment(superblock.log_head_page)));
+    let recycled = superblock
+        .recycled_segments
+        .iter()
+        .filter(|&&first| first != NO_PAGE)
+        .map(move |&first| ("recycled_segments", segment(first)));
+    catalog.into_iter().chain(log_head).chain(recycled)
+}
+
+fn check_not_listed(
+    superblock: &Superblock,
+    entries: &BTreeSet<u64>,
+    list_pages: &[u64],
+) -> Result<(), FormatError> {
+    for (field, pages) in pages_in_use_by(superblock) {
+        let listed = entries.range(pages.clone()).next().is_some()
+            || list_pages.iter().any(|page| pages.contains(page));
+        if listed {
+            return Err(FormatError::InvalidField { field });
+        }
+    }
+    Ok(())
 }
 
 fn corrupt_free_list(page: u64) -> StorageError {
@@ -810,6 +836,45 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs.operation_count(), before);
+    }
+
+    #[test]
+    fn a_commit_that_would_list_the_catalog_root_as_free_is_refused_before_any_write() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let root = file.allocate().unwrap();
+        write_filled(&mut file, root, 4);
+        file.commit(|superblock| superblock.catalog_root = root)
+            .unwrap();
+        file.free(root).unwrap();
+        let before = fs.operation_count();
+        assert!(matches!(
+            file.commit(|_| {}),
+            Err(StorageError::Format(FormatError::InvalidField {
+                field: "catalog_root"
+            }))
+        ));
+        assert_eq!(fs.operation_count(), before);
+        drop(file);
+        let file = open(&fs, Access::ReadWrite).unwrap();
+        assert_eq!(file.superblock().catalog_root, root);
+        assert_eq!(read_fill(&file, root).unwrap(), 4);
+    }
+
+    #[test]
+    fn a_commit_that_would_list_a_log_segment_as_free_is_refused() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let pages: Vec<u64> = (0..20).map(|_| file.allocate().unwrap()).collect();
+        file.commit(|superblock| superblock.log_head_page = pages[0])
+            .unwrap();
+        file.free(pages[5]).unwrap();
+        assert!(matches!(
+            file.commit(|_| {}),
+            Err(StorageError::Format(FormatError::InvalidField {
+                field: "log_head_page"
+            }))
+        ));
     }
 
     #[test]
