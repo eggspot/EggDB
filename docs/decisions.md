@@ -3242,20 +3242,23 @@ still appends segments at the end of the file every time, and they pile up in th
 taking log segments from free space, or writing a commit's newly allocated pages in place
 without logging them, is left for later (issue #44).
 
-**Cost** (D80, this Mac; Linux lines are the median of CI runs):
+**Cost** (D80, this Mac; the Linux lines are the median of four CI runs):
 - `large_value.put`, a one-put transaction of a 100 KiB value through `Database` under
   `Durability::Off`: about 52 µs, 9.8 times writing the value twice with two `pwrite`s, the
-  floor of logging it and writing it in place. The rest is computing CRC-32C over every page
+  floor of logging it and writing it in place (9.3 on Linux). The rest is computing CRC-32C over every page
   twice (page checksum and log record), copying the value into 26 frames and the log buffer, a
   write per page in place, and reading the old chain to free it. Gated counts on the simulator
   under `Full`: 3,299 file operations and 166 syncs per 100 puts, 26 pages per value, and a
   file of 263 pages and no leaked page after 500 puts rewriting four keys.
-- `large_value.get`: about 3.1 µs, 2.4 times copying 100 KiB into a new `Vec`, with exactly one
-  allocation (the value).
-- Existing hot paths: `btree.get` and `btree.put` unchanged; `btree.delete`, `btree.scan`,
-  `btree.scan_reverse` and `transaction.read` measured 3 to 5% slower than main on this Mac in
+- `large_value.get`: about 3.1 µs, 2.4 times copying 100 KiB into a new `Vec` (1.9 on Linux),
+  with exactly one allocation (the value).
+- Existing hot paths: `btree.get`, `btree.put` and `btree.scan_reverse` unchanged; `btree.delete`,
+  `btree.scan` and `transaction.read` measured 3 to 4% slower than main on this Mac in
   alternating runs, within the run-to-run spread (main's own `btree.scan` ranged 4.96 to 5.29);
-  the large-value paths of `get` and the cursor are kept out of line.
+  the large-value paths of `get` and the cursor are kept out of line. On Linux CI,
+  `transaction.read` reads 1.12 to 1.19 against its line of 1.004, because its reference,
+  `btree.get` through the cache, got faster there (1.63 to 1.71 against `BTreeMap`, line 1.85);
+  the scans there spread as widely as on main (main's last five runs: 3.4 to 5.9).
 - The crash sweep (CI) takes about 29 s of a debug build, up from about 20 s, and the
   exhaustive run (`EGGDB_CRASH_SWEEP=1`) gives 27,048 crash points and 43,992 crashes during
   recovery in 195 s.

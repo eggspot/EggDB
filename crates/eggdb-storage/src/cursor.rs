@@ -302,6 +302,7 @@ impl Cursor {
         Ok(Batch::LeafDone)
     }
 
+    #[inline(always)]
     fn copy_entry(
         &mut self,
         pages: &impl PageSource,
