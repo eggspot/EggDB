@@ -1,6 +1,6 @@
 //! Files written by released versions of EggDB, which every later version must keep reading
-//! (D20, D96). Each sample lives in `tests/data` and is never regenerated; a new release adds
-//! its own. `docs/testing.md` says how each one was made.
+//! (D20, D96). Each sample lives in `tests/data` and is frozen at its release's tag; a later
+//! release adds its own. `docs/testing.md` says how each one was made.
 
 use eggdb::{Database, Options};
 use eggdb_platform::OsFileSystem;
@@ -184,7 +184,7 @@ fn the_sample_files_are_the_bytes_v0_2_0_wrote() {
         assert_eq!(
             (contents.len(), fnv1a_64(&contents)),
             (bytes, fingerprint),
-            "{sample} changed: sample files are never regenerated, only added to (D96)"
+            "{sample} changed: a sample changes only by a numbered decision before its release's tag, never after (D96)"
         );
     }
 }
