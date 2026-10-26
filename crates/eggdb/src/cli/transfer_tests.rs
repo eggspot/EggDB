@@ -253,7 +253,7 @@ fn a_key_twice_in_the_export_follows_the_policy() {
     ok(&["import", "--create", &new, &export, "--on-conflict", "skip"]);
     assert_eq!(ok(&["get", &new, "a"]).stdout, b"first");
     let last = directory.file("last.db");
-    ok(&[
+    let overwrote = ok(&[
         "import",
         "--create",
         &last,
@@ -261,6 +261,11 @@ fn a_key_twice_in_the_export_follows_the_policy() {
         "--on-conflict",
         "overwrite",
     ]);
+    assert!(
+        stdout(&overwrote).contains("\"entries\":3,\"imported\":2,\"skipped\":0,"),
+        "{}",
+        stdout(&overwrote)
+    );
     assert_eq!(ok(&["get", &last, "a"]).stdout, b"second");
 }
 
@@ -623,4 +628,84 @@ fn hostile_imports_exit_cleanly_and_leave_every_file_consistent() {
         expected = now;
     }
     assert!(Path::new(&target).exists());
+}
+
+#[cfg(unix)]
+fn run_from_fifo(directory: &TempDirectory, args: &[&str], export: &[u8]) -> Ran {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let fifo = directory.file("export.fifo");
+    let _ = std::fs::remove_file(&fifo);
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let writer_path = fifo.clone();
+    let bytes = export.to_vec();
+    std::thread::spawn(move || {
+        if let Ok(mut pipe) = std::fs::OpenOptions::new().write(true).open(writer_path) {
+            let _ = std::io::Write::write_all(&mut pipe, &bytes);
+        }
+    });
+    let mut owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    owned.push(fifo);
+    let (done, finished) = mpsc::channel();
+    std::thread::spawn(move || {
+        let args: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let _ = done.send(run(&args));
+    });
+    finished
+        .recv_timeout(Duration::from_secs(60))
+        .expect("import from a named pipe hung")
+}
+
+#[cfg(unix)]
+#[test]
+fn a_named_pipe_given_as_the_export_is_read_once_without_a_hang() {
+    let directory = TempDirectory::new("fifo");
+    let export = export_bytes(&[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")]);
+    let new = directory.file("new.db");
+    let created = run_from_fifo(&directory, &["import", "--create", &new], &export);
+    assert_eq!(created.exit, 0, "{}", stderr(&created));
+    assert!(stdout(&created).contains("\"entries\":3,\"imported\":3,"));
+    assert_eq!(ok(&["get", &new, "c"]).stdout, b"3");
+    let checked = run_from_fifo(&directory, &["import", "--dry-run", &new], &export);
+    assert_eq!(checked.exit, 3, "{}", stderr(&checked));
+    assert!(stderr(&checked).contains("key a is already in"));
+    let overwritten = run_from_fifo(
+        &directory,
+        &["import", &new, "--on-conflict", "overwrite"],
+        &export_bytes(&[(b"a", b"new")]),
+    );
+    assert_eq!(overwritten.exit, 0, "{}", stderr(&overwritten));
+    assert_eq!(ok(&["get", &new, "a"]).stdout, b"new");
+    let mut cut = export_bytes(&[(b"d", b"4")]);
+    cut.truncate(cut.len() - 3);
+    let refused = run_from_fifo(&directory, &["import", &new], &cut);
+    assert_eq!(refused.exit, 3);
+    assert!(
+        stderr(&refused).contains("Nothing was imported."),
+        "{}",
+        stderr(&refused)
+    );
+    assert_eq!(run(&["get", &new, "d"]).exit, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_symbolic_link_as_the_target_is_named_as_such() {
+    let directory = TempDirectory::new("dangling");
+    let link = directory.file("link.db");
+    std::os::unix::fs::symlink(directory.file("missing.db"), &link).unwrap();
+    let export = directory.file("in.jsonl");
+    std::fs::write(&export, export_bytes(&[(b"a", b"1")])).unwrap();
+    let refused = run(&["import", "--create", &link, &export]);
+    assert_eq!(refused.exit, 3);
+    assert_eq!(
+        stderr(&refused),
+        format!(
+            "eggdb: cannot import into {link}: it is a symbolic link to a file that does not exist. Import into the path it should name, or remove the link.\n"
+        )
+    );
 }

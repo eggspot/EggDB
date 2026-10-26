@@ -803,3 +803,20 @@ fn export_and_import_move_every_kind_of_entry_to_a_fresh_file() {
     assert_eq!(large_copy.stdout, large);
     assert!(!dir.path().join("copy.db.importing").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn import_reads_dev_stdin_given_as_a_path_once() {
+    let dir = TempDirectory::new("dev-stdin");
+    dir.database_with("source.db", &[(b"a", b"1"), (b"b", b"2")]);
+    let exported = dir.eggdb(&["export", "source.db"]);
+    assert_exit(&exported, 0);
+    let imported = dir.eggdb_with_stdin(
+        &["import", "--create", "copy.db", "/dev/stdin"],
+        &exported.stdout,
+    );
+    assert_exit(&imported, 0);
+    let source = dir.eggdb(&["scan", "source.db", "-F", "hex"]);
+    let copy = dir.eggdb(&["scan", "copy.db", "-F", "hex"]);
+    assert_eq!(copy.stdout, source.stdout);
+}

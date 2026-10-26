@@ -4,11 +4,13 @@ use crate::cli::failure::{Exit, Failure, output_failure};
 use crate::cli::jsonl::{self, ExportReader, Header, ReadError};
 use crate::cli::output::{Output, Style};
 use crate::cli::render::{self, JsonObject, TimeStyle};
-use eggdb::{Database, Durability, Error, Options, ReadTransaction, Scan, WriteTransaction};
+use eggdb::{
+    Database, Durability, Error, ErrorKind, Options, ReadTransaction, Scan, WriteTransaction,
+};
 use eggdb_platform::{FileSystem, OsFileSystem};
 use eggdb_storage::{BTree, PageSize};
 use std::ffi::OsString;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -50,6 +52,10 @@ impl Session<'_> {
                 operation_failure(&error, &format!("cannot export {}", self.file))
             }
             ExportFailure::Write(error) => output_failure(error),
+            ExportFailure::SyncDirectory(error) => Failure::database(
+                format!("cannot sync the output: {error}"),
+                Exit::DatabaseError,
+            ),
         })?;
         drop(writer);
         if self.stderr_is_terminal {
@@ -87,15 +93,20 @@ impl Session<'_> {
                 Failure::database(message, Exit::DatabaseError)
             })?;
         let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
-        let written = write_export(db, header, &mut writer, progress, &mut self.messages).and_then(
-            |entries| {
+        let written = write_export(db, header, &mut writer, progress, &mut self.messages)
+            .and_then(|entries| {
                 writer
                     .get_ref()
                     .sync_all()
                     .map(|()| entries)
                     .map_err(ExportFailure::Write)
-            },
-        );
+            })
+            .and_then(|entries| {
+                OsFileSystem::new()
+                    .sync_dir(directory_of(path))
+                    .map(|()| entries)
+                    .map_err(ExportFailure::SyncDirectory)
+            });
         drop(writer);
         let entries = match written {
             Ok(entries) => entries,
@@ -108,6 +119,12 @@ impl Session<'_> {
                     ),
                     ExportFailure::Write(error) => Failure::database(
                         format!("cannot write {out}: {error}; the partial export was removed"),
+                        Exit::DatabaseError,
+                    ),
+                    ExportFailure::SyncDirectory(error) => Failure::database(
+                        format!(
+                            "cannot sync the directory of {out}, so a power loss could lose the file: {error}; the export was removed"
+                        ),
                         Exit::DatabaseError,
                     ),
                 });
@@ -143,6 +160,15 @@ impl Session<'_> {
             Some(ExportFile::Standard) | None => None,
         };
         let target_exists = std::fs::symlink_metadata(&self.request.file).is_ok();
+        if target_exists && std::fs::metadata(&self.request.file).is_err() {
+            return Err(Failure::database(
+                format!(
+                    "cannot import into {}: it is a symbolic link to a file that does not exist. Import into the path it should name, or remove the link.",
+                    self.file
+                ),
+                Exit::DatabaseError,
+            ));
+        }
         if !target_exists && !self.request.create {
             return Err(Failure::database(
                 format!(
@@ -165,6 +191,10 @@ impl Session<'_> {
             Some(_) => render::text(source_display.as_bytes()),
             None => "stdin".to_owned(),
         };
+        let mut input = match &source {
+            Some(path) => open_source(path, &source_shown)?,
+            None => Input::ReadOnce(Box::new(&mut *self.stdin)),
+        };
         let mut import = Import {
             target: &self.request.file,
             file: &self.file,
@@ -184,10 +214,6 @@ impl Session<'_> {
                 },
             ),
             tally: Tally::default(),
-        };
-        let mut input = match &source {
-            Some(path) => Input::File(path),
-            None => Input::Stdin(&mut *self.stdin),
         };
         let result = if self.request.dry_run {
             import.check_only(&mut input, target_exists)
@@ -218,6 +244,7 @@ impl Session<'_> {
 enum ExportFailure {
     Read(Error),
     Write(std::io::Error),
+    SyncDirectory(eggdb_platform::Error),
 }
 
 fn write_export(
@@ -293,8 +320,30 @@ impl Progress {
 }
 
 enum Input<'s> {
-    File(&'s Path),
-    Stdin(&'s mut dyn Read),
+    RegularFile(std::fs::File),
+    ReadOnce(Box<dyn Read + 's>),
+}
+
+fn open_source<'s>(path: &Path, shown: &str) -> Result<Input<'s>, Failure> {
+    let unreadable = |error: std::io::Error| {
+        Failure::usage(
+            format!("cannot read {shown}: {error}"),
+            Some(CommandName::Import),
+        )
+    };
+    let file = std::fs::File::open(path).map_err(unreadable)?;
+    let regular = file.metadata().map_err(unreadable)?.is_file();
+    Ok(if regular {
+        Input::RegularFile(file)
+    } else {
+        Input::ReadOnce(Box::new(file))
+    })
+}
+
+fn directory_of(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 #[derive(Debug, Default)]
@@ -310,6 +359,7 @@ struct Tally {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decision {
     Write,
+    WriteAgain,
     Skip,
 }
 
@@ -336,6 +386,7 @@ struct WriteState {
 #[derive(Default)]
 struct Batch {
     entries: u64,
+    keys: u64,
     bytes: usize,
 }
 
@@ -383,7 +434,7 @@ impl Import<'_, '_> {
         let mut db = self.open(&target, cache, None)?;
         let check_existing = self.view_if_not_empty(&db)?.is_some();
         let max_key = db.max_key_bytes();
-        if let Input::File(_) = input {
+        if let Input::RegularFile(_) = input {
             let view = if check_existing {
                 Some(
                     db.begin_read()
@@ -439,7 +490,7 @@ impl Import<'_, '_> {
         let fixed_cache = self.cache_bytes.is_some();
         let mut cache = self.cache_bytes.unwrap_or(IMPORT_CACHE_BYTES);
         let not_created = format!("Nothing was imported and {} was not created.", self.file);
-        if let Input::File(_) = input {
+        if let Input::RegularFile(_) = input {
             self.check_pass(input, KeyLimit::FromHeader, None)
                 .map_err(|failure| with_note(failure, &not_created))?;
             if !fixed_cache {
@@ -487,12 +538,7 @@ impl Import<'_, '_> {
                 Exit::DatabaseError,
             )
         })?;
-        let directory = self
-            .target
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        file_system.sync_dir(directory).map_err(|error| {
+        file_system.sync_dir(directory_of(self.target)).map_err(|error| {
             Failure::database(
                 format!(
                     "imported into {}, but cannot sync its directory, so a power loss could still undo the rename: {error}",
@@ -509,25 +555,21 @@ impl Import<'_, '_> {
         read: impl FnOnce(&mut Self, &mut ExportReader<'_>) -> Result<T, Failure>,
     ) -> Result<T, Failure> {
         match input {
-            Input::File(path) => {
-                let mut file = self.open_source(path)?;
-                let mut reader = ExportReader::new(&mut file);
+            Input::RegularFile(file) => {
+                file.rewind().map_err(|error| {
+                    Failure::database(
+                        format!("cannot read {}: {error}", self.source_shown),
+                        Exit::DatabaseError,
+                    )
+                })?;
+                let mut reader = ExportReader::new(file);
                 read(self, &mut reader)
             }
-            Input::Stdin(stdin) => {
-                let mut reader = ExportReader::new(&mut **stdin);
+            Input::ReadOnce(stream) => {
+                let mut reader = ExportReader::new(&mut **stream);
                 read(self, &mut reader)
             }
         }
-    }
-
-    fn open_source(&self, path: &Path) -> Result<std::fs::File, Failure> {
-        std::fs::File::open(path).map_err(|error| {
-            Failure::usage(
-                format!("cannot read {}: {error}", self.source_shown),
-                Some(CommandName::Import),
-            )
-        })
     }
 
     fn check_pass(
@@ -651,7 +693,7 @@ impl Import<'_, '_> {
                     Ok(false)
                 }
             })?;
-            if decision == Decision::Write {
+            if decision != Decision::Skip {
                 open.put(key, value).map_err(|error| {
                     operation_failure(
                         &error,
@@ -664,6 +706,7 @@ impl Import<'_, '_> {
                     )
                 })?;
                 batch.entries += 1;
+                batch.keys += u64::from(decision == Decision::Write);
                 batch.bytes = batch.bytes.saturating_add(entry_bytes);
             }
             self.count(decision);
@@ -687,7 +730,7 @@ impl Import<'_, '_> {
             transaction.commit().map_err(|error| {
                 operation_failure(&error, &format!("cannot commit to {}", self.file))
             })?;
-            self.tally.committed += batch.entries;
+            self.tally.committed += batch.keys;
         }
         *batch = Batch::default();
         Ok(())
@@ -737,7 +780,7 @@ impl Import<'_, '_> {
                                 shown_key(key)
                             ),
                         )),
-                        ConflictPolicy::Overwrite => Ok(Decision::Write),
+                        ConflictPolicy::Overwrite => Ok(Decision::WriteAgain),
                         ConflictPolicy::Skip => Ok(Decision::Skip),
                     };
                 }
@@ -772,6 +815,7 @@ impl Import<'_, '_> {
     fn count(&mut self, decision: Decision) {
         match decision {
             Decision::Write => self.tally.imported += 1,
+            Decision::WriteAgain => {}
             Decision::Skip => self.tally.skipped += 1,
         }
     }
@@ -811,7 +855,16 @@ impl Import<'_, '_> {
         };
         Database::open_with(path, options).map_err(|error| {
             let display = path.display().to_string();
-            open_failure(&render::text(display.as_bytes()), &display, &error, access)
+            let shown = render::text(display.as_bytes());
+            if error.kind() == ErrorKind::NotFound && new_page_size.is_none() {
+                return Failure::database(
+                    format!(
+                        "cannot open {shown}: no such file. Pass --create to make it, or check the path."
+                    ),
+                    Exit::DatabaseError,
+                );
+            }
+            open_failure(&shown, &display, &error, access)
         })
     }
 

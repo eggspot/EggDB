@@ -106,7 +106,7 @@ lowercase hex, instead of `key` or `value`. Numbers are plain integers. The fiel
 | `check` | `{"ok":true,"file","commit_stamp","commit_time","page_size","pages","file_bytes","entries","key_bytes","value_bytes","tree_height","tree_pages","overflow_values","overflow_pages","free_pages","log_pages","leaked_pages"}`; when damaged `{"ok":false,"file","problem","page","what_to_do"}`, `page` only when the problem names one |
 | `stats` | `{"file","page_size","pages","free_pages","file_bytes","last_commit_stamp","last_commit_time","log_bytes_since_checkpoint"}`; the commit fields are `null` before the first commit |
 | `export` | `{"file","out","entries"}` when the export goes to a file; to stdout, the export itself |
-| `import` | `{"file","from","entries","imported","skipped","created","dry_run"}`; `from` is `-` for stdin, and with `--dry-run` the counts and `created` say what the import would do |
+| `import` | `{"file","from","entries","imported","skipped","created","dry_run"}`; `from` is `-` for stdin; `imported` counts the keys stored, so a key repeated in the export counts once under `--on-conflict overwrite`; with `--dry-run` the counts and `created` say what the import would do |
 
 `text` shows bytes as text when they are valid UTF-8 without control characters, and as `0x`
 hex otherwise; `get` also keeps newlines, tabs and carriage returns as text. `scan` cuts a value
@@ -309,12 +309,20 @@ eggdb import app.db changes.jsonl --on-conflict overwrite
 | `--on-conflict skip` | keep the value already there; of a key twice in the export, the first |
 | `--dry-run` | check the whole export and report what would happen, writing nothing |
 
-**What a failed import leaves.** From a file, `import` checks the whole export first (every line,
-the trailer's count, the key order and sizes, and with `--on-conflict error` every key against
-the database) and writes nothing when something is wrong. It then commits in batches of at most
-4 MiB, so only an I/O error or a full disk can stop it part way. From stdin, which cannot be read
-twice, a bad line stops the import after the batches before it, and the error says how many
-entries were committed: fix the export and import it again with `--on-conflict skip`. A new file
+**What a failed import leaves.** From a regular file, `import` checks the whole export first
+(every line, the trailer's count, the key order and sizes, and with `--on-conflict error` every
+key against the database) and writes nothing when something is wrong. It then rewinds the same
+file and commits in batches of at most 4 MiB. The export itself can no longer stop it then, but
+other things still can, after some batches were committed:
+- an I/O error or a full disk;
+- a `--cache` too small for a batch or an entry;
+- Ctrl-C;
+- another program opening the file in the moment `import` reopens it with a larger cache for a
+  large entry (only from stdin or a pipe, where the largest entry is not known in advance).
+
+Stdin, and a path that can be read only once (a named pipe, `/dev/stdin`, a shell's `<(…)`), is
+read in one pass: a bad line stops the import after the batches before it, and the error says
+how many entries were committed. Fix the export and import it again with `--on-conflict skip`. A new file
 (`--create`) is built as `<file>.importing` and renamed to `<file>` only when the whole import
 succeeded, so a failed restore leaves no file; a `<file>.importing` left by a crash is refused
 until you remove it.

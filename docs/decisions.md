@@ -3618,17 +3618,21 @@ commit it (below).
 
 **Writing, and what a failure leaves.** One write transaction cannot hold a large import, since
 a transaction keeps every page it changes in the page cache until it commits. Import therefore:
-- with a file to read, first checks the whole export (syntax, header, trailer count, key order
-  and sizes against the target's page size, and with the default `--on-conflict error`, every
-  key against those already in the target) and writes nothing when it finds a problem; only an
-  I/O error or a full disk can then stop the writing part way;
+- with a regular file to read, opens it once, checks the whole export (syntax, header, trailer
+  count, key order and sizes against the target's page size, and with the default
+  `--on-conflict error`, every key against those already in the target) and writes nothing when
+  it finds a problem, then rewinds the same handle to write; the export can then no longer stop
+  the writing, but an I/O error, a full disk, a `--cache` too small for a batch or an entry,
+  Ctrl-C, or another program taking the file while it is reopened with a larger cache (only
+  without the checked pass) can, after some batches were committed;
 - commits in batches of at most 4 MiB of keys and values and 2 MiB of pages' worth of entries
   (512 entries with 4 KiB pages, 32 with 64 KiB), with `Durability::Normal` and a sync when the
   file closes, in a 32 MiB page cache; an entry above 4 MiB is a commit of its own, and the
   cache grows to fit it (the file is reopened with a larger cache, as `put` sizes its cache to
   its value), unless `--cache` was given;
-- from stdin, which cannot be read twice, stops at a bad line after the batches before it and
-  says how many entries were committed, so the same export can be imported again with
+- from stdin, or a path that is not a regular file (a named pipe, `/dev/stdin`, a shell's
+  `<(…)`), which can be read only once, reads in one pass, stops at a bad line after the batches
+  before it and says how many entries were committed, so the same export can be imported again with
   `--on-conflict skip`; `--dry-run` checks an export without writing anything;
 - with `--create` and no file at the path, builds the database as `<file>.importing`, syncs it,
   renames it into place only after the whole import succeeded and syncs the directory, so a
@@ -3641,7 +3645,8 @@ previous key, lets the checked pass see every conflict before writing, and leave
 faster append path later; accepting any order could come later as an option, while going from
 loose to strict would break files people already have. A key equal to the previous one follows
 `--on-conflict` like a key already in the target: `error` (the default) stops, `overwrite` keeps
-the later value, `skip` the earlier.
+the later value, `skip` the earlier. The `imported` count is of keys stored, so a repeated key
+counts once under `overwrite`.
 
 **The command line.** As Claude Fable's design sketched them (`docs/ux/cli.md`, section 2): the
 second argument is the export file, `-` or nothing meaning stdout for `export` and stdin for
@@ -3669,13 +3674,23 @@ an empty database, the text and JSON reports, the three conflict policies, keys 
 of order, 1,500 entries from stdin with a bad last line (1,024 committed, `check` passes), a
 failed import into a new file leaving nothing, a stale `.importing` refused, 4,000-byte keys
 keeping 64 KiB pages and refused with 4 KiB ones, the dry run, every usage and file error, a
-closed pipe, and 150 mutated exports imported into new and existing files (exit 0 or 3, `check`
+closed pipe, a named pipe given as the export path (read once, no hang, on Unix), a dangling
+symbolic link as the target, and 150 mutated exports imported into new and existing files (exit 0 or 3, `check`
 passes, nothing left behind, an existing file unchanged when nothing was imported). Through the
 real binary: the acceptance check (text, binary, empty key, empty value and a 6 MiB value put
 with the CLI, exported, imported into a fresh file from the file and from a pipe, `scan`
-identical, `check` passing on all three), the help and random arguments with the new words.
+identical, `check` passing on all three), `/dev/stdin` given as the export path, the help and
+random arguments with the new words.
 
-**Size (D6).** The release binary grows from 866,912 to 933,296 bytes (+66,384, +7.7%) on
+**Known limitations.** The rename that puts a new file in place checks that nothing is at the
+path just before it, but is not a no-replace rename, so a file created at that path in the
+instant between the check and the rename would be replaced; a no-replace rename needs a
+per-platform call (`renameat2`, `renamex_np`, `MoveFileEx` without `REPLACE_EXISTING`) in the
+platform layer and is left for later. An interrupted import into a new file leaves
+`<file>.importing`, which the next import refuses until it is removed. `export` syncs the new
+file and its directory.
+
+**Size (D6).** The release binary grows from 866,912 to 933,312 bytes (+66,400, +7.7%) on
 aarch64 macOS: about 34 KB is the format reader and writer and the two commands, the rest their
 help and messages and the standard library's file creation, rename and clock code they use. The
 library is unchanged, and no engine path changed, so the gated benchmarks are unaffected.

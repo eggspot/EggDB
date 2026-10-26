@@ -195,9 +195,9 @@ Examples:
 const IMPORT: &str = "\
 Loads an export made by eggdb export into the file, from <in> or, without it or with -, from
 stdin. Every line is checked: the header, the trailer's count, the escapes, keys in ascending
-order and their sizes. From a file, the whole export is checked before anything is written, so
-a bad line changes nothing. The entries are then committed in batches; from stdin, a bad line
-stops the import after the batches before it. With --create, a missing file is created with the
+order and their sizes. From a regular file, the whole export is checked before anything is
+written, so a bad line changes nothing. The entries are then committed in batches; from stdin or
+a pipe, a bad line stops the import after the batches before it. With --create, a missing file is created with the
 export's page size, built under <file>.importing and renamed into place only when the import
 succeeded.
 
