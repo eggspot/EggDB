@@ -7,7 +7,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum FormatError {
-    /// The buffer is not exactly one page of the expected size.
+    /// The buffer is not exactly one page, or one header slot, of the expected size.
     WrongLength {
         /// The length the format requires.
         expected: usize,
@@ -62,7 +62,7 @@ pub enum FormatError {
         /// The field's name, as in `docs/format.md`.
         field: &'static str,
     },
-    /// Neither header page is valid, so the file cannot be opened.
+    /// Neither header slot is valid, so the file cannot be opened.
     NoValidHeader,
 }
 
@@ -70,7 +70,7 @@ impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::WrongLength { expected, actual } => {
-                write!(f, "expected a page of {expected} bytes, got {actual} bytes")
+                write!(f, "expected {expected} bytes, got {actual} bytes")
             }
             Self::NotADatabase => f.write_str("not an EggDB database: the magic bytes are missing"),
             Self::ChecksumMismatch { page } => write!(
@@ -106,7 +106,7 @@ impl fmt::Display for FormatError {
                 write!(f, "the field `{field}` holds a forbidden value")
             }
             Self::NoValidHeader => f.write_str(
-                "neither header page is valid; the file is damaged or not an EggDB database",
+                "neither header slot is valid; the file is damaged or not an EggDB database",
             ),
         }
     }

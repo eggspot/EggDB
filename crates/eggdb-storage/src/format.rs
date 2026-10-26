@@ -29,6 +29,9 @@ pub const RECYCLED_SEGMENTS: usize = 7;
 /// holds the first header slot, so it never names a data page.
 pub const NO_PAGE: u64 = 0;
 
+/// The longest a log segment may be, in bytes: 64 MiB.
+pub const MAX_LOG_SEGMENT_BYTES: u64 = 64 << 20;
+
 const SUPERBLOCK_CHECKSUM_AT: usize = 8;
 
 /// The size of a page: a power of two from 4 KiB to 64 KiB, chosen when a file is created and
@@ -128,7 +131,8 @@ pub struct PageHeader {
     /// The layout version of this page type, so one type can change its layout behind a
     /// feature flag without a new type byte.
     pub layout: u8,
-    /// Bits reserved for per-page compression and encryption; zero in this format.
+    /// Bits reserved for per-page compression and encryption; zero in this format, and refused
+    /// otherwise.
     pub flags: u16,
     /// The position in the write-ahead log of the last change to this page.
     pub lsn: u64,
@@ -347,9 +351,25 @@ impl Superblock {
                 field: "free_list_head",
             });
         }
-        if self.log_segment_pages == 0 {
+        let segment_bytes = u64::from(self.log_segment_pages) * self.page_size.bytes() as u64;
+        if self.log_segment_pages == 0 || segment_bytes > MAX_LOG_SEGMENT_BYTES {
             return Err(FormatError::InvalidField {
                 field: "log_segment_pages",
+            });
+        }
+        let segment_end = |first: u64| first + u64::from(self.log_segment_pages);
+        if self.log_head_page != NO_PAGE && segment_end(self.log_head_page) > self.page_count {
+            return Err(FormatError::InvalidField {
+                field: "log_head_page",
+            });
+        }
+        let recycled_past_the_end = self
+            .recycled_segments
+            .iter()
+            .any(|&first| first != NO_PAGE && segment_end(first) > self.page_count);
+        if recycled_past_the_end {
+            return Err(FormatError::InvalidField {
+                field: "recycled_segments",
             });
         }
         Ok(())
@@ -359,36 +379,60 @@ impl Superblock {
     /// generation among those whose magic and checksum hold, then checks it fully.
     ///
     /// A slot that fails its checksum is treated as a write that a crash interrupted, and the
-    /// other slot is used. A slot whose checksum holds but whose contents are refused (a newer
-    /// version, a forbidden field) refuses the file rather than falling back to the older slot,
-    /// so a release never silently opens an older state of a file a newer release wrote.
-    pub fn choose(slot0: &[u8], slot1: &[u8]) -> Result<Self, FormatError> {
-        let newest = match (check_slot(slot0, 0).is_ok(), check_slot(slot1, 1).is_ok()) {
-            (true, true) => {
-                if read_u64(slot1, 16) > read_u64(slot0, 16) {
-                    1
-                } else {
-                    0
+    /// other slot is used; [`HeaderChoice::damaged_slot`] says so, because a slot damaged after
+    /// it was synced also looks like that, and the caller should report it. A slot whose
+    /// checksum holds but whose contents are refused (a newer version, a superblock in the
+    /// wrong slot, a forbidden field) refuses the file rather than falling back to the older
+    /// slot, so a release never silently opens an older state of a file a newer release wrote.
+    /// Two intact slots with the same generation refuse the file too.
+    pub fn choose(slot0: &[u8], slot1: &[u8]) -> Result<HeaderChoice, FormatError> {
+        let intact = (check_slot(slot0, 0).is_ok(), check_slot(slot1, 1).is_ok());
+        let has_magic = |slot: &[u8]| slot.get(..8) == Some(&MAGIC[..]);
+        let newest = match intact {
+            (true, true) => match read_u64(slot1, 16).cmp(&read_u64(slot0, 16)) {
+                std::cmp::Ordering::Greater => 1,
+                std::cmp::Ordering::Less => 0,
+                std::cmp::Ordering::Equal => {
+                    return Err(FormatError::InvalidField {
+                        field: "generation",
+                    });
                 }
-            }
+            },
             (true, false) => 0,
             (false, true) => 1,
             (false, false) => {
-                return Err(
-                    if slot0.get(..8) != Some(&MAGIC[..]) && slot1.get(..8) != Some(&MAGIC[..]) {
-                        FormatError::NotADatabase
-                    } else {
-                        FormatError::NoValidHeader
-                    },
-                );
+                return Err(if !has_magic(slot0) && !has_magic(slot1) {
+                    FormatError::NotADatabase
+                } else {
+                    FormatError::NoValidHeader
+                });
             }
         };
-        if newest == 0 {
-            Self::decode(slot0, 0)
+        let superblock = if newest == 0 {
+            Self::decode(slot0, 0)?
         } else {
-            Self::decode(slot1, 1)
-        }
+            Self::decode(slot1, 1)?
+        };
+        let other = 1 - newest;
+        let other_slot = if other == 0 { slot0 } else { slot1 };
+        let damaged_slot =
+            (has_magic(other_slot) && check_slot(other_slot, other).is_err()).then_some(other);
+        Ok(HeaderChoice {
+            superblock,
+            damaged_slot,
+        })
     }
+}
+
+/// The superblock [`Superblock::choose`] picked, and whether the other slot was damaged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HeaderChoice {
+    /// The current superblock.
+    pub superblock: Superblock,
+    /// The other slot, when it has the magic bytes but fails its checksum: torn by a crash
+    /// during a header update, or damaged since. `None` when the other slot is intact or was
+    /// never written.
+    pub damaged_slot: Option<usize>,
 }
 
 fn check_slot(slot: &[u8], slot_index: usize) -> Result<(), FormatError> {
@@ -435,8 +479,8 @@ impl PageChecksum {
     }
 
     /// Writes `header` into the start of `page` and then the checksum of the whole page as
-    /// page number `page_id`. Refuses a buffer of the wrong length, and a page number in the
-    /// header slots or with volume bits set.
+    /// page number `page_id`. Refuses a buffer of the wrong length, a page number in the
+    /// header slots or with volume bits set, and flags other than zero.
     pub fn write(
         &self,
         page: &mut [u8],
@@ -445,6 +489,9 @@ impl PageChecksum {
     ) -> Result<(), FormatError> {
         self.check_length(page)?;
         self.check_page_id(page_id)?;
+        if header.flags != 0 {
+            return Err(FormatError::InvalidField { field: "flags" });
+        }
         page[4] = header.page_type.to_byte();
         page[5] = header.layout;
         write_u16(page, 6, header.flags);
@@ -454,8 +501,8 @@ impl PageChecksum {
         Ok(())
     }
 
-    /// Checks that `page` is page number `page_id` of this file, intact, and of a known type,
-    /// and returns its header.
+    /// Checks that `page` is page number `page_id` of this file, intact, of a known type and
+    /// with no flags set, and returns its header.
     pub fn verify(&self, page: &[u8], page_id: u64) -> Result<PageHeader, FormatError> {
         self.check_length(page)?;
         self.check_page_id(page_id)?;
@@ -466,10 +513,14 @@ impl PageChecksum {
             page: page_id,
             found: page[4],
         })?;
+        let flags = read_u16(page, 6);
+        if flags != 0 {
+            return Err(FormatError::InvalidField { field: "flags" });
+        }
         Ok(PageHeader {
             page_type,
             layout: page[5],
-            flags: read_u16(page, 6),
+            flags,
             lsn: read_u64(page, 8),
         })
     }
@@ -528,7 +579,7 @@ mod tests {
             log_head_sequence: generation,
             clock_high_water: 0x1234_5678,
             log_segment_pages: 16,
-            recycled_segments: [32, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE],
+            recycled_segments: [24, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE],
         }
     }
 
@@ -583,7 +634,10 @@ mod tests {
         let old = superblock(6);
         let new = superblock(7);
         let (old_slot, new_slot) = (old.encode().unwrap(), new.encode().unwrap());
-        assert_eq!(Superblock::choose(&old_slot, &new_slot), Ok(new));
+        assert_eq!(
+            Superblock::choose(&old_slot, &new_slot).map(|choice| choice.superblock),
+            Ok(new)
+        );
         let mut rng = TestRng::new(20);
         for _ in 0..2000 {
             let mut torn = vec![0u8; HEADER_SLOT_SIZE];
@@ -594,31 +648,54 @@ mod tests {
                     torn[range.clone()].copy_from_slice(&new_slot[range]);
                 }
             }
-            let chosen = Superblock::choose(&old_slot, &torn).unwrap();
-            assert!(chosen == old || chosen == new);
+            let choice = Superblock::choose(&old_slot, &torn).unwrap();
+            assert!(choice.superblock == old || choice.superblock == new);
+            if choice.superblock == old && torn[..8] == super::MAGIC {
+                assert_eq!(choice.damaged_slot, Some(1));
+            }
         }
     }
 
     #[test]
-    fn a_crash_at_any_point_of_a_header_update_leaves_the_old_or_the_new_state() {
+    fn a_first_header_with_a_blank_second_slot_opens_and_reports_no_damage() {
+        let blank = vec![0u8; HEADER_SLOT_SIZE];
+        let choice = Superblock::choose(&superblock(0).encode().unwrap(), &blank).unwrap();
+        assert_eq!(choice.superblock, superblock(0));
+        assert_eq!(choice.damaged_slot, None);
+    }
+
+    #[test]
+    fn a_header_update_cut_off_after_any_sector_opens_the_old_or_the_new_state() {
         let old = superblock(10);
         let new = superblock(11);
         let previous = superblock(9).encode().unwrap();
         let (old_slot, new_slot) = (old.encode().unwrap(), new.encode().unwrap());
-        let blank = vec![0u8; HEADER_SLOT_SIZE];
-        let empty_then_first = Superblock::choose(&superblock(0).encode().unwrap(), &blank);
-        assert_eq!(empty_then_first, Ok(superblock(0)));
         for sectors_written in 0..=HEADER_SLOT_SIZE / SECTOR {
             let mut slot1 = previous.clone();
             let written = sectors_written * SECTOR;
             slot1[..written].copy_from_slice(&new_slot[..written]);
-            let chosen = Superblock::choose(&old_slot, &slot1).unwrap();
-            if sectors_written * SECTOR >= SUPERBLOCK_SIZE {
-                assert_eq!(chosen, new);
+            let choice = Superblock::choose(&old_slot, &slot1).unwrap();
+            if written >= SUPERBLOCK_SIZE {
+                assert_eq!(choice.superblock, new);
             } else {
-                assert_eq!(chosen, old);
+                assert_eq!(choice.superblock, old);
             }
         }
+    }
+
+    #[test]
+    fn two_slots_with_the_same_generation_refuse_the_file() {
+        let slot = superblock(4).encode().unwrap();
+        let mut copy = slot.clone();
+        copy[8..12].fill(0);
+        let checksum = super::superblock_checksum(&copy);
+        copy[8..12].copy_from_slice(&checksum.to_le_bytes());
+        assert_eq!(
+            Superblock::choose(&slot, &copy),
+            Err(FormatError::InvalidField {
+                field: "generation"
+            })
+        );
     }
 
     #[test]
@@ -654,15 +731,28 @@ mod tests {
     }
 
     #[test]
-    fn fields_pointing_outside_the_file_are_refused() {
-        let cases: [(&str, Damage); 6] = [
+    fn fields_pointing_outside_the_data_pages_are_refused() {
+        let cases: [(&str, Damage); 10] = [
             ("page_count", |s| s.page_count = 1),
+            ("page_count", |s| s.page_count = 1 << 48),
+            ("recycled_segments", |s| s.recycled_segments[3] = 40),
+            ("recycled_segments", |s| s.recycled_segments[0] = 30),
+            ("log_head_page", |s| s.log_head_page = 30),
             ("free_list_head", |s| s.free_list_head = 40),
             ("catalog_root", |s| s.catalog_root = 1),
             ("log_head_page", |s| s.log_head_page = u64::MAX),
             ("free_page_count", |s| s.free_page_count = 39),
             ("log_segment_pages", |s| s.log_segment_pages = 0),
         ];
+        let mut huge_segments = superblock(0);
+        huge_segments.log_segment_pages = (super::MAX_LOG_SEGMENT_BYTES / 4096) as u32 + 1;
+        huge_segments.page_count = 1 << 40;
+        assert_eq!(
+            Superblock::decode(&huge_segments.encode_unchecked(), 0),
+            Err(FormatError::InvalidField {
+                field: "log_segment_pages"
+            })
+        );
         for (field, damage) in cases {
             let mut bad = superblock(0);
             damage(&mut bad);
@@ -792,6 +882,22 @@ mod tests {
     }
 
     #[test]
+    fn page_flags_other_than_zero_are_refused() {
+        let mut rng = TestRng::new(4);
+        let mut page = written_page(&mut rng, 3, 1);
+        let flagged = PageHeader {
+            flags: 1,
+            ..leaf(1)
+        };
+        let field = FormatError::InvalidField { field: "flags" };
+        assert_eq!(checksums().write(&mut page, 3, &flagged), Err(field));
+        page[6] = 1;
+        let checksum = checksums().checksum(&page, 3);
+        page[..4].copy_from_slice(&checksum.to_le_bytes());
+        assert_eq!(checksums().verify(&page, 3), Err(field));
+    }
+
+    #[test]
     fn header_pages_volume_bits_and_wrong_lengths_are_refused() {
         let mut page = vec![0u8; PageSize::DEFAULT.bytes()];
         let checks = checksums();
@@ -841,7 +947,13 @@ mod tests {
             if let Ok(superblock) = Superblock::decode(&slot, superblock_slot(&slot)) {
                 let _ = superblock.features.check(Access::ReadWrite);
             }
-            let _ = checks.verify(&slot[..length], rng.next_u64());
+            let page_id = 2 + rng.below(1000) as u64;
+            let _ = checks.verify(&slot[..length], page_id);
+            if case % 3 == 0 {
+                let checksum = checks.checksum(&slot, page_id);
+                slot[..4].copy_from_slice(&checksum.to_le_bytes());
+                let _ = checks.verify(&slot, page_id);
+            }
         }
     }
 

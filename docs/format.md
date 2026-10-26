@@ -12,6 +12,9 @@ v0.2.0 ships, because no file has been released before it. After that, changes f
 
 ## Conventions
 - Every integer is little-endian and unsigned unless stated otherwise.
+- **Checksums detect accidental damage, not tampering.** A file crafted on purpose can pass
+  them. Such a file must still only ever produce errors, never a crash or a hang (D9). Tamper
+  detection comes later, with encryption at rest (D23), behind a feature flag.
 - **Checksums** are CRC-32C (Castagnoli, the reflected polynomial `0x82F63B78`), as RFC 3720
   defines it. That means an initial value of `0xFFFFFFFF` and a final XOR of `0xFFFFFFFF`. The
   check value of `"123456789"` is `0xE3069283`. Processors with CRC instructions compute it
@@ -66,7 +69,7 @@ slot 1. A superblock found in the other slot is refused.
 | 104 | 8 | `log_head_page` | first page of the oldest live log segment, or 0 |
 | 112 | 8 | `log_head_sequence` | sequence number of that segment |
 | 120 | 8 | `clock_high_water` | the highest hybrid-clock stamp handed out before the last checkpoint |
-| 128 | 4 | `log_segment_pages` | pages per log segment, at least 1 (default: 64 KiB of pages) |
+| 128 | 4 | `log_segment_pages` | pages per log segment: at least 1, at most 64 MiB of pages (default: 64 KiB of pages) |
 | 132 | 4 | reserved | written as zero |
 | 136 | 56 | `recycled_segments` | seven first pages of log segments emptied by checkpoints, kept for reuse before the file grows. 0 marks an unused entry. |
 | 192 | 8 | reserved | written as zero |
@@ -74,18 +77,26 @@ slot 1. A superblock found in the other slot is refused.
 | 232 | 280 | reserved | written as zero |
 
 Every page pointer (`free_list_head`, `catalog_root`, `log_head_page` and the recycled
-segments) must be 0 or lie between `first_data_page` and `page_count − 1`. Reserved fields are
+segments) must be 0 or lie between `first_data_page` and `page_count − 1`. A log segment
+starting at `log_head_page` or at a recycled entry must also end within `page_count`.
+`page_count` must be below 2^48 (no volume bits). Opening a file also checks it against the
+file's real length. Reserved fields are
 written as zero and ignored on read, so a later version can use them behind a feature flag.
 
 **Opening a file:**
 1. Read both slots. A slot is *intact* when it has the magic and its checksum holds.
-2. Take the intact slot with the higher generation. If neither is intact, the error is "not a
-   database" when neither slot has the magic, and "no valid header" otherwise.
+2. Take the intact slot with the higher generation. Two intact slots with the same generation
+   refuse the file. If neither is intact, the error is "not a database" when neither slot has
+   the magic, and "no valid header" otherwise.
 3. Check that slot fully: version, page size, slot parity and pointers. A slot that is intact
-   but refused (a newer version, say) refuses the whole file. The reader never falls back to
+   but refused (a newer version, or a superblock in the wrong slot) refuses the whole file. The reader never falls back to
    the older slot, because that would silently open an older state of a file a newer release
    wrote.
 4. Check the feature flags against the access asked for.
+5. If the other slot has the magic but fails its checksum, report it. A crash during a header
+   update looks like that, and so does damage to a synced slot. In the second case the chosen
+   superblock is older than the file. Recovery catches that case: it refuses the file when the
+   segment at `log_head_page` doesn't carry `log_head_sequence`.
 
 A crash while a slot is being written leaves that slot torn and the other one intact, so the
 file opens in the old state or the new one. The superblock fits in the first 512 bytes, one
@@ -109,15 +120,21 @@ Every page except the header slots starts with a 16-byte header:
 | 0 | 4 | `checksum` | see below |
 | 4 | 1 | `page_type` | see the table below. 0 is never valid, so a page that was never written is refused. |
 | 5 | 1 | `layout` | the layout version of this page type |
-| 6 | 2 | `flags` | reserved for per-page compression and encryption. 0 in version 1. |
+| 6 | 2 | `flags` | reserved for per-page compression and encryption. 0 in version 1, and a reader refuses anything else. |
 | 8 | 8 | `lsn` | the log position of the last change to the page |
 
 **The checksum** is CRC-32C, computed as
 `crc32c_append(crc32c_append(crc32c(file_id), page_number as 8 bytes), page[4..page_size])`.
 Mixing the file's identity and the page number into the seed means a page written to the wrong
-place, a stale page from another file, and a torn or damaged page all fail the same check. The
-page doesn't store its own number. Header-slot pages and page numbers with volume bits set are
-refused before anything is checked.
+place, a page from another database, and a torn or damaged page all fail the same check. The
+page doesn't store its own number. After the buffer's length, header-slot pages and page
+numbers with volume bits set are refused before the checksum is computed.
+
+Two kinds of damage the checksum can't see:
+- a page from a copy of the same file (`cp`, a restored backup), which shares its `file_id`;
+- a lost write that left an older, intact version of the same page.
+
+The page's `lsn`, checked against the log during recovery, is what catches those.
 
 | `page_type` | Page |
 |------------:|------|

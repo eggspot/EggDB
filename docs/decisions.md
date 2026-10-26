@@ -2365,7 +2365,9 @@ the database file. Not a sidecar, and not a fixed ring:
 Segments are recycled after checkpoints and reused before the file grows. One sync covers the
 log and the data.
 
-**Checksums: CRC-32C everywhere**, in hardware where the processor has it. The page checksum
+**Checksums: CRC-32C everywhere**, in hardware where the processor has it. They detect
+accidental damage, not tampering. A crafted file must still fail safely, and tamper detection
+waits for encryption at rest (D23). The page checksum
 is seeded with the file's identity and the page number:
 - a misdirected or foreign page fails like a damaged one;
 - pages need not store their own number;
@@ -2376,9 +2378,12 @@ Splitting the work into three interleaved streams to go faster is a later optimi
 the benchmark harness (#28) exists.
 
 **Header: two 4 KiB slots at bytes 0 and 4096, whatever the page size.** The slot is chosen by
-the generation's parity, so a stray copy in the wrong slot is refused. The newest intact slot
-wins. An intact slot that is refused for its contents refuses the file, rather than falling
-back to an older state. Compatibility uses ext4's three feature sets: compatible,
+the generation's parity. The newest intact slot wins. An intact slot that is refused for its
+contents refuses the file, rather than falling back to an older state. That includes a
+superblock in the wrong slot and two slots with the same generation: failing safe beats
+guessing. A damaged other slot is reported to the caller, because damage after a sync looks
+like a torn write. Recovery then checks the log head's sequence number, so an older header
+can't silently open a newer file. Compatibility uses ext4's three feature sets: compatible,
 read-only-compatible and incompatible. Page numbers keep 16 bits for a later volume number.
 
 **Snapshot readers in v0.2.0: copies of pages in memory.** Before the writer first changes a
