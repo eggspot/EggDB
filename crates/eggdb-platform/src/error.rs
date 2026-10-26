@@ -49,6 +49,8 @@ pub enum ErrorKind {
     /// In a simulation, nothing could complete the operations a queue waits for unless another
     /// queue acts first.
     Stalled,
+    /// Another handle holds a lock on the file that conflicts with the one asked for.
+    Locked,
     /// Any other failure reported by the operating system.
     Other,
 }
@@ -76,6 +78,7 @@ impl ErrorKind {
             Self::NotConnected => "not connected",
             Self::HostUnreachable => "host unreachable",
             Self::Stalled => "simulation stalled",
+            Self::Locked => "locked by another handle",
             Self::Other => "operating system error",
         }
     }

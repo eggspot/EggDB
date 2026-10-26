@@ -113,3 +113,114 @@ impl fmt::Display for FormatError {
 }
 
 impl std::error::Error for FormatError {}
+
+/// Why a storage operation failed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum StorageError {
+    /// The file system failed.
+    Io(eggdb_platform::Error),
+    /// Bytes read from the file were refused.
+    Format(FormatError),
+    /// Another handle, in this process or another, has the file open in a way that excludes
+    /// this one: one writer, or any number of readers.
+    Locked,
+    /// The file is shorter than its superblock says: it was cut off.
+    Truncated {
+        /// The length the superblock implies.
+        expected_bytes: u64,
+        /// The file's length.
+        actual_bytes: u64,
+    },
+    /// The page number is a header slot or lies past the end of the file.
+    PageOutOfRange {
+        /// The page asked for.
+        page: u64,
+        /// How many pages the file holds.
+        page_count: u64,
+    },
+    /// A page that is free, freed since the last commit, or part of the free list was written.
+    PageNotInUse {
+        /// The page.
+        page: u64,
+    },
+    /// A page was freed that is already free.
+    DoubleFree {
+        /// The page.
+        page: u64,
+    },
+    /// The free list is damaged: a page of it loops, points outside the file, lists a page
+    /// twice or a page in use, or disagrees with the superblock's count.
+    CorruptFreeList {
+        /// The free-list page where the damage was found.
+        page: u64,
+    },
+    /// The file was opened read-only.
+    ReadOnly,
+    /// An earlier write or sync failed, so the file accepts no more changes until it is opened
+    /// again and recovered from its durable state (D59).
+    NeedsReopen,
+    /// The file holds as many pages as page numbers allow.
+    FileFull,
+}
+
+impl From<eggdb_platform::Error> for StorageError {
+    fn from(error: eggdb_platform::Error) -> Self {
+        if error.kind() == eggdb_platform::ErrorKind::Locked {
+            Self::Locked
+        } else {
+            Self::Io(error)
+        }
+    }
+}
+
+impl From<FormatError> for StorageError {
+    fn from(error: FormatError) -> Self {
+        Self::Format(error)
+    }
+}
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "file system error: {error}"),
+            Self::Format(error) => error.fmt(f),
+            Self::Locked => f.write_str(
+                "the database is open elsewhere: a writer excludes every other user, and readers exclude a writer",
+            ),
+            Self::Truncated {
+                expected_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "the file is cut off: its header says {expected_bytes} bytes, it has {actual_bytes}"
+            ),
+            Self::PageOutOfRange { page, page_count } => write!(
+                f,
+                "page {page} is not a data page of this file, which has {page_count} pages"
+            ),
+            Self::DoubleFree { page } => write!(f, "page {page} was freed twice"),
+            Self::PageNotInUse { page } => {
+                write!(f, "page {page} is free and must be allocated before it is written")
+            }
+            Self::CorruptFreeList { page } => {
+                write!(f, "the free list is damaged at page {page}; run `eggdb check`")
+            }
+            Self::ReadOnly => f.write_str("the database was opened read-only"),
+            Self::NeedsReopen => f.write_str(
+                "an earlier write or sync failed; reopen the database to recover its last durable state",
+            ),
+            Self::FileFull => f.write_str("the file holds as many pages as page numbers allow"),
+        }
+    }
+}
+
+impl std::error::Error for StorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Format(error) => Some(error),
+            _ => None,
+        }
+    }
+}

@@ -1,11 +1,12 @@
 use crate::aligned::AlignedBuffer;
 use crate::error::{Error, ErrorKind, Result};
-use crate::fs::{File, FileSystem, OpenMode, advance};
+use crate::fs::{File, FileLock, FileSystem, OpenMode, advance};
 use crate::io::IoQueueOptions;
 use crate::rng::SplitMix64;
 use crate::sim_io::SimIoQueue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// What a simulated crash does to the writes that were not yet synced.
@@ -68,6 +69,8 @@ struct Inode {
     unsynced: Vec<Change>,
     unsynced_bytes: u64,
     open_handles: usize,
+    shared_locks: usize,
+    exclusive_lock: bool,
     name_count: usize,
     durable_name_count: usize,
 }
@@ -192,6 +195,7 @@ impl SimFileSystem {
             generation: state.generation,
             writable: mode.is_writable(),
             uncached,
+            lock: AtomicU8::new(UNLOCKED),
         })
     }
 }
@@ -296,6 +300,19 @@ pub struct SimFile {
     generation: u64,
     writable: bool,
     uncached: bool,
+    lock: AtomicU8,
+}
+
+const UNLOCKED: u8 = 0;
+const SHARED: u8 = 1;
+const EXCLUSIVE: u8 = 2;
+
+fn lock_from_state(state: u8) -> Option<FileLock> {
+    match state {
+        SHARED => Some(FileLock::Shared),
+        EXCLUSIVE => Some(FileLock::Exclusive),
+        _ => None,
+    }
 }
 
 impl SimFile {
@@ -350,6 +367,9 @@ impl Drop for SimFile {
         }
         if let Some(inode) = state.inodes.get_mut(&self.inode) {
             inode.open_handles = inode.open_handles.saturating_sub(1);
+            if let Some(lock) = lock_from_state(self.lock.load(Ordering::Acquire)) {
+                inode.release_lock(lock);
+            }
         }
         state.free_if_unreachable(self.inode);
     }
@@ -409,6 +429,21 @@ impl File for SimFile {
         self.uncached
     }
 
+    fn try_lock(&self, lock: FileLock) -> Result<()> {
+        self.with_inode(|inode, _| {
+            if self.lock.load(Ordering::Acquire) != UNLOCKED {
+                return Err(Error::new(ErrorKind::InvalidInput));
+            }
+            inode.take_lock(lock)?;
+            let state = match lock {
+                FileLock::Shared => SHARED,
+                FileLock::Exclusive => EXCLUSIVE,
+            };
+            self.lock.store(state, Ordering::Release);
+            Ok(())
+        })
+    }
+
     fn sync_data(&self) -> Result<()> {
         self.with_inode(|inode, _| {
             self.require_writable()?;
@@ -461,6 +496,30 @@ impl Inode {
         self.unsynced.clear();
         self.unsynced_bytes = 0;
         self.open_handles = 0;
+        self.shared_locks = 0;
+        self.exclusive_lock = false;
+    }
+
+    fn take_lock(&mut self, lock: FileLock) -> Result<()> {
+        let free = match lock {
+            FileLock::Shared => !self.exclusive_lock,
+            FileLock::Exclusive => !self.exclusive_lock && self.shared_locks == 0,
+        };
+        if !free {
+            return Err(Error::new(ErrorKind::Locked));
+        }
+        match lock {
+            FileLock::Shared => self.shared_locks += 1,
+            FileLock::Exclusive => self.exclusive_lock = true,
+        }
+        Ok(())
+    }
+
+    fn release_lock(&mut self, lock: FileLock) {
+        match lock {
+            FileLock::Shared => self.shared_locks = self.shared_locks.saturating_sub(1),
+            FileLock::Exclusive => self.exclusive_lock = false,
+        }
     }
 }
 

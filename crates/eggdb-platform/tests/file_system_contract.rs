@@ -1,7 +1,7 @@
 //! The behavior every `FileSystem` shares, checked against the operating system and the simulation.
 
 use eggdb_platform::{
-    AlignedBuffer, ErrorKind, File, FileSystem, OpenMode, OsFileSystem, SimFileSystem,
+    AlignedBuffer, ErrorKind, File, FileLock, FileSystem, OpenMode, OsFileSystem, SimFileSystem,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -357,3 +357,95 @@ contract!(
         assert!(!fs.exists(&path("e")).unwrap());
     }
 );
+
+contract!(
+    an_exclusive_lock_refuses_every_other_lock_until_its_handle_drops,
+    |fs, path| {
+        let owner = fs.open(&path("db"), OpenMode::CreateNew).unwrap();
+        owner.try_lock(FileLock::Exclusive).unwrap();
+        let other = fs.open(&path("db"), OpenMode::ReadWrite).unwrap();
+        let kinds = [FileLock::Exclusive, FileLock::Shared]
+            .map(|lock| other.try_lock(lock).unwrap_err().kind());
+        assert_eq!(kinds, [ErrorKind::Locked; 2]);
+        drop(owner);
+        other.try_lock(FileLock::Exclusive).unwrap();
+    }
+);
+
+contract!(
+    shared_locks_share_and_keep_an_exclusive_lock_away,
+    |fs, path| {
+        let first = fs.open(&path("db"), OpenMode::CreateNew).unwrap();
+        let second = fs.open(&path("db"), OpenMode::Read).unwrap();
+        let writer = fs.open(&path("db"), OpenMode::ReadWrite).unwrap();
+        first.try_lock(FileLock::Shared).unwrap();
+        second.try_lock(FileLock::Shared).unwrap();
+        assert_eq!(
+            writer.try_lock(FileLock::Exclusive).unwrap_err().kind(),
+            ErrorKind::Locked
+        );
+        drop(first);
+        assert_eq!(
+            writer.try_lock(FileLock::Exclusive).unwrap_err().kind(),
+            ErrorKind::Locked
+        );
+        drop(second);
+        writer.try_lock(FileLock::Exclusive).unwrap();
+    }
+);
+
+contract!(
+    a_locked_file_is_still_read_and_written_through_other_handles,
+    |fs, path| {
+        let owner = fs.open(&path("db"), OpenMode::CreateNew).unwrap();
+        owner.write_all_at(b"page", 0).unwrap();
+        owner.try_lock(FileLock::Exclusive).unwrap();
+        let other = fs.open(&path("db"), OpenMode::ReadWrite).unwrap();
+        other.write_all_at(b"P", 0).unwrap();
+        assert_eq!(read_all(&other), b"Page");
+        assert_eq!(read_all(&owner), b"Page");
+    }
+);
+
+contract!(a_handle_takes_one_lock_for_its_life, |fs, path| {
+    let file = fs.open(&path("db"), OpenMode::CreateNew).unwrap();
+    file.try_lock(FileLock::Shared).unwrap();
+    assert_eq!(
+        file.try_lock(FileLock::Exclusive).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        file.try_lock(FileLock::Shared).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+});
+
+contract!(a_refused_lock_can_be_asked_for_again, |fs, path| {
+    let owner = fs.open(&path("db"), OpenMode::CreateNew).unwrap();
+    owner.try_lock(FileLock::Exclusive).unwrap();
+    let other = fs.open(&path("db"), OpenMode::ReadWrite).unwrap();
+    assert_eq!(
+        other.try_lock(FileLock::Shared).unwrap_err().kind(),
+        ErrorKind::Locked
+    );
+    drop(owner);
+    other.try_lock(FileLock::Shared).unwrap();
+});
+
+#[test]
+fn a_simulated_crash_releases_every_lock() {
+    let fs = SimFileSystem::new();
+    let owner = fs.open(Path::new("db"), OpenMode::CreateNew).unwrap();
+    owner.sync_all().unwrap();
+    fs.sync_dir(Path::new("")).unwrap();
+    owner.try_lock(FileLock::Exclusive).unwrap();
+    fs.crash(eggdb_platform::CrashMode::DropUnsynced);
+    let reopened = fs.open(Path::new("db"), OpenMode::ReadWrite).unwrap();
+    reopened.try_lock(FileLock::Exclusive).unwrap();
+    drop(owner);
+    let third = fs.open(Path::new("db"), OpenMode::ReadWrite).unwrap();
+    assert_eq!(
+        third.try_lock(FileLock::Shared).unwrap_err().kind(),
+        ErrorKind::Locked
+    );
+}

@@ -148,6 +148,30 @@ The page's `lsn`, checked against the log during recovery, is what catches those
 
 The body of each page type is specified by the item that implements it.
 
+### Free-list pages (type 1, layout 1)
+| Offset | Size | Field |
+|-------:|-----:|-------|
+| 16 | 8 | `next`: the next free-list page, or 0 |
+| 24 | 4 | `count`: the entries on this page, at most `(page_size − 32) / 8` |
+| 28 | 4 | reserved, zero |
+| 32 | 8 × `count` | the free pages, as page numbers |
+
+**Validity.** Starting at `free_list_head` and following `next`, the list pages plus their
+entries number exactly `free_page_count`. Every number is a data page of the file and appears
+once. None is the catalog root or a page of a live or recycled log segment. A list that breaks
+any of these rules refuses the open. That includes a list that loops, points outside the file
+or disagrees with the count. A crafted list naming other pages in use can't be told apart from
+a real one here. `eggdb check` finds it, by checking that free, reachable and log pages are
+disjoint and together account for every page.
+
+**Commits.** A commit never overwrites the committed list:
+1. The new list is written to pages that are free in the committed state, or to new pages at
+   the end of the file.
+2. The old list pages join the new list as free pages.
+3. A page freed since the last commit is handed out again only after the commit that frees it.
+
+So a crash before the new superblock is durable finds the old state whole (D78).
+
 ## Write-ahead log (item 4 of the v0.2.0 plan)
 - **Segments:** the log is a chain of segments inside the file. Each segment is
   `log_segment_pages` consecutive pages. Its first page has page type 5 and a segment header
@@ -211,15 +235,16 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
 
 On Apple's systems, a sync that must reach the disk uses `F_FULLFSYNC`.
 
-## Locking (item 2)
+## Locking
 - An open for writing takes an exclusive lock on the database file itself, through the platform
   layer:
-  - open-file-description locks on Linux;
-  - `flock` on Apple's systems and the BSDs;
-  - `LockFileEx` on Windows, on a byte range past any data.
+  - `flock` on Linux, Apple's systems and the BSDs, whose locks belong to the open file
+    description;
+  - `LockFileEx` on Windows, on one byte at offset 2^62, past any data.
 - A second open fails at once, even from the same process.
 - A read-only open takes a shared lock.
 - The lock disappears when the process ends, so there are no stale locks.
+- Only on WASI, which has no file locks, does a file open unlocked.
 
 ## Compatibility
 - Every later release reads version-1 files.
