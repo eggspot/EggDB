@@ -556,8 +556,12 @@ simplest consistent option (D92):
    as `\r` (xterm, VTE, Windows Terminal) or `\r\n`, so in a paste `\r\n` and a lone `\r`
    become `\n` (a line break in the multi-line editor, the escape `\n` in the key line), and a
    carriage return byte is entered by typing `\r`. Pasted JSON keeps its line breaks and the
-   `\n` inside its strings. A paste larger than 1 MiB never arrives: the input layer drops it
-   whole and the UI says `The paste was larger than 1 MiB and was dropped`. Typed invisible
+   `\n` inside its strings. A paste of more than 1 MiB (1,048,576 bytes) never arrives, however
+   the terminal splits it across reads: the input layer drops it whole, up to its end marker,
+   and the UI says `The paste was larger than 1 MiB and was dropped`; in a value editor it also
+   names `eggdb put "<file>" <key> @file`. Pauses inside a paste never end it early: only its
+   end marker does, or 1 s with no input at all (a terminal that never sends the marker), after
+   which what was collected arrives as text and later bytes are keys again. Typed invisible
    characters (a bidi override from an input method) are spelled too, so the editor never
    shows one raw. `Tab` types `\t`.
 2. **Keys that type.** In an editor every printable key types, `?` and `q` included; `F1`
@@ -598,9 +602,14 @@ simplest consistent option (D92):
     expose, and the engine's `TooLarge` message names the pages and frames when it is exceeded.
 12. **Modals** are as wide as their longest line, up to the screen's width less 8 columns of
     text, and wrap longer lines.
-13. **A question waits to be seen.** A modal ignores every key until a frame showing it has
-    been presented (`Ui::presented`, called by the run loop after each frame). Keys that were
-    already queued, typed ahead or pasted by a terminal without bracketed paste (`dd`,
-    `x` Enter Enter), can open a confirmation but never answer it. The Key line of a
+13. **A question waits to be seen.** A modal (a confirmation, an error, a question) takes keys
+    only after two things, in order: a frame that shows it was presented (a too-small screen or
+    the help screen does not show it, and a frame that hides it takes back what it was given),
+    and then 50 ms passed with no input at all. Every key that arrives before that is dropped,
+    and each one starts the 50 ms over. So keys already on their way, typed ahead or pasted by
+    a terminal without bracketed paste (`dd`, `x` Enter Enter, padded and split across reads),
+    can open a confirmation but never answer it; a key pressed after looking at it works. The
+    one exception is `Ctrl-C`, which is handled before any modal: it never confirms a change; it
+    quits at once, or, with an unsaved edit, asks first and quits on a second `Ctrl-C`. The Key line of a
     confirmation shows the key's length and wraps at any character, so two keys that differ
     only in spaces never look alike.

@@ -3534,15 +3534,25 @@ one the viewer did not load, above 64 MiB) is refused at `e` with a pointer to
 the escape spelling and decodes strictly, a bad escape refused at the cursor; a paste is taken
 literally, its invisible and control characters spelled as escapes, so neither path can put a
 raw bidi override or control on the screen. Pasted line breaks (`\r\n` or a lone `\r`, as
-terminals send them) are stored as `\n`. A paste larger than 1 MiB is never cut: the input
-decoder turns it into one `Event::PasteTooLarge` and drops its bytes, and the UI refuses it
-with a message. Undo and redo keep the newest 16 MiB of changes.
+terminals send them) are stored as `\n`. A paste of more than 1 MiB is never cut, however its
+bytes are split across reads: the input decoder turns it into one `Event::PasteTooLarge` and
+drops its bytes up to the end marker, keeping only a possible partial marker, and the UI
+refuses it with a message. The escape wait (25 ms) no longer ends a paste: only its end marker
+does, or 1 s with no input (`InputDecoder::end_paste`, called by the terminal), so a pause
+inside a paste over ssh never turns its tail into keys, and a terminal that never sends the
+marker cannot swallow keys, `Ctrl-C` included, for longer than that second. Undo and redo keep
+the newest 16 MiB of changes.
 
-**A confirmation is answered only once it is seen.** The run loop handles every queued event
-before it draws, so a burst of keys (typed ahead, or a paste in a terminal without bracketed
-paste) could open a confirmation and answer it unseen. Every modal therefore ignores keys until
-`Ui::presented` reports a frame showing it was presented; `run` and `Ui::process` call it after
-each `present`. `Ctrl-C` is not affected: it never confirms a change, only quits.
+**A confirmation is answered only once it is seen.** A burst of keys (typed ahead, or a paste
+in a terminal without bracketed paste, which a pty delivers in many reads with tiny gaps) could
+open a confirmation and answer it before anyone saw it. Every modal therefore takes keys only
+after `Ui::presented` reports a frame that shows it (not the too-small screen nor the help
+screen; a frame that hides it disarms it), followed by `Ui::input_quiet`: the run loop waits
+50 ms after that frame and calls it only when no input came. Keys arriving earlier are dropped
+and restart the wait, so padding can never arm a question, while a deliberate key after looking
+works. `Ui::process`, the tests' step, treats the end of its queued events as quiet. `Ctrl-C` is
+the one exception, handled before any modal: it never confirms a change; it quits at once, or,
+with an unsaved edit, asks first and quits on a second `Ctrl-C`.
 
 **Toasts and messages.** A toast clears at the next key or after 8 s (`Ui::tick_at` takes the
 time so tests can expire one); a cut or multi-line toast ends with `(m)`, and `m` opens the last

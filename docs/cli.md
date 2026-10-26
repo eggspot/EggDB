@@ -239,12 +239,14 @@ edit is not committed).
   that starts nothing else is refused with `Bad escape at column 12: expected two hex digits
   after \x` and the cursor on it. A paste is taken literally, so pasted bytes are stored as
   they are, except that its line breaks, which terminals send as `\r` or `\r\n`, are stored as
-  `\n`; a paste larger than 1 MiB is refused whole with a message, never cut. Confirming shows
+  `\n`; a paste of more than 1 MiB is refused whole with a message, never cut, and none of it
+  arrives as keys. Confirming shows
   the key with its length and the value's sizes (`58 B → 61 B`); `Enter` (for a delete, `d`
   again) then runs one write transaction (put or delete, commit) that is on disk before the
   screen redraws, and the status line says `Committed user:1 (61 B) at 09:14:03Z`. A
-  confirmation takes keys only once it is on the screen, so keys typed or pasted ahead of it
-  cannot answer it. No transaction is open while an editor is. The editor takes values up to
+  confirmation takes keys only once it has been drawn and then 50 ms passed with no input;
+  keys arriving sooner (typed ahead, or a paste in a terminal without bracketed paste) are
+  dropped, so they can never answer it. `Ctrl-C` alone is handled first: it only ever quits. No transaction is open while an editor is. The editor takes values up to
   4 MiB of text; store larger ones with `eggdb put <file> <key> @file`.
 - **When a change fails**, nothing is committed and the editor keeps its text. Errors read
   `Error (<Kind>): <message>` with the engine's kind and message: `TooLarge` (one commit's
