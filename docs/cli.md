@@ -37,7 +37,7 @@ eggdb <command> <file> [arguments] [options]
 | `scan <file>` | read-only | prints entries in key order (options below) |
 | `check <file>` | read-only | reads every page and reports the file's health |
 | `stats <file>` | read-only | the page size, pages, file size, last commit and log, without reading a page |
-| `ui <file>` | read-only | browse keys and values full screen in the terminal (below) |
+| `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
@@ -168,15 +168,17 @@ app.db
 ## `eggdb ui`
 
 ```
-eggdb ui <file> [--mono] [--ascii] [--cache <bytes>]
+eggdb ui <file> [--read-only] [--mono] [--ascii] [--cache <bytes>]
 ```
 
-Opens the file read-only and full screen: the keys in order on the left, the selected key's
-value on the right. The design is [ux/ui.md](ux/ui.md); this release has its read-only part,
-and editing comes with v0.2.0 item 15. A screen at 80 × 24, captured from the test terminal:
+Opens the file full screen: the keys in order on the left, the selected key's value on the
+right, and editors that change one key per confirmed commit. `--read-only` opens the file
+read-only, which refuses every change and works beside another reader; without it the file is
+open for writing, so no other program can open it meanwhile. The design is
+[ux/ui.md](ux/ui.md). A screen at 80 × 24, captured from the test terminal:
 
 ```
- EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RO
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
  Keys                1–20 of 24 │ Value  json (auto) · 87 B        line 1–10/10
   bin                         40│ doc:json
 > doc:json                    87│───────────────────────────────────────────────
@@ -199,7 +201,7 @@ and editing comes with v0.2.0 item 15. A screen at 80 × 24, captured from the t
   user:4                      41│
   user:5                      41│
 
- ↑↓ move  Enter open  / filter  v view  r re-read  ? help  q quit
+ ↑↓ move  Enter open  / filter  e edit  a add  d delete  c check  ? help  q quit
 ```
 
 | Keys | In the key list | In the value viewer |
@@ -211,16 +213,45 @@ and editing comes with v0.2.0 item 15. A screen at 80 × 24, captured from the t
 | `Enter` | open the value | load a value above 64 MiB |
 | `Tab` `Shift-Tab` | switch pane | switch pane |
 | `/` | filter by key prefix as you type (`\xNN` is a byte); `Enter` keeps it, `Esc` restores | |
-| `v` | | cycle the view: text, JSON, hex, automatic |
+| `v` | cycle the view: text, JSON, hex, automatic | same |
 | `w` | | wrap long lines (text) |
+| `e` | edit the selected value | edit this value |
+| `a` | add a key | add a key |
+| `d` | delete the selected key (asks for `d` again) | delete this key |
+| `c` | check every page and show the stats | same |
+| `m` | show the last message in full | same |
 | `r` | re-read the keys, the value and the stats | same |
 | `?` | every key and the database's limits | same |
 | `q` `Ctrl-C` | quit | quit |
+
+In the editors: `Enter` confirms a one-line value and `Ctrl-S` any value, `Alt-Enter` adds a
+line break, `Esc` cancels (asking first when something changed), `Ctrl-Z`/`Ctrl-Y` undo and
+redo, `Ctrl-A`/`Ctrl-E` go to the line's start and end, `Ctrl-U`/`Ctrl-K` delete to them,
+`Ctrl-←`/`Ctrl-→` move by word, `F1` shows the help, and `Ctrl-C` quits (asking first when an
+edit is not committed).
 
 - **Views.** A value opens as JSON (pretty-printed by our own strict parser) when it is an
   object or array, as hex when it is not UTF-8 text or holds control bytes, and as text
   otherwise. Forcing JSON on a value that is not JSON says where it stopped:
   `Not JSON: expected ',' or '}' at byte 212`.
+- **Changes.** A value is edited as bytes in the same spelling the screen shows: `\xNN` is a
+  byte, `\u{202e}` a character, `\n`, `\t`, `\r` and `\\` what they are in Rust; a backslash
+  that starts nothing else is refused with `Bad escape at column 12: expected two hex digits
+  after \x` and the cursor on it. A paste is taken literally, so pasted bytes are stored as
+  they are. Confirming shows the key and the sizes (`58 B → 61 B`); `Enter` (for a delete,
+  `d` again) then runs one write transaction (put or delete, commit) that is on disk before the
+  screen redraws, and the status line says `Committed user:1 (61 B) at 09:14:03Z`. No transaction is open while an
+  editor is. The editor takes values up to 4 MiB of text; store larger ones with
+  `eggdb put <file> <key> @file`.
+- **When a change fails**, nothing is committed and the editor keeps its text. Errors read
+  `Error (<Kind>): <message>` with the engine's kind and message: `TooLarge` (one commit's
+  pages must fit in the page cache, so a larger `--cache` helps), `WriterActive` (`r` waits up
+  to 5 s for the other writer), `NeedsReopen` (`r` reopens the file and offers the edit again),
+  `Corrupt` (`c` runs the check). A long message ends with `(m)` in the status line, and `m`
+  shows it in full. Messages clear at the next key or after 8 s.
+- **Check.** `c` shows the header's stats at once and runs `Database::check` on a worker
+  thread, then the report (`Check  OK — every page accounted for`) or `Check  FAILED` with the
+  damage; `Enter` goes back.
 - **Any size.** The list is a window over a scan, so it moves as fast over a billion keys as
   over twenty; the key count runs in steps between key presses (`1,204+ keys` until it is done).
   A value is read whole when it is selected, except above 64 MiB, which waits for `Enter`.
@@ -259,7 +290,7 @@ eggdb: unknown option '--reverse' for eggdb get
   try: eggdb help get
 ```
 
-The commands that are coming (`export`, `import`, `shell`, `backup`, `compact`, `ui`) answer
+The commands that are coming (`export`, `import`, `shell`, `backup`, `compact`) answer
 `eggdb <name> is not in this release yet; see docs/roadmap.md` and exit 2, so no script is built
 on a name that later changes meaning.
 

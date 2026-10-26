@@ -3496,3 +3496,57 @@ run with a piped stdin, which must exit 2 with `eggdb ui needs a terminal`.
 aarch64 macOS: the terminal UI, which the command did not have before. The library is
 unchanged apart from `next_back_entry` and the key-and-length steps.
 
+## D92 `eggdb ui` part 2: read-write by default, one confirmed commit per change, the check on a worker — Decided (build loop, 2026-10-27); completes v0.2.0 item 15, refines D9, D15 and D91
+Item 15 builds the editing half of Claude Fable's design for `eggdb ui`, `docs/ux/ui.md` (D15).
+The details the design left open are listed in that file's "Decided while building part 2";
+the decisions that shape the code:
+
+**Read-write by default, `--read-only` to refuse writes.** `eggdb ui <file>` opens the file for
+writing (never creating it), so it excludes every other open of the file meanwhile, as `put`
+does; `--read-only` opens it read-only, which refuses `e`, `a` and `d` with a toast and works
+beside another reader. A `Locked` open for writing names `--read-only` as the way to browse.
+
+**No transaction outlives a key press.** An editor holds only text. Confirming shows a modal
+with the key and the sizes; `Enter` (for a delete, `d` again) calls `Source::write`, which is
+the whole write transaction: `try_begin_write`, `put` or `delete`, `commit`, durable before the
+screen redraws. A cancelled edit or a closed modal never reaches the database. The screen then
+re-reads its window from the same anchor, keeps or moves the selection as the design says, and
+adjusts a finished key count by one (a running count starts over).
+
+**Failures by kind.** `Source` errors carry the engine's `ErrorKind` (a `SourceError`), shown
+as `Error (<Kind>): <message>` with a `Try:` line where the UI knows the fix. `WriterActive`
+opens a modal whose `r` waits up to the write timeout with `begin_write` on the UI thread, after
+the waiting message is drawn; no worker thread, because inside one process the only other
+writer is the embedding program, and the wait is bounded by the timeout. `TooLarge` and
+`CacheFull` keep the editor; `NeedsReopen` reopens the file through `Source::reopen` and keeps
+the edit; `Corrupt` offers the check.
+
+**The check runs on a worker thread.** `Database::check` reads every page and cannot run in
+steps, so the CLI's source shares the database through an `Arc` and runs it on a thread;
+the UI polls `Source::check_outcome` every 200 ms and calls nothing else on the database
+until it ends, so the screen keeps drawing and no read waits behind the check. Quitting during
+a check leaves the thread to the process exit and closes the file without a checkpoint, which
+loses nothing (D87). The key count, by contrast, stays in steps on the UI thread (D91).
+
+**Bounded editing (D9).** The editor holds at most 4 MiB of text, so a value above that (or
+one the viewer did not load, above 64 MiB) is refused at `e` with a pointer to
+`eggdb put <file> <key> @file`; typing and pasting past the bound are refused. Typed text is
+the escape spelling and decodes strictly, a bad escape refused at the cursor; a paste (already
+capped at 1 MiB by the input decoder) is taken literally, its invisible and control characters
+spelled as escapes, so neither path can put a raw bidi override or control on the screen.
+
+**Toasts and messages.** A toast clears at the next key or after 8 s (`Ui::tick_at` takes the
+time so tests can expire one); a cut or multi-line toast ends with `(m)`, and `m` opens the last
+message in a modal that scrolls.
+
+**Tests.** Fake-terminal scenarios 10 to 16, 18, 23 and 24 with golden screens, plus error
+modals, reopen, toast expiry, quitting with an unsaved edit, an editor surviving a terminal too
+small to draw it, and editing at 40 × 10; with real files: a confirmed edit, add and delete
+persist after reopening and a cancelled edit does not, a read-only session leaves the file byte
+for byte unchanged, a writer held on another thread is reported and waited for, the worker
+check reports a damaged file as `Corrupt`, and 200 random adds and deletes through the UI agree
+with a scan of the reopened file.
+
+**Size (D6).** The release binary grows from 750,704 to 850,384 bytes (+99,680, +13.3%) on
+aarch64 macOS: the editors, modals and check screen the UI did not have. The library is
+unchanged.
