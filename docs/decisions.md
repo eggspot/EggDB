@@ -3351,6 +3351,14 @@ commit into a recycled segment, reopen for writing, damage the newest slot, and 
 older slot to open the same state; without the fix the first one opens a mixed state. The first
 window is now closed; the second stays open from the crash to the next open for writing.
 
+**A benchmark finding.** With the comparison and the copy written inline in `PageFile::open`, the
+gated `database.open` ratio (a read-only `Database` open against a read-only `Store` open, which
+never run that code) read 1.38 to 1.39 in six CI runs on one kind of Linux runner and 1.007 on
+the other, while `main` read 1.007 to 1.017 on both; a branch with only `page_file.rs` and
+`format.rs` taken back from `main` read 1.017. The cause is code generation, not work: both opens
+run the same steps. The check and the copy now live in two `#[inline(never)]` helpers, so
+`open`'s own code is as on `main`, and the ratio reads 0.934 on the slow kind of runner.
+
 Decided by research (a Sonnet research subagent, 2026-10-26), since it is a cost-against-safety
 choice the owner would otherwise make:
 - *Which trigger?* Options were a copy whenever the older slot isn't one (as issue #39
