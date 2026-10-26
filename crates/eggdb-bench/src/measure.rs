@@ -12,8 +12,24 @@ pub(crate) struct Paired {
 }
 
 type Run<'a> = dyn FnMut(u64) -> Result<(), String> + 'a;
+type TimedRun<'a> = dyn FnMut(u64) -> Result<Duration, String> + 'a;
+
+fn timed<'a>(run: &'a mut Run<'_>) -> impl FnMut(u64) -> Result<Duration, String> + 'a {
+    move |iterations| {
+        let start = Instant::now();
+        run(iterations)?;
+        Ok(start.elapsed())
+    }
+}
 
 pub(crate) fn paired(subject: &mut Run<'_>, reference: &mut Run<'_>) -> Result<Paired, String> {
+    paired_timed(&mut timed(subject), &mut timed(reference))
+}
+
+pub(crate) fn paired_timed(
+    subject: &mut TimedRun<'_>,
+    reference: &mut TimedRun<'_>,
+) -> Result<Paired, String> {
     let subject_iterations = calibrate(subject)?;
     let reference_iterations = calibrate(reference)?;
     let mut subject_ns = Vec::with_capacity(SAMPLES);
@@ -34,6 +50,7 @@ pub(crate) fn paired(subject: &mut Run<'_>, reference: &mut Run<'_>) -> Result<P
 }
 
 pub(crate) fn single(subject: &mut Run<'_>) -> Result<f64, String> {
+    let subject = &mut timed(subject);
     let iterations = calibrate(subject)?;
     let mut samples = (0..SAMPLES)
         .map(|_| ns_per_op(subject, iterations))
@@ -41,22 +58,18 @@ pub(crate) fn single(subject: &mut Run<'_>) -> Result<f64, String> {
     Ok(median(&mut samples))
 }
 
-fn calibrate(run: &mut Run<'_>) -> Result<u64, String> {
+fn calibrate(run: &mut TimedRun<'_>) -> Result<u64, String> {
     let mut iterations = 64;
     loop {
-        let start = Instant::now();
-        run(iterations)?;
-        if start.elapsed() >= SAMPLE_TIME || iterations >= MAX_ITERATIONS {
+        if run(iterations)? >= SAMPLE_TIME || iterations >= MAX_ITERATIONS {
             return Ok(iterations);
         }
         iterations *= 2;
     }
 }
 
-fn ns_per_op(run: &mut Run<'_>, iterations: u64) -> Result<f64, String> {
-    let start = Instant::now();
-    run(iterations)?;
-    Ok(start.elapsed().as_nanos() as f64 / iterations as f64)
+fn ns_per_op(run: &mut TimedRun<'_>, iterations: u64) -> Result<f64, String> {
+    Ok(run(iterations)?.as_nanos() as f64 / iterations as f64)
 }
 
 pub(crate) fn median(values: &mut [f64]) -> f64 {
