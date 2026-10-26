@@ -2440,7 +2440,9 @@ mean the committed state is never overwritten before the new superblock is durab
   over the committed list.
 
 A crash at any operation of a commit, under torn writes, opens the old state or the new one.
-The simulator checks every operation with four torn-write seeds each. The cost is that a
+The simulator checks every operation with four torn-write seeds each. Writes to free pages are
+refused. Overwriting a page of the committed state in place isn't undone by a crash: the log
+(item 4) makes that safe, by logging each change before its page is written. The cost is that a
 commit with no free page grows the file by the pages its list needs. The log and checkpoints
 (items 4 and 7) replace this with logged allocation.
 
@@ -2463,7 +2465,8 @@ valid checksums and checks this.
   machine crashes.
 
 A handle takes one lock for its life, and a writer opens with an exclusive lock, so a second
-writer anywhere is refused with "locked".
+writer anywhere is refused with "locked". Where the platform has no file locks (WASI), the file
+opens unlocked: those targets run one process per file.
 
 **File identity.** A new file's 16-byte identity comes from the standard library's randomly
 seeded hasher (`RandomState`), which draws on the operating system's randomness. That needs no

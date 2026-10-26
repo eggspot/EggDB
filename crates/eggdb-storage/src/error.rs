@@ -139,6 +139,11 @@ pub enum StorageError {
         /// How many pages the file holds.
         page_count: u64,
     },
+    /// A page that is free, or freed since the last commit, was written.
+    PageNotInUse {
+        /// The page.
+        page: u64,
+    },
     /// A page was freed that is already free.
     DoubleFree {
         /// The page.
@@ -195,6 +200,9 @@ impl fmt::Display for StorageError {
                 "page {page} is not a data page of this file, which has {page_count} pages"
             ),
             Self::DoubleFree { page } => write!(f, "page {page} was freed twice"),
+            Self::PageNotInUse { page } => {
+                write!(f, "page {page} is free and must be allocated before it is written")
+            }
             Self::CorruptFreeList { page } => {
                 write!(f, "the free list is damaged at page {page}; run `eggdb check`")
             }

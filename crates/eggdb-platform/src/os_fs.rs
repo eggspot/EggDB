@@ -402,17 +402,17 @@ fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
+mod windows_lock {
     use std::ffi::c_void;
-    use std::os::windows::io::{AsRawHandle, RawHandle};
+    use std::os::windows::io::RawHandle;
 
-    const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
-    const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
-    const ERROR_LOCK_VIOLATION: i32 = 33;
+    pub(super) const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
+    pub(super) const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
+    pub(super) const ERROR_LOCK_VIOLATION: i32 = 33;
     const LOCKED_BYTE: u64 = 1 << 62;
 
     #[repr(C)]
-    struct Overlapped {
+    pub(super) struct Overlapped {
         internal: usize,
         internal_high: usize,
         offset: u32,
@@ -420,9 +420,21 @@ fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
         event: *mut c_void,
     }
 
+    impl Overlapped {
+        pub(super) fn at_the_locked_byte() -> Self {
+            Self {
+                internal: 0,
+                internal_high: 0,
+                offset: LOCKED_BYTE as u32,
+                offset_high: (LOCKED_BYTE >> 32) as u32,
+                event: std::ptr::null_mut(),
+            }
+        }
+    }
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn LockFileEx(
+        pub(super) fn LockFileEx(
             file: RawHandle,
             flags: u32,
             reserved: u32,
@@ -430,19 +442,46 @@ fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
             bytes_high: u32,
             overlapped: *mut Overlapped,
         ) -> i32;
+        pub(super) fn UnlockFileEx(
+            file: RawHandle,
+            reserved: u32,
+            bytes_low: u32,
+            bytes_high: u32,
+            overlapped: *mut Overlapped,
+        ) -> i32;
     }
+}
+
+#[cfg(windows)]
+impl Drop for OsFile {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        if !*self.locked.get_mut() {
+            return;
+        }
+        let mut overlapped = windows_lock::Overlapped::at_the_locked_byte();
+        // SAFETY: the handle is still open, since `self.file` is dropped after this runs, and
+        // `overlapped` lives on this stack frame until the synchronous call returns. A failure
+        // only leaves the lock for the operating system to release when the handle closes.
+        let _ = unsafe {
+            windows_lock::UnlockFileEx(self.file.as_raw_handle(), 0, 1, 0, &mut overlapped)
+        };
+    }
+}
+
+#[cfg(windows)]
+fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_lock::{
+        ERROR_LOCK_VIOLATION, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+        Overlapped,
+    };
 
     let flags = match lock {
         FileLock::Shared => LOCKFILE_FAIL_IMMEDIATELY,
         FileLock::Exclusive => LOCKFILE_FAIL_IMMEDIATELY | LOCKFILE_EXCLUSIVE_LOCK,
     };
-    let mut overlapped = Overlapped {
-        internal: 0,
-        internal_high: 0,
-        offset: LOCKED_BYTE as u32,
-        offset_high: (LOCKED_BYTE >> 32) as u32,
-        event: std::ptr::null_mut(),
-    };
+    let mut overlapped = Overlapped::at_the_locked_byte();
     // SAFETY: the handle is open for the duration of the call, the file was opened for
     // synchronous I/O so LockFileEx finishes before returning, and `overlapped` lives on this
     // stack frame until then.

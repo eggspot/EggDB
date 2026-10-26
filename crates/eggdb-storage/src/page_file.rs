@@ -4,7 +4,7 @@ use crate::format::{
     Access, FileId, HEADER_SLOT_SIZE, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum,
     PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, Superblock,
 };
-use eggdb_platform::{File, FileLock, FileSystem, OpenMode};
+use eggdb_platform::{ErrorKind, File, FileLock, FileSystem, OpenMode};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -44,13 +44,19 @@ impl Default for CreateOptions {
 ///
 /// Changes become durable only at [`PageFile::commit`], which syncs the pages and then writes
 /// the next superblock to the slot the current one is not in. A crash at any moment leaves the
-/// file as it was at the last commit or as the commit left it. A page freed since the last
-/// commit is not handed out again until a commit has made the free durable, so a crash never
-/// finds a page of the committed state overwritten.
+/// header, the page count and the free list as the last commit left them, and pages allocated
+/// since then unreachable. A page freed since the last commit is not handed out again until a
+/// commit has made the free durable, and writes to free pages are refused, so the page file
+/// itself never overwrites a page of the committed state.
+///
+/// Overwriting a page of the committed state in place, through [`PageFile::write_page`], is
+/// not undone by a crash: the write-ahead log makes such writes safe, by logging a change
+/// before its page is written and replaying it after a crash.
 ///
 /// Opening for writing takes an exclusive lock on the file and opening for reading a shared
 /// one, so a second writer, in this process or another, is refused with
-/// [`StorageError::Locked`]. A failed write or sync stops the file accepting changes until it
+/// [`StorageError::Locked`]. Where the platform has no file locks (WASI), the file opens
+/// unlocked. A failed write or sync stops the file accepting changes until it
 /// is opened again (D59).
 #[derive(Debug)]
 pub struct PageFile<F: File> {
@@ -75,7 +81,7 @@ impl<F: File> PageFile<F> {
         options: CreateOptions,
     ) -> Result<Self, StorageError> {
         let file = fs.open(path, OpenMode::CreateNew)?;
-        file.try_lock(FileLock::Exclusive)?;
+        lock(&file, FileLock::Exclusive)?;
         let page_size = options.page_size;
         let superblock = Superblock {
             page_size,
@@ -107,12 +113,12 @@ impl<F: File> PageFile<F> {
         path: &Path,
         access: Access,
     ) -> Result<Self, StorageError> {
-        let (mode, lock) = match access {
+        let (mode, lock_kind) = match access {
             Access::ReadOnly => (OpenMode::Read, FileLock::Shared),
             Access::ReadWrite => (OpenMode::ReadWrite, FileLock::Exclusive),
         };
         let file = fs.open(path, mode)?;
-        file.try_lock(lock)?;
+        lock(&file, lock_kind)?;
         let mut slots = vec![0u8; 2 * HEADER_SLOT_SIZE];
         let read = read_up_to(&file, &mut slots)?;
         if read < HEADER_SLOT_SIZE {
@@ -192,8 +198,9 @@ impl<F: File> PageFile<F> {
     }
 
     /// Writes `header` and the checksum into `page`, which must be one page long, and writes
-    /// it as data page `page_id`. The page must be inside the file: allocated, or part of the
-    /// committed state.
+    /// it as data page `page_id`. The page must be in use: allocated, or part of the committed
+    /// state and not freed. A write to a free page, to a page freed since the last commit or to
+    /// a page of the free list is refused with [`StorageError::PageNotInUse`].
     pub fn write_page(
         &mut self,
         page_id: u64,
@@ -202,6 +209,12 @@ impl<F: File> PageFile<F> {
     ) -> Result<(), StorageError> {
         self.check_writable()?;
         self.check_data_page(page_id)?;
+        if self.available.contains(&page_id)
+            || self.freed.contains(&page_id)
+            || self.free_list_pages.contains(&page_id)
+        {
+            return Err(StorageError::PageNotInUse { page: page_id });
+        }
         self.checksums.write(page, page_id, header)?;
         let written = self
             .file
@@ -237,6 +250,10 @@ impl<F: File> PageFile<F> {
 
     /// Makes every change since the last commit durable: writes the new free list, syncs the
     /// file, writes the next superblock with `update` applied to it, and syncs again.
+    ///
+    /// `update` sets the fields the page file doesn't own, such as the catalog root and the
+    /// log's position; the commit itself sets the page size, file identity, generation, page
+    /// count and free list, whatever `update` did to them.
     ///
     /// The free list is written to pages that are free in the committed state, or to new pages
     /// at the end, never over the pages of the committed list, so a crash before the new
@@ -424,6 +441,13 @@ impl<F: File> PageFile<F> {
     }
 }
 
+fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
+    match file.try_lock(kind) {
+        Err(error) if error.kind() == ErrorKind::Unsupported => Ok(()),
+        locked => Ok(locked?),
+    }
+}
+
 fn corrupt_free_list(page: u64) -> StorageError {
     StorageError::CorruptFreeList { page }
 }
@@ -567,6 +591,34 @@ mod tests {
         assert_ne!(file.allocate().unwrap(), a);
         file.commit(|_| {}).unwrap();
         assert_eq!(allocate_all(&mut file), BTreeSet::from([a]));
+    }
+
+    #[test]
+    fn writing_a_free_or_freed_page_is_refused() {
+        let fs = SimFileSystem::new();
+        let mut file = create(&fs);
+        let (a, b) = (file.allocate().unwrap(), file.allocate().unwrap());
+        write_filled(&mut file, a, 1);
+        write_filled(&mut file, b, 1);
+        file.commit(|_| {}).unwrap();
+        file.free(a).unwrap();
+        let mut page = vec![0; 4096];
+        assert!(matches!(
+            file.write_page(a, &mut page, &leaf(a)),
+            Err(StorageError::PageNotInUse { page }) if page == a
+        ));
+        file.commit(|_| {}).unwrap();
+        assert!(matches!(
+            file.write_page(a, &mut page, &leaf(a)),
+            Err(StorageError::PageNotInUse { .. })
+        ));
+        let list_page = file.free_list_pages[0];
+        assert!(matches!(
+            file.write_page(list_page, &mut page, &leaf(list_page)),
+            Err(StorageError::PageNotInUse { .. })
+        ));
+        assert_eq!(file.allocate().unwrap(), a);
+        write_filled(&mut file, a, 2);
     }
 
     #[test]
