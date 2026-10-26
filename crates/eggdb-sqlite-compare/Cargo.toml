@@ -1,0 +1,29 @@
+[package]
+name = "eggdb-sqlite-compare"
+description = "EggDB's embedded key-value store measured against SQLite on the same machine, gated against the committed baseline (D7, D94). Never published and never shipped."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/eggspot/EggDB"
+publish = false
+
+[workspace]
+
+[dependencies]
+eggdb = { path = "../eggdb" }
+rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
