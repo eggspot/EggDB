@@ -2766,3 +2766,84 @@ scan.
 A delete of every key of a 100,000-entry tree in random order leaves the single root page.
 Holding the leaf's path (as LMDB's cursor stack does) to save the descents waits for a benchmark
 that shows them to be the cost.
+
+## D84 Checkpoints at the log's append position, recycled segments, and segment sequences never used twice — Decided by research (build loop, 2026-10-26); refines D77 and D81
+`PageFile::checkpoint` and `PageCache::checkpoint` complete v0.2.0's item 7 (D76): recovery
+replays only the log written since the last checkpoint, and the log reuses its segments
+instead of growing the file. [format.md](format.md) "Checkpoints" and "Segment sequences"
+specify it.
+
+**A checkpoint** syncs the log, writes the pages that durability `Normal` left only in the log
+to their places, syncs, and writes the next superblock with `checkpoint_lsn` at the log's
+current append position and `log_head_page` at the current segment, then syncs. It writes no
+log record and no new segment. Every earlier segment of the log, and every unused recycled one,
+becomes reusable: the seven with the lowest page numbers go to `recycled_segments`, and any
+others join the free list. The pages in the page cache stay valid, since a checkpoint writes
+committed pages unchanged. Changes not yet committed refuse it with `UncommittedChanges`.
+
+**Automatic checkpoints.** After a commit, a checkpoint runs once the log since the last one
+reaches `auto_checkpoint` bytes (1 MiB by default, `None` turns it off) or goes through more
+segments than `recycled_segments` holds. The second rule keeps the file from growing in steady
+state: with seven recycled slots, a log that never needs an eighth segment always finds one.
+
+**Decided by research** (a research subagent, recorded in this PR):
+1. *Sequence numbers are never used twice.* Recycling exposed a hazard the old rule ("one more
+   than the previous segment's") could not handle: a flush cut off by a crash can leave its
+   records in a recycled segment, and after recovery the next writer gives the same segment
+   the same sequence and LSN, so if its link survives and its own header and records are torn
+   away, recovery would read the old records, a stale commit record included, as new. A test
+   builds exactly that file. The fix: a link names the next segment's sequence, which must be
+   above the previous one's, and the header's new `log_sequence_reserved` bounds every sequence
+   used. A writer that opens the file starts above it, and raises it, writing the header and
+   syncing, before it writes a higher sequence. Rejected: a random salt per segment (SQLite's
+   WAL salts; needs an entropy source, which `no_std` targets and deterministic simulation
+   lack), zeroing recycled segments before reuse (a write of a whole segment per reuse),
+   deriving the next sequence from the recycled segments' headers (a torn header hides a used
+   sequence), and keeping recycled segments out of use until the next checkpoint (the same
+   sequence and LSN pairs come back from the same tail). The raise is lazy: the first segment
+   a writer starts after opening costs one header write and sync, and checkpoints raise it for
+   free.
+2. *The checkpoint position* is the writer's append position, which is mid-segment and, right
+   after a recovery that found a cut-off flush, not block-aligned; the writer then still links
+   to a fresh segment at its next flush, so the cut-off records are never read. The format
+   therefore drops the block alignment of `checkpoint_lsn` and keeps "not in the last 9 bytes
+   of a block". When the last flush ended with a link, the position is the start of the next
+   segment, whose header is already durable, so the segment before it is recycled.
+3. *Segments beyond seven* go to the free list at the checkpoint, written in place to pages
+   free in the committed state before the header, as D78's commits did before the log. The
+   alternative, freeing them with a logged commit after the header, leaks them on a crash in
+   between, and nothing finds such a leak.
+4. *A failed automatic checkpoint* does not fail the commit, which is already durable as its
+   durability promises: the commit returns `Ok`, and the file refuses every later change with
+   `NeedsReopen` (D59), so a caller never retries a commit that happened. Triggering at the
+   start of the next commit was rejected (it charges an unrelated commit and leaves the log
+   long while idle), and so was leaving triggering to the caller.
+
+**Hostile logs.** A link must name a sequence above its segment's and at most the reservation,
+and either an unused entry of `recycled_segments` (page count 0) or a new segment at or past the
+header's page count that ends at the page count it names and overlaps no recycled segment. A
+segment header found with a sequence above the reservation, like a link above it, refuses the
+open, since only a header older than the log can produce one. Replayed images may not overwrite
+the log's segments or any recycled segment. The superblock refuses overlapping log segments and
+a reservation below `log_head_sequence`.
+
+**Known limit.** Recycling overwrites the log an older header slot would replay. If the newest
+slot is damaged after it was synced, the older slot is chosen (D77): the open is refused when
+the older head segment has since been reused or the log reaches a sequence above the older
+reservation, but otherwise it opens the state of the older checkpoint and reports the damaged
+slot. That is the class of damage after a sync that Alagappan et al. (FAST'18) describe;
+detection is best-effort.
+
+**Cost.** A checkpoint under `Full` is three file operations and two syncs (benchmark
+`log.checkpoint`). Opening a file after 1,000 one-page commits takes 148 file operations and
+replays 8.8 MB of log at 1.8 times the cost of computing CRC-32C over it; after a checkpoint
+the same open takes 10 operations and replays nothing (about 85 µs against 1.5 ms on this Mac,
+`log.recovery`). Commits pay for checkpoints: per 1,000 one-page commits, `Full` syncs 1,040
+times instead of 1,000 and `Normal` 60 instead of 8, since `Normal` now syncs at checkpoints as
+D77 planned; file operations fall because recycled segments need no file growth. Larger
+segments or more recycled slots would space checkpoints out under `Normal`, and wait for a
+benchmark that needs it.
+
+**Review fixes** (from a review of the code merged since the last one): a leaf page's values
+are no longer readable or writable as child pointers, which a short value could turn into a
+panic, and a leaf split allocates its right page before overwriting the left one.

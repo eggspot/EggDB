@@ -4,8 +4,8 @@ This is the specification of EggDB's own file format (D20). The design behind it
 release reads every file an earlier release wrote. From v0.2.0 on, a committed sample file
 checks that in CI.
 
-Status: the checksum, the superblock, the page header, the free list, the write-ahead log and
-the B+tree pages are implemented in `crates/eggdb-storage`. The other sections are specified here first and
+Status: the checksum, the superblock, the page header, the free list, the write-ahead log with
+checkpoints and recovery, and the B+tree pages are implemented in `crates/eggdb-storage`. The other sections are specified here first and
 implemented by the v0.2.0 items in [roadmap.md](roadmap.md). A section may still change until
 v0.2.0 ships, because no file has been released before it. After that, changes follow
 "Compatibility" below.
@@ -72,13 +72,15 @@ slot 1. A superblock found in the other slot is refused.
 | 128 | 4 | `log_segment_pages` | pages per log segment: at least 1, at most 64 MiB of pages, and at least one page plus 8 KiB once the file has a log (default: 64 KiB of pages, at least two) |
 | 132 | 4 | reserved | written as zero |
 | 136 | 56 | `recycled_segments` | seven first pages of log segments emptied by checkpoints, kept for reuse before the file grows. 0 marks an unused entry. |
-| 192 | 8 | reserved | written as zero |
+| 192 | 8 | `log_sequence_reserved` | the highest log segment sequence number a writer may have used (see "Segment sequences") |
 | 200 | 32 | reserved for the consensus hard state (term and vote, M15) | written as zero |
 | 232 | 280 | reserved | written as zero |
 
 Every page pointer (`free_list_head`, `catalog_root`, `log_head_page` and the recycled
 segments) must be 0 or lie between `first_data_page` and `page_count − 1`. A log segment
-starting at `log_head_page` or at a recycled entry must also end within `page_count`.
+starting at `log_head_page` or at a recycled entry must also end within `page_count`, and the
+segments at `log_head_page` and the recycled entries must not overlap one another. A file with
+a log needs `log_sequence_reserved` at least `log_head_sequence`.
 `page_count` must be below 2^48 (no volume bits). Opening a file also checks it against the
 file's real length. Reserved fields are
 written as zero and ignored on read, so a later version can use them behind a feature flag.
@@ -180,10 +182,12 @@ and only then writes the pages in place. Opening the file replays the committed 
 
 **Creating the log.** A file is created without a log, so a file that is never changed stays
 8 KiB. The first change appends a segment at the end of the file, writes its header, syncs,
-and then writes the next superblock with `log_head_page`, `log_head_sequence` (the old value
-plus one), `checkpoint_lsn` (the segment's start) and `log_segment_pages`, and syncs again. A
-file with no log, such as one written before the log existed, opens as it is and gets its log
-the same way. Until checkpoints (item 7), the header is written only then.
+and then writes the next superblock with `log_head_page`, `log_head_sequence` (one more than
+the larger of the old `log_head_sequence` and `log_sequence_reserved`), `log_sequence_reserved`
+(that sequence plus 65,536), `checkpoint_lsn` (the segment's start) and `log_segment_pages`,
+and syncs again. A file with no log, such as one written before the log existed, opens as it
+is and gets its log the same way. After that the header is written only by checkpoints and by
+sequence reservations.
 
 **Segments.** A segment is `log_segment_pages` consecutive pages. A file with a log needs
 segments of at least one page plus 8 KiB, so the largest record fits in one; the default is
@@ -197,7 +201,7 @@ replaced when the log is created. The first 4 KiB block of a segment is its head
 | 5 | 1 | `layout` | 1 |
 | 6 | 2 | `flags` | 0 |
 | 8 | 8 | `start_lsn` | the LSN of the segment's byte 4096 |
-| 16 | 8 | `sequence` | one more than the previous segment's |
+| 16 | 8 | `sequence` | above the previous segment's, and exactly the sequence the link to it names |
 | 24 | 4072 | reserved | zero |
 
 Records follow from byte 4096. The checksum covers only the header block, because records are
@@ -222,14 +226,14 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
 | 2 | pad | zeros up to the end of the 4 KiB block |
 | 3 | page image | the page number (8) and the whole page as it is written in place, its own checksum included |
 | 4 | commit | the commit stamp (8, 0 until item 9), then `page_count`, `free_list_head`, `free_page_count`, `catalog_root`, `clock_high_water` and the three feature sets (8 each) |
-| 5 | link | the next segment's first page (8) and the page count once it exists (8) |
+| 5 | link | the next segment's first page (8), the page count once it exists, or 0 for a recycled segment (8), and the next segment's sequence (8) |
 
 - A record never spans segments, and never starts in the last 9 bytes of a 4 KiB block; those
   bytes are zero and skipped. A pad never crosses the end of its block.
 - Mixing the LSN into the seed means a record copied or misdirected to another position, even
   within its segment, fails its check.
 - A reader checks the type, the flags and the payload length the type requires (batch 8, page
-  image 8 plus a page, commit 72, link 16, pad at most the rest of its block) before computing
+  image 8 plus a page, commit 72, link 24, pad at most the rest of its block) before computing
   the checksum, so no crafted length makes it checksum more than one record's bytes.
 - **Flushes:** each commit is one flush. It starts at a block boundary with a batch record, and
   ends with a pad to the end of its block, so a block that has been synced is never rewritten.
@@ -238,11 +242,11 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
   The images of a transaction come before its commit record, and images after the last commit
   record belong to no commit.
 - **Growing:** when a record would leave less room than a link record before the segment's
-  end, a link record names the next segment, which comes from the end of the file, and the
-  flush continues there after a batch record. A flush whose pad would reach the segment's end
-  ends with a link instead. Recovery learns the file's growth from link records; it needs no
-  free list. Reusing recycled segments, and moving `log_head_page`, are checkpoints' work
-  (item 7).
+  end, a link record names the next segment, and the flush continues there after a batch
+  record. A flush whose pad would reach the segment's end ends with a link instead. The next
+  segment is the first unused entry of `recycled_segments`, whose link carries a page count
+  of 0, or else a new segment at the end of the file, whose link carries the page count that
+  ends it. Recovery learns the file's growth from link records; it needs no free list.
 - **Torn tail or corruption:** the log ends at the first record that fails its checks. That is
   a torn tail, and the file opens at the last commit before it, unless a valid batch record at
   a later block boundary of the same segment carries a `durable_lsn` above the bad record's
@@ -251,8 +255,12 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
   is wrong ends the log the same way. These are damage too, and refuse the open the same way:
   - a page image whose own page checksum fails, or that names a header slot, a page outside
     the file or a page of the log;
-  - a link that overlaps an earlier segment, or whose page count isn't exactly the end of the
-    segment it names;
+  - a link whose sequence is not above its segment's or is above `log_sequence_reserved`, that
+    names a segment overlapping one the log already went through, or whose page count is 0
+    for a segment that is not an unused entry of `recycled_segments`, or otherwise is not
+    exactly the end of the segment it names, starting at or after the header's `page_count`
+    and overlapping no recycled segment;
+  - a segment named by a link whose header carries a sequence above `log_sequence_reserved`;
   - a commit record whose fields the superblock would refuse, whose page count is below the
     header's, or whose page count is more than the file's real length in pages plus the number
     of committed page images. Every page a commit adds is logged as an image, so a valid log
@@ -265,10 +273,54 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
   read as part of the log. Opening for writing first sets the file to the replayed page count
   and always syncs, which also makes the replayed records durable before any page is written
   in place from them, and before a later batch record claims they are durable.
-- **Truncation:** checkpoints (item 7) truncate the head by moving `log_head_page` and the tail
-  by starting a segment with a higher sequence number.
+- **Truncation:** checkpoints truncate the head by moving `log_head_page` and
+  `checkpoint_lsn` (see "Checkpoints"). Records a crash left after the end of the log are cut
+  off by a link to a fresh segment, as above.
 - **Failed syncs:** a failed sync is never retried. The database stops accepting writes and
   recovers from the durable state (D59).
+
+**Segment sequences.** No segment sequence number is ever used twice, so a record left in a
+recycled segment by an older use, or by a flush a crash cut off, never passes its checksum
+under the segment's new sequence (D84):
+- A writer that opens the file starts at `log_sequence_reserved + 1`, since any sequence up to
+  it may have been written before a crash.
+- Before it writes anything that uses a sequence above `log_sequence_reserved`, a link
+  included, it writes the next superblock with only `generation` raised and
+  `log_sequence_reserved` set to that sequence plus 65,536, and syncs. Checkpoints raise it
+  the same way.
+- So every sequence in the file is at most the newest durable header's `log_sequence_reserved`,
+  and a link or segment header above the header's value shows that the header is older than
+  the log: the newer slot was damaged after it was synced. The open is refused.
+
+## Checkpoints (item 7)
+A checkpoint bounds what recovery replays and lets the log's segments be reused. It needs no
+uncommitted changes, writes nothing when no log was written since the last one, and runs in
+this order:
+1. Sync the log, then write every committed page still only in the log (durability `Normal`)
+   to its place.
+2. Choose the segments to recycle: every segment the log went through before the current one,
+   and the unused recycled entries. The seven with the lowest page numbers become the next
+   `recycled_segments`. Any others go to the free list: a new free list holding them, the old
+   entries and the old list pages is written in place, with page checksums and `lsn` set to the
+   checkpoint position, to pages free in the committed state or to new pages at the end of the
+   file, never over the committed list (as in "Free-list pages").
+3. Sync, so every page in place, and the new list, is durable.
+4. Write the next superblock: the committed state's fields (and the new free list, if any),
+   `checkpoint_lsn` at the log's current append position, `log_head_page` and
+   `log_head_sequence` naming the current segment, the new `recycled_segments` and a raised
+   `log_sequence_reserved`. Sync.
+
+The checkpoint position is where the next flush starts. It is usually at a block boundary, but
+right after a recovery that found the records of a cut-off flush it is where the last commit
+ended, and the next flush starts with a link to a fresh segment. It is never in the last 9
+bytes of a block. Recovery starts there.
+
+A crash before step 4's superblock is durable leaves the old header and the old log, which
+nothing has overwritten: recycled segments are reused only after the header listing them is
+synced. A commit checkpoints automatically after it once the log since the last checkpoint
+reaches a configured size (1 MiB by default) or goes through more segments than
+`recycled_segments` holds, so the log keeps reusing its segments instead of growing the file.
+Under durability `Off` the checkpoint writes the same things without syncing.
 
 ## Recovery (item 7)
 Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
@@ -276,9 +328,17 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   in the page cache until its commit record is in the log. A transaction that would need more
   changed pages than the cache holds fails with a readable error. M3's versions in the leaves
   lift that limit.
-- **A checkpoint** writes the changed pages, syncs, and then writes the next superblock.
-- **Torn pages:** the first change to a page after a checkpoint logs the whole page, so a page
-  torn by a crash is rebuilt from the log.
+- **Redo:** the log is read from `checkpoint_lsn` through its links to the end of the last
+  whole commit; the images of committed transactions are written in place (or served from the
+  log when the file is opened read-only) and the last commit record's fields replace the
+  header's. Every page of the log and of the recycled segments is off limits to images.
+  Recovery holds two segment buffers and one entry per replayed image, and writes nothing
+  before the replayed state passes every check, so a crash during recovery leaves the same
+  log to replay again.
+- **A checkpoint** writes the changed pages, syncs, and then writes the next superblock (see
+  "Checkpoints").
+- **Torn pages:** every change logs the whole page, so a page torn by a crash is rebuilt from
+  the log.
 
 ## Keys and trees (items 5 and 6)
 - **The catalog tree** maps each tree's identity to its root page, its key scheme (a byte) and

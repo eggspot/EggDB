@@ -54,9 +54,10 @@ impl Default for CreateOptions {
 /// to the write-ahead log inside the file; with [`Durability::Full`] it then syncs the log, and
 /// only after that writes the pages in place. Opening the file replays every committed record
 /// since the last checkpoint, so a crash at any moment, even one that tears a page being
-/// overwritten in place, leaves exactly the commits whose records were durable. The header
-/// slots are written only when the log is created; checkpoints, which write them again and
-/// let the log be recycled, are item 7 of the v0.2.0 plan.
+/// overwritten in place, leaves exactly the commits whose records were durable. A
+/// [`PageFile::checkpoint`], run automatically by commits as [`PageFile::set_auto_checkpoint`]
+/// says, makes the next open replay only the log written after it and lets the log reuse its
+/// segments instead of growing the file.
 ///
 /// A page freed since the last commit is not handed out again until a commit has made the
 /// free durable, and writes to free pages and to the log's pages are refused.
