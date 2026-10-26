@@ -1,3 +1,4 @@
+use crate::cells;
 use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageSize, PageType, Superblock};
 use crate::frames::{FrameMut, FrameRef, Frames};
@@ -108,17 +109,16 @@ impl<F: File> PageCache<F> {
     ) -> Result<Self, StorageError> {
         let page_size = file.page_size();
         let frames = size.pages(page_size);
-        let invalid = StorageError::InvalidCacheSize { pages: frames };
         if frames == 0 || u32::try_from(frames).is_err() {
-            return Err(invalid);
+            return Err(StorageError::InvalidCacheSize { pages: frames });
         }
-        let table = PageTable::for_frames(frames).ok_or(invalid)?;
+        let frame_memory = Frames::new(memory, frames, page_size.bytes())?;
         Ok(Self {
-            frames: Frames::new(memory, frames, page_size.bytes())?,
-            table,
-            pages: (0..frames).map(|_| Cell::new(NO_PAGE)).collect(),
-            headers: (0..frames).map(|_| Cell::new(EMPTY_FRAME_HEADER)).collect(),
-            states: (0..frames).map(|_| Cell::new(0)).collect(),
+            frames: frame_memory,
+            table: PageTable::for_frames(frames)?,
+            pages: cells::filled(frames, NO_PAGE)?,
+            headers: cells::filled(frames, EMPTY_FRAME_HEADER)?,
+            states: cells::filled(frames, 0)?,
             file: RefCell::new(file),
             hand: Cell::new(0),
             dirty_pages: Cell::new(0),
@@ -126,7 +126,7 @@ impl<F: File> PageCache<F> {
             misses: Cell::new(0),
             evictions: Cell::new(0),
             pages_written: Cell::new(0),
-            commit_order: Vec::with_capacity(frames),
+            commit_order: cells::reserved(frames)?,
         })
     }
 
@@ -230,15 +230,17 @@ impl<F: File> PageCache<F> {
     /// Writes every changed page, in page order, and then commits the file through
     /// [`PageFile::commit`] with `update`. The pages stay in memory, no longer changed.
     ///
-    /// A failed write or sync leaves the file refusing changes until it is opened again (D59).
+    /// Everything that can refuse the commit is checked before the first write: the update
+    /// (see [`PageFile::commit`]), and that no changed page is still held by a handle, which
+    /// only a leaked handle can cause. A refused commit writes nothing and leaves the changes
+    /// in memory, to commit again or roll back. A failed write or sync leaves the file refusing
+    /// changes until it is opened again (D59).
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
         let mut order = std::mem::take(&mut self.commit_order);
         order.clear();
         order.extend((0..self.frames.count()).filter(|&frame| self.is_dirty(frame)));
         order.sort_unstable_by_key(|&frame| self.pages[frame].get());
-        let committed = self
-            .write_frames(&order)
-            .and_then(|()| self.file.get_mut().commit(update));
+        let committed = self.write_and_commit(&order, update);
         if committed.is_ok() {
             for &frame in &order {
                 self.states[frame].set(self.states[frame].get() & !DIRTY);
@@ -259,6 +261,29 @@ impl<F: File> PageCache<F> {
             if self.is_dirty(frame) {
                 self.discard(frame);
             }
+        }
+        Ok(())
+    }
+
+    fn write_and_commit(
+        &mut self,
+        order: &[usize],
+        update: impl FnOnce(&mut Superblock),
+    ) -> Result<(), StorageError> {
+        self.check_frames_writable(order)?;
+        let prepared = self.file.get_mut().prepare_commit(update)?;
+        self.write_frames(order)?;
+        self.file.get_mut().finish_commit(prepared)
+    }
+
+    fn check_frames_writable(&self, order: &[usize]) -> Result<(), StorageError> {
+        let file = self.file.borrow();
+        for &frame in order {
+            let page_id = self.pages[frame].get();
+            if self.frames.is_latched(frame) {
+                return Err(StorageError::PageBorrowed { page: page_id });
+            }
+            file.check_page_writable(page_id)?;
         }
         Ok(())
     }
@@ -466,7 +491,7 @@ impl DerefMut for PageMut<'_> {
 mod tests {
     use super::{CacheSize, PageCache};
     use crate::error::{FormatError, StorageError};
-    use crate::format::{Access, FileId, PageHeader, PageSize, PageType};
+    use crate::format::{Access, FileId, PageHeader, PageSize, PageType, Superblock};
     use crate::page_file::{CreateOptions, PageFile};
     use crate::test_rng::TestRng;
     use eggdb_platform::{
@@ -644,6 +669,103 @@ mod tests {
         ));
         assert_eq!(allocate_filled(&cache, 3), added);
         cache.commit(|_| {}).unwrap();
+    }
+
+    fn assert_refused_commit_wrote_nothing(
+        fs: &SimFileSystem,
+        mut cache: PageCache<SimFile>,
+        update: impl FnOnce(&mut Superblock),
+        expected: StorageError,
+    ) {
+        let before = fs.operation_count();
+        let error = cache.commit(update).unwrap_err();
+        assert_eq!(error.to_string(), expected.to_string());
+        assert_eq!(fs.operation_count(), before);
+        assert!(cache.stats().dirty_pages > 0);
+        cache.rollback().unwrap();
+        assert_eq!(cache.stats().dirty_pages, 0);
+        cache.commit(|_| {}).unwrap();
+    }
+
+    #[test]
+    fn a_commit_refused_for_its_update_writes_no_page() {
+        let fs = SimFileSystem::new();
+        let pages = committed_pages(&fs, 2, 4);
+        let mut cache = open(&fs, Access::ReadWrite, 4);
+        cache
+            .commit(|superblock| superblock.catalog_root = pages[0])
+            .unwrap();
+        cache.write(pages[1]).unwrap().fill(9);
+        assert_refused_commit_wrote_nothing(
+            &fs,
+            cache,
+            |superblock| superblock.catalog_root = 999_999_999,
+            FormatError::InvalidField {
+                field: "catalog_root",
+            }
+            .into(),
+        );
+        let cache = open(&fs, Access::ReadOnly, 4);
+        assert_eq!(cache.superblock().catalog_root, pages[0]);
+        assert_eq!(fill_of(&cache, pages[1]), 1);
+    }
+
+    #[test]
+    fn a_commit_refused_for_freeing_the_catalog_root_writes_no_page() {
+        let fs = SimFileSystem::new();
+        let pages = committed_pages(&fs, 2, 4);
+        let mut cache = open(&fs, Access::ReadWrite, 4);
+        cache
+            .commit(|superblock| superblock.catalog_root = pages[0])
+            .unwrap();
+        cache.write(pages[1]).unwrap().fill(9);
+        cache.free(pages[0]).unwrap();
+        assert_refused_commit_wrote_nothing(
+            &fs,
+            cache,
+            |_| {},
+            FormatError::InvalidField {
+                field: "catalog_root",
+            }
+            .into(),
+        );
+        let cache = open(&fs, Access::ReadOnly, 4);
+        assert_eq!(fill_of(&cache, pages[0]), 0);
+        assert_eq!(fill_of(&cache, pages[1]), 1);
+    }
+
+    #[test]
+    fn a_leaked_page_handle_refuses_the_commit_before_any_write() {
+        let fs = SimFileSystem::new();
+        let pages = committed_pages(&fs, 3, 4);
+        let cache = open(&fs, Access::ReadWrite, 4);
+        cache.write(pages[0]).unwrap().fill(8);
+        let mut leaked = cache.write(pages[2]).unwrap();
+        leaked.fill(8);
+        std::mem::forget(leaked);
+        assert_refused_commit_wrote_nothing(
+            &fs,
+            cache,
+            |_| {},
+            StorageError::PageBorrowed { page: pages[2] },
+        );
+        let cache = open(&fs, Access::ReadOnly, 4);
+        for (fill, &page) in pages.iter().enumerate() {
+            assert_eq!(fill_of(&cache, page), fill as u8);
+        }
+    }
+
+    #[test]
+    fn the_largest_size_is_refused_by_the_memory_budget_without_aborting() {
+        let fs = SimFileSystem::new();
+        drop(create(&fs, 1));
+        let memory = SimMemory::new();
+        memory.set_budget(1 << 20);
+        let file = PageFile::open(&fs, Path::new(DB), Access::ReadOnly).unwrap();
+        assert!(matches!(
+            PageCache::new(file, &memory, CacheSize::Pages(u32::MAX as usize)),
+            Err(StorageError::Io(error)) if error.kind() == ErrorKind::OutOfMemory
+        ));
     }
 
     #[test]

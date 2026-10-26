@@ -17,6 +17,7 @@
 //!   changes kept in memory until their commit, and [`CacheStats`].
 
 mod bytes;
+mod cells;
 mod crc32c;
 mod error;
 mod format;

@@ -1,3 +1,4 @@
+use crate::cells;
 use crate::error::StorageError;
 use eggdb_platform::{Memory, MemoryRegion, PageMode};
 use std::cell::Cell;
@@ -31,7 +32,7 @@ impl Frames {
         Ok(Self {
             base,
             frame_bytes,
-            latches: (0..count).map(|_| Cell::new(UNLATCHED)).collect(),
+            latches: cells::filled(count, UNLATCHED)?,
             region,
         })
     }

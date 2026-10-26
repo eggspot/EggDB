@@ -269,32 +269,34 @@ impl<F: File> PageFile<F> {
     ///
     /// The free list is written to pages that are free in the committed state, or to new pages
     /// at the end, never over the pages of the committed list, so a crash before the new
-    /// superblock is durable leaves the old state whole. An update whose catalog root or log
-    /// segments would be free pages is refused with [`FormatError::InvalidField`] before
-    /// anything is written, since the file could not be opened again.
+    /// superblock is durable leaves the old state whole. A commit that can't be made, such as
+    /// one whose catalog root or log segments would be free pages, which the file could not be
+    /// opened with again, is refused with [`FormatError::InvalidField`] before anything is
+    /// written, and leaves the changes since the last commit in place.
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
-        self.check_writable()?;
-        let committed = self.write_free_list_and_superblock(update);
-        self.fail_on_error(committed)
+        let prepared = self.prepare_commit(update)?;
+        self.finish_commit(prepared)
     }
 
-    fn write_free_list_and_superblock(
-        &mut self,
+    pub(crate) fn prepare_commit(
+        &self,
         update: impl FnOnce(&mut Superblock),
-    ) -> Result<(), StorageError> {
+    ) -> Result<PreparedCommit, StorageError> {
+        self.check_writable()?;
         let capacity = self.free_list_capacity();
         let mut entries: BTreeSet<u64> = self.available.clone();
         entries.extend(self.freed.iter().copied());
         entries.extend(self.free_list_pages.iter().copied());
         let mut list_pages = Vec::new();
         let mut reusable = self.available.clone();
+        let mut page_count = self.page_count;
         while list_pages.len() * capacity < entries.len() {
             let page = match reusable.pop_first() {
                 Some(page) => {
                     entries.remove(&page);
                     page
                 }
-                None => self.grow()?,
+                None => grow(&mut page_count)?,
             };
             list_pages.push(page);
         }
@@ -309,12 +311,36 @@ impl<F: File> PageFile<F> {
                 .ok_or(FormatError::InvalidField {
                     field: "generation",
                 })?;
-        next.page_count = self.page_count;
+        next.page_count = page_count;
         next.free_list_head = list_pages.first().copied().unwrap_or(NO_PAGE);
         next.free_page_count = (entries.len() + list_pages.len()) as u64;
         let slot = next.encode()?;
         check_not_listed(&next, &entries, &list_pages)?;
+        Ok(PreparedCommit {
+            superblock: next,
+            slot,
+            entries,
+            list_pages,
+        })
+    }
 
+    pub(crate) fn finish_commit(&mut self, prepared: PreparedCommit) -> Result<(), StorageError> {
+        self.check_writable()?;
+        let written = self.write_free_list_and_superblock(prepared);
+        self.fail_on_error(written)
+    }
+
+    fn write_free_list_and_superblock(
+        &mut self,
+        prepared: PreparedCommit,
+    ) -> Result<(), StorageError> {
+        let PreparedCommit {
+            superblock,
+            slot,
+            entries,
+            list_pages,
+        } = prepared;
+        self.page_count = superblock.page_count;
         self.write_free_list(&list_pages, &entries)?;
         let bytes = self.page_count * self.page_size().bytes() as u64;
         if self.file.size()? < bytes {
@@ -322,10 +348,10 @@ impl<F: File> PageFile<F> {
         }
         self.file.sync_data()?;
         self.file
-            .write_all_at(&slot, (next.slot() * HEADER_SLOT_SIZE) as u64)?;
+            .write_all_at(&slot, (superblock.slot() * HEADER_SLOT_SIZE) as u64)?;
         self.file.sync_data()?;
 
-        self.superblock = next;
+        self.superblock = superblock;
         self.available = entries;
         self.reused.clear();
         self.freed.clear();
@@ -334,12 +360,7 @@ impl<F: File> PageFile<F> {
     }
 
     fn grow(&mut self) -> Result<u64, StorageError> {
-        let page = self.page_count;
-        if (page + 1) & PAGE_VOLUME_MASK != 0 {
-            return Err(StorageError::FileFull);
-        }
-        self.page_count += 1;
-        Ok(page)
+        grow(&mut self.page_count)
     }
 
     fn write_free_list(
@@ -492,6 +513,23 @@ fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
         Err(error) if cfg!(target_os = "wasi") && error.kind() == ErrorKind::Unsupported => Ok(()),
         locked => Ok(locked?),
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedCommit {
+    superblock: Superblock,
+    slot: Vec<u8>,
+    entries: BTreeSet<u64>,
+    list_pages: Vec<u64>,
+}
+
+fn grow(page_count: &mut u64) -> Result<u64, StorageError> {
+    let page = *page_count;
+    if (page + 1) & PAGE_VOLUME_MASK != 0 {
+        return Err(StorageError::FileFull);
+    }
+    *page_count += 1;
+    Ok(page)
 }
 
 fn pages_in_use_by(
@@ -837,17 +875,19 @@ mod tests {
     }
 
     #[test]
-    fn a_crafted_generation_at_its_limit_refuses_a_commit_instead_of_wrapping() {
+    fn a_crafted_generation_at_its_limit_refuses_a_commit_before_any_write() {
         let fs = SimFileSystem::new();
         let mut file = create(&fs);
         file.superblock.generation = u64::MAX;
+        let before = fs.operation_count();
         assert!(matches!(
             file.commit(|_| {}),
             Err(StorageError::Format(FormatError::InvalidField {
                 field: "generation"
             }))
         ));
-        assert!(matches!(file.allocate(), Err(StorageError::NeedsReopen)));
+        assert_eq!(fs.operation_count(), before);
+        assert!(file.allocate().is_ok());
     }
 
     #[test]
@@ -883,6 +923,8 @@ mod tests {
             }))
         ));
         assert_eq!(fs.operation_count(), before);
+        file.rollback().unwrap();
+        file.commit(|_| {}).unwrap();
         drop(file);
         let file = open(&fs, Access::ReadWrite).unwrap();
         assert_eq!(file.superblock().catalog_root, root);

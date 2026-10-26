@@ -1,3 +1,5 @@
+use crate::cells;
+use crate::error::StorageError;
 use crate::format::NO_PAGE;
 use std::cell::Cell;
 
@@ -22,10 +24,14 @@ pub(crate) struct PageTable {
 }
 
 impl PageTable {
-    pub(crate) fn for_frames(frames: usize) -> Option<Self> {
-        let capacity = frames.checked_mul(2)?.checked_next_power_of_two()?.max(2);
-        Some(Self {
-            slots: (0..capacity).map(|_| Cell::new(EMPTY)).collect(),
+    pub(crate) fn for_frames(frames: usize) -> Result<Self, StorageError> {
+        let capacity = frames
+            .checked_mul(2)
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or(StorageError::InvalidCacheSize { pages: frames })?
+            .max(2);
+        Ok(Self {
+            slots: cells::filled(capacity, EMPTY)?,
             shift: u64::BITS - capacity.trailing_zeros(),
             len: Cell::new(0),
         })
@@ -141,6 +147,6 @@ mod tests {
 
     #[test]
     fn a_size_that_overflows_is_refused() {
-        assert!(PageTable::for_frames(usize::MAX).is_none());
+        assert!(PageTable::for_frames(usize::MAX).is_err());
     }
 }
