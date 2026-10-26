@@ -382,6 +382,60 @@ fn scenario_09_a_value_above_64_mib_waits_for_enter() {
 }
 
 #[test]
+fn a_single_20000_character_line_wraps_and_scrolls_to_its_end() {
+    let mut source = fixture();
+    let mut line: String = (0..2000).map(|n| format!("{:09} ", n)).collect();
+    line.push_str("THE END");
+    source
+        .entries
+        .insert(b"aaa:long".to_vec(), line.into_bytes());
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, source);
+    s.press(&["Enter", "w"]);
+    assert!(s.row(4).contains("000000000 000000001"), "{}", s.row(4));
+    s.press(&["End"]);
+    s.matches("wrap_long_line_end");
+    assert!(s.row(21).contains("THE END"), "{}", s.screen());
+    s.press(&["Home"]);
+    for _ in 0..30 {
+        s.press(&["PgDn"]);
+    }
+    assert!(s.row(21).contains("THE END"), "{}", s.screen());
+    s.press(&["Up"]);
+    assert!(!s.screen().contains("THE END"), "{}", s.screen());
+    s.press(&["Down"]);
+    assert!(s.row(21).contains("THE END"), "{}", s.screen());
+}
+
+#[test]
+fn values_above_4_mib_are_never_pretty_printed() {
+    let mut source = fixture();
+    let mut big = String::from("[");
+    while big.len() < (4 << 20) + 16 {
+        big.push_str("1,");
+    }
+    big.push_str("1]");
+    source
+        .entries
+        .insert(b"aaa:array".to_vec(), big.into_bytes());
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, source);
+    assert!(s.row(1).contains("text (auto)"), "{}", s.row(1));
+    assert!(
+        s.row(22).contains("JSON view takes values up to 4 MiB"),
+        "{}",
+        s.row(22)
+    );
+    s.press(&["v", "v"]);
+    assert!(s.row(1).contains("Value  text"), "{}", s.row(1));
+    assert!(
+        s.row(22).contains("JSON view takes values up to 4 MiB"),
+        "{}",
+        s.row(22)
+    );
+    s.press(&["Enter", "Right", "Right", "End"]);
+    assert!(s.row(4).contains(",1,1,1"), "{}", s.row(4));
+}
+
+#[test]
 fn scenario_17_quit_keys_and_interrupt_end_the_ui() {
     for keys in [&["q"][..], &["Ctrl-C"][..]] {
         let mut s = Scenario::new(80, 24);

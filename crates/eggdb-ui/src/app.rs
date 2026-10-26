@@ -3,6 +3,7 @@ use crate::json::{self, JsonLine, Token};
 use crate::source::{KeyRow, Source, Start, Summary};
 use crate::terminal::{Capabilities, Event, KeyCode, KeyEvent, Size, Terminal};
 use crate::text;
+use crate::text_view::{self, Segment};
 use crate::theme::{Role, Symbol, Theme};
 use crate::width::text_width;
 use std::io;
@@ -13,7 +14,8 @@ const COUNT_STEP: u64 = 10_000;
 const SMALLEST: Size = Size { cols: 40, rows: 10 };
 const TWO_PANES_FROM_COLS: u16 = 80;
 const PAN_STEP: usize = 8;
-const TAB_CELLS: usize = 4;
+const MOST_LINES: usize = 1 << 20;
+const JSON_TOO_LARGE: &str = "Shown as text: the JSON view takes values up to 4 MiB";
 const READ_ONLY_TOAST: &str =
     "eggdb ui browses read-only in this version; change keys with eggdb put and eggdb del";
 
@@ -62,7 +64,9 @@ struct Viewer {
     mode: Mode,
     json: Option<Vec<JsonLine>>,
     line_starts: Vec<usize>,
+    lines_capped: bool,
     scroll: usize,
+    wrap_offset: usize,
     pan: usize,
     wrap: bool,
 }
@@ -102,8 +106,6 @@ pub struct Ui<S> {
     help: Option<usize>,
     quit: bool,
 }
-
-type Segment = (String, Role);
 
 impl<S: Source> Ui<S> {
     /// Opens the screen on `source` at `size`: the first keys, the first value, and a count
@@ -412,7 +414,9 @@ impl<S: Source> Ui<S> {
             mode: Mode::Text,
             json: None,
             line_starts: Vec::new(),
+            lines_capped: false,
             scroll: 0,
+            wrap_offset: 0,
             pan: 0,
             wrap: false,
         };
@@ -426,7 +430,9 @@ impl<S: Source> Ui<S> {
         match self.source.value(&viewer.key) {
             Ok(Some(bytes)) => {
                 viewer.value_bytes = bytes.len() as u64;
-                viewer.line_starts = line_starts(&bytes);
+                let (starts, capped) = line_starts(&bytes);
+                viewer.line_starts = starts;
+                viewer.lines_capped = capped;
                 viewer.bytes = Some(bytes);
                 self.choose_mode(viewer);
             }
@@ -440,7 +446,12 @@ impl<S: Source> Ui<S> {
             return;
         };
         viewer.json = None;
+        let too_big_for_json = bytes.len() > json::LARGEST_JSON;
         viewer.mode = match viewer.forced {
+            Some(Mode::Json) if too_big_for_json => {
+                self.info(JSON_TOO_LARGE);
+                Mode::Text
+            }
             Some(Mode::Json) => match json::pretty(bytes) {
                 Ok(lines) => {
                     viewer.json = Some(lines);
@@ -461,6 +472,10 @@ impl<S: Source> Ui<S> {
                     _ if bytes.is_empty() => Mode::Text,
                     None => Mode::Hex,
                     Some(_) if has_controls => Mode::Hex,
+                    Some(text) if too_big_for_json && text.trim_start().starts_with(['{', '[']) => {
+                        self.info(JSON_TOO_LARGE);
+                        Mode::Text
+                    }
                     Some(text) if text.trim_start().starts_with(['{', '[']) => {
                         match json::pretty(bytes) {
                             Ok(lines) => {
@@ -475,7 +490,14 @@ impl<S: Source> Ui<S> {
             }
         };
         viewer.scroll = 0;
+        viewer.wrap_offset = 0;
         viewer.pan = 0;
+        if viewer.mode == Mode::Text && viewer.lines_capped {
+            self.info(format!(
+                "Showing the first {} lines; v shows the whole value as hex",
+                text::count(MOST_LINES as u64)
+            ));
+        }
     }
 
     /// Changes the state for one event.
@@ -567,7 +589,11 @@ impl<S: Source> Ui<S> {
             }
             return;
         };
-        let last_top = self.last_top(&viewer);
+        if self.wraps(&viewer) && self.wrapped_key(&mut viewer, code, visible) {
+            self.viewer = Some(viewer);
+            return;
+        }
+        let last_top = self.viewer_lines(&viewer).saturating_sub(visible);
         match code {
             KeyCode::Esc => self.focus = Pane::Keys,
             KeyCode::Enter if viewer.bytes.is_none() && !viewer.missing => {
@@ -588,7 +614,8 @@ impl<S: Source> Ui<S> {
             KeyCode::Char('w') if viewer.mode == Mode::Text => {
                 viewer.wrap = !viewer.wrap;
                 viewer.pan = 0;
-                viewer.scroll = viewer.scroll.min(self.last_top(&viewer));
+                viewer.wrap_offset = 0;
+                viewer.scroll = viewer.scroll.min(last_top);
             }
             _ => {}
         }
@@ -1001,12 +1028,21 @@ impl<S: Source> Ui<S> {
             }
             (_, Some(_)) => {
                 let total = self.viewer_lines(viewer);
+                let last_line = if self.wraps(viewer) {
+                    self.wrapped_rows(viewer, visible)
+                        .last()
+                        .map_or(viewer.scroll, |&(line, _, _)| line)
+                        + 1
+                } else {
+                    viewer.scroll + visible
+                };
                 format!(
-                    "line {}{}{}/{} ",
+                    "line {}{}{}/{}{} ",
                     text::count((viewer.scroll + 1).min(total) as u64),
                     self.theme.symbol(Symbol::EnDash),
-                    text::count((viewer.scroll + self.lines_shown(viewer)).min(total) as u64),
-                    text::count(total as u64)
+                    text::count(last_line.min(total) as u64),
+                    text::count(total as u64),
+                    if viewer.lines_capped { "+" } else { "" }
                 )
             }
         };
@@ -1060,7 +1096,7 @@ impl<S: Source> Ui<S> {
                     .iter()
                     .skip(viewer.scroll)
                     .take(visible)
-                    .map(json_segments)
+                    .map(|line| json_segments(bytes, *line))
                     .collect()
             }),
             Mode::Hex => self.hex_rows(viewer, bytes, visible),
@@ -1082,70 +1118,123 @@ impl<S: Source> Ui<S> {
         room: usize,
         visible: usize,
     ) -> Vec<Vec<Segment>> {
-        let mut rows = Vec::new();
-        for line in viewer.scroll..viewer.line_starts.len() {
-            if rows.len() >= visible {
-                break;
-            }
-            let segments = text_segments(line_bytes(viewer, bytes, line));
-            if viewer.wrap && room > 0 {
-                rows.extend(wrap(segments, room));
-            } else {
-                rows.push(segments);
-            }
+        if self.wraps(viewer) {
+            return self
+                .wrapped_rows(viewer, visible)
+                .into_iter()
+                .map(|(line, from, to)| {
+                    let line = line_bytes(viewer, bytes, line);
+                    text_view::segments(line.get(from..to).unwrap_or_default())
+                })
+                .collect();
         }
-        rows.truncate(visible);
-        rows
+        (viewer.scroll..viewer.line_starts.len())
+            .take(visible)
+            .map(|line| {
+                text_view::prefix_segments(line_bytes(viewer, bytes, line), viewer.pan + room + 1)
+            })
+            .collect()
     }
 
     fn wraps(&self, viewer: &Viewer) -> bool {
         viewer.wrap && viewer.mode == Mode::Text && viewer.bytes.is_some()
     }
 
-    fn rows_of_line(&self, viewer: &Viewer, line: usize) -> usize {
-        let room = usize::from(self.viewer_cols().saturating_sub(1)).max(1);
+    fn wrap_room(&self) -> usize {
+        usize::from(self.viewer_cols().saturating_sub(1)).max(1)
+    }
+
+    fn wrapped_rows(&self, viewer: &Viewer, limit: usize) -> Vec<(usize, usize, usize)> {
         let bytes = viewer.bytes.as_deref().unwrap_or_default();
-        let width: usize = text_segments(line_bytes(viewer, bytes, line))
-            .iter()
-            .map(|(text, _)| text_width(text))
-            .sum();
-        width.div_ceil(room).max(1)
+        let room = self.wrap_room();
+        let mut rows = Vec::new();
+        let mut line = viewer.scroll;
+        let mut from = viewer.wrap_offset;
+        while rows.len() < limit && line < viewer.line_starts.len() {
+            let content = line_bytes(viewer, bytes, line);
+            let to = text_view::row_end(content, from, room);
+            rows.push((line, from, to));
+            if to >= content.len() {
+                line += 1;
+                from = 0;
+            } else {
+                from = to;
+            }
+        }
+        rows
     }
 
-    fn last_top(&self, viewer: &Viewer) -> usize {
+    fn wrap_down(&self, viewer: &mut Viewer) -> bool {
         let visible = self.viewer_rows();
-        let total = self.viewer_lines(viewer);
-        if !self.wraps(viewer) {
-            return total.saturating_sub(visible);
-        }
-        let mut used = 0;
-        let mut top = total;
-        while top > 0 {
-            used += self.rows_of_line(viewer, top - 1);
-            if used > visible {
-                break;
+        let rows = self.wrapped_rows(viewer, visible + 1);
+        match rows.get(1) {
+            Some(&(line, from, _)) if rows.len() > visible => {
+                viewer.scroll = line;
+                viewer.wrap_offset = from;
+                true
             }
-            top -= 1;
+            _ => false,
         }
-        top.min(total.saturating_sub(1))
     }
 
-    fn lines_shown(&self, viewer: &Viewer) -> usize {
-        let visible = self.viewer_rows();
-        let total = self.viewer_lines(viewer);
-        if !self.wraps(viewer) {
-            return visible.min(total.saturating_sub(viewer.scroll));
+    fn wrap_up(&self, viewer: &mut Viewer) -> bool {
+        let bytes = viewer.bytes.as_deref().unwrap_or_default();
+        let room = self.wrap_room();
+        if viewer.wrap_offset > 0 {
+            let content = line_bytes(viewer, bytes, viewer.scroll);
+            viewer.wrap_offset = text_view::row_start_before(content, viewer.wrap_offset, room);
+            return true;
         }
-        let mut used = 0;
-        let mut shown = 0;
-        for line in viewer.scroll..total {
-            used += self.rows_of_line(viewer, line);
-            if used > visible && shown > 0 {
-                break;
+        if viewer.scroll == 0 {
+            return false;
+        }
+        viewer.scroll -= 1;
+        let content = line_bytes(viewer, bytes, viewer.scroll);
+        viewer.wrap_offset = text_view::row_start_before(content, content.len(), room);
+        true
+    }
+
+    fn wrapped_key(&self, viewer: &mut Viewer, code: KeyCode, visible: usize) -> bool {
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.wrap_down(viewer);
             }
-            shown += 1;
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.wrap_up(viewer);
+            }
+            KeyCode::PageDown => {
+                for _ in 0..visible {
+                    if !self.wrap_down(viewer) {
+                        break;
+                    }
+                }
+            }
+            KeyCode::PageUp => {
+                for _ in 0..visible {
+                    if !self.wrap_up(viewer) {
+                        break;
+                    }
+                }
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                viewer.scroll = 0;
+                viewer.wrap_offset = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                viewer.scroll = viewer.line_starts.len().saturating_sub(1);
+                let bytes = viewer.bytes.as_deref().unwrap_or_default();
+                let content = line_bytes(viewer, bytes, viewer.scroll);
+                viewer.wrap_offset =
+                    text_view::row_start_before(content, content.len(), self.wrap_room());
+                for _ in 1..visible {
+                    if !self.wrap_up(viewer) {
+                        break;
+                    }
+                }
+            }
+            _ => return false,
         }
-        shown
+        true
     }
 
     fn hex_rows(&self, viewer: &Viewer, bytes: &[u8], visible: usize) -> Vec<Vec<Segment>> {
@@ -1379,83 +1468,23 @@ fn line_bytes<'a>(viewer: &Viewer, bytes: &'a [u8], line: usize) -> &'a [u8] {
     content.strip_suffix(b"\r").unwrap_or(content)
 }
 
-fn line_starts(bytes: &[u8]) -> Vec<usize> {
+fn line_starts(bytes: &[u8]) -> (Vec<usize>, bool) {
     let mut starts = vec![0];
-    starts.extend(
-        bytes
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| **b == b'\n')
-            .map(|(index, _)| index + 1)
-            .filter(|&start| start < bytes.len()),
-    );
-    starts
+    for (index, _) in bytes.iter().enumerate().filter(|(_, b)| **b == b'\n') {
+        if index + 1 >= bytes.len() {
+            break;
+        }
+        if starts.len() == MOST_LINES {
+            return (starts, true);
+        }
+        starts.push(index + 1);
+    }
+    (starts, false)
 }
 
-fn text_segments(bytes: &[u8]) -> Vec<Segment> {
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut plain = String::new();
-    for chunk in bytes.utf8_chunks() {
-        for c in chunk.valid().chars() {
-            match c {
-                '\t' => plain.push_str(&" ".repeat(TAB_CELLS)),
-                c if c.is_control() => {
-                    let code = u32::from(c);
-                    if code < 0x20 || code == 0x7f {
-                        plain.push('^');
-                        plain.push(char::from((code as u8) ^ 0x40));
-                    } else {
-                        plain.push_str(&format!("\\u{{{code:x}}}"));
-                    }
-                }
-                c => plain.push(c),
-            }
-        }
-        if !chunk.invalid().is_empty() {
-            if !plain.is_empty() {
-                segments.push((std::mem::take(&mut plain), Role::Plain));
-            }
-            let escaped: String = chunk
-                .invalid()
-                .iter()
-                .map(|b| format!("\\x{b:02x}"))
-                .collect();
-            segments.push((escaped, Role::Error));
-        }
-    }
-    if !plain.is_empty() {
-        segments.push((plain, Role::Plain));
-    }
-    segments
-}
-
-fn wrap(segments: Vec<Segment>, room: usize) -> Vec<Vec<Segment>> {
-    let mut rows = vec![Vec::new()];
-    let mut used = 0;
-    for (text, role) in segments {
-        let mut piece = String::new();
-        for c in text.chars() {
-            let width = crate::width::char_width(c);
-            if used + width > room {
-                if let Some(row) = rows.last_mut() {
-                    row.push((std::mem::take(&mut piece), role));
-                }
-                rows.push(Vec::new());
-                used = 0;
-            }
-            piece.push(c);
-            used += width;
-        }
-        if let Some(row) = rows.last_mut() {
-            row.push((piece, role));
-        }
-    }
-    rows
-}
-
-fn json_segments(line: &JsonLine) -> Vec<Segment> {
-    let mut segments = vec![(" ".repeat(line.indent * 2), Role::Plain)];
-    for (token, part) in &line.parts {
+fn json_segments(bytes: &[u8], line: JsonLine) -> Vec<Segment> {
+    let mut segments = vec![(" ".repeat(line.indent as usize * 2), Role::Plain)];
+    for (token, part) in json::line_parts(bytes, line) {
         let role = match token {
             Token::Punctuation => Role::Plain,
             Token::Key => Role::JsonKey,
@@ -1463,42 +1492,27 @@ fn json_segments(line: &JsonLine) -> Vec<Segment> {
             Token::Number => Role::JsonNumber,
             Token::Literal => Role::JsonLiteral,
         };
-        segments.push((part.clone(), role));
+        segments.push((part.to_owned(), role));
     }
     segments
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{line_starts, text_segments, wrap};
-    use crate::theme::Role;
+    use super::{MOST_LINES, line_starts};
 
     #[test]
     fn lines_start_after_each_line_break() {
-        assert_eq!(line_starts(b"a\nbc\n"), [0, 2]);
-        assert_eq!(line_starts(b"a\n\nb"), [0, 2, 3]);
-        assert_eq!(line_starts(b""), [0]);
+        assert_eq!(line_starts(b"a\nbc\n"), (vec![0, 2], false));
+        assert_eq!(line_starts(b"a\n\nb"), (vec![0, 2, 3], false));
+        assert_eq!(line_starts(b""), (vec![0], false));
     }
 
     #[test]
-    fn tabs_controls_and_invalid_bytes_are_visible() {
-        assert_eq!(
-            text_segments(b"a\tb\x01\xffc"),
-            [
-                ("a    b^A".to_owned(), Role::Plain),
-                ("\\xff".to_owned(), Role::Error),
-                ("c".to_owned(), Role::Plain),
-            ]
-        );
-    }
-
-    #[test]
-    fn wrapping_splits_at_the_room() {
-        let rows = wrap(vec![("abcdefg".to_owned(), Role::Plain)], 3);
-        let spelled: Vec<String> = rows
-            .iter()
-            .map(|row| row.iter().map(|(text, _)| text.as_str()).collect())
-            .collect();
-        assert_eq!(spelled, ["abc", "def", "g"]);
+    fn the_line_index_is_capped() {
+        let many = vec![b'\n'; MOST_LINES + 10];
+        let (starts, capped) = line_starts(&many);
+        assert!(capped);
+        assert_eq!(starts.len(), MOST_LINES);
     }
 }

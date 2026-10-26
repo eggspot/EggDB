@@ -5,6 +5,11 @@
 //! [`Source`] and draws on a [`Terminal`]: [`OsTerminal`] for the real one (raw mode and
 //! restore come from the platform layer), [`FakeTerminal`] for tests, which compare its
 //! [`FakeTerminal::screen`] with golden text files.
+//!
+//! Character widths come from our own range tables, an approximation of Unicode's East Asian
+//! Width (Wide and Fullwidth take two cells: CJK, Hangul, fullwidth forms, emoji) and of the
+//! nonspacing, enclosing and format characters (zero cells, joined to the cell before);
+//! anything else takes one cell.
 
 mod app;
 mod decoder;
@@ -16,6 +21,7 @@ mod render;
 mod source;
 mod terminal;
 mod text;
+mod text_view;
 mod theme;
 mod width;
 
@@ -37,9 +43,12 @@ const IDLE_WAIT: Duration = Duration::from_millis(200);
 /// background work (the key count) runs in steps whenever no event is waiting.
 pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Result<()> {
     let mut frame = Frame::new(terminal.size());
+    let mut changed = true;
     loop {
-        ui.draw(&mut frame);
-        terminal.present(&frame)?;
+        if changed {
+            ui.draw(&mut frame);
+            terminal.present(&frame)?;
+        }
         if ui.should_quit() {
             return Ok(());
         }
@@ -48,7 +57,7 @@ pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Resu
         } else {
             Duration::ZERO
         };
-        match terminal.next_event(wait)? {
+        changed = match terminal.next_event(wait)? {
             Some(event) => {
                 ui.handle(event);
                 while !ui.should_quit()
@@ -56,8 +65,87 @@ pub fn run<T: Terminal, S: Source>(terminal: &mut T, ui: &mut Ui<S>) -> io::Resu
                 {
                     ui.handle(event);
                 }
+                true
             }
-            None => ui.tick(),
+            None if ui.is_idle() => false,
+            None => {
+                ui.tick();
+                true
+            }
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Capabilities, Event, FakeTerminal, KeyCode, KeyEvent, Ui, UiOptions, run};
+    use crate::frame::Frame;
+    use crate::source::{CountStep, KeyRow, Source, Start, Summary};
+    use crate::terminal::{Size, Terminal};
+    use std::io;
+    use std::time::Duration;
+
+    struct Empty;
+
+    impl Source for Empty {
+        fn summary(&self) -> Result<Summary, String> {
+            Ok(Summary::default())
         }
+        fn keys(&self, _: &[u8], _: Start<'_>, _: usize) -> Result<Vec<KeyRow>, String> {
+            Ok(Vec::new())
+        }
+        fn value(&self, _: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+        fn count(&self, _: &[u8], _: Option<&[u8]>, _: u64) -> Result<CountStep, String> {
+            Ok(CountStep {
+                counted: 0,
+                resume_after: None,
+            })
+        }
+    }
+
+    struct IdleThenQuit {
+        inner: FakeTerminal,
+        idle_polls: usize,
+    }
+
+    impl Terminal for IdleThenQuit {
+        fn size(&self) -> Size {
+            self.inner.size()
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+        fn next_event(&mut self, _: Duration) -> io::Result<Option<Event>> {
+            if self.idle_polls == 0 {
+                return Ok(Some(Event::Key(KeyEvent::plain(KeyCode::Char('q')))));
+            }
+            self.idle_polls -= 1;
+            Ok(None)
+        }
+        fn present(&mut self, frame: &Frame) -> io::Result<()> {
+            self.inner.present(frame)
+        }
+    }
+
+    #[test]
+    fn idle_timeouts_present_nothing() {
+        let mut terminal = IdleThenQuit {
+            inner: FakeTerminal::new(80, 24, Capabilities::FULL),
+            idle_polls: 50,
+        };
+        let mut ui = Ui::new(
+            Empty,
+            UiOptions {
+                capabilities: Capabilities::FULL,
+            },
+            terminal.size(),
+        );
+        ui.run_until_idle();
+        if let Err(error) = run(&mut terminal, &mut ui) {
+            panic!("run: {error}");
+        }
+        assert_eq!(terminal.inner.frames_presented(), 2);
     }
 }

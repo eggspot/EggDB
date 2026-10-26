@@ -1,8 +1,11 @@
 use eggdb::{CommitStamp, Database, Scan};
 use eggdb_ui::{CountStep, KeyRow, Source, Start, Summary};
 use std::ops::Bound;
+use std::time::{Duration, Instant};
 
 const SECONDS_PER_DAY: u64 = 86_400;
+const LONGEST_COUNT_STEP: Duration = Duration::from_millis(20);
+const TIME_CHECK_EVERY: u64 = 64;
 
 pub(crate) struct DatabaseSource {
     db: Database,
@@ -127,9 +130,13 @@ impl Source for DatabaseSource {
             .read(|tx| {
                 let mut scan = tx.scan(bounds);
                 let mut counted = 0;
+                let started = Instant::now();
                 while let Some((key, _)) = scan.next_entry()? {
                     counted += 1;
-                    if counted == limit {
+                    if counted == limit
+                        || (counted % TIME_CHECK_EVERY == 0
+                            && started.elapsed() >= LONGEST_COUNT_STEP)
+                    {
                         return Ok(CountStep {
                             counted,
                             resume_after: Some(key.to_vec()),

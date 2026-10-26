@@ -9,10 +9,10 @@ pub(crate) enum Token {
     Literal,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct JsonLine {
-    pub(crate) indent: usize,
-    pub(crate) parts: Vec<(Token, String)>,
+    offset: u32,
+    pub(crate) indent: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,34 +30,104 @@ impl JsonError {
     }
 }
 
+pub(crate) const LARGEST_JSON: usize = 4 << 20;
+
 pub(crate) fn pretty(bytes: &[u8]) -> Result<Vec<JsonLine>, JsonError> {
+    if bytes.len() > LARGEST_JSON {
+        return Err(JsonError {
+            offset: 0,
+            expected: "a value of at most 4 MiB for the JSON view",
+        });
+    }
     let text = std::str::from_utf8(bytes).map_err(|error| JsonError {
         offset: error.valid_up_to(),
         expected: "valid UTF-8",
     })?;
     let mut printer = Printer {
         bytes: text.as_bytes(),
-        text,
         at: 0,
         lines: Vec::new(),
-        current: JsonLine::default(),
     };
     printer.whitespace();
+    printer.new_line(0);
     printer.value(0)?;
     printer.whitespace();
     if printer.at != printer.bytes.len() {
         return Err(printer.error("the end of the value"));
     }
-    printer.lines.push(printer.current);
     Ok(printer.lines)
+}
+
+pub(crate) fn line_parts(bytes: &[u8], line: JsonLine) -> Vec<(Token, &str)> {
+    let mut parts = Vec::new();
+    let mut at = usize::try_from(line.offset).unwrap_or(usize::MAX);
+    let next_significant = |from: usize| {
+        bytes
+            .get(from..)
+            .and_then(|rest| rest.iter().find(|b| !b.is_ascii_whitespace()).copied())
+    };
+    let slice = |from: usize, to: usize| {
+        bytes
+            .get(from..to)
+            .and_then(|part| std::str::from_utf8(part).ok())
+            .unwrap_or("")
+    };
+    while let Some(&first) = bytes.get(at) {
+        let end = match first {
+            b'{' | b'[' | b'}' | b']' | b',' | b':' => at + 1,
+            b'"' => string_end(bytes, at),
+            _ => {
+                at + bytes[at..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'+' | b'.'))
+                    .count()
+                    .max(1)
+            }
+        };
+        let next = next_significant(end);
+        let token = match first {
+            b'"' if next == Some(b':') => Token::Key,
+            b'"' => Token::String,
+            b't' | b'f' | b'n' => Token::Literal,
+            b'{' | b'[' | b'}' | b']' | b',' | b':' => Token::Punctuation,
+            _ => Token::Number,
+        };
+        parts.push((token, if first == b':' { ": " } else { slice(at, end) }));
+        at = end;
+        let ends_line = match first {
+            b'{' => next != Some(b'}'),
+            b'[' => next != Some(b']'),
+            b',' => true,
+            b':' => false,
+            _ => matches!(next, Some(b'}' | b']') | None),
+        };
+        if ends_line {
+            break;
+        }
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+    }
+    parts
+}
+
+fn string_end(bytes: &[u8], start: usize) -> usize {
+    let mut at = start + 1;
+    while let Some(&byte) = bytes.get(at) {
+        at += 1;
+        match byte {
+            b'"' => return at,
+            b'\\' => at += 1,
+            _ => {}
+        }
+    }
+    bytes.len()
 }
 
 struct Printer<'a> {
     bytes: &'a [u8],
-    text: &'a str,
     at: usize,
     lines: Vec<JsonLine>,
-    current: JsonLine,
 }
 
 impl Printer<'_> {
@@ -78,19 +148,11 @@ impl Printer<'_> {
         }
     }
 
-    fn push(&mut self, token: Token, text: &str) {
-        self.current.parts.push((token, text.to_owned()));
-    }
-
     fn new_line(&mut self, indent: usize) {
-        let line = std::mem::replace(
-            &mut self.current,
-            JsonLine {
-                indent,
-                parts: Vec::new(),
-            },
-        );
-        self.lines.push(line);
+        self.lines.push(JsonLine {
+            offset: u32::try_from(self.at).unwrap_or(u32::MAX),
+            indent: u32::try_from(indent).unwrap_or(u32::MAX),
+        });
     }
 
     fn value(&mut self, depth: usize) -> Result<(), JsonError> {
@@ -101,15 +163,11 @@ impl Printer<'_> {
             Some(b'{') => self.container(depth, b'}', true),
             Some(b'[') => self.container(depth, b']', false),
             Some(b'"') => {
-                let raw = self.string()?;
-                let text = self.text;
-                self.push(Token::String, &text[raw]);
+                self.string()?;
                 Ok(())
             }
             Some(b'-' | b'0'..=b'9') => {
-                let raw = self.number()?;
-                let text = self.text;
-                self.push(Token::Number, &text[raw]);
+                self.number()?;
                 Ok(())
             }
             Some(b't') => self.literal("true"),
@@ -120,13 +178,10 @@ impl Printer<'_> {
     }
 
     fn container(&mut self, depth: usize, close: u8, object: bool) -> Result<(), JsonError> {
-        let (open_text, close_text) = if object { ("{", "}") } else { ("[", "]") };
         self.at += 1;
-        self.push(Token::Punctuation, open_text);
         self.whitespace();
         if self.peek() == Some(close) {
             self.at += 1;
-            self.push(Token::Punctuation, close_text);
             return Ok(());
         }
         loop {
@@ -135,15 +190,12 @@ impl Printer<'_> {
                 if self.peek() != Some(b'"') {
                     return Err(self.error("a string key"));
                 }
-                let key = self.string()?;
-                let text = self.text;
-                self.push(Token::Key, &text[key]);
+                self.string()?;
                 self.whitespace();
                 if self.peek() != Some(b':') {
                     return Err(self.error("':'"));
                 }
                 self.at += 1;
-                self.push(Token::Punctuation, ": ");
                 self.whitespace();
             }
             self.value(depth + 1)?;
@@ -151,13 +203,11 @@ impl Printer<'_> {
             match self.peek() {
                 Some(b',') => {
                     self.at += 1;
-                    self.push(Token::Punctuation, ",");
                     self.whitespace();
                 }
                 Some(byte) if byte == close => {
-                    self.at += 1;
                     self.new_line(depth);
-                    self.push(Token::Punctuation, close_text);
+                    self.at += 1;
                     return Ok(());
                 }
                 _ => {
@@ -244,7 +294,6 @@ impl Printer<'_> {
             return Err(self.error(word));
         }
         self.at += word.len();
-        self.push(Token::Literal, word);
         Ok(())
     }
 }
@@ -255,13 +304,18 @@ mod tests {
 
     fn lines(text: &str) -> Vec<String> {
         pretty(text.as_bytes())
-            .map(|lines| lines.iter().map(spell).collect())
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| spell(text.as_bytes(), line))
+                    .collect()
+            })
             .unwrap_or_else(|error| vec![error.message()])
     }
 
-    fn spell(line: &JsonLine) -> String {
-        let mut out = " ".repeat(line.indent * 2);
-        for (_, part) in &line.parts {
+    fn spell(bytes: &[u8], line: &JsonLine) -> String {
+        let mut out = " ".repeat(line.indent as usize * 2);
+        for (_, part) in super::line_parts(bytes, *line) {
             out.push_str(part);
         }
         out
@@ -285,6 +339,31 @@ mod tests {
                 "}",
             ]
         );
+    }
+
+    #[test]
+    fn keys_are_told_from_strings_and_the_index_is_small() {
+        let text = r#"{ "k" : "v" , "list" : [ "x" , { } ] }"#;
+        let Ok(index) = pretty(text.as_bytes()) else {
+            panic!("valid JSON");
+        };
+        let parts = super::line_parts(text.as_bytes(), index[1]);
+        assert_eq!(parts[0], (super::Token::Key, "\"k\""));
+        assert_eq!(parts[2], (super::Token::String, "\"v\""));
+        assert_eq!(lines(text)[3], r#"    "x","#);
+        assert_eq!(lines(text)[4], "    {}");
+        assert_eq!(std::mem::size_of::<JsonLine>(), 8);
+    }
+
+    #[test]
+    fn values_above_4_mib_are_not_indexed() {
+        let big = format!("[{}1]", "1,".repeat(super::LARGEST_JSON / 2));
+        assert!(pretty(big.as_bytes()).is_err());
+        let fits = format!("[{}1]", "1,".repeat(super::LARGEST_JSON / 2 - 2));
+        let Ok(index) = pretty(fits.as_bytes()) else {
+            panic!("fits");
+        };
+        assert_eq!(index.len(), super::LARGEST_JSON / 2 + 1);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use crate::terminal::{Event, KeyCode, KeyEvent, Modifiers};
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 const LONGEST_SEQUENCE: usize = 64;
+const LARGEST_PASTE: usize = 1 << 20;
 
 /// Turns the bytes a terminal sends into [`Event`]s: keys, escape sequences (CSI and SS3),
 /// UTF-8 characters and bracketed paste, across reads that split them anywhere.
@@ -10,7 +11,8 @@ const LONGEST_SEQUENCE: usize = 64;
 /// A lone `Esc` byte could start a sequence, so it stays pending until more bytes arrive or
 /// the caller decides none will (25 ms of quiet, in the real terminal) and calls
 /// [`InputDecoder::flush`]. Hostile or garbled input never panics; bytes that make no sense are
-/// dropped or shown as U+FFFD.
+/// dropped or shown as U+FFFD. A paste ends after 1 MiB even without its end marker, so the
+/// keys after it (`q` among them) still arrive as keys.
 #[derive(Debug, Default)]
 pub struct InputDecoder {
     pending: Vec<u8>,
@@ -51,8 +53,9 @@ impl InputDecoder {
         while at < self.pending.len() {
             if let Some(paste) = self.paste.as_mut() {
                 let rest = &self.pending[at..];
+                let room = LARGEST_PASTE - paste.len();
                 match find(rest, PASTE_END) {
-                    Some(end) => {
+                    Some(end) if end <= room => {
                         paste.extend_from_slice(&rest[..end]);
                         let text = String::from_utf8_lossy(paste).into_owned();
                         self.paste = None;
@@ -60,10 +63,21 @@ impl InputDecoder {
                         at += end + PASTE_END.len();
                         continue;
                     }
-                    None => {
-                        let keep = longest_partial_suffix(rest, PASTE_END);
-                        paste.extend_from_slice(&rest[..rest.len() - keep]);
-                        at = self.pending.len() - keep;
+                    found => {
+                        let keep = if found.is_some() {
+                            0
+                        } else {
+                            longest_partial_suffix(rest, PASTE_END)
+                        };
+                        let take = (rest.len() - keep).min(room);
+                        paste.extend_from_slice(&rest[..take]);
+                        at += take;
+                        if paste.len() >= LARGEST_PASTE {
+                            let text = String::from_utf8_lossy(paste).into_owned();
+                            self.paste = None;
+                            events.push(Event::Paste(text));
+                            continue;
+                        }
                         break;
                     }
                 }
@@ -410,6 +424,21 @@ mod tests {
                 key(KeyCode::Char('j'))
             ]
         );
+    }
+
+    #[test]
+    fn a_paste_without_an_end_stops_at_one_mebibyte() {
+        let mut decoder = InputDecoder::new();
+        let mut events = decoder.feed(b"\x1b[200~");
+        let chunk = vec![b'x'; 300 * 1024];
+        for _ in 0..4 {
+            events.extend(decoder.feed(&chunk));
+        }
+        events.extend(decoder.feed(b"q"));
+        assert!(matches!(&events[0], Event::Paste(text) if text.len() == super::LARGEST_PASTE));
+        assert_eq!(events.len(), 1 + 4 * 300 * 1024 - super::LARGEST_PASTE + 1);
+        assert_eq!(events[1], key(KeyCode::Char('x')));
+        assert_eq!(events.last(), Some(&key(KeyCode::Char('q'))));
     }
 
     #[test]
