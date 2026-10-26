@@ -17,15 +17,19 @@
 //!   allocated once, clock eviction, pages pinned by [`PageRef`] and [`PageMut`] handles,
 //!   changes kept in memory until their commit, and [`CacheStats`];
 //! - [`BTree`], a B+tree of byte-string keys and values in the cache's pages, with fence keys,
-//!   prefix truncation and splits up to the root, and [`BTree::check`], which checks a whole
-//!   tree and returns a [`TreeReport`].
+//!   prefix truncation, splits up to the root, deletes that merge under-filled pages, a
+//!   [`Cursor`] for range, prefix and reverse scans in a [`ScanOrder`], and [`BTree::check`],
+//!   which checks a whole tree and returns a [`TreeReport`].
 
 mod btree;
+#[cfg(test)]
+mod btree_delete_tests;
 #[cfg(test)]
 mod btree_tests;
 mod bytes;
 mod cells;
 mod crc32c;
+mod cursor;
 mod error;
 mod format;
 mod frames;
@@ -39,6 +43,7 @@ mod tree_page;
 
 pub use btree::{BTree, TreeReport};
 pub use crc32c::{crc32c, crc32c_append};
+pub use cursor::{Cursor, ScanOrder};
 pub use error::{FormatError, StorageError};
 pub use format::{
     Access, FORMAT_VERSION, Features, FileId, HEADER_SLOT_SIZE, HeaderChoice, MAGIC,

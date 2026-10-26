@@ -168,6 +168,53 @@ impl Shape {
         self.low_len != 0 || self.high_len.is_some()
     }
 
+    pub(crate) fn has_high_fence(&self) -> bool {
+        self.high_len.is_some()
+    }
+
+    pub(crate) fn used_bytes(&self) -> usize {
+        PAGE_HEADER_SIZE + self.slots_end() + (self.body_len - self.cell_start - self.garbage)
+    }
+
+    pub(crate) fn merged_size(
+        &self,
+        body: &[u8],
+        separator: &[u8],
+        right: &Self,
+        right_body: &[u8],
+    ) -> usize {
+        let low = (self.prefix(body), self.low_suffix(body));
+        let high = right
+            .high_suffix(right_body)
+            .map(|high| (right.prefix(right_body), high));
+        let prefix = high.map_or(0, |high| {
+            low.0
+                .iter()
+                .chain(low.1)
+                .zip(high.0.iter().chain(high.1))
+                .take_while(|(a, b)| a == b)
+                .count()
+        });
+        let fences = self.low_len + high.map_or(0, |(head, tail)| head.len() + tail.len() - prefix);
+        let longer_keys = |shape: &Self| shape.count * shape.prefix_len.saturating_sub(prefix);
+        let separator_cell = if self.is_leaf() {
+            0
+        } else {
+            SLOT + INNER_CELL_HEADER + separator.len().saturating_sub(prefix)
+        };
+        TREE_HEADER_END
+            + fences
+            + self.entry_bytes()
+            + longer_keys(self)
+            + right.entry_bytes()
+            + longer_keys(right)
+            + separator_cell
+    }
+
+    fn entry_bytes(&self) -> usize {
+        self.count * SLOT + (self.body_len - self.cell_start - self.garbage)
+    }
+
     fn high_suffix_len(&self) -> usize {
         self.high_len.map_or(0, |len| len - self.prefix_len)
     }
@@ -212,6 +259,25 @@ impl Shape {
             return Err(outside());
         }
         if self.high_suffix(body).is_some_and(|high| suffix >= high) {
+            return Err(outside());
+        }
+        Ok(suffix)
+    }
+
+    pub(crate) fn suffix_below<'k>(
+        &self,
+        body: &[u8],
+        key: &'k [u8],
+    ) -> Result<&'k [u8], FormatError> {
+        let outside = || self.corrupt("no key below the one sought lies within the fence keys");
+        if key.get(..self.prefix_len) != Some(self.prefix(body)) {
+            return Err(outside());
+        }
+        let suffix = &key[self.prefix_len..];
+        if suffix <= self.low_suffix(body) {
+            return Err(outside());
+        }
+        if self.high_suffix(body).is_some_and(|high| suffix > high) {
             return Err(outside());
         }
         Ok(suffix)
@@ -295,11 +361,24 @@ impl Shape {
     }
 
     pub(crate) fn child_for(&self, body: &[u8], suffix: &[u8]) -> Result<u64, FormatError> {
-        let index = match self.search(body, suffix)? {
+        self.child_at(body, self.child_index_for(body, suffix)?)
+    }
+
+    pub(crate) fn child_index_for(&self, body: &[u8], suffix: &[u8]) -> Result<usize, FormatError> {
+        Ok(match self.search(body, suffix)? {
             Ok(index) => index + 1,
             Err(index) => index,
-        };
-        self.child_at(body, index)
+        })
+    }
+
+    pub(crate) fn child_index_below(
+        &self,
+        body: &[u8],
+        suffix: &[u8],
+    ) -> Result<usize, FormatError> {
+        Ok(match self.search(body, suffix)? {
+            Ok(index) | Err(index) => index,
+        })
     }
 
     pub(crate) fn validate(&self, body: &[u8]) -> Result<(), FormatError> {
@@ -531,6 +610,17 @@ impl Node {
             node.children.push(shape.right);
         }
         Ok(node)
+    }
+
+    pub(crate) fn merge(mut self, separator: Vec<u8>, right: Self) -> Self {
+        self.high = right.high;
+        if self.level != 0 {
+            self.keys.push(separator);
+        }
+        self.keys.extend(right.keys);
+        self.values.extend(right.values);
+        self.children.extend(right.children);
+        self
     }
 
     pub(crate) fn size(&self) -> usize {
