@@ -19,6 +19,7 @@ mod checkpoint;
 mod log;
 mod measure;
 mod page_cache;
+mod transaction;
 
 use crate::allocations::CountingAllocator;
 use crate::baseline::{Baseline, Gate, Metric, Verdict, judge, line};
@@ -31,7 +32,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
 type Benchmark = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 
-const BENCHMARKS: [(&str, Benchmark); 13] = [
+const BENCHMARKS: [(&str, Benchmark); 15] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -45,6 +46,8 @@ const BENCHMARKS: [(&str, Benchmark); 13] = [
     (btree::DELETE, btree::delete),
     (btree::SCAN, btree::scan_ascending),
     (btree::SCAN_REVERSE, btree::scan_descending),
+    (transaction::READ, transaction::read),
+    (transaction::WRITE, transaction::write),
 ];
 
 const OS: &str = std::env::consts::OS;
