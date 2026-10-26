@@ -512,11 +512,12 @@ mod tests {
     use std::io::{PipeWriter, Read, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
-    use std::process::Command;
+    use std::process::{Command, ExitStatus};
+    use std::thread::JoinHandle;
 
     struct ChildBeforeItsProgram {
         start_program: PipeWriter,
-        spawning: Option<std::thread::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
+        spawning: Option<JoinHandle<std::io::Result<ExitStatus>>>,
     }
 
     impl ChildBeforeItsProgram {
@@ -546,9 +547,9 @@ mod tests {
     impl Drop for ChildBeforeItsProgram {
         fn drop(&mut self) {
             let _ = (&self.start_program).write_all(b"s");
-            if let Some(spawning) = self.spawning.take() {
-                let status = spawning.join().unwrap().unwrap();
-                assert!(status.success() || std::thread::panicking());
+            let finished = self.spawning.take().map(JoinHandle::join);
+            if !std::thread::panicking() {
+                assert!(finished.unwrap().unwrap().unwrap().success());
             }
         }
     }

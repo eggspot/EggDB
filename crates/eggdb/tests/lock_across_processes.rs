@@ -77,9 +77,9 @@ mod forked_child {
     impl Drop for ChildBeforeItsProgram {
         fn drop(&mut self) {
             let _ = (&self.start_program).write_all(b"s");
-            if let Some(spawning) = self.spawning.take() {
-                let status = spawning.join().unwrap().unwrap();
-                assert!(status.success() || std::thread::panicking());
+            let finished = self.spawning.take().map(JoinHandle::join);
+            if !std::thread::panicking() {
+                assert!(finished.unwrap().unwrap().unwrap().success());
             }
         }
     }
