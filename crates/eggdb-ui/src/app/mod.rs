@@ -269,16 +269,37 @@ impl<S: Source> Ui<S> {
         self.draw(frame);
         terminal.present(frame)?;
         self.presented();
+        self.input_quiet();
         Ok(())
     }
 
     /// Tells the UI that the frame it last drew is on the screen. A question (a confirmation,
-    /// an error) takes no key until a frame showing it has been presented, so keys typed or
-    /// pasted ahead of it can never answer it unseen.
+    /// an error) takes keys only after a frame showing it was presented and the input then
+    /// went quiet ([`Ui::input_quiet`]); a frame that does not show it (too small a terminal,
+    /// the help screen) takes back any keys it took.
     pub fn presented(&mut self) {
+        let visible = !self.too_small() && self.help.is_none();
         if let Some(modal) = self.modal.as_mut() {
-            modal.arm();
+            modal.presented(visible);
         }
+    }
+
+    /// Whether a question is on the screen and waits for the input to go quiet before it takes
+    /// keys; keys that arrive meanwhile are dropped.
+    pub fn awaits_quiet(&self) -> bool {
+        self.modal.as_ref().is_some_and(Modal::awaits_quiet)
+    }
+
+    /// Tells the UI that no input arrived for a while after the last presented frame, so a
+    /// question that frame showed now takes keys.
+    pub fn input_quiet(&mut self) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.arm_if_shown();
+        }
+    }
+
+    fn too_small(&self) -> bool {
+        self.size.cols < SMALLEST.cols || self.size.rows < SMALLEST.rows
     }
 
     fn page(&self) -> usize {
@@ -660,7 +681,7 @@ impl<S: Source> Ui<S> {
             self.ctrl_c();
             return;
         }
-        if self.size.cols < SMALLEST.cols || self.size.rows < SMALLEST.rows {
+        if self.too_small() {
             if key.code == KeyCode::Char('q') && !self.has_unsaved_edit() {
                 self.quit = true;
             }
@@ -719,7 +740,12 @@ impl<S: Source> Ui<S> {
 
     fn ctrl_c(&mut self) {
         if self.has_unsaved_edit() && !self.modal.as_ref().is_some_and(Modal::asks_to_quit) {
-            self.modal = Some(Modal::quit_question());
+            let stay = if self.check.is_some() {
+                "stay"
+            } else {
+                "keep editing"
+            };
+            self.modal = Some(Modal::quit_question(stay));
         } else {
             self.quit = true;
         }
@@ -901,7 +927,7 @@ impl<S: Source> Ui<S> {
             *frame = Frame::new(self.size);
         }
         frame.clear();
-        if self.size.cols < SMALLEST.cols || self.size.rows < SMALLEST.rows {
+        if self.too_small() {
             self.draw_too_small(frame);
             return;
         }

@@ -77,15 +77,11 @@ impl<S: Source> Ui<S> {
     }
 
     fn too_large_to_edit(&mut self, bytes: u64) {
-        let name = self
-            .summary
-            .as_ref()
-            .map(|summary| summary.name.clone())
-            .unwrap_or_default();
+        let command = self.put_from_file_command();
         self.toast(
             ToastKind::Error,
             format!(
-                "Value is {}; the editor holds up to {} of text. Store larger values with eggdb put {name} <key> @file",
+                "Value is {}; the editor holds up to {} of text. Store larger values with {command}",
                 text::short_size(bytes),
                 text::file_size(LONGEST_TEXT as u64)
             ),
@@ -96,10 +92,11 @@ impl<S: Source> Ui<S> {
         self.toast(
             ToastKind::Error,
             format!(
-                "Value is {}, but spelled with escapes it is {} of text; the editor holds up to {}. Store it with eggdb put <file> <key> @file",
+                "Value is {}, but spelled with escapes it is {} of text; the editor holds up to {}. Store it with {}",
                 text::short_size(value_bytes),
                 text::file_size(spelled_bytes as u64),
-                text::file_size(LONGEST_TEXT as u64)
+                text::file_size(LONGEST_TEXT as u64),
+                self.put_from_file_command()
             ),
         );
     }
@@ -186,17 +183,24 @@ impl<S: Source> Ui<S> {
     }
 
     pub(super) fn paste_too_large(&mut self) {
+        let mut message =
+            "The paste was larger than 1 MiB and was dropped; nothing was inserted".to_owned();
+        if matches!(self.edit, Some(Edit::Value(_))) {
+            message.push_str(&format!(
+                ". Store a large value with {}",
+                self.put_from_file_command()
+            ));
+        }
+        self.toast(ToastKind::Error, message);
+    }
+
+    fn put_from_file_command(&self) -> String {
         let name = self
             .summary
             .as_ref()
-            .map(|summary| summary.name.clone())
+            .map(|summary| summary.name.as_str())
             .unwrap_or_default();
-        self.toast(
-            ToastKind::Error,
-            format!(
-                "The paste was larger than 1 MiB and was dropped; nothing was inserted. Store large values with eggdb put {name} <key> @file"
-            ),
-        );
+        format!("eggdb put \"{name}\" <key> @file")
     }
 
     pub(super) fn edit_key(&mut self, key: KeyEvent) {

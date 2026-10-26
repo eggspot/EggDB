@@ -20,6 +20,7 @@ struct Hooks {
     needs_reopen: Cell<bool>,
     writes: Cell<u32>,
     reopens: Cell<u32>,
+    fail_reads: Cell<bool>,
 }
 
 struct MapSource {
@@ -78,6 +79,12 @@ impl Source for MapSource {
         start: Start<'_>,
         limit: usize,
     ) -> Result<Vec<KeyRow>, SourceError> {
+        if self.hooks.fail_reads.get() {
+            return Err(SourceError::new(
+                ErrorKind::Io,
+                "cannot read page 9 of app.db: input/output error",
+            ));
+        }
         let row = |(key, value): (&Vec<u8>, &Vec<u8>)| KeyRow {
             key: key.clone(),
             value_bytes: value.len() as u64,
@@ -1383,7 +1390,18 @@ fn a_paste_larger_than_1_mib_is_refused_whole() {
         s.row(22)
     );
     assert!(s.row(1).contains("87 B → 87 B"), "{}", s.row(1));
-    s.press(&["Enter", "Enter"]);
+    s.press(&["Esc", "m"]);
+    assert!(
+        s.screen().contains("eggdb put \"app.db\" <key> @file"),
+        "{}",
+        s.screen()
+    );
+    s.press(&["Esc"]);
+    paste_bytes(&mut s, &vec![b'x'; (1 << 20) + 1]);
+    assert_eq!(
+        s.row(22),
+        " The paste was larger than 1 MiB and was dropped; nothing was inserted"
+    );
     assert_model(&s, &fixture().entries);
 }
 
@@ -1401,8 +1419,186 @@ fn quitting_from_the_check_screen_asks_about_an_unsaved_edit() {
     s.press(&["q"]);
     assert!(!s.ui.should_quit());
     assert!(s.screen().contains("┌ Quit"), "{}", s.screen());
+    assert!(s.screen().contains("Esc stay"), "{}", s.screen());
     s.press(&["Esc", "Ctrl-C"]);
     assert!(s.screen().contains("┌ Quit"), "{}", s.screen());
     s.press(&["Ctrl-C"]);
     assert!(s.ui.should_quit());
+}
+
+enum Input {
+    Bytes(Vec<u8>),
+    Resize(u16, u16),
+    Quiet,
+}
+
+struct SplitReads {
+    size: Size,
+    inputs: std::collections::VecDeque<Input>,
+    decoder: eggdb_ui::InputDecoder,
+    queue: std::collections::VecDeque<Event>,
+    between_reads: bool,
+}
+
+impl SplitReads {
+    fn new(inputs: Vec<Input>) -> Self {
+        Self {
+            size: Size { cols: 80, rows: 24 },
+            inputs: inputs.into(),
+            decoder: eggdb_ui::InputDecoder::new(),
+            queue: std::collections::VecDeque::new(),
+            between_reads: false,
+        }
+    }
+}
+
+impl Terminal for SplitReads {
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::FULL
+    }
+
+    fn next_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>> {
+        loop {
+            if let Some(event) = self.queue.pop_front() {
+                return Ok(Some(event));
+            }
+            if timeout.is_zero() && self.between_reads {
+                self.between_reads = false;
+                if self.decoder.has_pending() {
+                    self.queue.extend(self.decoder.flush());
+                    continue;
+                }
+                return Ok(None);
+            }
+            match self.inputs.pop_front() {
+                Some(Input::Bytes(bytes)) => {
+                    self.queue.extend(self.decoder.feed(&bytes));
+                    self.between_reads = true;
+                }
+                Some(Input::Resize(cols, rows)) => {
+                    self.size = Size { cols, rows };
+                    return Ok(Some(Event::Resize(self.size)));
+                }
+                Some(Input::Quiet) if timeout.is_zero() => {
+                    self.inputs.push_front(Input::Quiet);
+                    return Ok(None);
+                }
+                Some(Input::Quiet) => {
+                    if self.decoder.in_paste() {
+                        self.queue.extend(self.decoder.end_paste());
+                        continue;
+                    }
+                    return Ok(None);
+                }
+                None => return Ok(Some(Event::Interrupt)),
+            }
+        }
+    }
+
+    fn present(&mut self, _: &Frame) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn run_split(inputs: Vec<Input>) -> Ui<MapSource> {
+    let mut terminal = SplitReads::new(inputs);
+    let mut ui = Ui::new(
+        fixture(),
+        UiOptions {
+            capabilities: Capabilities::FULL,
+        },
+        terminal.size(),
+    );
+    ui.run_until_idle();
+    if let Err(error) = eggdb_ui::run(&mut terminal, &mut ui) {
+        panic!("run: {error}");
+    }
+    ui
+}
+
+fn padded(before: &[u8], after: &[u8]) -> Vec<u8> {
+    let mut bytes = before.to_vec();
+    bytes.extend(vec![b'x'; 1000]);
+    bytes.extend_from_slice(after);
+    bytes
+}
+
+#[test]
+fn keys_split_across_reads_cannot_answer_a_question_before_the_input_goes_quiet() {
+    let ui = run_split(vec![
+        Input::Bytes(padded(b"d", b"")),
+        Input::Bytes(padded(b"", b"d")),
+    ]);
+    assert_eq!(ui.source().hooks.writes.get(), 0);
+    let ui = run_split(vec![
+        Input::Bytes(b"jex".to_vec()),
+        Input::Bytes(padded(b"\r", b"")),
+        Input::Bytes(padded(b"", b"\r")),
+    ]);
+    assert_eq!(ui.source().hooks.writes.get(), 0);
+    let ui = run_split(vec![
+        Input::Bytes(b"d".to_vec()),
+        Input::Quiet,
+        Input::Bytes(b"d".to_vec()),
+    ]);
+    assert_eq!(ui.source().hooks.writes.get(), 1);
+    assert!(!ui.source().entries.contains_key(b"bin".as_slice()));
+}
+
+#[test]
+fn a_question_hidden_by_a_too_small_terminal_takes_no_key_until_it_is_seen() {
+    let ui = run_split(vec![
+        Input::Bytes(b"d".to_vec()),
+        Input::Resize(30, 8),
+        Input::Quiet,
+        Input::Resize(80, 24),
+        Input::Bytes(b"d".to_vec()),
+    ]);
+    assert_eq!(ui.source().hooks.writes.get(), 0);
+    let ui = run_split(vec![
+        Input::Bytes(b"d".to_vec()),
+        Input::Resize(30, 8),
+        Input::Quiet,
+        Input::Resize(80, 24),
+        Input::Quiet,
+        Input::Bytes(b"d".to_vec()),
+    ]);
+    assert_eq!(ui.source().hooks.writes.get(), 1);
+}
+
+#[test]
+fn the_tail_of_a_dropped_paste_never_becomes_keys_across_pauses() {
+    let mut big = b"\x1b[200~".to_vec();
+    big.extend(vec![b'x'; (1 << 20) + 10]);
+    let ui = run_split(vec![
+        Input::Bytes(big),
+        Input::Bytes(padded(b"d", b"")),
+        Input::Bytes(padded(b"", b"d\r\x1b[201~")),
+    ]);
+    assert_eq!(ui.source().hooks.writes.get(), 0);
+    assert!(ui.source().entries == fixture().entries);
+}
+
+#[test]
+fn adding_a_key_whose_existence_cannot_be_read_shows_the_error() {
+    let mut s = Scenario::new(80, 24);
+    s.press(&["a"]);
+    s.type_str("user:2");
+    s.press(&["Enter"]);
+    s.type_str("x");
+    s.hooks().fail_reads.set(true);
+    s.press(&["Enter"]);
+    s.hooks().fail_reads.set(false);
+    assert!(
+        s.row(22).starts_with(" Error (Io): cannot read"),
+        "{}",
+        s.row(22)
+    );
+    assert!(!s.screen().contains("┌ "), "{}", s.screen());
+    assert!(s.row(1).contains(" Add "), "{}", s.row(1));
+    assert_eq!(s.hooks().writes.get(), 0);
 }

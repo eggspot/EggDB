@@ -81,7 +81,7 @@ impl<S: Source> Ui<S> {
     pub(super) fn check_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('q') if self.has_unsaved_edit() => {
-                self.modal = Some(Modal::quit_question());
+                self.modal = Some(Modal::quit_question("stay"));
             }
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Enter | KeyCode::Esc if !self.check_running() => {

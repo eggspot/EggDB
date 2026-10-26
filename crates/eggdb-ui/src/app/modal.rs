@@ -37,6 +37,7 @@ pub(super) struct Modal {
     body: Vec<BodyLine>,
     keys: Vec<(&'static str, &'static str)>,
     scroll: usize,
+    shown: bool,
     armed: bool,
 }
 
@@ -70,6 +71,7 @@ impl Modal {
             body: Vec::new(),
             keys: Vec::new(),
             scroll: 0,
+            shown: false,
             armed: false,
         }
     }
@@ -105,11 +107,11 @@ impl Modal {
         self
     }
 
-    pub(super) fn quit_question() -> Self {
+    pub(super) fn quit_question(stay: &'static str) -> Self {
         Self::new(ModalKind::QuitWithEdit, "Quit")
             .line("Your edit is not committed; quitting now discards it.")
             .key("Ctrl-C", "quit")
-            .key("Esc", "keep editing")
+            .key("Esc", stay)
     }
 
     pub(super) fn discard_question() -> Self {
@@ -119,8 +121,17 @@ impl Modal {
             .key("Esc", "keep editing")
     }
 
-    pub(super) fn arm(&mut self) {
-        self.armed = true;
+    pub(super) fn presented(&mut self, visible: bool) {
+        self.shown = visible;
+        self.armed &= visible;
+    }
+
+    pub(super) fn awaits_quiet(&self) -> bool {
+        self.shown && !self.armed
+    }
+
+    pub(super) fn arm_if_shown(&mut self) {
+        self.armed = self.shown;
     }
 
     pub(super) fn asks_to_quit(&self) -> bool {
