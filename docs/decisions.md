@@ -3556,7 +3556,7 @@ handled before any modal: it never confirms a change; it quits at once, or, with
 edit, asks first and quits on a second `Ctrl-C`.
 
 What this guarantees, exactly: with bracketed paste (the normal case) pasted bytes are never
-keys, whatever pauses the paste has. Without it, a paste or typed-ahead keys cannot answer a
+keys, whatever pauses the paste has, unless the terminal passes a raw `ESC[201~` through. Without it, a paste or typed-ahead keys cannot answer a
 question while they arrive less than 300 ms apart; a paste that pauses longer (a slow link
 delivering it in bursts), or one carrying a raw `ESC[201~` that the terminal passes through
 unsanitised, can still answer a question that appeared meanwhile. The two timeouts do not

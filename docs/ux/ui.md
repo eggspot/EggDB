@@ -609,8 +609,9 @@ simplest consistent option (D92):
     that arrives before that is dropped, and each one starts the 300 ms over. A key pressed
     after looking at the question works.
 
-    What that guarantees: with bracketed paste, which every terminal the UI targets turns on,
-    pasted bytes are never keys at all. Keys typed ahead, or a paste in a terminal without
+    What that guarantees: with bracketed paste, which the terminals the UI targets turn on (an older
+    Windows 10 console may not), pasted bytes are never keys, unless the terminal passes a raw
+    end marker through. Keys typed ahead, or a paste in a terminal without
     bracketed paste, can open a confirmation but cannot answer it as long as they arrive with
     gaps shorter than 300 ms. A paste without bracketed paste that pauses longer than that (a
     slow link delivering it in bursts), or one whose text contains a raw end marker

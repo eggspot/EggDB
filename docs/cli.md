@@ -246,7 +246,8 @@ edit is not committed).
   screen redraws, and the status line says `Committed user:1 (61 B) at 09:14:03Z`. A
   confirmation takes keys only once it has been drawn and then 300 ms passed with no input
   (time inside an open bracketed paste does not count); keys arriving sooner are dropped. With
-  bracketed paste, pasted bytes are never keys. Without it, keys typed ahead or pasted cannot
+  bracketed paste, pasted bytes are never keys unless the terminal passes a raw `ESC[201~`
+  through. Without it, keys typed ahead or pasted cannot
   answer a confirmation while they keep arriving within 300 ms of each other, but a paste that
   pauses longer than that, or that carries a raw `ESC[201~` the terminal passes through, can:
   the guard is seeing the question and 300 ms of quiet, not an absolute guarantee. `Ctrl-C` is
