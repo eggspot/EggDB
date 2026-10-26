@@ -503,12 +503,20 @@ impl<F: File> PageFile<F> {
     }
 
     fn write_commit(&mut self) -> Result<(), StorageError> {
-        let wanted = self.page_count * self.page_size().bytes() as u64;
+        let page_bytes = self.page_size().bytes() as u64;
+        let wanted = self.page_count * page_bytes;
+        let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
         if self.file_bytes < wanted {
+            let grown_pages = (wanted - self.file_bytes) / page_bytes;
+            let segment_pages =
+                log.new_segments().len() as u64 * u64::from(self.superblock.log_segment_pages);
+            let unlogged_pages = grown_pages.saturating_sub(segment_pages);
             self.file.set_size(wanted)?;
             self.file_bytes = wanted;
+            if self.durability != Durability::Full && unlogged_pages > log.images().len() as u64 {
+                self.file.sync_data()?;
+            }
         }
-        let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
         log.write(&self.file)?;
         match self.durability {
             Durability::Full => {
@@ -519,13 +527,20 @@ impl<F: File> PageFile<F> {
             }
             Durability::Off => self.write_logged_pages_in_place(),
             Durability::Normal => {
-                for image in log.images() {
-                    self.unwritten.insert(image.page_id, image.file_offset);
-                }
-                if self.unwritten.len() > NORMAL_UNWRITTEN_PAGES
+                let waiting = self.unwritten.len() + log.images().len();
+                if waiting > NORMAL_UNWRITTEN_PAGES
                     || log.unsynced_bytes() >= NORMAL_UNSYNCED_LOG_BYTES
                 {
-                    self.sync_log()?;
+                    let lsn = log.lsn();
+                    log.sync_to(&self.file, lsn)?;
+                    for image in log.images() {
+                        self.unwritten.remove(&image.page_id);
+                    }
+                    self.drain_unwritten()?;
+                    return self.write_logged_pages_in_place();
+                }
+                for image in log.images() {
+                    self.unwritten.insert(image.page_id, image.file_offset);
                 }
                 Ok(())
             }
@@ -720,15 +735,28 @@ impl<F: File> PageFile<F> {
     fn recover(&mut self) -> Result<(), StorageError> {
         let geometry = self.geometry(self.header.log_segment_pages);
         let scan = log::scan(&self.file, &geometry, &self.checksums, &self.header)?;
+        let damaged_commit = || -> StorageError {
+            match scan.commit_at {
+                Some((segment, offset)) => log::corrupt(&segment, offset),
+                None => FormatError::InvalidField {
+                    field: "page_count",
+                }
+                .into(),
+            }
+        };
+        let page_bytes = self.page_size().bytes() as u64;
         let mut state = self.header;
         if let Some(commit) = scan.commit {
+            let proven_pages =
+                (self.file_bytes / page_bytes).saturating_add(scan.images.len() as u64);
+            if commit.page_count < self.header.page_count || commit.page_count > proven_pages {
+                return Err(damaged_commit());
+            }
             commit.apply(&mut state);
         }
-        state.page_count = state
-            .page_count
-            .max(self.header.page_count)
-            .max(scan.linked_page_count);
-        state.check()?;
+        state.page_count = state.page_count.max(scan.linked_page_count);
+        state.check().map_err(|_| damaged_commit())?;
+        state.features.check(self.access)?;
         let segment_pages = u64::from(geometry.segment_pages());
         for segment in &scan.segments {
             self.log_pages
@@ -745,14 +773,15 @@ impl<F: File> PageFile<F> {
         if self.access == Access::ReadOnly {
             return Ok(());
         }
-        let wanted = state.page_count * self.page_size().bytes() as u64;
-        if self.file_bytes != wanted || !scan.images.is_empty() {
-            if self.file_bytes != wanted {
-                self.file.set_size(wanted)?;
-                self.file_bytes = wanted;
-            }
-            self.file.sync_data()?;
+        let wanted = state
+            .page_count
+            .checked_mul(page_bytes)
+            .ok_or_else(damaged_commit)?;
+        if self.file_bytes != wanted {
+            self.file.set_size(wanted)?;
+            self.file_bytes = wanted;
         }
+        self.file.sync_data()?;
         self.drain_unwritten()?;
         self.log = Some(LogWriter::new(
             geometry,

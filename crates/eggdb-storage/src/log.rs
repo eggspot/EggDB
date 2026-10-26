@@ -122,8 +122,9 @@ impl LogGeometry {
         page * self.page_size.bytes() as u64
     }
 
-    fn record_seed(&self, sequence: u64) -> u32 {
-        crc32c_append(self.file_seed, &sequence.to_le_bytes())
+    fn record_seed(&self, sequence: u64, lsn: u64) -> u32 {
+        let segment_seed = crc32c_append(self.file_seed, &sequence.to_le_bytes());
+        crc32c_append(segment_seed, &lsn.to_le_bytes())
     }
 
     fn header_checksum(&self, first_page: u64, block: &[u8]) -> u32 {
@@ -162,33 +163,45 @@ impl LogGeometry {
     }
 }
 
-fn parse_record(seed: u32, area: &[u8], page_bytes: usize) -> Option<(RecordType, &[u8])> {
+fn parse_record<'a>(
+    geometry: &LogGeometry,
+    segment: &Segment,
+    buffer: &'a [u8],
+    offset: usize,
+) -> Option<(RecordType, &'a [u8])> {
+    let area = buffer.get(offset..)?;
     if area.len() < RECORD_HEADER {
-        return None;
-    }
-    let length = read_u32(area, 4) as usize;
-    if length > area.len() - RECORD_HEADER {
         return None;
     }
     let kind = RecordType::from_byte(area[8])?;
     if area[9] != 0 {
         return None;
     }
-    let end = RECORD_HEADER + length;
-    if read_u32(area, 0) != crc32c_append(seed, &area[4..end]) {
+    let length = read_u32(area, 4) as usize;
+    let allowed = match kind {
+        RecordType::Batch => length == BATCH_PAYLOAD,
+        RecordType::Pad => (LOG_BLOCK - offset % LOG_BLOCK)
+            .checked_sub(RECORD_HEADER)
+            .is_some_and(|room| length <= room),
+        RecordType::PageImage => length == IMAGE_PAGE_AT + geometry.page_size.bytes(),
+        RecordType::Commit => length == COMMIT_PAYLOAD,
+        RecordType::Link => length == LINK_PAYLOAD,
+    };
+    if !allowed || length > area.len() - RECORD_HEADER {
         return None;
     }
-    let expected = match kind {
-        RecordType::Batch => Some(BATCH_PAYLOAD),
-        RecordType::Pad => None,
-        RecordType::PageImage => Some(IMAGE_PAGE_AT + page_bytes),
-        RecordType::Commit => Some(COMMIT_PAYLOAD),
-        RecordType::Link => Some(LINK_PAYLOAD),
-    };
-    if expected.is_some_and(|expected| expected != length) {
+    let end = RECORD_HEADER + length;
+    let seed = geometry.record_seed(segment.sequence, geometry.lsn_at(segment, offset));
+    if read_u32(area, 0) != record_checksum(seed, &area[4..end]) {
         return None;
     }
     Some((kind, &area[RECORD_HEADER..end]))
+}
+
+fn record_checksum(seed: u32, bytes: &[u8]) -> u32 {
+    #[cfg(test)]
+    tests::CHECKSUMMED_BYTES.with(|total| total.set(total.get() + bytes.len() as u64));
+    crc32c_append(seed, bytes)
 }
 
 fn align_up(offset: usize) -> usize {
@@ -531,7 +544,8 @@ impl LogWriter {
         for part in parts {
             self.buffer.extend_from_slice(part);
         }
-        let seed = self.geometry.record_seed(self.segment.sequence);
+        let lsn = self.lsn();
+        let seed = self.geometry.record_seed(self.segment.sequence, lsn);
         let checksum = crc32c_append(seed, &self.buffer[start + 4..]);
         write_u32(&mut self.buffer, start, checksum);
         self.offset += RECORD_HEADER + length;
@@ -555,6 +569,7 @@ pub(crate) struct Scan {
     pub(crate) needs_fresh_segment: bool,
     pub(crate) end_lsn: u64,
     pub(crate) commit: Option<CommitFields>,
+    pub(crate) commit_at: Option<(Segment, usize)>,
     pub(crate) images: Vec<LoggedImage>,
     pub(crate) linked_page_count: u64,
 }
@@ -593,19 +608,19 @@ fn proves_durable_beyond(
     offset: usize,
 ) -> bool {
     let lsn = geometry.lsn_at(segment, offset);
-    let seed = geometry.record_seed(segment.sequence);
-    let page_bytes = geometry.page_size.bytes();
+    let batch = RecordType::Batch.to_byte();
     (align_up(offset + 1).max(LOG_BLOCK)..buffer.len())
         .step_by(LOG_BLOCK)
+        .filter(|&block| buffer.get(block + 8) == Some(&batch))
         .any(|block| {
             matches!(
-                parse_record(seed, &buffer[block..], page_bytes),
+                parse_record(geometry, segment, buffer, block),
                 Some((RecordType::Batch, payload)) if read_u64(payload, 0) > lsn
             )
         })
 }
 
-fn corrupt(segment: &Segment, offset: usize) -> StorageError {
+pub(crate) fn corrupt(segment: &Segment, offset: usize) -> StorageError {
     FormatError::CorruptLog {
         segment: segment.first_page,
         offset: offset as u64,
@@ -628,7 +643,6 @@ pub(crate) fn scan<F: File>(
     checksums: &PageChecksum,
     superblock: &Superblock,
 ) -> Result<Scan, StorageError> {
-    let page_bytes = geometry.page_size.bytes();
     let segment_pages = u64::from(geometry.segment_pages);
     let first_data_page = geometry.page_size.first_data_page();
     let mut buffer = segment_buffer(geometry)?;
@@ -655,6 +669,7 @@ pub(crate) fn scan<F: File>(
     let mut images = Vec::new();
     let mut committed_images = 0;
     let mut commit = None;
+    let mut commit_at = None;
     let mut linked_page_count = 0;
     let mut at_commit_boundary = true;
     let mut resume = Resume {
@@ -674,8 +689,7 @@ pub(crate) fn scan<F: File>(
         if offset >= buffer.len() {
             break;
         }
-        let seed = geometry.record_seed(segment.sequence);
-        let Some((kind, payload)) = parse_record(seed, &buffer[offset..], page_bytes) else {
+        let Some((kind, payload)) = parse_record(geometry, &segment, &buffer, offset) else {
             if proves_durable_beyond(geometry, &segment, &buffer, offset) {
                 return Err(corrupt(&segment, offset));
             }
@@ -707,6 +721,7 @@ pub(crate) fn scan<F: File>(
             }
             RecordType::Commit => {
                 commit = Some(CommitFields::decode(payload));
+                commit_at = Some((segment, offset));
                 committed_images = images.len();
                 at_commit_boundary = true;
                 resume = Resume {
@@ -730,7 +745,7 @@ pub(crate) fn scan<F: File>(
                     && segment.sequence != u64::MAX
                     && segment.start_lsn.checked_add(geometry.capacity()).is_some()
                     && end.is_some_and(|end| {
-                        end <= page_count && !overlaps(&occupied, next_page, end)
+                        end == page_count && !overlaps(&occupied, next_page, end)
                     });
                 if !plausible {
                     return Err(corrupt(&segment, offset));
@@ -781,6 +796,7 @@ pub(crate) fn scan<F: File>(
         needs_fresh_segment,
         end_lsn: geometry.lsn_at(&resume.segment, resume.offset),
         commit,
+        commit_at,
         images,
         linked_page_count: resume.linked_page_count,
     })
@@ -802,6 +818,10 @@ mod tests {
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
+
+    thread_local! {
+        pub(super) static CHECKSUMMED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     const DB: &str = "db";
     const FILE_ID: FileId = FileId(*b"write-ahead-log!");
@@ -864,17 +884,24 @@ mod tests {
         }
     }
 
-    fn records(writer: &LogWriter, sequence: u64) -> Vec<(RecordType, Vec<u8>)> {
-        let seed = geometry().record_seed(sequence);
-        let buffer = writer.buffer();
+    fn segment_with(writer: &LogWriter) -> Vec<u8> {
+        let mut bytes = vec![0u8; 16 * LOG_BLOCK];
+        let flush = writer.buffer();
+        bytes[LOG_BLOCK..LOG_BLOCK + flush.len()].copy_from_slice(flush);
+        bytes
+    }
+
+    fn records(writer: &LogWriter) -> Vec<(RecordType, Vec<u8>)> {
+        let bytes = segment_with(writer);
+        let end = LOG_BLOCK + writer.buffer().len();
         let mut found = Vec::new();
-        let mut at = 0;
-        while at < buffer.len() {
+        let mut at = LOG_BLOCK;
+        while at < end {
             if super::too_close_to_block_end(at) {
                 at = super::align_up(at);
                 continue;
             }
-            let Some((kind, payload)) = parse_record(seed, &buffer[at..], 4096) else {
+            let Some((kind, payload)) = parse_record(&geometry(), &segment(), &bytes, at) else {
                 break;
             };
             found.push((kind, payload.to_vec()));
@@ -914,7 +941,7 @@ mod tests {
     fn records_survive_encoding_and_a_flush_ends_on_a_block_boundary() {
         let (writer, page) = sample_flush();
         assert!(writer.buffer().len().is_multiple_of(LOG_BLOCK));
-        let found = records(&writer, 7);
+        let found = records(&writer);
         let kinds: Vec<RecordType> = found.iter().map(|(kind, _)| *kind).collect();
         assert_eq!(
             kinds,
@@ -938,23 +965,56 @@ mod tests {
     }
 
     #[test]
-    fn a_record_fails_for_any_flipped_bit_another_sequence_or_another_file() {
+    fn a_record_fails_for_any_flipped_bit_another_place_sequence_or_file() {
         let (writer, _) = sample_flush();
-        let seed = geometry().record_seed(7);
-        let buffer = writer.buffer();
-        let image_at = RECORD_HEADER + 8;
-        let image = &buffer[image_at..image_at + RECORD_HEADER + 8 + 4096];
-        assert!(parse_record(seed, image, 4096).is_some());
+        let bytes = segment_with(&writer);
+        let image_at = LOG_BLOCK + RECORD_HEADER + 8;
+        let image_len = RECORD_HEADER + 8 + 4096;
+        assert!(parse_record(&geometry(), &segment(), &bytes, image_at).is_some());
         let mut rng = TestRng::new(0x5EC);
         for _ in 0..2000 {
-            let mut damaged = image.to_vec();
-            let bit = rng.below(damaged.len() * 8);
-            damaged[bit / 8] ^= 1 << (bit % 8);
-            assert!(parse_record(seed, &damaged, 4096).is_none(), "bit {bit}");
+            let mut damaged = bytes.clone();
+            let bit = rng.below(image_len * 8);
+            damaged[image_at + bit / 8] ^= 1 << (bit % 8);
+            let parsed = parse_record(&geometry(), &segment(), &damaged, image_at);
+            assert!(parsed.is_none(), "bit {bit}");
         }
-        assert!(parse_record(geometry().record_seed(8), image, 4096).is_none());
+        let mut moved = vec![0u8; bytes.len()];
+        let moved_at = image_at + 3 * LOG_BLOCK;
+        moved[moved_at..moved_at + image_len]
+            .copy_from_slice(&bytes[image_at..image_at + image_len]);
+        assert!(parse_record(&geometry(), &segment(), &moved, moved_at).is_none());
+        let next_sequence = Segment {
+            sequence: 8,
+            ..segment()
+        };
+        assert!(parse_record(&geometry(), &next_sequence, &bytes, image_at).is_none());
         let other_file = LogGeometry::new(FileId(*b"another-file-id!"), PageSize::DEFAULT, 16);
-        assert!(parse_record(other_file.record_seed(7), image, 4096).is_none());
+        assert!(parse_record(&other_file, &segment(), &bytes, image_at).is_none());
+    }
+
+    #[test]
+    fn a_record_whose_length_does_not_fit_its_type_is_refused_before_its_checksum() {
+        let geometry = LogGeometry::new(FILE_ID, PageSize::from_log2(16).unwrap(), 1024);
+        let head = Segment {
+            first_page: 1,
+            sequence: 1,
+            start_lsn: 0,
+        };
+        let mut bytes = vec![0u8; 1024 << 16];
+        for block in (LOG_BLOCK..bytes.len()).step_by(LOG_BLOCK) {
+            let rest = (bytes.len() - block - RECORD_HEADER) as u32;
+            bytes[block + 4..block + 8].copy_from_slice(&rest.to_le_bytes());
+            bytes[block + 8] = RecordType::Batch.to_byte();
+        }
+        CHECKSUMMED_BYTES.with(|total| total.set(0));
+        assert!(!super::proves_durable_beyond(
+            &geometry, &head, &bytes, LOG_BLOCK
+        ));
+        for block in (LOG_BLOCK..bytes.len()).step_by(LOG_BLOCK) {
+            assert!(parse_record(&geometry, &head, &bytes, block).is_none());
+        }
+        assert_eq!(CHECKSUMMED_BYTES.with(|total| total.get()), 0);
     }
 
     #[test]
@@ -1117,13 +1177,17 @@ mod tests {
         drop(cache);
         let raw = raw(&fs);
         let mut last_batch = 0;
-        let mut block = vec![0u8; LOG_BLOCK];
+        let mut bytes = vec![0u8; 16 * LOG_BLOCK];
+        raw.read_exact_at(&mut bytes, head * 4096).unwrap();
+        let head_segment = Segment {
+            first_page: head,
+            sequence: 1,
+            start_lsn: 0,
+        };
         for index in 1..16u64 {
-            raw.read_exact_at(&mut block, (head + index) * 4096)
-                .unwrap();
-            let seed = geometry().record_seed(1);
+            let at = index as usize * LOG_BLOCK;
             if matches!(
-                parse_record(seed, &block, 4096),
+                parse_record(&geometry(), &head_segment, &bytes, at),
                 Some((RecordType::Batch, _))
             ) {
                 last_batch = index;
@@ -1425,6 +1489,277 @@ mod tests {
         }
     }
 
+    #[test]
+    fn image_less_commits_then_a_reopen_then_a_power_loss_never_refuse_the_file() {
+        for seed in 0..64 {
+            let fs = SimFileSystem::new();
+            let mut cache = create(&fs);
+            cache.commit(|_| {}).unwrap();
+            cache.set_durability(Durability::Normal).unwrap();
+            for round in 1..=3 {
+                cache
+                    .commit(|superblock| superblock.clock_high_water = round)
+                    .unwrap();
+            }
+            drop(cache);
+            let mut cache = open(&fs, Access::ReadWrite).unwrap();
+            assert_eq!(cache.superblock().clock_high_water, 3);
+            cache.set_durability(Durability::Normal).unwrap();
+            allocate(&cache, 7);
+            cache
+                .commit(|superblock| superblock.clock_high_water = 4)
+                .unwrap();
+            drop(cache);
+            fs.crash(CrashMode::Torn { seed });
+            let cache = open(&fs, Access::ReadOnly).unwrap();
+            assert!(cache.superblock().clock_high_water >= 3, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn a_full_commit_cut_at_any_operation_after_image_less_commits_never_refuses_the_file() {
+        for step in 0..8 {
+            for seed in 0..16 {
+                let fs = SimFileSystem::new();
+                let mut cache = create(&fs);
+                cache.commit(|_| {}).unwrap();
+                cache.set_durability(Durability::Normal).unwrap();
+                cache
+                    .commit(|superblock| superblock.clock_high_water = 1)
+                    .unwrap();
+                drop(cache);
+                let mut cache = open(&fs, Access::ReadWrite).unwrap();
+                allocate(&cache, 3);
+                let failing = fs.operation_count() + step;
+                fs.fail_operation(failing);
+                let _ = cache.commit(|superblock| superblock.clock_high_water = 2);
+                drop(cache);
+                while fs.operation_count() <= failing {
+                    let _ = fs.exists(Path::new(DB));
+                }
+                fs.crash(CrashMode::Torn { seed });
+                let cache = open(&fs, Access::ReadOnly).unwrap();
+                assert!(
+                    cache.superblock().clock_high_water >= 1,
+                    "step {step}, seed {seed}"
+                );
+            }
+        }
+    }
+
+    fn rounds_with_images(fs: &SimFileSystem, durability: Durability) -> Vec<u64> {
+        let mut cache = create(fs);
+        let pages: Vec<u64> = (0..4).map(|_| allocate(&cache, 1)).collect();
+        cache
+            .commit(|superblock| superblock.clock_high_water = 1)
+            .unwrap();
+        cache.set_durability(durability).unwrap();
+        for round in 2..=4u8 {
+            for &page in &pages {
+                set_fill(&cache, page, round);
+            }
+            cache
+                .commit(|superblock| superblock.clock_high_water = u64::from(round))
+                .unwrap();
+        }
+        pages
+    }
+
+    #[test]
+    fn a_crash_at_any_operation_of_replaying_the_log_keeps_the_replayed_state() {
+        for durability in [Durability::Full, Durability::Normal] {
+            let operations = {
+                let fs = SimFileSystem::new();
+                rounds_with_images(&fs, durability);
+                let before = fs.operation_count();
+                drop(open(&fs, Access::ReadWrite).unwrap());
+                fs.operation_count() - before
+            };
+            for step in 0..operations {
+                for seed in 0..4 {
+                    let fs = SimFileSystem::new();
+                    let pages = rounds_with_images(&fs, durability);
+                    fs.fail_operation(fs.operation_count() + step);
+                    assert!(open(&fs, Access::ReadWrite).is_err());
+                    fs.crash(CrashMode::Torn { seed });
+                    let cache = open(&fs, Access::ReadWrite).unwrap();
+                    let round = cache.superblock().clock_high_water;
+                    if durability == Durability::Full {
+                        assert_eq!(round, 4, "step {step}, seed {seed}");
+                    }
+                    for &page in &pages {
+                        let fill = u64::from(fill_of(&cache, page).unwrap());
+                        assert_eq!(fill, round, "step {step}, seed {seed}");
+                    }
+                }
+            }
+        }
+    }
+
+    fn forged_commit(
+        fs: &SimFileSystem,
+        fields: impl FnOnce(&mut CommitFields),
+        image: Option<u64>,
+    ) {
+        let mut cache = create(fs);
+        let page = allocate(&cache, 1);
+        cache.commit(|_| {}).unwrap();
+        let superblock = cache.superblock();
+        drop(cache);
+        let geometry = LogGeometry::new(FILE_ID, PageSize::DEFAULT, superblock.log_segment_pages);
+        let raw = raw(fs);
+        let head = Segment {
+            first_page: superblock.log_head_page,
+            sequence: superblock.log_head_sequence,
+            start_lsn: superblock.checkpoint_lsn,
+        };
+        let mut writer = LogWriter::new(geometry, head, LOG_BLOCK, false, 0);
+        let mut page_count = superblock.page_count;
+        writer.begin(&mut page_count).unwrap();
+        if let Some(target) = image.map(|_| page) {
+            let mut bytes = vec![0xAB; 4096];
+            crate::format::PageChecksum::new(FILE_ID, PageSize::DEFAULT)
+                .write(&mut bytes, target, &leaf())
+                .unwrap();
+            writer.reserve(8 + 4096, &mut page_count).unwrap();
+            writer.put_image(target, &bytes);
+        }
+        let mut commit = CommitFields::of(&superblock, 0);
+        fields(&mut commit);
+        writer
+            .reserve(super::COMMIT_PAYLOAD, &mut page_count)
+            .unwrap();
+        writer.put_commit(&commit);
+        writer.seal(&mut page_count).unwrap();
+        writer.write(&raw).unwrap();
+        raw.sync_all().unwrap();
+    }
+
+    fn file_bytes(fs: &SimFileSystem) -> Vec<u8> {
+        let raw = raw(fs);
+        let mut bytes = vec![0u8; raw.size().unwrap() as usize];
+        raw.read_exact_at(&mut bytes, 0).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_replayed_page_count_the_file_can_not_prove_refuses_the_open_without_growing_it() {
+        for page_count in [1 << 40, (1 << 48) - 1, 40] {
+            let fs = SimFileSystem::new();
+            forged_commit(&fs, |commit| commit.page_count = page_count, None);
+            let before = file_bytes(&fs);
+            for access in [Access::ReadWrite, Access::ReadOnly] {
+                let error = open(&fs, access).unwrap_err();
+                assert!(
+                    matches!(error, StorageError::Format(FormatError::CorruptLog { .. })),
+                    "{page_count}: {error}"
+                );
+            }
+            assert_eq!(file_bytes(&fs), before);
+        }
+        let fs = SimFileSystem::new();
+        forged_commit(&fs, |commit| commit.page_count = 19, Some(0));
+        assert_eq!(
+            open(&fs, Access::ReadWrite)
+                .unwrap()
+                .superblock()
+                .page_count,
+            19
+        );
+    }
+
+    #[test]
+    fn unknown_features_in_a_replayed_commit_refuse_the_open_before_any_write() {
+        let fs = SimFileSystem::new();
+        forged_commit(
+            &fs,
+            |commit| commit.features.incompatible = 1 << 63,
+            Some(0),
+        );
+        let before = file_bytes(&fs);
+        let syncs = fs.sync_count();
+        assert!(matches!(
+            open(&fs, Access::ReadWrite),
+            Err(StorageError::Format(FormatError::UnsupportedFeatures { bits })) if bits == 1 << 63
+        ));
+        assert_eq!(file_bytes(&fs), before);
+        assert_eq!(fs.sync_count(), syncs);
+        let fs = SimFileSystem::new();
+        forged_commit(
+            &fs,
+            |commit| commit.features.read_only_compatible = 1 << 2,
+            Some(0),
+        );
+        let before = file_bytes(&fs);
+        assert!(matches!(
+            open(&fs, Access::ReadWrite),
+            Err(StorageError::Format(FormatError::ReadOnlyFeatures { .. }))
+        ));
+        assert_eq!(file_bytes(&fs), before);
+        let reader = open(&fs, Access::ReadOnly).unwrap();
+        assert_eq!(fill_of(&reader, 18).unwrap(), 0xAB);
+    }
+
+    fn normal_rounds_until_a_sync(fs: &SimFileSystem, fail_at: Option<(u8, u64)>) -> (u8, u64) {
+        let mut file = PageFile::create(fs, Path::new(DB), options(PageSize::DEFAULT)).unwrap();
+        let page = file.allocate().unwrap();
+        let mut bytes = vec![0u8; 4096];
+        file.write_page(page, &mut bytes, &leaf()).unwrap();
+        file.commit(|_| {}).unwrap();
+        file.set_durability(Durability::Normal).unwrap();
+        for round in 1..=250u8 {
+            let mut bytes = vec![round; 4096];
+            file.write_page(page, &mut bytes, &leaf()).unwrap();
+            if let Some((failing_round, offset)) = fail_at
+                && failing_round == round
+            {
+                fs.fail_operation(fs.operation_count() + offset);
+                assert!(file.commit(|_| {}).is_err());
+                file.read_page(page, &mut bytes).unwrap();
+                return (round, u64::from(bytes[100]));
+            }
+            let syncs = fs.sync_count();
+            file.commit(|_| {}).unwrap();
+            if fs.sync_count() > syncs {
+                return (round, page);
+            }
+        }
+        panic!("no group sync in 250 commits");
+    }
+
+    #[test]
+    fn a_failed_group_sync_under_normal_never_serves_the_failed_commit() {
+        let (sync_round, _) = normal_rounds_until_a_sync(&SimFileSystem::new(), None);
+        assert!(sync_round > 100);
+        for offset in [1, 2] {
+            let fs = SimFileSystem::new();
+            let (round, fill) = normal_rounds_until_a_sync(&fs, Some((sync_round, offset)));
+            assert_eq!(round, sync_round);
+            assert_eq!(fill, u64::from(sync_round - 1), "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn pages_allocated_but_never_written_under_normal_survive_a_power_loss() {
+        for seed in 0..16 {
+            let fs = SimFileSystem::new();
+            let mut file =
+                PageFile::create(&fs, Path::new(DB), options(PageSize::DEFAULT)).unwrap();
+            file.commit(|_| {}).unwrap();
+            file.set_durability(Durability::Normal).unwrap();
+            for _ in 0..5 {
+                file.allocate().unwrap();
+            }
+            file.commit(|superblock| superblock.clock_high_water = 1)
+                .unwrap();
+            drop(file);
+            fs.crash(CrashMode::Torn { seed });
+            let file = PageFile::open(&fs, Path::new(DB), Access::ReadWrite).unwrap();
+            let count = file.superblock().page_count;
+            assert!(count == 18 || count == 23, "seed {seed}: {count}");
+        }
+    }
+
     fn log_image(fs: &SimFileSystem) -> (Vec<u8>, u64) {
         committed_states(fs, Durability::Full);
         let head = open(fs, Access::ReadOnly)
@@ -1458,12 +1793,30 @@ mod tests {
                 }
                 1 => {
                     let block = log_start + LOG_BLOCK * (1 + rng.below(15));
-                    let length = rng.below(64) as u32;
-                    bytes[block + 4..block + 8].copy_from_slice(&length.to_le_bytes());
-                    bytes[block + 8] = 1 + rng.below(6) as u8;
-                    rng.fill(&mut bytes[block + RECORD_HEADER..block + RECORD_HEADER + 64]);
-                    let seed = geometry.record_seed(1);
-                    let end = block + RECORD_HEADER + length as usize;
+                    let kind = 1 + rng.below(5) as u8;
+                    let length = match kind {
+                        1 => 8,
+                        2 => rng.below(64),
+                        3 => 8 + 4096,
+                        4 => super::COMMIT_PAYLOAD,
+                        _ => 16,
+                    };
+                    let room = (log_end - block - RECORD_HEADER).min(length);
+                    bytes[block + 4..block + 8].copy_from_slice(&(length as u32).to_le_bytes());
+                    bytes[block + 8] = kind;
+                    bytes[block + 9] = 0;
+                    let payload = block + RECORD_HEADER;
+                    rng.fill(&mut bytes[payload..payload + room]);
+                    if kind == 4 || kind == 5 {
+                        for field in 0..room / 8 {
+                            let value = rng.below(64) as u64;
+                            bytes[payload + 8 * field..payload + 8 * field + 8]
+                                .copy_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                    let lsn = (block - log_start - LOG_BLOCK) as u64;
+                    let seed = geometry.record_seed(1, lsn);
+                    let end = block + RECORD_HEADER + room;
                     let checksum = crate::crc32c::crc32c_append(seed, &bytes[block + 4..end]);
                     bytes[block..block + 4].copy_from_slice(&checksum.to_le_bytes());
                 }

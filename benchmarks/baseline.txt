@@ -1,6 +1,6 @@
 any log.commit_full file_operations_per_1000_commits 3284
 any log.commit_full syncs_per_1000_commits 1000
-any log.commit_normal file_operations_per_1000_commits 1308
+any log.commit_normal file_operations_per_1000_commits 1300
 any log.commit_normal syncs_per_1000_commits 8
 any log.commit_off file_operations_per_1000_commits 2284
 any log.commit_off syncs_per_1000_commits 0
