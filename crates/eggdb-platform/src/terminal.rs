@@ -1,8 +1,108 @@
-//! The terminal behind the standard streams: whether a stream is one, and whether text written
-//! to it may carry colours as ANSI escape sequences.
+//! The terminal behind the standard streams: whether a stream is one, whether text written
+//! to it may carry colours as ANSI escape sequences, and a [`RawTerminal`] that takes the whole
+//! terminal for a full-screen program and gives it back on exit, on a panic and on the signals
+//! that end a process.
 
 use std::ffi::OsStr;
 use std::io::IsTerminal;
+use std::time::Duration;
+
+#[cfg(all(
+    unix,
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "solaris",
+        target_os = "illumos"
+    )
+))]
+use crate::os_terminal_unix as os;
+#[cfg(windows)]
+use crate::os_terminal_windows as os;
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+    target_os = "solaris",
+    target_os = "illumos"
+)))]
+use unsupported as os;
+
+pub(crate) const START_SEQUENCE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[2J";
+pub(crate) const RESTORE_SEQUENCE: &[u8] = b"\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l";
+
+/// The size of a terminal's window in character cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TerminalSize {
+    /// Columns.
+    pub cols: u16,
+    /// Rows.
+    pub rows: u16,
+}
+
+/// What [`RawTerminal::read_input`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Input {
+    /// This many bytes were read into the buffer, as the terminal sent them.
+    Bytes(usize),
+    /// The window changed size; [`RawTerminal::size`] has the new one.
+    Resized,
+    /// Nothing arrived before the timeout.
+    TimedOut,
+    /// The terminal is gone: its input reached the end.
+    Closed,
+}
+
+/// The terminal behind standard input and output, in raw mode, on the alternate screen, with
+/// the cursor hidden and bracketed paste on.
+///
+/// Raw mode passes every key to the program as bytes (`Ctrl-C` included, which no longer sends
+/// a signal) and stops the terminal from echoing or changing what is written. Dropping the
+/// value gives the terminal back as it was, as do a panic and, on Unix, `SIGTERM`, `SIGHUP`
+/// and `SIGQUIT` (which then end the process with exit status 128 + the signal's number); on
+/// Windows closing the console, logging off and shutting down restore it too. Only one exists
+/// at a time.
+#[derive(Debug)]
+pub struct RawTerminal {
+    mode: os::RawMode,
+}
+
+impl RawTerminal {
+    /// Takes the terminal. Fails with [`std::io::ErrorKind::Unsupported`] when standard input
+    /// and output are not both terminals or the system has none, and with
+    /// [`std::io::ErrorKind::AlreadyExists`] while another `RawTerminal` exists.
+    pub fn enter() -> std::io::Result<Self> {
+        Ok(Self {
+            mode: os::RawMode::enter(START_SEQUENCE)?,
+        })
+    }
+
+    /// The window's size now.
+    pub fn size(&self) -> std::io::Result<TerminalSize> {
+        self.mode.size()
+    }
+
+    /// Waits up to `timeout` for input and reads what has arrived into `buffer`, or reports a
+    /// resize. Escape sequences come as the terminal sent them, possibly split across reads.
+    pub fn read_input(&mut self, buffer: &mut [u8], timeout: Duration) -> std::io::Result<Input> {
+        self.mode.read_input(buffer, timeout)
+    }
+
+    /// Writes all of `bytes` to the terminal and flushes them.
+    pub fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.mode.write_all(bytes)
+    }
+}
 
 /// One of the three standard streams a process starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -87,6 +187,64 @@ fn os_enable_escape_sequences(stream: StandardStream) -> bool {
 #[cfg(not(any(unix, windows)))]
 fn os_enable_escape_sequences(_stream: StandardStream) -> bool {
     false
+}
+
+/// Whether standard input and standard output are both terminals, which a [`RawTerminal`]
+/// needs.
+pub fn is_interactive() -> bool {
+    os::both_streams_are_terminals()
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+    target_os = "solaris",
+    target_os = "illumos"
+)))]
+mod unsupported {
+    use super::{Input, TerminalSize};
+    use std::io;
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    pub(crate) enum RawMode {}
+
+    const _: &[u8] = super::RESTORE_SEQUENCE;
+
+    pub(crate) fn both_streams_are_terminals() -> bool {
+        false
+    }
+
+    impl RawMode {
+        pub(crate) fn enter(_start_sequence: &[u8]) -> io::Result<Self> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this system has no terminal support",
+            ))
+        }
+
+        pub(crate) fn size(&self) -> io::Result<TerminalSize> {
+            match *self {}
+        }
+
+        pub(crate) fn read_input(
+            &mut self,
+            _buffer: &mut [u8],
+            _timeout: Duration,
+        ) -> io::Result<Input> {
+            match *self {}
+        }
+
+        pub(crate) fn write_all(&mut self, _bytes: &[u8]) -> io::Result<()> {
+            match *self {}
+        }
+    }
 }
 
 #[cfg(windows)]

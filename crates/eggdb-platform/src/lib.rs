@@ -19,7 +19,8 @@
 //!   machine's [`CpuTopology`] (cores, packages, NUMA nodes, shared caches), and pinning
 //!   threads to CPUs; with [`ThreadOptions`] to start named, pinned threads and
 //!   [`CachePadded`] against false sharing;
-//! - [`terminal`]: whether a standard stream is a terminal, and whether it takes colours.
+//! - [`terminal`]: whether a standard stream is a terminal, whether it takes colours, and a
+//!   [`terminal::RawTerminal`] for full-screen programs that restores the terminal on exit.
 //!
 //! Each trait has an implementation backed by the operating system ([`OsFileSystem`],
 //! [`OsIoQueue`], [`OsNetwork`], [`SystemClock`], [`OsMemory`], [`OsCpus`]) and a
@@ -44,6 +45,23 @@ mod os_iocp;
 mod os_memory;
 mod os_net;
 mod os_net_readiness;
+#[cfg(all(
+    unix,
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "solaris",
+        target_os = "illumos"
+    )
+))]
+mod os_terminal_unix;
+#[cfg(windows)]
+mod os_terminal_windows;
 mod rng;
 mod sim_cpus;
 mod sim_fs;
