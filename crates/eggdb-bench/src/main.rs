@@ -1,9 +1,9 @@
-//! `eggdb-bench`: EggDB's benchmarks, gated against `benchmarks/baseline.txt` (D7, D79).
+//! `eggdb-bench`: EggDB's benchmarks, gated against `benchmarks/baseline.txt` (D7, D80).
 //!
 //! Run with `cargo run --release -p eggdb-bench`. Each benchmark reports metrics of three
 //! kinds:
 //! - counts (file operations, evictions and heap allocations per operation), the same on every
-//!   machine, which fail when they rise above their baseline line for `any` system;
+//!   machine, which fail when they differ from their baseline line for `any` system;
 //! - ratios of a hot path's time to a reference workload run in the same process, which fail
 //!   when the median of interleaved samples is more than 30% above the line for this system,
 //!   after one retry;

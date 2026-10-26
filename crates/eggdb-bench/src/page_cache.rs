@@ -68,16 +68,26 @@ fn scattered(pages: &[u64]) -> Vec<u64> {
     order
 }
 
-fn read_first_bytes<F: File>(cache: &PageCache<F>, order: &[u64], iterations: u64) -> u8 {
+fn read_first_bytes<F: File>(
+    cache: &PageCache<F>,
+    order: &[u64],
+    iterations: u64,
+) -> Result<u8, String> {
     let mask = order.len() - 1;
     let mut folded = 0u8;
     for index in 0..iterations as usize {
-        let byte = cache
-            .read(black_box(order[index & mask]))
-            .map_or(0xFF, |page| page[0]);
-        folded ^= byte;
+        let page_id = order[index & mask];
+        match cache.read(black_box(page_id)) {
+            Ok(page) => folded ^= page[0],
+            Err(error) => return Err(read_failed(page_id, error)),
+        }
     }
-    folded
+    Ok(folded)
+}
+
+#[cold]
+fn read_failed(page_id: u64, error: StorageError) -> String {
+    format!("reading page {page_id}: {error}")
 }
 
 pub(crate) fn hit(allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
@@ -86,12 +96,12 @@ pub(crate) fn hit(allocator: &CountingAllocator) -> Result<Vec<Metric>, String> 
     let pages = create_file(&fs, path, HIT_PAGES)?;
     let cache = open_cache(&fs, path, HIT_PAGES)?;
     let order = scattered(&pages);
-    black_box(read_first_bytes(&cache, &order, HIT_PAGES as u64));
+    black_box(read_first_bytes(&cache, &order, HIT_PAGES as u64)?);
     let misses = cache.stats().misses;
 
     let operations = fs.operation_count();
     let allocations = allocator.count();
-    black_box(read_first_bytes(&cache, &order, COUNTED_OPERATIONS));
+    black_box(read_first_bytes(&cache, &order, COUNTED_OPERATIONS)?);
     let allocations_per_op = (allocator.count() - allocations) as f64 / COUNTED_OPERATIONS as f64;
     let operations_per_op = (fs.operation_count() - operations) as f64 / COUNTED_OPERATIONS as f64;
 
@@ -103,21 +113,24 @@ pub(crate) fn hit(allocator: &CountingAllocator) -> Result<Vec<Metric>, String> 
     let page_bytes = cache.page_size().bytes();
     let memory = vec![1u8; HIT_PAGES * page_bytes];
     let measured = measure::paired(
-        |iterations| {
-            black_box(read_first_bytes(&cache, &order, iterations));
+        &mut |iterations| {
+            black_box(read_first_bytes(&cache, &order, iterations)?);
+            Ok(())
         },
-        |iterations| {
+        &mut |iterations| {
             let mask = order.len() - 1;
             let mut folded = 0u8;
             for index in 0..iterations as usize {
-                let byte = frames
-                    .get(&black_box(order[index & mask]))
-                    .map_or(0xFF, |&frame| memory[frame * page_bytes + 16]);
-                folded ^= byte;
+                let page_id = order[index & mask];
+                let frame = frames
+                    .get(&black_box(page_id))
+                    .ok_or_else(|| format!("the reference has no page {page_id}"))?;
+                folded ^= memory[frame * page_bytes + 16];
             }
             black_box(folded);
+            Ok(())
         },
-    );
+    )?;
     if cache.stats().misses != misses {
         return Err(format!("{HIT}: a read missed the cache"));
     }
@@ -154,10 +167,10 @@ pub(crate) fn miss(allocator: &CountingAllocator) -> Result<Vec<Metric>, String>
     let path = Path::new(SIM_PATH);
     let pages = create_file(&fs, path, MISS_FILE_PAGES)?;
     let cache = open_cache(&fs, path, MISS_FRAMES)?;
-    black_box(read_first_bytes(&cache, &pages, MISS_FILE_PAGES as u64));
+    black_box(read_first_bytes(&cache, &pages, MISS_FILE_PAGES as u64)?);
     let before = cache.stats();
     let operations = fs.operation_count();
-    black_box(read_first_bytes(&cache, &pages, COUNTED_OPERATIONS));
+    black_box(read_first_bytes(&cache, &pages, COUNTED_OPERATIONS)?);
     let after = cache.stats();
     let per_op = |count: u64| count as f64 / COUNTED_OPERATIONS as f64;
     let operations_per_op = per_op(fs.operation_count() - operations);
@@ -168,13 +181,14 @@ pub(crate) fn miss(allocator: &CountingAllocator) -> Result<Vec<Metric>, String>
     let file = TemporaryFile::new();
     let pages = create_file(&os, &file.path, MISS_FILE_PAGES)?;
     let cache = open_cache(&os, &file.path, MISS_FRAMES)?;
-    black_box(read_first_bytes(&cache, &pages, MISS_FILE_PAGES as u64));
+    black_box(read_first_bytes(&cache, &pages, MISS_FILE_PAGES as u64)?);
     let allocations = allocator.count();
-    black_box(read_first_bytes(&cache, &pages, COUNTED_OPERATIONS));
+    black_box(read_first_bytes(&cache, &pages, COUNTED_OPERATIONS)?);
     let allocations_per_op = per_op(allocator.count() - allocations);
-    let ns_per_op = measure::single(|iterations| {
-        black_box(read_first_bytes(&cache, &pages, iterations));
-    });
+    let ns_per_op = measure::single(&mut |iterations| {
+        black_box(read_first_bytes(&cache, &pages, iterations)?);
+        Ok(())
+    })?;
     Ok(vec![
         Metric::exact(MISS, "misses_per_op", misses_per_op),
         Metric::exact(MISS, "file_operations_per_op", operations_per_op),

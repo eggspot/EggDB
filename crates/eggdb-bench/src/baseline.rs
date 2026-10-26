@@ -73,6 +73,7 @@ pub(crate) enum Verdict {
     Within,
     Improved,
     Regressed { limit: f64 },
+    Fell { baseline: f64 },
     Missing,
     Reported,
 }
@@ -80,7 +81,7 @@ pub(crate) enum Verdict {
 impl Verdict {
     pub(crate) fn fails(self, gate: Gate) -> bool {
         match self {
-            Self::Regressed { .. } => true,
+            Self::Regressed { .. } | Self::Fell { .. } => true,
             Self::Missing => gate == Gate::Exact,
             Self::Within | Self::Improved | Self::Reported => false,
         }
@@ -93,6 +94,10 @@ impl fmt::Display for Verdict {
             Self::Within => f.write_str("ok"),
             Self::Improved => f.write_str("improved: lower the baseline with --update"),
             Self::Regressed { limit } => write!(f, "REGRESSED: above the limit {limit:.3}"),
+            Self::Fell { baseline } => write!(
+                f,
+                "CHANGED: below the baseline {baseline}; counts must match exactly, so if this is intended run --update and say why"
+            ),
             Self::Missing => f.write_str("no baseline line"),
             Self::Reported => f.write_str("reported only"),
         }
@@ -112,7 +117,7 @@ pub(crate) fn judge(metric: &Metric, baseline: Option<f64>) -> Verdict {
         Gate::Exact if metric.value > baseline + EXACT_EPSILON => {
             Verdict::Regressed { limit: baseline }
         }
-        Gate::Exact if metric.value < baseline - EXACT_EPSILON => Verdict::Improved,
+        Gate::Exact if metric.value < baseline - EXACT_EPSILON => Verdict::Fell { baseline },
         Gate::Exact => Verdict::Within,
         Gate::Ratio => {
             let limit = baseline * (1.0 + RATIO_TOLERANCE);
@@ -210,14 +215,18 @@ mod tests {
     use super::{Baseline, Gate, Metric, Verdict, judge};
 
     #[test]
-    fn exact_counts_fail_above_the_baseline_and_ratios_only_beyond_the_tolerance() {
+    fn exact_counts_fail_on_any_change_and_ratios_only_beyond_the_tolerance() {
         let count = |value| Metric::exact("cache.hit", "allocations_per_op", value);
         assert_eq!(judge(&count(0.0), Some(0.0)), Verdict::Within);
         assert_eq!(
             judge(&count(0.001), Some(0.0)),
             Verdict::Regressed { limit: 0.0 }
         );
-        assert_eq!(judge(&count(1.0), Some(2.0)), Verdict::Improved);
+        assert_eq!(
+            judge(&count(1.0), Some(2.0)),
+            Verdict::Fell { baseline: 2.0 }
+        );
+        assert!(judge(&count(1.0), Some(2.0)).fails(Gate::Exact));
         let ratio = |value| Metric::ratio("cache.hit", "ratio_to_reference", value);
         assert_eq!(judge(&ratio(1.25), Some(1.0)), Verdict::Within);
         assert!(matches!(
