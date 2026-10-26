@@ -13,6 +13,7 @@
 
 mod app;
 mod decoder;
+mod editor;
 mod fake;
 mod frame;
 mod json;
