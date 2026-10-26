@@ -3776,8 +3776,10 @@ eggdb`) and gates, for each system:
 - `footprint.start` (`eggdb --version`) and `footprint.open_and_get` (`eggdb get` of one key from
   a closed 10,000-entry file): the median start time over 20 runs as a ratio to starting
   `eggdb-bench --exit-at-once`, a Rust program that exits at once, 50% above the line, since a
-  process start depends on the machine; and the median peak resident memory of 20 more runs, 5%
-  above the line.
+  process start depends on the machine; and the median peak resident memory of 20 more runs, 10%
+  above the line. The research suggested 5%, but the `--version` peak on Linux runners ranged
+  from 2,471,936 to about 2,610,000 bytes (+5.6%) with the same binary, so 5% would fail on the
+  runner alone; 10% is still about 250 KB on a 2.5 MB peak.
 
 The peak is measured from outside, in the platform layer (D8):
 `eggdb_platform::process::run_with_peak_memory` runs a command and returns its exit code and peak.
@@ -3817,13 +3819,14 @@ choice:
   parallel with the others, with its own cache and a 15-minute timeout; other systems run it by
   hand.
 - *How to measure memory?* The child's own peak through the platform layer (VmHWM on Linux,
-  `ru_maxrss` on Apple's systems, the peak working set on Windows), with 1% for size, 5% for memory
+  `ru_maxrss` on Apple's systems, the peak working set on Windows), with 1% for size, 5% for memory (10% in the build, above)
   and a wide band for start time.
 - *A result where SQLite wins?* State it, gate it so it cannot grow, and put the fix on the
   roadmap.
 
 Decided during the build (not by the research): the 50% band for the SQLite ratios, the `Off`
-mode for the gated batch, and tracing on Linux for the peak, each for the reason given above.
+mode for the gated batch, tracing on Linux for the peak and the 10% band for memory, each for
+the reason given above.
 
 ## D95 A file lock is released when its handle drops, even while a child process is starting — Decided (build loop, 2026-10-27); supersedes D87's known limit, refines D8 and D9
 **Cause.** `cargo test -p eggdb --bin eggdb` failed about one run in six on macOS (and nearly

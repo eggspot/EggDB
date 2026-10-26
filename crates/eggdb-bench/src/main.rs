@@ -8,7 +8,7 @@
 //!   when the median of interleaved samples is more than 30% above the line for this system,
 //!   after one retry;
 //! - the footprint of the `eggdb` binary, which it builds first: its size (1% tolerance), its
-//!   peak memory (5%) and its start time as a ratio to starting a program that exits at once
+//!   peak memory (10%) and its start time as a ratio to starting a program that exits at once
 //!   (50%), for this system;
 //! - times in nanoseconds per operation, reported and never gated.
 //!

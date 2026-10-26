@@ -73,9 +73,9 @@ reported, not gated.
 |-----------|--------|------|
 | `footprint.binary` | size of the stripped release binary, in bytes | 1% above the line |
 | `footprint.start` | `eggdb --version`: start time as a ratio to starting a Rust program that exits at once | 50% above the line |
-| `footprint.start` | its peak resident memory, in bytes | 5% above the line |
+| `footprint.start` | its peak resident memory, in bytes | 10% above the line |
 | `footprint.open_and_get` | `eggdb get` of one key from a closed 10,000-entry file: the same ratio | 50% above the line |
-| `footprint.open_and_get` | its peak resident memory, in bytes | 5% above the line |
+| `footprint.open_and_get` | its peak resident memory, in bytes | 10% above the line |
 
 Times and memory are medians of 20 runs each. Memory is measured from outside the process
 through the platform layer: on Linux the child's `VmHWM` when it exits, on Apple's systems

@@ -16,7 +16,7 @@ pub(crate) const START: &str = "footprint.start";
 pub(crate) const OPEN_AND_GET: &str = "footprint.open_and_get";
 
 const SIZE_TOLERANCE_PERCENT: u32 = 1;
-const MEMORY_TOLERANCE_PERCENT: u32 = 5;
+const MEMORY_TOLERANCE_PERCENT: u32 = 10;
 const START_TOLERANCE_PERCENT: u32 = 50;
 const ROUNDS: usize = 20;
 const FIXTURE_ENTRIES: u64 = 10_000;
