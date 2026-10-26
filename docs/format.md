@@ -314,8 +314,9 @@ never left in an older slot's log, because such a checkpoint writes its superblo
 slots (step 4 below).
 
 The guarantee: when the newest slot is damaged after it was synced, the open either replays to
-the newest commit or is refused. Two double faults, each a crash followed later by that damage,
-used to break it, and step 6 of "Opening a file" closes both (issue #39, D89):
+the newest commit or is refused, except in the one window left below. Two double faults, each a
+crash followed later by that damage, used to break it; step 6 of "Opening a file" closes the first and narrows the second to the time
+before the next open for writing (issue #39, D89):
 1. A crash between a freeing checkpoint's two superblock writes left the older slot naming the
    old log, whose segments the newest superblock gives to the free list. Once they were reused
    as data, damage to the newest slot opened the older one, whose log broke at a reused segment
