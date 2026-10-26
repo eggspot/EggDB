@@ -51,6 +51,7 @@ pass "help, --version and an unknown command"
 expect_exit 0 "$eggdb" create app.db
 expect_exit 3 "$eggdb" create app.db
 expect_exit 3 "$eggdb" get missing.db user:1
+[ ! -e missing.db ] || fail "get on a missing path created a file"
 pass "create, and no file made by a wrong path"
 
 expect_exit 0 "$eggdb" put app.db user:1 Ada
