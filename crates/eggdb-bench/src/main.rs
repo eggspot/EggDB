@@ -15,6 +15,7 @@
 mod allocations;
 mod baseline;
 mod btree;
+mod checkpoint;
 mod log;
 mod measure;
 mod page_cache;
@@ -30,13 +31,15 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
 type Benchmark = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 
-const BENCHMARKS: [(&str, Benchmark); 11] = [
+const BENCHMARKS: [(&str, Benchmark); 13] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
     (log::COMMIT_FULL, log::commit_full),
     (log::COMMIT_NORMAL, log::commit_normal),
     (log::COMMIT_OFF, log::commit_off),
+    (checkpoint::CHECKPOINT, checkpoint::checkpoint),
+    (checkpoint::RECOVERY, checkpoint::recovery),
     (btree::GET, btree::get),
     (btree::PUT, btree::put),
     (btree::DELETE, btree::delete),
