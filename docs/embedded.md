@@ -3,9 +3,20 @@
 EggDB opens in your process, like SQLite: no server, one file. This release is an ordered
 key-value store with transactions: keys and values are byte strings, keys are sorted as unsigned
 bytes, and every change commits atomically and survives a crash. The API is the `eggdb` crate
-(D87); its rustdoc has an example for every item.
+(D87); its rustdoc has an example for every item. Every example on this page is compiled by
+`cargo test` (the `EmbeddedGuide` doctests in `crates/eggdb/src/lib.rs`), so none of them can
+drift from the API.
 
-```rust
+## Adding it to a project
+EggDB is not on crates.io yet (publishing waits for the project's accounts). Depend on a
+release tag from the repository, which uses no other crate:
+
+```toml
+[dependencies]
+eggdb = { git = "https://github.com/eggspot/EggDB", tag = "v0.2.0" }
+```
+
+```rust,no_run
 use eggdb::Database;
 
 fn main() -> eggdb::Result<()> {
@@ -31,6 +42,23 @@ fn main() -> eggdb::Result<()> {
 | `page_size_bytes(usize)` | 4096 | the page size of a new file, a power of two up to 65,536 |
 | `write_timeout(Duration)` | 5 s | how long `begin_write` waits for the writer before it |
 
+```rust,no_run
+use eggdb::{Database, Durability, Options};
+use std::time::Duration;
+
+fn main() -> eggdb::Result<()> {
+    let options = Options::new()
+        .create_if_missing(false)
+        .durability(Durability::Normal)
+        .cache_bytes(64 << 20)
+        .write_timeout(Duration::from_secs(1));
+    let db = Database::open_with("app.db", options)?;
+    let reader = Database::open_with("other.db", Options::new().read_only(true))?;
+    println!("pages of {} bytes, keys up to {} bytes", reader.page_size(), db.max_key_bytes());
+    Ok(())
+}
+```
+
 Opening recovers the file: it replays the commits in the write-ahead log since the last
 checkpoint, so it holds exactly the commits that were durable when the last process stopped,
 however it stopped. Values outside what EggDB accepts fail the open with
@@ -51,11 +79,28 @@ can fail with `Locked`.
   them, so `?` rolls back by itself.
 - `commit()` returns a `CommitStamp`, a hybrid-clock timestamp above every earlier commit's.
 
-```rust
-let mut tx = db.begin_write()?;
-tx.put("a", "1")?;
-tx.delete("b")?;
-tx.commit()?;
+```rust,no_run
+use eggdb::Database;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+
+    let mut tx = db.begin_write()?;
+    tx.put("a", "1")?;
+    tx.delete("b")?;
+    let stamp = tx.commit()?;
+    println!("committed at {stamp:?}");
+
+    let moved = db.write(|tx| {
+        let value = tx.get("a")?.unwrap_or_default();
+        tx.put("c", &value)?;
+        tx.delete("a")?;
+        Ok(value.len())
+    })?;
+    let count = db.read(|tx| Ok(tx.scan(..).count()))?;
+    println!("moved {moved} bytes; {count} keys");
+    db.close()
+}
 ```
 
 Closures do the same with less code: `db.write(|tx| { ...; Ok(value) })` commits when the
@@ -78,10 +123,25 @@ forms works, with keys as `&str`, `&[u8]`, `&[u8; N]`, `String` or `Vec<u8>`: `.
 `"a"..`, `..="z"`, or a pair of `std::ops::Bound`s. `tx.scan_prefix(prefix)` returns the keys
 that start with `prefix`. A range whose start lies above its end is empty.
 
-```rust
-let tx = db.begin_read()?;
-for entry in tx.scan_prefix("user:").rev() {
-    let (key, value) = entry?;
+```rust,no_run
+use eggdb::Database;
+use std::ops::Bound;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    let tx = db.begin_read()?;
+    for entry in tx.scan_prefix("user:").rev() {
+        let (key, value) = entry?;
+        println!("{key:?} = {value:?}");
+    }
+    let first_ten: Vec<_> = tx.scan("a".."m").take(10).collect::<eggdb::Result<_>>()?;
+    let after_k = tx.scan((Bound::Excluded("k"), Bound::Unbounded)).count();
+    let mut scan = tx.scan(..);
+    while let Some((key, value)) = scan.next_entry()? {
+        println!("{} bytes under {} bytes of key", value.len(), key.len());
+    }
+    println!("{} entries, then {after_k}", first_ten.len());
+    Ok(())
 }
 ```
 
@@ -136,6 +196,21 @@ for AI models; `error.kind()` is an `ErrorKind` to match on:
 `ErrorKind` may gain kinds in later releases, so a `match` needs a wildcard arm. An
 `eggdb::Error` converts into a `std::io::Error` of the closest kind.
 
+```rust,no_run
+use eggdb::{Database, ErrorKind};
+
+fn main() {
+    match Database::open("app.db") {
+        Ok(db) => println!("{} bytes per page", db.page_size()),
+        Err(error) if error.kind() == ErrorKind::Locked => eprintln!("open elsewhere: {error}"),
+        Err(error) => match error.kind() {
+            ErrorKind::Corrupt => eprintln!("run `eggdb check app.db`: {error}"),
+            _ => eprintln!("{error}"),
+        },
+    }
+}
+```
+
 ## Threads
 `Database` is `Send` and `Sync`: share it by reference, in scoped threads, or through an `Arc`.
 Readers never wait for the writer, nor the writer for readers. A second writer waits for the
@@ -159,6 +234,19 @@ or give them more `snapshot_memory_bytes`.
 - `db.stats()` reads no page: the page size and count, free pages, the file's size, the last
   commit's stamp, the cache's size, contents, hits and misses, and the log since the last
   checkpoint.
+
+```rust,no_run
+use eggdb::Database;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    let report = db.check()?;
+    println!("{} entries, {} leaked pages", report.entries, report.leaked_pages);
+    let stats = db.stats()?;
+    println!("{} of {} bytes per page", stats.file_bytes, stats.page_size);
+    db.close()
+}
+```
 
 ## Limits in this release
 - **Size of keys:** at most an eighth of a page, 512 bytes with the default 4 KiB pages and 8,192
@@ -187,4 +275,6 @@ or give them more `snapshot_memory_bytes`.
 - **One key space** per database. Named collections come later, as an addition: the default key
   space stays what `get`, `put`, `delete` and `scan` use (D87).
 - **No in-memory database** yet: every database is a file (D87).
-- **The file format** may still change until v0.2.0 ships ([format.md](format.md)).
+- **The file format** is version 1 ([format.md](format.md)). Every later release reads the
+  files v0.2.0 writes, and CI keeps opening the v0.2.0 sample files to hold it to that (D20,
+  D96).

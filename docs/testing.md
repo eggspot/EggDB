@@ -1,7 +1,7 @@
 # What is tested
 
 This page lists what the storage engine's tests prove about crashes and I/O faults, and what they
-don't. It feeds the correctness statement of v0.2.0 (roadmap row 18). Every test runs on the
+don't. It feeds the correctness statement, [correctness.md](correctness.md). Every test runs on the
 simulated file system of `eggdb-platform` (D9), which numbers every file operation, can fail any
 one of them, and can simulate a power loss that drops every unsynced write or tears unsynced
 writes into 512-byte pieces that survive or not, chosen by a seed.
@@ -141,6 +141,58 @@ never a panic, an input error or a case over 5 s. CI runs 4,000 cases (under a s
 `cli/transfer_tests.rs`: mutated exports imported into new and existing files must exit 0 or 3,
 leave no `.importing` file, keep `check` passing, and change nothing when the message says
 nothing was imported.
+
+## Files from released versions (D96)
+`crates/eggdb/tests/data` holds files written by released versions, which every later version
+must keep reading (D20). From their release's tag on they are never regenerated or edited, and a
+release that changes what it writes adds samples of its own beside them; before the tag, only a
+change to the bytes on disk that a numbered decision approves replaces them, in the same pull
+request and the same documented way. `sample_files.rs` pins each one by its size and an
+FNV-1a fingerprint of its bytes, so a changed sample fails CI, and checks that it opens
+read-only and for writing, holds exactly the expected entries (every key read, scans in both
+directions), passes `check` with the expected counts, takes new commits and reopens, and reads
+through the `eggdb` command; the smoke test reads the samples with each release binary too.
+
+**v0.2.0.** Written on 2026-10-27, before the v0.2.0 tag, by the release build of commit
+`2b04bd5` on `main` (its binary still reports 0.1.0), format version 1, 4 KiB pages:
+- `v0.2.0.db` (188,416 bytes, checkpointed, a B+tree of height 2, one value on two overflow
+  pages, four free pages), made with the `eggdb` command:
+
+  ```sh
+  eggdb create v0.2.0.db
+  eggdb put v0.2.0.db = "the empty key"
+  eggdb put v0.2.0.db 0x00ff10 0xdeadbeef
+  eggdb put v0.2.0.db doc:json '{"name":"Ada Lovelace","born":1815,"tags":["math","poetry"]}'
+  eggdb put v0.2.0.db empty =
+  yes 'large value, first version' | head -c 9000 > large-1.txt
+  eggdb put v0.2.0.db large @large-1.txt
+  yes 'EggDB v0.2.0 sample, large value' | head -c 6000 > large-2.txt
+  eggdb put v0.2.0.db large @large-2.txt
+  for n in $(seq 1 30); do eggdb put v0.2.0.db "user:$n" "user number $n"; done
+  eggdb put v0.2.0.db user:2 "Grace Hopper"
+  eggdb del v0.2.0.db user:30
+  eggdb put v0.2.0.db removed "this key is deleted"
+  eggdb del v0.2.0.db removed
+  eggdb put v0.2.0.db "名前" "エッグ"
+  eggdb put v0.2.0.db "$(printf 'k%.0s' $(seq 1 512))" "the longest key with 4 KiB pages"
+  for n in $(seq 100 399); do eggdb put v0.2.0.db "item:$n" "item $n of the v0.2.0 sample file"; done
+  for n in $(seq 200 249); do eggdb del v0.2.0.db "item:$n"; done
+  eggdb export v0.2.0.db v0.2.0.jsonl
+  ```
+- `v0.2.0.jsonl`, the export made by the last line.
+- `v0.2.0-log-to-replay.db`: a copy of `v0.2.0.db` with three more commits through the
+  embedded API (`log_sample_commits` in `sample_files.rs`: puts, deletes, a new large value and
+  a removed one) and no checkpoint, so opening it replays those commits from the log. The
+  ignored test `write_the_v0_2_0_log_sample` wrote it, and refuses to run while the file exists.
+
+## The release smoke test (D96)
+`scripts/smoke-test.sh <binary>` runs a built `eggdb` through every command: create, put (text,
+hex, stdin, a 3 MB value), get, del, scan options, check, stats, an export and import round
+trip, the sample files, `eggdb ui --help`, the refusal without a terminal, and, where `script(1)`
+gives it a pseudo-terminal (Linux and macOS), a scripted `eggdb ui` session that moves, deletes a
+key through the confirmation and quits, after which the file must show the delete and pass
+`check`. CI runs it against the debug binary on Linux, macOS and Windows; the release workflow
+runs it against the release binary on every target its runner can execute.
 
 ## Each layer
 - **Page file:** creating, growing and freeing pages, both header slots and a torn header update,

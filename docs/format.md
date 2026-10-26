@@ -580,8 +580,10 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
 - A change that an older release would misread needs a feature flag (see "Feature flags").
   Within a page type, `layout` versions the body.
 - `format_version` rises only for a change that feature flags can't express.
-- The v0.2.0 sample file, committed to the repository, is opened and checked by CI on every
-  change from then on (D20, D35).
+- The v0.2.0 sample files in `crates/eggdb/tests/data` (a checkpointed file, one with commits
+  in its log, and an export) are opened, read, checked and written to by CI on every change
+  (D20, D35, D96). They are frozen at the v0.2.0 tag; [testing.md](testing.md) says how they
+  were made.
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.

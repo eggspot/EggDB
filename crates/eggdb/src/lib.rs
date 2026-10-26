@@ -62,6 +62,14 @@ pub use options::{Durability, Options};
 pub use scan::{KeyRange, Scan};
 pub use transaction::{ReadTransaction, WriteTransaction};
 
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/embedded.md")]
+pub struct EmbeddedGuide;
+
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+pub struct Readme;
+
 /// The version of this EggDB build.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

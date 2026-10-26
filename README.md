@@ -31,9 +31,33 @@ One database for every kind of data, written from scratch in Rust.
   more, with each one's exact behavior.
 - **Everywhere:** every OS, every CPU and every cloud.
 
-Status: early. See [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
-To use EggDB as an embedded key-value store from Rust, see [docs/embedded.md](docs/embedded.md);
-from a shell or a script, the `eggdb` command ([docs/cli.md](docs/cli.md)):
+## Today: v0.2.0, an embedded key-value store in one file
+
+Everything above is the goal; the first release people can use is smaller. v0.2.0 is an
+embedded, crash-safe, transactional key-value store: one file, a Rust API, the `eggdb` command
+and `eggdb ui`, a full-screen terminal UI. There is no server, SQL or other protocol yet, and one
+writer at a time. What is in it and what is not: [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md);
+what is tested and what is not: [docs/correctness.md](docs/correctness.md); the plan:
+[docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
+
+### Install: download one file
+
+Each release on the [releases page](https://github.com/eggspot/EggDB/releases) has one archive
+per platform holding the `eggdb` binary, which needs nothing else (the Linux `musl` builds are
+static and run on any distribution). On Linux on x86-64:
+
+```sh
+curl -fsSL https://github.com/eggspot/EggDB/releases/download/v0.2.0/eggdb-v0.2.0-x86_64-unknown-linux-musl.tar.gz | tar -xz
+sudo mv eggdb-v0.2.0-x86_64-unknown-linux-musl/eggdb /usr/local/bin/
+eggdb version
+```
+
+Other platforms swap the target: `aarch64-unknown-linux-musl`, `aarch64-apple-darwin` (Apple
+silicon), `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc` or `aarch64-pc-windows-msvc` as a
+`.zip`. `SHA256SUMS` and `gh attestation verify <archive> -R eggspot/EggDB` check a download. To
+build it instead: `cargo build --release -p eggdb`, and the binary is `target/release/eggdb`.
+
+### Use it from a shell
 
 ```sh
 eggdb create app.db
@@ -43,8 +67,39 @@ eggdb scan app.db --prefix user:             # user:1  Ada
 cat photo.jpg | eggdb put app.db photo       # any bytes, up to 1 GiB
 eggdb scan app.db --format json | jq .key    # for scripts and agents
 eggdb check app.db                           # "ok: every page passed its checksum …"
+eggdb export app.db backup.jsonl             # every entry as JSON lines; import loads it
+eggdb ui app.db                              # browse and edit it full screen; q quits
 ```
 
-Build it from source with `cargo build --release`; the binary is `target/release/eggdb`.
+Every command, the output formats, exit codes and the UI's keys: [docs/cli.md](docs/cli.md).
+
+### Use it from Rust
+
+```toml
+[dependencies]
+eggdb = { git = "https://github.com/eggspot/EggDB", tag = "v0.2.0" }
+```
+
+```rust,no_run
+use eggdb::Database;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    db.write(|tx| {
+        tx.put("user:1", "Ada")?;
+        tx.put("user:2", "Grace")?;
+        Ok(())
+    })?;
+    let tx = db.begin_read()?;
+    for entry in tx.scan_prefix("user:") {
+        let (key, value) = entry?;
+        println!("{} = {}", String::from_utf8_lossy(&key), String::from_utf8_lossy(&value));
+    }
+    drop(tx);
+    db.close()
+}
+```
+
+Transactions, scans, durability, errors and limits: [docs/embedded.md](docs/embedded.md).
 
 Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.

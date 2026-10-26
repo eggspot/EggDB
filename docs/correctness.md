@@ -1,0 +1,75 @@
+# Correctness statement
+
+What EggDB v0.2.0 promises about your data, how each promise is tested, and what is not tested
+yet. Correct and safe comes before fast (D9), so this page says plainly where the evidence
+stops. The details of every test are in [testing.md](testing.md); this page is the summary.
+
+## The promises
+- **A commit is atomic.** After any crash, a database holds every change of a commit or none of
+  them, never part of one, and never a mix of two commits.
+- **A commit is durable once it returns,** under `Durability::Full` (the default and what the
+  `eggdb` command uses): a crash of the process or a power loss after that loses nothing.
+  `Normal` can lose the latest commits on a power loss but never corrupts the file, and `Off`
+  promises nothing after a power loss ([embedded.md](embedded.md), "Durability").
+- **Damage is found, never served.** Every page and every log record carries a CRC-32C checksum
+  that is checked when it is read; a damaged page is an error (`Corrupt`, exit 4), never wrong
+  data. `eggdb check` and `Database::check` read every page and account for every page of the
+  file.
+- **Hostile input never crashes or hangs EggDB.** A damaged or crafted file, a hostile export
+  and any command-line argument produce an error, not a panic or a hang, and a hostile file
+  never makes EggDB allocate more than twice the file's size plus 16 MiB at once.
+- **Files stay readable.** Every later release opens the files v0.2.0 writes (D20, D96).
+
+## How each one is tested
+| What | How | Where |
+|------|-----|-------|
+| Crash at any moment | A seeded workload through the page cache, the log and the file, in each durability mode, fails every one of its I/O operations in turn and ends in a reopen, a power loss that drops unsynced writes, or one that tears them into 512-byte pieces; the reopened file must hold exactly one commit, no older than promised, with every page accounted for. A sample of those points also crashes during recovery, and writes after it. | [testing.md](testing.md), "The whole stack" (D85) |
+| Transactions under crashes | The same sweep through write and read transactions: atomic commits, rollbacks, snapshot readers that keep their view, and a handle that refuses work after a failed sync instead of retrying it as a success. | testing.md (D86) |
+| Injected faults | The simulated file system fails any operation on request; every layer (page file, log, checkpoints, page cache, B+tree) has its own crash and fault tests. | testing.md, "Each layer" |
+| Behaves like a map | Seeded random transactions, rollbacks, large values, scans, checks, reopens, power losses and faults compared with Rust's `BTreeMap`, through the storage engine and through the embedded API on real files. | testing.md, "Against a model" (D89) |
+| Hostile files | A seeded fuzzer damages five kinds of valid files 22 ways (bit flips, cuts, swapped pages, rewritten fields with valid checksums, damaged logs), opens each read-only and for writing, reads, scans, checks and writes; 800 cases in every CI run. | testing.md, "Hostile files" (D89) |
+| Hostile exports and arguments | A fuzzer for the `eggdb import` reader (4,000 cases per run), mutated exports imported by the real binary, random arguments to the real binary, and a fuzzed terminal-input decoder for `eggdb ui`. | testing.md, "Hostile exports" (D93); D90, D91 |
+| `check` finds damage | Crafted pages and chains that must fail `check`, and a check after every case of the tests above. | testing.md |
+| Files from v0.2.0 stay readable | Two sample files written by v0.2.0, one checkpointed and one with three commits still in its log, and a v0.2.0 export, are committed and pinned by their bytes. CI opens, reads, scans, checks, replays, writes to and imports them on every change. | `crates/eggdb/tests/sample_files.rs`, testing.md, "Files from released versions" (D96) |
+| The released binaries work | A smoke test runs every command, an export and import round trip, the sample files and a scripted `eggdb ui` session in a pseudo-terminal against each release binary on its own platform. | `scripts/smoke-test.sh`, testing.md "The release smoke test" (D96) |
+| One writer, locked files | Two processes opening one file, a busy file for every command, and locks released when a handle closes. | `crates/eggdb/tests/lock_across_processes.rs`, `cli_busy.rs` (D95) |
+
+## Where it runs in CI
+- **Every test** runs on Linux x86-64 (glibc and musl), macOS on Apple silicon and Windows
+  x86-64, on every pull request.
+- **The release smoke test** runs on those three and on Linux AArch64 (glibc and musl), each
+  against the release binary built for it.
+- **Built, not run:** macOS x86-64 and Windows AArch64 (the runners can't execute them), so
+  only their build is checked.
+- **Compiled and linted, never run:** FreeBSD, NetBSD, illumos, Solaris, Android, iOS and
+  WebAssembly (WASI).
+- **`eggdb ui` in a real terminal:** the smoke test drives it on Linux and macOS through
+  `script(1)`. Windows has no such tool on its runners, so there it is tested through the UI's
+  fake terminal and the refusal without a terminal only.
+
+## What is not tested, or not promised
+- **Real power loss on real hardware.** Crashes and power losses are simulated: unsynced writes
+  are dropped or torn into 512-byte pieces. EggDB relies on the operating system's sync
+  (`fsync`, `F_FULLFSYNC` on Apple's systems, `FlushFileBuffers` on Windows through Rust's
+  standard library) and on the disk honouring it. No test pulls the plug on a machine, and a
+  disk or a virtual machine that acknowledges writes it hasn't stored can lose commits.
+- **A real process killed in the middle of a commit.** That is covered by the simulator, which
+  stops at every I/O operation; no test kills a running `eggdb` process during a write.
+- **More than one writer.** v0.2.0 has one writer at a time by design (D76); concurrent writers
+  come with M3.
+- **`Off` after a power loss**, which promises nothing.
+- **No outside audit.** No Jepsen-style test or independent review outside the project has
+  checked EggDB yet; every test here is our own.
+- **Damage to synced bytes** is detected by checksums, not repaired: EggDB has no repair yet, so
+  restore from a backup (`eggdb export`, or a copy of the closed file).
+- **Network and shared file systems** (NFS, SMB) and their locks.
+- **Large files and long runs.** The tests use small files; the largest value written end to end
+  is 20 MiB, against a limit of 1 GiB, and there is no soak test of days or of databases of many
+  gigabytes yet.
+- **CPUs and systems outside CI**: 32-bit and big-endian CPUs are not built or run.
+- **No network listener exists in v0.2.0**, so nothing here covers one. When the first one
+  lands, it listens on loopback only and without TLS until EggDB's own TLS is built (D22,
+  D23), and this page will say how it is tested.
+
+A problem with your data? Keep the file unchanged, run `eggdb check` on a copy, and open an
+issue at https://github.com/eggspot/EggDB/issues with its output.

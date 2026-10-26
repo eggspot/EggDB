@@ -392,6 +392,23 @@ fn golden(name: &str, screen: &str) {
 }
 
 #[test]
+fn the_cli_guide_shows_the_screens_as_the_ui_draws_them() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let guide = std::fs::read_to_string(manifest.join("../../docs/cli.md"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    for name in ["06_json_pretty", "14_confirm_delete", "18_check_ok"] {
+        let screen = std::fs::read_to_string(manifest.join(format!("tests/screens/{name}.txt")))
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert!(
+            guide.contains(&format!("```text\n{screen}```\n")),
+            "docs/cli.md does not show tests/screens/{name}.txt as it is; copy the screen in"
+        );
+    }
+}
+
+#[test]
 fn scenario_01_opens_at_80_by_24_on_the_first_key() {
     let s = Scenario::new(80, 24);
     s.matches("01_open_80x24");
