@@ -220,6 +220,32 @@ impl<'t> Scan<'t> {
         self.step(ScanOrder::Ascending)
     }
 
+    /// The next entry from the back, lent like [`Scan::next_entry`]: the reverse scan without
+    /// copying keys and values.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-next-back-entry-{}.db", std::process::id()));
+    /// let db = eggdb::Database::open(&path)?;
+    /// db.put("a", "12")?;
+    /// db.put("b", "345")?;
+    /// let tx = db.begin_read()?;
+    /// let mut scan = tx.scan(..);
+    /// let mut keys = Vec::new();
+    /// while let Some((key, _value)) = scan.next_back_entry()? {
+    ///     keys.push(key.to_vec());
+    /// }
+    /// assert_eq!(keys, [b"b".to_vec(), b"a".to_vec()]);
+    /// # drop(scan);
+    /// # drop(tx);
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn next_back_entry(&mut self) -> Result<Option<(&[u8], &[u8])>> {
+        self.step(ScanOrder::Descending)
+    }
+
     fn step(&mut self, order: ScanOrder) -> Result<Option<Entry<'_>>> {
         let Some(tree) = self.tree.filter(|_| !self.finished) else {
             return Ok(None);

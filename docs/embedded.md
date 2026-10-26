@@ -87,8 +87,9 @@ for entry in tx.scan_prefix("user:").rev() {
 
 - **Reverse:** `.rev()` gives the largest key first, as for a `BTreeMap` range, and `next()` and
   `next_back()` can be mixed; the scan ends where the two ends meet.
-- **Cost:** each item is two new `Vec<u8>`s, the key and the value. `scan.next_entry()` lends
-  them instead, with no copy, until the next call. Underneath, the scan copies one leaf page of
+- **Cost:** each item is two new `Vec<u8>`s, the key and the value. `scan.next_entry()` (and
+  `scan.next_back_entry()` from the other end) lends them instead, with no copy, until the next
+  call. Underneath, the scan copies one leaf page of
   entries at a time and holds no page between calls. A large value is copied whole and ends
   that copy, so the scan holds at most one large value; as an owned item it is copied once
   more, twice its size in memory until the item is dropped.
