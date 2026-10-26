@@ -53,7 +53,7 @@ impl CommandName {
             OptionName::Cache | OptionName::Help | OptionName::Version => true,
             OptionName::Color => true,
             OptionName::Format => self != Self::Ui,
-            OptionName::Mono | OptionName::Ascii => self == Self::Ui,
+            OptionName::Mono | OptionName::Ascii | OptionName::ReadOnly => self == Self::Ui,
             OptionName::PageSize => self == Self::Create,
             OptionName::Create => self == Self::Put,
             OptionName::Prefix
@@ -117,6 +117,7 @@ enum OptionName {
     KeysOnly,
     Mono,
     Ascii,
+    ReadOnly,
 }
 
 impl OptionName {
@@ -137,6 +138,7 @@ impl OptionName {
             b"keys-only" => Self::KeysOnly,
             b"mono" => Self::Mono,
             b"ascii" => Self::Ascii,
+            b"read-only" => Self::ReadOnly,
             _ => return None,
         })
     }
@@ -164,6 +166,7 @@ impl OptionName {
                 | Self::KeysOnly
                 | Self::Mono
                 | Self::Ascii
+                | Self::ReadOnly
         )
     }
 }
@@ -190,6 +193,7 @@ pub(crate) struct Request {
     pub(crate) scan: ScanOptions,
     pub(crate) mono: bool,
     pub(crate) ascii: bool,
+    pub(crate) read_only: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -370,6 +374,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         scan: ScanOptions::default(),
         mono: false,
         ascii: false,
+        read_only: false,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -408,6 +413,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::KeysOnly => request.scan.keys_only = true,
             OptionName::Mono => request.mono = true,
             OptionName::Ascii => request.ascii = true,
+            OptionName::ReadOnly => request.read_only = true,
             OptionName::Help | OptionName::Version => {}
         }
     }

@@ -1,23 +1,84 @@
-use eggdb::{CommitStamp, Database, Scan};
-use eggdb_ui::{CountStep, KeyRow, Source, Start, Summary};
+use super::render::{self, TimeStyle};
+use eggdb::{CheckReport, CommitStamp, Database, Options, Scan};
+use eggdb_ui::{
+    Change, CheckSummary, CountStep, ErrorKind, KeyRow, Source, SourceError, Start, Summary,
+    WriterBusy,
+};
 use std::ops::Bound;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const LONGEST_COUNT_STEP: Duration = Duration::from_millis(20);
+const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+type CheckThread = JoinHandle<eggdb::Result<CheckReport>>;
 
 pub(crate) struct DatabaseSource {
-    db: Database,
+    db: Option<Arc<Database>>,
     name: String,
+    path: PathBuf,
+    options: Options,
+    check: Option<CheckThread>,
 }
 
 impl DatabaseSource {
-    pub(crate) fn new(db: Database, name: String) -> Self {
-        Self { db, name }
+    pub(crate) fn new(db: Database, name: String, options: Options) -> Self {
+        Self {
+            path: db.path().to_path_buf(),
+            db: Some(Arc::new(db)),
+            name,
+            options,
+            check: None,
+        }
     }
 
-    pub(crate) fn into_database(self) -> Database {
-        self.db
+    pub(crate) fn into_database(self) -> Option<Database> {
+        if self.check.is_some() {
+            return None;
+        }
+        Arc::into_inner(self.db?)
+    }
+
+    fn db(&self) -> Result<&Database, SourceError> {
+        self.db.as_deref().ok_or_else(|| {
+            SourceError::new(
+                ErrorKind::NeedsReopen,
+                format!("{} is closed; reopen it to go on", self.name),
+            )
+        })
+    }
+}
+
+fn source_error(error: &eggdb::Error) -> SourceError {
+    let kind = match error.kind() {
+        eggdb::ErrorKind::WriterActive => ErrorKind::WriterActive,
+        eggdb::ErrorKind::TooLarge => ErrorKind::TooLarge,
+        eggdb::ErrorKind::CacheFull => ErrorKind::CacheFull,
+        eggdb::ErrorKind::ReadOnly => ErrorKind::ReadOnly,
+        eggdb::ErrorKind::NeedsReopen => ErrorKind::NeedsReopen,
+        eggdb::ErrorKind::Corrupt => ErrorKind::Corrupt,
+        eggdb::ErrorKind::DatabaseFull => ErrorKind::DatabaseFull,
+        eggdb::ErrorKind::Io => ErrorKind::Io,
+        _ => ErrorKind::Other,
+    };
+    SourceError::new(kind, error.to_string())
+}
+
+fn check_summary(report: &CheckReport) -> CheckSummary {
+    CheckSummary {
+        entries: report.entries,
+        key_bytes: report.key_bytes,
+        value_bytes: report.value_bytes,
+        tree_height: report.tree_height,
+        tree_pages: report.tree_pages,
+        overflow_values: report.overflow_values,
+        overflow_pages: report.overflow_pages,
+        free_pages: report.free_pages,
+        log_pages: report.log_pages,
+        leaked_pages: report.leaked_pages,
     }
 }
 
@@ -69,6 +130,15 @@ fn clock_time(stamp: CommitStamp) -> Option<String> {
     ))
 }
 
+fn commit_detail(stamp: CommitStamp) -> Option<String> {
+    (stamp != CommitStamp::NONE).then(|| {
+        format!(
+            "{} (stamp {stamp})",
+            render::utc_time(stamp.unix_micros(), TimeStyle::Readable)
+        )
+    })
+}
+
 fn collect(scan: &mut Scan<'_>, descending: bool, limit: usize) -> eggdb::Result<Vec<KeyRow>> {
     let mut rows = Vec::with_capacity(limit.min(1024));
     while rows.len() < limit {
@@ -88,36 +158,74 @@ fn collect(scan: &mut Scan<'_>, descending: bool, limit: usize) -> eggdb::Result
     Ok(rows)
 }
 
+fn apply(db: &Database, change: &Change, busy: WriterBusy) -> eggdb::Result<Option<CommitStamp>> {
+    let mut transaction = match busy {
+        WriterBusy::Fail => db.try_begin_write()?,
+        WriterBusy::Wait => db.begin_write()?,
+    };
+    let changed = match change {
+        Change::Put { key, value } => {
+            transaction.put(key, value)?;
+            true
+        }
+        Change::Delete { key } => transaction.delete(key)?,
+    };
+    if changed {
+        transaction.commit().map(Some)
+    } else {
+        transaction.rollback().map(|()| None)
+    }
+}
+
 impl Source for DatabaseSource {
-    fn summary(&self) -> Result<Summary, String> {
-        let stats = self.db.stats().map_err(|error| error.to_string())?;
+    fn summary(&self) -> Result<Summary, SourceError> {
+        let db = self.db()?;
+        let stats = db.stats().map_err(|error| source_error(&error))?;
         Ok(Summary {
             name: self.name.clone(),
             file_bytes: stats.file_bytes,
             page_count: stats.page_count,
+            free_pages: stats.free_pages,
             page_size: stats.page_size,
             last_commit: clock_time(stats.last_commit),
-            read_only: self.db.is_read_only(),
-            max_key_bytes: self.db.max_key_bytes(),
-            max_value_bytes: self.db.max_value_bytes() as u64,
+            last_commit_detail: commit_detail(stats.last_commit),
+            read_only: db.is_read_only(),
+            max_key_bytes: db.max_key_bytes(),
+            max_value_bytes: db.max_value_bytes() as u64,
+            cache_bytes: (stats.cache_pages as u64).saturating_mul(stats.page_size as u64),
+            cached_pages: stats.cached_pages as u64,
+            cache_hits: stats.cache_hits,
+            cache_misses: stats.cache_misses,
+            log_bytes: stats.log_bytes_since_checkpoint,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
         })
     }
 
-    fn keys(&self, prefix: &[u8], start: Start<'_>, limit: usize) -> Result<Vec<KeyRow>, String> {
+    fn keys(
+        &self,
+        prefix: &[u8],
+        start: Start<'_>,
+        limit: usize,
+    ) -> Result<Vec<KeyRow>, SourceError> {
         let Some(bounds) = range(prefix, start) else {
             return Ok(Vec::new());
         };
         let descending = matches!(start, Start::Last | Start::Before(_));
-        self.db
+        self.db()?
             .read(|tx| collect(&mut tx.scan(bounds), descending, limit))
-            .map_err(|error| error.to_string())
+            .map_err(|error| source_error(&error))
     }
 
-    fn value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        self.db.get(key).map_err(|error| error.to_string())
+    fn value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, SourceError> {
+        self.db()?.get(key).map_err(|error| source_error(&error))
     }
 
-    fn count(&self, prefix: &[u8], after: Option<&[u8]>, limit: u64) -> Result<CountStep, String> {
+    fn count(
+        &self,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u64,
+    ) -> Result<CountStep, SourceError> {
         let start = after.map_or(Start::First, Start::After);
         let Some(bounds) = range(prefix, start) else {
             return Ok(CountStep {
@@ -125,7 +233,7 @@ impl Source for DatabaseSource {
                 resume_after: None,
             });
         };
-        self.db
+        self.db()?
             .read(|tx| {
                 let mut scan = tx.scan(bounds);
                 let mut counted = 0;
@@ -144,17 +252,76 @@ impl Source for DatabaseSource {
                     resume_after: None,
                 })
             })
-            .map_err(|error| error.to_string())
+            .map_err(|error| source_error(&error))
+    }
+
+    fn write(&mut self, change: &Change, busy: WriterBusy) -> Result<String, SourceError> {
+        match apply(self.db()?, change, busy) {
+            Ok(Some(stamp)) => Ok(clock_time(stamp).unwrap_or_default()),
+            Ok(None) => Err(SourceError::new(
+                ErrorKind::Other,
+                format!(
+                    "{} is no longer in {}; nothing was committed. Press r to re-read",
+                    render::text(change.key()),
+                    self.name
+                ),
+            )),
+            Err(error) => Err(source_error(&error)),
+        }
+    }
+
+    fn start_check(&mut self) -> Result<(), SourceError> {
+        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
+            SourceError::new(ErrorKind::NeedsReopen, format!("{} is closed", self.name))
+        })?);
+        let thread = std::thread::Builder::new()
+            .name("eggdb-ui-check".to_owned())
+            .spawn(move || db.check())
+            .map_err(|error| {
+                SourceError::new(ErrorKind::Other, format!("cannot start the check: {error}"))
+            })?;
+        self.check = Some(thread);
+        Ok(())
+    }
+
+    fn check_outcome(&mut self) -> Option<Result<CheckSummary, SourceError>> {
+        if !self.check.as_ref()?.is_finished() {
+            return None;
+        }
+        let thread = self.check.take()?;
+        Some(match thread.join() {
+            Ok(Ok(report)) => Ok(check_summary(&report)),
+            Ok(Err(error)) => Err(source_error(&error)),
+            Err(_) => Err(SourceError::new(
+                ErrorKind::Other,
+                "the check stopped before it finished",
+            )),
+        })
+    }
+
+    fn reopen(&mut self) -> Result<(), SourceError> {
+        if self.check.is_some() {
+            return Err(SourceError::new(
+                ErrorKind::Other,
+                "a check is still running; reopen once it ends",
+            ));
+        }
+        drop(self.db.take());
+        let db = Database::open_with(&self.path, self.options.clone())
+            .map_err(|error| source_error(&error))?;
+        self.db = Some(Arc::new(db));
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{DatabaseSource, prefix_end, range};
-    use eggdb::Database;
+    use eggdb::{Database, Durability, Options};
     use eggdb_ui::{Capabilities, FakeTerminal, Frame, Size, Source, Start, Ui, UiOptions};
     use std::ops::Bound;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, mpsc};
 
     struct TempFile(PathBuf);
 
@@ -164,11 +331,14 @@ mod tests {
         }
     }
 
-    fn database(name: &str) -> (TempFile, Database) {
+    fn temp_path(name: &str) -> TempFile {
         let path =
             std::env::temp_dir().join(format!("eggdb-cli-ui-{name}-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let db = Database::open(&path).unwrap_or_else(|error| panic!("open: {error}"));
+        TempFile(path)
+    }
+
+    fn fill(db: &Database) {
         db.write(|tx| {
             for n in 1..=30 {
                 tx.put(format!("user:{n:02}"), format!("User {n}"))?;
@@ -177,7 +347,65 @@ mod tests {
             tx.put("big", vec![7u8; 20_000])
         })
         .unwrap_or_else(|error| panic!("write: {error}"));
-        (TempFile(path), db)
+    }
+
+    fn database(name: &str) -> (TempFile, Database) {
+        let file = temp_path(name);
+        let db = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));
+        fill(&db);
+        (file, db)
+    }
+
+    fn source_at(path: &Path, options: Options) -> DatabaseSource {
+        let db = Database::open_with(path, options.clone())
+            .unwrap_or_else(|error| panic!("open: {error}"));
+        DatabaseSource::new(db, "t.db".to_owned(), options)
+    }
+
+    struct Screen {
+        ui: Ui<DatabaseSource>,
+        terminal: FakeTerminal,
+        frame: Frame,
+    }
+
+    impl Screen {
+        fn new(source: DatabaseSource) -> Self {
+            let size = Size { cols: 80, rows: 24 };
+            let mut screen = Self {
+                ui: Ui::new(
+                    source,
+                    UiOptions {
+                        capabilities: Capabilities::FULL,
+                    },
+                    size,
+                ),
+                terminal: FakeTerminal::new(size.cols, size.rows, Capabilities::FULL),
+                frame: Frame::new(size),
+            };
+            screen.keys(&[]);
+            screen
+        }
+
+        fn keys(&mut self, names: &[&str]) -> String {
+            for name in names {
+                assert!(self.terminal.press(name), "unknown key {name}");
+            }
+            self.ui
+                .process(&mut self.terminal, &mut self.frame)
+                .unwrap_or_else(|error| panic!("present: {error}"));
+            self.terminal.screen()
+        }
+
+        fn typed(&mut self, text: &str) -> String {
+            self.terminal.type_str(text);
+            self.keys(&[])
+        }
+
+        fn close(self) {
+            if let Some(db) = self.ui.into_source().into_database() {
+                db.close().unwrap_or_else(|error| panic!("close: {error}"));
+            }
+        }
     }
 
     #[test]
@@ -196,8 +424,8 @@ mod tests {
 
     #[test]
     fn the_source_scans_windows_both_ways_within_a_prefix() {
-        let (_file, db) = database("windows");
-        let source = DatabaseSource::new(db, "t.db".to_owned());
+        let (file, db) = database("windows");
+        let source = DatabaseSource::new(db, "t.db".to_owned(), Options::new());
         let names = |rows: Vec<eggdb_ui::KeyRow>| -> Vec<String> {
             rows.iter()
                 .map(|row| String::from_utf8_lossy(&row.key).into_owned())
@@ -232,6 +460,8 @@ mod tests {
             source.summary().map(|s| (s.name, s.read_only)),
             Ok(("t.db".to_owned(), false))
         );
+        drop(source);
+        drop(file);
     }
 
     #[test]
@@ -244,20 +474,19 @@ mod tests {
             tx.put("big:c", "small")
         })
         .unwrap_or_else(|error| panic!("write: {error}"));
-        let source = DatabaseSource::new(db, "t.db".to_owned());
+        let source = DatabaseSource::new(db, "t.db".to_owned(), Options::new());
         let lookups = |source: &DatabaseSource| {
-            let stats = source
-                .db
-                .stats()
-                .unwrap_or_else(|error| panic!("stats: {error}"));
-            stats.cache_hits + stats.cache_misses
+            source
+                .summary()
+                .map(|summary| summary.cache_hits + summary.cache_misses)
+                .unwrap_or_else(|error| panic!("stats: {error:?}"))
         };
         let before = lookups(&source);
         let first = source.keys(b"big:", Start::First, 10);
         let last = source.keys(b"big:", Start::Last, 10);
         let counted = source.count(b"", None, 1000);
         let used = lookups(&source) - before;
-        let sizes = |rows: Result<Vec<eggdb_ui::KeyRow>, String>| -> Vec<u64> {
+        let sizes = |rows: Result<Vec<eggdb_ui::KeyRow>, eggdb_ui::SourceError>| -> Vec<u64> {
             rows.map(|rows| rows.iter().map(|row| row.value_bytes).collect())
                 .unwrap_or_default()
         };
@@ -270,35 +499,196 @@ mod tests {
     #[test]
     fn the_ui_browses_a_real_database() {
         let (_file, db) = database("browse");
-        let source = DatabaseSource::new(db, "t.db".to_owned());
-        let mut terminal = FakeTerminal::new(80, 24, Capabilities::FULL);
-        let mut ui = Ui::new(
-            source,
-            UiOptions {
-                capabilities: Capabilities::FULL,
-            },
-            Size { cols: 80, rows: 24 },
-        );
-        let mut frame = Frame::new(Size { cols: 80, rows: 24 });
-        let step = |ui: &mut Ui<DatabaseSource>, terminal: &mut FakeTerminal, frame: &mut Frame| {
-            ui.process(terminal, frame)
-                .unwrap_or_else(|error| panic!("present: {error}"));
+        let mut screen = Screen::new(DatabaseSource::new(db, "t.db".to_owned(), Options::new()));
+        let shown = screen.keys(&[]);
+        assert!(shown.contains("32 keys"), "{shown}");
+        assert!(shown.contains("> big"), "{shown}");
+        assert!(shown.contains("hex (auto)"), "{shown}");
+        assert!(screen.keys(&["Down"]).contains("json (auto)"));
+        let shown = screen.keys(&["End"]);
+        assert!(shown.contains("> user:30"), "{shown}");
+        assert!(shown.contains("13–32 of 32"), "{shown}");
+        assert!(screen.typed("/user:2").contains("1–10 of 10"));
+    }
+
+    #[test]
+    fn a_confirmed_edit_persists_after_reopening_and_a_cancelled_one_does_not() {
+        let (file, db) = database("persist");
+        db.close().unwrap_or_else(|error| panic!("close: {error}"));
+        let mut screen = Screen::new(source_at(&file.0, Options::new()));
+        screen.keys(&["Down", "e", "End", "Backspace", "Backspace"]);
+        screen.typed(",3]}");
+        let shown = screen.keys(&["Enter", "Enter"]);
+        assert!(shown.contains("Committed doc (13 B) at "), "{shown}");
+        screen.keys(&["Down", "e"]);
+        screen.typed("cancelled ");
+        screen.keys(&["Enter", "Esc", "Esc", "y"]);
+        screen.keys(&["a"]);
+        screen.typed("new\\x00key");
+        screen.keys(&["Enter"]);
+        screen.typed("\\xff\\x00 added");
+        let shown = screen.keys(&["Enter", "Enter"]);
+        assert!(shown.contains("> new\\x00key"), "{shown}");
+        screen.keys(&["/"]);
+        screen.typed("user:30");
+        let shown = screen.keys(&["Enter", "d", "d"]);
+        assert!(shown.contains("Deleted user:30 (7 B)"), "{shown}");
+        screen.close();
+        let reopened = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));
+        let get = |key: &[u8]| {
+            reopened
+                .get(key)
+                .unwrap_or_else(|error| panic!("get: {error}"))
         };
-        step(&mut ui, &mut terminal, &mut frame);
-        let screen = terminal.screen();
-        assert!(screen.contains("32 keys"), "{screen}");
-        assert!(screen.contains("> big"), "{screen}");
-        assert!(screen.contains("hex (auto)"), "{screen}");
-        terminal.press("Down");
-        step(&mut ui, &mut terminal, &mut frame);
-        assert!(terminal.screen().contains("json (auto)"));
-        terminal.press("End");
-        step(&mut ui, &mut terminal, &mut frame);
-        let screen = terminal.screen();
-        assert!(screen.contains("> user:30"), "{screen}");
-        assert!(screen.contains("13–32 of 32"), "{screen}");
-        terminal.type_str("/user:2");
-        step(&mut ui, &mut terminal, &mut frame);
-        assert!(terminal.screen().contains("1–10 of 10"));
+        assert_eq!(get(b"doc"), Some(br#"{"a":[1,2,3]}"#.to_vec()));
+        assert_eq!(get(b"user:01"), Some(b"User 1".to_vec()));
+        assert_eq!(get(b"new\x00key"), Some(b"\xff\x00 added".to_vec()));
+        assert_eq!(get(b"user:30"), None);
+        let report = reopened
+            .check()
+            .unwrap_or_else(|error| panic!("check: {error}"));
+        assert_eq!(report.entries, 32);
+    }
+
+    #[test]
+    fn read_only_never_writes_the_file() {
+        let (file, db) = database("read-only");
+        db.close().unwrap_or_else(|error| panic!("close: {error}"));
+        let before = std::fs::read(&file.0).unwrap_or_else(|error| panic!("read: {error}"));
+        let mut screen = Screen::new(source_at(&file.0, Options::new().read_only(true)));
+        assert!(screen.keys(&[]).contains(" RO"));
+        for keys in [&["e"][..], &["a"], &["d"], &["Tab", "e"], &["Tab"]] {
+            let shown = screen.keys(keys);
+            assert!(
+                shown.contains("Opened read-only; start without --read-only to edit")
+                    || !keys.contains(&"e") && !keys.contains(&"a") && !keys.contains(&"d"),
+                "{shown}"
+            );
+        }
+        screen.typed("vj/user:0");
+        let shown = screen.keys(&["Enter", "c"]);
+        assert!(shown.contains("Check  OK"), "{shown}");
+        screen.keys(&["Enter", "r", "q"]);
+        assert!(screen.ui.should_quit());
+        screen.close();
+        let after = std::fs::read(&file.0).unwrap_or_else(|error| panic!("read: {error}"));
+        assert!(before == after, "a read-only session changed the file");
+    }
+
+    #[test]
+    fn a_writer_on_another_thread_is_reported_and_waited_for() {
+        let (_file, db) = database("busy");
+        let source = DatabaseSource::new(db, "t.db".to_owned(), Options::new());
+        let shared = source
+            .db
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| panic!("no database"));
+        let (holding, held) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let transaction = shared
+                .begin_write()
+                .unwrap_or_else(|error| panic!("begin: {error}"));
+            let _ = holding.send(());
+            let _ = released.recv();
+            transaction
+                .rollback()
+                .unwrap_or_else(|error| panic!("rollback: {error}"));
+        });
+        let _ = held.recv();
+        let mut screen = Screen::new(source);
+        screen.keys(&["Down", "e", "End"]);
+        screen.typed(" ");
+        let shown = screen.keys(&["Enter", "Enter"]);
+        assert!(shown.contains("Writer busy"), "{shown}");
+        assert!(shown.contains("Error (WriterActive):"), "{shown}");
+        let _ = release.send(());
+        let _ = writer.join();
+        let shown = screen.keys(&["r"]);
+        assert!(shown.contains("Committed doc (12 B)"), "{shown}");
+        screen.close();
+    }
+
+    #[test]
+    fn the_check_runs_on_a_worker_and_reports_damage() {
+        let file = temp_path("damage");
+        let db = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));
+        db.write(|tx| {
+            for n in 0..3000u32 {
+                tx.put(format!("key:{n:05}"), format!("value number {n}"))?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("write: {error}"));
+        let mut screen = Screen::new(DatabaseSource::new(db, "t.db".to_owned(), Options::new()));
+        let shown = screen.keys(&["c"]);
+        assert!(shown.contains("Check  OK"), "{shown}");
+        assert!(shown.contains("3,000 keys"), "{shown}");
+        screen.keys(&["Enter"]);
+        screen.close();
+        let mut bytes = std::fs::read(&file.0).unwrap_or_else(|error| panic!("read: {error}"));
+        let middle = bytes.len() / 2;
+        for byte in &mut bytes[middle..middle + 64] {
+            *byte ^= 0x5a;
+        }
+        std::fs::write(&file.0, &bytes).unwrap_or_else(|error| panic!("write: {error}"));
+        let mut screen = Screen::new(source_at(&file.0, Options::new().read_only(true)));
+        let shown = screen.keys(&["c"]);
+        assert!(shown.contains("Check  FAILED"), "{shown}");
+        assert!(shown.contains("Error (Corrupt):"), "{shown}");
+        screen.close();
+    }
+
+    #[test]
+    fn random_edits_through_the_ui_agree_with_a_scan_of_the_file() {
+        let file = temp_path("model");
+        let options = Options::new().durability(Durability::Off);
+        let mut screen = Screen::new(source_at(&file.0, options));
+        let mut model = std::collections::BTreeMap::new();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut random = |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        for _ in 0..200 {
+            let key = format!("k{}", random(25)).into_bytes();
+            let value: Vec<u8> = (0..random(16))
+                .map(|_| random(256) as u8)
+                .filter(|&byte| byte != b'\n')
+                .collect();
+            let spelled: String = value.iter().map(|byte| format!("\\x{byte:02x}")).collect();
+            let existing = model.contains_key(&key);
+            let key_text = String::from_utf8_lossy(&key).into_owned();
+            match random(10) {
+                0..5 => {
+                    screen.terminal.press("a");
+                    screen.terminal.type_str(&key_text);
+                    screen.terminal.press("Enter");
+                    screen.terminal.type_str(&spelled);
+                    screen.terminal.press("Enter");
+                    screen.terminal.press("Enter");
+                    model.insert(key, value);
+                }
+                _ if existing => {
+                    screen.terminal.press("/");
+                    screen.terminal.type_str(&key_text);
+                    for name in ["Enter", "d", "d", "/", "Esc"] {
+                        screen.terminal.press(name);
+                    }
+                    model.remove(&key);
+                }
+                _ => continue,
+            }
+            screen.keys(&[]);
+        }
+        screen.close();
+        let reopened = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));
+        let scanned: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = reopened
+            .read(|tx| tx.scan(..).collect())
+            .unwrap_or_else(|error| panic!("scan: {error}"));
+        assert!(scanned == model, "the file differs from the model");
     }
 }
