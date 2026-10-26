@@ -5,12 +5,15 @@
 //! crate has a workspace of its own, so SQLite is never compiled by the main workspace's
 //! commands and never reaches what EggDB ships. Both stores hold the same 16-byte keys and
 //! values, and samples alternate between them; each workload reports EggDB's time, SQLite's
-//! time and their ratio. The ratios of point gets, ordered scans and batched puts that never
-//! wait for the disk are gated against the `ratio_to_sqlite` lines of `benchmarks/baseline.txt`,
-//! 30% above the line after one retry, as `eggdb-bench` gates its ratios (D80); batched puts in
-//! the `Normal` mode and the durable commit, one commit per put waiting for the disk, depend on
-//! the disk more than on either engine and are reported only. `--update` rewrites this system's lines of these
-//! benchmarks and `--baseline <path>` reads another file.
+//! time and their ratio.
+//!
+//! The ratios of point gets, ordered scans and batched puts that never wait for the disk are
+//! gated against the `ratio_to_sqlite` lines of `benchmarks/baseline.txt`: they fail 50% above
+//! the line after one retry. `eggdb-bench` gates its ratios the same way at 30% (D80), but two
+//! engines respond differently to each CI runner's processor, so their ratio moves more between
+//! runs. Batched puts in the `Normal` mode and the durable commit, one commit per put waiting for
+//! the disk, depend on the disk more than on either engine and are reported only. `--update`
+//! rewrites this system's lines of these benchmarks and `--baseline <path>` reads another file.
 
 #[path = "../../eggdb-bench/src/baseline.rs"]
 #[allow(dead_code)]

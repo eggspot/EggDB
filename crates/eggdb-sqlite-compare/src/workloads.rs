@@ -16,6 +16,7 @@ pub(crate) const ENTRIES: u64 = 100_000;
 const DURABLE_ENTRIES: u64 = 1000;
 const PUTS_PER_BATCH: u64 = 1000;
 const RATIO: &str = "ratio_to_sqlite";
+const RATIO_TOLERANCE_PERCENT: u32 = 50;
 
 const SELECT_VALUE: &str = "SELECT v FROM kv WHERE k = ?1";
 const SELECT_IN_ORDER: &str = "SELECT k, v FROM kv ORDER BY k";
@@ -335,7 +336,9 @@ fn paired_metrics(
     [eggdb_ns, sqlite_ns]: [&'static str; 2],
 ) -> Vec<Metric> {
     let ratio = match gate {
-        RatioGate::Gated => Metric::ratio(benchmark, RATIO, measured.ratio),
+        RatioGate::Gated => {
+            Metric::ceiling(benchmark, RATIO, measured.ratio, RATIO_TOLERANCE_PERCENT)
+        }
         RatioGate::Reported => Metric::reported(benchmark, RATIO, measured.ratio),
     };
     vec![
