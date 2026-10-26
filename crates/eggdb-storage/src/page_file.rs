@@ -166,9 +166,8 @@ impl<F: File> PageFile<F> {
         let (slot0, slot1) = slots.split_at(HEADER_SLOT_SIZE);
         let choice = Superblock::choose(slot0, slot1)?;
         let superblock = choice.superblock;
-        let older_slot = if superblock.slot() == 0 { slot1 } else { slot0 };
         let older_slot_is_a_copy =
-            access == Access::ReadOnly || superblock.is_copied_in(older_slot);
+            access == Access::ReadOnly || older_slot_holds_a_copy(&superblock, slot0, slot1);
         superblock.features.check(access)?;
         let expected_bytes = superblock
             .page_count
@@ -1153,6 +1152,7 @@ impl<F: File> PageFile<F> {
         Ok(())
     }
 
+    #[inline(never)]
     fn copy_header_to_the_older_slot(&mut self) -> Result<(), StorageError> {
         let Ok(generation) = self.next_generation() else {
             return Ok(());
@@ -1352,6 +1352,12 @@ impl<F: File> PageFile<F> {
         }
         result
     }
+}
+
+#[inline(never)]
+fn older_slot_holds_a_copy(newest: &Superblock, slot0: &[u8], slot1: &[u8]) -> bool {
+    let older_slot = if newest.slot() == 0 { slot1 } else { slot0 };
+    newest.is_copied_in(older_slot)
 }
 
 fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
