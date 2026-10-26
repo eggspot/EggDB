@@ -188,6 +188,9 @@ pub enum StorageError {
     NeedsReopen,
     /// The file holds as many pages as page numbers allow.
     FileFull,
+    /// A checkpoint was asked for while changes since the last commit are pending; commit or
+    /// roll them back first.
+    UncommittedChanges,
     /// The page cache has no frame to give: every frame holds a page that is pinned by an open
     /// page handle, or changed by the uncommitted transaction, which stays in memory until its
     /// commit.
@@ -276,6 +279,9 @@ impl fmt::Display for StorageError {
                 "an earlier write or sync failed; reopen the database to recover its last durable state",
             ),
             Self::FileFull => f.write_str("the file holds as many pages as page numbers allow"),
+            Self::UncommittedChanges => f.write_str(
+                "a checkpoint needs every change committed; commit or roll back first",
+            ),
             Self::CacheFull {
                 frames,
                 pinned,

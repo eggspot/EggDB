@@ -2,7 +2,7 @@ use crate::cells;
 use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageSize, PageType, Superblock};
 use crate::frames::{FrameMut, FrameRef, Frames};
-use crate::log::Durability;
+use crate::log::{Durability, LogStats};
 use crate::page_file::PageFile;
 use crate::page_table::PageTable;
 use eggdb_platform::{File, Memory};
@@ -157,6 +157,34 @@ impl<F: File> PageCache<F> {
     /// Makes every commit so far durable with one sync (see [`PageFile::sync`]).
     pub fn sync(&mut self) -> Result<(), StorageError> {
         self.file.get_mut().sync()
+    }
+
+    /// Writes a checkpoint (see [`PageFile::checkpoint`]). Pages changed since the last commit
+    /// refuse it with [`StorageError::UncommittedChanges`]. The pages in memory stay valid: a
+    /// checkpoint writes committed pages where they belong, unchanged.
+    pub fn checkpoint(&mut self) -> Result<(), StorageError> {
+        if self.dirty_pages.get() > 0 {
+            return Err(StorageError::UncommittedChanges);
+        }
+        self.file.get_mut().checkpoint()
+    }
+
+    /// How much log a commit may leave before it checkpoints automatically (see
+    /// [`PageFile::auto_checkpoint`]).
+    pub fn auto_checkpoint(&self) -> Option<u64> {
+        self.file.borrow().auto_checkpoint()
+    }
+
+    /// Sets how much log a commit may leave before it checkpoints automatically (see
+    /// [`PageFile::set_auto_checkpoint`]).
+    pub fn set_auto_checkpoint(&mut self, log_bytes: Option<u64>) {
+        self.file.get_mut().set_auto_checkpoint(log_bytes);
+    }
+
+    /// What the log has replayed and checkpointed since the file was opened (see
+    /// [`PageFile::log_stats`]).
+    pub fn log_stats(&self) -> LogStats {
+        self.file.borrow().log_stats()
     }
 
     /// What the cache holds and has done.

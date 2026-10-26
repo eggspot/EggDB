@@ -50,6 +50,6 @@ pub use format::{
     MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader,
     PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };
-pub use log::Durability;
+pub use log::{Durability, LogStats};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
 pub use page_file::{CreateOptions, PageFile};
