@@ -19,6 +19,7 @@ eggdb get app.db photo > copy.jpg            # bytes back, exactly
 eggdb scan app.db --format json | jq .key    # for scripts and agents
 eggdb check app.db                           # "ok: every page passed its checksum …"
 eggdb stats app.db
+eggdb ui app.db                              # browse it full screen; q quits
 ```
 
 ## Commands
@@ -36,6 +37,7 @@ eggdb <command> <file> [arguments] [options]
 | `scan <file>` | read-only | prints entries in key order (options below) |
 | `check <file>` | read-only | reads every page and reports the file's health |
 | `stats <file>` | read-only | the page size, pages, file size, last commit and log, without reading a page |
+| `ui <file>` | read-only | browse keys and values full screen in the terminal (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
@@ -162,6 +164,72 @@ app.db
   last commit     2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
   log since checkpoint  0 B (the next open replays nothing)
 ```
+
+## `eggdb ui`
+
+```
+eggdb ui <file> [--mono] [--ascii] [--cache <bytes>]
+```
+
+Opens the file read-only and full screen: the keys in order on the left, the selected key's
+value on the right. The design is [ux/ui.md](ux/ui.md); this release has its read-only part,
+and editing comes with v0.2.0 item 15. A screen at 80 × 24, captured from the test terminal:
+
+```
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RO
+ Keys                1–20 of 24 │ Value  json (auto) · 87 B        line 1–10/10
+  bin                         40│ doc:json
+> doc:json                    87│───────────────────────────────────────────────
+  empty                        0│ {
+  large                   14.0 K│   "name": "Ada Lovelace",
+  user:1                      41│   "born": 1815,
+  user:10                     43│   "tags": [
+  user:11                     43│     "math",
+  user:12                     43│     "poetry"
+  user:13                     43│   ],
+  user:14                     43│   "active": true,
+  user:15                     43│   "notes": null
+  user:16                     43│ }
+  user:17                     43│
+  user:18                     43│
+  user:19                     43│
+  user:2                      41│
+  user:20                     43│
+  user:3                      41│
+  user:4                      41│
+  user:5                      41│
+
+ ↑↓ move  Enter open  / filter  v view  r re-read  ? help  q quit
+```
+
+| Keys | In the key list | In the value viewer |
+|------|-----------------|---------------------|
+| `↑` `↓` or `j` `k` | move the selection | scroll one line |
+| `PgUp` `PgDn` | move one window | scroll one pane |
+| `Home` `End` or `g` `G` | first or last key | top or bottom of the value |
+| `←` `→` | | scroll sideways by 8 columns |
+| `Enter` | open the value | load a value above 64 MiB |
+| `Tab` `Shift-Tab` | switch pane | switch pane |
+| `/` | filter by key prefix as you type (`\xNN` is a byte); `Enter` keeps it, `Esc` restores | |
+| `v` | | cycle the view: text, JSON, hex, automatic |
+| `w` | | wrap long lines (text) |
+| `r` | re-read the keys, the value and the stats | same |
+| `?` | every key and the database's limits | same |
+| `q` `Ctrl-C` | quit | quit |
+
+- **Views.** A value opens as JSON (pretty-printed by our own strict parser) when it is an
+  object or array, as hex when it is not UTF-8 text or holds control bytes, and as text
+  otherwise. Forcing JSON on a value that is not JSON says where it stopped:
+  `Not JSON: expected ',' or '}' at byte 212`.
+- **Any size.** The list is a window over a scan, so it moves as fast over a billion keys as
+  over twenty; the key count runs in steps between key presses (`1,204+ keys` until it is done).
+  A value is read whole when it is selected, except above 64 MiB, which waits for `Enter`.
+- **Terminals.** Both stdin and stdout must be terminals; otherwise the command exits 2 with
+  `eggdb ui needs a terminal; use eggdb get/scan instead`. The screen needs 40 × 10 and shows
+  two panes from 80 columns. `NO_COLOR` or `--mono` drops colours, `--ascii` uses ASCII for
+  box lines and arrows, and `TERM=dumb` or `--mono --ascii` draws no styles at all, which also
+  suits screen readers. The terminal is put back as it was on quit, on a panic, and on
+  `SIGTERM`, `SIGHUP` and `SIGQUIT` (on Windows when the console closes).
 
 ## Exit codes and errors
 

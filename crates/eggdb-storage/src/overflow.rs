@@ -166,7 +166,7 @@ pub(crate) fn check_value(
     Ok(count)
 }
 
-fn checked_length(
+pub(crate) fn checked_length(
     pages: &impl PageSource,
     reference: &OverflowReference,
 ) -> Result<usize, StorageError> {

@@ -1,0 +1,20 @@
+ EggDB  app.db                                  24 keys  RO
+ Keys                                            1–16 of 24
+  bin                                                     40
+  doc:json                                                87
+  empty                                                    0
+  large                                               14.0 K
+  user:1                                                  41
+> user:10                                                 43
+  user:11                                                 43
+  user:12                                                 43
+  user:13                                                 43
+  user:14                                                 43
+  user:15                                                 43
+  user:16                                                 43
+  user:17                                                 43
+  user:18                                                 43
+  user:19                                                 43
+  user:2                                                  41
+
+ ↑↓ move  Enter open  / filter  v view  ? help  q quit

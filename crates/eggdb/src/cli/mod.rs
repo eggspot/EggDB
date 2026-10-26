@@ -6,6 +6,7 @@ mod help;
 mod output;
 mod render;
 mod reports;
+mod ui;
 
 use args::{CommandName, Invocation};
 use failure::{Exit, Failure};

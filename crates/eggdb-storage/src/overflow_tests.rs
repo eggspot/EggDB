@@ -994,3 +994,172 @@ fn a_value_that_just_fits_the_cache_can_replace_one_as_large() {
     model.insert(b"big".to_vec(), patterned(largest, 3));
     assert_holds(&store, &tree, &model);
 }
+
+fn page_lookups(store: &Store<SimFile>) -> u64 {
+    let stats = store.cache_stats().unwrap();
+    stats.hits + stats.misses
+}
+
+fn mixed_model(store: &Store<SimFile>, tree: &BTree, page: usize) -> Model {
+    let mut model = Model::new();
+    let mut rng = TestRng::new(91);
+    for index in 0..150u32 {
+        let len = match index % 9 {
+            0 if index % 45 == 0 => 600 * page,
+            0 | 4 => page + rng.below(3 * page),
+            7 => 0,
+            _ => rng.below(120),
+        };
+        let puts = [(index.to_be_bytes().to_vec(), rng.bytes(len))];
+        commit_changes(store, tree, &mut model, &puts, &[]);
+    }
+    model
+}
+
+fn keys_and_lengths(
+    read: &ReadTransaction<'_, SimFile>,
+    cursor: &mut crate::Cursor,
+) -> Vec<(Vec<u8>, u64)> {
+    let mut found = Vec::new();
+    while let Some((key, len)) = read.next_key_and_value_len(cursor).unwrap() {
+        found.push((key.to_vec(), len));
+    }
+    found
+}
+
+#[test]
+fn keys_and_value_lengths_match_the_values_in_both_directions_over_any_range() {
+    let fs = SimFileSystem::new();
+    let page_size = PageSize::DEFAULT;
+    let (store, tree) = created_store(&fs, page_size, 2048);
+    let model = mixed_model(&store, &tree, per_page(page_size));
+    let read = store.begin_read().unwrap();
+    let ranges: [KeyBounds<'_>; 5] = [
+        (Bound::Unbounded, Bound::Unbounded),
+        (
+            Bound::Included(&[0, 0, 0, 9]),
+            Bound::Excluded(&[0, 0, 0, 90]),
+        ),
+        (
+            Bound::Excluded(&[0, 0, 0, 45]),
+            Bound::Included(&[0, 0, 0, 135]),
+        ),
+        (Bound::Unbounded, Bound::Included(&[0, 0, 0, 0])),
+        (Bound::Included(&[0, 0, 0, 140]), Bound::Unbounded),
+    ];
+    for (start, end) in ranges {
+        let expected: Vec<(Vec<u8>, u64)> = model
+            .range::<[u8], _>((start, end))
+            .map(|(key, value)| (key.clone(), value.len() as u64))
+            .collect();
+        for order in [ScanOrder::Ascending, ScanOrder::Descending] {
+            let mut found = keys_and_lengths(&read, &mut tree.scan(start, end, order));
+            if order == ScanOrder::Descending {
+                found.reverse();
+            }
+            assert!(found == expected, "{start:?} {end:?} {order:?}");
+        }
+    }
+}
+
+#[test]
+fn stepping_keys_and_value_lengths_never_reads_a_large_value() {
+    let fs = SimFileSystem::new();
+    let page_size = PageSize::DEFAULT;
+    let (store, tree) = created_store(&fs, page_size, 2048);
+    let model = mixed_model(&store, &tree, per_page(page_size));
+    let overflow_pages: u64 = model
+        .iter()
+        .filter(|(key, value)| spills(page_size, key, value))
+        .map(|(_, value)| overflow::pages_for(value.len() as u64, page_size))
+        .sum();
+    assert!(overflow_pages > 1200, "{overflow_pages}");
+    let read = store.begin_read().unwrap();
+    for order in [ScanOrder::Ascending, ScanOrder::Descending] {
+        let before = page_lookups(&store);
+        let mut cursor = tree.scan(Bound::Unbounded, Bound::Unbounded, order);
+        assert_eq!(keys_and_lengths(&read, &mut cursor).len(), model.len());
+        let lengths_only = page_lookups(&store) - before;
+        assert!(cursor.buffer_capacity() < 64 << 10, "{order:?}");
+        let before = page_lookups(&store);
+        assert_eq!(
+            scanned(&read, &tree, order).unwrap().len(),
+            model.len(),
+            "{order:?}"
+        );
+        let copied = page_lookups(&store) - before;
+        assert!(lengths_only < 64, "{order:?}: {lengths_only} lookups");
+        assert!(
+            lengths_only + overflow_pages <= copied,
+            "{order:?}: {lengths_only} + {overflow_pages} > {copied}"
+        );
+    }
+}
+
+#[test]
+fn one_cursor_can_mix_value_steps_and_length_steps() {
+    let fs = SimFileSystem::new();
+    let page_size = PageSize::DEFAULT;
+    let (store, tree) = created_store(&fs, page_size, 2048);
+    let model = mixed_model(&store, &tree, per_page(page_size));
+    let read = store.begin_read().unwrap();
+    let mut rng = TestRng::new(5);
+    for order in [ScanOrder::Ascending, ScanOrder::Descending] {
+        for _ in 0..4 {
+            let mut cursor = tree.scan(Bound::Unbounded, Bound::Unbounded, order);
+            let mut found = Vec::new();
+            loop {
+                let step = if rng.below(3) == 0 {
+                    read.next(&mut cursor).unwrap().map(|(key, value)| {
+                        (key.to_vec(), value.len() as u64, Some(value.to_vec()))
+                    })
+                } else {
+                    read.next_key_and_value_len(&mut cursor)
+                        .unwrap()
+                        .map(|(key, len)| (key.to_vec(), len, None))
+                };
+                let Some(entry) = step else {
+                    break;
+                };
+                found.push(entry);
+            }
+            if order == ScanOrder::Descending {
+                found.reverse();
+            }
+            assert_eq!(found.len(), model.len(), "{order:?}");
+            for ((key, len, value), (expected_key, expected_value)) in found.iter().zip(&model) {
+                assert_eq!(key, expected_key, "{order:?}");
+                assert_eq!(*len, expected_value.len() as u64, "{order:?} {key:?}");
+                assert!(value.as_ref().is_none_or(|value| value == expected_value));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_large_value_length_longer_than_the_file_is_refused_by_the_length_step() {
+    let (fs, _model) = damaged(|cache| {
+        rewrite_leaf_entry(cache, b"a", |value| {
+            let StoredValue::Overflow(reference) = value else {
+                panic!("not a large value");
+            };
+            reference.value_bytes = 1 << 29;
+        });
+    });
+    let (store, tree) = opened_store(&fs, Access::ReadOnly, 64);
+    let read = store.begin_read().unwrap();
+    for order in [ScanOrder::Ascending, ScanOrder::Descending] {
+        let mut cursor = tree.scan(Bound::Unbounded, Bound::Unbounded, order);
+        let error = loop {
+            match read.next_key_and_value_len(&mut cursor) {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("{order:?}: the damaged length was not refused"),
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            corrupt_overflow("the value is longer than the file could hold")(&error),
+            "{order:?}: {error}"
+        );
+    }
+}

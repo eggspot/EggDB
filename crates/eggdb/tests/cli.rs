@@ -132,6 +132,7 @@ Commands:
   scan   <file>                 list entries in key order; see --prefix, --from, --to
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
+  ui     <file>                 browse keys and values full screen in the terminal
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -184,12 +185,33 @@ fn help_text_matches_the_design() {
         assert_exit(&output, 0);
         assert_eq!(stdout(&output), SCAN_HELP, "{args:?}");
     }
-    for command in ["create", "put", "get", "del", "delete", "check", "stats"] {
+    for command in [
+        "create", "put", "get", "del", "delete", "check", "stats", "ui",
+    ] {
         let output = dir.eggdb(&["help", command]);
         assert_exit(&output, 0);
         assert!(stdout(&output).starts_with("Usage: eggdb "), "{command}");
         assert!(stdout(&output).contains("\nExamples:\n"), "{command}");
     }
+}
+
+#[test]
+fn ui_without_a_terminal_refuses_cleanly() {
+    let dir = TempDirectory::new("ui-no-terminal");
+    let file = dir.database_with("app.db", &[(b"user:1", b"Ada")]);
+    let file = file.to_string_lossy().into_owned();
+    let output = dir.eggdb_with_stdin(&["ui", &file], b"q");
+    assert_exit(&output, 2);
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output)
+            .starts_with("eggdb: eggdb ui needs a terminal; use eggdb get/scan instead\n"),
+        "{}",
+        stderr(&output)
+    );
+    let output = dir.eggdb(&["ui", &file, "--format", "json"]);
+    assert_exit(&output, 2);
+    assert!(stderr(&output).contains("unknown option '--format' for eggdb ui"));
 }
 
 #[test]
@@ -443,7 +465,7 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);
@@ -451,7 +473,7 @@ fn every_exit_code_and_its_message() {
         stderr(&option),
         "eggdb: unknown option '--reverse' for eggdb get\n  usage: eggdb get <file> <key>\n  try: eggdb help get\n"
     );
-    for reserved in ["export", "import", "shell", "backup", "compact", "ui"] {
+    for reserved in ["export", "import", "shell", "backup", "compact"] {
         let output = dir.eggdb(&[reserved, "app.db"]);
         assert_exit(&output, 2);
         assert_eq!(

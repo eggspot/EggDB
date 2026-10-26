@@ -286,3 +286,53 @@ fn next_entry_lends_the_same_entries_without_copies() {
         )
     );
 }
+
+#[test]
+fn key_and_length_steps_list_every_key_with_its_value_size_from_both_ends() {
+    let file = TempPath::new("next-key-len");
+    let mut model = numbered(600);
+    for n in [3u32, 250, 599] {
+        model.insert(format!("key:{n:06}").into_bytes(), vec![n as u8; 3 << 20]);
+    }
+    let db = filled(&file, &model);
+    let tx = db.begin_read().unwrap();
+    let expected: Vec<(Vec<u8>, u64)> = model
+        .iter()
+        .map(|(key, value)| (key.clone(), value.len() as u64))
+        .collect();
+    let mut scan = tx.scan(..);
+    let mut forward = Vec::new();
+    while let Some((key, len)) = scan.next_key_and_value_len().unwrap() {
+        forward.push((key.to_vec(), len));
+    }
+    assert_eq!(forward, expected);
+    let mut scan = tx.scan(..);
+    let mut backward = Vec::new();
+    while let Some((key, len)) = scan.next_back_key_and_value_len().unwrap() {
+        backward.push((key.to_vec(), len));
+    }
+    backward.reverse();
+    assert_eq!(backward, expected);
+    let mut scan = tx.scan(..);
+    let mut mixed = Vec::new();
+    for turn in 0.. {
+        let step = match turn % 4 {
+            0 => scan.next_key_and_value_len().unwrap(),
+            1 => scan.next_back_key_and_value_len().unwrap(),
+            2 => scan
+                .next_entry()
+                .unwrap()
+                .map(|(key, value)| (key, value.len() as u64)),
+            _ => scan
+                .next_back_entry()
+                .unwrap()
+                .map(|(key, value)| (key, value.len() as u64)),
+        };
+        let Some((key, len)) = step else {
+            break;
+        };
+        mixed.push((key.to_vec(), len));
+    }
+    mixed.sort();
+    assert_eq!(mixed, expected);
+}

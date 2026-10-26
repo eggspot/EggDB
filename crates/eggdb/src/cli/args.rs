@@ -4,7 +4,7 @@ use super::render;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-const RESERVED_COMMANDS: [&str; 6] = ["export", "import", "shell", "backup", "compact", "ui"];
+const RESERVED_COMMANDS: [&str; 5] = ["export", "import", "shell", "backup", "compact"];
 const SMALLEST_PAGE_SIZE: usize = 4096;
 const LARGEST_PAGE_SIZE: usize = 65536;
 
@@ -17,6 +17,7 @@ pub(crate) enum CommandName {
     Scan,
     Check,
     Stats,
+    Ui,
 }
 
 impl CommandName {
@@ -29,6 +30,7 @@ impl CommandName {
             b"scan" => Self::Scan,
             b"check" => Self::Check,
             b"stats" => Self::Stats,
+            b"ui" => Self::Ui,
             _ => return None,
         })
     }
@@ -42,16 +44,16 @@ impl CommandName {
             Self::Scan => "scan",
             Self::Check => "check",
             Self::Stats => "stats",
+            Self::Ui => "ui",
         }
     }
 
     fn takes(self, option: OptionName) -> bool {
         match option {
-            OptionName::Format
-            | OptionName::Color
-            | OptionName::Cache
-            | OptionName::Help
-            | OptionName::Version => true,
+            OptionName::Cache | OptionName::Help | OptionName::Version => true,
+            OptionName::Color => true,
+            OptionName::Format => self != Self::Ui,
+            OptionName::Mono | OptionName::Ascii => self == Self::Ui,
             OptionName::PageSize => self == Self::Create,
             OptionName::Create => self == Self::Put,
             OptionName::Prefix
@@ -113,6 +115,8 @@ enum OptionName {
     Reverse,
     Limit,
     KeysOnly,
+    Mono,
+    Ascii,
 }
 
 impl OptionName {
@@ -131,6 +135,8 @@ impl OptionName {
             b"reverse" => Self::Reverse,
             b"limit" => Self::Limit,
             b"keys-only" => Self::KeysOnly,
+            b"mono" => Self::Mono,
+            b"ascii" => Self::Ascii,
             _ => return None,
         })
     }
@@ -151,7 +157,13 @@ impl OptionName {
     fn takes_value(self) -> bool {
         !matches!(
             self,
-            Self::Help | Self::Version | Self::Create | Self::Reverse | Self::KeysOnly
+            Self::Help
+                | Self::Version
+                | Self::Create
+                | Self::Reverse
+                | Self::KeysOnly
+                | Self::Mono
+                | Self::Ascii
         )
     }
 }
@@ -176,6 +188,8 @@ pub(crate) struct Request {
     pub(crate) page_size: Option<usize>,
     pub(crate) create: bool,
     pub(crate) scan: ScanOptions,
+    pub(crate) mono: bool,
+    pub(crate) ascii: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -234,7 +248,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, help, version.",
+            "no command given. Commands: create, put, get, del, scan, check, stats, ui, help, version.",
             None,
         ));
     };
@@ -354,6 +368,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         page_size: None,
         create: false,
         scan: ScanOptions::default(),
+        mono: false,
+        ascii: false,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -390,6 +406,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.scan.limit = Some(parse_limit(&option.spelled, value).map_err(usage)?);
             }
             OptionName::KeysOnly => request.scan.keys_only = true,
+            OptionName::Mono => request.mono = true,
+            OptionName::Ascii => request.ascii = true,
             OptionName::Help | OptionName::Version => {}
         }
     }
@@ -400,7 +418,11 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     }
     let arguments = &tokens.positionals[1..];
     let (least, most) = match command {
-        CommandName::Create | CommandName::Scan | CommandName::Check | CommandName::Stats => (1, 1),
+        CommandName::Create
+        | CommandName::Scan
+        | CommandName::Check
+        | CommandName::Stats
+        | CommandName::Ui => (1, 1),
         CommandName::Get | CommandName::Del => (2, 2),
         CommandName::Put => (2, 3),
     };
@@ -467,7 +489,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, help, version.",
             render::text(name)
         ),
         None,
@@ -664,7 +686,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -707,11 +729,11 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, help, version."
         );
         assert_eq!(
-            usage_message("ui -h"),
-            "eggdb ui is not in this release yet; see docs/roadmap.md"
+            parse_words("ui -h"),
+            Ok(Invocation::Help(Some(CommandName::Ui)))
         );
         assert_eq!(parse_words("version --help"), Ok(Invocation::Help(None)));
     }
@@ -720,7 +742,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),
@@ -730,7 +752,7 @@ mod tests {
 
     #[test]
     fn reserved_commands_point_to_the_roadmap() {
-        for name in ["export", "import", "shell", "backup", "compact", "ui"] {
+        for name in ["export", "import", "shell", "backup", "compact"] {
             assert_eq!(
                 usage_message(&format!("{name} app.db")),
                 format!("eggdb {name} is not in this release yet; see docs/roadmap.md")

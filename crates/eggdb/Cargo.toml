@@ -16,3 +16,4 @@ path = "src/main.rs"
 [dependencies]
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-storage = { path = "../eggdb-storage" }
+eggdb-ui = { path = "../eggdb-ui" }
