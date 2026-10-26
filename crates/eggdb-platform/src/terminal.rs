@@ -83,10 +83,10 @@ pub enum Input {
 ///
 /// Raw mode passes every key to the program as bytes (`Ctrl-C` included, which no longer sends
 /// a signal) and stops the terminal from echoing or changing what is written. Dropping the
-/// value gives the terminal back as it was, as do a panic and, on Unix, `SIGTERM`, `SIGHUP`
-/// and `SIGQUIT` (which then end the process with exit status 128 + the signal's number); on
-/// Windows closing the console, logging off and shutting down restore it too. Only one exists
-/// at a time.
+/// value gives the terminal back as it was, as do a panic and, on Unix, `SIGTERM`, `SIGHUP`,
+/// `SIGQUIT` and a `SIGINT` sent by another process (which then end the process with exit
+/// status 128 + the signal's number); on Windows `Ctrl-C` and `Ctrl-Break` events, closing the
+/// console, logging off and shutting down restore it too. Only one exists at a time.
 #[derive(Debug)]
 pub struct RawTerminal {
     mode: os::RawMode,

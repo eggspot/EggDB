@@ -22,6 +22,8 @@ const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 0x102;
 const KEY_EVENT: u16 = 0x0001;
 const WINDOW_BUFFER_SIZE_EVENT: u16 = 0x0004;
+const CTRL_C_EVENT: u32 = 0;
+const CTRL_BREAK_EVENT: u32 = 1;
 const CTRL_CLOSE_EVENT: u32 = 2;
 const CTRL_LOGOFF_EVENT: u32 = 5;
 const CTRL_SHUTDOWN_EVENT: u32 = 6;
@@ -307,9 +309,18 @@ impl Drop for RawMode {
 }
 
 fn restore() {
-    if !ACTIVE.swap(false, Ordering::AcqRel) {
+    restore_with(put_console_back);
+}
+
+fn restore_with(put_back: impl FnOnce()) {
+    if !ACTIVE.load(Ordering::Acquire) {
         return;
     }
+    put_back();
+    ACTIVE.store(false, Ordering::Release);
+}
+
+fn put_console_back() {
     write_unlocked(crate::terminal::RESTORE_SEQUENCE);
     set_console_mode(
         standard_handle(STD_INPUT_HANDLE),
@@ -342,13 +353,21 @@ fn write_unlocked(bytes: &[u8]) {
 }
 
 extern "system" fn on_console_control(event: u32) -> i32 {
-    if matches!(
-        event,
-        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
-    ) {
+    if ends_the_process(event) {
         restore();
     }
     0
+}
+
+fn ends_the_process(event: u32) -> bool {
+    matches!(
+        event,
+        CTRL_C_EVENT
+            | CTRL_BREAK_EVENT
+            | CTRL_CLOSE_EVENT
+            | CTRL_LOGOFF_EVENT
+            | CTRL_SHUTDOWN_EVENT
+    )
 }
 
 fn install_panic_hook() {
@@ -359,4 +378,31 @@ fn install_panic_hook() {
             previous(info);
         }));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ACTIVE, ends_the_process, restore_with};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn every_console_event_that_ends_the_process_restores_the_console() {
+        for event in [0, 1, 2, 5, 6] {
+            assert!(ends_the_process(event), "{event}");
+        }
+        for event in [3, 4, 7, u32::MAX] {
+            assert!(!ends_the_process(event), "{event}");
+        }
+    }
+
+    #[test]
+    fn a_control_event_arriving_during_a_restore_still_restores() {
+        ACTIVE.store(true, Ordering::Release);
+        let mut handler_restored = false;
+        restore_with(|| {
+            restore_with(|| handler_restored = true);
+        });
+        assert!(handler_restored);
+        assert!(!ACTIVE.load(Ordering::Acquire));
+    }
 }

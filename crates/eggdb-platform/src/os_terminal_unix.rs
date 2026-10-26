@@ -11,6 +11,7 @@ const TCSANOW: c_int = 0;
 const POLLIN: c_short = 0x1;
 const POLLNVAL: c_short = 0x20;
 const SIGHUP: c_int = 1;
+const SIGINT: c_int = 2;
 const SIGQUIT: c_int = 3;
 const SIGTERM: c_int = 15;
 const SIGWINCH: c_int = 28;
@@ -84,16 +85,17 @@ unsafe extern "C" {
     fn _exit(status: c_int) -> !;
 }
 
-const HANDLED_SIGNALS: [c_int; 4] = [SIGWINCH, SIGTERM, SIGHUP, SIGQUIT];
+const HANDLED_SIGNALS: [c_int; 5] = [SIGWINCH, SIGTERM, SIGHUP, SIGQUIT, SIGINT];
 
 static CLAIMED: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static RESIZED: AtomicBool = AtomicBool::new(false);
 static SAVED: [AtomicU64; OPAQUE_WORDS] = [const { AtomicU64::new(0) }; OPAQUE_WORDS];
 static PANIC_HOOK: Once = Once::new();
-static PREVIOUS_ACTIONS: [[AtomicU64; OPAQUE_WORDS]; 4] =
-    [const { [const { AtomicU64::new(0) }; OPAQUE_WORDS] }; 4];
-static REPLACED: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+static PREVIOUS_ACTIONS: [[AtomicU64; OPAQUE_WORDS]; HANDLED_SIGNALS.len()] =
+    [const { [const { AtomicU64::new(0) }; OPAQUE_WORDS] }; HANDLED_SIGNALS.len()];
+static REPLACED: [AtomicBool; HANDLED_SIGNALS.len()] =
+    [const { AtomicBool::new(false) }; HANDLED_SIGNALS.len()];
 
 #[derive(Debug)]
 pub(crate) struct RawMode {
@@ -263,9 +265,18 @@ fn write_fully(mut bytes: &[u8]) -> io::Result<()> {
 }
 
 fn restore() {
-    if !ACTIVE.swap(false, Ordering::AcqRel) {
+    restore_with(put_terminal_back);
+}
+
+fn restore_with(put_back: impl FnOnce()) {
+    if !ACTIVE.load(Ordering::Acquire) {
         return;
     }
+    put_back();
+    ACTIVE.store(false, Ordering::Release);
+}
+
+fn put_terminal_back() {
     let restore_bytes = crate::terminal::RESTORE_SEQUENCE;
     // SAFETY: write is async-signal-safe; the pointer and length describe a static string.
     let _ = unsafe { write(STDOUT, restore_bytes.as_ptr().cast(), restore_bytes.len()) };
@@ -339,4 +350,24 @@ fn install_panic_hook() {
             previous(info);
         }));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ACTIVE, restore_with};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn a_signal_arriving_during_a_restore_still_restores_before_it_exits() {
+        ACTIVE.store(true, Ordering::Release);
+        let mut handler_restored = false;
+        restore_with(|| {
+            restore_with(|| handler_restored = true);
+        });
+        assert!(handler_restored);
+        assert!(!ACTIVE.load(Ordering::Acquire));
+        let mut restored_again = false;
+        restore_with(|| restored_again = true);
+        assert!(!restored_again);
+    }
 }
