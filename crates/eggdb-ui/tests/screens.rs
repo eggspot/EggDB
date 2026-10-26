@@ -197,7 +197,9 @@ fn golden(name: &str, screen: &str) {
         }
         return;
     }
-    let expected = std::fs::read_to_string(&path).unwrap_or_default();
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     if expected != screen.as_str() {
         let mut report = format!(
             "screen {name} differs from {} (UPDATE_SCREENS=1 rewrites it)\n",
