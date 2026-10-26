@@ -544,3 +544,82 @@ exported so the CLI's `eggdb shell` (a nice-to-have) can test against it too.
 8. The OS parts (raw mode, size, resize, restore on exit, panic and signals) live in
    `eggdb-platform`'s `terminal` module; the UI itself in a new `eggdb-ui` crate used by the
    `eggdb` binary.
+
+## Decided while building part 2 (v0.2.0 item 15)
+Where the design above was silent, or could not be built as written, the build chose the
+simplest consistent option (D92):
+1. **Typing and pasting.** Typed text is the escape spelling (`\xNN`, `\u{..}`, `\n`, `\t`,
+   `\r`, `\\`); a backslash must start one of these, or confirming reports `Bad escape`. A paste
+   is taken literally: its backslashes, tabs, controls and invisible characters are spelled as
+   escapes on the way in, so the value gets the pasted bytes; a paste into the prefix filter
+   is taken literally too. The one change is line breaks: terminals send a pasted line break
+   as `\r` (xterm, VTE, Windows Terminal) or `\r\n`, so in a paste `\r\n` and a lone `\r`
+   become `\n` (a line break in the multi-line editor, the escape `\n` in the key line), and a
+   carriage return byte is entered by typing `\r`. Pasted JSON keeps its line breaks and the
+   `\n` inside its strings. A paste of more than 1 MiB (1,048,576 bytes) never arrives, however
+   the terminal splits it across reads: the input layer drops it whole, up to its end marker,
+   and the UI says `The paste was larger than 1 MiB and was dropped`; in a value editor it also
+   names `eggdb put "<file>" <key> @file`. Pauses inside a paste never end it early: only its
+   end marker does, or 1 s with no input at all (a terminal that never sends the marker), after
+   which what was collected arrives as text and later bytes are keys again. Typed invisible
+   characters (a bidi override from an input method) are spelled too, so the editor never
+   shows one raw. `Tab` types `\t`.
+2. **Keys that type.** In an editor every printable key types, `?` and `q` included; `F1`
+   opens the help screen at its Editing section, and `Ctrl-C` is the quit key that asks before
+   discarding an unsaved edit (a second `Ctrl-C` quits). `Esc` on a changed value asks
+   `Discard edit` (`y` discards, `Esc` keeps editing); the key line of `a` cancels at once.
+3. **Which editor.** A text value with a line break, or any value of 1 KiB or more, opens in
+   the multi-line editor; a binary value always keeps its line breaks as `\n`. The cursor starts
+   at the beginning of the value. The editor holds at most 4 MiB of text: a larger value is
+   refused at `e` with a toast pointing to `eggdb put <file> <key> @file` (also a smaller
+   binary value whose escaped spelling is longer than 4 MiB, and the toast says so), and typing
+   or pasting past the bound is refused with a toast. Undo and redo keep the newest 16 MiB of
+   changes; older ones are forgotten.
+4. **The editor's title** is ` Edit  <view> · <old> → <new>  <key>`, with the key last so the
+   sizes survive a narrow pane (the key is also on the row below). A new key's title starts
+   with `Add` and its old size is `new`.
+5. **Error text.** Every engine error reads `Error (<Kind>): <message>`, the kind spelled as
+   `eggdb::ErrorKind` spells it, followed by a `Try:` line where the UI knows one. A cut or
+   multi-line toast ends with `(m)`; `m` opens the last message in a modal that scrolls.
+6. **Waiting for a writer.** `r` in `Writer busy` first draws `Waiting up to 5 s for the other
+   write transaction…`, then calls `begin_write` on the UI thread; the screen is still for at
+   most the write timeout, and a timeout shows the modal again with the engine's message. A
+   worker thread would need the database shared with it for one rare case.
+7. **The check.** `Database::check` runs on a worker thread with the database shared through
+   an `Arc`; the UI calls nothing else on the database until it ends, so its own reads never
+   wait behind it. There is no progress callback, so the screen shows the elapsed seconds and a
+   spinner (`| / - \`). `q` and `Ctrl-C` quit at any time (a running check is left to the
+   process exit, and the file is then closed without a checkpoint, which loses nothing); with
+   an unsaved edit both ask first, as everywhere else.
+8. **Counts after a commit.** A commit adjusts a finished key count by ±1; while the count is
+   still running it starts over. A new key outside the window moves the window to it, and the
+   position shows `?–?` until a `Home` or the count makes it known again.
+9. **The opening toast** is `Opened app.db read-write` or `Opened app.db read-only`.
+10. **Unavailable keys** in the hints bar are dimmed, and left out in the builds that cannot
+    show dim (mono and plain); available keys show the key plain and the label dimmed.
+11. **The help screen's limits** show the editor's 4 MiB bound and the page cache's size; the
+    exact largest value one commit can store depends on overflow-page sizes the engine does not
+    expose, and the engine's `TooLarge` message names the pages and frames when it is exceeded.
+12. **Modals** are as wide as their longest line, up to the screen's width less 8 columns of
+    text, and wrap longer lines.
+13. **A question waits to be seen.** A modal (a confirmation, an error, a question) takes keys
+    only after two things, in order: a frame that shows it was presented (a too-small screen or
+    the help screen does not show it, and a frame that hides it takes back what it was given),
+    and then 300 ms with no input, not counting time inside an open bracketed paste. Every key
+    that arrives before that is dropped, and each one starts the 300 ms over. A key pressed
+    after looking at the question works.
+
+    What that guarantees: with bracketed paste, which the terminals the UI targets turn on (an older
+    Windows 10 console may not), pasted bytes are never keys, unless the terminal passes a raw
+    end marker through. Keys typed ahead, or a paste in a terminal without
+    bracketed paste, can open a confirmation but cannot answer it as long as they arrive with
+    gaps shorter than 300 ms. A paste without bracketed paste that pauses longer than that (a
+    slow link delivering it in bursts), or one whose text contains a raw end marker
+    (`ESC[201~`) that the terminal passes through, can still answer a question that appeared
+    meanwhile. So a delete or a commit is guarded by being shown and by 300 ms of quiet, not by
+    an absolute guarantee.
+
+    The one exception is `Ctrl-C`, which is handled before any modal: it never confirms a
+    change; it quits at once, or, with an unsaved edit, asks first and quits on a second
+    `Ctrl-C`. The Key line of a confirmation shows the key's length and wraps at any character,
+    so two keys that differ only in spaces never look alike.

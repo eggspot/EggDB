@@ -47,6 +47,8 @@ pub enum Event {
     Key(KeyEvent),
     /// Text was pasted, line breaks included; it never triggers key bindings.
     Paste(String),
+    /// A paste larger than the input layer takes (1 MiB) was dropped whole; none of it arrives.
+    PasteTooLarge,
     /// The terminal changed size.
     Resize(Size),
     /// The terminal is going away; the program should end at once.
@@ -154,4 +156,10 @@ pub trait Terminal {
     fn next_event(&mut self, timeout: Duration) -> io::Result<Option<Event>>;
     /// Shows `frame`.
     fn present(&mut self, frame: &Frame) -> io::Result<()>;
+
+    /// Whether a bracketed paste has begun and its end marker has not arrived, so a pause in
+    /// the input is a pause inside the paste, not a quiet keyboard.
+    fn paste_open(&self) -> bool {
+        false
+    }
 }

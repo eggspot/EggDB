@@ -1,4 +1,4 @@
- EggDB  app.db                    1.2 MiB · 312 pages · 26 keys · 09:14:03Z  RO
+ EggDB  app.db                    1.2 MiB · 312 pages · 26 keys · 09:14:03Z  RW
  Keys                1–20 of 26 │ Value  text (auto) · 23 B          line 1–1/1
 > aaa:user\u{202e}gnp.exe     23│ aaa:user\u{202e}gnp.exe
   aab:doc                     16│───────────────────────────────────────────────
@@ -20,5 +20,5 @@
   user:2                      41│
   user:20                     43│
   user:3                      41│
-
- ↑↓ move  Enter open  / filter  v view  r re-read  ? help  q quit
+ Opened app.db read-write
+ ↑↓ move  Enter open  / filter  e edit  a add  d delete  c check  ? help  q quit

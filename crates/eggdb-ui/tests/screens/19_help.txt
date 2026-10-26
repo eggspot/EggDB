@@ -1,24 +1,24 @@
- EggDB ui help                                                          1–13/13
+ EggDB ui help                                                          1–22/22
 
  Move        ↑↓ or j/k   PgUp/PgDn   Home/End or g/G   ←→ scroll
  Panes       Tab or Shift-Tab switch   Enter open the value   Esc back to keys
  Find        /  filter keys by prefix (bytes; \xNN for a byte)   Esc restores
  View        v  text > json > hex > auto      w  wrap long lines (text)
- Re-read     r  re-read the list, the value and the stats
- Quit        q or Ctrl-C
+ Change      e  edit value   a  add key   d  delete key (asks d again)
+ Check       c  verify every page and show stats     r  re-read
+ Messages    m  show the last message in full
+ Quit        q, or Ctrl-C (asks before discarding an edit)
 
- This version browses read-only; eggdb put and eggdb del change keys.
+ Editing     Enter confirms a one-line value, Ctrl-S confirms any value
+             Alt-Enter makes it multi-line   Esc cancels   F1 this help
+             Ctrl-Z/Ctrl-Y undo/redo   Ctrl-U/Ctrl-K delete to line start/end
+             Values are edited as bytes: \xNN is one byte, \\ a backslash,
+             \n a line break in a one-line editor; a paste is taken as it is
+ Every change is one transaction, written to disk before the screen redraws.
+ Nothing is changed until you confirm. There is no undo after a commit.
 
  Terminal    at least 40x10; two panes from 80 columns
              NO_COLOR, --mono and --ascii change colours and box characters
  Database    app.db   page size 4.0 KiB   keys up to 512 B   values up to 1.0 G…
+             the editor holds 4.0 MiB of text   page cache 16.0 MiB
  Version     EggDB X.Y.Z   docs github.com/eggspot/EggDB/blob/main/docs/ux/ui.md
-
-
-
-
-
-
-
-
-

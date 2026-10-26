@@ -1,13 +1,20 @@
+mod check;
+mod edit;
+mod modal;
+
 use crate::frame::Frame;
 use crate::json::{self, JsonLine, Token};
-use crate::source::{KeyRow, Source, Start, Summary};
+use crate::source::{KeyRow, Source, SourceError, Start, Summary};
 use crate::terminal::{Capabilities, Event, KeyCode, KeyEvent, Size, Terminal};
 use crate::text;
 use crate::text_view::{self, Segment};
 use crate::theme::{Role, Symbol, Theme};
 use crate::width::text_width;
+use check::CheckRun;
+use edit::Edit;
+use modal::Modal;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const LARGEST_AUTO_LOAD: u64 = 64 << 20;
 const COUNT_STEP: u64 = 10_000;
@@ -16,8 +23,9 @@ const TWO_PANES_FROM_COLS: u16 = 80;
 const PAN_STEP: usize = 8;
 const MOST_LINES: usize = 1 << 20;
 const JSON_TOO_LARGE: &str = "Shown as text: the JSON view takes values up to 4 MiB";
-const READ_ONLY_TOAST: &str =
-    "eggdb ui browses read-only in this version; change keys with eggdb put and eggdb del";
+const READ_ONLY_TOAST: &str = "Opened read-only; start without --read-only to edit";
+const TOAST_LIFETIME: Duration = Duration::from_secs(8);
+const WAIT_FOR_A_WORKER: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pane {
@@ -45,13 +53,25 @@ impl Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToastKind {
     Info,
+    Success,
     Error,
+}
+
+impl ToastKind {
+    fn role(self) -> Role {
+        match self {
+            Self::Info => Role::Plain,
+            Self::Success => Role::Success,
+            Self::Error => Role::Error,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct Toast {
     kind: ToastKind,
     text: String,
+    shown_at: Instant,
 }
 
 #[derive(Debug)]
@@ -91,7 +111,7 @@ pub struct Ui<S> {
     source: S,
     theme: Theme,
     size: Size,
-    summary: Result<Summary, String>,
+    summary: Result<Summary, SourceError>,
     focus: Pane,
     filter: Vec<u8>,
     filter_edit: Option<FilterEdit>,
@@ -103,7 +123,11 @@ pub struct Ui<S> {
     counting: bool,
     viewer: Option<Viewer>,
     toast: Option<Toast>,
+    last_message: Option<Toast>,
     help: Option<usize>,
+    edit: Option<Edit>,
+    modal: Option<Modal>,
+    check: Option<CheckRun>,
     quit: bool,
 }
 
@@ -128,11 +152,31 @@ impl<S: Source> Ui<S> {
             counting: true,
             viewer: None,
             toast: None,
+            last_message: None,
             help: None,
+            edit: None,
+            modal: None,
+            check: None,
             quit: false,
         };
         ui.home();
+        if ui.toast.is_none()
+            && let Ok(summary) = &ui.summary
+        {
+            let access = if summary.read_only {
+                "read-only"
+            } else {
+                "read-write"
+            };
+            let opened = format!("Opened {} {access}", summary.name);
+            ui.info(opened);
+        }
         ui
+    }
+
+    /// The source the UI reads and writes.
+    pub fn source(&self) -> &S {
+        &self.source
     }
 
     /// Ends the UI and gives back its source.
@@ -145,16 +189,47 @@ impl<S: Source> Ui<S> {
         self.quit
     }
 
-    /// Whether no background work (the key count) is left.
+    /// Whether no background work is left: no key count, no write waiting for the writer and
+    /// no check running.
     pub fn is_idle(&self) -> bool {
-        !self.counting
+        !self.has_steps() && !self.check_running()
     }
 
-    /// Runs one step of background work.
-    pub fn tick(&mut self) {
-        if !self.counting {
-            return;
+    pub(crate) fn has_steps(&self) -> bool {
+        self.counting || self.write_waiting()
+    }
+
+    /// Runs one step of background work and expires an old toast; returns whether the screen
+    /// changed.
+    pub fn tick(&mut self) -> bool {
+        self.tick_at(Instant::now())
+    }
+
+    /// [`Ui::tick`] as if the time were `now`, which lets tests expire toasts.
+    pub fn tick_at(&mut self, now: Instant) -> bool {
+        if self.write_waiting() {
+            self.retry_write();
+            return true;
         }
+        let mut changed = false;
+        if self.check_running() {
+            changed = self.poll_check(now);
+        } else if self.counting {
+            self.count_step();
+            changed = true;
+        }
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| now.saturating_duration_since(toast.shown_at) >= TOAST_LIFETIME)
+        {
+            self.toast = None;
+            changed = true;
+        }
+        changed
+    }
+
+    fn count_step(&mut self) {
         match self
             .source
             .count(&self.filter, self.count_resume.as_deref(), COUNT_STEP)
@@ -174,22 +249,58 @@ impl<S: Source> Ui<S> {
         }
     }
 
-    /// Runs background work until none is left.
+    /// Runs background work until none is left, waiting for a running check to end.
     pub fn run_until_idle(&mut self) {
-        while self.counting {
+        while !self.is_idle() {
             self.tick();
+            if self.check_running() {
+                std::thread::sleep(WAIT_FOR_A_WORKER);
+            }
         }
     }
 
     /// Handles every event `terminal` has queued, finishes background work, then draws and
-    /// presents one frame. Tests drive the UI with this.
+    /// presents one frame, treating the end of the queued events as quiet input. It is for
+    /// tests, which drive the UI one step at a time; [`crate::run`] is the real loop.
     pub fn process<T: Terminal>(&mut self, terminal: &mut T, frame: &mut Frame) -> io::Result<()> {
         while let Some(event) = terminal.next_event(Duration::ZERO)? {
             self.handle(event);
         }
         self.run_until_idle();
         self.draw(frame);
-        terminal.present(frame)
+        terminal.present(frame)?;
+        self.presented();
+        self.input_quiet();
+        Ok(())
+    }
+
+    /// Tells the UI that the frame it last drew is on the screen. A question (a confirmation,
+    /// an error) takes keys only after a frame showing it was presented and the input then
+    /// went quiet ([`Ui::input_quiet`]); a frame that does not show it (too small a terminal,
+    /// the help screen) takes back any keys it took.
+    pub fn presented(&mut self) {
+        let visible = !self.too_small() && self.help.is_none();
+        if let Some(modal) = self.modal.as_mut() {
+            modal.presented(visible);
+        }
+    }
+
+    /// Whether a question is on the screen and waits for the input to go quiet before it takes
+    /// keys; keys that arrive meanwhile are dropped.
+    pub fn awaits_quiet(&self) -> bool {
+        self.modal.as_ref().is_some_and(Modal::awaits_quiet)
+    }
+
+    /// Tells the UI that no input arrived for a while after the last presented frame, so a
+    /// question that frame showed now takes keys.
+    pub fn input_quiet(&mut self) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.arm_if_shown();
+        }
+    }
+
+    fn too_small(&self) -> bool {
+        self.size.cols < SMALLEST.cols || self.size.rows < SMALLEST.rows
     }
 
     fn page(&self) -> usize {
@@ -209,18 +320,25 @@ impl<S: Source> Ui<S> {
         }
     }
 
-    fn error(&mut self, message: String) {
-        self.toast = Some(Toast {
-            kind: ToastKind::Error,
-            text: format!("Error: {message}"),
-        });
+    fn error(&mut self, error: SourceError) {
+        self.toast(
+            ToastKind::Error,
+            format!("Error ({}): {}", error.kind.name(), error.message),
+        );
     }
 
     fn info(&mut self, message: impl Into<String>) {
-        self.toast = Some(Toast {
-            kind: ToastKind::Info,
-            text: message.into(),
-        });
+        self.toast(ToastKind::Info, message.into());
+    }
+
+    fn toast(&mut self, kind: ToastKind, text: String) {
+        let toast = Toast {
+            kind,
+            text,
+            shown_at: Instant::now(),
+        };
+        self.last_message = Some(toast.clone());
+        self.toast = Some(toast);
     }
 
     fn fetch(&mut self, start: Start<'_>, limit: usize) -> Vec<KeyRow> {
@@ -376,6 +494,11 @@ impl<S: Source> Ui<S> {
     }
 
     fn reload(&mut self) {
+        self.reread_window();
+        self.restart_count();
+    }
+
+    fn reread_window(&mut self) {
         self.summary = self.source.summary();
         let anchor = self.rows.first().map(|row| row.key.clone());
         let selected_key = self.rows.get(self.selected).map(|row| row.key.clone());
@@ -385,9 +508,8 @@ impl<S: Source> Ui<S> {
         };
         self.selected = selected_key
             .and_then(|key| self.rows.iter().position(|row| row.key >= key))
-            .unwrap_or(0);
+            .unwrap_or_else(|| self.rows.len().saturating_sub(1));
         self.refit();
-        self.restart_count();
         self.viewer = None;
         self.selection_changed();
     }
@@ -459,7 +581,7 @@ impl<S: Source> Ui<S> {
                     Mode::Json
                 }
                 Err(error) => {
-                    self.error(error.message());
+                    self.toast(ToastKind::Error, format!("Error: {}", error.message()));
                     Mode::Text
                 }
             },
@@ -508,18 +630,28 @@ impl<S: Source> Ui<S> {
             Event::Resize(size) => {
                 let hex_per_row = self.hex_per_row();
                 self.size = size;
-                self.refit();
-                self.selection_changed();
-                self.keep_scrolls_in_range(hex_per_row);
+                if !self.check_running() {
+                    self.refit();
+                    self.selection_changed();
+                    self.keep_scrolls_in_range(hex_per_row);
+                }
             }
             Event::Paste(text) => {
-                if let Some(edit) = self.filter_edit.as_mut() {
-                    edit.text.push_str(&text.replace(['\n', '\r'], ""));
+                if self.modal.is_some() || self.help.is_some() || self.check.is_some() {
+                    return;
+                }
+                if self.edit.is_some() {
+                    self.edit_paste(&text);
+                } else if let Some(edit) = self.filter_edit.as_mut() {
+                    edit.text
+                        .push_str(&text::literal(&text.replace(['\n', '\r'], "")));
                     self.apply_filter();
                 }
             }
+            Event::PasteTooLarge => self.paste_too_large(),
             Event::Key(key) => self.key(key),
         }
+        self.follow_editor_cursor();
     }
 
     fn keep_scrolls_in_range(&mut self, previous_hex_per_row: usize) {
@@ -547,17 +679,29 @@ impl<S: Source> Ui<S> {
         self.toast = None;
         let ctrl = key.modifiers.ctrl;
         if ctrl && key.code == KeyCode::Char('c') {
-            self.quit = true;
+            self.ctrl_c();
             return;
         }
-        if self.size.cols < SMALLEST.cols || self.size.rows < SMALLEST.rows {
-            if key.code == KeyCode::Char('q') {
+        if self.too_small() {
+            if key.code == KeyCode::Char('q') && !self.has_unsaved_edit() {
                 self.quit = true;
             }
             return;
         }
         if self.help.is_some() {
             self.help_key(key.code);
+            return;
+        }
+        if self.modal.is_some() {
+            self.modal_key(key);
+            return;
+        }
+        if self.check.is_some() {
+            self.check_key(key.code);
+            return;
+        }
+        if self.edit.is_some() {
+            self.edit_key(key);
             return;
         }
         if self.filter_edit.is_some() {
@@ -576,13 +720,35 @@ impl<S: Source> Ui<S> {
                     Pane::Value => Pane::Keys,
                 };
             }
-            KeyCode::Char('e' | 'a' | 'd' | 'c') => self.info(READ_ONLY_TOAST),
+            KeyCode::Char('e' | 'a' | 'd') if self.read_only() => self.info(READ_ONLY_TOAST),
+            KeyCode::Char('e') => self.start_edit(),
+            KeyCode::Char('a') => self.start_add(),
+            KeyCode::Char('d') => self.start_delete(),
+            KeyCode::Char('c') => self.start_check(),
+            KeyCode::Char('m') => self.show_last_message(),
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('v') => self.cycle_mode(),
             _ => match self.focus {
                 Pane::Keys => self.list_key(key.code),
                 Pane::Value => self.viewer_key(key.code),
             },
+        }
+    }
+
+    fn read_only(&self) -> bool {
+        self.summary.as_ref().is_ok_and(|summary| summary.read_only)
+    }
+
+    fn ctrl_c(&mut self) {
+        if self.has_unsaved_edit() && !self.modal.as_ref().is_some_and(Modal::asks_to_quit) {
+            let stay = if self.check.is_some() {
+                "stay"
+            } else {
+                "keep editing"
+            };
+            self.modal = Some(Modal::quit_question(stay));
+        } else {
+            self.quit = true;
         }
     }
 
@@ -762,7 +928,7 @@ impl<S: Source> Ui<S> {
             *frame = Frame::new(self.size);
         }
         frame.clear();
-        if self.size.cols < SMALLEST.cols || self.size.rows < SMALLEST.rows {
+        if self.too_small() {
             self.draw_too_small(frame);
             return;
         }
@@ -771,6 +937,15 @@ impl<S: Source> Ui<S> {
             return;
         }
         self.draw_header(frame);
+        if let Some(check) = &self.check {
+            self.draw_check(frame, check);
+            self.draw_status(frame);
+            self.draw_hints(frame);
+            if let Some(modal) = &self.modal {
+                self.draw_modal(frame, modal);
+            }
+            return;
+        }
         let list_cols = self.list_cols();
         if self.two_panes() {
             self.draw_list(frame, 0, list_cols);
@@ -778,14 +953,23 @@ impl<S: Source> Ui<S> {
             for row in 1..self.size.rows - 2 {
                 frame.put(list_cols, row, line, self.theme.style(Role::Plain), 1, '|');
             }
-            self.draw_viewer(frame, list_cols + 1, self.viewer_cols());
+            self.draw_value_pane(frame, list_cols + 1, self.viewer_cols());
         } else if self.focus == Pane::Keys {
             self.draw_list(frame, 0, self.size.cols);
         } else {
-            self.draw_viewer(frame, 0, self.size.cols);
+            self.draw_value_pane(frame, 0, self.size.cols);
         }
         self.draw_status(frame);
         self.draw_hints(frame);
+        if let Some(modal) = &self.modal {
+            self.draw_modal(frame, modal);
+        }
+    }
+
+    fn draw_value_pane(&self, frame: &mut Frame, col: u16, width: u16) {
+        if !self.draw_value_editor(frame, col, width) {
+            self.draw_viewer(frame, col, width);
+        }
     }
 
     fn put(&self, frame: &mut Frame, col: u16, row: u16, text: &str, role: Role, room: u16) -> u16 {
@@ -856,6 +1040,9 @@ impl<S: Source> Ui<S> {
         };
         if !self.two_panes() {
             fields.retain(|field| field.ends_with(" keys"));
+        }
+        if let Some(running) = self.check.as_ref().and_then(CheckRun::running_label) {
+            fields = vec![running];
         }
         let left = " EggDB  ";
         let left_width = text_width(left);
@@ -940,33 +1127,38 @@ impl<S: Source> Ui<S> {
     fn draw_list(&self, frame: &mut Frame, col: u16, width: u16) {
         let role = self.title_role(Pane::Keys);
         frame.fill(col, 1, width, self.theme.style(role));
-        let mut title = format!(" {}", self.pane_name(Pane::Keys, "Keys"));
-        let mut cursor = None;
-        if let Some(edit) = &self.filter_edit {
-            title.push_str(" /");
-            title.push_str(&edit.text);
-            let at = col + u16::try_from(text_width(&title)).unwrap_or(width);
-            cursor = Some((at.min(col + width - 1), 1));
-        } else if !self.filter.is_empty() {
-            title.push_str(" /");
-            title.push_str(&text::escaped(&self.filter));
+        if !self.draw_key_entry(frame, col, width) {
+            let mut title = format!(" {}", self.pane_name(Pane::Keys, "Keys"));
+            let mut cursor = None;
+            if let Some(edit) = &self.filter_edit {
+                title.push_str(" /");
+                title.push_str(&edit.text);
+                let at = col + u16::try_from(text_width(&title)).unwrap_or(width);
+                cursor = Some((at.min(col + width - 1), 1));
+            } else if !self.filter.is_empty() {
+                title.push_str(" /");
+                title.push_str(&text::escaped(&self.filter));
+            }
+            let position = format!("{} ", self.position());
+            let position_width = u16::try_from(text_width(&position)).unwrap_or(width);
+            self.put(
+                frame,
+                col,
+                1,
+                &title,
+                role,
+                width.saturating_sub(position_width + 1),
+            );
+            self.put_right(frame, col + width, 1, &position, role);
+            frame.cursor = cursor;
         }
-        let position = format!("{} ", self.position());
-        let position_width = u16::try_from(text_width(&position)).unwrap_or(width);
-        self.put(
-            frame,
-            col,
-            1,
-            &title,
-            role,
-            width.saturating_sub(position_width + 1),
-        );
-        self.put_right(frame, col + width, 1, &position, role);
-        frame.cursor = cursor;
         let size_cells = 6u16;
         if self.rows.is_empty() {
             let message = if self.filter.is_empty() {
-                "empty database".to_owned()
+                format!(
+                    "empty database {} press a to add a key",
+                    self.theme.symbol(Symbol::EmDash)
+                )
             } else {
                 format!("no keys start with \"{}\"", text::escaped(&self.filter))
             };
@@ -1352,70 +1544,127 @@ impl<S: Source> Ui<S> {
         let Some(toast) = &self.toast else {
             return;
         };
-        let role = match toast.kind {
-            ToastKind::Info => Role::Plain,
-            ToastKind::Error => Role::Error,
-        };
         let row = self.size.rows - 2;
-        self.put(
+        let room = self.size.cols.saturating_sub(2);
+        let first_line = toast.text.lines().next().unwrap_or_default();
+        let one_line = first_line.len() == toast.text.len();
+        if one_line && text_width(first_line) <= usize::from(room) {
+            self.put(frame, 1, row, first_line, toast.kind.role(), room);
+            return;
+        }
+        let cut = text_width(first_line) + 6 > usize::from(room);
+        let more = if cut {
+            " (m)".to_owned()
+        } else {
+            format!(" {} (m)", self.theme.symbol(Symbol::Ellipsis))
+        };
+        let more_width = u16::try_from(text_width(&more)).unwrap_or(room);
+        let used = self.put(
             frame,
             1,
             row,
-            &toast.text,
-            role,
-            self.size.cols.saturating_sub(1),
+            first_line,
+            toast.kind.role(),
+            room.saturating_sub(more_width),
         );
+        self.put(frame, 1 + used, row, &more, Role::Dim, more_width);
     }
 
-    fn draw_hints(&self, frame: &mut Frame) {
+    fn hints(&self) -> Vec<Hint> {
         let up_down = self.theme.symbol(Symbol::UpDown);
         let left_right = self.theme.symbol(Symbol::LeftRight);
-        let hints: Vec<(String, &str)> = if self.filter_edit.is_some() {
+        let writable = !self.read_only();
+        if let Some(modal) = &self.modal {
+            return modal.hints();
+        }
+        if let Some(hints) = self.check_hints() {
+            return hints;
+        }
+        if let Some(hints) = self.edit_hints() {
+            return hints;
+        }
+        if self.filter_edit.is_some() {
+            return vec![
+                Hint::new("Enter", "keep filter"),
+                Hint::new("Esc", "restore"),
+                Hint::new("Backspace", "delete"),
+                Hint::new("\\xNN", "a byte"),
+            ];
+        }
+        if self.focus == Pane::Keys {
             vec![
-                ("Enter".to_owned(), "keep filter"),
-                ("Esc".to_owned(), "restore"),
-                ("Backspace".to_owned(), "delete"),
-                ("\\xNN".to_owned(), "a byte"),
-            ]
-        } else if self.focus == Pane::Keys {
-            vec![
-                (up_down.to_owned(), "move"),
-                ("Enter".to_owned(), "open"),
-                ("/".to_owned(), "filter"),
-                ("v".to_owned(), "view"),
-                ("r".to_owned(), "re-read"),
-                ("?".to_owned(), "help"),
-                ("q".to_owned(), "quit"),
+                Hint::new(up_down, "move"),
+                Hint::new("Enter", "open"),
+                Hint::new("/", "filter"),
+                Hint::new("e", "edit").available(writable && !self.rows.is_empty()),
+                Hint::new("a", "add").available(writable),
+                Hint::new("d", "delete").available(writable && !self.rows.is_empty()),
+                Hint::new("c", "check"),
+                Hint::new("?", "help"),
+                Hint::new("q", "quit"),
             ]
         } else {
             vec![
-                (up_down.to_owned(), "scroll"),
-                (left_right.to_owned(), "pan"),
-                ("v".to_owned(), "view"),
-                ("w".to_owned(), "wrap"),
-                ("Esc".to_owned(), "keys"),
-                ("?".to_owned(), "help"),
-                ("q".to_owned(), "quit"),
+                Hint::new(up_down, "scroll"),
+                Hint::new(left_right, "pan"),
+                Hint::new("v", "view"),
+                Hint::new("w", "wrap"),
+                Hint::new("e", "edit").available(writable && self.viewer.is_some()),
+                Hint::new("d", "delete").available(writable && self.viewer.is_some()),
+                Hint::new("Esc", "keys"),
+                Hint::new("?", "help"),
+                Hint::new("q", "quit"),
             ]
-        };
-        let row = self.size.rows - 1;
-        let room = usize::from(self.size.cols.saturating_sub(1));
-        let mut chosen: Vec<String> = hints
-            .iter()
-            .map(|(key, label)| format!("{key} {label}"))
-            .collect();
-        while chosen.len() > 1 && text_width(&chosen.join("  ")) > room {
-            let help_at = chosen.len().saturating_sub(2);
-            chosen.remove(help_at.saturating_sub(1));
         }
-        self.put(
-            frame,
-            1,
-            row,
-            &chosen.join("  "),
-            Role::Dim,
-            self.size.cols.saturating_sub(1),
-        );
+    }
+
+    fn draw_hints(&self, frame: &mut Frame) {
+        let mut hints = self.hints();
+        if !self.theme.shows_dim() {
+            hints.retain(|hint| hint.available);
+        }
+        let room = usize::from(self.size.cols.saturating_sub(1));
+        let width = |hints: &[Hint]| {
+            hints
+                .iter()
+                .map(|hint| text_width(&hint.key) + 1 + text_width(hint.label))
+                .sum::<usize>()
+                + 2 * hints.len().saturating_sub(1)
+        };
+        while hints.len() > 1 && width(&hints) > room {
+            let help_at = hints.len().saturating_sub(2);
+            hints.remove(help_at.saturating_sub(1));
+        }
+        let row = self.size.rows - 1;
+        let mut col = 1u16;
+        for (index, hint) in hints.iter().enumerate() {
+            let end = self.size.cols;
+            if index > 0 {
+                col = col.saturating_add(2);
+            }
+            let key_role = if hint.available {
+                Role::Plain
+            } else {
+                Role::Dim
+            };
+            col += self.put(
+                frame,
+                col,
+                row,
+                &hint.key,
+                key_role,
+                end.saturating_sub(col),
+            );
+            col += 1;
+            col += self.put(
+                frame,
+                col,
+                row,
+                hint.label,
+                Role::Dim,
+                end.saturating_sub(col),
+            );
+        }
     }
 
     fn draw_help(&self, frame: &mut Frame, scroll: usize) {
@@ -1446,6 +1695,36 @@ impl<S: Source> Ui<S> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct Hint {
+    key: String,
+    label: &'static str,
+    available: bool,
+}
+
+impl Hint {
+    fn new(key: &str, label: &'static str) -> Self {
+        Self {
+            key: key.to_owned(),
+            label,
+            available: true,
+        }
+    }
+
+    fn available(self, available: bool) -> Self {
+        Self { available, ..self }
+    }
+}
+
+const HELP_EDITING_TOPIC: &str = "Editing";
+
+fn help_editing_line<S: Source>(ui: &Ui<S>) -> usize {
+    help_lines(ui)
+        .iter()
+        .position(|line| line.starts_with(HELP_EDITING_TOPIC))
+        .unwrap_or(0)
+}
+
 fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
     let up_down = if ui.theme.unicode() {
         "↑↓"
@@ -1462,14 +1741,31 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
         "Panes       Tab or Shift-Tab switch   Enter open the value   Esc back to keys".to_owned(),
         "Find        /  filter keys by prefix (bytes; \\xNN for a byte)   Esc restores".to_owned(),
         "View        v  text > json > hex > auto      w  wrap long lines (text)".to_owned(),
-        "Re-read     r  re-read the list, the value and the stats".to_owned(),
-        "Quit        q or Ctrl-C".to_owned(),
+        "Change      e  edit value   a  add key   d  delete key (asks d again)".to_owned(),
+        "Check       c  verify every page and show stats     r  re-read".to_owned(),
+        "Messages    m  show the last message in full".to_owned(),
+        "Quit        q, or Ctrl-C (asks before discarding an edit)".to_owned(),
         String::new(),
-        "This version browses read-only; eggdb put and eggdb del change keys.".to_owned(),
+        format!(
+            "{HELP_EDITING_TOPIC}     Enter confirms a one-line value, Ctrl-S confirms any value"
+        ),
+        "            Alt-Enter makes it multi-line   Esc cancels   F1 this help".to_owned(),
+        "            Ctrl-Z/Ctrl-Y undo/redo   Ctrl-U/Ctrl-K delete to line start/end".to_owned(),
+        "            Values are edited as bytes: \\xNN is one byte, \\\\ a backslash,".to_owned(),
+        "            \\n a line break in a one-line editor; a paste is taken as it is".to_owned(),
+        "Every change is one transaction, written to disk before the screen redraws.".to_owned(),
+        "Nothing is changed until you confirm. There is no undo after a commit.".to_owned(),
+    ];
+    if ui.read_only() {
+        lines.push(
+            "Opened read-only: e, a and d are off; start without --read-only to edit.".to_owned(),
+        );
+    }
+    lines.extend([
         String::new(),
         "Terminal    at least 40x10; two panes from 80 columns".to_owned(),
         "            NO_COLOR, --mono and --ascii change colours and box characters".to_owned(),
-    ];
+    ]);
     if let Ok(summary) = &ui.summary {
         lines.push(format!(
             "Database    {}   page size {}   keys up to {} B   values up to {}",
@@ -1477,6 +1773,11 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
             text::file_size(summary.page_size as u64),
             text::count(summary.max_key_bytes as u64),
             text::file_size(summary.max_value_bytes)
+        ));
+        lines.push(format!(
+            "            the editor holds {} of text   page cache {}",
+            text::file_size(crate::editor::LONGEST_TEXT as u64),
+            text::file_size(summary.cache_bytes)
         ));
     }
     lines.push(format!(

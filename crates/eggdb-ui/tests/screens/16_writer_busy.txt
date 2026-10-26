@@ -1,0 +1,24 @@
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
+ Keys                1–20 of 24 │ Edit  json · 87 B → 88 B  doc:js… ln 1 col 89
+  bin                         40│ doc:json
+> doc:json                    87│───────────────────────────────────────────────
+  empty                        0│ math","poetry"],"active":true,"notes":null}
+  large                   14.0 K│
+  user:1                      41│
+  ┌ Writer busy ─────────────────────────────────────────────────────────────┐
+  │ Another write transaction is open on this database.                      │
+  │                                                                          │
+  │ Error (WriterActive): another write transaction is open; one writer at a │
+  │ time: commit or roll it back first                                       │
+  │                                                                          │
+  │ Try: r waits up to 5 s for it to end, then commits.                      │
+  │                                                                          │
+  │                           r retry     Esc back                           │
+  └──────────────────────────────────────────────────────────────────────────┘
+  user:2                      41│
+  user:20                     43│
+  user:3                      41│
+  user:4                      41│
+  user:5                      41│
+
+ r retry  Esc back

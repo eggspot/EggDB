@@ -11,10 +11,11 @@ const LARGEST_PASTE: usize = 1 << 20;
 /// A lone `Esc` byte could start a sequence, so it stays pending until more bytes arrive or
 /// the caller decides none will (25 ms of quiet, in the real terminal) and calls
 /// [`InputDecoder::flush`]. Hostile or garbled input never panics; bytes that make no sense are
-/// dropped or shown as U+FFFD. A paste is cut at 1 MiB; the rest of it is dropped, never
-/// decoded as keys, up to its end marker or, if the marker never comes, up to the first pause
-/// in the input (the next [`InputDecoder::flush`]), so the keys after it (`q` among them) still
-/// arrive as keys.
+/// dropped or shown as U+FFFD. A paste of more than 1 MiB is never delivered, however its
+/// bytes are split across reads: it becomes one [`Event::PasteTooLarge`], and its bytes are
+/// dropped, never decoded as keys, up to its end marker. Inside a paste [`InputDecoder::flush`]
+/// changes nothing; only [`InputDecoder::end_paste`], which the caller calls after a long
+/// silence, gives up on an end marker that never comes.
 #[derive(Debug, Default)]
 pub struct InputDecoder {
     pending: Vec<u8>,
@@ -39,9 +40,34 @@ impl InputDecoder {
         self.decode(false)
     }
 
-    /// Whether bytes are waiting for more to complete them.
+    /// Whether bytes outside a paste are waiting for more to complete them, such as a lone
+    /// `Esc`; [`InputDecoder::flush`] decides them after a short wait.
     pub fn has_pending(&self) -> bool {
-        (!self.pending.is_empty() && self.paste.is_none()) || self.dropping_paste
+        !self.pending.is_empty() && !self.in_paste()
+    }
+
+    /// Whether a bracketed paste has begun and its end marker has not arrived.
+    pub fn in_paste(&self) -> bool {
+        self.paste.is_some() || self.dropping_paste
+    }
+
+    /// Gives up on the open paste's end marker, after a silence long enough that no terminal
+    /// pauses that long inside a paste: what was collected arrives as one [`Event::Paste`]
+    /// (or [`Event::PasteTooLarge`]), a paste being dropped ends, and later bytes are keys again.
+    pub fn end_paste(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        if let Some(mut paste) = self.paste.take() {
+            paste.append(&mut self.pending);
+            events.push(if paste.len() > LARGEST_PASTE {
+                Event::PasteTooLarge
+            } else {
+                Event::Paste(String::from_utf8_lossy(&paste).into_owned())
+            });
+        } else if self.dropping_paste {
+            self.pending.clear();
+        }
+        self.dropping_paste = false;
+        events
     }
 
     /// Decodes what is pending as if no more bytes will come: a lone `Esc` is the Esc key, and
@@ -53,7 +79,7 @@ impl InputDecoder {
     fn decode(&mut self, flush: bool) -> Vec<Event> {
         let mut events = Vec::new();
         let mut at = 0;
-        while at < self.pending.len() || (flush && self.dropping_paste) {
+        while at < self.pending.len() {
             if self.dropping_paste {
                 let rest = &self.pending[at..];
                 match find(rest, PASTE_END) {
@@ -61,11 +87,6 @@ impl InputDecoder {
                         at += end + PASTE_END.len();
                         self.dropping_paste = false;
                         continue;
-                    }
-                    None if flush => {
-                        at = self.pending.len();
-                        self.dropping_paste = false;
-                        break;
                     }
                     None => {
                         at += rest.len() - longest_partial_suffix(rest, PASTE_END);
@@ -76,31 +97,35 @@ impl InputDecoder {
             if let Some(paste) = self.paste.as_mut() {
                 let rest = &self.pending[at..];
                 let room = LARGEST_PASTE - paste.len();
-                match find(rest, PASTE_END) {
-                    Some(end) if end <= room => {
-                        paste.extend_from_slice(&rest[..end]);
+                let (content, after_end) = match find(rest, PASTE_END) {
+                    Some(end) => (end, Some(end + PASTE_END.len())),
+                    None => (rest.len() - longest_partial_suffix(rest, PASTE_END), None),
+                };
+                match (content > room, after_end) {
+                    (true, Some(after_end)) => {
+                        self.paste = None;
+                        events.push(Event::PasteTooLarge);
+                        at += after_end;
+                        continue;
+                    }
+                    (true, None) => {
+                        self.paste = None;
+                        self.dropping_paste = true;
+                        events.push(Event::PasteTooLarge);
+                        at += content;
+                        break;
+                    }
+                    (false, Some(after_end)) => {
+                        paste.extend_from_slice(&rest[..content]);
                         let text = String::from_utf8_lossy(paste).into_owned();
                         self.paste = None;
                         events.push(Event::Paste(text));
-                        at += end + PASTE_END.len();
+                        at += after_end;
                         continue;
                     }
-                    found => {
-                        let keep = if found.is_some() {
-                            0
-                        } else {
-                            longest_partial_suffix(rest, PASTE_END)
-                        };
-                        let take = (rest.len() - keep).min(room);
-                        paste.extend_from_slice(&rest[..take]);
-                        at += take;
-                        if paste.len() >= LARGEST_PASTE {
-                            let text = String::from_utf8_lossy(paste).into_owned();
-                            self.paste = None;
-                            self.dropping_paste = true;
-                            events.push(Event::Paste(text));
-                            continue;
-                        }
+                    (false, None) => {
+                        paste.extend_from_slice(&rest[..content]);
+                        at += content;
                         break;
                     }
                 }
@@ -460,22 +485,75 @@ mod tests {
         events.extend(decoder.feed(b"rq\x1b[20"));
         events.extend(decoder.feed(b"1~j"));
         assert_eq!(events.len(), 2, "{:?}", &events[1..events.len().min(4)]);
-        assert!(matches!(&events[0], Event::Paste(text) if text.len() == super::LARGEST_PASTE));
+        assert_eq!(events[0], Event::PasteTooLarge);
         assert_eq!(events[1], key(KeyCode::Char('j')));
         assert!(!decoder.has_pending());
     }
 
     #[test]
-    fn a_paste_that_never_ends_drops_bytes_only_until_the_input_pauses() {
+    fn a_pause_inside_a_dropped_paste_never_turns_its_tail_into_keys() {
+        let mut decoder = InputDecoder::new();
+        let mut events = decoder.feed(b"\x1b[200~");
+        events.extend(decoder.feed(&vec![b'x'; super::LARGEST_PASTE + 10]));
+        assert!(decoder.in_paste());
+        assert!(!decoder.has_pending());
+        events.extend(decoder.flush());
+        events.extend(decoder.feed(b"d\rq\x1b"));
+        events.extend(decoder.flush());
+        events.extend(decoder.feed(b"[201~j"));
+        assert_eq!(events, [Event::PasteTooLarge, key(KeyCode::Char('j'))]);
+        assert!(!decoder.in_paste());
+    }
+
+    #[test]
+    fn a_paste_that_never_ends_is_given_up_only_by_end_paste() {
         let mut decoder = InputDecoder::new();
         let mut events = decoder.feed(b"\x1b[200~");
         events.extend(decoder.feed(&vec![b'x'; super::LARGEST_PASTE + 10]));
         events.extend(decoder.feed(b"rr\x1b[201"));
-        assert_eq!(events.len(), 1);
-        assert!(decoder.has_pending());
+        assert_eq!(events, [Event::PasteTooLarge]);
         assert!(decoder.flush().is_empty());
-        assert!(!decoder.has_pending());
+        assert!(decoder.in_paste());
+        assert!(decoder.end_paste().is_empty());
+        assert!(!decoder.in_paste());
         assert_eq!(decoder.feed(b"q"), [key(KeyCode::Char('q'))]);
+        decoder.feed(b"\x1b[200~half a paste, then silence\x1b[20");
+        assert_eq!(decoder.feed(&[3]), []);
+        assert_eq!(
+            decoder.end_paste(),
+            [Event::Paste(
+                "half a paste, then silence\u{1b}[20\u{3}".to_owned()
+            )]
+        );
+        assert_eq!(
+            decoder.feed(&[3]),
+            [with(KeyCode::Char('c'), Modifiers::CTRL)]
+        );
+    }
+
+    #[test]
+    fn exactly_one_mebibyte_is_accepted_and_one_byte_more_refused_however_it_is_split() {
+        let exact = vec![b'y'; super::LARGEST_PASTE];
+        for split in [1, super::LARGEST_PASTE / 2, super::LARGEST_PASTE] {
+            let mut decoder = InputDecoder::new();
+            let mut input = b"\x1b[200~".to_vec();
+            input.extend_from_slice(&exact);
+            input.extend_from_slice(b"\x1b[201~");
+            let at = 6 + split;
+            let mut events = decoder.feed(&input[..at]);
+            events.extend(decoder.feed(&input[at..]));
+            assert!(
+                matches!(&events[..], [Event::Paste(text)] if text.len() == super::LARGEST_PASTE),
+                "split at {split}"
+            );
+            let mut decoder = InputDecoder::new();
+            let mut longer = b"\x1b[200~".to_vec();
+            longer.extend_from_slice(&exact);
+            longer.extend_from_slice(b"y\x1b[201~");
+            let mut events = decoder.feed(&longer[..at]);
+            events.extend(decoder.feed(&longer[at..]));
+            assert_eq!(events, [Event::PasteTooLarge], "split at {split}");
+        }
     }
 
     #[test]

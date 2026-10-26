@@ -434,7 +434,16 @@ impl Session<'_> {
     }
 
     fn ui(&mut self) -> Result<Exit, Failure> {
-        let db = self.open(Access::ReadOnly, None)?;
+        let access = if self.request.read_only {
+            Access::ReadOnly
+        } else {
+            Access::Write { create: false }
+        };
+        let options = self
+            .database_options(access, None)
+            .write_timeout(ui::WRITE_TIMEOUT);
+        let db = Database::open_with(&self.request.file, options.clone())
+            .map_err(|error| self.ui_open_failure(&error, access))?;
         let capabilities = eggdb_ui::detect_capabilities(eggdb_ui::Fallbacks {
             mono: self.request.mono || self.request.color == ColorChoice::Never,
             ascii: self.request.ascii,
@@ -455,15 +464,30 @@ impl Session<'_> {
             }
         };
         let size = eggdb_ui::Terminal::size(&terminal);
-        let source = ui::DatabaseSource::new(db, self.file_display.clone());
+        let source = ui::DatabaseSource::new(db, self.file_display.clone(), options);
         let mut screen = eggdb_ui::Ui::new(source, eggdb_ui::UiOptions { capabilities }, size);
         let ran = eggdb_ui::run(&mut terminal, &mut screen);
         drop(terminal);
         ran.map_err(|error| {
             Failure::database(format!("the terminal failed: {error}"), Exit::DatabaseError)
         })?;
-        self.close(screen.into_source().into_database())?;
+        if let Some(db) = screen.into_source().into_database() {
+            self.close(db)?;
+        }
         Ok(Exit::Done)
+    }
+
+    fn ui_open_failure(&self, error: &Error, access: Access) -> Failure {
+        let file = &self.file;
+        match (error.kind(), access) {
+            (ErrorKind::Locked, Access::Write { .. }) => Failure::database(
+                format!(
+                    "cannot open {file}: another program has it open. Close it before editing, or browse it with `eggdb ui --read-only {file}`, which works beside other readers."
+                ),
+                Exit::Busy,
+            ),
+            _ => self.open_failure(error, access),
+        }
     }
 
     fn open(&self, access: Access, cache_for_command: Option<usize>) -> Result<Database, Failure> {
@@ -476,6 +500,13 @@ impl Session<'_> {
         access: Access,
         cache_for_command: Option<usize>,
     ) -> Result<Database, Error> {
+        Database::open_with(
+            &self.request.file,
+            self.database_options(access, cache_for_command),
+        )
+    }
+
+    fn database_options(&self, access: Access, cache_for_command: Option<usize>) -> Options {
         let cache = self
             .request
             .cache_bytes
@@ -489,7 +520,7 @@ impl Session<'_> {
         if let Some(page_size) = self.request.page_size {
             options = options.page_size_bytes(page_size);
         }
-        Database::open_with(&self.request.file, options)
+        options
     }
 
     fn close(&self, db: Database) -> Result<(), Failure> {

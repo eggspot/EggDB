@@ -132,7 +132,7 @@ Commands:
   scan   <file>                 list entries in key order; see --prefix, --from, --to
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
-  ui     <file>                 browse keys and values full screen in the terminal
+  ui     <file>                 browse and edit keys full screen in the terminal
   help   [command]              this text, or one command's help
   version                       print the version
 

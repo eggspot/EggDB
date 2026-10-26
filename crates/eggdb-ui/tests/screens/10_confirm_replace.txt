@@ -1,0 +1,24 @@
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
+ Keys                1–20 of 24 │ Edit  json · 87 B → 93 B  doc:js… ln 1 col 94
+  bin                         40│ doc:json
+> doc:json                    87│───────────────────────────────────────────────
+  empty                        0│ ,"poetry"],"active":true,"notes":null,"x":1}
+  large                   14.0 K│
+  user:1                      41│
+  user:10                     43│
+  user:11     ┌ Replace value ───────────────────────────────────┐
+  user:12     │ Key    doc:json (8 B)                            │
+  user:13     │ Value  87 B → 93 B, text                         │
+  user:14     │                                                  │
+  user:15     │ One commit, written to disk before you continue. │
+  user:16     │                                                  │
+  user:17     │       Enter commit     Esc back to editor        │
+  user:18     └──────────────────────────────────────────────────┘
+  user:19                     43│
+  user:2                      41│
+  user:20                     43│
+  user:3                      41│
+  user:4                      41│
+  user:5                      41│
+
+ Enter commit  Esc back to editor

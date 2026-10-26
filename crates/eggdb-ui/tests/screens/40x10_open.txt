@@ -1,4 +1,4 @@
- EggDB  app.db              24 keys  RO
+ EggDB  app.db              24 keys  RW
  Keys                         1–6 of 24
 > bin                                 40
   doc:json                            87
@@ -6,5 +6,5 @@
   large                           14.0 K
   user:1                              41
   user:10                             43
-
+ Opened app.db read-write
  ↑↓ move  Enter open  ? help  q quit

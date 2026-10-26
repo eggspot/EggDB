@@ -1,0 +1,10 @@
+ EggDB  app.db              24 keys  RW
+ Edit  json · 87 B → 88 B … ln 1 col 89
+ d┌ Replace value ───────────────────┐
+──│ Key    doc:json (8 B)            │──
+ p│ Value  87 B → 88 B, text         │
+  │                                  │
+  │ Enter commit     Esc back to ed… │
+  └── 1–2/5 ─────────────────────────┘
+
+ Enter commit  Esc back to editor

@@ -1,0 +1,24 @@
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
+ Keys                1–20 of 24 │ Add  text · new → 2.0 M  … ln 1 col 2,097,153
+> bin                         40│ big
+  doc:json                    87│───────────────────────────────────────────────
+  empty                        0│ yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+  large                   14.0 K│
+  user:1                      41│
+  user:10                     43│
+  user:11                     43│
+  user:12                     43│
+  user:13                     43│
+  user:14                     43│
+  user:15                     43│
+  user:16                     43│
+  user:17                     43│
+  user:18                     43│
+  user:19                     43│
+  user:2                      41│
+  user:20                     43│
+  user:3                      41│
+  user:4                      41│
+  user:5                      41│
+ Error (TooLarge): a value of 2097152 bytes needs 526 pages, more than the… (m)
+ Enter confirm  Alt-Enter new line  Esc cancel  \xNN a byte  F1 help

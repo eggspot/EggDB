@@ -9,6 +9,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 const ESCAPE_WAIT: Duration = Duration::from_millis(25);
+const SILENCE_THAT_ENDS_A_PASTE: Duration = Duration::from_secs(1);
 
 /// The real terminal behind standard input and output, through the platform layer's
 /// [`RawTerminal`]: raw mode while it lives, input decoded into events, frames drawn as the
@@ -22,6 +23,7 @@ pub struct OsTerminal {
     capabilities: Capabilities,
     size: Size,
     output: Vec<u8>,
+    last_input: Instant,
 }
 
 /// What `--mono` and `--ascii` ask for.
@@ -82,6 +84,7 @@ impl OsTerminal {
                 rows: size.rows,
             },
             output: Vec::new(),
+            last_input: Instant::now(),
         })
     }
 }
@@ -105,13 +108,17 @@ impl Terminal for OsTerminal {
             let left = deadline.map_or(timeout, |deadline| {
                 deadline.saturating_duration_since(Instant::now())
             });
+            let silence_left = SILENCE_THAT_ENDS_A_PASTE.saturating_sub(self.last_input.elapsed());
             let wait = if self.decoder.has_pending() {
                 ESCAPE_WAIT
+            } else if self.decoder.in_paste() {
+                left.min(silence_left)
             } else {
                 left
             };
             match self.raw.read_input(&mut buffer, wait)? {
                 Input::Bytes(count) => {
+                    self.last_input = Instant::now();
                     let events = self.decoder.feed(&buffer[..count.min(buffer.len())]);
                     self.queue.extend(events);
                 }
@@ -129,12 +136,23 @@ impl Terminal for OsTerminal {
                     let events = self.decoder.flush();
                     self.queue.extend(events);
                 }
+                Input::TimedOut
+                    if self.decoder.in_paste()
+                        && self.last_input.elapsed() >= SILENCE_THAT_ENDS_A_PASTE =>
+                {
+                    let events = self.decoder.end_paste();
+                    self.queue.extend(events);
+                }
                 Input::TimedOut => return Ok(None),
             }
             if self.queue.is_empty() && left.is_zero() && !self.decoder.has_pending() {
                 return Ok(None);
             }
         }
+    }
+
+    fn paste_open(&self) -> bool {
+        self.decoder.in_paste()
     }
 
     fn present(&mut self, frame: &Frame) -> io::Result<()> {

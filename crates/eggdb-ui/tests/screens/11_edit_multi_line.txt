@@ -1,0 +1,24 @@
+ EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RW
+ Keys                1–20 of 24 │ Edit  text · 41 B → 41 B  user:1   ln 1 col 1
+  bin                         40│ user:1
+  doc:json                    87│───────────────────────────────────────────────
+  empty                        0│ User 1
+  large                   14.0 K│ user1@example.com
+> user:1                      41│ born 1801-12-10
+  user:10                     43│
+  user:11                     43│
+  user:12                     43│
+  user:13                     43│
+  user:14                     43│
+  user:15                     43│
+  user:16                     43│
+  user:17                     43│
+  user:18                     43│
+  user:19                     43│
+  user:2                      41│
+  user:20                     43│
+  user:3                      41│
+  user:4                      41│
+  user:5                      41│
+
+ Ctrl-S confirm  Ctrl-Z undo  Ctrl-Y redo  Esc cancel  F1 help
