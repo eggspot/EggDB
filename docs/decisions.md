@@ -3375,3 +3375,60 @@ choice the owner would otherwise make:
 
 Issue #44 (commits longer than the recycled segments grow the file) is not part of this item:
 each of its fixes changes the log and recovery and needs its own crash tests and review.
+
+## D90 The `eggdb` command: command first, byte arguments, formats chosen by the terminal, exit codes 0 to 5, terminal detection in the platform layer — Decided by research (build loop, 2026-10-26); completes v0.2.0 item 13, refines D6, D8, D9 and D15
+Item 13 builds the `eggdb` command from Claude Fable's design, `docs/ux/cli.md` (D15), which
+is the record of every choice: command first (`eggdb <command> <file> …`), files created only by
+`create` or `put --create`, byte arguments (text, `0x` hex, `@file`, `@-`, `=` escape), the
+`text|json|hex|raw` formats with `text` on a terminal and `json` in a pipe (`raw` for `get`), the
+`check` and `stats` reports, exit codes 0 done, 1 not found, 2 usage, 3 database error,
+4 damaged, 5 busy, errors as `eggdb: what: why. what to do` with a `try:` line, colour only on a
+terminal with `NO_COLOR` unset and `TERM` not `dumb`, and the names `export`, `import`, `shell`,
+`backup`, `compact` and `ui` reserved. The user guide is `docs/cli.md`.
+
+**Where the code lives.** The command is the `eggdb` binary's own modules (`crates/eggdb/src/cli/`),
+not the library's API: parsing, byte arguments, rendering, reports, output and the commands are
+separate modules with unit tests, and `cli::run` takes the arguments, the three streams and what
+the terminal is, so tests run it in the process as well as through the real binary. The parser
+is hand-written (D1). Whether a stream is a terminal and whether it takes colour is a new
+platform-layer module, `eggdb_platform::terminal` (D8): `std::io::IsTerminal` on every target,
+the `NO_COLOR` and `TERM` rules, and on Windows the console's virtual-terminal mode turned on
+through `GetConsoleMode` and `SetConsoleMode`, our own declarations, with colour only when the
+console accepts it. `eggdb ui` (item 14) extends the same module with raw mode and window size.
+
+**Safety (D9).** No input reaches a panic: arguments are parsed into values or usage errors,
+`print!` is never used, so a closed pipe ends the command with exit 0 instead of a panic, and
+reading `@file` or stdin stops at 1 GiB and a byte. Tests run 20,000 random argument lists
+through the parser, 600 random commands in the process against a real file, a file that is not
+a database and a missing one, and 150 random commands through the real binary, all of which
+must exit with a designed code and never print a panic or a debug dump. The binary's tests also
+cover every command, every exit code and its message, the formats a pipe gets, a 20 MiB value
+through stdin, a busy file in both directions (in its own test binary, so no other test's child
+process holds the file's lock), a closed pipe, a page damaged on disk and a file damaged where
+opening reads it.
+
+**Size (D6).** The release binary on macOS (AArch64) grows from 302,448 to 651,104 bytes. Until
+now the binary only printed its version, so the linker dropped the whole storage engine; a build
+of the same binary that only opens a database, writes, reads, scans, checks and prints its stats
+is 568,176 bytes, so the engine accounts for about 266 KB and the command itself (parser,
+formats, reports, help text) for about 83 KB. Startup for `eggdb stats` is under 10 ms.
+
+Decided by research (a Sonnet research subagent, 2026-10-26), where the design could not be
+built as written or was silent:
+- *Ctrl-C:* keep the operating system's default (shells report 130) rather than install a
+  signal handler per OS: `put` is atomic, `check` cannot stop half-way, and a handler would buy
+  nothing until `eggdb ui` needs signals anyway. Output goes out in blocks of 64 KiB and more,
+  which a pipe does not take atomically, so a killed `scan` can leave a partial last line;
+  scripts that read a stopped scan drop a final line without a newline.
+- *The damaged report's "what was checked" line:* the library reports no progress, and a B+tree
+  check is not a left-to-right prefix, so the line says that every page read before the damage
+  passed and the check stopped there; damage found while opening says so, with no commit. The
+  library's closing advice is dropped from the `damaged:` line, which the `what to do` line
+  replaces.
+- *`--version`:* prints the crate version, so it reads 0.1.0 until the v0.2.0 bump.
+- *Colour on Windows:* turn on the console's virtual-terminal mode and use colour only if that
+  works, rather than no colour on Windows or escape codes an old console prints as text.
+
+The smaller choices the design left open (usage error layout, `hex` and `raw` only for `get`
+and `scan`, where not-found messages go per format, `@file` errors as usage errors) are listed in
+`docs/ux/cli.md` section 13.
