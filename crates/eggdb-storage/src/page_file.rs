@@ -307,7 +307,8 @@ impl<F: File> PageFile<F> {
     /// makes the log durable, writes every committed page still only in the log to its place,
     /// syncs, and then writes the next header, which starts the log at the current position
     /// and keeps the log's earlier segments for reuse; segments a flush longer than the reused
-    /// ones added at the end of the file are cut off it (`docs/format.md`, "Checkpoints"). A crash
+    /// ones added at the end of the file are cut off the page count, and the file keeps their
+    /// space for the next growth (`docs/format.md`, "Checkpoints"). A crash
     /// at any point leaves the file opening at its last durable commit. Under
     /// [`Durability::Off`] nothing is synced.
     ///
@@ -383,10 +384,6 @@ impl<F: File> PageFile<F> {
             let mut copy = plan.superblock;
             copy.generation = self.next_generation()?;
             self.write_header(copy)?;
-        }
-        if plan.cuts_segments_off {
-            self.file.set_size(wanted)?;
-            self.file_bytes = wanted;
         }
         if let Some(log) = self.log.as_mut() {
             log.skip_sequences_to(previous_reservation.saturating_add(1));

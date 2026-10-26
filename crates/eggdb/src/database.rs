@@ -81,7 +81,9 @@ pub struct Stats {
     pub page_count: u64,
     /// Pages in the file that are free for later commits to reuse.
     pub free_pages: u64,
-    /// The file's size as of the last commit: `page_count × page_size`.
+    /// The file's size as of the last commit: `page_count × page_size`. The file on disk can be
+    /// longer by the log space of its longest transaction, which later ones reuse and the next
+    /// open for writing gives back.
     pub file_bytes: u64,
     /// The stamp of the last commit, or [`CommitStamp::NONE`] when nothing was ever committed.
     pub last_commit: CommitStamp,

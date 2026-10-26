@@ -420,7 +420,7 @@ fn a_checkpoint_after_a_flush_longer_than_the_recycled_segments_cuts_its_new_seg
         after.page_count
     );
     assert_eq!(after.free_page_count, before.free_page_count);
-    assert_eq!(raw(&fs).size().unwrap(), after.page_count * PAGE);
+    assert_eq!(raw(&fs).size().unwrap(), before.page_count * PAGE);
     assert!(after.log_head_page + SEGMENT_PAGES <= after.page_count);
     assert_eq!(
         after
@@ -435,6 +435,9 @@ fn a_checkpoint_after_a_flush_longer_than_the_recycled_segments_cuts_its_new_seg
     let cache = open(&fs, Access::ReadOnly).unwrap();
     assert_eq!(cache.superblock().page_count, after.page_count);
     assert_model(&cache, &model, "after cutting segments off");
+    drop(cache);
+    drop(open(&fs, Access::ReadWrite).unwrap());
+    assert_eq!(raw(&fs).size().unwrap(), after.page_count * PAGE);
 }
 
 #[test]
@@ -448,17 +451,17 @@ fn commits_longer_than_the_recycled_segments_keep_the_file_from_growing() {
         for round in 0..40 {
             rewrite_every_page(&mut cache, &mut model, round + 1);
             let superblock = cache.superblock();
-            sizes.push((superblock.page_count, superblock.free_page_count));
+            let file_bytes = raw(&fs).size().unwrap();
+            sizes.push((
+                superblock.page_count,
+                superblock.free_page_count,
+                file_bytes,
+            ));
         }
         assert!(cache.log_stats().checkpoints >= 39, "{durability:?}");
         assert!(
             sizes[2..].iter().all(|&size| size == sizes[2]),
             "{durability:?}: {sizes:?}"
-        );
-        assert_eq!(
-            raw(&fs).size().unwrap(),
-            sizes[39].0 * PAGE,
-            "{durability:?}"
         );
         drop(cache);
         let cache = open(&fs, Access::ReadOnly).unwrap();
