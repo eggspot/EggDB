@@ -1,0 +1,10 @@
+ EggDB  app.db              24 keys  RO
+ Keys                         1–6 of 24
+> bin                                 40
+  doc:json                            87
+  empty                                0
+  large                           14.0 K
+  user:1                              41
+  user:10                             43
+
+ ↑↓ move  Enter open  ? help  q quit

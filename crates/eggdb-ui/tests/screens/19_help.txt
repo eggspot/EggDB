@@ -1,0 +1,24 @@
+ EggDB ui help                                                          1–13/13
+
+ Move        ↑↓ or j/k   PgUp/PgDn   Home/End or g/G   ←→ scroll
+ Panes       Tab or Shift-Tab switch   Enter open the value   Esc back to keys
+ Find        /  filter keys by prefix (bytes; \xNN for a byte)   Esc restores
+ View        v  text > json > hex > auto      w  wrap long lines (text)
+ Re-read     r  re-read the list, the value and the stats
+ Quit        q or Ctrl-C
+
+ This version browses read-only; eggdb put and eggdb del change keys.
+
+ Terminal    at least 40x10; two panes from 80 columns
+             NO_COLOR, --mono and --ascii change colours and box characters
+ Database    app.db   page size 4.0 KiB   keys up to 512 B   values up to 1.0 G…
+ Version     EggDB 0.1.0   docs github.com/eggspot/EggDB/blob/main/docs/ux/ui.md
+
+
+
+
+
+
+
+
+
