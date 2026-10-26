@@ -351,6 +351,13 @@ page to its end, in any order. A cell stores its key without the page's prefix:
   bounds, and a page reached twice (a cycle or a shared child) fails that check.
 - **An inner page may hold no separators**, only `right_child`: the fallback of an inner split
   can leave one, and the format allows it.
+- **Deletes and merges (D83).** A page may hold any number of entries, none included: a
+  delete removes the entry's slot and counts its cell as `garbage`, and a page left under a
+  quarter full is merged with the page beside it under the same parent only when the two fit
+  in one page with the prefix of their joined fence keys, which can be shorter than either
+  page's. So an empty leaf can stay next to a full one. The root is the exception: an inner
+  root always holds at least one separator, because a root left with a single child takes
+  over that child's entries, and `eggdb check` refuses an inner root without one.
 
 ## Hybrid-clock stamps (item 9)
 - A commit stamp is a `u64`: 52 bits of microseconds since **2026-01-01T00:00:00Z** (Unix time
