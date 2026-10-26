@@ -33,8 +33,14 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - name: Check the shipped crates are only our own
         run: |
-          foreign=$(cargo tree -p eggdb -e normal,build --prefix none --format '{p}' \
-            | awk '{print $1}' | sort -u | grep -v -E '^eggdb(-[a-z]+)?$' || true)
+          set -o pipefail
+          shipped=$(cargo tree -p eggdb -e normal,build --target all --prefix none --format '{p}' \
+            | awk '{print $1}' | sort -u)
+          if [ -z "$shipped" ]; then
+            echo "::error::cargo tree listed no crates for eggdb"
+            exit 1
+          fi
+          foreign=$(echo "$shipped" | grep -v -E '^eggdb(-[a-z]+)?$' || true)
           if [ -n "$foreign" ]; then
             echo "::error::third-party crates in what ships (D1): $foreign"
             exit 1
