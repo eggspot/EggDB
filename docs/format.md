@@ -211,7 +211,7 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
 
 | Offset | Size | Field |
 |-------:|-----:|-------|
-| 0 | 4 | CRC-32C of bytes 4 to the end of the payload, seeded with `crc32c_append(crc32c(file_id), sequence)`, the segment's sequence as 8 bytes |
+| 0 | 4 | CRC-32C of bytes 4 to the end of the payload, seeded with `crc32c_append(crc32c_append(crc32c(file_id), sequence), lsn)`: the segment's sequence and then the record's own LSN, 8 bytes each |
 | 4 | 4 | payload length |
 | 8 | 1 | type |
 | 9 | 1 | flags: 0. Bit 0 is reserved for a consensus term and index as varints after the frame (M15), so they take no bytes when standalone. A reader refuses any other value. |
@@ -225,9 +225,16 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
 | 5 | link | the next segment's first page (8) and the page count once it exists (8) |
 
 - A record never spans segments, and never starts in the last 9 bytes of a 4 KiB block; those
-  bytes are zero and skipped.
+  bytes are zero and skipped. A pad never crosses the end of its block.
+- Mixing the LSN into the seed means a record copied or misdirected to another position, even
+  within its segment, fails its check.
+- A reader checks the type, the flags and the payload length the type requires (batch 8, page
+  image 8 plus a page, commit 72, link 16, pad at most the rest of its block) before computing
+  the checksum, so no crafted length makes it checksum more than one record's bytes.
 - **Flushes:** each commit is one flush. It starts at a block boundary with a batch record, and
   ends with a pad to the end of its block, so a block that has been synced is never rewritten.
+  The one exception is the first flush after opening a log whose last commit was not followed
+  by its pad (see "Resuming"): that flush starts with a link record where the commit ended.
   The images of a transaction come before its commit record, and images after the last commit
   record belong to no commit.
 - **Growing:** when a record would leave less room than a link record before the segment's
@@ -241,14 +248,23 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
   a later block boundary of the same segment carries a `durable_lsn` above the bad record's
   LSN. Then the bad record had been synced, and the open fails with "the log is damaged" and
   the segment and offset (Alagappan et al., FAST'18). A segment named by a link whose header
-  is wrong ends the log the same way. A page image whose own page checksum fails, a link that
-  overlaps an earlier segment, or a commit naming pages outside the file are damage too.
+  is wrong ends the log the same way. These are damage too, and refuse the open the same way:
+  - a page image whose own page checksum fails, or that names a page outside the file or a
+    page of the log;
+  - a link that overlaps an earlier segment, or whose page count isn't exactly the end of the
+    segment it names;
+  - a commit record whose fields the superblock would refuse, whose page count is below the
+    header's, or whose page count is more than the file's real length in pages plus the number
+    of committed page images. Every page a commit adds is logged as an image, so a valid log
+    can't claim more; this stops a crafted record from growing the file.
+- **Features:** the feature flags of the last commit record are checked against the access
+  asked for before anything is written, so a release never changes a file it would refuse.
 - **Resuming:** after replaying, appends continue at the block after the last commit. If any
   byte after that point in its segment is not zero (records of a flush that never completed),
   the next flush starts with a link to a fresh segment instead, so those records can never be
-  read as part of the log. Opening for writing first cuts the file to the replayed page count
-  and syncs, which also makes the replayed records durable before any page is written in
-  place from them.
+  read as part of the log. Opening for writing first sets the file to the replayed page count
+  and always syncs, which also makes the replayed records durable before any page is written
+  in place from them, and before a later batch record claims they are durable.
 - **Truncation:** checkpoints (item 7) truncate the head by moving `log_head_page` and the tail
   by starting a segment with a higher sequence number.
 - **Failed syncs:** a failed sync is never retried. The database stops accepting writes and
@@ -286,7 +302,7 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
 | Mode | A commit returns after | A power loss can |
 |------|------------------------|------------------|
 | `Full` (default) | its log records are synced; then its pages are written in place | lose nothing that was committed |
-| `Normal` | its log records are written. Its pages are served from the log and written in place only after the next sync: an explicit `sync`, a change of mode, or once 1 MiB of log or 1024 pages wait | lose the latest commits, never corrupt |
+| `Normal` | its log records are written. Its pages are served from the log and written in place only after the next sync: an explicit `sync`, a change of mode, or a commit that would leave 1 MiB of log or more than 1024 pages waiting, which syncs before it returns. A commit that grows the file by more pages than it logs images (pages allocated and never written) syncs the new size first. | lose the latest commits, never corrupt |
 | `Off` | its records and pages are written; nothing is synced | corrupt the file (for bulk loads and tests) |
 
 **Group commit.** A sync covers every commit written before it, and a sync of a log already

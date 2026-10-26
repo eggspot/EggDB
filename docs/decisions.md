@@ -2590,9 +2590,17 @@ the log is durable are the pages written in place, without a sync.
 
 **Opening.** Replay runs from `checkpoint_lsn`: committed images are written in place, the last
 commit record's fields replace the header's, and the free list is checked after that. A
-read-only open serves those pages from the log instead. Opening for writing first cuts the file
-to the replayed page count and syncs, so no page is written in place from log bytes that are
-only in the operating system's cache, and stale records past the end are gone.
+read-only open serves those pages from the log instead. Opening for writing first sets the
+file to the replayed page count and always syncs, so no page is written in place from log
+bytes that are only in the operating system's cache, no later batch record claims durability
+for them, and stale records past the end are gone. The replayed feature flags are checked
+before anything is written.
+
+**Records are bound to their position.** A record's checksum seed mixes in the file's
+identity, the segment's sequence and the record's own LSN, so a misdirected or duplicated
+block write can't replay an old image after a newer one. A reader checks a record's type and
+the length that type requires before checksumming it, and the corruption check looks only at
+blocks that start with a batch record, so scanning costs at most one pass over the log.
 
 **Decided by research** (a research subagent, recorded in PR 35):
 1. *Torn tail or corruption.* Each flush starts with a batch record carrying the LSN known
@@ -2621,6 +2629,17 @@ only in the operating system's cache, and stale records past the end are gone.
    least one page plus 8 KiB once the file has a log. The default stays 64 KiB of pages, but at
    least two pages, so 64 KiB pages get 128 KiB segments. A smaller value in a file without a
    log is replaced when the log is created.
+6. *A replayed page count the file can't prove* (raised by the security review of PR 35, where
+   a crafted 72 KiB file opened for writing grew to 256 TiB). A commit record's page count is
+   accepted only up to the file's real length in pages plus the number of committed page
+   images, and never below the header's; past that the open fails with "the log is damaged".
+   Every page a commit adds is logged as an image, and each image lies inside the real file, so
+   a valid log can claim at most that many pages past the end, and a file opened at most
+   doubles. Refusing beats clamping, because a clamp could leave the catalog root or the free
+   list pointing past the end. A link record's page count must be exactly the end of the
+   segment it names. The one legitimate commit that adds pages without images, pages allocated
+   and never written, syncs its new size before writing its records under `Normal` and `Off`;
+   under `Full` the log's sync covers it.
 
 **Durable syncs on Apple's systems.** The pinned standard library (1.99.1) implements both
 `File::sync_data` and `File::sync_all` with `fcntl(F_FULLFSYNC)` on Apple targets, as its
