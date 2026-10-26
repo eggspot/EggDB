@@ -221,12 +221,10 @@ impl<F: File> PageCache<F> {
             .read(frame)
             .ok_or(StorageError::PageBorrowed { page: page_id })?;
         Ok(PageRef {
-            pinned: Pinned::Frame {
-                bytes,
-                header: &self.headers[frame],
-                state: &self.states[frame],
-            },
+            bytes,
             page_id,
+            header: &self.headers[frame],
+            state: &self.states[frame],
         })
     }
 
@@ -395,7 +393,11 @@ impl<F: File> PageCache<F> {
         }
     }
 
-    pub(crate) fn read_at(&self, page_id: u64, version: u64) -> Result<PageRef<'_>, StorageError> {
+    pub(crate) fn read_at(
+        &self,
+        page_id: u64,
+        version: u64,
+    ) -> Result<SnapshotPage<'_>, StorageError> {
         if self.file.borrow().has_failed() {
             return Err(StorageError::NeedsReopen);
         }
@@ -405,14 +407,13 @@ impl<F: File> PageCache<F> {
             .map_err(|_| StorageError::PageBorrowed { page: page_id })?;
         images.check_live(version)?;
         match Ref::filter_map(images, |images| images.image_for(page_id, version)) {
-            Ok(image) => Ok(PageRef {
-                pinned: Pinned::Image(image),
-                page_id,
-            }),
-            Err(_) => self.read(page_id),
+            Ok(image) => Ok(SnapshotPage::Image { page_id, image }),
+            Err(_) => self.read(page_id).map(SnapshotPage::Current),
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn keep_before_image(
         &self,
         page_id: u64,
@@ -660,11 +661,27 @@ impl<F: File> fmt::Debug for PageCache<F> {
     }
 }
 
+pub(crate) trait TreePage: Deref<Target = [u8]> {
+    fn page_id(&self) -> u64;
+    fn header(&self) -> PageHeader;
+    fn contents_checked(&self) -> bool;
+    fn set_contents_checked(&self);
+}
+
 pub(crate) trait PageSource {
-    fn page(&self, page_id: u64) -> Result<PageRef<'_>, StorageError>;
+    type Page<'a>: TreePage
+    where
+        Self: 'a;
+
+    fn page(&self, page_id: u64) -> Result<Self::Page<'_>, StorageError>;
 }
 
 impl<F: File> PageSource for PageCache<F> {
+    type Page<'a>
+        = PageRef<'a>
+    where
+        Self: 'a;
+
     #[inline(always)]
     fn page(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
         self.read(page_id)
@@ -677,8 +694,84 @@ pub(crate) struct Snapshot<'a, F: File> {
 }
 
 impl<F: File> PageSource for Snapshot<'_, F> {
-    fn page(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
+    type Page<'a>
+        = SnapshotPage<'a>
+    where
+        Self: 'a;
+
+    fn page(&self, page_id: u64) -> Result<SnapshotPage<'_>, StorageError> {
         self.cache.read_at(page_id, self.version)
+    }
+}
+
+pub(crate) enum SnapshotPage<'a> {
+    Current(PageRef<'a>),
+    Image {
+        page_id: u64,
+        image: Ref<'a, PageImage>,
+    },
+}
+
+impl Deref for SnapshotPage<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Current(page) => page,
+            Self::Image { image, .. } => &image.bytes[PAGE_HEADER_SIZE..],
+        }
+    }
+}
+
+impl TreePage for SnapshotPage<'_> {
+    fn page_id(&self) -> u64 {
+        match self {
+            Self::Current(page) => page.page_id,
+            Self::Image { page_id, .. } => *page_id,
+        }
+    }
+
+    fn header(&self) -> PageHeader {
+        match self {
+            Self::Current(page) => page.header(),
+            Self::Image { image, .. } => image.header,
+        }
+    }
+
+    fn contents_checked(&self) -> bool {
+        match self {
+            Self::Current(page) => page.contents_checked(),
+            Self::Image { image, .. } => image.checked.get(),
+        }
+    }
+
+    fn set_contents_checked(&self) {
+        match self {
+            Self::Current(page) => page.set_contents_checked(),
+            Self::Image { image, .. } => image.checked.set(true),
+        }
+    }
+}
+
+impl TreePage for PageRef<'_> {
+    #[inline(always)]
+    fn page_id(&self) -> u64 {
+        self.page_id
+    }
+
+    #[inline(always)]
+    fn header(&self) -> PageHeader {
+        self.header.get()
+    }
+
+    #[inline(always)]
+    fn contents_checked(&self) -> bool {
+        self.state.get() & CONTENTS_CHECKED != 0
+    }
+
+    #[inline(always)]
+    fn set_contents_checked(&self) {
+        self.state.set(self.state.get() | CONTENTS_CHECKED);
     }
 }
 
@@ -693,18 +786,10 @@ fn check_header(header: &PageHeader) -> Result<(), StorageError> {
 /// dropped. It dereferences to the page's contents after its header.
 #[derive(Debug)]
 pub struct PageRef<'a> {
-    pinned: Pinned<'a>,
+    bytes: FrameRef<'a>,
     page_id: u64,
-}
-
-#[derive(Debug)]
-enum Pinned<'a> {
-    Frame {
-        bytes: FrameRef<'a>,
-        header: &'a Cell<PageHeader>,
-        state: &'a Cell<u8>,
-    },
-    Image(Ref<'a, PageImage>),
+    header: &'a Cell<PageHeader>,
+    state: &'a Cell<u8>,
 }
 
 impl PageRef<'_> {
@@ -715,10 +800,7 @@ impl PageRef<'_> {
 
     /// The page's header.
     pub fn header(&self) -> PageHeader {
-        match &self.pinned {
-            Pinned::Frame { header, .. } => header.get(),
-            Pinned::Image(image) => image.header,
-        }
+        self.header.get()
     }
 
     /// Whether the structure that owns the page has checked its contents since the cache last
@@ -726,29 +808,19 @@ impl PageRef<'_> {
     /// [`PageCache::write`] clears it too, so a structure checks each page once per read from
     /// the file, or after a change it did not make itself, instead of on every use (D9).
     pub fn contents_checked(&self) -> bool {
-        match &self.pinned {
-            Pinned::Frame { state, .. } => state.get() & CONTENTS_CHECKED != 0,
-            Pinned::Image(image) => image.checked.get(),
-        }
+        self.state.get() & CONTENTS_CHECKED != 0
     }
 
     pub(crate) fn set_contents_checked(&self) {
-        match &self.pinned {
-            Pinned::Frame { state, .. } => state.set(state.get() | CONTENTS_CHECKED),
-            Pinned::Image(image) => image.checked.set(true),
-        }
+        self.state.set(self.state.get() | CONTENTS_CHECKED);
     }
 }
 
 impl Deref for PageRef<'_> {
     type Target = [u8];
 
-    #[inline(always)]
     fn deref(&self) -> &[u8] {
-        match &self.pinned {
-            Pinned::Frame { bytes, .. } => &bytes[PAGE_HEADER_SIZE..],
-            Pinned::Image(image) => &image.bytes[PAGE_HEADER_SIZE..],
-        }
+        &self.bytes[PAGE_HEADER_SIZE..]
     }
 }
 

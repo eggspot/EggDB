@@ -1,6 +1,6 @@
 use crate::btree::{expect_level, shape_of_ref};
 use crate::error::StorageError;
-use crate::page_cache::{PageCache, PageRef, PageSource};
+use crate::page_cache::{PageCache, PageSource};
 use crate::tree_page::Shape;
 use eggdb_platform::File;
 use std::ops::Bound;
@@ -167,10 +167,10 @@ impl Cursor {
         Ok(())
     }
 
-    fn find_leaf<'c>(&self, pages: &'c impl PageSource) -> Result<PageRef<'c>, StorageError> {
+    fn find_leaf<'c, P: PageSource>(&self, pages: &'c P) -> Result<P::Page<'c>, StorageError> {
         let mut page_id = self.root;
         let mut level = None;
-        let mut parent: Option<(PageRef<'c>, Shape, usize)> = None;
+        let mut parent: Option<(P::Page<'c>, Shape, usize)> = None;
         loop {
             let page = pages.page(page_id)?;
             let shape = shape_of_ref(&page)?;
@@ -317,9 +317,13 @@ fn expect_bounds(
     Ok(())
 }
 
-fn same_key(a: Fence<'_>, b: Fence<'_>) -> bool {
-    a.0.len() + a.1.len() == b.0.len() + b.1.len()
-        && a.0.iter().chain(a.1).eq(b.0.iter().chain(b.1))
+fn same_key((a_head, a_tail): Fence<'_>, (b_head, b_tail): Fence<'_>) -> bool {
+    a_head.len() + a_tail.len() == b_head.len() + b_tail.len()
+        && a_head
+            .iter()
+            .chain(a_tail)
+            .zip(b_head.iter().chain(b_tail))
+            .all(|(a, b)| a == b)
 }
 
 fn above_end(end: &Bound<Vec<u8>>, key: &[u8]) -> bool {

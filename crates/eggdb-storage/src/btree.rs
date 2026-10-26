@@ -1,7 +1,7 @@
 use crate::cursor::{Cursor, ScanOrder};
 use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PageSize};
-use crate::page_cache::{PageCache, PageMut, PageRef, PageSource};
+use crate::page_cache::{PageCache, PageMut, PageSource, TreePage};
 use crate::tree_page::{self, MAX_HEIGHT, Node, Shape};
 use eggdb_platform::File;
 use std::ops::Bound;
@@ -468,7 +468,7 @@ fn read_node<F: File>(cache: &PageCache<F>, page_id: u64, level: u8) -> Result<N
     Ok(Node::decode(&shape, &page)?)
 }
 
-pub(crate) fn shape_of_ref(page: &PageRef<'_>) -> Result<Shape, StorageError> {
+pub(crate) fn shape_of_ref(page: &impl TreePage) -> Result<Shape, StorageError> {
     let shape = Shape::parse(page.page_id(), page.header(), page)?;
     if !page.contents_checked() {
         shape.validate(page)?;
