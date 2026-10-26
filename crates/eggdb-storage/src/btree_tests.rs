@@ -156,6 +156,10 @@ fn keys_that_are_prefixes_of_each_other_and_the_empty_key_are_kept_apart() {
     let fs = SimFileSystem::new();
     let mut cache = create(&fs, PageSize::DEFAULT, 256);
     let tree = new_tree(&mut cache);
+    assert_eq!(tree.get(&cache, b"").unwrap(), None);
+    let empty = tree.check(&cache).unwrap();
+    assert_eq!((empty.height, empty.leaf_pages, empty.entries), (1, 1, 0));
+    assert!(BTree::open(&cache, 0).is_err());
     let mut model = Model::new();
     let max_key = BTree::max_key_bytes(PageSize::DEFAULT);
     for len in (0..=max_key).rev() {
