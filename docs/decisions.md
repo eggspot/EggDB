@@ -3547,6 +3547,6 @@ for byte unchanged, a writer held on another thread is reported and waited for, 
 check reports a damaged file as `Corrupt`, and 200 random adds and deletes through the UI agree
 with a scan of the reopened file.
 
-**Size (D6).** The release binary grows from 750,704 to 850,384 bytes (+99,680, +13.3%) on
-aarch64 macOS: the editors, modals and check screen the UI did not have. The library is
-unchanged.
+**Size (D6).** The release binary grows from 750,704 to 866,912 bytes (+116,208, +15.5%) on
+aarch64 macOS: the editors, modals, check screen and error texts the UI did not have. The
+library is unchanged.
