@@ -40,15 +40,17 @@ debug build. Setting `EGGDB_CRASH_SWEEP=1` gives every operation every ending; t
 last exhaustive run are in D85.
 
 ## Each layer
-- **Page file:** creating, growing and freeing pages, both header slots, the file lock, and a crash
-  at every operation of commits before and after the log existed (`page_file.rs`).
-- **Log:** records, links and segments, torn tails against damage, group commit, the durability
-  modes, sequence reservations, and crafted logs that must be refused without a panic (`log.rs`).
+- **Page file:** creating, growing and freeing pages, both header slots and a torn header update,
+  the file lock, a failed sync that stops every later change, and a crash at every operation of a
+  commit (`page_file.rs`).
+- **Log:** records, links and segments, torn tails against damage, group commit and a failed group
+  sync, the durability modes, and a crash at every operation of creating the log, of commits and of
+  replaying it (`log.rs`).
 - **Checkpoints and recovery:** a crash at every operation of a checkpoint, of a checkpoint that
   frees segments, of commits that move to a new or recycled segment, and of recovering a wrapped
   log; damage to the newest header slot; mutated logs (`checkpoint_tests.rs`).
-- **Page cache:** eviction, pinning and a crash at every operation of its commits
-  (`page_cache.rs`).
+- **Page cache:** eviction, pinning, refusing every read and change after a failed commit, and a
+  crash at every operation of a commit (`page_cache.rs`).
 - **B+tree:** splits, deletes, merges, cursors and `check` against a model, and crafted pages that
   must fail `check` (`btree_tests.rs`, `btree_delete_tests.rs`).
 

@@ -223,13 +223,13 @@ fn run(
     for step in &workload.steps {
         let result = match step {
             Step::Commit(changes) => {
-                outcome.attempted += 1;
-                let stamp = first_stamp + outcome.attempted as u64;
                 let applied = apply(tree, cache, changes);
                 if let Err(error) = applied {
                     outcome.failed = Some(error);
                     break;
                 }
+                outcome.attempted += 1;
+                let stamp = first_stamp + outcome.attempted as u64;
                 let committed = cache.commit(|superblock| superblock.clock_high_water = stamp);
                 if committed.is_ok() {
                     outcome.acknowledged += 1;
