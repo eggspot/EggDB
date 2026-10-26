@@ -5,7 +5,7 @@ on:
     tags: ['v*.*.*']
   pull_request:
     branches: [main]
-    paths: ['.github/workflows/release.yml', 'docs/releases/**']
+    paths: ['.github/workflows/release.yml', 'docs/releases/**', 'scripts/smoke-test.sh', 'crates/eggdb/tests/data/**']
 
 concurrency:
   group: release-${{ github.ref }}
@@ -85,12 +85,15 @@ jobs:
           fi
       - name: Build
         run: cargo build --release --locked -p eggdb --target "$TARGET"
-      - name: Run the built binary
+      - name: Check the built binary names the version
         if: matrix.runs_here
         run: |
-          output=$("target/$TARGET/release/eggdb$EXE")
+          output=$("target/$TARGET/release/eggdb$EXE" version)
           echo "$output"
-          [ "$output" = "EggDB ${VERSION#v}" ]
+          [ "$output" = "eggdb ${VERSION#v}" ]
+      - name: Smoke test the built binary
+        if: matrix.runs_here
+        run: scripts/smoke-test.sh "target/$TARGET/release/eggdb$EXE"
       - name: Package
         run: |
           mkdir -p "dist/$PACKAGE"
