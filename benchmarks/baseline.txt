@@ -60,7 +60,7 @@ linux large_value.get ratio_to_copying_the_value 1.902
 linux large_value.put ratio_to_writing_the_value_twice 9.343
 linux log.recovery ratio_to_crc32c_of_the_replayed_log 2.142
 linux page_cache.hit ratio_to_reference 0.37
-linux sqlite_compare.batch_put ratio_to_sqlite 1.085
+linux sqlite_compare.batch_put ratio_to_sqlite 0.606
 linux sqlite_compare.get ratio_to_sqlite 0.691
 linux sqlite_compare.scan ratio_to_sqlite 0.390
 linux transaction.read ratio_to_btree_get 1.004
@@ -82,7 +82,7 @@ macos large_value.get ratio_to_copying_the_value 2.367
 macos large_value.put ratio_to_writing_the_value_twice 9.798
 macos log.recovery ratio_to_crc32c_of_the_replayed_log 1.827
 macos page_cache.hit ratio_to_reference 0.375
-macos sqlite_compare.batch_put ratio_to_sqlite 1.350
+macos sqlite_compare.batch_put ratio_to_sqlite 0.693
 macos sqlite_compare.get ratio_to_sqlite 0.752
 macos sqlite_compare.scan ratio_to_sqlite 0.584
 macos transaction.read ratio_to_btree_get 1.0

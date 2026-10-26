@@ -264,8 +264,8 @@ fn main() -> eggdb::Result<()> {
   - Replacing or deleting a large value frees its pages at the commit, and later values reuse
     them, so rewriting large values keeps the file's size steady. A single transaction whose
     log is longer than the seven log segments the file keeps for reuse (about 448 KiB of
-    changed pages with the default segments) grows the file while it commits, and the
-    checkpoint right after it shrinks the file back (D97).
+    changed pages with the default segments) grows the file by its log once; later ones reuse
+    that space, and the next open for writing gives it back (D97).
   - A read transaction that stays open while the writer replaces large values keeps their old
     pages in the snapshot memory; a value larger than `snapshot_memory_bytes` expires older
     snapshots with `SnapshotTooOld`.

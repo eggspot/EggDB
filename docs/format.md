@@ -358,9 +358,11 @@ this order:
    `log_sequence_reserved` as "Segment sequences" says. Sync. When step 2 gave segments to the
    free list or cut them off, write the same superblock again with `generation` raised by one,
    to the other slot, and sync, so no header slot names a log that runs through pages now free
-   or gone.
-5. When step 2 cut segments off, shorten the file to `page_count` pages. A crash before that
-   leaves a longer file, which opens as it is and which the next open for writing shortens.
+   or cut off.
+   A checkpoint that cut segments off leaves the file's length as it is: the pages after
+   `page_count` hold nothing the header names, the next growth reuses their space, and the
+   next open for writing shortens the file to `page_count` pages (a file longer than its
+   `page_count` always opens).
 
 The checkpoint position is where the next flush starts. It is usually at a block boundary, but
 right after a recovery that found the records of a cut-off flush it is where the last commit
@@ -373,8 +375,9 @@ synced. A commit checkpoints automatically after it once the log since the last 
 reaches a configured size (1 MiB by default) or goes through more segments than
 `recycled_segments` holds, or when a flush as long as the commit's own would no longer fit in
 the rest of the current segment and the unused recycled ones. So the log keeps reusing its
-segments instead of growing the file, and a commit whose flush is longer than them grows the
-file only until the checkpoint after it cuts its new segments off again (issue #44, D97). Under
+segments instead of growing the file, and a commit whose flush is longer than them takes new
+segments in the space the checkpoint after the previous such commit cut off, so the file stops
+growing (issue #44, D97). Under
 durability `Off` the checkpoint writes the same things without syncing.
 
 ## Recovery (item 7)

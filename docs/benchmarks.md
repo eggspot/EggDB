@@ -84,15 +84,16 @@ every target, the static musl builds included (D75).
 
 ## Current numbers
 
-Measured on 2026-10-27. macOS is an Apple-silicon Mac (aarch64); Linux is the median of five runs
-of GitHub's `ubuntu-latest` x86-64 runners, whose hardware varies between runs.
+Measured on 2026-10-27, the batched puts again after D97 the same day. macOS is an
+Apple-silicon Mac (aarch64), the median of five runs for the batched puts; Linux is the median
+of five runs of GitHub's `ubuntu-latest` x86-64 runners, whose hardware varies between runs.
 
 | | macOS ratio | macOS EggDB | macOS SQLite | Linux ratio |
 |-|-------------|-------------|--------------|-------------|
 | get | 0.74 | 279 ns | 375 ns | 0.69 |
 | scan, per entry | 0.59 | 20.9 ns | 35.8 ns | 0.39 |
-| batch put, `Off` | 1.35 | 3.07 µs | 2.28 µs | 1.09 |
-| batch put, `Normal` | 1.18 | 25.0 µs | 21.0 µs | 1.09 |
+| batch put, `Off` | 0.69 | 1.58 µs | 2.28 µs | 0.61 |
+| batch put, `Normal` | 1.13 | 24.0 µs | 21.3 µs | 1.07 |
 | durable commit | about 1.0 | 4.2 ms | 4.1 ms | 0.92 |
 
 | | macOS | Linux |
@@ -103,13 +104,16 @@ of GitHub's `ubuntu-latest` x86-64 runners, whose hardware varies between runs.
 | Peak memory, `--version` | 1,654,784 bytes | 2,484,224 bytes |
 | Peak memory, `get` | 2,310,144 bytes | 5,103,616 bytes |
 
-EggDB is faster than SQLite on point gets and scans on both systems. **SQLite is faster on
-batched random overwrites**: EggDB takes about 1.35 times its time on this Mac without syncs and
-1.18 times in `Normal`, and about 1.09 times in both modes on Linux. Both log whole pages, so the
-gap is in EggDB's own write path and is avoidable. The 50% band would let it grow to about 1.63
-on Linux and 2.03 on this Mac before CI fails, so closing it, or showing by research that what
-remains is unavoidable (D7), is required before v0.2.0 ships: issue #52. A durable commit on either
-engine is one disk flush (`F_FULLFSYNC` on the Mac), which takes nearly all of its time.
+EggDB is faster than SQLite on point gets, scans and batched random overwrites without syncs on
+both systems. The overwrites used to take EggDB about 1.35 times SQLite's time on this Mac and
+1.09 times on Linux: each commit's log was longer than the log segments EggDB keeps for reuse, so
+every commit grew the file and its free list. A long commit's log now ends in a reused segment
+and the checkpoint after it cuts the new ones off the file again (D97, issues #52 and #44). In
+`Normal`, SQLite stays ahead by about 1.1 times because EggDB syncs four times per commit there
+and SQLite twice; the two extra syncs make EggDB's header durable before log segments are reused
+and keep its second header slot a copy, which D97 records as the price of correctness (D7). A
+durable commit on either engine is one disk flush (`F_FULLFSYNC` on the Mac), which takes nearly
+all of its time.
 
 The binary is unchanged by this measurement; its growth since v0.1.0 (302,448 bytes on macOS,
 when it only printed its version) is the storage engine, the command-line tool, `eggdb ui` and
