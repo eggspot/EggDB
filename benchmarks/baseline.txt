@@ -17,9 +17,9 @@ any page_cache.miss allocations_per_op 0
 any page_cache.miss evictions_per_op 1
 any page_cache.miss file_operations_per_op 1
 any page_cache.miss misses_per_op 1
-linux btree.get ratio_to_std_btreemap 1.540
-linux btree.put ratio_to_std_btreemap 2.287
-linux page_cache.hit ratio_to_reference 0.303
+linux btree.get ratio_to_std_btreemap 1.85
+linux btree.put ratio_to_std_btreemap 2.574
+linux page_cache.hit ratio_to_reference 0.37
 macos btree.get ratio_to_std_btreemap 2.214
 macos btree.put ratio_to_std_btreemap 2.456
 macos page_cache.hit ratio_to_reference 0.375
