@@ -7,34 +7,49 @@ use std::ffi::OsStr;
 use std::io::IsTerminal;
 use std::time::Duration;
 
-#[cfg(all(
-    unix,
-    any(
-        target_os = "linux",
-        target_os = "android",
-        target_vendor = "apple",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly",
-        target_os = "solaris",
-        target_os = "illumos"
-    )
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "loongarch64",
+            target_arch = "s390x"
+        )
+    ),
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
 ))]
 use crate::os_terminal_unix as os;
 #[cfg(windows)]
 use crate::os_terminal_windows as os;
 #[cfg(not(any(
     windows,
-    target_os = "linux",
-    target_os = "android",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "loongarch64",
+            target_arch = "s390x"
+        )
+    ),
     target_vendor = "apple",
     target_os = "freebsd",
     target_os = "netbsd",
     target_os = "openbsd",
-    target_os = "dragonfly",
-    target_os = "solaris",
-    target_os = "illumos"
+    target_os = "dragonfly"
 )))]
 use unsupported as os;
 
@@ -216,15 +231,24 @@ pub fn is_interactive() -> bool {
 
 #[cfg(not(any(
     windows,
-    target_os = "linux",
-    target_os = "android",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "loongarch64",
+            target_arch = "s390x"
+        )
+    ),
     target_vendor = "apple",
     target_os = "freebsd",
     target_os = "netbsd",
     target_os = "openbsd",
-    target_os = "dragonfly",
-    target_os = "solaris",
-    target_os = "illumos"
+    target_os = "dragonfly"
 )))]
 mod unsupported {
     use super::{Input, TerminalSize};

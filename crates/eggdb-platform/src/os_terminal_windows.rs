@@ -26,6 +26,7 @@ const CTRL_CLOSE_EVENT: u32 = 2;
 const CTRL_LOGOFF_EVENT: u32 = 5;
 const CTRL_SHUTDOWN_EVENT: u32 = 6;
 const RECORDS_PER_READ: usize = 32;
+const LARGEST_SIDE: i32 = 1000;
 const LONGEST_WAIT: Duration = Duration::from_millis(100);
 
 #[repr(C)]
@@ -98,6 +99,7 @@ unsafe extern "system" {
     fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
 }
 
+static CLAIMED: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static SAVED_INPUT_MODE: AtomicU32 = AtomicU32::new(0);
 static SAVED_OUTPUT_MODE: AtomicU32 = AtomicU32::new(0);
@@ -147,7 +149,10 @@ impl RawMode {
                 "standard input and output are not both consoles",
             ));
         };
-        if ACTIVE.load(Ordering::Acquire) {
+        if CLAIMED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "the console is already in raw mode",
@@ -157,6 +162,7 @@ impl RawMode {
             (output_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
                 | DISABLE_NEWLINE_AUTO_RETURN;
         if !set_console_mode(output, raw_output) {
+            CLAIMED.store(false, Ordering::Release);
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "this console does not interpret escape sequences",
@@ -167,8 +173,10 @@ impl RawMode {
             | ENABLE_VIRTUAL_TERMINAL_INPUT
             | ENABLE_WINDOW_INPUT;
         if !set_console_mode(input, raw_input) {
+            let error = io::Error::last_os_error();
             set_console_mode(output, output_mode);
-            return Err(io::Error::last_os_error());
+            CLAIMED.store(false, Ordering::Release);
+            return Err(error);
         }
         // SAFETY: reads the console's output code page; no arguments.
         let code_page = unsafe { GetConsoleOutputCP() };
@@ -201,8 +209,8 @@ impl RawMode {
         let cols = i32::from(info.window.right) - i32::from(info.window.left) + 1;
         let rows = i32::from(info.window.bottom) - i32::from(info.window.top) + 1;
         Ok(TerminalSize {
-            cols: u16::try_from(cols.max(0)).unwrap_or(u16::MAX),
-            rows: u16::try_from(rows.max(0)).unwrap_or(u16::MAX),
+            cols: u16::try_from(cols.clamp(0, LARGEST_SIDE)).unwrap_or(0),
+            rows: u16::try_from(rows.clamp(0, LARGEST_SIDE)).unwrap_or(0),
         })
     }
 
@@ -294,6 +302,7 @@ impl Drop for RawMode {
         restore();
         // SAFETY: removes the handler added in `enter`.
         unsafe { SetConsoleCtrlHandler(Some(on_console_control), 0) };
+        CLAIMED.store(false, Ordering::Release);
     }
 }
 
