@@ -133,6 +133,11 @@ impl<S: Source> Ui<S> {
         ui
     }
 
+    /// Ends the UI and gives back its source.
+    pub fn into_source(self) -> S {
+        self.source
+    }
+
     /// Whether the user asked to quit.
     pub fn should_quit(&self) -> bool {
         self.quit
@@ -819,7 +824,7 @@ impl<S: Source> Ui<S> {
         }
         let right_width = u16::try_from(text_width(&right)).unwrap_or(cols);
         self.put(frame, 0, 0, left, Role::Header, cols);
-        let name_room = usize::from(cols.saturating_sub(right_width + 8 + 1));
+        let name_room = usize::from(cols.saturating_sub(right_width + 8 + 2));
         let shown_name = if name_width > name_room {
             let mut tail: Vec<char> = Vec::new();
             let mut used = 1;

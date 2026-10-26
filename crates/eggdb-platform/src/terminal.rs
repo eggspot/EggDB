@@ -38,8 +38,8 @@ use crate::os_terminal_windows as os;
 )))]
 use unsupported as os;
 
-pub(crate) const START_SEQUENCE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[2J";
-pub(crate) const RESTORE_SEQUENCE: &[u8] = b"\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l";
+pub(crate) const START_SEQUENCE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?7l\x1b[2J";
+pub(crate) const RESTORE_SEQUENCE: &[u8] = b"\x1b[0m\x1b[?7h\x1b[?2004l\x1b[?25h\x1b[?1049l";
 
 /// The size of a terminal's window in character cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -189,6 +189,25 @@ fn os_enable_escape_sequences(_stream: StandardStream) -> bool {
     false
 }
 
+/// Whether the terminal shows Unicode: on Windows always (a [`RawTerminal`] sets the console
+/// to UTF-8), elsewhere when the first of `LC_ALL`, `LC_CTYPE` and `LANG` that is set names
+/// UTF-8.
+pub fn wants_unicode() -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .find(|value| !value.is_empty())
+        .is_some_and(|value| locale_is_utf8(&value))
+}
+
+fn locale_is_utf8(locale: &OsStr) -> bool {
+    let lower = locale.to_string_lossy().to_ascii_lowercase();
+    lower.contains("utf-8") || lower.contains("utf8")
+}
+
 /// Whether standard input and standard output are both terminals, which a [`RawTerminal`]
 /// needs.
 pub fn is_interactive() -> bool {
@@ -291,6 +310,14 @@ mod tests {
             None,
             Some(OsStr::new("dumb"))
         ));
+    }
+
+    #[test]
+    fn utf8_locales_are_recognised() {
+        assert!(super::locale_is_utf8(OsStr::new("en_US.UTF-8")));
+        assert!(super::locale_is_utf8(OsStr::new("C.utf8")));
+        assert!(!super::locale_is_utf8(OsStr::new("C")));
+        assert!(!super::locale_is_utf8(OsStr::new("en_US.ISO-8859-1")));
     }
 
     #[test]
