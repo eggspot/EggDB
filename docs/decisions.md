@@ -3123,12 +3123,15 @@ reads through any page source, the cache or a snapshot. `Database::check` uses i
 sees one commit while writers continue. It holds the store for the whole walk.
 
 **Cost** (D80; ratios against the same operation through the raw `Store` on the same file
-system, so they measure only this layer): `database.read`, a read transaction's begin, a point
-get returning the value and its end, 1.019 on this Mac, with exactly one allocation (the
-returned value, as for the store); `database.write`, a one-put write transaction under `Off`,
-1.018; `database.open`, a read-only open of a checkpointed file with the default 16 MiB cache,
-1.004, about 33 µs on this Mac (D14's start-up time). The write benchmark uses `Off` so that it
-measures the layer and not the disk.
+system, so they measure only this layer; Linux lines are the median of five CI runs):
+`database.read`, a read transaction's begin, a point get returning the value and its end, 1.023
+on this Mac and 1.006 on Linux, with exactly one allocation (the returned value, as for the
+store); `database.write`, a one-put write transaction under `Off`, 1.009 and 0.997;
+`database.open`, a read-only open of a checkpointed file with the default 16 MiB cache, 1.004
+and 1.002, about 32 µs on this Mac (D14's start-up time). The write benchmark uses `Off` so that
+it measures the layer and not the disk. The first version of the writer slot woke waiters on
+every commit, which on Linux is a system call (the standard library's condition variable has no
+waiter count), and cost `database.write` 1.078 there; the slot now counts its waiters.
 
 **Known limit.** The lock belongs to the open file, and a child process shares its parent's open
 files until it starts its own program, so while another thread starts a child, a database just
