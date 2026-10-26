@@ -1,8 +1,9 @@
 # EggDB roadmap
 
-Each milestone ships as a release when it is merged (CLAUDE.md, "Releases"), except during the week before v0.2.0, when releases are batched into it (D76). The order puts the
-core first and then the models and protocols that most applications use (D5). The build loop may
-refine it through research, recorded in docs/decisions.md.
+Each milestone ships as a release when it is merged (CLAUDE.md, "Releases"), except in the week
+before v0.2.0, when releases are batched into it (D76). The order puts the core first and then
+the models and protocols that most applications use (D5). The build loop may refine it through
+research, recorded in docs/decisions.md.
 
 ## Milestones
 | # | Milestone | Status |

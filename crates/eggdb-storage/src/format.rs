@@ -22,12 +22,14 @@ pub const PAGE_HEADER_SIZE: usize = 16;
 /// The bits of a page number reserved for a volume number; they are zero in this format.
 pub const PAGE_VOLUME_MASK: u64 = 0xFFFF << 48;
 
+/// How many recycled log segments the superblock remembers.
+pub const RECYCLED_SEGMENTS: usize = 7;
+
 /// The page number that means "no page", used for empty lists and absent roots. Page 0 always
 /// holds the first header slot, so it never names a data page.
 pub const NO_PAGE: u64 = 0;
 
 const SUPERBLOCK_CHECKSUM_AT: usize = 8;
-const RECYCLED_SEGMENT_SLOTS: usize = 7;
 
 /// The size of a page: a power of two from 4 KiB to 64 KiB, chosen when a file is created and
 /// fixed for its life.
@@ -132,6 +134,15 @@ pub struct PageHeader {
     pub lsn: u64,
 }
 
+/// What an open of a file asks for, which decides how its unknown feature flags are treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Access {
+    /// Reading only.
+    ReadOnly,
+    /// Reading and writing.
+    ReadWrite,
+}
+
 /// The feature flags of a file, in three sets with different rules for a release that finds a
 /// bit it does not know, as ext4 does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -153,16 +164,16 @@ impl Features {
     /// The incompatible features this release knows: none yet.
     pub const KNOWN_INCOMPATIBLE: u64 = 0;
 
-    /// Whether this release may open a file with these features, for writing when `write` is
-    /// true. Unknown compatible bits are ignored, unknown read-only-compatible bits refuse a
-    /// write, and unknown incompatible bits refuse any open.
-    pub fn check(&self, write: bool) -> Result<(), FormatError> {
+    /// Whether this release may open a file with these features for `access`. Unknown
+    /// compatible bits are ignored, unknown read-only-compatible bits refuse a write, and
+    /// unknown incompatible bits refuse any open.
+    pub fn check(&self, access: Access) -> Result<(), FormatError> {
         let incompatible = self.incompatible & !Self::KNOWN_INCOMPATIBLE;
         if incompatible != 0 {
             return Err(FormatError::UnsupportedFeatures { bits: incompatible });
         }
         let read_only = self.read_only_compatible & !Self::KNOWN_READ_ONLY_COMPATIBLE;
-        if write && read_only != 0 {
+        if access == Access::ReadWrite && read_only != 0 {
             return Err(FormatError::ReadOnlyFeatures { bits: read_only });
         }
         Ok(())
@@ -213,7 +224,7 @@ pub struct Superblock {
     pub log_segment_pages: u32,
     /// Log segments emptied by checkpoints and kept for reuse before the file grows, each a
     /// first page; unused entries are [`NO_PAGE`].
-    pub recycled_segments: [u64; RECYCLED_SEGMENT_SLOTS],
+    pub recycled_segments: [u64; RECYCLED_SEGMENTS],
 }
 
 impl Superblock {
@@ -222,8 +233,15 @@ impl Superblock {
         (self.generation & 1) as usize
     }
 
-    /// Encodes the superblock into a whole header slot, checksum included.
-    pub fn encode(&self) -> Vec<u8> {
+    /// Encodes the superblock into a whole header slot, checksum included. Refuses a
+    /// superblock that [`Superblock::decode`] would refuse, so an invalid header never reaches
+    /// the file.
+    pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
+        self.check_fields()?;
+        Ok(self.encode_unchecked())
+    }
+
+    fn encode_unchecked(&self) -> Vec<u8> {
         let mut slot = vec![0u8; HEADER_SLOT_SIZE];
         slot[..8].copy_from_slice(&MAGIC);
         write_u16(&mut slot, 12, FORMAT_VERSION);
@@ -250,11 +268,11 @@ impl Superblock {
         slot
     }
 
-    /// Decodes the header slot `slot_index` (0 or 1), checking its magic, checksum, version,
-    /// slot and fields. Feature flags are left to [`Features::check`], so a tool can still
+    /// Decodes the header slot `slot_index` (0 or 1), checking its length, magic, checksum,
+    /// version, slot and fields. Feature flags are left to [`Features::check`], so a tool can still
     /// report on a file it may not open.
     pub fn decode(slot: &[u8], slot_index: usize) -> Result<Self, FormatError> {
-        check_slot(slot)?;
+        check_slot(slot, slot_index)?;
         let major = read_u16(slot, 12);
         if major > FORMAT_VERSION || major == 0 {
             return Err(FormatError::UnsupportedVersion { major });
@@ -265,7 +283,7 @@ impl Superblock {
                 field: "page_reserved_tail",
             });
         }
-        let mut recycled_segments = [NO_PAGE; RECYCLED_SEGMENT_SLOTS];
+        let mut recycled_segments = [NO_PAGE; RECYCLED_SEGMENTS];
         for (index, page) in recycled_segments.iter_mut().enumerate() {
             *page = read_u64(slot, 136 + 8 * index);
         }
@@ -345,8 +363,7 @@ impl Superblock {
     /// version, a forbidden field) refuses the file rather than falling back to the older slot,
     /// so a release never silently opens an older state of a file a newer release wrote.
     pub fn choose(slot0: &[u8], slot1: &[u8]) -> Result<Self, FormatError> {
-        let intact = |slot: &[u8]| check_slot(slot).is_ok();
-        let newest = match (intact(slot0), intact(slot1)) {
+        let newest = match (check_slot(slot0, 0).is_ok(), check_slot(slot1, 1).is_ok()) {
             (true, true) => {
                 if read_u64(slot1, 16) > read_u64(slot0, 16) {
                     1
@@ -374,7 +391,7 @@ impl Superblock {
     }
 }
 
-fn check_slot(slot: &[u8]) -> Result<(), FormatError> {
+fn check_slot(slot: &[u8], slot_index: usize) -> Result<(), FormatError> {
     if slot.len() != HEADER_SLOT_SIZE {
         return Err(FormatError::WrongLength {
             expected: HEADER_SLOT_SIZE,
@@ -385,7 +402,7 @@ fn check_slot(slot: &[u8]) -> Result<(), FormatError> {
         return Err(FormatError::NotADatabase);
     }
     if read_u32(slot, SUPERBLOCK_CHECKSUM_AT) != superblock_checksum(slot) {
-        return Err(FormatError::ChecksumMismatch { page: 0 });
+        return Err(FormatError::HeaderChecksumMismatch { slot: slot_index });
     }
     Ok(())
 }
@@ -485,7 +502,7 @@ impl PageChecksum {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileId, HEADER_SLOT_SIZE, NO_PAGE, PageChecksum, PageHeader, PageSize, PageType,
+        Access, FileId, HEADER_SLOT_SIZE, NO_PAGE, PageChecksum, PageHeader, PageSize, PageType,
         SUPERBLOCK_SIZE, Superblock,
     };
     use crate::error::FormatError;
@@ -539,7 +556,7 @@ mod tests {
     fn a_superblock_survives_encoding_in_its_own_slot() {
         for generation in [0, 1, 2, 77] {
             let original = superblock(generation);
-            let slot = original.encode();
+            let slot = original.encode().unwrap();
             assert_eq!(slot.len(), HEADER_SLOT_SIZE);
             assert_eq!(Superblock::decode(&slot, original.slot()), Ok(original));
             assert_eq!(
@@ -553,7 +570,7 @@ mod tests {
 
     #[test]
     fn every_bit_flip_in_a_superblock_is_refused() {
-        let slot = superblock(4).encode();
+        let slot = superblock(4).encode().unwrap();
         for bit in 0..SUPERBLOCK_SIZE * 8 {
             let mut damaged = slot.clone();
             damaged[bit / 8] ^= 1 << (bit % 8);
@@ -565,7 +582,7 @@ mod tests {
     fn the_newest_intact_slot_wins_and_a_torn_one_falls_back() {
         let old = superblock(6);
         let new = superblock(7);
-        let (old_slot, new_slot) = (old.encode(), new.encode());
+        let (old_slot, new_slot) = (old.encode().unwrap(), new.encode().unwrap());
         assert_eq!(Superblock::choose(&old_slot, &new_slot), Ok(new));
         let mut rng = TestRng::new(20);
         for _ in 0..2000 {
@@ -586,10 +603,10 @@ mod tests {
     fn a_crash_at_any_point_of_a_header_update_leaves_the_old_or_the_new_state() {
         let old = superblock(10);
         let new = superblock(11);
-        let previous = superblock(9).encode();
-        let (old_slot, new_slot) = (old.encode(), new.encode());
+        let previous = superblock(9).encode().unwrap();
+        let (old_slot, new_slot) = (old.encode().unwrap(), new.encode().unwrap());
         let blank = vec![0u8; HEADER_SLOT_SIZE];
-        let empty_then_first = Superblock::choose(&superblock(0).encode(), &blank);
+        let empty_then_first = Superblock::choose(&superblock(0).encode().unwrap(), &blank);
         assert_eq!(empty_then_first, Ok(superblock(0)));
         for sectors_written in 0..=HEADER_SLOT_SIZE / SECTOR {
             let mut slot1 = previous.clone();
@@ -606,8 +623,8 @@ mod tests {
 
     #[test]
     fn a_newer_version_in_the_newest_slot_refuses_the_file_instead_of_falling_back() {
-        let old_slot = superblock(2).encode();
-        let mut newer = superblock(3).encode();
+        let old_slot = superblock(2).encode().unwrap();
+        let mut newer = superblock(3).encode().unwrap();
         newer[12] = 2;
         let checksum = super::superblock_checksum(&newer);
         newer[8..12].copy_from_slice(&checksum.to_le_bytes());
@@ -624,11 +641,15 @@ mod tests {
             Superblock::choose(&zeros, &zeros),
             Err(FormatError::NotADatabase)
         );
-        let mut damaged = superblock(0).encode();
+        let mut damaged = superblock(0).encode().unwrap();
         damaged[100] ^= 1;
         assert_eq!(
             Superblock::choose(&damaged, &zeros),
             Err(FormatError::NoValidHeader)
+        );
+        assert_eq!(
+            Superblock::decode(&damaged, 0),
+            Err(FormatError::HeaderChecksumMismatch { slot: 0 })
         );
     }
 
@@ -646,14 +667,15 @@ mod tests {
             let mut bad = superblock(0);
             damage(&mut bad);
             assert_eq!(
-                Superblock::decode(&bad.encode(), 0),
+                Superblock::decode(&bad.encode_unchecked(), 0),
                 Err(FormatError::InvalidField { field }),
                 "{field}"
             );
         }
         let mut empty_list = superblock(0);
         empty_list.free_list_head = NO_PAGE;
-        assert!(Superblock::decode(&empty_list.encode(), 0).is_err());
+        assert!(Superblock::decode(&empty_list.encode_unchecked(), 0).is_err());
+        assert!(empty_list.encode().is_err());
     }
 
     #[test]
@@ -662,14 +684,14 @@ mod tests {
             compatible: 1 << 9,
             ..Features::default()
         };
-        assert_eq!(compatible.check(true), Ok(()));
+        assert_eq!(compatible.check(Access::ReadWrite), Ok(()));
         let read_only = Features {
             read_only_compatible: 1 << 3,
             ..Features::default()
         };
-        assert_eq!(read_only.check(false), Ok(()));
+        assert_eq!(read_only.check(Access::ReadOnly), Ok(()));
         assert_eq!(
-            read_only.check(true),
+            read_only.check(Access::ReadWrite),
             Err(FormatError::ReadOnlyFeatures { bits: 1 << 3 })
         );
         let incompatible = Features {
@@ -677,8 +699,8 @@ mod tests {
             ..Features::default()
         };
         let refused = Err(FormatError::UnsupportedFeatures { bits: 1 << 63 });
-        assert_eq!(incompatible.check(false), refused);
-        assert_eq!(incompatible.check(true), refused);
+        assert_eq!(incompatible.check(Access::ReadOnly), refused);
+        assert_eq!(incompatible.check(Access::ReadWrite), refused);
     }
 
     #[test]
@@ -792,7 +814,7 @@ mod tests {
     #[test]
     fn arbitrary_bytes_never_panic_the_decoders() {
         let mut rng = TestRng::new(0xF022);
-        let valid = superblock(8).encode();
+        let valid = superblock(8).encode().unwrap();
         let checks = checksums();
         for case in 0..10_000 {
             let mut slot = if case % 2 == 0 {
@@ -817,7 +839,7 @@ mod tests {
             let _ = Superblock::choose(&slot[..length], &valid);
             let _ = Superblock::choose(&valid, &slot[..length]);
             if let Ok(superblock) = Superblock::decode(&slot, superblock_slot(&slot)) {
-                let _ = superblock.features.check(true);
+                let _ = superblock.features.check(Access::ReadWrite);
             }
             let _ = checks.verify(&slot[..length], rng.next_u64());
         }

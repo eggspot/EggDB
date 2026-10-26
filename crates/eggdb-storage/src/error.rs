@@ -22,6 +22,12 @@ pub enum FormatError {
         /// The page whose checksum failed.
         page: u64,
     },
+    /// A header slot's stored checksum does not match its bytes: it is damaged or was torn by
+    /// a crash while being written.
+    HeaderChecksumMismatch {
+        /// The slot, 0 or 1.
+        slot: usize,
+    },
     /// The page type byte names no type this release knows.
     UnknownPageType {
         /// The page that was read.
@@ -70,6 +76,10 @@ impl fmt::Display for FormatError {
             Self::ChecksumMismatch { page } => write!(
                 f,
                 "page {page} failed its checksum: it is damaged, torn by a crash, or belongs elsewhere"
+            ),
+            Self::HeaderChecksumMismatch { slot } => write!(
+                f,
+                "header slot {slot} failed its checksum: it is damaged or was torn by a crash"
             ),
             Self::UnknownPageType { page, found } => {
                 write!(f, "page {page} has unknown page type {found}")

@@ -161,6 +161,28 @@ mod tests {
         }
     }
 
+    fn bit_at_a_time(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0x82F6_3B78 & mask);
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn matches_a_bit_at_a_time_reference_on_random_inputs() {
+        let mut rng = TestRng::new(0x82F6_3B78);
+        for _ in 0..300 {
+            let len = rng.below(700);
+            let bytes = rng.bytes(len);
+            assert_eq!(crc32c(&bytes), bit_at_a_time(&bytes));
+        }
+    }
+
     #[test]
     fn hardware_and_tables_agree_on_random_inputs() {
         let mut rng = TestRng::new(32);
