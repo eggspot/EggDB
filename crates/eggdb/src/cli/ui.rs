@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const LONGEST_COUNT_STEP: Duration = Duration::from_millis(20);
-const TIME_CHECK_EVERY: u64 = 64;
 
 pub(crate) struct DatabaseSource {
     db: Database,
@@ -74,16 +73,16 @@ fn collect(scan: &mut Scan<'_>, descending: bool, limit: usize) -> eggdb::Result
     let mut rows = Vec::with_capacity(limit.min(1024));
     while rows.len() < limit {
         let entry = if descending {
-            scan.next_back_entry()?
+            scan.next_back_key_and_value_len()?
         } else {
-            scan.next_entry()?
+            scan.next_key_and_value_len()?
         };
-        let Some((key, value)) = entry else {
+        let Some((key, value_bytes)) = entry else {
             break;
         };
         rows.push(KeyRow {
             key: key.to_vec(),
-            value_bytes: value.len() as u64,
+            value_bytes,
         });
     }
     Ok(rows)
@@ -131,12 +130,9 @@ impl Source for DatabaseSource {
                 let mut scan = tx.scan(bounds);
                 let mut counted = 0;
                 let started = Instant::now();
-                while let Some((key, _)) = scan.next_entry()? {
+                while let Some((key, _)) = scan.next_key_and_value_len()? {
                     counted += 1;
-                    if counted == limit
-                        || (counted % TIME_CHECK_EVERY == 0
-                            && started.elapsed() >= LONGEST_COUNT_STEP)
-                    {
+                    if counted == limit || started.elapsed() >= LONGEST_COUNT_STEP {
                         return Ok(CountStep {
                             counted,
                             resume_after: Some(key.to_vec()),
@@ -236,6 +232,39 @@ mod tests {
             source.summary().map(|s| (s.name, s.read_only)),
             Ok(("t.db".to_owned(), false))
         );
+    }
+
+    #[test]
+    fn listing_and_counting_keys_never_reads_a_large_value() {
+        let (_file, db) = database("large");
+        let large = 6 << 20;
+        db.write(|tx| {
+            tx.put("big:a", vec![1u8; large])?;
+            tx.put("big:b", vec![2u8; large])?;
+            tx.put("big:c", "small")
+        })
+        .unwrap_or_else(|error| panic!("write: {error}"));
+        let source = DatabaseSource::new(db, "t.db".to_owned());
+        let lookups = |source: &DatabaseSource| {
+            let stats = source
+                .db
+                .stats()
+                .unwrap_or_else(|error| panic!("stats: {error}"));
+            stats.cache_hits + stats.cache_misses
+        };
+        let before = lookups(&source);
+        let first = source.keys(b"big:", Start::First, 10);
+        let last = source.keys(b"big:", Start::Last, 10);
+        let counted = source.count(b"", None, 1000);
+        let used = lookups(&source) - before;
+        let sizes = |rows: Result<Vec<eggdb_ui::KeyRow>, String>| -> Vec<u64> {
+            rows.map(|rows| rows.iter().map(|row| row.value_bytes).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(sizes(first), [large as u64, large as u64, 5]);
+        assert_eq!(sizes(last), [5, large as u64, large as u64]);
+        assert_eq!(counted.map(|step| step.counted), Ok(35));
+        assert!(used < 64, "{used} page lookups");
     }
 
     #[test]
