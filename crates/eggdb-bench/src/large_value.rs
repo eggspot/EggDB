@@ -1,6 +1,7 @@
 use crate::allocations::CountingAllocator;
 use crate::baseline::Metric;
-use crate::database::{BenchFile, failed};
+use crate::bench_file::BenchFile;
+use crate::database::failed;
 use crate::measure;
 use eggdb::{Database, Durability, Options};
 use eggdb_platform::{File, FileSystem, OpenMode, OsFileSystem, SimFileSystem, SystemClock};
