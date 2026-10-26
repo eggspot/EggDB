@@ -3011,7 +3011,27 @@ cache does (`transaction.read`, ratio 1.0, 0 allocations); a one-put write trans
 times a put and commit through the cache (`transaction.write`, same 3,203 file operations and
 1,040 syncs per 1,000 commits). The B+tree and cache benchmarks are unchanged within their noise.
 
-**Left for later:** a reader whose snapshot needs a page while every frame is pinned or changed
-fails with `CacheFull` like any read; readers of an older snapshot could read straight from the
-file instead. Transactions larger than the cache wait for M3, which also replaces the images
-with versions in the leaves.
+**Left for later, and known limits:**
+- A reader whose snapshot needs a page while every frame is pinned or changed fails with
+  `CacheFull` like any read; readers of an older snapshot could read straight from the file
+  instead. A cursor's descent pins a parent and its child at once (two frames, for the fence
+  check), so snapshot scans on a tiny cache reach `CacheFull` a little sooner.
+- Commit stamps are unique among durable commits only. Under `Normal` or `Off` a commit lost to a
+  power loss never reached `clock_high_water`, so after the reopen its stamp can be handed out
+  again when the wall clock is behind it.
+- A damaged `clock_high_water` near `2^64 − 1` makes every commit fail with `ClockExhausted`;
+  there is no repair tool yet (`eggdb check`, item 13).
+- Dropping or beginning a transaction inside a `get_with` callback deadlocks, since the callback
+  runs while the store is held; the rustdoc says so.
+- Dropping a version's images walks every kept image (`BTreeMap::retain`), so expiring or pruning
+  costs the number of images times the versions dropped; an index by version comes when a
+  benchmark shows it.
+- Transactions larger than the cache wait for M3, which also replaces the images with versions in
+  the leaves.
+
+**Review fix before merge:** a write transaction that expired snapshots (its images outgrew the
+snapshot memory) and was then rolled back, by `rollback`, a drop, a failed change or a refused
+commit, left the expiry mark above the last commit, so every new reader failed with
+`SnapshotTooOld` until the next commit. A rollback now lowers the mark to the last commit: the
+cache holds exactly that commit again, so readers of it need no images, while older readers whose
+images were dropped stay expired. Readers of the last commit that had expired work again.

@@ -94,6 +94,10 @@ impl BeforeImages {
             .filter(|&newest| newest >= self.expired_below)
     }
 
+    pub(crate) fn wants_image_of(&self, page_id: u64) -> bool {
+        !self.has_pending_image(page_id) && self.is_needed(page_id)
+    }
+
     fn is_needed(&self, page_id: u64) -> bool {
         let Some(newest) = self.newest_live_reader() else {
             return false;
@@ -127,7 +131,7 @@ impl BeforeImages {
         checked: bool,
         page: &[u8],
     ) -> Result<(), StorageError> {
-        if self.has_pending_image(page_id) || !self.is_needed(page_id) {
+        if !self.wants_image_of(page_id) {
             return Ok(());
         }
         while self.images.len() >= self.budget_pages {
@@ -163,6 +167,7 @@ impl BeforeImages {
 
     pub(crate) fn discard_pending(&mut self) {
         self.drop_version(self.pending());
+        self.expired_below = self.expired_below.min(self.committed);
     }
 
     pub(crate) fn discard_all(&mut self) {

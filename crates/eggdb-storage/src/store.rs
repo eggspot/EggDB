@@ -61,7 +61,7 @@ impl<F: File> Store<F> {
     /// after it, for as long as it lives. A write transaction open at the time stays
     /// invisible to it, committed or not.
     pub fn begin_read(&self) -> Result<ReadTransaction<'_, F>, StorageError> {
-        let state = self.lock()?;
+        let mut state = self.lock()?;
         let version = state.cache.begin_snapshot()?;
         Ok(ReadTransaction {
             store: self,
@@ -206,7 +206,8 @@ impl<F: File> ReadTransaction<'_, F> {
 
     /// Calls `read` with the value stored under `key` in `tree` as of the snapshot, and
     /// returns what it returns, or `None` when the key is absent. The store is held while
-    /// `read` runs, so `read` must not use the store itself.
+    /// `read` runs, so `read` must not use the store itself: beginning, using or dropping a
+    /// transaction of the same store inside it deadlocks.
     pub fn get_with<R>(
         &self,
         tree: &BTree,
@@ -238,7 +239,7 @@ impl<F: File> ReadTransaction<'_, F> {
 
 impl<F: File> Drop for ReadTransaction<'_, F> {
     fn drop(&mut self) {
-        if let Ok(state) = self.store.state.lock() {
+        if let Ok(mut state) = self.store.state.lock() {
             state.cache.end_snapshot(self.version);
         }
     }
@@ -306,7 +307,8 @@ impl<F: File> WriteTransaction<'_, F> {
 
     /// Calls `read` with the value stored under `key` in `tree`, this transaction's changes
     /// included, and returns what it returns, or `None` when the key is absent. The store is
-    /// held while `read` runs, so `read` must not use the store itself.
+    /// held while `read` runs, so `read` must not use the store itself: beginning, using or
+    /// dropping a transaction of the same store inside it deadlocks.
     pub fn get_with<R>(
         &self,
         tree: &BTree,

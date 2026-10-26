@@ -6,7 +6,7 @@ use crate::frames::{FrameMut, FrameRef, Frames};
 use crate::log::{Durability, LogStats};
 use crate::page_file::{NO_STAMP, PageFile};
 use crate::page_table::PageTable;
-use eggdb_platform::{File, Memory};
+use eggdb_platform::{ErrorKind, File, Memory};
 use std::cell::{Cell, Ref, RefCell};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
@@ -376,23 +376,19 @@ impl<F: File> PageCache<F> {
         self.images.get_mut().set_budget(pages);
     }
 
-    pub(crate) fn begin_snapshot(&self) -> Result<u64, StorageError> {
-        let mut images = self
-            .images
-            .try_borrow_mut()
-            .map_err(|_| StorageError::PageBorrowed { page: NO_PAGE })?;
-        let version = images.register_reader()?;
-        if let Err(error) = self.keep_uncaptured_changes(&mut images) {
+    pub(crate) fn begin_snapshot(&mut self) -> Result<u64, StorageError> {
+        let version = self.images.get_mut().register_reader()?;
+        let mut images = std::mem::replace(self.images.get_mut(), BeforeImages::new(0));
+        let kept = self.keep_uncaptured_changes(&mut images);
+        if kept.is_err() {
             images.release_reader(version);
-            return Err(error);
         }
-        Ok(version)
+        *self.images.get_mut() = images;
+        kept.map(|()| version)
     }
 
-    pub(crate) fn end_snapshot(&self, version: u64) {
-        if let Ok(mut images) = self.images.try_borrow_mut() {
-            images.release_reader(version);
-        }
+    pub(crate) fn end_snapshot(&mut self, version: u64) {
+        self.images.get_mut().release_reader(version);
     }
 
     pub(crate) fn read_at(
@@ -438,7 +434,7 @@ impl<F: File> PageCache<F> {
             .images
             .try_borrow_mut()
             .map_err(|_| StorageError::PageBorrowed { page: page_id })?;
-        if !images.wants_images() || images.has_pending_image(page_id) {
+        if !images.wants_image_of(page_id) {
             return Ok(());
         }
         if let Some(frame) = cached.filter(|&frame| !self.is_dirty(frame)) {
@@ -453,19 +449,19 @@ impl<F: File> PageCache<F> {
     }
 
     fn keep_uncaptured_changes(&self, images: &mut BeforeImages) -> Result<(), StorageError> {
+        if !images.wants_images() {
+            return Ok(());
+        }
         let dirty_frames = self.dirty_frames.borrow();
         for &frame in dirty_frames.iter() {
             let state = self.states[frame].get();
-            let page_id = self.pages[frame].get();
-            if state & DIRTY != 0 && state & ALLOCATED == 0 && !images.has_pending_image(page_id) {
-                self.keep_committed_image(images, page_id)?;
+            if state & DIRTY != 0 && state & ALLOCATED == 0 {
+                self.keep_committed_image(images, self.pages[frame].get())?;
             }
         }
-        let freed: Vec<u64> = self.file.borrow().freed_committed_pages().collect();
-        for page_id in freed {
-            if !images.has_pending_image(page_id) {
-                self.keep_committed_image(images, page_id)?;
-            }
+        let file = self.file.borrow();
+        for page_id in file.freed_committed_pages() {
+            self.keep_committed_image(images, page_id)?;
         }
         Ok(())
     }
@@ -475,7 +471,14 @@ impl<F: File> PageCache<F> {
         images: &mut BeforeImages,
         page_id: u64,
     ) -> Result<(), StorageError> {
-        let mut page = vec![0u8; self.page_size().bytes()];
+        if !images.wants_image_of(page_id) {
+            return Ok(());
+        }
+        let page_bytes = self.page_size().bytes();
+        let mut page = Vec::new();
+        page.try_reserve_exact(page_bytes)
+            .map_err(|_| StorageError::Io(eggdb_platform::Error::new(ErrorKind::OutOfMemory)))?;
+        page.resize(page_bytes, 0);
         let header = self.file.borrow().read_page(page_id, &mut page)?;
         images.keep_pending(page_id, header, false, &page)
     }

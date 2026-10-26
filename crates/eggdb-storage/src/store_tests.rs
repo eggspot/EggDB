@@ -510,6 +510,109 @@ fn a_reader_living_across_many_commits_keeps_one_image_per_changed_page() {
     assert_eq!(store.cache_stats().unwrap().before_images, 1);
 }
 
+fn change_every_twentieth(write: &mut WriteTransaction<'_, SimFile>, tree: &BTree) {
+    for index in (0..600).step_by(20) {
+        write.put(tree, &key(index), b"new").unwrap();
+    }
+}
+
+fn assert_readers_see(store: &Store<SimFile>, tree: &BTree, model: &Model) {
+    let fresh = store.begin_read().unwrap();
+    assert_eq!(
+        fresh.get(tree, &key(1)).unwrap().as_ref(),
+        model.get(&key(1))
+    );
+    assert_eq!(read_all(&fresh, tree, ScanOrder::Ascending), *model);
+}
+
+#[test]
+fn a_rolled_back_writer_that_expired_snapshots_leaves_new_and_current_readers_working() {
+    for explicit in [true, false] {
+        let fs = SimFileSystem::new();
+        let (store, tree) = created(&fs, 64, &october_clock());
+        let before = fill(&store, &tree, 600, 60);
+        store.set_snapshot_memory(CacheSize::Pages(4)).unwrap();
+        let old = store.begin_read().unwrap();
+        let mut write = store.begin_write().unwrap();
+        change_every_twentieth(&mut write, &tree);
+        assert!(matches!(
+            old.get(&tree, &key(1)),
+            Err(StorageError::SnapshotTooOld)
+        ));
+        if explicit {
+            write.rollback().unwrap();
+        } else {
+            drop(write);
+        }
+        assert_eq!(read_all(&old, &tree, ScanOrder::Ascending), before);
+        drop(old);
+        assert_readers_see(&store, &tree, &before);
+    }
+}
+
+#[test]
+fn snapshot_memory_lowered_inside_a_write_transaction_then_rolled_back_leaves_readers_working() {
+    let fs = SimFileSystem::new();
+    let (store, tree) = created(&fs, 64, &october_clock());
+    let before = fill(&store, &tree, 600, 60);
+    let old = store.begin_read().unwrap();
+    let mut write = store.begin_write().unwrap();
+    change_every_twentieth(&mut write, &tree);
+    assert!(store.cache_stats().unwrap().before_images > 2);
+    store.set_snapshot_memory(CacheSize::Pages(2)).unwrap();
+    assert!(matches!(
+        old.get(&tree, &key(1)),
+        Err(StorageError::SnapshotTooOld)
+    ));
+    drop(write);
+    assert_eq!(old.get(&tree, &key(1)).unwrap().unwrap(), before[&key(1)]);
+    assert_readers_see(&store, &tree, &before);
+}
+
+#[test]
+fn a_failed_put_that_rolled_back_an_over_budget_writer_leaves_readers_working() {
+    let fs = SimFileSystem::new();
+    let before = {
+        let (store, tree) = created(&fs, 64, &october_clock());
+        fill(&store, &tree, 600, 60)
+    };
+    let (store, tree) = reopened(&fs, 8, &october_clock());
+    store.set_snapshot_memory(CacheSize::Pages(2)).unwrap();
+    let old = store.begin_read().unwrap();
+    let mut write = store.begin_write().unwrap();
+    let failure = (0..600)
+        .step_by(20)
+        .find_map(|index| write.put(&tree, &key(index), b"new").err());
+    assert!(
+        matches!(failure, Some(StorageError::CacheFull { .. })),
+        "{failure:?}"
+    );
+    drop(write);
+    assert_eq!(old.get(&tree, &key(1)).unwrap().unwrap(), before[&key(1)]);
+    drop(old);
+    assert_readers_see(&store, &tree, &before);
+}
+
+#[test]
+fn a_refused_commit_of_an_over_budget_writer_leaves_readers_working() {
+    let fs = SimFileSystem::new();
+    let before = {
+        let (store, tree) = created(&fs, 64, &october_clock());
+        fill(&store, &tree, 600, 60)
+    };
+    cache(&fs, 32)
+        .commit(|superblock| superblock.clock_high_water = u64::MAX)
+        .unwrap();
+    let (store, tree) = reopened(&fs, 64, &october_clock());
+    store.set_snapshot_memory(CacheSize::Pages(4)).unwrap();
+    let old = store.begin_read().unwrap();
+    let mut write = store.begin_write().unwrap();
+    change_every_twentieth(&mut write, &tree);
+    assert!(matches!(write.commit(), Err(StorageError::ClockExhausted)));
+    drop(old);
+    assert_readers_see(&store, &tree, &before);
+}
+
 fn sequential_tree(fs: &SimFileSystem) -> Model {
     let (store, tree) = created(fs, 64, &october_clock());
     let model = fill(&store, &tree, 200, 100);
