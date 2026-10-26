@@ -31,6 +31,20 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Check the shipped crates are only our own
+        run: |
+          set -o pipefail
+          shipped=$(cargo tree -p eggdb -e normal,build --target all --prefix none --format '{p}' \
+            | awk '{print $1}' | sort -u)
+          if [ -z "$shipped" ]; then
+            echo "::error::cargo tree listed no crates for eggdb"
+            exit 1
+          fi
+          foreign=$(echo "$shipped" | grep -v -E '^eggdb(-[a-z]+)?$' || true)
+          if [ -n "$foreign" ]; then
+            echo "::error::third-party crates in what ships (D1): $foreign"
+            exit 1
+          fi
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
@@ -137,3 +151,30 @@ jobs:
           key: cargo-bench-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - name: Benchmarks against the committed baseline
         run: cargo run --release -p eggdb-bench
+
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPARE_MANIFEST: crates/eggdb-sqlite-compare/Cargo.toml
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/eggdb-sqlite-compare/target
+          key: cargo-compare-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'crates/eggdb-sqlite-compare/Cargo.lock') }}
+      - name: Format
+        run: cargo fmt --manifest-path "$COMPARE_MANIFEST" --check
+      - name: Lint
+        run: cargo clippy --manifest-path "$COMPARE_MANIFEST" --release --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --manifest-path "$COMPARE_MANIFEST" --release --locked
+      - name: EggDB against SQLite, against the committed baseline
+        run: cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked

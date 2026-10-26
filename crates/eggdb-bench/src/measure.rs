@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 const SAMPLES: usize = 15;
 const SAMPLE_TIME: Duration = Duration::from_millis(20);
+const FIRST_CALIBRATION_ITERATIONS: u64 = 64;
 const MAX_ITERATIONS: u64 = 1 << 34;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -14,7 +15,7 @@ pub(crate) struct Paired {
 type Run<'a> = dyn FnMut(u64) -> Result<(), String> + 'a;
 type TimedRun<'a> = dyn FnMut(u64) -> Result<Duration, String> + 'a;
 
-fn timed<'a>(run: &'a mut Run<'_>) -> impl FnMut(u64) -> Result<Duration, String> + 'a {
+pub(crate) fn timed<'a>(run: &'a mut Run<'_>) -> impl FnMut(u64) -> Result<Duration, String> + 'a {
     move |iterations| {
         let start = Instant::now();
         run(iterations)?;
@@ -30,8 +31,16 @@ pub(crate) fn paired_timed(
     subject: &mut TimedRun<'_>,
     reference: &mut TimedRun<'_>,
 ) -> Result<Paired, String> {
-    let subject_iterations = calibrate(subject)?;
-    let reference_iterations = calibrate(reference)?;
+    paired_calibrated_from(FIRST_CALIBRATION_ITERATIONS, subject, reference)
+}
+
+pub(crate) fn paired_calibrated_from(
+    first_iterations: u64,
+    subject: &mut TimedRun<'_>,
+    reference: &mut TimedRun<'_>,
+) -> Result<Paired, String> {
+    let subject_iterations = calibrate(first_iterations, subject)?;
+    let reference_iterations = calibrate(first_iterations, reference)?;
     let mut subject_ns = Vec::with_capacity(SAMPLES);
     let mut reference_ns = Vec::with_capacity(SAMPLES);
     let mut ratios = Vec::with_capacity(SAMPLES);
@@ -51,15 +60,15 @@ pub(crate) fn paired_timed(
 
 pub(crate) fn single(subject: &mut Run<'_>) -> Result<f64, String> {
     let subject = &mut timed(subject);
-    let iterations = calibrate(subject)?;
+    let iterations = calibrate(FIRST_CALIBRATION_ITERATIONS, subject)?;
     let mut samples = (0..SAMPLES)
         .map(|_| ns_per_op(subject, iterations))
         .collect::<Result<Vec<f64>, String>>()?;
     Ok(median(&mut samples))
 }
 
-fn calibrate(run: &mut TimedRun<'_>) -> Result<u64, String> {
-    let mut iterations = 64;
+fn calibrate(first_iterations: u64, run: &mut TimedRun<'_>) -> Result<u64, String> {
+    let mut iterations = first_iterations;
     loop {
         if run(iterations)? >= SAMPLE_TIME || iterations >= MAX_ITERATIONS {
             return Ok(iterations);

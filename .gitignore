@@ -1,2 +1,3 @@
 /target
+/crates/eggdb-sqlite-compare/target
 .claude/worktrees/

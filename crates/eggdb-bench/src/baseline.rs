@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-pub(crate) const RATIO_TOLERANCE: f64 = 0.30;
+const RATIO_TOLERANCE_PERCENT: u32 = 30;
 const EXACT_EPSILON: f64 = 1e-9;
 pub(crate) const ANY_OS: &str = "any";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Gate {
     Exact,
-    Ratio,
+    Ceiling { tolerance_percent: u32 },
     Reported,
 }
 
@@ -31,11 +31,20 @@ impl Metric {
     }
 
     pub(crate) fn ratio(benchmark: &'static str, name: &'static str, value: f64) -> Self {
+        Self::ceiling(benchmark, name, value, RATIO_TOLERANCE_PERCENT)
+    }
+
+    pub(crate) fn ceiling(
+        benchmark: &'static str,
+        name: &'static str,
+        value: f64,
+        tolerance_percent: u32,
+    ) -> Self {
         Self {
             benchmark,
             name,
             value,
-            gate: Gate::Ratio,
+            gate: Gate::Ceiling { tolerance_percent },
         }
     }
 
@@ -51,7 +60,7 @@ impl Metric {
     pub(crate) fn os_key(&self, os: &'static str) -> &'static str {
         match self.gate {
             Gate::Exact => ANY_OS,
-            Gate::Ratio | Gate::Reported => os,
+            Gate::Ceiling { .. } | Gate::Reported => os,
         }
     }
 
@@ -62,8 +71,9 @@ impl Metric {
 
 fn format_value(gate: Gate, value: f64) -> String {
     match gate {
-        Gate::Exact if value.fract() == 0.0 => format!("{value:.0}"),
-        Gate::Exact | Gate::Ratio => format!("{value:.3}"),
+        Gate::Exact | Gate::Ceiling { .. } if value.fract() == 0.0 => format!("{value:.0}"),
+        Gate::Exact | Gate::Ceiling { .. } => format!("{value:.3}"),
+        Gate::Reported if value.abs() < 10.0 => format!("{value:.3}"),
         Gate::Reported => format!("{value:.1}"),
     }
 }
@@ -119,11 +129,12 @@ pub(crate) fn judge(metric: &Metric, baseline: Option<f64>) -> Verdict {
         }
         Gate::Exact if metric.value < baseline - EXACT_EPSILON => Verdict::Fell { baseline },
         Gate::Exact => Verdict::Within,
-        Gate::Ratio => {
-            let limit = baseline * (1.0 + RATIO_TOLERANCE);
+        Gate::Ceiling { tolerance_percent } => {
+            let factor = 1.0 + f64::from(tolerance_percent) / 100.0;
+            let limit = baseline * factor;
             if metric.value > limit {
                 Verdict::Regressed { limit }
-            } else if metric.value < baseline / (1.0 + RATIO_TOLERANCE) {
+            } else if metric.value < baseline / factor {
                 Verdict::Improved
             } else {
                 Verdict::Within
@@ -134,42 +145,58 @@ pub(crate) fn judge(metric: &Metric, baseline: Option<f64>) -> Verdict {
 
 type Key = (String, String, String);
 
+#[derive(Debug, Clone, PartialEq)]
+struct Entry {
+    value: f64,
+    text: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Baseline {
-    values: BTreeMap<Key, f64>,
+    entries: BTreeMap<Key, Entry>,
 }
 
 impl Baseline {
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
-        let mut values = BTreeMap::new();
+        let mut entries = BTreeMap::new();
         for (index, line) in text.lines().enumerate() {
             let fields: Vec<&str> = line.split_whitespace().collect();
             if fields.is_empty() {
                 continue;
             }
-            let [os, benchmark, metric, value] = fields[..] else {
+            let [os, benchmark, metric, text] = fields[..] else {
                 return Err(format!(
                     "baseline line {}: expected `<os> <benchmark> <metric> <value>`",
                     index + 1
                 ));
             };
-            let value: f64 = value
+            let value: f64 = text
                 .parse()
-                .map_err(|_| format!("baseline line {}: `{value}` is not a number", index + 1))?;
-            values.insert((os.into(), benchmark.into(), metric.into()), value);
+                .map_err(|_| format!("baseline line {}: `{text}` is not a number", index + 1))?;
+            let entry = Entry {
+                value,
+                text: text.into(),
+            };
+            entries.insert((os.into(), benchmark.into(), metric.into()), entry);
         }
-        Ok(Self { values })
+        Ok(Self { entries })
     }
 
     pub(crate) fn get(&self, os: &str, benchmark: &str, metric: &str) -> Option<f64> {
-        self.values
+        self.entries
             .get(&(os.into(), benchmark.into(), metric.into()))
-            .copied()
+            .map(|entry| entry.value)
     }
 
     pub(crate) fn replace_os(&mut self, os: &'static str, metrics: &[Metric]) {
-        self.values
-            .retain(|(line_os, _, _), _| line_os != os && line_os != ANY_OS);
+        let measured_family = |benchmark: &str| {
+            metrics
+                .iter()
+                .any(|metric| family(metric.benchmark) == family(benchmark))
+        };
+        self.entries.retain(|(line_os, benchmark, _), _| {
+            (line_os != os && line_os != ANY_OS) || !measured_family(benchmark)
+        });
         for metric in metrics
             .iter()
             .filter(|metric| metric.gate != Gate::Reported)
@@ -179,25 +206,28 @@ impl Baseline {
                 metric.benchmark.to_string(),
                 metric.name.to_string(),
             );
-            self.values.insert(key, metric.value);
+            let entry = Entry {
+                value: metric.value,
+                text: metric.formatted_value(),
+            };
+            self.entries.insert(key, entry);
         }
     }
 
-    pub(crate) fn render(&self, metrics: &[Metric]) -> String {
-        let gate_of = |benchmark: &str, name: &str| {
-            metrics
-                .iter()
-                .find(|metric| metric.benchmark == benchmark && metric.name == name)
-                .map_or(Gate::Ratio, |metric| metric.gate)
-        };
-        self.values
+    pub(crate) fn render(&self) -> String {
+        self.entries
             .iter()
-            .map(|((os, benchmark, name), &value)| {
-                let value = format_value(gate_of(benchmark, name), value);
-                format!("{os} {benchmark} {name} {value}\n")
+            .map(|((os, benchmark, name), entry)| {
+                format!("{os} {benchmark} {name} {}\n", entry.text)
             })
             .collect()
     }
+}
+
+fn family(benchmark: &str) -> &str {
+    benchmark
+        .split_once('.')
+        .map_or(benchmark, |(family, _)| family)
 }
 
 pub(crate) fn line(metric: &Metric, os: &'static str) -> String {
@@ -237,20 +267,39 @@ mod tests {
     }
 
     #[test]
+    fn a_ceiling_has_its_own_tolerance() {
+        let size = |value| Metric::ceiling("footprint.binary", "bytes", value, 1);
+        assert_eq!(
+            judge(&size(1_009_000.0), Some(1_000_000.0)),
+            Verdict::Within
+        );
+        assert!(matches!(
+            judge(&size(1_011_000.0), Some(1_000_000.0)),
+            Verdict::Regressed { .. }
+        ));
+        assert_eq!(
+            judge(&size(980_000.0), Some(1_000_000.0)),
+            Verdict::Improved
+        );
+        assert_eq!(size(933_312.0).formatted_value(), "933312");
+    }
+
+    #[test]
     fn a_missing_count_fails_and_a_missing_ratio_only_warns() {
         let count = Metric::exact("cache.miss", "evictions_per_op", 1.0);
         let ratio = Metric::ratio("cache.hit", "ratio_to_reference", 1.0);
         assert!(judge(&count, None).fails(Gate::Exact));
-        assert!(!judge(&ratio, None).fails(Gate::Ratio));
+        assert!(!judge(&ratio, None).fails(ratio.gate));
         let reported = Metric::reported("cache.hit", "ns_per_op", 5.0);
         assert_eq!(judge(&reported, None), Verdict::Reported);
     }
 
     #[test]
-    fn an_update_replaces_this_os_and_shared_lines_and_keeps_other_systems() {
-        let mut baseline =
-            Baseline::parse("linux cache.hit ratio_to_reference 0.5\nmacos cache.hit ratio_to_reference 0.4\nany cache.old allocations_per_op 3\n")
-                .unwrap();
+    fn an_update_replaces_this_os_and_shared_lines_of_the_measured_families_only() {
+        let mut baseline = Baseline::parse(
+            "linux cache.hit ratio_to_reference 0.5\nmacos cache.hit ratio_to_reference 0.4\nany cache.old allocations_per_op 3\nmacos other.get ratio_to_x 1.0\nany other.get allocations_per_op 205941\n",
+        )
+        .unwrap();
         let metrics = [
             Metric::exact("cache.hit", "allocations_per_op", 0.0),
             Metric::ratio("cache.hit", "ratio_to_reference", 0.42),
@@ -258,13 +307,10 @@ mod tests {
         ];
         baseline.replace_os("macos", &metrics);
         assert_eq!(
-            baseline.render(&metrics),
-            "any cache.hit allocations_per_op 0\nlinux cache.hit ratio_to_reference 0.500\nmacos cache.hit ratio_to_reference 0.420\n"
+            baseline.render(),
+            "any cache.hit allocations_per_op 0\nany other.get allocations_per_op 205941\nlinux cache.hit ratio_to_reference 0.5\nmacos cache.hit ratio_to_reference 0.420\nmacos other.get ratio_to_x 1.0\n"
         );
-        assert_eq!(
-            Baseline::parse(&baseline.render(&metrics)).unwrap(),
-            baseline
-        );
+        assert_eq!(Baseline::parse(&baseline.render()).unwrap(), baseline);
     }
 
     #[test]

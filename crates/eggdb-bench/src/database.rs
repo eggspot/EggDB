@@ -1,6 +1,7 @@
 use crate::allocations::CountingAllocator;
 use crate::baseline::Metric;
-use crate::btree::{key, value};
+use crate::bench_file::BenchFile;
+use crate::entries::{key, value};
 use crate::measure;
 use eggdb::{Database, Durability, Options};
 use eggdb_platform::{OsFile, OsFileSystem, OsMemory, SystemClock};
@@ -8,7 +9,7 @@ use eggdb_storage::{
     Access, BTree, CacheSize, CreateOptions, PageCache, PageFile, StorageError, Store,
 };
 use std::hint::black_box;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 const READ_ENTRIES: u64 = 100_000;
@@ -21,36 +22,6 @@ const OPEN_CACHE_BYTES: usize = 16 << 20;
 pub(crate) const READ: &str = "database.read";
 pub(crate) const WRITE: &str = "database.write";
 pub(crate) const OPEN: &str = "database.open";
-
-pub(crate) struct BenchFile {
-    pub(crate) path: PathBuf,
-}
-
-impl BenchFile {
-    pub(crate) fn new(name: &str) -> Result<Self, String> {
-        let file = format!("eggdb-bench-{name}-{}.db", std::process::id());
-        let bench_file = Self {
-            path: std::env::temp_dir().join(file),
-        };
-        bench_file.remove()?;
-        Ok(bench_file)
-    }
-
-    fn remove(&self) -> Result<(), String> {
-        match std::fs::remove_file(&self.path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                Err(format!("{}: {error}", self.path.display()))
-            }
-            _ => Ok(()),
-        }
-    }
-}
-
-impl Drop for BenchFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
 
 pub(crate) fn failed<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> String + '_ {
     move |error| format!("{what}: {error}")
