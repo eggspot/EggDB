@@ -788,3 +788,25 @@ fn a_failed_commit_leaves_the_store_needing_a_reopen_for_writers_and_readers() {
     let (store, tree) = reopened(&fs, 32, &october_clock());
     assert_eq!(committed(&store, &tree), model);
 }
+
+#[test]
+fn a_rollback_keeps_a_reader_that_lost_its_images_expired() {
+    let fs = SimFileSystem::new();
+    let (store, tree) = created(&fs, 64, &october_clock());
+    let before = fill(&store, &tree, 600, 60);
+    store.set_snapshot_memory(CacheSize::Pages(4)).unwrap();
+    let older = store.begin_read().unwrap();
+    let mut first = store.begin_write().unwrap();
+    first.put(&tree, &key(1), b"first").unwrap();
+    first.commit().unwrap();
+    assert_eq!(older.get(&tree, &key(1)).unwrap().unwrap(), before[&key(1)]);
+    let mut write = store.begin_write().unwrap();
+    change_every_twentieth(&mut write, &tree);
+    drop(write);
+    assert!(matches!(
+        older.get(&tree, &key(1)),
+        Err(StorageError::SnapshotTooOld)
+    ));
+    let fresh = store.begin_read().unwrap();
+    assert_eq!(fresh.get(&tree, &key(1)).unwrap().unwrap(), b"first");
+}
