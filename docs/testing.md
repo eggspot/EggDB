@@ -70,7 +70,65 @@ numbers) with checksums fixed, swapped chain pages, other page types and layouts
 flagged as references, and truncated files. Each case must open, read, scan, check and, for a
 quarter of them, write and commit without a panic, a hang or an out-of-memory error, a length
 past the file must be refused before anything is allocated, and a check that passes must mean
-every read works. It is the seed corpus for the item 12 fuzzer.
+every read works. Its mutations of references and chains are not repeated by the hostile-file fuzzer below.
+
+## Against a model: random use of the store and the API (D89)
+`crates/eggdb-storage/src/model_tests.rs` drives a `Store` on the simulator through seeded random
+steps and compares every read with a `BTreeMap` of what was committed:
+- write transactions of one to forty changes: puts of empty, small, leaf-limit and overflow
+  values (one to sixteen pages), puts over existing keys, deletes of present and absent keys,
+  keys from empty to the longest allowed with bytes 0x00 and 0xFF, keys and values over the
+  limits refused with the transaction left open, and gets and range scans inside the
+  transaction, which see its own changes;
+- commits, explicit rollbacks, dropped transactions, and transactions that fill the cache and
+  must then refuse every call while the store takes a new writer;
+- a read transaction begun before a writer, which must still read its snapshot after the
+  commit;
+- gets, full scans in both orders, range scans with every kind of bound and prefix scans in
+  both orders, and `check`, whose counts of entries, key and value bytes and overflow values
+  must match the model, with no leaked page;
+- checkpoints, syncs, reopens, read-only opens that must refuse a writer, power losses that drop
+  or tear unsynced writes, and I/O faults injected into commits, checkpoints and syncs, some
+  followed by a power loss and some by a fault during recovery.
+
+After a reopen the store must hold exactly one commit at or after the last one that was durable
+(every acknowledged commit under `Full`, or with no power loss; the last synced one under
+`Normal`), or the commit whose failure was reported. A third of the seeds use a 40-page cache so
+transactions run out of frames. CI runs 12 seeds of 250 steps (about 2 s of a debug build);
+`EGGDB_MODEL_TEST=1` runs 256 seeds of 3,000 steps.
+
+`crates/eggdb/tests/model.rs` does the same through the embedded API on real files: closure and
+one-step transactions, rollbacks by an error from the closure, every range form, prefixes,
+scans that take entries from both ends at random, `check` and `stats`, closes, drops and
+read-only reopens.
+
+## Hostile files (D89)
+`crates/eggdb-storage/tests/hostile_files.rs` is a seeded fuzzer with no outside tools. It builds
+five valid files (checkpointed; with a log to replay; with a log that wrapped through its
+recycled segments and gave segments to the free list; cut off by a torn power loss; with 16 KiB
+pages) and damages each case with one to three of 22 mutations:
+- bit flips anywhere, in a leaf or in the log; truncation anywhere, at a page boundary or one
+  byte short; garbage or zeros appended; a page or a range zeroed;
+- pages swapped or copied over each other, raw or with their checksums fixed for their new
+  place;
+- a superblock field (version, page size, generation, features, page count, free list, catalog
+  root, checkpoint position, log head and sequence, segment length, recycled segments,
+  reservation) set to an interesting number with the checksum fixed, in the newest slot or in
+  both, and raw header bytes;
+- bytes, 16-bit and 64-bit fields of inner, leaf, overflow and free-list pages, their headers
+  (type, layout, flags, `lsn`) and the free list's next page, count and entries, rewritten with
+  valid page checksums;
+- log bytes and log blocks copied over each other.
+
+Each case opens the file read-only and then for writing, reads every key, scans both ways, by a
+prefix and by a range, runs `check`, writes a small and a large value, deletes a key, commits,
+checkpoints and reopens. Errors are expected; the test fails on a panic, on a case running more
+than a minute, on a scan returning more entries than the file can hold, on one allocation larger
+than twice the file plus 16 MiB (a global allocator records the largest per thread), and on a
+file that passes `check` but fails a read, or fails `check` or a reopen after a commit. Cases run
+on every core, and a failure names its seed and case. CI runs 1,600 cases (about 13 s of a debug
+build); `EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run longer campaigns, and the counts of the last
+one are in D89.
 
 ## Each layer
 - **Page file:** creating, growing and freeing pages, both header slots and a torn header update,
@@ -81,7 +139,10 @@ every read works. It is the seed corpus for the item 12 fuzzer.
   replaying it (`log.rs`).
 - **Checkpoints and recovery:** a crash at every operation of a checkpoint, of a checkpoint that
   frees segments, of commits that move to a new or recycled segment, and of recovering a wrapped
-  log; damage to the newest header slot; mutated logs (`checkpoint_tests.rs`).
+  log; damage to the newest header slot, also after a crash between a freeing checkpoint's two
+  header writes and after a crash in the first flush into a recycled segment, each followed by
+  an open for writing that must leave the older slot a copy; mutated logs
+  (`checkpoint_tests.rs`).
 - **Page cache:** eviction, pinning, refusing every read and change after a failed commit, and a
   crash at every operation of a commit (`page_cache.rs`).
 - **B+tree:** splits, deletes, merges, cursors and `check` against a model, and crafted pages that
@@ -99,8 +160,9 @@ every read works. It is the seed corpus for the item 12 fuzzer.
   opening and checking don't panic.
 - Several writers (M3) and transactions larger than the cache, which fail with `CacheFull` until
   M3.
-- Damage to bytes after they were synced, beyond the header-slot and crafted-log tests: the
-  limits are in format.md, "Damage to the newest header slot" (issue #39).
-- A fuzzer for hostile files (roadmap row 12) beyond the seeded mutation tests, and real disks:
-  the simulator's model of a power loss is sector-sized pieces of unsynced writes, not every
-  behavior of real hardware.
+- Damage to bytes after they were synced, beyond the header-slot tests, the crafted logs and the
+  hostile-file fuzzer: the limits are in format.md, "Damage to the newest header slot".
+- Log records forged with valid record checksums are tested at the log's layer
+  (`checkpoint_tests.rs`, `log.rs`), not by the whole-file fuzzer, which can only damage them.
+- Real disks: the simulator's model of a power loss is sector-sized pieces of unsynced writes,
+  not every behavior of real hardware.
