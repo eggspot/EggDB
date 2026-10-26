@@ -74,6 +74,14 @@ pub enum FormatError {
         /// The damaged record's byte offset from the start of that segment.
         offset: u64,
     },
+    /// A page of a B+tree breaks the tree's rules: its layout is impossible, its cells overlap
+    /// or are out of order, or it does not fit where its parent puts it.
+    CorruptTree {
+        /// The page where the damage was found.
+        page: u64,
+        /// The rule the page breaks.
+        problem: &'static str,
+    },
 }
 
 impl fmt::Display for FormatError {
@@ -121,6 +129,10 @@ impl fmt::Display for FormatError {
             Self::CorruptLog { segment, offset } => write!(
                 f,
                 "the write-ahead log is damaged in the segment at page {segment}, at byte {offset}, after it was made durable; restore from a backup or run `eggdb check`"
+            ),
+            Self::CorruptTree { page, problem } => write!(
+                f,
+                "the B+tree page {page} is damaged: {problem}; restore from a backup or run `eggdb check`"
             ),
         }
     }
@@ -199,6 +211,22 @@ pub enum StorageError {
         /// The number of pages the size works out to.
         pages: usize,
     },
+    /// A key is longer than a B+tree of this page size stores (see
+    /// [`BTree::max_key_bytes`](crate::BTree::max_key_bytes)).
+    KeyTooLarge {
+        /// The key's length.
+        bytes: usize,
+        /// The longest key allowed.
+        max: usize,
+    },
+    /// A key and its value together are longer than a B+tree of this page size stores in a
+    /// leaf (see [`BTree::max_entry_bytes`](crate::BTree::max_entry_bytes)).
+    EntryTooLarge {
+        /// The key's and the value's lengths together.
+        bytes: usize,
+        /// The most allowed.
+        max: usize,
+    },
 }
 
 impl From<eggdb_platform::Error> for StorageError {
@@ -264,6 +292,14 @@ impl fmt::Display for StorageError {
                 f,
                 "a page cache of {pages} pages is outside the allowed range of 1 to {} pages",
                 crate::page_cache::MAX_FRAMES
+            ),
+            Self::KeyTooLarge { bytes, max } => write!(
+                f,
+                "a key of {bytes} bytes is longer than the {max} bytes a key may have with this page size"
+            ),
+            Self::EntryTooLarge { bytes, max } => write!(
+                f,
+                "a key and value of {bytes} bytes together are longer than the {max} bytes an entry may have with this page size; values stored outside the tree come later"
             ),
         }
     }

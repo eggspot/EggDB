@@ -14,6 +14,7 @@ pub(crate) const MAX_FRAMES: u32 = u32::MAX;
 
 const REFERENCED: u8 = 1;
 const DIRTY: u8 = 2;
+const CONTENTS_CHECKED: u8 = 4;
 
 const EMPTY_FRAME_HEADER: PageHeader = PageHeader {
     page_type: PageType::FreeList,
@@ -185,6 +186,7 @@ impl<F: File> PageCache<F> {
             bytes,
             page_id,
             header: self.headers[frame].get(),
+            state: &self.states[frame],
         })
     }
 
@@ -212,6 +214,7 @@ impl<F: File> PageCache<F> {
             bytes,
             page_id,
             header: &self.headers[frame],
+            state: &self.states[frame],
         })
     }
 
@@ -229,6 +232,7 @@ impl<F: File> PageCache<F> {
             bytes,
             page_id,
             header: &self.headers[frame],
+            state: &self.states[frame],
         })
     }
 
@@ -467,6 +471,7 @@ pub struct PageRef<'a> {
     bytes: FrameRef<'a>,
     page_id: u64,
     header: PageHeader,
+    state: &'a Cell<u8>,
 }
 
 impl PageRef<'_> {
@@ -478,6 +483,19 @@ impl PageRef<'_> {
     /// The page's header.
     pub fn header(&self) -> PageHeader {
         self.header
+    }
+
+    /// Whether the structure that owns the page has checked its contents since the cache last
+    /// read it from the file. The cache clears this whenever it reads a page in, so a structure
+    /// checks each page once per read from the file instead of on every use (D9).
+    pub fn contents_checked(&self) -> bool {
+        self.state.get() & CONTENTS_CHECKED != 0
+    }
+
+    /// Records that the page's contents passed its structure's checks, until the cache next
+    /// reads it from the file.
+    pub fn set_contents_checked(&self) {
+        self.state.set(self.state.get() | CONTENTS_CHECKED);
     }
 }
 
@@ -497,6 +515,7 @@ pub struct PageMut<'a> {
     bytes: FrameMut<'a>,
     page_id: u64,
     header: &'a Cell<PageHeader>,
+    state: &'a Cell<u8>,
 }
 
 impl PageMut<'_> {
@@ -516,6 +535,19 @@ impl PageMut<'_> {
         check_header(&header)?;
         self.header.set(header);
         Ok(())
+    }
+
+    /// Whether the structure that owns the page has checked its contents since the cache last
+    /// read it from the file (see [`PageRef::contents_checked`]). A page allocated in this
+    /// cache starts unchecked.
+    pub fn contents_checked(&self) -> bool {
+        self.state.get() & CONTENTS_CHECKED != 0
+    }
+
+    /// Records that the page's contents are valid for its structure, until the cache next
+    /// reads it from the file.
+    pub fn set_contents_checked(&self) {
+        self.state.set(self.state.get() | CONTENTS_CHECKED);
     }
 }
 
