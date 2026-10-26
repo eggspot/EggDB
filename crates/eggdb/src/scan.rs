@@ -72,7 +72,35 @@ impl<K: AsRef<[u8]>> sealed::Bounds for (Bound<K>, Bound<K>) {
     }
 }
 
-type Entry<'a> = (&'a [u8], &'a [u8]);
+#[derive(Clone, Copy)]
+enum Wanted {
+    Values,
+    Lengths,
+}
+
+struct Lent<'a> {
+    key: &'a [u8],
+    value: &'a [u8],
+    value_len: u64,
+}
+
+impl<'a> Lent<'a> {
+    fn with_value((key, value): (&'a [u8], &'a [u8])) -> Self {
+        Self {
+            key,
+            value,
+            value_len: value.len() as u64,
+        }
+    }
+
+    fn without_value((key, value_len): (&'a [u8], u64)) -> Self {
+        Self {
+            key,
+            value: &[],
+            value_len,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum Reader<'t> {
@@ -81,10 +109,24 @@ pub(crate) enum Reader<'t> {
 }
 
 impl Reader<'_> {
-    fn next(self, cursor: &mut Cursor) -> std::result::Result<Option<Entry<'_>>, StorageError> {
-        match self {
-            Self::Snapshot(transaction) => transaction.next(cursor),
-            Self::Writer(transaction) => transaction.next(cursor),
+    fn lend(
+        self,
+        cursor: &mut Cursor,
+        wanted: Wanted,
+    ) -> std::result::Result<Option<Lent<'_>>, StorageError> {
+        match (self, wanted) {
+            (Self::Snapshot(transaction), Wanted::Values) => {
+                Ok(transaction.next(cursor)?.map(Lent::with_value))
+            }
+            (Self::Writer(transaction), Wanted::Values) => {
+                Ok(transaction.next(cursor)?.map(Lent::with_value))
+            }
+            (Self::Snapshot(transaction), Wanted::Lengths) => Ok(transaction
+                .next_key_and_value_len(cursor)?
+                .map(Lent::without_value)),
+            (Self::Writer(transaction), Wanted::Lengths) => Ok(transaction
+                .next_key_and_value_len(cursor)?
+                .map(Lent::without_value)),
         }
     }
 }
@@ -128,8 +170,10 @@ struct End {
 ///
 /// **Cost.** Each item is a key and a value copied into two new `Vec<u8>`s. A loop that only
 /// looks at the bytes can avoid those copies with [`Scan::next_entry`], which lends them
-/// instead. The scan underneath copies one leaf page of entries at a time into a buffer it
-/// reuses, and holds no page of the database between calls. A large value, stored on overflow
+/// instead, and a loop that needs only keys and the sizes of their values can skip reading
+/// values altogether with [`Scan::next_key_and_value_len`]. The scan underneath copies one leaf
+/// page of entries at a time into a buffer it reuses, and holds no page of the database
+/// between calls. A large value, stored on overflow
 /// pages, is copied whole into that buffer and ends the leaf's batch, so the buffer holds at
 /// most one large value; as an owned item it is copied once more, so it costs twice its size
 /// in memory until the item is dropped.
@@ -217,7 +261,9 @@ impl<'t> Scan<'t> {
     /// # Ok(()) }
     /// ```
     pub fn next_entry(&mut self) -> Result<Option<(&[u8], &[u8])>> {
-        self.step(ScanOrder::Ascending)
+        Ok(self
+            .step(ScanOrder::Ascending, Wanted::Values)?
+            .map(|lent| (lent.key, lent.value)))
     }
 
     /// The next entry from the back, lent like [`Scan::next_entry`]: the reverse scan without
@@ -243,10 +289,70 @@ impl<'t> Scan<'t> {
     /// # Ok(()) }
     /// ```
     pub fn next_back_entry(&mut self) -> Result<Option<(&[u8], &[u8])>> {
-        self.step(ScanOrder::Descending)
+        Ok(self
+            .step(ScanOrder::Descending, Wanted::Values)?
+            .map(|lent| (lent.key, lent.value)))
     }
 
-    fn step(&mut self, order: ScanOrder) -> Result<Option<Entry<'_>>> {
+    /// The next key from the front and the length in bytes of its value, which is not read:
+    /// a large value's length comes from its reference, so none of its pages is touched. The
+    /// key stays valid until the next call; `Ok(None)` once the scan is done. This is the step
+    /// for listing or counting keys. It mixes freely with the other steps of the scan.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-next-key-len-{}.db", std::process::id()));
+    /// let db = eggdb::Database::open(&path)?;
+    /// db.put("a", "12")?;
+    /// db.put("b", vec![0u8; 1 << 20])?;
+    /// let tx = db.begin_read()?;
+    /// let mut scan = tx.scan(..);
+    /// let mut lengths = Vec::new();
+    /// while let Some((key, value_len)) = scan.next_key_and_value_len()? {
+    ///     lengths.push((key.to_vec(), value_len));
+    /// }
+    /// assert_eq!(lengths, [(b"a".to_vec(), 2), (b"b".to_vec(), 1 << 20)]);
+    /// # drop(scan);
+    /// # drop(tx);
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn next_key_and_value_len(&mut self) -> Result<Option<(&[u8], u64)>> {
+        Ok(self
+            .step(ScanOrder::Ascending, Wanted::Lengths)?
+            .map(|lent| (lent.key, lent.value_len)))
+    }
+
+    /// The next key from the back and its value's length, like
+    /// [`Scan::next_key_and_value_len`]: the reverse key listing without reading values.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-next-back-key-len-{}.db", std::process::id()));
+    /// let db = eggdb::Database::open(&path)?;
+    /// db.put("a", "12")?;
+    /// db.put("b", "345")?;
+    /// let tx = db.begin_read()?;
+    /// let mut scan = tx.scan(..);
+    /// let mut lengths = Vec::new();
+    /// while let Some((key, value_len)) = scan.next_back_key_and_value_len()? {
+    ///     lengths.push((key.to_vec(), value_len));
+    /// }
+    /// assert_eq!(lengths, [(b"b".to_vec(), 3), (b"a".to_vec(), 2)]);
+    /// # drop(scan);
+    /// # drop(tx);
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn next_back_key_and_value_len(&mut self) -> Result<Option<(&[u8], u64)>> {
+        Ok(self
+            .step(ScanOrder::Descending, Wanted::Lengths)?
+            .map(|lent| (lent.key, lent.value_len)))
+    }
+
+    fn step(&mut self, order: ScanOrder, wanted: Wanted) -> Result<Option<Lent<'_>>> {
         let Some(tree) = self.tree.filter(|_| !self.finished) else {
             return Ok(None);
         };
@@ -256,7 +362,7 @@ impl<'t> Scan<'t> {
         };
         let keys = &self.keys;
         let cursor = this.cursor.get_or_insert_with(|| keys.cursor(&tree, order));
-        let entry = match self.reader.next(cursor) {
+        let entry = match self.reader.lend(cursor, wanted) {
             Ok(Some(entry)) => entry,
             Ok(None) => {
                 self.finished = true;
@@ -267,7 +373,7 @@ impl<'t> Scan<'t> {
                 return Err(Error::storage(error));
             }
         };
-        let (key, _) = entry;
+        let key = entry.key;
         let crossed = other.returned_any
             && match order {
                 ScanOrder::Ascending => key >= other.last_key.as_slice(),
@@ -284,8 +390,8 @@ impl<'t> Scan<'t> {
     }
 
     fn step_owned(&mut self, order: ScanOrder) -> Option<Result<(Vec<u8>, Vec<u8>)>> {
-        self.step(order)
-            .map(|entry| entry.map(|(key, value)| (key.to_vec(), value.to_vec())))
+        self.step(order, Wanted::Values)
+            .map(|entry| entry.map(|lent| (lent.key.to_vec(), lent.value.to_vec())))
             .transpose()
     }
 }

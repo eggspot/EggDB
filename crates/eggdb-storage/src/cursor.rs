@@ -31,6 +31,12 @@ pub enum ScanOrder {
 /// leaf of small entries and one large value, and a buffer grown past a megabyte is released
 /// when its batch is done.
 ///
+/// [`Cursor::next_key_and_value_len`] steps through the same entries without their values: it
+/// copies only keys and takes each value's length from its cell, or from a large value's
+/// reference, so it never reads an overflow page. Mixing the two steps on one cursor works:
+/// the first call of the other kind drops the rest of the batch and looks the tree up again
+/// just past the last entry returned.
+///
 /// A change reaches the cursor when it lands in a part of the tree the cursor has not copied
 /// yet; the entries it has copied are as they were when it copied them. Every page is checked
 /// as for [`BTree::get`](crate::BTree::get), so a damaged page fails with an error, and every
@@ -46,9 +52,11 @@ pub struct Cursor {
     bytes: Vec<u8>,
     entries: Vec<Entry>,
     position: usize,
+    values: Values,
 }
 
 pub(crate) type KeyAndValue<'a> = (&'a [u8], &'a [u8]);
+pub(crate) type KeyAndValueLen<'a> = (&'a [u8], u64);
 type Fence<'a> = (&'a [u8], &'a [u8]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,17 +69,24 @@ enum Seek {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Values {
+    Copied,
+    LengthsOnly,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Entry {
     key_start: usize,
     value_start: usize,
     value_end: usize,
+    value_len: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Copied {
-    Inline,
-    Overflow,
+    Entry,
+    EntryWithLargeValue,
     OutOfRange,
 }
 
@@ -112,6 +127,7 @@ impl Cursor {
             bytes: Vec::new(),
             entries: Vec::new(),
             position: 0,
+            values: Values::Copied,
         }
     }
 
@@ -132,6 +148,50 @@ impl Cursor {
         &mut self,
         pages: &impl PageSource,
     ) -> Result<Option<KeyAndValue<'_>>, StorageError> {
+        let Some(entry) = self.advance(pages, Values::Copied)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            &self.bytes[entry.key_start..entry.value_start],
+            &self.bytes[entry.value_start..entry.value_end],
+        )))
+    }
+
+    /// The next entry's key and its value's length in bytes, or `None` once the range is
+    /// done: [`Cursor::next`] without the value. The key stays valid until the next call.
+    ///
+    /// A large value's length comes from the reference in its leaf, so none of its overflow
+    /// pages is read, and its key does not end the batch of keys copied from the leaf. Errors
+    /// are as for [`Cursor::next`].
+    pub fn next_key_and_value_len<F: File>(
+        &mut self,
+        cache: &PageCache<F>,
+    ) -> Result<Option<KeyAndValueLen<'_>>, StorageError> {
+        self.next_key_and_value_len_in(cache)
+    }
+
+    pub(crate) fn next_key_and_value_len_in(
+        &mut self,
+        pages: &impl PageSource,
+    ) -> Result<Option<KeyAndValueLen<'_>>, StorageError> {
+        let Some(entry) = self.advance(pages, Values::LengthsOnly)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            &self.bytes[entry.key_start..entry.value_start],
+            entry.value_len,
+        )))
+    }
+
+    fn advance(
+        &mut self,
+        pages: &impl PageSource,
+        values: Values,
+    ) -> Result<Option<Entry>, StorageError> {
+        if values != self.values {
+            self.seek_past_returned();
+            self.values = values;
+        }
         while self.position == self.entries.len() {
             if self.seek == Seek::Done {
                 return Ok(None);
@@ -150,10 +210,36 @@ impl Cursor {
         }
         let entry = self.entries[self.position];
         self.position += 1;
-        Ok(Some((
-            &self.bytes[entry.key_start..entry.value_start],
-            &self.bytes[entry.value_start..entry.value_end],
-        )))
+        Ok(Some(entry))
+    }
+
+    fn seek_past_returned(&mut self) {
+        if self.position == self.entries.len() {
+            return;
+        }
+        let (anchor, seek) = match self.position.checked_sub(1) {
+            Some(returned) => (
+                self.entries[returned],
+                match self.order {
+                    ScanOrder::Ascending => Seek::After,
+                    ScanOrder::Descending => Seek::Before,
+                },
+            ),
+            None => (
+                self.entries[0],
+                match self.order {
+                    ScanOrder::Ascending => Seek::AtOrAfter,
+                    ScanOrder::Descending => Seek::AtOrBefore,
+                },
+            ),
+        };
+        self.seek_key.clear();
+        self.seek_key
+            .extend_from_slice(&self.bytes[anchor.key_start..anchor.value_start]);
+        self.seek = seek;
+        self.bytes.clear();
+        self.entries.clear();
+        self.position = 0;
     }
 
     fn read_leaf(&mut self, pages: &impl PageSource) -> Result<(), StorageError> {
@@ -273,12 +359,12 @@ impl Cursor {
     ) -> Result<Batch, StorageError> {
         for index in first..shape.count {
             match self.copy_entry(pages, shape, leaf, index)? {
-                Copied::Inline => {}
+                Copied::Entry => {}
                 Copied::OutOfRange => return Ok(Batch::RangeDone),
-                Copied::Overflow if index + 1 < shape.count => {
+                Copied::EntryWithLargeValue if index + 1 < shape.count => {
                     return Ok(Batch::StoppedAfterLargeValue);
                 }
-                Copied::Overflow => {}
+                Copied::EntryWithLargeValue => {}
             }
         }
         Ok(Batch::LeafDone)
@@ -293,10 +379,12 @@ impl Cursor {
     ) -> Result<Batch, StorageError> {
         for index in (0..end).rev() {
             match self.copy_entry(pages, shape, leaf, index)? {
-                Copied::Inline => {}
+                Copied::Entry => {}
                 Copied::OutOfRange => return Ok(Batch::RangeDone),
-                Copied::Overflow if index > 0 => return Ok(Batch::StoppedAfterLargeValue),
-                Copied::Overflow => {}
+                Copied::EntryWithLargeValue if index > 0 => {
+                    return Ok(Batch::StoppedAfterLargeValue);
+                }
+                Copied::EntryWithLargeValue => {}
             }
         }
         Ok(Batch::LeafDone)
@@ -324,17 +412,24 @@ impl Cursor {
             return Ok(Copied::OutOfRange);
         }
         let value_start = self.bytes.len();
-        let copied = if cell.overflow {
-            self.copy_large_value(pages, shape, &cell)?;
-            Copied::Overflow
-        } else {
-            self.bytes.extend_from_slice(cell.payload);
-            Copied::Inline
+        let (copied, value_len) = match (cell.overflow, self.values) {
+            (false, Values::Copied) => {
+                self.bytes.extend_from_slice(cell.payload);
+                (Copied::Entry, cell.payload.len() as u64)
+            }
+            (false, Values::LengthsOnly) => (Copied::Entry, cell.payload.len() as u64),
+            (true, Values::Copied) => {
+                self.copy_large_value(pages, shape, &cell)?;
+                let value_len = (self.bytes.len() - value_start) as u64;
+                (Copied::EntryWithLargeValue, value_len)
+            }
+            (true, Values::LengthsOnly) => (Copied::Entry, large_value_len(pages, shape, &cell)?),
         };
         self.entries.push(Entry {
             key_start,
             value_start,
             value_end: self.bytes.len(),
+            value_len,
         });
         Ok(copied)
     }
@@ -360,6 +455,19 @@ impl Cursor {
             overflow::read_value(pages, &reference, &mut self.bytes)?;
         }
         Ok(())
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn large_value_len(
+    pages: &impl PageSource,
+    shape: &Shape,
+    cell: &CellRef<'_>,
+) -> Result<u64, StorageError> {
+    match shape.overflow_reference(cell)? {
+        Some(reference) => overflow::checked_length(pages, &reference).map(|len| len as u64),
+        None => Ok(0),
     }
 }
 

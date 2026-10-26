@@ -1,5 +1,5 @@
 use crate::btree::{BTree, TreeReport};
-use crate::cursor::{Cursor, KeyAndValue};
+use crate::cursor::{Cursor, KeyAndValue, KeyAndValueLen};
 use crate::error::StorageError;
 use crate::format::{NO_PAGE, Superblock};
 use crate::hybrid_clock::{CommitStamp, HybridClock};
@@ -314,6 +314,20 @@ impl<F: File> ReadTransaction<'_, F> {
         };
         cursor.next_in(&snapshot)
     }
+
+    /// The next key of `cursor` and its value's length, as of the snapshot, without reading
+    /// the value (see [`Cursor::next_key_and_value_len`]).
+    pub fn next_key_and_value_len<'c>(
+        &self,
+        cursor: &'c mut Cursor,
+    ) -> Result<Option<KeyAndValueLen<'c>>, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        cursor.next_key_and_value_len_in(&snapshot)
+    }
 }
 
 impl<F: File> Drop for ReadTransaction<'_, F> {
@@ -409,6 +423,17 @@ impl<F: File> WriteTransaction<'_, F> {
         self.check_open()?;
         let state = self.store.lock()?;
         cursor.next_in(&state.cache)
+    }
+
+    /// The next key of `cursor` and its value's length, this transaction's changes included,
+    /// without reading the value (see [`Cursor::next_key_and_value_len`]).
+    pub fn next_key_and_value_len<'c>(
+        &self,
+        cursor: &'c mut Cursor,
+    ) -> Result<Option<KeyAndValueLen<'c>>, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        cursor.next_key_and_value_len_in(&state.cache)
     }
 
     /// Checks that [`WriteTransaction::put`] would accept `key` and `value`, as
