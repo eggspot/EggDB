@@ -3578,3 +3578,117 @@ with a scan of the reopened file.
 **Size (D6).** The release binary grows from 750,704 to 866,912 bytes (+116,208, +15.5%) on
 aarch64 macOS: the editors, modals, check screen and error texts the UI did not have. The
 library is unchanged.
+
+## D93 `eggdb export` and `eggdb import`: the eggdb-jsonl format, a checked pass before writing, batched commits and new files built aside — Decided by research (build loop, 2026-10-27); completes v0.2.0 item 16, refines D9, D13, D15 and D90
+Item 16 lets a database move between files, versions and machines as text: `eggdb export <file>
+[<out> | -]` writes it as JSON lines and `eggdb import <file> [<in> | -]` loads such a file. The
+user guide is `docs/cli.md`, section "`export` and `import`".
+
+**The format, eggdb-jsonl version 1.** UTF-8 text, one JSON object per line, each line ended by
+`\n`:
+- a header first: `{"format":"eggdb-jsonl","version":1,"eggdb":"0.2.0","page_size":4096,
+  "exported_at":"2026-10-27T09:14:07.123456Z"}`; `format` and `version` are required, the other
+  three informational (`page_size` is the page size a new file gets on import);
+- one line per entry, in ascending byte order of the keys: `{"key":…,"value":…}`;
+- a trailer last: `{"entries":N}`, the number of entry lines, so a cut file is refused.
+
+A key or value is written as a JSON string (`"key"`, `"value"`) when its bytes are UTF-8 without
+control characters other than tab, line feed and carriage return, and otherwise as lowercase hex
+(`"key_hex"`, `"value_hex"`). This is the field-name tag `scan --format json` already uses, with
+a stricter rule for text, so an escaped string is never more than twice its bytes. Hex rather
+than base64 because the CLI speaks hex everywhere else (`0x` arguments, `--format hex`,
+`key_hex`); a later version may add a base64 tag without breaking this one. Import reads both
+spellings and any JSON a tool might write for them: whitespace between tokens, fields in any
+order, every JSON escape including surrogate pairs, hex of either case. It refuses what is not
+exactly that: an unknown or repeated field, both spellings of one field, a raw control character
+or a lone surrogate in a string, invalid UTF-8 in a text field, an odd or non-hex digit, a
+number with a sign, fraction, exponent or leading zero, an empty line, a second header, a
+version other than 1 (above 1: "from a newer EggDB; upgrade"), a page size that is not one, a
+missing or wrong trailer count, and anything after the trailer. Every refusal names its line.
+
+**Bounded memory (D9).** Import never holds a line: a reader of our own decodes straight from a
+64 KiB buffer into the key and value, so the bytes it holds are the decoded entry, and it stops
+a key at 8 KiB (the longest key any page size stores) and a value at 1 GiB while decoding, before
+taking more memory. A line is also capped at twice the largest entry plus 64 KiB, about 2 GiB,
+so endless whitespace is refused with its line number. Export reads through one read
+transaction with the lending scan, and writes each value through a 256 KiB buffer in 8 KiB
+pieces of hex or escaped text; a value is held whole only because the engine reads it whole.
+So the largest entry costs its own size in each direction, plus the page cache import needs to
+commit it (below).
+
+**Writing, and what a failure leaves.** One write transaction cannot hold a large import, since
+a transaction keeps every page it changes in the page cache until it commits. Import therefore:
+- with a file to read, first checks the whole export (syntax, header, trailer count, key order
+  and sizes against the target's page size, and with the default `--on-conflict error`, every
+  key against those already in the target) and writes nothing when it finds a problem; only an
+  I/O error or a full disk can then stop the writing part way;
+- commits in batches of at most 4 MiB of keys and values and 2 MiB of pages' worth of entries
+  (512 entries with 4 KiB pages, 32 with 64 KiB), with `Durability::Normal` and a sync when the
+  file closes, in a 32 MiB page cache; an entry above 4 MiB is a commit of its own, and the
+  cache grows to fit it (the file is reopened with a larger cache, as `put` sizes its cache to
+  its value), unless `--cache` was given;
+- from stdin, which cannot be read twice, stops at a bad line after the batches before it and
+  says how many entries were committed, so the same export can be imported again with
+  `--on-conflict skip`; `--dry-run` checks an export without writing anything;
+- with `--create` and no file at the path, builds the database as `<file>.importing`, syncs it,
+  renames it into place only after the whole import succeeded and syncs the directory, so a
+  failed or interrupted restore never leaves a half-filled `<file>`; a `<file>.importing` left
+  by a crash is refused, never reused or removed.
+
+**Keys in ascending order.** Import requires each key to be above the one before, which
+`eggdb export` always writes. It finds a key repeated in the export with no memory beyond the
+previous key, lets the checked pass see every conflict before writing, and leaves room for a
+faster append path later; accepting any order could come later as an option, while going from
+loose to strict would break files people already have. A key equal to the previous one follows
+`--on-conflict` like a key already in the target: `error` (the default) stops, `overwrite` keeps
+the later value, `skip` the earlier.
+
+**The command line.** As Claude Fable's design sketched them (`docs/ux/cli.md`, section 2): the
+second argument is the export file, `-` or nothing meaning stdout for `export` and stdin for
+`import`; `import` with neither a file nor a pipe is a usage error. `export` never replaces a
+file (like `create`) and removes the partial file when it fails. `import` makes a file only with
+`--create`, like `put --create`, with the export's page size unless `--page-size` says
+otherwise; `--page-size` on an existing file is a usage error. Errors are exit 3 (an unreadable
+export file is exit 2, like an unreadable `@file`); a closed pipe ends an export with exit 0.
+The summary goes to stdout in `text` or `json`; an export to stdout prints its summary to stderr
+only on a terminal, and both commands show a progress line on stderr, redrawn at most once a
+second, only when stderr is a terminal.
+
+**Tests.** Unit tests of the format: the exact bytes of an export, 300 random exports of random
+bytes and text (quotes, backslashes, line breaks, control and C1 characters, emoji) read back
+through a reader that returns one to nine bytes per call and `Interrupted` errors, values of
+3 MiB crossing every buffer boundary, the other spellings import accepts, 49 refusals each with
+its line and message, the key and line limits, and a seeded fuzzer that mutates valid exports
+(bit flips, bytes replaced, cut, deleted, JSON tokens inserted, lines moved, noise) or makes
+random bytes, through the trickling reader, and requires a refusal with a line or entries within
+the limits, never a panic, an input error or a case over 5 s: 4,000 cases in CI,
+`EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` for campaigns (2,000,000 cases in 5.7 s of a release
+build on this Mac, no failure). In-process command tests: every kind of entry (text, binary, the
+empty key, an empty value, 5 MiB of binary, 3.7 MiB of text) through a file and through a pipe,
+an empty database, the text and JSON reports, the three conflict policies, keys repeated and out
+of order, 1,500 entries from stdin with a bad last line (1,024 committed, `check` passes), a
+failed import into a new file leaving nothing, a stale `.importing` refused, 4,000-byte keys
+keeping 64 KiB pages and refused with 4 KiB ones, the dry run, every usage and file error, a
+closed pipe, and 150 mutated exports imported into new and existing files (exit 0 or 3, `check`
+passes, nothing left behind, an existing file unchanged when nothing was imported). Through the
+real binary: the acceptance check (text, binary, empty key, empty value and a 6 MiB value put
+with the CLI, exported, imported into a fresh file from the file and from a pipe, `scan`
+identical, `check` passing on all three), the help and random arguments with the new words.
+
+**Size (D6).** The release binary grows from 866,912 to 933,296 bytes (+66,384, +7.7%) on
+aarch64 macOS: about 34 KB is the format reader and writer and the two commands, the rest their
+help and messages and the standard library's file creation, rename and clock code they use. The
+library is unchanged, and no engine path changed, so the gated benchmarks are unaffected.
+
+Decided by research (a research subagent, 2026-10-27), where the brief and the design differed
+or were silent:
+- *`--out`/`--from` or a second argument?* The second argument, as the design's grammar has it;
+  `--from` already means "first key" on `scan`, and two spellings were not wanted.
+- *Replace an existing export file?* No, like `create`; `-` and the shell's `>` replace files.
+- *Create a missing database?* Only with `--create`, like `put --create`, so a typo in the path
+  never becomes a new file.
+- *Atomic or batched?* Batched, with the checked pass before writing from a file, `--dry-run`,
+  and new files built aside and renamed; atomic imports would need a page cache as large as the
+  import.
+- *Key order?* Required ascending, as above.
+- *Hex or base64?* Hex with the `_hex` field tag, as above.
