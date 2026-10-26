@@ -3790,7 +3790,11 @@ and a spawned child's old address space is its parent's, so the first CI run rep
 benchmark's own 145 MB for every `eggdb` run. There the child is traced (`PTRACE_TRACEME` before
 `exec`, `PTRACE_O_TRACEEXIT`) and its `VmHWM` read from `/proc/<pid>/status` when it stops at its
 exit, which counts only its own address space; a test runs a child from a parent holding 256 MiB
-and requires a peak under 64 MiB. Start times are measured in runs that are not traced.
+and requires a peak under 64 MiB. A child that starts another program in its place (`sh -c 'exec
+…'`) is followed through that `exec` (`PTRACE_O_TRACEEXEC`) to its exit, and its peak is then the
+final program's alone, since `exec` starts a new address space; if tracing fails part-way, the
+child is killed and reaped before the error returns. Start times are measured in runs that are
+not traced.
 
 **Size (D6).** This item changes no code in the `eggdb` binary: 933,312 bytes on aarch64 macOS,
 1,133,296 on x86-64 Linux (glibc). Against v0.1.0's 302,448 bytes on macOS, which only printed
@@ -3798,12 +3802,19 @@ its version, the growth is the storage engine and embedded API (about 266 KB, D9
 command-line tool (about 83 KB, D90), `eggdb ui` (+99,600 bytes in D91 and +116,208 in D92) and
 `export`/`import` (+66,400, D93), each stated with its reason when it landed.
 
-**What SQLite still wins.** Batched random overwrites: EggDB takes about 1.35 times SQLite's time
-on this Mac (3.07 against 2.28 µs per put without syncs, 25.0 against 21.0 µs in `Normal`) and
-about 1.09 times on the Linux runners, in both modes. Both log whole pages, so the gap is in EggDB's write path
-(page images per commit, checkpoints writing in place); it is a follow-up on the roadmap rather
-than a blocker of this item, whose job is to measure and gate (CLAUDE.md note 5 asks a research
-subagent to decide when a slower result may stay; this one was decided with the item, below).
+**What SQLite still wins, and why this item merges anyway.** Batched random overwrites: EggDB
+takes about 1.35 times SQLite's time on this Mac (3.07 against 2.28 µs per put without syncs,
+25.0 against 21.0 µs in `Normal`) and about 1.09 times on the Linux runners, in both modes. Both
+engines log whole pages, so the gap is in EggDB's own write path (page images per commit,
+checkpoints writing in place). It is a measured, avoidable shortfall, not the unavoidable,
+minimised price of correctness or security that D7's research exception covers. The gate does not
+hold it where it is either: the `ratio_to_sqlite` line fails only 50% above its value, so the gap
+can grow to about 1.63 on Linux and 2.03 on this Mac before CI fails. This item may still merge
+because it only adds measurement: it changes no hot path and no engine code, the slower write
+path landed earlier (D81, D86, D87), and blocking the measurement would leave the gap ungated
+altogether. D7 now binds the follow-up, issue #52: before v0.2.0 ships, either make the write
+path at least as fast as SQLite's on this workload, or run a proper D7 research that shows the
+remaining cost is unavoidable and minimised, and record it as a decision.
 
 Decided by research (a research subagent, 2026-10-27, before the build), where the brief left a
 choice:
@@ -3821,8 +3832,8 @@ choice:
 - *How to measure memory?* The child's own peak through the platform layer (VmHWM on Linux,
   `ru_maxrss` on Apple's systems, the peak working set on Windows), with 1% for size, 5% for memory (10% in the build, above)
   and a wide band for start time.
-- *A result where SQLite wins?* State it, gate it so it cannot grow, and put the fix on the
-  roadmap.
+- *A result where SQLite wins?* State it, gate it, and put the fix on the roadmap. As built, the
+  gate's 50% band does not stop it growing, and D7 still applies to the fix (issue #52, above).
 
 Decided during the build (not by the research): the 50% band for the SQLite ratios, the `Off`
 mode for the gated batch, tracing on Linux for the peak and the 10% band for memory, each for

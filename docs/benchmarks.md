@@ -106,7 +106,9 @@ of GitHub's `ubuntu-latest` x86-64 runners, whose hardware varies between runs.
 EggDB is faster than SQLite on point gets and scans on both systems. **SQLite is faster on
 batched random overwrites**: EggDB takes about 1.35 times its time on this Mac without syncs and
 1.18 times in `Normal`, and about 1.09 times in both modes on Linux. Both log whole pages, so the
-gap is in EggDB's write path; making it faster is on the roadmap. A durable commit on either
+gap is in EggDB's own write path and is avoidable. The 50% band would let it grow to about 1.63
+on Linux and 2.03 on this Mac before CI fails, so closing it, or showing by research that what
+remains is unavoidable (D7), is required before v0.2.0 ships: issue #52. A durable commit on either
 engine is one disk flush (`F_FULLFSYNC` on the Mac), which takes nearly all of its time.
 
 The binary is unchanged by this measurement; its growth since v0.1.0 (302,448 bytes on macOS,
