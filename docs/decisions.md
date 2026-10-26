@@ -2483,3 +2483,80 @@ correctness.
   every later commit.
 - A commit checks the new superblock before writing anything.
 - Free-list entries naming the catalog root or a log segment are refused.
+
+## D79 The page cache: one region of frames, clock eviction, latched page handles and no-steal — Decided by research (build loop, 2026-10-26); refines D77 and D78
+`eggdb-storage`'s `PageCache` is the buffer manager over the page file (D78). Every structure
+of the engine reads and changes pages through it.
+
+**Memory: one region, allocated once.** The cache takes its frames, one page each, as a single
+`MemoryRegion` from the platform layer's `Memory` when it is created, and never allocates
+again on a page read. The size is set at creation, in pages or bytes. The page table and the
+per-frame state take up to about 100 bytes per frame on top, under 3% of a 4 KiB page.
+- One region is lazily zeroed by the operating system, so creating a large cache costs almost
+  nothing at start (D14). It can move to huge pages later, and a hit is one index calculation.
+- The alternative, one aligned buffer per frame behind a `RefCell`, needed no `unsafe`, but it
+  touched every frame at creation and ruled out huge pages. It stays the fallback behind the
+  same API.
+- The `unsafe` code is confined to one private module: a pointer to the region, taken once,
+  and slices built from it only under the frame's latch.
+
+**Page table:** our own open-addressing table with linear probing, sized at twice the frames
+rounded up to a power of two, with Fibonacci hashing and backward-shift deletion. It never
+allocates after creation.
+
+**Eviction: a clock (second chance).** The hand skips pinned frames and changed frames, and
+clears the reference bit of the others before taking one on its next pass. After two full
+sweeps without a frame, the request fails with `CacheFull`, which counts the pinned and the
+changed frames and says what to do.
+
+**Handles and latches.** `read` returns a `PageRef` and `write` and `allocate` return a
+`PageMut`. Each frame's latch counts readers or marks one writer. A conflicting request fails
+with `PageBorrowed`: it never waits and never panics. Several pages can be pinned at once,
+because these methods take the cache by shared reference. `commit` and `rollback` take it
+exclusively, so the borrow checker guarantees no handle outlives them.
+
+**No-steal.** A changed page is never evicted. `commit` writes the changed pages in page order
+through `PageFile::write_page` and then calls `PageFile::commit`. `rollback` drops them and
+calls the new `PageFile::rollback`, which undoes the allocations and frees since the last
+commit. Every cached page is in use: reading a free page is refused, and freeing a page drops
+it from memory with any change to it. Pages are verified by checksum when read in. A failure
+leaves the frame empty and returns the error, naming the page.
+
+**Snapshot readers (D77) will fit here.** `write` is the one place where a committed page first
+becomes changed. That is where the writer will copy the committed image into the bounded
+before-image store. Readers on other threads will read from that store or straight from the
+file, which under no-steal always holds the committed image. They will need a `Sync` store and
+page file, not shared frames. Concurrent access to frames later turns the latch counts into
+atomic state words (issue #30). Once the log exists (item 4), changed pages whose commit record
+is durable may be written and evicted before a checkpoint.
+
+**Statistics:** frames, cached pages, changed pages, hits, misses, evictions and pages written,
+for `eggdb stats` (item 13).
+
+## D80 Benchmarks: a harness of our own, counts gated exactly, times gated as ratios — Decided by research (build loop, 2026-10-26); refines D7, partly addresses issue #28
+`crates/eggdb-bench` is a plain binary that uses only the standard library and is never
+published. `cargo run --release -p eggdb-bench` runs every benchmark and checks it against
+`benchmarks/baseline.txt`. Each line of the baseline is `<system> <benchmark> <metric>
+<value>`.
+- **Counts gate exactly**: file operations per operation (from the simulator), evictions and
+  heap allocations per operation (from a counting allocator in the binary). They are the same
+  on every machine, so their lines are under `any`. A count above its line fails, and a
+  missing count line fails too.
+- **Times gate only as ratios**: the hot path against a reference workload of the same shape,
+  run in the same process. Fifteen samples of at least 20 ms each alternate between the two,
+  and the gate is the median ratio. It fails more than 30% above the line for this system,
+  after one retry of that benchmark. The page-cache hit's reference is a standard `HashMap`
+  lookup plus a byte read from a frame-sized array. A reference made only of CRC-32C would
+  track the processor's CRC instructions, not memory and hashing. A missing ratio line only
+  warns and prints the line to add, so a new system's line can be committed from its first CI
+  run.
+- **Nanoseconds per operation are reported**, never gated. This covers the cache miss, which is
+  dominated by a system call that a CPU-bound reference doesn't track.
+- `--update` rewrites this system's lines and the shared count lines, and is refused when `CI`
+  is set. A pull request that raises a gated line says why (D7).
+- **CI:** a `bench` job on Linux runs it in parallel with the others. It is not a required
+  check and has no path filter, since it takes under a minute. Results go to the job summary.
+
+Adding a benchmark means writing a function that returns its metrics, listing it in
+`BENCHMARKS`, and committing its lines. The comparison against SQLite and the size, startup and
+memory baselines are v0.2.0 item 17. Issue #28's ports of M1's platform probes are still open.
