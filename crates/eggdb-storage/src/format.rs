@@ -430,13 +430,13 @@ impl Superblock {
     }
 
     fn log_segments_overlap(&self) -> bool {
-        let mut firsts: Vec<u64> = std::iter::once(self.log_head_page)
-            .chain(self.recycled_segments)
-            .filter(|&first| first != NO_PAGE)
-            .collect();
+        let mut firsts = [NO_PAGE; RECYCLED_SEGMENTS + 1];
+        firsts[0] = self.log_head_page;
+        firsts[1..].copy_from_slice(&self.recycled_segments);
         firsts.sort_unstable();
         firsts
             .windows(2)
+            .filter(|pair| pair[0] != NO_PAGE)
             .any(|pair| pair[1] - pair[0] < u64::from(self.log_segment_pages))
     }
 

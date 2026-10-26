@@ -55,7 +55,7 @@ impl Default for CreateOptions {
 /// only after that writes the pages in place. Opening the file replays every committed record
 /// since the last checkpoint, so a crash at any moment, even one that tears a page being
 /// overwritten in place, leaves exactly the commits whose records were durable. A
-/// [`PageFile::checkpoint`], run automatically by commits as [`PageFile::set_auto_checkpoint`]
+/// [`PageFile::checkpoint`], run automatically by commits as [`PageFile::set_auto_checkpoint_bytes`]
 /// says, makes the next open replay only the log written after it and lets the log reuse its
 /// segments instead of growing the file.
 ///
@@ -85,7 +85,7 @@ pub struct PageFile<F: File> {
     log_pages: BTreeMap<u64, u64>,
     unwritten: BTreeMap<u64, u64>,
     durability: Durability,
-    auto_checkpoint: Option<u64>,
+    auto_checkpoint_bytes: Option<u64>,
     log_stats: LogStats,
     scratch: Vec<u8>,
     page_count_before_commit: Option<u64>,
@@ -178,11 +178,16 @@ impl<F: File> PageFile<F> {
         }
         let mut page_file = Self::from_parts(file, access, superblock, actual_bytes);
         page_file.damaged_header_slot = choice.damaged_slot;
-        if superblock.log_head_page != NO_PAGE {
-            page_file.recover()?;
-        }
+        let resumed = if superblock.log_head_page != NO_PAGE {
+            page_file.recover()?
+        } else {
+            None
+        };
         page_file.superblock.features.check(access)?;
         page_file.load_free_list()?;
+        if let Some(resumed) = resumed {
+            page_file.resume_log(resumed)?;
+        }
         Ok(page_file)
     }
 
@@ -204,7 +209,7 @@ impl<F: File> PageFile<F> {
             log_pages: BTreeMap::new(),
             unwritten: BTreeMap::new(),
             durability: Durability::Full,
-            auto_checkpoint: Some(DEFAULT_AUTO_CHECKPOINT_BYTES),
+            auto_checkpoint_bytes: Some(DEFAULT_AUTO_CHECKPOINT_BYTES),
             log_stats: LogStats::default(),
             scratch: Vec::new(),
             page_count_before_commit: None,
@@ -268,8 +273,8 @@ impl<F: File> PageFile<F> {
 
     /// How much log a commit may leave since the last checkpoint before it checkpoints
     /// automatically, in bytes; `None` when only [`PageFile::checkpoint`] checkpoints.
-    pub fn auto_checkpoint(&self) -> Option<u64> {
-        self.auto_checkpoint
+    pub fn auto_checkpoint_bytes(&self) -> Option<u64> {
+        self.auto_checkpoint_bytes
     }
 
     /// Sets how much log, in bytes, a commit may leave since the last checkpoint before it
@@ -277,8 +282,8 @@ impl<F: File> PageFile<F> {
     /// A commit also checkpoints once the log since the last checkpoint fills more segments
     /// than the header can recycle, so the log's segments are reused instead of the file
     /// growing; with `None` the log grows until [`PageFile::checkpoint`] is called.
-    pub fn set_auto_checkpoint(&mut self, log_bytes: Option<u64>) {
-        self.auto_checkpoint = log_bytes;
+    pub fn set_auto_checkpoint_bytes(&mut self, log_bytes: Option<u64>) {
+        self.auto_checkpoint_bytes = log_bytes;
     }
 
     /// What the log has replayed and checkpointed since the file was opened.
@@ -320,7 +325,7 @@ impl<F: File> PageFile<F> {
     }
 
     fn wants_checkpoint(&self) -> bool {
-        let (Some(limit), Some(log)) = (self.auto_checkpoint, self.log.as_ref()) else {
+        let (Some(limit), Some(log)) = (self.auto_checkpoint_bytes, self.log.as_ref()) else {
             return false;
         };
         let since = log.lsn().saturating_sub(self.header.checkpoint_lsn);
@@ -363,8 +368,17 @@ impl<F: File> PageFile<F> {
             self.write_free_list_in_place(&plan.list_pages, entries, lsn)?;
         }
         self.sync_unless_off()?;
+        let previous_reservation = self.header.log_sequence_reserved;
         self.write_header(plan.superblock)?;
-        self.superblock = plan.superblock;
+        if plan.free_entries.is_some() {
+            let mut copy = plan.superblock;
+            copy.generation = self.next_generation()?;
+            self.write_header(copy)?;
+        }
+        if let Some(log) = self.log.as_mut() {
+            log.skip_sequences_to(previous_reservation.saturating_add(1));
+        }
+        self.superblock = self.header;
         self.page_count = plan.superblock.page_count;
         if let Some(entries) = plan.free_entries {
             self.available = entries;
@@ -405,7 +419,8 @@ impl<F: File> PageFile<F> {
         next.log_sequence_reserved = self
             .header
             .log_sequence_reserved
-            .max(log.highest_sequence().saturating_add(SEQUENCE_RESERVATION));
+            .max(log.highest_sequence())
+            .saturating_add(SEQUENCE_RESERVATION);
         let segment_pages = u64::from(next.log_segment_pages);
         let mut page_count = next.page_count;
         let (free_entries, list_pages) = if extra.is_empty() {
@@ -579,7 +594,7 @@ impl<F: File> PageFile<F> {
     /// the file could not be opened with again, is refused with [`FormatError::InvalidField`]
     /// before anything is written, and leaves the changes since the last commit in place.
     ///
-    /// After it, the commit checkpoints when [`PageFile::set_auto_checkpoint`] says so. A
+    /// After it, the commit checkpoints when [`PageFile::set_auto_checkpoint_bytes`] says so. A
     /// checkpoint that fails there leaves the commit made: it still returns `Ok`, and the file
     /// refuses every later change with [`StorageError::NeedsReopen`].
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
@@ -632,6 +647,14 @@ impl<F: File> PageFile<F> {
             next.free_page_count = (entries.len() + list_pages.len()) as u64;
         }
         next.check()?;
+        for (field, page) in [
+            ("catalog_root", next.catalog_root),
+            ("free_list_head", next.free_list_head),
+        ] {
+            if page != NO_PAGE && self.is_log_page(page) {
+                return Err(FormatError::InvalidField { field }.into());
+            }
+        }
         match &entries {
             Some(entries) => check_not_listed(&next, entries, |pages| {
                 list_pages.iter().any(|page| pages.contains(page))
@@ -936,6 +959,13 @@ impl<F: File> PageFile<F> {
             .checked_add(1)
             .ok_or(sequence_exhausted)?;
         let next_sequence = sequence.checked_add(1).ok_or(sequence_exhausted)?;
+        let capacity = u64::from(segment_pages) * page_size.bytes() as u64 - LOG_BLOCK as u64;
+        self.header
+            .checkpoint_lsn
+            .checked_add(capacity)
+            .ok_or(FormatError::InvalidField {
+                field: "checkpoint_lsn",
+            })?;
         let segment = Segment {
             first_page,
             sequence,
@@ -1000,7 +1030,7 @@ impl<F: File> PageFile<F> {
         Ok(())
     }
 
-    fn recover(&mut self) -> Result<(), StorageError> {
+    fn recover(&mut self) -> Result<Option<ResumedLog>, StorageError> {
         let geometry = self.geometry(self.header.log_segment_pages);
         let scan = log::scan(&self.file, &geometry, &self.checksums, &self.header)?;
         let damaged_commit = || -> StorageError {
@@ -1054,7 +1084,7 @@ impl<F: File> PageFile<F> {
         self.superblock = state;
         self.page_count = state.page_count;
         if self.access == Access::ReadOnly {
-            return Ok(());
+            return Ok(None);
         }
         let wanted = state
             .page_count
@@ -1067,10 +1097,6 @@ impl<F: File> PageFile<F> {
                 .ok_or(FormatError::InvalidField {
                     field: "log_sequence_reserved",
                 })?;
-        if self.file_bytes != wanted {
-            self.file.set_size(wanted)?;
-            self.file_bytes = wanted;
-        }
         let mut recycled = self.header.recycled_segments;
         for first in &mut recycled {
             if scan
@@ -1081,11 +1107,9 @@ impl<F: File> PageFile<F> {
                 *first = NO_PAGE;
             }
         }
-        self.file.sync_data()?;
-        self.drain_unwritten()?;
-        self.log = Some(LogWriter::new(
+        Ok(Some(ResumedLog {
             geometry,
-            WriterStart {
+            start: WriterStart {
                 segment: scan.tail,
                 offset: scan.resume_offset,
                 needs_fresh_segment: scan.needs_fresh_segment,
@@ -1093,7 +1117,18 @@ impl<F: File> PageFile<F> {
                 recycled,
                 next_sequence,
             },
-        ));
+            file_bytes: wanted,
+        }))
+    }
+
+    fn resume_log(&mut self, resumed: ResumedLog) -> Result<(), StorageError> {
+        if self.file_bytes != resumed.file_bytes {
+            self.file.set_size(resumed.file_bytes)?;
+            self.file_bytes = resumed.file_bytes;
+        }
+        self.file.sync_data()?;
+        self.drain_unwritten()?;
+        self.log = Some(LogWriter::new(resumed.geometry, resumed.start));
         Ok(())
     }
 
@@ -1252,6 +1287,13 @@ pub(crate) struct PreparedCommit {
     superblock: Superblock,
     entries: Option<BTreeSet<u64>>,
     list_pages: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct ResumedLog {
+    geometry: LogGeometry,
+    start: WriterStart,
+    file_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -1523,7 +1565,7 @@ mod tests {
     fn a_free_list_spanning_many_pages_survives_a_reopen() {
         let fs = SimFileSystem::new();
         let mut file = create(&fs);
-        file.set_auto_checkpoint(None);
+        file.set_auto_checkpoint_bytes(None);
         let pages: Vec<u64> = (0..1500).map(|_| file.allocate().unwrap()).collect();
         for &page in &pages {
             write_filled(&mut file, page, 7);

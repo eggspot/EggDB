@@ -145,7 +145,7 @@ fn grow_log_by_segments(
 fn opening_after_a_checkpoint_replays_only_the_log_written_since() {
     let fs = SimFileSystem::new();
     let mut cache = create(&fs, 64);
-    cache.set_auto_checkpoint(None);
+    cache.set_auto_checkpoint_bytes(None);
     let mut model = allocated(&mut cache, 10);
     let mut rng = TestRng::new(1);
     rounds(&mut cache, &mut model, &mut rng, 40);
@@ -154,7 +154,7 @@ fn opening_after_a_checkpoint_replays_only_the_log_written_since() {
     let whole = cache.log_stats();
     assert_eq!(whole.replayed_commits, 41);
     assert!(whole.replayed_bytes > 40 * 8192, "{whole:?}");
-    cache.set_auto_checkpoint(None);
+    cache.set_auto_checkpoint_bytes(None);
     cache.checkpoint().unwrap();
     assert_eq!(cache.log_stats().checkpoints, 1);
     assert_eq!(cache.log_stats().bytes_since_checkpoint, 0);
@@ -257,8 +257,8 @@ fn commits_checkpoint_on_their_own_and_reuse_the_log_s_segments_as_it_wraps_arou
 fn a_log_without_automatic_checkpoints_grows_and_replays_whole() {
     let fs = SimFileSystem::new();
     let mut cache = create(&fs, 64);
-    cache.set_auto_checkpoint(None);
-    assert_eq!(cache.auto_checkpoint(), None);
+    cache.set_auto_checkpoint_bytes(None);
+    assert_eq!(cache.auto_checkpoint_bytes(), None);
     let mut model = allocated(&mut cache, 12);
     let mut rng = TestRng::new(4);
     rounds(&mut cache, &mut model, &mut rng, 300);
@@ -269,7 +269,7 @@ fn a_log_without_automatic_checkpoints_grows_and_replays_whole() {
     let mut cache = open(&fs, Access::ReadWrite).unwrap();
     assert_eq!(cache.log_stats().replayed_commits, 301);
     assert_eq!(
-        cache.auto_checkpoint(),
+        cache.auto_checkpoint_bytes(),
         Some(crate::log::DEFAULT_AUTO_CHECKPOINT_BYTES)
     );
     change(&mut cache, &mut model, &mut rng, 7).unwrap();
@@ -291,7 +291,7 @@ fn before_checkpoint(
     big_commit: bool,
 ) -> (PageCache<SimFile>, Model) {
     let mut cache = create(fs, 256);
-    cache.set_auto_checkpoint(None);
+    cache.set_auto_checkpoint_bytes(None);
     let mut model = allocated(&mut cache, if big_commit { 150 } else { 12 });
     cache.set_durability(durability).unwrap();
     let mut rng = TestRng::new(5);
@@ -338,7 +338,7 @@ fn crash_at_every_operation_of_a_checkpoint(durability: Durability, big_commit: 
             fs.crash(CrashMode::Torn { seed });
             let mut cache = open(&fs, Access::ReadWrite).unwrap();
             assert_model(&cache, &model, &context);
-            cache.set_auto_checkpoint(None);
+            cache.set_auto_checkpoint_bytes(None);
             let mut rng = TestRng::new(seed);
             rounds(&mut cache, &mut model, &mut rng, 12);
             cache.checkpoint().unwrap();
@@ -425,7 +425,7 @@ type Setup = fn(&SimFileSystem) -> (PageCache<SimFile>, Model);
 
 fn a_fresh_log(fs: &SimFileSystem) -> (PageCache<SimFile>, Model) {
     let mut cache = create(fs, 64);
-    cache.set_auto_checkpoint(None);
+    cache.set_auto_checkpoint_bytes(None);
     let model = allocated(&mut cache, 8);
     (cache, model)
 }
@@ -444,7 +444,7 @@ fn a_reopened_log_with_recycled_segments(fs: &SimFileSystem) -> (PageCache<SimFi
     let generation = cache.superblock().generation;
     drop(cache);
     let mut cache = open(fs, Access::ReadWrite).unwrap();
-    cache.set_auto_checkpoint(None);
+    cache.set_auto_checkpoint_bytes(None);
     assert_eq!(cache.superblock().generation, generation);
     (cache, model)
 }
@@ -653,6 +653,16 @@ fn forge(
     next_sequence: u64,
     flush: impl FnOnce(&mut LogWriter, &mut u64),
 ) {
+    forge_commit(fs, forgery, next_sequence, flush, |_| {});
+}
+
+fn forge_commit(
+    fs: &SimFileSystem,
+    forgery: &Forgery,
+    next_sequence: u64,
+    flush: impl FnOnce(&mut LogWriter, &mut u64),
+    update: impl FnOnce(&mut CommitFields),
+) {
     let mut writer = LogWriter::new(
         forgery.geometry,
         WriterStart {
@@ -670,6 +680,7 @@ fn forge(
     writer.reserve(COMMIT_PAYLOAD, &mut page_count).unwrap();
     let mut fields = CommitFields::of(&forgery.superblock, 0);
     fields.clock_high_water = 0xF0F0;
+    update(&mut fields);
     writer.put_commit(&fields);
     writer.seal(&mut page_count).unwrap();
     let raw = raw(fs);
@@ -874,7 +885,7 @@ fn a_small_cache_serves_committed_pages_across_checkpoints_under_every_durabilit
             cache.commit(|_| {}).unwrap();
         }
         cache.set_durability(durability).unwrap();
-        cache.set_auto_checkpoint(Some(3 * PAGE * SEGMENT_PAGES));
+        cache.set_auto_checkpoint_bytes(Some(3 * PAGE * SEGMENT_PAGES));
         let mut rng = TestRng::new(16);
         for round in 0..300 {
             change(&mut cache, &mut model, &mut rng, (round % 250) as u8 + 1).unwrap();
@@ -984,7 +995,7 @@ fn tree_rounds(
     fail_at: Option<u64>,
 ) -> (u64, usize) {
     let mut cache = btree_tests::open(fs, Access::ReadWrite, 512);
-    cache.set_auto_checkpoint(Some(2 * PAGE * SEGMENT_PAGES));
+    cache.set_auto_checkpoint_bytes(Some(2 * PAGE * SEGMENT_PAGES));
     let tree = stored_tree(&cache);
     let mut rng = TestRng::new(18);
     let mut model = models.last().unwrap().clone();
@@ -1055,7 +1066,7 @@ fn a_tree_reopens_whole_after_a_crash_at_any_operation_of_commits_that_checkpoin
 
 fn unsynced_normal_commits(fs: &SimFileSystem) -> (PageCache<SimFile>, BTreeMap<u64, Model>) {
     let mut cache = create(fs, 64);
-    cache.set_auto_checkpoint(None);
+    cache.set_auto_checkpoint_bytes(None);
     let mut model = allocated(&mut cache, 12);
     cache.set_durability(Durability::Normal).unwrap();
     let mut history = BTreeMap::from([(0, model.clone())]);
@@ -1111,4 +1122,210 @@ fn a_crash_at_any_operation_of_a_checkpoint_of_unsynced_normal_commits_keeps_a_w
     }
     assert!(rounds_kept.contains(&40), "{rounds_kept:?}");
     assert!(rounds_kept.len() > 1, "{rounds_kept:?}");
+}
+
+fn with_newest_slot_damaged(bytes: &[u8]) -> Vec<u8> {
+    let (slot0, slot1) = bytes[..2 * HEADER_SLOT_SIZE].split_at(HEADER_SLOT_SIZE);
+    let newest = Superblock::choose(slot0, slot1).unwrap().superblock.slot();
+    let mut damaged = bytes.to_vec();
+    let at = newest * HEADER_SLOT_SIZE + 64;
+    damaged[at..at + 4].copy_from_slice(&[0xFF; 4]);
+    damaged
+}
+
+fn assert_refused_or_latest(bytes: &[u8], model: &Model, context: &str) -> bool {
+    let fs = SimFileSystem::new();
+    let raw = fs.open(Path::new(DB), OpenMode::CreateNew).unwrap();
+    raw.write_all_at(&with_newest_slot_damaged(bytes), 0)
+        .unwrap();
+    raw.sync_all().unwrap();
+    drop(raw);
+    let Ok(cache) = open(&fs, Access::ReadOnly) else {
+        return false;
+    };
+    for (&page, &fill) in model {
+        let read = cache.read(page).map(|bytes| bytes[0]);
+        assert_eq!(
+            read.ok(),
+            Some(fill),
+            "{context}: an older header opened a state that never existed, page {page}"
+        );
+    }
+    true
+}
+
+#[test]
+fn a_damaged_newest_header_slot_never_opens_a_state_that_never_existed() {
+    for seed in 0..6 {
+        let fs = SimFileSystem::new();
+        let mut cache = create(&fs, 256);
+        let mut model = allocated(&mut cache, 150);
+        let mut rng = TestRng::new(seed);
+        let (mut refused, mut opened) = (0, 0);
+        for round in 0..400usize {
+            let fill = (round % 250) as u8 + 1;
+            if round % 97 == 96 {
+                for (&page, value) in model.iter_mut() {
+                    cache.write(page).unwrap().fill(fill);
+                    *value = fill;
+                }
+                cache.commit(|_| {}).unwrap();
+                for _ in 0..32 {
+                    let mut page = cache.allocate(leaf()).unwrap();
+                    page.fill(fill);
+                    model.insert(page.page_id(), fill);
+                }
+                cache.commit(|_| {}).unwrap();
+            } else {
+                change(&mut cache, &mut model, &mut rng, fill).unwrap();
+            }
+            if round % 3 == 0 || round % 97 == 96 {
+                let context = format!("seed {seed}, round {round}");
+                if assert_refused_or_latest(&file_bytes(&fs), &model, &context) {
+                    opened += 1;
+                } else {
+                    refused += 1;
+                }
+            }
+        }
+        assert!(
+            cache.log_stats().checkpoints >= 8,
+            "{:?}",
+            cache.log_stats()
+        );
+        assert!(
+            refused > 0 && opened > 0,
+            "seed {seed}: {refused} refused, {opened} opened"
+        );
+    }
+}
+
+#[test]
+fn a_damaged_newest_header_slot_after_freeing_extra_segments_never_opens_a_mixed_state() {
+    let fs = SimFileSystem::new();
+    let (mut cache, model) = before_checkpoint(&fs, Durability::Full, true);
+    let older_head = cache.superblock().log_head_page;
+    let free_before = cache.superblock().free_page_count;
+    cache.checkpoint().unwrap();
+    assert!(cache.superblock().free_page_count > free_before + SEGMENT_PAGES);
+    drop(cache);
+    let mut file = PageFile::open(&fs, Path::new(DB), Access::ReadWrite).unwrap();
+    file.set_auto_checkpoint_bytes(None);
+    let mut freed_segments = Vec::new();
+    while file.available_pages() > 0 {
+        let page = file.allocate().unwrap();
+        let block = header_block(&fs, page);
+        if page != older_head && block[4] == PageType::LogSegment.to_byte() && block[5] == 1 {
+            freed_segments.push(page);
+        }
+    }
+    file.commit(|_| {}).unwrap();
+    drop(file);
+    assert!(freed_segments.len() >= 2, "{freed_segments:?}");
+    let raw = raw(&fs);
+    for &first in &freed_segments {
+        for page in first..first + SEGMENT_PAGES {
+            raw.write_all_at(&image_of(page), page * PAGE).unwrap();
+        }
+    }
+    raw.sync_all().unwrap();
+    drop(raw);
+    let bytes = file_bytes(&fs);
+    assert_refused_or_latest(&bytes, &model, "after freed segments became data pages");
+}
+
+#[test]
+fn a_replayed_free_list_that_names_a_data_page_refuses_the_open_before_any_write() {
+    let fs = SimFileSystem::new();
+    let (forgery, model) = checkpointed_for_forgery(&fs);
+    let data_page = *model.keys().next().unwrap();
+    forge_commit(
+        &fs,
+        &forgery,
+        forgery.head.sequence + 1,
+        |_, _| {},
+        |fields| {
+            fields.free_list_head = data_page;
+            fields.free_page_count = 1;
+        },
+    );
+    let before = file_bytes(&fs);
+    let syncs = fs.sync_count();
+    for access in [Access::ReadWrite, Access::ReadOnly] {
+        assert!(matches!(
+            open(&fs, access),
+            Err(StorageError::CorruptFreeList { page }) if page == data_page
+        ));
+    }
+    assert_eq!(file_bytes(&fs), before);
+    assert_eq!(fs.sync_count(), syncs);
+}
+
+#[test]
+fn a_commit_naming_a_log_page_as_the_catalog_root_is_refused_and_the_file_stays_usable() {
+    let fs = SimFileSystem::new();
+    let (mut cache, mut model) = a_fresh_log(&fs);
+    let mut rng = TestRng::new(21);
+    grow_log_by_segments(&mut cache, &mut model, &mut rng, 1);
+    let newest_segment = cache.superblock().page_count - SEGMENT_PAGES;
+    for root in [
+        newest_segment,
+        newest_segment + 5,
+        cache.superblock().log_head_page,
+    ] {
+        let before = fs.operation_count();
+        assert!(matches!(
+            cache.commit(|superblock| superblock.catalog_root = root),
+            Err(StorageError::Format(FormatError::InvalidField {
+                field: "catalog_root"
+            }))
+        ));
+        assert_eq!(fs.operation_count(), before);
+    }
+    let root = *model.keys().next().unwrap();
+    cache
+        .commit(|superblock| superblock.catalog_root = root)
+        .unwrap();
+    change(&mut cache, &mut model, &mut rng, 50).unwrap();
+    cache.checkpoint().unwrap();
+    drop(cache);
+    let cache = open(&fs, Access::ReadOnly).unwrap();
+    assert_eq!(cache.superblock().catalog_root, root);
+    assert_model(&cache, &model, "after the refused commit");
+}
+
+#[test]
+fn a_failed_automatic_checkpoint_keeps_the_commit_and_refuses_every_later_page() {
+    let commit_with_failure = |fail_last: bool| {
+        let fs = SimFileSystem::new();
+        let mut cache = create(&fs, 16);
+        let mut model = allocated(&mut cache, 4);
+        cache.set_auto_checkpoint_bytes(Some(1));
+        let page = *model.keys().next().unwrap();
+        cache.write(page).unwrap().fill(6);
+        model.insert(page, 6);
+        let start = fs.operation_count();
+        if fail_last {
+            fs.fail_operation(start + 5);
+        }
+        let committed = cache.commit(|superblock| superblock.clock_high_water = 6);
+        (fs, cache, model, committed, start)
+    };
+    let (fs, cache, _, committed, start) = commit_with_failure(false);
+    committed.unwrap();
+    assert_eq!(fs.operation_count() - start, 6);
+    assert_eq!(cache.log_stats().checkpoints, 1);
+    let (fs, mut cache, model, committed, _) = commit_with_failure(true);
+    committed.unwrap();
+    assert_eq!(cache.stats().cached_pages, 0);
+    for &page in model.keys() {
+        assert!(matches!(cache.read(page), Err(StorageError::NeedsReopen)));
+        assert!(matches!(cache.write(page), Err(StorageError::NeedsReopen)));
+    }
+    assert!(matches!(cache.checkpoint(), Err(StorageError::NeedsReopen)));
+    drop(cache);
+    fs.crash(CrashMode::Torn { seed: 4 });
+    let cache = open(&fs, Access::ReadOnly).unwrap();
+    assert_eq!(cache.superblock().clock_high_water, 6);
+    assert_model(&cache, &model, "after the failed checkpoint");
 }

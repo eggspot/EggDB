@@ -389,6 +389,10 @@ impl LogWriter {
             .count()
     }
 
+    pub(crate) fn skip_sequences_to(&mut self, next_sequence: u64) {
+        self.next_sequence = self.next_sequence.max(next_sequence);
+    }
+
     pub(crate) fn highest_sequence(&self) -> u64 {
         self.next_sequence.saturating_sub(1)
     }
@@ -1863,7 +1867,7 @@ mod tests {
 
     fn normal_rounds_until_a_sync(fs: &SimFileSystem, fail_at: Option<(u8, u64)>) -> (u8, u64) {
         let mut file = PageFile::create(fs, Path::new(DB), options(PageSize::DEFAULT)).unwrap();
-        file.set_auto_checkpoint(None);
+        file.set_auto_checkpoint_bytes(None);
         let page = file.allocate().unwrap();
         let mut bytes = vec![0u8; 4096];
         file.write_page(page, &mut bytes, &leaf()).unwrap();

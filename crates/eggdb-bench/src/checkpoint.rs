@@ -40,7 +40,7 @@ fn pages_without_auto_checkpoints<S: FileSystem>(
     let file = PageFile::create(fs, path, CreateOptions::new()).map_err(failed("create"))?;
     let mut cache = PageCache::new(file, &OsMemory::new(), CacheSize::Pages(FRAMES))
         .map_err(failed("cache"))?;
-    cache.set_auto_checkpoint(None);
+    cache.set_auto_checkpoint_bytes(None);
     let pages = (0..PAGES)
         .map(|_| cache.allocate(leaf()).map(|page| page.page_id()))
         .collect::<Result<Vec<u64>, StorageError>>()

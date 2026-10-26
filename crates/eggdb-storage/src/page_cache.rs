@@ -170,15 +170,15 @@ impl<F: File> PageCache<F> {
     }
 
     /// How much log a commit may leave before it checkpoints automatically (see
-    /// [`PageFile::auto_checkpoint`]).
-    pub fn auto_checkpoint(&self) -> Option<u64> {
-        self.file.borrow().auto_checkpoint()
+    /// [`PageFile::auto_checkpoint_bytes`]).
+    pub fn auto_checkpoint_bytes(&self) -> Option<u64> {
+        self.file.borrow().auto_checkpoint_bytes()
     }
 
     /// Sets how much log a commit may leave before it checkpoints automatically (see
-    /// [`PageFile::set_auto_checkpoint`]).
-    pub fn set_auto_checkpoint(&mut self, log_bytes: Option<u64>) {
-        self.file.get_mut().set_auto_checkpoint(log_bytes);
+    /// [`PageFile::set_auto_checkpoint_bytes`]).
+    pub fn set_auto_checkpoint_bytes(&mut self, log_bytes: Option<u64>) {
+        self.file.get_mut().set_auto_checkpoint_bytes(log_bytes);
     }
 
     /// What the log has replayed and checkpointed since the file was opened (see
@@ -203,7 +203,8 @@ impl<F: File> PageCache<F> {
     /// Pins data page `page_id` for reading, reading it from the file and verifying its
     /// checksum if it is not in memory. A page that is free, outside the file or failing its
     /// checksum is refused, the last with [`FormatError::ChecksumMismatch`] naming it.
-    /// After a failed commit every page is refused with [`StorageError::NeedsReopen`].
+    /// After a failed commit, or a commit whose automatic checkpoint failed, every page is
+    /// refused with [`StorageError::NeedsReopen`].
     #[inline(always)]
     pub fn read(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
         let frame = self.locate(page_id)?;
@@ -302,7 +303,9 @@ impl<F: File> PageCache<F> {
         order.sort_unstable_by_key(|&frame| (self.pages[frame].get(), frame));
         order.dedup();
         let committed = self.write_and_commit(&order, update);
-        if committed.is_ok() {
+        if committed.is_ok() && self.file.get_mut().has_failed() {
+            self.drop_every_page();
+        } else if committed.is_ok() {
             for &frame in &order {
                 self.states[frame].set(self.states[frame].get() & !DIRTY);
             }
