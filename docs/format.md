@@ -4,8 +4,8 @@ This is the specification of EggDB's own file format (D20). The design behind it
 release reads every file an earlier release wrote. From v0.2.0 on, a committed sample file
 checks that in CI.
 
-Status: the checksum, the superblock and the page header are implemented in
-`crates/eggdb-storage` (`format.rs`). The other sections are specified here first and
+Status: the checksum, the superblock, the page header, the free list and the write-ahead log
+are implemented in `crates/eggdb-storage`. The other sections are specified here first and
 implemented by the v0.2.0 items in [roadmap.md](roadmap.md). A section may still change until
 v0.2.0 ships, because no file has been released before it. After that, changes follow
 "Compatibility" below.
@@ -69,7 +69,7 @@ slot 1. A superblock found in the other slot is refused.
 | 104 | 8 | `log_head_page` | first page of the oldest live log segment, or 0 |
 | 112 | 8 | `log_head_sequence` | sequence number of that segment |
 | 120 | 8 | `clock_high_water` | the highest hybrid-clock stamp handed out before the last checkpoint |
-| 128 | 4 | `log_segment_pages` | pages per log segment: at least 1, at most 64 MiB of pages (default: 64 KiB of pages) |
+| 128 | 4 | `log_segment_pages` | pages per log segment: at least 1, at most 64 MiB of pages, and at least one page plus 8 KiB once the file has a log (default: 64 KiB of pages, at least two) |
 | 132 | 4 | reserved | written as zero |
 | 136 | 56 | `recycled_segments` | seven first pages of log segments emptied by checkpoints, kept for reuse before the file grows. 0 marks an unused entry. |
 | 192 | 8 | reserved | written as zero |
@@ -173,28 +173,84 @@ disjoint and together account for every page.
 So a crash before the new superblock is durable finds the old state whole (D78).
 
 ## Write-ahead log (item 4 of the v0.2.0 plan)
-- **Segments:** the log is a chain of segments inside the file. Each segment is
-  `log_segment_pages` consecutive pages. Its first page has page type 5 and a segment header
-  holding the segment's sequence number and the log position it starts at.
-- **Growing and recycling:** a new segment comes from the recycled list or from the end of the
-  file. The old segment ends with a link record naming the next segment's first page and the
-  new `page_count`, so recovery learns about the growth by replaying the log. That avoids
-  needing the free list, which itself depends on the log.
-- **Records:** each record is framed by its length, type, flags and a CRC-32C. The checksum's
-  seed mixes in `file_id` and the segment's sequence number, so bytes left over from a recycled
-  segment never validate.
-- **Positions:** a log sequence number (LSN) is a byte position in the logical log, and it only
-  grows. Each record also has room for a consensus term and index, as varints that take zero
-  bytes when standalone (M15), and the commit record carries the hybrid-clock stamp.
-- **Flushes:** a flush pads to the end of a 4 KiB block, so a block that has been synced is
-  never rewritten.
-- **Group commit:** one leader syncs for every committer waiting in its group.
-- **Torn tail or corruption:** an invalid record counts as a torn tail only if no valid record
-  follows it in the segment. A damaged record with valid records after it is reported as
-  corruption with its position, never truncated silently (Alagappan et al., FAST'18).
-- **Truncation:** the head is truncated by moving `log_head_page` past segments a checkpoint
-  made redundant and recycling them. The tail is truncated by starting a new segment with a
-  higher sequence number.
+The log is a chain of segments inside the file (D77, D81). A commit appends a whole image of
+every page it writes and a commit record, makes the log durable as its durability mode says,
+and only then writes the pages in place. Opening the file replays the committed records since
+`checkpoint_lsn`, so a page torn while being overwritten in place is rebuilt from the log.
+
+**Creating the log.** A file is created without a log, so a file that is never changed stays
+8 KiB. The first change appends a segment at the end of the file, writes its header, syncs,
+and then writes the next superblock with `log_head_page`, `log_head_sequence` (the old value
+plus one), `checkpoint_lsn` (the segment's start) and `log_segment_pages`, and syncs again. A
+file with no log, such as one written before the log existed, opens as it is and gets its log
+the same way. Until checkpoints (item 7), the header is written only then.
+
+**Segments.** A segment is `log_segment_pages` consecutive pages. A file with a log needs
+segments of at least one page plus 8 KiB, so the largest record fits in one; the default is
+64 KiB of pages and at least two pages. A file without a log may hold a smaller value, which is
+replaced when the log is created. The first 4 KiB block of a segment is its header:
+
+| Offset | Size | Field | Meaning |
+|-------:|-----:|-------|---------|
+| 0 | 4 | `checksum` | CRC-32C seeded like a page's (`file_id`, then the page number), over bytes 4–4095 only |
+| 4 | 1 | `page_type` | 5 |
+| 5 | 1 | `layout` | 1 |
+| 6 | 2 | `flags` | 0 |
+| 8 | 8 | `start_lsn` | the LSN of the segment's byte 4096 |
+| 16 | 8 | `sequence` | one more than the previous segment's |
+| 24 | 4072 | reserved | zero |
+
+Records follow from byte 4096. The checksum covers only the header block, because records are
+appended to the rest of the segment after it is written.
+
+**Positions.** An LSN is a byte position in the logical log: byte `o` (from 4096) of a segment
+is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + segment bytes −
+4096`. A page's header `lsn` is the LSN of the record that logged it.
+
+**Records.** Each record is a 10-byte frame and a payload:
+
+| Offset | Size | Field |
+|-------:|-----:|-------|
+| 0 | 4 | CRC-32C of bytes 4 to the end of the payload, seeded with `crc32c_append(crc32c(file_id), sequence)`, the segment's sequence as 8 bytes |
+| 4 | 4 | payload length |
+| 8 | 1 | type |
+| 9 | 1 | flags: 0. Bit 0 is reserved for a consensus term and index as varints after the frame (M15), so they take no bytes when standalone. A reader refuses any other value. |
+
+| Type | Record | Payload |
+|-----:|--------|---------|
+| 1 | batch | `durable_lsn` (8): the LSN up to which the log was known to be synced when this flush was written |
+| 2 | pad | zeros up to the end of the 4 KiB block |
+| 3 | page image | the page number (8) and the whole page as it is written in place, its own checksum included |
+| 4 | commit | the commit stamp (8, 0 until item 9), then `page_count`, `free_list_head`, `free_page_count`, `catalog_root`, `clock_high_water` and the three feature sets (8 each) |
+| 5 | link | the next segment's first page (8) and the page count once it exists (8) |
+
+- A record never spans segments, and never starts in the last 9 bytes of a 4 KiB block; those
+  bytes are zero and skipped.
+- **Flushes:** each commit is one flush. It starts at a block boundary with a batch record, and
+  ends with a pad to the end of its block, so a block that has been synced is never rewritten.
+  The images of a transaction come before its commit record, and images after the last commit
+  record belong to no commit.
+- **Growing:** when a record would leave less room than a link record before the segment's
+  end, a link record names the next segment, which comes from the end of the file, and the
+  flush continues there after a batch record. A flush whose pad would reach the segment's end
+  ends with a link instead. Recovery learns the file's growth from link records; it needs no
+  free list. Reusing recycled segments, and moving `log_head_page`, are checkpoints' work
+  (item 7).
+- **Torn tail or corruption:** the log ends at the first record that fails its checks. That is
+  a torn tail, and the file opens at the last commit before it, unless a valid batch record at
+  a later block boundary of the same segment carries a `durable_lsn` above the bad record's
+  LSN. Then the bad record had been synced, and the open fails with "the log is damaged" and
+  the segment and offset (Alagappan et al., FAST'18). A segment named by a link whose header
+  is wrong ends the log the same way. A page image whose own page checksum fails, a link that
+  overlaps an earlier segment, or a commit naming pages outside the file are damage too.
+- **Resuming:** after replaying, appends continue at the block after the last commit. If any
+  byte after that point in its segment is not zero (records of a flush that never completed),
+  the next flush starts with a link to a fresh segment instead, so those records can never be
+  read as part of the log. Opening for writing first cuts the file to the replayed page count
+  and syncs, which also makes the replayed records durable before any page is written in
+  place from them.
+- **Truncation:** checkpoints (item 7) truncate the head by moving `log_head_page` and the tail
+  by starting a segment with a higher sequence number.
 - **Failed syncs:** a failed sync is never retried. The database stops accepting writes and
   recovers from the durable state (D59).
 
@@ -229,11 +285,18 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
 ## Durability modes (item 4)
 | Mode | A commit returns after | A power loss can |
 |------|------------------------|------------------|
-| `Full` (default) | its log group is synced | lose nothing that was committed |
-| `Normal` | its log records are written; syncs happen at checkpoints | lose the latest commits, never corrupt |
-| `Off` | its records are written; nothing is ever synced | corrupt the file (for bulk loads and tests) |
+| `Full` (default) | its log records are synced; then its pages are written in place | lose nothing that was committed |
+| `Normal` | its log records are written. Its pages are served from the log and written in place only after the next sync: an explicit `sync`, a change of mode, or once 1 MiB of log or 1024 pages wait | lose the latest commits, never corrupt |
+| `Off` | its records and pages are written; nothing is synced | corrupt the file (for bulk loads and tests) |
 
-On Apple's systems, a sync that must reach the disk uses `F_FULLFSYNC`.
+**Group commit.** A sync covers every commit written before it, and a sync of a log already
+durable up to that point does nothing. With one writer, as in v0.2.0, commits under `Normal`
+followed by one `sync` share it; the same "sync up to this LSN" step is where several writers
+will wait for one leader later.
+
+On Apple's systems, a sync that must reach the disk uses `F_FULLFSYNC`. The standard library's
+`File::sync_data` and `File::sync_all` already do that on Apple targets (checked in the source
+of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
 
 ## Locking
 - An open for writing takes an exclusive lock on the database file itself, through the platform

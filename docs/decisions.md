@@ -2571,3 +2571,68 @@ published. `cargo run --release -p eggdb-bench` runs every benchmark and checks 
 Adding a benchmark means writing a function that returns its metrics, listing it in
 `BENCHMARKS`, and committing its lines. The comparison against SQLite and the size, startup and
 memory baselines are v0.2.0 item 17. Issue #28's ports of M1's platform probes are still open.
+
+## D81 The write-ahead log: whole-page images in segments inside the file, redo on open, three durability modes — Decided by research (build loop, 2026-10-26); refines D77, D78 and D79
+`eggdb-storage`'s log is the chain of segments [format.md](format.md) specifies, inside the
+database file. Every commit goes through it, which makes overwriting committed pages in place
+crash-safe.
+
+**What a commit logs.** A whole image of every page it writes, the new free-list pages
+included, then a commit record carrying the superblock fields a commit changes: the page count,
+the free list, the catalog root, the clock's high-water mark and the feature flags. Only after
+the log is durable are the pages written in place, without a sync.
+- Whole images need no page-LSN comparison on replay, and repair torn pages. The B+tree's
+  smaller records (items 5 and 6) can come later behind the same framing.
+- Carrying the superblock fields in the commit record means a commit costs one sync, where
+  D78's commit cost two. The header slots are written only when the log is created, and later
+  by checkpoints (item 7).
+- The free list is rewritten, and logged, only when a commit allocated or freed a page.
+
+**Opening.** Replay runs from `checkpoint_lsn`: committed images are written in place, the last
+commit record's fields replace the header's, and the free list is checked after that. A
+read-only open serves those pages from the log instead. Opening for writing first cuts the file
+to the replayed page count and syncs, so no page is written in place from log bytes that are
+only in the operating system's cache, and stale records past the end are gone.
+
+**Decided by research** (a research subagent, recorded in PR 35):
+1. *Torn tail or corruption.* Each flush starts with a batch record carrying the LSN known
+   durable when it was written. A bad record is corruption only when a later batch in its
+   segment proves it had been synced. The naive "any valid record after it" rule calls an
+   ordinary torn multi-block flush corruption, and "stop at the first bad record" silently
+   drops durable commits. Damage in the very last synced flush still looks like a torn tail,
+   as in PostgreSQL. Damage near a segment's end, proven only by a later segment, is also read
+   as a torn tail, since the link to that segment is past the damage.
+2. *Resuming after replay.* Appends continue at the block after the last commit. If anything
+   after it in that segment is not zero, the next flush links to a fresh segment with a higher
+   sequence, so a record of a flush that never completed can never be read as part of the log.
+   Rejected: a fresh segment on every open (wastes a segment per open), and zeroing the rest
+   (an extra sync and rewrites).
+3. *When the log is created.* At the first change, not at creation, so a file that is never
+   changed stays 8 KiB (D6, D14). No feature flag is set for it, because no release before this
+   one wrote files: v0.1.0 only prints its version, and format.md lets the format change until
+   v0.2.0 ships. A file PR 34's code wrote, with no log, opens unchanged and gets its log at its
+   first change; a test builds such a file and checks it.
+4. *Durability `Normal`.* A commit writes its records without a sync and doesn't write its
+   pages in place, because a page reaching the disk before its record could be torn with
+   nothing to rebuild it from. The file keeps a map from each such page to its image in the
+   log, reads go there, and the pages are written in place after the next sync: an explicit
+   `sync`, a change of mode, or once 1 MiB of log or 1024 pages wait.
+5. *Segment size.* A record never spans segments, so a segment must hold one page image: at
+   least one page plus 8 KiB once the file has a log. The default stays 64 KiB of pages, but at
+   least two pages, so 64 KiB pages get 128 KiB segments. A smaller value in a file without a
+   log is replaced when the log is created.
+
+**Durable syncs on Apple's systems.** The pinned standard library (1.99.1) implements both
+`File::sync_data` and `File::sync_all` with `fcntl(F_FULLFSYNC)` on Apple targets, as its
+source shows, so the platform layer needs nothing new.
+
+**Group commit.** A sync covers every commit written before it, and syncing a log already
+durable to a given LSN does nothing. With v0.2.0's one writer, commits under `Normal` share the
+next `sync`. That "sync up to this LSN" step is where a leader will sync for several waiting
+writers later.
+
+**Left for item 7:** checkpoints that write the superblock and move `log_head_page`,
+recycling segments through `recycled_segments`, and truncating the log. Until then the log
+grows by one segment per 64 KiB of commits, and opening replays it all. Recycled segments will
+also need their stale bytes handled, since cutting the file only removes stale bytes past the
+end. A failed sync stops the file taking changes (D59).
