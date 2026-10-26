@@ -9,15 +9,19 @@ use std::process::Command;
 const PTRACE_TRACEME: c_int = 0;
 const PTRACE_CONT: c_int = 7;
 const PTRACE_SETOPTIONS: c_int = 0x4200;
+const PTRACE_O_TRACEEXEC: usize = 0x10;
 const PTRACE_O_TRACEEXIT: usize = 0x40;
 const PTRACE_O_EXITKILL: usize = 0x10_0000;
+const PTRACE_EVENT_EXEC: c_int = 4;
 const PTRACE_EVENT_EXIT: c_int = 6;
 const SIGTRAP: c_int = 5;
+const SIGKILL: c_int = 9;
 const PEAK_FIELD: &str = "VmHWM:";
 
 unsafe extern "C" {
     fn ptrace(request: c_int, ...) -> c_long;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+    fn kill(pid: c_int, signal: c_int) -> c_int;
 }
 
 fn trace_me() -> io::Result<()> {
@@ -74,7 +78,16 @@ pub(crate) fn run_with_peak_memory(mut command: Command) -> Result<ChildExit> {
     let child = command.spawn()?;
     let pid =
         c_int::try_from(child.id()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let mut traced_exit = false;
+    let traced = trace_to_exit(pid);
+    if traced.is_err() {
+        kill_and_reap(pid);
+    }
+    drop(child);
+    traced
+}
+
+fn trace_to_exit(pid: c_int) -> Result<ChildExit> {
+    let mut options_set = false;
     let mut peak = None;
     loop {
         match wait_for(pid)? {
@@ -82,25 +95,41 @@ pub(crate) fn run_with_peak_memory(mut command: Command) -> Result<ChildExit> {
                 peak = Some(peak_resident_bytes(pid));
                 request(PTRACE_CONT, pid, 0)?;
             }
-            WaitStatus::Stopped { signal, .. } if signal == SIGTRAP && !traced_exit => {
+            WaitStatus::Stopped { event, .. } if event == PTRACE_EVENT_EXEC => {
+                request(PTRACE_CONT, pid, 0)?;
+            }
+            WaitStatus::Stopped { signal, .. } if signal == SIGTRAP && !options_set => {
                 request(
                     PTRACE_SETOPTIONS,
                     pid,
-                    PTRACE_O_TRACEEXIT | PTRACE_O_EXITKILL,
+                    PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_EXITKILL,
                 )?;
-                traced_exit = true;
+                options_set = true;
                 request(PTRACE_CONT, pid, 0)?;
             }
             WaitStatus::Stopped { signal, .. } => {
                 request(PTRACE_CONT, pid, usize::try_from(signal).unwrap_or(0))?;
             }
             exit => {
-                drop(child);
                 return Ok(ChildExit {
                     code: exit.exit_code(),
                     peak_resident_bytes: peak.ok_or_else(|| Error::new(ErrorKind::Other))??,
                 });
             }
+        }
+    }
+}
+
+fn kill_and_reap(pid: c_int) {
+    // SAFETY: `kill` takes no pointers, and `pid` is this process's child, not yet reaped, so
+    // the number cannot name another process.
+    let _ = unsafe { kill(pid, SIGKILL) };
+    loop {
+        match wait_for(pid) {
+            Ok(WaitStatus::Stopped { .. }) => {
+                let _ = request(PTRACE_CONT, pid, 0);
+            }
+            Ok(WaitStatus::Exited(_) | WaitStatus::Signaled) | Err(_) => return,
         }
     }
 }

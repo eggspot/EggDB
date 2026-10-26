@@ -21,6 +21,11 @@ pub struct ChildExit {
 /// hold the child); on Apple's systems and the BSDs the `ru_maxrss` of `wait4`; on Windows the
 /// peak working set. The operating system counts it in whole pages or kibibytes.
 ///
+/// A child that starts another program in its place (`exec`, as `sh -c 'exec …'` does) is
+/// followed to the end. On Linux and Android `exec` gives the process a new address space with
+/// its own `VmHWM`, so the peak is the final program's alone; elsewhere it is what the
+/// operating system reports for the process, which may include the earlier programs.
+///
 /// # Errors
 ///
 /// The error `spawn` gives when the command cannot start;

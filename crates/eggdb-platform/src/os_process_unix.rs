@@ -55,6 +55,8 @@ pub(crate) fn run_with_peak_memory(mut command: Command) -> Result<ChildExit> {
     drop(child);
     Ok(ChildExit {
         code: WaitStatus::decode(status).exit_code(),
-        peak_resident_bytes: u64::try_from(usage.peak_resident).unwrap_or(0) * PEAK_UNIT_BYTES,
+        peak_resident_bytes: u64::try_from(usage.peak_resident)
+            .unwrap_or(0)
+            .saturating_mul(PEAK_UNIT_BYTES),
     })
 }
