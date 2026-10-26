@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-storage"
+description = "EggDB's storage engine: the file format, its checksums and the structures that keep data on disk."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
