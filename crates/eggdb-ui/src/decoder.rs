@@ -11,12 +11,15 @@ const LARGEST_PASTE: usize = 1 << 20;
 /// A lone `Esc` byte could start a sequence, so it stays pending until more bytes arrive or
 /// the caller decides none will (25 ms of quiet, in the real terminal) and calls
 /// [`InputDecoder::flush`]. Hostile or garbled input never panics; bytes that make no sense are
-/// dropped or shown as U+FFFD. A paste ends after 1 MiB even without its end marker, so the
-/// keys after it (`q` among them) still arrive as keys.
+/// dropped or shown as U+FFFD. A paste is cut at 1 MiB; the rest of it is dropped, never
+/// decoded as keys, up to its end marker or, if the marker never comes, up to the first pause
+/// in the input (the next [`InputDecoder::flush`]), so the keys after it (`q` among them) still
+/// arrive as keys.
 #[derive(Debug, Default)]
 pub struct InputDecoder {
     pending: Vec<u8>,
     paste: Option<Vec<u8>>,
+    dropping_paste: bool,
 }
 
 enum Step {
@@ -38,7 +41,7 @@ impl InputDecoder {
 
     /// Whether bytes are waiting for more to complete them.
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty() && self.paste.is_none()
+        (!self.pending.is_empty() && self.paste.is_none()) || self.dropping_paste
     }
 
     /// Decodes what is pending as if no more bytes will come: a lone `Esc` is the Esc key, and
@@ -50,7 +53,26 @@ impl InputDecoder {
     fn decode(&mut self, flush: bool) -> Vec<Event> {
         let mut events = Vec::new();
         let mut at = 0;
-        while at < self.pending.len() {
+        while at < self.pending.len() || (flush && self.dropping_paste) {
+            if self.dropping_paste {
+                let rest = &self.pending[at..];
+                match find(rest, PASTE_END) {
+                    Some(end) => {
+                        at += end + PASTE_END.len();
+                        self.dropping_paste = false;
+                        continue;
+                    }
+                    None if flush => {
+                        at = self.pending.len();
+                        self.dropping_paste = false;
+                        break;
+                    }
+                    None => {
+                        at += rest.len() - longest_partial_suffix(rest, PASTE_END);
+                        break;
+                    }
+                }
+            }
             if let Some(paste) = self.paste.as_mut() {
                 let rest = &self.pending[at..];
                 let room = LARGEST_PASTE - paste.len();
@@ -75,6 +97,7 @@ impl InputDecoder {
                         if paste.len() >= LARGEST_PASTE {
                             let text = String::from_utf8_lossy(paste).into_owned();
                             self.paste = None;
+                            self.dropping_paste = true;
                             events.push(Event::Paste(text));
                             continue;
                         }
@@ -427,18 +450,32 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_without_an_end_stops_at_one_mebibyte() {
+    fn a_paste_past_one_mebibyte_drops_the_rest_up_to_its_end_marker() {
         let mut decoder = InputDecoder::new();
         let mut events = decoder.feed(b"\x1b[200~");
-        let chunk = vec![b'x'; 300 * 1024];
+        let chunk = vec![b'q'; 300 * 1024];
         for _ in 0..4 {
             events.extend(decoder.feed(&chunk));
         }
-        events.extend(decoder.feed(b"q"));
+        events.extend(decoder.feed(b"rq\x1b[20"));
+        events.extend(decoder.feed(b"1~j"));
+        assert_eq!(events.len(), 2, "{:?}", &events[1..events.len().min(4)]);
         assert!(matches!(&events[0], Event::Paste(text) if text.len() == super::LARGEST_PASTE));
-        assert_eq!(events.len(), 1 + 4 * 300 * 1024 - super::LARGEST_PASTE + 1);
-        assert_eq!(events[1], key(KeyCode::Char('x')));
-        assert_eq!(events.last(), Some(&key(KeyCode::Char('q'))));
+        assert_eq!(events[1], key(KeyCode::Char('j')));
+        assert!(!decoder.has_pending());
+    }
+
+    #[test]
+    fn a_paste_that_never_ends_drops_bytes_only_until_the_input_pauses() {
+        let mut decoder = InputDecoder::new();
+        let mut events = decoder.feed(b"\x1b[200~");
+        events.extend(decoder.feed(&vec![b'x'; super::LARGEST_PASTE + 10]));
+        events.extend(decoder.feed(b"rr\x1b[201"));
+        assert_eq!(events.len(), 1);
+        assert!(decoder.has_pending());
+        assert!(decoder.flush().is_empty());
+        assert!(!decoder.has_pending());
+        assert_eq!(decoder.feed(b"q"), [key(KeyCode::Char('q'))]);
     }
 
     #[test]
