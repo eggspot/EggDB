@@ -255,6 +255,15 @@ impl Superblock {
         (self.generation & 1) as usize
     }
 
+    pub(crate) fn is_copied_in(&self, other_slot: &[u8]) -> bool {
+        Self::decode(other_slot, 1 - self.slot()).is_ok_and(|other| {
+            Self {
+                generation: self.generation,
+                ..other
+            } == *self
+        })
+    }
+
     /// Encodes the superblock into a whole header slot, checksum included. Refuses a
     /// superblock that [`Superblock::decode`] would refuse, so an invalid header never reaches
     /// the file.
