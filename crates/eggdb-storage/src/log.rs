@@ -213,8 +213,6 @@ fn too_close_to_block_end(offset: usize) -> bool {
     within != 0 && LOG_BLOCK - within < RECORD_HEADER
 }
 
-/// The fields of the superblock a commit record carries, so that replaying the log restores
-/// them without a header update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommitFields {
     pub(crate) stamp: u64,
@@ -303,11 +301,8 @@ struct Mark {
     segment: Segment,
     offset: usize,
     needs_fresh_segment: bool,
-    new_segments: usize,
 }
 
-/// The end of the log that commits append to: the segment being filled, the bytes of the
-/// flush being built, and how far the log is known to be durable.
 #[derive(Debug)]
 pub(crate) struct LogWriter {
     geometry: LogGeometry,
@@ -373,7 +368,6 @@ impl LogWriter {
             segment: self.segment,
             offset: self.offset,
             needs_fresh_segment: self.needs_fresh_segment,
-            new_segments: 0,
         });
         self.start_run();
         if self.needs_fresh_segment {
@@ -389,7 +383,7 @@ impl LogWriter {
             self.segment = mark.segment;
             self.offset = mark.offset;
             self.needs_fresh_segment = mark.needs_fresh_segment;
-            self.new_segments.truncate(mark.new_segments);
+            self.new_segments.clear();
         }
         self.buffer.clear();
         self.runs.clear();
@@ -552,15 +546,12 @@ impl LogWriter {
     }
 }
 
-/// A committed page image found in the log: the page it belongs to and where its bytes lie
-/// in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LoggedImage {
     pub(crate) page_id: u64,
     pub(crate) file_offset: u64,
 }
 
-/// What reading the log from the checkpoint found.
 #[derive(Debug)]
 pub(crate) struct Scan {
     pub(crate) segments: Vec<Segment>,
@@ -635,8 +626,6 @@ fn overlaps(occupied: &BTreeMap<u64, u64>, first: u64, end: u64) -> bool {
         .is_some_and(|(_, &other_end)| other_end > first)
 }
 
-/// Reads the log of the file whose header is `superblock`, from its checkpoint to its last
-/// valid record, verifying every record (format.md, "Write-ahead log").
 pub(crate) fn scan<F: File>(
     file: &F,
     geometry: &LogGeometry,
@@ -825,6 +814,7 @@ mod tests {
 
     const DB: &str = "db";
     const FILE_ID: FileId = FileId(*b"write-ahead-log!");
+    const FIRST_ALLOCATED: u64 = 18;
 
     fn leaf() -> PageHeader {
         PageHeader {
@@ -1616,11 +1606,18 @@ mod tests {
         let mut writer = LogWriter::new(geometry, head, LOG_BLOCK, false, 0);
         let mut page_count = superblock.page_count;
         writer.begin(&mut page_count).unwrap();
-        if let Some(target) = image.map(|_| page) {
+        assert_eq!(page, FIRST_ALLOCATED);
+        if let Some(target) = image {
             let mut bytes = vec![0xAB; 4096];
-            crate::format::PageChecksum::new(FILE_ID, PageSize::DEFAULT)
-                .write(&mut bytes, target, &leaf())
-                .unwrap();
+            bytes[4] = PageType::BTreeLeaf.to_byte();
+            bytes[5] = 1;
+            bytes[6..16].fill(0);
+            let seed = crate::crc32c::crc32c_append(
+                crate::crc32c::crc32c(&FILE_ID.0),
+                &target.to_le_bytes(),
+            );
+            let checksum = crate::crc32c::crc32c_append(seed, &bytes[4..]);
+            bytes[..4].copy_from_slice(&checksum.to_le_bytes());
             writer.reserve(8 + 4096, &mut page_count).unwrap();
             writer.put_image(target, &bytes);
         }
@@ -1658,7 +1655,7 @@ mod tests {
             assert_eq!(file_bytes(&fs), before);
         }
         let fs = SimFileSystem::new();
-        forged_commit(&fs, |commit| commit.page_count = 19, Some(0));
+        forged_commit(&fs, |commit| commit.page_count = 19, Some(FIRST_ALLOCATED));
         assert_eq!(
             open(&fs, Access::ReadWrite)
                 .unwrap()
@@ -1669,12 +1666,37 @@ mod tests {
     }
 
     #[test]
+    fn a_replayed_image_of_a_header_slot_or_a_log_page_refuses_the_open() {
+        let log_head = {
+            let fs = SimFileSystem::new();
+            forged_commit(&fs, |_| {}, None);
+            open(&fs, Access::ReadOnly)
+                .unwrap()
+                .superblock()
+                .log_head_page
+        };
+        for target in [0, 1, log_head] {
+            let fs = SimFileSystem::new();
+            forged_commit(&fs, |_| {}, Some(target));
+            let before = file_bytes(&fs);
+            for access in [Access::ReadWrite, Access::ReadOnly] {
+                let error = open(&fs, access).unwrap_err();
+                assert!(
+                    matches!(error, StorageError::Format(FormatError::CorruptLog { .. })),
+                    "page {target}: {error}"
+                );
+            }
+            assert_eq!(file_bytes(&fs), before, "page {target}");
+        }
+    }
+
+    #[test]
     fn unknown_features_in_a_replayed_commit_refuse_the_open_before_any_write() {
         let fs = SimFileSystem::new();
         forged_commit(
             &fs,
             |commit| commit.features.incompatible = 1 << 63,
-            Some(0),
+            Some(FIRST_ALLOCATED),
         );
         let before = file_bytes(&fs);
         let syncs = fs.sync_count();
@@ -1688,7 +1710,7 @@ mod tests {
         forged_commit(
             &fs,
             |commit| commit.features.read_only_compatible = 1 << 2,
-            Some(0),
+            Some(FIRST_ALLOCATED),
         );
         let before = file_bytes(&fs);
         assert!(matches!(

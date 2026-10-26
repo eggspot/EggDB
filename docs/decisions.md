@@ -2658,3 +2658,57 @@ recycling segments through `recycled_segments`, and truncating the log. Until th
 grows by one segment per 64 KiB of commits, and opening replays it all. Recycled segments will
 also need their stale bytes handled, since cutting the file only removes stale bytes past the
 end. A failed sync stops the file taking changes (D59).
+
+## D82 The B+tree: slotted pages with fence keys and prefix truncation, a fixed root, and pages checked once per read from the file — Decided by research (build loop, 2026-10-26); refines D77 and D79
+`eggdb-storage`'s `BTree` is v0.2.0's index (D77), over the page cache (D79), with its changes
+committed through the log (D81). [format.md](format.md) "B+tree pages" specifies the pages byte
+for byte.
+
+**Pages.** Leaves (type 3) and inner pages (type 2) share one slotted layout: a 32-byte tree
+header, the fence keys, a sorted array of two-byte slots searched by binary search, and cells
+packed from the end of the page. Each page stores its low and high fence keys, and their
+common prefix only once; its keys are stored without that prefix. Leaf splits use the
+shortest separator between the halves. A `level` byte (0 for leaves) makes every child exactly
+one level below its parent, which bounds every walk to 48 steps and rules out cycles without
+remembering visited pages. Small key-head hints in the slots, as LeanStore and Umbra use, are
+left out until a benchmark shows binary search is the cost.
+
+**Decided by research** (a research subagent, recorded in PR 36):
+1. *Size limits.* A key is at most an eighth of a page (512 bytes with 4 KiB pages, LMDB's
+   default too), and a key and value together at most `3 × page_size / 16 − 18` bytes, so four
+   of the largest entries plus two of the longest fence keys fill a leaf exactly. That follows
+   the common rule of at least four entries per page (SQLite's local payload), and stays
+   between PostgreSQL's third of a page and InnoDB's limits. A sixteenth of a page is too small
+   for composite SQL keys, and a quarter leaves no room for fence keys. Keys stay inside the
+   tree after item 11; only values move to overflow pages, so the value limit becomes a spill
+   threshold. Keys up to 512 bytes work with every page size.
+2. *A fixed root.* A root split moves the root's entries into two new pages, and the root
+   becomes an inner page one level up, as in SQLite and InnoDB. The catalog is never rewritten
+   on a split, and latch coupling (M3) never chases a moving root.
+3. *Checking pages.* A page is checked in full (layout, slots, non-overlapping cells that
+   account for every byte, key order within the fence keys, limits) when the cache reads it
+   from the file, not on every use: the cache keeps a "contents checked" bit per frame that it
+   clears on every read-in, as SQLite checks a page once when loading it. Every step down the
+   tree still checks the child's level and that the key lies within its fence keys, cheaply,
+   and `BTree::check` (for `eggdb check`) also checks each child's fence keys against its
+   parent's bounds. Siblings' ranges never overlap and are never empty, so that check also
+   refuses a page reached twice, without a set of visited pages. When frames are shared between threads
+   (issue #30) the bit becomes part of the atomic state word.
+4. *Split points.* A split of the rightmost leaf after an insert at its end keeps every old
+   entry on the left, and of the leftmost leaf after an insert at its start keeps them all on
+   the right, so sequential and reverse loads fill pages (SQLite's quick balance; PostgreSQL's
+   nbtree splits the rightmost page unevenly too). Other splits divide the bytes evenly, and
+   fall back to any point where both halves fit, which always exists with these limits. An
+   inner split's fallback may leave a page with no separators and only its rightmost child,
+   which the format allows. A
+   fill factor below 100% for sequential loads waits for a benchmark that needs it.
+5. *Prefix truncation now.* It changes the page layout, so it is built before v0.2.0 ships
+   rather than behind a layout version later.
+
+**Errors.** Over-limit keys and entries are refused before anything changes. Any other error
+during a put, such as a full cache in the middle of a split, can leave the transaction half
+changed, and the caller rolls it back; v0.2.0's transactions (item 9) do that for it.
+
+**Left for item 6:** delete, merges, and cursors and range scans. Removing a slot and counting
+its cell as `garbage` already exists for replacing values, and the fence keys let a cursor move
+between leaves through their parents, so leaves have no sibling pointers.

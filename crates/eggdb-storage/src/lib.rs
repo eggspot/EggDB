@@ -15,8 +15,14 @@
 //!   [`StorageError`] for what can go wrong;
 //! - [`PageCache`], the buffer manager over a [`PageFile`]: a fixed number of page frames
 //!   allocated once, clock eviction, pages pinned by [`PageRef`] and [`PageMut`] handles,
-//!   changes kept in memory until their commit, and [`CacheStats`].
+//!   changes kept in memory until their commit, and [`CacheStats`];
+//! - [`BTree`], a B+tree of byte-string keys and values in the cache's pages, with fence keys,
+//!   prefix truncation and splits up to the root, and [`BTree::check`], which checks a whole
+//!   tree and returns a [`TreeReport`].
 
+mod btree;
+#[cfg(test)]
+mod btree_tests;
 mod bytes;
 mod cells;
 mod crc32c;
@@ -29,7 +35,9 @@ mod page_file;
 mod page_table;
 #[cfg(test)]
 mod test_rng;
+mod tree_page;
 
+pub use btree::{BTree, TreeReport};
 pub use crc32c::{crc32c, crc32c_append};
 pub use error::{FormatError, StorageError};
 pub use format::{

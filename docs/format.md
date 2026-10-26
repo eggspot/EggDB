@@ -4,8 +4,8 @@ This is the specification of EggDB's own file format (D20). The design behind it
 release reads every file an earlier release wrote. From v0.2.0 on, a committed sample file
 checks that in CI.
 
-Status: the checksum, the superblock, the page header, the free list and the write-ahead log
-are implemented in `crates/eggdb-storage`. The other sections are specified here first and
+Status: the checksum, the superblock, the page header, the free list, the write-ahead log and
+the B+tree pages are implemented in `crates/eggdb-storage`. The other sections are specified here first and
 implemented by the v0.2.0 items in [roadmap.md](roadmap.md). A section may still change until
 v0.2.0 ships, because no file has been released before it. After that, changes follow
 "Compatibility" below.
@@ -249,8 +249,8 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
   LSN. Then the bad record had been synced, and the open fails with "the log is damaged" and
   the segment and offset (Alagappan et al., FAST'18). A segment named by a link whose header
   is wrong ends the log the same way. These are damage too, and refuse the open the same way:
-  - a page image whose own page checksum fails, or that names a page outside the file or a
-    page of the log;
+  - a page image whose own page checksum fails, or that names a header slot, a page outside
+    the file or a page of the log;
   - a link that overlaps an earlier segment, or whose page count isn't exactly the end of the
     segment it names;
   - a commit record whose fields the superblock would refuse, whose page count is below the
@@ -282,13 +282,75 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
 
 ## Keys and trees (items 5 and 6)
 - **The catalog tree** maps each tree's identity to its root page, its key scheme (a byte) and
-  room for partition bounds.
-- **Key scheme 0**, the only scheme in v0.2.0, is the raw key compared as unsigned bytes.
+  room for partition bounds. Until it exists, the superblock's `catalog_root` names the root
+  of the one tree a file holds.
+- **Key scheme 0**, the only scheme in v0.2.0, is the raw key compared as unsigned bytes. The
+  empty key is a valid key, and the smallest.
 - **Tenant and shard prefixes (D20):** a later scheme encodes `(tenant, shard, key)` into the
   same byte string, preserving order, and sets an incompatible feature bit.
 - **Prefix truncation:** B+tree pages keep low and high fence keys and store the prefix those
   keys share only once. So an unused prefix costs nothing, and a used one costs about nothing
   per entry.
+
+### B+tree pages (types 2 and 3, layout 1)
+A tree is a B+tree (D77, D82): values live in leaf pages (type 3), and inner pages (type 2)
+hold separator keys and child page numbers. Both types share one layout. After the 16-byte
+page header comes a 32-byte tree header:
+
+| Offset | Size | Field | Meaning |
+|-------:|-----:|-------|---------|
+| 16 | 2 | `count` | entries on the page: slots in the slot array |
+| 18 | 2 | `prefix_len` | bytes every key on the page starts with, stored once: exactly the longest common prefix of the two fence keys, and 0 without a high fence key |
+| 20 | 2 | `low_len` | length of the low fence key |
+| 22 | 2 | `high_len` | length of the high fence key; 0 means the page has no upper bound |
+| 24 | 1 | `level` | 0 for a leaf; a child is exactly one level below its parent. Below 48. |
+| 25 | 3 | reserved | zero |
+| 28 | 4 | `cell_start` | byte offset where the cell area starts, at most the page size |
+| 32 | 8 | `right_child` | inner pages: the child holding the keys from the last separator up to the high fence key. Leaves: 0. |
+| 40 | 4 | `garbage` | bytes in the cell area that no slot points to, left by replaced values |
+| 44 | 4 | reserved | zero |
+| 48 | | fence keys | the prefix (`prefix_len` bytes), the rest of the low fence key (`low_len − prefix_len`), the rest of the high fence key (`high_len − prefix_len`, none without one) |
+| after them | 2 × `count` | slot array | the byte offset of each entry's cell, in increasing key order |
+
+Free space runs from the end of the slot array to `cell_start`; the cells fill the rest of the
+page to its end, in any order. A cell stores its key without the page's prefix:
+
+| Page | Cell |
+|------|------|
+| leaf | key length (2), value length (2), key, value |
+| inner | key length (2), child page number (8), key |
+
+- **Key ranges.** A page holds the keys from its low fence key (included) up to its high fence
+  key (excluded). Inner entry *i* names the child for keys below its separator and at or
+  above the previous separator (or the page's low fence key); `right_child` takes the rest.
+  So a child's fence keys are exactly the bounds its parent gives it. The root has an empty
+  low fence key and no high fence key, and its page number never changes: a root split moves
+  its entries into two new pages and turns it into an inner page one level up.
+- **Separators.** A leaf split separates the halves by the shortest key above the last key of
+  the left half and at most the first key of the right half: the first key of the right
+  half, cut one byte after where it first differs from the last key of the left. An inner
+  split moves its middle separator up.
+- **Limits.** A key is at most `page_size / 8` bytes, and a key and value together at most
+  `3 × page_size / 16 − 18` bytes, so four of the largest entries and two of the longest fence
+  keys fill a leaf exactly (512 and 750 bytes with 4 KiB pages; 8,192 and 12,270 with 64 KiB
+  pages). A longer key or entry is refused with an error. The value length's top bit is
+  reserved for values stored outside the tree (item 11); it is zero in layout 1.
+- **Validity.** A reader refuses a page that breaks any of these rules: a type that does not
+  match its level (type 3 exactly at level 0), a layout other than 1, a level of 48 or more,
+  reserved bytes that are not zero, `right_child` of 0 on an inner page or not 0 on a leaf,
+  a fence key longer than the key limit, a `prefix_len` that is not the fence keys' common
+  prefix, fence keys out of order, a slot array that overlaps the cells, a slot pointing
+  outside the cell area, a cell running past the page end, cells that overlap, cell bytes and
+  `garbage` that don't add up to the cell area, keys not strictly increasing, keys outside the
+  fence keys (an inner page's separators must be strictly above its low fence key), sizes
+  over the limits, a value length with its top bit set, and a child page number of 0. Each
+  step down the tree also checks that the child is one level below its parent and that the
+  key sought lies within the child's fence keys, which bounds every walk by the root's level.
+  `eggdb check` also checks that every child's fence keys equal the bounds its parent gives
+  it. Siblings' key ranges never overlap and are never empty, so no two children get the same
+  bounds, and a page reached twice (a cycle or a shared child) fails that check.
+- **An inner page may hold no separators**, only `right_child`: the fallback of an inner split
+  can leave one, and the format allows it.
 
 ## Hybrid-clock stamps (item 9)
 - A commit stamp is a `u64`: 52 bits of microseconds since **2026-01-01T00:00:00Z** (Unix time
