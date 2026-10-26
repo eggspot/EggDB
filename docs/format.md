@@ -255,9 +255,13 @@ is LSN `start_lsn + o − 4096`, and the next segment starts at `start_lsn + seg
 - **Growing:** when a record would leave less room than a link record before the segment's
   end, a link record names the next segment, and the flush continues there after a batch
   record. A flush whose pad would reach the segment's end ends with a link instead. The next
-  segment is the first unused entry of `recycled_segments`, whose link carries a page count
-  of 0, or else a new segment at the end of the file, whose link carries the page count that
-  ends it. Recovery learns the file's growth from link records; it needs no free list.
+  segment is an unused entry of `recycled_segments`, whose link carries a page count of 0, or a
+  new segment at the end of the file, whose link carries the page count that ends it. The
+  writer takes the first unused recycled entry, except while the records its flush still has to
+  write might not fit in the unused recycled segments: then it takes a new segment at the end,
+  so a flush longer than the recycled segments ends in one of them, and the checkpoint after it
+  can cut the new segments off the file (see "Checkpoints"). Recovery accepts either kind at any
+  link; it learns the file's growth from link records and needs no free list.
 - **Torn tail or corruption:** the log ends at the first record that fails its checks. That is
   a torn tail, and the file opens at the last commit before it, unless a valid batch record at
   a later block boundary of the same segment carries a `durable_lsn` above the bad record's
@@ -341,17 +345,22 @@ this order:
    to its place.
 2. Choose the segments to recycle: every segment the log went through before the current one,
    and the unused recycled entries. The seven with the lowest page numbers become the next
-   `recycled_segments`. Any others go to the free list: a new free list holding them, the old
-   entries and the old list pages is written in place, with page checksums and `lsn` set to the
-   checkpoint position, to pages free in the committed state or to new pages at the end of the
-   file, never over the committed list (as in "Free-list pages").
+   `recycled_segments`. When the others are exactly the last pages of the file, which is what
+   a flush longer than the recycled segments leaves, they are cut off: the next superblock's
+   `page_count` ends before them. Otherwise they go to the free list: a new free list holding
+   them, the old entries and the old list pages is written in place, with page checksums and
+   `lsn` set to the checkpoint position, to pages free in the committed state or to new pages at
+   the end of the file, never over the committed list (as in "Free-list pages").
 3. Sync, so every page in place, and the new list, is durable.
 4. Write the next superblock: the committed state's fields (and the new free list, if any),
    `checkpoint_lsn` at the log's current append position, `log_head_page` and
    `log_head_sequence` naming the current segment, the new `recycled_segments` and
    `log_sequence_reserved` as "Segment sequences" says. Sync. When step 2 gave segments to the
-   free list, write the same superblock again with `generation` raised by one, to the other
-   slot, and sync, so no header slot names a log that runs through pages now free.
+   free list or cut them off, write the same superblock again with `generation` raised by one,
+   to the other slot, and sync, so no header slot names a log that runs through pages now free
+   or gone.
+5. When step 2 cut segments off, shorten the file to `page_count` pages. A crash before that
+   leaves a longer file, which opens as it is and which the next open for writing shortens.
 
 The checkpoint position is where the next flush starts. It is usually at a block boundary, but
 right after a recovery that found the records of a cut-off flush it is where the last commit
@@ -364,7 +373,8 @@ synced. A commit checkpoints automatically after it once the log since the last 
 reaches a configured size (1 MiB by default) or goes through more segments than
 `recycled_segments` holds, or when a flush as long as the commit's own would no longer fit in
 the rest of the current segment and the unused recycled ones. So the log keeps reusing its
-segments instead of growing the file, as long as one commit's flush fits in them. Under
+segments instead of growing the file, and a commit whose flush is longer than them grows the
+file only until the checkpoint after it cuts its new segments off again (issue #44, D97). Under
 durability `Off` the checkpoint writes the same things without syncing.
 
 ## Recovery (item 7)

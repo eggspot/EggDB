@@ -548,7 +548,10 @@ impl<F: File> PageCache<F> {
         update: impl FnOnce(&mut Superblock),
     ) -> Result<(), StorageError> {
         self.check_frames_writable(order)?;
-        let prepared = self.file.get_mut().prepare_commit(stamp, update)?;
+        let prepared = self
+            .file
+            .get_mut()
+            .prepare_commit(stamp, order.len(), update)?;
         if let Err(error) = self.log_frames(order) {
             self.file.get_mut().abort_commit();
             return Err(error);
