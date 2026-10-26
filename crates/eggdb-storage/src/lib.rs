@@ -18,13 +18,15 @@
 //!   allocated once, clock eviction, pages pinned by [`PageRef`] and [`PageMut`] handles,
 //!   changes kept in memory until their commit, and [`CacheStats`];
 //! - [`BTree`], a B+tree of byte-string keys and values in the cache's pages, with fence keys,
-//!   prefix truncation, splits up to the root, deletes that merge under-filled pages, a
-//!   [`Cursor`] for range, prefix and reverse scans in a [`ScanOrder`], and [`BTree::check`],
-//!   which checks a whole tree and returns a [`TreeReport`];
+//!   prefix truncation, splits up to the root, deletes that merge under-filled pages, values
+//!   too large for a leaf on chains of overflow pages, a [`Cursor`] for range, prefix and
+//!   reverse scans in a [`ScanOrder`], and [`BTree::check`], which checks a whole tree and
+//!   returns a [`TreeReport`];
 //! - [`Store`], transactions over the cache: one [`WriteTransaction`] at a time, committed
 //!   atomically or rolled back, any number of [`ReadTransaction`]s reading snapshots kept
-//!   consistent by before-images of the pages the writer changes, and a hybrid-clock
-//!   [`CommitStamp`] for every commit.
+//!   consistent by before-images of the pages the writer changes, a hybrid-clock
+//!   [`CommitStamp`] for every commit, and [`Store::check`], which checks the last commit and
+//!   accounts for every page of the file in a [`FileReport`].
 
 mod before_images;
 mod btree;
@@ -45,8 +47,14 @@ mod format;
 mod frames;
 mod hybrid_clock;
 mod log;
+mod overflow;
+#[cfg(test)]
+mod overflow_mutation_tests;
+#[cfg(test)]
+mod overflow_tests;
 mod page_cache;
 mod page_file;
+mod page_set;
 mod page_table;
 mod store;
 #[cfg(test)]
@@ -68,4 +76,4 @@ pub use hybrid_clock::CommitStamp;
 pub use log::{Durability, LogStats};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
 pub use page_file::{CreateOptions, PageFile};
-pub use store::{ReadTransaction, Store, WriteTransaction};
+pub use store::{FileReport, ReadTransaction, Store, WriteTransaction};

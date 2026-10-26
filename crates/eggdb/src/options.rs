@@ -115,8 +115,10 @@ impl Options {
     /// It is reserved when the database opens and never grows, and the operating system
     /// gives it real memory only as pages are used. Every page a write transaction changes
     /// stays in the cache until the commit, so this also bounds the size of one write
-    /// transaction: a larger one fails with [`ErrorKind::CacheFull`]. Less than one page fails
-    /// the open with [`ErrorKind::InvalidOption`].
+    /// transaction: a larger one fails with [`ErrorKind::CacheFull`]. A large value takes
+    /// about its size in pages, so it also bounds a value: with the default, a value of more
+    /// than about 15.8 MiB fails with [`ErrorKind::TooLarge`]. Less than one page fails the
+    /// open with [`ErrorKind::InvalidOption`].
     pub fn cache_bytes(mut self, bytes: usize) -> Self {
         self.cache_bytes = bytes;
         self
@@ -143,8 +145,9 @@ impl Options {
 
     /// The page size of a new database file, in bytes: a power of two from 4,096 (the
     /// default) to 65,536. It is fixed for the file's life and ignored when the file exists.
-    /// Larger pages allow longer keys and values (see
-    /// [`Database::max_entry_bytes`](crate::Database::max_entry_bytes)).
+    /// Larger pages allow longer keys (see
+    /// [`Database::max_key_bytes`](crate::Database::max_key_bytes)), and keep longer values
+    /// in the B+tree's leaves instead of on overflow pages.
     pub fn page_size_bytes(mut self, bytes: usize) -> Self {
         self.page_size_bytes = bytes;
         self

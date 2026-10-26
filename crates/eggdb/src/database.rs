@@ -97,7 +97,8 @@ pub struct Stats {
     pub log_bytes_since_checkpoint: u64,
 }
 
-/// What [`Database::check`] found in a database whose every page it read passed.
+/// What [`Database::check`] found in a database whose every page it read passed, and what
+/// each page of the file is used for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub struct CheckReport {
@@ -114,6 +115,18 @@ pub struct CheckReport {
     pub tree_height: u32,
     /// The B+tree's pages, inner and leaf.
     pub tree_pages: u64,
+    /// Values too large for a leaf, stored on overflow pages.
+    pub overflow_values: u64,
+    /// The overflow pages holding them.
+    pub overflow_pages: u64,
+    /// Pages free for later commits to reuse, as [`Stats::free_pages`] counts them.
+    pub free_pages: u64,
+    /// Pages of the write-ahead log, the segments kept for reuse included.
+    pub log_pages: u64,
+    /// Pages in use by nothing at all: neither the tree, its values, the free list nor the
+    /// log. They do no harm, but the file lost track of them and never reuses them; a healthy
+    /// database has none.
+    pub leaked_pages: u64,
 }
 
 impl Database {
@@ -321,13 +334,17 @@ impl Database {
         self.store.checkpoint().map_err(Error::storage)
     }
 
-    /// Checks every page of the database's B+tree as of the last commit, and how the pages fit
-    /// together, and counts what it holds. A damaged page fails with
-    /// [`ErrorKind::Corrupt`](crate::ErrorKind::Corrupt), with a message that says what
-    /// is damaged. The free list was checked when the database was opened.
+    /// Checks every page of the database's B+tree as of the last commit, how the pages fit
+    /// together, and every large value's chain of overflow pages, and counts what it holds.
+    /// Then it accounts for every page of the file: each must be exactly one of a page of the
+    /// tree or of a value, a free page, or a page of the log. A damaged page, or a page with
+    /// two uses, fails with [`ErrorKind::Corrupt`](crate::ErrorKind::Corrupt), with a message
+    /// that says what is damaged; a page with no use is counted in
+    /// [`CheckReport::leaked_pages`]. The free list was checked when the database was opened.
     ///
-    /// The check reads the whole tree and holds the database while it does: other
-    /// transactions' operations wait until it ends.
+    /// The check reads the whole tree and every value, and holds the database while it does:
+    /// other transactions' operations wait until it ends. An open write transaction's changes
+    /// are not seen. Its memory is one bit per page of the file, beside one leaf at a time.
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -342,21 +359,20 @@ impl Database {
     /// # Ok(()) }
     /// ```
     pub fn check(&self) -> Result<CheckReport> {
-        let transaction = self.begin_read()?;
-        let stamp = transaction.stamp();
-        let Some(tree) = transaction.check()? else {
-            return Ok(CheckReport {
-                stamp,
-                ..CheckReport::default()
-            });
-        };
+        let file = self.store.check().map_err(Error::storage)?;
+        let tree = file.tree.unwrap_or_default();
         Ok(CheckReport {
-            stamp,
+            stamp: file.stamp,
             entries: tree.entries,
             key_bytes: tree.key_bytes,
             value_bytes: tree.value_bytes,
             tree_height: tree.height,
             tree_pages: tree.inner_pages + tree.leaf_pages,
+            overflow_values: tree.overflow_values,
+            overflow_pages: tree.overflow_pages,
+            free_pages: file.free_pages,
+            log_pages: file.log_pages,
+            leaked_pages: file.leaked_pages,
         })
     }
 
@@ -415,11 +431,17 @@ impl Database {
         BTree::max_key_bytes(self.page_size)
     }
 
-    /// The most bytes a key and its value may take together: 750 with the default 4 KiB
-    /// pages, and 12,270 with 64 KiB pages (see [`Options::page_size_bytes`]). A longer entry
-    /// fails with [`ErrorKind::TooLarge`](crate::ErrorKind::TooLarge).
-    pub fn max_entry_bytes(&self) -> usize {
-        BTree::max_entry_bytes(self.page_size)
+    /// The longest value this database stores, in bytes: 1 GiB, whatever the page size. A
+    /// longer one fails with [`ErrorKind::TooLarge`](crate::ErrorKind::TooLarge).
+    ///
+    /// A value is read and written whole, so it takes its size in memory while it is used,
+    /// and twice that when a [`Scan`](crate::Scan) returns it as an owned item. A value that
+    /// does not fit in a B+tree leaf beside its key (750 bytes for the key and value together
+    /// with the default 4 KiB pages) goes to overflow pages, which a write transaction keeps
+    /// in the page cache until it commits, so the cache bounds a value too (see
+    /// [`Options::cache_bytes`]).
+    pub fn max_value_bytes(&self) -> usize {
+        BTree::MAX_VALUE_BYTES
     }
 
     pub(crate) fn store(&self) -> &Store<OsFile> {

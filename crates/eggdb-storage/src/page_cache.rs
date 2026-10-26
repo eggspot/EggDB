@@ -4,7 +4,8 @@ use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageSize, PageType, Superblock};
 use crate::frames::{FrameMut, FrameRef, Frames};
 use crate::log::{Durability, LogStats};
-use crate::page_file::{NO_STAMP, PageFile};
+use crate::page_file::{NO_STAMP, PageFile, PageUses};
+use crate::page_set::PageSet;
 use crate::page_table::PageTable;
 use eggdb_platform::{ErrorKind, File, Memory};
 use std::cell::{Cell, Ref, RefCell};
@@ -372,6 +373,14 @@ impl<F: File> PageCache<F> {
         self.file.borrow().check_writable()
     }
 
+    pub(crate) fn frame_count(&self) -> usize {
+        self.frames.count()
+    }
+
+    pub(crate) fn account_pages(&self, reachable: &PageSet) -> Result<PageUses, StorageError> {
+        self.file.borrow().account_pages(reachable)
+    }
+
     pub(crate) fn set_before_image_budget(&mut self, pages: usize) {
         self.images.get_mut().set_budget(pages);
     }
@@ -679,6 +688,10 @@ pub(crate) trait PageSource {
         Self: 'a;
 
     fn page(&self, page_id: u64) -> Result<Self::Page<'_>, StorageError>;
+
+    fn page_size(&self) -> PageSize;
+
+    fn page_count(&self) -> u64;
 }
 
 impl<F: File> PageSource for PageCache<F> {
@@ -690,6 +703,14 @@ impl<F: File> PageSource for PageCache<F> {
     #[inline(always)]
     fn page(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
         self.read(page_id)
+    }
+
+    fn page_size(&self) -> PageSize {
+        PageCache::page_size(self)
+    }
+
+    fn page_count(&self) -> u64 {
+        self.file.borrow().page_count()
     }
 }
 
@@ -706,6 +727,14 @@ impl<F: File> PageSource for Snapshot<'_, F> {
 
     fn page(&self, page_id: u64) -> Result<SnapshotPage<'_>, StorageError> {
         self.cache.read_at(page_id, self.version)
+    }
+
+    fn page_size(&self) -> PageSize {
+        self.cache.page_size()
+    }
+
+    fn page_count(&self) -> u64 {
+        PageSource::page_count(self.cache)
     }
 }
 

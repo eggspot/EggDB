@@ -129,7 +129,10 @@ struct End {
 /// **Cost.** Each item is a key and a value copied into two new `Vec<u8>`s. A loop that only
 /// looks at the bytes can avoid those copies with [`Scan::next_entry`], which lends them
 /// instead. The scan underneath copies one leaf page of entries at a time into a buffer it
-/// reuses, and holds no page of the database between calls.
+/// reuses, and holds no page of the database between calls. A large value, stored on overflow
+/// pages, is copied whole into that buffer and ends the leaf's batch, so the buffer holds at
+/// most one large value; as an owned item it is copied once more, so it costs twice its size
+/// in memory until the item is dropped.
 ///
 /// **Errors.** A failure, such as a damaged page or an expired snapshot, is returned as one
 /// `Err` item, after which the scan yields nothing more.

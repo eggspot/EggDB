@@ -8,6 +8,7 @@ use crate::log::{
     self, COMMIT_PAYLOAD, CommitFields, DEFAULT_AUTO_CHECKPOINT_BYTES, Durability, LOG_BLOCK,
     LogGeometry, LogStats, LogWriter, RecycledSegments, SEQUENCE_RESERVATION, Segment, WriterStart,
 };
+use crate::page_set::PageSet;
 use eggdb_platform::{ErrorKind, File, FileLock, FileSystem, OpenMode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -333,7 +334,9 @@ impl<F: File> PageFile<F> {
             .log_pages
             .len()
             .saturating_sub(log.unused_recycled_segments());
-        since >= limit || chain > RECYCLED_SEGMENTS
+        let a_flush_like_the_last_needs_a_new_segment = log.unused_recycled_segments() > 0
+            && log.room_before_a_new_segment() < log.last_flush_bytes();
+        since >= limit || chain > RECYCLED_SEGMENTS || a_flush_like_the_last_needs_a_new_segment
     }
 
     fn sync_unless_off(&self) -> Result<(), StorageError> {
@@ -1258,6 +1261,42 @@ impl<F: File> PageFile<F> {
         }
     }
 
+    pub(crate) fn account_pages(&self, reachable: &PageSet) -> Result<PageUses, StorageError> {
+        let reused: BTreeSet<u64> = self.reused.iter().copied().collect();
+        let mut uses = PageUses::default();
+        for page in self.page_size().first_data_page()..self.superblock.page_count {
+            let found = [
+                ("reachable from the tree", reachable.contains(page)),
+                (
+                    "a free page",
+                    self.available.contains(&page) || reused.contains(&page),
+                ),
+                (
+                    "a page of the free list",
+                    self.free_list_pages.contains(&page),
+                ),
+                ("a page of the log", self.is_log_page(page)),
+            ];
+            let mut present = found.iter().filter(|(_, present)| *present);
+            match (present.next(), present.next()) {
+                (Some(&(first_use, _)), Some(&(second_use, _))) => {
+                    return Err(FormatError::PageUsedTwice {
+                        page,
+                        first_use,
+                        second_use,
+                    }
+                    .into());
+                }
+                (Some(_), None) => {}
+                _ => uses.leaked += 1,
+            }
+            uses.free += u64::from(found[1].1 || found[2].1);
+            uses.free_list += u64::from(found[2].1);
+            uses.log += u64::from(found[3].1);
+        }
+        Ok(uses)
+    }
+
     pub(crate) fn freed_committed_pages(&self) -> impl Iterator<Item = u64> + '_ {
         self.freed
             .iter()
@@ -1292,6 +1331,14 @@ fn lock(file: &impl File, kind: FileLock) -> Result<(), StorageError> {
         Err(error) if cfg!(target_os = "wasi") && error.kind() == ErrorKind::Unsupported => Ok(()),
         locked => Ok(locked?),
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PageUses {
+    pub(crate) free: u64,
+    pub(crate) free_list: u64,
+    pub(crate) log: u64,
+    pub(crate) leaked: u64,
 }
 
 #[derive(Debug)]

@@ -82,6 +82,25 @@ pub enum FormatError {
         /// The rule the page breaks.
         problem: &'static str,
     },
+    /// A page of a large value's chain of overflow pages breaks the chain's rules: it is of
+    /// another type, belongs to another value or another place in the chain, ends the chain too
+    /// early or too late, or is reached twice.
+    CorruptOverflow {
+        /// The page where the damage was found.
+        page: u64,
+        /// The rule the page breaks.
+        problem: &'static str,
+    },
+    /// A page has two uses at once, such as a page of the tree that is also on the free list,
+    /// so the file's structures overlap.
+    PageUsedTwice {
+        /// The page.
+        page: u64,
+        /// One of its uses.
+        first_use: &'static str,
+        /// Another of its uses.
+        second_use: &'static str,
+    },
 }
 
 impl fmt::Display for FormatError {
@@ -133,6 +152,18 @@ impl fmt::Display for FormatError {
             Self::CorruptTree { page, problem } => write!(
                 f,
                 "the B+tree page {page} is damaged: {problem}; restore from a backup or run `eggdb check`"
+            ),
+            Self::CorruptOverflow { page, problem } => write!(
+                f,
+                "the overflow page {page} of a large value is damaged: {problem}; restore from a backup or run `eggdb check`"
+            ),
+            Self::PageUsedTwice {
+                page,
+                first_use,
+                second_use,
+            } => write!(
+                f,
+                "page {page} is both {first_use} and {second_use}, so the file's structures overlap; restore from a backup"
             ),
         }
     }
@@ -222,13 +253,24 @@ pub enum StorageError {
         /// The longest key allowed.
         max: usize,
     },
-    /// A key and its value together are longer than a B+tree of this page size stores in a
-    /// leaf (see [`BTree::max_entry_bytes`](crate::BTree::max_entry_bytes)).
-    EntryTooLarge {
-        /// The key's and the value's lengths together.
+    /// A value is longer than the largest value a B+tree stores (see
+    /// [`BTree::MAX_VALUE_BYTES`](crate::BTree::MAX_VALUE_BYTES)).
+    ValueTooLarge {
+        /// The value's length.
         bytes: usize,
-        /// The most allowed.
+        /// The longest value allowed.
         max: usize,
+    },
+    /// A value needs more overflow pages, with the leaf that names them, than the page cache
+    /// has frames, so no write transaction could hold it: every page a write transaction
+    /// changes stays in the cache until its commit.
+    ValueExceedsCache {
+        /// The value's length.
+        bytes: usize,
+        /// The pages the value needs: its overflow pages and its leaf.
+        pages: u64,
+        /// The frames of the page cache.
+        frames: usize,
     },
     /// A write transaction was asked for while another one is open: a store has one writer at
     /// a time, and a second one fails at once rather than waiting.
@@ -315,9 +357,17 @@ impl fmt::Display for StorageError {
                 f,
                 "a key of {bytes} bytes is longer than the {max} bytes a key may have with this page size"
             ),
-            Self::EntryTooLarge { bytes, max } => write!(
+            Self::ValueTooLarge { bytes, max } => write!(
                 f,
-                "a key and value of {bytes} bytes together are longer than the {max} bytes an entry may have with this page size; values stored outside the tree come later"
+                "a value of {bytes} bytes is longer than the {max} bytes a value may have"
+            ),
+            Self::ValueExceedsCache {
+                bytes,
+                pages,
+                frames,
+            } => write!(
+                f,
+                "a value of {bytes} bytes needs {pages} pages, more than the {frames} frames of the page cache, which holds every page a write transaction changes until its commit; open the database with a larger cache"
             ),
             Self::WriterActive => f.write_str(
                 "another write transaction is open; one writer at a time: commit or roll it back first",

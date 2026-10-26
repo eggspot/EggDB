@@ -9,7 +9,7 @@ use crate::format::{Access, PageSize};
 use crate::page_cache::PageCache;
 use crate::page_file::PageFile;
 use crate::test_rng::TestRng;
-use crate::tree_page::{Node, Shape, header_for};
+use crate::tree_page::{Node, Shape, StoredValue, header_for};
 use eggdb_platform::{CrashMode, SimFile, SimFileSystem};
 use std::ops::Bound;
 use std::path::Path;
@@ -317,7 +317,7 @@ fn a_merge_that_would_not_fit_once_the_prefix_shrinks_leaves_an_empty_leaf_in_pl
         level: 0,
         low,
         high,
-        values: vec![Vec::new(); keys.len()],
+        values: vec![StoredValue::Inline(Vec::new()); keys.len()],
         keys,
         children: Vec::new(),
     };

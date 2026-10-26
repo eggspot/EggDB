@@ -97,8 +97,10 @@ fn key(rng: &mut TestRng) -> Vec<u8> {
 
 fn value(rng: &mut TestRng, key: &[u8]) -> Vec<u8> {
     let len = match rng.below(12) {
-        0 => BTree::max_entry_bytes(PageSize::DEFAULT) - key.len(),
-        1..=3 => (200 + rng.below(400)).min(BTree::max_entry_bytes(PageSize::DEFAULT) - key.len()),
+        0 => BTree::max_inline_entry_bytes(PageSize::DEFAULT) - key.len(),
+        1..=3 => {
+            (200 + rng.below(400)).min(BTree::max_inline_entry_bytes(PageSize::DEFAULT) - key.len())
+        }
         _ => rng.below(60),
     };
     rng.bytes(len)
@@ -350,14 +352,14 @@ fn end(fs: &SimFileSystem, ending: Ending) {
     }
 }
 
-fn file_bytes(fs: &SimFileSystem) -> Vec<u8> {
+pub(crate) fn file_bytes(fs: &SimFileSystem) -> Vec<u8> {
     let raw = fs.open(Path::new(DB), OpenMode::Read).unwrap();
     let mut bytes = vec![0u8; raw.size().unwrap() as usize];
     raw.read_exact_at(&mut bytes, 0).unwrap();
     bytes
 }
 
-fn file_system_holding(bytes: &[u8]) -> SimFileSystem {
+pub(crate) fn file_system_holding(bytes: &[u8]) -> SimFileSystem {
     let fs = SimFileSystem::new();
     let raw = fs.open(Path::new(DB), OpenMode::Create).unwrap();
     raw.write_all_at(bytes, 0).unwrap();

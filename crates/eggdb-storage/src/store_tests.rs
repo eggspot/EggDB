@@ -676,11 +676,22 @@ fn a_change_refused_before_it_starts_leaves_the_transaction_open() {
         write.put(&tree, &long_key, b""),
         Err(StorageError::KeyTooLarge { .. })
     ));
-    let long_value = vec![0; BTree::max_entry_bytes(PageSize::DEFAULT)];
+    let value_over_the_cache =
+        vec![0; 32 * crate::overflow::data_bytes_per_page(PageSize::DEFAULT)];
     assert!(matches!(
-        write.put(&tree, b"b", &long_value),
-        Err(StorageError::EntryTooLarge { .. })
+        write.put(&tree, b"b", &value_over_the_cache),
+        Err(StorageError::ValueExceedsCache { .. })
     ));
+    let value_over_the_limit = vec![0; BTree::MAX_VALUE_BYTES + 1];
+    assert!(matches!(
+        write.check_fits(b"b", &value_over_the_limit),
+        Err(StorageError::ValueTooLarge { .. })
+    ));
+    assert!(matches!(
+        write.put(&tree, b"b", &value_over_the_limit),
+        Err(StorageError::ValueTooLarge { .. })
+    ));
+    drop(value_over_the_limit);
     write.put(&tree, b"c", b"3").unwrap();
     write.commit().unwrap();
     assert_eq!(committed(&store, &tree).len(), 2);
