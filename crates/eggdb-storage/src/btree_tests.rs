@@ -1,4 +1,4 @@
-use crate::btree::BTree;
+use crate::btree::{BTree, TreeReport};
 use crate::error::{FormatError, StorageError};
 use crate::format::{Access, FileId, PageHeader, PageSize, PageType};
 use crate::page_cache::{CacheSize, PageCache};
@@ -321,11 +321,11 @@ fn tree_with_entries(fs: &SimFileSystem, seed: u64, count: usize) -> Model {
     model
 }
 
-fn grow(fs: &SimFileSystem, model: &mut Model, fail_at: Option<u64>) -> u64 {
+fn grow(fs: &SimFileSystem, model: &mut Model, puts: usize, fail_at: Option<u64>) -> u64 {
     let mut cache = open(fs, Access::ReadWrite, 512);
     let tree = stored_tree(&cache);
     let mut rng = TestRng::new(99);
-    for _ in 0..400 {
+    for _ in 0..puts {
         let key = bytes_up_to(&mut rng, 4, 12);
         let value = bytes_up_to(&mut rng, 0, 60);
         tree.put(&cache, &key, &value).unwrap();
@@ -340,28 +340,26 @@ fn grow(fs: &SimFileSystem, model: &mut Model, fail_at: Option<u64>) -> u64 {
     fs.operation_count() - start
 }
 
-#[test]
-fn a_crash_at_any_operation_of_a_commit_that_splits_leaves_the_old_or_the_new_tree() {
-    let (operations, splits) = {
+fn committed_report(fs: &SimFileSystem) -> TreeReport {
+    let cache = open(fs, Access::ReadOnly, 64);
+    stored_tree(&cache).check(&cache).unwrap()
+}
+
+fn crash_at_every_operation_of_growing(entries: usize, puts: usize) -> (TreeReport, TreeReport) {
+    let (operations, before, after) = {
         let fs = SimFileSystem::new();
-        let mut model = tree_with_entries(&fs, 1, 300);
-        let before = {
-            let cache = open(&fs, Access::ReadOnly, 64);
-            stored_tree(&cache).check(&cache).unwrap()
-        };
-        let operations = grow(&fs, &mut model, None);
-        let cache = open(&fs, Access::ReadOnly, 64);
-        let after = stored_tree(&cache).check(&cache).unwrap();
-        (operations, after.leaf_pages - before.leaf_pages)
+        let mut model = tree_with_entries(&fs, 1, entries);
+        let before = committed_report(&fs);
+        let operations = grow(&fs, &mut model, puts, None);
+        (operations, before, committed_report(&fs))
     };
-    assert!(splits >= 3, "{splits}");
     let mut outcomes = std::collections::BTreeSet::new();
     for step in 0..operations {
         for seed in 0..4 {
             let fs = SimFileSystem::new();
-            let old = tree_with_entries(&fs, 1, 300);
+            let old = tree_with_entries(&fs, 1, entries);
             let mut new = old.clone();
-            grow(&fs, &mut new, Some(step));
+            grow(&fs, &mut new, puts, Some(step));
             fs.crash(CrashMode::Torn { seed });
             let cache = open(&fs, Access::ReadOnly, 64);
             let tree = stored_tree(&cache);
@@ -376,6 +374,19 @@ fn a_crash_at_any_operation_of_a_commit_that_splits_leaves_the_old_or_the_new_tr
         }
     }
     assert_eq!(outcomes.len(), 2);
+    (before, after)
+}
+
+#[test]
+fn a_crash_at_any_operation_of_a_commit_that_splits_leaves_the_old_or_the_new_tree() {
+    let (before, after) = crash_at_every_operation_of_growing(300, 400);
+    assert!(after.leaf_pages >= before.leaf_pages + 3, "{after:?}");
+}
+
+#[test]
+fn a_crash_at_any_operation_of_a_commit_that_splits_the_root_leaves_the_old_or_the_new_tree() {
+    let (before, after) = crash_at_every_operation_of_growing(20, 150);
+    assert_eq!((before.height, after.height), (1, 2), "{after:?}");
 }
 
 fn tree_pages(cache: &PageCache<SimFile>) -> Vec<u64> {
@@ -510,4 +521,37 @@ fn hostile_child_pointers_and_levels_are_refused() {
         "{error}"
     );
     assert!(tree.check(&cache).is_err());
+}
+
+#[test]
+fn a_child_shared_by_two_parents_is_refused() {
+    let fs = SimFileSystem::new();
+    let model = tree_with_entries(&fs, 6, 400);
+    let mut cache = open(&fs, Access::ReadWrite, 64);
+    let root = cache.superblock().catalog_root;
+    {
+        let mut page = cache.write(root).unwrap();
+        let header = page.header();
+        let mut body = page.to_vec();
+        let shape = Shape::parse(root, header, &body).unwrap();
+        let mut node = Node::decode(&shape, &body).unwrap();
+        assert_eq!(node.level, 1);
+        node.children[1] = node.children[0];
+        node.encode(root, &mut body).unwrap();
+        page.copy_from_slice(&body);
+    }
+    cache.commit(|_| {}).unwrap();
+    drop(cache);
+    let cache = open(&fs, Access::ReadOnly, 64);
+    let tree = stored_tree(&cache);
+    let error = tree.check(&cache).unwrap_err();
+    assert!(
+        matches!(error, StorageError::Format(FormatError::CorruptTree { .. })),
+        "{error}"
+    );
+    let shared_range_key = model
+        .keys()
+        .find(|key| tree.get(&cache, key).is_err())
+        .cloned();
+    assert!(shared_range_key.is_some());
 }

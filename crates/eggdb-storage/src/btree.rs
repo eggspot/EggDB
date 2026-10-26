@@ -3,7 +3,6 @@ use crate::format::{NO_PAGE, PageSize};
 use crate::page_cache::{PageCache, PageMut, PageRef};
 use crate::tree_page::{self, MAX_HEIGHT, Node, Shape};
 use eggdb_platform::File;
-use std::collections::BTreeSet;
 
 /// A B+tree of byte-string keys and values in the pages of a [`PageCache`] (D77, format.md
 /// "B+tree pages").
@@ -199,16 +198,16 @@ impl BTree {
     /// the page, cells that don't overlap and account for every byte, keys in strictly
     /// increasing order within its fence keys, sizes within the limits). Beyond those, each
     /// child must sit one level below its parent, with fence keys equal to the bounds its
-    /// parent gives it, and no page may be reached twice. The first page that fails is
-    /// reported as [`FormatError::CorruptTree`].
+    /// parent gives it. No two children anywhere get the same bounds, so a page reached twice
+    /// fails that check, and the walk reads each page at most once. The first page that fails
+    /// is reported as [`FormatError::CorruptTree`].
     pub fn check<F: File>(&self, cache: &PageCache<F>) -> Result<TreeReport, StorageError> {
         let mut report = TreeReport::default();
-        let mut visited = BTreeSet::new();
         let bounds = Bounds {
             low: Vec::new(),
             high: None,
         };
-        check_page(cache, self.root, None, &bounds, &mut visited, &mut report)?;
+        check_page(cache, self.root, None, &bounds, &mut report)?;
         Ok(report)
     }
 }
@@ -343,7 +342,6 @@ fn check_page<F: File>(
     page_id: u64,
     level: Option<u8>,
     bounds: &Bounds,
-    visited: &mut BTreeSet<u64>,
     report: &mut TreeReport,
 ) -> Result<(), StorageError> {
     let corrupt = |problem| -> StorageError {
@@ -353,9 +351,6 @@ fn check_page<F: File>(
         }
         .into()
     };
-    if !visited.insert(page_id) {
-        return Err(corrupt("the page is reached twice"));
-    }
     let node = {
         let page = cache.read(page_id)?;
         let shape = Shape::parse(page_id, page.header(), &page)?;
@@ -393,14 +388,7 @@ fn check_page<F: File>(
             },
             high: node.keys.get(index).cloned().or_else(|| node.high.clone()),
         };
-        check_page(
-            cache,
-            child,
-            Some(node.level - 1),
-            &child_bounds,
-            visited,
-            report,
-        )?;
+        check_page(cache, child, Some(node.level - 1), &child_bounds, report)?;
     }
     Ok(())
 }

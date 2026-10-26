@@ -305,7 +305,7 @@ page header comes a 32-byte tree header:
 | 22 | 2 | `high_len` | length of the high fence key; 0 means the page has no upper bound |
 | 24 | 1 | `level` | 0 for a leaf; a child is exactly one level below its parent. Below 48. |
 | 25 | 3 | reserved | zero |
-| 28 | 4 | `cell_start` | byte offset of the lowest cell; the page size when there are none |
+| 28 | 4 | `cell_start` | byte offset where the cell area starts, at most the page size |
 | 32 | 8 | `right_child` | inner pages: the child holding the keys from the last separator up to the high fence key. Leaves: 0. |
 | 40 | 4 | `garbage` | bytes in the cell area that no slot points to, left by replaced values |
 | 44 | 4 | reserved | zero |
@@ -346,8 +346,11 @@ page to its end, in any order. A cell stores its key without the page's prefix:
   over the limits, a value length with its top bit set, and a child page number of 0. Each
   step down the tree also checks that the child is one level below its parent and that the
   key sought lies within the child's fence keys, which bounds every walk by the root's level.
-  `eggdb check` also checks that every child's fence keys equal the bounds its parent gives it
-  and that no page is reached twice.
+  `eggdb check` also checks that every child's fence keys equal the bounds its parent gives
+  it. Siblings' key ranges never overlap and are never empty, so no two children get the same
+  bounds, and a page reached twice (a cycle or a shared child) fails that check.
+- **An inner page may hold no separators**, only `right_child`: the fallback of an inner split
+  can leave one, and the format allows it.
 
 ## Hybrid-clock stamps (item 9)
 - A commit stamp is a `u64`: 52 bits of microseconds since **2026-01-01T00:00:00Z** (Unix time

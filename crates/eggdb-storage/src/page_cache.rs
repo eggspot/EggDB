@@ -492,9 +492,7 @@ impl PageRef<'_> {
         self.state.get() & CONTENTS_CHECKED != 0
     }
 
-    /// Records that the page's contents passed its structure's checks, until the cache next
-    /// reads it from the file.
-    pub fn set_contents_checked(&self) {
+    pub(crate) fn set_contents_checked(&self) {
         self.state.set(self.state.get() | CONTENTS_CHECKED);
     }
 }
@@ -544,9 +542,7 @@ impl PageMut<'_> {
         self.state.get() & CONTENTS_CHECKED != 0
     }
 
-    /// Records that the page's contents are valid for its structure, until the cache next
-    /// reads it from the file.
-    pub fn set_contents_checked(&self) {
+    pub(crate) fn set_contents_checked(&self) {
         self.state.set(self.state.get() | CONTENTS_CHECKED);
     }
 }

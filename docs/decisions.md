@@ -2691,13 +2691,16 @@ left out until a benchmark shows binary search is the cost.
    clears on every read-in, as SQLite checks a page once when loading it. Every step down the
    tree still checks the child's level and that the key lies within its fence keys, cheaply,
    and `BTree::check` (for `eggdb check`) also checks each child's fence keys against its
-   parent's bounds and that no page is reached twice. When frames are shared between threads
+   parent's bounds. Siblings' ranges never overlap and are never empty, so that check also
+   refuses a page reached twice, without a set of visited pages. When frames are shared between threads
    (issue #30) the bit becomes part of the atomic state word.
 4. *Split points.* A split of the rightmost leaf after an insert at its end keeps every old
    entry on the left, and of the leftmost leaf after an insert at its start keeps them all on
    the right, so sequential and reverse loads fill pages (SQLite's quick balance; PostgreSQL's
    nbtree splits the rightmost page unevenly too). Other splits divide the bytes evenly, and
-   fall back to any point where both halves fit, which always exists with these limits. A
+   fall back to any point where both halves fit, which always exists with these limits. An
+   inner split's fallback may leave a page with no separators and only its rightmost child,
+   which the format allows. A
    fill factor below 100% for sequential loads waits for a benchmark that needs it.
 5. *Prefix truncation now.* It changes the page layout, so it is built before v0.2.0 ships
    rather than behind a layout version later.
