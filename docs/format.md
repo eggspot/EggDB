@@ -503,9 +503,16 @@ After the 16-byte page header, each overflow page holds:
   `first` or `next` rules instead of looping, and it checks that the file holds at least that
   many pages before it reserves memory for the value, so a crafted length can't make it
   allocate more than the file could hold.
-- **Shared chains.** Two references naming the same chain can't be told apart from valid ones
-  by a reader. `eggdb check` finds them: it remembers every page it reaches, tree and overflow
-  pages alike, and refuses a page reached twice.
+- **Shared chains.** A chain that passes these rules is well formed for the reference that
+  names it; that does not prove that no other live reference names it too. Two references
+  naming the same chain, or a reference naming a chain whose pages were freed, are found only by
+  `eggdb check`, which remembers every page it reaches, tree and overflow pages alike, and
+  refuses a page reached twice.
+- **Freeing.** A put that replaces a large value, and a delete, read and check the old chain
+  whole before freeing any of it, and before writing a new chain. A chain whose pages the same
+  transaction wrote for another key is refused too. So a damaged or crafted reference makes the
+  put or delete of that key fail, with the transaction rolled back, instead of freeing pages
+  still in use.
 - **Compatibility.** Overflow pages and the reference's `0x8010` length field ship in format
   version 1 with no feature flag: no release before v0.2.0 wrote a database file (D88). A later
   kind of reference, such as one keeping part of the value in the leaf, uses another length in

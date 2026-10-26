@@ -331,7 +331,13 @@ fn read_everything(fs: &SimFileSystem, model: &Model, huge_length: bool, context
     false
 }
 
-fn write_after(fs: &SimFileSystem, model: &Model, rng: &mut TestRng, context: &str) {
+fn write_after(
+    fs: &SimFileSystem,
+    model: &Model,
+    rng: &mut TestRng,
+    passed_check_before: bool,
+    context: &str,
+) {
     let Some(file) = expect_allowed(
         PageFile::open(fs, Path::new(DB), Access::ReadWrite),
         context,
@@ -349,8 +355,17 @@ fn write_after(fs: &SimFileSystem, model: &Model, rng: &mut TestRng, context: &s
         write.put(&tree, keys[rng.below(keys.len())], &value)?;
         write.commit()
     });
-    if expect_allowed(written, context).is_some() {
-        expect_allowed(store.check(), context);
+    if expect_allowed(written, context).is_none() {
+        return;
+    }
+    let checked = store.check();
+    if passed_check_before {
+        assert!(
+            checked.is_ok(),
+            "{context}: a file that passed the check fails it after a commit: {checked:?}"
+        );
+    } else {
+        expect_allowed(checked, context);
     }
 }
 
@@ -377,8 +392,8 @@ fn seeded_mutations_of_large_values_never_panic_hang_or_allocate_beyond_the_file
         let fs = file_system_holding(&bytes);
         let damage_found = read_everything(&fs, &fixture.model, huge_length, &context);
         refused[case as usize % MUTATIONS.len()] += u64::from(damage_found);
-        if case % 4 == 0 {
-            write_after(&fs, &fixture.model, &mut rng, &context);
+        if case % 4 == 0 || !damage_found {
+            write_after(&fs, &fixture.model, &mut rng, !damage_found, &context);
         }
     }
     eprintln!("refused by check, per mutation: {refused:?}");

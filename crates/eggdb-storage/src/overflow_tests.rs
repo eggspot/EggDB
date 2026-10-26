@@ -878,3 +878,119 @@ fn a_page_with_two_uses_fails_the_page_accounting() {
         );
     });
 }
+
+const OWNED_BY_ANOTHER_KEY: &str =
+    "the value's pages belong to another value written in this transaction";
+
+#[test]
+fn replacing_or_deleting_a_value_whose_reference_points_past_the_file_fails_and_frees_nothing() {
+    let fs = SimFileSystem::new();
+    let model = three_large_values(&fs);
+    {
+        let mut cache = opened_cache(&fs, Access::ReadWrite, 128);
+        let past_the_end = cache.superblock().page_count;
+        rewrite_leaf_entry(&cache, b"a", |value| {
+            let StoredValue::Overflow(reference) = value else {
+                panic!("not a large value");
+            };
+            reference.first_page = past_the_end;
+        });
+        cache.commit(|_| {}).unwrap();
+    }
+    let (store, tree) = opened_store(&fs, Access::ReadWrite, 128);
+    let before = store.superblock().unwrap();
+    let same_length = patterned(model[&b"a"[..]].len(), 77);
+    for change in 0..3 {
+        let mut write = store.begin_write().unwrap();
+        let error = match change {
+            0 => write.put(&tree, b"a", &same_length).unwrap_err(),
+            1 => write.put(&tree, b"a", b"small").unwrap_err(),
+            _ => write.delete(&tree, b"a").unwrap_err(),
+        };
+        assert!(
+            matches!(
+                error,
+                StorageError::PageOutOfRange { .. } | StorageError::PageNotInUse { .. }
+            ),
+            "{error}"
+        );
+        assert!(matches!(
+            write.put(&tree, b"b", b""),
+            Err(StorageError::TransactionFailed)
+        ));
+    }
+    assert_eq!(store.superblock().unwrap(), before);
+    let read = store.begin_read().unwrap();
+    for key in [&b"b"[..], b"c", b"d"] {
+        assert_eq!(read.get(&tree, key).unwrap().as_ref(), model.get(key));
+    }
+    assert!(store.check().is_err());
+}
+
+#[test]
+fn a_reference_to_a_chain_another_key_wrote_in_this_transaction_is_refused() {
+    for change in 0..3 {
+        let fs = SimFileSystem::new();
+        let model = three_large_values(&fs);
+        let mut cache = opened_cache(&fs, Access::ReadWrite, 128);
+        let tree = BTree::open(&cache, cache.superblock().catalog_root).unwrap();
+        let new_value = patterned(2 * per_page(PageSize::DEFAULT), 5);
+        tree.put(&cache, b"new", &new_value).unwrap();
+        let StoredValue::Overflow(new_reference) = stored_value(&cache, b"new") else {
+            panic!("not a large value");
+        };
+        rewrite_leaf_entry(&cache, b"d", |value| {
+            *value = StoredValue::Overflow(new_reference);
+        });
+        let error = match change {
+            0 => tree.delete(&cache, b"d").unwrap_err(),
+            1 => tree.put(&cache, b"d", b"small").unwrap_err(),
+            _ => tree.put(&cache, b"d", &new_value).unwrap_err(),
+        };
+        assert!(corrupt_overflow(OWNED_BY_ANOTHER_KEY)(&error), "{error}");
+        assert_eq!(tree.get(&cache, b"new").unwrap(), Some(new_value));
+        cache.rollback().unwrap();
+        drop(cache);
+        let (store, tree) = opened_store(&fs, Access::ReadOnly, 64);
+        assert_holds(&store, &tree, &model);
+    }
+}
+
+#[test]
+fn one_key_rewritten_many_times_in_a_transaction_frees_each_chain_it_wrote() {
+    let fs = SimFileSystem::new();
+    let page = per_page(PageSize::DEFAULT);
+    let (store, tree) = created_store(&fs, PageSize::DEFAULT, 256);
+    let mut model = Model::new();
+    let mut write = store.begin_write().unwrap();
+    for (round, len) in [5 * page, 4 * page, 4, 2 * page].into_iter().enumerate() {
+        write
+            .put(&tree, b"x", &patterned(len, round as u64))
+            .unwrap();
+    }
+    assert!(write.delete(&tree, b"x").unwrap());
+    write.put(&tree, b"x", &patterned(3 * page, 9)).unwrap();
+    write.put(&tree, b"y", &patterned(2 * page, 10)).unwrap();
+    write.commit().unwrap();
+    model.insert(b"x".to_vec(), patterned(3 * page, 9));
+    model.insert(b"y".to_vec(), patterned(2 * page, 10));
+    assert_holds(&store, &tree, &model);
+}
+
+#[test]
+fn a_value_that_just_fits_the_cache_can_replace_one_as_large() {
+    let fs = SimFileSystem::new();
+    let page = per_page(PageSize::DEFAULT);
+    let (store, tree) = created_store(&fs, PageSize::DEFAULT, 40);
+    let mut model = Model::new();
+    let largest = 39 * page;
+    let puts = [(b"big".to_vec(), patterned(largest, 1))];
+    commit_changes(&store, &tree, &mut model, &puts, &[]);
+    let mut write = store.begin_write().unwrap();
+    write.check_fits(b"big", &patterned(largest, 2)).unwrap();
+    write.put(&tree, b"big", &patterned(largest, 2)).unwrap();
+    write.put(&tree, b"big", &patterned(largest, 3)).unwrap();
+    write.commit().unwrap();
+    model.insert(b"big".to_vec(), patterned(largest, 3));
+    assert_holds(&store, &tree, &model);
+}

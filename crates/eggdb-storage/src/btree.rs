@@ -223,7 +223,10 @@ impl BTree {
     /// Stores `value` under `key`, inserting it or replacing the value there. Pages split as
     /// needed, up to the root. A value that does not fit in a leaf beside its key goes to a new
     /// chain of overflow pages, and the chain of a value it replaces goes back to the free
-    /// list, to be reused after the commit.
+    /// list, to be reused after the commit. That chain is read whole and checked before any of
+    /// it is freed, and before the new chain is written: a damaged chain, or one that a value
+    /// written earlier in the transaction under another key owns, fails the put with
+    /// [`FormatError::CorruptOverflow`] instead of freeing pages still in use.
     ///
     /// A key or value refused by [`BTree::check_fits`] fails before anything changes. Any other
     /// error, such as [`StorageError::CacheFull`] in the middle of a split, can leave the
@@ -236,15 +239,7 @@ impl BTree {
         value: &[u8],
     ) -> Result<(), StorageError> {
         Self::check_fits(cache, key, value)?;
-        let written = if fits_inline(cache.page_size(), key, value) {
-            None
-        } else {
-            Some(overflow::write_value(cache, value)?)
-        };
-        let stored = match &written {
-            None => LeafValue::Inline(value),
-            Some(reference) => LeafValue::Overflow(reference.encode()),
-        };
+        let inline = fits_inline(cache.page_size(), key, value);
         let mut path = [NO_PAGE; MAX_HEIGHT as usize];
         let mut depth = 0;
         let mut page_id = self.root;
@@ -265,19 +260,30 @@ impl BTree {
         let mut page = cache.write_keeping_check(page_id)?;
         let mut shape = shape_of_mut(&page)?;
         let suffix = shape.key_suffix(&page, key)?;
-        let mut replaced = None;
         let index = match shape.search(&page, suffix)? {
             Ok(index) => {
                 let cell = shape.cell_at(&page, index)?;
-                replaced = shape.overflow_reference(&cell)?;
-                if written.is_none() && replaced.is_none() && cell.payload.len() == value.len() {
+                let replaced = shape.overflow_reference(&cell)?;
+                if inline && replaced.is_none() && cell.payload.len() == value.len() {
                     shape.overwrite_value(&mut page, index, value)?;
                     return Ok(());
+                }
+                if let Some(reference) = replaced {
+                    overflow::free_value(cache, &reference, key)?;
                 }
                 shape.remove(&mut page, index)?;
                 index
             }
             Err(index) => index,
+        };
+        let written = if inline {
+            None
+        } else {
+            Some(overflow::write_value(cache, key, value)?)
+        };
+        let stored = match &written {
+            None => LeafValue::Inline(value),
+            Some(reference) => LeafValue::Overflow(reference.encode()),
         };
         if shape.leaf_fits(suffix.len(), &stored) {
             shape.insert_leaf(&mut page, index, suffix, &stored);
@@ -294,10 +300,7 @@ impl BTree {
             );
             store(cache, &path[..=depth], page, node, index)?;
         }
-        match replaced {
-            Some(reference) => overflow::free_value(cache, &reference),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// Removes `key` and its value, and returns whether the key was there. A key that is not
@@ -339,7 +342,7 @@ impl BTree {
             level = Some(shape.level - 1);
             depth += 1;
         }
-        let removed = {
+        {
             let mut page = cache.write_keeping_check(page_id)?;
             let mut shape = shape_of_mut(&page)?;
             let suffix = shape.key_suffix(&page, key)?;
@@ -348,12 +351,10 @@ impl BTree {
                     .corrupt("a key found in a leaf is gone when the leaf is changed")
                     .into());
             };
-            let removed = shape.overflow_reference(&shape.cell_at(&page, index)?)?;
+            if let Some(reference) = shape.overflow_reference(&shape.cell_at(&page, index)?)? {
+                overflow::free_value(cache, &reference, key)?;
+            }
             shape.remove(&mut page, index)?;
-            removed
-        };
-        if let Some(reference) = removed {
-            overflow::free_value(cache, &reference)?;
         }
         rebalance(cache, &path[..depth], page_id)?;
         Ok(true)

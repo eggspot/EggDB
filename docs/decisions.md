@@ -3171,6 +3171,17 @@ that key, so the cursor's buffer holds at most one leaf of small entries and one
 and a buffer grown past a megabyte is released when its batch is done. A streaming read of one
 value, piece by piece, is a later item.
 
+**Freeing is fail-safe.** A put that replaces a large value, and a delete, read the old chain
+whole and check every page before freeing any of it, and do so before the new chain is written;
+the freed frames also make room for the new chain, so a value that fits the cache can replace one
+as large. A chain whose pages this transaction wrote is freed only by the key that wrote it (the
+cache remembers each new chain's first page and key until the commit or rollback), so a crafted
+reference naming another key's new chain is refused. A chain that passes its rules is well formed
+for its reference; it does not prove that no other live reference names it. Two committed
+references sharing a chain, or one naming freed pages, are found only by `check`. A damaged or
+crafted chain therefore makes the put or delete of its key fail, with the transaction rolled
+back, rather than free pages still in use.
+
 **Hostile files (D9).** Every chain page is read through the cache, so it must pass its
 checksum and lie inside the file, outside the free list and the log. Before reserving memory
 for a value, a reader checks the length against 1 GiB and against the pages the file holds
@@ -3262,6 +3273,19 @@ without logging them, is left for later (issue #44).
 - The crash sweep (CI) takes about 29 s of a debug build, up from about 20 s, and the
   exhaustive run (`EGGDB_CRASH_SWEEP=1`) gives 27,048 crash points and 43,992 crashes during
   recovery in 195 s.
+
+**Review fixes before merge** (security review of PR 43): put used to write the new chain before
+freeing the old one, so a crafted old reference naming the page one past the file's end matched
+the new chain and freed it, and a crafted reference could free a chain another key wrote in the
+same transaction; both now fail as above, with regression tests on crafted files. The mutation
+test now requires a file that passed the check before a commit to pass it after. Freeing first
+also fixed an overwrite at the cache's limit that `check_fits` accepted but that ran out of
+frames. A chain that leads to the leaf being changed is reported as damage, not as a borrowed
+page.
+
+**API renames for the v0.2.0 notes:** `StorageError::EntryTooLarge` became `ValueTooLarge` and
+`ValueExceedsCache`, `BTree::max_entry_bytes` became `max_inline_entry_bytes`, and
+`Database::max_entry_bytes` became `max_value_bytes`; none was in a release.
 
 **Left for later:** a streaming read of one value; reading a large value's pages without
 setting the clock's reference bit, so one scan doesn't flush the cache; coalescing consecutive

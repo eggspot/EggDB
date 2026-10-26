@@ -64,6 +64,7 @@ impl OverflowReference {
 
 pub(crate) fn write_value<F: File>(
     cache: &PageCache<F>,
+    key: &[u8],
     value: &[u8],
 ) -> Result<OverflowReference, StorageError> {
     let mut chunks = value.chunks(data_bytes_per_page(cache.page_size()));
@@ -77,6 +78,8 @@ pub(crate) fn write_value<F: File>(
         fill(&mut next, first_page, index, chunk);
         page = next;
     }
+    drop(page);
+    cache.record_new_chain(first_page, key);
     Ok(OverflowReference {
         value_bytes: value.len() as u64,
         first_page,
@@ -125,8 +128,22 @@ pub(crate) fn value_pages(
 pub(crate) fn free_value<F: File>(
     cache: &PageCache<F>,
     reference: &OverflowReference,
+    key: &[u8],
 ) -> Result<(), StorageError> {
-    for page in value_pages(cache, reference)? {
+    let pages = value_pages(cache, reference)?;
+    let written_now = pages
+        .iter()
+        .filter(|&&page| cache.allocated_in_this_transaction(page))
+        .count();
+    let owned_by_key =
+        written_now == pages.len() && cache.forget_new_chain(reference.first_page, key);
+    if written_now > 0 && !owned_by_key {
+        return Err(corrupt(
+            reference.first_page,
+            "the value's pages belong to another value written in this transaction",
+        ));
+    }
+    for page in pages {
         cache.free(page)?;
     }
     Ok(())
@@ -173,7 +190,13 @@ fn walk(
     let mut page_id = reference.first_page;
     let mut remaining = reference.value_bytes;
     for index in 0..page_count {
-        let page = pages.page(page_id)?;
+        let page = pages.page(page_id).map_err(|error| match error {
+            StorageError::PageBorrowed { page } => corrupt(
+                page,
+                "a large value leads to a page of the tree being changed",
+            ),
+            error => error,
+        })?;
         let chunk = remaining.min(per_page) as usize;
         let last = index + 1 == page_count;
         let next = check_page(&page, reference, index, chunk, last)?;
