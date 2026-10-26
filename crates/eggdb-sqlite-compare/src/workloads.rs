@@ -12,7 +12,7 @@ pub(crate) const BATCH_PUT: &str = "sqlite_compare.batch_put";
 pub(crate) const BATCH_PUT_NORMAL: &str = "sqlite_compare.batch_put_normal";
 pub(crate) const DURABLE_COMMIT: &str = "sqlite_compare.durable_commit";
 
-pub(crate) const ENTRIES: u64 = 100_000;
+const ENTRIES: u64 = 100_000;
 const DURABLE_ENTRIES: u64 = 1000;
 const PUTS_PER_BATCH: u64 = 1000;
 const RATIO: &str = "ratio_to_sqlite";
@@ -23,12 +23,7 @@ const SELECT_IN_ORDER: &str = "SELECT k, v FROM kv ORDER BY k";
 const UPSERT: &str =
     "INSERT INTO kv(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v";
 
-pub(crate) fn eggdb_get(
-    db: &Database,
-    first: u64,
-    count: u64,
-    entries: u64,
-) -> Result<usize, String> {
+fn eggdb_get(db: &Database, first: u64, count: u64, entries: u64) -> Result<usize, String> {
     let mut folded = 0;
     for index in first..first + count {
         let found = db
@@ -40,7 +35,7 @@ pub(crate) fn eggdb_get(
     Ok(folded)
 }
 
-pub(crate) fn sqlite_get(
+fn sqlite_get(
     select: &mut Statement<'_>,
     first: u64,
     count: u64,
@@ -82,7 +77,7 @@ pub(crate) fn get() -> Result<Vec<Metric>, String> {
     ))
 }
 
-pub(crate) fn eggdb_scan(
+fn eggdb_scan(
     db: &Database,
     count: u64,
     mut visit: impl FnMut(&[u8], &[u8]),
@@ -107,7 +102,7 @@ pub(crate) fn eggdb_scan(
     Ok(())
 }
 
-pub(crate) fn sqlite_scan(
+fn sqlite_scan(
     select: &mut Statement<'_>,
     count: u64,
     mut visit: impl FnMut(&[u8], &[u8]),
@@ -164,12 +159,7 @@ pub(crate) fn scan() -> Result<Vec<Metric>, String> {
     ))
 }
 
-pub(crate) fn eggdb_batch_put(
-    db: &Database,
-    first: u64,
-    count: u64,
-    entries: u64,
-) -> Result<(), String> {
+fn eggdb_batch_put(db: &Database, first: u64, count: u64, entries: u64) -> Result<(), String> {
     let mut next = first;
     let end = first + count;
     while next < end {
@@ -185,14 +175,14 @@ pub(crate) fn eggdb_batch_put(
     Ok(())
 }
 
-pub(crate) struct SqliteWriter<'c> {
+struct SqliteWriter<'c> {
     begin: Statement<'c>,
     upsert: Statement<'c>,
     commit: Statement<'c>,
 }
 
 impl<'c> SqliteWriter<'c> {
-    pub(crate) fn new(sqlite: &'c Connection) -> Result<Self, String> {
+    fn new(sqlite: &'c Connection) -> Result<Self, String> {
         Ok(Self {
             begin: prepare(sqlite, "BEGIN IMMEDIATE")?,
             upsert: prepare(sqlite, UPSERT)?,
@@ -200,7 +190,7 @@ impl<'c> SqliteWriter<'c> {
         })
     }
 
-    pub(crate) fn batch_put(&mut self, first: u64, count: u64, entries: u64) -> Result<(), String> {
+    fn batch_put(&mut self, first: u64, count: u64, entries: u64) -> Result<(), String> {
         let mut next = first;
         let end = first + count;
         while next < end {
@@ -215,12 +205,7 @@ impl<'c> SqliteWriter<'c> {
         Ok(())
     }
 
-    pub(crate) fn commit_each(
-        &mut self,
-        first: u64,
-        count: u64,
-        entries: u64,
-    ) -> Result<(), String> {
+    fn commit_each(&mut self, first: u64, count: u64, entries: u64) -> Result<(), String> {
         for index in first..first + count {
             self.upsert(index, entries)?;
         }
@@ -279,12 +264,7 @@ fn batch_put_with(
     ))
 }
 
-pub(crate) fn eggdb_commit_each(
-    db: &Database,
-    first: u64,
-    count: u64,
-    entries: u64,
-) -> Result<(), String> {
+fn eggdb_commit_each(db: &Database, first: u64, count: u64, entries: u64) -> Result<(), String> {
     for index in first..first + count {
         db.put(key(index % entries), value(index))
             .map_err(failed("EggDB put"))?;
@@ -397,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn both_stores_find_every_key_with_the_same_values() {
+    fn both_stores_find_every_key_and_values_of_the_same_lengths() {
         let stores = Stores::open("test-get", Durability::Off, ENTRIES).unwrap();
         let mut select = prepare(&stores.sqlite, SELECT_VALUE).unwrap();
         let eggdb = eggdb_get(&stores.eggdb, 0, 2 * ENTRIES, ENTRIES).unwrap();

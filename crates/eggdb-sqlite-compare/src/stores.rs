@@ -3,8 +3,8 @@ use crate::entries::{key, value};
 use eggdb::{Database, Durability, Options};
 use rusqlite::Connection;
 
-pub(crate) const CACHE_BYTES: usize = 64 << 20;
-pub(crate) const PAGE_BYTES: usize = 4096;
+const CACHE_BYTES: usize = 64 << 20;
+const PAGE_BYTES: usize = 4096;
 const AUTO_CHECKPOINT_LOG_BYTES: usize = 1 << 20;
 const SQLITE_SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
@@ -87,7 +87,7 @@ fn open_eggdb(file: &BenchFile, durability: Durability) -> Result<Database, Stri
     Database::open_with(&file.path, options).map_err(failed("open EggDB"))
 }
 
-pub(crate) fn synchronous(durability: Durability) -> Result<&'static str, String> {
+fn synchronous(durability: Durability) -> Result<&'static str, String> {
     match durability {
         Durability::Full => Ok("FULL"),
         Durability::Normal => Ok("NORMAL"),

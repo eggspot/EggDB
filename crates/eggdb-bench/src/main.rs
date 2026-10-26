@@ -12,7 +12,8 @@
 //!   (50%), for this system;
 //! - times in nanoseconds per operation, reported and never gated.
 //!
-//! `--update` rewrites this system's lines and the shared count lines, `--baseline <path>`
+//! `--update` rewrites this system's lines and the shared count lines of the benchmark families
+//! it measured, keeping the others (such as `eggdb-sqlite-compare`'s), `--baseline <path>`
 //! reads another file, and the results are added to `$GITHUB_STEP_SUMMARY` when it is set.
 
 mod allocations;
