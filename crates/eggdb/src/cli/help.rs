@@ -13,6 +13,7 @@ Commands:
   scan   <file>                 list entries in key order; see --prefix, --from, --to
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
+  ui     <file>                 browse keys and values full screen in the terminal
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -41,6 +42,7 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         }
         CommandName::Check => "eggdb check <file>",
         CommandName::Stats => "eggdb stats <file>",
+        CommandName::Ui => "eggdb ui <file> [--mono] [--ascii] [--cache <bytes>]",
     }
 }
 
@@ -61,6 +63,7 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Scan => SCAN,
         CommandName::Check => CHECK,
         CommandName::Stats => STATS,
+        CommandName::Ui => UI,
     }
 }
 
@@ -146,4 +149,19 @@ written since the last checkpoint. It reads no page, so it is instant on a file 
 Examples:
   eggdb stats app.db
   eggdb stats app.db --format json
+";
+
+const UI: &str = "\
+Opens the file read-only, full screen: the keys in order on the left, the selected value on the
+right as text, JSON or hex. Up/Down or j/k move, PgUp/PgDn page, Home/End jump, / filters by
+prefix, v changes the view, Tab switches pane, ? shows every key, q quits. Needs a terminal
+on both stdin and stdout; in a script use eggdb get and eggdb scan.
+
+Options:
+  --mono    no colours (also when NO_COLOR is set)
+  --ascii   ASCII only, no box lines or arrows; with --mono, no styles at all
+
+Examples:
+  eggdb ui app.db
+  eggdb ui app.db --mono --ascii
 ";

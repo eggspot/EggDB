@@ -5,6 +5,7 @@ use super::failure::{Exit, Failure};
 use super::output::{Output, Style};
 use super::render::{self, JsonObject, LineBreaks};
 use super::reports::{self, Damage};
+use super::ui;
 use eggdb::{Database, Error, ErrorKind, Options};
 use eggdb_storage::{BTree, PageSize, StorageError};
 use std::io::Read;
@@ -50,6 +51,12 @@ pub(crate) fn uses_color(choice: ColorChoice, terminal_wants_color: bool) -> boo
 
 pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exit, Failure> {
     let terminal = console.terminal;
+    if request.command == CommandName::Ui && !(terminal.stdin && terminal.stdout) {
+        return Err(Failure::usage(
+            "eggdb ui needs a terminal; use eggdb get/scan instead",
+            Some(CommandName::Ui),
+        ));
+    }
     let format = request
         .format
         .unwrap_or_else(|| default_format(request.command, terminal.stdout));
@@ -75,6 +82,7 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
         CommandName::Scan => session.scan(),
         CommandName::Check => session.check(),
         CommandName::Stats => session.stats(),
+        CommandName::Ui => session.ui(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -423,6 +431,39 @@ impl Session<'_> {
 
     fn error_message(&mut self, message: &str) {
         super::error_line(&mut self.messages, message);
+    }
+
+    fn ui(&mut self) -> Result<Exit, Failure> {
+        let db = self.open(Access::ReadOnly, None)?;
+        let capabilities = eggdb_ui::detect_capabilities(eggdb_ui::Fallbacks {
+            mono: self.request.mono,
+            ascii: self.request.ascii,
+        });
+        let mut terminal = match eggdb_ui::OsTerminal::open(capabilities) {
+            Ok(terminal) => terminal,
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+                return Err(Failure::usage(
+                    "eggdb ui needs a terminal; use eggdb get/scan instead",
+                    Some(CommandName::Ui),
+                ));
+            }
+            Err(error) => {
+                return Err(Failure::database(
+                    format!("cannot use the terminal: {error}"),
+                    Exit::DatabaseError,
+                ));
+            }
+        };
+        let size = eggdb_ui::Terminal::size(&terminal);
+        let source = ui::DatabaseSource::new(db, self.file_display.clone());
+        let mut screen = eggdb_ui::Ui::new(source, eggdb_ui::UiOptions { capabilities }, size);
+        let ran = eggdb_ui::run(&mut terminal, &mut screen);
+        drop(terminal);
+        ran.map_err(|error| {
+            Failure::database(format!("the terminal failed: {error}"), Exit::DatabaseError)
+        })?;
+        self.close(screen.into_source().into_database())?;
+        Ok(Exit::Done)
     }
 
     fn open(&self, access: Access, cache_for_command: Option<usize>) -> Result<Database, Failure> {
