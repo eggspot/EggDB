@@ -2833,9 +2833,20 @@ state: with seven recycled slots, a log that never needs an eighth segment alway
    keeping released segments out of reuse until the next checkpoint, needed state the header
    has no room for. A test damages the newest slot after every third commit of a workload with
    checkpoints, reuse and freed segments, and another after freed segments are overwritten;
-   each open is refused or shows the latest commit. One gap remains (format.md, "Damage to the
-   newest header slot"): a crash between the two writes, then later damage to the newest slot
-   after the freed segments were reused (issue #39).
+   each open is refused or shows the latest commit. The guarantee is therefore: a damaged
+   newest slot means a replay to the newest commit or a refused open, except after two double
+   faults, each a crash followed later by that damage (format.md, "Damage to the newest header
+   slot"; issue #39):
+   - a crash between the two superblock writes of a freeing checkpoint, then damage to the
+     newest slot after the freed segments were reused;
+   - a crash in the first flush into a recycled segment (its new header block lost while later
+     blocks persist, no later batch record to prove durability), then damage to the newest
+     slot before the next header write (the first commit after reopen writes one): the older
+     slot then opens with 0 commits replayed over pages that are newer, a mixed state;
+     open-for-write could close the window by writing the newest superblock to the other slot
+     after a recovery that found a cut-off flush.
+   Each checkpoint consumes 65,536 sequence numbers, so about 2^48 checkpoints fit before the
+   reservation is exhausted and opening for writing is refused.
 6. *Recovery writes nothing before the free list is checked* (raised by the general review of
    PR 38). Opening now checks the replayed free list, reading replayed pages from the log,
    before it resizes the file, syncs or writes any page in place, so a forged log naming a data
@@ -2852,8 +2863,10 @@ a reservation below `log_head_sequence`.
 **Known limit.** If the newest slot is damaged after it was synced, the older slot is chosen
 (D77) and replays its own log as far as that log links, which can run past its checkpoint up
 to the newest commit. The rules in item 5 make that open either reach the newest commit or be
-refused, except after the double fault item 5 names. That is the class of damage after a sync
-that Alagappan et al. (FAST'18) describe; detection beyond it is best-effort.
+refused, except after the two double faults item 5 names (a crash between a freeing
+checkpoint's two header writes, or a crash in the first flush into a recycled segment, each
+followed later by damage to the newest slot; issue #39). That is the class of damage after a
+sync that Alagappan et al. (FAST'18) describe; detection beyond it is best-effort.
 
 **Cost.** A checkpoint under `Full` is three file operations and two syncs (benchmark
 `log.checkpoint`). Opening a file after 1,000 one-page commits takes 148 file operations and

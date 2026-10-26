@@ -100,7 +100,8 @@ written as zero and ignored on read, so a later version can use them behind a fe
    update looks like that, and so does damage to a synced slot. In the second case the chosen
    superblock is older than the file. Recovery then either replays that older header's log all
    the way to the newest commit, or refuses the file, as "Damage to the newest header slot"
-   below says, with the one exception it names.
+   below says, except after the two double faults (a crash, then later damage to the newest
+   slot) it names.
 
 A crash while a slot is being written leaves that slot torn and the other one intact, so the
 file opens in the old state or the new one. The superblock fits in the first 512 bytes, one
@@ -302,11 +303,25 @@ older slot is chosen (see "Opening a file"). Its log was not overwritten by anyt
 detect: a recycled segment reused since then, its own head included, carries a sequence above
 its reservation or not its head sequence, and segments a checkpoint gave to the free list are
 never left in an older slot's log, because such a checkpoint writes its superblock to both
-slots (step 4 below). So the open either replays that log through to the newest commit, or is
-refused. The exception is a crash between those two writes followed, later, by damage to the
-newest slot after the freed segments were reused: the older slot can then open a mix of older
-and newer pages. Checksums can't tell damage after a sync from a crash (Alagappan et al.,
-FAST'18); detection beyond this is best-effort (issue #39 tracks closing the exception).
+slots (step 4 below).
+
+The guarantee: when the newest slot is damaged after it was synced, the open either replays to
+the newest commit or is refused, except after one of two double faults, each a crash followed
+later by that damage:
+1. A crash between a freeing checkpoint's two superblock writes, then damage to the newest
+   slot after the freed segments were reused as data: the older slot's log breaks at a reused
+   segment, and the open shows a mix of older and newer pages.
+2. A crash in the first flush into a recycled segment (its new header block lost while later
+   blocks persist, with no later batch record to prove them durable), then damage to the
+   newest slot before the next superblock write (the first commit after the reopen writes
+   one): the older slot then opens with no commits replayed over pages that are newer, a mixed
+   state. Opening for writing could close this window by writing the newest superblock to the
+   other slot after a recovery that found a cut-off flush.
+
+Checksums can't tell damage after a sync from a crash (Alagappan et al., FAST'18); detection
+beyond this is best-effort. Issue #39 tracks closing both windows, by writing the newest
+superblock to the other slot after a recovery that found a cut-off flush, or whenever the older
+slot isn't a copy of the newest.
 
 ## Checkpoints (item 7)
 A checkpoint bounds what recovery replays and lets the log's segments be reused. It needs no
