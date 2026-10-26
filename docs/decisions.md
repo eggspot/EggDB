@@ -2490,10 +2490,14 @@ of the engine reads and changes pages through it.
 
 **Memory: one region, allocated once.** The cache takes its frames, one page each, as a single
 `MemoryRegion` from the platform layer's `Memory` when it is created, and never allocates
-again on a page read. The size is set at creation, in pages or bytes. The page table and the
-per-frame state take up to about 100 bytes per frame on top, under 3% of a 4 KiB page.
-- One region is lazily zeroed by the operating system, so creating a large cache costs almost
-  nothing at start (D14). It can move to huge pages later, and a hit is one index calculation.
+again on a page read. The size is set at creation, in pages or bytes. The region comes first,
+so a size the memory can't hold fails there. The page table and the per-frame state follow,
+reserved fallibly, so a failure is an out-of-memory error rather than an abort.
+- **Cost at creation.** The region is lazily zeroed by the operating system, so its pages cost
+  nothing until they are used. The side tables, about 60 to 95 bytes per frame, are written
+  at creation. That is 16 to 24 MB for a 1 GiB cache of 4 KiB pages. Making them lazy too is
+  left until startup is measured (D14).
+- One region can move to huge pages later, and a hit is one index calculation.
 - The alternative, one aligned buffer per frame behind a `RefCell`, needed no `unsafe`, but it
   touched every frame at creation and ruled out huge pages. It stays the fallback behind the
   same API.
@@ -2515,8 +2519,13 @@ with `PageBorrowed`: it never waits and never panics. Several pages can be pinne
 because these methods take the cache by shared reference. `commit` and `rollback` take it
 exclusively, so the borrow checker guarantees no handle outlives them.
 
-**No-steal.** A changed page is never evicted. `commit` writes the changed pages in page order
-through `PageFile::write_page` and then calls `PageFile::commit`. `rollback` drops them and
+**No-steal.** A changed page is never evicted. `commit` first checks everything that can
+refuse it without writing: the update and the next superblock (a new no-I/O prepare step of
+`PageFile::commit`), every changed page still in use, and no changed page still held by a
+leaked handle. Only then does it write the changed pages in page order through
+`PageFile::write_page`, and finish the page file's commit. A refused commit writes nothing,
+leaves the changes in memory to commit again or roll back, and no longer stops the file taking
+changes. Only a failed write or sync does that. `rollback` drops them and
 calls the new `PageFile::rollback`, which undoes the allocations and frees since the last
 commit. Every cached page is in use: reading a free page is refused, and freeing a page drops
 it from memory with any change to it. Pages are verified by checksum when read in. A failure
@@ -2540,8 +2549,10 @@ published. `cargo run --release -p eggdb-bench` runs every benchmark and checks 
 <value>`.
 - **Counts gate exactly**: file operations per operation (from the simulator), evictions and
   heap allocations per operation (from a counting allocator in the binary). They are the same
-  on every machine, so their lines are under `any`. A count above its line fails, and a
-  missing count line fails too.
+  on every machine, so their lines are under `any`. A count that differs from its line in
+  either direction fails, and so does a missing count line. A count that falls, such as
+  evictions per miss, can mean the benchmark stopped measuring what it should, so a lower
+  count is updated deliberately, never accepted silently.
 - **Times gate only as ratios**: the hot path against a reference workload of the same shape,
   run in the same process. Fifteen samples of at least 20 ms each alternate between the two,
   and the gate is the median ratio. It fails more than 30% above the line for this system,
