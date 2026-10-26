@@ -2938,7 +2938,9 @@ smallest tag above that number, or from the cache when there is none.
   nothing. The image is copied when the writer first changes a committed page in a transaction
   (`PageCache::write`, where D79 said it would go), and when it frees one (from the frame, or from
   the file when the page is not cached). Pages the transaction allocated are never visible to a
-  reader, so they need none.
+  reader, so they need none. An image is skipped when the page's newest kept image shows it last
+  changed after every live reader began: no reader can see the version it would hold. So a reader
+  that lives across many commits of one page keeps one image of it, not one per commit.
 - **Freed pages are reused at once.** A page a reader may still need is kept as an image when it is
   freed, so the free list hands it out as before. That keeps the change inside the cache. The
   alternative, holding freed pages out of the free list until no reader can see them, needs new

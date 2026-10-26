@@ -84,9 +84,26 @@ impl BeforeImages {
     }
 
     pub(crate) fn wants_images(&self) -> bool {
+        self.newest_live_reader().is_some()
+    }
+
+    fn newest_live_reader(&self) -> Option<u64> {
         self.readers
             .last()
-            .is_some_and(|&(newest, _)| newest >= self.expired_below)
+            .map(|&(newest, _)| newest)
+            .filter(|&newest| newest >= self.expired_below)
+    }
+
+    fn is_needed(&self, page_id: u64) -> bool {
+        let Some(newest) = self.newest_live_reader() else {
+            return false;
+        };
+        let last_change = self
+            .images
+            .range((page_id, 0)..=(page_id, u64::MAX))
+            .next_back()
+            .map(|(&(_, tagged), _)| tagged);
+        last_change.is_none_or(|tagged| tagged <= newest)
     }
 
     pub(crate) fn has_pending_image(&self, page_id: u64) -> bool {
@@ -110,7 +127,7 @@ impl BeforeImages {
         checked: bool,
         page: &[u8],
     ) -> Result<(), StorageError> {
-        if !self.wants_images() || self.has_pending_image(page_id) {
+        if self.has_pending_image(page_id) || !self.is_needed(page_id) {
             return Ok(());
         }
         while self.images.len() >= self.budget_pages {

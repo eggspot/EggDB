@@ -411,6 +411,9 @@ fn readers_on_other_threads_always_see_one_whole_commit() {
         write.put(&tree, &key(index), &0u64.to_le_bytes()).unwrap();
     }
     write.commit().unwrap();
+    store
+        .set_snapshot_memory(CacheSize::Pages(1 << 20))
+        .unwrap();
     std::thread::scope(|scope| {
         for _ in 0..3 {
             scope.spawn(|| {
@@ -472,6 +475,38 @@ fn a_reader_left_too_far_behind_fails_as_too_old_and_the_writer_goes_on() {
     small.put(&tree, &key(0), b"newer").unwrap();
     small.commit().unwrap();
     assert_eq!(fresh.get(&tree, &key(0)).unwrap().unwrap(), b"new");
+    assert_eq!(store.cache_stats().unwrap().before_images, 1);
+}
+
+#[test]
+fn a_reader_living_across_many_commits_keeps_one_image_per_changed_page() {
+    let fs = SimFileSystem::new();
+    let (store, tree) = created(&fs, 64, &october_clock());
+    let before = fill(&store, &tree, 400, 60);
+    let reader = store.begin_read().unwrap();
+    for round in 0..500u32 {
+        let mut write = store.begin_write().unwrap();
+        write.put(&tree, &key(7), &round.to_le_bytes()).unwrap();
+        write.commit().unwrap();
+    }
+    assert_eq!(store.cache_stats().unwrap().before_images, 1);
+    assert_eq!(
+        reader.get(&tree, &key(7)).unwrap().unwrap(),
+        before[&key(7)]
+    );
+    let middle = store.begin_read().unwrap();
+    for round in 0..500u32 {
+        let mut write = store.begin_write().unwrap();
+        write.put(&tree, &key(7), &round.to_le_bytes()).unwrap();
+        write.commit().unwrap();
+    }
+    assert_eq!(store.cache_stats().unwrap().before_images, 2);
+    assert_eq!(
+        middle.get(&tree, &key(7)).unwrap().unwrap(),
+        499u32.to_le_bytes()
+    );
+    assert_eq!(read_all(&reader, &tree, ScanOrder::Ascending), before);
+    drop(reader);
     assert_eq!(store.cache_stats().unwrap().before_images, 1);
 }
 
