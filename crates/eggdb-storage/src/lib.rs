@@ -31,6 +31,8 @@ mod bytes;
 mod cells;
 #[cfg(test)]
 mod checkpoint_tests;
+#[cfg(test)]
+mod crash_sweep_tests;
 mod crc32c;
 mod cursor;
 mod error;
