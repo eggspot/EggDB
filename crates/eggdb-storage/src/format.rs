@@ -33,6 +33,7 @@ pub const NO_PAGE: u64 = 0;
 pub const MAX_LOG_SEGMENT_BYTES: u64 = 64 << 20;
 
 const SUPERBLOCK_CHECKSUM_AT: usize = 8;
+const LOG_SEQUENCE_RESERVED_AT: usize = 192;
 
 /// The size of a page: a power of two from 4 KiB to 64 KiB, chosen when a file is created and
 /// fixed for its life.
@@ -242,6 +243,10 @@ pub struct Superblock {
     /// Log segments emptied by checkpoints and kept for reuse before the file grows, each a
     /// first page; unused entries are [`NO_PAGE`].
     pub recycled_segments: [u64; RECYCLED_SEGMENTS],
+    /// The highest log segment sequence number a writer may have used: a writer that opens the
+    /// file starts above it, and writes the header again before it uses a higher one, so no
+    /// sequence number is ever used twice.
+    pub log_sequence_reserved: u64,
 }
 
 impl Superblock {
@@ -280,6 +285,11 @@ impl Superblock {
         for (index, &page) in self.recycled_segments.iter().enumerate() {
             write_u64(&mut slot, 136 + 8 * index, page);
         }
+        write_u64(
+            &mut slot,
+            LOG_SEQUENCE_RESERVED_AT,
+            self.log_sequence_reserved,
+        );
         let checksum = superblock_checksum(&slot);
         write_u32(&mut slot, SUPERBLOCK_CHECKSUM_AT, checksum);
         slot
@@ -323,6 +333,7 @@ impl Superblock {
             clock_high_water: read_u64(slot, 120),
             log_segment_pages: read_u32(slot, 128),
             recycled_segments,
+            log_sequence_reserved: read_u64(slot, LOG_SEQUENCE_RESERVED_AT),
         };
         if superblock.slot() != slot_index {
             return Err(FormatError::InvalidField {
@@ -391,12 +402,42 @@ impl Superblock {
             .recycled_segments
             .iter()
             .any(|&first| first != NO_PAGE && segment_end(first) > self.page_count);
-        if recycled_past_the_end {
+        if recycled_past_the_end || self.log_segments_overlap() {
             return Err(FormatError::InvalidField {
                 field: "recycled_segments",
             });
         }
+        let in_a_log_segment = |page: u64| {
+            std::iter::once(self.log_head_page)
+                .chain(self.recycled_segments)
+                .filter(|&first| first != NO_PAGE)
+                .any(|first| (first..segment_end(first)).contains(&page))
+        };
+        for (field, page) in [
+            ("catalog_root", self.catalog_root),
+            ("free_list_head", self.free_list_head),
+        ] {
+            if page != NO_PAGE && in_a_log_segment(page) {
+                return Err(FormatError::InvalidField { field });
+            }
+        }
+        if self.log_head_page != NO_PAGE && self.log_sequence_reserved < self.log_head_sequence {
+            return Err(FormatError::InvalidField {
+                field: "log_sequence_reserved",
+            });
+        }
         Ok(())
+    }
+
+    fn log_segments_overlap(&self) -> bool {
+        let mut firsts = [NO_PAGE; RECYCLED_SEGMENTS + 1];
+        firsts[0] = self.log_head_page;
+        firsts[1..].copy_from_slice(&self.recycled_segments);
+        firsts.sort_unstable();
+        firsts
+            .windows(2)
+            .filter(|pair| pair[0] != NO_PAGE)
+            .any(|pair| pair[1] - pair[0] < u64::from(self.log_segment_pages))
     }
 
     /// Picks the current superblock from the two header slots: the slot with the higher
@@ -594,7 +635,7 @@ mod tests {
             generation,
             features: Features::default(),
             file_id: FileId(*b"0123456789abcdef"),
-            page_count: 40,
+            page_count: 60,
             free_list_head: 7,
             free_page_count: 3,
             catalog_root: 2,
@@ -603,7 +644,8 @@ mod tests {
             log_head_sequence: generation,
             clock_high_water: 0x1234_5678,
             log_segment_pages: 16,
-            recycled_segments: [24, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE],
+            recycled_segments: [40, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE],
+            log_sequence_reserved: generation + 9,
         }
     }
 
@@ -752,17 +794,25 @@ mod tests {
 
     #[test]
     fn fields_pointing_outside_the_data_pages_are_refused() {
-        let cases: [(&str, Damage); 10] = [
+        let cases: [(&str, Damage); 16] = [
             ("page_count", |s| s.page_count = 1),
             ("page_count", |s| s.page_count = 1 << 48),
+            ("recycled_segments", |s| s.recycled_segments[3] = 60),
+            ("recycled_segments", |s| s.recycled_segments[0] = 50),
             ("recycled_segments", |s| s.recycled_segments[3] = 40),
             ("recycled_segments", |s| s.recycled_segments[0] = 30),
-            ("log_head_page", |s| s.log_head_page = 30),
-            ("free_list_head", |s| s.free_list_head = 40),
+            ("recycled_segments", |s| s.recycled_segments[5] = 2),
+            ("log_head_page", |s| s.log_head_page = 50),
+            ("free_list_head", |s| s.free_list_head = 60),
             ("catalog_root", |s| s.catalog_root = 1),
             ("log_head_page", |s| s.log_head_page = u64::MAX),
-            ("free_page_count", |s| s.free_page_count = 39),
+            ("free_page_count", |s| s.free_page_count = 59),
             ("log_segment_pages", |s| s.log_segment_pages = 0),
+            ("log_sequence_reserved", |s| {
+                s.log_head_sequence = s.log_sequence_reserved + 1
+            }),
+            ("catalog_root", |s| s.catalog_root = 20),
+            ("free_list_head", |s| s.free_list_head = 45),
         ];
         let mut huge_segments = superblock(0);
         huge_segments.log_segment_pages = (super::MAX_LOG_SEGMENT_BYTES / 4096) as u32 + 1;

@@ -512,9 +512,9 @@ fn store<F: File>(
     let Some(&parent_id) = parents.last() else {
         return split_root(cache, page, node.level, split);
     };
+    let right_id = new_page(cache, &split.right)?;
     split.left.encode(page_id, &mut page)?;
     drop(page);
-    let right_id = new_page(cache, &split.right)?;
     let mut parent = cache.write(parent_id)?;
     let mut shape = shape_of_mut(&parent)?;
     let suffix = shape.key_suffix(&parent, &split.separator)?;

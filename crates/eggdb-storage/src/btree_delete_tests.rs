@@ -224,6 +224,7 @@ fn deleting_every_key_merges_pages_shrinks_the_tree_to_its_root_and_frees_the_pa
     for order in orders {
         let fs = SimFileSystem::new();
         let mut cache = create(&fs, PageSize::DEFAULT, 4096);
+        cache.set_auto_checkpoint_bytes(None);
         let tree = new_tree(&mut cache);
         for number in 0..count {
             tree.put(&cache, &numbered(number), &number.to_le_bytes())
@@ -263,6 +264,7 @@ fn deleting_every_key_merges_pages_shrinks_the_tree_to_its_root_and_frees_the_pa
         let free_when_empty = available(&fs);
         assert!(free_when_empty >= freed, "{free_when_empty} {freed}");
         let mut cache = open(&fs, Access::ReadWrite, 4096);
+        cache.set_auto_checkpoint_bytes(None);
         let tree = stored_tree(&cache);
         for number in 0..count {
             tree.put(&cache, &numbered(number), b"again").unwrap();

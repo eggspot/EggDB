@@ -333,6 +333,9 @@ impl Shape {
     }
 
     pub(crate) fn child_at(&self, body: &[u8], index: usize) -> Result<u64, FormatError> {
+        if self.is_leaf() {
+            return Err(self.corrupt("a leaf page has no children"));
+        }
         if index == self.count {
             return Ok(self.right);
         }
@@ -537,6 +540,9 @@ impl Shape {
         index: usize,
         child: u64,
     ) -> Result<(), FormatError> {
+        if self.is_leaf() {
+            return Err(self.corrupt("a leaf page has no children"));
+        }
         if index == self.count {
             self.right = child;
             write_u64(body, RIGHT_CHILD, child);

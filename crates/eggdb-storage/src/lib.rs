@@ -10,7 +10,8 @@
 //! - [`FormatError`], how every check of bytes read from a file fails, as a value and never a
 //!   panic (D9);
 //! - [`PageFile`], the file as checksummed pages: commits through a write-ahead log inside the
-//!   file that survive a crash at any point, with a choice of [`Durability`], page reads and
+//!   file that survive a crash at any point, with a choice of [`Durability`], checkpoints that
+//!   bound recovery and recycle the log's segments, reported in [`LogStats`], page reads and
 //!   writes, growth, a free list, and the lock that keeps a second writer out, with
 //!   [`StorageError`] for what can go wrong;
 //! - [`PageCache`], the buffer manager over a [`PageFile`]: a fixed number of page frames
@@ -28,6 +29,8 @@ mod btree_delete_tests;
 mod btree_tests;
 mod bytes;
 mod cells;
+#[cfg(test)]
+mod checkpoint_tests;
 mod crc32c;
 mod cursor;
 mod error;
@@ -50,6 +53,6 @@ pub use format::{
     MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader,
     PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };
-pub use log::Durability;
+pub use log::{Durability, LogStats};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
 pub use page_file::{CreateOptions, PageFile};

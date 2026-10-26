@@ -298,6 +298,30 @@ fn page_layouts_survive_encoding_and_pass_their_checks() {
 }
 
 #[test]
+fn a_leaf_s_values_are_never_read_or_written_as_child_pointers() {
+    let leaf = Node {
+        level: 0,
+        low: Vec::new(),
+        high: None,
+        keys: vec![b"a".to_vec(), b"b".to_vec()],
+        values: vec![b"x".to_vec(), Vec::new()],
+        children: Vec::new(),
+    };
+    let header = crate::tree_page::header_for(0, 0);
+    let mut body = vec![0; PageSize::DEFAULT.bytes() - 16];
+    leaf.encode(9, &mut body).unwrap();
+    let mut shape = Shape::parse(9, header, &body).unwrap();
+    for index in 0..=2 {
+        assert!(matches!(
+            shape.child_at(&body, index),
+            Err(FormatError::CorruptTree { page: 9, .. })
+        ));
+        assert!(shape.set_child(&mut body, index, 77).is_err());
+    }
+    assert_eq!(Node::decode(&shape, &body).unwrap(), leaf);
+}
+
+#[test]
 fn separators_are_the_shortest_key_between_the_halves() {
     assert_eq!(shortest_separator(b"abc", b"abd"), b"abd");
     assert_eq!(shortest_separator(b"abc", b"b"), b"b");

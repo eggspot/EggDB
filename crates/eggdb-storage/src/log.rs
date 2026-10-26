@@ -3,23 +3,26 @@ use crate::cells;
 use crate::crc32c::{crc32c, crc32c_append};
 use crate::error::{FormatError, StorageError};
 use crate::format::{
-    Features, FileId, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageSize, PageType,
-    Superblock,
+    Features, FileId, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageSize,
+    PageType, RECYCLED_SEGMENTS, Superblock,
 };
 use eggdb_platform::{ErrorKind, File};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const LOG_BLOCK: usize = 4096;
 pub(crate) const RECORD_HEADER: usize = 10;
 pub(crate) const SEGMENT_LAYOUT: u8 = 1;
 const SEGMENT_SEQUENCE_AT: usize = PAGE_HEADER_SIZE;
-const LINK_PAYLOAD: usize = 16;
+const LINK_PAYLOAD: usize = 24;
 const LINK_RECORD: usize = RECORD_HEADER + LINK_PAYLOAD;
 const BATCH_PAYLOAD: usize = 8;
 const IMAGE_PAGE_AT: usize = 8;
 pub(crate) const COMMIT_PAYLOAD: usize = 9 * 8;
 const SEGMENT_ROOM_BEYOND_A_PAGE: u64 = 8192;
 const DEFAULT_SEGMENT_BYTES: usize = 64 << 10;
+pub(crate) const SEQUENCE_RESERVATION: u64 = 1 << 16;
+pub(crate) const DEFAULT_AUTO_CHECKPOINT_BYTES: u64 = 1 << 20;
+pub(crate) type RecycledSegments = [u64; RECYCLED_SEGMENTS];
 
 /// How long a commit waits before it returns, and so what a power loss can take (format.md,
 /// "Durability modes").
@@ -32,14 +35,32 @@ pub enum Durability {
     /// A commit returns once its log records are written, without a sync; its pages reach
     /// their places in the file only after the next sync, so a power loss can lose the latest
     /// commits but never corrupts the file. A sync happens when [`PageFile::sync`] is called,
-    /// when the durability changes, and once a megabyte of log or a thousand pages wait for
-    /// one.
+    /// when the durability changes, at every checkpoint, and once a megabyte of log or a
+    /// thousand pages wait for one.
     ///
     /// [`PageFile::sync`]: crate::PageFile::sync
     Normal,
     /// A commit writes its records and its pages and never syncs: a power loss can corrupt
     /// the file. For bulk loads and tests.
     Off,
+}
+
+/// What the write-ahead log has done since the file was opened: the replay that opened it and
+/// the checkpoints written since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub struct LogStats {
+    /// Bytes of log replayed when the file was opened, from the last checkpoint to the end of
+    /// the last whole commit.
+    pub replayed_bytes: u64,
+    /// Commits replayed when the file was opened.
+    pub replayed_commits: u64,
+    /// Page images replayed when the file was opened.
+    pub replayed_pages: u64,
+    /// Checkpoints written since the file was opened, explicit and automatic.
+    pub checkpoints: u64,
+    /// Bytes of log written since the last checkpoint, which the next open would replay.
+    pub bytes_since_checkpoint: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +143,7 @@ impl LogGeometry {
         page * self.page_size.bytes() as u64
     }
 
-    fn record_seed(&self, sequence: u64, lsn: u64) -> u32 {
+    pub(crate) fn record_seed(&self, sequence: u64, lsn: u64) -> u32 {
         let segment_seed = crc32c_append(self.file_seed, &sequence.to_le_bytes());
         crc32c_append(segment_seed, &lsn.to_le_bytes())
     }
@@ -301,6 +322,18 @@ struct Mark {
     segment: Segment,
     offset: usize,
     needs_fresh_segment: bool,
+    recycled: RecycledSegments,
+    next_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WriterStart {
+    pub(crate) segment: Segment,
+    pub(crate) offset: usize,
+    pub(crate) needs_fresh_segment: bool,
+    pub(crate) durable_lsn: u64,
+    pub(crate) recycled: RecycledSegments,
+    pub(crate) next_sequence: u64,
 }
 
 #[derive(Debug)]
@@ -310,6 +343,8 @@ pub(crate) struct LogWriter {
     offset: usize,
     durable_lsn: u64,
     needs_fresh_segment: bool,
+    recycled: RecycledSegments,
+    next_sequence: u64,
     buffer: Vec<u8>,
     runs: Vec<Run>,
     images: Vec<StagedImage>,
@@ -318,19 +353,15 @@ pub(crate) struct LogWriter {
 }
 
 impl LogWriter {
-    pub(crate) fn new(
-        geometry: LogGeometry,
-        segment: Segment,
-        offset: usize,
-        needs_fresh_segment: bool,
-        durable_lsn: u64,
-    ) -> Self {
+    pub(crate) fn new(geometry: LogGeometry, start: WriterStart) -> Self {
         Self {
             geometry,
-            segment,
-            offset,
-            durable_lsn,
-            needs_fresh_segment,
+            segment: start.segment,
+            offset: start.offset,
+            durable_lsn: start.durable_lsn,
+            needs_fresh_segment: start.needs_fresh_segment,
+            recycled: start.recycled,
+            next_sequence: start.next_sequence,
             buffer: Vec::new(),
             runs: Vec::new(),
             images: Vec::new(),
@@ -341,6 +372,29 @@ impl LogWriter {
 
     pub(crate) fn lsn(&self) -> u64 {
         self.geometry.lsn_at(&self.segment, self.offset)
+    }
+
+    pub(crate) fn segment(&self) -> Segment {
+        self.segment
+    }
+
+    pub(crate) fn set_recycled(&mut self, recycled: RecycledSegments) {
+        self.recycled = recycled;
+    }
+
+    pub(crate) fn unused_recycled_segments(&self) -> usize {
+        self.recycled
+            .iter()
+            .filter(|&&first| first != NO_PAGE)
+            .count()
+    }
+
+    pub(crate) fn skip_sequences_to(&mut self, next_sequence: u64) {
+        self.next_sequence = self.next_sequence.max(next_sequence);
+    }
+
+    pub(crate) fn highest_sequence(&self) -> u64 {
+        self.next_sequence.saturating_sub(1)
     }
 
     pub(crate) fn unsynced_bytes(&self) -> u64 {
@@ -368,6 +422,8 @@ impl LogWriter {
             segment: self.segment,
             offset: self.offset,
             needs_fresh_segment: self.needs_fresh_segment,
+            recycled: self.recycled,
+            next_sequence: self.next_sequence,
         });
         self.start_run();
         if self.needs_fresh_segment {
@@ -383,6 +439,8 @@ impl LogWriter {
             self.segment = mark.segment;
             self.offset = mark.offset;
             self.needs_fresh_segment = mark.needs_fresh_segment;
+            self.recycled = mark.recycled;
+            self.next_sequence = mark.next_sequence;
             self.new_segments.clear();
         }
         self.buffer.clear();
@@ -492,29 +550,40 @@ impl LogWriter {
     }
 
     fn switch_segment(&mut self, page_count: &mut u64) -> Result<(), StorageError> {
-        let first_page = *page_count;
-        let new_page_count = first_page
-            .checked_add(u64::from(self.geometry.segment_pages))
-            .filter(|&count| count & PAGE_VOLUME_MASK == 0)
+        let sequence = self.next_sequence;
+        let following = sequence.checked_add(1).ok_or(StorageError::FileFull)?;
+        let start_lsn = self
+            .segment
+            .start_lsn
+            .checked_add(self.geometry.capacity())
             .ok_or(StorageError::FileFull)?;
+        let recycled = self.recycled.iter().position(|&first| first != NO_PAGE);
+        let (first_page, linked_page_count) = match recycled {
+            Some(index) => (std::mem::replace(&mut self.recycled[index], NO_PAGE), 0),
+            None => {
+                let first_page = *page_count;
+                let end = first_page
+                    .checked_add(u64::from(self.geometry.segment_pages))
+                    .filter(|&count| count & PAGE_VOLUME_MASK == 0)
+                    .ok_or(StorageError::FileFull)?;
+                *page_count = end;
+                (first_page, end)
+            }
+        };
         let next = Segment {
             first_page,
-            sequence: self
-                .segment
-                .sequence
-                .checked_add(1)
-                .ok_or(StorageError::FileFull)?,
-            start_lsn: self
-                .segment
-                .start_lsn
-                .checked_add(self.geometry.capacity())
-                .ok_or(StorageError::FileFull)?,
+            sequence,
+            start_lsn,
         };
         self.put(
             RecordType::Link,
-            &[&first_page.to_le_bytes(), &new_page_count.to_le_bytes()],
+            &[
+                &first_page.to_le_bytes(),
+                &linked_page_count.to_le_bytes(),
+                &sequence.to_le_bytes(),
+            ],
         );
-        *page_count = new_page_count;
+        self.next_sequence = following;
         self.segment = next;
         self.offset = 0;
         self.start_run();
@@ -562,6 +631,7 @@ pub(crate) struct Scan {
     pub(crate) commit: Option<CommitFields>,
     pub(crate) commit_at: Option<(Segment, usize)>,
     pub(crate) images: Vec<LoggedImage>,
+    pub(crate) commits: u64,
     pub(crate) linked_page_count: u64,
 }
 
@@ -570,7 +640,57 @@ struct Resume {
     segment: Segment,
     offset: usize,
     segments: usize,
+    commits: u64,
     linked_page_count: u64,
+}
+
+struct LogPages {
+    segment_pages: u64,
+    occupied: BTreeMap<u64, u64>,
+    recycled: BTreeMap<u64, u64>,
+    unused_recycled: BTreeSet<u64>,
+}
+
+impl LogPages {
+    fn new(superblock: &Superblock) -> Self {
+        let segment_pages = u64::from(superblock.log_segment_pages);
+        let head = superblock.log_head_page;
+        let firsts = superblock
+            .recycled_segments
+            .iter()
+            .copied()
+            .filter(|&first| first != NO_PAGE);
+        Self {
+            segment_pages,
+            occupied: BTreeMap::from([(head, head + segment_pages)]),
+            recycled: firsts
+                .clone()
+                .map(|first| (first, first + segment_pages))
+                .collect(),
+            unused_recycled: firsts.collect(),
+        }
+    }
+
+    fn may_link(&self, superblock: &Superblock, first: u64, linked_page_count: u64) -> bool {
+        let Some(end) = first.checked_add(self.segment_pages) else {
+            return false;
+        };
+        if overlaps(&self.occupied, first, end) {
+            return false;
+        }
+        if linked_page_count == 0 {
+            return self.unused_recycled.contains(&first);
+        }
+        linked_page_count & PAGE_VOLUME_MASK == 0
+            && end == linked_page_count
+            && first >= superblock.page_count
+            && !overlaps(&self.recycled, first, end)
+    }
+
+    fn take(&mut self, first: u64) {
+        self.unused_recycled.remove(&first);
+        self.occupied.insert(first, first + self.segment_pages);
+    }
 }
 
 fn segment_buffer(geometry: &LogGeometry) -> Result<Vec<u8>, StorageError> {
@@ -632,7 +752,6 @@ pub(crate) fn scan<F: File>(
     checksums: &PageChecksum,
     superblock: &Superblock,
 ) -> Result<Scan, StorageError> {
-    let segment_pages = u64::from(geometry.segment_pages);
     let first_data_page = geometry.page_size.first_data_page();
     let mut buffer = segment_buffer(geometry)?;
     let mut next_buffer = segment_buffer(geometry)?;
@@ -647,16 +766,19 @@ pub(crate) fn scan<F: File>(
     let checkpoint = superblock
         .checkpoint_lsn
         .checked_sub(head.start_lsn)
-        .filter(|&into| into < geometry.capacity() && into.is_multiple_of(LOG_BLOCK as u64))
+        .filter(|&into| {
+            into < geometry.capacity() && !too_close_to_block_end(LOG_BLOCK + into as usize)
+        })
         .ok_or(FormatError::InvalidField {
             field: "checkpoint_lsn",
         })?;
     let mut segment = head;
     let mut offset = LOG_BLOCK + checkpoint as usize;
     let mut segments = vec![head];
-    let mut occupied = BTreeMap::from([(head_page, head_page + segment_pages)]);
+    let mut log_pages = LogPages::new(superblock);
     let mut images = Vec::new();
     let mut committed_images = 0;
+    let mut commits = 0;
     let mut commit = None;
     let mut commit_at = None;
     let mut linked_page_count = 0;
@@ -665,6 +787,7 @@ pub(crate) fn scan<F: File>(
         segment,
         offset,
         segments: 1,
+        commits,
         linked_page_count,
     };
     loop {
@@ -712,44 +835,49 @@ pub(crate) fn scan<F: File>(
                 commit = Some(CommitFields::decode(payload));
                 commit_at = Some((segment, offset));
                 committed_images = images.len();
+                commits += 1;
                 at_commit_boundary = true;
                 resume = Resume {
                     segment,
                     offset: next,
                     segments: segments.len(),
+                    commits,
                     linked_page_count,
                 };
             }
             RecordType::Link => {
                 let next_page = read_u64(payload, 0);
                 let page_count = read_u64(payload, 8);
+                let sequence = read_u64(payload, 16);
+                let start_lsn = segment.start_lsn.checked_add(geometry.capacity());
+                let plausible = next_page >= first_data_page
+                    && sequence > segment.sequence
+                    && sequence <= superblock.log_sequence_reserved
+                    && start_lsn.is_some()
+                    && log_pages.may_link(superblock, next_page, page_count);
+                let Some(start_lsn) = start_lsn.filter(|_| plausible) else {
+                    return Err(corrupt(&segment, offset));
+                };
                 let expected = Segment {
                     first_page: next_page,
-                    sequence: segment.sequence.wrapping_add(1),
-                    start_lsn: segment.start_lsn.wrapping_add(geometry.capacity()),
+                    sequence,
+                    start_lsn,
                 };
-                let end = next_page.checked_add(segment_pages);
-                let plausible = next_page >= first_data_page
-                    && page_count & PAGE_VOLUME_MASK == 0
-                    && segment.sequence != u64::MAX
-                    && segment.start_lsn.checked_add(geometry.capacity()).is_some()
-                    && end.is_some_and(|end| {
-                        end == page_count && !overlaps(&occupied, next_page, end)
-                    });
-                if !plausible {
-                    return Err(corrupt(&segment, offset));
-                }
                 let read = read_segment(file, geometry, next_page, &mut next_buffer)?;
                 let found = read
                     .then(|| geometry.decode_segment_header(next_page, &next_buffer))
                     .flatten();
                 if found != Some(expected) {
-                    if read && proves_durable_beyond(geometry, &expected, &next_buffer, 0) {
+                    let newer_than_the_header = found
+                        .is_some_and(|found| found.sequence > superblock.log_sequence_reserved);
+                    if newer_than_the_header
+                        || (read && proves_durable_beyond(geometry, &expected, &next_buffer, 0))
+                    {
                         return Err(corrupt(&expected, 0));
                     }
                     break;
                 }
-                occupied.insert(next_page, next_page + segment_pages);
+                log_pages.take(next_page);
                 segments.push(expected);
                 linked_page_count = linked_page_count.max(page_count);
                 std::mem::swap(&mut buffer, &mut next_buffer);
@@ -760,6 +888,7 @@ pub(crate) fn scan<F: File>(
                         segment,
                         offset,
                         segments: segments.len(),
+                        commits,
                         linked_page_count,
                     };
                 }
@@ -787,6 +916,7 @@ pub(crate) fn scan<F: File>(
         commit,
         commit_at,
         images,
+        commits: resume.commits,
         linked_page_count: resume.linked_page_count,
     })
 }
@@ -795,10 +925,12 @@ pub(crate) fn scan<F: File>(
 mod tests {
     use super::{
         CommitFields, Durability, LOG_BLOCK, LogGeometry, LogWriter, RECORD_HEADER, RecordType,
-        Segment, parse_record,
+        Segment, WriterStart, parse_record,
     };
     use crate::error::{FormatError, StorageError};
-    use crate::format::{Access, FileId, NO_PAGE, PageHeader, PageSize, PageType, Superblock};
+    use crate::format::{
+        Access, FileId, NO_PAGE, PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, Superblock,
+    };
     use crate::page_cache::{CacheSize, PageCache};
     use crate::page_file::{CreateOptions, PageFile};
     use crate::test_rng::TestRng;
@@ -874,6 +1006,17 @@ mod tests {
         }
     }
 
+    fn start(segment: Segment, durable_lsn: u64) -> WriterStart {
+        WriterStart {
+            segment,
+            offset: LOG_BLOCK,
+            needs_fresh_segment: false,
+            durable_lsn,
+            recycled: [NO_PAGE; RECYCLED_SEGMENTS],
+            next_sequence: segment.sequence + 1,
+        }
+    }
+
     fn segment_with(writer: &LogWriter) -> Vec<u8> {
         let mut bytes = vec![0u8; 16 * LOG_BLOCK];
         let flush = writer.buffer();
@@ -901,7 +1044,7 @@ mod tests {
     }
 
     fn sample_flush() -> (LogWriter, Vec<u8>) {
-        let mut writer = LogWriter::new(geometry(), segment(), LOG_BLOCK, false, 1 << 20);
+        let mut writer = LogWriter::new(geometry(), start(segment(), 1 << 20));
         let mut page_count = 18;
         writer.begin(&mut page_count).unwrap();
         let mut page = vec![0x5A; 4096];
@@ -1603,7 +1746,7 @@ mod tests {
             sequence: superblock.log_head_sequence,
             start_lsn: superblock.checkpoint_lsn,
         };
-        let mut writer = LogWriter::new(geometry, head, LOG_BLOCK, false, 0);
+        let mut writer = LogWriter::new(geometry, start(head, 0));
         let mut page_count = superblock.page_count;
         writer.begin(&mut page_count).unwrap();
         assert_eq!(page, FIRST_ALLOCATED);
@@ -1724,6 +1867,7 @@ mod tests {
 
     fn normal_rounds_until_a_sync(fs: &SimFileSystem, fail_at: Option<(u8, u64)>) -> (u8, u64) {
         let mut file = PageFile::create(fs, Path::new(DB), options(PageSize::DEFAULT)).unwrap();
+        file.set_auto_checkpoint_bytes(None);
         let page = file.allocate().unwrap();
         let mut bytes = vec![0u8; 4096];
         file.write_page(page, &mut bytes, &leaf()).unwrap();
@@ -1866,7 +2010,7 @@ mod tests {
                         2 => rng.below(64),
                         3 => 8 + 4096,
                         4 => super::COMMIT_PAYLOAD,
-                        _ => 16,
+                        _ => super::LINK_PAYLOAD,
                     };
                     let room = (log_end - block - RECORD_HEADER).min(length);
                     bytes[block + 4..block + 8].copy_from_slice(&(length as u32).to_le_bytes());
