@@ -3440,24 +3440,41 @@ beyond the design:
 
 **The terminal in the platform layer (D8).** `eggdb_platform::terminal::RawTerminal` takes the
 terminal behind stdin and stdout and gives it back on drop, on a panic (a hook installed once)
-and on `SIGTERM`, `SIGHUP` and `SIGQUIT`, whose handlers only write the restore bytes, call
-`tcsetattr` and `_exit(128 + signal)` (the shell convention; the design's `130 + n` was a slip).
-On Unix the saved `termios` is an opaque, 8-byte-aligned 256-byte buffer made raw by
+and on `SIGTERM`, `SIGHUP`, `SIGQUIT` and a `SIGINT` sent by another process, whose handlers
+only write the restore bytes, call `tcsetattr` and `_exit(128 + signal)` (the shell convention;
+the design's `130 + n` was a slip). A restore marks the terminal given back only after
+`tcsetattr` returns, so a signal arriving in the middle of one restores it again rather than
+exiting raw. On Unix the saved `termios` is an opaque, 16-byte-aligned 256-byte buffer made raw by
 `cfmakeraw` and kept in atomics for the signal handler, so no per-OS struct layout is
 declared; only `TIOCGWINSZ`, `SIGWINCH` and `nfds_t` differ per OS. A resize sets an atomic
 flag from `SIGWINCH`, and the input wait polls stdin in slices of at most 100 ms and checks
 the flag, instead of a self-pipe. Autowrap is off while the screen is drawn, so writing the
 bottom-right cell never scrolls. On Windows the console gets virtual-terminal input and output
 and the UTF-8 output code page; key records are turned back into the bytes the terminal sent,
-so one decoder serves every system. Systems without a terminal (WASI, `no_std`) get
-`Unsupported`.
+so one decoder serves every system; `Ctrl-C` and `Ctrl-Break` console events restore the
+console before the default handler ends the process, like closing it. Systems without a
+terminal (WASI, `no_std`) get `Unsupported`.
+
+**Nothing in the data reaches the terminal raw (D9).** Keys and values are shown escaped:
+controls as `\xNN` or `^X`, and bidi overrides and isolates (U+202A–U+202E, U+2066–U+2069),
+the other invisible Unicode format characters and the line and paragraph separators as
+`\u{202e}`, so a key such as `user\u{202e}gnp.exe` cannot reorder or hide what the screen
+shows. The frame, the one place every cell is written, replaces any such character that gets
+past the escaping with `?`, and the renderer refuses them too. Zero-width joiners and variation
+selectors stay, so emoji sequences and scripts that need them still render. A paste is cut at
+1 MiB and the rest of it is dropped up to its end marker (or the next pause in input, if the
+marker never comes) rather than arriving as keys.
 
 **The UI is its own crate and never sees `eggdb::Database`.** The `eggdb` binary lives in the
 `eggdb` package, so a UI crate depending on `eggdb` would be a package cycle. `eggdb-ui` reads
 through a `Source` trait (summary, a window of keys from a start in either direction, a value,
 a count in steps) that the CLI implements on `Database` with lending scans; tests implement it
-on a `BTreeMap`. The library's `Scan` gains `next_back_entry`, the lending reverse step, so
-`PgUp` and `End` never copy a value.
+on a `BTreeMap`. The library's `Scan` gains `next_back_entry`, the lending reverse step, and
+`next_key_and_value_len` and `next_back_key_and_value_len`, which lend a key and the length of
+its value without reading the value: a large value's length comes from its reference in the
+leaf (the storage `Cursor::next_key_and_value_len`), so listing and counting keys never reads
+an overflow page. The key list and the count use them, and the count checks its 20 ms budget
+after every key.
 
 **The count runs in steps, not on a thread.** The design's worker thread is replaced by steps
 of 10,000 keys that the event loop runs whenever no key is waiting. The screen is just as
@@ -3477,5 +3494,5 @@ run with a piped stdin, which must exit 2 with `eggdb ui needs a terminal`.
 
 **Size (D6).** The release binary grows from 651,088 to 750,688 bytes (+99,600, +15.3%) on
 aarch64 macOS: the terminal UI, which the command did not have before. The library is
-unchanged apart from `next_back_entry`.
+unchanged apart from `next_back_entry` and the key-and-length steps.
 
