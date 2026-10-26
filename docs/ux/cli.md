@@ -44,6 +44,8 @@ Parsing rules, in order:
 | `scan <file> [options]` | read-only | prints entries in key order |
 | `check <file>` | read-only | reads every page and reports the file's health |
 | `stats <file>` | read-only | prints the file's size, pages, last commit and log |
+| `export <file> [<out>\|-]` | read-only | writes every entry as JSON lines (shipped in item 16, D93) |
+| `import <file> [<in>\|-]` | writing; `--create` makes it | loads an export (shipped in item 16, D93) |
 | `help [<command>]`, `version` | none | |
 
 `delete` is accepted as an alias of `del`; `del` is the documented name because it matches
@@ -53,7 +55,7 @@ Parsing rules, in order:
 `export`, `import`, `shell`, `backup`, `compact`, `ui`. In v0.2.0, before each ships, typing one
 prints `eggdb <name> is not in this release yet; see docs/roadmap.md` and exits 2. How they fit
 the grammar when they come: `export <file> [<out>|-]` and `import <file> [<in>|-]` (JSON lines,
-same byte rules as section 4); `shell <file>` runs the commands of this document without the
+same byte rules as section 4; shipped as designed, D93); `shell <file>` runs the commands of this document without the
 `eggdb <command> <file>` prefix, one per line; `backup <file> <copy>` copies a consistent
 snapshot while others write; `compact <file>` rewrites the file without free or leaked pages;
 `ui <file>` opens the terminal UI (its own design document).
@@ -67,8 +69,9 @@ error (exit 3) with the fix in the message: `eggdb create app.bd` or `--create`.
 - `eggdb put --create <file> <key> <value>` creates on the way, for one-liners and scripts.
 - `create` on an existing path fails (exit 3): `app.db already exists; eggdb create never
   replaces a file`. It never truncates anything.
-- The library's `create_if_missing` is set `false` for every command except `create` and
-  `put --create`.
+- `eggdb import --create <file> <export>` creates the file to restore into (D93).
+- The library's `create_if_missing` is set `false` for every command except `create`,
+  `put --create` and `import --create`.
 
 ### Read-only opens
 `get`, `scan`, `check` and `stats` open with `read_only(true)`. A read-only open takes a shared
@@ -402,8 +405,8 @@ eggdb stats app.db
 
 1. Command first (`eggdb <command> <file>`), for help without a file, two-file commands and the
    `eggdb check` the engine's messages already quote.
-2. Files are created only by `eggdb create` or `put --create`; a wrong path is an error, not a
-   new file.
+2. Files are created only by `eggdb create`, `put --create` or `import --create`; a wrong path
+   is an error, not a new file.
 3. Byte arguments: text, `0x` hex, `@file`, `@-`, `=` escape; stdin is the value when piped.
 4. Formats `text|json|hex|raw`; terminal gets `text`, a pipe gets `json`, except `get`, which
    gets `raw` so bytes round-trip. Only `text` abbreviates, and says so.
@@ -415,8 +418,8 @@ eggdb stats app.db
 9. Colour only on a terminal with `NO_COLOR` unset and `TERM` not `dumb`; 16-colour SGR; data
    is never coloured.
 10. `stats` omits the page-cache counters; `check` with leaked pages is still `ok` (exit 0).
-11. Reserved: `export`, `import`, `shell`, `backup`, `compact`, `ui`; they answer with the
-    roadmap until they ship.
+11. Reserved: `shell`, `backup`, `compact`; they answer with the roadmap until they ship
+    (`ui`, `export` and `import` have shipped).
 
 ## 13. As built in v0.2.0 (D90)
 
@@ -465,3 +468,12 @@ as written, it did this, and the sections above were updated where they changed:
     creates the file, so a refused put leaves no empty file behind.
 16. **Help for each command** follows the `scan` pattern of section 9: usage, a paragraph,
     options, examples.
+17. **`export` and `import`** (item 16, D93) follow the grammar of section 2: the second argument
+    is the export file, `-` or nothing meaning stdout or stdin. `export` never replaces a file;
+    `import` makes one only with `--create`, building it as `<file>.importing` and renaming it
+    when the import succeeded. Their errors read `eggdb: cannot import <in>: line <n>: <what is
+    wrong>. <what the failure left>`, for example `… Nothing was imported.`; a key already there
+    adds `Choose what happens to keys already there: --on-conflict overwrite or --on-conflict
+    skip`; the empty key appears as `""`, and a key longer than 64 bytes is cut with its length.
+    Progress (`imported 1,204,000 entries…`) is redrawn on stderr once a second, only on a
+    terminal.

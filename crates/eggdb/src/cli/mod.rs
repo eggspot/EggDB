@@ -3,6 +3,7 @@ mod byte_argument;
 mod commands;
 mod failure;
 mod help;
+mod jsonl;
 mod output;
 mod render;
 mod reports;
@@ -18,6 +19,7 @@ use std::io::{Read, Write};
 pub(crate) struct Terminal {
     pub(crate) stdin: bool,
     pub(crate) stdout: bool,
+    pub(crate) stderr: bool,
     pub(crate) stdout_color: bool,
     pub(crate) stderr_color: bool,
 }
@@ -115,3 +117,5 @@ fn usage_line(messages: &mut Output<'_>, command: CommandName) {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transfer_tests;

@@ -11,6 +11,8 @@ use eggdb_storage::{BTree, PageSize, StorageError};
 use std::io::Read;
 use std::ops::Bound;
 
+mod transfer;
+
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
 const CACHE_HEADROOM_BYTES: usize = 1 << 20;
 const SCAN_VALUE_SHOWN_BYTES: usize = 128;
@@ -31,6 +33,7 @@ struct Session<'a> {
     stdin: &'a mut dyn Read,
     stdin_is_terminal: bool,
     stdin_taken: bool,
+    stderr_is_terminal: bool,
 }
 
 pub(crate) fn default_format(command: CommandName, stdout_is_terminal: bool) -> Format {
@@ -73,6 +76,7 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
         stdin: &mut *console.stdin,
         stdin_is_terminal: terminal.stdin,
         stdin_taken: false,
+        stderr_is_terminal: terminal.stderr,
     };
     let result = match session.request.command {
         CommandName::Create => session.create(),
@@ -83,6 +87,8 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
         CommandName::Check => session.check(),
         CommandName::Stats => session.stats(),
         CommandName::Ui => session.ui(),
+        CommandName::Export => session.export(),
+        CommandName::Import => session.import(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -529,59 +535,62 @@ impl Session<'_> {
     }
 
     fn open_failure(&self, error: &Error, access: Access) -> Failure {
-        let file = &self.file;
-        let creates = matches!(access, Access::Write { create: true });
-        match error.kind() {
-            ErrorKind::NotFound if !creates => match access {
-                Access::ReadOnly => Failure::database(
-                    format!(
-                        "cannot open {file}: no such file. Check the path, or create it with `eggdb create {file}`"
-                    ),
-                    Exit::DatabaseError,
-                ),
-                Access::Write { .. } => Failure::Database {
-                    message: format!(
-                        "cannot open {file}: no such file. Create it with `eggdb create {file}`, or pass --create to put."
-                    ),
-                    try_command: Some(format!("eggdb create {file}")),
-                    exit: Exit::DatabaseError,
-                },
-            },
-            ErrorKind::Locked => match access {
-                Access::ReadOnly => Failure::database(
-                    format!(
-                        "cannot open {file}: another program has it open for writing. Close it, or wait and run the command again."
-                    ),
-                    Exit::Busy,
-                ),
-                Access::Write { .. } => Failure::database(
-                    format!(
-                        "cannot open {file}: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers."
-                    ),
-                    Exit::Busy,
-                ),
-            },
-            ErrorKind::NotADatabase => Failure::database(
+        open_failure(&self.file, &self.file_display, error, access)
+    }
+}
+
+fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -> Failure {
+    let creates = matches!(access, Access::Write { create: true });
+    match error.kind() {
+        ErrorKind::NotFound if !creates => match access {
+            Access::ReadOnly => Failure::database(
                 format!(
-                    "cannot open {file}: not an EggDB database. If it is a database of another kind, EggDB restores its backups in a later release (docs/roadmap.md)."
+                    "cannot open {file}: no such file. Check the path, or create it with `eggdb create {file}`"
                 ),
                 Exit::DatabaseError,
             ),
-            ErrorKind::Incompatible => Failure::database(
-                format!(
-                    "cannot open {file}: it was written by a newer EggDB ({}). Upgrade eggdb from https://github.com/eggspot/EggDB/releases.",
-                    incompatibility(error, &self.file_display)
+            Access::Write { .. } => Failure::Database {
+                message: format!(
+                    "cannot open {file}: no such file. Create it with `eggdb create {file}`, or pass --create to put."
                 ),
-                Exit::DatabaseError,
-            ),
-            kind => Failure::database(
+                try_command: Some(format!("eggdb create {file}")),
+                exit: Exit::DatabaseError,
+            },
+        },
+        ErrorKind::Locked => match access {
+            Access::ReadOnly => Failure::database(
                 format!(
-                    "cannot open {file}: {}",
-                    without_open_prefix(&error.to_string(), &self.file_display)
+                    "cannot open {file}: another program has it open for writing. Close it, or wait and run the command again."
                 ),
-                Exit::for_error(kind),
+                Exit::Busy,
             ),
-        }
+            Access::Write { .. } => Failure::database(
+                format!(
+                    "cannot open {file}: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers."
+                ),
+                Exit::Busy,
+            ),
+        },
+        ErrorKind::NotADatabase => Failure::database(
+            format!(
+                "cannot open {file}: not an EggDB database. If it is a database of another kind, EggDB restores its backups in a later release (docs/roadmap.md)."
+            ),
+            Exit::DatabaseError,
+        ),
+        ErrorKind::Incompatible => Failure::database(
+            format!(
+                "cannot open {file}: it was written by a newer EggDB ({}). Upgrade eggdb from https://github.com/eggspot/EggDB/releases.",
+                incompatibility(error, file_display)
+            ),
+            Exit::DatabaseError,
+        ),
+        kind => Failure::database(
+            format!(
+                "cannot open {file}: {}",
+                without_open_prefix(&error.to_string(), file_display)
+            ),
+            Exit::for_error(kind),
+        ),
     }
 }
 

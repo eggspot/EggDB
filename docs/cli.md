@@ -1,10 +1,10 @@
 # The `eggdb` command
 
 `eggdb` works with an EggDB database file from a shell, a script or an AI agent: create a file,
-store, read and remove values, list entries in key order, check the file's health and see its
-statistics. It opens the file in its own process, like `sqlite3`: there is no server. The
-design behind every choice here is [ux/cli.md](ux/cli.md) (D15, D90); the embedded Rust API is
-[embedded.md](embedded.md).
+store, read and remove values, list entries in key order, check the file's health, see its
+statistics, and export it to a text file that another database imports. It opens the file in
+its own process, like `sqlite3`: there is no server. The design behind every choice here is
+[ux/cli.md](ux/cli.md) (D15, D90, D93); the embedded Rust API is [embedded.md](embedded.md).
 
 ## Quickstart
 
@@ -20,6 +20,8 @@ eggdb scan app.db --format json | jq .key    # for scripts and agents
 eggdb check app.db                           # "ok: every page passed its checksum …"
 eggdb stats app.db
 eggdb ui app.db                              # browse it full screen; q quits
+eggdb export app.db backup.jsonl             # every entry, as JSON lines
+eggdb import --create copy.db backup.jsonl   # and back, into a new file
 ```
 
 ## Commands
@@ -38,19 +40,22 @@ eggdb <command> <file> [arguments] [options]
 | `check <file>` | read-only | reads every page and reports the file's health |
 | `stats <file>` | read-only | the page size, pages, file size, last commit and log, without reading a page |
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
+| `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below) |
+| `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
 The command comes first and the file second; options may go anywhere after the command, and
 `--` ends them, so `eggdb get app.db -- -k` reads the key `-k`.
 
-**Only `create` and `put --create` make a file.** A wrong path such as `app.bd` is an error
-that says how to create the file, never a new empty database that later reads as "empty".
+**Only `create`, `put --create` and `import --create` make a database file.** A wrong path such
+as `app.bd` is an error that says how to create the file, never a new empty database that later
+reads as "empty".
 
-**Read-only commands share the file.** `get`, `scan`, `check` and `stats` can run together, and
-next to an application that has the file open read-only. A program that has it open for
-writing keeps them out, and `put` and `del` wait for nobody: they exit 5 at once when the file
-is open anywhere (see "Exit codes").
+**Read-only commands share the file.** `get`, `scan`, `check`, `stats` and `export` can run
+together, and next to an application that has the file open read-only. A program that has it
+open for writing keeps them out, and `put`, `del` and `import` wait for nobody: they exit 5 at
+once when the file is open anywhere (see "Exit codes").
 
 **Large values.** `put` sizes its page cache to the value, so any value up to 1 GiB works
 without an option. `--cache <bytes>` sets the cache for any command (`--cache 64m`).
@@ -81,7 +86,7 @@ is an error, never an empty value. Stdin can be read once per command.
 file gets `json`, except `get`, which gets `raw` so that `eggdb get app.db photo > photo.jpg`
 gives back the bytes. `hex` and `raw` are for `get` and `scan`, the commands that print data.
 
-| Format | `get` | `scan` | `put`, `del`, `create`, `check`, `stats` |
+| Format | `get` | `scan` | `put`, `del`, `create`, `check`, `stats`, `export`, `import` |
 |--------|-------|--------|------------------------------------------|
 | `text` | the value; binary as `0x…` hex | `key<tab>value` lines, the count on stderr | nothing, `created app.db (4 KiB pages)`, or the report |
 | `json` | `{"key":"user:1","value":"Ada"}` | one object per line | one object |
@@ -100,6 +105,8 @@ lowercase hex, instead of `key` or `value`. Numbers are plain integers. The fiel
 | `scan` | `{"key":…,"value":…}` per entry, `{"key":…}` with `--keys-only` |
 | `check` | `{"ok":true,"file","commit_stamp","commit_time","page_size","pages","file_bytes","entries","key_bytes","value_bytes","tree_height","tree_pages","overflow_values","overflow_pages","free_pages","log_pages","leaked_pages"}`; when damaged `{"ok":false,"file","problem","page","what_to_do"}`, `page` only when the problem names one |
 | `stats` | `{"file","page_size","pages","free_pages","file_bytes","last_commit_stamp","last_commit_time","log_bytes_since_checkpoint"}`; the commit fields are `null` before the first commit |
+| `export` | `{"file","out","entries"}` when the export goes to a file; to stdout, the export itself |
+| `import` | `{"file","from","entries","imported","skipped","created","dry_run"}`; `from` is `-` for stdin; `imported` counts the keys stored, so a key repeated in the export counts once under `--on-conflict overwrite`; with `--dry-run` the counts and `created` say what the import would do |
 
 `text` shows bytes as text when they are valid UTF-8 without control characters, and as `0x`
 hex otherwise; `get` also keeps newlines, tabs and carriage returns as text. `scan` cuts a value
@@ -274,14 +281,99 @@ edit is not committed).
   suits screen readers. The terminal is put back as it was on quit, on a panic, and on
   `SIGTERM`, `SIGHUP` and `SIGQUIT` (on Windows when the console closes).
 
+## `export` and `import`
+
+```
+eggdb export <file> [<out> | -]
+eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run]
+```
+
+`export` writes every entry, from one snapshot, to `<out>`, or to stdout without it or with `-`.
+It never replaces a file, and removes what it wrote when it fails. `import` loads such a file
+into the database, from `<in>`, or from stdin without it or with `-`. Together they back up and
+restore a database, move it to another machine or version, and load data made by other tools:
+
+```sh
+eggdb export app.db backup.jsonl
+eggdb import --create restored.db backup.jsonl
+eggdb export app.db | ssh other-host eggdb import --create app.db
+eggdb import app.db changes.jsonl --on-conflict overwrite
+```
+
+| Option | Meaning |
+|--------|---------|
+| `--create` | create the database if it is missing, with the export's page size |
+| `--page-size <bytes>` | the new file's page size instead (only with a file `import` creates) |
+| `--on-conflict error` | stop at a key already in the database, or twice in the export (the default) |
+| `--on-conflict overwrite` | store the export's value; of a key twice in the export, the last |
+| `--on-conflict skip` | keep the value already there; of a key twice in the export, the first |
+| `--dry-run` | check the whole export and report what would happen, writing nothing |
+
+**What a failed import leaves.** From a regular file, `import` checks the whole export first
+(every line, the trailer's count, the key order and sizes, and with `--on-conflict error` every
+key against the database) and writes nothing when something is wrong. It then rewinds the same
+file and commits in batches of at most 4 MiB. The export itself can no longer stop it then, but
+other things still can, after some batches were committed:
+- an I/O error or a full disk;
+- a `--cache` too small for a batch or an entry;
+- Ctrl-C;
+- another program opening the file in the moment `import` reopens it with a larger cache for a
+  large entry (only from stdin or a pipe, where the largest entry is not known in advance).
+
+Stdin, and a path that can be read only once (a named pipe, `/dev/stdin`, a shell's `<(…)`), is
+read in one pass: a bad line stops the import after the batches before it, and the error says
+how many entries were committed. Fix the export and import it again with `--on-conflict skip`. A new file
+(`--create`) is built as `<file>.importing` and renamed to `<file>` only when the whole import
+succeeded, so a failed restore leaves no file; a `<file>.importing` left by a crash is refused
+until you remove it.
+
+**Memory.** Neither command holds the export in memory: `export` streams from one read
+transaction, and `import` decodes each line straight into its key and value. The largest entry
+needs its size in memory, and `import` sizes its page cache to it (32 MiB by default, more for an
+entry above about 30 MiB), as `put` does.
+
+**Progress.** On a terminal, both show `imported 1,204,000 entries…` on stderr, redrawn once a
+second, and erase it when they end.
+
+### The export format, eggdb-jsonl version 1
+
+UTF-8 text with one JSON object per line, each line ended by a line feed:
+
+```
+{"format":"eggdb-jsonl","version":1,"eggdb":"0.2.0","page_size":4096,"exported_at":"2026-10-27T09:14:07.123456Z"}
+{"key":"","value":"the empty key"}
+{"key_hex":"00ff10","value_hex":"deadbeef"}
+{"key":"user:1","value":"Ada Lovelace\nmathematician"}
+{"entries":3}
+```
+
+- **The header** comes first. `format` and `version` are required; `eggdb` (the version that
+  wrote it), `page_size` (what `import --create` gives a new file) and `exported_at` (UTC) are
+  optional.
+- **An entry** has exactly two fields: the key as `key` or `key_hex`, and the value as `value` or
+  `value_hex`. A JSON string (`key`, `value`) holds the bytes when they are UTF-8; export writes
+  one when they are UTF-8 without control characters other than tab, line feed and carriage
+  return. Hex (`key_hex`, `value_hex`) holds any bytes, two digits each, either case on import,
+  lowercase from export. Keys are in ascending order of their bytes, compared unsigned.
+- **The trailer** comes last: `{"entries":N}` with the number of entry lines. A file without it,
+  or with a count that differs, was cut or changed and is refused.
+
+Import accepts any JSON that means the same thing (spaces between tokens, fields in any order,
+every JSON escape including `\uXXXX` and surrogate pairs) and refuses everything else with the
+line number and what is wrong: an unknown or repeated field, a raw control character, a lone
+surrogate, invalid UTF-8 in `key` or `value`, an odd number of hex digits, an empty line,
+anything after the trailer, or a `version` above 1 (made by a newer EggDB: upgrade).
+`scan --format json` prints entry lines in the same spelling, except that it writes text for any
+UTF-8, so its lines are valid entries too.
+
 ## Exit codes and errors
 
 | Code | Meaning |
 |------|---------|
 | 0 | done; `check` found no damage |
 | 1 | not found: `get` or `del` of a key that is not there |
-| 2 | usage: unknown command or option, missing argument, bad hex, an unreadable `@file`, a command not in this release |
-| 3 | database error: no such file, not an EggDB file, written by a newer EggDB, permission denied, I/O failure, key or value too large, disk full |
+| 2 | usage: unknown command or option, missing argument, bad hex, an unreadable `@file` or export file, a command not in this release |
+| 3 | database error: no such file, not an EggDB file, written by a newer EggDB, permission denied, I/O failure, key or value too large, disk full; an export that is not valid, or a key already there (`import`); an output file that exists (`export`) |
 | 4 | damaged: `check` found damage, or any command read a damaged page |
 | 5 | busy: another program has the file open |
 
@@ -289,7 +381,8 @@ Ctrl-C stops the command the way the operating system stops any program: shells 
 A `put` either committed or did not. A stopped `scan` can leave its last line cut off, since
 output goes out in blocks of 64 KiB and more, so a script that reads a stopped scan should drop a
 final line without a newline. Writing to a
-closed pipe (`eggdb scan app.db | head`) ends the command quietly with exit 0.
+closed pipe (`eggdb scan app.db | head`, or `eggdb export app.db | head`) ends the command
+quietly with exit 0.
 
 Errors go to stderr as `eggdb: <what happened>: <why>. <what to do>`, never as a Rust debug dump,
 and add a `try:` line when the fix is a command:
@@ -302,7 +395,7 @@ eggdb: unknown option '--reverse' for eggdb get
   try: eggdb help get
 ```
 
-The commands that are coming (`export`, `import`, `shell`, `backup`, `compact`) answer
+The commands that are coming (`shell`, `backup`, `compact`) answer
 `eggdb <name> is not in this release yet; see docs/roadmap.md` and exit 2, so no script is built
 on a name that later changes meaning.
 

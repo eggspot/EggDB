@@ -130,6 +130,18 @@ on every core, and a failure names its seed and case. CI runs 800 cases (about 7
 build); `EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run longer campaigns, and the counts of the last
 one are in D89.
 
+## Hostile exports (D93)
+`eggdb import` reads files from anywhere, so its reader (`crates/eggdb/src/cli/jsonl.rs`) has a
+seeded fuzzer of its own in `jsonl/tests.rs`: it mutates valid exports (bit flips, bytes
+replaced, cut or deleted, JSON tokens and noise inserted, lines moved) or makes random bytes,
+feeds them through a reader that returns one to nine bytes per call and `Interrupted` errors,
+and requires either a refusal with a line number or entries within the key and value limits,
+never a panic, an input error or a case over 5 s. CI runs 4,000 cases (under a second);
+`EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run longer campaigns. The command itself is fuzzed in
+`cli/transfer_tests.rs`: mutated exports imported into new and existing files must exit 0 or 3,
+leave no `.importing` file, keep `check` passing, and change nothing when the message says
+nothing was imported.
+
 ## Each layer
 - **Page file:** creating, growing and freeing pages, both header slots and a torn header update,
   the file lock, a failed sync that stops every later change, and a crash at every operation of a
