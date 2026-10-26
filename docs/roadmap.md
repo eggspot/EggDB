@@ -1,15 +1,16 @@
 # EggDB roadmap
 
-Each milestone ships as a release when it is merged (CLAUDE.md, "Releases"). The order puts the
-core first and then the models and protocols that most applications use (D5). The build loop may
-refine it through research, recorded in docs/decisions.md.
+Each milestone ships as a release when it is merged (CLAUDE.md, "Releases"), except in the week
+before v0.2.0, when releases are batched into it (D76). The order puts the core first and then
+the models and protocols that most applications use (D5). The build loop may refine it through
+research, recorded in docs/decisions.md.
 
 ## Milestones
 | # | Milestone | Status |
 |---|-----------|--------|
 | M0 | Repo skeleton: workspace, pinned toolchain, CI, docs | **done** |
 | M1 | Platform layer: files, direct and async I/O, memory, threads, clocks, behind one interface (D8) | **done**, released as v0.1.0 (D75): files, clocks, the crash simulator (D59), direct I/O with aligned buffers (D60), memory with huge pages and its simulator (D61), CPU sets, pinning and cache padding (D62), named, pinned thread starts (D63), the first review (D64), the CPU topology (D65) and asynchronous file I/O through a completion queue with a worker pool and its simulator (D66) and io_uring behind it, with backends chosen automatically or by request (D67) done, the second review (D68), I/O completion ports on Windows on request (D69), networking's first part: TCP through a completion queue with a portable poller and a simulated network (D70), and epoll and kqueue behind it, with connects that never block (D71), and timeouts: a timed reap and cancel, with simulated time, latency and partitions (D72), and `poll(2)` on the BSDs and illumos (D73), and fewer system calls per connection and per wait: one-shot interest kept between waits, sockets made ready in one call, one accept woken per connection (D74), and the wrap-up review. The rest of the platform work (the "Missing" column below) continues alongside later milestones |
-| M2 | Storage engine: our own versioned, checksummed page format, buffer management, write-ahead log ready to become a consensus log, hybrid logical clock timestamps, tenant and shard keys in the key layout (D20), checkpoints, crash recovery, partitioning; the B-tree/LSM/hybrid choice made by research with benchmarks | next |
+| M2 | Storage engine: our own versioned, checksummed page format, buffer management, write-ahead log ready to become a consensus log, hybrid logical clock timestamps, tenant and shard keys in the key layout (D20), checkpoints, crash recovery, partitioning; the B-tree/LSM/hybrid choice made by research with benchmarks | **in progress**, toward v0.2.0 (D76): the design and the file format's spec (D77), CRC-32C, the superblock in two header slots, page checksums |
 | M3 | Transactions: MVCC snapshots, serializable isolation, deadlock-free locking, durability modes | |
 | M4 | Embedded key-value API and the single-file database (D3); first SQLite and Redis comparisons and the first size, memory and startup budgets (D6); the first release binary with its download and install times measured (D14) | |
 | M5 | SQL: parser, planner, optimizer and executor; SQLite-compatible embedded SQL and the SQLite file format; the stable C API and the first official drivers (Rust, C#, Java, Node.js, Python, Go) in embedded mode (D16); the `eggdb` CLI client (D15) | |
@@ -32,6 +33,37 @@ refine it through research, recorded in docs/decisions.md.
 | M17 | Every platform: Windows, macOS, BSDs, Android, iOS, EggOS, WebAssembly, `no_std` (D8); packages and cloud deployments | |
 | M18 | The other ways of scaling (D18): multi-primary, leaderless quorums, storage separated from compute, serverless, tiered storage, edge copies, offline-first sync, federation | |
 
+## Next: v0.2.0, the first user release (2026-11-01, D76)
+An embedded, crash-safe, transactional key-value store in one file, with a Rust API, the
+`eggdb` command-line tool and `eggdb ui`, a terminal UI. It brings forward M2's storage
+engine, a single-writer slice of M3, M4's embedded API and the one-shot commands of M5's CLI.
+No network server, SQL, other protocols, compression or concurrent writers yet. Feature freeze
+2026-10-30 23:59.
+
+| # | Must-have, in order | Status |
+|---|---------------------|--------|
+| 1 | Storage design decision by research and the spec in [format.md](format.md), with CRC-32C, the superblock in its two header slots and the page checksums (D77) | **done** |
+| 2 | File layout: the two alternating header slots, the page allocator and free list, file growth, an exclusive file lock in the platform layer | next |
+| 3 | Page cache with a fixed memory budget, eviction and pinning | |
+| 4 | Write-ahead log: sequence numbers, checksums, group commit, durability modes | |
+| 5 | B+tree: get, put and splits | |
+| 6 | B+tree: delete, and cursors for range, prefix and reverse scans | |
+| 7 | Checkpoints, crash recovery and log truncation | |
+| 8 | Crash tests in the simulator: a crash at every I/O step, torn writes, injected faults | |
+| 9 | Transactions: one writer with snapshot readers, atomic commit, rollback, hybrid-clock commit stamps | |
+| 10 | Embedded Rust API (`Database::open`, read and write transactions, get, put, delete, scan) | |
+| 11 | Large values on overflow pages, size limits, free-space reuse | |
+| 12 | A model test against an in-memory map, and a fuzzer for hostile files | |
+| 13 | The `eggdb` CLI: `put`, `get`, `del`, `scan`, `check`, `stats` (designed by Claude Fable, D15) | |
+| 14 | `eggdb ui`, part 1: the design in `docs/ux/`, our own terminal layer, the main screen | |
+| 15 | `eggdb ui`, part 2: edit, add and delete keys, `check`, readable errors, help, fake-terminal tests | |
+| 16 | `eggdb export` and `import` (JSON lines) | |
+| 17 | Benchmarks against SQLite as the committed baseline, plus binary size, startup and memory | |
+| 18 | Release engineering: CLI smoke tests on every target, a committed v0.2.0 sample file CI keeps reading, the README quickstart, `docs/embedded.md`, `docs/cli.md`, release notes, the correctness statement | |
+
+Nice-to-have once the must-haves are merged, before the freeze: an interactive `eggdb shell`,
+online `eggdb backup`, a C API with a header. The cut order and what is never cut are in D76.
+
 ## Where we are
 Rough progress toward the whole goal: **about 2%**. The skeleton, the decisions and the platform
 layer exist, and v0.1.0 is the first release; there is no storage engine, transaction system or
@@ -40,7 +72,7 @@ query layer yet.
 | Area | Status | Missing |
 |------|--------|---------|
 | Platform layer (M1) | files with positional, direct and asynchronous I/O (a completion queue on io_uring on Linux, I/O completion ports on Windows on request, and a worker pool elsewhere), aligned buffers, directory sync, clocks, memory (page sizes, explicit and transparent huge pages), CPU sets, thread pinning on Linux and Windows and pinned thread starts, cache padding, CPU topology (cores, packages, NUMA nodes, last-level caches) on Linux, Android and Windows with counts on Apple's systems, the same error for the same wrong path on every OS, deterministic crash, fault, memory, CPU and I/O-ordering simulation; TCP listeners and connections through a completion queue that waits in epoll on Linux and Android, in kqueue on Apple's systems and in `poll(2)` on FreeBSD, NetBSD, illumos and Solaris (a portable poller elsewhere), with a simulated network of hosts (ordered bounded streams, seeded delivery, latency, partitions, resets, injected faults) on a simulated clock; timed reaps and cancel on the network queue | IOCP as Windows' automatic choice (after a benchmark), batched io_uring submission, retransmission timeouts and one-way cuts in simulation, timed reaps and cancel on the file I/O queue, sockets on io_uring and IOCP, non-blocking connects and CI runners on the BSDs and illumos, OpenBSD and DragonFly, Unix sockets and UDP, per-device alignment, NUMA memory placement and locked memory, performance and efficiency cores, pinning and topology on the BSDs, a memory allocator of our own (D75), and the M1 wrap-up review's follow-ups: a guard against completion packets after an immediate IOCP success, `NotConnected` from a reset stream's address and shutdown in simulation, tests that cancel a pending connect and mix port and worker operations on IOCP, and no readiness call in a reap that is already satisfied |
-| Storage and transactions (M2, M3) | not started | everything |
+| Storage and transactions (M2, M3) | the design (D77), the file format's spec ([format.md](format.md)), CRC-32C with the processor's instructions, the superblock in two header slots, page headers and their checksums | the page file, page cache, write-ahead log, B+tree, checkpoints and recovery, crash tests, transactions (the v0.2.0 list above), then MVCC, serializable isolation, partitioning and the LSM bake-off |
 | Models (D2) | none | key-value, relational, search, documents, time series, columnar, graphs, vectors, geospatial, wide-column, objects, queues |
 | SQL dialects (D10, D47) | none (0%) | PostgreSQL, SQLite, MySQL/MariaDB, T-SQL, Oracle, then GoogleSQL, Snowflake, Spark, ClickHouse, Trino, Db2, Sybase |
 | Protocols (D5) | none (0%) | PostgreSQL, RESP, MongoDB, Elasticsearch, CQL, Kafka, AMQP, MQTT, S3 and the rest |

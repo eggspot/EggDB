@@ -2294,3 +2294,131 @@ D23's cryptography. The shipped binary has no third-party code, and the workflow
 while nothing third-party ships), reproducible builds, package managers and registries (they
 need the owner's accounts), and the startup, idle-memory and install-time measurements, which
 start with the first build that serves data (M4).
+
+## D76 The first user release: v0.2.0 on 2026-11-01, an embedded key-value store in one file — Decided (owner, 2026-10-26); refines D75 and the roadmap's order
+v0.1.0 only prints its version. The owner put time to market first for one week: v0.2.0, on
+2026-11-01, is the first release people can use. It is an embedded, crash-safe, transactional
+key-value store in one file, with:
+- a Rust API;
+- an `eggdb` command-line tool;
+- `eggdb ui`, a full-screen terminal UI for browsing and editing a database.
+
+**Why a terminal UI:** a web UI needs a network listener, and D22 requires TLS on every
+listener, while a desktop app needs a GUI toolkit, and D1 allows no third-party crates. The
+desktop GUI stays a must-have of the client track (D15) after this release.
+
+**Out of scope for v0.2.0:**
+- a network server, because D22 requires TLS and D35 requires our own cryptography, which
+  doesn't fit the week;
+- SQL and the Redis and PostgreSQL protocols;
+- compression;
+- more than one writer at a time.
+
+**The roadmap's own order, cut down:** M2's storage engine, a single-writer slice of M3's
+transactions, M4's embedded API and the one-shot commands of M5's CLI, brought forward. The
+must-have list, in order, is the roadmap's "Next: v0.2.0" section. Its cut order when behind is:
+1. the nice-to-haves;
+2. reverse scans;
+3. merging under-filled pages on delete;
+4. overflow pages (a documented value-size limit instead);
+5. import (export stays);
+6. editing in `eggdb ui` (it ships read-only).
+
+Never cut: checksums, recovery, the crash tests, the hostile-file fuzzer, the sample-file
+compatibility test, `eggdb check` and the correctness statement.
+
+**Releases are held this week (an exception to D75's release on every milestone):** milestone
+releases are batched into v0.2.0, and no other release is cut before it except a release
+candidate. The feature freeze is 2026-10-30 23:59; after it only fixes, tests, release
+engineering and docs merge. If crash safety isn't proven by the freeze, v0.2.0 still ships on
+2026-11-01, as a GitHub pre-release labelled preview, "not for data you can't lose", rather
+than move the date. The exception ends when v0.2.0 is out.
+
+## D77 The storage engine's design and file format, version 1 — Decided by research (build loop, 2026-10-26); refines D20, D40 and D41 under D76
+The full specification is [format.md](format.md). The research behind this entry is the M2 design
+brief in issue #30 (from the papers it cites) and a research pass on what a one-file v0.2.0
+needs.
+
+**Index: an in-place B+tree**, with fence keys and prefix truncation. Neither an LSM nor a
+copy-on-write tree:
+- an in-place B+tree reads best and fits serializable snapshot isolation (M3);
+- LeanStore (ICDE'18) and Umbra (CIDR'20) show it comes close to in-memory speed with a lean
+  buffer manager;
+- an LSM's compaction spikes and background wake-ups hurt embedded use (D41);
+- a copy-on-write tree has no log to become a consensus log (D20).
+
+Page types are reserved for immutable sorted runs, and an LSM or hybrid replaces the B+tree
+only if it wins issue #30's pre-registered bake-off:
+- it ingests more than twice as fast;
+- with at most 1.5 times the read latency;
+- and at most 1.3 times the space.
+
+**Buffer: our own page cache** with a fixed memory budget. No `mmap`: Crotty, Leis and Pavlo,
+CIDR'22.
+
+**One file, with the log inside it.** The write-ahead log is a chain of fixed-size segments in
+the database file. Not a sidecar, and not a fixed ring:
+- a sidecar breaks D3's one file while the database is open, can be left behind or separated
+  from its file, and needs directory syncs;
+- a fixed ring fixes the log's size at creation and makes the empty file bigger.
+
+Segments are recycled after checkpoints and reused before the file grows. One sync covers the
+log and the data.
+
+**Checksums: CRC-32C everywhere**, in hardware where the processor has it. They detect
+accidental damage, not tampering. A crafted file must still fail safely, and tamper detection
+waits for encryption at rest (D23). The page checksum
+is seeded with the file's identity and the page number:
+- a misdirected or foreign page fails like a damaged one;
+- pages need not store their own number;
+- the superblock checksum covers its magic and fields.
+
+Measured on this Mac (Apple silicon, one stream): about 11.5 GB/s, 357 ns per 4 KiB page.
+Splitting the work into three interleaved streams to go faster is a later optimisation, once
+the benchmark harness (#28) exists.
+
+**Header: two 4 KiB slots at bytes 0 and 4096, whatever the page size.** The slot is chosen by
+the generation's parity. The newest intact slot wins. An intact slot that is refused for its
+contents refuses the file, rather than falling back to an older state. That includes a
+superblock in the wrong slot and two slots with the same generation: failing safe beats
+guessing. A damaged other slot is reported to the caller, because damage after a sync looks
+like a torn write. Recovery then checks the log head's sequence number, so an older header
+can't silently open a newer file. Compatibility uses ext4's three feature sets: compatible,
+read-only-compatible and incompatible. Page numbers keep 16 bits for a later volume number.
+
+**Snapshot readers in v0.2.0: copies of pages in memory.** Before the writer first changes a
+page that a live reader may still need, it keeps the committed image in memory. A reader
+whose snapshot predates a page's current version reads that copy. Pages freed by a commit are
+reused only once no reader can see them. A reader that falls further behind than the bounded
+store allows gets a "snapshot too old" error.
+
+Nothing of this reaches the file, so recovery never sees it. Reading old pages back from the
+log (as SQLite's WAL mode does) was rejected, because our log isn't made of whole pages. M3
+replaces the copies with versions in the leaves.
+
+**Recovery: analysis and redo, no undo.** In v0.2.0 no page changed by an uncommitted
+transaction is written to the file. A transaction larger than the page cache therefore fails
+with a readable error until M3. The first change to a page after a checkpoint logs the whole
+page, against torn pages.
+
+**Hybrid-clock stamps:** 64 bits, 52 bits of microseconds since 2026-01-01T00:00:00Z and a
+12-bit counter. That runs to about 2168, where a 1970 epoch would end in 2112. The high-water
+mark is persisted so stamps never go backwards.
+
+**Durability modes:** `Full` (the default, a sync per commit group), `Normal` (syncs at
+checkpoints, never corrupts) and `Off`. The names and behaviour follow SQLite's `synchronous`
+setting, so they are familiar. Apple's systems use `F_FULLFSYNC`.
+
+**Locking:** an exclusive lock on the database file itself, never a lock file:
+- open-file-description locks on Linux;
+- `flock` on Apple's systems and the BSDs;
+- `LockFileEx` on Windows, on a byte range past any data.
+
+Classic POSIX record locks are avoided, because closing any descriptor of the file drops them.
+
+**Keys:** each tree has a key scheme in the catalog. Scheme 0, raw bytes compared as unsigned,
+is the only one in v0.2.0. Tenant and shard prefixes come as a later scheme behind an
+incompatible feature flag. Prefix truncation makes them cost about nothing per entry (D20).
+
+**Fuzzing:** our own deterministic, seeded fuzz loops run inside `cargo test`, with no crate.
+Every decoder of file bytes returns errors as values.
