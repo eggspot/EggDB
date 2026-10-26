@@ -9,9 +9,10 @@
 //!   [`PageChecksum`];
 //! - [`FormatError`], how every check of bytes read from a file fails, as a value and never a
 //!   panic (D9);
-//! - [`PageFile`], the file as checksummed pages: header updates that survive a crash at any
-//!   point, page reads and writes, growth, a free list, and the lock that keeps a second
-//!   writer out, with [`StorageError`] for what can go wrong;
+//! - [`PageFile`], the file as checksummed pages: commits through a write-ahead log inside the
+//!   file that survive a crash at any point, with a choice of [`Durability`], page reads and
+//!   writes, growth, a free list, and the lock that keeps a second writer out, with
+//!   [`StorageError`] for what can go wrong;
 //! - [`PageCache`], the buffer manager over a [`PageFile`]: a fixed number of page frames
 //!   allocated once, clock eviction, pages pinned by [`PageRef`] and [`PageMut`] handles,
 //!   changes kept in memory until their commit, and [`CacheStats`].

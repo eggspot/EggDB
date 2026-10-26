@@ -1347,6 +1347,50 @@ mod tests {
         assert_eq!(cache.superblock().catalog_root, 2);
     }
 
+    #[test]
+    fn an_empty_log_reopens_and_takes_commits() {
+        let fs = SimFileSystem::new();
+        let mut cache = create(&fs);
+        let page = allocate(&cache, 4);
+        cache.rollback().unwrap();
+        drop(cache);
+        fs.crash(CrashMode::Torn { seed: 9 });
+        let mut cache = open(&fs, Access::ReadWrite).unwrap();
+        assert_eq!(cache.superblock().log_head_page, 2);
+        assert_eq!(allocate(&cache, 5), page);
+        cache.commit(|_| {}).unwrap();
+        drop(cache);
+        fs.crash(CrashMode::Torn { seed: 10 });
+        let cache = open(&fs, Access::ReadOnly).unwrap();
+        assert_eq!(fill_of(&cache, page).unwrap(), 5);
+    }
+
+    #[test]
+    fn pages_committed_under_normal_are_read_back_from_the_log_after_eviction() {
+        let fs = SimFileSystem::new();
+        let file = PageFile::create(&fs, Path::new(DB), options(PageSize::DEFAULT)).unwrap();
+        let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(2)).unwrap();
+        cache.set_durability(Durability::Normal).unwrap();
+        let pages: Vec<u64> = (0..6)
+            .map(|fill| {
+                let page = allocate(&cache, fill);
+                cache.commit(|_| {}).unwrap();
+                page
+            })
+            .collect();
+        assert!(cache.stats().evictions > 0);
+        for (fill, &page) in pages.iter().enumerate() {
+            assert_eq!(fill_of(&cache, page).unwrap(), fill as u8);
+        }
+        let reader = PageFile::open(&fs, Path::new(DB), Access::ReadOnly);
+        assert!(matches!(reader, Err(StorageError::Locked)));
+        drop(cache);
+        let cache = open(&fs, Access::ReadOnly).unwrap();
+        for (fill, &page) in pages.iter().enumerate() {
+            assert_eq!(fill_of(&cache, page).unwrap(), fill as u8);
+        }
+    }
+
     fn log_image(fs: &SimFileSystem) -> (Vec<u8>, u64) {
         committed_states(fs, Durability::Full);
         let head = open(fs, Access::ReadOnly)
