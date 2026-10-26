@@ -22,7 +22,7 @@ impl WriterSlot {
         if state.holder == Some(me) {
             return Err(Error::new(
                 ErrorKind::WriterActive,
-                "this thread already holds the write transaction; commit or roll it back before beginning another",
+                "the open write transaction was begun on this thread, so waiting for it here would never end; commit or roll it back before beginning another",
             ));
         }
         if state.holder.is_some() && !timeout.is_zero() {

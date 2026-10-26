@@ -201,9 +201,10 @@ impl Database {
     /// Begins the write transaction (see [`WriteTransaction`]). While another one is open, it
     /// waits for that one to end, up to [`Options::write_timeout`] (five seconds by default),
     /// and then fails with [`ErrorKind::WriterActive`](crate::ErrorKind::WriterActive). It
-    /// fails at once when this thread holds the open write transaction itself, since waiting
-    /// would never end, and with [`ErrorKind::ReadOnly`](crate::ErrorKind::ReadOnly) on a
-    /// read-only database.
+    /// fails at once when this thread began the open write transaction, since waiting could
+    /// never end; that holds even after the transaction was sent to another thread, so the
+    /// beginning thread stays refused until it ends. On a read-only database it fails with
+    /// [`ErrorKind::ReadOnly`](crate::ErrorKind::ReadOnly).
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>> {
         self.begin_write_within(self.write_timeout)
     }
@@ -301,7 +302,8 @@ impl Database {
 
     /// Makes every commit so far durable with one sync, for databases opened with
     /// [`Durability::Normal`](crate::Durability::Normal); with
-    /// [`Durability::Full`](crate::Durability::Full) commits already are.
+    /// [`Durability::Full`](crate::Durability::Full) commits already are. A read-only database
+    /// fails with [`ErrorKind::ReadOnly`](crate::ErrorKind::ReadOnly).
     pub fn sync(&self) -> Result<()> {
         self.store.sync().map_err(Error::storage)
     }

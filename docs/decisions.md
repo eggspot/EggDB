@@ -3141,4 +3141,6 @@ inheriting the file, which the platform layer does not offer yet.
 
 **Left for later:** a lending scan in both directions, a writer wait with a fairness order,
 collections, an in-memory database, values larger than a page (item 11), and the `eggdb` crate's
-publication to crates.io, which needs the owner's account (CLAUDE.md, "Releases").
+publication to crates.io, which needs the owner's account (CLAUDE.md, "Releases"). Also from the
+independent review: no `database.scan` benchmark yet, and `Scan` copies its last key on every
+step; `snapshot_memory_bytes` is not range-checked; the comparison against SQLite is item 17.

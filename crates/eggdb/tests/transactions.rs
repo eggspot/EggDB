@@ -338,3 +338,23 @@ fn reads_of_an_empty_database_find_nothing() {
     assert_eq!(tx.scan(..).next_back().map(|entry| entry.is_ok()), None);
     tx.commit().unwrap();
 }
+
+#[test]
+fn a_refused_first_put_leaves_a_database_with_no_tree() {
+    let file = TempPath::new("refused-first-put");
+    let db = Database::open(file.path()).unwrap();
+    let mut tx = db.begin_write().unwrap();
+    assert_eq!(
+        tx.put(vec![0; 513], "").unwrap_err().kind(),
+        ErrorKind::TooLarge
+    );
+    assert_eq!(
+        tx.put("k", vec![0; 750]).unwrap_err().kind(),
+        ErrorKind::TooLarge
+    );
+    tx.commit().unwrap();
+    let report = db.check().unwrap();
+    assert_eq!((report.tree_height, report.tree_pages), (0, 0));
+    db.put("k", "v").unwrap();
+    assert_eq!(db.check().unwrap().tree_height, 1);
+}

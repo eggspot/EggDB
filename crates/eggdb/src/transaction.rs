@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::scan::{KeyRange, Reader, Scan};
 use crate::writer_slot::WriterTurn;
 use eggdb_platform::OsFile;
-use eggdb_storage::{BTree, CommitStamp};
+use eggdb_storage::{BTree, CommitStamp, StorageError};
 
 /// A consistent, read-only view of a [`Database`]: the last commit before
 /// [`Database::begin_read`], unchanged by any commit after it, for as long as it lives.
@@ -165,8 +165,33 @@ impl<'db> WriteTransaction<'db> {
     }
 
     fn put_bytes(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        let tree = self.tree_to_change()?;
+        let tree = match self.tree {
+            Some(tree) => tree,
+            None => {
+                self.check_entry_fits(key, value)?;
+                self.create_tree()?
+            }
+        };
         self.inner.put(&tree, key, value).map_err(Error::storage)
+    }
+
+    fn check_entry_fits(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let max_key = self.database.max_key_bytes();
+        if key.len() > max_key {
+            return Err(Error::storage(StorageError::KeyTooLarge {
+                bytes: key.len(),
+                max: max_key,
+            }));
+        }
+        let max_entry = self.database.max_entry_bytes();
+        let entry = key.len().saturating_add(value.len());
+        if entry > max_entry {
+            return Err(Error::storage(StorageError::EntryTooLarge {
+                bytes: entry,
+                max: max_entry,
+            }));
+        }
+        Ok(())
     }
 
     /// Removes `key` and its value, and returns whether the key was there.
@@ -207,10 +232,7 @@ impl<'db> WriteTransaction<'db> {
         self.inner.rollback().map_err(Error::storage)
     }
 
-    fn tree_to_change(&mut self) -> Result<BTree> {
-        if let Some(tree) = self.tree {
-            return Ok(tree);
-        }
+    fn create_tree(&mut self) -> Result<BTree> {
         let tree = self.inner.create_tree().map_err(Error::storage)?;
         self.inner.set_catalog_root(tree.root());
         self.tree = Some(tree);
