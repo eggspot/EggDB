@@ -21,4 +21,4 @@
   user:4                      41│ line 0175: the quick brown fox jumps over the
   user:5                      41│ lazy dog, again and again and again
 
- ↑↓ scroll  ←→ pan  v view  w wrap  e edit  Esc keys  ? help  q quit
+ ↑↓ scroll  ←→ pan  v view  w wrap  e edit  d delete  Esc keys  ? help  q quit

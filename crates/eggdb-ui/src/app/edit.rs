@@ -1,5 +1,5 @@
 use super::modal::{Modal, Pending};
-use super::{HELP_EDITING_LINE, Hint, Pane, ToastKind, Ui};
+use super::{Hint, Pane, ToastKind, Ui, help_editing_line};
 use crate::editor::{Editor, LONGEST_TEXT, Lines, Outcome};
 use crate::frame::Frame;
 use crate::source::{Change, Source, Start, WriterBusy};
@@ -192,7 +192,7 @@ impl<S: Source> Ui<S> {
                 self.modal = Some(Modal::discard_question());
             }
             Outcome::Cancel => self.close_edit(),
-            Outcome::Help => self.help = Some(HELP_EDITING_LINE),
+            Outcome::Help => self.help = Some(help_editing_line(self)),
             Outcome::TooLong => self.toast(
                 ToastKind::Error,
                 format!(

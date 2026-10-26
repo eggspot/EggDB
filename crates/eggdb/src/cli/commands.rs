@@ -439,7 +439,9 @@ impl Session<'_> {
         } else {
             Access::Write { create: false }
         };
-        let options = self.database_options(access, None);
+        let options = self
+            .database_options(access, None)
+            .write_timeout(ui::WRITE_TIMEOUT);
         let db = Database::open_with(&self.request.file, options.clone())
             .map_err(|error| self.ui_open_failure(&error, access))?;
         let capabilities = eggdb_ui::detect_capabilities(eggdb_ui::Fallbacks {

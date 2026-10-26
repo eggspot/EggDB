@@ -211,11 +211,10 @@ impl<S: Source> Ui<S> {
             self.retry_write();
             return true;
         }
-        if self.check_running() {
-            return self.poll_check(now);
-        }
         let mut changed = false;
-        if self.counting {
+        if self.check_running() {
+            changed = self.poll_check(now);
+        } else if self.counting {
             self.count_step();
             changed = true;
         }
@@ -1569,6 +1568,7 @@ impl<S: Source> Ui<S> {
                 Hint::new("v", "view"),
                 Hint::new("w", "wrap"),
                 Hint::new("e", "edit").available(writable && self.viewer.is_some()),
+                Hint::new("d", "delete").available(writable && self.viewer.is_some()),
                 Hint::new("Esc", "keys"),
                 Hint::new("?", "help"),
                 Hint::new("q", "quit"),
@@ -1674,7 +1674,14 @@ impl Hint {
     }
 }
 
-const HELP_EDITING_LINE: usize = 9;
+const HELP_EDITING_TOPIC: &str = "Editing";
+
+fn help_editing_line<S: Source>(ui: &Ui<S>) -> usize {
+    help_lines(ui)
+        .iter()
+        .position(|line| line.starts_with(HELP_EDITING_TOPIC))
+        .unwrap_or(0)
+}
 
 fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
     let up_down = if ui.theme.unicode() {
@@ -1697,7 +1704,9 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
         "Messages    m  show the last message in full".to_owned(),
         "Quit        q, or Ctrl-C (asks before discarding an edit)".to_owned(),
         String::new(),
-        "Editing     Enter confirms a one-line value, Ctrl-S confirms any value".to_owned(),
+        format!(
+            "{HELP_EDITING_TOPIC}     Enter confirms a one-line value, Ctrl-S confirms any value"
+        ),
         "            Alt-Enter makes it multi-line   Esc cancels   F1 this help".to_owned(),
         "            Ctrl-Z/Ctrl-Y undo/redo   Ctrl-U/Ctrl-K delete to line start/end".to_owned(),
         "            Values are edited as bytes: \\xNN is one byte, \\\\ a backslash,".to_owned(),

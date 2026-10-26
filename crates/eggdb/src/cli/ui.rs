@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const LONGEST_COUNT_STEP: Duration = Duration::from_millis(20);
-const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type CheckThread = JoinHandle<eggdb::Result<CheckReport>>;
 
@@ -53,15 +53,25 @@ impl DatabaseSource {
 }
 
 fn source_error(error: &eggdb::Error) -> SourceError {
+    use eggdb::ErrorKind as Engine;
     let kind = match error.kind() {
-        eggdb::ErrorKind::WriterActive => ErrorKind::WriterActive,
-        eggdb::ErrorKind::TooLarge => ErrorKind::TooLarge,
-        eggdb::ErrorKind::CacheFull => ErrorKind::CacheFull,
-        eggdb::ErrorKind::ReadOnly => ErrorKind::ReadOnly,
-        eggdb::ErrorKind::NeedsReopen => ErrorKind::NeedsReopen,
-        eggdb::ErrorKind::Corrupt => ErrorKind::Corrupt,
-        eggdb::ErrorKind::DatabaseFull => ErrorKind::DatabaseFull,
-        eggdb::ErrorKind::Io => ErrorKind::Io,
+        Engine::NotFound => ErrorKind::NotFound,
+        Engine::PermissionDenied => ErrorKind::PermissionDenied,
+        Engine::Locked => ErrorKind::Locked,
+        Engine::ReadOnly => ErrorKind::ReadOnly,
+        Engine::NotADatabase => ErrorKind::NotADatabase,
+        Engine::Incompatible => ErrorKind::Incompatible,
+        Engine::Corrupt => ErrorKind::Corrupt,
+        Engine::Io => ErrorKind::Io,
+        Engine::OutOfMemory => ErrorKind::OutOfMemory,
+        Engine::TooLarge => ErrorKind::TooLarge,
+        Engine::CacheFull => ErrorKind::CacheFull,
+        Engine::WriterActive => ErrorKind::WriterActive,
+        Engine::SnapshotTooOld => ErrorKind::SnapshotTooOld,
+        Engine::TransactionFailed => ErrorKind::TransactionFailed,
+        Engine::NeedsReopen => ErrorKind::NeedsReopen,
+        Engine::DatabaseFull => ErrorKind::DatabaseFull,
+        Engine::InvalidOption => ErrorKind::InvalidOption,
         _ => ErrorKind::Other,
     };
     SourceError::new(kind, error.to_string())
@@ -197,7 +207,7 @@ impl Source for DatabaseSource {
             cache_hits: stats.cache_hits,
             cache_misses: stats.cache_misses,
             log_bytes: stats.log_bytes_since_checkpoint,
-            write_timeout: DEFAULT_WRITE_TIMEOUT,
+            write_timeout: WRITE_TIMEOUT,
         })
     }
 

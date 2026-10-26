@@ -159,26 +159,44 @@ impl SourceError {
     }
 }
 
-/// The kinds of failure the UI tells apart, named as `eggdb::ErrorKind` names them.
+/// The kind of a failure, one for each kind `eggdb::ErrorKind` has, named as it names them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
-    /// Another write transaction is open.
-    WriterActive,
+    /// The database file does not exist.
+    NotFound,
+    /// The operating system refused access to the file.
+    PermissionDenied,
+    /// The file is open elsewhere.
+    Locked,
+    /// The database is open read-only.
+    ReadOnly,
+    /// The file is not an EggDB database.
+    NotADatabase,
+    /// The file was written by a newer EggDB.
+    Incompatible,
+    /// A page or structure of the file is damaged.
+    Corrupt,
+    /// The file system failed.
+    Io,
+    /// Memory could not be had.
+    OutOfMemory,
     /// A key or value is longer than the database stores, or than one commit's pages fit in
     /// the page cache; nothing changed.
     TooLarge,
     /// The commit changed more pages than the page cache holds; it was rolled back.
     CacheFull,
-    /// The database is open read-only.
-    ReadOnly,
+    /// Another write transaction is open.
+    WriterActive,
+    /// A read transaction's snapshot expired.
+    SnapshotTooOld,
+    /// The write transaction failed earlier and was rolled back.
+    TransactionFailed,
     /// An earlier write failed; the database must be opened again.
     NeedsReopen,
-    /// A page or structure of the file is damaged.
-    Corrupt,
     /// The file can take no more commits.
     DatabaseFull,
-    /// The file system failed.
-    Io,
+    /// An option is outside what EggDB accepts.
+    InvalidOption,
     /// Anything else.
     Other,
 }
@@ -187,14 +205,23 @@ impl ErrorKind {
     /// The kind's name, as `eggdb::ErrorKind` spells it.
     pub fn name(self) -> &'static str {
         match self {
-            Self::WriterActive => "WriterActive",
+            Self::NotFound => "NotFound",
+            Self::PermissionDenied => "PermissionDenied",
+            Self::Locked => "Locked",
+            Self::ReadOnly => "ReadOnly",
+            Self::NotADatabase => "NotADatabase",
+            Self::Incompatible => "Incompatible",
+            Self::Corrupt => "Corrupt",
+            Self::Io => "Io",
+            Self::OutOfMemory => "OutOfMemory",
             Self::TooLarge => "TooLarge",
             Self::CacheFull => "CacheFull",
-            Self::ReadOnly => "ReadOnly",
+            Self::WriterActive => "WriterActive",
+            Self::SnapshotTooOld => "SnapshotTooOld",
+            Self::TransactionFailed => "TransactionFailed",
             Self::NeedsReopen => "NeedsReopen",
-            Self::Corrupt => "Corrupt",
             Self::DatabaseFull => "DatabaseFull",
-            Self::Io => "Io",
+            Self::InvalidOption => "InvalidOption",
             Self::Other => "Other",
         }
     }

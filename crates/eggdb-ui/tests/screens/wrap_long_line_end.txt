@@ -21,4 +21,4 @@
   user:3                      41│ 1 000001992 000001993 000001994 000001995 0000
   user:4                      41│ 01996 000001997 000001998 000001999 THE END
 
- ↑↓ scroll  ←→ pan  v view  w wrap  e edit  Esc keys  ? help  q quit
+ ↑↓ scroll  ←→ pan  v view  w wrap  e edit  d delete  Esc keys  ? help  q quit

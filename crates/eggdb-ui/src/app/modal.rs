@@ -1,5 +1,5 @@
 use super::edit::is_text;
-use super::{Hint, Pane, ToastKind, Ui};
+use super::{Hint, Mode, Pane, ToastKind, Ui};
 use crate::frame::Frame;
 use crate::source::{Change, ErrorKind, Source, SourceError, WriterBusy};
 use crate::terminal::{KeyCode, KeyEvent};
@@ -8,6 +8,7 @@ use crate::theme::{Role, Symbol};
 use crate::width::{char_width, text_width};
 
 const SMALLEST_TEXT_WIDTH: usize = 30;
+const PREVIEW_BYTES: usize = 256;
 const KEY_GAP: &str = "     ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,11 +188,12 @@ impl<S: Source> Ui<S> {
         let size = text::value_size(pending.replaced_bytes.unwrap_or(0));
         let value_line = match self.viewer.as_ref().filter(|viewer| viewer.key == key) {
             Some(viewer) => match viewer.bytes.as_deref() {
-                Some(bytes) if value_kind(bytes) == "text" => {
-                    let first = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
+                Some(_) if viewer.mode == Mode::Hex => format!("Value  {size}, binary"),
+                Some(bytes) => {
+                    let shown = &bytes[..bytes.len().min(PREVIEW_BYTES)];
+                    let first = shown.split(|&b| b == b'\n').next().unwrap_or_default();
                     format!("Value  {size}, text: {}", text::escaped(first))
                 }
-                Some(bytes) => format!("Value  {size}, {}", value_kind(bytes)),
                 None => format!("Value  {size}"),
             },
             None => format!("Value  {size}"),
