@@ -143,7 +143,7 @@ impl LogGeometry {
         page * self.page_size.bytes() as u64
     }
 
-    fn record_seed(&self, sequence: u64, lsn: u64) -> u32 {
+    pub(crate) fn record_seed(&self, sequence: u64, lsn: u64) -> u32 {
         let segment_seed = crc32c_append(self.file_seed, &sequence.to_le_bytes());
         crc32c_append(segment_seed, &lsn.to_le_bytes())
     }

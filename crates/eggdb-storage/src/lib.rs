@@ -28,6 +28,8 @@ mod btree_delete_tests;
 mod btree_tests;
 mod bytes;
 mod cells;
+#[cfg(test)]
+mod checkpoint_tests;
 mod crc32c;
 mod cursor;
 mod error;

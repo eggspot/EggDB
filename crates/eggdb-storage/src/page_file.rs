@@ -445,13 +445,18 @@ impl<F: File> PageFile<F> {
             .write_all_at(&slot, (next.slot() * HEADER_SLOT_SIZE) as u64)?;
         self.sync_unless_off()?;
         self.header = next;
-        self.superblock.generation = next.generation;
-        self.superblock.checkpoint_lsn = next.checkpoint_lsn;
-        self.superblock.log_head_page = next.log_head_page;
-        self.superblock.log_head_sequence = next.log_head_sequence;
-        self.superblock.recycled_segments = next.recycled_segments;
-        self.superblock.log_sequence_reserved = next.log_sequence_reserved;
+        self.adopt_header_fields();
         Ok(())
+    }
+
+    fn adopt_header_fields(&mut self) {
+        let header = &self.header;
+        self.superblock.generation = header.generation;
+        self.superblock.checkpoint_lsn = header.checkpoint_lsn;
+        self.superblock.log_head_page = header.log_head_page;
+        self.superblock.log_head_sequence = header.log_head_sequence;
+        self.superblock.recycled_segments = header.recycled_segments;
+        self.superblock.log_sequence_reserved = header.log_sequence_reserved;
     }
 
     fn reserve_sequences(&mut self) -> Result<(), StorageError> {
@@ -684,6 +689,7 @@ impl<F: File> PageFile<F> {
         } = prepared;
         superblock.page_count = self.page_count;
         self.superblock = superblock;
+        self.adopt_header_fields();
         if let Some(entries) = entries {
             self.available = entries;
             self.free_list_pages = list_pages.into_iter().collect();
