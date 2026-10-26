@@ -43,6 +43,8 @@ linux btree.scan ratio_to_std_btreemap 4.965
 linux btree.scan_reverse ratio_to_std_btreemap 5.586
 linux log.recovery ratio_to_crc32c_of_the_replayed_log 2.142
 linux page_cache.hit ratio_to_reference 0.37
+linux transaction.read ratio_to_btree_get 1.004
+linux transaction.write ratio_to_page_cache_commit 1.024
 macos btree.delete ratio_to_std_btreemap 2.226
 macos btree.get ratio_to_std_btreemap 2.214
 macos btree.put ratio_to_std_btreemap 2.456
