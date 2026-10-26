@@ -47,8 +47,8 @@ No network server, SQL, other protocols, compression or concurrent writers yet. 
 | 3 | Page cache with a fixed memory budget, eviction and pinning (D79), and the benchmark harness with a gated baseline (D80) | **done** |
 | 4 | Write-ahead log: sequence numbers, checksums, group commit, durability modes (D81) | **done**: the log inside the file, commits through it, redo on open. Checkpoints, recycling segments and truncating the log stay with row 7 |
 | 5 | B+tree: get, put and splits | **done**: slotted pages with fence keys and prefix truncation, a fixed root, pages checked when read from the file, `BTree::check` (D82) |
-| 6 | B+tree: delete, and cursors for range, prefix and reverse scans | **in progress** (PR 37): delete with merges of pages under a quarter full and root collapse, cursors that move between leaves through the root by fence key and hold no page between calls (D83) |
-| 7 | Checkpoints, crash recovery and log truncation | |
+| 6 | B+tree: delete, and cursors for range, prefix and reverse scans | **done**: delete with merges of pages under a quarter full and root collapse, cursors that move between leaves through the root by fence key and hold no page between calls (D83) |
+| 7 | Checkpoints, crash recovery and log truncation | **next** |
 | 8 | Crash tests in the simulator: a crash at every I/O step, torn writes, injected faults | |
 | 9 | Transactions: one writer with snapshot readers, atomic commit, rollback, hybrid-clock commit stamps | |
 | 10 | Embedded Rust API (`Database::open`, read and write transactions, get, put, delete, scan) | |
