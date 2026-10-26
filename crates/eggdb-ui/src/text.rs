@@ -1,3 +1,4 @@
+use crate::width::is_unprintable;
 use std::fmt::Write;
 
 pub(crate) fn escaped(bytes: &[u8]) -> String {
@@ -15,11 +16,26 @@ pub(crate) fn escaped(bytes: &[u8]) -> String {
                         let _ = write!(out, "\\x{byte:02x}");
                     }
                 }
+                c if is_unprintable(c) => {
+                    let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+                }
                 c => out.push(c),
             }
         }
         for byte in chunk.invalid() {
             let _ = write!(out, "\\x{byte:02x}");
+        }
+    }
+    out
+}
+
+pub(crate) fn unprintables_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        if is_unprintable(character) {
+            let _ = write!(out, "\\u{{{:x}}}", u32::from(character));
+        } else {
+            out.push(character);
         }
     }
     out
@@ -33,14 +49,19 @@ pub(crate) fn unescaped(text: &str) -> Vec<u8> {
         if bytes[at] == b'\\' {
             match bytes.get(at + 1) {
                 Some(b'x') => {
-                    let digits = bytes.get(at + 2..at + 4).and_then(|pair| {
-                        std::str::from_utf8(pair)
-                            .ok()
-                            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-                    });
-                    if let Some(byte) = digits {
+                    if let Some(byte) = bytes.get(at + 2..at + 4).and_then(hex_value)
+                        && let Ok(byte) = u8::try_from(byte)
+                    {
                         out.push(byte);
                         at += 4;
+                        continue;
+                    }
+                }
+                Some(b'u') => {
+                    if let Some((character, used)) = braced_character(&bytes[at + 2..]) {
+                        let mut buffer = [0u8; 4];
+                        out.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+                        at += 2 + used;
                         continue;
                     }
                 }
@@ -71,6 +92,32 @@ pub(crate) fn unescaped(text: &str) -> Vec<u8> {
         at += 1;
     }
     out
+}
+
+const LONGEST_CODE_POINT_DIGITS: usize = 6;
+
+fn hex_value(digits: &[u8]) -> Option<u32> {
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let text = std::str::from_utf8(digits).ok()?;
+    u32::from_str_radix(text, 16).ok()
+}
+
+fn braced_character(bytes: &[u8]) -> Option<(char, usize)> {
+    if bytes.first() != Some(&b'{') {
+        return None;
+    }
+    let close = bytes
+        .iter()
+        .take(LONGEST_CODE_POINT_DIGITS + 2)
+        .position(|&b| b == b'}')?;
+    let digits = bytes.get(1..close)?;
+    if digits.len() > LONGEST_CODE_POINT_DIGITS {
+        return None;
+    }
+    let character = char::from_u32(hex_value(digits)?)?;
+    Some((character, close + 1))
 }
 
 pub(crate) fn count(n: u64) -> String {
@@ -130,7 +177,7 @@ pub(crate) fn value_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{count, escaped, file_size, short_size, unescaped};
+    use super::{count, escaped, file_size, short_size, unescaped, unprintables_escaped};
 
     #[test]
     fn printable_text_is_shown_as_it_is() {
@@ -155,6 +202,55 @@ mod tests {
             assert_eq!(unescaped(&escaped(bytes)), bytes);
         }
         assert_eq!(unescaped("\\xZ1"), b"\\xZ1");
+    }
+
+    #[test]
+    fn bidi_overrides_isolates_and_invisible_formats_are_shown_as_code_points() {
+        assert_eq!(
+            escaped("user\u{202e}gnp.exe".as_bytes()),
+            "user\\u{202e}gnp.exe"
+        );
+        assert_eq!(
+            escaped("a\u{2067}b\u{2069}\u{200b}\u{feff}\u{ad}".as_bytes()),
+            "a\\u{2067}b\\u{2069}\\u{200b}\\u{feff}\\u{ad}"
+        );
+        assert_eq!(escaped("👩\u{200d}💻".as_bytes()), "👩\u{200d}💻");
+        for text in [
+            "user\u{202e}gnp.exe",
+            "\u{2066}x\u{2069}",
+            "\\u{202e} typed",
+        ] {
+            assert_eq!(unescaped(&escaped(text.as_bytes())), text.as_bytes());
+        }
+    }
+
+    #[test]
+    fn json_text_keeps_its_backslashes_and_shows_format_characters() {
+        assert_eq!(
+            unprintables_escaped("\"a\\\"b\u{202e}\u{85}\""),
+            "\"a\\\"b\\u{202e}\\u{85}\""
+        );
+    }
+
+    #[test]
+    fn code_point_escapes_need_braces_and_a_valid_scalar() {
+        assert_eq!(unescaped("\\u{202e}"), "\u{202e}".as_bytes());
+        assert_eq!(unescaped("\\u{41}b"), b"Ab");
+        assert_eq!(unescaped("\\u{d800}"), b"\\u{d800}");
+        assert_eq!(unescaped("\\u{1100000}"), b"\\u{1100000}");
+        assert_eq!(unescaped("\\u{}"), b"\\u{}");
+        assert_eq!(unescaped("\\u{+41}"), b"\\u{+41}");
+        assert_eq!(unescaped("\\u202e"), b"\\u202e");
+        assert_eq!(unescaped("\\u{41"), b"\\u{41");
+        assert_eq!(unescaped("\\u"), b"\\u");
+    }
+
+    #[test]
+    fn a_byte_escape_takes_two_hex_digits_and_no_sign() {
+        assert_eq!(unescaped("\\x+f"), b"\\x+f");
+        assert_eq!(unescaped("\\x-1"), b"\\x-1");
+        assert_eq!(unescaped("\\x0F"), b"\x0f");
+        assert_eq!(unescaped("\\xf"), b"\\xf");
     }
 
     #[test]

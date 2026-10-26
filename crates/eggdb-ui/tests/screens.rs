@@ -547,3 +547,40 @@ fn the_screen_works_at_40_by_10() {
     s.press(&["Enter"]);
     assert!(s.row(1).contains("/user"), "{}", s.row(1));
 }
+
+fn has_unprintable(screen: &str) -> bool {
+    screen.chars().any(|c| {
+        c.is_control() && c != '\n'
+            || matches!(u32::from(c), 0x200B | 0x200E | 0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFEFF)
+    })
+}
+
+#[test]
+fn bidi_overrides_and_isolates_in_keys_and_values_show_as_code_points() {
+    let mut source = fixture();
+    source.entries.insert(
+        "aaa:user\u{202e}gnp.exe".as_bytes().to_vec(),
+        "safe\u{2067}text\u{2069} and json".as_bytes().to_vec(),
+    );
+    source.entries.insert(
+        "aab:doc".as_bytes().to_vec(),
+        "{\"name\":\"x\u{202e}y\"}".as_bytes().to_vec(),
+    );
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, source);
+    s.matches("bidi_controls");
+    let screen = s.screen();
+    assert!(!has_unprintable(&screen), "{screen:?}");
+    assert!(
+        s.row(2).contains("aaa:user\\u{202e}gnp.exe"),
+        "{}",
+        s.row(2)
+    );
+    assert!(
+        screen.contains("safe\\u{2067}text\\u{2069} and json"),
+        "{screen}"
+    );
+    s.press(&["Down"]);
+    assert!(s.row(1).contains("json (auto)"), "{}", s.row(1));
+    assert!(s.screen().contains("\"x\\u{202e}y\""), "{}", s.screen());
+    assert!(!has_unprintable(&s.screen()));
+}

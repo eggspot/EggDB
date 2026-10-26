@@ -1,5 +1,5 @@
 use crate::terminal::Size;
-use crate::width::char_width;
+use crate::width::{char_width, is_unprintable};
 
 /// A full screen of cells, drawn by the UI and shown by [`crate::Terminal::present`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,18 +140,15 @@ impl Frame {
         let mut at = col;
         let mut used = 0usize;
         for character in text.chars() {
-            let character = if character.is_control() {
+            let character = if is_unprintable(character) {
                 '?'
             } else {
                 character
             };
             let width = char_width(character);
             if width == 0 {
-                if at > col
-                    && let Some(index) = self.index(at - 1, row)
-                    && let CellText::Char(previous) = self.cells[index].text
-                {
-                    self.cells[index].text = CellText::Combined(previous, character);
+                if at > col {
+                    self.attach_mark(at - 1, row, character);
                 }
                 continue;
             }
@@ -172,6 +169,17 @@ impl Frame {
             at += 1;
         }
         at - col
+    }
+
+    pub(crate) fn attach_mark(&mut self, col: u16, row: u16, mark: char) {
+        if is_unprintable(mark) || char_width(mark) != 0 {
+            return;
+        }
+        if let Some(index) = self.index(col, row)
+            && let CellText::Char(previous) = self.cells[index].text
+        {
+            self.cells[index].text = CellText::Combined(previous, mark);
+        }
     }
 
     fn set(&mut self, col: u16, row: u16, text: CellText, style: Style) {
@@ -228,6 +236,38 @@ mod tests {
         let mut f = frame(10);
         f.put(0, 0, "a\u{1b}[2J\u{9b}b", Style::default(), 10, '~');
         assert_eq!(f.row_text(0), "a?[2J?b");
+    }
+
+    #[test]
+    fn bidi_controls_and_isolates_never_reach_a_cell() {
+        let mut f = frame(20);
+        let drawn = f.put(
+            0,
+            0,
+            "user\u{202e}gnp.exe\u{2067}x\u{200b}",
+            Style::default(),
+            20,
+            '~',
+        );
+        assert_eq!(f.row_text(0), "user?gnp.exe?x?");
+        assert_eq!(drawn, 15);
+        let mut f = frame(4);
+        f.put(0, 0, "ab\u{202e}cd", Style::default(), 4, '~');
+        assert_eq!(f.row_text(0), "ab?~");
+    }
+
+    #[test]
+    fn a_format_character_never_joins_a_cell_as_a_mark() {
+        let mut f = frame(4);
+        f.put(0, 0, "a", Style::default(), 4, '~');
+        f.attach_mark(0, 0, '\u{202e}');
+        f.attach_mark(0, 0, 'b');
+        assert_eq!(f.cell(0, 0).map(|c| c.text), Some(CellText::Char('a')));
+        f.attach_mark(0, 0, '\u{301}');
+        assert_eq!(
+            f.cell(0, 0).map(|c| c.text),
+            Some(CellText::Combined('a', '\u{301}'))
+        );
     }
 
     #[test]

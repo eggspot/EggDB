@@ -1,4 +1,5 @@
 use crate::frame::{Cell, CellText, Color, Frame, Style};
+use crate::width::is_unprintable;
 use std::fmt::Write;
 
 /// Turns frames into the ANSI bytes that bring the screen from the last frame to the next:
@@ -87,12 +88,22 @@ impl Renderer {
 
 fn push_cell(text: &mut String, cell: &Cell) {
     match cell.text {
-        CellText::Char(c) | CellText::Wide(c) => text.push(c),
+        CellText::Char(c) | CellText::Wide(c) => text.push(printable(c)),
         CellText::Combined(c, mark) => {
-            text.push(c);
-            text.push(mark);
+            text.push(printable(c));
+            if !is_unprintable(mark) {
+                text.push(mark);
+            }
         }
         CellText::WideContinuation => {}
+    }
+}
+
+fn printable(character: char) -> char {
+    if is_unprintable(character) {
+        '?'
+    } else {
+        character
     }
 }
 
@@ -134,7 +145,7 @@ fn push_style(text: &mut String, style: Style) {
 #[cfg(test)]
 mod tests {
     use super::Renderer;
-    use crate::frame::{Color, Frame, Style};
+    use crate::frame::{CellText, Color, Frame, Style};
     use crate::terminal::Size;
 
     fn frame(rows: &[&str]) -> Frame {
@@ -212,6 +223,20 @@ mod tests {
         renderer.render(&f, &mut out);
         let text = String::from_utf8(out).unwrap_or_default();
         assert!(!text.contains("\x1b[0;1"));
+    }
+
+    #[test]
+    fn cells_set_directly_never_write_controls_or_bidi_overrides() {
+        let mut renderer = Renderer::new(false);
+        let mut f = Frame::new(Size { cols: 3, rows: 1 });
+        f.cells[0].text = CellText::Char('\u{202e}');
+        f.cells[1].text = CellText::Combined('a', '\u{2067}');
+        f.cells[2].text = CellText::Wide('\u{1b}');
+        let mut out = Vec::new();
+        renderer.render(&f, &mut out);
+        let text = String::from_utf8(out).unwrap_or_default();
+        assert!(text.contains("?a?"), "{text:?}");
+        assert!(!text.contains(['\u{202e}', '\u{2067}']), "{text:?}");
     }
 
     #[test]

@@ -90,7 +90,7 @@ const WIDE: [(u32, u32); 89] = [
     (0x30000, 0x3FFFD),
 ];
 
-const COMBINING: [(u32, u32); 127] = [
+const COMBINING: [(u32, u32); 122] = [
     (0x300, 0x36F),
     (0x483, 0x489),
     (0x591, 0x5BD),
@@ -99,7 +99,6 @@ const COMBINING: [(u32, u32); 127] = [
     (0x5C4, 0x5C5),
     (0x5C7, 0x5C7),
     (0x610, 0x61A),
-    (0x61C, 0x61C),
     (0x64B, 0x65F),
     (0x670, 0x670),
     (0x6D6, 0x6DC),
@@ -184,15 +183,14 @@ const COMBINING: [(u32, u32); 127] = [
     (0x17C6, 0x17C6),
     (0x17C9, 0x17D3),
     (0x17DD, 0x17DD),
-    (0x180B, 0x180F),
+    (0x180B, 0x180D),
+    (0x180F, 0x180F),
     (0x1AB0, 0x1AFF),
     (0x1B00, 0x1B03),
     (0x1B34, 0x1B34),
     (0x1B36, 0x1B3A),
     (0x1DC0, 0x1DFF),
-    (0x200B, 0x200F),
-    (0x202A, 0x202E),
-    (0x2060, 0x2064),
+    (0x200C, 0x200D),
     (0x20D0, 0x20F0),
     (0x2CEF, 0x2CF1),
     (0x2DE0, 0x2DFF),
@@ -210,14 +208,35 @@ const COMBINING: [(u32, u32); 127] = [
     (0xFB1E, 0xFB1E),
     (0xFE00, 0xFE0F),
     (0xFE20, 0xFE2F),
-    (0xFEFF, 0xFEFF),
     (0x1D167, 0x1D169),
     (0x1D17B, 0x1D182),
     (0x1D185, 0x1D18B),
     (0x1D1AA, 0x1D1AD),
+    (0xE0100, 0xE01EF),
+];
+
+const UNPRINTABLE_FORMATS: [(u32, u32); 21] = [
+    (0xAD, 0xAD),
+    (0x600, 0x605),
+    (0x61C, 0x61C),
+    (0x6DD, 0x6DD),
+    (0x70F, 0x70F),
+    (0x890, 0x891),
+    (0x8E2, 0x8E2),
+    (0x180E, 0x180E),
+    (0x200B, 0x200B),
+    (0x200E, 0x200F),
+    (0x2028, 0x202E),
+    (0x2060, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
     (0xE0001, 0xE0001),
     (0xE0020, 0xE007F),
-    (0xE0100, 0xE01EF),
 ];
 
 fn in_ranges(ranges: &[(u32, u32)], code: u32) -> bool {
@@ -248,17 +267,21 @@ pub(crate) fn char_width(character: char) -> usize {
     }
 }
 
+pub(crate) fn is_unprintable(character: char) -> bool {
+    character.is_control() || in_ranges(&UNPRINTABLE_FORMATS, u32::from(character))
+}
+
 pub(crate) fn text_width(text: &str) -> usize {
     text.chars().map(char_width).sum()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{COMBINING, WIDE, char_width, text_width};
+    use super::{COMBINING, UNPRINTABLE_FORMATS, WIDE, char_width, is_unprintable, text_width};
 
     #[test]
     fn the_tables_are_sorted_and_disjoint() {
-        for table in [&WIDE[..], &COMBINING[..]] {
+        for table in [&WIDE[..], &COMBINING[..], &UNPRINTABLE_FORMATS[..]] {
             for pair in table.windows(2) {
                 assert!(pair[0].0 <= pair[0].1 && pair[0].1 < pair[1].0);
             }
@@ -299,10 +322,9 @@ mod tests {
             '\u{093F}',
             '\u{094D}',
             '\u{0E48}',
-            '\u{200B}',
+            '\u{200C}',
             '\u{200D}',
             '\u{FE0F}',
-            '\u{FEFF}',
             '\u{1160}',
             '\u{E0100}',
         ] {
@@ -320,5 +342,30 @@ mod tests {
         assert_eq!(char_width('Ж'), 1);
         assert_eq!(char_width('…'), 1);
         assert_eq!(char_width('│'), 1);
+    }
+
+    #[test]
+    fn bidi_and_other_format_characters_are_unprintable_and_one_cell_wide() {
+        for &(first, last) in &UNPRINTABLE_FORMATS {
+            for code in first..=last {
+                let Some(character) = char::from_u32(code) else {
+                    panic!("U+{code:X} is not a character");
+                };
+                assert!(is_unprintable(character), "U+{code:X}");
+                assert_eq!(char_width(character), 1, "U+{code:X}");
+            }
+        }
+        for code in [0x202E, 0x2067, 0x2066, 0x2069, 0x200E, 0x61C, 0xAD, 0x2028] {
+            assert!(
+                char::from_u32(code).is_some_and(is_unprintable),
+                "U+{code:X}"
+            );
+        }
+        for kept in [
+            'a', 'é', '\u{200D}', '\u{200C}', '\u{FE0F}', '\u{301}', '日',
+        ] {
+            assert!(!is_unprintable(kept), "U+{:X}", u32::from(kept));
+        }
+        assert!(is_unprintable('\u{1b}') && is_unprintable('\u{9b}'));
     }
 }

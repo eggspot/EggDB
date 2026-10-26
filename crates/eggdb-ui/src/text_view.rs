@@ -1,5 +1,5 @@
 use crate::theme::Role;
-use crate::width::char_width;
+use crate::width::{char_width, is_unprintable};
 
 pub(crate) type Segment = (String, Role);
 
@@ -57,7 +57,7 @@ fn unit_at(bytes: &[u8], at: usize) -> (usize, Unit) {
         .and_then(|text| text.chars().next());
     match decoded {
         Some('\t') => (1, Unit::Tab),
-        Some(c) if c.is_control() => (length, Unit::Control(u32::from(c))),
+        Some(c) if is_unprintable(c) => (length, Unit::Control(u32::from(c))),
         Some(c) => (length, Unit::Char(c)),
         None => (1, Unit::Invalid(lead)),
     }
@@ -150,6 +150,14 @@ mod tests {
         assert_eq!(row_start_before(line, 6, 3), 3);
         assert_eq!(row_start_before(line, 3, 3), 0);
         assert_eq!(row_end("日本語".as_bytes(), 0, 3), 3);
+    }
+
+    #[test]
+    fn bidi_and_format_characters_in_values_are_shown_as_code_points() {
+        assert_eq!(
+            segments("a\u{2067}b\u{202e}c\u{200d}".as_bytes()),
+            [("a\\u{2067}b\\u{202e}c\u{200d}".to_owned(), Role::Plain)]
+        );
     }
 
     #[test]

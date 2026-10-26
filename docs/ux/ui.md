@@ -153,7 +153,7 @@ when it was chosen by the rule:
 
 | Mode | Rendering |
 |------|-----------|
-| text | The bytes as UTF-8. Lines longer than the pane are cut with `…`; `←`/`→` scroll horizontally by 8 cells, `w` toggles wrapping. Invalid bytes show as `\xNN` in the error style. Tabs expand to 4 cells; other controls show as `^X`. |
+| text | The bytes as UTF-8. Lines longer than the pane are cut with `…`; `←`/`→` scroll horizontally by 8 cells, `w` toggles wrapping. Invalid bytes show as `\xNN` in the error style. Tabs expand to 4 cells; other controls show as `^X`; bidi overrides and isolates and the other invisible format characters show as `\u{202e}`, in keys too, so no byte of the data can reorder or hide text on the screen. |
 | json | Our own strict RFC 8259 parser and pretty-printer: 2-space indent, one member per line, keys in the key style, strings, numbers and `true`/`false`/`null` in their styles, long strings cut per line like text mode. `v` to json on a value that is not JSON shows text mode plus the toast `Not JSON: expected ',' or '}' at byte 212`. |
 | hex | `offset  hex bytes  │ ascii gutter`: 16 bytes per row when the viewer has ≥ 76 columns, 8 otherwise. Offsets are 8 hex digits, bytes grouped in 8, the gutter shows `.` for anything outside 0x20–0x7E. |
 

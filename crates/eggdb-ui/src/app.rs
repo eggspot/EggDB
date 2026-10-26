@@ -1492,7 +1492,7 @@ fn json_segments(bytes: &[u8], line: JsonLine) -> Vec<Segment> {
             Token::Number => Role::JsonNumber,
             Token::Literal => Role::JsonLiteral,
         };
-        segments.push((part.to_owned(), role));
+        segments.push((text::unprintables_escaped(part), role));
     }
     segments
 }
