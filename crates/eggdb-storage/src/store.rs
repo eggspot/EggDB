@@ -1,10 +1,11 @@
 use crate::btree::{BTree, TreeReport};
 use crate::cursor::{Cursor, KeyAndValue};
 use crate::error::StorageError;
-use crate::format::Superblock;
+use crate::format::{NO_PAGE, Superblock};
 use crate::hybrid_clock::{CommitStamp, HybridClock};
 use crate::log::{Durability, LogStats};
-use crate::page_cache::{CacheSize, CacheStats, PageCache, Snapshot};
+use crate::page_cache::{CacheSize, CacheStats, PageCache, PageSource, Snapshot};
+use crate::page_set::PageSet;
 use eggdb_platform::{Clock, File};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -33,6 +34,28 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// change fails half-way, so an error never leaves a half-applied change to commit.
 pub struct Store<F: File> {
     state: Mutex<State<F>>,
+}
+
+/// What [`Store::check`] found in a file whose every page it read passed: the tree, and what
+/// every page of the file is used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub struct FileReport {
+    /// The stamp of the commit that was checked.
+    pub stamp: CommitStamp,
+    /// The tree whose root is the catalog root, or `None` when the file has none.
+    pub tree: Option<TreeReport>,
+    /// The pages of the file, the header slots included.
+    pub page_count: u64,
+    /// The pages on the free list, the free list's own pages included.
+    pub free_pages: u64,
+    /// The free list's own pages.
+    pub free_list_pages: u64,
+    /// The pages of the write-ahead log's segments, the recycled ones included.
+    pub log_pages: u64,
+    /// Pages neither reachable from the tree, free nor part of the log: space the file lost
+    /// track of. They do no harm but are never reused.
+    pub leaked_pages: u64,
 }
 
 struct State<F: File> {
@@ -148,9 +171,48 @@ impl<F: File> Store<F> {
         self.lock()?.cache.checkpoint()
     }
 
+    /// Checks the last commit's tree, as [`BTree::check`] does, with every chain of overflow
+    /// pages, and accounts for every page of the file: each data page must be exactly one of
+    /// a page reachable from the tree, a free page, a page of the free list, or a page of the
+    /// log. A page with two uses fails with
+    /// [`FormatError::PageUsedTwice`](crate::FormatError::PageUsedTwice); a page with none is
+    /// counted in [`FileReport::leaked_pages`]. An open write transaction's changes are not
+    /// seen. The store is held for the whole walk, so the writer and readers wait until it
+    /// ends.
+    pub fn check(&self) -> Result<FileReport, StorageError> {
+        let mut state = self.lock()?;
+        let version = state.cache.begin_snapshot()?;
+        let checked = check_committed(&state, version);
+        state.cache.end_snapshot(version);
+        checked
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, State<F>>, StorageError> {
         self.state.lock().map_err(|_| StorageError::NeedsReopen)
     }
+}
+
+fn check_committed<F: File>(state: &State<F>, version: u64) -> Result<FileReport, StorageError> {
+    let snapshot = Snapshot {
+        cache: &state.cache,
+        version,
+    };
+    let superblock = state.cache.superblock();
+    let mut reachable = PageSet::for_pages(snapshot.page_count())?;
+    let tree = match superblock.catalog_root {
+        NO_PAGE => None,
+        root => Some(BTree::open_in(&snapshot, root)?.check_marking(&snapshot, &mut reachable)?),
+    };
+    let uses = state.cache.account_pages(&reachable)?;
+    Ok(FileReport {
+        stamp: state.last_commit,
+        tree,
+        page_count: superblock.page_count,
+        free_pages: uses.free,
+        free_list_pages: uses.free_list,
+        log_pages: uses.log,
+        leaked_pages: uses.leaked,
+    })
 }
 
 impl<F: File> fmt::Debug for Store<F> {
@@ -201,7 +263,12 @@ impl<F: File> ReadTransaction<'_, F> {
 
     /// The value stored under `key` in `tree` as of the snapshot, copied out, or `None`.
     pub fn get(&self, tree: &BTree, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        self.get_with(tree, key, <[u8]>::to_vec)
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        tree.get_in(&snapshot, key, |value| value.into_vec())
     }
 
     /// Calls `read` with the value stored under `key` in `tree` as of the snapshot, and
@@ -219,7 +286,7 @@ impl<F: File> ReadTransaction<'_, F> {
             cache: &state.cache,
             version: self.version,
         };
-        tree.get_in(&snapshot, key, read)
+        tree.get_in(&snapshot, key, |value| read(value.as_slice()))
     }
 
     /// Checks every page of `tree` as of the snapshot, as [`BTree::check`] does, and counts what
@@ -314,7 +381,9 @@ impl<F: File> WriteTransaction<'_, F> {
 
     /// The value stored under `key` in `tree`, this transaction's changes included.
     pub fn get(&self, tree: &BTree, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        self.get_with(tree, key, <[u8]>::to_vec)
+        self.check_open()?;
+        let state = self.store.lock()?;
+        tree.get_in(&state.cache, key, |value| value.into_vec())
     }
 
     /// Calls `read` with the value stored under `key` in `tree`, this transaction's changes
@@ -329,7 +398,7 @@ impl<F: File> WriteTransaction<'_, F> {
     ) -> Result<Option<R>, StorageError> {
         self.check_open()?;
         let state = self.store.lock()?;
-        tree.get_in(&state.cache, key, read)
+        tree.get_in(&state.cache, key, |value| read(value.as_slice()))
     }
 
     /// The next entry of `cursor`, this transaction's changes included (see [`Cursor::next`]).
@@ -342,7 +411,15 @@ impl<F: File> WriteTransaction<'_, F> {
         cursor.next_in(&state.cache)
     }
 
-    /// Stores `value` under `key` in `tree` (see [`BTree::put`]). A key or entry over the
+    /// Checks that [`WriteTransaction::put`] would accept `key` and `value`, as
+    /// [`BTree::check_fits`] does, without changing anything.
+    pub fn check_fits(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        BTree::check_fits(&state.cache, key, value)
+    }
+
+    /// Stores `value` under `key` in `tree` (see [`BTree::put`]). A key or value over the
     /// limits is refused with nothing changed; any other error rolls the transaction back.
     pub fn put(&mut self, tree: &BTree, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         self.change(|cache| tree.put(cache, key, value))
@@ -430,7 +507,9 @@ impl<F: File> WriteTransaction<'_, F> {
 fn leaves_the_transaction_intact(error: &StorageError) -> bool {
     matches!(
         error,
-        StorageError::KeyTooLarge { .. } | StorageError::EntryTooLarge { .. }
+        StorageError::KeyTooLarge { .. }
+            | StorageError::ValueTooLarge { .. }
+            | StorageError::ValueExceedsCache { .. }
     )
 }
 

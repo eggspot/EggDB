@@ -4,7 +4,7 @@ use crate::format::{Access, FileId, PageHeader, PageSize, PageType};
 use crate::page_cache::{CacheSize, PageCache};
 use crate::page_file::{CreateOptions, PageFile};
 use crate::test_rng::TestRng;
-use crate::tree_page::{Node, Shape, shortest_separator};
+use crate::tree_page::{Node, Shape, StoredValue, shortest_separator};
 use eggdb_platform::{CrashMode, SimFile, SimFileSystem, SimMemory};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -62,7 +62,7 @@ pub(crate) fn bytes_up_to(rng: &mut TestRng, least: usize, extra: usize) -> Vec<
 
 pub(crate) fn random_entry(rng: &mut TestRng, page_size: PageSize) -> (Vec<u8>, Vec<u8>) {
     let max_key = BTree::max_key_bytes(page_size);
-    let max_entry = BTree::max_entry_bytes(page_size);
+    let max_entry = BTree::max_inline_entry_bytes(page_size);
     let key_len = match rng.below(10) {
         0 => max_key,
         1 => 0,
@@ -92,7 +92,7 @@ fn random_workload(page_size: PageSize, seed: u64, puts: usize) {
             let value = bytes_up_to(
                 &mut rng,
                 0,
-                BTree::max_entry_bytes(page_size) - existing.len(),
+                BTree::max_inline_entry_bytes(page_size) - existing.len(),
             );
             (existing, value)
         } else {
@@ -180,22 +180,27 @@ fn keys_that_are_prefixes_of_each_other_and_the_empty_key_are_kept_apart() {
 }
 
 #[test]
-fn keys_and_entries_over_the_limits_are_refused_before_any_change() {
+fn keys_and_values_over_the_limits_are_refused_before_any_change() {
     for log2 in [12, 16] {
         let page_size = PageSize::from_log2(log2).unwrap();
         let fs = SimFileSystem::new();
         let mut cache = create(&fs, page_size, 64);
         let tree = new_tree(&mut cache);
         let max_key = BTree::max_key_bytes(page_size);
-        let max_entry = BTree::max_entry_bytes(page_size);
+        let max_entry = BTree::max_inline_entry_bytes(page_size);
         assert_eq!(max_key, page_size.bytes() / 8);
         assert!(matches!(
             tree.put(&cache, &vec![1; max_key + 1], b""),
             Err(StorageError::KeyTooLarge { bytes, max }) if bytes == max_key + 1 && max == max_key
         ));
+        let too_many_pages = 64 * crate::overflow::data_bytes_per_page(page_size);
         assert!(matches!(
-            tree.put(&cache, &vec![1; max_key], &vec![2; max_entry - max_key + 1]),
-            Err(StorageError::EntryTooLarge { max, .. }) if max == max_entry
+            tree.put(&cache, &vec![1; max_key], &vec![2; too_many_pages]),
+            Err(StorageError::ValueExceedsCache {
+                pages: 65,
+                frames: 64,
+                ..
+            })
         ));
         assert_eq!(cache.stats().dirty_pages, 0);
         let mut model = Model::new();
@@ -274,7 +279,9 @@ fn page_layouts_survive_encoding_and_pass_their_checks() {
             b"apple/1x".to_vec(),
             b"apple/5".to_vec(),
         ],
-        values: vec![b"".to_vec(), b"one".to_vec(), vec![5; 100]],
+        values: [b"".to_vec(), b"one".to_vec(), vec![5; 100]]
+            .map(StoredValue::Inline)
+            .to_vec(),
         children: Vec::new(),
     };
     let inner = Node {
@@ -304,7 +311,10 @@ fn a_leaf_s_values_are_never_read_or_written_as_child_pointers() {
         low: Vec::new(),
         high: None,
         keys: vec![b"a".to_vec(), b"b".to_vec()],
-        values: vec![b"x".to_vec(), Vec::new()],
+        values: vec![
+            StoredValue::Inline(b"x".to_vec()),
+            StoredValue::Inline(Vec::new()),
+        ],
         children: Vec::new(),
     };
     let header = crate::tree_page::header_for(0, 0);

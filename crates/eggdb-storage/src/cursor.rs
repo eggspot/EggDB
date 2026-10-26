@@ -1,7 +1,8 @@
 use crate::btree::{expect_level, shape_of_ref};
 use crate::error::StorageError;
+use crate::overflow;
 use crate::page_cache::{PageCache, PageSource};
-use crate::tree_page::Shape;
+use crate::tree_page::{CellRef, Shape};
 use eggdb_platform::File;
 use std::ops::Bound;
 
@@ -22,11 +23,18 @@ pub enum ScanOrder {
 /// through the tree: having read a leaf, it looks up the leaf holding its high fence key going
 /// up, or the keys just below its low fence key going down, from the root. It copies the
 /// entries in range of one leaf at a time into a buffer it reuses, and holds no page between
-/// calls: pages can be evicted, and the tree changed between calls. A change reaches the
-/// cursor when it lands in a leaf the cursor has not read yet; entries of the leaf it is
-/// reading are as they were when it read that leaf. Every page is checked as for
-/// [`BTree::get`](crate::BTree::get), so a damaged page fails with an error, and every leaf it
-/// moves to lies strictly past the last one, so a cursor never loops.
+/// calls: pages can be evicted, and the tree changed between calls.
+///
+/// A value on overflow pages is copied whole too, and ends the batch: the cursor copies the
+/// leaf's entries up to and including the first such value, and the next batch looks the
+/// leaf up again from the root, just past that value's key. So the buffer holds at most one
+/// leaf of small entries and one large value, and a buffer grown past a megabyte is released
+/// when its batch is done.
+///
+/// A change reaches the cursor when it lands in a part of the tree the cursor has not copied
+/// yet; the entries it has copied are as they were when it copied them. Every page is checked
+/// as for [`BTree::get`](crate::BTree::get), so a damaged page fails with an error, and every
+/// batch starts strictly past the last one, so a cursor never loops.
 #[derive(Debug, Clone)]
 pub struct Cursor {
     root: u64,
@@ -59,6 +67,22 @@ struct Entry {
     value_start: usize,
     value_end: usize,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Copied {
+    Inline,
+    Overflow,
+    OutOfRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Batch {
+    LeafDone,
+    RangeDone,
+    StoppedAfterLargeValue,
+}
+
+const RETAINED_BUFFER_BYTES: usize = 1 << 20;
 
 impl Cursor {
     pub(crate) fn new(
@@ -112,6 +136,9 @@ impl Cursor {
             if self.seek == Seek::Done {
                 return Ok(None);
             }
+            if self.bytes.capacity() > RETAINED_BUFFER_BYTES {
+                self.bytes = Vec::new();
+            }
             self.bytes.clear();
             self.entries.clear();
             self.position = 0;
@@ -133,11 +160,23 @@ impl Cursor {
         let leaf = self.find_leaf(pages)?;
         let shape = shape_of_ref(&leaf)?;
         let position = self.position_in(&shape, &leaf)?;
-        let finished = match self.order {
-            ScanOrder::Ascending => self.copy_ascending(&shape, &leaf, position)?,
-            ScanOrder::Descending => self.copy_descending(&shape, &leaf, position)?,
+        let batch = match self.order {
+            ScanOrder::Ascending => self.copy_ascending(pages, &shape, &leaf, position)?,
+            ScanOrder::Descending => self.copy_descending(pages, &shape, &leaf, position)?,
         };
         self.seek_key.clear();
+        if batch == Batch::StoppedAfterLargeValue {
+            if let Some(last) = self.entries.last() {
+                self.seek_key
+                    .extend_from_slice(&self.bytes[last.key_start..last.value_start]);
+            }
+            self.seek = match self.order {
+                ScanOrder::Ascending => Seek::After,
+                ScanOrder::Descending => Seek::Before,
+            };
+            return Ok(());
+        }
+        let finished = batch == Batch::RangeDone;
         self.seek_key.extend_from_slice(shape.prefix(&leaf));
         self.seek = match self.order {
             ScanOrder::Ascending => match shape.high_suffix(&leaf) {
@@ -227,38 +266,50 @@ impl Cursor {
 
     fn copy_ascending(
         &mut self,
+        pages: &impl PageSource,
         shape: &Shape,
         leaf: &[u8],
         first: usize,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Batch, StorageError> {
         for index in first..shape.count {
-            if !self.copy_entry(shape, leaf, index)? {
-                return Ok(true);
+            match self.copy_entry(pages, shape, leaf, index)? {
+                Copied::Inline => {}
+                Copied::OutOfRange => return Ok(Batch::RangeDone),
+                Copied::Overflow if index + 1 < shape.count => {
+                    return Ok(Batch::StoppedAfterLargeValue);
+                }
+                Copied::Overflow => {}
             }
         }
-        Ok(false)
+        Ok(Batch::LeafDone)
     }
 
     fn copy_descending(
         &mut self,
+        pages: &impl PageSource,
         shape: &Shape,
         leaf: &[u8],
         end: usize,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Batch, StorageError> {
         for index in (0..end).rev() {
-            if !self.copy_entry(shape, leaf, index)? {
-                return Ok(true);
+            match self.copy_entry(pages, shape, leaf, index)? {
+                Copied::Inline => {}
+                Copied::OutOfRange => return Ok(Batch::RangeDone),
+                Copied::Overflow if index > 0 => return Ok(Batch::StoppedAfterLargeValue),
+                Copied::Overflow => {}
             }
         }
-        Ok(false)
+        Ok(Batch::LeafDone)
     }
 
+    #[inline(always)]
     fn copy_entry(
         &mut self,
+        pages: &impl PageSource,
         shape: &Shape,
         leaf: &[u8],
         index: usize,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Copied, StorageError> {
         let cell = shape.cell_at(leaf, index)?;
         let key_start = self.bytes.len();
         self.bytes.extend_from_slice(shape.prefix(leaf));
@@ -270,16 +321,45 @@ impl Cursor {
         };
         if !in_range {
             self.bytes.truncate(key_start);
-            return Ok(false);
+            return Ok(Copied::OutOfRange);
         }
         let value_start = self.bytes.len();
-        self.bytes.extend_from_slice(cell.payload);
+        let copied = if cell.overflow {
+            self.copy_large_value(pages, shape, &cell)?;
+            Copied::Overflow
+        } else {
+            self.bytes.extend_from_slice(cell.payload);
+            Copied::Inline
+        };
         self.entries.push(Entry {
             key_start,
             value_start,
             value_end: self.bytes.len(),
         });
-        Ok(true)
+        Ok(copied)
+    }
+}
+
+#[cfg(test)]
+impl Cursor {
+    pub(crate) fn buffer_capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
+}
+
+impl Cursor {
+    #[cold]
+    #[inline(never)]
+    fn copy_large_value(
+        &mut self,
+        pages: &impl PageSource,
+        shape: &Shape,
+        cell: &CellRef<'_>,
+    ) -> Result<(), StorageError> {
+        if let Some(reference) = shape.overflow_reference(cell)? {
+            overflow::read_value(pages, &reference, &mut self.bytes)?;
+        }
+        Ok(())
     }
 }
 

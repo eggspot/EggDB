@@ -25,7 +25,7 @@ fn main() -> eggdb::Result<()> {
 | `create_if_missing(bool)` | `true` | `false` fails with `ErrorKind::NotFound` instead of creating a file |
 | `read_only(bool)` | `false` | opens for reading only; several read-only opens can share the file |
 | `durability(Durability)` | `Full` | how commits wait for the disk (below) |
-| `cache_bytes(usize)` | 16 MiB | the page cache; also the most one write transaction can change |
+| `cache_bytes(usize)` | 16 MiB | the page cache; also the most one write transaction can change, a large value included |
 | `snapshot_memory_bytes(usize)` | the cache's size | memory for pages that open read transactions still need |
 | `auto_checkpoint_log_bytes(Option<u64>)` | 1 MiB | log written before a commit checkpoints by itself; `None` turns it off |
 | `page_size_bytes(usize)` | 4096 | the page size of a new file, a power of two up to 65,536 |
@@ -66,8 +66,9 @@ Both use `eggdb::Error`; for an error type of your own, use `begin_write` and `c
 `Durability::Full` waits for the disk, so put many keys in one `write` instead of a loop of
 `put`s.
 
-**Failures inside a write transaction.** A key or value over the size limits fails with
-`ErrorKind::TooLarge` and changes nothing; the transaction stays open. Any other failure of a
+**Failures inside a write transaction.** A key or value over the size limits, or a value
+needing more pages than the page cache holds, fails with `ErrorKind::TooLarge` and changes
+nothing; the transaction stays open. Any other failure of a
 change, such as `ErrorKind::CacheFull`, rolls the whole transaction back at once: later calls
 fail with `ErrorKind::TransactionFailed`, and the next writer can begin.
 
@@ -88,7 +89,9 @@ for entry in tx.scan_prefix("user:").rev() {
   `next_back()` can be mixed; the scan ends where the two ends meet.
 - **Cost:** each item is two new `Vec<u8>`s, the key and the value. `scan.next_entry()` lends
   them instead, with no copy, until the next call. Underneath, the scan copies one leaf page of
-  entries at a time and holds no page between calls.
+  entries at a time and holds no page between calls. A large value is copied whole and ends
+  that copy, so the scan holds at most one large value; as an owned item it is copied once
+  more, twice its size in memory until the item is dropped.
 - **Errors** come as one `Err` item, after which the scan ends.
 - A write transaction's scans include its own changes. A scan borrows its transaction, so
   nothing changes under it.
@@ -121,7 +124,7 @@ for AI models; `error.kind()` is an `ErrorKind` to match on:
 | `Locked` | the file is open elsewhere |
 | `ReadOnly` | a change to a read-only database |
 | `NotADatabase`, `Incompatible`, `Corrupt` | not an EggDB file, a newer one, or a damaged one |
-| `TooLarge` | a key or entry over the limits below; nothing changed |
+| `TooLarge` | a key or value over the limits below; nothing changed |
 | `CacheFull` | a write transaction outgrew the page cache; it was rolled back |
 | `WriterActive` | another writer stayed open for the whole wait |
 | `SnapshotTooOld` | a read transaction's snapshot expired; begin a new one |
@@ -145,18 +148,37 @@ in the snapshot memory. When that memory runs out, the oldest snapshots expire w
 or give them more `snapshot_memory_bytes`.
 
 ## Checking and measuring
-- `db.check()` reads every page of the tree as of the last commit and checks how the pages fit
-  together. It returns a `CheckReport` (entries, key and value bytes, tree height and pages), or
-  `ErrorKind::Corrupt` naming the damage. Other operations wait while it runs.
+- `db.check()` reads every page of the tree and every large value as of the last commit, checks
+  how the pages fit together, and accounts for every page of the file: each must belong to the
+  tree or a value, be free, or belong to the log. It returns a `CheckReport` (entries, key and
+  value bytes, tree height and pages, large values and their overflow pages, free, log and
+  leaked pages), or `ErrorKind::Corrupt` naming the damage, such as a page with two uses. A
+  leaked page, used by nothing, does no harm but is never reused; a healthy database has none.
+  Other operations wait while it runs.
 - `db.stats()` reads no page: the page size and count, free pages, the file's size, the last
   commit's stamp, the cache's size, contents, hits and misses, and the log since the last
   checkpoint.
 
 ## Limits in this release
-- **Size of keys and values:** a key is at most an eighth of a page, and a key and its value
-  together at most `3 × page_size / 16 − 18` bytes: 512 and 750 bytes with the default 4 KiB
-  pages, 8,192 and 12,270 bytes with 64 KiB pages (`db.max_key_bytes()`,
-  `db.max_entry_bytes()`). Larger values come with overflow pages (v0.2.0 item 11).
+- **Size of keys:** at most an eighth of a page, 512 bytes with the default 4 KiB pages and 8,192
+  with 64 KiB pages (`db.max_key_bytes()`).
+- **Size of values:** at most 1 GiB (`db.max_value_bytes()`). A value is read and written
+  whole, so it takes its size in memory while it is used; a streaming read comes later.
+  - A key and value of up to `3 × page_size / 16 − 18` bytes together (750 bytes with 4 KiB
+    pages, 12,270 with 64 KiB pages) sit in a B+tree leaf.
+  - A longer value goes to overflow pages of its own, about one page per 4,056 bytes with 4
+    KiB pages, the last one partly empty; its leaf keeps the key and a 16-byte reference.
+    Reading it costs one more page read per page of value.
+  - Every page a write transaction writes stays in the page cache until its commit, so a value
+    needs about its size in cache: with the default 16 MiB, a value above about 15.8 MiB fails
+    with `TooLarge` and needs a larger `cache_bytes`.
+  - Replacing or deleting a large value frees its pages at the commit, and later values reuse
+    them, so rewriting large values keeps the file's size steady. A single transaction whose
+    log is longer than the seven log segments the file keeps for reuse (about 448 KiB of
+    changed pages with the default segments) grows the file each time (issue #44).
+  - A read transaction that stays open while the writer replaces large values keeps their old
+    pages in the snapshot memory; a value larger than `snapshot_memory_bytes` expires older
+    snapshots with `SnapshotTooOld`.
 - **Size of a write transaction:** every page it changes stays in the page cache until the
   commit, so a transaction larger than `cache_bytes` fails with `CacheFull`. Split bulk loads
   into several transactions.

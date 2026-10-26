@@ -349,7 +349,7 @@ fn a_refused_first_put_leaves_a_database_with_no_tree() {
         ErrorKind::TooLarge
     );
     assert_eq!(
-        tx.put("k", vec![0; 750]).unwrap_err().kind(),
+        tx.put("k", vec![0; 17 << 20]).unwrap_err().kind(),
         ErrorKind::TooLarge
     );
     tx.commit().unwrap();

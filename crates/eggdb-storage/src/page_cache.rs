@@ -4,10 +4,12 @@ use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageSize, PageType, Superblock};
 use crate::frames::{FrameMut, FrameRef, Frames};
 use crate::log::{Durability, LogStats};
-use crate::page_file::{NO_STAMP, PageFile};
+use crate::page_file::{NO_STAMP, PageFile, PageUses};
+use crate::page_set::PageSet;
 use crate::page_table::PageTable;
 use eggdb_platform::{ErrorKind, File, Memory};
 use std::cell::{Cell, Ref, RefCell};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
@@ -106,6 +108,7 @@ pub struct PageCache<F: File> {
     dirty_frames: RefCell<Vec<usize>>,
     commit_order: Vec<usize>,
     images: RefCell<BeforeImages>,
+    new_chains: RefCell<BTreeMap<u64, Box<[u8]>>>,
 }
 
 impl<F: File> PageCache<F> {
@@ -140,6 +143,7 @@ impl<F: File> PageCache<F> {
             dirty_frames: RefCell::new(cells::reserved(frames)?),
             commit_order: cells::reserved(frames)?,
             images: RefCell::new(BeforeImages::new(frames)),
+            new_chains: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -340,6 +344,7 @@ impl<F: File> PageCache<F> {
         let committed = self.write_and_commit(&order, stamp, update);
         if committed.is_ok() {
             self.images.get_mut().commit();
+            self.new_chains.get_mut().clear();
         }
         if committed.is_ok() && self.file.get_mut().has_failed() {
             self.drop_every_page();
@@ -363,6 +368,7 @@ impl<F: File> PageCache<F> {
     /// The changed pages leave memory even when the file refuses, such as after a failed
     /// commit.
     pub fn rollback(&mut self) -> Result<(), StorageError> {
+        self.new_chains.get_mut().clear();
         self.drop_changes();
         self.images.get_mut().discard_pending();
         self.file.get_mut().rollback()
@@ -370,6 +376,36 @@ impl<F: File> PageCache<F> {
 
     pub(crate) fn check_writable(&self) -> Result<(), StorageError> {
         self.file.borrow().check_writable()
+    }
+
+    pub(crate) fn frame_count(&self) -> usize {
+        self.frames.count()
+    }
+
+    pub(crate) fn allocated_in_this_transaction(&self, page_id: u64) -> bool {
+        self.table
+            .get(page_id)
+            .is_some_and(|frame| self.states[frame as usize].get() & ALLOCATED != 0)
+    }
+
+    pub(crate) fn record_new_chain(&self, first_page: u64, key: &[u8]) {
+        self.new_chains.borrow_mut().insert(first_page, key.into());
+    }
+
+    pub(crate) fn forget_new_chain(&self, first_page: u64, key: &[u8]) -> bool {
+        let mut new_chains = self.new_chains.borrow_mut();
+        if new_chains
+            .get(&first_page)
+            .is_some_and(|owner| **owner == *key)
+        {
+            new_chains.remove(&first_page);
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn account_pages(&self, reachable: &PageSet) -> Result<PageUses, StorageError> {
+        self.file.borrow().account_pages(reachable)
     }
 
     pub(crate) fn set_before_image_budget(&mut self, pages: usize) {
@@ -491,6 +527,7 @@ impl<F: File> PageCache<F> {
         }
         self.dirty_frames.get_mut().clear();
         self.images.get_mut().discard_all();
+        self.new_chains.get_mut().clear();
     }
 
     fn drop_changes(&mut self) {
@@ -679,6 +716,10 @@ pub(crate) trait PageSource {
         Self: 'a;
 
     fn page(&self, page_id: u64) -> Result<Self::Page<'_>, StorageError>;
+
+    fn page_size(&self) -> PageSize;
+
+    fn page_count(&self) -> u64;
 }
 
 impl<F: File> PageSource for PageCache<F> {
@@ -690,6 +731,14 @@ impl<F: File> PageSource for PageCache<F> {
     #[inline(always)]
     fn page(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
         self.read(page_id)
+    }
+
+    fn page_size(&self) -> PageSize {
+        PageCache::page_size(self)
+    }
+
+    fn page_count(&self) -> u64 {
+        self.file.borrow().page_count()
     }
 }
 
@@ -706,6 +755,14 @@ impl<F: File> PageSource for Snapshot<'_, F> {
 
     fn page(&self, page_id: u64) -> Result<SnapshotPage<'_>, StorageError> {
         self.cache.read_at(page_id, self.version)
+    }
+
+    fn page_size(&self) -> PageSize {
+        self.cache.page_size()
+    }
+
+    fn page_count(&self) -> u64 {
+        PageSource::page_count(self.cache)
     }
 }
 

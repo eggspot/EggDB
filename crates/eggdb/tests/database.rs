@@ -158,8 +158,11 @@ fn the_page_size_is_chosen_at_creation_and_sets_the_size_limits() {
     let db = Database::open_with(file.path(), Options::new().page_size_bytes(1 << 16)).unwrap();
     assert_eq!(db.page_size(), 65_536);
     assert_eq!(db.max_key_bytes(), 8192);
-    assert_eq!(db.max_entry_bytes(), 12_270);
+    assert_eq!(db.max_value_bytes(), 1 << 30);
     db.put(vec![1; 8192], vec![2; 12_270 - 8192]).unwrap();
+    db.put(vec![3; 8192], vec![4; 12_270 - 8192 + 1]).unwrap();
+    let report = db.check().unwrap();
+    assert_eq!((report.overflow_values, report.overflow_pages), (1, 1));
     drop(db);
 
     let db = Database::open_with(file.path(), Options::new().page_size_bytes(4096)).unwrap();
@@ -168,24 +171,38 @@ fn the_page_size_is_chosen_at_creation_and_sets_the_size_limits() {
         db.get(vec![1; 8192]).unwrap().map(|value| value.len()),
         Some(12_270 - 8192)
     );
+    assert_eq!(
+        db.get(vec![3; 8192]).unwrap(),
+        Some(vec![4; 12_270 - 8192 + 1])
+    );
 }
 
 #[test]
-fn keys_and_entries_over_the_limits_are_refused_and_change_nothing() {
+fn keys_and_values_over_the_limits_are_refused_and_change_nothing() {
     let file = TempPath::new("limits");
-    let db = Database::open(file.path()).unwrap();
-    assert_eq!((db.max_key_bytes(), db.max_entry_bytes()), (512, 750));
+    let db = Database::open_with(file.path(), Options::new().cache_bytes(64 * 4096)).unwrap();
+    assert_eq!((db.max_key_bytes(), db.max_value_bytes()), (512, 1 << 30));
+    let over_the_limit = vec![0; db.max_value_bytes() + 1];
+    let error = db.put("first", &over_the_limit).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::TooLarge);
+    assert!(error.to_string().contains("1073741825"), "{error}");
     let mut tx = db.begin_write().unwrap();
     tx.put("kept", "1").unwrap();
     let error = tx.put(vec![0; 513], "").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::TooLarge);
     assert!(error.to_string().contains("513"), "{error}");
-    let error = tx.put("key", vec![0; 748]).unwrap_err();
+    let error = tx.put("key", &over_the_limit).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::TooLarge);
+    drop(over_the_limit);
+    let error = tx.put("key", vec![0; 64 * 4056]).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::TooLarge);
+    assert!(error.to_string().contains("larger cache"), "{error}");
+    tx.put("key", vec![0; 748]).unwrap();
     tx.put(vec![9; 512], vec![0; 238]).unwrap();
     tx.commit().unwrap();
     assert_eq!(db.get("kept").unwrap(), Some(b"1".to_vec()));
-    assert_eq!(db.check().unwrap().entries, 2);
+    let report = db.check().unwrap();
+    assert_eq!((report.entries, report.overflow_values), (3, 1));
 }
 
 #[test]
@@ -227,6 +244,19 @@ fn check_counts_what_the_database_holds() {
     assert!(report.tree_height >= 2, "{report:?}");
     assert!(report.tree_pages > 1, "{report:?}");
     assert_eq!(report.stamp, db.stats().unwrap().last_commit);
+    assert_eq!((report.overflow_values, report.leaked_pages), (0, 0));
+    db.put("large", vec![5; 10_000]).unwrap();
+    db.delete(0u32.to_be_bytes()).unwrap();
+    let report = db.check().unwrap();
+    assert_eq!((report.overflow_values, report.overflow_pages), (1, 3));
+    assert_eq!(report.value_bytes, 4999 * 20 + 10_000);
+    assert_eq!(report.leaked_pages, 0);
+    let stats = db.stats().unwrap();
+    assert_eq!(report.free_pages, stats.free_pages);
+    assert_eq!(
+        2 + report.tree_pages + report.overflow_pages + report.free_pages + report.log_pages,
+        stats.page_count
+    );
 }
 
 #[test]

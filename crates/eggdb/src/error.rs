@@ -44,10 +44,12 @@ pub enum ErrorKind {
     Io,
     /// The memory for the page cache, or for an operation, could not be had.
     OutOfMemory,
-    /// A key, or a key and its value together, are longer than this database's page size
-    /// allows (see [`Database::max_key_bytes`](crate::Database::max_key_bytes) and
-    /// [`Database::max_entry_bytes`](crate::Database::max_entry_bytes)). Nothing changed, and
-    /// the transaction stays open.
+    /// A key or a value is longer than EggDB stores (see
+    /// [`Database::max_key_bytes`](crate::Database::max_key_bytes) and
+    /// [`Database::max_value_bytes`](crate::Database::max_value_bytes)), or a value needs
+    /// more pages than the page cache holds (see
+    /// [`Options::cache_bytes`](crate::Options::cache_bytes)). Nothing changed, and the
+    /// transaction stays open.
     TooLarge,
     /// The page cache has no room left: a write transaction changed more pages than the cache
     /// holds. The transaction was rolled back; commit smaller transactions, or open with a
@@ -156,9 +158,9 @@ fn kind_of(error: &StorageError) -> ErrorKind {
         | StorageError::CorruptFreeList { .. } => ErrorKind::Corrupt,
         StorageError::CacheFull { .. } => ErrorKind::CacheFull,
         StorageError::InvalidCacheSize { .. } => ErrorKind::InvalidOption,
-        StorageError::KeyTooLarge { .. } | StorageError::EntryTooLarge { .. } => {
-            ErrorKind::TooLarge
-        }
+        StorageError::KeyTooLarge { .. }
+        | StorageError::ValueTooLarge { .. }
+        | StorageError::ValueExceedsCache { .. } => ErrorKind::TooLarge,
         StorageError::WriterActive | StorageError::UncommittedChanges => ErrorKind::WriterActive,
         StorageError::TransactionFailed => ErrorKind::TransactionFailed,
         StorageError::SnapshotTooOld => ErrorKind::SnapshotTooOld,

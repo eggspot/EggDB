@@ -3,8 +3,10 @@ use crate::cursor::ScanOrder;
 use crate::error::StorageError;
 use crate::format::{Access, FileId, PageSize};
 use crate::log::Durability;
+use crate::overflow;
 use crate::page_cache::{CacheSize, PageCache};
 use crate::page_file::{CreateOptions, PageFile};
+use crate::page_set::PageSet;
 use crate::store::{Store, WriteTransaction};
 use crate::test_rng::TestRng;
 use eggdb_platform::{
@@ -96,9 +98,11 @@ fn key(rng: &mut TestRng) -> Vec<u8> {
 }
 
 fn value(rng: &mut TestRng, key: &[u8]) -> Vec<u8> {
+    let inline = BTree::max_inline_entry_bytes(PageSize::DEFAULT) - key.len();
     let len = match rng.below(12) {
-        0 => BTree::max_entry_bytes(PageSize::DEFAULT) - key.len(),
-        1..=3 => (200 + rng.below(400)).min(BTree::max_entry_bytes(PageSize::DEFAULT) - key.len()),
+        0 => inline,
+        1..=3 => (200 + rng.below(400)).min(inline),
+        4 => inline + 1 + rng.below(3 * overflow::data_bytes_per_page(PageSize::DEFAULT)),
         _ => rng.below(60),
     };
     rng.bytes(len)
@@ -295,9 +299,14 @@ fn recovered_commit(
         .unwrap_or_else(|| panic!("{context}: recovered stamp {stamp}, not a commit of this run"));
     let tree = BTree::open(&cache, cache.superblock().catalog_root)
         .unwrap_or_else(|error| panic!("{context}: tree: {error}"));
+    let mut reachable = PageSet::for_pages(cache.superblock().page_count).unwrap();
     let report = tree
-        .check(&cache)
+        .check_marking(&cache, &mut reachable)
         .unwrap_or_else(|error| panic!("{context}: check: {error}"));
+    let uses = cache
+        .account_pages(&reachable)
+        .unwrap_or_else(|error| panic!("{context}: page accounting: {error}"));
+    assert_eq!(uses.leaked, 0, "{context}: pages leaked: {uses:?}");
     let model = &history[commit];
     assert_eq!(
         report.entries,
@@ -350,14 +359,14 @@ fn end(fs: &SimFileSystem, ending: Ending) {
     }
 }
 
-fn file_bytes(fs: &SimFileSystem) -> Vec<u8> {
+pub(crate) fn file_bytes(fs: &SimFileSystem) -> Vec<u8> {
     let raw = fs.open(Path::new(DB), OpenMode::Read).unwrap();
     let mut bytes = vec![0u8; raw.size().unwrap() as usize];
     raw.read_exact_at(&mut bytes, 0).unwrap();
     bytes
 }
 
-fn file_system_holding(bytes: &[u8]) -> SimFileSystem {
+pub(crate) fn file_system_holding(bytes: &[u8]) -> SimFileSystem {
     let fs = SimFileSystem::new();
     let raw = fs.open(Path::new(DB), OpenMode::Create).unwrap();
     raw.write_all_at(bytes, 0).unwrap();
@@ -399,21 +408,32 @@ fn operations_of_a_clean_run(workload: &Workload) -> u64 {
     operations
 }
 
-fn heights_over_time(workload: &Workload) -> (u32, u32) {
+struct Shapes {
+    tallest: u32,
+    last: u32,
+    most_overflow_values: u64,
+}
+
+fn shapes_over_time(workload: &Workload) -> Shapes {
     let fs = SimFileSystem::new();
     let (mut cache, tree) = created_tree(&fs);
     cache.set_auto_checkpoint_bytes(Some(AUTO_CHECKPOINT_BYTES));
-    let mut tallest = 0;
-    let mut last = 0;
+    let mut shapes = Shapes {
+        tallest: 0,
+        last: 0,
+        most_overflow_values: 0,
+    };
     for step in &workload.steps {
         if let Step::Commit(changes) = step {
             apply(&tree, &cache, changes).unwrap();
             cache.commit(|_| {}).unwrap();
-            last = tree.check(&cache).unwrap().height;
-            tallest = tallest.max(last);
+            let report = tree.check(&cache).unwrap();
+            shapes.last = report.height;
+            shapes.tallest = shapes.tallest.max(report.height);
+            shapes.most_overflow_values = shapes.most_overflow_values.max(report.overflow_values);
         }
     }
-    (tallest, last)
+    shapes
 }
 
 fn crashed_run(
@@ -502,10 +522,17 @@ fn sweep(durability: Durability, seed: u64, transactions: usize) -> (u64, u64) {
     let options = Sweep::from_environment();
     let workload = workload(durability, seed, transactions, &Model::new());
     let operations = operations_of_a_clean_run(&workload);
-    let (tallest, last) = heights_over_time(&workload);
+    let shapes = shapes_over_time(&workload);
     assert!(
-        tallest >= 2 && last == 1,
-        "the workload must split and then collapse the root: {tallest}, {last}"
+        shapes.tallest >= 2 && shapes.last == 1,
+        "the workload must split and then collapse the root: {}, {}",
+        shapes.tallest,
+        shapes.last
+    );
+    assert!(
+        shapes.most_overflow_values >= 5,
+        "the workload must hold large values: {}",
+        shapes.most_overflow_values
     );
     let mut crash_points = 0;
     let mut recovery_points = 0;

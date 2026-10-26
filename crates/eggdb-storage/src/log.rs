@@ -389,6 +389,17 @@ impl LogWriter {
             .count()
     }
 
+    pub(crate) fn last_flush_bytes(&self) -> u64 {
+        self.buffer.len() as u64
+    }
+
+    pub(crate) fn room_before_a_new_segment(&self) -> u64 {
+        let segment_bytes = self.geometry.segment_bytes() as u64;
+        let left_in_this_segment = segment_bytes.saturating_sub(self.offset as u64);
+        let records_per_segment = segment_bytes - LOG_BLOCK as u64;
+        left_in_this_segment + self.unused_recycled_segments() as u64 * records_per_segment
+    }
+
     pub(crate) fn skip_sequences_to(&mut self, next_sequence: u64) {
         self.next_sequence = self.next_sequence.max(next_sequence);
     }

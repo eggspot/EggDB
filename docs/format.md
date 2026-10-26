@@ -5,7 +5,8 @@ release reads every file an earlier release wrote. From v0.2.0 on, a committed s
 checks that in CI.
 
 Status: the checksum, the superblock, the page header, the free list, the write-ahead log with
-checkpoints and recovery, and the B+tree pages are implemented in `crates/eggdb-storage`. The other sections are specified here first and
+checkpoints and recovery, the B+tree pages and the overflow pages are implemented in
+`crates/eggdb-storage`. The other sections are specified here first and
 implemented by the v0.2.0 items in [roadmap.md](roadmap.md). A section may still change until
 v0.2.0 ships, because no file has been released before it. After that, changes follow
 "Compatibility" below.
@@ -146,7 +147,7 @@ The page's `lsn`, checked against the log during recovery, is what catches those
 | 1 | free-list page: a count, then the numbers of free pages |
 | 2 | B+tree inner page |
 | 3 | B+tree leaf page |
-| 4 | overflow page, holding part of a large value |
+| 4 | overflow page, holding part of a large value (see "Overflow pages") |
 | 5 | first page of a log segment |
 | 6 – 15 | reserved for version 1's later items |
 | 16 – 255 | reserved for later structures, such as immutable sorted runs and columnar pages, each behind an incompatible feature flag |
@@ -166,8 +167,11 @@ entries number exactly `free_page_count`. Every number is a data page of the fil
 once. None is the catalog root or a page of a live or recycled log segment. A list that breaks
 any of these rules refuses the open. That includes a list that loops, points outside the file
 or disagrees with the count. A crafted list naming other pages in use can't be told apart from
-a real one here. `eggdb check` finds it, by checking that free, reachable and log pages are
-disjoint and together account for every page.
+a real one here. `eggdb check` finds it: it checks that every data page below `page_count` is
+exactly one of a page reachable from the tree (its tree pages and its values' overflow pages),
+a listed free page, a free-list page, or a page of a log segment (the live ones and the
+recycled ones). A page with two of these uses refuses the check; a page with none is reported
+as leaked, space the file lost track of, which does no harm but is never reused.
 
 **Commits.** A commit never overwrites the committed list:
 1. The new list is written to pages that are free in the committed state, or to new pages at
@@ -352,8 +356,10 @@ A crash before step 4's superblock is durable leaves the old header and the old 
 nothing has overwritten: recycled segments are reused only after the header listing them is
 synced. A commit checkpoints automatically after it once the log since the last checkpoint
 reaches a configured size (1 MiB by default) or goes through more segments than
-`recycled_segments` holds, so the log keeps reusing its segments instead of growing the file.
-Under durability `Off` the checkpoint writes the same things without syncing.
+`recycled_segments` holds, or when a flush as long as the commit's own would no longer fit in
+the rest of the current segment and the unused recycled ones. So the log keeps reusing its
+segments instead of growing the file, as long as one commit's flush fits in them. Under
+durability `Off` the checkpoint writes the same things without syncing.
 
 ## Recovery (item 7)
 Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
@@ -424,11 +430,13 @@ page to its end, in any order. A cell stores its key without the page's prefix:
   the left half and at most the first key of the right half: the first key of the right
   half, cut one byte after where it first differs from the last key of the left. An inner
   split moves its middle separator up.
-- **Limits.** A key is at most `page_size / 8` bytes, and a key and value together at most
-  `3 × page_size / 16 − 18` bytes, so four of the largest entries and two of the longest fence
-  keys fill a leaf exactly (512 and 750 bytes with 4 KiB pages; 8,192 and 12,270 with 64 KiB
-  pages). A longer key or entry is refused with an error. The value length's top bit is
-  reserved for values stored outside the tree (item 11); it is zero in layout 1.
+- **Limits.** A key is at most `page_size / 8` bytes, and a key and value stored together in a
+  leaf at most `3 × page_size / 16 − 18` bytes, so four of the largest entries and two of the
+  longest fence keys fill a leaf exactly (512 and 750 bytes with 4 KiB pages; 8,192 and 12,270
+  with 64 KiB pages). A longer key is refused with an error. A value too long to be stored
+  beside its key goes to overflow pages (see "Overflow pages"), and its cell holds a 16-byte
+  reference instead: the value length field is then `0x8010`, its top bit set and its low 15
+  bits the reference's length.
 - **Validity.** A reader refuses a page that breaks any of these rules: a type that does not
   match its level (type 3 exactly at level 0), a layout other than 1, a level of 48 or more,
   reserved bytes that are not zero, `right_child` of 0 on an inner page or not 0 on a leaf,
@@ -437,7 +445,9 @@ page to its end, in any order. A cell stores its key without the page's prefix:
   outside the cell area, a cell running past the page end, cells that overlap, cell bytes and
   `garbage` that don't add up to the cell area, keys not strictly increasing, keys outside the
   fence keys (an inner page's separators must be strictly above its low fence key), sizes
-  over the limits, a value length with its top bit set, and a child page number of 0. Each
+  over the limits, a value length with its top bit set and any other low bits than 16, a
+  reference whose value length is 0 or above 2^30 or whose first page is 0, and a child page
+  number of 0. Each
   step down the tree also checks that the child is one level below its parent and that the
   key sought lies within the child's fence keys, which bounds every walk by the root's level.
   `eggdb check` also checks that every child's fence keys equal the bounds its parent gives
@@ -452,6 +462,65 @@ page to its end, in any order. A cell stores its key without the page's prefix:
   page's. So an empty leaf can stay next to a full one. The root is the exception: an inner
   root always holds at least one separator, because a root left with a single child takes
   over that child's entries, and `eggdb check` refuses an inner root without one.
+
+### Overflow pages (type 4, layout 1)
+A value too long to be stored in a leaf beside its key (item 11, D88), so longer than
+`3 × page_size / 16 − 18` bytes together with it, is stored whole on a chain of overflow
+pages of its own. Its leaf cell holds the key and a 16-byte reference:
+
+| Offset in the value | Size | Field | Meaning |
+|--------------------:|-----:|-------|---------|
+| 0 | 8 | `value_length` | the value's length in bytes: at least 1 and at most 2^30 (1 GiB) |
+| 8 | 8 | `first_page` | the chain's first overflow page |
+
+After the 16-byte page header, each overflow page holds:
+
+| Offset | Size | Field | Meaning |
+|-------:|-----:|-------|---------|
+| 16 | 8 | `next` | the chain's next page, or 0 on its last page |
+| 24 | 8 | `first` | the chain's first page, the one the reference names |
+| 32 | 4 | `index` | the page's place in the chain, 0 for the first |
+| 36 | 4 | `bytes_here` | the value's bytes on this page |
+| 40 | `page_size − 40` | data | those bytes, then zeros to the end of the page |
+
+- **The chain.** A value of `n` bytes takes `ceil(n / (page_size − 40))` pages (4,056 bytes
+  each with 4 KiB pages, 65,496 with 64 KiB pages). Every page but the last holds a full
+  page of data, and the last holds the rest. The pages need not be consecutive; a writer
+  takes them from the free list, lowest page numbers first, then from the end of the file.
+- **Write once.** A chain is never changed after its commit. A put that replaces a large value,
+  or a delete, frees the old chain's pages, which go to the free list at the commit and are
+  reused only after it (as "Free-list pages" says), and a new value gets a new chain. So a
+  reader of an older snapshot reads the old chain as it was, and a crash leaves either chain
+  whole.
+- **Validity.** A reader refuses a chain that breaks any of these rules, as damage: a page
+  that is not of type 4 or not of layout 1; a `first` other than the reference's
+  `first_page`; an `index` other than the page's place in the chain; a `bytes_here` other than
+  the value's bytes that place must hold; a page before the last whose `next` is 0, or a last
+  page whose `next` is not; and a last page with bytes other than zero after the value's end.
+  Each page is also read like any data page, so it must pass its checksum and lie inside the
+  file, outside the free list and outside the log. A reader walks exactly the number of pages
+  the length gives, so a chain cut short, made longer or bent into a cycle fails the `index`,
+  `first` or `next` rules instead of looping, and it checks that the file holds at least that
+  many pages before it reserves memory for the value, so a crafted length can't make it
+  allocate more than the file could hold.
+- **Shared chains.** A chain that passes these rules is well formed for the reference that
+  names it; that does not prove that no other live reference names it too. Two references
+  naming the same chain, or a reference naming a chain whose pages were freed, are found only by
+  `eggdb check`, which remembers every page it reaches, tree and overflow pages alike, and
+  refuses a page reached twice.
+- **Freeing.** A put that replaces a large value, and a delete, read and check the old chain
+  whole before freeing any of it, and before writing a new chain. A chain whose pages the same
+  transaction wrote for another key is refused too. So a reference to a chain that breaks these
+  rules (a wrong type, `first`, `index` or length), or to a chain another key wrote in the same
+  transaction, makes the put or delete of that key fail, with the transaction rolled back. A
+  shared reference, or one naming freed pages, left by earlier commits passes these rules:
+  deleting or replacing one key frees pages the other still names, and a later value of the same
+  length can then be read through the stale reference until `eggdb check` finds it. Only a
+  damaged or crafted file holds such a reference; an ordinary workload cannot create one.
+- **Compatibility.** Overflow pages and the reference's `0x8010` length field ship in format
+  version 1 with no feature flag: no release before v0.2.0 wrote a database file (D88). A later
+  kind of reference, such as one keeping part of the value in the leaf, uses another length in
+  the low bits behind a feature flag; this layout refuses every length but 16.
 
 ## Hybrid-clock stamps (item 9)
 - A commit stamp is a `u64`: 52 bits of microseconds since **2026-01-01T00:00:00Z** (Unix time
@@ -507,3 +576,6 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
 - `format_version` rises only for a change that feature flags can't express.
 - The v0.2.0 sample file, committed to the repository, is opened and checked by CI on every
   change from then on (D20, D35).
+- Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
+  v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
+  layout needs a new layout number behind a feature flag.

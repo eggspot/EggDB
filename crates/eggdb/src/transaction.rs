@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::scan::{KeyRange, Reader, Scan};
 use crate::writer_slot::WriterTurn;
 use eggdb_platform::OsFile;
-use eggdb_storage::{BTree, CommitStamp, StorageError};
+use eggdb_storage::{BTree, CommitStamp};
 
 /// A consistent, read-only view of a [`Database`]: the last commit before
 /// [`Database::begin_read`], unchanged by any commit after it, for as long as it lives.
@@ -65,13 +65,6 @@ impl<'db> ReadTransaction<'db> {
     /// was committed to the database before it began.
     pub fn stamp(&self) -> CommitStamp {
         self.inner.stamp()
-    }
-
-    pub(crate) fn check(&self) -> Result<Option<eggdb_storage::TreeReport>> {
-        self.tree
-            .map(|tree| self.inner.check(&tree))
-            .transpose()
-            .map_err(Error::storage)
     }
 }
 
@@ -157,9 +150,15 @@ impl<'db> WriteTransaction<'db> {
         Scan::prefix(Reader::Writer(&self.inner), self.tree, prefix.as_ref())
     }
 
-    /// Stores `value` under `key`, replacing the value there. Any byte string is a key,
-    /// the empty one included, up to [`Database::max_key_bytes`]; the key and value together
-    /// may take up to [`Database::max_entry_bytes`].
+    /// Stores `value` under `key`, replacing the value there. Any byte string is a key, the
+    /// empty one included, up to [`Database::max_key_bytes`], and any byte string is a value,
+    /// up to [`Database::max_value_bytes`].
+    ///
+    /// A value too large to sit beside its key in a B+tree leaf is stored on overflow pages
+    /// of its own. Each of them stays in the page cache until the commit, like every page a
+    /// write transaction changes, so a value also needs about its size in cache: one larger
+    /// than [`Options::cache_bytes`](crate::Options::cache_bytes) allows fails with
+    /// [`ErrorKind::TooLarge`](crate::ErrorKind::TooLarge) and changes nothing.
     pub fn put(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
         self.put_bytes(key.as_ref(), value.as_ref())
     }
@@ -168,30 +167,11 @@ impl<'db> WriteTransaction<'db> {
         let tree = match self.tree {
             Some(tree) => tree,
             None => {
-                self.check_entry_fits(key, value)?;
+                self.inner.check_fits(key, value).map_err(Error::storage)?;
                 self.create_tree()?
             }
         };
         self.inner.put(&tree, key, value).map_err(Error::storage)
-    }
-
-    fn check_entry_fits(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let max_key = self.database.max_key_bytes();
-        if key.len() > max_key {
-            return Err(Error::storage(StorageError::KeyTooLarge {
-                bytes: key.len(),
-                max: max_key,
-            }));
-        }
-        let max_entry = self.database.max_entry_bytes();
-        let entry = key.len().saturating_add(value.len());
-        if entry > max_entry {
-            return Err(Error::storage(StorageError::EntryTooLarge {
-                bytes: entry,
-                max: max_entry,
-            }));
-        }
-        Ok(())
     }
 
     /// Removes `key` and its value, and returns whether the key was there.

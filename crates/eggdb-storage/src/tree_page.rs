@@ -1,6 +1,7 @@
 use crate::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use crate::error::FormatError;
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageType};
+use crate::overflow::{OverflowReference, REFERENCE_BYTES};
 use std::cmp::Ordering;
 
 pub(crate) const LAYOUT: u8 = 1;
@@ -25,14 +26,83 @@ const TREE_HEADER_END: usize = 48;
 const SLOT: usize = 2;
 const LEAF_CELL_HEADER: usize = 4;
 const INNER_CELL_HEADER: usize = 10;
-const OUTSIDE_VALUE_FLAG: u16 = 0x8000;
+const OVERFLOW_FLAG: u16 = 0x8000;
+const OVERFLOW_LENGTH_FIELD: u16 = OVERFLOW_FLAG | REFERENCE_BYTES as u16;
 
 pub(crate) fn max_key_bytes(page_size: usize) -> usize {
     page_size / 8
 }
 
-pub(crate) fn max_entry_bytes(page_size: usize) -> usize {
+pub(crate) fn max_inline_entry_bytes(page_size: usize) -> usize {
     page_size * 3 / 16 - 18
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoredValue {
+    Inline(Vec<u8>),
+    Overflow(OverflowReference),
+}
+
+impl StoredValue {
+    pub(crate) fn cell_bytes(&self) -> usize {
+        match self {
+            Self::Inline(value) => value.len(),
+            Self::Overflow(_) => REFERENCE_BYTES,
+        }
+    }
+
+    pub(crate) fn value_bytes(&self) -> u64 {
+        match self {
+            Self::Inline(value) => value.len() as u64,
+            Self::Overflow(reference) => reference.value_bytes,
+        }
+    }
+
+    fn as_leaf_value(&self) -> LeafValue<'_> {
+        match self {
+            Self::Inline(value) => LeafValue::Inline(value),
+            Self::Overflow(reference) => LeafValue::Overflow(reference.encode()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LeafValue<'a> {
+    Inline(&'a [u8]),
+    Overflow([u8; REFERENCE_BYTES]),
+}
+
+impl LeafValue<'_> {
+    pub(crate) fn cell_bytes(&self) -> usize {
+        match self {
+            Self::Inline(value) => value.len(),
+            Self::Overflow(_) => REFERENCE_BYTES,
+        }
+    }
+
+    fn length_field(&self) -> u16 {
+        match self {
+            Self::Inline(value) => value.len() as u16,
+            Self::Overflow(_) => OVERFLOW_LENGTH_FIELD,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Inline(value) => value,
+            Self::Overflow(reference) => reference,
+        }
+    }
+
+    fn write_cell(&self, body: &mut [u8], offset: usize, suffix: &[u8]) {
+        write_u16(body, offset, suffix.len() as u16);
+        write_u16(body, offset + 2, self.length_field());
+        let key_start = offset + LEAF_CELL_HEADER;
+        let value_start = key_start + suffix.len();
+        body[key_start..value_start].copy_from_slice(suffix);
+        let value = self.bytes();
+        body[value_start..value_start + value.len()].copy_from_slice(value);
+    }
 }
 
 pub(crate) fn header_for(level: u8, lsn: u64) -> PageHeader {
@@ -64,6 +134,7 @@ pub(crate) fn shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
 pub(crate) struct CellRef<'a> {
     pub(crate) key: &'a [u8],
     pub(crate) payload: &'a [u8],
+    pub(crate) overflow: bool,
     offset: usize,
     len: usize,
 }
@@ -304,14 +375,15 @@ impl Shape {
         };
         let header = body.get(offset..offset + header_len).ok_or_else(outside)?;
         let key_len = usize::from(read_u16(header, 0));
-        let payload_len = if self.is_leaf() {
+        let (payload_len, overflow) = if self.is_leaf() {
             let value_len = read_u16(header, 2);
-            if value_len & OUTSIDE_VALUE_FLAG != 0 {
-                return Err(self.corrupt("a value is flagged as stored outside the tree"));
+            let overflow = value_len & OVERFLOW_FLAG != 0;
+            if overflow && value_len != OVERFLOW_LENGTH_FIELD {
+                return Err(self.corrupt("a large value's reference is not 16 bytes"));
             }
-            usize::from(value_len)
+            (usize::from(value_len & !OVERFLOW_FLAG), overflow)
         } else {
-            0
+            (0, false)
         };
         let key_start = offset + header_len;
         let len = header_len + key_len + payload_len;
@@ -327,8 +399,28 @@ impl Shape {
         Ok(CellRef {
             key,
             payload,
+            overflow,
             offset,
             len,
+        })
+    }
+
+    pub(crate) fn overflow_reference(
+        &self,
+        cell: &CellRef<'_>,
+    ) -> Result<Option<OverflowReference>, FormatError> {
+        if !cell.overflow {
+            return Ok(None);
+        }
+        OverflowReference::decode(cell.payload)
+            .map(Some)
+            .map_err(|problem| self.corrupt(problem))
+    }
+
+    pub(crate) fn stored_value(&self, cell: &CellRef<'_>) -> Result<StoredValue, FormatError> {
+        Ok(match self.overflow_reference(cell)? {
+            Some(reference) => StoredValue::Overflow(reference),
+            None => StoredValue::Inline(cell.payload.to_vec()),
         })
     }
 
@@ -400,7 +492,7 @@ impl Shape {
         }
         let page_size = self.body_len + PAGE_HEADER_SIZE;
         let max_key = max_key_bytes(page_size);
-        let max_entry = max_entry_bytes(page_size);
+        let max_entry = max_inline_entry_bytes(page_size);
         let mut cells = Vec::new();
         cells
             .try_reserve_exact(self.count)
@@ -416,6 +508,7 @@ impl Shape {
                 if key_len + cell.payload.len() > max_entry {
                     return Err(self.corrupt("an entry is longer than the entry limit"));
                 }
+                self.overflow_reference(&cell)?;
             } else if read_u64(cell.payload, 0) == NO_PAGE {
                 return Err(self.corrupt("a child pointer is zero"));
             }
@@ -453,8 +546,8 @@ impl Shape {
         Ok(())
     }
 
-    pub(crate) fn leaf_fits(&self, suffix_len: usize, value_len: usize) -> bool {
-        self.free() >= SLOT + LEAF_CELL_HEADER + suffix_len + value_len
+    pub(crate) fn leaf_fits(&self, suffix_len: usize, value: &LeafValue<'_>) -> bool {
+        self.free() >= SLOT + LEAF_CELL_HEADER + suffix_len + value.cell_bytes()
     }
 
     pub(crate) fn inner_fits(&self, suffix_len: usize) -> bool {
@@ -466,15 +559,11 @@ impl Shape {
         body: &mut [u8],
         index: usize,
         suffix: &[u8],
-        value: &[u8],
+        value: &LeafValue<'_>,
     ) {
-        let len = LEAF_CELL_HEADER + suffix.len() + value.len();
+        let len = LEAF_CELL_HEADER + suffix.len() + value.cell_bytes();
         let offset = self.open_slot(body, index, len);
-        write_u16(body, offset, suffix.len() as u16);
-        write_u16(body, offset + 2, value.len() as u16);
-        let key_start = offset + LEAF_CELL_HEADER;
-        body[key_start..key_start + suffix.len()].copy_from_slice(suffix);
-        body[key_start + suffix.len()..offset + len].copy_from_slice(value);
+        value.write_cell(body, offset, suffix);
     }
 
     pub(crate) fn insert_inner(
@@ -526,7 +615,7 @@ impl Shape {
         value: &[u8],
     ) -> Result<(), FormatError> {
         let cell = self.cell_at(body, index)?;
-        if cell.payload.len() != value.len() {
+        if cell.overflow || cell.payload.len() != value.len() {
             return Err(self.corrupt("a value was overwritten with one of another length"));
         }
         let start = cell.offset + cell.len - value.len();
@@ -570,7 +659,7 @@ pub(crate) struct Node {
     pub(crate) low: Vec<u8>,
     pub(crate) high: Option<Vec<u8>>,
     pub(crate) keys: Vec<Vec<u8>>,
-    pub(crate) values: Vec<Vec<u8>>,
+    pub(crate) values: Vec<StoredValue>,
     pub(crate) children: Vec<u64>,
 }
 
@@ -607,7 +696,7 @@ impl Node {
             let cell = shape.cell_at(body, index)?;
             node.keys.push(with_prefix(cell.key));
             if shape.is_leaf() {
-                node.values.push(cell.payload.to_vec());
+                node.values.push(shape.stored_value(&cell)?);
             } else {
                 node.children.push(shape.child_at(body, index)?);
             }
@@ -682,14 +771,9 @@ impl Node {
         for (index, key) in self.keys.iter().enumerate() {
             let suffix = &key[prefix..];
             if self.level == 0 {
-                let value = &self.values[index];
-                cell_start -= LEAF_CELL_HEADER + suffix.len() + value.len();
-                write_u16(body, cell_start, suffix.len() as u16);
-                write_u16(body, cell_start + 2, value.len() as u16);
-                let key_start = cell_start + LEAF_CELL_HEADER;
-                body[key_start..key_start + suffix.len()].copy_from_slice(suffix);
-                body[key_start + suffix.len()..key_start + suffix.len() + value.len()]
-                    .copy_from_slice(value);
+                let value = self.values[index].as_leaf_value();
+                cell_start -= LEAF_CELL_HEADER + suffix.len() + value.cell_bytes();
+                value.write_cell(body, cell_start, suffix);
             } else {
                 cell_start -= INNER_CELL_HEADER + suffix.len();
                 write_u16(body, cell_start, suffix.len() as u16);
@@ -738,7 +822,9 @@ impl Node {
             .keys
             .iter()
             .enumerate()
-            .map(|(index, key)| key.len() + self.values.get(index).map_or(8, Vec::len))
+            .map(|(index, key)| {
+                key.len() + self.values.get(index).map_or(8, StoredValue::cell_bytes)
+            })
             .collect();
         let total: usize = sizes.iter().sum();
         let mut running = 0;
@@ -812,7 +898,7 @@ fn size_of(
     low: &[u8],
     high: Option<&[u8]>,
     keys: &[Vec<u8>],
-    values: &[Vec<u8>],
+    values: &[StoredValue],
 ) -> usize {
     let prefix = fence_prefix(low, high);
     let fences = low.len() + high.map_or(0, |high| high.len() - prefix);
@@ -822,7 +908,9 @@ fn size_of(
         .map(|(index, key)| {
             let suffix = key.len().saturating_sub(prefix);
             if level == 0 {
-                SLOT + LEAF_CELL_HEADER + suffix + values.get(index).map_or(0, Vec::len)
+                SLOT + LEAF_CELL_HEADER
+                    + suffix
+                    + values.get(index).map_or(0, StoredValue::cell_bytes)
             } else {
                 SLOT + INNER_CELL_HEADER + suffix
             }
