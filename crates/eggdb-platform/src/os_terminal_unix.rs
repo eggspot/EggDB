@@ -2,7 +2,7 @@ use crate::terminal::{Input, TerminalSize};
 use std::ffi::{c_int, c_short, c_ulong, c_ushort, c_void};
 use std::io;
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const STDIN: c_int = 0;
@@ -91,6 +91,7 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static RESIZED: AtomicBool = AtomicBool::new(false);
 static SAVED: [AtomicU64; TERMIOS_WORDS] = [const { AtomicU64::new(0) }; TERMIOS_WORDS];
 static PANIC_HOOK: Once = Once::new();
+static PREVIOUS_HANDLERS: [AtomicUsize; 4] = [const { AtomicUsize::new(SIG_DFL) }; 4];
 
 #[derive(Debug)]
 pub(crate) struct RawMode {
@@ -263,22 +264,40 @@ extern "C" fn on_terminate(signal: c_int) {
     unsafe { _exit(128 + signal) }
 }
 
+const HANDLED_SIGNALS: [c_int; 4] = [SIGWINCH, SIGTERM, SIGHUP, SIGQUIT];
+const SIG_IGN: usize = 1;
+const SIG_ERR: usize = usize::MAX;
+
 fn install_handlers() {
     let resize: extern "C" fn(c_int) = on_resize;
     let terminate: extern "C" fn(c_int) = on_terminate;
-    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
-    unsafe { signal(SIGWINCH, resize as usize) };
-    for signal_number in [SIGTERM, SIGHUP, SIGQUIT] {
-        // SAFETY: the handler only uses async-signal-safe calls (write, tcsetattr, _exit) and
-        // atomics.
-        unsafe { signal(signal_number, terminate as usize) };
+    for (slot, signal_number) in PREVIOUS_HANDLERS.iter().zip(HANDLED_SIGNALS) {
+        let handler = if signal_number == SIGWINCH {
+            resize as usize
+        } else {
+            terminate as usize
+        };
+        // SAFETY: both handlers only use atomics and async-signal-safe calls (write,
+        // tcsetattr, _exit).
+        let previous = unsafe { signal(signal_number, handler) };
+        let previous = if previous == SIG_ERR {
+            SIG_DFL
+        } else {
+            previous
+        };
+        slot.store(previous, Ordering::Relaxed);
+        if previous == SIG_IGN && signal_number != SIGWINCH {
+            // SAFETY: puts back the ignored disposition the process started with (nohup).
+            unsafe { signal(signal_number, SIG_IGN) };
+        }
     }
 }
 
 fn reset_handlers() {
-    for signal_number in [SIGWINCH, SIGTERM, SIGHUP, SIGQUIT] {
-        // SAFETY: SIG_DFL restores the default disposition, which needs no handler code.
-        unsafe { signal(signal_number, SIG_DFL) };
+    for (slot, signal_number) in PREVIOUS_HANDLERS.iter().zip(HANDLED_SIGNALS) {
+        // SAFETY: the value is the disposition `signal` returned when the handler was
+        // installed: SIG_DFL, SIG_IGN or a handler the process had set, which is still valid.
+        unsafe { signal(signal_number, slot.load(Ordering::Relaxed)) };
     }
 }
 

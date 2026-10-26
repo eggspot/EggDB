@@ -567,8 +567,7 @@ impl<S: Source> Ui<S> {
             }
             return;
         };
-        let total = self.viewer_lines(&viewer);
-        let last_top = total.saturating_sub(visible);
+        let last_top = self.last_top(&viewer);
         match code {
             KeyCode::Esc => self.focus = Pane::Keys,
             KeyCode::Enter if viewer.bytes.is_none() && !viewer.missing => {
@@ -589,6 +588,7 @@ impl<S: Source> Ui<S> {
             KeyCode::Char('w') if viewer.mode == Mode::Text => {
                 viewer.wrap = !viewer.wrap;
                 viewer.pan = 0;
+                viewer.scroll = viewer.scroll.min(self.last_top(&viewer));
             }
             _ => {}
         }
@@ -1005,7 +1005,7 @@ impl<S: Source> Ui<S> {
                     "line {}{}{}/{} ",
                     text::count((viewer.scroll + 1).min(total) as u64),
                     self.theme.symbol(Symbol::EnDash),
-                    text::count((viewer.scroll + visible).min(total) as u64),
+                    text::count((viewer.scroll + self.lines_shown(viewer)).min(total) as u64),
                     text::count(total as u64)
                 )
             }
@@ -1087,16 +1087,7 @@ impl<S: Source> Ui<S> {
             if rows.len() >= visible {
                 break;
             }
-            let start = viewer.line_starts[line];
-            let end = viewer.line_starts.get(line + 1).map_or_else(
-                || bytes.len() - usize::from(bytes.ends_with(b"\n")),
-                |next| next - 1,
-            );
-            let mut content = &bytes[start..end.max(start)];
-            if let Some(stripped) = content.strip_suffix(b"\r") {
-                content = stripped;
-            }
-            let segments = text_segments(content);
+            let segments = text_segments(line_bytes(viewer, bytes, line));
             if viewer.wrap && room > 0 {
                 rows.extend(wrap(segments, room));
             } else {
@@ -1105,6 +1096,56 @@ impl<S: Source> Ui<S> {
         }
         rows.truncate(visible);
         rows
+    }
+
+    fn wraps(&self, viewer: &Viewer) -> bool {
+        viewer.wrap && viewer.mode == Mode::Text && viewer.bytes.is_some()
+    }
+
+    fn rows_of_line(&self, viewer: &Viewer, line: usize) -> usize {
+        let room = usize::from(self.viewer_cols().saturating_sub(1)).max(1);
+        let bytes = viewer.bytes.as_deref().unwrap_or_default();
+        let width: usize = text_segments(line_bytes(viewer, bytes, line))
+            .iter()
+            .map(|(text, _)| text_width(text))
+            .sum();
+        width.div_ceil(room).max(1)
+    }
+
+    fn last_top(&self, viewer: &Viewer) -> usize {
+        let visible = self.viewer_rows();
+        let total = self.viewer_lines(viewer);
+        if !self.wraps(viewer) {
+            return total.saturating_sub(visible);
+        }
+        let mut used = 0;
+        let mut top = total;
+        while top > 0 {
+            used += self.rows_of_line(viewer, top - 1);
+            if used > visible {
+                break;
+            }
+            top -= 1;
+        }
+        top.min(total.saturating_sub(1))
+    }
+
+    fn lines_shown(&self, viewer: &Viewer) -> usize {
+        let visible = self.viewer_rows();
+        let total = self.viewer_lines(viewer);
+        if !self.wraps(viewer) {
+            return visible.min(total.saturating_sub(viewer.scroll));
+        }
+        let mut used = 0;
+        let mut shown = 0;
+        for line in viewer.scroll..total {
+            used += self.rows_of_line(viewer, line);
+            if used > visible && shown > 0 {
+                break;
+            }
+            shown += 1;
+        }
+        shown
     }
 
     fn hex_rows(&self, viewer: &Viewer, bytes: &[u8], visible: usize) -> Vec<Vec<Segment>> {
@@ -1324,6 +1365,18 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
         env!("CARGO_PKG_VERSION")
     ));
     lines
+}
+
+fn line_bytes<'a>(viewer: &Viewer, bytes: &'a [u8], line: usize) -> &'a [u8] {
+    let Some(&start) = viewer.line_starts.get(line) else {
+        return &[];
+    };
+    let end = viewer.line_starts.get(line + 1).map_or_else(
+        || bytes.len() - usize::from(bytes.ends_with(b"\n")),
+        |next| next - 1,
+    );
+    let content = bytes.get(start..end.max(start)).unwrap_or_default();
+    content.strip_suffix(b"\r").unwrap_or(content)
 }
 
 fn line_starts(bytes: &[u8]) -> Vec<usize> {

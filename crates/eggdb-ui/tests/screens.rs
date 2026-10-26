@@ -187,6 +187,7 @@ impl Scenario {
 }
 
 fn golden(name: &str, screen: &str) {
+    let screen = screen.replace(env!("CARGO_PKG_VERSION"), "X.Y.Z");
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/screens")
         .join(format!("{name}.txt"));
@@ -197,7 +198,7 @@ fn golden(name: &str, screen: &str) {
         return;
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_default();
-    if expected != screen {
+    if expected != screen.as_str() {
         let mut report = format!(
             "screen {name} differs from {} (UPDATE_SCREENS=1 rewrites it)\n",
             path.display()
@@ -354,7 +355,11 @@ fn scenario_08_scrolling_a_large_value() {
     s.press(&["Right", "Right"]);
     assert!(s.row(4).starts_with(&format!("{}│", " ".repeat(33))) || s.row(4).contains("fox"));
     s.press(&["w"]);
+    assert!(s.row(1).contains("line 158–"), "{}", s.row(1));
+    s.press(&["End"]);
     s.matches("08_large_text_wrapped");
+    assert!(s.row(1).contains("–175/175"), "{}", s.row(1));
+    assert!(s.row(21).contains("again"), "{}", s.row(21));
     s.press(&["v", "v", "v"]);
     s.press(&["Home"]);
     assert!(s.row(1).contains("Value  hex ·"), "{}", s.row(1));
@@ -478,7 +483,7 @@ fn scenario_22_moving_down_redraws_only_what_changed() {
 }
 
 #[test]
-fn every_scenario_screen_fits_at_40_by_10() {
+fn the_screen_works_at_40_by_10() {
     let mut s = Scenario::new(40, 10);
     s.matches("40x10_open");
     s.press(&["Down", "PgDn", "End", "Enter", "?", "Esc", "Tab", "/"]);

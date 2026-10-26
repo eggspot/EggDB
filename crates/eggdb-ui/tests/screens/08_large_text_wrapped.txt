@@ -1,24 +1,24 @@
  EggDB  app.db                    1.2 MiB · 312 pages · 24 keys · 09:14:03Z  RO
- Keys                1–20 of 24 │ Value  text (auto) · 14.0 K  line 158–175/175
+ Keys                1–20 of 24 │ Value  text (auto) · 14.0 K  line 167–175/175
   bin                         40│ large
   doc:json                    87│───────────────────────────────────────────────
-  empty                        0│ line 0158: the quick brown fox jumps over the
+  empty                        0│ line 0167: the quick brown fox jumps over the
 > large                   14.0 K│ lazy dog, again and again and again
-  user:1                      41│ line 0159: the quick brown fox jumps over the
+  user:1                      41│ line 0168: the quick brown fox jumps over the
   user:10                     43│ lazy dog, again and again and again
-  user:11                     43│ line 0160: the quick brown fox jumps over the
+  user:11                     43│ line 0169: the quick brown fox jumps over the
   user:12                     43│ lazy dog, again and again and again
-  user:13                     43│ line 0161: the quick brown fox jumps over the
+  user:13                     43│ line 0170: the quick brown fox jumps over the
   user:14                     43│ lazy dog, again and again and again
-  user:15                     43│ line 0162: the quick brown fox jumps over the
+  user:15                     43│ line 0171: the quick brown fox jumps over the
   user:16                     43│ lazy dog, again and again and again
-  user:17                     43│ line 0163: the quick brown fox jumps over the
+  user:17                     43│ line 0172: the quick brown fox jumps over the
   user:18                     43│ lazy dog, again and again and again
-  user:19                     43│ line 0164: the quick brown fox jumps over the
+  user:19                     43│ line 0173: the quick brown fox jumps over the
   user:2                      41│ lazy dog, again and again and again
-  user:20                     43│ line 0165: the quick brown fox jumps over the
+  user:20                     43│ line 0174: the quick brown fox jumps over the
   user:3                      41│ lazy dog, again and again and again
-  user:4                      41│ line 0166: the quick brown fox jumps over the
+  user:4                      41│ line 0175: the quick brown fox jumps over the
   user:5                      41│ lazy dog, again and again and again
 
  ↑↓ scroll  ←→ pan  v view  w wrap  Esc keys  ? help  q quit

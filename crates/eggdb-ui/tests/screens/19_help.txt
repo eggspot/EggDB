@@ -12,7 +12,7 @@
  Terminal    at least 40x10; two panes from 80 columns
              NO_COLOR, --mono and --ascii change colours and box characters
  Database    app.db   page size 4.0 KiB   keys up to 512 B   values up to 1.0 G…
- Version     EggDB 0.1.0   docs github.com/eggspot/EggDB/blob/main/docs/ux/ui.md
+ Version     EggDB X.Y.Z   docs github.com/eggspot/EggDB/blob/main/docs/ux/ui.md
 
 
 

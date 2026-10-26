@@ -140,6 +140,11 @@ impl Frame {
         let mut at = col;
         let mut used = 0usize;
         for character in text.chars() {
+            let character = if character.is_control() {
+                '?'
+            } else {
+                character
+            };
             let width = char_width(character);
             if width == 0 {
                 if at > col
@@ -216,6 +221,13 @@ mod tests {
             f.cell(3, 0).map(|c| c.text),
             Some(CellText::WideContinuation)
         );
+    }
+
+    #[test]
+    fn control_characters_never_reach_a_cell() {
+        let mut f = frame(10);
+        f.put(0, 0, "a\u{1b}[2J\u{9b}b", Style::default(), 10, '~');
+        assert_eq!(f.row_text(0), "a?[2J?b");
     }
 
     #[test]
