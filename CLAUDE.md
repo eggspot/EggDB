@@ -204,6 +204,8 @@ Check each task against these before starting and again before opening the PR.
   `cargo doc --workspace --no-deps`. CI runs exactly these (job `check`, the required status check).
 - `cargo run --release -p eggdb-bench` runs the benchmarks against `benchmarks/baseline.txt`
   (`-- --update` rewrites this system's lines); CI's `bench` job gates on it (D80).
+  `cargo run --release --manifest-path crates/eggdb-sqlite-compare/Cargo.toml` compares EggDB with
+  SQLite (its own workspace, never shipped); CI's `compare` job gates on it (D94).
 - EggDB is public, so standard GitHub runners are free: CI aims for the shortest time from push to
   the first failure and to a green run (parallel jobs are fine when they shorten it), with no larger
   runners, superseded PR runs cancelled, and a timeout on every job.

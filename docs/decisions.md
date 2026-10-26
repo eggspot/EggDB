@@ -3708,6 +3708,123 @@ or were silent:
 - *Key order?* Required ascending, as above.
 - *Hex or base64?* Hex with the `_hex` field tag, as above.
 
+## D94 Benchmarks against SQLite in a crate of its own, and the binary's size, start time and peak memory gated — Decided by research (build loop, 2026-10-27); completes v0.2.0 item 17, refines D1, D6, D7, D8, D14 and D80
+Item 17 measures the embedded key-value store against SQLite on the same machine and commits the
+results, with the `eggdb` binary's size, start time and peak memory, as baseline lines CI gates.
+The method, the settings and the current numbers are in [benchmarks.md](benchmarks.md).
+
+**A crate of its own (D1).** `crates/eggdb-sqlite-compare` has its own `[workspace]` and its own
+committed `Cargo.lock`, is excluded from the main workspace and never published, so
+`cargo test --workspace`, `cargo clippy --workspace` and the release build never compile SQLite
+and the main `Cargo.lock` never lists it. It depends on `eggdb` by path and on `rusqlite` pinned
+to `=0.41.0` with `default-features = false, features = ["bundled"]`, which compiles SQLite 3.54.1
+into the benchmark. The licences, read with `cargo metadata`, are all permissive: `rusqlite`
+0.41.0 and `libsqlite3-sys` 0.39.1 MIT; `bitflags` 2.13.2, `fallible-iterator` 0.3.0,
+`fallible-streaming-iterator` 0.1.9 and `smallvec` 1.16.4 MIT or Apache-2.0; the build-only `cc`
+1.10.0, `find-msvc-tools` 0.1.15, `shlex` 2.0.1, `pkg-config` 0.3.34 and `vcpkg` 0.2.15 MIT or
+Apache-2.0; SQLite itself is in the public domain. D1 allows such a crate for benchmarks only; a
+CI step in the `check` job fails when `cargo tree -p eggdb -e normal,build` lists any package
+but our own `eggdb` crates. The harness is shared, not copied: the compare crate includes
+`eggdb-bench`'s baseline, measurement, run-loop and key modules by `#[path]`.
+
+**Fair settings.** Both stores hold the same 16-byte keys and values (100,000 rows preloaded, or
+1,000 for the durable commit) in files in the same temporary directory. SQLite runs in WAL mode
+with `locking_mode = EXCLUSIVE` (EggDB's writer holds an exclusive lock on its file for as long
+as it is open), 4 KiB pages, a 64 MiB cache (`cache_size = -65536`, EggDB's `cache_bytes`),
+`mmap_size = 0` (EggDB reads through its own cache), `wal_autocheckpoint = 256` pages (EggDB
+checkpoints after 1 MiB of log), `fullfsync` and `checkpoint_fullfsync` on Apple's systems (EggDB
+syncs with `F_FULLFSYNC` there, D81), a `kv(k BLOB PRIMARY KEY, v BLOB) WITHOUT ROWID, STRICT`
+table, statements prepared once and reused, and `synchronous` mapped from EggDB's durability:
+`Full` to `FULL`, `Normal` to `NORMAL`, `Off` to `OFF`. A unit test reads every one of these
+settings back, and others check that both stores scan the same entries in the same order and
+hold the same contents after the same puts. *The `NORMAL` caveat:* both modes promise that a
+power loss can lose the latest commits and never corrupts the file, but SQLite in WAL with
+`NORMAL` syncs only at checkpoints, while EggDB's `Normal` also syncs once a megabyte of log or a
+thousand pages wait, so EggDB syncs more often for the same promise.
+
+**Workloads** (samples alternate between EggDB and SQLite in one process, D80):
+- `get`: a point get returning the value, a read transaction each (`Database::get`, and the
+  prepared `SELECT v FROM kv WHERE k = ?1` in autocommit);
+- `scan`: ascending entries without copying them (`scan(..)`, and the prepared `SELECT k, v FROM
+  kv ORDER BY k`), per entry;
+- `batch_put`: overwrites of random existing keys, 1,000 per write transaction (`BEGIN
+  IMMEDIATE` … `COMMIT` around a prepared upsert), per put, with `Off` and `synchronous = OFF`;
+- `batch_put_normal`: the same with `Normal` and `NORMAL`, reported only;
+- `durable_commit`: one put per transaction waiting for the disk (`Full` and `FULL`), per commit,
+  reported only.
+
+The batched workloads time whole batches, so a sample never commits a partial one; slow workloads
+calibrate from one iteration instead of 64. On a CI runner the `Normal` batches are dominated by
+checkpoint syncs (their ratio moved from 1.08 to 1.69 between two runs), so the gated batch never
+waits for the disk, as `database.write` does (D87).
+
+**Gates.** `ratio_to_sqlite` lines in `benchmarks/baseline.txt`, EggDB's median time over
+SQLite's, so below 1 means EggDB is faster. They fail 50% above the line after one retry, where
+D80's ratios fail at 30%: seven CI runs on different runners gave point gets 0.60 to 0.83 and
+scans 0.35 to 0.52, because two engines respond differently to each runner's processor, while a
+ratio of EggDB to itself does not move that way. A missing line only warns, as in D80, so the
+Linux lines are the median of five CI runs and macOS lines are measured on this Mac. Gates now
+carry their own tolerance (`Gate::Ceiling`), and `--update` replaces only the lines of the
+benchmark families it measured and keeps every other line's text, so `eggdb-bench` and the
+compare crate each update their own lines of the one file.
+
+**Footprint (D6, D14).** `eggdb-bench` builds the `eggdb` binary (`cargo build --release -p
+eggdb`) and gates, for each system:
+- `footprint.binary stripped_release_bytes`, its size, 1% above the line (D6 lets it only shrink;
+  the 1% leaves room for toolchain noise, and the release notes list every target's size, musl's
+  included, D75);
+- `footprint.start` (`eggdb --version`) and `footprint.open_and_get` (`eggdb get` of one key from
+  a closed 10,000-entry file): the median start time over 20 runs as a ratio to starting
+  `eggdb-bench --exit-at-once`, a Rust program that exits at once, 50% above the line, since a
+  process start depends on the machine; and the median peak resident memory of 20 more runs, 5%
+  above the line.
+
+The peak is measured from outside, in the platform layer (D8):
+`eggdb_platform::process::run_with_peak_memory` runs a command and returns its exit code and peak.
+On Apple's systems and the BSDs it is `ru_maxrss` from `wait4` (bytes on Apple's systems,
+kibibytes elsewhere); on Windows the peak working set from `K32GetProcessMemoryInfo`. On Linux and
+Android `ru_maxrss` cannot be used: `exec` folds the old address space's high-water mark into it,
+and a spawned child's old address space is its parent's, so the first CI run reported the
+benchmark's own 145 MB for every `eggdb` run. There the child is traced (`PTRACE_TRACEME` before
+`exec`, `PTRACE_O_TRACEEXIT`) and its `VmHWM` read from `/proc/<pid>/status` when it stops at its
+exit, which counts only its own address space; a test runs a child from a parent holding 256 MiB
+and requires a peak under 64 MiB. Start times are measured in runs that are not traced.
+
+**Size (D6).** This item changes no code in the `eggdb` binary: 933,312 bytes on aarch64 macOS,
+1,133,296 on x86-64 Linux (glibc). Against v0.1.0's 302,448 bytes on macOS, which only printed
+its version, the growth is the storage engine and embedded API (about 266 KB, D90), the
+command-line tool (about 83 KB, D90), `eggdb ui` (+99,600 bytes in D91 and +116,208 in D92) and
+`export`/`import` (+66,400, D93), each stated with its reason when it landed.
+
+**What SQLite still wins.** Batched random overwrites: EggDB takes about 1.35 times SQLite's time
+on this Mac (3.07 against 2.28 µs per put without syncs, 25.0 against 21.0 µs in `Normal`) and
+about 1.09 times on the Linux runners, in both modes. Both log whole pages, so the gap is in EggDB's write path
+(page images per commit, checkpoints writing in place); it is a follow-up on the roadmap rather
+than a blocker of this item, whose job is to measure and gate (CLAUDE.md note 5 asks a research
+subagent to decide when a slower result may stay; this one was decided with the item, below).
+
+Decided by research (a research subagent, 2026-10-27, before the build), where the brief left a
+choice:
+- *Where does SQLite live?* A separate crate with its own workspace (above), rather than a
+  dev-dependency of `eggdb-bench`, so no main-workspace command ever compiles it or lists it in
+  the main lock file.
+- *Which settings?* WAL with matching page size, cache, checkpoint threshold and sync mode, no
+  mmap, `fullfsync` where EggDB uses `F_FULLFSYNC`, a `WITHOUT ROWID, STRICT` table and prepared
+  statements; the exclusive locking mode was added during the build, as EggDB's writer also holds
+  its file exclusively.
+- *What to gate?* Point gets, scans and batched puts, gated as ratios like D80; the durable
+  commit reported, since it measures the disk. CI's `compare` job runs on Linux only, in
+  parallel with the others, with its own cache and a 15-minute timeout; other systems run it by
+  hand.
+- *How to measure memory?* The child's own peak through the platform layer (VmHWM on Linux,
+  `ru_maxrss` on Apple's systems, the peak working set on Windows), with 1% for size, 5% for memory
+  and a wide band for start time.
+- *A result where SQLite wins?* State it, gate it so it cannot grow, and put the fix on the
+  roadmap.
+
+Decided during the build (not by the research): the 50% band for the SQLite ratios, the `Off`
+mode for the gated batch, and tracing on Linux for the peak, each for the reason given above.
+
 ## D95 A file lock is released when its handle drops, even while a child process is starting — Decided (build loop, 2026-10-27); supersedes D87's known limit, refines D8 and D9
 **Cause.** `cargo test -p eggdb --bin eggdb` failed about one run in six on macOS (and nearly
 always on macOS CI once more tests started child processes) with exit code 5, "another program
