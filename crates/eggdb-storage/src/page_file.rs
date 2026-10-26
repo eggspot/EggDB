@@ -324,7 +324,10 @@ impl<F: File> PageFile<F> {
             return false;
         };
         let since = log.lsn().saturating_sub(self.header.checkpoint_lsn);
-        let chain = self.log_pages.len() - log.unused_recycled_segments();
+        let chain = self
+            .log_pages
+            .len()
+            .saturating_sub(log.unused_recycled_segments());
         since >= limit || chain > RECYCLED_SEGMENTS
     }
 
@@ -575,6 +578,10 @@ impl<F: File> PageFile<F> {
     /// commit that can't be made, such as one whose catalog root would be a free page, which
     /// the file could not be opened with again, is refused with [`FormatError::InvalidField`]
     /// before anything is written, and leaves the changes since the last commit in place.
+    ///
+    /// After it, the commit checkpoints when [`PageFile::set_auto_checkpoint`] says so. A
+    /// checkpoint that fails there leaves the commit made: it still returns `Ok`, and the file
+    /// refuses every later change with [`StorageError::NeedsReopen`].
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
         let prepared = self.prepare_commit(update)?;
         let mut staged = std::mem::take(&mut self.staged);

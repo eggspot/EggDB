@@ -1052,3 +1052,63 @@ fn a_tree_reopens_whole_after_a_crash_at_any_operation_of_commits_that_checkpoin
         }
     }
 }
+
+fn unsynced_normal_commits(fs: &SimFileSystem) -> (PageCache<SimFile>, BTreeMap<u64, Model>) {
+    let mut cache = create(fs, 64);
+    cache.set_auto_checkpoint(None);
+    let mut model = allocated(&mut cache, 12);
+    cache.set_durability(Durability::Normal).unwrap();
+    let mut history = BTreeMap::from([(0, model.clone())]);
+    let mut rng = TestRng::new(20);
+    for fill in 1..=40u8 {
+        change(&mut cache, &mut model, &mut rng, fill).unwrap();
+        history.insert(u64::from(fill), model.clone());
+        if fill == 20 {
+            cache.checkpoint().unwrap();
+        }
+    }
+    (cache, history)
+}
+
+#[test]
+fn a_crash_at_any_operation_of_a_checkpoint_of_unsynced_normal_commits_keeps_a_whole_prefix() {
+    let operations = {
+        let fs = SimFileSystem::new();
+        let (mut cache, history) = unsynced_normal_commits(&fs);
+        let start = fs.operation_count();
+        cache.checkpoint().unwrap();
+        let operations = fs.operation_count() - start;
+        drop(cache);
+        fs.crash(CrashMode::Torn { seed: 1 });
+        let cache = open(&fs, Access::ReadOnly).unwrap();
+        assert_eq!(cache.superblock().clock_high_water, 40);
+        assert_model(&cache, &history[&40], "checkpointed");
+        operations
+    };
+    let mut rounds_kept = std::collections::BTreeSet::new();
+    for step in 0..operations {
+        for seed in 0..4 {
+            let context = format!("step {step}, seed {seed}");
+            let fs = SimFileSystem::new();
+            let (mut cache, history) = unsynced_normal_commits(&fs);
+            fs.fail_operation(fs.operation_count() + step);
+            assert!(cache.checkpoint().is_err(), "{context}");
+            drop(cache);
+            fs.crash(CrashMode::Torn { seed });
+            let mut cache = open(&fs, Access::ReadWrite).unwrap();
+            let round = cache.superblock().clock_high_water;
+            assert!(round >= 20, "{context}: round {round}");
+            let mut model = history[&round].clone();
+            assert_model(&cache, &model, &context);
+            rounds_kept.insert(round);
+            let mut rng = TestRng::new(seed);
+            change(&mut cache, &mut model, &mut rng, 99).unwrap();
+            drop(cache);
+            fs.crash(CrashMode::Torn { seed: seed + 30 });
+            let cache = open(&fs, Access::ReadOnly).unwrap();
+            assert_model(&cache, &model, &context);
+        }
+    }
+    assert!(rounds_kept.contains(&40), "{rounds_kept:?}");
+    assert!(rounds_kept.len() > 1, "{rounds_kept:?}");
+}

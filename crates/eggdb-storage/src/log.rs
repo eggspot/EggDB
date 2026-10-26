@@ -35,8 +35,8 @@ pub enum Durability {
     /// A commit returns once its log records are written, without a sync; its pages reach
     /// their places in the file only after the next sync, so a power loss can lose the latest
     /// commits but never corrupts the file. A sync happens when [`PageFile::sync`] is called,
-    /// when the durability changes, and once a megabyte of log or a thousand pages wait for
-    /// one.
+    /// when the durability changes, at every checkpoint, and once a megabyte of log or a
+    /// thousand pages wait for one.
     ///
     /// [`PageFile::sync`]: crate::PageFile::sync
     Normal,

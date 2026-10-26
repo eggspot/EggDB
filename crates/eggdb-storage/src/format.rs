@@ -407,6 +407,20 @@ impl Superblock {
                 field: "recycled_segments",
             });
         }
+        let in_a_log_segment = |page: u64| {
+            std::iter::once(self.log_head_page)
+                .chain(self.recycled_segments)
+                .filter(|&first| first != NO_PAGE)
+                .any(|first| (first..segment_end(first)).contains(&page))
+        };
+        for (field, page) in [
+            ("catalog_root", self.catalog_root),
+            ("free_list_head", self.free_list_head),
+        ] {
+            if page != NO_PAGE && in_a_log_segment(page) {
+                return Err(FormatError::InvalidField { field });
+            }
+        }
         if self.log_head_page != NO_PAGE && self.log_sequence_reserved < self.log_head_sequence {
             return Err(FormatError::InvalidField {
                 field: "log_sequence_reserved",
@@ -780,7 +794,7 @@ mod tests {
 
     #[test]
     fn fields_pointing_outside_the_data_pages_are_refused() {
-        let cases: [(&str, Damage); 14] = [
+        let cases: [(&str, Damage); 16] = [
             ("page_count", |s| s.page_count = 1),
             ("page_count", |s| s.page_count = 1 << 48),
             ("recycled_segments", |s| s.recycled_segments[3] = 60),
@@ -797,6 +811,8 @@ mod tests {
             ("log_sequence_reserved", |s| {
                 s.log_head_sequence = s.log_sequence_reserved + 1
             }),
+            ("catalog_root", |s| s.catalog_root = 20),
+            ("free_list_head", |s| s.free_list_head = 45),
         ];
         let mut huge_segments = superblock(0);
         huge_segments.log_segment_pages = (super::MAX_LOG_SEGMENT_BYTES / 4096) as u32 + 1;

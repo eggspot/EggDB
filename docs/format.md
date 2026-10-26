@@ -79,8 +79,9 @@ slot 1. A superblock found in the other slot is refused.
 Every page pointer (`free_list_head`, `catalog_root`, `log_head_page` and the recycled
 segments) must be 0 or lie between `first_data_page` and `page_count − 1`. A log segment
 starting at `log_head_page` or at a recycled entry must also end within `page_count`, and the
-segments at `log_head_page` and the recycled entries must not overlap one another. A file with
-a log needs `log_sequence_reserved` at least `log_head_sequence`.
+segments at `log_head_page` and the recycled entries must not overlap one another, and
+`catalog_root` and `free_list_head` must not lie in any of them. A file with a log needs
+`log_sequence_reserved` at least `log_head_sequence`.
 `page_count` must be below 2^48 (no volume bits). Opening a file also checks it against the
 file's real length. Reserved fields are
 written as zero and ignored on read, so a later version can use them behind a feature flag.
@@ -431,7 +432,7 @@ page to its end, in any order. A cell stores its key without the page's prefix:
 | Mode | A commit returns after | A power loss can |
 |------|------------------------|------------------|
 | `Full` (default) | its log records are synced; then its pages are written in place | lose nothing that was committed |
-| `Normal` | its log records are written. Its pages are served from the log and written in place only after the next sync: an explicit `sync`, a change of mode, or a commit that would leave 1 MiB of log or more than 1024 pages waiting, which syncs before it returns. | lose the latest commits, never corrupt |
+| `Normal` | its log records are written. Its pages are served from the log and written in place only after the next sync: an explicit `sync`, a change of mode, a checkpoint, or a commit that would leave 1 MiB of log or more than 1024 pages waiting, which syncs before it returns. | lose the latest commits, never corrupt |
 | `Off` | its records and pages are written; nothing is synced except a new file size, as below | corrupt the file (for bulk loads and tests) |
 
 In every mode, a commit that grows the file by more pages than it logs images (pages allocated
