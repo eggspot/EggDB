@@ -18,7 +18,8 @@
 //! - [`Cpus`]: the [`CpuSet`] a process may run on, how many threads can run at once, the
 //!   machine's [`CpuTopology`] (cores, packages, NUMA nodes, shared caches), and pinning
 //!   threads to CPUs; with [`ThreadOptions`] to start named, pinned threads and
-//!   [`CachePadded`] against false sharing.
+//!   [`CachePadded`] against false sharing;
+//! - [`terminal`]: whether a standard stream is a terminal, and whether it takes colours.
 //!
 //! Each trait has an implementation backed by the operating system ([`OsFileSystem`],
 //! [`OsIoQueue`], [`OsNetwork`], [`SystemClock`], [`OsMemory`], [`OsCpus`]) and a
@@ -49,6 +50,7 @@ mod sim_fs;
 mod sim_io;
 mod sim_memory;
 mod sim_net;
+pub mod terminal;
 mod threads;
 mod topology;
 #[cfg(any(test, target_os = "linux", target_os = "android"))]
