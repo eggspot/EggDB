@@ -2637,9 +2637,12 @@ blocks that start with a batch record, so scanning costs at most one pass over t
    a valid log can claim at most that many pages past the end, and a file opened at most
    doubles. Refusing beats clamping, because a clamp could leave the catalog root or the free
    list pointing past the end. A link record's page count must be exactly the end of the
-   segment it names. The one legitimate commit that adds pages without images, pages allocated
-   and never written, syncs its new size before writing its records under `Normal` and `Off`;
-   under `Full` the log's sync covers it.
+   segment it names. A commit that adds more pages than it logs images (pages allocated and
+   never written, or allocated and freed in the same transaction) syncs its new size before
+   writing its records, in every mode. `Full` is no exception: a power loss before its log sync
+   can keep the commit record, which may lie in an existing segment, and lose the size change,
+   and the open would then refuse the file instead of falling back to the previous commit (found
+   by the second review of PR 35).
 
 **Durable syncs on Apple's systems.** The pinned standard library (1.99.1) implements both
 `File::sync_data` and `File::sync_all` with `fcntl(F_FULLFSYNC)` on Apple targets, as its

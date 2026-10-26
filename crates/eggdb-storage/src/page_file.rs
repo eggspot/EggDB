@@ -513,7 +513,7 @@ impl<F: File> PageFile<F> {
             let unlogged_pages = grown_pages.saturating_sub(segment_pages);
             self.file.set_size(wanted)?;
             self.file_bytes = wanted;
-            if self.durability != Durability::Full && unlogged_pages > log.images().len() as u64 {
+            if unlogged_pages > log.images().len() as u64 {
                 self.file.sync_data()?;
             }
         }

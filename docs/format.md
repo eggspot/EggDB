@@ -302,8 +302,14 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
 | Mode | A commit returns after | A power loss can |
 |------|------------------------|------------------|
 | `Full` (default) | its log records are synced; then its pages are written in place | lose nothing that was committed |
-| `Normal` | its log records are written. Its pages are served from the log and written in place only after the next sync: an explicit `sync`, a change of mode, or a commit that would leave 1 MiB of log or more than 1024 pages waiting, which syncs before it returns. A commit that grows the file by more pages than it logs images (pages allocated and never written) syncs the new size first. | lose the latest commits, never corrupt |
-| `Off` | its records and pages are written; nothing is synced | corrupt the file (for bulk loads and tests) |
+| `Normal` | its log records are written. Its pages are served from the log and written in place only after the next sync: an explicit `sync`, a change of mode, or a commit that would leave 1 MiB of log or more than 1024 pages waiting, which syncs before it returns. | lose the latest commits, never corrupt |
+| `Off` | its records and pages are written; nothing is synced except a new file size, as below | corrupt the file (for bulk loads and tests) |
+
+In every mode, a commit that grows the file by more pages than it logs images (pages allocated
+and never written, or allocated and freed again in the same transaction) syncs the file's new
+size before writing its records. Otherwise a power loss could keep the commit record but lose
+the size, and the page count it claims would exceed what the file can prove (see "Torn tail
+or corruption"), so the file would be refused instead of opening at the previous commit.
 
 **Group commit.** A sync covers every commit written before it, and a sync of a log already
 durable up to that point does nothing. With one writer, as in v0.2.0, commits under `Normal`

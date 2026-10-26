@@ -1740,23 +1740,68 @@ mod tests {
     }
 
     #[test]
-    fn pages_allocated_but_never_written_under_normal_survive_a_power_loss() {
-        for seed in 0..16 {
-            let fs = SimFileSystem::new();
-            let mut file =
-                PageFile::create(&fs, Path::new(DB), options(PageSize::DEFAULT)).unwrap();
-            file.commit(|_| {}).unwrap();
-            file.set_durability(Durability::Normal).unwrap();
-            for _ in 0..5 {
-                file.allocate().unwrap();
+    fn pages_allocated_but_never_written_survive_a_power_loss_in_every_mode() {
+        for durability in [Durability::Full, Durability::Normal, Durability::Off] {
+            for fail_at in [None, Some(2), Some(3)] {
+                for seed in 0..16 {
+                    let context = format!("{durability:?}, fail {fail_at:?}, seed {seed}");
+                    let fs = SimFileSystem::new();
+                    let mut file =
+                        PageFile::create(&fs, Path::new(DB), options(PageSize::DEFAULT)).unwrap();
+                    file.commit(|_| {}).unwrap();
+                    file.set_durability(durability).unwrap();
+                    for _ in 0..5 {
+                        file.allocate().unwrap();
+                    }
+                    let failing = fail_at.map(|offset| fs.operation_count() + offset);
+                    if let Some(operation) = failing {
+                        fs.fail_operation(operation);
+                    }
+                    let committed = file.commit(|superblock| superblock.clock_high_water = 1);
+                    assert!(committed.is_ok() || fail_at.is_some(), "{context}");
+                    drop(file);
+                    while failing.is_some_and(|operation| fs.operation_count() <= operation) {
+                        let _ = fs.exists(Path::new(DB));
+                    }
+                    fs.crash(CrashMode::Torn { seed });
+                    let file = PageFile::open(&fs, Path::new(DB), Access::ReadWrite).unwrap();
+                    let count = file.superblock().page_count;
+                    assert!(count == 18 || count == 23, "{context}: {count}");
+                }
             }
-            file.commit(|superblock| superblock.clock_high_water = 1)
-                .unwrap();
-            drop(file);
-            fs.crash(CrashMode::Torn { seed });
-            let file = PageFile::open(&fs, Path::new(DB), Access::ReadWrite).unwrap();
-            let count = file.superblock().page_count;
-            assert!(count == 18 || count == 23, "seed {seed}: {count}");
+        }
+    }
+
+    #[test]
+    fn pages_allocated_and_freed_in_one_transaction_survive_a_power_loss_in_every_mode() {
+        for durability in [Durability::Full, Durability::Normal] {
+            for fail_at in [None, Some(2), Some(3)] {
+                for seed in 0..16 {
+                    let context = format!("{durability:?}, fail {fail_at:?}, seed {seed}");
+                    let fs = SimFileSystem::new();
+                    let mut cache = create(&fs);
+                    let kept = allocate(&cache, 1);
+                    cache.commit(|_| {}).unwrap();
+                    cache.set_durability(durability).unwrap();
+                    let dropped: Vec<u64> = (0..5).map(|_| allocate(&cache, 2)).collect();
+                    for page in dropped {
+                        cache.free(page).unwrap();
+                    }
+                    let failing = fail_at.map(|offset| fs.operation_count() + offset);
+                    if let Some(operation) = failing {
+                        fs.fail_operation(operation);
+                    }
+                    let committed = cache.commit(|superblock| superblock.clock_high_water = 1);
+                    assert!(committed.is_ok() || fail_at.is_some(), "{context}");
+                    drop(cache);
+                    while failing.is_some_and(|operation| fs.operation_count() <= operation) {
+                        let _ = fs.exists(Path::new(DB));
+                    }
+                    fs.crash(CrashMode::Torn { seed });
+                    let cache = open(&fs, Access::ReadWrite).unwrap();
+                    assert_eq!(fill_of(&cache, kept).unwrap(), 1, "{context}");
+                }
+            }
         }
     }
 
