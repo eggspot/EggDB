@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
-pub(crate) const MAX_FRAMES: usize = u32::MAX as usize;
+pub(crate) const MAX_FRAMES: u32 = u32::MAX;
 
 const REFERENCED: u8 = 1;
 const DIRTY: u8 = 2;
@@ -109,7 +109,7 @@ impl<F: File> PageCache<F> {
         let page_size = file.page_size();
         let frames = size.pages(page_size);
         let invalid = StorageError::InvalidCacheSize { pages: frames };
-        if frames == 0 || frames > MAX_FRAMES {
+        if frames == 0 || u32::try_from(frames).is_err() {
             return Err(invalid);
         }
         let table = PageTable::for_frames(frames).ok_or(invalid)?;
