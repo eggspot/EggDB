@@ -828,6 +828,53 @@ struct Progress {
     passed_check: u64,
 }
 
+#[derive(Default)]
+struct Shared {
+    next_case: AtomicU64,
+    stop: AtomicBool,
+    progress: Mutex<Progress>,
+}
+
+fn run_cases(fixtures: &[Fixture], shared: &Shared, worker: usize, seed: u64, cases: u64) {
+    while !shared.stop.load(Ordering::Relaxed) {
+        let case = shared.next_case.fetch_add(1, Ordering::Relaxed);
+        if case >= cases {
+            break;
+        }
+        shared
+            .progress
+            .lock()
+            .unwrap()
+            .running
+            .insert(worker, (case, Instant::now()));
+        let outcome = catch_unwind(AssertUnwindSafe(|| run_case(fixtures, seed, case)));
+        let mut progress = shared.progress.lock().unwrap();
+        progress.running.remove(&worker);
+        match outcome {
+            Ok((verdict, largest, context)) => {
+                let file_bytes = fixtures[case as usize % fixtures.len()].bytes.len();
+                if largest > 2 * file_bytes + ALLOCATION_ALLOWANCE {
+                    progress.failures.push(format!(
+                        "{context}: one allocation of {largest} bytes for a file of {file_bytes}"
+                    ));
+                }
+                progress.opened += u64::from(verdict.opened);
+                progress.passed_check += u64::from(verdict.passed_check);
+            }
+            Err(panic) => {
+                let message = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|text| text.to_string()))
+                    .unwrap_or_default();
+                progress
+                    .failures
+                    .push(format!("seed {seed}, case {case}: panicked: {message}"));
+            }
+        }
+    }
+}
+
 #[test]
 fn hostile_files_never_panic_hang_or_allocate_beyond_the_file() {
     let cases = environment_number("EGGDB_FUZZ_CASES", DEFAULT_CASES);
@@ -853,78 +900,41 @@ fn hostile_files_never_panic_hang_or_allocate_beyond_the_file() {
                 })
         );
     }
+    let fixtures = Arc::new(fixtures);
+    let shared = Arc::new(Shared::default());
     let workers = std::thread::available_parallelism().map_or(2, |count| count.get().min(8));
-    let next_case = AtomicU64::new(0);
-    let stop = AtomicBool::new(false);
-    let progress = Mutex::new(Progress::default());
-    std::thread::scope(|scope| {
-        for worker in 0..workers {
-            let (fixtures, next_case, stop, progress) = (&fixtures, &next_case, &stop, &progress);
-            scope.spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    let case = next_case.fetch_add(1, Ordering::Relaxed);
-                    if case >= cases {
-                        break;
-                    }
-                    progress
-                        .lock()
-                        .unwrap()
-                        .running
-                        .insert(worker, (case, Instant::now()));
-                    let outcome = catch_unwind(AssertUnwindSafe(|| run_case(fixtures, seed, case)));
-                    let mut progress = progress.lock().unwrap();
-                    progress.running.remove(&worker);
-                    match outcome {
-                        Ok((verdict, largest, context)) => {
-                            let file_bytes = fixtures[case as usize % fixtures.len()].bytes.len();
-                            if largest > 2 * file_bytes + ALLOCATION_ALLOWANCE {
-                                progress.failures.push(format!(
-                                    "{context}: one allocation of {largest} bytes for a file of {file_bytes}"
-                                ));
-                            }
-                            progress.opened += u64::from(verdict.opened);
-                            progress.passed_check += u64::from(verdict.passed_check);
-                        }
-                        Err(panic) => {
-                            let message = panic
-                                .downcast_ref::<String>()
-                                .cloned()
-                                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                                .unwrap_or_default();
-                            progress
-                                .failures
-                                .push(format!("seed {seed}, case {case}: panicked: {message}"));
-                        }
-                    }
-                }
-            });
+    let handles: Vec<_> = (0..workers)
+        .map(|worker| {
+            let (fixtures, shared) = (Arc::clone(&fixtures), Arc::clone(&shared));
+            std::thread::spawn(move || run_cases(&fixtures[..], &shared, worker, seed, cases))
+        })
+        .collect();
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let progress = shared.progress.lock().unwrap();
+        if let Some(&(case, started)) = progress
+            .running
+            .values()
+            .find(|(_, started)| started.elapsed() > CASE_TIME_LIMIT)
+        {
+            shared.stop.store(true, Ordering::Relaxed);
+            drop(progress);
+            panic!(
+                "seed {seed}, case {case} has run for {:?}: a hostile file hangs",
+                started.elapsed()
+            );
         }
-        loop {
-            std::thread::sleep(Duration::from_millis(50));
-            let progress = progress.lock().unwrap();
-            if let Some((case, started)) = progress
-                .running
-                .values()
-                .find(|(_, started)| started.elapsed() > CASE_TIME_LIMIT)
-            {
-                stop.store(true, Ordering::Relaxed);
-                panic!(
-                    "seed {seed}, case {case} has run for {:?}: a hostile file hangs",
-                    started.elapsed()
-                );
-            }
-            if next_case.load(Ordering::Relaxed) >= cases && progress.running.is_empty() {
-                break;
-            }
-            if progress.failures.len() > 20 {
-                stop.store(true, Ordering::Relaxed);
-            }
-            if stop.load(Ordering::Relaxed) && progress.running.is_empty() {
-                break;
-            }
+        if progress.failures.len() > 20 {
+            shared.stop.store(true, Ordering::Relaxed);
         }
-    });
-    let progress = progress.into_inner().unwrap();
+        if handles.iter().all(|handle| handle.is_finished()) {
+            break;
+        }
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let progress = std::mem::take(&mut *shared.progress.lock().unwrap());
     eprintln!(
         "{cases} hostile files: {} opened, {} passed the check",
         progress.opened, progress.passed_check
