@@ -3144,3 +3144,123 @@ collections, an in-memory database, values larger than a page (item 11), and the
 publication to crates.io, which needs the owner's account (CLAUDE.md, "Releases"). Also from the
 independent review: no `database.scan` benchmark yet, and `Scan` copies its last key on every
 step; `snapshot_memory_bytes` is not range-checked; the comparison against SQLite is item 17.
+
+## D88 Large values on chains of overflow pages, a 1 GiB value limit, and a check that accounts for every page — Decided by research (build loop, 2026-10-26); completes v0.2.0 item 11, refines D77, D81, D82, D84 and D87
+A value too long to sit in a B+tree leaf beside its key, longer together with it than
+`3 × page_size / 16 − 18` bytes (D82's entry limit, now the spill threshold), is stored whole on
+a chain of overflow pages (type 4, layout 1), and its leaf cell holds the key and a 16-byte
+reference: the value's length and the chain's first page. Keys stay in the leaves, with the
+same limit as before. [format.md](format.md) "Overflow pages" specifies the bytes.
+
+**Chains.** Each overflow page carries the next page, the chain's first page, its index in the
+chain and the number of the value's bytes it holds; the rest of its last page is zero. A reader
+walks exactly as many pages as the length implies, so a chain cut short, lengthened or bent
+into a cycle fails the `first`, `index`, `bytes_here` or `next` rules instead of looping, with
+no set of visited pages, and the per-page byte count catches a reference whose length is off
+by less than a page. Chains are written once: a put that replaces a large value, and a delete,
+free the old chain (after reading it whole and validating every page, so a crafted chain can
+never make a delete free a live page), and a new value gets a new chain. Freed pages go
+through the transaction system as tree pages do: to the free list at the commit, reused only
+after it (D78), kept as before-images while a reader may need them (D86), all dropped by a
+rollback.
+
+**Reads.** `get` copies the value whole; `get_with` lends an inline value where it lies and
+copies a large one into a buffer first. A cursor copies one leaf's entries at a time as before,
+but a large value ends the batch: the next batch looks the leaf up again from the root just past
+that key, so the cursor's buffer holds at most one leaf of small entries and one large value,
+and a buffer grown past a megabyte is released when its batch is done. A streaming read of one
+value, piece by piece, is a later item.
+
+**Hostile files (D9).** Every chain page is read through the cache, so it must pass its
+checksum and lie inside the file, outside the free list and the log. Before reserving memory
+for a value, a reader checks the length against 1 GiB and against the pages the file holds
+(the file's real length was checked at open), then reserves fallibly, so a crafted length
+fails as damage, never as an allocation the file could not back. A deterministic mutation test
+(2,400 cases, about 10 s of a debug build) flips bits, rewrites every chain field and the
+reference's fields with checksums fixed, swaps chain pages, changes page types and layouts,
+flags inline values as references and truncates the file; every case must end in a clean
+error or a passing check, with no panic, no hang and no out-of-memory error, a length past the
+file must be refused before any allocation, and a passing check must mean every get and scan
+works.
+
+**Check.** `BTree::check` reads every chain whole and remembers every page it reaches, tree
+and overflow pages alike, in a set of one bit per page of the file, so a page reached twice,
+by two values or by a value and the tree, is refused. The new `Store::check` checks the last
+commit's tree that way and then accounts for every page of the file: each data page must be
+exactly one of reachable, free, a free-list page or a log page (live or recycled). A page with
+two uses fails with `PageUsedTwice`; a page with none is counted as leaked, since it does no harm
+but is never reused. It reads the committed free list (the free pages, plus those an open
+writer has taken from it), so it runs beside an open write transaction. `Database::check`
+uses it, and `CheckReport` gains `overflow_values`, `overflow_pages`, `free_pages`,
+`log_pages` and `leaked_pages`. The crash sweep now requires no leaked page in every recovered
+state.
+
+**Decided by research** (a research subagent, recorded in PR 43):
+1. *A linked chain, not a directory of pages.* Chains are written once, so they never hold
+   stale versions; a directory page would cost an extra page for every value that just spills.
+   LMDB-style contiguous runs need extent allocation the free list doesn't have. Freeing a chain
+   reads it, as SQLite does; a directory would avoid that read and allow prefetching, and is
+   left until a benchmark shows the read matters.
+2. *The whole value goes out, with no prefix kept in the leaf.* LMDB and redb do the same;
+   SQLite keeps a local prefix to fill overflow pages fully. The cost is real for values just
+   over the threshold: with 4 KiB pages a value of 751 bytes to 4 KiB takes a whole overflow
+   page and one more page read. A kept prefix is a later kind of reference, behind the
+   reference's length bits and a feature flag. A reader accepts any length from 1 to the limit,
+   not only lengths above the threshold, so a later release can change the threshold.
+3. *1 GiB per value* (`BTree::MAX_VALUE_BYTES`, `Database::max_value_bytes`), stored as a `u64`
+   so the limit can rise later behind a feature flag. It matches SQLite's default (10^9 bytes)
+   and PostgreSQL's field limit; Redis allows 512 MB. A value is read and written whole, so it
+   takes its size in memory while used, twice that as an owned scan item.
+4. *A value the cache can't hold is refused up front.* No-steal (D79) keeps every page of a
+   write transaction in the cache, so a value whose overflow pages and leaf need more pages
+   than the cache has frames fails with `ValueExceedsCache` (`ErrorKind::TooLarge`) before
+   anything changes, and the transaction stays open; with the default 16 MiB cache that is a
+   value above about 15.8 MiB. A transaction that runs out of frames later, after other
+   changes, still fails with `CacheFull` and rolls back (D86). The static check is
+   deterministic; one against the cache's current dirty pages was rejected as racy in spirit.
+5. *No feature flag and no version bump.* No release before v0.2.0 wrote a database file and
+   format.md lets the format change until v0.2.0 ships, as D81 used for the log. From the
+   v0.2.0 sample file on, a change to this layout needs a new layout behind a flag.
+6. *Names.* `EntryTooLarge` is replaced by `ValueTooLarge` and `ValueExceedsCache`;
+   `BTree::max_entry_bytes` becomes `max_inline_entry_bytes`, since it no longer limits what a
+   user can store; `Database::max_entry_bytes` (never released) becomes `max_value_bytes`, and
+   the inline threshold is not part of the embedded API.
+7. *Whole-file accounting now*, not with the item 12 fuzzer or the item 13 CLI: format.md
+   already promised it, overflow pages add new ways to leak or share a page, and the shared-chain
+   check needs the same set of pages. It costs one bit per page: 32 KiB per GiB of file.
+
+**Log segments for large commits** (found by this item's test that rewrites 100 KiB values: the
+file grew by a log segment every few commits, forever). A commit's flush that runs past the
+last unused recycled segment appends a segment at the end of the file, and the checkpoint after
+it gives one of the older segments to the free list, so the file grew by a segment while free
+pages piled up. A commit now also checkpoints after it when a flush as long as its own would
+not fit in the rest of the current segment and the unused recycled ones. That changes only when
+checkpoints run, not the format or recovery, and leaves the gated counts of one-page commits
+unchanged: 100 KiB values rewritten 80 times keep the file at 263 pages. A commit whose flush
+is longer than the seven recycled segments (about 448 KiB of log with the default segments)
+still appends segments at the end of the file every time, and they pile up in the free list;
+taking log segments from free space, or writing a commit's newly allocated pages in place
+without logging them, is left for later (issue #44).
+
+**Cost** (D80, this Mac; Linux lines are the median of CI runs):
+- `large_value.put`, a one-put transaction of a 100 KiB value through `Database` under
+  `Durability::Off`: about 52 µs, 9.8 times writing the value twice with two `pwrite`s, the
+  floor of logging it and writing it in place. The rest is computing CRC-32C over every page
+  twice (page checksum and log record), copying the value into 26 frames and the log buffer, a
+  write per page in place, and reading the old chain to free it. Gated counts on the simulator
+  under `Full`: 3,299 file operations and 166 syncs per 100 puts, 26 pages per value, and a
+  file of 263 pages and no leaked page after 500 puts rewriting four keys.
+- `large_value.get`: about 3.1 µs, 2.4 times copying 100 KiB into a new `Vec`, with exactly one
+  allocation (the value).
+- Existing hot paths: `btree.get` and `btree.put` unchanged; `btree.delete`, `btree.scan`,
+  `btree.scan_reverse` and `transaction.read` measured 3 to 5% slower than main on this Mac in
+  alternating runs, within the run-to-run spread (main's own `btree.scan` ranged 4.96 to 5.29);
+  the large-value paths of `get` and the cursor are kept out of line.
+- The crash sweep (CI) takes about 29 s of a debug build, up from about 20 s, and the
+  exhaustive run (`EGGDB_CRASH_SWEEP=1`) gives 27,048 crash points and 43,992 crashes during
+  recovery in 195 s.
+
+**Left for later:** a streaming read of one value; reading a large value's pages without
+setting the clock's reference bit, so one scan doesn't flush the cache; coalescing consecutive
+page writes; an inline prefix for values just over the threshold; log segments from free space
+for commits longer than the recycled segments; shrinking the file when its last pages are free.

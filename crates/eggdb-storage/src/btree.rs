@@ -60,7 +60,6 @@ pub struct TreeReport {
     pub overflow_pages: u64,
 }
 
-/// A value found by a lookup: borrowed from its leaf, or assembled from its overflow pages.
 pub(crate) enum FoundValue<'a> {
     Borrowed(&'a [u8]),
     Assembled(Vec<u8>),
