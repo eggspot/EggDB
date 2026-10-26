@@ -2887,3 +2887,40 @@ are no longer readable or writable as child pointers, which a short value could 
 panic, and a leaf split allocates its right page before overwriting the left one. After a
 commit whose automatic checkpoint failed, the page cache drops its pages, so every later read
 is refused with `NeedsReopen` as after a failed commit.
+
+## D85 Crash tests across the whole storage stack: a sweep that fails every I/O operation of a B+tree workload — Decided (build loop, 2026-10-26); completes v0.2.0 item 8, refines D9
+The per-layer crash tests (page file, log, checkpoints, page cache, B+tree) each prove one layer.
+v0.2.0's item 8 (D76) adds a sweep over all of them together, a test-only harness in
+`crates/eggdb-storage/src/crash_sweep_tests.rs`, described in [testing.md](testing.md):
+
+- **The workload** is seeded and deterministic, and is generated before it runs, with the model
+  (an ordered map) after each commit: puts with overwrites, large values and long keys, a growing
+  phase that splits the root and a shrinking phase that merges pages and collapses it, rolled-back
+  transactions, explicit checkpoints and syncs, and automatic checkpoints every 128 KiB of log, so
+  the log wraps through its recycled segments and frees extra ones. A 24-frame cache makes pages
+  leave memory and come back from the file. Each commit stamps its number in `clock_high_water`,
+  so the recovered commit is known exactly.
+- **Each I/O operation is failed in turn** (`fail_operation`), and the run ends with a reopen and no
+  power loss, or a power loss that drops unsynced writes or tears them. The reopened tree must
+  pass `BTree::check` and scan, forward and in reverse, to exactly one commit's contents.
+- **What it asserts is what format.md promises, and nothing weaker:** at most the last commit
+  attempted; at least every acknowledged commit under `Full`, and in every mode when there was no
+  power loss; under `Normal`, every commit acknowledged before the last successful sync; under
+  `Off` after a power loss nothing beyond no panic, since the format promises nothing there. A
+  failed commit, checkpoint or sync leaves the handle refusing commits with `NeedsReopen` and
+  syncs with an error (D59). Every injected fault must come back as an error.
+- **Double crashes and continuing.** From a sample of crash points, every operation of the
+  following recovery is failed in turn and followed by a torn power loss, and the next open must
+  recover the same commit; and more transactions, a checkpoint and a commit run on the recovered
+  file before a last power loss, which must keep that commit.
+- **Size.** CI gives every operation one of the four endings in rotation (about 15 s of a debug
+  build for 2,478 crash points and 4,331 crashes during recovery); `EGGDB_CRASH_SWEEP=1` gives every
+  operation all six endings (torn seeds 0 to 3): 14,868 crash points and 34,134 crashes during
+  recovery, about 100 s of a debug build on an Apple M-series Mac. An environment variable rather
+  than a feature keeps the exhaustive run a local command with no build change.
+
+**What it does not prove:** `Off` after a power loss, damage to bytes after they were synced
+(format.md's limits, issue #39), several writers and snapshot readers (item 9), and real disks:
+the simulator tears unsynced writes into 512-byte pieces, which is not every behavior of real
+hardware. **Result:** the sweep found no lost acknowledged commit, no mix of two commits, no
+failed check, no panic and no swallowed error in the stack as merged through D84.
