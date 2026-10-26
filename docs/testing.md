@@ -126,7 +126,7 @@ checkpoints and reopens. Errors are expected; the test fails on a panic, on a ca
 than a minute, on a scan returning more entries than the file can hold, on one allocation larger
 than twice the file plus 16 MiB (a global allocator records the largest per thread), and on a
 file that passes `check` but fails a read, or fails `check` or a reopen after a commit. Cases run
-on every core, and a failure names its seed and case. CI runs 1,600 cases (about 13 s of a debug
+on every core, and a failure names its seed and case. CI runs 800 cases (about 7 s of a debug
 build); `EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run longer campaigns, and the counts of the last
 one are in D89.
 

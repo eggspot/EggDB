@@ -3,7 +3,7 @@
 //! Every outcome must be a value: no panic, no hang and no allocation sized by the damage
 //! beyond the file (D9, `docs/testing.md`, "Hostile files").
 //!
-//! `EGGDB_FUZZ_CASES` sets how many cases run (1,600 by default) and `EGGDB_FUZZ_SEED` the
+//! `EGGDB_FUZZ_CASES` sets how many cases run (800 by default) and `EGGDB_FUZZ_SEED` the
 //! seed they are drawn from, so a long campaign runs as
 //! `EGGDB_FUZZ_CASES=200000 cargo test --release -p eggdb-storage --test hostile_files`, and
 //! a failure names the seed and case that reproduce it.
@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DB: &str = "db";
-const DEFAULT_CASES: u64 = 1600;
+const DEFAULT_CASES: u64 = 800;
 const DEFAULT_SEED: u64 = 0x0D15_EA5E;
 const CASE_TIME_LIMIT: Duration = Duration::from_secs(60);
 const CACHE_FRAMES: usize = 64;

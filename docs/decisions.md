@@ -3325,7 +3325,8 @@ Errors are the expected outcome. A panic, a case over a minute, a scan longer th
 hold, a single allocation over twice the file plus 16 MiB, or a file that passes `check` and then
 fails a read, a commit's check or a reopen, fails the test with the seed and case that reproduce
 it. It runs as an integration test so it can install its own global allocator, which records the
-largest allocation per thread; cases run on every core. CI runs 1,600 cases;
+largest allocation per thread; cases run on every core. CI runs 800 cases (about 27 s on a
+GitHub runner);
 `EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run campaigns. The last ones, in release builds on this
 Mac: 150,000 cases from seed 7 in 171 s (112,901 files opened, 60,825 passed the check) and
 40,000 from the default seed in 47 s, with no failure.
