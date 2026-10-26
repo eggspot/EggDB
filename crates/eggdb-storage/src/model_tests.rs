@@ -31,6 +31,7 @@ struct Counts {
     commits: u64,
     rollbacks: u64,
     failed_transactions: u64,
+    reads_refused_by_a_full_cache: u64,
     refused_changes: u64,
     overflow_puts: u64,
     reopens: u64,
@@ -226,26 +227,35 @@ impl ModelRun {
             }
             if self.rng.below(4) == 0 {
                 let key = self.key(pending);
-                let found = write
-                    .get(&tree, &key)
-                    .unwrap_or_else(|error| panic!("{context}: get in a write: {error}"));
-                assert_eq!(
-                    found.as_ref(),
-                    pending.get(&key),
-                    "{context}: get in a write"
-                );
+                match write.get(&tree, &key) {
+                    Ok(found) => {
+                        assert_eq!(
+                            found.as_ref(),
+                            pending.get(&key),
+                            "{context}: get in a write"
+                        )
+                    }
+                    Err(StorageError::CacheFull { .. }) => {
+                        self.counts.reads_refused_by_a_full_cache += 1
+                    }
+                    Err(error) => panic!("{context}: get in a write: {error}"),
+                }
             }
         }
         if self.rng.below(6) == 0 {
             let (start, end) = self.range(pending);
             let order = self.order();
             let mut cursor = tree.scan(as_ref(&start), as_ref(&end), order);
-            let scanned = drain(|cursor| write.next(cursor), &mut cursor)
-                .unwrap_or_else(|error| panic!("{context}: scan in a write: {error}"));
-            assert!(
-                scanned == expected_range(pending, &start, &end, order),
-                "{context}: scan in a write of {start:?}..{end:?} {order:?}"
-            );
+            match drain(|cursor| write.next(cursor), &mut cursor) {
+                Ok(scanned) => assert!(
+                    scanned == expected_range(pending, &start, &end, order),
+                    "{context}: scan in a write of {start:?}..{end:?} {order:?}"
+                ),
+                Err(StorageError::CacheFull { .. }) => {
+                    self.counts.reads_refused_by_a_full_cache += 1
+                }
+                Err(error) => panic!("{context}: scan in a write: {error}"),
+            }
         }
         match self.rng.below(10) {
             0 => {
@@ -802,6 +812,7 @@ fn run_seeds(seeds: std::ops::Range<u64>, steps: usize) -> Counts {
         total.commits += counts.commits;
         total.rollbacks += counts.rollbacks;
         total.failed_transactions += counts.failed_transactions;
+        total.reads_refused_by_a_full_cache += counts.reads_refused_by_a_full_cache;
         total.refused_changes += counts.refused_changes;
         total.overflow_puts += counts.overflow_puts;
         total.reopens += counts.reopens;
