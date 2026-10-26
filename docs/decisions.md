@@ -3326,7 +3326,9 @@ hold, a single allocation over twice the file plus 16 MiB, or a file that passes
 fails a read, a commit's check or a reopen, fails the test with the seed and case that reproduce
 it. It runs as an integration test so it can install its own global allocator, which records the
 largest allocation per thread; cases run on every core. CI runs 1,600 cases;
-`EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run campaigns. FUZZ_LONG_RUN
+`EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run campaigns. The last ones, in release builds on this
+Mac: 150,000 cases from seed 7 in 171 s (112,901 files opened, 60,825 passed the check) and
+40,000 from the default seed in 47 s, with no failure.
 
 What they found: nothing in the engine. The earlier layer-by-layer mutation tests (D82, D84,
 D88) had already made every decoder return errors; the failures while building the fuzzer were
