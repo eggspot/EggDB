@@ -762,7 +762,10 @@ impl<F: File> PageFile<F> {
                 .insert(segment.first_page, segment.first_page + segment_pages);
         }
         for image in &scan.images {
-            if image.page_id >= state.page_count || self.is_log_page(image.page_id) {
+            if image.page_id < state.page_size.first_data_page()
+                || image.page_id >= state.page_count
+                || self.is_log_page(image.page_id)
+            {
                 return Err(self.corrupt_log_at(image.file_offset));
             }
             self.unwritten.insert(image.page_id, image.file_offset);
