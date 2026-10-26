@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
 
-struct TempDirectory {
+pub(super) struct TempDirectory {
     path: PathBuf,
 }
 
 impl TempDirectory {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let number = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "eggdb-cli-unit-{name}-{}-{number}",
@@ -20,7 +20,7 @@ impl TempDirectory {
         Self { path }
     }
 
-    fn file(&self, name: &str) -> String {
+    pub(super) fn file(&self, name: &str) -> String {
         self.path.join(name).to_string_lossy().into_owned()
     }
 }
@@ -31,17 +31,17 @@ impl Drop for TempDirectory {
     }
 }
 
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
     }
 
@@ -50,13 +50,13 @@ impl Rng {
     }
 }
 
-struct Ran {
-    exit: u8,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(super) struct Ran {
+    pub(super) exit: u8,
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
 }
 
-fn run_with(args: &[&str], stdin: &[u8], terminal: Terminal) -> Ran {
+pub(super) fn run_with(args: &[&str], stdin: &[u8], terminal: Terminal) -> Ran {
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
     let mut stdin = stdin;
     let mut stdout = Vec::new();
@@ -193,6 +193,7 @@ fn random_commands_against_real_files_never_panic_and_exit_with_a_designed_code(
         let terminal = Terminal {
             stdin: rng.below(2) == 0,
             stdout: rng.below(2) == 0,
+            stderr: rng.below(2) == 0,
             stdout_color: rng.below(2) == 0,
             stderr_color: rng.below(2) == 0,
         };
@@ -223,6 +224,7 @@ fn colour_marks_keys_and_messages_but_never_the_data() {
     let colour = Terminal {
         stdin: true,
         stdout: true,
+        stderr: true,
         stdout_color: true,
         stderr_color: true,
     };

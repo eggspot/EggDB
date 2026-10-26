@@ -1,5 +1,6 @@
-//! The `eggdb` command: create, read, write, scan and check an EggDB database file from a shell
-//! or a script. `eggdb help` lists the commands; the guide is `docs/cli.md` in the repository.
+//! The `eggdb` command: create, read, write, scan, check, export and import an EggDB database
+//! file from a shell or a script. `eggdb help` lists the commands; the guide is `docs/cli.md` in
+//! the repository.
 
 mod cli;
 
@@ -11,6 +12,7 @@ fn main() -> ExitCode {
     let terminal = cli::Terminal {
         stdin: is_terminal(StandardStream::Input),
         stdout: is_terminal(StandardStream::Output),
+        stderr: is_terminal(StandardStream::Error),
         stdout_color: wants_color(StandardStream::Output),
         stderr_color: wants_color(StandardStream::Error),
     };

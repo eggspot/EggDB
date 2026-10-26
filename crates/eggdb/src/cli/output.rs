@@ -71,6 +71,11 @@ impl<'a> Output<'a> {
         self.sink.write_all(bytes).map_err(output_failure)
     }
 
+    pub(crate) fn sink(&mut self) -> Result<&mut dyn Write, Failure> {
+        self.write_buffer()?;
+        Ok(&mut *self.sink)
+    }
+
     pub(crate) fn finish(&mut self) -> Result<(), Failure> {
         self.write_buffer()?;
         self.sink.flush().map_err(output_failure)

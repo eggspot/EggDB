@@ -1,6 +1,6 @@
 //! The `eggdb` command, run as a real process: every command, every exit code, the formats a
-//! pipe gets, byte arguments, large values, a closed pipe, damaged files, the help text, and
-//! random arguments. A busy file has a test binary of its own, `cli_busy.rs`.
+//! pipe gets, byte arguments, large values, export and import, a closed pipe, damaged files, the
+//! help text, and random arguments. A busy file has a test binary of its own, `cli_busy.rs`.
 //!
 //! A child process started while this process has a database file open could hold that file's
 //! lock for a moment, so starting a child and opening a database take turns.
@@ -133,6 +133,8 @@ Commands:
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
   ui     <file>                 browse and edit keys full screen in the terminal
+  export <file> [out]           write every entry to a JSON-lines file, or to stdout
+  import <file> [in]            load an export, from a file or stdin; see --create
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -186,7 +188,7 @@ fn help_text_matches_the_design() {
         assert_eq!(stdout(&output), SCAN_HELP, "{args:?}");
     }
     for command in [
-        "create", "put", "get", "del", "delete", "check", "stats", "ui",
+        "create", "put", "get", "del", "delete", "check", "stats", "ui", "export", "import",
     ] {
         let output = dir.eggdb(&["help", command]);
         assert_exit(&output, 0);
@@ -465,7 +467,7 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);
@@ -473,7 +475,7 @@ fn every_exit_code_and_its_message() {
         stderr(&option),
         "eggdb: unknown option '--reverse' for eggdb get\n  usage: eggdb get <file> <key>\n  try: eggdb help get\n"
     );
-    for reserved in ["export", "import", "shell", "backup", "compact"] {
+    for reserved in ["shell", "backup", "compact"] {
         let output = dir.eggdb(&[reserved, "app.db"]);
         assert_exit(&output, 2);
         assert_eq!(
@@ -690,6 +692,12 @@ fn random_arguments_never_panic_the_binary() {
         "help",
         "version",
         "ui",
+        "export",
+        "import",
+        "out.jsonl",
+        "--on-conflict",
+        "skip",
+        "--dry-run",
         "app.db",
         "new.db",
         "missing/x.db",
@@ -750,4 +758,48 @@ fn random_arguments_never_panic_the_binary() {
             stderr(&output)
         );
     }
+}
+
+#[test]
+fn export_and_import_move_every_kind_of_entry_to_a_fresh_file() {
+    let dir = TempDirectory::new("export-import");
+    assert_exit(&dir.eggdb(&["create", "source.db"]), 0);
+    let large: Vec<u8> = (0..6u32 << 20)
+        .map(|n| (n.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    std::fs::write(dir.path().join("large.bin"), &large).unwrap();
+    for args in [
+        &["put", "source.db", "user:1", "Ada Lovelace"][..],
+        &["put", "source.db", "0x00ff10", "0xdeadbeef"],
+        &["put", "source.db", "", "the empty key"],
+        &["put", "source.db", "empty value", ""],
+        &["put", "source.db", "large", "@large.bin"],
+    ] {
+        assert_exit(&dir.eggdb(args), 0);
+    }
+    assert_exit(&dir.eggdb(&["export", "source.db", "backup.jsonl"]), 0);
+    assert_exit(
+        &dir.eggdb(&["import", "--create", "copy.db", "backup.jsonl"]),
+        0,
+    );
+    let exported = dir.eggdb(&["export", "source.db"]);
+    assert_exit(&exported, 0);
+    let piped = dir.eggdb_with_stdin(&["import", "--create", "piped.db", "-"], &exported.stdout);
+    assert_exit(&piped, 0);
+    let source = dir.eggdb(&["scan", "source.db", "-F", "hex"]);
+    assert_exit(&source, 0);
+    assert_eq!(
+        source.stdout.iter().filter(|byte| **byte == b'\n').count(),
+        5
+    );
+    for copy in ["copy.db", "piped.db"] {
+        let scanned = dir.eggdb(&["scan", copy, "-F", "hex"]);
+        assert_exit(&scanned, 0);
+        assert_eq!(scanned.stdout, source.stdout, "{copy}");
+        assert_exit(&dir.eggdb(&["check", copy]), 0);
+    }
+    assert_exit(&dir.eggdb(&["check", "source.db"]), 0);
+    let large_copy = dir.eggdb(&["get", "copy.db", "large"]);
+    assert_eq!(large_copy.stdout, large);
+    assert!(!dir.path().join("copy.db.importing").exists());
 }

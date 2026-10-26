@@ -4,7 +4,7 @@ use super::render;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-const RESERVED_COMMANDS: [&str; 5] = ["export", "import", "shell", "backup", "compact"];
+const RESERVED_COMMANDS: [&str; 3] = ["shell", "backup", "compact"];
 const SMALLEST_PAGE_SIZE: usize = 4096;
 const LARGEST_PAGE_SIZE: usize = 65536;
 
@@ -18,6 +18,8 @@ pub(crate) enum CommandName {
     Check,
     Stats,
     Ui,
+    Export,
+    Import,
 }
 
 impl CommandName {
@@ -31,6 +33,8 @@ impl CommandName {
             b"check" => Self::Check,
             b"stats" => Self::Stats,
             b"ui" => Self::Ui,
+            b"export" => Self::Export,
+            b"import" => Self::Import,
             _ => return None,
         })
     }
@@ -45,6 +49,8 @@ impl CommandName {
             Self::Check => "check",
             Self::Stats => "stats",
             Self::Ui => "ui",
+            Self::Export => "export",
+            Self::Import => "import",
         }
     }
 
@@ -54,8 +60,9 @@ impl CommandName {
             OptionName::Color => true,
             OptionName::Format => self != Self::Ui,
             OptionName::Mono | OptionName::Ascii | OptionName::ReadOnly => self == Self::Ui,
-            OptionName::PageSize => self == Self::Create,
-            OptionName::Create => self == Self::Put,
+            OptionName::PageSize => matches!(self, Self::Create | Self::Import),
+            OptionName::Create => matches!(self, Self::Put | Self::Import),
+            OptionName::OnConflict | OptionName::DryRun => self == Self::Import,
             OptionName::Prefix
             | OptionName::From
             | OptionName::To
@@ -93,6 +100,20 @@ impl Format {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ConflictPolicy {
+    #[default]
+    Error,
+    Overwrite,
+    Skip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExportFile {
+    Standard,
+    Path(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ColorChoice {
     #[default]
     Auto,
@@ -118,6 +139,8 @@ enum OptionName {
     Mono,
     Ascii,
     ReadOnly,
+    OnConflict,
+    DryRun,
 }
 
 impl OptionName {
@@ -139,6 +162,8 @@ impl OptionName {
             b"mono" => Self::Mono,
             b"ascii" => Self::Ascii,
             b"read-only" => Self::ReadOnly,
+            b"on-conflict" => Self::OnConflict,
+            b"dry-run" => Self::DryRun,
             _ => return None,
         })
     }
@@ -167,6 +192,7 @@ impl OptionName {
                 | Self::Mono
                 | Self::Ascii
                 | Self::ReadOnly
+                | Self::DryRun
         )
     }
 }
@@ -194,6 +220,9 @@ pub(crate) struct Request {
     pub(crate) mono: bool,
     pub(crate) ascii: bool,
     pub(crate) read_only: bool,
+    pub(crate) export_file: Option<ExportFile>,
+    pub(crate) on_conflict: ConflictPolicy,
+    pub(crate) dry_run: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -252,7 +281,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, ui, help, version.",
+            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version.",
             None,
         ));
     };
@@ -375,6 +404,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         mono: false,
         ascii: false,
         read_only: false,
+        export_file: None,
+        on_conflict: ConflictPolicy::Error,
+        dry_run: false,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -414,6 +446,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Mono => request.mono = true,
             OptionName::Ascii => request.ascii = true,
             OptionName::ReadOnly => request.read_only = true,
+            OptionName::OnConflict => {
+                request.on_conflict = parse_on_conflict(value).map_err(usage)?
+            }
+            OptionName::DryRun => request.dry_run = true,
             OptionName::Help | OptionName::Version => {}
         }
     }
@@ -429,6 +465,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Check
         | CommandName::Stats
         | CommandName::Ui => (1, 1),
+        CommandName::Export | CommandName::Import => (1, 2),
         CommandName::Get | CommandName::Del => (2, 2),
         CommandName::Put => (2, 3),
     };
@@ -439,12 +476,24 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         return Err(too_many_arguments(&arguments[most..], Some(command)));
     }
     request.file = PathBuf::from(arguments[0]);
+    if matches!(command, CommandName::Export | CommandName::Import) {
+        request.export_file = arguments.get(1).map(|argument| export_file(argument));
+        return Ok(request);
+    }
     let byte_argument = |argument: &&OsStr| {
         ByteArgument::parse(argument).map_err(|message| Failure::usage(message, Some(command)))
     };
     request.key = arguments.get(1).map(byte_argument).transpose()?;
     request.value = arguments.get(2).map(byte_argument).transpose()?;
     Ok(request)
+}
+
+fn export_file(argument: &OsStr) -> ExportFile {
+    if argument.as_encoded_bytes() == b"-" {
+        ExportFile::Standard
+    } else {
+        ExportFile::Path(PathBuf::from(argument))
+    }
 }
 
 fn missing_arguments(command: CommandName, given: usize) -> String {
@@ -495,7 +544,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version.",
             render::text(name)
         ),
         None,
@@ -517,6 +566,18 @@ fn parse_format(value: &OsStr) -> Result<Format, String> {
         b"raw" => Ok(Format::Raw),
         _ => Err(format!(
             "--format must be text, json, hex or raw, not '{}'",
+            shown(value)
+        )),
+    }
+}
+
+fn parse_on_conflict(value: &OsStr) -> Result<ConflictPolicy, String> {
+    match value.as_encoded_bytes() {
+        b"error" => Ok(ConflictPolicy::Error),
+        b"overwrite" => Ok(ConflictPolicy::Overwrite),
+        b"skip" => Ok(ConflictPolicy::Skip),
+        _ => Err(format!(
+            "--on-conflict must be error, overwrite or skip, not '{}'",
             shown(value)
         )),
     }
@@ -692,7 +753,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -735,7 +796,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -748,7 +809,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),
@@ -758,7 +819,7 @@ mod tests {
 
     #[test]
     fn reserved_commands_point_to_the_roadmap() {
-        for name in ["export", "import", "shell", "backup", "compact"] {
+        for name in ["shell", "backup", "compact"] {
             assert_eq!(
                 usage_message(&format!("{name} app.db")),
                 format!("eggdb {name} is not in this release yet; see docs/roadmap.md")
