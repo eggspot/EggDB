@@ -3177,10 +3177,14 @@ the freed frames also make room for the new chain, so a value that fits the cach
 as large. A chain whose pages this transaction wrote is freed only by the key that wrote it (the
 cache remembers each new chain's first page and key until the commit or rollback), so a crafted
 reference naming another key's new chain is refused. A chain that passes its rules is well formed
-for its reference; it does not prove that no other live reference names it. Two committed
-references sharing a chain, or one naming freed pages, are found only by `check`. A damaged or
-crafted chain therefore makes the put or delete of its key fail, with the transaction rolled
-back, rather than free pages still in use.
+for its reference; it does not prove that no other live reference names it. A reference to a
+chain that breaks the rules (a wrong type, `first`, `index` or length), or to a chain another key
+wrote in this transaction, therefore makes the put or delete of its key fail, with the
+transaction rolled back. A shared reference, or one naming freed pages, left by earlier commits
+passes them: deleting or replacing one key frees pages the other still names, and a later value
+of the same length can be read through the stale reference until `check` runs, which alone finds
+it. Only a damaged or crafted file holds such a reference; an ordinary workload cannot create
+one.
 
 **Hostile files (D9).** Every chain page is read through the cache, so it must pass its
 checksum and lie inside the file, outside the free list and the log. Before reserving memory

@@ -510,9 +510,13 @@ After the 16-byte page header, each overflow page holds:
   refuses a page reached twice.
 - **Freeing.** A put that replaces a large value, and a delete, read and check the old chain
   whole before freeing any of it, and before writing a new chain. A chain whose pages the same
-  transaction wrote for another key is refused too. So a damaged or crafted reference makes the
-  put or delete of that key fail, with the transaction rolled back, instead of freeing pages
-  still in use.
+  transaction wrote for another key is refused too. So a reference to a chain that breaks these
+  rules (a wrong type, `first`, `index` or length), or to a chain another key wrote in the same
+  transaction, makes the put or delete of that key fail, with the transaction rolled back. A
+  shared reference, or one naming freed pages, left by earlier commits passes these rules:
+  deleting or replacing one key frees pages the other still names, and a later value of the same
+  length can then be read through the stale reference until `eggdb check` finds it. Only a
+  damaged or crafted file holds such a reference; an ordinary workload cannot create one.
 - **Compatibility.** Overflow pages and the reference's `0x8010` length field ship in format
   version 1 with no feature flag: no release before v0.2.0 wrote a database file (D88). A later
   kind of reference, such as one keeping part of the value in the leaf, uses another length in
