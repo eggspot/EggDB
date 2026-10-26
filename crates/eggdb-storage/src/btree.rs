@@ -249,7 +249,8 @@ impl BTree {
     }
 
     /// A cursor over the entries with keys from `start` to `end`, in `order`. It reads the
-    /// tree as [`Cursor::next`] is called, and holds no page between calls.
+    /// tree as [`Cursor::next`] is called, and holds no page between calls. A range with
+    /// `start` above `end` holds no entries.
     pub fn scan(&self, start: Bound<&[u8]>, end: Bound<&[u8]>, order: ScanOrder) -> Cursor {
         Cursor::new(
             self.root,
@@ -259,7 +260,8 @@ impl BTree {
         )
     }
 
-    /// A cursor over the entries whose keys start with `prefix`, in `order`.
+    /// A cursor over the entries whose keys start with `prefix`, in `order`. The empty prefix
+    /// scans the whole tree.
     pub fn scan_prefix(&self, prefix: &[u8], order: ScanOrder) -> Cursor {
         Cursor::new(
             self.root,
@@ -301,7 +303,7 @@ struct Step {
     child: usize,
 }
 
-const UNDER_FILLED_FRACTION: usize = 4;
+const UNDER_FILLED_DIVISOR: usize = 4;
 
 fn keys_after_prefix(prefix: &[u8]) -> Bound<Vec<u8>> {
     let Some(last) = prefix.iter().rposition(|&byte| byte != 0xFF) else {
@@ -317,7 +319,7 @@ fn rebalance<F: File>(
     parents: &[Step],
     changed: u64,
 ) -> Result<(), StorageError> {
-    let under_filled = cache.page_size().bytes() / UNDER_FILLED_FRACTION;
+    let under_filled = cache.page_size().bytes() / UNDER_FILLED_DIVISOR;
     let mut page_id = changed;
     for &step in parents.iter().rev() {
         let mut child = step.child;

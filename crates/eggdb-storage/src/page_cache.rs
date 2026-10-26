@@ -175,6 +175,7 @@ impl<F: File> PageCache<F> {
     /// Pins data page `page_id` for reading, reading it from the file and verifying its
     /// checksum if it is not in memory. A page that is free, outside the file or failing its
     /// checksum is refused, the last with [`FormatError::ChecksumMismatch`] naming it.
+    /// After a failed commit every page is refused with [`StorageError::NeedsReopen`].
     #[inline(always)]
     pub fn read(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
         let frame = self.locate(page_id)?;
