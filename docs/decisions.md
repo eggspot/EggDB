@@ -3035,3 +3035,112 @@ commit, left the expiry mark above the last commit, so every new reader failed w
 `SnapshotTooOld` until the next commit. A rollback now lowers the mark to the last commit: the
 cache holds exactly that commit again, so readers of it need no images, while older readers whose
 images were dropped stay expired. Readers of the last commit that had expired work again.
+
+## D87 The embedded Rust API: `Database`, two transaction types, double-ended scans and errors with a kind — Decided by research (build loop, 2026-10-26); completes v0.2.0 item 10, refines D11, D41 and D86
+The `eggdb` crate is the public face of the engine: `eggdb::Database` over `eggdb-storage`'s
+`Store`, with `ReadTransaction`, `WriteTransaction`, `Scan`, `Options`, `Durability`, `Error`,
+`ErrorKind`, `Stats` and `CheckReport`; `CommitStamp` is the storage crate's, re-exported. No
+other storage type is part of the API, and the engine core still depends on no protocol or
+platform choice: the `eggdb` crate picks the operating system's file system, memory and clock.
+The guide is [embedded.md](embedded.md).
+
+**Names** follow the business language: a database, transactions, keys and values, `get`, `put`,
+`delete`, `scan`, `scan_prefix`, `check`, `stats`, `sync`, `checkpoint`, `close`. Keys and values
+are anything that is bytes (`impl AsRef<[u8]>`). Option names carry their units
+(`cache_bytes`, `snapshot_memory_bytes`, `auto_checkpoint_log_bytes`, `page_size_bytes`). The
+transaction types keep the storage crate's names, which users never see side by side, and
+`Store` stays the storage crate's word.
+
+**The default key space.** Transactions read and change one ordered map, whose B+tree root is the
+superblock's `catalog_root`, as format.md says for files before the catalog tree. A database
+that never held a key has no tree: reads find nothing, scans are empty, a delete returns
+`false`, and the first `put` creates the tree in its own transaction, so a rollback leaves the
+file without one. The root never moves (D82), so the database remembers the tree once it is
+committed and a transaction's begin costs no page read.
+
+**Decided by research** (a research subagent, recorded in PR 42):
+1. *No in-memory database in v0.2.0.* The only in-memory file system is the platform layer's
+   `SimFileSystem`, a fault simulator that keeps unsynced writes for power-loss tests, and a
+   `Database` generic over the file type would put a type parameter in every user's signatures
+   (a default type parameter does not help `Database::open`'s inference). `Database` stays
+   concrete; an in-memory file can be added behind it later without a change to its type.
+2. *Closing.* `close(self)` writes a checkpoint, so the next open replays nothing, and returns
+   any error; the file is closed either way. Dropping does no I/O, since a drop can't report an
+   error and must not stall an exit or an unwind: no commit is lost by a drop, and the next open
+   replays at most the log since the last checkpoint (about 1 MiB by default). `sync` and
+   `checkpoint` are methods of their own, for a database shared through an `Arc` that is never
+   closed. Rejected: a drop that syncs and checkpoints, which hides failures.
+3. *A second writer waits* up to `Options::write_timeout` (5 s by default) and then fails with
+   `WriterActive`; `try_begin_write` fails at once. LMDB and redb wait without a limit, and
+   SQLite applications almost always set a busy timeout; failing at once only would put a retry
+   loop in every threaded application, and waiting forever turns a bug into a silent hang. The
+   database keeps a writer slot (a mutex and a condition variable) taken before
+   `Store::begin_write`, so the store never sees a second writer. The slot records the holding
+   thread, and a thread that asks again while it holds the writer is refused at once, which
+   keeps D86's "no deadlock in the same thread"; a transaction moved to another thread is
+   refused the same way on the thread that began it, and waits elsewhere. `checkpoint` takes the
+   slot too, so a checkpoint never meets uncommitted changes.
+4. *Cache size.* 16 MiB by default. No-steal (D79) makes the cache a hard bound on a write
+   transaction's size, so a larger default lets bulk loads go further; the frames are reserved
+   as virtual memory and become resident only as they are used, and the per-frame arrays cost
+   about 200 KB at this size. The snapshot memory defaults to the cache's size (D86), so the
+   worst case is twice the cache. Rejected: 64 MiB (address space on 32-bit and
+   no-overcommit systems), and SQLite's 2 MiB (too small a transaction bound without spilling).
+5. *Scans.* `scan(range)` takes any of Rust's range forms over byte keys, through a sealed
+   `KeyRange` trait, because `RangeBounds<K>` can't infer the key type of `..`, and
+   `RangeBounds<[u8]>` is not implemented for `Range<&[u8]>`. `Scan` is an iterator of owned
+   `(Vec<u8>, Vec<u8>)`: the cursor copies a leaf at a time into a buffer it reuses and returns
+   slices valid until its next call, which `Iterator` can't lend. `Scan::next_entry` lends them
+   instead, without the two copies. `Scan` is double-ended, as `BTreeMap::range` is: each end
+   gets a cursor only when it is first used, each keeps its last key in a reused buffer, and the
+   scan ends where they meet. After an error it yields nothing more (`FusedIterator`), so a loop
+   that skips errors can't spin. Rejected: a `ScanOrder` parameter or a `scan_reverse` method.
+6. *Closures and one-step calls.* `read` and `write` take closures that return
+   `eggdb::Result`, which keeps type inference working in closures that use `?`; a generic
+   `E: From<Error>` needs annotations in most of them. `get`, `put` and `delete` on the database
+   are one-step transactions, as SQLite's autocommit is; the docs say a loop of `put`s commits
+   and syncs every time. A `delete` of an absent key commits nothing.
+7. *Errors.* `Error` is opaque and `Send + Sync`: `kind()` gives a non-exhaustive `ErrorKind`,
+   `Display` a message for people and models (D11) that names the file for open errors and says
+   what to do, and `source()` the storage error, whose type is not part of the stable API. It
+   converts into a `std::io::Error` of the closest kind. Storage errors map as: file-system
+   errors to `NotFound`, `PermissionDenied`, `Locked`, `OutOfMemory` or `Io`; a missing magic
+   to `NotADatabase`; a newer version or features to `Incompatible`; every other format error,
+   a cut-off file and a damaged free list or page reference to `Corrupt`; a full file and an
+   exhausted clock to `DatabaseFull` (the file is valid and reads still work);
+   `UncommittedChanges` to `WriterActive`; a cache too small to `InvalidOption`.
+8. *Options* is a by-value builder, checked when the database opens and never in its setters, and
+   an option EggDB refuses fails before any file is created. `Durability` is the crate's own enum,
+   with SQLite's names, so its docs talk about the database and not the page file.
+9. *Collections later, without a break.* Named key spaces arrive as `tx.collection(name)` views
+   with the same method names; the transactions' own methods keep meaning the default key space.
+   When the catalog tree arrives, the existing tree becomes its entry under the reserved empty
+   name, behind an incompatible feature flag, so older releases refuse such files. Rejected: a
+   `Collection` type now, which would be API with nothing behind it.
+
+**Storage change.** `ReadTransaction::check` checks a tree as of a snapshot: `BTree::check` now
+reads through any page source, the cache or a snapshot. `Database::check` uses it, so a check
+sees one commit while writers continue. It holds the store for the whole walk.
+
+**Cost** (D80; ratios against the same operation through the raw `Store` on the same file
+system, so they measure only this layer; Linux lines are the median of five CI runs):
+`database.read`, a read transaction's begin, a point get returning the value and its end, 1.023
+on this Mac and 1.006 on Linux, with exactly one allocation (the returned value, as for the
+store); `database.write`, a one-put write transaction under `Off`, 1.009 and 0.997;
+`database.open`, a read-only open of a checkpointed file with the default 16 MiB cache, 1.004
+and 1.002, about 32 µs on this Mac (D14's start-up time). The write benchmark uses `Off` so that
+it measures the layer and not the disk. The first version of the writer slot woke waiters on
+every commit, which on Linux is a system call (the standard library's condition variable has no
+waiter count), and cost `database.write` 1.078 there; the slot now counts its waiters.
+
+**Known limit.** The lock belongs to the open file, and a child process shares its parent's open
+files until it starts its own program, so while another thread starts a child, a database just
+closed can stay locked for that moment (the tests met it: the cross-process lock test runs in a
+binary of its own). Avoiding it needs the application to start its child processes without
+inheriting the file, which the platform layer does not offer yet.
+
+**Left for later:** a lending scan in both directions, a writer wait with a fairness order,
+collections, an in-memory database, values larger than a page (item 11), and the `eggdb` crate's
+publication to crates.io, which needs the owner's account (CLAUDE.md, "Releases"). Also from the
+independent review: no `database.scan` benchmark yet, and `Scan` copies its last key on every
+step; `snapshot_memory_bytes` is not range-checked; the comparison against SQLite is item 17.

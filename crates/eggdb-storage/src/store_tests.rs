@@ -810,3 +810,28 @@ fn a_rollback_keeps_a_reader_that_lost_its_images_expired() {
     let fresh = store.begin_read().unwrap();
     assert_eq!(fresh.get(&tree, &key(1)).unwrap().unwrap(), b"first");
 }
+
+#[test]
+fn a_check_of_a_snapshot_counts_its_commit_while_the_writer_changes_the_tree() {
+    let fs = SimFileSystem::new();
+    let (store, tree) = created(&fs, 256, &october_clock());
+    let mut write = store.begin_write().unwrap();
+    for index in 0..2000 {
+        write.put(&tree, &key(index), b"old").unwrap();
+    }
+    write.commit().unwrap();
+    let read = store.begin_read().unwrap();
+    let mut write = store.begin_write().unwrap();
+    for index in 0..1500 {
+        write.delete(&tree, &key(index)).unwrap();
+    }
+    let during = read.check(&tree).unwrap();
+    write.commit().unwrap();
+    let after = read.check(&tree).unwrap();
+    assert_eq!(during, after);
+    assert_eq!(after.entries, 2000);
+    assert_eq!(after.value_bytes, 2000 * 3);
+    let latest = store.begin_read().unwrap().check(&tree).unwrap();
+    assert_eq!(latest.entries, 500);
+    assert!(latest.leaf_pages < after.leaf_pages);
+}

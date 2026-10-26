@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+eggdb = { path = "../eggdb" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-storage = { path = "../eggdb-storage" }
 

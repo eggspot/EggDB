@@ -32,6 +32,7 @@ One database for every kind of data, written from scratch in Rust.
 - **Everywhere:** every OS, every CPU and every cloud.
 
 Status: early. See [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
+To use EggDB as an embedded key-value store from Rust, see [docs/embedded.md](docs/embedded.md).
 
 ```sh
 cargo run

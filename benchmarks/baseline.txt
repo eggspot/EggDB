@@ -13,6 +13,7 @@ any btree.scan page_reads_per_100000_entries 3993
 any btree.scan_reverse allocations_per_100000_entries 16
 any btree.scan_reverse file_operations_per_100000_entries 0
 any btree.scan_reverse page_reads_per_100000_entries 3993
+any database.read allocations_per_op 1
 any log.checkpoint file_operations_per_checkpoint 3
 any log.checkpoint syncs_per_checkpoint 2
 any log.commit_full file_operations_per_1000_commits 3209
@@ -41,6 +42,9 @@ linux btree.get ratio_to_std_btreemap 1.85
 linux btree.put ratio_to_std_btreemap 2.574
 linux btree.scan ratio_to_std_btreemap 4.965
 linux btree.scan_reverse ratio_to_std_btreemap 5.586
+linux database.open ratio_to_store_open 1.002
+linux database.read ratio_to_store_read 1.006
+linux database.write ratio_to_store_commit 0.997
 linux log.recovery ratio_to_crc32c_of_the_replayed_log 2.142
 linux page_cache.hit ratio_to_reference 0.37
 linux transaction.read ratio_to_btree_get 1.004
@@ -50,6 +54,9 @@ macos btree.get ratio_to_std_btreemap 2.214
 macos btree.put ratio_to_std_btreemap 2.456
 macos btree.scan ratio_to_std_btreemap 5.059
 macos btree.scan_reverse ratio_to_std_btreemap 7.586
+macos database.open ratio_to_store_open 1.004
+macos database.read ratio_to_store_read 1.023
+macos database.write ratio_to_store_commit 1.009
 macos log.recovery ratio_to_crc32c_of_the_replayed_log 1.827
 macos page_cache.hit ratio_to_reference 0.375
 macos transaction.read ratio_to_btree_get 1.0

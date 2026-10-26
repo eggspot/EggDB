@@ -1,4 +1,4 @@
-use crate::btree::BTree;
+use crate::btree::{BTree, TreeReport};
 use crate::cursor::{Cursor, KeyAndValue};
 use crate::error::StorageError;
 use crate::format::Superblock;
@@ -220,6 +220,18 @@ impl<F: File> ReadTransaction<'_, F> {
             version: self.version,
         };
         tree.get_in(&snapshot, key, read)
+    }
+
+    /// Checks every page of `tree` as of the snapshot, as [`BTree::check`] does, and counts what
+    /// it holds. The store is held for the whole walk, so the writer and other readers wait
+    /// until it ends.
+    pub fn check(&self, tree: &BTree) -> Result<TreeReport, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        tree.check_in(&snapshot)
     }
 
     /// The next entry of `cursor`, from a [`BTree::scan`] or [`BTree::scan_prefix`] of a tree,
