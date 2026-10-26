@@ -175,7 +175,7 @@ impl<F: File> PageCache<F> {
     /// Pins data page `page_id` for reading, reading it from the file and verifying its
     /// checksum if it is not in memory. A page that is free, outside the file or failing its
     /// checksum is refused, the last with [`FormatError::ChecksumMismatch`] naming it.
-    #[inline]
+    #[inline(always)]
     pub fn read(&self, page_id: u64) -> Result<PageRef<'_>, StorageError> {
         let frame = self.locate(page_id)?;
         let bytes = self
@@ -185,7 +185,7 @@ impl<F: File> PageCache<F> {
         Ok(PageRef {
             bytes,
             page_id,
-            header: self.headers[frame].get(),
+            header: &self.headers[frame],
             state: &self.states[frame],
         })
     }
@@ -342,7 +342,7 @@ impl<F: File> PageCache<F> {
         Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     fn locate(&self, page_id: u64) -> Result<usize, StorageError> {
         match self.table.get(page_id) {
             Some(frame) => {
@@ -353,7 +353,7 @@ impl<F: File> PageCache<F> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn hit(&self, frame: usize) {
         self.hits.set(self.hits.get() + 1);
         self.states[frame].set(self.states[frame].get() | REFERENCED);
@@ -470,7 +470,7 @@ fn check_header(header: &PageHeader) -> Result<(), StorageError> {
 pub struct PageRef<'a> {
     bytes: FrameRef<'a>,
     page_id: u64,
-    header: PageHeader,
+    header: &'a Cell<PageHeader>,
     state: &'a Cell<u8>,
 }
 
@@ -482,7 +482,7 @@ impl PageRef<'_> {
 
     /// The page's header.
     pub fn header(&self) -> PageHeader {
-        self.header
+        self.header.get()
     }
 
     /// Whether the structure that owns the page has checked its contents since the cache last
