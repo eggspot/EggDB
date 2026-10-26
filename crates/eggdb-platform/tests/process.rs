@@ -22,7 +22,11 @@ fn this_test_as_a_child(test: &str) -> Command {
 fn measured(command: Command) -> Option<ChildExit> {
     match run_with_peak_memory(command) {
         Ok(exit) => Some(exit),
-        Err(error) if error.kind() == ErrorKind::PermissionDenied => None,
+        Err(error)
+            if error.kind() == ErrorKind::PermissionDenied && std::env::var_os("CI").is_none() =>
+        {
+            None
+        }
         Err(error) => panic!("running the child failed: {error}"),
     }
 }

@@ -78,51 +78,85 @@ pub(crate) fn run_with_peak_memory(mut command: Command) -> Result<ChildExit> {
     let child = command.spawn()?;
     let pid =
         c_int::try_from(child.id()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let traced = trace_to_exit(pid);
-    if traced.is_err() {
+    let end = trace_to_exit(pid);
+    if end.leaves_the_child_unreaped() {
         kill_and_reap(pid);
     }
     drop(child);
-    traced
+    end.into_exit()
 }
 
-fn trace_to_exit(pid: c_int) -> Result<ChildExit> {
+#[derive(Debug)]
+enum TraceEnd {
+    Reaped {
+        code: Option<i32>,
+        peak: Option<Result<u64>>,
+    },
+    RequestFailed(Error),
+    WaitFailed(Error),
+}
+
+impl TraceEnd {
+    fn leaves_the_child_unreaped(&self) -> bool {
+        matches!(self, Self::RequestFailed(_))
+    }
+
+    fn into_exit(self) -> Result<ChildExit> {
+        match self {
+            Self::Reaped { code, peak } => Ok(ChildExit {
+                code,
+                peak_resident_bytes: peak.ok_or_else(|| Error::new(ErrorKind::Other))??,
+            }),
+            Self::RequestFailed(error) | Self::WaitFailed(error) => Err(error),
+        }
+    }
+}
+
+fn trace_to_exit(pid: c_int) -> TraceEnd {
     let mut options_set = false;
     let mut peak = None;
     loop {
-        match wait_for(pid)? {
+        let status = match wait_for(pid) {
+            Ok(status) => status,
+            Err(error) => return TraceEnd::WaitFailed(error),
+        };
+        let continued = match status {
             WaitStatus::Stopped { event, .. } if event == PTRACE_EVENT_EXIT => {
                 peak = Some(peak_resident_bytes(pid));
-                request(PTRACE_CONT, pid, 0)?;
+                request(PTRACE_CONT, pid, 0)
             }
             WaitStatus::Stopped { event, .. } if event == PTRACE_EVENT_EXEC => {
-                request(PTRACE_CONT, pid, 0)?;
+                request(PTRACE_CONT, pid, 0)
             }
             WaitStatus::Stopped { signal, .. } if signal == SIGTRAP && !options_set => {
+                options_set = true;
                 request(
                     PTRACE_SETOPTIONS,
                     pid,
                     PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_EXITKILL,
-                )?;
-                options_set = true;
-                request(PTRACE_CONT, pid, 0)?;
+                )
+                .and_then(|()| request(PTRACE_CONT, pid, 0))
             }
             WaitStatus::Stopped { signal, .. } => {
-                request(PTRACE_CONT, pid, usize::try_from(signal).unwrap_or(0))?;
+                request(PTRACE_CONT, pid, usize::try_from(signal).unwrap_or(0))
             }
             exit => {
-                return Ok(ChildExit {
+                return TraceEnd::Reaped {
                     code: exit.exit_code(),
-                    peak_resident_bytes: peak.ok_or_else(|| Error::new(ErrorKind::Other))??,
-                });
+                    peak,
+                };
             }
+        };
+        if let Err(error) = continued {
+            return TraceEnd::RequestFailed(error);
         }
     }
 }
 
 fn kill_and_reap(pid: c_int) {
-    // SAFETY: `kill` takes no pointers, and `pid` is this process's child, not yet reaped, so
-    // the number cannot name another process.
+    // SAFETY: `kill` takes no pointers, and it is only called after a ptrace request failed on
+    // `pid`, a child this process traces and has not reaped (no wait returned its exit), so the
+    // number still names that child and cannot name another process.
     let _ = unsafe { kill(pid, SIGKILL) };
     loop {
         match wait_for(pid) {
@@ -136,7 +170,44 @@ fn kill_and_reap(pid: c_int) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_peak;
+    use super::{TraceEnd, parse_peak};
+    use crate::error::{Error, ErrorKind};
+
+    #[test]
+    fn only_a_failed_request_leaves_the_child_to_kill_and_a_reaped_child_is_never_killed() {
+        let reaped_without_a_peak = TraceEnd::Reaped {
+            code: None,
+            peak: None,
+        };
+        assert!(!reaped_without_a_peak.leaves_the_child_unreaped());
+        assert_eq!(
+            reaped_without_a_peak.into_exit().unwrap_err().kind(),
+            ErrorKind::Other
+        );
+        let reaped_with_an_unreadable_peak = TraceEnd::Reaped {
+            code: Some(0),
+            peak: Some(Err(Error::new(ErrorKind::NotFound))),
+        };
+        assert!(!reaped_with_an_unreadable_peak.leaves_the_child_unreaped());
+        assert_eq!(
+            reaped_with_an_unreadable_peak
+                .into_exit()
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotFound
+        );
+        let wait_failed = TraceEnd::WaitFailed(Error::new(ErrorKind::Other));
+        assert!(!wait_failed.leaves_the_child_unreaped());
+        let request_failed = TraceEnd::RequestFailed(Error::new(ErrorKind::PermissionDenied));
+        assert!(request_failed.leaves_the_child_unreaped());
+        let exit = TraceEnd::Reaped {
+            code: Some(3),
+            peak: Some(Ok(4096)),
+        }
+        .into_exit()
+        .unwrap();
+        assert_eq!((exit.code, exit.peak_resident_bytes), (Some(3), 4096));
+    }
 
     #[test]
     fn the_peak_is_read_from_the_vm_hwm_line_in_kibibytes() {
