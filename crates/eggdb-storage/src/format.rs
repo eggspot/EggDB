@@ -333,6 +333,10 @@ impl Superblock {
         Ok(superblock)
     }
 
+    pub(crate) fn check(&self) -> Result<(), FormatError> {
+        self.check_fields()
+    }
+
     fn check_fields(&self) -> Result<(), FormatError> {
         let first_data_page = self.page_size.first_data_page();
         if self.page_count < first_data_page || self.page_count & PAGE_VOLUME_MASK != 0 {
@@ -365,7 +369,14 @@ impl Superblock {
             });
         }
         let segment_bytes = u64::from(self.log_segment_pages) * self.page_size.bytes() as u64;
-        if self.log_segment_pages == 0 || segment_bytes > MAX_LOG_SEGMENT_BYTES {
+        let has_log = self.log_head_page != NO_PAGE
+            || self.recycled_segments.iter().any(|&page| page != NO_PAGE);
+        let too_small_for_a_log =
+            has_log && !crate::log::segment_holds_a_page(self.page_size, self.log_segment_pages);
+        if self.log_segment_pages == 0
+            || segment_bytes > MAX_LOG_SEGMENT_BYTES
+            || too_small_for_a_log
+        {
             return Err(FormatError::InvalidField {
                 field: "log_segment_pages",
             });

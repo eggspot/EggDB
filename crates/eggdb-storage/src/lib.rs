@@ -22,6 +22,7 @@ mod crc32c;
 mod error;
 mod format;
 mod frames;
+mod log;
 mod page_cache;
 mod page_file;
 mod page_table;
@@ -35,5 +36,6 @@ pub use format::{
     MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader,
     PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };
+pub use log::Durability;
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
 pub use page_file::{CreateOptions, PageFile};
