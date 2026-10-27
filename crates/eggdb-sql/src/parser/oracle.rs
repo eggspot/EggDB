@@ -14,7 +14,13 @@ pub const ORACLE_COMPATIBLE_VERSION: &str = "23ai";
 
 const MAX_DECODE_ARGUMENTS: usize = 255;
 
-const DICTIONARY_VIEWS: [&str; 10] = [
+const DICTIONARY_VIEWS: [&str; 16] = [
+    "user_views",
+    "all_views",
+    "user_tab_comments",
+    "all_tab_comments",
+    "user_col_comments",
+    "all_col_comments",
     "user_tables",
     "all_tables",
     "user_tab_columns",

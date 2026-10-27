@@ -313,6 +313,7 @@ pub(crate) enum MySqlStatement {
         like: Option<String>,
     },
     ShowCreateTable(Name),
+    ShowCreateView(Name),
     ShowIndex(Name),
     ShowVariables {
         like: Option<String>,
@@ -363,6 +364,7 @@ pub(crate) struct CreateTable {
     pub(crate) primary_key_name: Option<Name>,
     pub(crate) indexes: Vec<IndexSpec>,
     pub(crate) constraints: Vec<ConstraintSpec>,
+    pub(crate) comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -375,6 +377,7 @@ pub(crate) struct ColumnDefinition {
     pub(crate) auto_increment: bool,
     pub(crate) unique: Option<Option<Name>>,
     pub(crate) constraints: Vec<ConstraintSpec>,
+    pub(crate) comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

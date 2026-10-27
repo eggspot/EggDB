@@ -1046,7 +1046,10 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("extension") {
             return self.create_extension();
         }
-        if self.is_word("or") && self.is_word_at(1, "replace") && !self.sqlite() {
+        if self.is_word("or") && self.sqlite() {
+            return Err(self.unexpected());
+        }
+        if self.is_word("or") && self.is_word_at(1, "replace") {
             self.at += 2;
             return self.create_view(true);
         }
@@ -1172,9 +1175,11 @@ impl<'t> Parser<'t> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        if self.mysql() {
-            self.mysql_table_options()?;
-        }
+        let comment = if self.mysql() {
+            self.mysql_table_options()?
+        } else {
+            None
+        };
         if self.sqlite() {
             self.sqlite_table_finish(&name, &mut columns, &primary_key, &integer_columns)?;
         }
@@ -1189,6 +1194,7 @@ impl<'t> Parser<'t> {
             primary_key_name,
             indexes,
             constraints,
+            comment,
         }))
     }
 
@@ -1256,6 +1262,7 @@ impl<'t> Parser<'t> {
             auto_increment: serial.is_some(),
             unique: None,
             constraints: Vec::new(),
+            comment: None,
         };
         loop {
             if self.mysql() && self.mysql_column_option(&mut column)? {

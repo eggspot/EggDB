@@ -296,3 +296,27 @@ pub(crate) fn move_schema_comment(
     }
     Ok(())
 }
+
+pub(crate) fn store_created(
+    writer: &mut dyn KeyValueWrite,
+    table: &str,
+    create: &crate::ast::CreateTable,
+) -> SqlResult<()> {
+    if let Some(comment) = &create.comment {
+        store(
+            writer,
+            &comment_key(table, CommentKind::Relation, ""),
+            Some(comment),
+        )?;
+    }
+    for column in &create.columns {
+        if let Some(comment) = &column.comment {
+            store(
+                writer,
+                &comment_key(table, CommentKind::Column, &column.name.text),
+                Some(comment),
+            )?;
+        }
+    }
+    Ok(())
+}

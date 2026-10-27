@@ -169,6 +169,14 @@ impl<'t> Parser<'t> {
         if self.is_word("materialized") {
             return Err(self.not_supported("CREATE MATERIALIZED VIEW"));
         }
+        if or_replace
+            && !self.is_word("view")
+            && let TokenKind::Word(word) = self.peek_kind()
+        {
+            return Err(
+                self.not_supported(&format!("CREATE OR REPLACE {}", word.to_ascii_uppercase()))
+            );
+        }
         self.expect_word("view")?;
         let if_not_exists = if self.sqlite() || self.postgresql() {
             self.if_not_exists()?

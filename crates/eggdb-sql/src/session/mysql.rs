@@ -93,11 +93,20 @@ fn create_statement(table: &TableSchema) -> String {
             columns.join(",")
         ));
     }
+    let comment = table
+        .comment
+        .as_ref()
+        .map(|comment| format!(" COMMENT={}", mysql_string(comment)))
+        .unwrap_or_default();
     format!(
-        "CREATE TABLE {} (\n{}\n) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+        "CREATE TABLE {} (\n{}\n) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci{comment}",
         backticked(&table.name),
         lines.join(",\n")
     )
+}
+
+fn mysql_string(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 fn column_definition(table: &TableSchema, column: &ColumnSchema) -> String {
@@ -116,6 +125,9 @@ fn column_definition(table: &TableSchema, column: &ColumnSchema) -> String {
     } else if !column.not_null && !table.primary_key.contains(&column.name) {
         line.push_str(" DEFAULT NULL");
     }
+    if let Some(comment) = &column.comment {
+        line.push_str(&format!(" COMMENT {}", mysql_string(comment)));
+    }
     line
 }
 
@@ -127,10 +139,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         Ok(match statement {
             MySqlStatement::ShowTables { full, .. } => Some(self.tables_columns(*full)),
             MySqlStatement::ShowDatabases { .. } => Some(vec![text_column("Database")]),
-            MySqlStatement::ShowColumns { .. } => Some(columns_columns()),
+            MySqlStatement::ShowColumns { full, .. } => Some(columns_columns(*full)),
             MySqlStatement::ShowCreateTable(_) => {
                 Some(vec![text_column("Table"), text_column("Create Table")])
             }
+            MySqlStatement::ShowCreateView(_) => Some(create_view_columns()),
             MySqlStatement::ShowIndex(_) => Some(index_columns()),
             MySqlStatement::ShowVariables { .. } | MySqlStatement::ShowStatus => {
                 Some(vec![text_column("Variable_name"), text_column("Value")])
@@ -157,18 +170,60 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     pub(super) fn run_mysql(&mut self, statement: &MySqlStatement) -> SqlResult<QueryResult> {
         match statement {
             MySqlStatement::ShowTables { full, like } => {
-                let tables = self.read(|reader, _| read_tables(reader))?;
+                let (tables, views) = self.read(|reader, _| {
+                    Ok((read_tables(reader)?, crate::views::every_view(reader)?))
+                })?;
+                let mut named: Vec<(String, &str)> = tables
+                    .into_iter()
+                    .filter(|table| table.schema == crate::schemas::DEFAULT_SCHEMA)
+                    .map(|table| (table.name, "BASE TABLE"))
+                    .chain(
+                        views
+                            .into_iter()
+                            .filter(|view| !crate::schemas::is_qualified(&view.name))
+                            .map(|view| (view.name, "VIEW")),
+                    )
+                    .collect();
+                named.sort();
                 let mut rows = Vec::new();
-                for table in tables {
-                    if matches_pattern(&table.name, like.as_deref())? {
-                        let mut row = vec![Value::Text(table.name)];
+                for (name, kind) in named {
+                    if matches_pattern(&name, like.as_deref())? {
+                        let mut row = vec![Value::Text(name)];
                         if *full {
-                            row.push(Value::Text("BASE TABLE".into()));
+                            row.push(Value::Text(kind.into()));
                         }
                         rows.push(row);
                     }
                 }
                 Ok(rows_result(self.tables_columns(*full), rows))
+            }
+            MySqlStatement::ShowCreateView(view) => {
+                let found = self.read(|reader, tables| tables.relation(reader, &view.text))?;
+                let Some(crate::execute::Relation::View(definition)) = found else {
+                    return Err(SqlError::new(
+                        SqlState::MYSQL_TABLE_NOT_FOUND,
+                        format!(
+                            "Table '{}.{}' doesn't exist",
+                            self.settings.database, view.text
+                        ),
+                    )
+                    .with_vendor_code(1146)
+                    .at(view.position));
+                };
+                let text = format!(
+                    "CREATE ALGORITHM=UNDEFINED DEFINER=CURRENT_USER SQL SECURITY DEFINER VIEW {} AS {}",
+                    backticked(&view.text),
+                    definition.query
+                );
+                Ok(rows_result(
+                    create_view_columns(),
+                    vec![vec![
+                        Value::Text(view.text.clone()),
+                        Value::Text(text),
+                        Value::Text("utf8mb4".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                    ]],
+                ))
             }
             MySqlStatement::ShowDatabases { like } => {
                 let database = self.settings.database.clone();
@@ -179,7 +234,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 };
                 Ok(rows_result(vec![text_column("Database")], rows))
             }
-            MySqlStatement::ShowColumns { table, like, .. } => {
+            MySqlStatement::ShowColumns { table, like, full } => {
                 let schema = self.table_schema(table)?;
                 let mut rows = Vec::new();
                 for column in &schema.columns {
@@ -187,9 +242,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         continue;
                     }
                     let key = column_key(&schema, &column.name);
-                    rows.push(vec![
+                    let collation = if *full {
+                        vec![if column.sql_type.is_character() {
+                            Value::Text("utf8mb4_0900_ai_ci".into())
+                        } else {
+                            Value::Null
+                        }]
+                    } else {
+                        Vec::new()
+                    };
+                    let mut row = vec![
                         Value::Text(column.name.clone()),
                         Value::Text(mysql_type_name(column.sql_type)),
+                    ];
+                    row.extend(collation);
+                    row.extend([
                         Value::Text(if column.not_null { "NO" } else { "YES" }.into()),
                         Value::Text(key.into()),
                         column
@@ -205,8 +272,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                             .into(),
                         ),
                     ]);
+                    if *full {
+                        row.push(Value::Text("select,insert,update,references".into()));
+                        row.push(Value::Text(column.comment.clone().unwrap_or_default()));
+                    }
+                    rows.push(row);
                 }
-                Ok(rows_result(columns_columns(), rows))
+                Ok(rows_result(columns_columns(*full), rows))
             }
             MySqlStatement::ShowIndex(table) => {
                 let schema = self.table_schema(table)?;
@@ -290,7 +362,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let tables = self.read(|reader, _| read_tables(reader))?;
         tables
             .into_iter()
-            .find(|schema| schema.name == table.text)
+            .find(|schema| {
+                schema.name == table.text && schema.schema == crate::schemas::DEFAULT_SCHEMA
+            })
             .ok_or_else(|| {
                 SqlError::new(
                     SqlState::UNDEFINED_TABLE,
@@ -447,11 +521,35 @@ fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
     rows
 }
 
-fn columns_columns() -> Vec<OutputColumn> {
-    ["Field", "Type", "Null", "Key", "Default", "Extra"]
-        .into_iter()
-        .map(text_column)
-        .collect()
+fn create_view_columns() -> Vec<OutputColumn> {
+    [
+        "View",
+        "Create View",
+        "character_set_client",
+        "collation_connection",
+    ]
+    .into_iter()
+    .map(text_column)
+    .collect()
+}
+
+fn columns_columns(full: bool) -> Vec<OutputColumn> {
+    let names: &[&str] = if full {
+        &[
+            "Field",
+            "Type",
+            "Collation",
+            "Null",
+            "Key",
+            "Default",
+            "Extra",
+            "Privileges",
+            "Comment",
+        ]
+    } else {
+        &["Field", "Type", "Null", "Key", "Default", "Extra"]
+    };
+    names.iter().copied().map(text_column).collect()
 }
 
 fn warnings_columns() -> Vec<OutputColumn> {

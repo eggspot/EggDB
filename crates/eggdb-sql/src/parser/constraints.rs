@@ -304,14 +304,12 @@ impl Parser<'_> {
                         parts.push(self.name()?);
                     }
                     let column = parts.pop().ok_or_else(|| self.unexpected())?;
-                    let table = parts.pop().ok_or_else(|| self.unexpected())?;
-                    if let Some(schema) = parts.pop()
-                        && schema.text != "public"
-                    {
-                        return Err(SqlError::not_supported(
-                            "schemas other than public are not supported yet",
-                        )
-                        .at(schema.position));
+                    let mut table = parts.pop().ok_or_else(|| self.unexpected())?;
+                    if let Some(schema) = parts.pop() {
+                        table = Name {
+                            text: crate::schemas::written_qualified(&schema.text, &table.text),
+                            position: schema.position,
+                        };
                     }
                     options.owned_by = Some(Some((table, column)));
                 }

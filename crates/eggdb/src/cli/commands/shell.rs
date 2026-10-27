@@ -598,6 +598,9 @@ impl<'s> Shell<'s> {
                     text.push_str(&index.create_statement_in(&table.name, dialect));
                     text.push('\n');
                 }
+                if dialect == eggdb_sql::Dialect::PostgreSql {
+                    text.push_str(&table.comment_statements());
+                }
                 text
             })
             .collect();

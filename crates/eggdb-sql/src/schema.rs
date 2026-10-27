@@ -6,8 +6,12 @@ use crate::types::SqlType;
 /// A table as the catalog defines it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableSchema {
-    /// The table's name.
+    /// The table's name, prefixed by its schema and a dot when that is not `public`.
     pub name: String,
+    /// The schema the table is in: `public` unless it was created in another one.
+    pub schema: String,
+    /// The table's comment, from `COMMENT ON TABLE` or MySQL's `COMMENT` table option.
+    pub comment: Option<String>,
     /// Its columns, in order.
     pub columns: Vec<ColumnSchema>,
     /// The names of the primary key's columns, in key order; empty without a primary key.
@@ -63,6 +67,8 @@ pub struct ColumnSchema {
     pub default: Option<String>,
     /// Whether MySQL's `AUTO_INCREMENT` numbers its rows.
     pub auto_increment: bool,
+    /// The column's comment, from `COMMENT ON COLUMN` or MySQL's `COMMENT` column option.
+    pub comment: Option<String>,
 }
 
 impl TableSchema {
@@ -75,6 +81,45 @@ impl TableSchema {
             crate::Dialect::Oracle => format!("{};", crate::session::oracle_create_text(self)),
             _ => self.create_statement(),
         }
+    }
+
+    /// The table's name as SQL spells it, schema-qualified when the schema is not `public`.
+    pub fn qualified_name(&self) -> String {
+        let base = self
+            .name
+            .strip_prefix(&format!("{}.", self.schema))
+            .filter(|_| self.schema != crate::schemas::DEFAULT_SCHEMA)
+            .unwrap_or(&self.name);
+        if self.schema == crate::schemas::DEFAULT_SCHEMA {
+            quoted(base)
+        } else {
+            format!("{}.{}", quoted(&self.schema), quoted(base))
+        }
+    }
+
+    /// The `COMMENT ON` statements that give this table and its columns their comments, each
+    /// ended by `;` and a line break; empty without comments.
+    pub fn comment_statements(&self) -> String {
+        let literal = |text: &str| format!("'{}'", text.replace('\'', "''"));
+        let mut out = String::new();
+        if let Some(comment) = &self.comment {
+            out.push_str(&format!(
+                "COMMENT ON TABLE {} IS {};\n",
+                self.qualified_name(),
+                literal(comment)
+            ));
+        }
+        for column in &self.columns {
+            if let Some(comment) = &column.comment {
+                out.push_str(&format!(
+                    "COMMENT ON COLUMN {}.{} IS {};\n",
+                    self.qualified_name(),
+                    quoted(&column.name),
+                    literal(comment)
+                ));
+            }
+        }
+        out
     }
 
     /// The `CREATE TABLE` statement that makes this table, ended by `;`.
@@ -99,7 +144,7 @@ impl TableSchema {
         }
         format!(
             "CREATE TABLE {} ({});",
-            quoted(&self.name),
+            self.qualified_name(),
             parts.join(", ")
         )
     }
@@ -141,15 +186,31 @@ pub(crate) fn read_tables(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableSchem
         }
         Ok(true)
     })?;
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(tables),
+    if let Some(error) = failure {
+        return Err(error);
     }
+    for table in &mut tables {
+        let internal = if table.schema == crate::schemas::DEFAULT_SCHEMA {
+            table.name.clone()
+        } else {
+            crate::schemas::qualified(&table.schema, &table.name)
+        };
+        table.comment = crate::comments::relation_comment(reader, &internal)?;
+        for (column, comment) in crate::comments::column_comments(reader, &internal)? {
+            if let Some(found) = table.columns.iter_mut().find(|known| known.name == column) {
+                found.comment = Some(comment);
+            }
+        }
+        table.name = crate::schemas::display(&internal);
+    }
+    Ok(tables)
 }
 
 fn schema_of(definition: &TableDefinition) -> TableSchema {
     TableSchema {
-        name: definition.name.clone(),
+        name: crate::schemas::base_name(&definition.name).to_owned(),
+        schema: crate::schemas::schema_of(&definition.name).to_owned(),
+        comment: None,
         columns: definition
             .columns
             .iter()
@@ -159,6 +220,7 @@ fn schema_of(definition: &TableDefinition) -> TableSchema {
                 not_null: column.not_null,
                 default: column.default.clone(),
                 auto_increment: column.auto_increment,
+                comment: None,
             })
             .collect(),
         primary_key: definition

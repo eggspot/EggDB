@@ -311,6 +311,7 @@ pub(crate) fn create_table(
     table.referenced = !constraints::referencing_tables(writer, &table.name)?.is_empty();
     writer.put(&meta_key(), &encode_meta(following))?;
     crate::comments::forget_owner(writer, &table.name)?;
+    crate::comments::store_created(writer, &table.name, create)?;
     writer.put(&table_key(&table.name), &table.encode())?;
     constraints::register_references(writer, tables, &table)?;
     Ok(QueryResult::command("CREATE TABLE"))

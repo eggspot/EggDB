@@ -423,6 +423,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut parameter_types = declared_types.to_vec();
         parameter_types.resize(highest_parameter(&tokens).max(declared_types.len()), None);
         let settings = Arc::clone(&self.settings);
+        let _path = self.enter_search_path(&settings);
         let mut parser = Parser::new(text, &tokens)
             .with_context(Parameters::Types(declared_types), &settings)
             .in_dialect(self.dialect);
@@ -455,7 +456,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         if matches!(self.block, Block::Failed) {
             return Err(aborted_block());
         }
-        let columns = match &statement {
+        let mut statement = statement;
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: true,
+        };
+        let binding = &binding;
+        let columns = match &mut statement {
             Statement::Select(select)
                 if self.sqlite()
                     && select
@@ -477,18 +484,27 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     .map(|result| result.columns)
             }
             Statement::Select(select) => self
-                .read(|reader, tables| execute::select(reader, tables, select, true))
+                .read(|reader, tables| {
+                    binding.select(reader, tables, select)?;
+                    execute::select(reader, tables, select, true)
+                })
                 .map(|result| result.columns),
             Statement::Query(query) => self
-                .read(|reader, tables| execute::query(reader, tables, query, true))
+                .read(|reader, tables| {
+                    binding.query(reader, tables, query)?;
+                    execute::query(reader, tables, query, true)
+                })
                 .map(|result| result.columns),
             Statement::Insert(insert) => self.read(|reader, tables| {
+                binding.insert(reader, tables, insert)?;
                 execute::returning_columns(reader, tables, &insert.table, &insert.returning)
             }),
             Statement::Update(update) => self.read(|reader, tables| {
+                binding.update(reader, tables, update)?;
                 execute::returning_columns(reader, tables, &update.table, &update.returning)
             }),
             Statement::Delete(delete) => self.read(|reader, tables| {
+                binding.delete(reader, tables, delete)?;
                 execute::returning_columns(reader, tables, &delete.table, &delete.returning)
             }),
             Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),

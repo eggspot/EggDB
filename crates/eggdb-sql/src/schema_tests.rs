@@ -353,3 +353,136 @@ fn schema_names_are_postgresql_only() {
     assert_eq!(code(&mut sqlite, "SELECT * FROM temp.t"), "0A000");
     assert!(run(&mut sqlite, "CREATE SCHEMA s").is_err());
 }
+
+#[test]
+fn mysql_views_and_comments_follow_mysql() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut session,
+        "CREATE TABLE t (id int PRIMARY KEY, name varchar(20) COMMENT 'the name') COMMENT='people'",
+    );
+    last(&mut session, "INSERT INTO t VALUES (1, 'a'), (2, 'b')");
+    last(
+        &mut session,
+        "CREATE ALGORITHM=MERGE DEFINER=`root`@`%` SQL SECURITY INVOKER VIEW v AS SELECT name FROM t WHERE id > 1",
+    );
+    assert_eq!(last(&mut session, "SELECT * FROM v"), "name\nb\nSELECT 1");
+    last(
+        &mut session,
+        "CREATE OR REPLACE VIEW v AS SELECT name, id FROM t",
+    );
+    assert_eq!(
+        last(&mut session, "SHOW FULL TABLES"),
+        "Tables_in_eggdb|Table_type\nt|BASE TABLE\nv|VIEW\nSELECT 2"
+    );
+    let created = last(&mut session, "SHOW CREATE VIEW v");
+    assert!(
+        created.contains("VIEW `v` AS SELECT name, id FROM t"),
+        "{created}"
+    );
+    let table = last(&mut session, "SHOW CREATE TABLE t");
+    assert!(
+        table.contains("COMMENT 'the name'") && table.contains("COMMENT='people'"),
+        "{table}"
+    );
+    let full = last(&mut session, "SHOW FULL COLUMNS FROM t");
+    assert!(full.contains("|the name"), "{full}");
+    assert_eq!(
+        fails(&mut session, "CREATE VIEW v AS SELECT 1").vendor_code(),
+        Some(1050)
+    );
+    assert_eq!(
+        fails(&mut session, "DROP VIEW missing").vendor_code(),
+        Some(1051)
+    );
+    last(&mut session, "DROP VIEW IF EXISTS missing, v");
+    assert_eq!(
+        fails(&mut session, "SELECT * FROM v").vendor_code(),
+        Some(1146)
+    );
+}
+
+#[test]
+fn sqlite_views_follow_sqlite() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    last(
+        &mut session,
+        "CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)",
+    );
+    last(&mut session, "INSERT INTO t VALUES (1, 'x')");
+    last(
+        &mut session,
+        "CREATE VIEW IF NOT EXISTS main.v AS SELECT b FROM t",
+    );
+    last(
+        &mut session,
+        "CREATE VIEW IF NOT EXISTS v AS SELECT a FROM t",
+    );
+    assert_eq!(last(&mut session, "SELECT * FROM main.v"), "b\nx\nSELECT 1");
+    let error = fails(&mut session, "CREATE VIEW v AS SELECT 1");
+    assert_eq!(error.message(), "view v already exists");
+    assert!(
+        fails(&mut session, "CREATE OR REPLACE VIEW w AS SELECT 1")
+            .message()
+            .contains("syntax")
+    );
+    last(&mut session, "DROP VIEW v");
+    assert_eq!(
+        fails(&mut session, "SELECT * FROM v").message(),
+        "no such table: v"
+    );
+    assert_eq!(
+        code(&mut session, "CREATE VIEW temp.w AS SELECT 1"),
+        "0A000"
+    );
+}
+
+#[test]
+fn oracle_views_and_comments_follow_oracle() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    last(
+        &mut session,
+        "CREATE TABLE t (id NUMBER(9) PRIMARY KEY, name VARCHAR2(20))",
+    );
+    last(&mut session, "INSERT INTO t VALUES (1, 'a')");
+    last(
+        &mut session,
+        "CREATE OR REPLACE FORCE VIEW v AS SELECT name FROM t WITH READ ONLY",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT name FROM v"),
+        "NAME\na\nSELECT 1"
+    );
+    last(&mut session, "COMMENT ON TABLE t IS 'people'");
+    last(&mut session, "COMMENT ON COLUMN t.name IS 'their name'");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT table_name, table_type, comments FROM user_tab_comments ORDER BY table_name"
+        ),
+        "TABLE_NAME|TABLE_TYPE|COMMENTS\nT|TABLE|people\nV|VIEW|NULL\nSELECT 2"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT comments FROM user_col_comments WHERE table_name = 'T' AND column_name = 'NAME'"
+        ),
+        "COMMENTS\ntheir name\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT view_name, text FROM user_views"),
+        "VIEW_NAME|TEXT\nV|SELECT name FROM t\nSELECT 1"
+    );
+    assert_eq!(
+        fails(&mut session, "SELECT * FROM other.t").vendor_code(),
+        Some(942)
+    );
+    assert_eq!(
+        fails(&mut session, "CREATE VIEW v AS SELECT 1 FROM dual").vendor_code(),
+        Some(955)
+    );
+    last(&mut session, "DROP VIEW v");
+}

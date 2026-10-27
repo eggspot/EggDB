@@ -80,6 +80,18 @@ fn is_name_character(character: char) -> bool {
     !matches!(character, ' ' | '"' | '\'' | '(' | ',' | '\n')
 }
 
+pub(crate) fn quoted_name(internal: &str) -> String {
+    match internal.split_once(QUALIFIER) {
+        Some((schema, name)) if !schema.is_empty() => format!(
+            "{}.{}",
+            crate::schema::quoted(schema),
+            crate::schema::quoted(name)
+        ),
+        Some((_, name)) => crate::schema::quoted(name),
+        None => crate::schema::quoted(internal),
+    }
+}
+
 pub(crate) fn unreachable_name(name: &str) -> String {
     format!("{QUALIFIER}{name}")
 }

@@ -434,6 +434,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut scratch = Scratch::default();
         let mut cache = TableCache::default();
         let create = CreateTable {
+            comment: None,
             name: Name {
                 text: name.clone(),
                 position: 0,
@@ -453,6 +454,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     auto_increment: false,
                     unique: None,
                     constraints: Vec::new(),
+                    comment: None,
                 })
                 .collect(),
             primary_key: None,
