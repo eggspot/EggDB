@@ -759,6 +759,12 @@ mod tests {
     use super::{Conversion, SqlType, Value, convert, parse_input};
 
     #[test]
+    fn a_value_stays_four_words_with_the_new_types() {
+        assert!(std::mem::size_of::<Value>() <= 32);
+        assert!(std::mem::size_of::<SqlType>() <= 12);
+    }
+
+    #[test]
     fn floats_print_like_postgresql() {
         let cases = [
             (Value::Double(1.5), "1.5"),

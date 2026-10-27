@@ -1442,7 +1442,7 @@ mod tests {
                 0 => {
                     let text = format!(
                         "{}{}.{}",
-                        if bits % 2 == 0 { "-" } else { "" },
+                        if bits.is_multiple_of(2) { "-" } else { "" },
                         bits % 1000,
                         (bits >> 20) % 100
                     );
@@ -1463,8 +1463,7 @@ mod tests {
                     compare_values(&left, &right),
                     "{left:?} vs {right:?}"
                 );
-                let mut key = key_of(&left);
-                key.push(7);
+                let key = [key_of(&left), vec![7]].concat();
                 let mut decoded = Vec::new();
                 let used = decode_key_values(&key, [*sql_type], &mut decoded).unwrap();
                 assert_eq!(used, key.len() - 1);

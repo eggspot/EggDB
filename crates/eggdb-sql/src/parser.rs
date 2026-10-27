@@ -120,6 +120,24 @@ fn is_plain_literal(kind: &TokenKind<'_>) -> bool {
     ) || matches!(kind, TokenKind::Word(word) if word == "null" || word == "true" || word == "false")
 }
 
+const POSTGRESQL_ONLY_FUNCTIONS: [&str; 13] = [
+    "now",
+    "transaction_timestamp",
+    "statement_timestamp",
+    "clock_timestamp",
+    "localtimestamp",
+    "current_date",
+    "current_timestamp",
+    "date_part",
+    "date_trunc",
+    "json_typeof",
+    "jsonb_typeof",
+    "json_array_length",
+    "jsonb_array_length",
+];
+
+const INTERNAL_FUNCTIONS: [&str; 3] = ["mysql_now", "mysql_utc_now", "concat_or_null"];
+
 pub(crate) struct Parser<'t> {
     text: &'t str,
     tokens: &'t [Token<'t>],
@@ -2565,6 +2583,18 @@ impl<'t> Parser<'t> {
             && let Some(expr) = self.oracle_function(&name)?
         {
             return Ok(expr);
+        }
+        let postgresql_only =
+            !self.postgresql() && POSTGRESQL_ONLY_FUNCTIONS.contains(&name.text.as_str());
+        if postgresql_only || INTERNAL_FUNCTIONS.contains(&name.text.as_str()) {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("function {}() does not exist", name.text),
+            )
+            .with_hint(
+                "No function matches the given name and argument types. You might need to add explicit type casts.",
+            )
+            .at(name.position));
         }
         if !self.sqlite()
             && !self.oracle()

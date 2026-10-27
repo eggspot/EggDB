@@ -799,7 +799,7 @@ fn random_typed_condition(random: &mut Seeded) -> String {
         6 => format!("d BETWEEN {day} AND '2024-02-27'"),
         7 => format!("t < {time}"),
         8 => format!("t >= {time} AND n IS NOT NULL"),
-        9 => format!("z = '1999-12-31 21:00:00+00'"),
+        9 => "z = '1999-12-31 21:00:00+00'".to_owned(),
         10 => format!("z < '2000-01-01 00:00:00+0{}'", random.below(3)),
         _ => format!("n IN ({number}, 0.50, 1.5)"),
     }

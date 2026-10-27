@@ -2784,3 +2784,34 @@ fn hostile_typed_statements_never_panic_in_any_dialect() {
         fuzz(&mut session, &fragments);
     }
 }
+
+#[test]
+fn the_new_types_functions_stay_in_their_dialects() {
+    let cases: [(crate::Dialect, &str); 8] = [
+        (crate::Dialect::Sqlite, "SELECT now()"),
+        (crate::Dialect::Sqlite, "SELECT jsonb_typeof('[]')"),
+        (crate::Dialect::MySql, "SELECT date_trunc('day', NOW())"),
+        (crate::Dialect::MySql, "SELECT '{\"a\": 1}' ->> 'a'"),
+        (crate::Dialect::PostgreSql, "SELECT mysql_now()"),
+        (crate::Dialect::PostgreSql, "SELECT concat_or_null('a')"),
+        (crate::Dialect::Oracle, "SELECT NOW() FROM dual"),
+        (
+            crate::Dialect::Sqlite,
+            "CREATE TABLE s (id serial PRIMARY KEY, n numeric(5,2))",
+        ),
+    ];
+    for (dialect, sql) in cases {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        let outcome = run(&mut session, sql);
+        if dialect == crate::Dialect::Sqlite && sql.starts_with("CREATE") {
+            assert!(outcome.is_ok(), "{dialect:?} {sql}: {outcome:?}");
+            assert_eq!(
+                last(&mut session, "SELECT typeof(id) FROM s"),
+                "typeof(id)\nSELECT 0"
+            );
+            continue;
+        }
+        assert!(outcome.is_err(), "{dialect:?} {sql}: {outcome:?}");
+    }
+}
