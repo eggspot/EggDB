@@ -46,8 +46,27 @@ fn arithmetic_type(
         }
         _ => (static_type(left, scope)?, static_type(right, scope)?),
     };
+    if left_type.is_datetime() || right_type.is_datetime() {
+        return match (operator, left_type, right_type) {
+            (BinaryOperator::Add, SqlType::Date, other)
+            | (BinaryOperator::Add, other, SqlType::Date)
+                if is_integer(other) =>
+            {
+                Some(SqlType::Date)
+            }
+            (BinaryOperator::Subtract, SqlType::Date, other) if is_integer(other) => {
+                Some(SqlType::Date)
+            }
+            (BinaryOperator::Subtract, SqlType::Date, SqlType::Date) => Some(SqlType::Integer),
+            _ => None,
+        };
+    }
     if !left_type.is_numeric() || !right_type.is_numeric() {
         return None;
+    }
+    let exact = |sql_type| matches!(sql_type, SqlType::Numeric(_));
+    if (exact(left_type) || exact(right_type)) && !left_type.is_float() && !right_type.is_float() {
+        return Some(SqlType::Numeric(None));
     }
     if operator == BinaryOperator::Power {
         return Some(SqlType::Double);
@@ -66,8 +85,35 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     match (name, arguments) {
         ("length" | "char_length" | "character_length", [_]) => Some(SqlType::Integer),
         ("lower" | "upper", [_]) => Some(SqlType::Text),
-        ("abs", [argument]) => {
-            static_type(argument, scope).filter(|sql_type| sql_type.is_numeric())
+        ("abs", [argument]) => static_type(argument, scope)
+            .filter(|sql_type| sql_type.is_numeric())
+            .map(SqlType::without_modifier),
+        (
+            "now"
+            | "current_timestamp"
+            | "transaction_timestamp"
+            | "statement_timestamp"
+            | "clock_timestamp",
+            [],
+        ) => Some(SqlType::TimestampTz(None)),
+        ("localtimestamp", []) => Some(SqlType::Timestamp(None)),
+        ("current_date", []) => Some(SqlType::Date),
+        ("extract", [_, _]) => Some(SqlType::Numeric(None)),
+        ("date_part", [_, _]) => Some(SqlType::Double),
+        ("date_trunc", [_, argument]) => match static_type(argument, scope)? {
+            SqlType::Timestamp(_) => Some(SqlType::Timestamp(None)),
+            SqlType::Date | SqlType::TimestampTz(_) => Some(SqlType::TimestampTz(None)),
+            _ => None,
+        },
+        ("json_typeof" | "jsonb_typeof", [_]) => Some(SqlType::Text),
+        ("json_array_length" | "jsonb_array_length", [_]) => Some(SqlType::Integer),
+        ("round" | "trunc" | "ceil" | "ceiling" | "floor", [argument, ..]) => {
+            match static_type(argument, scope)? {
+                SqlType::Numeric(_) => Some(SqlType::Numeric(None)),
+                sql_type if sql_type.is_numeric() && arguments.len() == 1 => Some(SqlType::Double),
+                sql_type if is_integer(sql_type) => Some(SqlType::Numeric(None)),
+                _ => None,
+            }
         }
         ("nullif", [left, _]) => static_type(left, scope),
         ("coalesce", [first, rest @ ..]) => {
@@ -95,7 +141,8 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
         }),
         ExprKind::Literal(Literal::Boolean(_)) => Some(SqlType::Boolean),
         ExprKind::Literal(Literal::String(_)) => Some(SqlType::Text),
-        ExprKind::Literal(Literal::Null | Literal::Decimal(_)) => None,
+        ExprKind::Literal(Literal::Decimal(_)) => Some(SqlType::Numeric(None)),
+        ExprKind::Literal(Literal::Null) => None,
         ExprKind::Column { qualifier, name } => scope
             .column(qualifier.as_deref(), name, expr.position)
             .ok()
@@ -122,7 +169,15 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::LessOrEqual
             | BinaryOperator::Greater
             | BinaryOperator::GreaterOrEqual => Some(SqlType::Boolean),
-            BinaryOperator::Concat => Some(SqlType::Text),
+            BinaryOperator::Concat
+            | BinaryOperator::JsonFieldText
+            | BinaryOperator::JsonPathText => Some(SqlType::Text),
+            BinaryOperator::JsonContains | BinaryOperator::JsonContainedIn => {
+                Some(SqlType::Boolean)
+            }
+            BinaryOperator::JsonField | BinaryOperator::JsonPath => {
+                static_type(left, scope).filter(|sql_type| sql_type.is_json())
+            }
             _ => arithmetic_type(*operator, left, right, scope),
         },
         ExprKind::Case {

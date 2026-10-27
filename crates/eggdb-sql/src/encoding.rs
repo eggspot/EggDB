@@ -1,5 +1,7 @@
+use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::types::{SqlType, Value};
+use crate::numeric::Numeric;
+use crate::types::{NumericModifier, SqlType, Value};
 
 pub(crate) const NAMESPACE: &[u8] = &[0xFF, b'S', b'Q', b'L', 0x00];
 const META_SPACE: u8 = 0x01;
@@ -9,6 +11,8 @@ const INDEX_SPACE: u8 = 0x04;
 const FORMAT_VERSION: u8 = 1;
 const AUTO_INCREMENT_FORMAT_VERSION: u8 = 2;
 const INDEXES_FORMAT_VERSION: u8 = 3;
+const TYPES_FORMAT_VERSION: u8 = 4;
+const NO_PRECISION: u8 = 0xFF;
 const DEFAULT_ABSENT: u8 = 0;
 const DEFAULT_EXPRESSION: u8 = 1;
 const DEFAULT_AUTO_INCREMENT: u8 = 2;
@@ -100,6 +104,33 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::Boolean => 6,
         SqlType::Text => 7,
         SqlType::Varchar(_) => 8,
+        SqlType::Numeric(_) => 9,
+        SqlType::Date => 10,
+        SqlType::Timestamp(_) => 11,
+        SqlType::TimestampTz(_) => 12,
+        SqlType::Json => 13,
+        SqlType::Jsonb => 14,
+    }
+}
+
+fn is_version_4_type(sql_type: SqlType) -> bool {
+    type_tag(sql_type) >= type_tag(SqlType::Numeric(None))
+}
+
+fn put_type(out: &mut Vec<u8>, sql_type: SqlType) {
+    out.push(type_tag(sql_type));
+    match sql_type {
+        SqlType::Varchar(length) => out.extend_from_slice(&length.unwrap_or(0).to_le_bytes()),
+        SqlType::Numeric(modifier) => {
+            let (precision, scale) =
+                modifier.map_or((0, 0), |modifier| (modifier.precision, modifier.scale));
+            out.extend_from_slice(&precision.to_le_bytes());
+            out.extend_from_slice(&scale.to_le_bytes());
+        }
+        SqlType::Timestamp(precision) | SqlType::TimestampTz(precision) => {
+            out.push(precision.unwrap_or(NO_PRECISION));
+        }
+        _ => {}
     }
 }
 
@@ -143,7 +174,13 @@ impl TableDefinition {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if !self.indexes.is_empty() {
+        let version = if self
+            .columns
+            .iter()
+            .any(|column| is_version_4_type(column.sql_type))
+        {
+            TYPES_FORMAT_VERSION
+        } else if !self.indexes.is_empty() {
             INDEXES_FORMAT_VERSION
         } else if self.auto_increment_column().is_some() {
             AUTO_INCREMENT_FORMAT_VERSION
@@ -155,10 +192,7 @@ impl TableDefinition {
         put_varint(&mut out, self.columns.len() as u64);
         for column in &self.columns {
             put_bytes(&mut out, column.name.as_bytes());
-            out.push(type_tag(column.sql_type));
-            if let SqlType::Varchar(length) = column.sql_type {
-                out.extend_from_slice(&length.unwrap_or(0).to_le_bytes());
-            }
+            put_type(&mut out, column.sql_type);
             out.push(u8::from(column.not_null));
             match &column.default {
                 _ if column.auto_increment => out.push(DEFAULT_AUTO_INCREMENT),
@@ -173,7 +207,7 @@ impl TableDefinition {
         for &index in &self.primary_key {
             put_varint(&mut out, index as u64);
         }
-        if version == INDEXES_FORMAT_VERSION {
+        if version >= INDEXES_FORMAT_VERSION {
             put_varint(&mut out, self.indexes.len() as u64);
             for index in &self.indexes {
                 out.extend_from_slice(&index.id.to_le_bytes());
@@ -190,8 +224,9 @@ impl TableDefinition {
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "table definition");
-        let version = reader.version_up_to(INDEXES_FORMAT_VERSION)?;
+        let version = reader.version_up_to(TYPES_FORMAT_VERSION)?;
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
+        let new_types_allowed = version >= TYPES_FORMAT_VERSION;
         let id = reader.u32()?;
         let count = reader.count()?;
         if count > MAX_COLUMNS {
@@ -212,6 +247,12 @@ impl TableDefinition {
                     0 => SqlType::Varchar(None),
                     length => SqlType::Varchar(Some(length)),
                 },
+                9 if new_types_allowed => reader.numeric_type()?,
+                10 if new_types_allowed => SqlType::Date,
+                11 if new_types_allowed => SqlType::Timestamp(reader.precision()?),
+                12 if new_types_allowed => SqlType::TimestampTz(reader.precision()?),
+                13 if new_types_allowed => SqlType::Json,
+                14 if new_types_allowed => SqlType::Jsonb,
                 _ => return Err(reader.damaged()),
             };
             let not_null = match reader.byte()? {
@@ -245,12 +286,19 @@ impl TableDefinition {
             }
             primary_key.push(index);
         }
-        let indexes = if version == INDEXES_FORMAT_VERSION {
-            decode_indexes(&mut reader, columns.len())?
-        } else {
-            Vec::new()
+        let indexes = match version {
+            INDEXES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), false)?,
+            TYPES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            _ => Vec::new(),
         };
         reader.finish()?;
+        if new_types_allowed
+            && !columns
+                .iter()
+                .any(|column| is_version_4_type(column.sql_type))
+        {
+            return Err(reader.damaged());
+        }
         if columns.is_empty() && !primary_key.is_empty() {
             return Err(reader.damaged());
         }
@@ -264,7 +312,7 @@ impl TableDefinition {
         if version == AUTO_INCREMENT_FORMAT_VERSION && (auto_columns != 1 || !auto_first_key) {
             return Err(reader.damaged());
         }
-        if (version == INDEXES_FORMAT_VERSION && auto_columns > 1)
+        if (version >= INDEXES_FORMAT_VERSION && auto_columns > 1)
             || (auto_columns == 1 && !auto_first_key)
         {
             return Err(reader.damaged());
@@ -279,9 +327,13 @@ impl TableDefinition {
     }
 }
 
-fn decode_indexes(reader: &mut Reader<'_>, column_count: usize) -> SqlResult<Vec<IndexDefinition>> {
+fn decode_indexes(
+    reader: &mut Reader<'_>,
+    column_count: usize,
+    none_allowed: bool,
+) -> SqlResult<Vec<IndexDefinition>> {
     let count = reader.count()?;
-    if count == 0 || count > MAX_INDEXES {
+    if (count == 0 && !none_allowed) || count > MAX_INDEXES {
         return Err(reader.damaged());
     }
     let mut indexes: Vec<IndexDefinition> = Vec::new();
@@ -398,7 +450,7 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
             };
             out.extend_from_slice(&ordered.to_be_bytes());
         }
-        Value::Text(text) => {
+        Value::Text(text) | Value::Json(text) | Value::Jsonb(text) => {
             out.push(PRESENT);
             for &byte in text.as_bytes() {
                 out.push(byte);
@@ -407,6 +459,18 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
                 }
             }
             out.extend_from_slice(&[0x00, 0x01]);
+        }
+        Value::Numeric(number) => {
+            out.push(PRESENT);
+            number.encode_key(out);
+        }
+        Value::Date(days) => {
+            out.push(PRESENT);
+            out.extend_from_slice(&((*days as u32) ^ 0x8000_0000).to_be_bytes());
+        }
+        Value::Timestamp(micros) | Value::TimestampTz(micros) => {
+            out.push(PRESENT);
+            out.extend_from_slice(&((*micros as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
         }
     }
 }
@@ -451,6 +515,30 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
                 out.push(7);
                 put_bytes(out, text.as_bytes());
             }
+            Value::Numeric(number) => {
+                out.push(9);
+                number.encode_row(out);
+            }
+            Value::Date(days) => {
+                out.push(10);
+                out.extend_from_slice(&days.to_le_bytes());
+            }
+            Value::Timestamp(micros) => {
+                out.push(11);
+                out.extend_from_slice(&micros.to_le_bytes());
+            }
+            Value::TimestampTz(micros) => {
+                out.push(12);
+                out.extend_from_slice(&micros.to_le_bytes());
+            }
+            Value::Json(text) => {
+                out.push(13);
+                put_bytes(out, text.as_bytes());
+            }
+            Value::Jsonb(text) => {
+                out.push(14);
+                put_bytes(out, text.as_bytes());
+            }
         }
     }
 }
@@ -492,9 +580,30 @@ pub(crate) fn decode_row_into(
                 _ => return Err(reader.damaged()),
             },
             7 if wanted => Value::Text(reader.text()?),
-            7 => {
+            13 if wanted => Value::Json(reader.text()?),
+            14 if wanted => Value::Jsonb(reader.text()?),
+            7 | 13 | 14 => {
                 reader.skip_text()?;
                 Value::Null
+            }
+            9 => Value::Numeric(reader.numeric()?),
+            10 => {
+                let days = i32::from_le_bytes(reader.array()?);
+                if !datetime::valid_date(days) {
+                    return Err(reader.damaged());
+                }
+                Value::Date(days)
+            }
+            11 | 12 => {
+                let micros = i64::from_le_bytes(reader.array()?);
+                if !datetime::valid_timestamp(micros) {
+                    return Err(reader.damaged());
+                }
+                if tag == 11 {
+                    Value::Timestamp(micros)
+                } else {
+                    Value::TimestampTz(micros)
+                }
             }
             _ => return Err(reader.damaged()),
         });
@@ -609,6 +718,43 @@ impl<'b> Reader<'b> {
         String::from_utf8(bytes.to_vec()).map_err(|_| self.damaged())
     }
 
+    fn numeric_type(&mut self) -> SqlResult<SqlType> {
+        let precision = u16::from_le_bytes(self.array()?);
+        let scale = i16::from_le_bytes(self.array()?);
+        if precision == 0 {
+            return if scale == 0 {
+                Ok(SqlType::Numeric(None))
+            } else {
+                Err(self.damaged())
+            };
+        }
+        crate::numeric::check_modifier(i64::from(precision), i64::from(scale))
+            .map_err(|_| self.damaged())?;
+        Ok(SqlType::Numeric(Some(NumericModifier { precision, scale })))
+    }
+
+    fn precision(&mut self) -> SqlResult<Option<u8>> {
+        match self.byte()? {
+            NO_PRECISION => Ok(None),
+            precision @ 0..=6 => Ok(Some(precision)),
+            _ => Err(self.damaged()),
+        }
+    }
+
+    fn numeric(&mut self) -> SqlResult<Numeric> {
+        let rest = self.bytes.get(self.at..).unwrap_or(&[]);
+        let (value, used) = Numeric::decode_row(rest).ok_or_else(|| self.damaged())?;
+        self.take(used)?;
+        Ok(value)
+    }
+
+    fn numeric_key(&mut self) -> SqlResult<Numeric> {
+        let rest = self.bytes.get(self.at..).unwrap_or(&[]);
+        let (value, used) = Numeric::decode_key(rest).ok_or_else(|| self.damaged())?;
+        self.take(used)?;
+        Ok(value)
+    }
+
     fn skip_text(&mut self) -> SqlResult<()> {
         let length = self.count()?;
         self.take(length)?;
@@ -624,9 +770,15 @@ impl<'b> Reader<'b> {
         let width = match sql_type {
             SqlType::Boolean => 1,
             SqlType::SmallInt => 2,
-            SqlType::Integer | SqlType::Real => 4,
-            SqlType::BigInt | SqlType::Double => 8,
-            SqlType::Text | SqlType::Varchar(_) => {
+            SqlType::Integer | SqlType::Real | SqlType::Date => 4,
+            SqlType::BigInt | SqlType::Double | SqlType::Timestamp(_) | SqlType::TimestampTz(_) => {
+                8
+            }
+            SqlType::Numeric(_) => {
+                let rest = self.bytes.get(self.at..).unwrap_or(&[]);
+                Numeric::key_length(rest).ok_or_else(|| self.damaged())?
+            }
+            SqlType::Text | SqlType::Varchar(_) | SqlType::Json | SqlType::Jsonb => {
                 let rest = self.bytes.get(self.at..).unwrap_or(&[]);
                 let mut at = 0;
                 loop {
@@ -682,7 +834,26 @@ impl<'b> Reader<'b> {
                 };
                 Value::Double(f64::from_bits(bits))
             }
-            SqlType::Text | SqlType::Varchar(_) => {
+            SqlType::Numeric(_) => Value::Numeric(self.numeric_key()?),
+            SqlType::Date => {
+                let days = (u32::from_be_bytes(self.array()?) ^ 0x8000_0000) as i32;
+                if !datetime::valid_date(days) {
+                    return Err(self.damaged());
+                }
+                Value::Date(days)
+            }
+            SqlType::Timestamp(_) | SqlType::TimestampTz(_) => {
+                let micros = (u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64;
+                if !datetime::valid_timestamp(micros) {
+                    return Err(self.damaged());
+                }
+                if matches!(sql_type, SqlType::Timestamp(_)) {
+                    Value::Timestamp(micros)
+                } else {
+                    Value::TimestampTz(micros)
+                }
+            }
+            SqlType::Text | SqlType::Varchar(_) | SqlType::Json | SqlType::Jsonb => {
                 let mut bytes = Vec::new();
                 loop {
                     match self.byte()? {
@@ -694,7 +865,12 @@ impl<'b> Reader<'b> {
                         byte => bytes.push(byte),
                     }
                 }
-                Value::Text(String::from_utf8(bytes).map_err(|_| self.damaged())?)
+                let text = String::from_utf8(bytes).map_err(|_| self.damaged())?;
+                match sql_type {
+                    SqlType::Json => Value::Json(text),
+                    SqlType::Jsonb => Value::Jsonb(text),
+                    _ => Value::Text(text),
+                }
             }
         })
     }
@@ -946,10 +1122,10 @@ mod tests {
     #[test]
     fn a_newer_table_definition_version_is_refused_by_name() {
         let mut newer = with_indexes([true, false]).encode();
-        newer[0] = 4;
+        newer[0] = 5;
         let error = TableDefinition::decode("t", &newer).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
-        assert!(error.message().contains("format version 4"), "{error}");
+        assert!(error.message().contains("format version 5"), "{error}");
     }
 
     fn with_indexes(auto: [bool; 2]) -> TableDefinition {

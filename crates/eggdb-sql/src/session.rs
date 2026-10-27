@@ -552,6 +552,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut resume = (0, 0);
         loop {
             let settings = Arc::clone(&self.settings);
+            let _clock =
+                crate::datetime::enter_statement(&settings.get("TimeZone").unwrap_or_default());
             let mut parser = Parser::new(text, &tokens)
                 .with_context(parameters, &settings)
                 .in_dialect(self.dialect)

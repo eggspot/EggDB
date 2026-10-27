@@ -72,6 +72,12 @@ fn oracle_type_name(sql_type: SqlType) -> &'static str {
         SqlType::Boolean => "BOOLEAN",
         SqlType::Text | SqlType::Varchar(None) => "CLOB",
         SqlType::Varchar(Some(_)) => "VARCHAR2",
+        SqlType::Numeric(_) => "NUMBER",
+        SqlType::Date => "DATE",
+        SqlType::Timestamp(Some(0)) => "DATE",
+        SqlType::Timestamp(_) => "TIMESTAMP",
+        SqlType::TimestampTz(_) => "TIMESTAMP WITH TIME ZONE",
+        SqlType::Json | SqlType::Jsonb => "JSON",
     }
 }
 
@@ -91,7 +97,11 @@ fn length_of(sql_type: SqlType) -> i64 {
         SqlType::Double => 8,
         SqlType::Text | SqlType::Varchar(None) => 4000,
         SqlType::Boolean => 1,
-        SqlType::SmallInt | SqlType::Integer | SqlType::BigInt => 22,
+        SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Numeric(_) => 22,
+        SqlType::Date | SqlType::Timestamp(Some(0)) => 7,
+        SqlType::Timestamp(_) => 11,
+        SqlType::TimestampTz(_) => 13,
+        SqlType::Json | SqlType::Jsonb => 8200,
     }
 }
 
@@ -99,6 +109,14 @@ fn type_text(sql_type: SqlType) -> String {
     match (sql_type, precision_of(sql_type)) {
         (_, Some(precision)) => format!("NUMBER({precision})"),
         (SqlType::Varchar(Some(length)), _) => format!("VARCHAR2({length} CHAR)"),
+        (SqlType::Numeric(Some(modifier)), _) => {
+            format!("NUMBER({},{})", modifier.precision, modifier.scale)
+        }
+        (SqlType::Timestamp(Some(precision)) | SqlType::TimestampTz(Some(precision)), _)
+            if precision != 0 =>
+        {
+            format!("{}({precision})", oracle_type_name(sql_type))
+        }
         _ => oracle_type_name(sql_type).to_owned(),
     }
 }

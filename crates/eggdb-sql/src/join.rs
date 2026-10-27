@@ -58,6 +58,11 @@ fn type_family(sql_type: SqlType) -> u8 {
         SqlType::Real | SqlType::Double => 1,
         SqlType::Text | SqlType::Varchar(_) => 2,
         SqlType::Boolean => 3,
+        SqlType::Numeric(_) => 4,
+        SqlType::Date | SqlType::Timestamp(_) => 5,
+        SqlType::TimestampTz(_) => 6,
+        SqlType::Json => 7,
+        SqlType::Jsonb => 8,
     }
 }
 

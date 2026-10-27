@@ -128,7 +128,6 @@ SELECT 1.5
 ?column?
 1.5
 SELECT 1
-... differs
 
 rows
 SELECT 10.0 / 4
@@ -136,7 +135,6 @@ SELECT 10.0 / 4
 ?column?
 2.5000000000000000
 SELECT 1
-... differs
 
 chapter sql-expressions "Type Casts", datatype-boolean, typeconv
 rows
@@ -491,7 +489,6 @@ INSERT INTO people (id, name, active) VALUES (10, 'x', 5)
 
 ok
 CREATE TABLE things (id integer PRIMARY KEY, price numeric)
-... differs
 
 rows
 SELECT count(*) FROM people
@@ -675,7 +672,6 @@ SELECT avg(age) FROM people WHERE age = 30
 avg
 30.0000000000000000
 SELECT 1
-... differs
 
 rows
 SELECT count(*), sum(age), max(name) FROM people WHERE id > 100

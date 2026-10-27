@@ -108,7 +108,10 @@ fn select_without_from_follows_postgresql_arithmetic() {
     assert_eq!(state(&mut session, "SELECT 1e308::float8 * 10"), "22003");
     assert_eq!(state(&mut session, "SELECT 'abc'::integer"), "22P02");
     assert_eq!(state(&mut session, "SELECT 1 + 'a'::text"), "42883");
-    assert_eq!(state(&mut session, "SELECT 1.5"), "0A000");
+    assert_eq!(
+        last(&mut session, "SELECT 1.5, 1.50 + 1, 10 / 4.0, 0.1 + 0.2"),
+        "?column?|?column?|?column?|?column?\n1.5|2.50|2.5000000000000000|0.3\nSELECT 1"
+    );
     assert_eq!(state(&mut session, "SELECT 0 ^ -1"), "2201F");
 }
 
@@ -355,11 +358,11 @@ fn inserts_check_constraints_and_return_rows() {
         "id|name|age|score|active\n7|gus|NULL|2.5|t\nINSERT 0 1"
     );
     assert_eq!(
-        state(
+        last(
             &mut session,
-            "INSERT INTO people (id, name, age) VALUES (8, 'x', 2.5)"
+            "INSERT INTO people (id, name, age) VALUES (8, 'x', 2.5) RETURNING age"
         ),
-        "0A000"
+        "age\n3\nINSERT 0 1"
     );
 }
 
@@ -548,7 +551,11 @@ fn create_and_drop_table_follow_postgresql() {
         state(&mut session, "CREATE TABLE u (a nosuchtype)"),
         "42704"
     );
-    assert_eq!(state(&mut session, "CREATE TABLE u (a numeric)"), "0A000");
+    assert_eq!(state(&mut session, "CREATE TABLE u (a money)"), "0A000");
+    assert_eq!(
+        state(&mut session, "CREATE TABLE u (a numeric(0))"),
+        "22023"
+    );
     assert_eq!(
         state(&mut session, "CREATE TABLE u (a int CHECK (a > 0))"),
         "0A000"
@@ -586,8 +593,8 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "WITH x AS (SELECT 1) SELECT * FROM x",
         "INSERT INTO people SELECT * FROM people",
         "ALTER TABLE people ADD COLUMN x int",
-        "CREATE TABLE ts (t timestamp)",
-        "CREATE TABLE js (j jsonb)",
+        "CREATE TABLE ts (t time)",
+        "CREATE TABLE js (j interval)",
         "SAVEPOINT a",
     ] {
         let error = fails(&mut session, sql);
@@ -1669,8 +1676,6 @@ fn grouping_errors_follow_postgresql() {
         ("SELECT sum(name) FROM people", "42883"),
         ("SELECT avg(name) FROM people", "42883"),
         ("SELECT min(active) FROM people", "42883"),
-        ("SELECT avg(age) FROM people", "0A000"),
-        ("SELECT avg(age + 1) FROM people", "0A000"),
         ("SELECT sum(*) FROM people", "42809"),
         ("SELECT count() FROM people", "42809"),
         ("SELECT count(age, name) FROM people", "42883"),
@@ -1731,10 +1736,13 @@ fn sums_keep_postgresql_result_types() {
         ),
         "sum\n1\nSELECT 1"
     );
-    assert_eq!(state(&mut session, "SELECT sum(b) FROM n"), "0A000");
     assert_eq!(
-        state(&mut session, "SELECT sum(b) / 2 FROM n WHERE i = 1"),
-        "0A000"
+        last(&mut session, "SELECT sum(b), avg(i) FROM n"),
+        "sum|avg\n9223372036854775808|1073741824.00000000\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT sum(b) / 2 FROM n WHERE i = 1"),
+        "?column?\n0.50000000000000000000\nSELECT 1"
     );
     assert_eq!(state(&mut session, "SELECT sum(d) FROM n"), "22003");
     assert_eq!(
