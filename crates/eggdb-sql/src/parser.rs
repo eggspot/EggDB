@@ -1311,7 +1311,12 @@ impl<'t> Parser<'t> {
         if !distinct {
             self.take_word("all");
         }
-        let items = if self.is_clause_end() {
+        let called = matches!(self.peek_kind(), TokenKind::Word(_))
+            && self.peek_kind_at(1) == &TokenKind::LeftParen;
+        let items = if self.is_clause_end() && !(self.sqlite() && called) {
+            if self.sqlite() {
+                return Err(self.unexpected());
+            }
             Vec::new()
         } else {
             self.select_items()?
