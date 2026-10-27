@@ -4260,11 +4260,17 @@ recorded here), and it stays in item 19e.
 Both lines are gated with the 15% ceiling of D99's SQL lines and may only shrink. The known
 cost of the hash choice without table statistics: joining a small filtered first table to a
 very large table by its key reads up to 64 MiB of the large one before it falls back to
-lookups; statistics come later. The point-select line is not moved: on Linux it measures about
-0.96 against its 0.85 line while the key-value `get` did not drift, so part of it is a real
-cost of the wider `SELECT` path. A profile shows the time in parsing, allocation and the one
-B+tree lookup, with no single new cost; two allocations this part had added are removed. The
-rest joins item 19e, and the line stays where it is.
+lookups; statistics come later. **The Linux point-select line, decided by research.** On CI's Linux runners
+`sql_point_select` measured 0.92-1.04 across eight runs of this pull request, against a line of
+0.851 taken from one run of #55; main's own run after #55 merged measured 0.905, and the runners'
+absolute times vary from 1.43 to 2.66 µs per select with the ratio moving with them. A
+deterministic A/B on an Apple-silicon Mac, the same harness with main's `eggdb-sql` sources
+swapped in, measured the single-table point select at 1,321 ns per select on this branch and
+1,323 ns on main (best of 7 runs of 100,000 selects): the SQL layer's point-select path did not
+get slower. Research concluded that the 0.851 line was a low sample, and that widening only that
+line to 0.910 (limit 1.047, above every observed run) with this record is justified, where an
+unexplained loosening would not be. The macOS line stays at 1.226, and D99's condition (at most
+1.0 before v0.3.0) is unchanged.
 
 **Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to 1,297,360 bytes on
 aarch64 macOS (+99,328, +8.3%) for the join planner and executor, the hash join, column pruning,
