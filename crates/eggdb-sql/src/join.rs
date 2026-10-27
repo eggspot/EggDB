@@ -15,6 +15,7 @@ use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert};
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(crate) struct JoinedFrom<'a> {
@@ -337,17 +338,58 @@ fn shift_slots(expr: &Expr, offset: usize) -> Expr {
     }
 }
 
+const MOST_EXPECTED_ROWS: usize = 1 << 20;
+
+#[derive(Default)]
+pub(crate) struct RowCountHints {
+    counts: HashMap<u32, (u64, usize)>,
+}
+
+impl RowCountHints {
+    fn expected(&self, table: u32, version: Option<u64>, most: Option<usize>) -> usize {
+        let Some(version) = version else {
+            return 0;
+        };
+        match self.counts.get(&table) {
+            Some(&(seen, rows)) if seen == version => rows
+                .min(most.unwrap_or(MOST_EXPECTED_ROWS))
+                .min(MOST_EXPECTED_ROWS),
+            _ => 0,
+        }
+    }
+
+    fn record(&mut self, table: u32, version: Option<u64>, rows: usize) {
+        if let Some(version) = version {
+            if self.counts.len() >= 256 {
+                self.counts.clear();
+            }
+            self.counts.insert(table, (version, rows));
+        }
+    }
+}
+
 const LOOKUP_HASH_LIMIT: usize = 64 << 20;
+
+struct HashBuild<'b> {
+    pairs: &'b [(usize, usize)],
+    needed: &'b [bool],
+    keep: &'b [Expr],
+    limit: Option<usize>,
+}
 
 fn build_hash(
     reader: &dyn KeyValueRead,
     shape: &StepShape<'_>,
-    pairs: &[(usize, usize)],
-    needed: &[bool],
-    keep: &[Expr],
-    limit: Option<usize>,
+    plan: HashBuild<'_>,
+    hints: &mut RowCountHints,
     memory: &mut WorkMemory,
 ) -> SqlResult<Option<HashIndex>> {
+    let HashBuild {
+        pairs,
+        needed,
+        keep,
+        limit,
+    } = plan;
     let scope = Scope::Many(&shape.visible);
     let integer = |offset: usize| {
         scope
@@ -357,7 +399,10 @@ fn build_hash(
     let integer_keys = matches!(pairs, [(outer, inner)] if integer(*outer) && integer(*inner));
     let offset = shape.source.offset;
     let build: Vec<usize> = pairs.iter().map(|&(_, inner)| inner - offset).collect();
-    let mut index = HashIndex::new(integer_keys, shape.source.table.columns.len());
+    let version = reader.committed_version();
+    let table_id = shape.source.table.id;
+    let expected = hints.expected(table_id, version, limit.map(|bytes| bytes / 256));
+    let mut index = HashIndex::new(integer_keys, shape.source.table.columns.len(), expected);
     let mut bounded = limit.map(WorkMemory::with_limit);
     let mut over = false;
     let table = shape.source.table;
@@ -395,6 +440,7 @@ fn build_hash(
     if over {
         return Ok(None);
     }
+    hints.record(table_id, version, index.len());
     if let Some(local) = bounded {
         memory.charge(local.used())?;
     }
@@ -437,6 +483,7 @@ impl<'a> JoinedRows<'a> {
         first_key: Option<Vec<u8>>,
         mut needed: Vec<Vec<bool>>,
         mut filters: Vec<Vec<Expr>>,
+        hints: &mut RowCountHints,
         memory: &mut WorkMemory,
     ) -> SqlResult<Self> {
         let outer_is_scanned = first_key.is_none();
@@ -507,10 +554,13 @@ impl<'a> JoinedRows<'a> {
                     build_hash(
                         reader,
                         shape,
-                        &probe_build,
-                        &step_needed,
-                        &keep,
-                        Some(LOOKUP_HASH_LIMIT),
+                        HashBuild {
+                            pairs: &probe_build,
+                            needed: &step_needed,
+                            keep: &keep,
+                            limit: Some(LOOKUP_HASH_LIMIT),
+                        },
+                        hints,
                         memory,
                     )?
                 } else {
@@ -527,8 +577,19 @@ impl<'a> JoinedRows<'a> {
                     None => Access::Lookup(lefts),
                 }
             } else if !pairs.is_empty() {
-                let built = build_hash(reader, shape, &pairs, &step_needed, &keep, None, memory)?
-                    .unwrap_or_else(|| HashIndex::new(false, table.columns.len()));
+                let built = build_hash(
+                    reader,
+                    shape,
+                    HashBuild {
+                        pairs: &pairs,
+                        needed: &step_needed,
+                        keep: &keep,
+                        limit: None,
+                    },
+                    hints,
+                    memory,
+                )?
+                .unwrap_or_else(|| HashIndex::new(false, table.columns.len(), 0));
                 if !keep.is_empty() {
                     filters[index + 1].retain(|filter| !touches_only(filter, &own));
                 }

@@ -12,7 +12,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
     Evaluator, Scope, Source, check_columns, compare_truth, output_name, reject_aggregates,
 };
-use crate::join::{self, JoinedRows};
+use crate::join::{self, JoinedRows, RowCountHints};
 use crate::lexer::tokenize;
 use crate::memory::WorkMemory;
 use crate::parser::{LiteralRows, LiteralToken, Parser};
@@ -44,6 +44,7 @@ struct CachedTable {
 #[derive(Default)]
 pub(crate) struct TableCache {
     entries: HashMap<String, CachedTable>,
+    row_counts: RowCountHints,
 }
 
 impl TableCache {
@@ -1089,6 +1090,7 @@ pub(crate) fn select(
                 first_key,
                 joined.needed_columns(select),
                 joined.filters_by_level(bound_filter.as_ref()),
+                &mut tables.row_counts,
                 &mut memory,
             )?)
         }

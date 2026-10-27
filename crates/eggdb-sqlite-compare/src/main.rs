@@ -17,6 +17,9 @@
 //! the disk, depend on the disk more than on either engine and are reported only. `--update`
 //! rewrites this system's lines of these benchmarks and `--baseline <path>` reads another file.
 
+#[cfg(test)]
+#[path = "../../eggdb-bench/src/allocations.rs"]
+mod allocations;
 #[path = "../../eggdb-bench/src/baseline.rs"]
 #[allow(dead_code)]
 mod baseline;
@@ -36,6 +39,10 @@ mod stores;
 mod workloads;
 
 use crate::harness::Benchmark;
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: allocations::CountingAllocator = allocations::CountingAllocator::new();
 use std::process::ExitCode;
 
 type Workload = fn() -> Result<Vec<crate::baseline::Metric>, String>;

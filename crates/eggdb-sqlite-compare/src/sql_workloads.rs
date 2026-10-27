@@ -376,4 +376,23 @@ mod tests {
             assert_eq!(eggdb, sqlite, "{sql}");
         }
     }
+
+    #[test]
+    fn a_join_and_a_group_by_allocate_per_statement_not_per_row() {
+        let stores = Stores::open("test-sql-allocations", Durability::Off, 0).unwrap();
+        let store = DatabaseStore(&stores.eggdb);
+        let mut session = Session::new(&store);
+        eggdb_run(&mut session, EGGDB_TABLE).unwrap();
+        eggdb_insert(&mut session, 0, 10_000).unwrap();
+        eggdb_run(&mut session, EGGDB_ORDERS).unwrap();
+        eggdb_run(&mut session, &orders_script()).unwrap();
+        for (sql, most) in [(JOIN_QUERY, 300), (super::GROUP_BY_QUERY, 1000)] {
+            eggdb_run(&mut session, sql).unwrap();
+            let before = crate::ALLOCATOR.count();
+            eggdb_run(&mut session, sql).unwrap();
+            let made = crate::ALLOCATOR.count() - before;
+            println!("ALLOCATIONS {made} for {sql}");
+            assert!(made <= most, "{made} allocations for {sql}");
+        }
+    }
 }

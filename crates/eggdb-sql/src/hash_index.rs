@@ -80,18 +80,25 @@ fn single_integer(row: &[Value], offsets: &[usize]) -> Option<Option<i64>> {
 }
 
 impl HashIndex {
-    pub(crate) fn new(integer_keys: bool, width: usize) -> Self {
+    pub(crate) fn new(integer_keys: bool, width: usize, expected_rows: usize) -> Self {
         Self {
             heads: if integer_keys {
-                Heads::Integer(HashMap::default())
+                Heads::Integer(HashMap::with_capacity_and_hasher(
+                    expected_rows,
+                    SeededIntegerHash::default(),
+                ))
             } else {
-                Heads::Bytes(HashMap::new())
+                Heads::Bytes(HashMap::with_capacity(expected_rows))
             },
-            next: Vec::new(),
-            values: Vec::new(),
+            next: Vec::with_capacity(expected_rows),
+            values: Vec::with_capacity(expected_rows * width),
             width,
             key: Vec::new(),
         }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.next.len()
     }
 
     pub(crate) fn insert(
