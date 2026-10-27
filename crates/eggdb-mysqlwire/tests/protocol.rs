@@ -357,6 +357,27 @@ fn decimal_date_time_and_json_columns_use_their_mysql_types_in_text_and_binary()
         client.query("INSERT INTO ledger (id, amount) VALUES (2, 1234567.5)"),
         Reply::Err { code: 1264, .. }
     ));
+    assert!(matches!(
+        client.query("INSERT INTO ledger (id, booked) VALUES (3, '12345-01-01')"),
+        Reply::Ok { .. }
+    ));
+    let mut execute = select.to_le_bytes().to_vec();
+    execute.extend_from_slice(&[0, 1, 0, 0, 0, 0, 1, 3, 0]);
+    execute.extend_from_slice(&3i32.to_le_bytes());
+    client.command(0x17, &execute);
+    assert_eq!(client.read().unwrap(), vec![4]);
+    for _ in 0..5 {
+        client.read().unwrap();
+    }
+    let refused = client.next_reply();
+    assert!(
+        matches!(refused, Reply::Err { code: 1292, .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        texts(&client.query("SELECT booked FROM ledger WHERE id = 3")),
+        vec![vec!["12345-01-01"]]
+    );
 }
 
 #[test]

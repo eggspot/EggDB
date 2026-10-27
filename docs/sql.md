@@ -123,7 +123,10 @@ What it reads, on top of the statements of "What runs today":
   protocol), and `JSON` columns `MYSQL_TYPE_JSON`.
 - **Date and time functions**: `NOW()`, `SYSDATE()`, `CURRENT_TIMESTAMP[()]`, `LOCALTIME`,
   `LOCALTIMESTAMP` (the session's local time, to the second), `UTC_TIMESTAMP()`, `CURDATE()` and
-  `CURRENT_DATE`, also as a column's `DEFAULT`; `EXTRACT(unit FROM d)`.
+  `CURRENT_DATE`, also as a column's `DEFAULT`; `EXTRACT(unit FROM d)` with MySQL's units
+  (`MICROSECOND` to `YEAR`, `WEEK` in mode 0, and the compound units `SECOND_MICROSECOND` to
+  `YEAR_MONTH`) as integers; another unit is error 1064. `TIMESTAMP '...'` and `DATE '...'`
+  literals. A binary-protocol row with a date outside years 0 to 9999 is error 1292.
 - **Functions and operators**: `IFNULL`, `IF`, `CONCAT`, `LENGTH` (bytes), `CHAR_LENGTH`,
   `UPPER`/`UCASE`, `LOWER`/`LCASE`, `COALESCE`, `NULLIF`, `ABS`, `DATABASE()`, `SCHEMA()`,
   `VERSION()`, `USER()`, `CURRENT_USER()`, `CONNECTION_ID()`, `LAST_INSERT_ID()`, `@@var`
@@ -260,7 +263,10 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `TIMESTAMP(p) WITH [LOCAL] TIME ZONE` as `timestamptz(p)` and `JSON` as `jsonb`. `DATE
   '...'` and `TIMESTAMP '...'` literals, `SYSDATE` and `CURRENT_DATE` (the session's local time
   to the second), `SYSTIMESTAMP`, `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP` work; dates show as
-  `YYYY-MM-DD HH24:MI:SS`. `RAW` and `BLOB` wait for their types.
+  `YYYY-MM-DD HH24:MI:SS`. `EXTRACT(field FROM d)` takes `YEAR`, `MONTH`, `DAY`, `HOUR`,
+  `MINUTE`, `SECOND`, `TIMEZONE_HOUR` and `TIMEZONE_MINUTE`; `HOUR`, `MINUTE` and `SECOND` of a
+  `DATE` and a zone field of a time stamp without a zone are `ORA-30076`, another field
+  `ORA-00907`. `RAW` and `BLOB` wait for their types.
 - **Indexes**: `CREATE [UNIQUE] INDEX name ON t (...)` with `TABLESPACE`, `ONLINE`, `LOGGING`
   and `COMPUTE STATISTICS` accepted, `DROP INDEX name`, `UNIQUE` columns and `CONSTRAINT name
   UNIQUE (...)` (an unnamed one is `SYS_C` and seven digits), `USER_INDEXES`/`ALL_INDEXES`
@@ -459,8 +465,9 @@ significant digits, as PostgreSQL's cast. `round`, `trunc` (both with an optiona
 places), `ceil`/`ceiling`, `floor` and `abs` take `numeric` (and floats). `NaN` is accepted,
 equals itself and sorts above every number. A result with more than 1,000 digits before the
 point fails with `22003` (`value overflows numeric format`) before it is computed, and `^` with
-an integer exponent is exact up to that size (otherwise computed in double precision and
-rounded).
+an integer exponent is exact up to that size (otherwise computed in double precision, through
+logarithms past double precision's range, and rounded): `0.5 ^ 1e400` is 0, `1 ^ 1e400` is 1
+and `10 ^ 400.5` has 401 digits before the point.
 
 `date`, `timestamp` and `timestamptz` read ISO 8601 and PostgreSQL's ISO style: `2024-02-29`,
 `2024-02-29 13:45:01.123456`, `2024-02-29T13:45:01Z`, an offset `+05:30`, `-0330` or `+05`
@@ -487,9 +494,12 @@ acts as UTC until the time zone database comes (D111).
 `54001`) and keeps it as written; `jsonb` stores the normalized text. `->` (a key or an array
 index, negative from the end), `->>` (the same as text), `#>` and `#>>` (a path such as
 `'{a,0}'`), `@>` and `<@` (containment, `jsonb` only), `json_typeof`/`jsonb_typeof` and
-`json_array_length`/`jsonb_array_length` work as in PostgreSQL. `jsonb` values compare and
-index by their normalized text; `json` has no equality, as in PostgreSQL (`42883`), and cannot
-be indexed or be a key (`42704`).
+`json_array_length`/`jsonb_array_length` work as in PostgreSQL. `jsonb` values compare, group
+and index by their normalized text with every number written without trailing zeros, so
+`'{"a": 1.0}'::jsonb = '{"a": 1}'::jsonb` is true and a unique index holds them once, while each
+value keeps the number as written (`1.0`); `json` has no equality, as in PostgreSQL (`42883`),
+and cannot be indexed or be a key (`42704`). Stored `json` and `jsonb` are parsed again when a
+row is read, so a damaged one is `XX001`.
 
 **Expressions**
 - Arithmetic `+ - * / % ^`, unary `-` and `+`, string concatenation `||`.
@@ -687,6 +697,10 @@ until they are fixed:
   31), so `timestamp - timestamp` and `+ interval` answer `0A000`. Named time zones act as UTC
   (above). `now()` is the statement's start time, where PostgreSQL's is the transaction's.
   `to_char`, `to_date`, `to_timestamp`, `age` and `make_date` are missing (`42883`).
+- Values of different types that one expression returns row by row (`coalesce(numeric_column,
+  double_column)`) are grouped and made distinct by their value where a `numeric` is exactly a
+  `double precision` (`2.5`); a `numeric` such as `0.1` and the double nearest it compare equal
+  but group apart. PostgreSQL gives such an expression one type before it runs.
 - `jsonb`'s `?`, `?|`, `?&`, `-`, `||` and `#-` operators, the JSON builder, aggregate, set and
   path (`jsonb_path_query`) functions and SQL/JSON (`JSON_TABLE`) are missing (item 36). `jsonb`
   sorts by its normalized text, not by PostgreSQL's jsonb ordering, and a `jsonb` value more than
@@ -722,7 +736,7 @@ until they are fixed:
   must reach 1.0 before v0.3.0 (item 19e, D100).
 
 ## Known differences from MySQL
-The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 148 cases from the MySQL 8.0
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 151 cases from the MySQL 8.0
 Reference Manual's documented behaviour) marks these as differing until they are fixed:
 - `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`, and decimal constants
   outside a `DECIMAL` column are doubles (`0.1 + 0.2` is `0.30000000000000004`); stored into a
@@ -751,6 +765,8 @@ And more, not in the suite yet:
   `ON UPDATE CURRENT_TIMESTAMP` are not supported yet, and `time_zone` is not applied (the
   session's time zone is UTC unless the PostgreSQL protocol's `TimeZone` sets it).
 - A value rounded to fit a `DECIMAL(p,s)`'s scale gives no note 1265.
+- `EXTRACT` gives integers and accepts no `WEEK` mode but 0; `EXTRACT` of a negative compound
+  value and of years before 1000 are not checked against MySQL.
 - `AVG` of integers and `SUM`/`AVG` of `DECIMAL` use PostgreSQL's result scale (`AVG(2, 3)` is
   `2.5000000000000000`) where MySQL adds 4 digits to the argument's scale (`2.5000`).
 - Indexes: a key on a column prefix (`KEY k (name(10))`) indexes the whole value, and a
@@ -800,7 +816,7 @@ And more, not in the suite yet:
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 190 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 193 cases from Oracle's SQL
 Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
   primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
@@ -816,6 +832,8 @@ And more, not in the suite yet:
   `ORA-01438` for 1000 in a `NUMBER(3)`); decimal constants, `/` and the numeric functions
   compute in double precision (`1/3` has 15 significant digits where Oracle has 38); `NUMBER`
   holds up to 1,000 digits (Oracle: 38 significant digits).
+- `EXTRACT(HOUR ...)` is `ORA-30076` for a `TIMESTAMP(0)` column too, which EggDB stores like a
+  `DATE`; `TIMEZONE_REGION` and `TIMEZONE_ABBR` are `ORA-00907`.
 - `DATE` and `TIMESTAMP` show as `YYYY-MM-DD HH24:MI:SS[.FF]` whatever `NLS_DATE_FORMAT` says;
   `TO_DATE`, `TO_TIMESTAMP`, `TO_CHAR` of a date, `ADD_MONTHS`, `MONTHS_BETWEEN`, `LAST_DAY`,
   `NEXT_DAY` and date arithmetic with numbers are not supported yet.

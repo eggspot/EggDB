@@ -98,7 +98,8 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         ) => Some(SqlType::TimestampTz(None)),
         ("localtimestamp" | "mysql_now" | "mysql_utc_now", []) => Some(SqlType::Timestamp(None)),
         ("current_date", []) => Some(SqlType::Date),
-        ("extract", [_, _]) => Some(SqlType::Numeric(None)),
+        ("extract" | "oracle_extract", [_, _]) => Some(SqlType::Numeric(None)),
+        ("mysql_extract", [_, _]) => Some(SqlType::BigInt),
         ("date_part", [_, _]) => Some(SqlType::Double),
         ("date_trunc", [_, argument]) => match static_type(argument, scope)? {
             SqlType::Timestamp(_) => Some(SqlType::Timestamp(None)),

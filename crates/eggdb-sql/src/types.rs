@@ -666,9 +666,12 @@ fn is_exact_number(value: &Value) -> bool {
 pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
-        (Value::Text(a), Value::Text(b))
-        | (Value::Jsonb(a), Value::Jsonb(b))
-        | (Value::Json(a), Value::Json(b)) => a.as_bytes().cmp(b.as_bytes()),
+        (Value::Text(a), Value::Text(b)) | (Value::Json(a), Value::Json(b)) => {
+            a.as_bytes().cmp(b.as_bytes())
+        }
+        (Value::Jsonb(a), Value::Jsonb(b)) => crate::json::comparable(a)
+            .as_bytes()
+            .cmp(crate::json::comparable(b).as_bytes()),
         (Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_), _)
             if right.sql_type().is_some_and(SqlType::is_datetime) =>
         {
@@ -731,6 +734,8 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
             {
                 out.push(3);
                 out.extend_from_slice(&whole.to_le_bytes());
+            } else if let Some(double) = number.exact_double() {
+                equality_key(out, &Value::Double(double));
             } else {
                 let text = number.equality_text();
                 out.push(6);
@@ -746,10 +751,16 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
             out.push(8);
             out.extend_from_slice(&micros.to_le_bytes());
         }
-        Value::Json(text) | Value::Jsonb(text) => {
+        Value::Json(text) => {
             out.push(9);
             out.extend_from_slice(&(text.len() as u64).to_le_bytes());
             out.extend_from_slice(text.as_bytes());
+        }
+        Value::Jsonb(text) => {
+            let comparable = crate::json::comparable(text);
+            out.push(9);
+            out.extend_from_slice(&(comparable.len() as u64).to_le_bytes());
+            out.extend_from_slice(comparable.as_bytes());
         }
     }
 }

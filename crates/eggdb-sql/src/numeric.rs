@@ -753,43 +753,69 @@ impl Numeric {
             }
             return Ok(Self::nan());
         }
-        let integer_exponent = exponent.integral_value();
+        let integral = exponent.is_integral();
+        let odd = integral && exponent.is_odd();
         if self.is_zero() {
             if exponent.negative {
                 return Err(invalid("zero raised to a negative power is undefined"));
             }
             return Ok(Self::zero(MIN_SIGNIFICANT_DIGITS as usize));
         }
-        if self.negative && integer_exponent.is_none() {
+        if self.negative && !integral {
             return Err(invalid(
                 "a negative number raised to a non-integer power yields a complex result",
             ));
         }
+        let floor_scale = i64::from(self.scale).max(i64::from(exponent.scale));
+        let one = Self::from_i64(1);
+        if self.absolute().compare(&one) == Ordering::Equal {
+            let magnitude = one.rescaled(MIN_SIGNIFICANT_DIGITS.max(floor_scale), true)?;
+            return Ok(if self.negative && odd {
+                magnitude.negated()
+            } else {
+                magnitude
+            });
+        }
         let estimate = self.log10_estimate() * exponent.to_f64();
-        if !estimate.is_finite() || estimate > MAX_INTEGRAL_DIGITS as f64 + 1.0 {
+        if estimate.is_nan() || estimate > MAX_INTEGRAL_DIGITS as f64 + 1.0 {
             return Err(overflow());
         }
-        let scale = (MIN_SIGNIFICANT_DIGITS - estimate.floor() as i64)
-            .max(i64::from(self.scale))
-            .max(i64::from(exponent.scale))
+        let bounded = estimate.max(-4.0 * MAX_SCALE as f64);
+        let scale = (MIN_SIGNIFICANT_DIGITS - bounded.floor() as i64)
+            .max(floor_scale)
             .clamp(0, MAX_SCALE as i64) as usize;
-        if estimate < -(scale as f64) - 2.0 {
+        if bounded < -(scale as f64) - 2.0 {
             return Ok(Self::zero(scale));
         }
-        if let Some(count) = integer_exponent
+        if integral
+            && let Some(count) = exponent.integral_value()
             && let Some(exact) = self.exact_power(count, scale)?
         {
             return Ok(exact);
         }
         let approximate = self.to_f64().abs().powf(exponent.to_f64());
-        let negative = self.negative && integer_exponent.is_some_and(|count| count % 2 != 0);
-        let magnitude = Self::from_f64(approximate, 15)?;
-        let signed = if negative {
+        let magnitude = if approximate.is_finite() && approximate != 0.0 {
+            Self::from_f64(approximate, 15)?
+        } else {
+            let whole = estimate.floor();
+            let mantissa = 10f64.powf(estimate - whole);
+            Self::parse(&format!("{mantissa:.14}e{}", whole as i64))?
+        };
+        let signed = if self.negative && odd {
             magnitude.negated()
         } else {
             magnitude
         };
         signed.rounded(scale as i64)
+    }
+
+    fn is_integral(&self) -> bool {
+        !self.nan && !cut_off(&self.limbs, usize::from(self.scale)).1
+    }
+
+    fn is_odd(&self) -> bool {
+        let (whole, _) = cut_off(&self.limbs, usize::from(self.scale));
+        whole.first().is_some_and(|limb| limb % 2 == 1)
     }
 
     fn log10_estimate(&self) -> f64 {
@@ -995,6 +1021,39 @@ impl Numeric {
             },
             end,
         ))
+    }
+
+    pub(crate) fn exact_double(&self) -> Option<f64> {
+        if self.nan {
+            return None;
+        }
+        let digits = magnitude_digits(&self.limbs);
+        let significant = digits.trim_end_matches('0');
+        let trimmed = digits.len() - significant.len();
+        let scale = usize::from(self.scale).saturating_sub(trimmed);
+        let units: u128 = if scale == 0 {
+            small_value(&self.limbs)?
+        } else {
+            significant.parse().ok()?
+        };
+        let (quotient, twos) = if scale == 0 {
+            (units, 0)
+        } else {
+            let five_power = 5u128.checked_pow(u32::try_from(scale).ok()?)?;
+            if !units.is_multiple_of(five_power) {
+                return None;
+            }
+            (units / five_power, scale)
+        };
+        let odd = quotient >> quotient.trailing_zeros().min(127);
+        if odd >= 1 << 53 {
+            return None;
+        }
+        let value = self.to_f64();
+        let exponent = i32::try_from(twos).ok()?;
+        let rebuilt = (quotient as f64) * 2f64.powi(-exponent);
+        (value.is_finite() && rebuilt == value.abs() && value.abs() >= f64::MIN_POSITIVE)
+            .then_some(value)
     }
 
     pub(crate) fn equality_text(&self) -> String {
@@ -1483,5 +1542,49 @@ mod tests {
         assert!(n("9.99").power(&n("100000")).is_err());
         assert!(n("0.5").power(&n("100000")).unwrap().is_zero());
         assert!(n("1.0000001").power(&n("99999")).is_ok());
+        assert!(
+            n("0.5")
+                .power(&n("99999999999999999999999"))
+                .unwrap()
+                .is_zero()
+        );
+        assert!(n("0.5").power(&n("1e400")).unwrap().is_zero());
+        assert_eq!(shown(n("1").power(&n("1e400"))), "1.0000000000000000");
+        assert_eq!(shown(n("-1").power(&n("1e400"))), "1.0000000000000000");
+        assert_eq!(shown(n("-1").power(&n("3"))), "-1.0000000000000000");
+        assert!(n("2").power(&n("99999999999999999999999")).is_err());
+        assert!(
+            n("2")
+                .power(&n("-99999999999999999999999"))
+                .unwrap()
+                .is_zero()
+        );
+        let large = n("10").power(&n("400.5")).unwrap();
+        assert!(large.to_string().starts_with("316227766016838"), "{large}");
+        assert_eq!(large.scale(), 1);
+        let small = n("10").power(&n("-400.5")).unwrap();
+        assert_eq!(small.scale(), 417);
+        assert!(small.to_string().ends_with("31622776601683800"), "{small}");
+        assert_eq!(
+            shown(n("-2").power(&n("0.5"))),
+            "error: a negative number raised to a non-integer power yields a complex result"
+        );
+        assert_eq!(shown(n("-2").power(&n("3.0"))), "-8.0000000000000000");
+        let mut seed = 0x00DD_5EED_u64;
+        for _ in 0..2_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let base = format!(
+                "{}{}.{}",
+                if seed.is_multiple_of(3) { "-" } else { "" },
+                seed % 97,
+                (seed >> 9) % 1000
+            );
+            let exponent = format!("{}e{}", (seed >> 20) % 1000, (seed >> 30) % 40);
+            let negative = format!("-{exponent}");
+            let _ = n(&base).power(&n(&exponent));
+            let _ = n(&base).power(&n(&negative));
+        }
     }
 }

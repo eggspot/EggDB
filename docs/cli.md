@@ -459,7 +459,8 @@ stdin (a script of `-`, or none at all when stdin is not a terminal). This relea
 first parts of the PostgreSQL dialect: tables with a primary key, `INSERT`, `SELECT` with
 `WHERE`, inner, left and cross joins, `GROUP BY` with aggregates, `HAVING`, `DISTINCT`,
 `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE` and transaction blocks, with the integer,
-floating-point, boolean and text types. `--dialect mysql` reads MySQL's SQL instead, on the
+floating-point, exact `numeric`, boolean, text, `date`, `timestamp`, `timestamptz`, `json` and
+`jsonb` types and `serial` and identity columns. `--dialect mysql` reads MySQL's SQL instead, on the
 same tables, and reports errors as MySQL does (`ERROR 1146 (42S02): Table 'eggdb.t' doesn't
 exist`) and warnings as `Warning 1062: ...` on stderr; `--dialect sqlite` (or `sqlite3`) reads
 SQLite's SQL (type affinity, `INTEGER PRIMARY KEY` row ids, upserts, PRAGMAs, `sqlite_schema`)

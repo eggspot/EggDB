@@ -647,10 +647,68 @@ fn numeric_of(units: i128, scale: u16) -> SqlResult<Numeric> {
     Ok(Numeric::from_scaled(units, scale))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalTime {
+    pub(crate) days: i64,
+    pub(crate) of_day: i64,
+}
+
+impl LocalTime {
+    pub(crate) fn of_date(days: i32) -> Self {
+        Self {
+            days: i64::from(days),
+            of_day: 0,
+        }
+    }
+
+    pub(crate) fn of_micros(micros: i64) -> Self {
+        Self {
+            days: micros.div_euclid(MICROS_PER_DAY),
+            of_day: micros.rem_euclid(MICROS_PER_DAY),
+        }
+    }
+
+    fn micros(self) -> i128 {
+        i128::from(self.days) * i128::from(MICROS_PER_DAY) + i128::from(self.of_day)
+    }
+
+    fn hour(self) -> i64 {
+        self.of_day / (3600 * MICROS_PER_SECOND)
+    }
+
+    fn minute(self) -> i64 {
+        self.of_day / (60 * MICROS_PER_SECOND) % 60
+    }
+
+    fn second(self) -> i64 {
+        self.of_day / MICROS_PER_SECOND % 60
+    }
+
+    fn microsecond(self) -> i64 {
+        self.of_day % MICROS_PER_SECOND
+    }
+}
+
+fn century_start(year: i64) -> i64 {
+    if year > 0 {
+        (year + 99) / 100 * 100 - 99
+    } else {
+        -((99 - (year - 1)) / 100) * 100 + 1
+    }
+}
+
+fn millennium_start(year: i64) -> i64 {
+    if year > 0 {
+        (year + 999) / 1000 * 1000 - 999
+    } else {
+        -((999 - (year - 1)) / 1000) * 1000 + 1
+    }
+}
+
 pub(crate) fn extract(
     name: &str,
     kind: DateTimeKind,
-    local_micros: i64,
+    local: LocalTime,
     offset: i32,
 ) -> SqlResult<Numeric> {
     let field = Field::named(name).ok_or_else(|| unknown_unit(name, kind))?;
@@ -659,8 +717,7 @@ pub(crate) fn extract(
     {
         return Err(unit_error(name, kind));
     }
-    let days = local_micros.div_euclid(MICROS_PER_DAY);
-    let of_day = local_micros.rem_euclid(MICROS_PER_DAY);
+    let LocalTime { days, of_day } = local;
     let (year, month, day) = civil_from_days(days);
     let seconds_with_fraction = i128::from(of_day % (60 * MICROS_PER_SECOND));
     let whole = |value: i64| Ok(Numeric::from_i64(value));
@@ -668,8 +725,8 @@ pub(crate) fn extract(
         Field::Microseconds => whole(of_day % (60 * MICROS_PER_SECOND)),
         Field::Milliseconds => numeric_of(seconds_with_fraction, 3),
         Field::Second => numeric_of(seconds_with_fraction, 6),
-        Field::Minute => whole(of_day / (60 * MICROS_PER_SECOND) % 60),
-        Field::Hour => whole(of_day / (3600 * MICROS_PER_SECOND)),
+        Field::Minute => whole(local.minute()),
+        Field::Hour => whole(local.hour()),
         Field::Day => whole(day),
         Field::Month => whole(month),
         Field::Quarter => whole((month - 1) / 3 + 1),
@@ -693,18 +750,17 @@ pub(crate) fn extract(
         Field::Julian => {
             let julian_days = i128::from(days) + 2_451_545;
             if kind == DateTimeKind::Date {
-                whole(julian_days as i64)
+                Ok(Numeric::from_i128(julian_days))
             } else {
                 let micros = julian_days * i128::from(MICROS_PER_DAY) + i128::from(of_day);
                 Numeric::from_i128(micros).divide(&Numeric::from_i64(MICROS_PER_DAY))
             }
         }
         Field::Epoch => {
-            let unix = i128::from(local_micros)
-                + i128::from(UNIX_EPOCH_DAYS) * i128::from(MICROS_PER_DAY)
+            let unix = local.micros() + i128::from(UNIX_EPOCH_DAYS) * i128::from(MICROS_PER_DAY)
                 - i128::from(offset) * i128::from(MICROS_PER_SECOND);
             if kind == DateTimeKind::Date {
-                whole((unix / i128::from(MICROS_PER_SECOND)) as i64)
+                Ok(Numeric::from_i128(unix / i128::from(MICROS_PER_SECOND)))
             } else {
                 numeric_of(unix, 6)
             }
@@ -715,22 +771,117 @@ pub(crate) fn extract(
     }
 }
 
-pub(crate) fn truncate(name: &str, kind: DateTimeKind, local_micros: i64) -> SqlResult<i64> {
+pub(crate) const MYSQL_UNITS: [&str; 20] = [
+    "microsecond",
+    "second",
+    "minute",
+    "hour",
+    "day",
+    "week",
+    "month",
+    "quarter",
+    "year",
+    "second_microsecond",
+    "minute_microsecond",
+    "minute_second",
+    "hour_microsecond",
+    "hour_second",
+    "hour_minute",
+    "day_microsecond",
+    "day_second",
+    "day_minute",
+    "day_hour",
+    "year_month",
+];
+
+fn mysql_week(days: i64) -> i64 {
+    let year = civil_from_days(days).0;
+    let first = days_from_civil(year, 1, 1);
+    let first_weekday = (first + 6).rem_euclid(7);
+    let first_sunday = (7 - first_weekday) % 7;
+    let day_of_year = days - first;
+    if day_of_year < first_sunday {
+        0
+    } else {
+        (day_of_year - first_sunday) / 7 + 1
+    }
+}
+
+pub(crate) fn mysql_extract(unit: &str, local: LocalTime) -> Option<i64> {
+    let (year, month, day) = civil_from_days(local.days);
+    let (hour, minute, second, micro) = (
+        local.hour(),
+        local.minute(),
+        local.second(),
+        local.microsecond(),
+    );
+    let clock = (hour * 100 + minute) * 100 + second;
+    Some(match unit {
+        "microsecond" => micro,
+        "second" => second,
+        "minute" => minute,
+        "hour" => hour,
+        "day" => day,
+        "week" => mysql_week(local.days),
+        "month" => month,
+        "quarter" => (month - 1) / 3 + 1,
+        "year" => year,
+        "second_microsecond" => second * 1_000_000 + micro,
+        "minute_microsecond" => (minute * 100 + second) * 1_000_000 + micro,
+        "minute_second" => minute * 100 + second,
+        "hour_microsecond" => clock * 1_000_000 + micro,
+        "hour_second" => clock,
+        "hour_minute" => hour * 100 + minute,
+        "day_microsecond" => (day * 1_000_000 + clock) * 1_000_000 + micro,
+        "day_second" => day * 1_000_000 + clock,
+        "day_minute" => (day * 100 + hour) * 100 + minute,
+        "day_hour" => day * 100 + hour,
+        "year_month" => year * 100 + month,
+        _ => return None,
+    })
+}
+
+pub(crate) const ORACLE_FIELDS: [&str; 8] = [
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "timezone_hour",
+    "timezone_minute",
+];
+
+pub(crate) fn oracle_extract(field: &str, local: LocalTime, offset: i32) -> Option<Numeric> {
+    let (year, month, day) = civil_from_days(local.days);
+    Some(match field {
+        "year" => Numeric::from_i64(if year <= 0 { year - 1 } else { year }),
+        "month" => Numeric::from_i64(month),
+        "day" => Numeric::from_i64(day),
+        "hour" => Numeric::from_i64(local.hour()),
+        "minute" => Numeric::from_i64(local.minute()),
+        "second" => {
+            let written = Numeric::from_scaled(
+                i128::from(local.second() * MICROS_PER_SECOND + local.microsecond()),
+                6,
+            )
+            .to_string();
+            Numeric::parse(written.trim_end_matches('0').trim_end_matches('.')).ok()?
+        }
+        "timezone_hour" => Numeric::from_i64(i64::from(offset / 3600)),
+        "timezone_minute" => Numeric::from_i64(i64::from(offset / 60 % 60)),
+        _ => return None,
+    })
+}
+
+pub(crate) fn truncate(name: &str, kind: DateTimeKind, local: LocalTime) -> SqlResult<i64> {
     let field = Field::named(name).ok_or_else(|| unknown_unit(name, kind))?;
-    let days = local_micros.div_euclid(MICROS_PER_DAY);
-    let of_day = local_micros.rem_euclid(MICROS_PER_DAY);
+    let LocalTime { days, of_day } = local;
     let (year, month, _) = civil_from_days(days);
     let at_day = |days: i64| i128::from(days) * i128::from(MICROS_PER_DAY);
     let within_day = |unit: i64| at_day(days) + i128::from(of_day / unit * unit);
-    let first_year_of = |span: i64, offset: i64| {
-        if year > 0 {
-            (year - offset).div_euclid(span) * span + offset
-        } else {
-            -((offset - year).div_euclid(span) * span) + offset - span + 1
-        }
-    };
     let micros = match field {
-        Field::Microseconds => i128::from(local_micros),
+        Field::Microseconds => local.micros(),
         Field::Milliseconds => within_day(1000),
         Field::Second => within_day(MICROS_PER_SECOND),
         Field::Minute => within_day(60 * MICROS_PER_SECOND),
@@ -741,8 +892,8 @@ pub(crate) fn truncate(name: &str, kind: DateTimeKind, local_micros: i64) -> Sql
         Field::Quarter => at_day(days_from_civil(year, (month - 1) / 3 * 3 + 1, 1)),
         Field::Year => at_day(days_from_civil(year, 1, 1)),
         Field::Decade => at_day(days_from_civil(year.div_euclid(10) * 10, 1, 1)),
-        Field::Century => at_day(days_from_civil(first_year_of(100, 1), 1, 1)),
-        Field::Millennium => at_day(days_from_civil(first_year_of(1000, 1), 1, 1)),
+        Field::Century => at_day(days_from_civil(century_start(year), 1, 1)),
+        Field::Millennium => at_day(days_from_civil(millennium_start(year), 1, 1)),
         _ => return Err(unit_error(name, kind)),
     };
     checked_timestamp(micros)
@@ -855,9 +1006,14 @@ mod tests {
     fn extract_and_truncate_follow_the_calendar() {
         let micros = parse_timestamp("2024-02-29 13:45:01.5", false).unwrap();
         let field = |name: &str| {
-            extract(name, DateTimeKind::Timestamp, micros, 0)
-                .unwrap()
-                .to_string()
+            extract(
+                name,
+                DateTimeKind::Timestamp,
+                LocalTime::of_micros(micros),
+                0,
+            )
+            .unwrap()
+            .to_string()
         };
         assert_eq!(field("year"), "2024");
         assert_eq!(field("month"), "2");
@@ -873,7 +1029,7 @@ mod tests {
         assert_eq!(field("week"), "9");
         assert_eq!(field("epoch"), "1709214301.500000");
         assert_eq!(field("century"), "21");
-        let date = i64::from(parse_date("2021-01-03").unwrap()) * MICROS_PER_DAY;
+        let date = LocalTime::of_date(parse_date("2021-01-03").unwrap());
         let date_field =
             |name: &str| extract(name, DateTimeKind::Date, date, 0).map(|value| value.to_string());
         assert_eq!(date_field("week").unwrap(), "53");
@@ -885,8 +1041,11 @@ mod tests {
             "unit \"hour\" not supported for type date"
         );
         assert!(date_field("fortnight").is_err());
-        let truncated =
-            |name: &str| format_timestamp(truncate(name, DateTimeKind::Timestamp, micros).unwrap());
+        let truncated = |name: &str| {
+            format_timestamp(
+                truncate(name, DateTimeKind::Timestamp, LocalTime::of_micros(micros)).unwrap(),
+            )
+        };
         assert_eq!(truncated("hour"), "2024-02-29 13:00:00");
         assert_eq!(truncated("day"), "2024-02-29 00:00:00");
         assert_eq!(truncated("week"), "2024-02-26 00:00:00");
@@ -897,11 +1056,107 @@ mod tests {
         assert_eq!(truncated("millennium"), "2001-01-01 00:00:00");
         let bc = parse_timestamp("0044-03-15 BC", false).unwrap();
         assert_eq!(
-            extract("year", DateTimeKind::Timestamp, bc, 0)
+            extract("year", DateTimeKind::Timestamp, LocalTime::of_micros(bc), 0)
                 .unwrap()
                 .to_string(),
             "-44"
         );
+    }
+
+    #[test]
+    fn centuries_millennia_and_decades_truncate_before_christ_as_postgresql_does() {
+        let truncated = |field: &str, text: &str| {
+            let local = LocalTime::of_micros(parse_timestamp(text, false).unwrap());
+            format_timestamp(truncate(field, DateTimeKind::Timestamp, local).unwrap())
+        };
+        assert_eq!(
+            truncated("century", "0050-01-01 BC"),
+            "0100-01-01 00:00:00 BC"
+        );
+        assert_eq!(
+            truncated("century", "0100-01-01 BC"),
+            "0100-01-01 00:00:00 BC"
+        );
+        assert_eq!(
+            truncated("century", "0101-06-01 BC"),
+            "0200-01-01 00:00:00 BC"
+        );
+        assert_eq!(
+            truncated("century", "0001-01-01 BC"),
+            "0100-01-01 00:00:00 BC"
+        );
+        assert_eq!(truncated("century", "0001-01-01"), "0001-01-01 00:00:00");
+        assert_eq!(truncated("century", "2000-12-31"), "1901-01-01 00:00:00");
+        assert_eq!(
+            truncated("millennium", "0050-01-01 BC"),
+            "1000-01-01 00:00:00 BC"
+        );
+        assert_eq!(
+            truncated("millennium", "1000-01-01 BC"),
+            "1000-01-01 00:00:00 BC"
+        );
+        assert_eq!(
+            truncated("millennium", "1001-01-01 BC"),
+            "2000-01-01 00:00:00 BC"
+        );
+        assert_eq!(truncated("millennium", "2000-01-01"), "1001-01-01 00:00:00");
+        assert_eq!(
+            truncated("decade", "0050-01-01 BC"),
+            "0051-01-01 00:00:00 BC"
+        );
+        assert_eq!(
+            truncated("decade", "0001-01-01 BC"),
+            "0001-01-01 00:00:00 BC"
+        );
+        assert_eq!(
+            truncated("decade", "0002-01-01 BC"),
+            "0011-01-01 00:00:00 BC"
+        );
+        assert_eq!(truncated("decade", "2024-05-05"), "2020-01-01 00:00:00");
+    }
+
+    #[test]
+    fn dates_past_the_time_stamp_range_extract_without_overflow() {
+        let last = LocalTime::of_date(MAX_DATE as i32);
+        let first = LocalTime::of_date(MIN_DATE as i32);
+        let field = |name: &str, local| {
+            extract(name, DateTimeKind::Date, local, 0)
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(field("year", last), "5874897");
+        assert_eq!(field("doy", last), "365");
+        assert_eq!(field("epoch", last), "185331706992000");
+        assert_eq!(field("julian", last), "2147483493");
+        assert_eq!(field("year", first), "-4714");
+        assert_eq!(field("epoch", first), "-210866803200");
+        assert!(truncate("year", DateTimeKind::TimestampTz, last).is_err());
+        assert!(truncate("day", DateTimeKind::Date, first).is_ok());
+        assert!(truncate("year", DateTimeKind::Date, first).is_err());
+        assert_eq!(mysql_extract("year_month", last), Some(587_489_712));
+        assert_eq!(
+            oracle_extract("year", first, 0).map(|value| value.to_string()),
+            Some("-4714".to_owned())
+        );
+    }
+
+    #[test]
+    fn mysql_units_follow_mysql() {
+        let at = |text: &str| LocalTime::of_micros(parse_timestamp(text, false).unwrap());
+        assert_eq!(mysql_extract("week", at("2024-01-01")), Some(0));
+        assert_eq!(mysql_extract("week", at("2024-01-07")), Some(1));
+        assert_eq!(mysql_extract("week", at("2023-01-01")), Some(1));
+        assert_eq!(mysql_extract("week", at("2024-12-31")), Some(52));
+        let moment = at("2024-02-29 13:45:01.5");
+        assert_eq!(mysql_extract("second", moment), Some(1));
+        assert_eq!(mysql_extract("microsecond", moment), Some(500_000));
+        assert_eq!(mysql_extract("year_month", moment), Some(202_402));
+        assert_eq!(mysql_extract("day_minute", moment), Some(291_345));
+        assert_eq!(
+            mysql_extract("hour_microsecond", moment),
+            Some(134_501_500_000)
+        );
+        assert_eq!(mysql_extract("epoch", moment), None);
     }
 
     #[test]

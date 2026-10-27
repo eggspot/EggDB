@@ -1,5 +1,5 @@
 use crate::ast::{BinaryOperator, Expr, ExprKind, Literal, TruthTest, UnaryOperator};
-use crate::datetime::{self, DateTimeKind};
+use crate::datetime::{self, DateTimeKind, LocalTime};
 use crate::encoding::TableDefinition;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::json;
@@ -745,8 +745,21 @@ impl Evaluator<'_> {
             ("localtimestamp", []) => datetime::utc_to_local(now).map(Value::Timestamp),
             ("current_date", []) => datetime::utc_to_local(now)
                 .map(|local| Value::Date(datetime::timestamp_to_date(local))),
-            ("extract" | "date_part" | "date_trunc", [_, Value::Null] | [Value::Null, _]) => {
-                Ok(Value::Null)
+            (
+                "extract" | "date_part" | "date_trunc" | "mysql_extract",
+                [_, Value::Null] | [Value::Null, _],
+            ) => Ok(Value::Null),
+            ("mysql_extract", [Value::Text(unit), value]) => {
+                let (_, local, _) = match local_instant(value) {
+                    Ok(Some(found)) => found,
+                    Ok(None) => return None,
+                    Err(error) => return Some(Err(error)),
+                };
+                datetime::mysql_extract(unit, local)
+                    .map(Value::BigInt)
+                    .ok_or_else(|| {
+                        SqlError::syntax(format!("syntax error at or near \"{unit}\""), 0)
+                    })
             }
             ("extract" | "date_part", [Value::Text(field), value]) => {
                 let (kind, local, offset) = match local_instant(value) {
@@ -818,7 +831,41 @@ impl Evaluator<'_> {
         }
     }
 
+    fn oracle_extract(&self, arguments: &[Expr]) -> SqlResult<Value> {
+        let [field, source] = arguments else {
+            return Err(invalid_extract_field());
+        };
+        let ExprKind::Literal(Literal::String(field)) = &field.kind else {
+            return Err(invalid_extract_field());
+        };
+        let declared_date = matches!(
+            self.declared_type(source),
+            Some(SqlType::Timestamp(Some(0)))
+        ) || matches!(&source.kind, ExprKind::Function { name, .. } if name == "mysql_now");
+        let value = self.eval(source, None)?;
+        let Some((kind, local, offset)) = local_instant(&value)? else {
+            return if value.is_null() {
+                Ok(Value::Null)
+            } else {
+                Err(invalid_extract_field())
+            };
+        };
+        let time_of_day = matches!(field.as_str(), "hour" | "minute" | "second");
+        let zone = field.starts_with("timezone_");
+        if (time_of_day && (declared_date || kind == DateTimeKind::Date))
+            || (zone && kind != DateTimeKind::TimestampTz)
+        {
+            return Err(invalid_extract_field());
+        }
+        datetime::oracle_extract(field, local, offset)
+            .map(Value::Numeric)
+            .ok_or_else(invalid_extract_field)
+    }
+
     fn function(&self, name: &str, arguments: &[Expr]) -> SqlResult<Value> {
+        if name == "oracle_extract" {
+            return self.oracle_extract(arguments);
+        }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
         for argument in arguments {
@@ -944,24 +991,25 @@ fn decimal_literal(text: &str, target: SqlType, explicit: bool) -> SqlResult<Val
     convert(Value::Numeric(Numeric::parse(text)?), target, conversion)
 }
 
-fn local_instant(value: &Value) -> SqlResult<Option<(DateTimeKind, i64, i32)>> {
+fn local_instant(value: &Value) -> SqlResult<Option<(DateTimeKind, LocalTime, i32)>> {
     Ok(Some(match value {
-        Value::Date(days) => (
-            DateTimeKind::Date,
-            i64::from(*days) * datetime::MICROS_PER_DAY,
-            0,
+        Value::Date(days) => (DateTimeKind::Date, LocalTime::of_date(*days), 0),
+        Value::Timestamp(micros) => (DateTimeKind::Timestamp, LocalTime::of_micros(*micros), 0),
+        Value::TimestampTz(micros) => (
+            DateTimeKind::TimestampTz,
+            LocalTime::of_micros(datetime::utc_to_local(*micros)?),
+            datetime::session_offset(),
         ),
-        Value::Timestamp(micros) => (DateTimeKind::Timestamp, *micros, 0),
-        Value::TimestampTz(micros) => {
-            let offset = datetime::session_offset();
-            (
-                DateTimeKind::TimestampTz,
-                datetime::utc_to_local(*micros)?,
-                offset,
-            )
-        }
         _ => return Ok(None),
     }))
+}
+
+fn invalid_extract_field() -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        "invalid extract field for extract source",
+    )
+    .with_oracle_code(30076)
 }
 
 fn numeric_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {

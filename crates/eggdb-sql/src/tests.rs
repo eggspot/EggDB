@@ -2698,6 +2698,24 @@ fn hostile_typed_statements_never_panic_in_any_dialect() {
         "DEFAULT",
         "CREATE INDEX ON typed (n)",
         "CREATE INDEX typed_d ON typed (d, t)",
+        "EXTRACT(",
+        "YEAR_MONTH",
+        "EPOCH",
+        "WEEK",
+        "HOUR",
+        "SECOND",
+        "FROM",
+        "^ 1e400",
+        "0.5 ^",
+        "^ 99999999999999999999999",
+        "'0050-01-01 BC'",
+        "'5874897-12-31'",
+        "'4714-11-24 BC'",
+        "date_trunc('century',",
+        "TRUNC(",
+        "localtimestamp",
+        "localtime",
+        "current_date",
     ];
     let per_dialect: [(crate::Dialect, &str, &[&str]); 4] = [
         (
@@ -2814,4 +2832,155 @@ fn the_new_types_functions_stay_in_their_dialects() {
         }
         assert!(outcome.is_err(), "{dialect:?} {sql}: {outcome:?}");
     }
+}
+
+#[test]
+fn dates_at_the_ends_of_their_range_never_overflow() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT extract(year FROM DATE '5874897-12-31'), date_part('doy', DATE '5874897-12-31'), extract(epoch FROM DATE '4714-11-24 BC'), DATE '5874897-12-30' + 1, DATE '4714-11-25 BC' - 1"
+        ),
+        "extract|date_part|extract|?column?|?column?\n5874897|365|-210866803200|5874897-12-31|4714-11-24 BC\nSELECT 1"
+    );
+    for (sql, state) in [
+        ("SELECT date_trunc('day', DATE '5874897-12-31')", "22008"),
+        ("SELECT DATE '5874897-12-31' + 1", "22008"),
+        ("SELECT DATE '4714-11-24 BC' - 1", "22008"),
+        ("SELECT DATE '5874897-12-31'::timestamp", "22008"),
+        ("SELECT DATE '5874897-12-31'::timestamptz", "22008"),
+        ("SELECT DATE '2000-01-01' + 9223372036854775807", "22008"),
+        (
+            "SELECT DATE '2000-01-01' - (-9223372036854775807 - 1)",
+            "22008",
+        ),
+        (
+            "SELECT DATE '5874897-12-31' - DATE '4714-11-24 BC'",
+            "00000",
+        ),
+        ("SELECT 0.5 ^ 99999999999999999999999", "00000"),
+        ("SELECT 10::numeric ^ 400.5", "00000"),
+        ("SELECT 1::numeric ^ 1e400", "00000"),
+    ] {
+        let found = run(&mut session, sql).map_or_else(
+            |error| error.state().code().to_owned(),
+            |_| "00000".to_owned(),
+        );
+        assert_eq!(found, state, "{sql}");
+    }
+    assert_eq!(
+        last(&mut session, "SELECT 0.5 ^ 1e400 = 0, 1::numeric ^ 1e400"),
+        "?column?|?column?\nt|1.0000000000000000\nSELECT 1"
+    );
+}
+
+#[test]
+fn equal_values_of_different_types_hash_alike() {
+    use crate::types::{Value, compare_values, equality_key};
+    let pairs = [
+        ("2.5", 2.5f64),
+        ("-0.125", -0.125),
+        ("100000000000000000000", 1e20),
+        ("3", 3.0),
+    ];
+    for (text, double) in pairs {
+        let numeric = Value::Numeric(crate::numeric::Numeric::parse(text).unwrap());
+        let float = Value::Double(double);
+        assert_eq!(compare_values(&numeric, &float), std::cmp::Ordering::Equal);
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        equality_key(&mut left, &numeric);
+        equality_key(&mut right, &float);
+        assert_eq!(left, right, "{text}");
+    }
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE m (id integer PRIMARY KEY, n numeric, d double precision, j jsonb UNIQUE);
+         INSERT INTO m VALUES (1, 2.5, NULL, '{\"a\": 1.0}'), (2, NULL, 2.5, '[2.50]'), (3, 2.50, NULL, NULL)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(DISTINCT coalesce(n, d)), '{\"a\": 1.0}'::jsonb = '{\"a\": 1}'::jsonb, '[1.10]'::jsonb > '[1.1]'::jsonb FROM m"
+        ),
+        "count|?column?|?column?\n1|t|f\nSELECT 1"
+    );
+    assert_eq!(
+        fails(
+            &mut session,
+            "INSERT INTO m (id, j) VALUES (4, '{\"a\": 1}')"
+        )
+        .state()
+        .code(),
+        "23505"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT j FROM m WHERE j = '[2.5]'"),
+        "j\n[2.50]\nSELECT 1"
+    );
+}
+
+#[test]
+fn extract_takes_each_dialects_own_units() {
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    assert_eq!(
+        last(
+            &mut mysql,
+            "SELECT EXTRACT(WEEK FROM DATE '2024-01-01') AS w, EXTRACT(SECOND FROM TIMESTAMP '2024-02-29 13:45:01.5') AS s, EXTRACT(YEAR_MONTH FROM DATE '2024-02-29') AS ym, EXTRACT(HOUR FROM DATE '2024-02-29') AS h"
+        ),
+        "w|s|ym|h\n0|1|202402|0\nSELECT 1"
+    );
+    for unit in ["EPOCH", "DOW", "ISODOW", "DOY", "CENTURY", "TIMEZONE"] {
+        let error = fails(&mut mysql, &format!("SELECT EXTRACT({unit} FROM NOW())"));
+        assert_eq!(error.vendor_code(), Some(1064), "{unit}: {error}");
+    }
+    assert_eq!(
+        fails(&mut mysql, "SELECT TRUNC(1.5)").vendor_code(),
+        Some(1305)
+    );
+    let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);
+    assert_eq!(
+        last(
+            &mut oracle,
+            "SELECT EXTRACT(YEAR FROM DATE '2024-02-29') y, EXTRACT(SECOND FROM TIMESTAMP '2024-02-29 13:45:01.5') s FROM dual"
+        ),
+        "Y|S\n2024|1.5\nSELECT 1"
+    );
+    for (sql, code) in [
+        (
+            "SELECT EXTRACT(HOUR FROM DATE '2024-02-29') FROM dual",
+            30076,
+        ),
+        ("SELECT EXTRACT(HOUR FROM SYSDATE) FROM dual", 30076),
+        (
+            "SELECT EXTRACT(TIMEZONE_HOUR FROM TIMESTAMP '2024-02-29 10:00:00') FROM dual",
+            30076,
+        ),
+        ("SELECT EXTRACT(EPOCH FROM SYSDATE) FROM dual", 907),
+        ("SELECT EXTRACT(DOW FROM SYSDATE) FROM dual", 907),
+    ] {
+        assert_eq!(fails(&mut oracle, sql).vendor_code(), Some(code), "{sql}");
+    }
+    let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    for sql in [
+        "SELECT localtimestamp",
+        "SELECT localtime",
+        "SELECT trunc(1.5)",
+        "SELECT floor(1.5)",
+    ] {
+        let error = fails(&mut sqlite, sql);
+        assert!(error.message().starts_with("no such"), "{sql}: {error}");
+    }
+    let mut postgresql = Session::new(&store);
+    assert_eq!(
+        last(
+            &mut postgresql,
+            "SELECT date_trunc('century', TIMESTAMP '0050-01-01 BC'), date_trunc('millennium', DATE '0100-01-01 BC')"
+        ),
+        "date_trunc|date_trunc\n0100-01-01 00:00:00 BC|1000-01-01 00:00:00+00 BC\nSELECT 1"
+    );
 }

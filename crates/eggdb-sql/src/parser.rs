@@ -136,7 +136,17 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 13] = [
     "jsonb_array_length",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 3] = ["mysql_now", "mysql_utc_now", "concat_or_null"];
+const INTERNAL_FUNCTIONS: [&str; 5] = [
+    "mysql_now",
+    "mysql_utc_now",
+    "mysql_extract",
+    "oracle_extract",
+    "concat_or_null",
+];
+
+const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
+
+const NOT_IN_SQLITE: [&str; 4] = ["trunc", "ceil", "ceiling", "floor"];
 
 pub(crate) struct Parser<'t> {
     text: &'t str,
@@ -1108,6 +1118,14 @@ impl<'t> Parser<'t> {
 
     fn postgresql(&self) -> bool {
         !self.mysql() && !self.sqlite() && !self.oracle()
+    }
+
+    fn typed_literal_allowed(&self, word: &str) -> bool {
+        match word {
+            "numeric" | "decimal" | "timestamptz" | "json" | "jsonb" => self.postgresql(),
+            "date" | "timestamp" => !self.sqlite(),
+            _ => true,
+        }
     }
 
     fn serial_type(&mut self) -> Option<SqlType> {
@@ -2428,11 +2446,13 @@ impl<'t> Parser<'t> {
                 {
                     Err(self.not_supported("ARRAY and ROW constructors"))
                 }
-                "current_date" | "current_timestamp" | "localtimestamp" => {
+                "current_date" | "current_timestamp" | "localtimestamp" if self.postgresql() => {
                     self.at += 1;
                     self.clock_function(word, position)
                 }
-                "current_time" | "localtime" => Err(self.not_supported("type time")),
+                "current_time" | "localtime" if self.postgresql() => {
+                    Err(self.not_supported("type time"))
+                }
                 "current_user" | "session_user" | "user" | "current_role" => {
                     self.at += 1;
                     let name = if word == "session_user" {
@@ -2461,12 +2481,18 @@ impl<'t> Parser<'t> {
                 | "float4" | "float8" | "boolean" | "bool" | "text" | "varchar" | "double"
                 | "numeric" | "decimal" | "date" | "timestamp" | "timestamptz" | "json"
                 | "jsonb"
-                    if matches!(self.peek_kind_at(1), TokenKind::String(_))
-                        || (word == "double"
-                            && self.is_word_at(1, "precision")
-                            && matches!(self.peek_kind_at(2), TokenKind::String(_))) =>
+                    if self.typed_literal_allowed(word)
+                        && (matches!(self.peek_kind_at(1), TokenKind::String(_))
+                            || (word == "double"
+                                && self.is_word_at(1, "precision")
+                                && matches!(self.peek_kind_at(2), TokenKind::String(_)))) =>
                 {
-                    let sql_type = self.sql_type()?;
+                    let sql_type = if self.mysql() && word == "timestamp" {
+                        self.at += 1;
+                        SqlType::Timestamp(None)
+                    } else {
+                        self.sql_type()?
+                    };
                     let TokenKind::String(text) = self.peek_kind() else {
                         return Err(self.unexpected());
                     };
@@ -2540,19 +2566,36 @@ impl<'t> Parser<'t> {
     fn extract(&mut self, name: Name) -> SqlResult<Expr> {
         self.expect(&TokenKind::LeftParen)?;
         let field = match self.peek_kind() {
-            TokenKind::Word(word) => word.to_string(),
-            TokenKind::QuotedIdentifier(word) => word.clone(),
-            TokenKind::String(text) => text.to_string(),
+            TokenKind::Word(word) => word.to_ascii_lowercase(),
+            TokenKind::QuotedIdentifier(word) if self.postgresql() => word.clone(),
+            TokenKind::String(text) if self.postgresql() => text.to_string(),
             _ => return Err(self.unexpected()),
         };
         let field_position = self.position();
+        let internal = if self.mysql() {
+            if !crate::datetime::MYSQL_UNITS.contains(&field.as_str()) {
+                return Err(self.unexpected());
+            }
+            "mysql_extract"
+        } else if self.oracle() {
+            if !crate::datetime::ORACLE_FIELDS.contains(&field.as_str()) {
+                return Err(
+                    SqlError::new(SqlState::SYNTAX_ERROR, "missing right parenthesis")
+                        .with_oracle_code(907)
+                        .at(field_position),
+                );
+            }
+            "oracle_extract"
+        } else {
+            "extract"
+        };
         self.at += 1;
         self.expect_word("from")?;
         let source = self.expression()?;
         self.expect(&TokenKind::RightParen)?;
         Ok(Expr {
             kind: ExprKind::Function {
-                name: name.text,
+                name: internal.to_owned(),
                 arguments: vec![
                     Expr {
                         kind: ExprKind::Literal(Literal::String(field)),
@@ -2584,8 +2627,10 @@ impl<'t> Parser<'t> {
         {
             return Ok(expr);
         }
-        let postgresql_only =
-            !self.postgresql() && POSTGRESQL_ONLY_FUNCTIONS.contains(&name.text.as_str());
+        let text = name.text.as_str();
+        let postgresql_only = (!self.postgresql() && POSTGRESQL_ONLY_FUNCTIONS.contains(&text))
+            || (self.mysql() && NOT_IN_MYSQL.contains(&text))
+            || (self.sqlite() && NOT_IN_SQLITE.contains(&text));
         if postgresql_only || INTERNAL_FUNCTIONS.contains(&name.text.as_str()) {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,

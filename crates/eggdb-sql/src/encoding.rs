@@ -450,7 +450,11 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
             };
             out.extend_from_slice(&ordered.to_be_bytes());
         }
-        Value::Text(text) | Value::Json(text) | Value::Jsonb(text) => {
+        Value::Jsonb(text) => {
+            out.push(PRESENT);
+            push_escaped_text(out, crate::json::comparable(text).as_bytes());
+        }
+        Value::Text(text) | Value::Json(text) => {
             out.push(PRESENT);
             for &byte in text.as_bytes() {
                 out.push(byte);
@@ -473,6 +477,16 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
             out.extend_from_slice(&((*micros as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
         }
     }
+}
+
+fn push_escaped_text(out: &mut Vec<u8>, bytes: &[u8]) {
+    for &byte in bytes {
+        out.push(byte);
+        if byte == 0 {
+            out.push(0xFF);
+        }
+    }
+    out.extend_from_slice(&[0x00, 0x01]);
 }
 
 pub(crate) fn encode_row(values: &[Value]) -> Vec<u8> {
@@ -580,8 +594,8 @@ pub(crate) fn decode_row_into(
                 _ => return Err(reader.damaged()),
             },
             7 if wanted => Value::Text(reader.text()?),
-            13 if wanted => Value::Json(reader.text()?),
-            14 if wanted => Value::Jsonb(reader.text()?),
+            13 if wanted => Value::Json(reader.json(false)?),
+            14 if wanted => Value::Jsonb(reader.json(true)?),
             7 | 13 | 14 => {
                 reader.skip_text()?;
                 Value::Null
@@ -753,6 +767,12 @@ impl<'b> Reader<'b> {
         let (value, used) = Numeric::decode_key(rest).ok_or_else(|| self.damaged())?;
         self.take(used)?;
         Ok(value)
+    }
+
+    fn json(&mut self, binary: bool) -> SqlResult<String> {
+        let text = self.text()?;
+        crate::json::parse(&text, binary).map_err(|_| self.damaged())?;
+        Ok(text)
     }
 
     fn skip_text(&mut self) -> SqlResult<()> {
@@ -1413,6 +1433,12 @@ mod tests {
         let mut early = encoded.clone();
         early[date_at + 1..date_at + 5].copy_from_slice(&(-2_451_546i32).to_le_bytes());
         assert!(decode_row(&early, &columns).is_err());
+        let mut broken_json = typed_values();
+        broken_json[6] = Value::Json("{\"a\": [1, 2}".into());
+        assert!(decode_row(&encode_row(&broken_json), &columns).is_err());
+        let mut broken_jsonb = typed_values();
+        broken_jsonb[7] = Value::Jsonb("[".repeat(300));
+        assert!(decode_row(&encode_row(&broken_jsonb), &columns).is_err());
         let mut random = Seeded(0x0DD_C0DE_0000_0019);
         for _ in 0..20_000 {
             let mut bytes = encoded.clone();

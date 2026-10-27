@@ -316,8 +316,23 @@ pub(crate) fn validate(text: &str) -> SqlResult<()> {
 pub(crate) fn normalize(text: &str) -> SqlResult<String> {
     let node = parse(text, true)?;
     let mut out = String::with_capacity(text.len());
-    write_normalized(&node.value, &mut out, size_limit(text.len()))?;
+    write_normalized(&node.value, &mut out, size_limit(text.len()), false)?;
     Ok(out)
+}
+
+pub(crate) fn comparable(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('.') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let canonical = parse(text, true).and_then(|node| {
+        let mut out = String::with_capacity(text.len());
+        write_normalized(&node.value, &mut out, size_limit(text.len()), true)?;
+        Ok(out)
+    });
+    match canonical {
+        Ok(out) => std::borrow::Cow::Owned(out),
+        Err(_) => std::borrow::Cow::Borrowed(text),
+    }
 }
 
 const MAX_NORMALIZED_GROWTH: usize = 16;
@@ -378,13 +393,23 @@ pub(crate) fn write_string(text: &str, out: &mut String) {
     out.push('"');
 }
 
-fn write_normalized(value: &Json, out: &mut String, limit: usize) -> SqlResult<()> {
+fn write_normalized(
+    value: &Json,
+    out: &mut String,
+    limit: usize,
+    canonical: bool,
+) -> SqlResult<()> {
     match value {
         Json::Null => out.push_str("null"),
         Json::Boolean(true) => out.push_str("true"),
         Json::Boolean(false) => out.push_str("false"),
         Json::Number(text) => {
-            out.push_str(&Numeric::parse(text)?.to_string());
+            let number = Numeric::parse(text)?.to_string();
+            if canonical && number.contains('.') {
+                out.push_str(number.trim_end_matches('0').trim_end_matches('.'));
+            } else {
+                out.push_str(&number);
+            }
             if out.len() > limit {
                 return Err(too_large());
             }
@@ -396,7 +421,7 @@ fn write_normalized(value: &Json, out: &mut String, limit: usize) -> SqlResult<(
                 if at > 0 {
                     out.push_str(", ");
                 }
-                write_normalized(&item.value, out, limit)?;
+                write_normalized(&item.value, out, limit, canonical)?;
             }
             out.push(']');
         }
@@ -408,7 +433,7 @@ fn write_normalized(value: &Json, out: &mut String, limit: usize) -> SqlResult<(
                 }
                 write_string(key, out);
                 out.push_str(": ");
-                write_normalized(value, out, limit)?;
+                write_normalized(value, out, limit, canonical)?;
             }
             out.push('}');
         }
@@ -467,7 +492,7 @@ pub(crate) fn child<'n>(node: &'n Node, step: &Step, binary: bool) -> Option<&'n
 pub(crate) fn render(text: &str, node: &Node, binary: bool) -> SqlResult<String> {
     if binary {
         let mut out = String::new();
-        write_normalized(&node.value, &mut out, size_limit(text.len()))?;
+        write_normalized(&node.value, &mut out, size_limit(text.len()), false)?;
         Ok(out)
     } else {
         Ok(text
@@ -622,6 +647,15 @@ mod tests {
         assert!(validate(&"[".repeat(MAX_DEPTH + 2)).is_err());
         let deep = format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
         assert!(validate(&deep).is_ok());
+    }
+
+    #[test]
+    fn numbers_compare_by_value_while_keeping_their_written_scale() {
+        let one = normalize(r#"{"a": 1.0, "b": [2.50, "1.0"]}"#).unwrap();
+        assert_eq!(one, r#"{"a": 1.0, "b": [2.50, "1.0"]}"#);
+        assert_eq!(comparable(&one), r#"{"a": 1, "b": [2.5, "1.0"]}"#);
+        assert_eq!(comparable(r#"{"a": 1}"#), r#"{"a": 1}"#);
+        assert_eq!(comparable("[0.00, -0.0]"), "[0, 0]");
     }
 
     #[test]

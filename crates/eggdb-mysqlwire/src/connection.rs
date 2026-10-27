@@ -454,7 +454,7 @@ fn column_for(
     }
 }
 
-fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Vec<u8> {
+fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Result<Vec<u8>, SqlError> {
     let mut bitmap = vec![0u8; (columns.len() + 9) / 8];
     let mut values = Payload::new();
     for (index, column) in columns.iter().enumerate() {
@@ -493,7 +493,7 @@ fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Vec<u8> {
             }
             TYPE_DATE | TYPE_DATETIME | TYPE_TIMESTAMP => {
                 let text = Dialect::MySql.value_text(value).unwrap_or_default();
-                values.bytes(&packed_temporal(&text));
+                values.bytes(&packed_temporal(&text)?);
             }
             _ => {
                 let text = Dialect::MySql.value_text(value).unwrap_or_default();
@@ -503,10 +503,23 @@ fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Vec<u8> {
     }
     let mut payload = Payload::new();
     payload.u8(0x00).bytes(&bitmap).bytes(&values.0);
-    payload.0
+    Ok(payload.0)
 }
 
-fn packed_temporal(text: &str) -> Vec<u8> {
+fn packed_temporal(text: &str) -> Result<Vec<u8>, SqlError> {
+    let in_mysql_range = text.len() >= 10
+        && text.as_bytes()[4] == b'-'
+        && !text.ends_with(" BC")
+        && text
+            .get(..4)
+            .is_some_and(|year| year.bytes().all(|byte| byte.is_ascii_digit()));
+    if !in_mysql_range {
+        return Err(SqlError::new(
+            eggdb_sql::SqlState::INVALID_DATETIME_FORMAT,
+            format!("Incorrect datetime value: '{text}'"),
+        )
+        .with_vendor_code(1292));
+    }
     let number = |range: std::ops::Range<usize>| -> u32 {
         text.get(range)
             .and_then(|digits| digits.parse().ok())
@@ -542,7 +555,7 @@ fn packed_temporal(text: &str) -> Vec<u8> {
         out.extend_from_slice(&micros.to_le_bytes());
     }
     out[0] = (out.len() - 1) as u8;
-    out
+    Ok(out)
 }
 
 fn text_row(row: &[Value]) -> Vec<u8> {
@@ -803,7 +816,13 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         for row in &result.rows {
             match encoding {
                 Encoding::Text => self.wire.send(&text_row(row)),
-                Encoding::Binary => self.wire.send(&binary_row(&definitions, row)),
+                Encoding::Binary => match binary_row(&definitions, row) {
+                    Ok(bytes) => self.wire.send(&bytes),
+                    Err(error) => {
+                        send_sql_error(&mut self.wire, &error);
+                        return;
+                    }
+                },
             }
             if self.wire.flush_if_large().is_err() {
                 return;

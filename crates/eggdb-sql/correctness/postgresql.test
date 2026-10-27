@@ -1333,3 +1333,21 @@ INSERT 0 1
 
 error 42704
 CREATE INDEX ON docs (raw)
+
+chapter functions-datetime, "date_trunc and EXTRACT before Christ and at the range's end"
+rows
+SELECT date_trunc('century', TIMESTAMP '0050-01-01 BC'), date_trunc('century', TIMESTAMP '0100-01-01 BC'), date_trunc('millennium', TIMESTAMP '2000-12-31'), extract(century FROM DATE '0001-01-01 BC'), extract(year FROM DATE '5874897-12-31')
+----
+date_trunc|date_trunc|date_trunc|extract|extract
+0100-01-01 00:00:00 BC|0100-01-01 00:00:00 BC|1001-01-01 00:00:00|-1|5874897
+SELECT 1
+
+error 22008
+SELECT DATE '5874897-12-31' + 1
+
+rows
+SELECT '{"a": 1.0}'::jsonb = '{"a": 1}'::jsonb, '{"a": 1.0}'::jsonb
+----
+?column?|jsonb
+t|{"a": 1.0}
+SELECT 1
