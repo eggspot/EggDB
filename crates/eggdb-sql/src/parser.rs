@@ -20,7 +20,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind, swap_uniform_case};
 use crate::session::Parameter;
 use crate::settings::Settings;
-use crate::types::SqlType;
+use crate::types::{NumericModifier, SqlType};
 use std::borrow::Cow;
 
 const MAX_NESTING: usize = 64;
@@ -119,6 +119,34 @@ fn is_plain_literal(kind: &TokenKind<'_>) -> bool {
         TokenKind::Integer(_) | TokenKind::Decimal(_) | TokenKind::String(_)
     ) || matches!(kind, TokenKind::Word(word) if word == "null" || word == "true" || word == "false")
 }
+
+const POSTGRESQL_ONLY_FUNCTIONS: [&str; 13] = [
+    "now",
+    "transaction_timestamp",
+    "statement_timestamp",
+    "clock_timestamp",
+    "localtimestamp",
+    "current_date",
+    "current_timestamp",
+    "date_part",
+    "date_trunc",
+    "json_typeof",
+    "jsonb_typeof",
+    "json_array_length",
+    "jsonb_array_length",
+];
+
+const INTERNAL_FUNCTIONS: [&str; 5] = [
+    "mysql_now",
+    "mysql_utc_now",
+    "mysql_extract",
+    "oracle_extract",
+    "concat_or_null",
+];
+
+const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
+
+const NOT_IN_SQLITE: [&str; 4] = ["trunc", "ceil", "ceiling", "floor"];
 
 pub(crate) struct Parser<'t> {
     text: &'t str,
@@ -1028,14 +1056,18 @@ impl<'t> Parser<'t> {
 
     fn column_definition(&mut self) -> SqlResult<ColumnDefinition> {
         let name = self.name()?;
-        let sql_type = self.sql_type()?;
+        let serial = self.serial_type();
+        let sql_type = match serial {
+            Some(sql_type) => sql_type,
+            None => self.sql_type()?,
+        };
         let mut column = ColumnDefinition {
             name,
             sql_type,
-            not_null: false,
+            not_null: serial.is_some(),
             primary_key: false,
             default: None,
-            auto_increment: false,
+            auto_increment: serial.is_some(),
             unique: None,
         };
         loop {
@@ -1069,6 +1101,8 @@ impl<'t> Parser<'t> {
                 column.default = Some((expr, source));
             } else if self.oracle() && self.is_word("generated") {
                 self.oracle_identity(&mut column)?;
+            } else if self.postgresql() && self.is_word("generated") {
+                self.postgresql_identity(&mut column)?;
             } else if ["check", "references", "generated", "collate"]
                 .iter()
                 .any(|word| self.is_word(word))
@@ -1080,6 +1114,133 @@ impl<'t> Parser<'t> {
                 return Ok(column);
             }
         }
+    }
+
+    fn postgresql(&self) -> bool {
+        !self.mysql() && !self.sqlite() && !self.oracle()
+    }
+
+    fn typed_literal_allowed(&self, word: &str) -> bool {
+        match word {
+            "numeric" | "decimal" | "timestamptz" | "json" | "jsonb" => self.postgresql(),
+            "date" | "timestamp" => !self.sqlite(),
+            _ => true,
+        }
+    }
+
+    fn serial_type(&mut self) -> Option<SqlType> {
+        if !self.postgresql() {
+            return None;
+        }
+        let TokenKind::Word(word) = self.peek_kind() else {
+            return None;
+        };
+        let sql_type = match word.as_ref() {
+            "smallserial" | "serial2" => SqlType::SmallInt,
+            "serial" | "serial4" => SqlType::Integer,
+            "bigserial" | "serial8" => SqlType::BigInt,
+            _ => return None,
+        };
+        self.at += 1;
+        Some(sql_type)
+    }
+
+    fn postgresql_identity(&mut self, column: &mut ColumnDefinition) -> SqlResult<()> {
+        let position = self.position();
+        self.at += 1;
+        if !self.take_word("always") {
+            self.expect_word("by")?;
+            self.expect_word("default")?;
+        }
+        self.expect_word("as")?;
+        if self.peek_kind() == &TokenKind::LeftParen {
+            return Err(self.not_supported("generated columns"));
+        }
+        self.expect_word("identity")?;
+        if self.peek_kind() == &TokenKind::LeftParen {
+            return Err(self.not_supported("identity options"));
+        }
+        if !matches!(
+            column.sql_type,
+            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
+        ) {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!(
+                    "identity column type must be smallint, integer, or bigint, not {}",
+                    column.sql_type.name()
+                ),
+            )
+            .at(position));
+        }
+        column.auto_increment = true;
+        column.not_null = true;
+        Ok(())
+    }
+
+    fn numeric_modifier(&mut self, position: usize) -> SqlResult<Option<NumericModifier>> {
+        if !self.take(&TokenKind::LeftParen) {
+            return Ok(None);
+        }
+        let precision = self.signed_type_argument()?;
+        let scale = if self.take(&TokenKind::Comma) {
+            self.signed_type_argument()?
+        } else {
+            0
+        };
+        self.expect(&TokenKind::RightParen)?;
+        crate::numeric::check_modifier(precision, scale).map_err(|error| error.at(position))?;
+        Ok(Some(NumericModifier {
+            precision: precision as u16,
+            scale: scale as i16,
+        }))
+    }
+
+    fn signed_type_argument(&mut self) -> SqlResult<i64> {
+        let negative = self.take_operator("-");
+        let TokenKind::Integer(digits) = self.peek_kind() else {
+            return Err(self.unexpected());
+        };
+        let value: i64 = digits.parse().unwrap_or(i64::MAX);
+        self.at += 1;
+        Ok(if negative { -value } else { value })
+    }
+
+    fn time_precision(&mut self, position: usize, name: &str) -> SqlResult<Option<u8>> {
+        match self.type_modifier()? {
+            None => Ok(None),
+            Some(precision @ 0..=6) => Ok(Some(precision as u8)),
+            Some(precision) if precision < 0 => Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!("{name}({precision}) precision must not be negative"),
+            )
+            .at(position)),
+            Some(_) => Ok(Some(6)),
+        }
+    }
+
+    fn timestamp_type(&mut self, word: &str, position: usize) -> SqlResult<SqlType> {
+        let precision = self.time_precision(position, word)?;
+        if word == "timestamptz" {
+            return Ok(SqlType::TimestampTz(precision));
+        }
+        let zoned = if self.is_word("with") && self.is_word_at(1, "time") {
+            self.at += 2;
+            self.expect_word("zone")?;
+            true
+        } else if self.is_word("without") {
+            self.at += 1;
+            self.expect_word("time")?;
+            self.expect_word("zone")?;
+            false
+        } else {
+            false
+        };
+        Ok(if zoned {
+            SqlType::TimestampTz(precision)
+        } else {
+            SqlType::Timestamp(precision)
+        })
     }
 
     pub(crate) fn sql_type(&mut self) -> SqlResult<SqlType> {
@@ -1127,10 +1288,13 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 SqlType::Varchar(self.varchar_length(token.start)?)
             }
-            "numeric" | "decimal" | "dec" | "timestamp" | "timestamptz" | "date" | "time"
-            | "timetz" | "interval" | "json" | "jsonb" | "uuid" | "bytea" | "serial"
-            | "serial4" | "bigserial" | "serial8" | "smallserial" | "serial2" | "character"
-            | "char" | "bpchar" | "money" | "inet" | "cidr" | "xml" | "bit" | "point" => {
+            "numeric" | "decimal" | "dec" => SqlType::Numeric(self.numeric_modifier(token.start)?),
+            "date" => SqlType::Date,
+            "timestamp" | "timestamptz" => self.timestamp_type(word, token.start)?,
+            "json" => SqlType::Json,
+            "jsonb" => SqlType::Jsonb,
+            "time" | "timetz" | "interval" | "uuid" | "bytea" | "character" | "char" | "bpchar"
+            | "money" | "inet" | "cidr" | "xml" | "bit" | "point" => {
                 return Err(
                     SqlError::not_supported(format!("type {word} is not supported yet"))
                         .at(token.start),
@@ -1948,6 +2112,13 @@ impl<'t> Parser<'t> {
             }
             Level::Pattern => self.pattern(left),
             Level::Other => {
+                if self.postgresql()
+                    && let Some(operator) = self.json_operator()
+                {
+                    self.at += 1;
+                    let right = self.expression_above(Level::Additive)?;
+                    return Ok(Self::binary(left, operator, right));
+                }
                 if !self.take_operator("||") {
                     let TokenKind::Operator(symbol) = self.peek_kind() else {
                         return Err(self.unexpected());
@@ -2046,6 +2217,21 @@ impl<'t> Parser<'t> {
             return Err(self.unexpected());
         };
         Ok(Expr { kind, position })
+    }
+
+    fn json_operator(&self) -> Option<BinaryOperator> {
+        let TokenKind::Operator(symbol) = self.peek_kind() else {
+            return None;
+        };
+        Some(match *symbol {
+            "->" => BinaryOperator::JsonField,
+            "->>" => BinaryOperator::JsonFieldText,
+            "#>" => BinaryOperator::JsonPath,
+            "#>>" => BinaryOperator::JsonPathText,
+            "@>" => BinaryOperator::JsonContains,
+            "<@" => BinaryOperator::JsonContainedIn,
+            _ => return None,
+        })
     }
 
     fn comparison_operator(&self) -> Option<BinaryOperator> {
@@ -2260,8 +2446,13 @@ impl<'t> Parser<'t> {
                 {
                     Err(self.not_supported("ARRAY and ROW constructors"))
                 }
-                "current_date" | "current_time" | "current_timestamp" | "localtime"
-                | "localtimestamp" => Err(self.not_supported("date and time values")),
+                "current_date" | "current_timestamp" | "localtimestamp" if self.postgresql() => {
+                    self.at += 1;
+                    self.clock_function(word, position)
+                }
+                "current_time" | "localtime" if self.postgresql() => {
+                    Err(self.not_supported("type time"))
+                }
                 "current_user" | "session_user" | "user" | "current_role" => {
                     self.at += 1;
                     let name = if word == "session_user" {
@@ -2282,23 +2473,26 @@ impl<'t> Parser<'t> {
                     };
                     self.session_value(name, position)
                 }
-                "interval" | "timestamp" | "date" | "time" | "numeric" | "decimal" | "json"
-                | "jsonb"
-                    if matches!(self.peek_kind_at(1), TokenKind::String(_)) =>
-                {
-                    Err(
-                        SqlError::not_supported(format!("type {word} is not supported yet"))
-                            .at(position),
-                    )
-                }
+                "interval" | "time" if matches!(self.peek_kind_at(1), TokenKind::String(_)) => Err(
+                    SqlError::not_supported(format!("type {word} is not supported yet"))
+                        .at(position),
+                ),
                 "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8" | "real"
                 | "float4" | "float8" | "boolean" | "bool" | "text" | "varchar" | "double"
-                    if matches!(self.peek_kind_at(1), TokenKind::String(_))
-                        || (word == "double"
-                            && self.is_word_at(1, "precision")
-                            && matches!(self.peek_kind_at(2), TokenKind::String(_))) =>
+                | "numeric" | "decimal" | "date" | "timestamp" | "timestamptz" | "json"
+                | "jsonb"
+                    if self.typed_literal_allowed(word)
+                        && (matches!(self.peek_kind_at(1), TokenKind::String(_))
+                            || (word == "double"
+                                && self.is_word_at(1, "precision")
+                                && matches!(self.peek_kind_at(2), TokenKind::String(_)))) =>
                 {
-                    let sql_type = self.sql_type()?;
+                    let sql_type = if self.mysql() && word == "timestamp" {
+                        self.at += 1;
+                        SqlType::Timestamp(None)
+                    } else {
+                        self.sql_type()?
+                    };
                     let TokenKind::String(text) = self.peek_kind() else {
                         return Err(self.unexpected());
                     };
@@ -2352,7 +2546,72 @@ impl<'t> Parser<'t> {
         })
     }
 
+    fn clock_function(&mut self, word: &str, position: usize) -> SqlResult<Expr> {
+        if word != "current_date" && self.take(&TokenKind::LeftParen) {
+            let TokenKind::Integer(_) = self.peek_kind() else {
+                return Err(self.unexpected());
+            };
+            self.at += 1;
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(Expr {
+            kind: ExprKind::Function {
+                name: word.to_owned(),
+                arguments: Vec::new(),
+            },
+            position,
+        })
+    }
+
+    fn extract(&mut self, name: Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let field = match self.peek_kind() {
+            TokenKind::Word(word) => word.to_ascii_lowercase(),
+            TokenKind::QuotedIdentifier(word) if self.postgresql() => word.clone(),
+            TokenKind::String(text) if self.postgresql() => text.to_string(),
+            _ => return Err(self.unexpected()),
+        };
+        let field_position = self.position();
+        let internal = if self.mysql() {
+            if !crate::datetime::MYSQL_UNITS.contains(&field.as_str()) {
+                return Err(self.unexpected());
+            }
+            "mysql_extract"
+        } else if self.oracle() {
+            if !crate::datetime::ORACLE_FIELDS.contains(&field.as_str()) {
+                return Err(
+                    SqlError::new(SqlState::SYNTAX_ERROR, "missing right parenthesis")
+                        .with_oracle_code(907)
+                        .at(field_position),
+                );
+            }
+            "oracle_extract"
+        } else {
+            "extract"
+        };
+        self.at += 1;
+        self.expect_word("from")?;
+        let source = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        Ok(Expr {
+            kind: ExprKind::Function {
+                name: internal.to_owned(),
+                arguments: vec![
+                    Expr {
+                        kind: ExprKind::Literal(Literal::String(field)),
+                        position: field_position,
+                    },
+                    source,
+                ],
+            },
+            position: name.position,
+        })
+    }
+
     fn function(&mut self, name: Name) -> SqlResult<Expr> {
+        if name.text == "extract" && !self.sqlite() {
+            return self.extract(name);
+        }
         if self.mysql()
             && let Some(expr) = self.mysql_function(&name)?
         {
@@ -2367,6 +2626,20 @@ impl<'t> Parser<'t> {
             && let Some(expr) = self.oracle_function(&name)?
         {
             return Ok(expr);
+        }
+        let text = name.text.as_str();
+        let postgresql_only = (!self.postgresql() && POSTGRESQL_ONLY_FUNCTIONS.contains(&text))
+            || (self.mysql() && NOT_IN_MYSQL.contains(&text))
+            || (self.sqlite() && NOT_IN_SQLITE.contains(&text));
+        if postgresql_only || INTERNAL_FUNCTIONS.contains(&name.text.as_str()) {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("function {}() does not exist", name.text),
+            )
+            .with_hint(
+                "No function matches the given name and argument types. You might need to add explicit type casts.",
+            )
+            .at(name.position));
         }
         if !self.sqlite()
             && !self.oracle()

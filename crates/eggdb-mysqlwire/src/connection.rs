@@ -2,9 +2,10 @@ use crate::auth::{CACHING_SHA2_PASSWORD, MYSQL_NATIVE_PASSWORD, NONCE_BYTES};
 use crate::packets::{
     BoundValue, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, ColumnDefinition, Command,
     ParameterType, Payload, SERVER_CAPABILITIES, STATUS_AUTOCOMMIT, STATUS_IN_TRANSACTION,
-    STATUS_MORE_RESULTS, TYPE_DOUBLE, TYPE_FLOAT, TYPE_LONG, TYPE_LONGLONG, TYPE_SHORT, TYPE_TINY,
-    TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet, err_packet,
-    ok_packet, parse_command, parse_execute, parse_handshake_response,
+    STATUS_MORE_RESULTS, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON, TYPE_LONG,
+    TYPE_LONGLONG, TYPE_NEWDECIMAL, TYPE_SHORT, TYPE_TIMESTAMP, TYPE_TINY, TYPE_VAR_STRING,
+    UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet, err_packet, ok_packet, parse_command,
+    parse_execute, parse_handshake_response,
 };
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
@@ -339,16 +340,33 @@ fn affected_rows(tag: &str) -> u64 {
 enum ValueClass {
     Integer,
     Float,
+    Decimal,
     Boolean,
     Text,
+    Date,
+    DateTime,
+    Timestamp,
+    Json,
 }
 
 fn class_of_type(sql_type: SqlType) -> ValueClass {
     match sql_type {
         SqlType::SmallInt | SqlType::Integer | SqlType::BigInt => ValueClass::Integer,
         SqlType::Real | SqlType::Double => ValueClass::Float,
+        SqlType::Numeric(_) => ValueClass::Decimal,
         SqlType::Boolean => ValueClass::Boolean,
         SqlType::Text | SqlType::Varchar(_) => ValueClass::Text,
+        SqlType::Date => ValueClass::Date,
+        SqlType::Timestamp(_) => ValueClass::DateTime,
+        SqlType::TimestampTz(_) => ValueClass::Timestamp,
+        SqlType::Json | SqlType::Jsonb => ValueClass::Json,
+    }
+}
+
+fn temporal_length(precision: Option<u8>) -> u32 {
+    match precision {
+        Some(digits @ 1..=6) => 20 + u32::from(digits),
+        _ => 19,
     }
 }
 
@@ -405,6 +423,27 @@ fn column_for(
             }
         }
         Some(SqlType::Varchar(Some(length))) => (TYPE_VAR_STRING, length.saturating_mul(4), 0),
+        Some(SqlType::Numeric(modifier)) => {
+            let (precision, scale) = modifier.map_or((65, 30), |modifier| {
+                (
+                    u32::from(modifier.precision),
+                    u8::try_from(modifier.scale.max(0)).unwrap_or(30),
+                )
+            });
+            (TYPE_NEWDECIMAL, precision + 2, scale)
+        }
+        Some(SqlType::Date) => (TYPE_DATE, 10, 0),
+        Some(SqlType::Timestamp(precision)) => (
+            TYPE_DATETIME,
+            temporal_length(precision),
+            precision.unwrap_or(0),
+        ),
+        Some(SqlType::TimestampTz(precision)) => (
+            TYPE_TIMESTAMP,
+            temporal_length(precision),
+            precision.unwrap_or(0),
+        ),
+        Some(SqlType::Json | SqlType::Jsonb) => (TYPE_JSON, u32::MAX, 0),
         _ => (TYPE_VAR_STRING, 262_140, 0),
     };
     ColumnDefinition {
@@ -415,7 +454,7 @@ fn column_for(
     }
 }
 
-fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Vec<u8> {
+fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Result<Vec<u8>, SqlError> {
     let mut bitmap = vec![0u8; (columns.len() + 9) / 8];
     let mut values = Payload::new();
     for (index, column) in columns.iter().enumerate() {
@@ -452,6 +491,10 @@ fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Vec<u8> {
             TYPE_DOUBLE => {
                 values.bytes(&value.as_float().unwrap_or(0.0).to_le_bytes());
             }
+            TYPE_DATE | TYPE_DATETIME | TYPE_TIMESTAMP => {
+                let text = Dialect::MySql.value_text(value).unwrap_or_default();
+                values.bytes(&packed_temporal(&text)?);
+            }
             _ => {
                 let text = Dialect::MySql.value_text(value).unwrap_or_default();
                 values.length_encoded_bytes(text.as_bytes());
@@ -460,7 +503,59 @@ fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Vec<u8> {
     }
     let mut payload = Payload::new();
     payload.u8(0x00).bytes(&bitmap).bytes(&values.0);
-    payload.0
+    Ok(payload.0)
+}
+
+fn packed_temporal(text: &str) -> Result<Vec<u8>, SqlError> {
+    let in_mysql_range = text.len() >= 10
+        && text.as_bytes()[4] == b'-'
+        && !text.ends_with(" BC")
+        && text
+            .get(..4)
+            .is_some_and(|year| year.bytes().all(|byte| byte.is_ascii_digit()));
+    if !in_mysql_range {
+        return Err(SqlError::new(
+            eggdb_sql::SqlState::INVALID_DATETIME_FORMAT,
+            format!("Incorrect datetime value: '{text}'"),
+        )
+        .with_vendor_code(1292));
+    }
+    let number = |range: std::ops::Range<usize>| -> u32 {
+        text.get(range)
+            .and_then(|digits| digits.parse().ok())
+            .unwrap_or(0)
+    };
+    let year = number(0..4) as u16;
+    let (month, day) = (number(5..7) as u8, number(8..10) as u8);
+    let (hour, minute, second) = (
+        number(11..13) as u8,
+        number(14..16) as u8,
+        number(17..19) as u8,
+    );
+    let fraction = text.get(20..).unwrap_or("");
+    let micros = if fraction.is_empty() {
+        0
+    } else {
+        let padded = format!("{fraction:0<6}");
+        padded
+            .get(..6)
+            .and_then(|digits| digits.parse().ok())
+            .unwrap_or(0u32)
+    };
+    let mut out = vec![0u8];
+    if (year, month, day) != (0, 0, 0) || hour != 0 || minute != 0 || second != 0 || micros != 0 {
+        out.extend_from_slice(&year.to_le_bytes());
+        out.push(month);
+        out.push(day);
+    }
+    if hour != 0 || minute != 0 || second != 0 || micros != 0 {
+        out.extend_from_slice(&[hour, minute, second]);
+    }
+    if micros != 0 {
+        out.extend_from_slice(&micros.to_le_bytes());
+    }
+    out[0] = (out.len() - 1) as u8;
+    Ok(out)
 }
 
 fn text_row(row: &[Value]) -> Vec<u8> {
@@ -721,7 +816,13 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         for row in &result.rows {
             match encoding {
                 Encoding::Text => self.wire.send(&text_row(row)),
-                Encoding::Binary => self.wire.send(&binary_row(&definitions, row)),
+                Encoding::Binary => match binary_row(&definitions, row) {
+                    Ok(bytes) => self.wire.send(&bytes),
+                    Err(error) => {
+                        send_sql_error(&mut self.wire, &error);
+                        return;
+                    }
+                },
             }
             if self.wire.flush_if_large().is_err() {
                 return;

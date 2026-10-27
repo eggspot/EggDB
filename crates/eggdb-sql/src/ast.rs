@@ -267,6 +267,12 @@ pub(crate) enum BinaryOperator {
     LessOrEqual,
     Greater,
     GreaterOrEqual,
+    JsonField,
+    JsonFieldText,
+    JsonPath,
+    JsonPathText,
+    JsonContains,
+    JsonContainedIn,
 }
 
 impl BinaryOperator {
@@ -285,6 +291,12 @@ impl BinaryOperator {
             Self::LessOrEqual => "<=",
             Self::Greater => ">",
             Self::GreaterOrEqual => ">=",
+            Self::JsonField => "->",
+            Self::JsonFieldText => "->>",
+            Self::JsonPath => "#>",
+            Self::JsonPathText => "#>>",
+            Self::JsonContains => "@>",
+            Self::JsonContainedIn => "<@",
         }
     }
 }

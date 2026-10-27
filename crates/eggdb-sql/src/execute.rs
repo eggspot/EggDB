@@ -174,6 +174,11 @@ pub(crate) fn create_table(
     }
     for &index in &primary_key {
         columns[index].not_null = true;
+        let position = create
+            .columns
+            .get(index)
+            .map_or(create.name.position, |column| column.name.position);
+        indexes::check_orderable(columns[index].sql_type, position)?;
     }
     check_auto_increment(create, &columns, &primary_key)?;
     if tables.table(writer, &create.name.text)?.is_some() {

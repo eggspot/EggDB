@@ -68,7 +68,33 @@ impl Dialect {
             (Self::Oracle, crate::Value::Double(number)) => {
                 Some(crate::oracle_functions::number_text(*number))
             }
+            (Self::Oracle, crate::Value::Numeric(number)) => Some(oracle_numeric_text(number)),
+            (Self::Sqlite, crate::Value::Numeric(number)) => Some(match number.integral_value() {
+                Some(whole) => whole.to_string(),
+                None => crate::sqlite_functions::real_text(number.to_f64())?,
+            }),
+            (Self::MySql | Self::Sqlite | Self::Oracle, crate::Value::TimestampTz(micros)) => {
+                Some(match crate::datetime::utc_to_local(*micros) {
+                    Ok(local) => crate::datetime::format_timestamp(local),
+                    Err(_) => crate::datetime::format_timestamp(*micros),
+                })
+            }
             _ => value.to_text(),
         }
     }
+}
+
+fn oracle_numeric_text(number: &crate::Numeric) -> String {
+    let text = number.to_string();
+    if number.is_nan() || !text.contains('.') {
+        return text;
+    }
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    if let Some(rest) = trimmed.strip_prefix("0.") {
+        return format!(".{rest}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("-0.") {
+        return format!("-.{rest}");
+    }
+    trimmed.to_owned()
 }

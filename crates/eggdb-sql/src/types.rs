@@ -1,4 +1,6 @@
+use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::numeric::Numeric;
 use std::cmp::Ordering;
 
 /// A column type of the PostgreSQL dialect that this release stores.
@@ -21,6 +23,31 @@ pub enum SqlType {
     /// `character varying(n)` (`varchar(n)`): a string of at most `n` characters, or of any
     /// length without `n`.
     Varchar(Option<u32>),
+    /// `numeric(p, s)` (`decimal`): an exact decimal number, rounded to scale `s` and at most
+    /// `p` digits when they are given.
+    Numeric(Option<NumericModifier>),
+    /// `date`: a day of the proleptic Gregorian calendar, 4713 BC to 5874897 AD.
+    Date,
+    /// `timestamp(p) without time zone`: a date and time of day to the microsecond, rounded to
+    /// `p` fractional digits when `p` is given.
+    Timestamp(Option<u8>),
+    /// `timestamp(p) with time zone` (`timestamptz`): an instant, stored in UTC and shown in
+    /// the session's time zone.
+    TimestampTz(Option<u8>),
+    /// `json`: JSON text, checked and kept as written.
+    Json,
+    /// `jsonb`: JSON in its normalized form (keys sorted, the last duplicate kept, whitespace
+    /// and number formats canonical).
+    Jsonb,
+}
+
+/// The precision and scale of a `numeric(p, s)` column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumericModifier {
+    /// The total number of significant digits, 1 to 1000.
+    pub precision: u16,
+    /// The number of digits after the decimal point, -1000 to 1000.
+    pub scale: i16,
 }
 
 impl SqlType {
@@ -36,6 +63,21 @@ impl SqlType {
             Self::Text => "text".into(),
             Self::Varchar(None) => "character varying".into(),
             Self::Varchar(Some(length)) => format!("character varying({length})"),
+            Self::Numeric(None) => "numeric".into(),
+            Self::Numeric(Some(modifier)) => {
+                format!("numeric({},{})", modifier.precision, modifier.scale)
+            }
+            Self::Date => "date".into(),
+            Self::Timestamp(None) => "timestamp without time zone".into(),
+            Self::Timestamp(Some(precision)) => {
+                format!("timestamp({precision}) without time zone")
+            }
+            Self::TimestampTz(None) => "timestamp with time zone".into(),
+            Self::TimestampTz(Some(precision)) => {
+                format!("timestamp({precision}) with time zone")
+            }
+            Self::Json => "json".into(),
+            Self::Jsonb => "jsonb".into(),
         }
     }
 
@@ -49,14 +91,42 @@ impl SqlType {
             Self::Boolean => "bool",
             Self::Text => "text",
             Self::Varchar(_) => "varchar",
+            Self::Numeric(_) => "numeric",
+            Self::Date => "date",
+            Self::Timestamp(_) => "timestamp",
+            Self::TimestampTz(_) => "timestamptz",
+            Self::Json => "json",
+            Self::Jsonb => "jsonb",
         }
     }
 
     pub(crate) fn is_numeric(self) -> bool {
         matches!(
             self,
-            Self::SmallInt | Self::Integer | Self::BigInt | Self::Real | Self::Double
+            Self::SmallInt
+                | Self::Integer
+                | Self::BigInt
+                | Self::Real
+                | Self::Double
+                | Self::Numeric(_)
         )
+    }
+
+    pub(crate) fn without_modifier(self) -> Self {
+        match self {
+            Self::Numeric(_) => Self::Numeric(None),
+            Self::Timestamp(_) => Self::Timestamp(None),
+            Self::TimestampTz(_) => Self::TimestampTz(None),
+            other => other,
+        }
+    }
+
+    pub(crate) fn is_datetime(self) -> bool {
+        matches!(self, Self::Date | Self::Timestamp(_) | Self::TimestampTz(_))
+    }
+
+    pub(crate) fn is_json(self) -> bool {
+        matches!(self, Self::Json | Self::Jsonb)
     }
 
     pub(crate) fn is_float(self) -> bool {
@@ -96,6 +166,18 @@ pub enum Value {
     Double(f64),
     /// A `text` or `character varying`.
     Text(String),
+    /// A `numeric`.
+    Numeric(Numeric),
+    /// A `date`: days since 2000-01-01.
+    Date(i32),
+    /// A `timestamp without time zone`: microseconds since 2000-01-01 00:00:00.
+    Timestamp(i64),
+    /// A `timestamp with time zone`: microseconds since 2000-01-01 00:00:00 UTC.
+    TimestampTz(i64),
+    /// A `json` value: its text as written.
+    Json(String),
+    /// A `jsonb` value: its normalized text.
+    Jsonb(String),
 }
 
 impl Value {
@@ -110,6 +192,12 @@ impl Value {
             Self::Real(_) => SqlType::Real,
             Self::Double(_) => SqlType::Double,
             Self::Text(_) => SqlType::Text,
+            Self::Numeric(_) => SqlType::Numeric(None),
+            Self::Date(_) => SqlType::Date,
+            Self::Timestamp(_) => SqlType::Timestamp(None),
+            Self::TimestampTz(_) => SqlType::TimestampTz(None),
+            Self::Json(_) => SqlType::Json,
+            Self::Jsonb(_) => SqlType::Jsonb,
         })
     }
 
@@ -135,15 +223,36 @@ impl Value {
 
     /// The value as a double-precision number, when it is a number of any type.
     pub fn as_float(&self) -> Option<f64> {
-        match *self {
-            Self::Real(value) => Some(value.into()),
-            Self::Double(value) => Some(value),
+        match self {
+            Self::Real(value) => Some(f64::from(*value)),
+            Self::Double(value) => Some(*value),
+            Self::Numeric(value) => Some(value.to_f64()),
             _ => self.as_integer().map(|value| value as f64),
         }
     }
 
+    pub(crate) fn as_numeric(&self) -> Option<Numeric> {
+        match self {
+            Self::Numeric(value) => Some(value.clone()),
+            _ => self.as_integer().map(Numeric::from_i64),
+        }
+    }
+
+    /// The value as [`Value::to_text`] prints it, with a `timestamp with time zone` shown at
+    /// `offset_seconds` east of UTC instead of the running statement's time zone.
+    pub fn to_text_at(&self, offset_seconds: i32) -> Option<String> {
+        match self {
+            Self::TimestampTz(micros) => {
+                Some(datetime::format_timestamptz_at(*micros, offset_seconds))
+            }
+            other => other.to_text(),
+        }
+    }
+
     /// The value as PostgreSQL prints it in text form: `t` and `f` for booleans, floating
-    /// point in the shortest form that reads back exactly, and `None` for NULL.
+    /// point in the shortest form that reads back exactly, dates and times in the ISO style
+    /// (a `timestamp with time zone` in the time zone of the statement running on this thread,
+    /// else UTC), and `None` for NULL.
     pub fn to_text(&self) -> Option<String> {
         Some(match self {
             Self::Null => return None,
@@ -154,7 +263,11 @@ impl Value {
             Self::BigInt(value) => value.to_string(),
             Self::Real(value) => format_float(f64::from(*value), format!("{value:e}"), 6),
             Self::Double(value) => format_float(*value, format!("{value:e}"), 15),
-            Self::Text(text) => text.clone(),
+            Self::Text(text) | Self::Json(text) | Self::Jsonb(text) => text.clone(),
+            Self::Numeric(value) => value.to_string(),
+            Self::Date(days) => datetime::format_date(*days),
+            Self::Timestamp(micros) => datetime::format_timestamp(*micros),
+            Self::TimestampTz(micros) => datetime::format_timestamptz(*micros),
         })
     }
 }
@@ -313,7 +426,73 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
         SqlType::Text | SqlType::Varchar(_) => {
             assign_string(text.to_owned(), sql_type, Conversion::Assignment)
         }
+        SqlType::Numeric(modifier) => numeric_value(Numeric::parse(text)?, modifier),
+        SqlType::Date => datetime::parse_date(text).map(Value::Date),
+        SqlType::Timestamp(precision) => {
+            timestamp_value(datetime::parse_timestamp(text, false)?, precision, false)
+        }
+        SqlType::TimestampTz(precision) => {
+            timestamp_value(datetime::parse_timestamp(text, true)?, precision, true)
+        }
+        SqlType::Json => {
+            crate::json::validate(text)?;
+            Ok(Value::Json(text.to_owned()))
+        }
+        SqlType::Jsonb => crate::json::normalize(text).map(Value::Jsonb),
     }
+}
+
+pub(crate) fn numeric_value(value: Numeric, modifier: Option<NumericModifier>) -> SqlResult<Value> {
+    match modifier {
+        None => Ok(Value::Numeric(value)),
+        Some(modifier) => value
+            .with_modifier(i64::from(modifier.precision), i64::from(modifier.scale))
+            .map(Value::Numeric),
+    }
+}
+
+fn timestamp_value(micros: i64, precision: Option<u8>, zoned: bool) -> SqlResult<Value> {
+    let micros = match precision {
+        Some(precision) => datetime::round_to_precision(micros, precision)?,
+        None => micros,
+    };
+    Ok(if zoned {
+        Value::TimestampTz(micros)
+    } else {
+        Value::Timestamp(micros)
+    })
+}
+
+fn convert_datetime(value: &Value, target: SqlType) -> Option<SqlResult<Value>> {
+    let local = |micros: i64| datetime::utc_to_local(micros);
+    Some(match (target, value) {
+        (SqlType::Date, Value::Date(_)) => Ok(value.clone()),
+        (SqlType::Date, Value::Timestamp(micros)) => {
+            Ok(Value::Date(datetime::timestamp_to_date(*micros)))
+        }
+        (SqlType::Date, Value::TimestampTz(micros)) => {
+            local(*micros).map(|local| Value::Date(datetime::timestamp_to_date(local)))
+        }
+        (SqlType::Timestamp(precision), Value::Date(days)) => datetime::date_to_timestamp(*days)
+            .and_then(|micros| timestamp_value(micros, precision, false)),
+        (SqlType::Timestamp(precision), Value::Timestamp(micros)) => {
+            timestamp_value(*micros, precision, false)
+        }
+        (SqlType::Timestamp(precision), Value::TimestampTz(micros)) => {
+            local(*micros).and_then(|local| timestamp_value(local, precision, false))
+        }
+        (SqlType::TimestampTz(precision), Value::Date(days)) => datetime::date_to_timestamp(*days)
+            .and_then(datetime::local_to_utc)
+            .and_then(|micros| timestamp_value(micros, precision, true)),
+        (SqlType::TimestampTz(precision), Value::Timestamp(micros)) => {
+            datetime::local_to_utc(*micros)
+                .and_then(|micros| timestamp_value(micros, precision, true))
+        }
+        (SqlType::TimestampTz(precision), Value::TimestampTz(micros)) => {
+            timestamp_value(*micros, precision, true)
+        }
+        _ => return None,
+    })
 }
 
 fn input_out_of_range(text: &str, sql_type: SqlType) -> SqlError {
@@ -369,7 +548,50 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
             _ => Err(mismatch(source, target)),
         };
     }
+    if target.is_datetime()
+        && let Some(converted) = convert_datetime(&value, target)
+    {
+        return converted;
+    }
     match (target, &value) {
+        (SqlType::Json, Value::Json(_)) | (SqlType::Jsonb, Value::Jsonb(_)) => Ok(value),
+        (SqlType::Json, Value::Jsonb(text)) => Ok(Value::Json(text.clone())),
+        (SqlType::Jsonb, Value::Json(text)) => crate::json::normalize(text).map(Value::Jsonb),
+        (SqlType::Numeric(modifier), _) if source.is_numeric() => {
+            let exact = match &value {
+                Value::Numeric(number) => number.clone(),
+                Value::Real(number) => Numeric::from_f64(f64::from(*number), 6)?,
+                Value::Double(number) => Numeric::from_f64(*number, 15)?,
+                other => Numeric::from_i64(other.as_integer().unwrap_or(0)),
+            };
+            numeric_value(exact, modifier)
+        }
+        (SqlType::SmallInt | SqlType::Integer | SqlType::BigInt, Value::Numeric(number)) => {
+            if number.is_nan() {
+                return Err(SqlError::new(
+                    SqlState::FEATURE_NOT_SUPPORTED,
+                    format!("cannot convert NaN to {}", target.name()),
+                ));
+            }
+            match number
+                .to_i128_rounded()
+                .and_then(|value| i64::try_from(value).ok())
+            {
+                Some(value) => integer_value(value, target),
+                None => Err(out_of_range(target)),
+            }
+        }
+        (SqlType::Real | SqlType::Double, Value::Numeric(number)) => {
+            let float = number.to_f64();
+            if float.is_infinite() {
+                return Err(float_overflow());
+            }
+            if target == SqlType::Real {
+                real_value(float)
+            } else {
+                Ok(Value::Double(float))
+            }
+        }
         (SqlType::Boolean, Value::Boolean(_)) => Ok(value),
         (SqlType::Boolean, Value::Integer(number)) if conversion == Conversion::Explicit => {
             Ok(Value::Boolean(*number != 0))
@@ -411,15 +633,60 @@ pub(crate) fn compare_floats(left: f64, right: f64) -> Ordering {
 }
 
 pub(crate) fn comparable(left: SqlType, right: SqlType) -> bool {
+    if left == SqlType::Json || right == SqlType::Json {
+        return false;
+    }
     (left.is_numeric() && right.is_numeric())
         || (left.is_string() && right.is_string())
+        || (left.is_datetime() && right.is_datetime())
         || left == right
+}
+
+fn instant(value: &Value, zoned: bool) -> i128 {
+    let local = match value {
+        Value::Date(days) => i128::from(*days) * i128::from(datetime::MICROS_PER_DAY),
+        Value::Timestamp(micros) => i128::from(*micros),
+        Value::TimestampTz(micros) => return i128::from(*micros),
+        _ => 0,
+    };
+    if zoned {
+        local - i128::from(datetime::session_offset()) * i128::from(datetime::MICROS_PER_SECOND)
+    } else {
+        local
+    }
+}
+
+fn is_exact_number(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Numeric(_)
+    )
 }
 
 pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
-        (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
+        (Value::Text(a), Value::Text(b)) | (Value::Json(a), Value::Json(b)) => {
+            a.as_bytes().cmp(b.as_bytes())
+        }
+        (Value::Jsonb(a), Value::Jsonb(b)) => crate::json::comparable(a)
+            .as_bytes()
+            .cmp(crate::json::comparable(b).as_bytes()),
+        (Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_), _)
+            if right.sql_type().is_some_and(SqlType::is_datetime) =>
+        {
+            let zoned =
+                matches!(left, Value::TimestampTz(_)) || matches!(right, Value::TimestampTz(_));
+            instant(left, zoned).cmp(&instant(right, zoned))
+        }
+        (Value::Numeric(_), _) | (_, Value::Numeric(_))
+            if is_exact_number(left) && is_exact_number(right) =>
+        {
+            match (left.as_numeric(), right.as_numeric()) {
+                (Some(a), Some(b)) => a.compare(&b),
+                _ => Ordering::Equal,
+            }
+        }
         _ => match (left.as_integer(), right.as_integer()) {
             (Some(a), Some(b)) => a.cmp(&b),
             _ => compare_floats(
@@ -458,12 +725,55 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
                 out.extend_from_slice(&number.to_bits().to_le_bytes());
             }
         }
+        Value::Numeric(number) => {
+            if number.is_nan() {
+                out.push(4);
+            } else if let Some(whole) = number
+                .integral_value()
+                .and_then(|whole| i64::try_from(whole).ok())
+            {
+                out.push(3);
+                out.extend_from_slice(&whole.to_le_bytes());
+            } else if let Some(double) = number.exact_double() {
+                equality_key(out, &Value::Double(double));
+            } else {
+                let text = number.equality_text();
+                out.push(6);
+                out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+                out.extend_from_slice(text.as_bytes());
+            }
+        }
+        Value::Date(_) | Value::Timestamp(_) => {
+            out.push(7);
+            out.extend_from_slice(&instant(value, false).to_le_bytes());
+        }
+        Value::TimestampTz(micros) => {
+            out.push(8);
+            out.extend_from_slice(&micros.to_le_bytes());
+        }
+        Value::Json(text) => {
+            out.push(9);
+            out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            out.extend_from_slice(text.as_bytes());
+        }
+        Value::Jsonb(text) => {
+            let comparable = crate::json::comparable(text);
+            out.push(9);
+            out.extend_from_slice(&(comparable.len() as u64).to_le_bytes());
+            out.extend_from_slice(comparable.as_bytes());
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Conversion, SqlType, Value, convert, parse_input};
+
+    #[test]
+    fn a_value_stays_four_words_with_the_new_types() {
+        assert!(std::mem::size_of::<Value>() <= 32);
+        assert!(std::mem::size_of::<SqlType>() <= 12);
+    }
 
     #[test]
     fn floats_print_like_postgresql() {

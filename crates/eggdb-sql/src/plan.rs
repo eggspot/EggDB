@@ -121,7 +121,9 @@ fn same_family(value: &Value, sql_type: SqlType) -> bool {
     match value {
         Value::Text(_) => sql_type.is_string(),
         Value::Boolean(_) => sql_type == SqlType::Boolean,
-        Value::Null => false,
+        Value::Null | Value::Json(_) => false,
+        Value::Jsonb(_) => sql_type == SqlType::Jsonb,
+        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => sql_type.is_datetime(),
         _ => sql_type.is_numeric(),
     }
 }

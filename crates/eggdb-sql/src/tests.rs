@@ -108,7 +108,10 @@ fn select_without_from_follows_postgresql_arithmetic() {
     assert_eq!(state(&mut session, "SELECT 1e308::float8 * 10"), "22003");
     assert_eq!(state(&mut session, "SELECT 'abc'::integer"), "22P02");
     assert_eq!(state(&mut session, "SELECT 1 + 'a'::text"), "42883");
-    assert_eq!(state(&mut session, "SELECT 1.5"), "0A000");
+    assert_eq!(
+        last(&mut session, "SELECT 1.5, 1.50 + 1, 10 / 4.0, 0.1 + 0.2"),
+        "?column?|?column?|?column?|?column?\n1.5|2.50|2.5000000000000000|0.3\nSELECT 1"
+    );
     assert_eq!(state(&mut session, "SELECT 0 ^ -1"), "2201F");
 }
 
@@ -355,11 +358,11 @@ fn inserts_check_constraints_and_return_rows() {
         "id|name|age|score|active\n7|gus|NULL|2.5|t\nINSERT 0 1"
     );
     assert_eq!(
-        state(
+        last(
             &mut session,
-            "INSERT INTO people (id, name, age) VALUES (8, 'x', 2.5)"
+            "INSERT INTO people (id, name, age) VALUES (8, 'x', 2.5) RETURNING age"
         ),
-        "0A000"
+        "age\n3\nINSERT 0 1"
     );
 }
 
@@ -548,7 +551,11 @@ fn create_and_drop_table_follow_postgresql() {
         state(&mut session, "CREATE TABLE u (a nosuchtype)"),
         "42704"
     );
-    assert_eq!(state(&mut session, "CREATE TABLE u (a numeric)"), "0A000");
+    assert_eq!(state(&mut session, "CREATE TABLE u (a money)"), "0A000");
+    assert_eq!(
+        state(&mut session, "CREATE TABLE u (a numeric(0))"),
+        "22023"
+    );
     assert_eq!(
         state(&mut session, "CREATE TABLE u (a int CHECK (a > 0))"),
         "0A000"
@@ -586,8 +593,8 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "WITH x AS (SELECT 1) SELECT * FROM x",
         "INSERT INTO people SELECT * FROM people",
         "ALTER TABLE people ADD COLUMN x int",
-        "CREATE TABLE ts (t timestamp)",
-        "CREATE TABLE js (j jsonb)",
+        "CREATE TABLE ts (t time)",
+        "CREATE TABLE js (j interval)",
         "SAVEPOINT a",
     ] {
         let error = fails(&mut session, sql);
@@ -1669,8 +1676,6 @@ fn grouping_errors_follow_postgresql() {
         ("SELECT sum(name) FROM people", "42883"),
         ("SELECT avg(name) FROM people", "42883"),
         ("SELECT min(active) FROM people", "42883"),
-        ("SELECT avg(age) FROM people", "0A000"),
-        ("SELECT avg(age + 1) FROM people", "0A000"),
         ("SELECT sum(*) FROM people", "42809"),
         ("SELECT count() FROM people", "42809"),
         ("SELECT count(age, name) FROM people", "42883"),
@@ -1731,10 +1736,13 @@ fn sums_keep_postgresql_result_types() {
         ),
         "sum\n1\nSELECT 1"
     );
-    assert_eq!(state(&mut session, "SELECT sum(b) FROM n"), "0A000");
     assert_eq!(
-        state(&mut session, "SELECT sum(b) / 2 FROM n WHERE i = 1"),
-        "0A000"
+        last(&mut session, "SELECT sum(b), avg(i) FROM n"),
+        "sum|avg\n9223372036854775808|1073741824.00000000\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT sum(b) / 2 FROM n WHERE i = 1"),
+        "?column?\n0.50000000000000000000\nSELECT 1"
     );
     assert_eq!(state(&mut session, "SELECT sum(d) FROM n"), "22003");
     assert_eq!(
@@ -2628,4 +2636,351 @@ fn rows_kept_for_a_rownum_limit_are_charged_to_the_work_memory() {
     )
     .expect("three rows");
     assert_eq!(kept.len(), 3);
+}
+
+#[test]
+fn hostile_typed_statements_never_panic_in_any_dialect() {
+    let shared = [
+        "SELECT",
+        "INSERT INTO typed VALUES (",
+        "UPDATE typed SET n =",
+        "WHERE",
+        "FROM typed",
+        "ORDER BY",
+        "n",
+        "d",
+        "t",
+        "z",
+        "j",
+        "(",
+        ")",
+        ",",
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "=",
+        "<",
+        "1",
+        "0",
+        "-1",
+        "9.99",
+        "1e999",
+        "123456789012345678901234567890.123456789",
+        "'NaN'",
+        "'2024-02-29'",
+        "'2024-02-30'",
+        "'0044-03-15 BC'",
+        "'294276-12-31 23:59:59.999999'",
+        "'5874897-12-31'",
+        "'2024-02-29 13:45:01.1234567+05:30'",
+        "'{\"a\": [1, {\"b\": 2}]}'",
+        "'[[[[[[[['",
+        "'{a,b}'",
+        "sum(n)",
+        "avg(n)",
+        "max(d)",
+        "round(",
+        "trunc(",
+        "ceil(",
+        "floor(",
+        "abs(",
+        "extract(year from",
+        "extract(epoch from",
+        "CAST(",
+        "AS",
+        "DATE",
+        "TIMESTAMP",
+        "CREATE TABLE x (a",
+        "PRIMARY KEY",
+        "NOT NULL",
+        "DEFAULT",
+        "CREATE INDEX ON typed (n)",
+        "CREATE INDEX typed_d ON typed (d, t)",
+        "EXTRACT(",
+        "YEAR_MONTH",
+        "EPOCH",
+        "WEEK",
+        "HOUR",
+        "SECOND",
+        "FROM",
+        "^ 1e400",
+        "0.5 ^",
+        "^ 99999999999999999999999",
+        "'0050-01-01 BC'",
+        "'5874897-12-31'",
+        "'4714-11-24 BC'",
+        "date_trunc('century',",
+        "TRUNC(",
+        "localtimestamp",
+        "localtime",
+        "current_date",
+    ];
+    let per_dialect: [(crate::Dialect, &str, &[&str]); 4] = [
+        (
+            crate::Dialect::PostgreSql,
+            "CREATE TABLE typed (id serial PRIMARY KEY, n numeric(12,3), d date, t timestamp(3), z timestamptz, j jsonb)",
+            &[
+                "numeric(",
+                "numeric(1000,",
+                "decimal",
+                "timestamptz",
+                "with time zone",
+                "json",
+                "jsonb",
+                "serial",
+                "bigserial",
+                "smallserial",
+                "GENERATED ALWAYS AS IDENTITY",
+                "GENERATED BY DEFAULT AS IDENTITY",
+                "::numeric",
+                "::numeric(3,1)",
+                "::date",
+                "::timestamptz",
+                "::jsonb",
+                "::json",
+                "->",
+                "->>",
+                "#>",
+                "#>>",
+                "@>",
+                "<@",
+                "^",
+                "now()",
+                "current_date",
+                "localtimestamp",
+                "date_trunc('month',",
+                "date_part('dow',",
+                "jsonb_typeof(",
+                "json_array_length(",
+                "SET TimeZone = 'UTC+05:30'",
+            ],
+        ),
+        (
+            crate::Dialect::MySql,
+            "CREATE TABLE typed (id INT AUTO_INCREMENT PRIMARY KEY, n DECIMAL(12,3), d DATE, t DATETIME(3), z TIMESTAMP, j JSON)",
+            &[
+                "DECIMAL(",
+                "DECIMAL(66,",
+                "DATETIME",
+                "DATETIME(7)",
+                "JSON",
+                "NOW()",
+                "CURDATE()",
+                "UTC_TIMESTAMP()",
+                "CURRENT_TIMESTAMP",
+                "UNSIGNED",
+            ],
+        ),
+        (
+            crate::Dialect::Sqlite,
+            "CREATE TABLE typed (id INTEGER PRIMARY KEY, n NUMERIC, d DATE, t DATETIME, z TIMESTAMP, j JSON)",
+            &["NUMERIC", "DATETIME", "date('now')", "typeof("],
+        ),
+        (
+            crate::Dialect::Oracle,
+            "CREATE TABLE typed (id NUMBER GENERATED BY DEFAULT ON NULL AS IDENTITY PRIMARY KEY, n NUMBER(12,3), d DATE, t TIMESTAMP(3), z TIMESTAMP WITH TIME ZONE, j JSON)",
+            &[
+                "NUMBER",
+                "NUMBER(38,",
+                "NUMBER(*,",
+                "TIMESTAMP(9)",
+                "WITH LOCAL TIME ZONE",
+                "SYSDATE",
+                "SYSTIMESTAMP",
+                "CURRENT_DATE",
+                "FROM dual",
+            ],
+        ),
+    ];
+    for (dialect, create, extra) in per_dialect {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        run(&mut session, create).unwrap_or_else(|error| panic!("{dialect:?}: {error}"));
+        let fragments: Vec<&str> = shared.iter().chain(extra.iter()).copied().collect();
+        fuzz(&mut session, &fragments);
+    }
+}
+
+#[test]
+fn the_new_types_functions_stay_in_their_dialects() {
+    let cases: [(crate::Dialect, &str); 8] = [
+        (crate::Dialect::Sqlite, "SELECT now()"),
+        (crate::Dialect::Sqlite, "SELECT jsonb_typeof('[]')"),
+        (crate::Dialect::MySql, "SELECT date_trunc('day', NOW())"),
+        (crate::Dialect::MySql, "SELECT '{\"a\": 1}' ->> 'a'"),
+        (crate::Dialect::PostgreSql, "SELECT mysql_now()"),
+        (crate::Dialect::PostgreSql, "SELECT concat_or_null('a')"),
+        (crate::Dialect::Oracle, "SELECT NOW() FROM dual"),
+        (
+            crate::Dialect::Sqlite,
+            "CREATE TABLE s (id serial PRIMARY KEY, n numeric(5,2))",
+        ),
+    ];
+    for (dialect, sql) in cases {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        let outcome = run(&mut session, sql);
+        if dialect == crate::Dialect::Sqlite && sql.starts_with("CREATE") {
+            assert!(outcome.is_ok(), "{dialect:?} {sql}: {outcome:?}");
+            assert_eq!(
+                last(&mut session, "SELECT typeof(id) FROM s"),
+                "typeof(id)\nSELECT 0"
+            );
+            continue;
+        }
+        assert!(outcome.is_err(), "{dialect:?} {sql}: {outcome:?}");
+    }
+}
+
+#[test]
+fn dates_at_the_ends_of_their_range_never_overflow() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT extract(year FROM DATE '5874897-12-31'), date_part('doy', DATE '5874897-12-31'), extract(epoch FROM DATE '4714-11-24 BC'), DATE '5874897-12-30' + 1, DATE '4714-11-25 BC' - 1"
+        ),
+        "extract|date_part|extract|?column?|?column?\n5874897|365|-210866803200|5874897-12-31|4714-11-24 BC\nSELECT 1"
+    );
+    for (sql, state) in [
+        ("SELECT date_trunc('day', DATE '5874897-12-31')", "22008"),
+        ("SELECT DATE '5874897-12-31' + 1", "22008"),
+        ("SELECT DATE '4714-11-24 BC' - 1", "22008"),
+        ("SELECT DATE '5874897-12-31'::timestamp", "22008"),
+        ("SELECT DATE '5874897-12-31'::timestamptz", "22008"),
+        ("SELECT DATE '2000-01-01' + 9223372036854775807", "22008"),
+        (
+            "SELECT DATE '2000-01-01' - (-9223372036854775807 - 1)",
+            "22008",
+        ),
+        (
+            "SELECT DATE '5874897-12-31' - DATE '4714-11-24 BC'",
+            "00000",
+        ),
+        ("SELECT 0.5 ^ 99999999999999999999999", "00000"),
+        ("SELECT 10::numeric ^ 400.5", "00000"),
+        ("SELECT 1::numeric ^ 1e400", "00000"),
+    ] {
+        let found = run(&mut session, sql).map_or_else(
+            |error| error.state().code().to_owned(),
+            |_| "00000".to_owned(),
+        );
+        assert_eq!(found, state, "{sql}");
+    }
+    assert_eq!(
+        last(&mut session, "SELECT 0.5 ^ 1e400 = 0, 1::numeric ^ 1e400"),
+        "?column?|?column?\nt|1.0000000000000000\nSELECT 1"
+    );
+}
+
+#[test]
+fn equal_values_of_different_types_hash_alike() {
+    use crate::types::{Value, compare_values, equality_key};
+    let pairs = [
+        ("2.5", 2.5f64),
+        ("-0.125", -0.125),
+        ("100000000000000000000", 1e20),
+        ("3", 3.0),
+    ];
+    for (text, double) in pairs {
+        let numeric = Value::Numeric(crate::numeric::Numeric::parse(text).unwrap());
+        let float = Value::Double(double);
+        assert_eq!(compare_values(&numeric, &float), std::cmp::Ordering::Equal);
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        equality_key(&mut left, &numeric);
+        equality_key(&mut right, &float);
+        assert_eq!(left, right, "{text}");
+    }
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE m (id integer PRIMARY KEY, n numeric, d double precision, j jsonb UNIQUE);
+         INSERT INTO m VALUES (1, 2.5, NULL, '{\"a\": 1.0}'), (2, NULL, 2.5, '[2.50]'), (3, 2.50, NULL, NULL)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(DISTINCT coalesce(n, d)), '{\"a\": 1.0}'::jsonb = '{\"a\": 1}'::jsonb, '[1.10]'::jsonb > '[1.1]'::jsonb FROM m"
+        ),
+        "count|?column?|?column?\n1|t|f\nSELECT 1"
+    );
+    assert_eq!(
+        fails(
+            &mut session,
+            "INSERT INTO m (id, j) VALUES (4, '{\"a\": 1}')"
+        )
+        .state()
+        .code(),
+        "23505"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT j FROM m WHERE j = '[2.5]'"),
+        "j\n[2.50]\nSELECT 1"
+    );
+}
+
+#[test]
+fn extract_takes_each_dialects_own_units() {
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    assert_eq!(
+        last(
+            &mut mysql,
+            "SELECT EXTRACT(WEEK FROM DATE '2024-01-01') AS w, EXTRACT(SECOND FROM TIMESTAMP '2024-02-29 13:45:01.5') AS s, EXTRACT(YEAR_MONTH FROM DATE '2024-02-29') AS ym, EXTRACT(HOUR FROM DATE '2024-02-29') AS h"
+        ),
+        "w|s|ym|h\n0|1|202402|0\nSELECT 1"
+    );
+    for unit in ["EPOCH", "DOW", "ISODOW", "DOY", "CENTURY", "TIMEZONE"] {
+        let error = fails(&mut mysql, &format!("SELECT EXTRACT({unit} FROM NOW())"));
+        assert_eq!(error.vendor_code(), Some(1064), "{unit}: {error}");
+    }
+    assert_eq!(
+        fails(&mut mysql, "SELECT TRUNC(1.5)").vendor_code(),
+        Some(1305)
+    );
+    let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);
+    assert_eq!(
+        last(
+            &mut oracle,
+            "SELECT EXTRACT(YEAR FROM DATE '2024-02-29') y, EXTRACT(SECOND FROM TIMESTAMP '2024-02-29 13:45:01.5') s FROM dual"
+        ),
+        "Y|S\n2024|1.5\nSELECT 1"
+    );
+    for (sql, code) in [
+        (
+            "SELECT EXTRACT(HOUR FROM DATE '2024-02-29') FROM dual",
+            30076,
+        ),
+        ("SELECT EXTRACT(HOUR FROM SYSDATE) FROM dual", 30076),
+        (
+            "SELECT EXTRACT(TIMEZONE_HOUR FROM TIMESTAMP '2024-02-29 10:00:00') FROM dual",
+            30076,
+        ),
+        ("SELECT EXTRACT(EPOCH FROM SYSDATE) FROM dual", 907),
+        ("SELECT EXTRACT(DOW FROM SYSDATE) FROM dual", 907),
+    ] {
+        assert_eq!(fails(&mut oracle, sql).vendor_code(), Some(code), "{sql}");
+    }
+    let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    for sql in [
+        "SELECT localtimestamp",
+        "SELECT localtime",
+        "SELECT trunc(1.5)",
+        "SELECT floor(1.5)",
+    ] {
+        let error = fails(&mut sqlite, sql);
+        assert!(error.message().starts_with("no such"), "{sql}: {error}");
+    }
+    let mut postgresql = Session::new(&store);
+    assert_eq!(
+        last(
+            &mut postgresql,
+            "SELECT date_trunc('century', TIMESTAMP '0050-01-01 BC'), date_trunc('millennium', DATE '0100-01-01 BC')"
+        ),
+        "date_trunc|date_trunc\n0100-01-01 00:00:00 BC|1000-01-01 00:00:00+00 BC\nSELECT 1"
+    );
 }

@@ -78,6 +78,11 @@ pub(crate) fn sqlite_type_name(sql_type: SqlType) -> &'static str {
         SqlType::Real | SqlType::Double => "REAL",
         SqlType::Boolean => "BOOLEAN",
         SqlType::Text | SqlType::Varchar(_) => "TEXT",
+        SqlType::Numeric(_) => "NUMERIC",
+        SqlType::Date => "DATE",
+        SqlType::Timestamp(_) => "DATETIME",
+        SqlType::TimestampTz(_) => "TIMESTAMP",
+        SqlType::Json | SqlType::Jsonb => "JSON",
     }
 }
 

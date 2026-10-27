@@ -44,6 +44,21 @@ pub(crate) fn mysql_type_name(sql_type: SqlType) -> String {
         SqlType::Boolean => "tinyint(1)".into(),
         SqlType::Text | SqlType::Varchar(None) => "text".into(),
         SqlType::Varchar(Some(length)) => format!("varchar({length})"),
+        SqlType::Numeric(None) => "decimal(65,30)".into(),
+        SqlType::Numeric(Some(modifier)) => {
+            format!("decimal({},{})", modifier.precision, modifier.scale)
+        }
+        SqlType::Date => "date".into(),
+        SqlType::Timestamp(precision) => with_fraction("datetime", precision),
+        SqlType::TimestampTz(precision) => with_fraction("timestamp", precision),
+        SqlType::Json | SqlType::Jsonb => "json".into(),
+    }
+}
+
+fn with_fraction(name: &str, precision: Option<u8>) -> String {
+    match precision {
+        Some(0) | None => name.to_owned(),
+        Some(digits) => format!("{name}({digits})"),
     }
 }
 

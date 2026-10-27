@@ -981,3 +981,19 @@ CREATE INDEX g ON gated (a COLLATE BINARY DESC)
 
 ok
 DROP TABLE gated
+
+chapter "Datatypes In SQLite": "Date and Time Datatype", "Type Affinity"
+ok
+CREATE TABLE stamps (d DATE, at DATETIME, price DECIMAL(10,2))
+
+rows
+INSERT INTO stamps VALUES ('2024-02-29', '2024-02-29 13:45:01', 2.25)
+----
+INSERT 0 1
+
+rows
+SELECT d, typeof(d), at, typeof(at), price, typeof(price) FROM stamps
+----
+d|typeof(d)|at|typeof(at)|price|typeof(price)
+2024-02-29|text|2024-02-29 13:45:01|text|2.25|real
+SELECT 1

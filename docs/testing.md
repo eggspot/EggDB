@@ -200,15 +200,27 @@ through the `eggdb` command; the smoke test reads the samples with each release 
   ignored test `write_the_v0_2_0_log_sample` wrote it, and refuses to run while the file exists.
 
 ## SQL against the manual (D105)
-`crates/eggdb-sql/correctness/postgresql.test` holds 186 cases, each a header (`ok`, `rows` with
+`crates/eggdb-sql/correctness/postgresql.test` holds 251 cases, each a header (`ok`, `rows` with
 the expected output after `----`, or `error <SQLSTATE>`), its SQL, and the PostgreSQL manual's
 chapter it comes from on a `chapter` line. They run in order in one session over the in-memory
 store, so later cases see the tables earlier ones made. The runner (`src/correctness.rs`) takes
-the dialect's name; each later dialect adds its own file. `mysql.test` (118 cases from the MySQL
+the dialect's name; each later dialect adds its own file. `mysql.test` (151 cases from the MySQL
 8.0 Reference Manual, D106) may name MySQL's error number after the SQLSTATE (`error 42S02
 1146`), and the runner then checks both. A case marked `... differs` is a known
 difference, listed in sql.md: the runner checks that it still differs, so fixing the engine
 fails the suite until the mark and the doc line go. At most one case in ten may be marked.
+
+## Typed values: numbers, dates and JSON (D111)
+The exact decimal is checked against a schoolbook decimal reference written in its tests (400
+random pairs of up to 80 digits through `+ - * / %`) and against `i128` (3,000 pairs, with their
+index keys' order). Seeded fuzzers feed 20,000 hostile inputs each to the date and time parser,
+the JSON parser and the path parser, the numeric row and key decoders, the PostgreSQL protocol's
+binary numeric reader, and table definitions, rows and index keys of the new types with bytes
+flipped or cut; every one is an error or a value, never a panic. `hostile_typed_statements_never_panic_in_any_dialect`
+runs 20,000 statements built from fragments of the new syntax in each of the four dialects,
+and `numeric_and_time_keys_return_the_same_rows_with_and_without_indexes` compares every query
+over `numeric`, `date`, `timestamp` and `timestamptz` keys with and without indexes, through
+updates, deletes and inserts.
 
 ## The shell and the query screen (D105)
 The shell's line editor runs against a scripted terminal (`crates/eggdb-ui/src/line.rs`):

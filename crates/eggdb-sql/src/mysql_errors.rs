@@ -184,6 +184,11 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             format!("Out of range value: {message}"),
         ),
         "22012" => translated(1365, SqlState::DIVISION_BY_ZERO, "Division by 0".to_owned()),
+        "22007" | "22008" => translated(
+            1292,
+            SqlState::INVALID_DATETIME_FORMAT,
+            format!("Incorrect datetime value: {message}"),
+        ),
         "22P02" => {
             let type_name = message
                 .strip_prefix("invalid input syntax for type ")

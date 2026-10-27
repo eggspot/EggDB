@@ -135,3 +135,4 @@ its full title with its status.
 - [D108](decisions/D108.md) The Oracle dialect: names that swap case on the shared catalog, the empty string as NULL, `ROWNUM` as a source-row limit, implicit transactions and `ORA-` errors; no Oracle wire protocol
 - [D109](decisions/D109.md) Secondary indexes: entries beside the rows on the key-value engine, table definitions in format version 3, a planner of fixed rules, `EXPLAIN` in each dialect's style
 - [D110](decisions/D110.md) v0.2.0 scope: bring PostgreSQL, SQL Server and Oracle databases into EggDB by restoring their own dumps and scripts; no other engine run, wrapped or proxied
+- [D111](decisions/D111.md) Exact numeric (own decimal, 1,000 digits each side), PostgreSQL's dates and time stamps, `json` checked and `jsonb` normalized as text, serial and identity on the auto-increment column, table definitions in format version 4

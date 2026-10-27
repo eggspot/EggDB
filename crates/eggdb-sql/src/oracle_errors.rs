@@ -115,7 +115,20 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
         "22001" => Some((12899, too_large(&error))),
         "22012" => Some((1476, "divisor is equal to zero".to_owned())),
         "22P02" => Some((1722, "invalid number".to_owned())),
+        "22003" if message == "numeric field overflow" => Some((
+            1438,
+            "value larger than specified precision allowed for this column".to_owned(),
+        )),
         "22003" => Some((1426, "numeric overflow".to_owned())),
+        "22007" => Some((1861, "literal does not match format string".to_owned())),
+        "22008" if message.starts_with("date/time field value out of range") => Some((
+            1847,
+            "day of month must be between 1 and last day of month".to_owned(),
+        )),
+        "22008" => Some((
+            1841,
+            "(full) year must be between -4713 and +9999, and not be 0".to_owned(),
+        )),
         "42804" | "42846" => Some((932, "inconsistent datatypes".to_owned())),
         "42803" => Some((979, "not a GROUP BY expression".to_owned())),
         "0A000" => Some((3001, format!("unimplemented feature: {message}"))),

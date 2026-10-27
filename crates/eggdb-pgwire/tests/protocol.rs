@@ -340,6 +340,89 @@ fn the_extended_protocol_binds_text_and_binary_parameters() {
 }
 
 #[test]
+fn numeric_date_time_and_json_values_round_trip_in_text_and_binary() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query(
+        "CREATE TABLE typed (id serial PRIMARY KEY, price numeric(8,2), day date, at timestamptz, doc jsonb)",
+    );
+    client.send(
+        b'P',
+        &parse(
+            "",
+            "INSERT INTO typed (price, day, at, doc) VALUES ($1, $2, $3, $4)",
+            &[1700, 1082, 1184, 3802],
+        ),
+    );
+    let price: Vec<u8> = [2i16, 0, 0, 2, 19, 9900]
+        .iter()
+        .flat_map(|word| word.to_be_bytes())
+        .collect();
+    let day = 8_825i32.to_be_bytes();
+    let at = 762_529_501_123_456i64.to_be_bytes();
+    let doc = b"\x01{\"b\": 1, \"a\": 2}";
+    client.send(
+        b'B',
+        &bind(
+            "",
+            "",
+            &[1],
+            &[Some(&price), Some(&day), Some(&at), Some(doc)],
+            &[],
+        ),
+    );
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12CZ", "{answer:?}");
+    client.query("SET TimeZone = 'UTC-01'");
+    client.send(
+        b'P',
+        &parse("read", "SELECT price, day, at, doc, id FROM typed", &[]),
+    );
+    client.send(b'B', &bind("text", "read", &[], &[], &[0]));
+    client.send(b'D', b"Ptext\0");
+    client.send(b'E', &execute("text", 0));
+    client.send(b'B', &bind("binary", "read", &[], &[], &[1]));
+    client.send(b'E', &execute("binary", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12TDC2DCZ", "{answer:?}");
+    assert_eq!(
+        answer[2].column_types(),
+        [
+            ("price".to_owned(), 1700, 0),
+            ("day".to_owned(), 1082, 0),
+            ("at".to_owned(), 1184, 0),
+            ("doc".to_owned(), 3802, 0),
+            ("id".to_owned(), 23, 0),
+        ]
+    );
+    assert_eq!(
+        answer[3].row(),
+        [
+            Some("19.99".to_owned()),
+            Some("2024-02-29".to_owned()),
+            Some("2024-02-29 14:45:01.123456+01".to_owned()),
+            Some("{\"a\": 2, \"b\": 1}".to_owned()),
+            Some("1".to_owned()),
+        ]
+    );
+    let mut doc = vec![1u8];
+    doc.extend_from_slice(b"{\"a\": 2, \"b\": 1}");
+    assert_eq!(
+        answer[6].raw_row(),
+        [
+            Some(price),
+            Some(day.to_vec()),
+            Some(at.to_vec()),
+            Some(doc),
+            Some(1i32.to_be_bytes().to_vec()),
+        ]
+    );
+}
+
+#[test]
 fn portals_return_rows_in_batches_and_errors_skip_to_sync() {
     let server = TestServer::start(8);
     let (mut client, _) = Client::login(server.address);

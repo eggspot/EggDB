@@ -38,6 +38,12 @@ impl SqlState {
     pub const CHARACTER_NOT_IN_REPERTOIRE: Self = Self(*b"22021");
     /// `22003` numeric_value_out_of_range.
     pub const NUMERIC_VALUE_OUT_OF_RANGE: Self = Self(*b"22003");
+    /// `22007` invalid_datetime_format.
+    pub const INVALID_DATETIME_FORMAT: Self = Self(*b"22007");
+    /// `22008` datetime_field_overflow: a date or time stamp outside its type's range.
+    pub const DATETIME_FIELD_OVERFLOW: Self = Self(*b"22008");
+    /// `22023` invalid_parameter_value.
+    pub const INVALID_PARAMETER_VALUE: Self = Self(*b"22023");
     /// `22012` division_by_zero.
     pub const DIVISION_BY_ZERO: Self = Self(*b"22012");
     /// `22019` invalid_escape_character.

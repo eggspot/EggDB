@@ -1,8 +1,9 @@
-use crate::ast::{AggregateFunction, BinaryOperator, Expr, ExprKind, Literal, Select, SelectItem};
+use crate::ast::{AggregateFunction, Expr, ExprKind, Literal, Select, SelectItem};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, check_columns, first_aggregate, output_name};
 use crate::hash_index::SeededIntegerHash;
 use crate::memory::WorkMemory;
+use crate::numeric::Numeric;
 use crate::types::{SqlType, Value, compare_values, equality_key, float_overflow};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -19,7 +20,6 @@ struct Call {
     function: AggregateFunction,
     argument: Option<Expr>,
     distinct: bool,
-    exact_bigint_allowed: bool,
     position: usize,
     shape: Expr,
 }
@@ -216,25 +216,25 @@ fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
 fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option<SqlType> {
     match function {
         AggregateFunction::Count => Some(SqlType::BigInt),
-        AggregateFunction::Avg => Some(SqlType::Double),
+        AggregateFunction::Avg => match argument? {
+            SqlType::Real | SqlType::Double => Some(SqlType::Double),
+            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Numeric(_) => {
+                Some(SqlType::Numeric(None))
+            }
+            _ => None,
+        },
         AggregateFunction::Sum => match argument? {
-            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt => Some(SqlType::BigInt),
+            SqlType::SmallInt | SqlType::Integer => Some(SqlType::BigInt),
+            SqlType::BigInt | SqlType::Numeric(_) => Some(SqlType::Numeric(None)),
             SqlType::Real => Some(SqlType::Real),
             SqlType::Double => Some(SqlType::Double),
             _ => None,
         },
         AggregateFunction::Min | AggregateFunction::Max => match argument? {
             SqlType::Varchar(_) => Some(SqlType::Text),
-            other => Some(other),
+            other => Some(other.without_modifier()),
         },
     }
-}
-
-fn is_integer(sql_type: SqlType) -> bool {
-    matches!(
-        sql_type,
-        SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
-    )
 }
 
 fn undefined_aggregate(function: AggregateFunction, type_name: &str) -> SqlError {
@@ -247,33 +247,12 @@ fn undefined_aggregate(function: AggregateFunction, type_name: &str) -> SqlError
     )
 }
 
-fn numeric_result(function: AggregateFunction, type_name: &str) -> SqlError {
-    let hint = match function {
-        AggregateFunction::Avg => format!(
-            "Write avg(expr::double precision) for a double precision average of {type_name} values."
-        ),
-        _ => "Use sum(expr) on its own as a select item or an ORDER BY item, or as one side of a comparison, or write sum(expr::double precision).".to_owned(),
-    };
-    SqlError::new(
-        SqlState::FEATURE_NOT_SUPPORTED,
-        format!(
-            "{}({type_name}) here returns type numeric, which is not supported yet",
-            function.name()
-        ),
-    )
-    .with_hint(hint)
-}
-
-fn check_argument_type(
-    function: AggregateFunction,
-    sql_type: SqlType,
-    exact_bigint_allowed: bool,
-) -> SqlResult<()> {
+fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlResult<()> {
     let name = || sql_type.name();
     match function {
         AggregateFunction::Count => Ok(()),
         AggregateFunction::Min | AggregateFunction::Max => {
-            if sql_type == SqlType::Boolean {
+            if sql_type == SqlType::Boolean || sql_type == SqlType::Json {
                 Err(undefined_aggregate(function, &name()))
             } else {
                 Ok(())
@@ -282,30 +261,8 @@ fn check_argument_type(
         AggregateFunction::Sum | AggregateFunction::Avg if !sql_type.is_numeric() => {
             Err(undefined_aggregate(function, &name()))
         }
-        AggregateFunction::Avg if is_integer(sql_type) => Err(numeric_result(function, &name())),
-        AggregateFunction::Sum if sql_type == SqlType::BigInt && !exact_bigint_allowed => {
-            Err(numeric_result(function, &name()))
-        }
         _ => Ok(()),
     }
-}
-
-fn keeps_exact_bigint(kind: &ExprKind) -> bool {
-    matches!(
-        kind,
-        ExprKind::Binary(
-            BinaryOperator::Equal
-                | BinaryOperator::NotEqual
-                | BinaryOperator::Less
-                | BinaryOperator::LessOrEqual
-                | BinaryOperator::Greater
-                | BinaryOperator::GreaterOrEqual,
-            ..
-        ) | ExprKind::IsNull { .. }
-            | ExprKind::IsDistinctFrom { .. }
-            | ExprKind::Between { .. }
-            | ExprKind::InList { .. }
-    )
 }
 
 pub(crate) fn is_aggregate_query(select: &Select) -> bool {
@@ -404,7 +361,7 @@ impl Analyzer<'_> {
         self.key_shapes.len() + index
     }
 
-    fn rewrite(&mut self, expr: &Expr, exact_bigint_allowed: bool) -> SqlResult<Expr> {
+    fn rewrite(&mut self, expr: &Expr) -> SqlResult<Expr> {
         let shape = shape_of(expr);
         let bound_shape = bind(expr, self.scope).ok().map(|bound| shape_of(&bound));
         if let Some(index) = self
@@ -435,15 +392,12 @@ impl Analyzer<'_> {
                     }
                     check_columns(argument, self.scope)?;
                     if let Some(sql_type) = static_type(argument, self.scope) {
-                        check_argument_type(*function, sql_type, true)
+                        check_argument_type(*function, sql_type)
                             .map_err(|error| error.at(expr.position))?;
                     }
                 }
                 let call = match self.calls.iter().position(|call| call.shape == shape) {
-                    Some(index) => {
-                        self.calls[index].exact_bigint_allowed &= exact_bigint_allowed;
-                        index
-                    }
+                    Some(index) => index,
                     None => {
                         self.calls.push(Call {
                             function: *function,
@@ -452,7 +406,6 @@ impl Analyzer<'_> {
                                 .map(|argument| bind(argument, self.scope))
                                 .transpose()?,
                             distinct: *distinct,
-                            exact_bigint_allowed,
                             position: expr.position,
                             shape,
                         });
@@ -505,10 +458,7 @@ impl Analyzer<'_> {
                     expr.position,
                 ))
             }
-            kind => {
-                let exact = keeps_exact_bigint(kind);
-                rebuild(expr, &mut |child| self.rewrite(child, exact))
-            }
+            _ => rebuild(expr, &mut |child| self.rewrite(child)),
         }
     }
 }
@@ -615,12 +565,12 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
     let mut items = Vec::with_capacity(outputs.len());
     for output in &outputs {
         items.push(SelectItem::Expr {
-            expr: analyzer.rewrite(&output.expr, true)?,
+            expr: analyzer.rewrite(&output.expr)?,
             alias: Some(output.name.clone()),
         });
     }
     let having = match &select.having {
-        Some(having) => Some(analyzer.rewrite(having, false)?),
+        Some(having) => Some(analyzer.rewrite(having)?),
         None => None,
     };
     let mut order = Vec::with_capacity(select.order_by.len());
@@ -631,14 +581,14 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
         order.push(if refers_to_output {
             None
         } else {
-            Some(analyzer.rewrite(&item.expr, true)?)
+            Some(analyzer.rewrite(&item.expr)?)
         });
     }
     for call in &analyzer.calls {
         if let Some(argument) = &call.argument
             && let Some(sql_type) = static_type(argument, scope)
         {
-            check_argument_type(call.function, sql_type, call.exact_bigint_allowed)
+            check_argument_type(call.function, sql_type)
                 .map_err(|error| error.at(call.position))?;
         }
     }
@@ -661,12 +611,13 @@ enum Sum {
     Integer { total: i128, wide: bool },
     Real(f32),
     Double(f64),
+    Numeric(Numeric),
 }
 
 enum Accumulator {
     Count(i64),
     Sum(Sum),
-    Average { total: f64, count: i64 },
+    Average { sum: Sum, count: i64 },
     Extreme(Value),
 }
 
@@ -691,7 +642,7 @@ impl Call {
             AggregateFunction::Count => Accumulator::Count(0),
             AggregateFunction::Sum => Accumulator::Sum(Sum::Empty),
             AggregateFunction::Avg => Accumulator::Average {
-                total: 0.0,
+                sum: Sum::Empty,
                 count: 0,
             },
             AggregateFunction::Min | AggregateFunction::Max => Accumulator::Extreme(Value::Null),
@@ -703,10 +654,14 @@ impl Call {
             (self.function, &value),
             (AggregateFunction::Count, _)
                 | (
-                    AggregateFunction::Sum,
-                    Value::SmallInt(_) | Value::Integer(_) | Value::Real(_) | Value::Double(_)
+                    AggregateFunction::Sum | AggregateFunction::Avg,
+                    Value::SmallInt(_)
+                        | Value::Integer(_)
+                        | Value::BigInt(_)
+                        | Value::Real(_)
+                        | Value::Double(_)
+                        | Value::Numeric(_)
                 )
-                | (AggregateFunction::Avg, Value::Real(_) | Value::Double(_))
                 | (
                     AggregateFunction::Min | AggregateFunction::Max,
                     Value::SmallInt(_)
@@ -718,13 +673,13 @@ impl Call {
                 )
         );
         if !always_valid && let Some(sql_type) = value.sql_type() {
-            check_argument_type(self.function, sql_type, self.exact_bigint_allowed)?;
+            check_argument_type(self.function, sql_type)?;
         }
         match accumulator {
             Accumulator::Count(count) => *count += 1,
             Accumulator::Sum(sum) => add_to_sum(sum, &value)?,
-            Accumulator::Average { total, count } => {
-                *total = add_float(*total, value.as_float().unwrap_or(f64::NAN))?;
+            Accumulator::Average { sum, count } => {
+                add_to_sum(sum, &value)?;
                 *count += 1;
             }
             Accumulator::Extreme(best) => {
@@ -756,6 +711,26 @@ fn integer_group_key(value: &Value) -> Option<i64> {
 }
 
 fn add_to_sum(sum: &mut Sum, value: &Value) -> SqlResult<()> {
+    if let Value::Numeric(number) = value {
+        *sum = match &*sum {
+            Sum::Empty => Sum::Numeric(number.clone()),
+            Sum::Numeric(total) => Sum::Numeric(total.add(number)?),
+            Sum::Integer { total, .. } => Sum::Numeric(Numeric::from_i128(*total).add(number)?),
+            Sum::Real(total) => Sum::Double(add_float(f64::from(*total), number.to_f64())?),
+            Sum::Double(total) => Sum::Double(add_float(*total, number.to_f64())?),
+        };
+        return Ok(());
+    }
+    if let Sum::Numeric(total) = &*sum {
+        *sum = match value.as_integer() {
+            Some(whole) => Sum::Numeric(total.add(&Numeric::from_i64(whole))?),
+            None => Sum::Double(add_float(
+                total.to_f64(),
+                value.as_float().unwrap_or(f64::NAN),
+            )?),
+        };
+        return Ok(());
+    }
     let wide_input = matches!(value, Value::BigInt(_));
     let float = || value.as_float().unwrap_or(f64::NAN);
     *sum = match (&*sum, value.as_integer()) {
@@ -781,6 +756,7 @@ fn add_to_sum(sum: &mut Sum, value: &Value) -> SqlResult<()> {
         (Sum::Real(total), _) => Sum::Double(add_float(f64::from(*total), float())?),
         (Sum::Integer { total, .. }, None) => Sum::Double(add_float(*total as f64, float())?),
         (Sum::Double(total), _) => Sum::Double(add_float(*total, float())?),
+        (Sum::Numeric(total), _) => Sum::Numeric(total.clone()),
     };
     Ok(())
 }
@@ -790,28 +766,34 @@ impl Call {
         Ok(match accumulator {
             Accumulator::Count(count) => Value::BigInt(count),
             Accumulator::Sum(Sum::Empty) => Value::Null,
-            Accumulator::Sum(Sum::Integer { total, wide }) => {
-                if wide && !self.exact_bigint_allowed {
-                    return Err(numeric_result(self.function, "bigint"));
-                }
-                match i64::try_from(total) {
-                    Ok(total) => Value::BigInt(total),
-                    Err(_) if wide => {
-                        return Err(numeric_result(self.function, "bigint")
-                            .with_detail("The sum does not fit in a bigint."));
-                    }
-                    Err(_) => {
-                        return Err(SqlError::new(
-                            SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
-                            "bigint out of range",
-                        ));
-                    }
-                }
+            Accumulator::Sum(Sum::Integer { total, wide: true }) => {
+                Value::Numeric(Numeric::from_i128(total))
             }
+            Accumulator::Sum(Sum::Integer { total, wide: false }) => match i64::try_from(total) {
+                Ok(total) => Value::BigInt(total),
+                Err(_) => {
+                    return Err(SqlError::new(
+                        SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+                        "bigint out of range",
+                    ));
+                }
+            },
             Accumulator::Sum(Sum::Real(total)) => Value::Real(total),
             Accumulator::Sum(Sum::Double(total)) => Value::Double(total),
+            Accumulator::Sum(Sum::Numeric(total)) => Value::Numeric(total),
             Accumulator::Average { count: 0, .. } => Value::Null,
-            Accumulator::Average { total, count } => Value::Double(total / count as f64),
+            Accumulator::Average { sum, count } => {
+                let count_value = Numeric::from_i64(count);
+                match sum {
+                    Sum::Empty => Value::Null,
+                    Sum::Integer { total, .. } => {
+                        Value::Numeric(Numeric::from_i128(total).divide(&count_value)?)
+                    }
+                    Sum::Numeric(total) => Value::Numeric(total.divide(&count_value)?),
+                    Sum::Real(total) => Value::Double(f64::from(total) / count as f64),
+                    Sum::Double(total) => Value::Double(total / count as f64),
+                }
+            }
             Accumulator::Extreme(best) => best,
         })
     }

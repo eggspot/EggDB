@@ -450,6 +450,10 @@ impl<'t> Parser<'t> {
             _ => return Err(self.unexpected()),
         };
         self.at += 1;
+        if ["decimal", "dec", "numeric", "fixed"].contains(&word) {
+            let sql_type = self.mysql_decimal(token.start)?;
+            return self.integer_attributes(sql_type);
+        }
         let width = self.optional_width()?;
         let sql_type = match word {
             "tinyint" if width == Some(1) => SqlType::Boolean,
@@ -464,7 +468,11 @@ impl<'t> Parser<'t> {
                 self.optional_width()?;
                 SqlType::Double
             }
-            "real" | "decimal" | "dec" | "numeric" | "fixed" => SqlType::Double,
+            "real" => SqlType::Double,
+            "date" => SqlType::Date,
+            "datetime" => SqlType::Timestamp(Some(self.fractional_digits(width, token.start)?)),
+            "timestamp" => SqlType::TimestampTz(Some(self.fractional_digits(width, token.start)?)),
+            "json" => SqlType::Jsonb,
             "varchar" => SqlType::Varchar(Some(self.required_length(width, token.start)?)),
             "char" | "character" => {
                 if self.take_word("varying") {
@@ -477,9 +485,8 @@ impl<'t> Parser<'t> {
                 }
             }
             "text" | "tinytext" | "mediumtext" | "longtext" => SqlType::Text,
-            "date" | "datetime" | "timestamp" | "time" | "year" | "blob" | "tinyblob"
-            | "mediumblob" | "longblob" | "binary" | "varbinary" | "bit" | "json" | "enum"
-            | "set" | "geometry" | "point" => {
+            "time" | "year" | "blob" | "tinyblob" | "mediumblob" | "longblob" | "binary"
+            | "varbinary" | "bit" | "enum" | "set" | "geometry" | "point" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()
@@ -505,6 +512,60 @@ impl<'t> Parser<'t> {
             self.at += 1;
         }
         Ok(sql_type)
+    }
+
+    fn mysql_decimal(&mut self, position: usize) -> SqlResult<SqlType> {
+        let mut precision = 10;
+        let mut scale = 0;
+        if self.take(&TokenKind::LeftParen) {
+            let TokenKind::Integer(digits) = self.peek_kind() else {
+                return Err(self.unexpected());
+            };
+            precision = digits.parse().unwrap_or(i64::MAX);
+            self.at += 1;
+            if self.take(&TokenKind::Comma) {
+                let TokenKind::Integer(digits) = self.peek_kind() else {
+                    return Err(self.unexpected());
+                };
+                scale = digits.parse().unwrap_or(i64::MAX);
+                self.at += 1;
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        if precision > 65 {
+            return Err(SqlError::new(
+                SqlState::MYSQL_SYNTAX_OR_ACCESS,
+                format!("Too-big precision {precision} specified. Maximum is 65."),
+            )
+            .with_vendor_code(1426)
+            .at(position));
+        }
+        if scale > 30 || scale > precision {
+            return Err(SqlError::new(
+                SqlState::MYSQL_SYNTAX_OR_ACCESS,
+                format!("Too big scale {scale} specified. Maximum is 30."),
+            )
+            .with_vendor_code(1425)
+            .at(position));
+        }
+        let precision = precision.max(1);
+        Ok(SqlType::Numeric(Some(crate::types::NumericModifier {
+            precision: precision as u16,
+            scale: scale as i16,
+        })))
+    }
+
+    fn fractional_digits(&self, width: Option<i64>, position: usize) -> SqlResult<u8> {
+        match width {
+            None => Ok(0),
+            Some(digits @ 0..=6) => Ok(digits as u8),
+            Some(digits) => Err(SqlError::new(
+                SqlState::MYSQL_SYNTAX_OR_ACCESS,
+                format!("Too-big precision {digits} specified. Maximum is 6."),
+            )
+            .with_vendor_code(1426)
+            .at(position)),
+        }
     }
 
     fn integer_attributes(&mut self, mut sql_type: SqlType) -> SqlResult<SqlType> {
@@ -830,9 +891,27 @@ impl<'t> Parser<'t> {
                     position,
                 }
             }
-            "current_timestamp" | "current_date" | "current_time" | "localtime"
-            | "localtimestamp" => {
-                return Err(self.not_supported("date and time values"));
+            "current_timestamp" | "current_date" | "localtime" | "localtimestamp" => {
+                self.at += 1;
+                if called {
+                    self.expect(&TokenKind::LeftParen)?;
+                    if !self.take(&TokenKind::RightParen) {
+                        let TokenKind::Integer(_) = self.peek_kind() else {
+                            return Err(self.unexpected());
+                        };
+                        self.at += 1;
+                        self.expect(&TokenKind::RightParen)?;
+                    }
+                }
+                let name = if word == "current_date" {
+                    "current_date"
+                } else {
+                    "mysql_now"
+                };
+                clock_call(name, position)
+            }
+            "current_time" => {
+                return Err(self.not_supported("type TIME"));
             }
             _ => return Ok(None),
         };
@@ -877,9 +956,24 @@ impl<'t> Parser<'t> {
                 };
                 return Ok(Some(expr));
             }
-            "now" | "sysdate" | "curdate" | "curtime" | "utc_timestamp" | "utc_date"
-            | "unix_timestamp" | "current_timestamp" => {
-                return Err(self.not_supported("date and time values"));
+            "now" | "sysdate" | "curdate" | "utc_timestamp" | "current_timestamp" => {
+                self.expect(&TokenKind::LeftParen)?;
+                if !self.take(&TokenKind::RightParen) {
+                    let TokenKind::Integer(_) = self.peek_kind() else {
+                        return Err(self.unexpected());
+                    };
+                    self.at += 1;
+                    self.expect(&TokenKind::RightParen)?;
+                }
+                let clock = match name.text.as_str() {
+                    "curdate" => "current_date",
+                    "utc_timestamp" => "mysql_utc_now",
+                    _ => "mysql_now",
+                };
+                return Ok(Some(clock_call(clock, position)));
+            }
+            "curtime" | "utc_date" | "unix_timestamp" => {
+                return Err(self.not_supported("this date and time function"));
             }
             "ifnull" => "coalesce",
             "length" | "octet_length" => "octet_length",
@@ -994,8 +1088,28 @@ fn value_expr(value: Value, position: usize) -> Expr {
     }
 }
 
+fn clock_call(name: &str, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Function {
+            name: name.to_owned(),
+            arguments: Vec::new(),
+        },
+        position,
+    }
+}
+
 fn postgresql_source(expr: &Expr) -> Option<String> {
     match &expr.kind {
+        ExprKind::Function { name, arguments } if arguments.is_empty() => match name.as_str() {
+            "mysql_now" => Some("localtimestamp".to_owned()),
+            "current_date" => Some("current_date".to_owned()),
+            _ => None,
+        },
+        ExprKind::Cast { expr, .. }
+            if matches!(expr.kind, ExprKind::Literal(Literal::Decimal(_))) =>
+        {
+            postgresql_source(expr)
+        }
         ExprKind::Literal(Literal::Null) => Some("NULL".to_owned()),
         ExprKind::Literal(Literal::Boolean(flag)) => Some(flag.to_string()),
         ExprKind::Literal(Literal::Integer(number)) => Some(number.to_string()),

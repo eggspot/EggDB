@@ -1,6 +1,9 @@
 use crate::ast::{BinaryOperator, Expr, ExprKind, Literal, TruthTest, UnaryOperator};
+use crate::datetime::{self, DateTimeKind, LocalTime};
 use crate::encoding::TableDefinition;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::json;
+use crate::numeric::Numeric;
 use crate::types::{
     Conversion, SqlType, Value, comparable, compare_values, convert, float_overflow, integer_value,
     out_of_range, parse_input,
@@ -499,6 +502,17 @@ impl Evaluator<'_> {
                     _ => Err(no_operator(operator, &value, &pattern)),
                 }
             }
+            ExprKind::Cast {
+                expr: inner,
+                sql_type: SqlType::Double,
+            } if matches!(hint, Some(SqlType::Numeric(_)))
+                && matches!(inner.kind, ExprKind::Literal(Literal::Decimal(_))) =>
+            {
+                let ExprKind::Literal(Literal::Decimal(text)) = &inner.kind else {
+                    return self.cast(inner, SqlType::Double);
+                };
+                decimal_constant(text, hint)
+            }
             ExprKind::Cast { expr, sql_type } => self.cast(expr, *sql_type),
             ExprKind::Case {
                 operand,
@@ -642,6 +656,7 @@ impl Evaluator<'_> {
                 .ok_or_else(|| out_of_range(SqlType::BigInt)),
             Value::Real(number) => Ok(Value::Real(-number)),
             Value::Double(number) => Ok(Value::Double(-number)),
+            Value::Numeric(number) => Ok(Value::Numeric(number.negated())),
             other => Err(no_prefix_operator(symbol, &other)),
         }
     }
@@ -686,7 +701,100 @@ impl Evaluator<'_> {
                 let (left, right) = self.pair(left, right)?;
                 arithmetic(operator, &left, &right)
             }
+            BinaryOperator::JsonContains | BinaryOperator::JsonContainedIn => {
+                let (left, right) = self.pair(left, right)?;
+                let (container, contained) = if operator == BinaryOperator::JsonContains {
+                    (&left, &right)
+                } else {
+                    (&right, &left)
+                };
+                match (container, contained) {
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    (Value::Jsonb(have), Value::Jsonb(want)) => {
+                        let have = json::parse(have, true)?;
+                        let want = json::parse(want, true)?;
+                        Ok(Value::Boolean(json::contains(&have.value, &want.value)))
+                    }
+                    _ => Err(no_operator(operator.symbol(), &left, &right)),
+                }
+            }
+            BinaryOperator::JsonField
+            | BinaryOperator::JsonFieldText
+            | BinaryOperator::JsonPath
+            | BinaryOperator::JsonPathText => {
+                let document = self.eval(left, None)?;
+                let selector = self.eval(right, Some(SqlType::Text))?;
+                json_select(operator, &document, &selector)
+            }
         }
+    }
+
+    fn datetime_function(&self, name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+        let now = datetime::statement_now();
+        Some(match (name, values) {
+            ("now" | "current_timestamp" | "transaction_timestamp" | "statement_timestamp", []) => {
+                Ok(Value::TimestampTz(now))
+            }
+            ("clock_timestamp", []) => Ok(Value::TimestampTz(now)),
+            ("mysql_now", []) => datetime::utc_to_local(now).map(|local| {
+                Value::Timestamp(local - local.rem_euclid(datetime::MICROS_PER_SECOND))
+            }),
+            ("mysql_utc_now", []) => Ok(Value::Timestamp(
+                now - now.rem_euclid(datetime::MICROS_PER_SECOND),
+            )),
+            ("localtimestamp", []) => datetime::utc_to_local(now).map(Value::Timestamp),
+            ("current_date", []) => datetime::utc_to_local(now)
+                .map(|local| Value::Date(datetime::timestamp_to_date(local))),
+            (
+                "extract" | "date_part" | "date_trunc" | "mysql_extract",
+                [_, Value::Null] | [Value::Null, _],
+            ) => Ok(Value::Null),
+            ("mysql_extract", [Value::Text(unit), value]) => {
+                let (_, local, _) = match local_instant(value) {
+                    Ok(Some(found)) => found,
+                    Ok(None) => return None,
+                    Err(error) => return Some(Err(error)),
+                };
+                datetime::mysql_extract(unit, local)
+                    .map(Value::BigInt)
+                    .ok_or_else(|| {
+                        SqlError::syntax(format!("syntax error at or near \"{unit}\""), 0)
+                    })
+            }
+            ("extract" | "date_part", [Value::Text(field), value]) => {
+                let (kind, local, offset) = match local_instant(value) {
+                    Ok(Some(found)) => found,
+                    Ok(None) => return None,
+                    Err(error) => return Some(Err(error)),
+                };
+                let extracted = datetime::extract(field, kind, local, offset);
+                if name == "extract" {
+                    extracted.map(Value::Numeric)
+                } else {
+                    extracted.map(|number| Value::Double(number.to_f64()))
+                }
+            }
+            ("date_trunc", [Value::Text(field), value]) => {
+                let (kind, local, _) = match local_instant(value) {
+                    Ok(Some(found)) => found,
+                    Ok(None) => return None,
+                    Err(error) => return Some(Err(error)),
+                };
+                let kind = if kind == DateTimeKind::Date {
+                    DateTimeKind::TimestampTz
+                } else {
+                    kind
+                };
+                datetime::truncate(field, kind, local).and_then(|truncated| {
+                    if kind == DateTimeKind::Timestamp {
+                        Ok(Value::Timestamp(truncated))
+                    } else {
+                        datetime::local_to_utc(truncated).map(Value::TimestampTz)
+                    }
+                })
+            }
+            _ => return None,
+        })
     }
 
     fn cast(&self, expr: &Expr, target: SqlType) -> SqlResult<Value> {
@@ -723,7 +831,41 @@ impl Evaluator<'_> {
         }
     }
 
+    fn oracle_extract(&self, arguments: &[Expr]) -> SqlResult<Value> {
+        let [field, source] = arguments else {
+            return Err(invalid_extract_field());
+        };
+        let ExprKind::Literal(Literal::String(field)) = &field.kind else {
+            return Err(invalid_extract_field());
+        };
+        let declared_date = matches!(
+            self.declared_type(source),
+            Some(SqlType::Timestamp(Some(0)))
+        ) || matches!(&source.kind, ExprKind::Function { name, .. } if name == "mysql_now");
+        let value = self.eval(source, None)?;
+        let Some((kind, local, offset)) = local_instant(&value)? else {
+            return if value.is_null() {
+                Ok(Value::Null)
+            } else {
+                Err(invalid_extract_field())
+            };
+        };
+        let time_of_day = matches!(field.as_str(), "hour" | "minute" | "second");
+        let zone = field.starts_with("timezone_");
+        if (time_of_day && (declared_date || kind == DateTimeKind::Date))
+            || (zone && kind != DateTimeKind::TimestampTz)
+        {
+            return Err(invalid_extract_field());
+        }
+        datetime::oracle_extract(field, local, offset)
+            .map(Value::Numeric)
+            .ok_or_else(invalid_extract_field)
+    }
+
     fn function(&self, name: &str, arguments: &[Expr]) -> SqlResult<Value> {
+        if name == "oracle_extract" {
+            return self.oracle_extract(arguments);
+        }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
         for argument in arguments {
@@ -741,6 +883,15 @@ impl Evaluator<'_> {
                 "No function matches the given name and argument types. You might need to add explicit type casts.",
             )
         };
+        if let Some(result) = self.datetime_function(name, &values) {
+            return result;
+        }
+        if let Some(result) = numeric_function(name, &values) {
+            return result;
+        }
+        if let Some(result) = json_function(name, &values) {
+            return result;
+        }
         match (name, values.as_slice()) {
             ("coalesce", [_, ..]) => Ok(values
                 .iter()
@@ -774,6 +925,7 @@ impl Evaluator<'_> {
                     .ok_or_else(|| out_of_range(SqlType::BigInt)),
                 Value::Real(number) => Ok(Value::Real(number.abs())),
                 Value::Double(number) => Ok(Value::Double(number.abs())),
+                Value::Numeric(number) => Ok(Value::Numeric(number.absolute())),
                 _ => Err(unknown()),
             },
             ("concat_or_null", _) => {
@@ -815,41 +967,232 @@ pub(crate) fn literal_value(literal: &Literal, hint: Option<SqlType>) -> SqlResu
 
 pub(crate) fn string_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Value> {
     match hint {
-        Some(sql_type) if !sql_type.is_string() => parse_input(text, sql_type),
+        Some(sql_type) if !sql_type.is_string() => parse_input(text, sql_type.without_modifier()),
         _ => Ok(Value::Text(text.to_owned())),
     }
 }
 
 pub(crate) fn decimal_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Value> {
     match hint {
-        Some(sql_type) if sql_type.is_float() => decimal_literal(text, SqlType::Double, false),
-        _ => Err(numeric_not_supported(text)),
+        Some(sql_type) if sql_type.is_float() => parse_input(text, SqlType::Double),
+        _ => Numeric::parse(text).map(Value::Numeric),
     }
-}
-
-fn numeric_not_supported(text: &str) -> SqlError {
-    SqlError::not_supported(format!(
-        "the numeric constant {text} needs type numeric, which is not supported yet"
-    ))
-    .with_hint(format!(
-        "Write {text}::double precision, or compare it with a real or double precision column."
-    ))
 }
 
 fn decimal_literal(text: &str, target: SqlType, explicit: bool) -> SqlResult<Value> {
     if target.is_float() {
         return parse_input(text, target);
     }
-    if explicit
-        && matches!(
-            target,
-            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
-        )
-    {
-        let parsed: f64 = text.parse().map_err(|_| numeric_not_supported(text))?;
-        return convert(Value::Double(parsed.round()), target, Conversion::Explicit);
+    let conversion = if explicit {
+        Conversion::Explicit
+    } else {
+        Conversion::Assignment
+    };
+    convert(Value::Numeric(Numeric::parse(text)?), target, conversion)
+}
+
+fn local_instant(value: &Value) -> SqlResult<Option<(DateTimeKind, LocalTime, i32)>> {
+    Ok(Some(match value {
+        Value::Date(days) => (DateTimeKind::Date, LocalTime::of_date(*days), 0),
+        Value::Timestamp(micros) => (DateTimeKind::Timestamp, LocalTime::of_micros(*micros), 0),
+        Value::TimestampTz(micros) => (
+            DateTimeKind::TimestampTz,
+            LocalTime::of_micros(datetime::utc_to_local(*micros)?),
+            datetime::session_offset(),
+        ),
+        _ => return Ok(None),
+    }))
+}
+
+fn invalid_extract_field() -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        "invalid extract field for extract source",
+    )
+    .with_oracle_code(30076)
+}
+
+fn numeric_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    let places = |value: &Value| value.as_integer();
+    Some(match (name, values) {
+        ("round" | "trunc" | "ceil" | "ceiling" | "floor", [Value::Null, ..])
+        | ("round" | "trunc", [_, Value::Null]) => Ok(Value::Null),
+        ("round", [Value::Numeric(number)]) => number.rounded(0).map(Value::Numeric),
+        ("trunc", [Value::Numeric(number)]) => number.truncated(0).map(Value::Numeric),
+        ("round", [Value::Numeric(number), count]) => {
+            number.rounded(places(count)?).map(Value::Numeric)
+        }
+        ("trunc", [Value::Numeric(number), count]) => {
+            number.truncated(places(count)?).map(Value::Numeric)
+        }
+        ("round" | "trunc", [whole, count])
+            if whole.as_integer().is_some() && places(count).is_some() =>
+        {
+            let number = Value::Numeric(Numeric::from_i64(whole.as_integer().unwrap_or(0)));
+            return numeric_function(name, &[number, count.clone()]);
+        }
+        ("ceil" | "ceiling", [Value::Numeric(number)]) => number.ceiling().map(Value::Numeric),
+        ("floor", [Value::Numeric(number)]) => number.floor().map(Value::Numeric),
+        ("round" | "trunc" | "ceil" | "ceiling" | "floor", [value]) => {
+            let number = value.as_float()?;
+            if matches!(value, Value::Boolean(_)) {
+                return None;
+            }
+            Ok(Value::Double(match name {
+                "round" => number.round_ties_even(),
+                "trunc" => number.trunc(),
+                "floor" => number.floor(),
+                _ => number.ceil(),
+            }))
+        }
+        _ => return None,
+    })
+}
+
+fn json_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    let (text, binary) = match values {
+        [Value::Json(text)] => (text, false),
+        [Value::Jsonb(text)] => (text, true),
+        [Value::Text(text)] => (text, name.starts_with("jsonb")),
+        [Value::Null]
+            if [
+                "json_typeof",
+                "jsonb_typeof",
+                "json_array_length",
+                "jsonb_array_length",
+            ]
+            .contains(&name) =>
+        {
+            return Some(Ok(Value::Null));
+        }
+        _ => return None,
+    };
+    let wanted_binary = name.starts_with("jsonb");
+    if wanted_binary != binary {
+        return None;
     }
-    Err(numeric_not_supported(text))
+    Some(match name {
+        "json_typeof" | "jsonb_typeof" => {
+            json::parse(text, binary).map(|node| Value::Text(json::type_of(&node.value).to_owned()))
+        }
+        "json_array_length" | "jsonb_array_length" => {
+            json::parse(text, binary).and_then(|node| match node.value {
+                json::Json::Array(items) => integer_value(items.len() as i64, SqlType::Integer),
+                _ => Err(SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    if binary {
+                        "cannot get array length of a non-array"
+                    } else {
+                        "cannot get array length of a scalar"
+                    },
+                )),
+            })
+        }
+        _ => return None,
+    })
+}
+
+fn json_select(operator: BinaryOperator, document: &Value, selector: &Value) -> SqlResult<Value> {
+    let (text, binary) = match document {
+        Value::Null => return Ok(Value::Null),
+        Value::Json(text) => (text, false),
+        Value::Jsonb(text) => (text, true),
+        _ => return Err(no_operator(operator.symbol(), document, selector)),
+    };
+    let steps: Vec<json::Step> = match (operator, selector) {
+        (_, Value::Null) => return Ok(Value::Null),
+        (BinaryOperator::JsonField | BinaryOperator::JsonFieldText, Value::Text(key)) => {
+            vec![json::Step::Key(key.clone())]
+        }
+        (BinaryOperator::JsonField | BinaryOperator::JsonFieldText, index)
+            if index.as_integer().is_some() =>
+        {
+            vec![json::Step::Index(index.as_integer().unwrap_or(0))]
+        }
+        (BinaryOperator::JsonPath | BinaryOperator::JsonPathText, Value::Text(path)) => {
+            json::parse_path(path)?
+                .into_iter()
+                .map(json::Step::Key)
+                .collect()
+        }
+        _ => return Err(no_operator(operator.symbol(), document, selector)),
+    };
+    let root = json::parse(text, binary)?;
+    let field_on_array = matches!(
+        operator,
+        BinaryOperator::JsonField | BinaryOperator::JsonFieldText
+    ) && matches!(root.value, json::Json::Array(_))
+        && matches!(steps.first(), Some(json::Step::Key(_)));
+    if field_on_array {
+        return Ok(Value::Null);
+    }
+    let mut node = &root;
+    for step in &steps {
+        match json::child(node, step, binary) {
+            Some(next) => node = next,
+            None => return Ok(Value::Null),
+        }
+    }
+    let as_text = matches!(
+        operator,
+        BinaryOperator::JsonFieldText | BinaryOperator::JsonPathText
+    );
+    if as_text {
+        return Ok(json::render_text(text, node, binary)?.map_or(Value::Null, Value::Text));
+    }
+    let rendered = json::render(text, node, binary)?;
+    Ok(if binary {
+        Value::Jsonb(rendered)
+    } else {
+        Value::Json(rendered)
+    })
+}
+
+fn datetime_arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResult<Value> {
+    let interval = || {
+        SqlError::not_supported(format!(
+            "{} {} {} returns type interval, which is not supported yet",
+            left.type_name(),
+            operator.symbol(),
+            right.type_name()
+        ))
+    };
+    let shifted = |days: i32, by: i64| -> SqlResult<Value> {
+        let moved = i64::from(days)
+            .checked_add(by)
+            .ok_or_else(datetime::date_out_of_range)?;
+        datetime::checked_date(moved).map(Value::Date)
+    };
+    match (operator, left, right) {
+        (BinaryOperator::Add, Value::Date(days), other)
+        | (BinaryOperator::Add, other, Value::Date(days))
+            if other.as_integer().is_some() =>
+        {
+            shifted(*days, other.as_integer().unwrap_or(0))
+        }
+        (BinaryOperator::Subtract, Value::Date(days), other) if other.as_integer().is_some() => {
+            shifted(
+                *days,
+                other
+                    .as_integer()
+                    .unwrap_or(0)
+                    .checked_neg()
+                    .unwrap_or(i64::MAX),
+            )
+        }
+        (BinaryOperator::Subtract, Value::Date(a), Value::Date(b)) => {
+            integer_value(i64::from(*a) - i64::from(*b), SqlType::Integer)
+        }
+        (
+            BinaryOperator::Subtract,
+            Value::Timestamp(_) | Value::TimestampTz(_),
+            Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_),
+        )
+        | (BinaryOperator::Subtract, Value::Date(_), Value::Timestamp(_) | Value::TimestampTz(_)) => {
+            Err(interval())
+        }
+        _ => Err(no_operator(operator.symbol(), left, right)),
+    }
 }
 
 pub(crate) fn truth_value(truth: Option<bool>) -> Value {
@@ -952,8 +1295,26 @@ fn arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResul
         }
         return Ok(Value::Null);
     };
+    if left_type.is_datetime() || right_type.is_datetime() {
+        return datetime_arithmetic(operator, left, right);
+    }
     if !left_type.is_numeric() || !right_type.is_numeric() {
         return Err(no_operator(symbol, left, right));
+    }
+    let exact = |value: &Value| matches!(value, Value::Numeric(_));
+    if (exact(left) || exact(right)) && !left_type.is_float() && !right_type.is_float() {
+        let nan = Numeric::nan;
+        let a = left.as_numeric().unwrap_or_else(nan);
+        let b = right.as_numeric().unwrap_or_else(nan);
+        return match operator {
+            BinaryOperator::Add => a.add(&b),
+            BinaryOperator::Subtract => a.subtract(&b),
+            BinaryOperator::Multiply => a.multiply(&b),
+            BinaryOperator::Divide => a.divide(&b),
+            BinaryOperator::Modulo => a.remainder(&b),
+            _ => a.power(&b),
+        }
+        .map(Value::Numeric);
     }
     if operator == BinaryOperator::Power {
         return power(

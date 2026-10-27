@@ -58,8 +58,10 @@ What the server does:
 - **The simple query protocol**, several statements in one message included, and the
   **extended protocol** (`Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Sync`, `Flush`) with
   named and unnamed statements and portals, `$1..$n` parameters in text or binary form
-  (`bool`, `int2`, `int4`, `int8`, `float4`, `float8`, `text`, `varchar`), results in text or
-  binary form, and row limits on `Execute`.
+  (`bool`, `int2`, `int4`, `int8`, `float4`, `float8`, `numeric` in its base-10000 form,
+  `date`, `timestamp`, `timestamptz`, `text`, `varchar`, `json`, `jsonb`), results in text or
+  binary form with each type's OID, and row limits on `Execute`. A `timestamptz` is sent in
+  the session's `TimeZone` when the rows are sent.
 - **PostgreSQL's answers**: type OIDs in `RowDescription`, command tags (`SELECT 2`,
   `INSERT 0 1`, `CREATE TABLE`, …), errors with SQLSTATE, severity, message, detail, hint and
   position, notices, and `ReadyForQuery`'s `I`, `T` and `E`. After an error inside `BEGIN`,
@@ -108,10 +110,23 @@ What it reads, on top of the statements of "What runs today":
   TABLE` lists the keys and `DESCRIBE` marks `UNI` and `MUL` columns.
 - **Types** as the engine's: `TINYINT(1)` and `BOOLEAN` are booleans (shown as `1` and `0`),
   `TINYINT` and `SMALLINT` are `smallint`, `MEDIUMINT` and `INT` are `integer`, `BIGINT` is
-  `bigint`, `UNSIGNED` takes the next wider type, `FLOAT` is `real`, `DOUBLE`, `REAL`,
-  `DECIMAL` and `NUMERIC` are `double precision` until the `numeric` type exists, `CHAR(n)` and
-  `VARCHAR(n)` are `varchar(n)`, the `TEXT` family is `text`; `DATE`, `DATETIME`, `TIMESTAMP`,
-  `JSON`, `BLOB` and `ENUM` answer error 1235 until item 19d.
+  `bigint`, `UNSIGNED` takes the next wider type, `FLOAT` is `real`, `DOUBLE` and `REAL` are
+  `double precision`, `DECIMAL(p,s)`, `DEC`, `NUMERIC` and `FIXED` are exact `numeric(p,s)`
+  (`DECIMAL` alone is `DECIMAL(10,0)`; `p` up to 65 and `s` up to 30, else error 1426 or 1425),
+  `DATE` is `date`, `DATETIME(fsp)` is `timestamp(fsp)`, `TIMESTAMP(fsp)` is `timestamptz(fsp)`
+  (stored in UTC, shown in the session's time zone without an offset, as MySQL shows it; `fsp`
+  defaults to 0), `JSON` is `jsonb` (MySQL also sorts keys by length and keeps the last
+  duplicate), `CHAR(n)` and `VARCHAR(n)` are `varchar(n)`, the `TEXT` family is `text`; `TIME`,
+  `YEAR`, `BLOB` and `ENUM` answer error 1235. A value out of a `DECIMAL`'s range is error 1264
+  and a malformed or impossible date error 1292. On the wire, `DECIMAL` columns are
+  `MYSQL_TYPE_NEWDECIMAL`, dates `DATE`, `DATETIME` and `TIMESTAMP` (packed in the binary
+  protocol), and `JSON` columns `MYSQL_TYPE_JSON`.
+- **Date and time functions**: `NOW()`, `SYSDATE()`, `CURRENT_TIMESTAMP[()]`, `LOCALTIME`,
+  `LOCALTIMESTAMP` (the session's local time, to the second), `UTC_TIMESTAMP()`, `CURDATE()` and
+  `CURRENT_DATE`, also as a column's `DEFAULT`; `EXTRACT(unit FROM d)` with MySQL's units
+  (`MICROSECOND` to `YEAR`, `WEEK` in mode 0, and the compound units `SECOND_MICROSECOND` to
+  `YEAR_MONTH`) as integers; another unit is error 1064. `TIMESTAMP '...'` and `DATE '...'`
+  literals. A binary-protocol row with a date outside years 0 to 9999 is error 1292.
 - **Functions and operators**: `IFNULL`, `IF`, `CONCAT`, `LENGTH` (bytes), `CHAR_LENGTH`,
   `UPPER`/`UCASE`, `LOWER`/`LCASE`, `COALESCE`, `NULLIF`, `ABS`, `DATABASE()`, `SCHEMA()`,
   `VERSION()`, `USER()`, `CURRENT_USER()`, `CONNECTION_ID()`, `LAST_INSERT_ID()`, `@@var`
@@ -153,7 +168,9 @@ What it reads, on top of the statements of "What runs today":
   such as `VARCHAR(10)` are not enforced, as in SQLite), `REAL`, `FLOA` or `DOUB` a real
   (`double precision`), no type at all text; the rest (`NUMERIC` affinity) is a real, except
   `BOOLEAN` (an integer) and names containing `DATE` or `TIME` (text, as SQLite's date
-  functions keep them). `BLOB` columns wait for the blob type.
+  functions keep them: `DATE`, `DATETIME` and `TIMESTAMP` columns hold ISO 8601 text, as an
+  SQLite application writes it). `DECIMAL(p,s)` is a real, by the same rule. `BLOB` columns
+  wait for the blob type.
 - **Row ids**: a column declared exactly `INTEGER PRIMARY KEY` (on the column or as the table's
   one-column key) is the row id: a NULL or missing value takes one more than the largest in
   the table; `AUTOINCREMENT` is accepted on it (and refused elsewhere, as in SQLite);
@@ -237,10 +254,19 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
 - **Types**: `VARCHAR2(n [BYTE|CHAR])`, `NVARCHAR2(n)` and `VARCHAR(n)` as `varchar(n)`
   (the length counts characters), `CHAR(n)`/`NCHAR(n)` as `varchar(n)` (not blank-padded),
   `NUMBER(p)` and `NUMBER(p,0)` as `smallint` (p up to 4), `integer` (up to 9) or `bigint` (up
-  to 18), `NUMBER(p,s)` with a scale, `NUMBER` without precision, `FLOAT`, `REAL`, `DOUBLE
-  PRECISION` and `BINARY_DOUBLE` as `double precision`, `BINARY_FLOAT` as `real`,
+  to 18), `NUMBER(p,s)` with a scale and `NUMBER(19..38)` as exact `numeric(p,s)` (a value
+  that does not fit is `ORA-01438`), `NUMBER` without precision as `numeric`, `FLOAT`, `REAL`,
+  `DOUBLE PRECISION` and `BINARY_DOUBLE` as `double precision`, `BINARY_FLOAT` as `real`,
   `INTEGER`/`INT`/`SMALLINT` (Oracle's `NUMBER(38)`) as `bigint`, `CLOB`, `NCLOB` and `LONG` as
-  `text`, and `BOOLEAN` (23ai). `DATE`, `TIMESTAMP`, `RAW` and `BLOB` wait for their types.
+  `text`, `BOOLEAN` (23ai), `DATE` as `timestamp(0)` (a date with a time of day, to the second,
+  as Oracle's), `TIMESTAMP(p)` as `timestamp(p)` (`p` defaults to 6; 7 to 9 keep 6),
+  `TIMESTAMP(p) WITH [LOCAL] TIME ZONE` as `timestamptz(p)` and `JSON` as `jsonb`. `DATE
+  '...'` and `TIMESTAMP '...'` literals, `SYSDATE` and `CURRENT_DATE` (the session's local time
+  to the second), `SYSTIMESTAMP`, `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP` work; dates show as
+  `YYYY-MM-DD HH24:MI:SS`. `EXTRACT(field FROM d)` takes `YEAR`, `MONTH`, `DAY`, `HOUR`,
+  `MINUTE`, `SECOND`, `TIMEZONE_HOUR` and `TIMEZONE_MINUTE`; `HOUR`, `MINUTE` and `SECOND` of a
+  `DATE` and a zone field of a time stamp without a zone are `ORA-30076`, another field
+  `ORA-00907`. `RAW` and `BLOB` wait for their types.
 - **Indexes**: `CREATE [UNIQUE] INDEX name ON t (...)` with `TABLESPACE`, `ONLINE`, `LOGGING`
   and `COMPUTE STATISTICS` accepted, `DROP INDEX name`, `UNIQUE` columns and `CONSTRAINT name
   UNIQUE (...)` (an unnamed one is `SYS_C` and seven digits), `USER_INDEXES`/`ALL_INDEXES`
@@ -369,10 +395,12 @@ the fast path always applies, since the server checks every password itself).
   order; use `ORDER BY`.
 - **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`, each with `DISTINCT` or
   `ALL`. They skip NULLs; `count` of nothing is 0, the others are NULL. Result types are
-  PostgreSQL's: `count` is `bigint`; `sum` of `smallint` or `integer` is `bigint`, of `real` is
-  `real`, of `double precision` is `double precision`; `avg` of a float is `double precision`;
-  `min` and `max` keep their argument's type and order NaN above every number, as `ORDER BY`
-  does. `sum` and `avg` of text, and `min` and `max` of booleans, fail with `42883`, as there.
+  PostgreSQL's: `count` is `bigint`; `sum` of `smallint` or `integer` is `bigint`, of `bigint`
+  or `numeric` is an exact `numeric`, of `real` is `real`, of `double precision` is `double
+  precision`; `avg` of an integer or `numeric` is an exact `numeric` (divided at PostgreSQL's
+  scale, `avg` of 1 and 2 is `1.5000000000000000`), of a float `double precision`; `min` and
+  `max` keep their argument's type and order NaN above every number, as `ORDER BY` does. `sum`
+  and `avg` of text, and `min` and `max` of booleans and `json`, fail with `42883`, as there.
 - `UPDATE name [[AS] alias] SET column = expr | DEFAULT, ... [WHERE expr] [RETURNING items]`.
   Changing a primary key moves the row; the uniqueness check runs after every row moved, so
   `UPDATE t SET id = id + 1` succeeds (PostgreSQL may refuse it, depending on the order it
@@ -388,6 +416,12 @@ the fast path always applies, since the server checks every password itself).
   (D104); outside it, `$1` is `42P02` (there is no parameter `$1`).
 - `version()`, `current_user`, `session_user`, `user`, `current_database()`, `current_schema`
   and `current_setting('name')`.
+- `serial`, `bigserial` and `smallserial` (`serial4`, `serial8`, `serial2`) columns, and
+  `GENERATED ALWAYS AS IDENTITY` and `GENERATED BY DEFAULT AS IDENTITY` on a `smallint`,
+  `integer` or `bigint` column: the column takes the next number when an `INSERT` leaves it out
+  (D111). The column must be the first column of the primary key until named sequences come
+  (item 32); identity options (`START WITH ...`) and generated columns (`GENERATED ALWAYS AS
+  (expr) STORED`) answer `0A000`.
 
 **Types** (one type system for every model, D19)
 
@@ -401,6 +435,12 @@ the fast path always applies, since the server checks every password itself).
 | `boolean` | `bool` | true or false |
 | `text` | | UTF-8 text of any length |
 | `character varying(n)` | `varchar(n)`, `varchar` | UTF-8 text of at most `n` characters |
+| `numeric(p, s)` | `decimal(p, s)`, `dec`, `numeric` | exact decimal: up to 1,000 digits before the point and 1,000 after, or `NaN` |
+| `date` | | a day, 4714-11-24 BC to 5874897-12-31 AD |
+| `timestamp(p) [without time zone]` | `timestamp` | a date and time of day to the microsecond, 4714-11-24 BC to 294276-12-31 AD |
+| `timestamp(p) with time zone` | `timestamptz` | an instant in the same range, stored in UTC |
+| `json` | | JSON text, checked and kept exactly as written |
+| `jsonb` | | JSON, normalized: keys sorted by length then bytes, the last duplicate kept, numbers as `numeric` |
 
 Values follow PostgreSQL's rules: integer arithmetic stays in the wider operand's type and
 fails with `22003` on overflow (`integer out of range`); `/` on integers truncates toward zero;
@@ -411,6 +451,55 @@ other number. Assigning a longer string to `varchar(n)` fails with `22001` unles
 spaces, and a cast truncates; a value of any type assigned to a text column is stored as its
 text (`true` as `true`). A quoted constant such as `'42'` takes the type its context needs
 (`WHERE id = '42'`, `INSERT INTO t (flag) VALUES ('yes')`), as PostgreSQL's "unknown" type does.
+
+`numeric` follows PostgreSQL's rules too (D111): a decimal constant (`1.5`, `1e3`) is `numeric`,
+and keeps the digits after the point it was written with (`1.50` prints `1.50` and equals
+`1.5`). `+`, `-` and `*` are exact, with the larger scale (the sum of the scales for `*`); `/`
+rounds to PostgreSQL's scale for a quotient (at least 16 significant digits: `1 / 3::numeric` is
+`0.33333333333333333333`); `%` keeps the dividend's sign. Mixed with an integer the result is
+`numeric`, mixed with a float it is `double precision`. `numeric(p, s)` rounds to `s` digits,
+half away from zero, and a value with more than `p - s` digits before the point fails with
+`22003` (`numeric field overflow`); a negative `s` rounds to tens, hundreds and so on. A cast to
+an integer rounds half away from zero; a float becomes `numeric` with its 15 (`real`: 6)
+significant digits, as PostgreSQL's cast. `round`, `trunc` (both with an optional number of
+places), `ceil`/`ceiling`, `floor` and `abs` take `numeric` (and floats). `NaN` is accepted,
+equals itself and sorts above every number. A result with more than 1,000 digits before the
+point fails with `22003` (`value overflows numeric format`) before it is computed, and `^` with
+an integer exponent is exact up to that size (otherwise computed in double precision, through
+logarithms past double precision's range, and rounded): `0.5 ^ 1e400` is 0, `1 ^ 1e400` is 1
+and `10 ^ 400.5` has 401 digits before the point.
+
+`date`, `timestamp` and `timestamptz` read ISO 8601 and PostgreSQL's ISO style: `2024-02-29`,
+`2024-02-29 13:45:01.123456`, `2024-02-29T13:45:01Z`, an offset `+05:30`, `-0330` or `+05`
+(`timestamptz` without one is read in the session's `TimeZone`), and ` BC` for years before 1
+AD; more than six fractional digits round to the microsecond, and `24:00:00` is the next
+midnight. They print in the ISO style (`2024-02-29 13:45:01.5`, `0044-03-15 BC`, a
+`timestamptz` as `2024-02-29 08:15:01+00` in the session's time zone). An impossible date
+(`2023-02-29`) fails with `22008`, text that is no date with `22007`, a value outside the range
+with `22008`. `timestamp(p)` rounds to `p` fractional digits. `date + integer` and `date -
+integer` move by days and `date - date` is the number of days between; casts between the three
+types, and comparisons across them, use the session's time zone where one side has a zone.
+`now()`, `current_timestamp`, `transaction_timestamp()`, `statement_timestamp()` and
+`clock_timestamp()` (all the statement's start time), `localtimestamp` and `current_date`;
+`extract(field FROM value)` (a `numeric`) and `date_part('field', value)` (a `double
+precision`) with `year`, `month`, `day`, `hour`, `minute`, `second`, `milliseconds`,
+`microseconds`, `dow`, `isodow`, `doy`, `week`, `isoyear`, `quarter`, `decade`, `century`,
+`millennium`, `julian`, `epoch` and the `timezone` fields; `date_trunc('field', value)` from
+`microseconds` to `millennium`. `TimeZone` takes `UTC` (and its aliases such as `Etc/UTC`) and
+fixed offsets written as POSIX does (`UTC+3`, `EST5`, `+05:30`: the sign means west of
+Greenwich, as in PostgreSQL); a named region such as `Europe/Rome` is remembered and shown but
+acts as UTC until the time zone database comes (D111).
+
+`json` checks its text with EggDB's own parser (nesting deeper than 256 levels fails with
+`54001`) and keeps it as written; `jsonb` stores the normalized text. `->` (a key or an array
+index, negative from the end), `->>` (the same as text), `#>` and `#>>` (a path such as
+`'{a,0}'`), `@>` and `<@` (containment, `jsonb` only), `json_typeof`/`jsonb_typeof` and
+`json_array_length`/`jsonb_array_length` work as in PostgreSQL. `jsonb` values compare, group
+and index by their normalized text with every number written without trailing zeros, so
+`'{"a": 1.0}'::jsonb = '{"a": 1}'::jsonb` is true and a unique index holds them once, while each
+value keeps the number as written (`1.0`); `json` has no equality, as in PostgreSQL (`42883`),
+and cannot be indexed or be a key (`42704`). Stored `json` and `jsonb` are parsed again when a
+row is read, so a damaged one is `XX001`.
 
 **Expressions**
 - Arithmetic `+ - * / % ^`, unary `-` and `+`, string concatenation `||`.
@@ -515,17 +604,30 @@ A table definition is written in format version 1, or version 2 when it has an
 after the primary key a count of indexes and, for each, its number, name, whether it is unique
 and its column numbers (D109). Tables without indexes keep their bytes, so older releases
 still read them; an older release refuses a version 3 table by name rather than misreading it.
+A table with a column of one of the types item 19d added is written in version 4 (D111): the
+version 3 layout, with the count of indexes always present (it may be 0) and the type tags 9
+(`numeric`, then its precision and scale as two 16-bit little-endian numbers, 0 and 0 without
+them), 10 (`date`), 11 (`timestamp`) and 12 (`timestamptz`, each then one byte of fractional
+digits, `0xff` without), 13 (`json`) and 14 (`jsonb`). Every other table keeps its version and
+bytes; an older release refuses a version 4 table by name.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
 point is IEEE 754 with the sign handled so negatives sort first (`-0` stored as `0`, every NaN as
 one NaN above infinity), booleans are one byte, and text is UTF-8 with `0x00` written as
 `0x00 0xff` and ended by `0x00 0x01`. Text compares byte by byte, as PostgreSQL's `C`
-collation does; other collations come with D30. A table without a primary key uses an 8-byte
+collation does; other collations come with D30. A `date` is its day number and a time stamp
+its microseconds, big-endian with the sign bit flipped; a `jsonb` is keyed as text. A
+`numeric` is a class byte (`0x01` negative, `0x02` zero, `0x03` positive, `0x04` NaN) and,
+unless zero or NaN, its decimal exponent (16 bits) and its significant digits one byte each
+ended by a terminator, every byte inverted for a negative number, so `1.5` and `1.50` have one
+key and a unique index holds them once (D111). A table without a primary key uses an 8-byte
 row number instead.
 
 A row is a format version byte, the column count, and per column a type byte (0 for NULL) and
-the value. A row shorter than its table reads its missing trailing columns as NULL, which leaves
+the value: a `numeric` as a flags byte, its scale (16 bits), a limb count and its base-10^9
+limbs; a `date` as 4 bytes, a time stamp as 8, `json` and `jsonb` as text. A value outside its
+type's range or limits is damage. A row shorter than its table reads its missing trailing columns as NULL, which leaves
 room for `ALTER TABLE ... ADD COLUMN` without rewriting rows. Every definition and row is read
 strictly: a damaged one is an error (`XX001`, exit code 4), never a panic; a text column that a
 join does not name is skipped by its length without checking its UTF-8. `eggdb check` checks
@@ -549,8 +651,6 @@ ui app.db` has a query screen (`s`, run with `F5`). Both print results and error
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
 checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
 until they are fixed:
-- Decimal constants (`1.5`, `10.0 / 4`), `numeric` columns and `avg` of integers are `numeric` in
-  PostgreSQL, which is not supported yet (`0A000`; roadmap: the `numeric` type, item 19's next parts).
 - `RIGHT` and `FULL` joins answer `0A000` (roadmap: "Next parts" below).
 - The string functions `substr`, `substring(... FROM ... FOR ...)`, `trim`, `ltrim`, `rtrim`,
   `btrim`, `replace`, `concat`, `position(... IN ...)`, `left`, `right`, `repeat` and `reverse`
@@ -587,11 +687,28 @@ until they are fixed:
   rows, sorted rows and its result) is counted, and past 1 GiB the statement fails with `53200`
   (`out of memory`) instead of exhausting the process; nothing spills to disk yet.
   A `FROM` clause joins at most 64 tables (`54000`).
-- `avg` of `smallint`, `integer` or `bigint` returns PostgreSQL's `numeric`, which is not
-  supported yet: it fails with `0A000` and a hint to write `avg(x::double precision)`. `sum` of
-  `bigint` is also `numeric` there: it runs where its value prints the same (a select item, an
-  `ORDER BY` item, either side of a comparison) while the sum fits in a `bigint`, and fails with
-  `0A000` inside arithmetic or past 64 bits.
+- `numeric` holds at most 1,000 digits before the point and 1,000 after (PostgreSQL: 131,072
+  and 16,383), input with more fails with `22003`; `Infinity` is not a `numeric` yet (`22P02`;
+  PostgreSQL 14 added it). `^` with a non-integer exponent, or an integer one whose exact result
+  would need more than 2,000 digits, is computed in double precision (15 significant digits).
+- `date` and time stamps take ISO 8601 and PostgreSQL's ISO style only: `infinity`, `epoch`,
+  `now`, `today`, month names (`Feb 29 2024`) and `MDY`/`DMY` forms (`02/29/2024`) answer
+  `22007`. `time`, `timetz` and `interval` are not supported yet (`0A000`; `interval` is item
+  31), so `timestamp - timestamp` and `+ interval` answer `0A000`. Named time zones act as UTC
+  (above). `now()` is the statement's start time, where PostgreSQL's is the transaction's.
+  `to_char`, `to_date`, `to_timestamp`, `age` and `make_date` are missing (`42883`).
+- Values of different types that one expression returns row by row (`coalesce(numeric_column,
+  double_column)`) are grouped and made distinct by their value where a `numeric` is exactly a
+  `double precision` (`2.5`); a `numeric` such as `0.1` and the double nearest it compare equal
+  but group apart. PostgreSQL gives such an expression one type before it runs.
+- `jsonb`'s `?`, `?|`, `?&`, `-`, `||` and `#-` operators, the JSON builder, aggregate, set and
+  path (`jsonb_path_query`) functions and SQL/JSON (`JSON_TABLE`) are missing (item 36). `jsonb`
+  sorts by its normalized text, not by PostgreSQL's jsonb ordering, and a `jsonb` value more than
+  16 times larger than its text once its numbers are written out (`1e999`) fails with `54000`.
+- `serial` and identity columns follow the table's auto-increment column: a NULL or `0` given
+  to it also takes the next number, `GENERATED ALWAYS` accepts a given value, the number of a
+  deleted last row is given again, and the column must be the first of the primary key (named
+  sequences are item 32).
 - `RIGHT`, `FULL` and `NATURAL` joins, subqueries in `FROM`, `LATERAL`, `DISTINCT ON`,
   `GROUPING SETS`, `ROLLUP` and `CUBE`, window functions, `FILTER`, ordered aggregates and the
   other aggregates (`string_agg`, `bool_and`, `array_agg`, ...) fail with `0A000`.
@@ -601,9 +718,6 @@ until they are fixed:
 - A whole transaction must fit in the page cache (`--cache`), as for every write (D86).
 - Type checks happen as rows are evaluated, so a type mismatch in a `WHERE` on an empty table
   is not reported (PostgreSQL reports it when planning).
-- Decimal constants such as `1.5` are PostgreSQL `numeric`, which is not supported yet: they
-  work where a `real` or `double precision` value is expected (a float column, a comparison
-  with one, `1.5::float8`) and fail with `0A000` elsewhere.
 - `DEFAULT` expressions are checked for column references when the table is created and
   evaluated at each `INSERT`, so a default that fails (`DEFAULT 1/0`) fails the `INSERT`, not
   the `CREATE TABLE`.
@@ -622,10 +736,11 @@ until they are fixed:
   must reach 1.0 before v0.3.0 (item 19e, D100).
 
 ## Known differences from MySQL
-The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 118 cases from the MySQL 8.0
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 151 cases from the MySQL 8.0
 Reference Manual's documented behaviour) marks these as differing until they are fixed:
-- `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`: decimals come with the
-  `numeric` type (item 19d).
+- `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`, and decimal constants
+  outside a `DECIMAL` column are doubles (`0.1 + 0.2` is `0.30000000000000004`); stored into a
+  `DECIMAL` column they are exact.
 - `1 / 0` is error 1365 where MySQL's `SELECT` gives `NULL` with a warning.
 - Text compares byte by byte (`'a' = 'A'` is false) where `utf8mb4_0900_ai_ci` ignores case and
   accents; collations come with D30.
@@ -643,14 +758,24 @@ And more, not in the suite yet:
 - `BIGINT UNSIGNED` is refused; `UNSIGNED` columns accept negative values.
 - `SET` remembers session variables without applying them (`sql_mode`, `time_zone`,
   `transaction_isolation`: every transaction is serializable); `SET GLOBAL` is refused.
-- `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`, `double` for `DECIMAL`).
+- `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`).
+- Dates and times: `DATE` and `DATETIME` take years 4714 BC to 5874897 (MySQL: 1000 to 9999),
+  zero dates (`0000-00-00`) are refused, a `DATETIME(fsp)` prints without trailing zeros in its
+  fraction, `TIME`, `YEAR`, `DATE_FORMAT`, `STR_TO_DATE`, `DATE_ADD`, `UNIX_TIMESTAMP` and
+  `ON UPDATE CURRENT_TIMESTAMP` are not supported yet, and `time_zone` is not applied (the
+  session's time zone is UTC unless the PostgreSQL protocol's `TimeZone` sets it).
+- A value rounded to fit a `DECIMAL(p,s)`'s scale gives no note 1265.
+- `EXTRACT` gives integers and accepts no `WEEK` mode but 0; `EXTRACT` of a negative compound
+  value and of years before 1000 are not checked against MySQL.
+- `AVG` of integers and `SUM`/`AVG` of `DECIMAL` use PostgreSQL's result scale (`AVG(2, 3)` is
+  `2.5000000000000000`) where MySQL adds 4 digits to the argument's scale (`2.5000`).
 - Indexes: a key on a column prefix (`KEY k (name(10))`) indexes the whole value, and a
   `UNIQUE` one answers 1235; `FULLTEXT` and `SPATIAL` keys answer 1235. `SHOW INDEX` gives
   `Cardinality` and `Sub_part` as `NULL`, and `EXPLAIN` gives `key_len`, `ref` and `rows` as
   `NULL`. `ALTER TABLE ... ADD INDEX` waits for `ALTER TABLE`.
 
 ## Known differences from SQLite
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 155 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 180 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
@@ -661,7 +786,8 @@ fixed:
   `NUMERIC` column given `7` keeps the integer `7` where EggDB keeps the real `7.0`, and an
   `INTEGER` column given `'abc'` keeps the text where EggDB answers `datatype mismatch`.
 - Dates and times: `date()`, `time()`, `datetime()`, `julianday()`, `strftime()`,
-  `unixepoch()` and `CURRENT_TIMESTAMP` wait for the timestamp type (item 19d).
+  `unixepoch()` and `CURRENT_TIMESTAMP` are not supported yet; `DATE` and `DATETIME` columns
+  keep their text, as SQLite's do.
 
 And more, not in the suite yet:
 - Columns without a declared type are text, so `typeof()` says `text` for numbers stored
@@ -690,24 +816,27 @@ And more, not in the suite yet:
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 164 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 193 cases from Oracle's SQL
 Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
   primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
 - `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`,
   and `FETCH ... PERCENT` and `WITH TIES`.
 - `LISTAGG`, `MINUS` and the other set operators, and `MERGE`.
-- `DATE` and `TIMESTAMP` columns, `SYSDATE`, `SYSTIMESTAMP` and `CURRENT_DATE`: they wait for
-  the timestamp type (item 19d).
 - Sequences (`CREATE SEQUENCE`, `seq.NEXTVAL`, `seq.CURRVAL`, `DROP SEQUENCE`): they need
   state kept in the file, a file-format change of their own (D108).
 - An identity column that is not the first column of the primary key.
 
 And more, not in the suite yet:
-- `NUMBER` is exact decimal in Oracle; here `NUMBER` without precision and `NUMBER(p,s)` with a
-  scale are binary floating point (`0.1 + 0.2` is `.30000000000000004`), precision is not
-  enforced beyond the storage type's range (no `ORA-01438`), and integer arithmetic past 64 bits
-  is `ORA-01426` where Oracle has 38 digits. They wait for the `numeric` type.
+- `NUMBER(p)` with `p` up to 18 is enforced by its storage type's range, not by `p` (no
+  `ORA-01438` for 1000 in a `NUMBER(3)`); decimal constants, `/` and the numeric functions
+  compute in double precision (`1/3` has 15 significant digits where Oracle has 38); `NUMBER`
+  holds up to 1,000 digits (Oracle: 38 significant digits).
+- `EXTRACT(HOUR ...)` is `ORA-30076` for a `TIMESTAMP(0)` column too, which EggDB stores like a
+  `DATE`; `TIMEZONE_REGION` and `TIMEZONE_ABBR` are `ORA-00907`.
+- `DATE` and `TIMESTAMP` show as `YYYY-MM-DD HH24:MI:SS[.FF]` whatever `NLS_DATE_FORMAT` says;
+  `TO_DATE`, `TO_TIMESTAMP`, `TO_CHAR` of a date, `ADD_MONTHS`, `MONTHS_BETWEEN`, `LAST_DAY`,
+  `NEXT_DAY` and date arithmetic with numbers are not supported yet.
 - `CHAR(n)` is not blank-padded, `VARCHAR2(n BYTE)` counts characters, and `ORA-12899` gives
   the maximum but not the column's name or the actual length.
 - A statement that fails after it wrote rows rolls back the whole transaction, where Oracle
@@ -722,11 +851,11 @@ And more, not in the suite yet:
 - Not supported yet: subqueries and views, `CONNECT BY`, outer joins with `(+)`, `RIGHT` and
   `FULL` joins, `ALTER TABLE`, `CHECK` and foreign keys, PL/SQL (`BEGIN ...
   END`, procedures, packages), `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms,
-  database links, `ROWID`, the date, regular-expression, analytic and XML functions, `NLS_`
+  database links, `ROWID`, the regular-expression, analytic and XML functions, `NLS_`
   settings, and schemas other than the session user's.
 
 ## Next parts (roadmap)
-- The `numeric`, `timestamp` and `json`/`jsonb` types, and `serial`/identity columns.
+- `interval` (item 31), named sequences (item 32) and the rest of the JSON functions (item 36).
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
 - `RIGHT` and `FULL` joins, subqueries, and the other aggregates.
