@@ -61,6 +61,8 @@ include.
 | `sqlite_compare.batch_put` | one overwrite of a random existing key, in transactions of 1,000 | `Off` / `OFF` | 50% above the line |
 | `sqlite_compare.batch_put_normal` | the same | `Normal` / `NORMAL` | reported |
 | `sqlite_compare.durable_commit` | one put in its own transaction, waiting for the disk | `Full` / `FULL` | reported |
+| `sqlite_compare.sql_point_select` | `SELECT name, score FROM people WHERE id = N` as SQL text, parsed and run each time, over 100,000 rows (`bigint PRIMARY KEY` in EggDB, `INTEGER PRIMARY KEY` in SQLite) | `Normal` / `NORMAL` | 15% above the line (D99) |
+| `sqlite_compare.sql_bulk_insert` | one row of 100-row `INSERT ... VALUES` statements, 1,000 rows per `BEGIN ... COMMIT`, as SQL text | `Off` / `OFF` | 15% above the line (D99) |
 
 The band is wider than the 30% of EggDB's other ratios because two engines respond differently
 to each CI runner's processor: seven runs gave point gets from 0.60 to 0.83 and scans from 0.35
@@ -95,10 +97,12 @@ of five runs of GitHub's `ubuntu-latest` x86-64 runners, whose hardware varies b
 | batch put, `Off` | 0.69 | 1.58 µs | 2.28 µs | 0.61 |
 | batch put, `Normal` | 1.13 | 24.0 µs | 21.3 µs | 1.07 |
 | durable commit | about 1.0 | 4.2 ms | 4.1 ms | 0.92 |
+| SQL point select | 1.90 | 1.95 µs | 1.02 µs | from CI |
+| SQL bulk insert, per row | 3.32 | 1.14 µs | 0.34 µs | from CI |
 
 | | macOS | Linux |
 |-|-------|-------|
-| Binary size | 933,312 bytes | 1,133,296 bytes |
+| Binary size | 1,164,944 bytes (933,312 before SQL, D99) | from CI (1,133,296 before SQL) |
 | `eggdb --version` | 1.48 ms, 0.97 × a program that exits at once | 0.78 ms, 1.02 × |
 | `eggdb get` on a 10,000-entry file | 1.28 ms, 1.05 × | 1.08 ms, 1.42 × |
 | Peak memory, `--version` | 1,654,784 bytes | 2,484,224 bytes |
