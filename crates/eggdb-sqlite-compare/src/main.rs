@@ -7,15 +7,15 @@
 //! values, and samples alternate between them; each workload reports EggDB's time, SQLite's
 //! time and their ratio.
 //!
-//! The ratios of point gets, ordered scans and batched puts that never wait for the disk are
-//! gated against the `ratio_to_sqlite` lines of `benchmarks/baseline.txt`: they fail 50% above
-//! the line after one retry. The SQL workloads run the same SQL text on both, without prepared
-//! statements on either side; their ratios fail 15% above the line, since their gap to SQLite is
-//! known and scheduled (D99) and may only shrink. `eggdb-bench` gates its ratios the same way at 30% (D80), but two
-//! engines respond differently to each CI runner's processor, so their ratio moves more between
-//! runs. Batched puts in the `Normal` mode and the durable commit, one commit per put waiting for
-//! the disk, depend on the disk more than on either engine and are reported only. `--update`
-//! rewrites this system's lines of these benchmarks and `--baseline <path>` reads another file.
+//! Every ratio with a `ratio_to_sqlite` line in `benchmarks/baseline.txt` is compared with it and
+//! reported in a table of changes. A ratio above its line (50% for point gets, ordered scans and
+//! batched puts that never wait for the disk, 15% for the SQL workloads, whose gap to SQLite is
+//! known and scheduled, D99) is reported as `SLOWER` without failing the run; one more than
+//! twice its line fails it, after one retry (D101). Batched puts in the `Normal` mode and the
+//! durable commit, one commit per put waiting for the disk, depend on the disk more than on
+//! either engine and are reported only. `--update` rewrites this system's lines of these
+//! benchmarks, `--baseline <path>` reads another file and `--results <path>` writes the
+//! results for CI to keep per pull request, as `eggdb-bench` does.
 
 #[path = "../../eggdb-bench/src/baseline.rs"]
 #[allow(dead_code)]

@@ -528,7 +528,7 @@ UI crate needs these operations and nothing else:
 The simulated terminal in the platform layer is the same `FakeTerminal` the UI tests use,
 exported so the CLI's `eggdb shell` (a nice-to-have) can test against it too.
 
-## Decided by this design (for the PR and docs/decisions.md)
+## Decided by this design (for the PR and docs/decisions/)
 1. The UI holds no transaction between key presses; a write transaction lives only from confirm
    to commit, begun with `try_begin_write` and retried with `begin_write` on request.
 2. The key list is a window over a scan with lending entries, so it works at every scale; the
