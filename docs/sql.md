@@ -154,7 +154,7 @@ exports into a new file, or into a file without SQL tables.
   `E'...'` strings, `CASE` branches of different types; `lower` and `upper` change case by
   Unicode rules, where PostgreSQL's `C` collation changes only ASCII letters.
 - Speed: a point `SELECT` by primary key takes about 1.2 times SQLite's time and multi-row
-  `INSERT`s about 1.7 times on an Apple-silicon Mac, measured with the same SQL text on both and
+  `INSERT`s about 1.7 times on an Apple-silicon Mac (0.85 and 1.67 times on CI's Linux runners), measured with the same SQL text on both and
   gated so they can only improve; closing the rest of the gap is roadmap item 19e (D99).
 
 ## Next parts (roadmap)

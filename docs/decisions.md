@@ -4116,8 +4116,10 @@ D34's profiles.
 **Closing the gap, first round (review fix, 2026-10-27).** The independent review blocked the pull
 request on D7, so this part now closes most of the gap instead of only gating it. Measured with
 `eggdb-sqlite-compare` on the same Apple-silicon Mac, `sql_point_select` went from 1.95 to 1.23
-(1.27 against 1.04 µs) and `sql_bulk_insert` from 3.16 to 1.74 (0.61 against 0.35 µs per row);
-the Linux lines are in the next paragraph. What changed, each measured with a profile first:
+(1.27 against 1.04 µs) and `sql_bulk_insert` from 3.16 to 1.74 (0.61 against 0.35 µs per row).
+On CI's Linux runner, point selects went from 1.25 to 0.85, now faster than SQLite (2.31 against
+2.68 µs), and bulk inserts from 2.63 to 1.67 (1.20 against 0.72 µs per row); the four ratio
+lines are lowered to these values, the Linux ones from that CI run as before. What changed, each measured with a profile first:
 - A table's cached definition carries the commit it was checked at: a read whose snapshot sees
   the same commit (`KeyValueRead::committed_version`, the commit stamp) uses it without reading
   the definition again, which had been a whole B+tree lookup per statement. A writer, which
@@ -4152,5 +4154,7 @@ with these fixes.
 **Binary size, second round (D6).** The new engine calls and the faster SQL paths add 16,560
 bytes on aarch64 macOS (1,164,944 to 1,181,504, +1.4%): `put_if_absent` and `get_with` on both
 transactions are generic over the key type, and the borrowed tokens, streamed rows and moved
-outputs are new code beside the old. That is the stated price of the speed above; the macOS
-footprint line is updated, and the Linux line follows CI's measurement.
+outputs are new code beside the old; on x86-64 Linux the binary grows by 24,576 bytes (1,420,120
+to 1,444,696, +1.7%), while its peak memory stays within its lines (3,010,560 bytes for
+`--version`, 5,638,144 for a `get`, both slightly below them). That is the stated price of the
+speed above; both footprint size lines are updated.
