@@ -232,6 +232,8 @@ fn shown(name: &str, dialect: Dialect) -> String {
     }
 }
 
+#[cold]
+#[inline(never)]
 fn missing_sequence(name: &str, dialect: Dialect) -> SqlError {
     match dialect {
         Dialect::Oracle => SqlError::new(SqlState::UNDEFINED_TABLE, "sequence does not exist")
@@ -243,6 +245,8 @@ fn missing_sequence(name: &str, dialect: Dialect) -> SqlError {
     }
 }
 
+#[cold]
+#[inline(never)]
 fn invalid(message: String, oracle: Option<(u16, &str)>, dialect: Dialect) -> SqlError {
     match (dialect, oracle) {
         (Dialect::Oracle, Some((code, text))) => {

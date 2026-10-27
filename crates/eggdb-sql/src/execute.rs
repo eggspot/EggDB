@@ -423,6 +423,8 @@ pub(crate) fn drop_tables(
     Ok(result)
 }
 
+#[cold]
+#[inline(never)]
 pub(crate) fn dependent_table(
     parent: &str,
     child: &str,

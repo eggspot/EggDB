@@ -97,6 +97,8 @@ fn column_names(table: &TableDefinition, columns: &[usize]) -> Vec<String> {
         .collect()
 }
 
+#[cold]
+#[inline(never)]
 fn mysql_definition(child: &TableDefinition, key: &ForeignKey) -> String {
     let quote = |name: &str| format!("`{name}`");
     let columns: Vec<String> = column_names(child, &key.columns)
@@ -121,6 +123,8 @@ fn oracle_name(name: &str) -> String {
     format!("{}.{}", context.owner, swap_uniform_case(name))
 }
 
+#[cold]
+#[inline(never)]
 fn missing_parent(child: &TableDefinition, key: &ForeignKey, row: &[Value]) -> SqlError {
     let error = SqlError::new(
         SqlState::FOREIGN_KEY_VIOLATION,
@@ -162,6 +166,8 @@ fn missing_parent(child: &TableDefinition, key: &ForeignKey, row: &[Value]) -> S
     }
 }
 
+#[cold]
+#[inline(never)]
 fn still_referenced(
     parent: &TableDefinition,
     child: &TableDefinition,
@@ -208,6 +214,8 @@ fn still_referenced(
     }
 }
 
+#[cold]
+#[inline(never)]
 fn check_failed(table: &TableDefinition, check: &CheckConstraint, row: &[Value]) -> SqlError {
     match context().dialect {
         Dialect::MySql => SqlError::new(
@@ -677,6 +685,8 @@ fn generated_name(table: &TableDefinition, base: String) -> String {
     }
 }
 
+#[cold]
+#[inline(never)]
 fn duplicate_constraint(table: &TableDefinition, name: &str, dialect: Dialect) -> SqlError {
     match dialect {
         Dialect::MySql => SqlError::new(
@@ -699,6 +709,8 @@ fn duplicate_constraint(table: &TableDefinition, name: &str, dialect: Dialect) -
     }
 }
 
+#[cold]
+#[inline(never)]
 fn too_many_constraints(table: &TableDefinition) -> SqlError {
     SqlError::new(
         SqlState::PROGRAM_LIMIT_EXCEEDED,
@@ -776,6 +788,8 @@ fn first_column_named(expr: &Expr, table: &TableDefinition) -> Option<String> {
         .find_map(|child| first_column_named(child, table))
 }
 
+#[cold]
+#[inline(never)]
 fn invalid_key(message: String) -> SqlError {
     SqlError::new(SqlState::INVALID_FOREIGN_KEY, message)
 }

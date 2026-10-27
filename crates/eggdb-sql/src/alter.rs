@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 const REWRITE_BATCH: usize = 1024;
 
+#[cold]
+#[inline(never)]
 fn missing_column(table: &TableDefinition, name: &Name, dialect: Dialect) -> SqlError {
     match dialect {
         Dialect::MySql => SqlError::new(
@@ -307,6 +309,8 @@ fn column_of(definition: &ColumnDefinition) -> Column {
     }
 }
 
+#[cold]
+#[inline(never)]
 fn duplicate_column(table: &TableDefinition, name: &Name) -> SqlError {
     SqlError::new(
         SqlState::DUPLICATE_COLUMN,
@@ -438,6 +442,8 @@ fn referencing_keys(
     Ok(found)
 }
 
+#[cold]
+#[inline(never)]
 fn depends_error(what: &str, constraint: &str, child: &str, dialect: Dialect) -> SqlError {
     match dialect {
         Dialect::Oracle => SqlError::new(
