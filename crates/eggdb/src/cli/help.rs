@@ -1,7 +1,8 @@
 use super::args::CommandName;
 
 pub(crate) const MAIN: &str = "\
-eggdb: one database for every kind of data. This release: an embedded key-value store in one file.
+eggdb: one database for every kind of data. This release: an embedded key-value store in one file,
+with a first part of SQL.
 
 Usage: eggdb <command> <file> [arguments] [options]
 
@@ -16,6 +17,7 @@ Commands:
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, from a file or stdin; see --create
+  sql    <file> [script]        run SQL (PostgreSQL dialect) from -c, a script or stdin
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -49,6 +51,7 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Import => {
             "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run]"
         }
+        CommandName::Sql => "eggdb sql <file> [-c <sql> | <script> | -] [--create]",
     }
 }
 
@@ -72,6 +75,7 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Ui => UI,
         CommandName::Export => EXPORT,
         CommandName::Import => IMPORT,
+        CommandName::Sql => SQL,
     }
 }
 
@@ -213,4 +217,25 @@ Examples:
   gunzip -c backup.jsonl.gz | eggdb import --create copy.db
   eggdb import app.db fixes.jsonl --on-conflict overwrite
   eggdb import app.db backup.jsonl --dry-run
+";
+
+const SQL: &str = "\
+Runs SQL statements, separated by semicolons, from -c, from a script file, or from stdin (a
+script of - or none at all), in order. This release runs a first part of the PostgreSQL
+dialect: CREATE TABLE with a PRIMARY KEY, DROP TABLE, INSERT, SELECT with WHERE, ORDER BY,
+LIMIT and OFFSET, UPDATE, DELETE, BEGIN, COMMIT and ROLLBACK, with the integer, floating-point,
+boolean and text types. Results print as aligned tables, like psql. Each statement outside
+BEGIN ... COMMIT is its own transaction. The first failing statement stops the run with exit 3
+and a PostgreSQL-style error on stderr; statements before it stay committed, and a block left
+open is rolled back. Joins, GROUP BY, indexes and more types come next (docs/sql.md).
+
+  -c, --command <sql>   the statements to run
+      --create          create the database file if it is missing
+
+Examples:
+  eggdb sql --create app.db -c \"CREATE TABLE users (id integer PRIMARY KEY, name text)\"
+  eggdb sql app.db -c \"INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace')\"
+  eggdb sql app.db -c \"SELECT name FROM users WHERE id = 2\"
+  eggdb sql app.db schema.sql
+  cat queries.sql | eggdb sql app.db
 ";

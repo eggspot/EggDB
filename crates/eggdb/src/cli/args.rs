@@ -20,6 +20,7 @@ pub(crate) enum CommandName {
     Ui,
     Export,
     Import,
+    Sql,
 }
 
 impl CommandName {
@@ -35,6 +36,7 @@ impl CommandName {
             b"ui" => Self::Ui,
             b"export" => Self::Export,
             b"import" => Self::Import,
+            b"sql" => Self::Sql,
             _ => return None,
         })
     }
@@ -51,6 +53,7 @@ impl CommandName {
             Self::Ui => "ui",
             Self::Export => "export",
             Self::Import => "import",
+            Self::Sql => "sql",
         }
     }
 
@@ -58,10 +61,11 @@ impl CommandName {
         match option {
             OptionName::Cache | OptionName::Help | OptionName::Version => true,
             OptionName::Color => true,
-            OptionName::Format => self != Self::Ui,
+            OptionName::Format => !matches!(self, Self::Ui | Self::Sql),
             OptionName::Mono | OptionName::Ascii | OptionName::ReadOnly => self == Self::Ui,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
-            OptionName::Create => matches!(self, Self::Put | Self::Import),
+            OptionName::Create => matches!(self, Self::Put | Self::Import | Self::Sql),
+            OptionName::Command => self == Self::Sql,
             OptionName::OnConflict | OptionName::DryRun => self == Self::Import,
             OptionName::Prefix
             | OptionName::From
@@ -141,6 +145,7 @@ enum OptionName {
     ReadOnly,
     OnConflict,
     DryRun,
+    Command,
 }
 
 impl OptionName {
@@ -164,6 +169,7 @@ impl OptionName {
             b"read-only" => Self::ReadOnly,
             b"on-conflict" => Self::OnConflict,
             b"dry-run" => Self::DryRun,
+            b"command" => Self::Command,
             _ => return None,
         })
     }
@@ -177,6 +183,7 @@ impl OptionName {
             b'r' => Self::Reverse,
             b'n' => Self::Limit,
             b'k' => Self::KeysOnly,
+            b'c' => Self::Command,
             _ => return None,
         })
     }
@@ -223,6 +230,14 @@ pub(crate) struct Request {
     pub(crate) export_file: Option<ExportFile>,
     pub(crate) on_conflict: ConflictPolicy,
     pub(crate) dry_run: bool,
+    pub(crate) sql: Option<SqlSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SqlSource {
+    Command(String),
+    Script(PathBuf),
+    Stdin,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -281,7 +296,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version.",
+            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version.",
             None,
         ));
     };
@@ -407,6 +422,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         export_file: None,
         on_conflict: ConflictPolicy::Error,
         dry_run: false,
+        sql: None,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -450,6 +466,18 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.on_conflict = parse_on_conflict(value).map_err(usage)?
             }
             OptionName::DryRun => request.dry_run = true,
+            OptionName::Command => {
+                if request.sql.is_some() {
+                    return Err(usage(
+                        "give -c once; put several statements in it, separated by semicolons"
+                            .to_owned(),
+                    ));
+                }
+                let text = value
+                    .to_str()
+                    .ok_or_else(|| usage(format!("{} must be UTF-8 text", option.spelled)))?;
+                request.sql = Some(SqlSource::Command(text.to_owned()));
+            }
             OptionName::Help | OptionName::Version => {}
         }
     }
@@ -465,7 +493,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Check
         | CommandName::Stats
         | CommandName::Ui => (1, 1),
-        CommandName::Export | CommandName::Import => (1, 2),
+        CommandName::Export | CommandName::Import | CommandName::Sql => (1, 2),
         CommandName::Get | CommandName::Del => (2, 2),
         CommandName::Put => (2, 3),
     };
@@ -476,6 +504,24 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         return Err(too_many_arguments(&arguments[most..], Some(command)));
     }
     request.file = PathBuf::from(arguments[0]);
+    if command == CommandName::Sql {
+        match (arguments.get(1), &request.sql) {
+            (Some(_), Some(_)) => {
+                return Err(usage(
+                    "give the SQL with -c or as a script, not both".to_owned(),
+                ));
+            }
+            (Some(script), None) => {
+                request.sql = Some(match export_file(script) {
+                    ExportFile::Standard => SqlSource::Stdin,
+                    ExportFile::Path(path) => SqlSource::Script(path),
+                });
+            }
+            (None, Some(_)) => {}
+            (None, None) => request.sql = Some(SqlSource::Stdin),
+        }
+        return Ok(request);
+    }
     if matches!(command, CommandName::Export | CommandName::Import) {
         request.export_file = arguments.get(1).map(|argument| export_file(argument));
         return Ok(request);
@@ -544,7 +590,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version.",
             render::text(name)
         ),
         None,
@@ -753,7 +799,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -796,7 +842,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -809,7 +855,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),
