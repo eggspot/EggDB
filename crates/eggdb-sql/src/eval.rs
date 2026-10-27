@@ -298,20 +298,22 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
 }
 
 pub(crate) fn output_name(expr: &Expr) -> String {
+    let (name, _) = name_and_whether_it_names_a_value(expr);
+    name
+}
+
+fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
     match &expr.kind {
-        ExprKind::Column { name, .. } => name.clone(),
-        ExprKind::Function { name, .. } => name.clone(),
-        ExprKind::SessionValue { name, .. } => (*name).to_owned(),
-        ExprKind::Aggregate { function, .. } => function.name().to_owned(),
-        ExprKind::Cast { expr, sql_type } => match &expr.kind {
-            ExprKind::Column { .. } | ExprKind::Function { .. } | ExprKind::Cast { .. } => {
-                output_name(expr)
-            }
-            _ => sql_type.internal_name().to_owned(),
+        ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
+        ExprKind::SessionValue { name, .. } => ((*name).to_owned(), true),
+        ExprKind::Aggregate { function, .. } => (function.name().to_owned(), true),
+        ExprKind::Cast { expr, sql_type } => match name_and_whether_it_names_a_value(expr) {
+            (name, true) => (name, true),
+            (_, false) => (sql_type.internal_name().to_owned(), false),
         },
-        ExprKind::Case { .. } => "case".into(),
-        ExprKind::Literal(Literal::Boolean(_)) => "bool".into(),
-        _ => "?column?".into(),
+        ExprKind::Case { .. } => ("case".into(), false),
+        ExprKind::Literal(Literal::Boolean(_)) => ("bool".into(), false),
+        _ => ("?column?".into(), false),
     }
 }
 

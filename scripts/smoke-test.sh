@@ -197,6 +197,20 @@ expect_output 'the last commit' "$eggdb" get v0.2.0-log-to-replay.db log:2
 expect_exit 1 "$eggdb" get v0.2.0-log-to-replay.db large
 pass "the v0.2.0 sample files: check, get, scan, a log to replay"
 
+expect_exit 0 "$eggdb" create shell.db
+printf '%s\n' 'put user:1 Ada' 'create table t (id integer primary key, name text);' \
+  "insert into t values (1, 'x')," "  (2, 'y');" 'select name from t order by id;' '.tables' 'get user:1' > shell.in
+expect_exit 0 "$eggdb" shell shell.db < shell.in
+[ "$(tr '\n' '|' < last.out)" = "CREATE TABLE|INSERT 0 2| name|------| x| y|(2 rows)||t|Ada|" ] ||
+  fail "eggdb shell with piped lines printed $(cat last.out)"
+grep -q "$(printf '\033')" last.out && fail "eggdb shell wrote escape sequences into a pipe"
+expect_exit 3 "$eggdb" shell shell.db -c 'select 1/0;' -c 'get user:1'
+grep -q 'SQLSTATE:  22012' last.err || fail "eggdb shell -c said $(cat last.err)"
+[ ! -s last.out ] || fail "eggdb shell ran on after the first failure: $(cat last.out)"
+expect_exit 1 "$eggdb" shell shell.db --keep-going -c 'get nobody' -c 'select count(*) from t'
+grep -q '     2' last.out || fail "eggdb shell --keep-going printed $(cat last.out)"
+pass "shell: piped lines and -c, key-value commands, SQL and meta-commands, stopping at the first failure"
+
 expect_exit 0 "$eggdb" ui --help
 grep -q '^Usage: eggdb ui <file>' last.out || fail "eggdb ui --help printed $(cat last.out)"
 expect_exit 2 "$eggdb" ui app.db < /dev/null
@@ -238,6 +252,37 @@ else
   expect_output 'value of a:3' "$eggdb" get ui.db a:3
   expect_exit 0 "$eggdb" check ui.db
   pass "ui in a terminal: open, move, delete with a confirmation, quit"
+  status=0
+  {
+    sleep 1
+    printf s
+    sleep 1
+    printf 'SELECT 6 * 7 AS answer;'
+    sleep 1
+    printf '\033[15~'
+    sleep 1
+    printf '\003'
+    sleep 1
+  } | run_in_terminal "'$eggdb' ui ui.db" > /dev/null 2>&1 || status=$?
+  [ "$status" -eq 0 ] || fail "eggdb ui's query screen exited $status; screen: $(cat screen.log)"
+  grep -q 'answer' screen.log || fail "the query screen showed no column: $(cat screen.log)"
+  grep -q '42' screen.log || fail "the query screen showed no result: $(cat screen.log)"
+  grep -q '(1 row)' screen.log || fail "the query screen showed no row count: $(cat screen.log)"
+  pass "ui in a terminal: the query screen runs SQL with F5 and shows the result"
+  status=0
+  {
+    sleep 1
+    printf 'select 40 + 2 as answer;\r'
+    sleep 1
+    printf '.quit\r'
+    sleep 1
+  } | EGGDB_HISTORY="$work/history" run_in_terminal "'$eggdb' shell ui.db" > /dev/null 2>&1 || status=$?
+  [ "$status" -eq 0 ] || fail "eggdb shell in a terminal exited $status; screen: $(cat screen.log)"
+  grep -q 'Type .help for help' screen.log || fail "eggdb shell showed no banner: $(cat screen.log)"
+  grep -q 'ui=> ' screen.log || fail "eggdb shell showed no prompt: $(cat screen.log)"
+  grep -q '42' screen.log || fail "eggdb shell showed no result: $(cat screen.log)"
+  grep -qx 'select 40 + 2 as answer;' "$work/history" || fail "eggdb shell kept no history: $(cat "$work/history")"
+  pass "shell in a terminal: banner, prompt, a statement, history, .quit"
 fi
 
 echo "smoke test passed: $passed groups against $eggdb"

@@ -111,7 +111,7 @@ pub(crate) fn both_streams_are_terminals() -> bool {
 }
 
 impl RawMode {
-    pub(crate) fn enter(start_sequence: &[u8]) -> io::Result<Self> {
+    pub(crate) fn enter(screen: crate::terminal::Screen) -> io::Result<Self> {
         if !both_streams_are_terminals() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -127,6 +127,7 @@ impl RawMode {
                 "the terminal is already in raw mode",
             ));
         }
+        screen.claim();
         match enter_raw_mode() {
             Ok(()) => {}
             Err(error) => {
@@ -138,7 +139,7 @@ impl RawMode {
         let mode = Self {
             _not_send: std::marker::PhantomData,
         };
-        write_fully(start_sequence)?;
+        write_fully(screen.start_sequence())?;
         Ok(mode)
     }
 
@@ -277,7 +278,7 @@ fn restore_with(put_back: impl FnOnce()) {
 }
 
 fn put_terminal_back() {
-    let restore_bytes = crate::terminal::RESTORE_SEQUENCE;
+    let restore_bytes = crate::terminal::restore_sequence();
     // SAFETY: write is async-signal-safe; the pointer and length describe a static string.
     let _ = unsafe { write(STDOUT, restore_bytes.as_ptr().cast(), restore_bytes.len()) };
     let saved = OpaqueBuffer::load(&SAVED);

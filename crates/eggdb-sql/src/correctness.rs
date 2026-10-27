@@ -1,0 +1,166 @@
+use crate::memory_store::MemoryStore;
+use crate::session::Session;
+use crate::tests::render;
+
+const SUITES: [(&str, &str); 1] = [("postgresql", include_str!("../correctness/postgresql.test"))];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Expected {
+    Success,
+    Output(String),
+    Failure(String),
+}
+
+#[derive(Debug, Clone)]
+struct Case {
+    line: usize,
+    chapter: String,
+    sql: String,
+    expected: Expected,
+    differs: bool,
+}
+
+fn parse(suite: &str) -> Result<Vec<Case>, String> {
+    let lines: Vec<&str> = suite.lines().collect();
+    let mut cases = Vec::new();
+    let mut chapter = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let header = lines[index].trim_end();
+        let line = index + 1;
+        index += 1;
+        if header.is_empty() {
+            continue;
+        }
+        if let Some(name) = header.strip_prefix("chapter ") {
+            chapter = name.to_owned();
+            continue;
+        }
+        let mut expected = match header.split_once(' ') {
+            None if header == "ok" => Expected::Success,
+            None if header == "rows" => Expected::Output(String::new()),
+            Some(("error", state)) if state.len() == 5 => Expected::Failure(state.to_owned()),
+            _ => return Err(format!("line {line}: unknown header '{header}'")),
+        };
+        let mut sql = Vec::new();
+        while index < lines.len() && !lines[index].is_empty() && lines[index] != "----" {
+            if lines[index] == "... differs" {
+                break;
+            }
+            sql.push(lines[index]);
+            index += 1;
+        }
+        if let Expected::Output(output) = &mut expected {
+            if lines.get(index) != Some(&"----") {
+                return Err(format!(
+                    "line {line}: a rows case needs ---- and its output"
+                ));
+            }
+            index += 1;
+            let mut shown = Vec::new();
+            while index < lines.len() && !lines[index].is_empty() && lines[index] != "... differs" {
+                shown.push(lines[index]);
+                index += 1;
+            }
+            *output = shown.join("\n");
+        }
+        let differs = lines.get(index) == Some(&"... differs");
+        if differs {
+            index += 1;
+        }
+        if sql.is_empty() {
+            return Err(format!("line {line}: a case needs SQL"));
+        }
+        cases.push(Case {
+            line,
+            chapter: chapter.clone(),
+            sql: sql.join("\n"),
+            expected,
+            differs,
+        });
+    }
+    Ok(cases)
+}
+
+fn outcome(session: &mut Session<'_, MemoryStore>, sql: &str) -> Expected {
+    let mut last = None;
+    match session.execute(sql, &mut |result| last = Some(render(&result))) {
+        Ok(()) => Expected::Output(last.unwrap_or_default()),
+        Err(error) => Expected::Failure(error.state().code().to_owned()),
+    }
+}
+
+fn agrees(expected: &Expected, found: &Expected) -> bool {
+    match expected {
+        Expected::Success => matches!(found, Expected::Output(_)),
+        other => other == found,
+    }
+}
+
+fn session_for<'s>(dialect: &str, store: &'s MemoryStore) -> Option<Session<'s, MemoryStore>> {
+    match dialect {
+        "postgresql" => Some(Session::new(store)),
+        _ => None,
+    }
+}
+
+fn run_suite(dialect: &str) -> Result<(usize, usize), Vec<String>> {
+    let Some((_, suite)) = SUITES.iter().find(|(name, _)| *name == dialect) else {
+        return Err(vec![format!("no suite for the dialect {dialect}")]);
+    };
+    let cases = parse(suite).map_err(|problem| vec![problem])?;
+    let store = MemoryStore::default();
+    let Some(mut session) = session_for(dialect, &store) else {
+        return Err(vec![format!("no session for the dialect {dialect}")]);
+    };
+    let mut problems = Vec::new();
+    let mut differences = 0;
+    for case in &cases {
+        let found = outcome(&mut session, &case.sql);
+        let agreed = agrees(&case.expected, &found);
+        if case.differs {
+            differences += 1;
+            if agreed {
+                problems.push(format!(
+                    "line {} ({}): now matches PostgreSQL; remove '... differs' and its entry in docs/sql.md: {}",
+                    case.line, case.chapter, case.sql
+                ));
+            }
+        } else if !agreed {
+            problems.push(format!(
+                "line {} ({}): {}\n  expected {:?}\n  found    {:?}",
+                case.line, case.chapter, case.sql, case.expected, found
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok((cases.len(), differences))
+    } else {
+        Err(problems)
+    }
+}
+
+#[test]
+fn the_postgresql_dialect_behaves_as_its_manual_documents() {
+    match run_suite("postgresql") {
+        Ok((cases, differences)) => {
+            assert!(cases >= 150, "only {cases} cases");
+            assert!(differences * 10 < cases, "{differences} known differences");
+        }
+        Err(problems) => panic!(
+            "{} cases disagree:\n{}",
+            problems.len(),
+            problems.join("\n")
+        ),
+    }
+}
+
+#[test]
+fn the_suite_runner_takes_only_dialects_it_knows() {
+    assert!(run_suite("oracle").is_err());
+    assert_eq!(
+        parse("rows\nSELECT 1").map(|cases| cases.len()),
+        Err("line 1: a rows case needs ---- and its output".to_owned())
+    );
+    assert!(parse("maybe\nSELECT 1").is_err());
+}

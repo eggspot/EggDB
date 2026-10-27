@@ -65,6 +65,29 @@ impl Editor {
         &self.text
     }
 
+    pub(crate) fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub(crate) fn replace(&mut self, from: usize, to: usize, inserted: &str) -> Outcome {
+        let to = to.min(self.text.len());
+        if !self.text.is_char_boundary(from) || !self.text.is_char_boundary(to) || from > to {
+            return Outcome::Ignored;
+        }
+        self.cursor = to;
+        let removed = self.remove(from, to);
+        let added = self.insert(inserted, false);
+        if added == Outcome::Changed {
+            Outcome::Changed
+        } else {
+            removed
+        }
+    }
+
+    pub(crate) fn delete_word_before(&mut self) -> Outcome {
+        self.remove(self.word_start_before(self.cursor), self.cursor)
+    }
+
     pub(crate) fn lines(&self) -> Lines {
         self.lines
     }
@@ -133,6 +156,14 @@ impl Editor {
             self.lines = Lines::Multi;
         }
         self.insert(&spelled, false)
+    }
+
+    pub(crate) fn paste_as_text(&mut self, pasted: &str) -> Outcome {
+        let kept = text::without_controls(&line_feeds(pasted));
+        if kept.contains('\n') {
+            self.lines = Lines::Multi;
+        }
+        self.insert(&kept, false)
     }
 
     pub(crate) fn paste_on_one_line(&mut self, pasted: &str) -> Outcome {

@@ -1,0 +1,180 @@
+use super::Terminal;
+use super::tests::{Ran, TempDirectory, run_with};
+
+fn shell(file: &str, extra: &[&str], stdin: &str) -> Ran {
+    let mut args = vec!["shell", file];
+    args.extend_from_slice(extra);
+    run_with(&args, stdin.as_bytes(), Terminal::default())
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn created(directory: &TempDirectory) -> String {
+    let file = directory.file("app.db");
+    let made = run_with(&["create", &file], b"", Terminal::default());
+    assert_eq!(made.exit, 0, "{}", text(&made.stderr));
+    file
+}
+
+#[test]
+fn piped_lines_mix_key_value_commands_sql_and_meta_commands() {
+    let directory = TempDirectory::new("shell-piped");
+    let file = created(&directory);
+    let script = "put user:1 Ada\n\
+        put user:2 \"Grace Hopper\"\n\
+        get user:2\n\
+        create table items (id integer primary key, name text);\n\
+        insert into items\n  values (1, 'egg'), (2, null);\n\
+        select * from items order by id;\n\
+        .tables\n\
+        .schema items\n\
+        .mode csv\n\
+        select name from items order by id;\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "Grace Hopper\n\
+         CREATE TABLE\n\
+         INSERT 0 2\n \
+         id | name\n\
+         ----+------\n  \
+         1 | egg\n  \
+         2 |\n\
+         (2 rows)\n\
+         \n\
+         items\n\
+         CREATE TABLE items (id integer, name text, PRIMARY KEY (id));\n\
+         mode: csv\n\
+         name\n\
+         egg\n\
+         \n"
+    );
+    assert!(!text(&ran.stdout).contains('\x1b'));
+}
+
+#[test]
+fn the_first_failure_stops_a_batch_unless_keep_going() {
+    let directory = TempDirectory::new("shell-stop");
+    let file = created(&directory);
+    let script = "select 1/0;\nselect 'after';\n";
+    let stopped = shell(&file, &[], script);
+    assert_eq!(stopped.exit, 3);
+    assert_eq!(text(&stopped.stdout), "");
+    assert_eq!(
+        text(&stopped.stderr),
+        "ERROR:  division by zero\nLINE 1: select 1/0;\n               ^\nSQLSTATE:  22012\n"
+    );
+    let kept = shell(&file, &["--keep-going"], "get nope\nselect 'after' as a;\n");
+    assert_eq!(kept.exit, 1);
+    assert!(
+        text(&kept.stdout).contains("after"),
+        "{}",
+        text(&kept.stdout)
+    );
+    assert!(text(&kept.stderr).contains("eggdb: key not found: nope"));
+}
+
+#[test]
+fn dash_c_runs_each_text_in_order_and_a_last_statement_needs_no_semicolon() {
+    let directory = TempDirectory::new("shell-c");
+    let file = created(&directory);
+    let ran = shell(
+        &file,
+        &["-c", "put k v", "-c", "scan -k", "-c", "select 1 as one"],
+        "",
+    );
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(text(&ran.stdout), "k\n one\n-----\n   1\n(1 row)\n\n");
+}
+
+#[test]
+fn a_transaction_block_spans_lines_and_a_failure_aborts_it_until_rollback() {
+    let directory = TempDirectory::new("shell-block");
+    let file = created(&directory);
+    let script = "create table t (id integer primary key);\n\
+        begin;\ninsert into t values (1);\ninsert into t values (1);\n\
+        select 1;\nrollback;\nselect count(*) from t;\nbegin;\ninsert into t values (2);\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    assert_eq!(ran.exit, 3);
+    let stderr = text(&ran.stderr);
+    assert!(stderr.contains("SQLSTATE:  23505"), "{stderr}");
+    assert!(stderr.contains("SQLSTATE:  25P02"), "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "WARNING:  the shell ended inside a transaction block (BEGIN without COMMIT); it was rolled back\n"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        text(&ran.stdout).contains("     0\n(1 row)"),
+        "{}",
+        text(&ran.stdout)
+    );
+}
+
+#[test]
+fn shell_usage_errors_name_the_problem() {
+    let directory = TempDirectory::new("shell-usage");
+    let file = created(&directory);
+    for (line, message) in [
+        (
+            ".nope",
+            "eggdb: unknown command '.nope'. Type .help for the list.\n",
+        ),
+        (
+            ".mode wide",
+            "eggdb: .mode takes table, expanded or csv, not 'wide'\n",
+        ),
+        (
+            "put only-key",
+            "eggdb: put needs a key and a value here; stdin is the shell's own, so give the value or @file\n",
+        ),
+        (
+            "put k @-",
+            "eggdb: @- reads stdin, which is the shell's own; use @file\n",
+        ),
+        ("get \"open", "eggdb: unfinished \"...\" in the line\n"),
+    ] {
+        let ran = shell(&file, &["-c", line], "");
+        assert_eq!(ran.exit, 2, "{line}");
+        assert_eq!(text(&ran.stderr), message, "{line}");
+    }
+    let missing = shell(&file, &["-c", ".schema nope"], "");
+    assert_eq!(missing.exit, 1);
+    assert_eq!(text(&missing.stderr), "eggdb: no table named nope\n");
+}
+
+#[test]
+fn expanded_mode_prints_one_record_per_block() {
+    let directory = TempDirectory::new("shell-expanded");
+    let file = created(&directory);
+    let ran = shell(
+        &file,
+        &["--mode", "expanded", "-c", "select 1 as id, 'Ada' as name"],
+        "",
+    );
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "-[ RECORD 1 ]-\nid   | 1\nname | Ada\n\n"
+    );
+}
+
+#[test]
+fn backslashes_and_tabs_in_sql_reach_the_table_unchanged() {
+    let directory = TempDirectory::new("shell-backslash");
+    let file = created(&directory);
+    let script = "create table t (id integer primary key, path text);\n\
+        insert into t values (1, 'C:\\dir\\file\tend');\n\
+        select path from t;\n";
+    let ran = shell(&file, &["--mode", "csv"], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert!(
+        text(&ran.stdout).ends_with("path\nC:\\dir\\file\tend\n"),
+        "{}",
+        text(&ran.stdout)
+    );
+}

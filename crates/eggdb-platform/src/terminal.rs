@@ -5,6 +5,7 @@
 
 use std::ffi::OsStr;
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(any(
@@ -53,8 +54,39 @@ use crate::os_terminal_windows as os;
 )))]
 use unsupported as os;
 
-pub(crate) const START_SEQUENCE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?7l\x1b[2J";
-pub(crate) const RESTORE_SEQUENCE: &[u8] = b"\x1b[0m\x1b[?7h\x1b[?2004l\x1b[?25h\x1b[?1049l";
+const START_SEQUENCE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?7l\x1b[2J";
+const RESTORE_SEQUENCE: &[u8] = b"\x1b[0m\x1b[?7h\x1b[?2004l\x1b[?25h\x1b[?1049l";
+const INLINE_START_SEQUENCE: &[u8] = b"\x1b[?2004h";
+const INLINE_RESTORE_SEQUENCE: &[u8] = b"\x1b[0m\x1b[?2004l";
+
+static INLINE_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Screen {
+    Alternate,
+    Inline,
+}
+
+impl Screen {
+    pub(crate) fn start_sequence(self) -> &'static [u8] {
+        match self {
+            Self::Alternate => START_SEQUENCE,
+            Self::Inline => INLINE_START_SEQUENCE,
+        }
+    }
+
+    pub(crate) fn claim(self) {
+        INLINE_SCREEN_ACTIVE.store(self == Self::Inline, Ordering::Release);
+    }
+}
+
+pub(crate) fn restore_sequence() -> &'static [u8] {
+    if INLINE_SCREEN_ACTIVE.load(Ordering::Acquire) {
+        INLINE_RESTORE_SEQUENCE
+    } else {
+        RESTORE_SEQUENCE
+    }
+}
 
 /// The size of a terminal's window in character cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -98,7 +130,16 @@ impl RawTerminal {
     /// [`std::io::ErrorKind::AlreadyExists`] while another `RawTerminal` exists.
     pub fn enter() -> std::io::Result<Self> {
         Ok(Self {
-            mode: os::RawMode::enter(START_SEQUENCE)?,
+            mode: os::RawMode::enter(Screen::Alternate)?,
+        })
+    }
+
+    /// Takes the terminal in raw mode on the normal screen, for a prompt that reads one line
+    /// and gives the terminal back before anything runs: no alternate screen, the cursor
+    /// shown, line wrapping kept, bracketed paste on. Fails as [`RawTerminal::enter`] does.
+    pub fn enter_inline() -> std::io::Result<Self> {
+        Ok(Self {
+            mode: os::RawMode::enter(Screen::Inline)?,
         })
     }
 
@@ -251,21 +292,23 @@ pub fn is_interactive() -> bool {
     target_os = "dragonfly"
 )))]
 mod unsupported {
-    use super::{Input, TerminalSize};
+    use super::{Input, Screen, TerminalSize};
     use std::io;
     use std::time::Duration;
 
     #[derive(Debug)]
     pub(crate) enum RawMode {}
 
-    const _: &[u8] = super::RESTORE_SEQUENCE;
+    const _: fn() -> &'static [u8] = super::restore_sequence;
+    const _: fn(Screen) = Screen::claim;
+    const _: fn(Screen) -> &'static [u8] = Screen::start_sequence;
 
     pub(crate) fn both_streams_are_terminals() -> bool {
         false
     }
 
     impl RawMode {
-        pub(crate) fn enter(_start_sequence: &[u8]) -> io::Result<Self> {
+        pub(crate) fn enter(_screen: Screen) -> io::Result<Self> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "this system has no terminal support",

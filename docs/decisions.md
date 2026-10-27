@@ -129,3 +129,4 @@ its full title with its status.
 - [D102](decisions/D102.md) Every listener binds only to loopback or a local socket until EggDB's own TLS exists (owner rule, an exception to D22)
 - [D103](decisions/D103.md) The PostgreSQL server: an `eggdb-pgwire` crate, a thread per connection, SCRAM-SHA-256 with our own `eggdb-crypto`, one user whose verifier is derived at startup
 - [D104](decisions/D104.md) SQL takes `$n` parameters as text bound at parse time, describes statements without running them, and keeps PostgreSQL's run-time parameters
+- [D105](decisions/D105.md) `eggdb shell` and the query screen reuse the UI's terminal layer and the `sql` command's printers; the correctness suite is a table-driven file per dialect

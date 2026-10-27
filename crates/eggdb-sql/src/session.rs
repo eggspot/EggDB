@@ -331,6 +331,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
+    /// Every table in the catalog, sorted by name, as this session sees them (inside a
+    /// block, with the block's own changes).
+    pub fn tables(&mut self) -> SqlResult<Vec<crate::schema::TableSchema>> {
+        self.read(|reader, _| crate::schema::read_tables(reader))
+    }
+
     /// Whether a `BEGIN` block is open, failed or not.
     pub fn in_block(&self) -> bool {
         !matches!(self.block, Block::None)

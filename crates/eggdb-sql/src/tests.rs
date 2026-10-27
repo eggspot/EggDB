@@ -3,7 +3,7 @@ use crate::memory_store::MemoryStore;
 use crate::{QueryResult, Session, SqlError};
 use std::collections::BTreeMap;
 
-fn render(result: &QueryResult) -> String {
+pub(crate) fn render(result: &QueryResult) -> String {
     let mut out = String::new();
     if let Some(columns) = &result.columns {
         let names: Vec<&str> = columns.iter().map(|column| column.name.as_str()).collect();

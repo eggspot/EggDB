@@ -1,6 +1,7 @@
 mod check;
 mod edit;
 mod modal;
+mod query;
 
 use crate::frame::Frame;
 use crate::json::{self, JsonLine, Token};
@@ -13,6 +14,7 @@ use crate::width::text_width;
 use check::CheckRun;
 use edit::Edit;
 use modal::Modal;
+use query::Query;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -128,6 +130,8 @@ pub struct Ui<S> {
     edit: Option<Edit>,
     modal: Option<Modal>,
     check: Option<CheckRun>,
+    query: Option<Query>,
+    query_open: bool,
     quit: bool,
 }
 
@@ -157,6 +161,8 @@ impl<S: Source> Ui<S> {
             edit: None,
             modal: None,
             check: None,
+            query: None,
+            query_open: false,
             quit: false,
         };
         ui.home();
@@ -640,7 +646,9 @@ impl<S: Source> Ui<S> {
                 if self.modal.is_some() || self.help.is_some() || self.check.is_some() {
                     return;
                 }
-                if self.edit.is_some() {
+                if self.query_open {
+                    self.query_paste(&text);
+                } else if self.edit.is_some() {
                     self.edit_paste(&text);
                 } else if let Some(edit) = self.filter_edit.as_mut() {
                     edit.text
@@ -700,6 +708,10 @@ impl<S: Source> Ui<S> {
             self.check_key(key.code);
             return;
         }
+        if self.query_open {
+            self.query_key(key);
+            return;
+        }
         if self.edit.is_some() {
             self.edit_key(key);
             return;
@@ -725,6 +737,7 @@ impl<S: Source> Ui<S> {
             KeyCode::Char('a') => self.start_add(),
             KeyCode::Char('d') => self.start_delete(),
             KeyCode::Char('c') => self.start_check(),
+            KeyCode::Char('s') => self.open_query(),
             KeyCode::Char('m') => self.show_last_message(),
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('v') => self.cycle_mode(),
@@ -937,6 +950,12 @@ impl<S: Source> Ui<S> {
             return;
         }
         self.draw_header(frame);
+        if self.query_open {
+            self.draw_query(frame);
+            self.draw_status(frame);
+            self.draw_hints(frame);
+            return;
+        }
         if let Some(check) = &self.check {
             self.draw_check(frame, check);
             self.draw_status(frame);
@@ -1580,6 +1599,9 @@ impl<S: Source> Ui<S> {
         if let Some(hints) = self.check_hints() {
             return hints;
         }
+        if let Some(hints) = self.query_hints() {
+            return hints;
+        }
         if let Some(hints) = self.edit_hints() {
             return hints;
         }
@@ -1594,11 +1616,11 @@ impl<S: Source> Ui<S> {
         if self.focus == Pane::Keys {
             vec![
                 Hint::new(up_down, "move"),
-                Hint::new("Enter", "open"),
                 Hint::new("/", "filter"),
                 Hint::new("e", "edit").available(writable && !self.rows.is_empty()),
                 Hint::new("a", "add").available(writable),
                 Hint::new("d", "delete").available(writable && !self.rows.is_empty()),
+                Hint::new("s", "sql"),
                 Hint::new("c", "check"),
                 Hint::new("?", "help"),
                 Hint::new("q", "quit"),
@@ -1762,6 +1784,11 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
         );
     }
     lines.extend([
+        String::new(),
+        "Query       s  SQL screen   F5 or Ctrl-R run   Tab editor/grid   Esc back".to_owned(),
+        "            Ctrl-P/Ctrl-N previous/next query   Enter is a line break".to_owned(),
+        "            A run holds nothing after it: BEGIN and COMMIT in one run, or rolled back"
+            .to_owned(),
         String::new(),
         "Terminal    at least 40x10; two panes from 80 columns".to_owned(),
         "            NO_COLOR, --mono and --ascii change colours and box characters".to_owned(),

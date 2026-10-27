@@ -351,6 +351,199 @@ arrows):
 ```
 The last section is filled in from the open database so the limits shown are the real ones.
 
+## The query screen (`s`)
+Roadmap item 20, designed by Claude Fable (D15). `s` (for SQL; free in every pane) opens the
+query screen from the key list or the viewer: a SQL editor on top, the result grid below, one
+database, the same session rules as `eggdb sql` ([sql.md](../sql.md)). `Esc` goes back to the
+browser, which redraws from a fresh read so tables written by SQL appear under their keys.
+
+### 80 × 24
+```
+ EggDB  app.db                 1.2 MiB · 312 pages · 1,204 keys · 09:14:03Z  RW 
+ SQL  ln 2 col 47                                  F5 or Ctrl-R run · Tab grid 
+ SELECT i.name, sum(s.quantity) AS sold FROM items i                            
+   JOIN sales s ON s.item_id = i.id GROUP BY i.name ORDER BY 2 DESC;█           
+                                                                                
+                                                                                
+ Result  2 rows · 1.3 ms                                 rows 1–2/2 · cols 1–2/2
+  name  | sold                                                                  
+ -------+------                                                                 
+  egg   |    7                                                                  
+  bread |    1                                                                  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ SELECT 2                                                                       
+ F5 run  Tab grid  Ctrl-P/Ctrl-N history  Esc back  ? help  q quit              
+```
+| Region | Rows | Content |
+|--------|------|---------|
+| Header | 1 | unchanged from the main screen |
+| Editor title | 1 | ` SQL  ln <line> col <col>`, right-aligned the run key reminder; focus style when the editor has focus |
+| Editor | `editor_rows` | the multi-line editor of the Editing section (`Lines::Multi`), no line-number gutter, horizontal scrolling per line; `editor_rows = 4` at `rows ≥ 20`, else `2` |
+| Result title | 1 | ` Result  <n> rows · <time>` after a query, ` Result  ERROR` after an error, ` Result` before the first run; right-aligned `rows a–b/n · cols c–d/m`, the grid's window; focus style when the grid has focus |
+| Grid | the rest (`rows − editor_rows − 5`) | the result, the error, or nothing |
+| Status | 1 | the last run's command tags, or a toast |
+| Hints | 1 | as above; in the grid: ` ↑↓ scroll  ←→ columns  Home/End  Tab editor  F5 run  Esc editor  ? help  q quit` |
+
+The main screen's hints bar gains `s sql` after `d delete`, and drops `Enter open` so the line
+fits 80 columns (`Enter` is in the help and under `Panes`): ` ↑↓ move  / filter  e edit  a add
+d delete  s sql  c check  ? help  q quit`. The golden screens and docs/cli.md's frame change
+with it.
+
+### Running
+**`F5` and `Ctrl-R` run**, both, because that is what terminals can send: `Ctrl-Enter` reaches
+the program as plain `Enter` in nearly every terminal (the decoder maps `\r` and `\n` to one
+`Enter`, so `Ctrl-J` is not distinguishable either), while `F5` is `ESC[15~` everywhere and is
+the run key of SQL Server Management Studio, and `Ctrl-R` is a plain control byte, free in the
+editor (`IXON` is off, so `Ctrl-S`/`Ctrl-Q` would also pass, but `Ctrl-S` is the editors'
+confirm key and stays out of this). `Enter` inserts a line break, as in every multi-line editor
+here. The hint bar names both keys.
+
+A run is the editor's whole text, executed as `eggdb sql` executes a script: statements in
+order, each its own transaction unless `BEGIN` opened a block, on a worker thread with the
+database shared as the check is, so the screen keeps drawing (`Result  running 00:03` and the
+spinner in the title; keys other than `q`/`Ctrl-C` wait). A statement cannot be cancelled in
+this release. Nothing is held between runs: **a block left open at the end of a run is rolled
+back** and the status says `WARNING: the run ended inside a transaction block (BEGIN without
+COMMIT); it was rolled back`, so the UI keeps its rule of holding no transaction between key
+presses; a transaction is `BEGIN … COMMIT` inside one run. An empty editor runs nothing and
+the toast says `Nothing to run`. The run's text is pushed on the history (below) when it
+differs from the newest entry.
+
+After a run:
+- The grid shows the **last result with columns** (the last `SELECT`, or `RETURNING`); the
+  result title shows its row count and the whole run's time (`2 rows · 1.3 ms`; `1 row`;
+  `0 rows`; `s` from 1,000 ms). A run with no such statement clears the grid and the title says
+  ` Result  no rows to show`.
+- The status line shows every statement's command tag in order, `·` between them:
+  `CREATE TABLE · INSERT 0 2 · SELECT 2`; a notice from the session is appended after the tags
+  and the line is cut with `(m)` as any toast is.
+- Rows are kept in memory as the session returns them (sql.md's 1 GiB bound applies, and its
+  `53200` error shows like any error); the grid formats only the visible window per frame.
+
+### The grid
+psql's aligned table, the same renderer as `eggdb sql` (centred header, rule, numbers
+right-aligned, NULL empty), windowed in both directions:
+- Column widths come from the header and every row, capped at 48 cells; a longer cell is cut
+  with `…` in the grid (the full value is in `eggdb sql`'s output or an expanded view of a
+  later release). Columns are never wrapped.
+- `↑` `↓` `j` `k` scroll one row, `PgUp` `PgDn` a page, `Home` `End` `g` `G` to the first and
+  last row; `←` `→` scroll by one whole column (the first visible column changes; the header and
+  rule scroll with the rows), `Ctrl-Home`/`Ctrl-End` to the first and last column. The title's
+  `rows 1–14/2,031 · cols 1–3/7` always says where the window is.
+- Below the last row, when it is visible, the grid prints `(2,031 rows)` dimmed, as psql does.
+
+### Errors
+An error replaces the grid with `eggdb sql`'s error text, the first line in the error style,
+and the editor's cursor moves to the error's position (the character the caret points at):
+```
+ Result  ERROR                                                                  
+ ERROR:  relation "users" does not exist                                        
+ LINE 1: SELECT name FROM users WHERE id = 1;                                   
+                          ^                                                     
+ SQLSTATE:  42P01                                                               
+```
+`DETAIL:` and `HINT:` lines appear as the session gives them. Statements before the failing
+one keep their effects (committed outside a block, rolled back inside one), and the status line
+shows their tags followed by `· ERROR`. Engine errors that are not SQL (`Locked`, `Corrupt`,
+`NeedsReopen`) use the main screen's modals and `Try:` lines unchanged.
+
+### Focus and keys
+Focus starts in the editor. `Tab` and `Shift-Tab` switch between editor and grid; `Esc` in the
+grid returns to the editor, `Esc` in the editor leaves the screen. The editor keeps its text,
+cursor and the last result while the UI runs, so `s` after `Esc` returns to where you were;
+nothing is written to disk. In the editor every printable key types (`?` and `q` included,
+`F1` opens the help at its Query section); `Ctrl-C` quits as everywhere (no question: the
+editor's text is not a value, and nothing is uncommitted between runs). In the grid, the
+letters of the key map above work and `s` is a no-op.
+
+| Key | In the editor | In the grid |
+|-----|---------------|-------------|
+| `F5` `Ctrl-R` | run | run |
+| `Tab` `Shift-Tab` | focus the grid (`Tab` never inserts a tab here; SQL has no use for one) | focus the editor |
+| `Enter` | line break | — |
+| `Ctrl-P` `Ctrl-N` | older / newer history entry | — |
+| `Esc` | back to the browser | focus the editor |
+| `↑` `↓` `←` `→` `Home` `End` `PgUp` `PgDn` | move the cursor (editor keys) | scroll (above) |
+| `Ctrl-A` `Ctrl-E` `Ctrl-U` `Ctrl-K` `Ctrl-Z` `Ctrl-Y` `Ctrl-←` `Ctrl-→` | the editor's own | — |
+| `?` | types | help screen |
+| `q` `Ctrl-C` | `q` types; `Ctrl-C` quits | quit |
+
+Read-only (`--read-only`): the screen opens and runs; a write fails with the session's `25006`
+error like any other error, so nothing is dimmed.
+
+### History
+In memory, the newest 100 distinct runs, in the order run; `Ctrl-P` replaces the editor's text
+with the previous entry and `Ctrl-N` with the next, the text being edited kept at the newest
+end as a shell does, the cursor at the end of the recalled text. The history is gone when the
+UI quits; the shell's file is the shell's (cli.md, section 15).
+
+### Help screen
+The help gains a section before `Terminal`:
+```
+ Query       s  SQL screen   F5 or Ctrl-R run   Tab editor/grid   Esc back
+             Ctrl-P/Ctrl-N previous/next query   Enter is a line break
+             A run holds nothing after it: BEGIN…COMMIT in one run, or rolled back
+```
+
+### Small terminals
+At `cols < 80` the grid still draws (the result is scrolled horizontally like any wide
+result); at `rows < 20` the editor is 2 rows. Below 40 × 10 the too-small message of the main
+screen applies and the editor's text waits behind it.
+
+### Examples
+A write, with its tags in the status line and no rows to show:
+```
+ EggDB  app.db                 1.2 MiB · 314 pages · 1,207 keys · 09:15:11Z  RW 
+ SQL  ln 2 col 46                                  F5 or Ctrl-R run · Tab grid 
+ CREATE TABLE sales (id integer PRIMARY KEY, item_id integer, quantity integer);
+ INSERT INTO sales VALUES (1, 1, 3), (2, 2, 1), (3, 1, 4);█                     
+                                                                                
+                                                                                
+ Result  no rows to show                                                        
+                                                                                
+ …                                                                              
+ CREATE TABLE · INSERT 0 3                                                      
+ F5 run  Tab grid  Ctrl-P/Ctrl-N history  Esc back  ? help  q quit              
+```
+Scenarios for the tests, in the style of the list above: 25. `s` opens the screen with focus
+in the editor and an empty grid; 26. `F5` and `Ctrl-R` run a `SELECT` and the grid, title and
+status match the golden screen; 27. a 2,031-row, 7-column result scrolls in both directions
+and the title tracks it; 28. an error replaces the grid, the cursor lands on the caret's
+character, the next run clears it; 29. `BEGIN` without `COMMIT` is rolled back with the
+warning and the main screen's keys show nothing of it; 30. `Ctrl-P`/`Ctrl-N` recall runs and
+keep the draft; 31. `Esc`, `s` returns with text, cursor and result intact; 32. the main
+screen's hints bar at 80 columns reads as stated above.
+
+### Decided by this design
+1. `s` opens it; `F5` and `Ctrl-R` run, because `Ctrl-Enter` and `Ctrl-J` cannot be told from
+   `Enter` by a terminal.
+2. A run is a script and holds nothing afterwards: a block left open is rolled back with a
+   warning, keeping decision 1 of this document.
+3. The grid shows the last result with columns; every statement's tag goes to the status line.
+4. Cells are cut at 48 cells with `…`, columns scroll whole; nothing wraps.
+5. History is in memory, 100 entries, `Ctrl-P`/`Ctrl-N`.
+6. The main screen's hints bar trades `Enter open` for `s sql` at 80 columns.
+
+### As built in v0.2.0 (D105)
+1. A run happens on the UI's thread, without the spinner: a statement cannot be cancelled in
+   this release, so a worker would only animate the wait. Engine errors show as error lines in
+   the grid's place, not as modals.
+2. The editor's hints bar reads ` F5 run  Tab grid  Ctrl-P/Ctrl-N history  Esc back  F1 help
+   Ctrl-C quit`: `?` and `q` type in the editor, so the hint names the keys that work there.
+3. `Ctrl-P` from a just-run text skips the history entry equal to it, so the first press shows
+   the run before.
+4. A page (`PgUp`/`PgDn`) is the grid's visible rows.
+
 ## Resize
 The terminal layer delivers a `Resize` event; the UI recomputes the layout and redraws. The
 selected key stays selected and visible (the window is re-read with the selection in the same

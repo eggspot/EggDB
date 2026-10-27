@@ -155,6 +155,22 @@ pub(crate) fn decoded(text: &str) -> Result<Vec<u8>, BadEscape> {
     Ok(out)
 }
 
+pub(crate) fn without_controls(text: &str) -> String {
+    text.chars()
+        .filter(|&c| !c.is_control() || c == '\t' || c == '\n')
+        .collect()
+}
+
+pub(crate) fn shown_in_cells(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\t' | '\n' => ' ',
+            c if is_unprintable(c) => '?',
+            c => c,
+        })
+        .collect()
+}
+
 pub(crate) fn literal(text: &str) -> String {
     spelled(text.as_bytes(), LineBreaks::Kept)
 }

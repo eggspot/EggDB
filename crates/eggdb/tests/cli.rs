@@ -124,6 +124,7 @@ Commands:
   import <file> [in]            load an export, from a file or stdin; see --create
   sql    <file> [script]        run SQL (PostgreSQL dialect) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL clients (psql, drivers); see --listen
+  shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -456,7 +457,7 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);
@@ -464,7 +465,7 @@ fn every_exit_code_and_its_message() {
         stderr(&option),
         "eggdb: unknown option '--reverse' for eggdb get\n  usage: eggdb get <file> <key>\n  try: eggdb help get\n"
     );
-    for reserved in ["shell", "backup", "compact"] {
+    for reserved in ["backup", "compact"] {
         let output = dir.eggdb(&[reserved, "app.db"]);
         assert_exit(&output, 2);
         assert_eq!(

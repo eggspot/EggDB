@@ -24,6 +24,7 @@ mod join;
 mod lexer;
 mod memory;
 mod parser;
+mod schema;
 mod session;
 mod settings;
 mod store;
@@ -31,11 +32,14 @@ mod types;
 mod typing;
 
 #[cfg(test)]
+mod correctness;
+#[cfg(test)]
 mod memory_store;
 #[cfg(test)]
 mod tests;
 
 pub use error::{SqlError, SqlResult, SqlState};
+pub use schema::{ColumnSchema, TableSchema, quoted};
 pub use session::{
     OutputColumn, Parameter, PreparedStatement, QueryResult, Session, StatementDescription,
     TransactionStatus,

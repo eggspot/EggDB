@@ -48,13 +48,14 @@ eggdb <command> <file> [arguments] [options]
 | `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below) |
 | `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect (below, and [sql.md](sql.md)) |
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
+| `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
 The command comes first and the file second; options may go anywhere after the command, and
 `--` ends them, so `eggdb get app.db -- -k` reads the key `-k`.
 
-**Only `create`, `put --create`, `import --create`, `sql --create` and `serve --create` make a database file.** A wrong path such
+**Only `create`, `put --create`, `import --create`, `sql --create`, `serve --create` and `shell --create` make a database file.** A wrong path such
 as `app.bd` is an error that says how to create the file, never a new empty database that later
 reads as "empty".
 
@@ -216,7 +217,7 @@ differs from them. The main screen, with a JSON value selected:
   user:4                      41│
   user:5                      41│
 
- ↑↓ move  Enter open  / filter  e edit  a add  d delete  c check  ? help  q quit
+ ↑↓ move  / filter  e edit  a add  d delete  s sql  c check  ? help  q quit
 ```
 
 | Keys | In the key list | In the value viewer |
@@ -347,6 +348,23 @@ edit is not committed).
 
 
  Enter back  q quit
+```
+
+`s` opens the query screen: a SQL editor on top and the last result below. `F5` or `Ctrl-R`
+runs the editor's whole text as `eggdb sql` runs a script (`Ctrl-Enter` cannot be told from
+`Enter` by a terminal, so `Enter` is a line break); `Tab` moves between the editor and the
+result grid, which scrolls by rows (`↑` `↓` `PgUp` `PgDn` `Home` `End`) and by whole columns
+(`←` `→`); `Ctrl-P` and `Ctrl-N` recall earlier runs; `Esc` goes back to the keys, which are
+read again. A run holds nothing afterwards: a `BEGIN` without `COMMIT` is rolled back with a
+warning in the status line, which lists every statement's command tag. An error replaces the
+grid in psql's style and puts the cursor on the character it points at:
+
+```text
+ Result  ERROR
+ ERROR:  relation "users" does not exist
+ LINE 1: SELECT name FROM users WHERE id = 1;
+                          ^
+ SQLSTATE:  42P01
 ```
 
 ## `export` and `import`
@@ -488,6 +506,102 @@ SQLSTATE:  42P01
   `-c` and a script together, a script that cannot be read, or SQL that is not UTF-8 are usage
   errors (exit 2).
 
+## `eggdb shell`
+
+```
+eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--read-only] [--create]
+```
+
+One prompt for everything this page and [sql.md](sql.md) do with a file: the key-value
+commands without their `eggdb <command> <file>` prefix, SQL in the PostgreSQL dialect, and a
+few `.` commands. The file stays open for writing while the shell runs (`--read-only`: open
+read-only), so other writers get the busy message meanwhile. The design is
+[ux/cli.md](ux/cli.md), section 15.
+
+```
+$ eggdb shell app.db
+EggDB 0.2.0: app.db, open read-write (2 tables)
+Type .help for help. SQL ends with ; and .quit or Ctrl-D quits.
+app=> put user:1 Ada
+app=> get user:1
+Ada
+app=> select i.name, sum(s.quantity) as sold
+app-> from items i join sales s on s.item_id = i.id
+app-> group by i.name order by 2 desc;
+ name  | sold
+-------+------
+ egg   |    7
+ bread |    1
+(2 rows)
+
+app=> begin;
+BEGIN
+app=*> select 1/0;
+ERROR:  division by zero
+LINE 1: select 1/0;
+               ^
+SQLSTATE:  22012
+app=!> rollback;
+ROLLBACK
+app=> .quit
+```
+
+**What a line is.** A line that starts with `.` is a shell command. A line whose first word is
+`put`, `get`, `del`, `scan`, `check` or `stats` (lower case) is that key-value command, with the
+arguments and options it takes on the command line, split like a shell splits them (`"..."` and
+`'...'` hold spaces); `@-` is refused, since stdin is the shell's own. Anything else is SQL,
+which continues over lines until a `;` outside quotes, comments and `$$` bodies. `delete` starts
+a SQL `DELETE`; the key-value command is `del`. Shell and key-value commands are recognised only
+at the start of a statement, not on its continuation lines.
+
+**The prompt** is the file's stem with psql's markers: `app=>` for a new statement, `app->` while
+one continues, `app'>` and `app">` inside an unfinished string or quoted name, `app=*>` inside a
+`BEGIN` block and `app=!>` in a failed one (every statement answers `25P02` until `ROLLBACK`).
+`BEGIN` holds the database's write transaction across prompts until `COMMIT` or `ROLLBACK`; a
+block still open when the shell ends is rolled back with a `WARNING:`. Key-value writes inside a
+block fail with the busy error (exit 5): the block holds the one write transaction.
+
+| Shell command | Does |
+|---------------|------|
+| `.tables` | the tables, one per line |
+| `.schema [table]` | the `CREATE TABLE` statements, all or one |
+| `.mode [table\|expanded\|csv]` | how results print: psql's aligned table (the default; on a terminal a result wider than the window prints expanded), one record per block, or CSV with a header row; no argument shows the mode |
+| `.timer [on\|off]` | `Time: 1.234 ms` on stderr after every statement and command |
+| `.help` | the commands, keys and the history file |
+| `.quit`, `.exit` | leave (so does `Ctrl-D` on an empty line) |
+
+| Key | Does |
+|-----|------|
+| `←` `→`, `Home` `End`, `Ctrl-A` `Ctrl-E` | move by a character, to the start or the end |
+| `Alt-B` `Alt-F`, `Ctrl-←` `Ctrl-→` | move by a word |
+| `Backspace` `Delete`, `Ctrl-W`, `Ctrl-U` `Ctrl-K` | delete a character, the word before the cursor, to the start or the end |
+| `Ctrl-Z` `Ctrl-Y` | undo and redo within the line |
+| `Tab` | complete: commands at the start of a line, table names after `FROM`, `JOIN`, `INTO`, `UPDATE`, `TABLE` and `.schema`, the columns of the tables a statement names, SQL keywords and functions, and keys after `get`, `del` and `scan --prefix/--from/--to`; a second `Tab` lists the candidates |
+| `↑` `↓`, `Ctrl-R` | the previous and next history entries, and a reverse search |
+| `Ctrl-C` | clears the line and an unfinished statement |
+| `Ctrl-D` | on an empty line, leaves |
+| `Ctrl-L` | clears the screen |
+
+**History** is kept in `$XDG_STATE_HOME/eggdb/history`, else `~/.local/state/eggdb/history`
+(macOS too), or `%LOCALAPPDATA%\EggDB\history` on Windows: one entry per statement or command,
+the newest 1,000, mode 0600 in a 0700 directory. Empty lines, lines starting with a space,
+repeats of the previous entry and `.quit` are not kept. `EGGDB_HISTORY=<path>` moves the file and
+`EGGDB_HISTORY=` (set and empty) turns it off.
+
+**Batch use.** With `-c` (repeatable, run in order) or with stdin not a terminal, the shell runs
+the text as if typed, without banner, prompt, colour or history, and prints results in `table`
+mode whatever their width, so the output is stable for scripts. A last statement without `;`
+runs at the end of each `-c` text and of stdin. It stops at the first failure with that
+failure's exit code (1 for a missing key, 2 for a usage error such as an unknown `.` command, 3
+for a SQL error, 4 damaged, 5 busy) unless `--keep-going`, which runs on and exits with the
+first failure's code.
+
+```sh
+eggdb shell app.db -c "put user:2 Grace" -c "select count(*) from items;"
+eggdb shell app.db < session.txt
+eggdb shell app.db --mode csv -c "select * from items" > items.csv
+```
+
 ## `eggdb serve`
 
 ```
@@ -567,7 +681,7 @@ eggdb: unknown option '--reverse' for eggdb get
   try: eggdb help get
 ```
 
-The commands that are coming (`shell`, `backup`, `compact`) answer
+The commands that are coming (`backup`, `compact`) answer
 `eggdb <name> is not in this release yet; see docs/roadmap.md` and exit 2, so no script is built
 on a name that later changes meaning.
 

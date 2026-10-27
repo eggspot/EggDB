@@ -5,7 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-const RESERVED_COMMANDS: [&str; 3] = ["shell", "backup", "compact"];
+const RESERVED_COMMANDS: [&str; 2] = ["backup", "compact"];
 const SMALLEST_PAGE_SIZE: usize = 4096;
 const LARGEST_PAGE_SIZE: usize = 65536;
 
@@ -23,6 +23,7 @@ pub(crate) enum CommandName {
     Import,
     Sql,
     Serve,
+    Shell,
 }
 
 impl CommandName {
@@ -40,6 +41,7 @@ impl CommandName {
             b"import" => Self::Import,
             b"sql" => Self::Sql,
             b"serve" => Self::Serve,
+            b"shell" => Self::Shell,
             _ => return None,
         })
     }
@@ -58,6 +60,7 @@ impl CommandName {
             Self::Import => "import",
             Self::Sql => "sql",
             Self::Serve => "serve",
+            Self::Shell => "shell",
         }
     }
 
@@ -65,19 +68,23 @@ impl CommandName {
         match option {
             OptionName::Cache | OptionName::Help | OptionName::Version => true,
             OptionName::Color => true,
-            OptionName::Format => !matches!(self, Self::Ui | Self::Sql),
+            OptionName::Format => !matches!(self, Self::Ui | Self::Sql | Self::Shell),
             OptionName::Mono | OptionName::Ascii => self == Self::Ui,
-            OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve),
+            OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve | Self::Shell),
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
             OptionName::Create => {
-                matches!(self, Self::Put | Self::Import | Self::Sql | Self::Serve)
+                matches!(
+                    self,
+                    Self::Put | Self::Import | Self::Sql | Self::Serve | Self::Shell
+                )
             }
             OptionName::Listen
             | OptionName::User
             | OptionName::PasswordFile
             | OptionName::Database
             | OptionName::MaxConnections => self == Self::Serve,
-            OptionName::Command => self == Self::Sql,
+            OptionName::Command => matches!(self, Self::Sql | Self::Shell),
+            OptionName::KeepGoing | OptionName::Mode => self == Self::Shell,
             OptionName::OnConflict | OptionName::DryRun => self == Self::Import,
             OptionName::Prefix
             | OptionName::From
@@ -163,6 +170,8 @@ enum OptionName {
     PasswordFile,
     Database,
     MaxConnections,
+    KeepGoing,
+    Mode,
 }
 
 impl OptionName {
@@ -192,6 +201,8 @@ impl OptionName {
             b"password-file" => Self::PasswordFile,
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
+            b"keep-going" => Self::KeepGoing,
+            b"mode" => Self::Mode,
             _ => return None,
         })
     }
@@ -222,6 +233,7 @@ impl OptionName {
                 | Self::Ascii
                 | Self::ReadOnly
                 | Self::DryRun
+                | Self::KeepGoing
         )
     }
 }
@@ -254,6 +266,40 @@ pub(crate) struct Request {
     pub(crate) dry_run: bool,
     pub(crate) sql: Option<SqlSource>,
     pub(crate) serve: ServeOptions,
+    pub(crate) shell: ShellOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ShellOptions {
+    pub(crate) commands: Vec<String>,
+    pub(crate) keep_going: bool,
+    pub(crate) mode: Option<ResultMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResultMode {
+    Table,
+    Expanded,
+    Csv,
+}
+
+impl ResultMode {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "table" => Self::Table,
+            "expanded" => Self::Expanded,
+            "csv" => Self::Csv,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Table => "table",
+            Self::Expanded => "expanded",
+            Self::Csv => "csv",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -328,7 +374,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version.",
+            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version.",
             None,
         ));
     };
@@ -456,6 +502,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         dry_run: false,
         sql: None,
         serve: ServeOptions::default(),
+        shell: ShellOptions::default(),
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -499,6 +546,23 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.on_conflict = parse_on_conflict(value).map_err(usage)?
             }
             OptionName::DryRun => request.dry_run = true,
+            OptionName::Command if command == CommandName::Shell => {
+                let text = value
+                    .to_str()
+                    .ok_or_else(|| usage(format!("{} must be UTF-8 text", option.spelled)))?;
+                request.shell.commands.push(text.to_owned());
+            }
+            OptionName::KeepGoing => request.shell.keep_going = true,
+            OptionName::Mode => {
+                let name = value.to_str().unwrap_or_default();
+                request.shell.mode = Some(ResultMode::parse(name).ok_or_else(|| {
+                    usage(format!(
+                        "{} takes table, expanded or csv, not '{}'",
+                        option.spelled,
+                        shown(value)
+                    ))
+                })?);
+            }
             OptionName::Command => {
                 if request.sql.is_some() {
                     return Err(usage(
@@ -549,7 +613,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Check
         | CommandName::Stats
         | CommandName::Ui
-        | CommandName::Serve => (1, 1),
+        | CommandName::Serve
+        | CommandName::Shell => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql => (1, 2),
         CommandName::Get | CommandName::Del => (2, 2),
         CommandName::Put => (2, 3),
@@ -647,7 +712,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version.",
             render::text(name)
         ),
         None,
@@ -886,7 +951,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -929,7 +994,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -942,7 +1007,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),
@@ -952,7 +1017,7 @@ mod tests {
 
     #[test]
     fn reserved_commands_point_to_the_roadmap() {
-        for name in ["shell", "backup", "compact"] {
+        for name in ["backup", "compact"] {
             assert_eq!(
                 usage_message(&format!("{name} app.db")),
                 format!("eggdb {name} is not in this release yet; see docs/roadmap.md")

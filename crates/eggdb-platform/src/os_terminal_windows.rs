@@ -141,7 +141,7 @@ pub(crate) fn both_streams_are_terminals() -> bool {
 }
 
 impl RawMode {
-    pub(crate) fn enter(start_sequence: &[u8]) -> io::Result<Self> {
+    pub(crate) fn enter(screen: crate::terminal::Screen) -> io::Result<Self> {
         let input = standard_handle(STD_INPUT_HANDLE);
         let output = standard_handle(STD_OUTPUT_HANDLE);
         let (Some(input_mode), Some(output_mode)) = (console_mode(input), console_mode(output))
@@ -160,6 +160,7 @@ impl RawMode {
                 "the console is already in raw mode",
             ));
         }
+        screen.claim();
         let raw_output =
             (output_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
                 | DISABLE_NEWLINE_AUTO_RETURN;
@@ -198,7 +199,7 @@ impl RawMode {
             resized: false,
             high_surrogate: None,
         };
-        mode.write_all(start_sequence)?;
+        mode.write_all(screen.start_sequence())?;
         Ok(mode)
     }
 
@@ -321,7 +322,7 @@ fn restore_with(put_back: impl FnOnce()) {
 }
 
 fn put_console_back() {
-    write_unlocked(crate::terminal::RESTORE_SEQUENCE);
+    write_unlocked(crate::terminal::restore_sequence());
     set_console_mode(
         standard_handle(STD_INPUT_HANDLE),
         SAVED_INPUT_MODE.load(Ordering::Relaxed),

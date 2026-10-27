@@ -292,9 +292,7 @@ pub fn cstring(text: &str) -> Vec<u8> {
 impl Client {
     pub fn connect(address: SocketAddr) -> Self {
         let stream = TcpStream::connect(address).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(20)))
-            .unwrap();
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
         Self { stream }
     }
 
