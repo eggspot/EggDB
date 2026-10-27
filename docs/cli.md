@@ -512,9 +512,9 @@ eggdb serve --create app.db
 |--------|---------|
 | `--listen <address>` | `host:port`, `[::1]:port`, `localhost:port` or a port alone (on `127.0.0.1`); port 0 takes any free port. Default `127.0.0.1:5432`. **Loopback addresses only** (below) |
 | `--user <name>` | the one user clients log in as, with SCRAM-SHA-256. Default `eggdb` |
-| `--password-file <file>` | the password is the file's first line; `-` reads it from stdin. Without it, `EGGDB_PASSWORD`. Never on the command line. ASCII only in this release (SASLprep is not implemented) |
+| `--password-file <file>` | the password is the file's first line; `-` reads it from stdin. Without it, `EGGDB_PASSWORD`. Never on the command line. ASCII only in this release (SASLprep is not implemented). Prefer the file: `EGGDB_PASSWORD` stays in the server's environment for as long as it runs, where the same user (and on some systems an administrator) can read it, for example through `/proc/<pid>/environ` on Linux |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
-| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already` |
+| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, so slow or failing logins cannot take every slot; a 17th gets `53300` too |
 | `--read-only` | open the file read-only: writes fail with `25006`, and it works beside other readers |
 | `--create` | create the file if it is missing |
 

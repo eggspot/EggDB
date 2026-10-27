@@ -66,8 +66,9 @@ What the server does:
   and `server_encoding` (`UTF8`), `DateStyle`, `TimeZone`, `integer_datetimes`,
   `standard_conforming_strings` and the other reported parameters; `SET`, `SHOW`, `RESET`,
   `version()`, `current_user`, `current_database()` and `current_setting()`.
-- **Several connections**, one thread and one session each, up to `--max-connections` (64);
-  readers run side by side, writers one at a time (a second waits 5 s, then `55P03`).
+- **Several connections**, one thread and one session each, up to `--max-connections` (64),
+  at most 16 of them still logging in; readers run side by side, writers one at a time (a
+  second waits 5 s, then `55P03`: retry once the other session's transaction ends).
 
 Not yet (each fails readably or is ignored harmlessly): TLS, psql's `\d` commands and the
 catalog queries of GUI tools (`pg_catalog`), `COPY`, `LISTEN`/`NOTIFY`, cancelling a running

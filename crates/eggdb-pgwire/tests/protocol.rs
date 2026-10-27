@@ -476,3 +476,166 @@ fn unsupported_startup_settings_and_function_calls_are_answered_without_hanging(
     client.send(b'd', b"stray copy data");
     assert_eq!(tags(&client.query("SELECT 1")), "TDCZ");
 }
+
+fn trickle(mut stream: std::net::TcpStream, first: Vec<u8>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        use std::io::Write;
+        if stream.write_all(&first).is_err() {
+            return;
+        }
+        for _ in 0..600 {
+            std::thread::sleep(Duration::from_millis(100));
+            if stream.write_all(b"x").is_err() {
+                return;
+            }
+        }
+    })
+}
+
+#[test]
+fn a_trickling_client_is_cut_off_at_the_authentication_deadline() {
+    let server = TestServer::start_with(8, Duration::from_millis(600));
+    let mut client = Client::connect(server.address);
+    let writer = trickle(
+        client.stream.try_clone().unwrap(),
+        9_999u32.to_be_bytes().to_vec(),
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(client.read_byte(), None);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(client);
+    writer.join().unwrap();
+}
+
+#[test]
+fn a_stop_is_seen_while_clients_trickle_before_and_after_authentication() {
+    let mut server = TestServer::start_with(8, Duration::from_secs(30));
+    let before = Client::connect(server.address);
+    let before_writer = trickle(
+        before.stream.try_clone().unwrap(),
+        9_999u32.to_be_bytes().to_vec(),
+    );
+    let (after, _) = Client::login(server.address);
+    let mut header = vec![b'Q'];
+    header.extend_from_slice(&10_000u32.to_be_bytes());
+    let after_writer = trickle(after.stream.try_clone().unwrap(), header);
+    std::thread::sleep(Duration::from_millis(500));
+    let started = std::time::Instant::now();
+    server.stop();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(before);
+    drop(after);
+    before_writer.join().unwrap();
+    after_writer.join().unwrap();
+}
+
+#[test]
+fn client_supplied_names_are_logged_on_one_line() {
+    let server = TestServer::start(8);
+    let mut client = Client::connect(server.address);
+    client.send_startup(196_608, &[("user", "eve\n2026-10-27 forged line")]);
+    assert_eq!(client.authenticate("wrong").code(), "28P01");
+    let mut client = Client::connect(server.address);
+    client.send_startup(196_608, &[("user", USER), ("database", "x\r\ny\u{1b}[2J")]);
+    assert_eq!(client.authenticate(common::PASSWORD).tag, b'R');
+    assert_eq!(client.read().unwrap().code(), "3D000");
+    let logged = server.logged.lock().unwrap().clone();
+    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert!(
+        logged
+            .iter()
+            .all(|line| !line.chars().any(char::is_control)),
+        "{logged:?}"
+    );
+    assert!(
+        logged[0].contains("user \"eve\\n2026-10-27 forged line\""),
+        "{logged:?}"
+    );
+    assert!(
+        logged[1].contains("database \"x\\r\\ny\\u{1b}[2J\""),
+        "{logged:?}"
+    );
+}
+
+#[test]
+fn execute_sends_values_as_the_statement_description_said() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query("CREATE TABLE items (id integer PRIMARY KEY); INSERT INTO items VALUES (1)");
+    client.send(
+        b'P',
+        &parse("s", "SELECT coalesce(NULL, id) FROM items", &[]),
+    );
+    client.send(b'D', b"Ss\0");
+    client.send(b'B', &bind("", "s", &[], &[], &[1]));
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "1tT2DCZ");
+    let (_, oid, _) = answer[2].column_types()[0].clone();
+    assert_eq!(oid, 25);
+    assert_eq!(answer[4].raw_row(), [Some(b"1".to_vec())]);
+}
+
+#[test]
+fn a_finished_portal_never_runs_its_statement_again() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query("CREATE TABLE t (id integer PRIMARY KEY)");
+    client.send(b'P', &parse("", "INSERT INTO t VALUES (1)", &[]));
+    client.send(b'B', &bind("ins", "", &[], &[], &[]));
+    client.send(b'E', &execute("ins", 0));
+    client.send(b'E', &execute("ins", 0));
+    client.send(b'P', &parse("sel", "SELECT id FROM t", &[]));
+    client.send(b'B', &bind("sel", "sel", &[], &[], &[]));
+    client.send(b'E', &execute("sel", 0));
+    client.send(b'E', &execute("sel", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12CC12DCCZ");
+    let completed: Vec<String> = answer
+        .iter()
+        .filter(|message| message.tag == b'C')
+        .map(Message::text)
+        .collect();
+    assert_eq!(
+        completed,
+        ["INSERT 0 1", "INSERT 0 0", "SELECT 1", "SELECT 0"]
+    );
+    assert_eq!(
+        rows(&client.query("SELECT count(*) FROM t")),
+        [vec![Some("1".into())]]
+    );
+}
+
+#[test]
+fn logins_in_progress_are_capped_below_the_connection_limit() {
+    let server = TestServer::start(64);
+    let idle: Vec<Client> = (0..eggdb_pgwire::MAX_UNAUTHENTICATED_CONNECTIONS)
+        .map(|_| Client::connect(server.address))
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+    let mut extra = Client::connect(server.address);
+    extra.send_startup(196_608, &[("user", USER)]);
+    assert_eq!(extra.read().unwrap().code(), "53300");
+    drop(idle);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut client = Client::connect(server.address);
+        client.send_startup(196_608, &[("user", USER), ("database", DATABASE)]);
+        let first = client.read().unwrap();
+        if first.tag == b'R' {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{first:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

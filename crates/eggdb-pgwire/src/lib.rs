@@ -30,6 +30,6 @@ pub use scram::{
     ScramVerifier,
 };
 pub use server::{
-    DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError, ServerConfig,
-    listen_on_loopback, serve,
+    DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
+    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen_on_loopback, serve,
 };

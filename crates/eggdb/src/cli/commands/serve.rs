@@ -21,7 +21,17 @@ fn stamped(line: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_micros() as u64);
     let stamp = render::utc_time(micros - micros % 1_000_000, TimeStyle::Readable);
-    format!("{}  {line}\n", stamp.replace(".000000", ""))
+    let one_line: String = line
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect();
+    format!("{}  {one_line}\n", stamp.replace(".000000", ""))
 }
 
 fn database_name_of(file: &Path) -> String {

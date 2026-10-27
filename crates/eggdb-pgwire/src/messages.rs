@@ -369,6 +369,42 @@ pub fn parse_sasl_initial_response(body: &[u8]) -> Result<SaslInitialResponse, M
     Ok(SaslInitialResponse { mechanism, data })
 }
 
+/// A backend message that would hold more than its count or length fields can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TooLarge {
+    /// More columns than a 16-bit count holds (32,767).
+    Columns(usize),
+    /// More parameters than a 16-bit count holds (32,767).
+    Parameters(usize),
+    /// A value longer than a 32-bit length holds.
+    ValueBytes(usize),
+}
+
+impl fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Columns(count) => write!(
+                f,
+                "a result of {count} columns does not fit the protocol's limit of 32767"
+            ),
+            Self::Parameters(count) => write!(
+                f,
+                "a statement with {count} parameters does not fit the protocol's limit of 32767"
+            ),
+            Self::ValueBytes(length) => write!(
+                f,
+                "a value of {length} bytes does not fit the protocol's limit of 2 GiB"
+            ),
+        }
+    }
+}
+
+fn count_field(count: usize, too_large: fn(usize) -> TooLarge) -> Result<[u8; 2], TooLarge> {
+    i16::try_from(count)
+        .map(i16::to_be_bytes)
+        .map_err(|_| too_large(count))
+}
+
 /// Builds backend messages into one buffer, ready to send.
 #[derive(Debug, Default)]
 pub struct Outbox {
@@ -527,10 +563,11 @@ impl Outbox {
         self.message(b'Z', |body| body.push(status));
     }
 
-    /// `RowDescription`.
-    pub fn row_description(&mut self, columns: &[ColumnDescription]) {
+    /// `RowDescription`; refused for more than 32,767 columns.
+    pub fn row_description(&mut self, columns: &[ColumnDescription]) -> Result<(), TooLarge> {
+        let count = count_field(columns.len(), TooLarge::Columns)?;
         self.message(b'T', |body| {
-            body.extend_from_slice(&(columns.len() as i16).to_be_bytes());
+            body.extend_from_slice(&count);
             for column in columns {
                 body.extend_from_slice(column.name.as_bytes());
                 body.push(0);
@@ -542,22 +579,32 @@ impl Outbox {
                 body.extend_from_slice(&column.format.code().to_be_bytes());
             }
         });
+        Ok(())
     }
 
-    /// `DataRow`, each value `None` for NULL.
-    pub fn data_row(&mut self, values: &[Option<Vec<u8>>]) {
+    /// `DataRow`, each value `None` for NULL; refused for more than 32,767 values or a value
+    /// over 2 GiB.
+    pub fn data_row(&mut self, values: &[Option<Vec<u8>>]) -> Result<(), TooLarge> {
+        let count = count_field(values.len(), TooLarge::Columns)?;
+        let mut lengths = Vec::with_capacity(values.len());
+        for value in values {
+            lengths.push(match value {
+                None => -1i32,
+                Some(bytes) => {
+                    i32::try_from(bytes.len()).map_err(|_| TooLarge::ValueBytes(bytes.len()))?
+                }
+            });
+        }
         self.message(b'D', |body| {
-            body.extend_from_slice(&(values.len() as i16).to_be_bytes());
-            for value in values {
-                match value {
-                    None => body.extend_from_slice(&(-1i32).to_be_bytes()),
-                    Some(bytes) => {
-                        body.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
-                        body.extend_from_slice(bytes);
-                    }
+            body.extend_from_slice(&count);
+            for (value, length) in values.iter().zip(lengths) {
+                body.extend_from_slice(&length.to_be_bytes());
+                if let Some(bytes) = value {
+                    body.extend_from_slice(bytes);
                 }
             }
         });
+        Ok(())
     }
 
     /// `CommandComplete` with its tag, such as `INSERT 0 1`.
@@ -598,14 +645,16 @@ impl Outbox {
         self.message(b's', |_| {});
     }
 
-    /// `ParameterDescription`.
-    pub fn parameter_description(&mut self, type_oids: &[u32]) {
+    /// `ParameterDescription`; refused for more than 32,767 parameters.
+    pub fn parameter_description(&mut self, type_oids: &[u32]) -> Result<(), TooLarge> {
+        let count = count_field(type_oids.len(), TooLarge::Parameters)?;
         self.message(b't', |body| {
-            body.extend_from_slice(&(type_oids.len() as i16).to_be_bytes());
+            body.extend_from_slice(&count);
             for oid in type_oids {
                 body.extend_from_slice(&oid.to_be_bytes());
             }
         });
+        Ok(())
     }
 
     /// `ErrorResponse` (`notice` false) or `NoticeResponse` (`notice` true) with its fields.
@@ -800,12 +849,38 @@ mod tests {
     }
 
     #[test]
+    fn counts_beyond_a_16_bit_field_are_refused_and_nothing_is_written() {
+        let mut outbox = Outbox::new();
+        assert_eq!(
+            outbox.parameter_description(&vec![23; 40_000]),
+            Err(TooLarge::Parameters(40_000))
+        );
+        assert_eq!(
+            outbox.data_row(&vec![None; 32_768]),
+            Err(TooLarge::Columns(32_768))
+        );
+        let column = ColumnDescription {
+            name: "c".into(),
+            type_oid: 25,
+            type_size: -1,
+            type_modifier: -1,
+            format: Format::Text,
+        };
+        assert_eq!(
+            outbox.row_description(&vec![column; 32_768]),
+            Err(TooLarge::Columns(32_768))
+        );
+        assert!(outbox.is_empty());
+        assert!(outbox.data_row(&vec![None; 32_767]).is_ok());
+    }
+
+    #[test]
     fn backend_messages_carry_their_length() {
         let mut outbox = Outbox::new();
         outbox.ready_for_query(b'I');
         assert_eq!(outbox.bytes(), b"Z\0\0\0\x05I");
         outbox.clear();
-        outbox.data_row(&[Some(b"1".to_vec()), None]);
+        outbox.data_row(&[Some(b"1".to_vec()), None]).unwrap();
         assert_eq!(
             outbox.bytes(),
             b"D\0\0\0\x0f\0\x02\0\0\0\x011\xff\xff\xff\xff"

@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
 /// How long a client has from connecting to finishing authentication, unless told otherwise.
 pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most connections still starting up or authenticating at once; more are refused with
+/// `53300`, so slow or failing logins cannot take every slot.
+pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
 const MAX_REFUSING_THREADS: usize = 8;
 const REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -115,9 +118,10 @@ pub(crate) struct Shared<'a> {
     pub(crate) log: &'a (dyn Fn(&str) + Sync),
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) secret: [u8; 32],
+    pub(crate) unauthenticated: AtomicUsize,
 }
 
-struct Slot<'c>(&'c AtomicUsize);
+pub(crate) struct Slot<'c>(&'c AtomicUsize);
 
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
@@ -125,7 +129,7 @@ impl Drop for Slot<'_> {
     }
 }
 
-fn take_slot(counter: &AtomicUsize, limit: usize) -> Option<Slot<'_>> {
+pub(crate) fn take_slot(counter: &AtomicUsize, limit: usize) -> Option<Slot<'_>> {
     counter
         .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             (count < limit).then_some(count + 1)
@@ -159,6 +163,7 @@ pub fn serve<S: KeyValueStore + Sync>(
         log,
         throttle: AuthenticationThrottle::new(),
         secret,
+        unauthenticated: AtomicUsize::new(0),
     };
     let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);

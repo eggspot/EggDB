@@ -1,9 +1,9 @@
 use crate::messages::{
-    ColumnDescription, Format, FrontendMessage, ReportField, StartupRequest, Target, parse_message,
-    parse_sasl_initial_response, parse_startup,
+    ColumnDescription, Format, FrontendMessage, ReportField, StartupRequest, Target, TooLarge,
+    parse_message, parse_sasl_initial_response, parse_startup,
 };
 use crate::scram::{SCRAM_SHA_256, ScramExchange, ScramFailure, ScramVerifier};
-use crate::server::Shared;
+use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, Shared, take_slot};
 use crate::types::{
     TEXT_OID, UNKNOWN_OID, decode_parameter, describe_columns, encode_value, format_at, oid_of,
     sql_type_of,
@@ -36,6 +36,32 @@ impl Severity {
             Self::Fatal => "FATAL",
         }
     }
+}
+
+pub(crate) fn printable(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\\' => shown.push_str("\\\\"),
+            '"' => shown.push_str("\\\""),
+            '\n' => shown.push_str("\\n"),
+            '\r' => shown.push_str("\\r"),
+            '\t' => shown.push_str("\\t"),
+            control if control.is_control() => {
+                shown.push_str(&format!("\\u{{{:x}}}", u32::from(control)));
+            }
+            other => shown.push(other),
+        }
+    }
+    shown
+}
+
+fn too_large(error: TooLarge) -> SqlError {
+    let state = match error {
+        TooLarge::Columns(_) => SqlState::TOO_MANY_COLUMNS,
+        TooLarge::Parameters(_) | TooLarge::ValueBytes(_) => SqlState::PROGRAM_LIMIT_EXCEEDED,
+    };
+    SqlError::new(state, error.to_string())
 }
 
 fn character_position(text: &str, byte_offset: usize) -> usize {
@@ -353,8 +379,9 @@ fn authenticate(wire: &mut Wire<'_>, shared: &Shared<'_>, user: &str) -> Authent
             }
             ScramFailure::WrongProof => {
                 (shared.log)(&format!(
-                    "{}  password authentication failed for user \"{user}\"",
-                    wire.peer()
+                    "{}  password authentication failed for user \"{}\"",
+                    wire.peer(),
+                    printable(user)
                 ));
                 sleep_unless_stopped(shared.throttle.delay_after_failure(), shared.stop);
                 fatal(
@@ -403,6 +430,13 @@ struct Portal {
     result_formats: Vec<Format>,
     described: Option<Vec<ColumnDescription>>,
     pending: Option<PendingRows>,
+    run: PortalRun,
+}
+
+enum PortalRun {
+    NotYet,
+    Failed,
+    Finished(String),
 }
 
 struct PendingRows {
@@ -438,6 +472,15 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     store: &'s S,
     process_id: i32,
 ) {
+    let Some(login_slot) = take_slot(&shared.unauthenticated, MAX_UNAUTHENTICATED_CONNECTIONS)
+    else {
+        (shared.log)(&format!(
+            "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
+            wire.peer()
+        ));
+        refuse_too_many(&mut wire);
+        return;
+    };
     let Some(startup) = read_startup(&mut wire) else {
         return;
     };
@@ -445,13 +488,14 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         AuthenticationOutcome::Authenticated => {}
         AuthenticationOutcome::Refused => return,
     }
+    drop(login_slot);
     wire.deadline = None;
     let mut session = Session::new(store);
     if startup.database != shared.config.database {
         (shared.log)(&format!(
             "{}  database \"{}\" does not exist",
             wire.peer(),
-            startup.database
+            printable(&startup.database)
         ));
         fatal(
             &mut wire,
@@ -665,6 +709,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
     fn simple_query(&mut self, text: &str) -> bool {
         let mut results = 0usize;
         let mut sent = true;
+        let mut unsendable = None;
         let outcome = {
             let wire = &mut self.wire;
             self.session.execute_while(text, &mut |result| {
@@ -674,13 +719,19 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 }
                 if let Some(columns) = &result.columns {
                     let description = describe_columns(columns, &result.rows, &[]);
-                    wire.outbox.row_description(&description);
+                    if let Err(error) = wire.outbox.row_description(&description) {
+                        unsendable = Some(too_large(error));
+                        return false;
+                    }
                     for row in &result.rows {
                         let values: Vec<Option<Vec<u8>>> = row
                             .iter()
                             .map(|value| value.to_text().map(String::into_bytes))
                             .collect();
-                        wire.outbox.data_row(&values);
+                        if let Err(error) = wire.outbox.data_row(&values) {
+                            unsendable = Some(too_large(error));
+                            return false;
+                        }
                         if wire.flush_if_large().is_err() {
                             sent = false;
                             return false;
@@ -695,6 +746,10 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         if !sent {
             return false;
         }
+        let outcome = match unsendable {
+            Some(error) => Err(error),
+            None => outcome,
+        };
         match outcome {
             Ok(()) if results == 0 => self.wire.outbox.empty_query_response(),
             Ok(()) => {}
@@ -817,6 +872,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             result_formats,
             described: None,
             pending: None,
+            run: PortalRun::NotYet,
         };
         self.portals.insert(portal_name, portal);
         self.wire.outbox.bind_complete();
@@ -857,8 +913,11 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                         }
                     })
                     .collect();
-                self.wire.outbox.parameter_description(&oids);
-                self.send_row_description(description.columns.as_deref(), &[]);
+                self.wire
+                    .outbox
+                    .parameter_description(&oids)
+                    .map_err(|error| (too_large(error), None))?;
+                self.send_row_description(description.columns.as_deref(), &[])?;
             }
             Target::Portal => {
                 let Some(portal) = self.portals.get(name) else {
@@ -872,7 +931,10 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 };
                 if let Some(pending) = &portal.pending {
                     let columns = pending.columns.clone();
-                    self.wire.outbox.row_description(&columns);
+                    self.wire
+                        .outbox
+                        .row_description(&columns)
+                        .map_err(|error| (too_large(error), None))?;
                     return Ok(());
                 }
                 let text = portal.text.clone();
@@ -882,7 +944,8 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                     .session
                     .describe(&text, &declared_types)
                     .map_err(|error| (error, Some(text.clone())))?;
-                let described = self.send_row_description(description.columns.as_deref(), &formats);
+                let described =
+                    self.send_row_description(description.columns.as_deref(), &formats)?;
                 if let Some(portal) = self.portals.get_mut(name) {
                     portal.described = described;
                 }
@@ -895,16 +958,19 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         &mut self,
         columns: Option<&[OutputColumn]>,
         formats: &[Format],
-    ) -> Option<Vec<ColumnDescription>> {
+    ) -> Result<Option<Vec<ColumnDescription>>, (SqlError, Option<String>)> {
         match columns {
             Some(columns) => {
                 let description = describe_columns(columns, &[], formats);
-                self.wire.outbox.row_description(&description);
-                Some(description)
+                self.wire
+                    .outbox
+                    .row_description(&description)
+                    .map_err(|error| (too_large(error), None))?;
+                Ok(Some(description))
             }
             None => {
                 self.wire.outbox.no_data();
-                None
+                Ok(None)
             }
         }
     }
@@ -926,8 +992,27 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         if let Some(pending) = portal.pending.take() {
             return self.send_rows(name, pending, limit);
         }
+        match &portal.run {
+            PortalRun::NotYet => {}
+            PortalRun::Finished(tag) => {
+                let tag = tag_with_count(tag, 0);
+                self.wire.outbox.command_complete(&tag);
+                return Ok(());
+            }
+            PortalRun::Failed => {
+                return Err((
+                    SqlError::new(
+                        SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                        format!("portal \"{name}\" cannot be run"),
+                    ),
+                    None,
+                ));
+            }
+        }
+        portal.run = PortalRun::Failed;
         let text = portal.text.clone();
         let parameters = portal.parameters.clone();
+        let declared_types = portal.declared_types.clone();
         let formats = portal.result_formats.clone();
         let described = portal.described.clone();
         if self.session.transaction_status() == TransactionStatus::Failed
@@ -935,6 +1020,15 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         {
             return Err((aborted(), None));
         }
+        let described = match described {
+            Some(described) => Some(described),
+            None => self
+                .session
+                .describe(&text, &declared_types)
+                .map_err(|error| (error, Some(text.clone())))?
+                .columns
+                .map(|columns| describe_columns(&columns, &[], &formats)),
+        };
         let mut results: Vec<QueryResult> = Vec::new();
         self.session
             .execute_prepared(&text, &parameters, &mut |result| {
@@ -944,9 +1038,15 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             .map_err(|error| (error, Some(text.clone())))?;
         self.report_changed_parameters();
         let Some(result) = results.pop() else {
+            if let Some(portal) = self.portals.get_mut(name) {
+                portal.run = PortalRun::NotYet;
+            }
             self.wire.outbox.empty_query_response();
             return Ok(());
         };
+        if let Some(portal) = self.portals.get_mut(name) {
+            portal.run = PortalRun::Finished(result.tag.clone());
+        }
         for notice in &result.notices {
             send_notice(&mut self.wire, notice);
         }
@@ -954,7 +1054,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             Some(columns) => {
                 let description = described
                     .filter(|described| described.len() == columns.len())
-                    .unwrap_or_else(|| describe_columns(&columns, &result.rows, &formats));
+                    .unwrap_or_else(|| describe_columns(&columns, &[], &formats));
                 let pending = PendingRows {
                     columns: description,
                     rows: result.rows.into_iter(),
@@ -987,7 +1087,10 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                         .map_err(|error| (error, None))?,
                 );
             }
-            self.wire.outbox.data_row(&values);
+            self.wire
+                .outbox
+                .data_row(&values)
+                .map_err(|error| (too_large(error), None))?;
             sent += 1;
             if self.wire.flush_if_large().is_err() {
                 return Ok(());
@@ -1010,6 +1113,15 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
 #[cfg(test)]
 mod tests {
     use super::{character_position, is_transaction_exit, options_parameters};
+
+    #[test]
+    fn client_values_are_escaped_onto_one_line() {
+        assert_eq!(super::printable("ada"), "ada");
+        assert_eq!(
+            super::printable("a\nb\r\"c\\\u{1b}[31m\u{85}"),
+            "a\\nb\\r\\\"c\\\\\\u{1b}[31m\\u{85}"
+        );
+    }
 
     #[test]
     fn positions_count_characters_from_one() {

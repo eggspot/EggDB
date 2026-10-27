@@ -110,6 +110,8 @@ impl SqlState {
     pub const TOO_MANY_COLUMNS: Self = Self(*b"54011");
     /// `54001` statement_too_complex.
     pub const STATEMENT_TOO_COMPLEX: Self = Self(*b"54001");
+    /// `55000` object_not_in_prerequisite_state.
+    pub const OBJECT_NOT_IN_PREREQUISITE_STATE: Self = Self(*b"55000");
     /// `55P03` lock_not_available: another writer holds the database.
     pub const LOCK_NOT_AVAILABLE: Self = Self(*b"55P03");
     /// `55P02` cant_change_runtime_param.

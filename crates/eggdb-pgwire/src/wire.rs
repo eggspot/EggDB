@@ -4,6 +4,7 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const SHORTEST_WAIT: Duration = Duration::from_millis(1);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
@@ -22,6 +23,7 @@ pub(crate) struct Wire<'a> {
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
     pub(crate) outbox: Outbox,
+    read_timeout: Duration,
 }
 
 impl<'a> Wire<'a> {
@@ -39,32 +41,46 @@ impl<'a> Wire<'a> {
             stop,
             deadline,
             outbox: Outbox::new(),
+            read_timeout: POLL_INTERVAL,
         })
+    }
+
+    fn next_wait(&self) -> Result<Duration, WireError> {
+        if (self.stop)() {
+            return Err(WireError::Stopping);
+        }
+        match self.deadline {
+            None => Ok(POLL_INTERVAL),
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(WireError::TimedOut);
+                }
+                Ok(left.clamp(SHORTEST_WAIT, POLL_INTERVAL))
+            }
+        }
     }
 
     fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), WireError> {
         let mut filled = 0;
         while filled < buffer.len() {
+            let wait = self.next_wait()?;
+            if wait != self.read_timeout {
+                self.stream
+                    .set_read_timeout(Some(wait))
+                    .map_err(|_| WireError::Io)?;
+                self.read_timeout = wait;
+            }
             match self.stream.read(&mut buffer[filled..]) {
                 Ok(0) => return Err(WireError::Closed),
                 Ok(count) => filled += count,
                 Err(error)
                     if matches!(
                         error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    if (self.stop)() {
-                        return Err(WireError::Stopping);
-                    }
-                    if self
-                        .deadline
-                        .is_some_and(|deadline| Instant::now() >= deadline)
-                    {
-                        return Err(WireError::TimedOut);
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
                 Err(_) => return Err(WireError::Io),
             }
         }
