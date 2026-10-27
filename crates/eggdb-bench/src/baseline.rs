@@ -3,6 +3,7 @@ use std::fmt;
 
 const RATIO_TOLERANCE_PERCENT: u32 = 30;
 const EXACT_EPSILON: f64 = 1e-9;
+pub(crate) const BLOCKING_FACTOR: f64 = 2.0;
 pub(crate) const ANY_OS: &str = "any";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,8 +83,8 @@ fn format_value(gate: Gate, value: f64) -> String {
 pub(crate) enum Verdict {
     Within,
     Improved,
-    Regressed { limit: f64 },
-    Fell { baseline: f64 },
+    Slower { limit: f64 },
+    Blocked { limit: f64 },
     Missing,
     Reported,
 }
@@ -91,9 +92,20 @@ pub(crate) enum Verdict {
 impl Verdict {
     pub(crate) fn fails(self, gate: Gate) -> bool {
         match self {
-            Self::Regressed { .. } | Self::Fell { .. } => true,
+            Self::Blocked { .. } => true,
             Self::Missing => gate == Gate::Exact,
-            Self::Within | Self::Improved | Self::Reported => false,
+            Self::Within | Self::Improved | Self::Slower { .. } | Self::Reported => false,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Within => "ok",
+            Self::Improved => "improved",
+            Self::Slower { .. } => "slower",
+            Self::Blocked { .. } => "blocked",
+            Self::Missing => "missing",
+            Self::Reported => "reported",
         }
     }
 }
@@ -103,10 +115,13 @@ impl fmt::Display for Verdict {
         match self {
             Self::Within => f.write_str("ok"),
             Self::Improved => f.write_str("improved: lower the baseline with --update"),
-            Self::Regressed { limit } => write!(f, "REGRESSED: above the limit {limit:.3}"),
-            Self::Fell { baseline } => write!(
+            Self::Slower { limit } => write!(
                 f,
-                "CHANGED: below the baseline {baseline}; counts must match exactly, so if this is intended run --update and say why"
+                "SLOWER: above the limit {limit:.3}; reported, the weekly performance pass fixes it"
+            ),
+            Self::Blocked { limit } => write!(
+                f,
+                "BLOCKED: more than {BLOCKING_FACTOR}x the baseline (limit {limit:.3}); fix it in this change"
             ),
             Self::Missing => f.write_str("no baseline line"),
             Self::Reported => f.write_str("reported only"),
@@ -122,24 +137,43 @@ pub(crate) fn judge(metric: &Metric, baseline: Option<f64>) -> Verdict {
             Verdict::Missing
         };
     };
+    let blocking_limit = baseline * BLOCKING_FACTOR;
     match metric.gate {
         Gate::Reported => Verdict::Reported,
+        Gate::Exact if metric.value > blocking_limit + EXACT_EPSILON => Verdict::Blocked {
+            limit: blocking_limit,
+        },
         Gate::Exact if metric.value > baseline + EXACT_EPSILON => {
-            Verdict::Regressed { limit: baseline }
+            Verdict::Slower { limit: baseline }
         }
-        Gate::Exact if metric.value < baseline - EXACT_EPSILON => Verdict::Fell { baseline },
+        Gate::Exact if metric.value < baseline - EXACT_EPSILON => Verdict::Improved,
         Gate::Exact => Verdict::Within,
         Gate::Ceiling { tolerance_percent } => {
             let factor = 1.0 + f64::from(tolerance_percent) / 100.0;
             let limit = baseline * factor;
-            if metric.value > limit {
-                Verdict::Regressed { limit }
+            if metric.value > blocking_limit {
+                Verdict::Blocked {
+                    limit: blocking_limit,
+                }
+            } else if metric.value > limit {
+                Verdict::Slower { limit }
             } else if metric.value < baseline / factor {
                 Verdict::Improved
             } else {
                 Verdict::Within
             }
         }
+    }
+}
+
+pub(crate) fn delta_text(value: f64, baseline: Option<f64>) -> String {
+    match baseline {
+        None => "-".to_string(),
+        Some(baseline) if baseline.abs() < EXACT_EPSILON && value.abs() < EXACT_EPSILON => {
+            "0%".to_string()
+        }
+        Some(baseline) if baseline.abs() < EXACT_EPSILON => "new".to_string(),
+        Some(baseline) => format!("{:+.1}%", (value / baseline - 1.0) * 100.0),
     }
 }
 
@@ -230,6 +264,24 @@ fn family(benchmark: &str) -> &str {
         .map_or(benchmark, |(family, _)| family)
 }
 
+pub(crate) fn result_line(
+    metric: &Metric,
+    os: &'static str,
+    baseline: Option<f64>,
+    verdict: Verdict,
+) -> String {
+    let expected = baseline.map_or_else(|| "-".to_string(), |value| format!("{value}"));
+    let delta = delta_text(metric.value, baseline);
+    format!(
+        "{} {} {} {} {expected} {delta} {}",
+        os,
+        metric.benchmark,
+        metric.name,
+        metric.formatted_value(),
+        verdict.label()
+    )
+}
+
 pub(crate) fn line(metric: &Metric, os: &'static str) -> String {
     format!(
         "{} {} {} {}",
@@ -242,46 +294,109 @@ pub(crate) fn line(metric: &Metric, os: &'static str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Baseline, Gate, Metric, Verdict, judge};
+    use super::{Baseline, Gate, Metric, Verdict, delta_text, judge, result_line};
 
     #[test]
-    fn exact_counts_fail_on_any_change_and_ratios_only_beyond_the_tolerance() {
+    fn a_count_above_its_line_is_reported_up_to_twice_the_line_and_blocks_beyond() {
+        let count = |value| Metric::exact("cache.hit", "file_operations_per_op", value);
+        assert_eq!(judge(&count(4.0), Some(4.0)), Verdict::Within);
+        assert_eq!(
+            judge(&count(5.0), Some(4.0)),
+            Verdict::Slower { limit: 4.0 }
+        );
+        assert_eq!(
+            judge(&count(8.0), Some(4.0)),
+            Verdict::Slower { limit: 4.0 }
+        );
+        assert_eq!(
+            judge(&count(8.5), Some(4.0)),
+            Verdict::Blocked { limit: 8.0 }
+        );
+        assert!(!judge(&count(8.0), Some(4.0)).fails(Gate::Exact));
+        assert!(judge(&count(8.5), Some(4.0)).fails(Gate::Exact));
+        assert_eq!(judge(&count(3.0), Some(4.0)), Verdict::Improved);
+        assert!(!judge(&count(3.0), Some(4.0)).fails(Gate::Exact));
+    }
+
+    #[test]
+    fn any_count_above_a_line_of_zero_blocks() {
         let count = |value| Metric::exact("cache.hit", "allocations_per_op", value);
         assert_eq!(judge(&count(0.0), Some(0.0)), Verdict::Within);
         assert_eq!(
-            judge(&count(0.001), Some(0.0)),
-            Verdict::Regressed { limit: 0.0 }
+            judge(&count(1.0), Some(0.0)),
+            Verdict::Blocked { limit: 0.0 }
         );
-        assert_eq!(
-            judge(&count(1.0), Some(2.0)),
-            Verdict::Fell { baseline: 2.0 }
-        );
-        assert!(judge(&count(1.0), Some(2.0)).fails(Gate::Exact));
+    }
+
+    #[test]
+    fn a_ratio_slower_than_its_tolerance_is_reported_and_more_than_twice_the_line_blocks() {
         let ratio = |value| Metric::ratio("cache.hit", "ratio_to_reference", value);
         assert_eq!(judge(&ratio(1.25), Some(1.0)), Verdict::Within);
-        assert!(matches!(
+        assert_eq!(
             judge(&ratio(1.31), Some(1.0)),
-            Verdict::Regressed { .. }
-        ));
+            Verdict::Slower { limit: 1.3 }
+        );
+        assert_eq!(
+            judge(&ratio(2.0), Some(1.0)),
+            Verdict::Slower { limit: 1.3 }
+        );
+        assert_eq!(
+            judge(&ratio(2.01), Some(1.0)),
+            Verdict::Blocked { limit: 2.0 }
+        );
+        assert!(judge(&ratio(2.01), Some(1.0)).fails(Gate::Ceiling {
+            tolerance_percent: 30
+        }));
+        assert!(!judge(&ratio(2.0), Some(1.0)).fails(Gate::Ceiling {
+            tolerance_percent: 30
+        }));
         assert_eq!(judge(&ratio(0.7), Some(1.0)), Verdict::Improved);
     }
 
     #[test]
-    fn a_ceiling_has_its_own_tolerance() {
+    fn a_ceiling_has_its_own_tolerance_and_the_same_blocking_limit() {
         let size = |value| Metric::ceiling("footprint.binary", "bytes", value, 1);
         assert_eq!(
             judge(&size(1_009_000.0), Some(1_000_000.0)),
             Verdict::Within
         );
-        assert!(matches!(
+        assert_eq!(
             judge(&size(1_011_000.0), Some(1_000_000.0)),
-            Verdict::Regressed { .. }
-        ));
+            Verdict::Slower { limit: 1_010_000.0 }
+        );
+        assert_eq!(
+            judge(&size(2_000_001.0), Some(1_000_000.0)),
+            Verdict::Blocked { limit: 2_000_000.0 }
+        );
         assert_eq!(
             judge(&size(980_000.0), Some(1_000_000.0)),
             Verdict::Improved
         );
         assert_eq!(size(933_312.0).formatted_value(), "933312");
+    }
+
+    #[test]
+    fn deltas_are_signed_percentages_against_the_line() {
+        assert_eq!(delta_text(1.25, Some(1.0)), "+25.0%");
+        assert_eq!(delta_text(0.5, Some(1.0)), "-50.0%");
+        assert_eq!(delta_text(3.0, None), "-");
+        assert_eq!(delta_text(0.0, Some(0.0)), "0%");
+        assert_eq!(delta_text(2.0, Some(0.0)), "new");
+    }
+
+    #[test]
+    fn a_result_line_carries_the_line_the_change_and_a_one_word_verdict() {
+        let ratio = Metric::ratio("cache.hit", "ratio_to_reference", 1.5);
+        let verdict = judge(&ratio, Some(1.0));
+        assert_eq!(
+            result_line(&ratio, "linux", Some(1.0), verdict),
+            "linux cache.hit ratio_to_reference 1.500 1 +50.0% slower"
+        );
+        let reported = Metric::reported("cache.hit", "ns_per_op", 5.0);
+        assert_eq!(
+            result_line(&reported, "linux", None, judge(&reported, None)),
+            "linux cache.hit ns_per_op 5.000 - - reported"
+        );
     }
 
     #[test]

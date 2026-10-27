@@ -195,6 +195,16 @@ key through the confirmation and quits, after which the file must show the delet
 `check`. CI runs it against the debug binary on Linux, macOS and Windows; the release workflow
 runs it against the release binary on every target its runner can execute.
 
+## Flaky tests and the CI gate (D101)
+CI's last job, `check`, is the one status the `main` ruleset requires: it fails when any other job
+failed or was cancelled. A test that fails on one platform and passes on a rerun is quarantined
+for that platform only, with `#[cfg_attr(target_os = "<os>", ignore = "flaky on <platform>: see
+issue #N")]`, and an issue labelled `flaky` names it; the cause is then fixed in the weekly
+performance pass and the `ignore` removed. None is quarantined today: the sporadic `platforms`
+failures of v0.2.0's development were one real bug, a file lock held by a starting child process
+(D95), now fixed and tested. Benchmarks are not tests: a slower benchmark is reported, and only
+one more than twice its line fails ([benchmarks.md](benchmarks.md)).
+
 ## Each layer
 - **Page file:** creating, growing and freeing pages, both header slots and a torn header update,
   the file lock, a failed sync that stops every later change, and a crash at every operation of a

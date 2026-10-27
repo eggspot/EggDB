@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -158,7 +158,18 @@ jobs:
             target
           key: cargo-bench-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - name: Benchmarks against the committed baseline
-        run: cargo run --release -p eggdb-bench
+        run: |
+          mkdir -p bench-results
+          cargo run --release -p eggdb-bench -- --results bench-results/eggdb-bench.txt
+      - name: Keep the benchmark results of this change
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmarks-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: bench-results/
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: warn
 
   compare:
     runs-on: ubuntu-latest
@@ -185,4 +196,30 @@ jobs:
       - name: Test
         run: cargo test --manifest-path "$COMPARE_MANIFEST" --release --locked
       - name: EggDB against SQLite, against the committed baseline
-        run: cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked
+        run: |
+          mkdir -p compare-results
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- --results compare-results/eggdb-sqlite-compare.txt
+      - name: Keep the SQLite comparison results of this change
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sqlite-compare-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: compare-results/
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: warn
+
+  check:
+    needs: [lint-and-test, platforms, musl, cross, bench, compare]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RESULTS: ${{ join(needs.*.result, ' ') }}
+    steps:
+      - name: Fail when a job failed or was cancelled
+        run: |
+          echo "results of the jobs: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) exit 1 ;;
+          esac

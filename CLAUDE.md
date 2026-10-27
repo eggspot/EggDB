@@ -36,8 +36,11 @@ Check each task against these before starting and again before opening the PR.
 5. **The fastest, with the best performance.** Every hot path gets a benchmark when it is written,
    compared with the best existing database for that workload (SQLite, PostgreSQL, MySQL, DuckDB,
    ClickHouse, Redis/Valkey/Dragonfly, Elasticsearch, MongoDB, Cassandra/ScyllaDB and others) on the
-   same hardware. A slower result blocks the PR until it is fixed, or until a research subagent
-   concludes the cost is the unavoidable, minimised price of correctness or security (D7).
+   same hardware. CI measures them on every PR and reports the change; a slower result doesn't
+   block the PR, except one more than 2x slower than its baseline line, which blocks until it is
+   fixed (or until a research subagent concludes the cost is the unavoidable, minimised price of
+   correctness or security). Everything else is fixed in the weekly performance pass, on
+   Saturdays (D7, D101).
 6. **Every scale.** From a microcontroller and a single small file (smaller and faster than SQLite)
    to a distributed cluster of many machines across regions holding billions of billions of rows
    (exabytes). Every way of scaling, not only a primary with replicas; D18 has the full list:
@@ -197,19 +200,25 @@ Check each task against these before starting and again before opening the PR.
 - `crates/eggdb`: the library and the `eggdb` binary. New subsystems become workspace crates
   under `crates/` when they have their own boundary (storage, transactions, query, protocols,
   platform layer); the engine core never depends on a protocol or a platform.
-- `docs/decisions.md`: numbered, append-only decisions. `docs/roadmap.md`: milestones and status.
+- `docs/decisions.md`: the index and rules of the numbered, append-only decisions, one line each.
+  Each decision is a file of its own, `docs/decisions/D<number>.md` (zero-padded to three digits),
+  so read only the ones a task needs. `docs/roadmap.md`: milestones and status.
 
 ## Commands
 - `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
-  `cargo doc --workspace --no-deps`. CI runs exactly these (job `check`, the required status check).
+  `cargo doc --workspace --no-deps`. CI runs exactly these (job `lint-and-test`). CI's last job,
+  `check`, waits for every other job and fails if one failed or was cancelled: it is the one
+  required status check, and a new job is added to its `needs:` list (D101).
 - `scripts/smoke-test.sh target/debug/eggdb` runs a built binary through every command, the
   sample files in `crates/eggdb/tests/data` and a scripted `eggdb ui`; CI runs it on Linux, macOS
   and Windows, and the release workflow on every release binary its runner can execute (D96).
   The sample files are never regenerated after their release's tag (D96).
 - `cargo run --release -p eggdb-bench` runs the benchmarks against `benchmarks/baseline.txt`
-  (`-- --update` rewrites this system's lines); CI's `bench` job gates on it (D80).
+  (`-- --update` rewrites this system's lines); CI's `bench` job reports the change and fails only
+  on more than 2x (D80, D101).
   `cargo run --release --manifest-path crates/eggdb-sqlite-compare/Cargo.toml` compares EggDB with
-  SQLite (its own workspace, never shipped); CI's `compare` job gates on it (D94).
+  SQLite (its own workspace, never shipped); CI's `compare` job does the same (D94, D101). Both
+  upload their results per PR as artifacts.
 - EggDB is public, so standard GitHub runners are free: CI aims for the shortest time from push to
   the first failure and to a green run (parallel jobs are fine when they shorten it), with no larger
   runners, superseded PR runs cancelled, and a timeout on every job.
@@ -218,16 +227,16 @@ Check each task against these before starting and again before opening the PR.
 The owner doesn't merge PRs by hand. After opening a PR, in the same session:
 1. Review it twice yourself (global PR workflow), then launch an independent review subagent with the
    PR, the diff and this file, and ask for MERGE or BLOCK. Fix every blocking issue and ask again.
-2. When the verdict is MERGE, both passes are clean and CI is green, squash-merge it
-   (`gh pr merge <n> --squash --delete-branch`), then confirm every workflow the merge started
-   succeeded.
+2. When the verdict is MERGE, both passes are clean and `check` is green, squash-merge it
+   (`gh pr merge <n> --squash --delete-branch`; `--auto` is allowed, D101), then confirm every
+   workflow the merge started succeeded.
 
 Security-critical PRs (cryptography, authentication and authorization, the file format) merge the
 same way, but need a second independent review focused only on security, plus test vectors,
 fuzzing and the format compatibility tests in CI (D35).
 
 An open question is never a reason to leave a PR unmerged: answer it with a research subagent,
-record the answer in the PR under "Decided by research" (and in docs/decisions.md for architecture),
+record the answer in the PR under "Decided by research" (and in docs/decisions/ for architecture),
 and merge. Only credentials, money, new accounts and going against an owner rule wait for the owner.
 A PR that changes the license is merged only on the owner's explicit instruction (D36).
 
@@ -241,5 +250,7 @@ Publishing to package registries (crates.io and others) needs accounts and token
 those up first.
 
 ## Owner decisions
-The decisions above are recorded in docs/decisions.md (D1 to D58). Record every further
-architecture decision there as a numbered entry; a later entry may supersede an earlier one.
+The decisions above are recorded in `docs/decisions/` (D1 to D101), one file each, indexed in
+`docs/decisions.md`. Record every further architecture decision as a new file there with the next
+free number (the highest in the index plus one) and a line in the index; a later entry may
+supersede an earlier one, with a note in both.

@@ -1,20 +1,25 @@
-//! `eggdb-bench`: EggDB's benchmarks, gated against `benchmarks/baseline.txt` (D7, D80).
+//! `eggdb-bench`: EggDB's benchmarks, compared with `benchmarks/baseline.txt` (D7, D80, D101).
 //!
 //! Run with `cargo run --release -p eggdb-bench`. Each benchmark reports metrics of four
 //! kinds:
 //! - counts (file operations, evictions and heap allocations per operation), the same on every
-//!   machine, which fail when they differ from their baseline line for `any` system;
-//! - ratios of a hot path's time to a reference workload run in the same process, which fail
-//!   when the median of interleaved samples is more than 30% above the line for this system,
-//!   after one retry;
+//!   machine, compared with their baseline line for `any` system;
+//! - ratios of a hot path's time to a reference workload run in the same process, the median of
+//!   interleaved samples, compared with the line for this system;
 //! - the footprint of the `eggdb` binary, which it builds first: its size (1% tolerance), its
 //!   peak memory (10%) and its start time as a ratio to starting a program that exits at once
 //!   (50%), for this system;
-//! - times in nanoseconds per operation, reported and never gated.
+//! - times in nanoseconds per operation, reported and never compared.
+//!
+//! A count or ratio above its line is printed in a table of changes and reported as `SLOWER`
+//! without failing the run, and one more than twice its line fails it after one retry for
+//! ratios (D101). A baseline line missing for a count also fails it.
 //!
 //! `--update` rewrites this system's lines and the shared count lines of the benchmark families
 //! it measured, keeping the others (such as `eggdb-sqlite-compare`'s), `--baseline <path>`
-//! reads another file, and the results are added to `$GITHUB_STEP_SUMMARY` when it is set.
+//! reads another file, `--results <path>` writes one line per metric (`<os> <benchmark>
+//! <metric> <value> <baseline> <change> <verdict>`) for CI to keep per pull request, and the
+//! table is added to `$GITHUB_STEP_SUMMARY` when it is set.
 
 mod allocations;
 mod baseline;
