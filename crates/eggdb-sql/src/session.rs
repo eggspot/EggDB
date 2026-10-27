@@ -291,8 +291,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// How far east of UTC the session's `TimeZone` is, in seconds: what a `timestamp with
     /// time zone` is shown in. A zone EggDB cannot resolve yet (a named region) counts as UTC.
     pub fn time_zone_offset_seconds(&self) -> i32 {
-        crate::datetime::time_zone_offset(&self.settings.get("TimeZone").unwrap_or_default())
-            .unwrap_or(0)
+        self.settings.time_zone_offset
     }
 
     /// The value of the run-time parameter `name`, as `SHOW name` gives it.
@@ -559,8 +558,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut resume = (0, 0);
         loop {
             let settings = Arc::clone(&self.settings);
-            let _clock =
-                crate::datetime::enter_statement(&settings.get("TimeZone").unwrap_or_default());
+            let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let mut parser = Parser::new(text, &tokens)
                 .with_context(parameters, &settings)
                 .in_dialect(self.dialect)

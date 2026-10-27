@@ -14,7 +14,7 @@ const MAX_OFFSET_SECONDS: i64 = 15 * 3600 + 59 * 60 + 59;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StatementClock {
-    pub(crate) now: i64,
+    pub(crate) now: Option<i64>,
     pub(crate) offset_seconds: i32,
 }
 
@@ -30,10 +30,10 @@ impl Drop for StatementClockGuard {
     }
 }
 
-pub(crate) fn enter_statement(time_zone: &str) -> StatementClockGuard {
+pub(crate) fn enter_statement(offset_seconds: i32) -> StatementClockGuard {
     let clock = StatementClock {
-        now: system_now(),
-        offset_seconds: time_zone_offset(time_zone).unwrap_or(0),
+        now: None,
+        offset_seconds,
     };
     StatementClockGuard(CURRENT.with(|current| current.replace(Some(clock))))
 }
@@ -48,7 +48,18 @@ fn system_now() -> i64 {
 }
 
 pub(crate) fn statement_now() -> i64 {
-    CURRENT.with(|current| current.get().map_or_else(system_now, |clock| clock.now))
+    CURRENT.with(|current| match current.get() {
+        Some(StatementClock { now: Some(now), .. }) => now,
+        Some(clock) => {
+            let now = system_now();
+            current.set(Some(StatementClock {
+                now: Some(now),
+                ..clock
+            }));
+            now
+        }
+        None => system_now(),
+    })
 }
 
 pub(crate) fn session_offset() -> i32 {
@@ -822,7 +833,7 @@ mod tests {
 
     #[test]
     fn the_session_time_zone_reads_and_shows_time_stamps() {
-        let _guard = enter_statement("UTC-05:30");
+        let _guard = enter_statement(time_zone_offset("UTC-05:30").unwrap_or(0));
         assert_eq!(session_offset(), 5 * 3600 + 1800);
         let micros = parse_timestamp("2024-01-01 10:00:00", true).unwrap();
         assert_eq!(format_timestamptz(micros), "2024-01-01 10:00:00+05:30");

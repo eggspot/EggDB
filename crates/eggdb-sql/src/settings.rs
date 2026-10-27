@@ -236,6 +236,7 @@ pub(crate) struct Settings {
     values: BTreeMap<&'static str, String>,
     custom: BTreeMap<String, String>,
     pub(crate) database: String,
+    pub(crate) time_zone_offset: i32,
     pub(crate) mysql: crate::mysql_variables::MySqlVariables,
     pub(crate) sqlite: SqliteState,
 }
@@ -274,6 +275,7 @@ impl Default for Settings {
                 .collect(),
             custom: BTreeMap::new(),
             database: "eggdb".to_owned(),
+            time_zone_offset: 0,
             mysql: crate::mysql_variables::MySqlVariables::default(),
             sqlite: SqliteState::default(),
         }
@@ -343,6 +345,9 @@ impl Settings {
                 }
             },
         };
+        if known.name == "TimeZone" {
+            self.time_zone_offset = crate::datetime::time_zone_offset(&value).unwrap_or(0);
+        }
         self.values.insert(known.name, value);
         Ok(())
     }
@@ -359,6 +364,7 @@ impl Settings {
             }
         }
         self.custom.clear();
+        self.time_zone_offset = 0;
         self.set_session_user(&user);
     }
 

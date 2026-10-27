@@ -751,6 +751,8 @@ And more, not in the suite yet:
   `ON UPDATE CURRENT_TIMESTAMP` are not supported yet, and `time_zone` is not applied (the
   session's time zone is UTC unless the PostgreSQL protocol's `TimeZone` sets it).
 - A value rounded to fit a `DECIMAL(p,s)`'s scale gives no note 1265.
+- `AVG` of integers and `SUM`/`AVG` of `DECIMAL` use PostgreSQL's result scale (`AVG(2, 3)` is
+  `2.5000000000000000`) where MySQL adds 4 digits to the argument's scale (`2.5000`).
 - Indexes: a key on a column prefix (`KEY k (name(10))`) indexes the whole value, and a
   `UNIQUE` one answers 1235; `FULLTEXT` and `SPATIAL` keys answer 1235. `SHOW INDEX` gives
   `Cardinality` and `Sub_part` as `NULL`, and `EXPLAIN` gives `key_len`, `ref` and `rows` as
