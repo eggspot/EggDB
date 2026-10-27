@@ -752,3 +752,140 @@ fn hostile_subquery_and_set_operation_statements_never_panic_in_any_dialect() {
         fuzz(&mut session, &shared);
     }
 }
+
+fn code(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+    match run(session, sql) {
+        Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
+        Err(error) => match error.vendor_code() {
+            Some(vendor) => format!("{} {vendor}", error.state().code()),
+            None => error.state().code().to_owned(),
+        },
+    }
+}
+
+#[test]
+fn repeated_output_names_follow_each_dialect() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE t (a integer, b integer); INSERT INTO t VALUES (1, 10), (2, 20), (3, NULL)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT * FROM (SELECT * FROM t x, t y WHERE x.a = 1 AND y.a = 2) s"
+        ),
+        "a|b|a|b\n1|10|2|20\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT * FROM (SELECT 1, 2) s"),
+        "?column?|?column?\n1|2\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "WITH c AS (SELECT 1 AS a, 2 AS a) SELECT * FROM c"
+        ),
+        "a|a\n1|2\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM (SELECT * FROM t x RIGHT JOIN t ON true) s"
+        ),
+        "count\n9\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT * FROM (SELECT * FROM (SELECT 1 AS a, 2 AS a) i) o"
+        ),
+        "a|a\n1|2\nSELECT 1"
+    );
+    assert_eq!(
+        code(
+            &mut session,
+            "WITH c AS (SELECT 1 AS a, 2 AS a) SELECT a FROM c"
+        ),
+        "42702"
+    );
+    assert_eq!(
+        code(&mut session, "SELECT s.b FROM (SELECT * FROM t x, t y) s"),
+        "42702"
+    );
+    let mut sqlite = Session::with_dialect(&store, Dialect::Sqlite);
+    assert_eq!(
+        last(&mut sqlite, "SELECT * FROM (SELECT 1 AS a, 2 AS a)"),
+        "a|a\n1|2\nSELECT 1"
+    );
+    assert!(run(&mut sqlite, "SELECT a FROM (SELECT 1 AS a, 2 AS a)").is_err());
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    assert_eq!(
+        code(&mut mysql, "SELECT * FROM (SELECT 1 AS a, 2 AS a) s"),
+        "42S21 1060"
+    );
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    assert_eq!(
+        code(
+            &mut oracle,
+            "SELECT * FROM (SELECT 1 AS a, 2 AS a FROM dual)"
+        ),
+        "42702 918"
+    );
+}
+
+#[test]
+fn aggregates_over_only_outer_columns_are_refused_in_every_dialect() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE t (a integer, b integer); INSERT INTO t VALUES (1, 10), (2, 20), (3, NULL); CREATE TABLE u (c integer); INSERT INTO u VALUES (1)",
+    );
+    for sql in [
+        "SELECT (SELECT sum(t.b)) FROM t",
+        "SELECT (SELECT max(t.b) FROM u) FROM t",
+        "SELECT a FROM t WHERE b = (SELECT max(t.b) FROM u)",
+        "SELECT a, (SELECT count(t.b) FROM u) FROM t",
+    ] {
+        assert_eq!(code(&mut session, sql), "0A000", "{sql}");
+    }
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT a, (SELECT count(*) + max(c) + max(t.b + c) FROM u) FROM t ORDER BY a"
+        ),
+        "a|?column?\n1|13\n2|23\n3|NULL\nSELECT 3"
+    );
+    assert_eq!(
+        code(
+            &mut session,
+            "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE EXISTS (SELECT 1 FROM u v WHERE v.c = t.a))"
+        ),
+        "0A000"
+    );
+    for (dialect, sql, expected) in [
+        (
+            Dialect::MySql,
+            "SELECT (SELECT SUM(t.b) FROM u) FROM t",
+            "42000 1235",
+        ),
+        (
+            Dialect::Sqlite,
+            "SELECT (SELECT sum(t.b) FROM u) FROM t",
+            "0A000",
+        ),
+        (
+            Dialect::Oracle,
+            "SELECT (SELECT SUM(t.b) FROM u) FROM t",
+            "0A000 3001",
+        ),
+    ] {
+        let mut other = Session::with_dialect(&store, dialect);
+        assert!(
+            code(&mut other, sql).starts_with(expected),
+            "{dialect:?}: {sql}"
+        );
+    }
+}

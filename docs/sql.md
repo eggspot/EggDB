@@ -128,7 +128,7 @@ What it reads, on top of the statements of "What runs today":
   `YEAR_MONTH`) as integers; another unit is error 1064. `TIMESTAMP '...'` and `DATE '...'`
   literals. A binary-protocol row with a date outside years 0 to 9999 is error 1292.
 - **Subqueries, `WITH` and set operations** as in "What runs today", with MySQL's rules: a
-  derived table needs an alias (error 1248), `WITH RECURSIVE` stops after 1,000 steps (error 3636,
+  derived table needs an alias (error 1248) and unique column names (error 1060), `WITH RECURSIVE` stops after 1,000 steps (error 3636,
   `cte_max_recursion_depth`'s default), there is no `FULL JOIN` (`FULL` is not a keyword, 1064)
   and no `MINUS`, a set operation of numbers and strings gives strings, and the errors are 1242
   ("Subquery returns more than 1 row"), 1241 ("Operand should contain 1 column(s)") and 1222.
@@ -299,7 +299,8 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
 - **Subqueries, subquery factoring and set operators**: `UNION [ALL]`, `INTERSECT [ALL]`,
   `MINUS [ALL]` and `EXCEPT [ALL]` (23ai), all of one precedence, left to right; `WITH name
   (columns) AS (...)` is recursive when it names itself (no `RECURSIVE` keyword); `RIGHT` and
-  `FULL [OUTER] JOIN`; derived tables without column lists. Errors: `ORA-01427` (single-row
+  `FULL [OUTER] JOIN`; derived tables without column lists, and with unique column names
+  (`ORA-00918` otherwise). Errors: `ORA-01427` (single-row
   subquery returns more than one row), `ORA-00913` (too many values), `ORA-01789` and
   `ORA-01790` (a set operator's columns differ in number or type).
 - **Functions**: `NVL`, `NVL2`, `COALESCE`, `NULLIF`, `DECODE` (NULL matches NULL, the first argument
@@ -419,6 +420,8 @@ the fast path always applies, since the server checks every password itself).
   `<=`, `>`, `>=`, in three-valued logic as the manual describes (`x NOT IN` a list holding a
   NULL is never true; `ALL` over no rows is true, `ANY` false). A subquery in `FROM`,
   `(SELECT ...) [AS] alias [(column, ...)]`, is a derived table; the alias may be left out.
+  A derived table or `WITH` query may have two columns of one name (`SELECT * FROM t x, t y`):
+  `*` returns both, and naming that column is `42702` ("column reference "a" is ambiguous").
   A subquery may name the columns of the query around it (a correlated subquery) in its own
   select list, `WHERE`, `HAVING` and `JOIN ... ON`, and stand in that query's select list,
   `WHERE` or `ORDER BY` (in a grouped query, in `WHERE` only); it then runs once for each
@@ -769,9 +772,13 @@ until they are fixed:
   deleted last row is given again, and the column must be the first of the primary key (named
   sequences are item 32).
 - Subqueries and `WITH` (item 30, D112): a correlated subquery may name only the query
-  directly around it (a name two or more levels out is `42703`), and stand only in the select
+  directly around it (a name two or more levels out is `0A000`), and stand only in the select
   list, `WHERE` or `ORDER BY`, and in a query with `GROUP BY` or aggregates only in `WHERE`
-  (elsewhere `0A000`); a derived table
+  (elsewhere `0A000`); an aggregate inside a subquery whose argument names only the outer
+  query's columns (`SELECT (SELECT sum(t.b) FROM u) FROM t`), which belongs to the outer query
+  in PostgreSQL and SQLite, answers `0A000`; a correlated subquery runs once per distinct outer
+  value, so one over a million distinct values runs a million times, with no statement timeout
+  yet (item 19e); a derived table
   or `WITH` query cannot name the outer query's columns, and `UPDATE`, `DELETE` and `INSERT`
   cannot have a correlated subquery (`0A000`). Subqueries nest at most 32 levels and a statement
   holds at most 1,024 `SELECT`s (`54001`). Every `WITH` query runs, even one nothing names, and

@@ -6,8 +6,15 @@ pub(crate) const WORK_MEMORY_LIMIT: usize = 1 << 30;
 const ROW_OVERHEAD: usize = 24;
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
+#[derive(Clone, Copy)]
+struct Shared {
+    statement: u64,
+    used: usize,
+}
+
 thread_local! {
-    static SHARED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static SHARED: std::cell::Cell<Option<Shared>> = const { std::cell::Cell::new(None) };
+    static STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) struct SharedStatementMemory {
@@ -25,27 +32,44 @@ impl Drop for SharedStatementMemory {
 pub(crate) fn share_statement_memory() -> SharedStatementMemory {
     let outermost = SHARED.with(|shared| {
         if shared.get().is_some() {
-            false
-        } else {
-            shared.set(Some(0));
-            true
+            return false;
         }
+        let statement = STATEMENTS.with(|statements| {
+            let next = statements.get().wrapping_add(1);
+            statements.set(next);
+            next
+        });
+        shared.set(Some(Shared { statement, used: 0 }));
+        true
     });
     SharedStatementMemory { outermost }
 }
 
-fn shared_add(bytes: usize) -> Option<usize> {
+fn current_statement() -> Option<u64> {
+    SHARED.with(|shared| shared.get().map(|shared| shared.statement))
+}
+
+fn shared_add(statement: u64, bytes: usize) -> Option<usize> {
     SHARED.with(|shared| {
-        let total = shared.get()?.saturating_add(bytes);
-        shared.set(Some(total));
-        Some(total)
+        let current = shared
+            .get()
+            .filter(|current| current.statement == statement)?;
+        let used = current.used.saturating_add(bytes);
+        shared.set(Some(Shared { statement, used }));
+        Some(used)
     })
 }
 
-fn shared_subtract(bytes: usize) {
+fn shared_subtract(statement: u64, bytes: usize) {
     SHARED.with(|shared| {
-        if let Some(total) = shared.get() {
-            shared.set(Some(total.saturating_sub(bytes)));
+        if let Some(current) = shared
+            .get()
+            .filter(|current| current.statement == statement)
+        {
+            shared.set(Some(Shared {
+                statement,
+                used: current.used.saturating_sub(bytes),
+            }));
         }
     });
 }
@@ -69,13 +93,13 @@ impl std::fmt::Debug for HeldMemory {
 pub(crate) struct WorkMemory {
     used: usize,
     limit: usize,
-    shared: bool,
+    statement: Option<u64>,
 }
 
 impl Drop for WorkMemory {
     fn drop(&mut self) {
-        if self.shared {
-            shared_subtract(self.used);
+        if let Some(statement) = self.statement {
+            shared_subtract(statement, self.used);
         }
     }
 }
@@ -85,7 +109,7 @@ impl WorkMemory {
         Self {
             used: 0,
             limit: WORK_MEMORY_LIMIT,
-            shared: SHARED.with(|shared| shared.get().is_some()),
+            statement: current_statement(),
         }
     }
 
@@ -93,7 +117,7 @@ impl WorkMemory {
         Self {
             used: 0,
             limit,
-            shared: false,
+            statement: None,
         }
     }
 
@@ -103,11 +127,10 @@ impl WorkMemory {
 
     pub(crate) fn charge(&mut self, bytes: usize) -> SqlResult<()> {
         self.used = self.used.saturating_add(bytes);
-        let total = if self.shared {
-            shared_add(bytes).unwrap_or(self.used)
-        } else {
-            self.used
-        };
+        let total = self
+            .statement
+            .and_then(|statement| shared_add(statement, bytes))
+            .unwrap_or(self.used);
         if total > self.limit {
             return Err(SqlError::new(SqlState::OUT_OF_MEMORY, "out of memory")
                 .with_detail(format!(
@@ -124,8 +147,8 @@ impl WorkMemory {
     pub(crate) fn release(&mut self, bytes: usize) {
         let released = bytes.min(self.used);
         self.used -= released;
-        if self.shared {
-            shared_subtract(released);
+        if let Some(statement) = self.statement {
+            shared_subtract(statement, released);
         }
     }
 
@@ -149,6 +172,27 @@ impl WorkMemory {
 mod tests {
     use super::{WORK_MEMORY_LIMIT, WorkMemory};
     use crate::types::Value;
+
+    #[test]
+    fn memory_charged_in_one_statement_never_counts_against_another() {
+        let first = super::share_statement_memory();
+        let mut held = WorkMemory::new();
+        held.charge(1 << 20).unwrap();
+        drop(first);
+        let second = super::share_statement_memory();
+        let mut fresh = WorkMemory::new();
+        fresh.charge(1 << 10).unwrap();
+        drop(held);
+        assert_eq!(
+            super::SHARED.with(|shared| shared.get().map(|now| now.used)),
+            Some(1 << 10)
+        );
+        let mut before = WorkMemory::with_limit(WORK_MEMORY_LIMIT);
+        before.charge(10).unwrap();
+        drop(fresh);
+        drop(second);
+        assert!(super::SHARED.with(|shared| shared.get().is_none()));
+    }
 
     #[test]
     fn a_statement_past_the_limit_fails_with_out_of_memory() {

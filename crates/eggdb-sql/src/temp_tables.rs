@@ -1,36 +1,48 @@
 use crate::ast::Name;
-use crate::encoding::{Column, TableDefinition, encode_row, rows_prefix, table_key};
+use crate::dialect::Dialect;
+use crate::encoding::{Column, TableDefinition, encode_row, rows_prefix};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::memory::WorkMemory;
 use crate::session::OutputColumn;
 use crate::store::{EntryVisitor, KeyValueRead, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, convert};
-use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 pub(crate) const TEMP_TABLE_MARKER: char = '\u{1}';
-const MOST_TEMP_TABLES: u32 = 1 << 24;
+const MOST_TEMP_TABLES: u32 = 1 << 20;
+const ID_SPACE: u64 = 1 << 24;
 const ENTRY_OVERHEAD: usize = 64;
+
+thread_local! {
+    static NEXT_NUMBER: Cell<u64> = const { Cell::new(0) };
+    static DEFINITIONS: RefCell<HashMap<String, Arc<TableDefinition>>> =
+        RefCell::new(HashMap::new());
+}
 
 #[derive(Default)]
 pub(crate) struct TempTableNames {
-    next: Cell<u32>,
+    made: Cell<u32>,
 }
 
 impl TempTableNames {
     fn next(&self) -> SqlResult<(u32, String)> {
-        let number = self.next.get();
-        if number >= MOST_TEMP_TABLES {
+        let made = self.made.get();
+        if made >= MOST_TEMP_TABLES {
             return Err(SqlError::new(
                 SqlState::PROGRAM_LIMIT_EXCEEDED,
                 format!("a statement can build at most {MOST_TEMP_TABLES} intermediate results"),
             ));
         }
-        self.next.set(number + 1);
-        Ok((
-            u32::MAX - number,
-            format!("{TEMP_TABLE_MARKER}intermediate {number}"),
-        ))
+        self.made.set(made + 1);
+        let number = NEXT_NUMBER.with(|next| {
+            let number = next.get();
+            next.set(number.wrapping_add(1));
+            number
+        });
+        let id = u32::MAX - u32::try_from(number % ID_SPACE).unwrap_or(0);
+        Ok((id, format!("{TEMP_TABLE_MARKER}intermediate {number}")))
     }
 }
 
@@ -38,15 +50,90 @@ pub(crate) fn is_temp_table(name: &str) -> bool {
     name.starts_with(TEMP_TABLE_MARKER)
 }
 
+pub(crate) fn temp_definition(name: &str) -> Option<Arc<TableDefinition>> {
+    DEFINITIONS.with(|definitions| definitions.try_borrow().ok()?.get(name).cloned())
+}
+
+pub(crate) fn display_name(name: &str) -> &str {
+    name.split(TEMP_TABLE_MARKER).next().unwrap_or(name)
+}
+
+pub(crate) fn is_repeated(table: &TableDefinition, name: &str) -> bool {
+    is_temp_table(&table.name)
+        && table.columns.iter().any(|column| {
+            column
+                .name
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with(TEMP_TABLE_MARKER))
+        })
+}
+
+pub(crate) fn ambiguous(name: &str, position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::AMBIGUOUS_COLUMN,
+        format!("column reference \"{name}\" is ambiguous"),
+    )
+    .at(position)
+}
+
 pub(crate) struct TempTables {
     entries: BTreeMap<Vec<u8>, Vec<u8>>,
+    registered: Vec<String>,
     memory: WorkMemory,
+}
+
+impl Drop for TempTables {
+    fn drop(&mut self) {
+        DEFINITIONS.with(|definitions| {
+            if let Ok(mut definitions) = definitions.try_borrow_mut() {
+                for name in &self.registered {
+                    definitions.remove(name);
+                }
+            }
+        });
+    }
+}
+
+fn unique_names(names: Vec<String>, dialect: Dialect, position: usize) -> SqlResult<Vec<String>> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut unique = Vec::with_capacity(names.len());
+    for (index, name) in names.into_iter().enumerate() {
+        let count = seen.entry(name.clone()).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            unique.push(name);
+            continue;
+        }
+        match dialect {
+            Dialect::MySql => {
+                return Err(SqlError::new(
+                    SqlState::DUPLICATE_COLUMN,
+                    format!("column \"{name}\" specified more than once"),
+                )
+                .at(position));
+            }
+            Dialect::Oracle => return Err(ambiguous(&name, position)),
+            Dialect::PostgreSql | Dialect::Sqlite => {
+                unique.push(format!("{name}{TEMP_TABLE_MARKER}{index}"));
+            }
+        }
+    }
+    Ok(unique)
+}
+
+pub(crate) struct Intermediate<'a> {
+    pub(crate) columns: &'a [OutputColumn],
+    pub(crate) renamed: &'a [Name],
+    pub(crate) label: &'a str,
+    pub(crate) dialect: Dialect,
+    pub(crate) position: usize,
 }
 
 impl TempTables {
     pub(crate) fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            registered: Vec::new(),
             memory: WorkMemory::new(),
         }
     }
@@ -54,11 +141,16 @@ impl TempTables {
     pub(crate) fn add(
         &mut self,
         names: &TempTableNames,
-        columns: &[OutputColumn],
-        renamed: &[Name],
-        label: &str,
+        shape: Intermediate<'_>,
         rows: Vec<Vec<Value>>,
     ) -> SqlResult<String> {
+        let Intermediate {
+            columns,
+            renamed,
+            label,
+            dialect,
+            position,
+        } = shape;
         if renamed.len() > columns.len() {
             let position = renamed.get(columns.len()).map_or(0, |name| name.position);
             return Err(SqlError::new(
@@ -72,6 +164,16 @@ impl TempTables {
             .at(position));
         }
         let (id, name) = names.next()?;
+        let shown: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                renamed
+                    .get(index)
+                    .map_or_else(|| column.name.clone(), |name| name.text.clone())
+            })
+            .collect();
+        let unique = unique_names(shown, dialect, position)?;
         let mut definition = TableDefinition {
             id,
             name: name.clone(),
@@ -79,24 +181,27 @@ impl TempTables {
             primary_key: Vec::new(),
             indexes: Vec::new(),
         };
-        for (index, column) in columns.iter().enumerate() {
+        for (index, (column, column_name)) in columns.iter().zip(unique).enumerate() {
             let sql_type = column.sql_type.unwrap_or_else(|| value_type(&rows, index));
             definition.columns.push(Column {
-                name: renamed
-                    .get(index)
-                    .map_or_else(|| column.name.clone(), |name| name.text.clone()),
+                name: column_name,
                 sql_type,
                 not_null: false,
                 default: None,
                 auto_increment: false,
             });
         }
-        let encoded = definition.encode();
-        self.memory.charge(encoded.len() + ENTRY_OVERHEAD)?;
-        self.entries.insert(table_key(&name), encoded);
+        let column_bytes: usize = definition
+            .columns
+            .iter()
+            .map(|column| column.name.len() + ENTRY_OVERHEAD)
+            .sum();
+        self.memory.charge(column_bytes + ENTRY_OVERHEAD)?;
         let prefix = rows_prefix(id);
+        let width = definition.columns.len();
+        let mut stored = Vec::with_capacity(rows.len());
         for (number, mut row) in rows.into_iter().enumerate() {
-            row.resize(definition.columns.len(), Value::Null);
+            row.resize(width, Value::Null);
             for (value, column) in row.iter_mut().zip(&definition.columns) {
                 if !value.is_null() && value.sql_type() != Some(column.sql_type) {
                     let original = std::mem::replace(value, Value::Null);
@@ -108,8 +213,24 @@ impl TempTables {
             let bytes = encode_row(&row);
             self.memory
                 .charge(key.len() + bytes.len() + ENTRY_OVERHEAD)?;
-            self.entries.insert(key, bytes);
+            stored.push((key, bytes));
         }
+        self.entries.extend(stored);
+        let registered = DEFINITIONS.with(|definitions| {
+            definitions
+                .try_borrow_mut()
+                .map(|mut definitions| {
+                    definitions.insert(name.clone(), Arc::new(definition));
+                })
+                .is_ok()
+        });
+        if !registered {
+            return Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "an intermediate result could not be registered",
+            ));
+        }
+        self.registered.push(name.clone());
         Ok(name)
     }
 }
@@ -212,7 +333,7 @@ impl KeyValueRead for Overlay<'_> {
     }
 
     fn committed_version(&self) -> Option<u64> {
-        if self.temp.entries.is_empty() {
+        if self.temp.registered.is_empty() {
             self.base.committed_version()
         } else {
             None

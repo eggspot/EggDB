@@ -12,7 +12,7 @@ use crate::memory::WorkMemory;
 use crate::session::{OutputColumn, QueryResult};
 use crate::set_operations::{self, Branch};
 use crate::store::KeyValueRead;
-use crate::temp_tables::{Overlay, TempTableNames, TempTables};
+use crate::temp_tables::{Intermediate, Overlay, TempTableNames, TempTables};
 use crate::types::{SqlType, Value, equality_key};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -255,6 +255,17 @@ pub(crate) fn first_column_name(query: &Query) -> Option<String> {
             SetExpr::Query(inner) => body = &inner.body,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct Outer<'a> {
+    scope: Scope<'a>,
+    next: Option<&'a Outer<'a>>,
+}
+
+fn mentions_inner_column(expr: &Expr) -> bool {
+    matches!(expr.kind, ExprKind::Column { .. })
+        || children(expr).into_iter().any(mentions_inner_column)
 }
 
 pub(crate) struct Template {
@@ -907,7 +918,7 @@ fn prepare_query(
     env: &Env<'_>,
     tables: &mut TableCache,
     query: &Query,
-    parent: Option<Scope<'_>>,
+    parent: Option<&Outer<'_>>,
     ctes: Option<&CteScope<'_>>,
     prepared: &mut Prepared,
 ) -> SqlResult<(Query, bool)> {
@@ -935,9 +946,13 @@ fn prepare_query(
         let columns = result.columns.unwrap_or_default();
         let temp = prepared.temp.add(
             env.names,
-            &columns,
-            &table.column_names,
-            &table.name.text,
+            Intermediate {
+                columns: &columns,
+                renamed: &table.column_names,
+                label: &table.name.text,
+                dialect: table.dialect,
+                position: table.name.position,
+            },
             result.rows,
         )?;
         names.push((table.name.text.clone(), temp));
@@ -1135,9 +1150,13 @@ fn recursive_table(
         let mut step_temp = TempTables::new();
         let temp = step_temp.add(
             env.names,
-            &columns,
-            &table.column_names,
-            name,
+            Intermediate {
+                columns: &columns,
+                renamed: &table.column_names,
+                label: name,
+                dialect: table.dialect,
+                position: table.name.position,
+            },
             std::mem::take(&mut working),
         )?;
         let names = [(name.clone(), temp)];
@@ -1197,7 +1216,7 @@ fn prepare_select(
     env: &Env<'_>,
     tables: &mut TableCache,
     select: &mut Select,
-    parent: Option<Scope<'_>>,
+    parent: Option<&Outer<'_>>,
     ctes: Option<&CteScope<'_>>,
     prepared: &mut Prepared,
 ) -> SqlResult<bool> {
@@ -1300,9 +1319,13 @@ fn prepare_reference(
         let label = reference.alias.as_deref().unwrap_or("unnamed_subquery");
         let temp = prepared.temp.add(
             env.names,
-            &columns,
-            &derived.column_names,
-            label,
+            Intermediate {
+                columns: &columns,
+                renamed: &derived.column_names,
+                label,
+                dialect: derived.dialect,
+                position: reference.name.position,
+            },
             result.rows,
         )?;
         reference.name.text = temp;
@@ -1327,23 +1350,62 @@ fn rewrite(
     tables: &mut TableCache,
     expr: &mut Expr,
     scope: Scope<'_>,
-    parent: Option<Scope<'_>>,
+    parent: Option<&Outer<'_>>,
     ctes: Option<&CteScope<'_>>,
     templates: &mut Vec<Template>,
     correlated: &mut bool,
 ) -> SqlResult<()> {
     match &mut expr.kind {
         ExprKind::Column { qualifier, name } => {
-            if let Some(parent) = parent
-                && let Err(error) = scope.column(qualifier.as_deref(), name, expr.position)
-                && is_missing(&error)
-                && let Ok(index) = parent.column(qualifier.as_deref(), name, expr.position)
+            let Some(outer) = parent else {
+                return Ok(());
+            };
+            let Err(error) = scope.column(qualifier.as_deref(), name, expr.position) else {
+                return Ok(());
+            };
+            if !is_missing(&error) {
+                return Ok(());
+            }
+            if let Ok(index) = outer
+                .scope
+                .column(qualifier.as_deref(), name, expr.position)
             {
                 expr.kind = ExprKind::OuterColumn {
                     index,
-                    sql_type: parent.column_type(index),
+                    sql_type: outer.scope.column_type(index),
                 };
                 *correlated = true;
+                return Ok(());
+            }
+            let mut farther = outer.next;
+            while let Some(level) = farther {
+                if level
+                    .scope
+                    .column(qualifier.as_deref(), name, expr.position)
+                    .is_ok()
+                {
+                    return Err(SqlError::not_supported(
+                        "a subquery that refers to a query two or more levels out is not supported yet",
+                    )
+                    .at(expr.position));
+                }
+                farther = level.next;
+            }
+            Ok(())
+        }
+        ExprKind::Aggregate {
+            argument: Some(argument),
+            ..
+        } => {
+            rewrite(
+                env, tables, argument, scope, parent, ctes, templates, correlated,
+            )?;
+            if parent.is_some() && mentions_outer(argument) && !mentions_inner_column(argument) {
+                return Err(SqlError::not_supported(
+                    "an aggregate over only the outer query's columns inside a subquery is not supported yet",
+                )
+                .with_hint("Compute the aggregate in the outer query, or name a column of the subquery's own tables in it.")
+                .at(expr.position));
             }
             Ok(())
         }
@@ -1353,7 +1415,11 @@ fn rewrite(
                     env, tables, operand, scope, parent, ctes, templates, correlated,
                 )?;
             }
-            prepare_subquery(env, tables, subquery, scope, ctes, templates)
+            let outer = Outer {
+                scope,
+                next: parent,
+            };
+            prepare_subquery(env, tables, subquery, &outer, ctes, templates)
         }
         _ => {
             for child in children_mut(expr) {
@@ -1417,13 +1483,13 @@ fn prepare_subquery(
     env: &Env<'_>,
     tables: &mut TableCache,
     subquery: &mut Subquery,
-    scope: Scope<'_>,
+    outer: &Outer<'_>,
     ctes: Option<&CteScope<'_>>,
     templates: &mut Vec<Template>,
 ) -> SqlResult<()> {
     let query = with_cap(subquery.query.clone(), row_cap(subquery));
     let mut inner = Prepared::new();
-    let (query, correlated) = prepare_query(env, tables, &query, Some(scope), ctes, &mut inner)?;
+    let (query, correlated) = prepare_query(env, tables, &query, Some(outer), ctes, &mut inner)?;
     let overlay = Overlay::new(env.reader, &inner.temp);
     let inner_env = Env {
         reader: &overlay,

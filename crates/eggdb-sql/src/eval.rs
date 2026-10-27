@@ -108,11 +108,14 @@ impl<'a> Scope<'a> {
                 {
                     return Err(missing_table(qualifier, position));
                 }
-                source
+                let index = source
                     .table
                     .column_index(name)
-                    .map(|index| source.offset + index)
-                    .ok_or_else(|| missing_column(qualifier, name, position))
+                    .ok_or_else(|| missing_column(qualifier, name, position))?;
+                if crate::temp_tables::is_repeated(source.table, name) {
+                    return Err(crate::temp_tables::ambiguous(name, position));
+                }
+                Ok(source.offset + index)
             }
             Scope::Many(sources) => sources.column(qualifier, name, position),
         }
@@ -135,17 +138,23 @@ impl Sources<'_> {
                 }
                 return Err(missing_table(qualifier, position));
             };
-            return source
+            let index = source
                 .table
                 .column_index(name)
-                .map(|index| source.offset + index)
-                .ok_or_else(|| missing_column(Some(qualifier), name, position));
+                .ok_or_else(|| missing_column(Some(qualifier), name, position))?;
+            if crate::temp_tables::is_repeated(source.table, name) {
+                return Err(crate::temp_tables::ambiguous(name, position));
+            }
+            return Ok(source.offset + index);
         }
         let mut found = None;
         for source in &self.list {
             let Some(index) = source.table.column_index(name) else {
                 continue;
             };
+            if crate::temp_tables::is_repeated(source.table, name) {
+                return Err(crate::temp_tables::ambiguous(name, position));
+            }
             let offset = source.offset + index;
             if self.merged.contains(&offset) {
                 continue;

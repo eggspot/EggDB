@@ -180,6 +180,7 @@ impl Parser<'_> {
                 name,
                 column_names,
                 query,
+                dialect: self.dialect,
             });
             if !self.take(&TokenKind::Comma) {
                 return Ok((tables, recursive));
@@ -446,6 +447,7 @@ impl Parser<'_> {
             derived: Some(Box::new(DerivedTable {
                 query,
                 column_names,
+                dialect: self.dialect,
             })),
         })
     }

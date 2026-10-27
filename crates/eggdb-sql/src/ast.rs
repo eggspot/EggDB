@@ -164,6 +164,7 @@ impl TableReference {
 pub(crate) struct DerivedTable {
     pub(crate) query: Query,
     pub(crate) column_names: Vec<Name>,
+    pub(crate) dialect: Dialect,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,6 +211,7 @@ pub(crate) struct CommonTable {
     pub(crate) name: Name,
     pub(crate) column_names: Vec<Name>,
     pub(crate) query: Query,
+    pub(crate) dialect: Dialect,
 }
 
 #[derive(Debug, Clone, PartialEq)]

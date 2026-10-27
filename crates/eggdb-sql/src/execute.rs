@@ -61,10 +61,7 @@ impl TableCache {
         name: &str,
     ) -> SqlResult<Option<Arc<TableDefinition>>> {
         if crate::temp_tables::is_temp_table(name) {
-            return reader
-                .get(&table_key(name))?
-                .map(|bytes| TableDefinition::decode(name, &bytes).map(Arc::new))
-                .transpose();
+            return Ok(crate::temp_tables::temp_definition(name));
         }
         let version = reader.committed_version();
         if let Some(cached) = self.entries.get(name)
@@ -1154,7 +1151,7 @@ impl<'a> Projection<'a> {
                         if let Some((source, index)) = scope.source_of(offset) {
                             let column = &source.table.columns[index];
                             columns.push(OutputColumn {
-                                name: column.name.clone(),
+                                name: crate::temp_tables::display_name(&column.name).to_owned(),
                                 sql_type: Some(column.sql_type),
                             });
                             projected.push(ProjectedItem::Column(offset));
