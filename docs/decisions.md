@@ -4244,11 +4244,16 @@ at most 1.0 on macOS and Linux, or a D7 research shows the remainder is the unav
 correctness or security. The work joins roadmap item 19e, cheapest first: decoding only the
 columns a statement reads, reused row buffers and no per-row type conversion when the key types
 match, `WHERE` conjuncts evaluated inside the join step, a cursor kept between lookups in key
-order, and merge joins. The point-select line moved from 1.23 to 1.32-1.41 in runs on this branch
-while the untouched key-value `get` moved from 0.75 to 0.82-0.83 in the same runs, so its line is
-left as it is.
+order, and merge joins. CI's Linux runner measured the join at 3.78-3.93 and the group-by at
+1.04-1.06. The point-select line is not moved: on the Mac it measured 1.32-1.41 against its 1.23
+while the untouched key-value `get` drifted as much (0.75 to 0.82), but on Linux it measured
+0.96-0.99 against 0.85 while `get` did not drift, so part of it is a real cost of the wider
+`SELECT` path (a larger statement, the grouping and join checks); two allocations it added are
+already removed (0.99 to 0.96). The rest is open and joins item 19e: it stays inside its 15% gate
+and is investigated with a profile before any line moves.
 
 **Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to 1,280,800 bytes on
 aarch64 macOS (+82,768, +6.9%) for the join planner and executor, the grouping rewrite and the
 aggregate states; start time and peak memory stay within their lines (1,671,168 and 2,359,296
-bytes peak). The Linux line moves by the amount CI measures.
+bytes peak). On x86-64 Linux it grows from 1,461,576 to 1,567,192 bytes (+105,616, +7.2%); peak
+memory stays within its lines.
