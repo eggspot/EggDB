@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -7,6 +7,8 @@ const SHORTEST_WAIT: Duration = Duration::from_millis(1);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
+const REFUSAL_LINGER: Duration = Duration::from_millis(200);
+const REFUSAL_LINGER_BYTES: usize = 256 * 1024;
 pub(crate) const LARGEST_FRAME: usize = 0xFF_FFFF;
 
 #[derive(Debug)]
@@ -154,6 +156,31 @@ impl<'a> Wire<'a> {
             self.flush()?;
         }
         Ok(())
+    }
+
+    pub(crate) fn close_after_refusal(&mut self) {
+        let _ = self.stream.shutdown(Shutdown::Write);
+        let deadline = Instant::now() + REFUSAL_LINGER;
+        let mut buffer = [0u8; 8 * 1024];
+        let mut discarded = 0;
+        while discarded < REFUSAL_LINGER_BYTES {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || self.stream.set_read_timeout(Some(left)).is_err() {
+                return;
+            }
+            match self.stream.read(&mut buffer) {
+                Ok(0) => return,
+                Ok(count) => discarded += count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return,
+            }
+        }
     }
 
     pub(crate) fn peer(&self) -> String {

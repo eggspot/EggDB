@@ -235,6 +235,24 @@ fn oversized_lengths_are_refused_without_allocating_them() {
 }
 
 #[test]
+fn refusals_reach_clients_that_keep_sending_after_the_refusal_is_decided() {
+    let server = TestServer::start(8);
+    for unread in [0, 4 * 1024, 100 * 1024] {
+        let mut client = Client::connect(server.address);
+        client.handshake();
+        client.send_raw(&framed(1, &vec![b'x'; 16 * 1024 + 1 + unread]));
+        let refused = client.read().unwrap();
+        assert!(matches!(
+            client.parse_reply(refused),
+            Reply::Err { code: 1153, .. }
+        ));
+        assert_eq!(client.read(), None);
+    }
+    let mut client = Client::login(server.address);
+    assert_eq!(texts(&client.query("SELECT 4")), vec![vec!["4".to_owned()]]);
+}
+
+#[test]
 fn truncated_handshakes_time_out_and_wrong_sequence_ids_are_refused() {
     let server = TestServer::start_with(8, Duration::from_millis(500));
     let mut slow = Client::connect(server.address);

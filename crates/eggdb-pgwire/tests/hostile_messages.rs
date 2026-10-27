@@ -247,9 +247,8 @@ fn oversized_lengths_are_refused_without_allocating_them() {
     client.send_startup(196_608, &[("user", USER)]);
     let _ = client.read();
     client.send_raw(&framed(b'p', &vec![b'x'; 64 * 1024]));
-    if let Some(refused) = client.read() {
-        assert_eq!(refused.code(), "08P01");
-    }
+    let refused = client.read().unwrap();
+    assert_eq!(refused.code(), "08P01");
     let (mut client, _) = Client::login(server.address);
     assert_eq!(tags(&client.query("SELECT 1")), "TDCZ");
 }
