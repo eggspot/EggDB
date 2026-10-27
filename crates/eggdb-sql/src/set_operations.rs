@@ -151,8 +151,9 @@ fn unify(
     let mut columns = Vec::with_capacity(left_columns.len());
     let mut texts = Vec::with_capacity(left_columns.len());
     for (index, (left_column, right_column)) in left_columns.iter().zip(right_columns).enumerate() {
-        let left_unknown = left.unknown.get(index).copied().unwrap_or(false);
-        let right_unknown = right.unknown.get(index).copied().unwrap_or(false);
+        let literals_unknown = operation.dialect == Dialect::PostgreSql;
+        let left_unknown = literals_unknown && left.unknown.get(index).copied().unwrap_or(false);
+        let right_unknown = literals_unknown && right.unknown.get(index).copied().unwrap_or(false);
         let left_type = column_type(left_column.sql_type, left_unknown, &left.result.rows, index);
         let right_type = column_type(
             right_column.sql_type,

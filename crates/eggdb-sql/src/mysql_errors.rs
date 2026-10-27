@@ -140,6 +140,26 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
                 "Prepared statement contains too many placeholders".to_owned(),
             )
         }
+        "42601" if message.starts_with("subquery must return only one column") => translated(
+            1241,
+            SqlState::CARDINALITY_VIOLATION,
+            "Operand should contain 1 column(s)".to_owned(),
+        ),
+        "42601" if message.ends_with("query must have the same number of columns") => translated(
+            1222,
+            SqlState::CARDINALITY_VIOLATION,
+            "The used SELECT statements have a different number of columns".to_owned(),
+        ),
+        "21000" => translated(
+            1242,
+            SqlState::CARDINALITY_VIOLATION,
+            "Subquery returns more than 1 row".to_owned(),
+        ),
+        "54001" if message.starts_with("Recursive query aborted") => translated(
+            3636,
+            SqlState::MYSQL_GENERAL,
+            format!("{message} Try increasing @@cte_max_recursion_depth to a larger value."),
+        ),
         "42601" | "2201W" | "2201X" | "42P02" => syntax(),
         "42704" if message.starts_with("type ") => syntax(),
         "42704" if message.starts_with("unrecognized configuration parameter") => translated(

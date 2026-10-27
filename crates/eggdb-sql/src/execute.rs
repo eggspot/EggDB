@@ -1753,6 +1753,7 @@ fn select_or_explain(
             let first_key = select
                 .filter
                 .as_ref()
+                .filter(|_| !joined.preserves_right())
                 .and_then(|filter| point_key(first.table, Scope::One(first), filter));
             RowSource::Joined(JoinedRows::new(
                 reader,

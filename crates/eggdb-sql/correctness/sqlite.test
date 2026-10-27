@@ -997,3 +997,94 @@ SELECT d, typeof(d), at, typeof(at), price, typeof(price) FROM stamps
 d|typeof(d)|at|typeof(at)|price|typeof(price)
 2024-02-29|text|2024-02-29 13:45:01|text|2.25|real
 SELECT 1
+
+chapter "lang_select: Compound Select Statements", "lang_expr: Subquery Expressions", "lang_with: WITH clause"
+ok
+CREATE TABLE sq_dept (id INTEGER PRIMARY KEY, name TEXT NOT NULL)
+
+ok
+INSERT INTO sq_dept VALUES (1, 'sales'), (2, 'research'), (3, 'empty')
+
+ok
+CREATE TABLE sq_emp (id INTEGER PRIMARY KEY, dept INTEGER, pay REAL)
+
+ok
+INSERT INTO sq_emp VALUES (1, 1, 100), (2, 1, 80), (3, 2, 120), (4, NULL, 50)
+
+rows
+SELECT (SELECT id FROM sq_emp ORDER BY id DESC)
+----
+(SELECT id FROM sq_emp ORDER BY id DESC)
+4
+SELECT 1
+
+error 42601
+SELECT (SELECT id, pay FROM sq_emp)
+
+rows
+SELECT name FROM sq_dept d WHERE NOT EXISTS (SELECT 1 FROM sq_emp e WHERE e.dept = d.id)
+----
+name
+empty
+SELECT 1
+
+rows
+SELECT 9 NOT IN (SELECT dept FROM sq_emp), 1 IN (SELECT dept FROM sq_emp)
+----
+9 NOT IN (SELECT dept FROM sq_emp)|1 IN (SELECT dept FROM sq_emp)
+NULL|1
+SELECT 1
+
+rows
+SELECT 1 UNION SELECT '1'
+----
+1
+1
+1
+SELECT 2
+
+rows
+SELECT id FROM sq_dept EXCEPT SELECT dept FROM sq_emp
+----
+id
+3
+SELECT 1
+
+rows
+SELECT dept FROM sq_emp UNION ALL SELECT id FROM sq_dept ORDER BY 1 NULLS FIRST LIMIT 3
+----
+dept
+NULL
+1
+1
+SELECT 3
+
+error 42601
+SELECT 1, 2 UNION SELECT 3
+
+error 42601
+SELECT 1 INTERSECT ALL SELECT 1
+
+error 42601
+(SELECT 1) UNION SELECT 2
+
+rows
+WITH t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 10) SELECT sum(n) FROM t
+----
+sum(n)
+55
+SELECT 1
+
+rows
+SELECT d.id, e.id FROM sq_dept d FULL JOIN sq_emp e ON d.id = e.dept ORDER BY d.id NULLS FIRST, e.id
+----
+id|id
+NULL|4
+1|1
+1|2
+2|3
+3|NULL
+SELECT 5
+
+error 42883
+SELECT greatest(1, 2)

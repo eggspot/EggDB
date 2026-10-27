@@ -220,10 +220,11 @@ impl Parser<'_> {
     }
 
     fn set_quantifier(&mut self, operator: SetOperator) -> SqlResult<bool> {
-        if self.take_word("all") {
+        if self.is_word("all") {
             if self.sqlite() && operator != SetOperator::Union {
                 return Err(self.unexpected());
             }
+            self.at += 1;
             return Ok(true);
         }
         if self.is_word("distinct") {

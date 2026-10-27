@@ -137,7 +137,9 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 13] = [
     "jsonb_array_length",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 5] = [
+const INTERNAL_FUNCTIONS: [&str; 7] = [
+    "mysql_greatest",
+    "mysql_least",
     "mysql_now",
     "mysql_utc_now",
     "mysql_extract",
@@ -147,7 +149,7 @@ const INTERNAL_FUNCTIONS: [&str; 5] = [
 
 const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
 
-const NOT_IN_SQLITE: [&str; 4] = ["trunc", "ceil", "ceiling", "floor"];
+const NOT_IN_SQLITE: [&str; 6] = ["trunc", "ceil", "ceiling", "floor", "greatest", "least"];
 
 pub(crate) struct Parser<'t> {
     text: &'t str,

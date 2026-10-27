@@ -117,14 +117,19 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
             }
         }
         ("nullif", [left, _]) => static_type(left, scope),
-        ("coalesce", [first, rest @ ..]) => {
-            let first_type = static_type(first, scope)?;
-            rest.iter()
-                .all(|argument| {
-                    matches!(argument.kind, ExprKind::Literal(Literal::Null))
-                        || static_type(argument, scope) == Some(first_type)
-                })
-                .then_some(first_type)
+        ("coalesce" | "greatest" | "least" | "mysql_greatest" | "mysql_least", [_, ..]) => {
+            let mut common: Option<SqlType> = None;
+            for argument in arguments {
+                if is_untyped_literal(argument) {
+                    continue;
+                }
+                let found = static_type(argument, scope)?;
+                common = Some(match common {
+                    None => found,
+                    Some(known) => crate::set_operations::common_type(known, found)?,
+                });
+            }
+            common
         }
         _ => None,
     }

@@ -814,7 +814,6 @@ carol|12
 NULL|13
 NULL|14
 SELECT 5
-... differs
 
 rows
 SELECT p.id, o.id FROM people p FULL JOIN orders o ON o.person_id = p.id WHERE p.id IS NULL OR o.id IS NULL ORDER BY 1, 2
@@ -826,7 +825,6 @@ id|id
 NULL|13
 NULL|14
 SELECT 5
-... differs
 
 chapter dml-update, dml-delete
 rows
@@ -1351,3 +1349,386 @@ SELECT '{"a": 1.0}'::jsonb = '{"a": 1}'::jsonb, '{"a": 1.0}'::jsonb
 ?column?|jsonb
 t|{"a": 1.0}
 SELECT 1
+
+chapter functions-subquery, queries-union, queries-with, queries-table-expressions "Subqueries", functions-conditional
+ok
+CREATE TABLE sq_dept (id integer PRIMARY KEY, name text NOT NULL)
+
+ok
+INSERT INTO sq_dept VALUES (1, 'sales'), (2, 'research'), (3, 'empty')
+
+ok
+CREATE TABLE sq_emp (id integer PRIMARY KEY, dept integer, pay numeric(8,2), boss integer)
+
+ok
+INSERT INTO sq_emp VALUES (1, 1, 100, NULL), (2, 1, 80, 1), (3, 2, 120, 1), (4, NULL, 50, 3), (5, 2, 90, 3)
+
+rows
+SELECT name FROM sq_dept d WHERE EXISTS (SELECT 1 FROM sq_emp e WHERE e.dept = d.id) ORDER BY name
+----
+name
+research
+sales
+SELECT 2
+
+rows
+SELECT name FROM sq_dept d WHERE NOT EXISTS (SELECT 1 FROM sq_emp e WHERE e.dept = d.id)
+----
+name
+empty
+SELECT 1
+
+rows
+SELECT name FROM sq_dept WHERE id IN (SELECT dept FROM sq_emp) ORDER BY id
+----
+name
+sales
+research
+SELECT 2
+
+rows
+SELECT name FROM sq_dept WHERE id NOT IN (SELECT dept FROM sq_emp)
+----
+name
+SELECT 0
+
+rows
+SELECT name FROM sq_dept WHERE id NOT IN (SELECT dept FROM sq_emp WHERE dept IS NOT NULL)
+----
+name
+empty
+SELECT 1
+
+rows
+SELECT 1 IN (SELECT dept FROM sq_emp), 9 IN (SELECT dept FROM sq_emp), 9 NOT IN (SELECT dept FROM sq_emp), NULL::int IN (SELECT dept FROM sq_emp WHERE false)
+----
+?column?|?column?|?column?|?column?
+t|NULL|NULL|f
+SELECT 1
+
+rows
+SELECT (SELECT max(pay) FROM sq_emp), (SELECT name FROM sq_dept WHERE id = 3) AS dept_name, (SELECT name FROM sq_dept WHERE id = 9)
+----
+max|dept_name|name
+120.00|empty|NULL
+SELECT 1
+
+error 21000
+SELECT (SELECT id FROM sq_emp)
+
+error 42601
+SELECT (SELECT id, pay FROM sq_emp WHERE id = 1)
+
+error 42601
+SELECT 1 WHERE 1 IN (SELECT id, pay FROM sq_emp)
+
+rows
+SELECT e.id, (SELECT d.name FROM sq_dept d WHERE d.id = e.dept) FROM sq_emp e ORDER BY e.id
+----
+id|name
+1|sales
+2|sales
+3|research
+4|NULL
+5|research
+SELECT 5
+
+rows
+SELECT d.name, (SELECT count(*) FROM sq_emp e WHERE e.dept = d.id) AS staff, (SELECT sum(pay) FROM sq_emp e WHERE e.dept = d.id) AS total FROM sq_dept d ORDER BY staff DESC, d.name
+----
+name|staff|total
+research|2|210.00
+sales|2|180.00
+empty|0|NULL
+SELECT 3
+
+rows
+SELECT e.id FROM sq_emp e WHERE e.pay > (SELECT avg(pay) FROM sq_emp x WHERE x.dept = e.dept) ORDER BY e.id
+----
+id
+1
+3
+SELECT 2
+
+rows
+SELECT id FROM sq_emp WHERE pay > ALL (SELECT pay FROM sq_emp WHERE dept = 1) ORDER BY id
+----
+id
+3
+SELECT 1
+
+rows
+SELECT id FROM sq_emp WHERE pay < ANY (SELECT pay FROM sq_emp WHERE dept = 2) AND pay > SOME (SELECT 85) ORDER BY id
+----
+id
+1
+5
+SELECT 2
+
+rows
+SELECT 5 > ALL (SELECT dept FROM sq_emp), 5 > ALL (SELECT dept FROM sq_emp WHERE false), 5 = ANY (SELECT dept FROM sq_emp WHERE false), 1 = ANY (SELECT dept FROM sq_emp), 2 <> ALL (SELECT dept FROM sq_emp WHERE dept IS NOT NULL)
+----
+?column?|?column?|?column?|?column?|?column?
+NULL|t|f|t|f
+SELECT 1
+
+rows
+SELECT EXISTS (SELECT 1 FROM sq_dept WHERE id = 3), NOT EXISTS (SELECT 1 FROM sq_dept WHERE id = 9)
+----
+exists|?column?
+t|t
+SELECT 1
+
+rows
+SELECT dept, total FROM (SELECT dept, sum(pay) AS total FROM sq_emp GROUP BY dept) AS t WHERE total > 100 ORDER BY dept
+----
+dept|total
+1|180.00
+2|210.00
+SELECT 2
+
+rows
+SELECT t.a, t.b FROM (SELECT id, pay FROM sq_emp WHERE id < 3) AS t (a, b) ORDER BY t.a
+----
+a|b
+1|100.00
+2|80.00
+SELECT 2
+
+rows
+SELECT d.name, s.top FROM sq_dept d JOIN (SELECT dept, max(pay) AS top FROM sq_emp GROUP BY dept) s ON s.dept = d.id ORDER BY d.name
+----
+name|top
+research|120.00
+sales|100.00
+SELECT 2
+
+error 42P10
+SELECT * FROM (SELECT 1) AS t (a, b)
+
+rows
+SELECT dept FROM sq_emp WHERE dept IS NOT NULL UNION SELECT id FROM sq_dept ORDER BY 1
+----
+dept
+1
+2
+3
+SELECT 3
+
+rows
+SELECT dept FROM sq_emp UNION ALL SELECT id FROM sq_dept ORDER BY dept NULLS FIRST LIMIT 4
+----
+dept
+NULL
+1
+1
+1
+SELECT 4
+
+rows
+SELECT id FROM sq_dept INTERSECT SELECT dept FROM sq_emp ORDER BY id
+----
+id
+1
+2
+SELECT 2
+
+rows
+SELECT dept FROM sq_emp INTERSECT ALL SELECT dept FROM sq_emp WHERE id > 1 ORDER BY 1
+----
+dept
+1
+2
+2
+NULL
+SELECT 4
+
+rows
+SELECT id FROM sq_dept EXCEPT SELECT dept FROM sq_emp
+----
+id
+3
+SELECT 1
+
+rows
+SELECT dept FROM sq_emp EXCEPT ALL SELECT id FROM sq_dept ORDER BY 1
+----
+dept
+1
+2
+NULL
+SELECT 3
+
+rows
+SELECT 1 UNION SELECT 2 INTERSECT SELECT 3 ORDER BY 1
+----
+?column?
+1
+SELECT 1
+
+rows
+(SELECT 1 UNION SELECT 2) INTERSECT SELECT 2
+----
+?column?
+2
+SELECT 1
+
+rows
+(SELECT id FROM sq_emp ORDER BY pay DESC LIMIT 1) UNION ALL (SELECT id FROM sq_emp ORDER BY pay LIMIT 1)
+----
+id
+3
+4
+SELECT 2
+
+rows
+SELECT 1 AS n UNION SELECT 2.5 UNION SELECT '3' ORDER BY n DESC
+----
+n
+3
+2.5
+1
+SELECT 3
+
+rows
+SELECT NULL UNION SELECT NULL
+----
+?column?
+NULL
+SELECT 1
+
+error 42804
+SELECT 1 UNION SELECT true
+
+error 42601
+SELECT 1, 2 UNION SELECT 3
+
+error 0A000
+SELECT id FROM sq_dept UNION SELECT id FROM sq_dept ORDER BY id + 1
+
+error 42P10
+SELECT id FROM sq_dept UNION SELECT id FROM sq_dept ORDER BY 2
+
+rows
+WITH big AS (SELECT * FROM sq_emp WHERE pay >= 90), counted AS (SELECT count(*) AS n FROM big) SELECT big.id, counted.n FROM big, counted ORDER BY big.id
+----
+id|n
+1|3
+3|3
+5|3
+SELECT 3
+
+rows
+WITH t (x) AS (SELECT id FROM sq_dept) SELECT a.x, b.x FROM t a JOIN t b ON b.x = a.x + 1 ORDER BY 1
+----
+x|x
+1|2
+2|3
+SELECT 2
+
+rows
+WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 100) SELECT sum(n) FROM t
+----
+sum
+5050
+SELECT 1
+... differs
+
+rows
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 100) SELECT sum(n) FROM t
+----
+sum
+5050
+SELECT 1
+
+rows
+WITH RECURSIVE chain(id, depth) AS (SELECT id, 0 FROM sq_emp WHERE boss IS NULL UNION ALL SELECT e.id, c.depth + 1 FROM sq_emp e JOIN chain c ON e.boss = c.id) SELECT id, depth FROM chain ORDER BY depth, id
+----
+id|depth
+1|0
+2|1
+3|1
+4|2
+5|2
+SELECT 5
+
+rows
+WITH RECURSIVE t(n) AS (SELECT 1 UNION SELECT n % 3 + 1 FROM t) SELECT n FROM t ORDER BY n
+----
+n
+1
+2
+3
+SELECT 3
+
+error 54001
+WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n FROM t) SELECT count(*) FROM t
+
+error 42P19
+WITH RECURSIVE t(n) AS (SELECT n FROM t UNION ALL SELECT 1) SELECT * FROM t
+
+error 0A000
+WITH t AS (DELETE FROM sq_emp RETURNING id) SELECT * FROM t
+
+rows
+SELECT id, CASE WHEN pay > 95 THEN 'high' WHEN pay > 60 THEN 'mid' ELSE 'low' END AS band, CASE dept WHEN 1 THEN 'one' WHEN 2 THEN 'two' END AS d FROM sq_emp ORDER BY id
+----
+id|band|d
+1|high|one
+2|mid|one
+3|high|two
+4|low|NULL
+5|mid|two
+SELECT 5
+
+rows
+SELECT coalesce(NULL, 2, 3), coalesce(NULL::int, NULL), nullif(1, 1), nullif(1, 2), greatest(1, 3, NULL, 2), least(5, 4.5), greatest(NULL::int, NULL)
+----
+coalesce|coalesce|nullif|nullif|greatest|least|greatest
+2|NULL|NULL|1|3|4.5|NULL
+SELECT 1
+
+rows
+SELECT d.name, e.id FROM sq_emp e RIGHT JOIN sq_dept d ON d.id = e.dept ORDER BY d.name, e.id
+----
+name|id
+empty|NULL
+research|3
+research|5
+sales|1
+sales|2
+SELECT 5
+
+rows
+SELECT d.id, e.id FROM sq_dept d FULL OUTER JOIN sq_emp e ON d.id = e.dept ORDER BY d.id NULLS FIRST, e.id
+----
+id|id
+NULL|4
+1|1
+1|2
+2|3
+2|5
+3|NULL
+SELECT 6
+
+rows
+SELECT d.id, e.id FROM sq_dept d FULL JOIN sq_emp e ON d.id = e.dept WHERE d.id IS NULL OR e.id IS NULL ORDER BY 1, 2
+----
+id|id
+3|NULL
+NULL|4
+SELECT 2
+
+rows
+SELECT * FROM sq_dept RIGHT JOIN sq_emp USING (id) WHERE sq_emp.id > 3 ORDER BY id
+----
+id|name|dept|pay|boss
+4|NULL|NULL|50.00|3
+5|NULL|2|90.00|3
+SELECT 2
+
+error 0A000
+SELECT * FROM sq_dept FULL JOIN sq_emp USING (id)
+
+error 0A000
+SELECT * FROM sq_dept, LATERAL (SELECT 1) x

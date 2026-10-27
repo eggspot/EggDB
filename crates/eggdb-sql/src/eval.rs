@@ -924,11 +924,13 @@ impl Evaluator<'_> {
             return result;
         }
         match (name, values.as_slice()) {
-            ("coalesce", [_, ..]) => Ok(values
-                .iter()
-                .find(|value| !value.is_null())
-                .cloned()
-                .unwrap_or(Value::Null)),
+            ("coalesce", [_, ..]) => {
+                let found = values.iter().find(|value| !value.is_null());
+                found.map_or(Ok(Value::Null), |value| in_common_type(value, &values))
+            }
+            ("greatest" | "least" | "mysql_greatest" | "mysql_least", [_, ..]) => {
+                extreme(name, &values)
+            }
             ("nullif", [left, right]) => {
                 if compare_truth(left, right, "=")? == Some(true) {
                     Ok(Value::Null)
@@ -980,6 +982,41 @@ impl Evaluator<'_> {
             ("upper", [Value::Text(text)]) => Ok(Value::Text(text.to_uppercase())),
             _ => Err(unknown()),
         }
+    }
+}
+
+fn extreme(name: &str, values: &[Value]) -> SqlResult<Value> {
+    let mysql = name.starts_with("mysql_");
+    if mysql && values.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+    let symbol = if name.ends_with("greatest") { ">" } else { "<" };
+    let mut best: Option<&Value> = None;
+    for value in values.iter().filter(|value| !value.is_null()) {
+        best = match best {
+            Some(current) if compare_truth(value, current, symbol)? != Some(true) => Some(current),
+            _ => Some(value),
+        };
+    }
+    best.map_or(Ok(Value::Null), |value| in_common_type(value, values))
+}
+
+fn in_common_type(chosen: &Value, values: &[Value]) -> SqlResult<Value> {
+    let mut common: Option<SqlType> = None;
+    for sql_type in values.iter().filter_map(Value::sql_type) {
+        common = match common {
+            None => Some(sql_type),
+            Some(known) => match crate::set_operations::common_type(known, sql_type) {
+                Some(found) => Some(found),
+                None => return Ok(chosen.clone()),
+            },
+        };
+    }
+    match common {
+        Some(sql_type) if chosen.sql_type() != Some(sql_type) && !sql_type.is_string() => {
+            convert(chosen.clone(), sql_type, Conversion::Explicit)
+        }
+        _ => Ok(chosen.clone()),
     }
 }
 
