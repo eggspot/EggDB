@@ -780,3 +780,20 @@ fn schema_and_view_changes_roll_back_as_one_transaction() {
     );
     last(&mut session, "CREATE TABLE app.t (a int)");
 }
+
+#[test]
+fn a_view_cannot_keep_a_parameter_of_the_statement_that_created_it() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let parameter = crate::Parameter {
+        declared_type: None,
+        value: Some("1".into()),
+    };
+    let error = session
+        .execute_prepared("CREATE VIEW v AS SELECT $1 AS a", &[parameter], &mut |_| {
+            true
+        })
+        .unwrap_err();
+    assert_eq!(error.state().code(), "42P02", "{error}");
+    assert_eq!(code(&mut session, "SELECT * FROM v"), "42P01");
+}
