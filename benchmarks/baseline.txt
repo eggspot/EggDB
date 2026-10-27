@@ -4,7 +4,7 @@ any btree.delete tree_pages_left_after_deleting_all 1
 any btree.get allocations_per_op 0
 any btree.get file_operations_per_op 0
 any btree.get page_reads_per_op 3
-any btree.put allocations_per_100000_puts 605766
+any btree.put allocations_per_100000_puts 309577
 any btree.put file_operations_per_100000_puts 0
 any btree.put pages_allocated_per_100000_puts 1339
 any btree.scan allocations_per_100000_entries 16
@@ -75,7 +75,7 @@ macos btree.scan_reverse ratio_to_std_btreemap 7.586
 macos database.open ratio_to_store_open 1.004
 macos database.read ratio_to_store_read 1.023
 macos database.write ratio_to_store_commit 1.009
-macos footprint.binary stripped_release_bytes 1164944
+macos footprint.binary stripped_release_bytes 1181504
 macos footprint.open_and_get peak_resident_bytes 2310144
 macos footprint.open_and_get ratio_to_a_program_that_exits_at_once 1.046
 macos footprint.start peak_resident_bytes 1654784
@@ -87,7 +87,7 @@ macos page_cache.hit ratio_to_reference 0.375
 macos sqlite_compare.batch_put ratio_to_sqlite 0.693
 macos sqlite_compare.get ratio_to_sqlite 0.752
 macos sqlite_compare.scan ratio_to_sqlite 0.584
-macos sqlite_compare.sql_bulk_insert ratio_to_sqlite 3.319
-macos sqlite_compare.sql_point_select ratio_to_sqlite 1.901
+macos sqlite_compare.sql_bulk_insert ratio_to_sqlite 1.736
+macos sqlite_compare.sql_point_select ratio_to_sqlite 1.226
 macos transaction.read ratio_to_btree_get 1.0
 macos transaction.write ratio_to_page_cache_commit 1.035

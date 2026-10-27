@@ -4112,3 +4112,45 @@ move with the binary and the start-time ratios stay within their gates. The Linu
 are 1.25 for point selects and 2.63 for bulk inserts, gated the same way. Shrinking it joins the speed item above: a table-driven parser and
 fewer monomorphised paths are the first candidates, and a build profile without SQL comes with
 D34's profiles.
+
+**Closing the gap, first round (review fix, 2026-10-27).** The independent review blocked the pull
+request on D7, so this part now closes most of the gap instead of only gating it. Measured with
+`eggdb-sqlite-compare` on the same Apple-silicon Mac, `sql_point_select` went from 1.95 to 1.23
+(1.27 against 1.04 µs) and `sql_bulk_insert` from 3.16 to 1.74 (0.61 against 0.35 µs per row);
+the Linux lines are in the next paragraph. What changed, each measured with a profile first:
+- A table's cached definition carries the commit it was checked at: a read whose snapshot sees
+  the same commit (`KeyValueRead::committed_version`, the commit stamp) uses it without reading
+  the definition again, which had been a whole B+tree lookup per statement. A writer, which
+  also sees its own changes, still checks the stored bytes.
+- Tokens borrow the SQL text (`Cow` only where a word folds case or a string has escapes), and
+  the token list is sized once.
+- Rows stream from the scan into the result instead of being collected twice; plain column
+  outputs are moved, not cloned; a point lookup reads its row in place (`get_with`, new on both
+  transactions of the embedded API) and does not evaluate a `WHERE` that is exactly its key
+  again; key buffers are sized once.
+- `INSERT` stores a row with `put_if_absent`, new on `WriteTransaction` and in the B+tree, which
+  finds the key's place once where a `get` and a `put` searched twice, and reuses its key and
+  row buffers.
+- A B+tree split sizes its candidate split points without building them and moves the entries
+  into the two halves instead of copying them: `btree.put` makes 309,577 allocations per
+  100,000 puts instead of 605,766 (its count line is updated), and every other `eggdb-bench`
+  line is unchanged.
+
+*Decided by research (D7, a research subagent, 2026-10-27):* the remainder is **avoidable**, not
+the price of correctness or security. About 40% of the engine's put in this workload is leaf
+splits that still decode the whole leaf into one allocation per entry, and the parser builds an
+AST of owned strings; nothing in the remaining cost is checking that SQLite skips. The next
+fixes, in order: an append split at the rightmost leaf that keeps the left page's cells where
+they are, an AST that borrows the SQL text, a direct path that encodes `INSERT ... VALUES`
+rows from tokens, and a plan cache for statements that differ only in their constants. The
+research's merge recommendation: merge with both ratios gated at the new values (the gate still
+fails 15% above them) and the v0.3.0 condition above unchanged, the same position D94 and the
+first version of this decision took, because the pull request changes no existing hot path for
+the worse and blocking it leaves the remaining gap unmeasured. Roadmap item 19e stays open
+with these fixes.
+
+**Binary size, second round (D6).** The new engine calls and the faster SQL paths add 16,560
+bytes on aarch64 macOS (1,164,944 to 1,181,504, +1.4%): `put_if_absent` and `get_with` on both
+transactions are generic over the key type, and the borrowed tokens, streamed rows and moved
+outputs are new code beside the old. That is the stated price of the speed above; the macOS
+footprint line is updated, and the Linux line follows CI's measurement.

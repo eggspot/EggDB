@@ -66,7 +66,7 @@ protocols, compression or concurrent writers yet. Feature freeze
 | 19b | Users can join tables (inner and left joins) and summarise them (`GROUP BY` with `count`, `sum`, `avg`, `min`, `max`, `HAVING`, `DISTINCT`) | **next** |
 | 19c | Users can create secondary indexes (`CREATE INDEX`, `UNIQUE`) that speed up `WHERE` and `ORDER BY` | planned |
 | 19d | Users can store `numeric`, `timestamp` and `json`/`jsonb` values and use `serial` and identity columns | planned |
-| 19e | Users get SQL point `SELECT`s and bulk `INSERT`s at least as fast as SQLite's (required by D7 before v0.3.0, D99) | planned |
+| 19e | Users get SQL point `SELECT`s and bulk `INSERT`s at least as fast as SQLite's (required by D7 before v0.3.0, D99) | **in progress**: from 1.95 to 1.23 times SQLite's time for point selects and from 3.16 to 1.74 for bulk inserts on macOS (cached definitions by commit, borrowed tokens, streamed rows, single-descent `put_if_absent`, splits that move entries, D99); next: append splits at the rightmost leaf, an AST that borrows the SQL text, a direct `INSERT ... VALUES` path, a plan cache |
 | 20 | `eggdb shell`: an interactive prompt with history and tab completion for key-value commands and SQL; a query screen in `eggdb ui`; readable errors in each dialect's style; a correctness suite from each database's documented behaviour | planned |
 | 21 | The PostgreSQL wire protocol v3: psql and drivers connect (simple and extended query, SCRAM-SHA-256 with our own SHA-256, HMAC and PBKDF2 checked against published vectors, SSLRequest answered no), CI connects with psql and a common driver; every listener binds only to loopback or a local socket, without TLS yet, and requires authentication (recorded when it lands) | planned |
 | 22 | The MySQL/MariaDB dialect and client/server protocol | planned |
@@ -83,9 +83,11 @@ SQL block in the owner's order (19c to 25) and the release extras (26 to 29), as
 on 2026-10-30 23:59 allows. The cut order and what is never cut are in D76.
 
 ## Where we are
-Rough progress toward the whole goal: **about 2%**. The skeleton, the decisions and the platform
-layer exist, and v0.1.0 is the first release; there is no storage engine, transaction system or
-query layer yet.
+Rough progress toward the whole goal: **about 3%**. The platform layer, the storage engine with
+its write-ahead log, transactions and the embedded key-value API, the `eggdb` command and its UI
+exist, v0.1.0 is released and v0.2.0 is being finished; the query layer has its first part, SQL
+tables with primary keys in the PostgreSQL dialect through `eggdb sql` (D98). There is no network
+server or second data model yet.
 
 | Area | Status | Missing |
 |------|--------|---------|

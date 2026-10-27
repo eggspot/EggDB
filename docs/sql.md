@@ -88,7 +88,10 @@ what is not supported yet. An expression nested, or a chain of operators or cast
 **Transactions.** Outside a block every statement is its own transaction: it commits whole or
 not at all, so a multi-row `INSERT` that hits a duplicate key leaves no row behind. `BEGIN`
 takes the database's one write transaction until `COMMIT` or `ROLLBACK`, so another writer
-waits for it (and gives up with `55P03` after the write timeout); readers never wait.
+waits for it (and gives up with `55P03` after the write timeout). A statement that only reads
+runs on a snapshot and never waits for the writer; `eggdb sql` itself still opens the file for
+writing, even for a script of `SELECT`s, so another program that opens the same file for
+writing is refused (exit code 5) while it runs.
 `BEGIN READ ONLY` reads one snapshot and refuses changes with `25006`. A failed statement inside
 a block rolls the block back at once and the session answers `25P02` until `ROLLBACK`; `COMMIT`
 of a failed block reports `ROLLBACK`, as PostgreSQL does. DDL is transactional: a rolled-back
@@ -116,16 +119,24 @@ row number instead.
 A row is a format version byte, the column count, and per column a type byte (0 for NULL) and
 the value. A row shorter than its table reads its missing trailing columns as NULL, which leaves
 room for `ALTER TABLE ... ADD COLUMN` without rewriting rows. Every definition and row is read
-strictly: a damaged one is an error (`XX001`), never a panic.
+strictly: a damaged one is an error (`XX001`, exit code 4), never a panic. `eggdb check` checks
+the file's pages and keys, not SQL rows and definitions, so it can pass on a file whose SQL
+data is damaged; restore such a table from a backup or an export.
 
 Because SQL data is keys and values, everything the engine does covers it: atomic commits,
 crash recovery, snapshots, `eggdb check`, `export` and `import`. The key-value commands show
-the SQL keys as they are; writing under the prefix by hand changes what SQL reads.
+the SQL keys as they are; writing under the prefix by hand changes what SQL reads. `import`
+copies SQL keys like any others, so importing an export that holds SQL tables into a file that
+already has SQL tables can give two tables the same number or overwrite the catalog: import SQL
+exports into a new file, or into a file without SQL tables.
 
 ## Limits of this part
 - One statement at a time is planned by simple rules: a `WHERE` that fixes every primary-key
-  column with `=` reads one row; anything else reads the whole table. Results are built in
-  memory before they print.
+  column with `=` reads one row; anything else reads the whole table. Each statement's result
+  is built in memory before it prints (a `SELECT` without `ORDER BY` holds only the rows it
+  returns; `ORDER BY` holds every matching row and sorts them, with no top-N for `LIMIT` yet).
+  When the output stops being read (`eggdb sql ... | head`), the command stops before the next
+  statement.
 - `UPDATE` and `DELETE` collect the rows they change before changing them, in memory.
 - A whole transaction must fit in the page cache (`--cache`), as for every write (D86).
 - Type checks happen as rows are evaluated, so a type mismatch in a `WHERE` on an empty table
@@ -133,15 +144,25 @@ the SQL keys as they are; writing under the prefix by hand changes what SQL read
 - Decimal constants such as `1.5` are PostgreSQL `numeric`, which is not supported yet: they
   work where a `real` or `double precision` value is expected (a float column, a comparison
   with one, `1.5::float8`) and fail with `0A000` elsewhere.
-- Speed: a point `SELECT` by primary key takes about 1.9 times SQLite's time and multi-row
-  `INSERT`s about 3.3 times, measured with the same SQL text on both and gated so they can only
-  improve; closing the gap is a scheduled roadmap item (D98).
+- `DEFAULT` expressions are checked for column references when the table is created and
+  evaluated at each `INSERT`, so a default that fails (`DEFAULT 1/0`) fails the `INSERT`, not
+  the `CREATE TABLE`.
+- `LIKE` and `ILIKE` match with backtracking, which takes time proportional to the text's length
+  times the pattern's in the worst case (as PostgreSQL's does).
+- Some syntax PostgreSQL accepts still answers with a syntax or type error instead of `0A000`:
+  adjacent string literals on separate lines, `U&'...'` strings, octal and Unicode escapes in
+  `E'...'` strings, `CASE` branches of different types; `lower` and `upper` change case by
+  Unicode rules, where PostgreSQL's `C` collation changes only ASCII letters.
+- Speed: a point `SELECT` by primary key takes about 1.2 times SQLite's time and multi-row
+  `INSERT`s about 1.7 times on an Apple-silicon Mac, measured with the same SQL text on both and
+  gated so they can only improve; closing the rest of the gap is roadmap item 19e (D99).
 
 ## Next parts (roadmap)
 - Joins: inner and left joins (`JOIN ... ON`, `USING`, comma joins).
 - `GROUP BY` with `count`, `sum`, `avg`, `min`, `max`, `HAVING`, and `DISTINCT`.
 - Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.
 - The `numeric`, `timestamp` and `json`/`jsonb` types, and `serial`/identity columns.
-- SQL as fast as SQLite for point `SELECT`s and bulk `INSERT`s: prepared statements and a plan
-  cache, an allocation-free parser, single-descent inserts.
+- SQL as fast as SQLite for point `SELECT`s and bulk `INSERT`s: leaf splits without decoding the
+  leaf, an AST that borrows the SQL text, a direct path for `INSERT ... VALUES`, and a plan
+  cache.
 - Then `eggdb shell`, the PostgreSQL wire protocol, and the other dialects (items 20 to 25).
