@@ -1132,3 +1132,33 @@ fn literal_inserts_take_the_direct_path_and_match_the_general_one() {
         run(&mut general, everything).unwrap()
     );
 }
+
+#[test]
+fn rows_without_a_key_stop_at_the_last_row_identifier_in_one_statement_or_many() {
+    use crate::store::{KeyValueStore, KeyValueWrite};
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE t (a integer)");
+    let mut writer = store.begin_write().unwrap();
+    let mut key = crate::encoding::rows_prefix(1);
+    key.extend_from_slice(&(u64::MAX - 1).to_be_bytes());
+    writer
+        .put(
+            &key,
+            &crate::encoding::encode_row(&[crate::Value::Integer(1)]),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    assert_eq!(
+        state(&mut session, "INSERT INTO t VALUES (2), (3)"),
+        "54000"
+    );
+    assert_eq!(
+        state(&mut session, "INSERT INTO t (a) VALUES (2), (3)"),
+        "54000"
+    );
+    assert_eq!(last(&mut session, "SELECT a FROM t"), "a\n1\nSELECT 1");
+    assert_eq!(last(&mut session, "INSERT INTO t VALUES (2)"), "INSERT 0 1");
+    assert_eq!(state(&mut session, "INSERT INTO t VALUES (3)"), "54000");
+    assert_eq!(last(&mut session, "SELECT a FROM t"), "a\n1\n2\nSELECT 2");
+}

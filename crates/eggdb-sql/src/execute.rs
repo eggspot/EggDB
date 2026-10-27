@@ -281,12 +281,16 @@ fn next_hidden_row_id(reader: &dyn KeyValueRead, table: &TableDefinition) -> Sql
         .get(prefix.len()..)
         .and_then(|suffix| suffix.try_into().ok())
         .ok_or_else(|| crate::encoding::corrupt("row key"))?;
-    u64::from_be_bytes(suffix).checked_add(1).ok_or_else(|| {
-        SqlError::new(
-            SqlState::PROGRAM_LIMIT_EXCEEDED,
-            format!("table \"{}\" has used every row identifier", table.name),
-        )
-    })
+    u64::from_be_bytes(suffix)
+        .checked_add(1)
+        .ok_or_else(|| row_identifiers_used(table))
+}
+
+fn row_identifiers_used(table: &TableDefinition) -> SqlError {
+    SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        format!("table \"{}\" has used every row identifier", table.name),
+    )
 }
 
 fn default_value(column: &Column) -> SqlResult<Value> {
@@ -488,7 +492,13 @@ struct StoredRows<'a> {
     key: Vec<u8>,
     prefix_length: usize,
     encoded: Vec<u8>,
-    next_row_id: Option<u64>,
+    next_row_id: NextRowId,
+}
+
+enum NextRowId {
+    Unknown,
+    Next(u64),
+    Exhausted,
 }
 
 impl<'a> StoredRows<'a> {
@@ -499,7 +509,7 @@ impl<'a> StoredRows<'a> {
             prefix_length: key.len(),
             key,
             encoded: Vec::new(),
-            next_row_id: None,
+            next_row_id: NextRowId::Unknown,
         }
     }
 
@@ -511,10 +521,13 @@ impl<'a> StoredRows<'a> {
         self.key.truncate(self.prefix_length);
         if table.primary_key.is_empty() {
             let id = match self.next_row_id {
-                Some(id) => id,
-                None => next_hidden_row_id(writer, table)?,
+                NextRowId::Unknown => next_hidden_row_id(writer, table)?,
+                NextRowId::Next(id) => id,
+                NextRowId::Exhausted => return Err(row_identifiers_used(table)),
             };
-            self.next_row_id = Some(id.saturating_add(1));
+            self.next_row_id = id
+                .checked_add(1)
+                .map_or(NextRowId::Exhausted, NextRowId::Next);
             self.key.extend_from_slice(&id.to_be_bytes());
             return writer.put(&self.key, &self.encoded);
         }
