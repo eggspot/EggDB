@@ -43,6 +43,13 @@ fn command_seeds() -> Vec<Vec<u8>> {
     long.extend_from_slice(b"data");
     vec![
         b"\x03SELECT 1; SELECT 'x'".to_vec(),
+        b"\x03CREATE TABLE IF NOT EXISTS `t` (id INT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(9)) ENGINE=InnoDB".to_vec(),
+        b"\x03INSERT INTO t (v) VALUES (\"a\\\"b\"), ('c\\'d') ON DUPLICATE KEY UPDATE v = VALUES(v)".to_vec(),
+        b"\x03REPLACE INTO t VALUES (1, 'x'); INSERT IGNORE INTO t VALUES (1, 'y')".to_vec(),
+        b"\x03SELECT /*!40101 1 + */ 1 # c\n, @@version, @a, `v` FROM t LIMIT 1, 2".to_vec(),
+        b"\x03SET NAMES utf8mb4; SET @a := 5, @@session.autocommit = 0; SHOW WARNINGS".to_vec(),
+        b"\x03SHOW FULL TABLES LIKE 't%'; DESCRIBE t; SHOW CREATE TABLE t; USE shop".to_vec(),
+        b"\x16INSERT INTO t (v) VALUES (?) ON DUPLICATE KEY UPDATE v = ?".to_vec(),
         b"\x16SELECT ? + 1".to_vec(),
         execute,
         long,

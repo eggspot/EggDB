@@ -111,7 +111,7 @@ pub(crate) struct Shared<'a> {
     pub(crate) stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) log: &'a (dyn Fn(&str) + Sync),
     pub(crate) throttle: AuthenticationThrottle,
-    pub(crate) secret: [u8; 32],
+    pub(crate) unknown_user: MySqlCredentials,
     pub(crate) unauthenticated: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
 }
@@ -134,7 +134,8 @@ pub(crate) fn take_slot(counter: &AtomicUsize, limit: usize) -> Option<Slot<'_>>
 }
 
 /// Serves the MySQL client/server protocol on `listener` over `store` until `stop` returns
-/// true: one thread per connection, each with its own SQL session in the MySQL dialect, at
+/// true, or refuses at once with [`io::ErrorKind::InvalidInput`] when the credentials are for an
+/// empty password, since there is no unauthenticated mode: one thread per connection, each with its own SQL session in the MySQL dialect, at
 /// most [`ServerConfig::max_connections`] at once. Every client authenticates as
 /// [`ServerConfig::user`] with `caching_sha2_password` or `mysql_native_password`. When `stop`
 /// turns true the server accepts no more connections, lets each finish the command it is
@@ -149,6 +150,12 @@ pub fn serve<S: KeyValueStore + Sync>(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    if config.credentials.is_for_empty_password() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the MySQL server needs a password: it has no unauthenticated mode (D22)",
+        ));
+    }
     listener.set_nonblocking(true)?;
     let mut secret = [0u8; 32];
     eggdb_platform::secure_random::fill(&mut secret)?;
@@ -157,7 +164,7 @@ pub fn serve<S: KeyValueStore + Sync>(
         stop,
         log,
         throttle: AuthenticationThrottle::new(),
-        secret,
+        unknown_user: MySqlCredentials::matching_nothing(&secret),
         unauthenticated: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
     };

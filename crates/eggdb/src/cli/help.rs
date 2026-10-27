@@ -237,11 +237,11 @@ script of - or none at all), in order. This release runs the first parts of the 
 dialect: CREATE TABLE with a PRIMARY KEY, DROP TABLE, INSERT, SELECT with WHERE, inner, left
 and cross joins, GROUP BY with count, sum, avg, min and max, HAVING, DISTINCT, ORDER BY,
 LIMIT and OFFSET, UPDATE, DELETE, BEGIN, COMMIT and ROLLBACK, with the integer, floating-point,
-boolean and text types. With --dialect mysql it reads MySQL's SQL and reports MySQL's errors. Results print as aligned
-tables, like psql. Each statement outside
-BEGIN ... COMMIT is its own transaction. The first failing statement stops the run with exit 3
-and a PostgreSQL-style error on stderr; statements before it stay committed, and a block left
-open is rolled back. Indexes, more types and the rest come next (docs/sql.md).
+boolean and text types; with --dialect mysql, MySQL's SQL on the same tables, with MySQL's
+errors. Results print as aligned tables, like psql. Each statement outside BEGIN ... COMMIT is
+its own transaction. The first failing statement stops the run with exit 3 and the dialect's
+error on stderr; statements before it stay committed, and a block left open is rolled back.
+Indexes, more types and the rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
       --dialect <name>  postgresql (default) or mysql
@@ -258,11 +258,12 @@ Examples:
 const SHELL: &str = "\
 An interactive prompt on one database file: the key-value commands without their
 'eggdb <command> <file>' prefix (put, get, del, scan, check, stats), SQL in the PostgreSQL
-dialect until a semicolon, and .help, .tables, .schema, .mode, .timer, .quit. Tab completes,
-Up/Down and Ctrl-R recall the history, which is kept in $XDG_STATE_HOME/eggdb/history
-(EGGDB_HISTORY=<path> moves it; set empty, turns it off). BEGIN holds a transaction across
-prompts until COMMIT or ROLLBACK. With -c, or with stdin not a terminal, it runs the text as a
-batch: plain output, no prompt, and it stops at the first failure unless --keep-going.
+dialect (or MySQL's, with --dialect mysql) until a semicolon, and .help, .tables, .schema,
+.mode, .timer, .quit. Tab completes, Up/Down and Ctrl-R recall the history, which is kept in
+$XDG_STATE_HOME/eggdb/history (EGGDB_HISTORY=<path> moves it; set empty, turns it off). BEGIN
+holds a transaction across prompts until COMMIT or ROLLBACK. With -c, or with stdin not a
+terminal, it runs the text as a batch: plain output, no prompt, and it stops at the first
+failure unless --keep-going.
 
   -c, --command <text>   a line to run, repeatable; runs in order, then exits
       --keep-going       run on after a failure, exiting with the first failure's code

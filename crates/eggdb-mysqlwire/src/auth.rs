@@ -67,6 +67,11 @@ impl MySqlCredentials {
         }
     }
 
+    /// Whether these are the credentials of an empty password, which a server refuses to serve.
+    pub fn is_for_empty_password(&self) -> bool {
+        self.empty
+    }
+
     /// `SHA256(SHA256(password))`, as the `caching_sha2_password` known-answer vectors list it.
     pub fn caching_sha2_digest(&self) -> [u8; 32] {
         self.sha256_twice

@@ -368,3 +368,49 @@ fn connections_over_the_limit_get_error_1040() {
         Reply::Err { code: 1040, .. }
     ));
 }
+
+#[test]
+fn empty_queries_and_too_many_placeholders_answer_as_mysql_does() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    for empty in ["", "   ", ";", "/* nothing */"] {
+        assert_eq!(
+            client.query(empty),
+            Reply::Err {
+                code: 1065,
+                state: "42000".into(),
+                message: "Query was empty".into(),
+            },
+            "{empty:?}"
+        );
+    }
+    client.command(0x16, b"  ");
+    assert!(matches!(client.next_reply(), Reply::Err { code: 1065, .. }));
+    let mut many = "SELECT ?".to_owned();
+    many.push_str(&", ?".repeat(65_535));
+    client.command(0x16, many.as_bytes());
+    assert!(matches!(client.next_reply(), Reply::Err { code: 1390, .. }));
+    assert!(matches!(
+        client.query("SELECT ?"),
+        Reply::Err { code: 1064, .. }
+    ));
+    assert!(matches!(client.query("SELECT 1"), Reply::Rows { .. }));
+}
+
+#[test]
+fn the_server_refuses_to_serve_an_empty_password() {
+    let store = common::SharedMemoryStore::default();
+    let listener = eggdb_mysqlwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+    let config = eggdb_mysqlwire::ServerConfig {
+        user: USER.to_owned(),
+        credentials: eggdb_mysqlwire::MySqlCredentials::derive(b""),
+        database: DATABASE.to_owned(),
+        max_connections: 4,
+        authentication_timeout: std::time::Duration::from_secs(1),
+    };
+    let refused = eggdb_mysqlwire::serve(&store, &listener, &config, &|| false, &|_| {});
+    assert_eq!(
+        refused.map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::InvalidInput)
+    );
+}

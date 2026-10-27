@@ -663,6 +663,83 @@ mod tests {
         }
     }
 
+    fn two_columns(auto: [bool; 2], primary_key: Vec<usize>) -> TableDefinition {
+        TableDefinition {
+            id: 7,
+            name: "t".into(),
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    sql_type: SqlType::BigInt,
+                    not_null: true,
+                    default: None,
+                    auto_increment: auto[0],
+                },
+                Column {
+                    name: "name".into(),
+                    sql_type: SqlType::Varchar(Some(20)),
+                    not_null: false,
+                    default: (!auto[1]).then(|| "'x'".to_owned()),
+                    auto_increment: auto[1],
+                },
+            ],
+            primary_key,
+        }
+    }
+
+    fn damaged(bytes: &[u8]) -> bool {
+        TableDefinition::decode("t", bytes).is_err_and(|error| error.state().code() == "XX001")
+    }
+
+    #[test]
+    fn a_table_without_auto_increment_stays_version_1_byte_for_byte() {
+        let encoded = two_columns([false, false], vec![0]).encode();
+        assert_eq!(
+            encoded,
+            [
+                1, 7, 0, 0, 0, 2, 2, b'i', b'd', 3, 1, 0, 4, b'n', b'a', b'm', b'e', 8, 20, 0, 0,
+                0, 0, 1, 3, b'\'', b'x', b'\'', 1, 0,
+            ]
+        );
+        let mut auto_marker = encoded.clone();
+        assert_eq!(auto_marker[11], 0);
+        auto_marker[11] = 2;
+        assert!(damaged(&auto_marker));
+    }
+
+    #[test]
+    fn an_auto_increment_table_is_version_2_and_round_trips() {
+        let table = two_columns([true, false], vec![0]);
+        let encoded = table.encode();
+        assert_eq!(encoded[0], 2);
+        assert_eq!(encoded[11], 2);
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(table));
+        for cut in 0..encoded.len() {
+            assert!(TableDefinition::decode("t", &encoded[..cut]).is_err());
+        }
+    }
+
+    #[test]
+    fn version_2_definitions_with_a_wrong_auto_increment_column_are_damaged() {
+        let mut no_auto = two_columns([false, false], vec![0]).encode();
+        no_auto[0] = 2;
+        assert!(damaged(&no_auto));
+        assert!(damaged(&two_columns([true, true], vec![0]).encode()));
+        assert!(damaged(&two_columns([false, true], vec![0]).encode()));
+        assert!(damaged(&two_columns([false, true], vec![0, 1]).encode()));
+        assert!(damaged(&two_columns([true, false], Vec::new()).encode()));
+        assert!(!damaged(&two_columns([true, false], vec![0, 1]).encode()));
+    }
+
+    #[test]
+    fn a_newer_table_definition_version_is_refused_by_name() {
+        let mut newer = two_columns([true, false], vec![0]).encode();
+        newer[0] = 3;
+        let error = TableDefinition::decode("t", &newer).unwrap_err();
+        assert_eq!(error.state().code(), "0A000");
+        assert!(error.message().contains("format version 3"), "{error}");
+    }
+
     #[test]
     fn a_prefix_end_is_the_first_key_after_every_key_with_the_prefix() {
         assert_eq!(prefix_end(&[1, 2]), vec![1, 3]);

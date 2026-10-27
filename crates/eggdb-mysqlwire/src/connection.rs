@@ -1,4 +1,4 @@
-use crate::auth::{CACHING_SHA2_PASSWORD, MYSQL_NATIVE_PASSWORD, MySqlCredentials, NONCE_BYTES};
+use crate::auth::{CACHING_SHA2_PASSWORD, MYSQL_NATIVE_PASSWORD, NONCE_BYTES};
 use crate::packets::{
     BoundValue, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, ColumnDefinition, Command,
     ParameterType, Payload, SERVER_CAPABILITIES, STATUS_AUTOCOMMIT, STATUS_IN_TRANSACTION,
@@ -20,6 +20,7 @@ pub const MAX_AUTHENTICATION_PACKET_BYTES: usize = 16 * 1024;
 /// The largest packet accepted from an authenticated client: `@@max_allowed_packet`, 64 MiB.
 pub const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PREPARED_STATEMENTS: usize = 4096;
+const MAX_PLACEHOLDERS: usize = 65_535;
 const MAX_HELD_BYTES: usize = MAX_PACKET_BYTES;
 
 pub(crate) fn printable(text: &str) -> String {
@@ -129,7 +130,7 @@ fn authenticate(
     let credentials = if response.user == config.user {
         config.credentials.clone()
     } else {
-        MySqlCredentials::matching_nothing(&shared.secret)
+        shared.unknown_user.clone()
     };
     let named_plugin = if response.capabilities & CLIENT_PLUGIN_AUTH != 0 {
         response.auth_plugin.as_deref()
@@ -638,6 +639,18 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         self.wire.flush().is_ok()
     }
 
+    fn query_was_empty(&mut self) -> bool {
+        self.error(1065, "42000", "Query was empty")
+    }
+
+    fn too_many_placeholders(&mut self) -> bool {
+        self.error(
+            1390,
+            "HY000",
+            "Prepared statement contains too many placeholders",
+        )
+    }
+
     fn unknown_statement(&mut self, statement: u32, command: &str) -> bool {
         self.error(
             1243,
@@ -742,6 +755,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             self.send_result(result, more, encoding);
         }
         match outcome {
+            Ok(()) if count == 0 && parameters.is_none() => self.query_was_empty(),
             Ok(()) if count == 0 => self.ok(0, 0, 0),
             Ok(()) => self.wire.flush().is_ok(),
             Err(error) => self.sql_error(&error),
@@ -771,7 +785,13 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             Ok(prepared) => prepared,
             Err(error) => return self.sql_error(&error),
         };
+        if prepared.is_empty {
+            return self.query_was_empty();
+        }
         let count = prepared.parameter_count;
+        if count > MAX_PLACEHOLDERS {
+            return self.too_many_placeholders();
+        }
         let description = match self.session.describe(&text, &vec![None; count]) {
             Ok(description) => description,
             Err(error) => return self.sql_error(&error),

@@ -127,7 +127,20 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
                 "Column count doesn't match value count at row 1".to_owned(),
             )
         }
-        "42601" | "2201W" | "2201X" => syntax(),
+        "42P02"
+            if message
+                .rsplit('$')
+                .next()
+                .and_then(|number| number.parse::<u64>().ok())
+                .is_none_or(|number| number > 65_535) =>
+        {
+            translated(
+                1390,
+                SqlState::MYSQL_GENERAL,
+                "Prepared statement contains too many placeholders".to_owned(),
+            )
+        }
+        "42601" | "2201W" | "2201X" | "42P02" => syntax(),
         "42704" if message.starts_with("type ") => syntax(),
         "42704" if message.starts_with("unrecognized configuration parameter") => translated(
             1193,
