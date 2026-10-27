@@ -50,6 +50,22 @@ fn shared_subtract(bytes: usize) {
     });
 }
 
+pub(crate) struct HeldMemory(WorkMemory);
+
+impl HeldMemory {
+    pub(crate) fn holding(bytes: usize) -> SqlResult<Self> {
+        let mut memory = WorkMemory::new();
+        memory.charge(bytes)?;
+        Ok(Self(memory))
+    }
+}
+
+impl std::fmt::Debug for HeldMemory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "HeldMemory({})", self.0.used)
+    }
+}
+
 pub(crate) struct WorkMemory {
     used: usize,
     limit: usize,

@@ -81,14 +81,14 @@ fn hashed(values: &[Value]) -> Option<HashedValues> {
 }
 
 impl SubqueryRows {
-    fn from_result(result: QueryResult, test: &SubqueryTest) -> Self {
+    fn from_result(result: QueryResult, test: &SubqueryTest) -> SqlResult<Self> {
         let sql_type = result
             .columns
             .as_ref()
             .and_then(|columns| columns.first())
             .and_then(|column| column.sql_type);
         let rows = result.rows.len();
-        let values = if matches!(test, SubqueryTest::Exists) {
+        let values: Vec<Value> = if matches!(test, SubqueryTest::Exists) {
             Vec::new()
         } else {
             result
@@ -97,12 +97,19 @@ impl SubqueryRows {
                 .map(|row| row.into_iter().next().unwrap_or(Value::Null))
                 .collect()
         };
-        Self {
+        let bytes = WorkMemory::row_bytes(&values);
+        let hashing = if values.len() >= HASHED_FROM {
+            bytes
+        } else {
+            0
+        };
+        Ok(Self {
             sql_type,
             values,
             rows,
             hashed: std::sync::OnceLock::new(),
-        }
+            _held: crate::memory::HeldMemory::holding(bytes.saturating_add(hashing))?,
+        })
     }
 
     fn bytes(&self) -> usize {
@@ -367,7 +374,7 @@ impl<'a> Correlation<'a> {
             Ok(mut tables) => execute_query(&env, &mut tables, &instance, &found.prepared)?,
             Err(_) => execute_query(&env, &mut TableCache::default(), &instance, &found.prepared)?,
         };
-        let rows = Arc::new(SubqueryRows::from_result(result, &found.test));
+        let rows = Arc::new(SubqueryRows::from_result(result, &found.test)?);
         if let Ok(mut memo) = self.memo.try_borrow_mut() {
             let bytes = key.1.len() + rows.bytes();
             if memo.bytes.saturating_add(bytes) > MEMO_BYTES {
@@ -481,7 +488,47 @@ fn select_expressions(select: &Select) -> Vec<&Expr> {
 }
 
 pub(crate) fn mentions_subquery(expr: &Expr) -> bool {
-    matches!(expr.kind, ExprKind::Subquery(_)) || children(expr).into_iter().any(mentions_subquery)
+    let any = |exprs: &[Expr]| exprs.iter().any(mentions_subquery);
+    match &expr.kind {
+        ExprKind::Subquery(_) => true,
+        ExprKind::Literal(_)
+        | ExprKind::Column { .. }
+        | ExprKind::Slot { .. }
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => false,
+        ExprKind::Unary(_, operand)
+        | ExprKind::IsNull { expr: operand, .. }
+        | ExprKind::IsTruth { expr: operand, .. }
+        | ExprKind::Cast { expr: operand, .. } => mentions_subquery(operand),
+        ExprKind::Binary(_, left, right)
+        | ExprKind::IsDistinctFrom { left, right, .. }
+        | ExprKind::Like {
+            expr: left,
+            pattern: right,
+            ..
+        } => mentions_subquery(left) || mentions_subquery(right),
+        ExprKind::Between {
+            expr, low, high, ..
+        } => mentions_subquery(expr) || mentions_subquery(low) || mentions_subquery(high),
+        ExprKind::InList { expr, list, .. } => mentions_subquery(expr) || any(list),
+        ExprKind::And(operands) | ExprKind::Or(operands) => any(operands),
+        ExprKind::Case {
+            operand,
+            branches,
+            otherwise,
+        } => {
+            operand.as_deref().is_some_and(mentions_subquery)
+                || branches.iter().any(|(condition, result)| {
+                    mentions_subquery(condition) || mentions_subquery(result)
+                })
+                || otherwise.as_deref().is_some_and(mentions_subquery)
+        }
+        ExprKind::Function { arguments, .. }
+        | ExprKind::SqliteFunction { arguments, .. }
+        | ExprKind::OracleFunction { arguments, .. } => any(arguments),
+        ExprKind::Aggregate { argument, .. } => argument.as_deref().is_some_and(mentions_subquery),
+    }
 }
 
 pub(crate) fn mentions_correlated(expr: &Expr) -> bool {
@@ -533,7 +580,9 @@ pub(crate) fn prepare_in_place(
             return Err(SqlError::not_supported(
                 "a subquery that refers to the rows being changed is not supported yet",
             )
-            .with_hint("Compute the values with a SELECT first, or use a subquery that stands alone.")
+            .with_hint(
+                "Compute the values with a SELECT first, or use a subquery that stands alone.",
+            )
             .at(expr.position));
         }
     }
@@ -988,7 +1037,6 @@ fn prepare_select(
             .collect::<SqlResult<_>>()?,
         None => Vec::new(),
     };
-    drop(overlay);
     let from = select.from.clone();
     let joined = match &from {
         Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions)?),
@@ -1212,8 +1260,7 @@ fn prepare_subquery(
             subquery.query.position,
         ));
     }
-    let rows = SubqueryRows::from_result(result, &subquery.test);
-    drop(overlay);
+    let rows = SubqueryRows::from_result(result, &subquery.test)?;
     if correlated {
         let mut outer = Vec::new();
         for_each_select(&query, &mut |select| {

@@ -321,6 +321,7 @@ pub(crate) struct SubqueryRows {
     pub(crate) values: Vec<Value>,
     pub(crate) rows: usize,
     pub(crate) hashed: std::sync::OnceLock<Option<crate::subquery::HashedValues>>,
+    pub(crate) _held: crate::memory::HeldMemory,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -86,6 +86,9 @@ include.
 | `sqlite_compare.sql_bulk_insert` | one row of 100-row `INSERT ... VALUES` statements, 1,000 rows per `BEGIN ... COMMIT`, as SQL text | `Off` / `OFF` | 15% above the line (D99) |
 | `sqlite_compare.sql_join` | `SELECT count(*), sum(o.amount) FROM orders o JOIN people p ON p.id = o.person_id WHERE p.score > 100` as SQL text: 10,000 orders, each joined to one of 10,000 people by primary key | `Normal` / `NORMAL` | 15% above the line (D100) |
 | `sqlite_compare.sql_group_by` | `SELECT bucket, count(*), sum(amount), min(amount), max(amount) FROM orders GROUP BY bucket` as SQL text: 10,000 rows in 100 groups | `Normal` / `NORMAL` | 15% above the line (D100) |
+| `sqlite_compare.sql_in_subquery` | `SELECT count(*), sum(amount) FROM orders WHERE person_id IN (SELECT id FROM people WHERE score > 500)` over the same tables: an uncorrelated subquery run once into a hash set | `Normal` / `NORMAL` | 15% above the line; the Linux line follows its first CI run (D112) |
+| `sqlite_compare.sql_correlated_exists` | `SELECT count(*) FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person_id = p.id AND o.amount > 900)`: a correlated subquery, run once per person by EggDB (D112) where SQLite flattens it | `Normal` / `NORMAL` | 15% above the line; the gap closes with item 19e's planner |
+| `sqlite_compare.sql_union` | `SELECT count(*) FROM (SELECT person_id FROM orders UNION SELECT id + 5000 FROM people) u`: a hashed `UNION` of 20,000 rows read through a derived table | `Normal` / `NORMAL` | 15% above the line (D112) |
 
 The band is wider than the 30% of EggDB's other ratios because two engines respond differently
 to each CI runner's processor: seven runs gave point gets from 0.60 to 0.83 and scans from 0.35

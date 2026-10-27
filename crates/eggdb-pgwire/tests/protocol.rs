@@ -703,7 +703,11 @@ fn set_operations_and_subqueries_describe_their_column_types() {
             vec![Some(b"1".to_vec())],
             vec![Some(b"2".to_vec())],
             vec![Some(b"2.5".to_vec())],
-            vec![Some(b"2.50".to_vec()), Some(b"t".to_vec()), Some(b"2".to_vec())],
+            vec![
+                Some(b"2.50".to_vec()),
+                Some(b"t".to_vec()),
+                Some(b"2".to_vec())
+            ],
         ]
     );
 }

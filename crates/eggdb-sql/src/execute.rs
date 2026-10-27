@@ -518,6 +518,34 @@ fn returning_exprs(items: &mut Option<Vec<SelectItem>>) -> impl Iterator<Item = 
     })
 }
 
+fn returning_mentions_subquery(items: &Option<Vec<SelectItem>>) -> bool {
+    items.iter().flatten().any(|item| match item {
+        SelectItem::Expr { expr, .. } => crate::subquery::mentions_subquery(expr),
+        SelectItem::Wildcard { .. } => false,
+    })
+}
+
+fn value_mentions_subquery(value: &InsertValue) -> bool {
+    matches!(value, InsertValue::Expr(expr) if crate::subquery::mentions_subquery(expr))
+}
+
+fn insert_mentions_subquery(insert: &Insert) -> bool {
+    let values = match &insert.source {
+        InsertSource::Values(rows) => rows.iter().flatten().any(value_mentions_subquery),
+        InsertSource::DefaultValues => false,
+    };
+    values || returning_mentions_subquery(&insert.returning)
+}
+
+fn update_mentions_subquery(update: &Update) -> bool {
+    update
+        .assignments
+        .iter()
+        .any(|(_, value)| value_mentions_subquery(value))
+        || update.filter.iter().any(crate::subquery::mentions_subquery)
+        || returning_mentions_subquery(&update.returning)
+}
+
 fn insert_exprs(insert: &mut Insert) -> Vec<&mut Expr> {
     let mut exprs: Vec<&mut Expr> = Vec::new();
     if let InsertSource::Values(rows) = &mut insert.source {
@@ -559,9 +587,6 @@ fn with_subqueries_run<T: Clone>(
 ) -> SqlResult<Option<T>> {
     let mut copy = statement.clone();
     let found = exprs(&mut copy);
-    if !found.iter().any(|expr| crate::subquery::mentions_subquery(expr)) {
-        return Ok(None);
-    }
     let table = tables.require(reader, &target.name)?;
     let scope = if values_only {
         Scope::empty()
@@ -577,7 +602,11 @@ pub(crate) fn insert(
     tables: &mut TableCache,
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
-    let prepared = with_subqueries_run(writer, tables, insert, &insert.table, true, insert_exprs)?;
+    let prepared = if insert_mentions_subquery(insert) {
+        with_subqueries_run(writer, tables, insert, &insert.table, true, insert_exprs)?
+    } else {
+        None
+    };
     let insert = prepared.as_ref().unwrap_or(insert);
     let table = tables.require(writer, &insert.table.name)?;
     let scope = scope_of(&table, &insert.table);
@@ -1597,8 +1626,7 @@ fn split_correlated(select: &Select) -> SqlResult<Option<(Select, Expr)>> {
         ExprKind::And(parts) => parts.clone(),
         _ => vec![filter.clone()],
     };
-    let (late, early): (Vec<Expr>, Vec<Expr>) =
-        parts.into_iter().partition(|part| correlated(part));
+    let (late, early): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(correlated);
     let joined = |mut parts: Vec<Expr>| match parts.len() {
         0 => None,
         1 => parts.pop(),
@@ -1682,7 +1710,10 @@ fn select_or_explain(
     explain: Option<&mut ExplainedQuery>,
     correlation: Option<&Correlation<'_>>,
 ) -> SqlResult<QueryResult> {
-    let split = split_correlated(select)?;
+    let split = match correlation {
+        Some(_) => split_correlated(select)?,
+        None => None,
+    };
     let (select, late) = match &split {
         Some((early, late)) => (early, Some(late)),
         None => (select, None),
@@ -2241,7 +2272,11 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
-    let prepared = with_subqueries_run(writer, tables, update, &update.table, false, update_exprs)?;
+    let prepared = if update_mentions_subquery(update) {
+        with_subqueries_run(writer, tables, update, &update.table, false, update_exprs)?
+    } else {
+        None
+    };
     let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require(writer, &update.table.name)?;
     let scope = scope_of(&table, &update.table);
@@ -2355,7 +2390,13 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
-    let prepared = with_subqueries_run(writer, tables, delete, &delete.table, false, delete_exprs)?;
+    let prepared = if delete.filter.iter().any(crate::subquery::mentions_subquery)
+        || returning_mentions_subquery(&delete.returning)
+    {
+        with_subqueries_run(writer, tables, delete, &delete.table, false, delete_exprs)?
+    } else {
+        None
+    };
     let delete = prepared.as_ref().unwrap_or(delete);
     let table = tables.require(writer, &delete.table.name)?;
     let scope = scope_of(&table, &delete.table);

@@ -247,9 +247,12 @@ pub(crate) fn combine(
     right: Branch,
 ) -> SqlResult<QueryResult> {
     let (columns, texts) = unify(operation, &left, &right)?;
+    let mut memory = WorkMemory::new();
+    for row in left.result.rows.iter().chain(&right.result.rows) {
+        memory.charge_row(row)?;
+    }
     let left_rows = converted(left.result.rows, &columns, &texts, operation.dialect)?;
     let right_rows = converted(right.result.rows, &columns, &texts, operation.dialect)?;
-    let mut memory = WorkMemory::new();
     let mut output = Vec::new();
     match (operation.operator, operation.all) {
         (SetOperator::Union, true) => {

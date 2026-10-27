@@ -92,6 +92,13 @@ impl Parser<'_> {
         } else {
             (Vec::new(), false)
         };
+        if !with.is_empty()
+            && ["insert", "update", "delete"]
+                .iter()
+                .any(|word| self.is_word(word))
+        {
+            return Err(self.not_supported("WITH before INSERT, UPDATE or DELETE"));
+        }
         let body = self.set_expression()?;
         let tail = self.query_tail()?;
         let (body, tail) = match body {
@@ -421,7 +428,7 @@ impl Parser<'_> {
             .at(position));
         }
         let column_names = if alias.is_some() && self.peek_kind() == &TokenKind::LeftParen {
-            if self.oracle() {
+            if self.oracle() || self.sqlite() {
                 return Err(self.unexpected());
             }
             self.name_list()?

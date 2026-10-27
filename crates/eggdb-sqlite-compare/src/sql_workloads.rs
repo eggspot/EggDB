@@ -13,6 +13,9 @@ pub(crate) const INDEXED_LOOKUP: &str = "sqlite_compare.sql_indexed_lookup";
 pub(crate) const BULK_INSERT: &str = "sqlite_compare.sql_bulk_insert";
 pub(crate) const JOIN: &str = "sqlite_compare.sql_join";
 pub(crate) const GROUP_BY: &str = "sqlite_compare.sql_group_by";
+pub(crate) const IN_SUBQUERY: &str = "sqlite_compare.sql_in_subquery";
+pub(crate) const CORRELATED_EXISTS: &str = "sqlite_compare.sql_correlated_exists";
+pub(crate) const UNION: &str = "sqlite_compare.sql_union";
 
 const ROWS: u64 = 100_000;
 const KNOWN_GAP_TOLERANCE_PERCENT: u32 = 15;
@@ -239,6 +242,10 @@ const SQLITE_ORDERS: &str = "CREATE TABLE orders (id INTEGER PRIMARY KEY, person
 const JOIN_QUERY: &str = "SELECT count(*), sum(o.amount) FROM orders o JOIN people p ON p.id = o.person_id WHERE p.score > 100";
 const GROUP_BY_QUERY: &str =
     "SELECT bucket, count(*), sum(amount), min(amount), max(amount) FROM orders GROUP BY bucket";
+const IN_SUBQUERY_QUERY: &str = "SELECT count(*), sum(amount) FROM orders WHERE person_id IN (SELECT id FROM people WHERE score > 500)";
+const CORRELATED_EXISTS_QUERY: &str = "SELECT count(*) FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person_id = p.id AND o.amount > 900)";
+const UNION_QUERY: &str =
+    "SELECT count(*) FROM (SELECT person_id FROM orders UNION SELECT id + 5000 FROM people) u";
 
 fn orders_script() -> String {
     let mut script = String::from("BEGIN;\n");
@@ -319,6 +326,18 @@ pub(crate) fn join() -> Result<Vec<Metric>, String> {
 
 pub(crate) fn group_by() -> Result<Vec<Metric>, String> {
     repeated(GROUP_BY_QUERY, GROUP_BY, BUCKETS as usize)
+}
+
+pub(crate) fn in_subquery() -> Result<Vec<Metric>, String> {
+    repeated(IN_SUBQUERY_QUERY, IN_SUBQUERY, 1)
+}
+
+pub(crate) fn correlated_exists() -> Result<Vec<Metric>, String> {
+    repeated(CORRELATED_EXISTS_QUERY, CORRELATED_EXISTS, 1)
+}
+
+pub(crate) fn union() -> Result<Vec<Metric>, String> {
+    repeated(UNION_QUERY, UNION, 1)
 }
 
 #[cfg(test)]

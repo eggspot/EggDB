@@ -866,8 +866,9 @@ impl<'t> Parser<'t> {
 }
 
 pub(crate) fn is_schema_table(table: &TableReference) -> bool {
-    matches!(
-        table.name.text.as_str(),
-        "sqlite_master" | "sqlite_schema" | "sqlite_temp_master" | "sqlite_temp_schema"
-    )
+    table.derived.is_none()
+        && matches!(
+            table.name.text.as_str(),
+            "sqlite_master" | "sqlite_schema" | "sqlite_temp_master" | "sqlite_temp_schema"
+        )
 }

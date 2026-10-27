@@ -146,7 +146,7 @@ pub(super) fn is_clause_word(word: &str) -> bool {
 }
 
 pub(crate) fn is_dictionary_view(table: &TableReference) -> bool {
-    DICTIONARY_VIEWS.contains(&table.name.text.as_str())
+    table.derived.is_none() && DICTIONARY_VIEWS.contains(&table.name.text.as_str())
 }
 
 fn literal(literal: Literal, position: usize) -> Expr {

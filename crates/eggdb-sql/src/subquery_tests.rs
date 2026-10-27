@@ -168,7 +168,7 @@ fn reference(r: &[Row], s: &[Row]) -> BTreeMap<String, Vec<String>> {
     let s_a: Vec<Option<i64>> = s.iter().map(|row| row.1).collect();
     let r_a: Vec<Option<i64>> = r.iter().map(|row| row.1).collect();
     let mut expected = BTreeMap::new();
-    let mut ids = |keep: &dyn Fn(&Row) -> bool| -> Vec<String> {
+    let ids = |keep: &dyn Fn(&Row) -> bool| -> Vec<String> {
         let mut found: Vec<String> = r
             .iter()
             .filter(|row| keep(row))
@@ -179,11 +179,17 @@ fn reference(r: &[Row], s: &[Row]) -> BTreeMap<String, Vec<String>> {
     };
     expected.insert(
         "exists".to_owned(),
-        ids(&|row| s.iter().any(|inner| equal_truth(inner.1, row.1) == Some(true))),
+        ids(&|row| {
+            s.iter()
+                .any(|inner| equal_truth(inner.1, row.1) == Some(true))
+        }),
     );
     expected.insert(
         "not exists".to_owned(),
-        ids(&|row| !s.iter().any(|inner| equal_truth(inner.1, row.1) == Some(true))),
+        ids(&|row| {
+            !s.iter()
+                .any(|inner| equal_truth(inner.1, row.1) == Some(true))
+        }),
     );
     expected.insert(
         "not in".to_owned(),
@@ -278,9 +284,7 @@ fn queries(r: &str, s: &str) -> Vec<(&'static str, String)> {
         ),
         (
             "not exists",
-            format!(
-                "SELECT id FROM {r} x WHERE NOT EXISTS (SELECT 1 FROM {s} y WHERE y.a = x.a)"
-            ),
+            format!("SELECT id FROM {r} x WHERE NOT EXISTS (SELECT 1 FROM {s} y WHERE y.a = x.a)"),
         ),
         (
             "not exists",
@@ -298,9 +302,7 @@ fn queries(r: &str, s: &str) -> Vec<(&'static str, String)> {
         ),
         (
             "correlated not in",
-            format!(
-                "SELECT id FROM {r} WHERE a NOT IN (SELECT a FROM {s} WHERE {s}.b = {r}.b)"
-            ),
+            format!("SELECT id FROM {r} WHERE a NOT IN (SELECT a FROM {s} WHERE {s}.b = {r}.b)"),
         ),
         (
             "< any",
@@ -320,9 +322,7 @@ fn queries(r: &str, s: &str) -> Vec<(&'static str, String)> {
         ),
         (
             "scalar count",
-            format!(
-                "SELECT id, (SELECT count(*) FROM {s} WHERE {s}.a = {r}.a) FROM {r}"
-            ),
+            format!("SELECT id, (SELECT count(*) FROM {s} WHERE {s}.a = {r}.a) FROM {r}"),
         ),
         (
             "scalar count",
@@ -330,12 +330,13 @@ fn queries(r: &str, s: &str) -> Vec<(&'static str, String)> {
                 "SELECT {r}.id, count({s}.id) FROM {r} LEFT JOIN {s} ON {s}.a = {r}.a GROUP BY {r}.id"
             ),
         ),
-        ("UNION", format!("SELECT a FROM {r} UNION SELECT a FROM {s}")),
         (
             "UNION",
-            format!(
-                "SELECT DISTINCT a FROM (SELECT a FROM {r} UNION ALL SELECT a FROM {s}) t"
-            ),
+            format!("SELECT a FROM {r} UNION SELECT a FROM {s}"),
+        ),
+        (
+            "UNION",
+            format!("SELECT DISTINCT a FROM (SELECT a FROM {r} UNION ALL SELECT a FROM {s}) t"),
         ),
         (
             "UNION",
@@ -355,7 +356,10 @@ fn queries(r: &str, s: &str) -> Vec<(&'static str, String)> {
             "INTERSECT ALL",
             format!("SELECT a FROM {r} INTERSECT ALL SELECT a FROM {s}"),
         ),
-        ("EXCEPT", format!("SELECT a FROM {r} EXCEPT SELECT a FROM {s}")),
+        (
+            "EXCEPT",
+            format!("SELECT a FROM {r} EXCEPT SELECT a FROM {s}"),
+        ),
         (
             "EXCEPT ALL",
             format!("SELECT a FROM {r} EXCEPT ALL SELECT a FROM {s}"),
@@ -391,7 +395,10 @@ fn subquery_forms_agree_with_joins_and_a_reference_with_and_without_indexes() {
             let found = sorted_rows(&mut session, sql);
             assert_eq!(&found, want, "round {round}: {sql}\nr={r:?}\ns={s:?}");
             let found = sorted_rows(&mut session, indexed_sql);
-            assert_eq!(&found, want, "round {round}: {indexed_sql}\nr={r:?}\ns={s:?}");
+            assert_eq!(
+                &found, want,
+                "round {round}: {indexed_sql}\nr={r:?}\ns={s:?}"
+            );
         }
     }
 }
@@ -417,7 +424,11 @@ fn nested_subqueries_are_bounded_and_never_overflow_the_stack() {
         derived = format!("SELECT id FROM ({derived}) d{level}");
     }
     assert_eq!(last(&mut session, &derived), "id\n1\n2\nSELECT 2");
-    let error = run(&mut session, &format!("SELECT id FROM (SELECT id FROM ({derived}) d31) d32")).unwrap_err();
+    let error = run(
+        &mut session,
+        &format!("SELECT id FROM (SELECT id FROM ({derived}) d31) d32"),
+    )
+    .unwrap_err();
     assert_eq!(error.state().code(), "54001", "{error}");
     let mut correlated = "SELECT 1 FROM t z WHERE z.id = t0.id".to_owned();
     for level in (0..15).rev() {
@@ -489,7 +500,9 @@ fn correlated_subqueries_run_once_per_distinct_outer_value() {
         &mut session,
         "CREATE TABLE big (id integer PRIMARY KEY, k integer); CREATE INDEX big_k ON big (k)",
     );
-    let values: Vec<String> = (0..5_000).map(|id| format!("({id}, {})", id % 10)).collect();
+    let values: Vec<String> = (0..5_000)
+        .map(|id| format!("({id}, {})", id % 10))
+        .collect();
     last(
         &mut session,
         &format!("INSERT INTO big VALUES {}", values.join(", ")),
@@ -536,10 +549,7 @@ fn set_operations_and_subqueries_report_their_column_types() {
         "CREATE TABLE t (i integer, b bigint, n numeric(6,2), d double precision, s text, v varchar(5))",
     );
     let description = session
-        .describe(
-            "SELECT i, n, s FROM t UNION SELECT b, d, v FROM t",
-            &[],
-        )
+        .describe("SELECT i, n, s FROM t UNION SELECT b, d, v FROM t", &[])
         .unwrap();
     let types: Vec<Option<SqlType>> = description
         .columns
@@ -549,7 +559,11 @@ fn set_operations_and_subqueries_report_their_column_types() {
         .collect();
     assert_eq!(
         types,
-        [Some(SqlType::BigInt), Some(SqlType::Double), Some(SqlType::Text)]
+        [
+            Some(SqlType::BigInt),
+            Some(SqlType::Double),
+            Some(SqlType::Text)
+        ]
     );
     let description = session
         .describe(
@@ -581,20 +595,44 @@ fn dialect_spellings_stay_in_their_dialects() {
         (Dialect::PostgreSql, "SELECT 1 MINUS SELECT 2", false),
         (Dialect::MySql, "SELECT 1 MINUS SELECT 2", false),
         (Dialect::Sqlite, "SELECT 1 MINUS SELECT 2", false),
-        (Dialect::Oracle, "SELECT 1 FROM dual MINUS SELECT 2 FROM dual", true),
-        (Dialect::MySql, "SELECT 1 FROM t FULL JOIN t u ON true", false),
+        (
+            Dialect::Oracle,
+            "SELECT 1 FROM dual MINUS SELECT 2 FROM dual",
+            true,
+        ),
+        (
+            Dialect::MySql,
+            "SELECT 1 FROM t FULL JOIN t u ON true",
+            false,
+        ),
         (Dialect::Sqlite, "SELECT 1 = ANY (SELECT 1)", false),
         (Dialect::Sqlite, "SELECT 1 INTERSECT ALL SELECT 1", false),
         (Dialect::Sqlite, "(SELECT 1) UNION SELECT 1", false),
-        (Dialect::Oracle, "WITH RECURSIVE t AS (SELECT 1 FROM dual) SELECT * FROM t", false),
-        (Dialect::Oracle, "SELECT * FROM (SELECT 1 FROM dual) x (a)", false),
+        (
+            Dialect::Oracle,
+            "WITH RECURSIVE t AS (SELECT 1 FROM dual) SELECT * FROM t",
+            false,
+        ),
+        (
+            Dialect::Oracle,
+            "SELECT * FROM (SELECT 1 FROM dual) x (a)",
+            false,
+        ),
         (Dialect::MySql, "SELECT * FROM (SELECT 1) AS x", true),
         (Dialect::MySql, "SELECT mysql_greatest(1, 2)", false),
         (Dialect::PostgreSql, "SELECT mysql_greatest(1, 2)", false),
         (Dialect::PostgreSql, "SELECT greatest(1, 2)", true),
         (Dialect::Sqlite, "SELECT greatest(1, 2)", false),
-        (Dialect::PostgreSql, "WITH t AS MATERIALIZED (SELECT 1) SELECT * FROM t", true),
-        (Dialect::MySql, "WITH t AS MATERIALIZED (SELECT 1) SELECT * FROM t", false),
+        (
+            Dialect::PostgreSql,
+            "WITH t AS MATERIALIZED (SELECT 1) SELECT * FROM t",
+            true,
+        ),
+        (
+            Dialect::MySql,
+            "WITH t AS MATERIALIZED (SELECT 1) SELECT * FROM t",
+            false,
+        ),
     ] {
         let mut session = Session::with_dialect(&store, dialect);
         let _ = run(&mut session, "CREATE TABLE t (x integer)");
