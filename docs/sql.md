@@ -203,11 +203,12 @@ exports into a new file, or into a file without SQL tables.
   `E'...'` strings, `CASE` branches of different types; `lower` and `upper` change case by
   Unicode rules, where PostgreSQL's `C` collation changes only ASCII letters.
 - Speed: a point `SELECT` by primary key takes about 1.2 times SQLite's time on an
-  Apple-silicon Mac (0.85 on CI's Linux runners), and multi-row `INSERT`s of constants about 0.9
+  Apple-silicon Mac (about 0.91 on CI's Linux runners, D100), and multi-row `INSERT`s of constants about 0.9
   times (0.83 on Linux), measured with the same SQL text on both and gated so they can only improve; the rest of
   the point-select gap is roadmap item 19e (D99). A `GROUP BY` with four aggregates over 10,000
-  rows takes about 0.94 times SQLite's time, and a 10,000-row join by primary key about 0.99
-  times, gated the same way (D100).
+  rows takes about 0.94 times SQLite's time on the Mac and 0.86 on Linux, and a 10,000-row join
+  by primary key about 0.99 times on the Mac and 1.4 on Linux, gated the same way; the Linux join
+  must reach 1.0 before v0.3.0 (item 19e, D100).
 
 ## Next parts (roadmap)
 - Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.

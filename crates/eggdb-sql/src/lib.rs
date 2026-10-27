@@ -10,7 +10,8 @@
 //! with `WHERE`, inner, left and cross joins, `GROUP BY` with `count`, `sum`, `avg`, `min` and
 //! `max`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE`,
 //! transaction blocks, and the integer, floating-point, boolean and text types. Everything
-//! else answers SQLSTATE `0A000` (feature not supported). The guide is `docs/sql.md` in the repository.
+//! else answers SQLSTATE `0A000` (feature not supported). The guide is `docs/sql.md` in the
+//! repository.
 
 mod aggregate;
 mod ast;

@@ -4252,11 +4252,22 @@ lookups, one B+tree descent per order. Changes, in order:
   reused buffer instead of a vector per row, and aggregates check argument types only for
   values whose type is not always valid (group by 1.13 to 0.94).
 
-Measured on the Mac: `sql_join` 0.99 and `sql_group_by` 0.94. On CI's Linux runner,
-`sql_group_by` measures 0.94-1.16 across two runs of the same commit (its line stays at 1.063)
-and `sql_join` 1.32-1.43 (from 3.78-3.93; its line is lowered to 1.431): the join is not at parity there
-yet, so D99's condition applies to it unchanged (at most 1.0 before v0.3.0, or a D7 research
-recorded here), and it stays in item 19e.
+Measured on the Mac: `sql_join` 0.99 and `sql_group_by` 0.94. On CI's Linux runners, after a last round (inner-join `WHERE` parts applied while the hash
+table is built; single integer `GROUP BY` keys in an integer map with a seeded 64-bit
+finalizer), `sql_group_by` measures 0.86 (its line is 0.900, above the measured value by the
+spread its earlier runs showed) and `sql_join` 1.40 (from 3.78-3.93; its line is 1.396).
+
+**The Linux join under D7, decided by research.** The gap of about 1.4 on Linux is not shown to be
+unavoidable, and the same code reaches 0.99 on the Mac, so D7's exception is not claimed and D7
+is not met on Linux for this line. As with D99 and D94 (issue #52), the pull request merges under
+a schedule, not a waiver. It improves the Linux ratio about 2.7 times and makes no existing line
+worse. The line is gated at today's value (15% ceiling, may only shrink), and D99's condition
+applies unchanged: at most 1.0 on macOS and Linux before v0.3.0, or a D7 research recorded here.
+The next steps are profiles on Linux x86-64 (`perf`) before any change: allocations in the hash
+build (`values`, `next` and the map grow without a reserve, and glibc's allocator costs more
+than Apple's for small vectors), `Value` clones and drops per probe, and the probe loop's branch
+misses against SQLite's rowid seeks on the same machine. They are item 19e.
+
 Both lines are gated with the 15% ceiling of D99's SQL lines and may only shrink. The known
 cost of the hash choice without table statistics: joining a small filtered first table to a
 very large table by its key reads up to 64 MiB of the large one before it falls back to
@@ -4272,8 +4283,8 @@ line to 0.910 (limit 1.047, above every observed run) with this record is justif
 unexplained loosening would not be. The macOS line stays at 1.226, and D99's condition (at most
 1.0 before v0.3.0) is unchanged.
 
-**Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to 1,297,360 bytes on
-aarch64 macOS (+99,328, +8.3%) for the join planner and executor, the hash join, column pruning,
+**Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to {M:,} bytes on
+aarch64 macOS (+{M-1198032:,}, +{(M-1198032)/1198032*100:.1f}%) for the join planner and executor, the hash join, column pruning,
 the grouping rewrite and the aggregate states; start time and peak memory stay within their lines (1,671,168 and 2,359,296
-bytes peak). On x86-64 Linux it grows from 1,461,576 to 1,582,856 bytes (+121,280, +8.3%) with the
+bytes peak). On x86-64 Linux it grows from 1,461,576 to 1,591,632 bytes (+130,056, +8.9%) with the
 hash join and column pruning; peak memory stays within its lines.
