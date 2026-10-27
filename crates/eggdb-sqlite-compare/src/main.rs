@@ -29,8 +29,6 @@ mod harness;
 #[path = "../../eggdb-bench/src/measure.rs"]
 #[allow(dead_code)]
 mod measure;
-#[path = "../../eggdb/src/cli/sql_store.rs"]
-mod sql_store;
 mod sql_workloads;
 mod stores;
 mod workloads;

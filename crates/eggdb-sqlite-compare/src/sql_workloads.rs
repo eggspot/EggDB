@@ -1,9 +1,9 @@
 use crate::baseline::Metric;
 use crate::measure;
-use crate::sql_store::DatabaseStore;
 use crate::stores::{Stores, failed};
 use crate::workloads::{RatioGate, paired_metrics};
 use eggdb::Durability;
+use eggdb::sql::Store as DatabaseStore;
 use eggdb_sql::Session;
 use rusqlite::Connection;
 use std::hint::black_box;
@@ -264,9 +264,9 @@ mod tests {
         EGGDB_ORDERS, EGGDB_TABLE, JOIN_QUERY, SQLITE_ORDERS, SQLITE_TABLE, eggdb_insert,
         eggdb_run, orders_script, sqlite_insert,
     };
-    use crate::sql_store::DatabaseStore;
     use crate::stores::Stores;
     use eggdb::Durability;
+    use eggdb::sql::Store as DatabaseStore;
     use eggdb_sql::Session;
 
     #[test]
