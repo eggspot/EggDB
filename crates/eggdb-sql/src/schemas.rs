@@ -7,8 +7,10 @@ use crate::encoding::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
 use crate::session::QueryResult;
+use crate::settings::Settings;
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use std::cell::RefCell;
+use std::sync::{Arc, Weak};
 
 pub(crate) const QUALIFIER: char = '\0';
 pub(crate) const DEFAULT_SCHEMA: &str = "public";
@@ -110,11 +112,21 @@ pub(crate) fn schema_named(text: &str, position: usize) -> SqlResult<Name> {
     })
 }
 
+type SharedPath = Arc<[String]>;
+
 struct PathState {
-    setting: String,
-    user: String,
-    dialect: Dialect,
-    resolved: Option<Vec<String>>,
+    settings: Option<Arc<Settings>>,
+    resolved: Option<SharedPath>,
+    relations: Option<SharedPath>,
+    known: Option<(u64, SharedPath)>,
+    computed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PathCache {
+    settings: Weak<Settings>,
+    version: u64,
+    path: Option<SharedPath>,
 }
 
 thread_local! {
@@ -123,6 +135,25 @@ thread_local! {
 
 pub(crate) struct EnteredPath {
     previous: Option<PathState>,
+}
+
+impl EnteredPath {
+    pub(crate) fn remember(&self, cache: &mut PathCache) {
+        let computed = PATH.with(|path| {
+            let path = path.try_borrow().ok()?;
+            let state = path.as_ref()?;
+            let version = state.computed?;
+            let settings = state.settings.as_ref()?;
+            Some((Arc::downgrade(settings), version, state.resolved.clone()?))
+        });
+        if let Some((settings, version, found)) = computed {
+            *cache = PathCache {
+                settings,
+                version,
+                path: Some(found),
+            };
+        }
+    }
 }
 
 impl Drop for EnteredPath {
@@ -136,12 +167,19 @@ impl Drop for EnteredPath {
     }
 }
 
-pub(crate) fn enter(setting: &str, user: &str, dialect: Dialect) -> EnteredPath {
+pub(crate) fn enter(settings: &Arc<Settings>, dialect: Dialect, cache: &PathCache) -> EnteredPath {
+    let known = match &cache.path {
+        Some(path) if std::ptr::eq(cache.settings.as_ptr(), Arc::as_ptr(settings)) => {
+            Some((cache.version, Arc::clone(path)))
+        }
+        _ => None,
+    };
     let state = PathState {
-        setting: setting.to_owned(),
-        user: user.to_owned(),
-        dialect,
+        settings: (dialect == Dialect::PostgreSql).then(|| Arc::clone(settings)),
         resolved: None,
+        relations: None,
+        known,
+        computed: None,
     };
     let previous = PATH.with(|path| {
         path.try_borrow_mut()
@@ -205,14 +243,28 @@ fn is_system_schema(name: &str) -> bool {
     name == CATALOG_SCHEMA || name == INFORMATION_SCHEMA
 }
 
-fn compute_path(reader: &dyn KeyValueRead, state: &PathState) -> SqlResult<Vec<String>> {
-    if state.dialect != Dialect::PostgreSql {
-        return Ok(vec![DEFAULT_SCHEMA.to_owned()]);
+fn default_path() -> SharedPath {
+    Arc::from([DEFAULT_SCHEMA.to_owned()])
+}
+
+fn compute_path(
+    reader: &dyn KeyValueRead,
+    settings: Option<&Settings>,
+    known: Option<&(u64, SharedPath)>,
+) -> SqlResult<SharedPath> {
+    let Some(settings) = settings else {
+        return Ok(default_path());
+    };
+    if let (Some(version), Some((known_at, known))) = (reader.committed_version(), known)
+        && version == *known_at
+    {
+        return Ok(Arc::clone(known));
     }
-    let mut existing = Vec::new();
-    for entry in path_entries(&state.setting) {
+    let user = settings.get("session_authorization").unwrap_or_default();
+    let mut existing: Vec<String> = Vec::new();
+    for entry in path_entries(&settings.get("search_path").unwrap_or_default()) {
         let name = if entry == "$user" {
-            state.user.clone()
+            user.clone()
         } else {
             entry
         };
@@ -223,54 +275,80 @@ fn compute_path(reader: &dyn KeyValueRead, state: &PathState) -> SqlResult<Vec<S
             existing.push(name);
         }
     }
-    Ok(existing)
+    Ok(existing.into())
 }
 
-pub(crate) fn effective_path(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
-    let cached = PATH.with(|path| {
-        path.try_borrow()
-            .ok()
-            .and_then(|path| path.as_ref().and_then(|state| state.resolved.clone()))
-    });
-    if let Some(path) = cached {
-        return Ok(path);
-    }
-    let computed = PATH.with(|path| {
+fn shared_path(reader: &dyn KeyValueRead) -> SqlResult<SharedPath> {
+    let pending = PATH.with(|path| {
         let path = path.try_borrow().ok()?;
         let state = path.as_ref()?;
-        Some(compute_path(reader, state))
+        Some(match &state.resolved {
+            Some(resolved) => Ok(Arc::clone(resolved)),
+            None => Err((state.settings.clone(), state.known.clone())),
+        })
     });
-    let resolved = match computed {
-        Some(result) => result?,
-        None => vec![DEFAULT_SCHEMA.to_owned()],
+    let (settings, known) = match pending {
+        None => return Ok(default_path()),
+        Some(Ok(resolved)) => return Ok(resolved),
+        Some(Err(inputs)) => inputs,
     };
+    let resolved = if settings.is_none() {
+        default_path()
+    } else {
+        compute_path(reader, settings.as_deref(), known.as_ref())?
+    };
+    let relations: SharedPath = if resolved.iter().any(|schema| is_system_schema(schema)) {
+        resolved
+            .iter()
+            .filter(|schema| !is_system_schema(schema))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    } else {
+        Arc::clone(&resolved)
+    };
+    let version = reader.committed_version();
     PATH.with(|path| {
         if let Ok(mut path) = path.try_borrow_mut()
             && let Some(state) = path.as_mut()
         {
-            state.resolved = Some(resolved.clone());
+            state.resolved = Some(Arc::clone(&resolved));
+            state.relations = Some(relations);
+            state.computed = version;
         }
     });
     Ok(resolved)
+}
+
+pub(crate) fn effective_path(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
+    Ok(shared_path(reader)?.to_vec())
+}
+
+pub(crate) fn shared_relation_path(reader: &dyn KeyValueRead) -> SqlResult<SharedPath> {
+    let resolved = shared_path(reader)?;
+    let relations = PATH.with(|path| {
+        path.try_borrow()
+            .ok()
+            .and_then(|path| path.as_ref().and_then(|state| state.relations.clone()))
+    });
+    Ok(relations.unwrap_or(resolved))
 }
 
 pub(crate) fn cached_relation_path() -> Vec<String> {
     PATH.with(|path| {
         path.try_borrow()
             .ok()
-            .and_then(|path| path.as_ref().and_then(|state| state.resolved.clone()))
+            .and_then(|path| path.as_ref().and_then(|state| state.relations.clone()))
     })
-    .unwrap_or_else(|| vec![DEFAULT_SCHEMA.to_owned()])
-    .into_iter()
-    .filter(|schema| !is_system_schema(schema))
-    .collect()
+    .map_or_else(|| vec![DEFAULT_SCHEMA.to_owned()], |path| path.to_vec())
 }
 
 pub(crate) fn relation_path(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
-    Ok(effective_path(reader)?
-        .into_iter()
-        .filter(|schema| !is_system_schema(schema))
-        .collect())
+    Ok(shared_relation_path(reader)?.to_vec())
+}
+
+pub(crate) fn is_default_path(path: &[String]) -> bool {
+    path.len() == 1 && path[0] == DEFAULT_SCHEMA
 }
 
 fn relation_stored(reader: &dyn KeyValueRead, internal: &str) -> SqlResult<bool> {

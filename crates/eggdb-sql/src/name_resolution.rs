@@ -24,8 +24,8 @@ const MAX_QUERIES: usize = 1024;
 pub(crate) struct Resolution {
     pub(crate) references: Vec<String>,
     pub(crate) expanded: Vec<String>,
-    recorded: HashSet<String>,
-    seen_expanded: HashSet<String>,
+    recorded: Option<HashSet<String>>,
+    seen_expanded: Option<HashSet<String>>,
 }
 
 pub(crate) struct Resolver<'a> {
@@ -36,9 +36,10 @@ pub(crate) struct Resolver<'a> {
     selects: usize,
     depth: usize,
     levels: usize,
-    recorded_at: usize,
+    recorded_at: Option<usize>,
     stack: Vec<String>,
-    paths: Vec<Vec<String>>,
+    base_path: Arc<[String]>,
+    view_paths: Vec<Arc<[String]>>,
     resolution: Resolution,
 }
 
@@ -99,7 +100,7 @@ impl<'a> Resolver<'a> {
         settings: Option<&'a Settings>,
         walk_expressions: bool,
     ) -> SqlResult<Self> {
-        let path = schemas::relation_path(reader)?;
+        let path = schemas::shared_relation_path(reader)?;
         Ok(Self {
             reader,
             tables,
@@ -108,9 +109,10 @@ impl<'a> Resolver<'a> {
             selects: 0,
             depth: 0,
             levels: 0,
-            recorded_at: 0,
+            recorded_at: None,
             stack: Vec::new(),
-            paths: vec![path],
+            base_path: path,
+            view_paths: Vec::new(),
             resolution: Resolution::default(),
         })
     }
@@ -122,17 +124,25 @@ impl<'a> Resolver<'a> {
                 existing.push(schema);
             }
         }
-        self.paths = vec![existing];
+        self.base_path = existing.into();
         Ok(self)
     }
 
     fn resolve_name(&self, name: &str) -> SqlResult<String> {
-        if is_qualified(name) || crate::temp_tables::is_temp_table(name) {
-            return Ok(schemas::normalized(name).to_owned());
+        Ok(self.resolved_name(name)?.unwrap_or_else(|| name.to_owned()))
+    }
+
+    fn resolved_name(&self, name: &str) -> SqlResult<Option<String>> {
+        if is_qualified(name) {
+            let plain = schemas::normalized(name);
+            return Ok((plain.len() != name.len()).then(|| plain.to_owned()));
         }
-        let path = self.paths.last().map(Vec::as_slice).unwrap_or(&[]);
-        if path.len() == 1 && path[0] == DEFAULT_SCHEMA {
-            return Ok(name.to_owned());
+        if crate::temp_tables::is_temp_table(name) {
+            return Ok(None);
+        }
+        let path: &[String] = self.view_paths.last().unwrap_or(&self.base_path);
+        if schemas::is_default_path(path) {
+            return Ok(None);
         }
         for schema in path {
             let candidate = schemas::qualified(schema, name);
@@ -145,13 +155,13 @@ impl<'a> Resolver<'a> {
                     .get(&crate::encoding::sequence_key(&candidate))?
                     .is_some()
             {
-                return Ok(candidate);
+                return Ok((candidate != name).then_some(candidate));
             }
         }
         if path.iter().any(|schema| schema == DEFAULT_SCHEMA) {
-            Ok(name.to_owned())
+            Ok(None)
         } else {
-            Ok(schemas::unreachable_name(name))
+            Ok(Some(schemas::unreachable_name(name)))
         }
     }
 
@@ -330,7 +340,12 @@ impl<'a> Resolver<'a> {
     }
 
     fn record(&mut self, name: &str) {
-        if self.stack.len() == self.recorded_at && self.resolution.recorded.insert(name.to_owned())
+        if self.recorded_at == Some(self.stack.len())
+            && self
+                .resolution
+                .recorded
+                .get_or_insert_with(HashSet::new)
+                .insert(name.to_owned())
         {
             self.resolution.references.push(name.to_owned());
         }
@@ -347,20 +362,21 @@ impl<'a> Resolver<'a> {
         if ctes.contains(&reference.name.text) {
             return Ok(());
         }
-        let resolved = self.resolve_name(&reference.name.text)?;
-        let relation = self.tables.relation(self.reader, &resolved)?;
-        if relation.is_some() {
-            self.record(&resolved);
+        let written_qualified = is_qualified(&reference.name.text);
+        if let Some(resolved) = self.resolved_name(&reference.name.text)? {
+            reference.name.text = resolved;
+        }
+        if written_qualified && reference.alias.is_none() {
+            reference.alias = Some(base_name(&reference.name.text).to_owned());
+        }
+        let relation = self.tables.relation(self.reader, &reference.name.text)?;
+        if relation.is_some() && self.recorded_at.is_some() {
+            let name = reference.name.text.clone();
+            self.record(&name);
         }
         match relation {
             Some(Relation::View(view)) => self.expand(reference, view),
-            _ => {
-                if is_qualified(&reference.name.text) && reference.alias.is_none() {
-                    reference.alias = Some(base_name(&resolved).to_owned());
-                }
-                reference.name.text = resolved;
-                Ok(())
-            }
+            _ => Ok(()),
         }
     }
 
@@ -397,7 +413,12 @@ impl<'a> Resolver<'a> {
         if selects > MAX_QUERIES {
             return Err(too_many_queries(position));
         }
-        if self.resolution.seen_expanded.insert(view.name.clone()) {
+        if self
+            .resolution
+            .seen_expanded
+            .get_or_insert_with(HashSet::new)
+            .insert(view.name.clone())
+        {
             self.resolution.expanded.push(view.name.clone());
         }
         let mut path = Vec::with_capacity(view.search_path.len());
@@ -407,7 +428,7 @@ impl<'a> Resolver<'a> {
             }
         }
         self.stack.push(view.name.clone());
-        self.paths.push(path);
+        self.view_paths.push(path.into());
         let walk_expressions = std::mem::replace(&mut self.walk_expressions, true);
         self.depth += 1;
         self.levels += 1;
@@ -416,7 +437,7 @@ impl<'a> Resolver<'a> {
         self.depth -= 1;
         self.levels -= 1;
         self.walk_expressions = walk_expressions;
-        self.paths.pop();
+        self.view_paths.pop();
         self.stack.pop();
         walked?;
         let column_names: Vec<Name> = view
@@ -514,7 +535,7 @@ pub(crate) fn resolve_view_body(
 ) -> SqlResult<Resolution> {
     let mut resolver = Resolver::new(reader, tables, settings, true)?.with_path(path)?;
     resolver.stack.push(view.to_owned());
-    resolver.recorded_at = 1;
+    resolver.recorded_at = Some(1);
     resolver.levels = 1;
     resolver.depth = 1;
     resolver.query(query)?;

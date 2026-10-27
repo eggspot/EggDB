@@ -219,6 +219,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     pending_sequences: Vec<SequenceAdvance>,
     statement_uses_sequences: bool,
     statement_walks_expressions: bool,
+    search_path_cache: crate::schemas::PathCache,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -248,6 +249,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             pending_sequences: Vec::new(),
             statement_uses_sequences: false,
             statement_walks_expressions: true,
+            search_path_cache: crate::schemas::PathCache::default(),
         }
     }
 
@@ -680,6 +682,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             );
             self.enter_sequences(uses_sequences);
             let result = self.run(&mut statement);
+            _path.remember(&mut self.search_path_cache);
             self.leave_sequences();
             let settled = self.settle_sequences();
             let result =
@@ -692,13 +695,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
-    fn enter_search_path(&self, settings: &Settings) -> crate::schemas::EnteredPath {
-        let user = settings.get("session_authorization").unwrap_or_default();
-        let path = match self.dialect {
-            Dialect::PostgreSql => settings.get("search_path").unwrap_or_default(),
-            _ => crate::schemas::DEFAULT_SCHEMA.to_owned(),
-        };
-        crate::schemas::enter(&path, &user, self.dialect)
+    fn enter_search_path(&self, settings: &Arc<Settings>) -> crate::schemas::EnteredPath {
+        crate::schemas::enter(settings, self.dialect, &self.search_path_cache)
     }
 
     fn apply_setting_changes(
