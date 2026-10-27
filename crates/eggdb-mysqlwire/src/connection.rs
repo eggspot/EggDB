@@ -86,9 +86,14 @@ fn send_sql_error(wire: &mut Wire<'_>, error: &SqlError) {
     wire.send(&err_packet(code, &state, error.message()));
 }
 
+fn refuse(wire: &mut Wire<'_>, code: u16, state: &str, message: &str) {
+    send_error(wire, code, state, message);
+    wire.close_after_refusal();
+}
+
 pub(crate) fn refuse_too_many(wire: &mut Wire<'_>) {
     wire.sequence = 0;
-    send_error(wire, 1040, "08004", "Too many connections");
+    refuse(wire, 1040, "08004", "Too many connections");
 }
 
 fn sleep_unless_stopped(duration: Duration, stop: &(dyn Fn() -> bool + Sync)) {
@@ -104,14 +109,14 @@ fn sleep_unless_stopped(duration: Duration, stop: &(dyn Fn() -> bool + Sync)) {
 
 fn report_wire_error(wire: &mut Wire<'_>, error: &WireError) {
     match error {
-        WireError::TooLarge => send_error(
+        WireError::TooLarge => refuse(
             wire,
             1153,
             "08S01",
             "Got a packet bigger than 'max_allowed_packet' bytes",
         ),
-        WireError::OutOfOrder => send_error(wire, 1156, "08S01", "Got packets out of order"),
-        WireError::TimedOut => send_error(wire, 1043, "08S01", "Bad handshake: timed out"),
+        WireError::OutOfOrder => refuse(wire, 1156, "08S01", "Got packets out of order"),
+        WireError::TimedOut => refuse(wire, 1043, "08S01", "Bad handshake: timed out"),
         WireError::Closed | WireError::Stopping | WireError::Io => {}
     }
 }
@@ -151,7 +156,7 @@ fn authenticate(
         ),
         _ => {
             let Some(switch_nonce) = fresh_nonce() else {
-                send_error(wire, 1105, "HY000", "could not generate a random nonce");
+                refuse(wire, 1105, "HY000", "could not generate a random nonce");
                 return Outcome::Refused;
             };
             let mut switch = Payload::new();
@@ -186,7 +191,7 @@ fn authenticate(
         ));
         sleep_unless_stopped(shared.throttle.delay_after_failure(), shared.stop);
         let using = if with_password { "YES" } else { "NO" };
-        send_error(
+        refuse(
             wire,
             1045,
             "28000",
@@ -254,7 +259,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         return;
     };
     let Some(nonce) = fresh_nonce() else {
-        send_error(
+        refuse(
             &mut wire,
             1105,
             "HY000",
@@ -277,7 +282,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let response = match parse_handshake_response(&body) {
         Ok(response) => response,
         Err(error) => {
-            send_error(&mut wire, 1043, "08S01", &format!("Bad handshake: {error}"));
+            refuse(&mut wire, 1043, "08S01", &format!("Bad handshake: {error}"));
             return;
         }
     };
@@ -293,7 +298,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
             wire.peer(),
             printable(database)
         ));
-        send_error(
+        refuse(
             &mut wire,
             1049,
             "42000",
@@ -637,7 +642,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                         .ended_by_stop
                         .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     self.wire.sequence = 1;
-                    send_error(&mut self.wire, 1053, "08S01", "Server shutdown in progress");
+                    refuse(&mut self.wire, 1053, "08S01", "Server shutdown in progress");
                     return;
                 }
                 Err(error) => {

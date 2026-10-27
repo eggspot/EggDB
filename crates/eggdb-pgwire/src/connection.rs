@@ -103,6 +103,7 @@ fn report_error(wire: &mut Wire<'_>, severity: Severity, error: &SqlError, text:
 fn fatal(wire: &mut Wire<'_>, state: SqlState, message: &str) {
     report_error(wire, Severity::Fatal, &SqlError::new(state, message), None);
     let _ = wire.flush();
+    wire.close_after_refusal();
 }
 
 fn send_notice(wire: &mut Wire<'_>, notice: &str) {
