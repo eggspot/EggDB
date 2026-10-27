@@ -22,10 +22,24 @@ dependencies = [
 name = "eggdb"
 version = "0.1.0"
 dependencies = [
+ "eggdb-pgwire",
  "eggdb-platform",
  "eggdb-sql",
  "eggdb-storage",
  "eggdb-ui",
+]
+
+[[package]]
+name = "eggdb-crypto"
+version = "0.1.0"
+
+[[package]]
+name = "eggdb-pgwire"
+version = "0.1.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-platform",
+ "eggdb-sql",
 ]
 
 [[package]]

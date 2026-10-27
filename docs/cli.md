@@ -2,8 +2,9 @@
 
 `eggdb` works with an EggDB database file from a shell, a script or an AI agent: create a file,
 store, read and remove values, list entries in key order, check the file's health, see its
-statistics, export it to a text file that another database imports, and run SQL on it. It opens the file in
-its own process, like `sqlite3`: there is no server. The design behind every choice here is
+statistics, export it to a text file that another database imports, run SQL on it, and serve it
+to psql and PostgreSQL drivers with `eggdb serve`. Every other command opens the file in its own
+process, like `sqlite3`. The design behind every choice here is
 [ux/cli.md](ux/cli.md) (D15, D90, D93); the embedded Rust API is [embedded.md](embedded.md).
 Installing it is downloading one file: see the README, "Install".
 
@@ -46,13 +47,14 @@ eggdb <command> <file> [arguments] [options]
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below) |
 | `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below) |
 | `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect (below, and [sql.md](sql.md)) |
+| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
 The command comes first and the file second; options may go anywhere after the command, and
 `--` ends them, so `eggdb get app.db -- -k` reads the key `-k`.
 
-**Only `create`, `put --create`, `import --create` and `sql --create` make a database file.** A wrong path such
+**Only `create`, `put --create`, `import --create`, `sql --create` and `serve --create` make a database file.** A wrong path such
 as `app.bd` is an error that says how to create the file, never a new empty database that later
 reads as "empty".
 
@@ -486,6 +488,56 @@ SQLSTATE:  42P01
   `-c` and a script together, a script that cannot be read, or SQL that is not UTF-8 are usage
   errors (exit 2).
 
+## `eggdb serve`
+
+```
+eggdb serve <file> [--listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]
+```
+
+Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
+PostgreSQL driver connect to it unchanged and run the SQL of `eggdb sql` ([sql.md](sql.md),
+"Connecting with psql"). The design is [ux/cli.md](ux/cli.md), section 14.
+
+```sh
+export EGGDB_PASSWORD='choose-one'
+eggdb serve --create app.db
+# listening on 127.0.0.1:5432 (PostgreSQL protocol; loopback only until EggDB has TLS)
+#   database     app (app.db, open for writing)
+#   user         eggdb (SCRAM-SHA-256), up to 64 connections
+#   connect      psql postgresql://eggdb@127.0.0.1:5432/app
+#   stop         Ctrl-C
+```
+
+| Option | Meaning |
+|--------|---------|
+| `--listen <address>` | `host:port`, `[::1]:port`, `localhost:port` or a port alone (on `127.0.0.1`); port 0 takes any free port. Default `127.0.0.1:5432`. **Loopback addresses only** (below) |
+| `--user <name>` | the one user clients log in as, with SCRAM-SHA-256. Default `eggdb` |
+| `--password-file <file>` | the password is the file's first line; `-` reads it from stdin. Without it, `EGGDB_PASSWORD`. Never on the command line. ASCII only in this release (SASLprep is not implemented). Prefer the file: `EGGDB_PASSWORD` stays in the server's environment for as long as it runs, where the same user (and on some systems an administrator) can read it, for example through `/proc/<pid>/environ` on Linux |
+| `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
+| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, so slow or failing logins cannot take every slot; a 17th gets `53300` too |
+| `--read-only` | open the file read-only: writes fail with `25006`, and it works beside other readers |
+| `--create` | create the file if it is missing |
+
+**Loopback only, no TLS yet (D102).** Until EggDB has its own TLS, `serve` listens only on
+`127.0.0.1`, `::1` or another loopback address, so only programs on this machine can connect and
+no password or query crosses a network in the clear. Any other address exits 2:
+`eggdb: cannot listen on 0.0.0.0:5432: it is not a loopback address. …`. Clients that ask for
+TLS are told no; `sslmode=require` fails, `prefer` (the default) connects without it. This rule
+is removed when TLS lands.
+
+**Output.** On a terminal, the report above; in a pipe, one JSON line,
+`{"listening":"127.0.0.1:5432","host":"127.0.0.1","port":5432,"file":"app.db","database":"app","user":"eggdb","max_connections":64,"read_only":false}`,
+so a script reads the port with `jq .port`. While it runs, stderr is a log of failures, one per
+line: `2026-10-27 09:14:07 UTC  127.0.0.1:53422  password authentication failed for user "bob"`.
+Ctrl-C or `SIGTERM` finishes the running statements, ends idle connections with `57P01`, rolls
+back open transactions, prints `stopped` (`{"stopped":true,"connections_closed":N}` in JSON) and
+exits 0; a second Ctrl-C ends it at once.
+
+**Errors.** No password: exit 2, `serve needs a password for user eggdb: set EGGDB_PASSWORD, or
+pass --password-file …`. A port in use: exit 3 with a `try:` line naming the next port. The file
+busy (another program has it open for writing): exit 5. While `serve` runs, the file is open for
+writing, so `eggdb put`, `sql` and the read-only commands exit 5 meanwhile.
+
 ## Exit codes and errors
 
 | Code | Meaning |
@@ -508,7 +560,7 @@ Errors go to stderr as `eggdb: <what happened>: <why>. <what to do>`, never as a
 and add a `try:` line when the fix is a command:
 
 ```
-eggdb: cannot open app.db: no such file. Create it with `eggdb create app.db`, or pass --create to put or sql.
+eggdb: cannot open app.db: no such file. Create it with `eggdb create app.db`, or pass --create to put, sql or serve.
   try: eggdb create app.db
 eggdb: unknown option '--reverse' for eggdb get
   usage: eggdb get <file> <key>

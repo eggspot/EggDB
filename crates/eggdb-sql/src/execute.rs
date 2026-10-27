@@ -19,6 +19,7 @@ use crate::parser::{LiteralRows, LiteralToken, Parser};
 use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
+use crate::typing;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -684,7 +685,10 @@ impl<'a> Projection<'a> {
                     };
                     columns.push(OutputColumn {
                         name: alias.clone().unwrap_or_else(|| output_name(expr)),
-                        sql_type: column.and_then(|(_, sql_type)| sql_type),
+                        sql_type: match column {
+                            Some((_, sql_type)) => sql_type,
+                            None => typing::static_type(expr, scope),
+                        },
                     });
                     projected.push(match column {
                         Some((index, _)) => ProjectedItem::Column(index),
@@ -1004,10 +1008,22 @@ fn sort_keys<'e>(
     Ok(keys)
 }
 
+pub(crate) fn returning_columns(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    table: &TableReference,
+    items: &Option<Vec<SelectItem>>,
+) -> SqlResult<Option<Vec<OutputColumn>>> {
+    let definition = tables.require(reader, &table.name)?;
+    let scope = scope_of(&definition, table);
+    Ok(returning(items, scope)?.map(|projection| projection.columns))
+}
+
 pub(crate) fn select(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
     select: &Select,
+    columns_only: bool,
 ) -> SqlResult<QueryResult> {
     let first = match &select.from {
         Some(from) => Some(tables.require(reader, &from.first.name)?),
@@ -1063,6 +1079,13 @@ pub(crate) fn select(
         post_scope,
         select.distinct,
     )?;
+    if columns_only {
+        return Ok(QueryResult::rows(
+            "SELECT 0".to_owned(),
+            projection.columns,
+            Vec::new(),
+        ));
+    }
     let limit = row_count(select.limit.as_ref(), "LIMIT")?;
     let offset = row_count(select.offset.as_ref(), "OFFSET")?.unwrap_or(0);
     let window = Window {

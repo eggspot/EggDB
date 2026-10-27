@@ -2,7 +2,7 @@ use super::args::CommandName;
 
 pub(crate) const MAIN: &str = "\
 eggdb: one database for every kind of data. This release: an embedded key-value store in one file,
-with a first part of SQL.
+with a first part of SQL, served over the PostgreSQL protocol.
 
 Usage: eggdb <command> <file> [arguments] [options]
 
@@ -18,6 +18,7 @@ Commands:
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, from a file or stdin; see --create
   sql    <file> [script]        run SQL (PostgreSQL dialect) from -c, a script or stdin
+  serve  <file>                 serve the file to PostgreSQL clients (psql, drivers); see --listen
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -52,6 +53,9 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
             "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run]"
         }
         CommandName::Sql => "eggdb sql <file> [-c <sql> | <script> | -] [--create]",
+        CommandName::Serve => {
+            "eggdb serve <file> [--listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
+        }
     }
 }
 
@@ -76,6 +80,7 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Export => EXPORT,
         CommandName::Import => IMPORT,
         CommandName::Sql => SQL,
+        CommandName::Serve => SERVE,
     }
 }
 
@@ -239,4 +244,30 @@ Examples:
   eggdb sql app.db -c \"SELECT name FROM users WHERE id = 2\"
   eggdb sql app.db schema.sql
   cat queries.sql | eggdb sql app.db
+";
+
+const SERVE: &str = "\
+Serves the file to PostgreSQL clients: psql and PostgreSQL drivers connect to it unchanged and
+run the SQL of eggdb sql. Clients log in as one user with a password (SCRAM-SHA-256), which
+comes from EGGDB_PASSWORD or --password-file, never from the command line. Until EggDB speaks
+TLS the server listens only on this machine, on a loopback address. The first line printed says
+where it listens; in a pipe it is one JSON line, so a script can read the port. While it runs
+the file is open for writing, so other eggdb commands on it exit 5. Ctrl-C or SIGTERM finishes
+the running statements, rolls back open transactions and stops with exit 0.
+
+      --listen <address>          host:port, [::1]:port, or a port alone on 127.0.0.1; port 0
+                                  takes any free port (default 127.0.0.1:5432)
+      --user <name>               the user clients log in as (default eggdb)
+      --password-file <file>      the password is the file's first line; - reads stdin
+      --database <name>           the name clients connect to (default: the file name
+                                  without its extension, so app.db is app)
+      --max-connections <count>   connections open at once, one thread each (default 64)
+      --read-only                 no writes, and it works beside other readers
+      --create                    create the database file if it is missing
+
+Examples:
+  eggdb serve app.db --password-file ~/.eggdb-password
+  EGGDB_PASSWORD=secret eggdb serve app.db --listen 127.0.0.1:5433
+  eggdb serve --create new.db --password-file - < password.txt
+  psql postgresql://eggdb@127.0.0.1:5432/app
 ";

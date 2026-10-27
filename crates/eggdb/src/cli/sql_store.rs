@@ -7,7 +7,12 @@ use std::ops::Bound;
 
 pub(crate) struct DatabaseStore<'db>(pub(crate) &'db Database);
 
+const WRITER_BUSY: &str = "another session holds the database's one write transaction; retry once it commits or rolls back (EggDB runs one writer at a time)";
+
 fn store_error(error: Error) -> SqlError {
+    if error.kind() == ErrorKind::WriterActive {
+        return SqlError::store(StoreFailure::Busy, WRITER_BUSY);
+    }
     let failure = match error.kind() {
         ErrorKind::Locked | ErrorKind::WriterActive => StoreFailure::Busy,
         ErrorKind::ReadOnly => StoreFailure::ReadOnly,

@@ -18,6 +18,64 @@ eggdb sql shop.db -c "SELECT i.name, count(s.id), sum(s.quantity) FROM items i L
 These are the first parts of the SQL core (roadmap items 19 and 19b). What comes next is listed
 at the end.
 
+## Connecting with psql
+
+`eggdb serve` serves a file over the PostgreSQL wire protocol v3 (roadmap item 21, D103), so
+psql and PostgreSQL drivers connect to it unchanged:
+
+```sh
+export EGGDB_PASSWORD='choose-one'
+eggdb serve --create shop.db                 # listening on 127.0.0.1:5432 …; Ctrl-C stops it
+```
+
+and in another terminal:
+
+```sh
+export PGPASSWORD='choose-one'
+psql -h 127.0.0.1 -p 5432 -U eggdb shop
+shop=> CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL);
+shop=> CREATE TABLE sales (id integer PRIMARY KEY, item_id integer, quantity integer);
+shop=> INSERT INTO items VALUES (1, 'egg'), (2, 'bread');
+shop=> INSERT INTO sales VALUES (1, 1, 3), (2, 2, 1), (3, 1, 4);
+shop=> SELECT i.name, sum(s.quantity) FROM items i JOIN sales s ON s.item_id = i.id GROUP BY i.name;
+shop=> \conninfo
+```
+
+A driver connects the same way, for example `postgresql://eggdb@127.0.0.1:5432/shop` with the
+password, and runs parameterized queries (`SELECT name FROM items WHERE id = $1`).
+
+**Loopback only, without TLS (D102).** Until EggDB has its own TLS, the server listens only on
+a loopback address (`127.0.0.1`, `::1`), so only programs on the same machine connect, and it
+answers a request for TLS with no: `sslmode=prefer` (the default) connects without TLS,
+`sslmode=require` fails. This note goes when TLS lands.
+
+What the server does:
+- **Authentication is always required**: SCRAM-SHA-256, with one user per server (`--user`,
+  default `eggdb`) whose password comes from `EGGDB_PASSWORD` or `--password-file`, never the
+  command line. A wrong password is `28P01`, and repeated failures are answered more slowly.
+- **The simple query protocol**, several statements in one message included, and the
+  **extended protocol** (`Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Sync`, `Flush`) with
+  named and unnamed statements and portals, `$1..$n` parameters in text or binary form
+  (`bool`, `int2`, `int4`, `int8`, `float4`, `float8`, `text`, `varchar`), results in text or
+  binary form, and row limits on `Execute`.
+- **PostgreSQL's answers**: type OIDs in `RowDescription`, command tags (`SELECT 2`,
+  `INSERT 0 1`, `CREATE TABLE`, …), errors with SQLSTATE, severity, message, detail, hint and
+  position, notices, and `ReadyForQuery`'s `I`, `T` and `E`. After an error inside `BEGIN`,
+  statements fail with `25P02` until `ROLLBACK`, as in PostgreSQL.
+- **What drivers ask at connect**: `server_version` (`16.0 (EggDB 0.2.0)`), `client_encoding`
+  and `server_encoding` (`UTF8`), `DateStyle`, `TimeZone`, `integer_datetimes`,
+  `standard_conforming_strings` and the other reported parameters; `SET`, `SHOW`, `RESET`,
+  `version()`, `current_user`, `current_database()` and `current_setting()`.
+- **Several connections**, one thread and one session each, up to `--max-connections` (64),
+  at most 16 of them still logging in; readers run side by side, writers one at a time (a
+  second waits 5 s, then `55P03`: retry once the other session's transaction ends).
+
+Not yet (each fails readably or is ignored harmlessly): TLS, psql's `\d` commands and the
+catalog queries of GUI tools (`pg_catalog`), `COPY`, `LISTEN`/`NOTIFY`, cancelling a running
+query, the implicit transaction around a multi-statement `Query` or an extended-protocol
+pipeline (each statement commits on its own outside `BEGIN`), stored users and roles, and
+non-ASCII passwords.
+
 ## What runs today
 
 **Statements**
@@ -58,6 +116,14 @@ at the end.
 - `DELETE FROM name [[AS] alias] [WHERE expr] [RETURNING items]`.
 - `BEGIN [WORK | TRANSACTION] [READ ONLY | READ WRITE] [ISOLATION LEVEL ...]`,
   `START TRANSACTION`, `COMMIT`/`END`, `ROLLBACK`/`ABORT`.
+- `SET [SESSION] name {TO | =} value | DEFAULT`, `SET TIME ZONE`, `SET NAMES`, `RESET name | ALL`,
+  `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding` takes `UTF8`
+  (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply yet, such as `statement_timeout` and `search_path`, are
+  remembered and shown; `SET LOCAL` and `SET TRANSACTION` are not supported yet.
+- `$1`, `$2`, …: parameters, given through the PostgreSQL protocol's extended query messages
+  (D104); outside it, `$1` is `42P02` (there is no parameter `$1`).
+- `version()`, `current_user`, `session_user`, `user`, `current_database()`, `current_schema`
+  and `current_setting('name')`.
 
 **Types** (one type system for every model, D19)
 
@@ -216,4 +282,6 @@ exports into a new file, or into a file without SQL tables.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
 - `RIGHT` and `FULL` joins, subqueries, and the other aggregates.
-- Then `eggdb shell`, the PostgreSQL wire protocol, and the other dialects (items 20 to 25).
+- Then `eggdb shell` and the other dialects (items 20, 22 to 25); for the PostgreSQL protocol,
+  TLS, the `pg_catalog` queries of psql's `\d` and GUI tools, `COPY` and query cancellation
+  (M6a).

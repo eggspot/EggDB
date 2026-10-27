@@ -25,8 +25,10 @@ mod lexer;
 mod memory;
 mod parser;
 mod session;
+mod settings;
 mod store;
 mod types;
+mod typing;
 
 #[cfg(test)]
 mod memory_store;
@@ -34,7 +36,11 @@ mod memory_store;
 mod tests;
 
 pub use error::{SqlError, SqlResult, SqlState};
-pub use session::{OutputColumn, QueryResult, Session};
+pub use session::{
+    OutputColumn, Parameter, PreparedStatement, QueryResult, Session, StatementDescription,
+    TransactionStatus,
+};
+pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, StoreFailure,
 };

@@ -142,6 +142,20 @@ never a panic, an input error or a case over 5 s. CI runs 4,000 cases (under a s
 leave no `.importing` file, keep `check` passing, and change nothing when the message says
 nothing was imported.
 
+## Hostile protocol messages (D103)
+`eggdb serve` reads bytes from any program on the machine, so the PostgreSQL protocol has a
+seeded fuzzer of its own in `crates/eggdb-pgwire/tests/hostile_messages.rs`: it mutates valid
+startup packets, `Query`, `Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Sync` and SASL
+messages (bit flips, cuts, noise, rewritten length and count fields, random message types) and
+feeds them to every parser and to the SCRAM exchange, which must return an error or a value and
+never panic (20,000 cases in CI); it then sends the same mutations over real sockets before and
+after authentication (80 cases) and requires a well-behaved client to connect and query
+afterwards. Oversized length fields are refused without allocating them. `EGGDB_FUZZ_CASES` and
+`EGGDB_FUZZ_SEED` run longer campaigns. The message codecs, the SCRAM exchange (RFC 7677's
+example and malformed variants) and the cryptography's published vectors have unit tests of
+their own, and `crates/eggdb-pgwire/tests/protocol.rs` drives every protocol flow with a client
+written in the test.
+
 ## Files from released versions (D96)
 `crates/eggdb/tests/data` holds files written by released versions, which every later version
 must keep reading (D20). From their release's tag on they are never regenerated or edited, and a

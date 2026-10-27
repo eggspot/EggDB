@@ -10,7 +10,7 @@ pub(crate) enum TokenKind<'t> {
     Integer(&'t str),
     Decimal(&'t str),
     String(Cow<'t, str>),
-    Parameter,
+    Parameter(&'t str),
     Operator(&'t str),
     LeftParen,
     RightParen,
@@ -363,8 +363,9 @@ impl<'t> Lexer<'t> {
         let start = self.at;
         if self.peek(1).is_some_and(|byte| byte.is_ascii_digit()) {
             self.at += 1;
+            let digits_start = self.at;
             self.digits();
-            return Ok(TokenKind::Parameter);
+            return Ok(TokenKind::Parameter(&self.text[digits_start..self.at]));
         }
         let mut end_of_tag = self.at + 1;
         while self

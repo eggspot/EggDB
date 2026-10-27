@@ -6,12 +6,36 @@ use std::fmt;
 pub struct SqlState([u8; 5]);
 
 impl SqlState {
+    /// `08006` connection_failure.
+    pub const CONNECTION_FAILURE: Self = Self(*b"08006");
+    /// `08P01` protocol_violation.
+    pub const PROTOCOL_VIOLATION: Self = Self(*b"08P01");
+    /// `26000` invalid_sql_statement_name: no prepared statement by that name.
+    pub const INVALID_SQL_STATEMENT_NAME: Self = Self(*b"26000");
+    /// `28000` invalid_authorization_specification.
+    pub const INVALID_AUTHORIZATION_SPECIFICATION: Self = Self(*b"28000");
+    /// `28P01` invalid_password.
+    pub const INVALID_PASSWORD: Self = Self(*b"28P01");
+    /// `34000` invalid_cursor_name: no portal by that name.
+    pub const INVALID_CURSOR_NAME: Self = Self(*b"34000");
+    /// `3D000` invalid_catalog_name: no database by that name.
+    pub const INVALID_CATALOG_NAME: Self = Self(*b"3D000");
+    /// `42P03` duplicate_cursor: a portal by that name exists.
+    pub const DUPLICATE_CURSOR: Self = Self(*b"42P03");
+    /// `42P05` duplicate_prepared_statement.
+    pub const DUPLICATE_PREPARED_STATEMENT: Self = Self(*b"42P05");
+    /// `53300` too_many_connections.
+    pub const TOO_MANY_CONNECTIONS: Self = Self(*b"53300");
+    /// `57P01` admin_shutdown: the server is stopping.
+    pub const ADMIN_SHUTDOWN: Self = Self(*b"57P01");
     /// `0A000` feature_not_supported: valid SQL that this release does not run yet.
     pub const FEATURE_NOT_SUPPORTED: Self = Self(*b"0A000");
     /// `21000` cardinality_violation.
     pub const CARDINALITY_VIOLATION: Self = Self(*b"21000");
     /// `22001` string_data_right_truncation.
     pub const STRING_DATA_RIGHT_TRUNCATION: Self = Self(*b"22001");
+    /// `22021` character_not_in_repertoire: bytes that are not valid UTF-8.
+    pub const CHARACTER_NOT_IN_REPERTOIRE: Self = Self(*b"22021");
     /// `22003` numeric_value_out_of_range.
     pub const NUMERIC_VALUE_OUT_OF_RANGE: Self = Self(*b"22003");
     /// `22012` division_by_zero.
@@ -26,6 +50,8 @@ impl SqlState {
     pub const INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE: Self = Self(*b"2201X");
     /// `22025` invalid_escape_sequence.
     pub const INVALID_ESCAPE_SEQUENCE: Self = Self(*b"22025");
+    /// `22P03` invalid_binary_representation.
+    pub const INVALID_BINARY_REPRESENTATION: Self = Self(*b"22P03");
     /// `22P02` invalid_text_representation.
     pub const INVALID_TEXT_REPRESENTATION: Self = Self(*b"22P02");
     /// `23502` not_null_violation.
@@ -72,6 +98,10 @@ impl SqlState {
     pub const INVALID_COLUMN_REFERENCE: Self = Self(*b"42P10");
     /// `42P16` invalid_table_definition.
     pub const INVALID_TABLE_DEFINITION: Self = Self(*b"42P16");
+    /// `42P02` undefined_parameter: a `$n` without a value.
+    pub const UNDEFINED_PARAMETER: Self = Self(*b"42P02");
+    /// `42P18` indeterminate_datatype.
+    pub const INDETERMINATE_DATATYPE: Self = Self(*b"42P18");
     /// `53200` out_of_memory.
     pub const OUT_OF_MEMORY: Self = Self(*b"53200");
     /// `54000` program_limit_exceeded.
@@ -80,8 +110,12 @@ impl SqlState {
     pub const TOO_MANY_COLUMNS: Self = Self(*b"54011");
     /// `54001` statement_too_complex.
     pub const STATEMENT_TOO_COMPLEX: Self = Self(*b"54001");
+    /// `55000` object_not_in_prerequisite_state.
+    pub const OBJECT_NOT_IN_PREREQUISITE_STATE: Self = Self(*b"55000");
     /// `55P03` lock_not_available: another writer holds the database.
     pub const LOCK_NOT_AVAILABLE: Self = Self(*b"55P03");
+    /// `55P02` cant_change_runtime_param.
+    pub const CANT_CHANGE_RUNTIME_PARAM: Self = Self(*b"55P02");
     /// `58030` io_error.
     pub const IO_ERROR: Self = Self(*b"58030");
     /// `XX000` internal_error.
