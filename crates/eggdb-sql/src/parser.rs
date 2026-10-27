@@ -9,79 +9,6 @@ use crate::types::SqlType;
 
 const MAX_NESTING: usize = 64;
 
-const RESERVED: &[&str] = &[
-    "all",
-    "and",
-    "any",
-    "array",
-    "as",
-    "asc",
-    "both",
-    "case",
-    "cast",
-    "check",
-    "collate",
-    "column",
-    "constraint",
-    "create",
-    "current_date",
-    "current_time",
-    "current_timestamp",
-    "default",
-    "desc",
-    "distinct",
-    "do",
-    "else",
-    "end",
-    "except",
-    "false",
-    "fetch",
-    "for",
-    "foreign",
-    "from",
-    "grant",
-    "group",
-    "having",
-    "in",
-    "initially",
-    "intersect",
-    "into",
-    "lateral",
-    "leading",
-    "limit",
-    "localtime",
-    "localtimestamp",
-    "not",
-    "null",
-    "offset",
-    "on",
-    "only",
-    "or",
-    "order",
-    "placing",
-    "primary",
-    "references",
-    "returning",
-    "select",
-    "session_user",
-    "some",
-    "symmetric",
-    "table",
-    "then",
-    "to",
-    "trailing",
-    "true",
-    "union",
-    "unique",
-    "user",
-    "using",
-    "variadic",
-    "when",
-    "where",
-    "window",
-    "with",
-];
-
 const AGGREGATES: &[&str] = &[
     "count",
     "sum",
@@ -99,6 +26,21 @@ const AGGREGATES: &[&str] = &[
     "variance",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Level {
+    Or,
+    And,
+    Not,
+    Is,
+    Comparison,
+    Pattern,
+    Other,
+    Additive,
+    Multiplicative,
+    Power,
+    Unary,
+}
+
 pub(crate) struct Parser<'t> {
     text: &'t str,
     tokens: &'t [Token],
@@ -107,7 +49,79 @@ pub(crate) struct Parser<'t> {
 }
 
 pub(crate) fn is_reserved(word: &str) -> bool {
-    RESERVED.contains(&word)
+    matches!(
+        word,
+        "all"
+            | "and"
+            | "any"
+            | "array"
+            | "as"
+            | "asc"
+            | "both"
+            | "case"
+            | "cast"
+            | "check"
+            | "collate"
+            | "column"
+            | "constraint"
+            | "create"
+            | "current_date"
+            | "current_time"
+            | "current_timestamp"
+            | "default"
+            | "desc"
+            | "distinct"
+            | "do"
+            | "else"
+            | "end"
+            | "except"
+            | "false"
+            | "fetch"
+            | "for"
+            | "foreign"
+            | "from"
+            | "grant"
+            | "group"
+            | "having"
+            | "in"
+            | "initially"
+            | "intersect"
+            | "into"
+            | "lateral"
+            | "leading"
+            | "limit"
+            | "localtime"
+            | "localtimestamp"
+            | "not"
+            | "null"
+            | "offset"
+            | "on"
+            | "only"
+            | "or"
+            | "order"
+            | "placing"
+            | "primary"
+            | "references"
+            | "returning"
+            | "select"
+            | "session_user"
+            | "some"
+            | "symmetric"
+            | "table"
+            | "then"
+            | "to"
+            | "trailing"
+            | "true"
+            | "union"
+            | "unique"
+            | "user"
+            | "using"
+            | "variadic"
+            | "when"
+            | "where"
+            | "window"
+            | "with"
+    )
 }
 
 impl<'t> Parser<'t> {
@@ -930,13 +944,29 @@ impl<'t> Parser<'t> {
     }
 
     pub(crate) fn expression(&mut self) -> SqlResult<Expr> {
+        self.expression_above(Level::Or)
+    }
+
+    fn expression_above(&mut self, least: Level) -> SqlResult<Expr> {
         self.depth += 1;
-        if self.depth > MAX_NESTING {
-            return Err(too_deep(self.position()));
-        }
-        let result = self.or_expression();
+        let result = if self.depth > MAX_NESTING {
+            Err(too_deep(self.position()))
+        } else {
+            self.expression_from(least)
+        };
         self.depth -= 1;
         result
+    }
+
+    fn expression_from(&mut self, least: Level) -> SqlResult<Expr> {
+        let mut left = self.prefix(least)?;
+        while let Some(level) = self.infix_level() {
+            if level < least {
+                break;
+            }
+            left = self.infix(left, level)?;
+        }
+        Ok(left)
     }
 
     fn binary(left: Expr, operator: BinaryOperator, right: Expr) -> Expr {
@@ -947,259 +977,19 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn or_expression(&mut self) -> SqlResult<Expr> {
-        let mut left = self.and_expression()?;
-        while self.take_word("or") {
-            let right = self.and_expression()?;
-            left = Self::binary(left, BinaryOperator::Or, right);
-        }
-        Ok(left)
-    }
-
-    fn and_expression(&mut self) -> SqlResult<Expr> {
-        let mut left = self.not_expression()?;
-        while self.take_word("and") {
-            let right = self.not_expression()?;
-            left = Self::binary(left, BinaryOperator::And, right);
-        }
-        Ok(left)
-    }
-
-    fn not_expression(&mut self) -> SqlResult<Expr> {
+    fn prefix(&mut self, least: Level) -> SqlResult<Expr> {
+        let position = self.position();
         if self.is_word("not") {
-            let position = self.position();
+            if least > Level::Not {
+                return Err(self.unexpected());
+            }
             self.at += 1;
-            let operand = self.nested(Self::not_expression)?;
+            let operand = self.expression_above(Level::Not)?;
             return Ok(Expr {
                 kind: ExprKind::Unary(UnaryOperator::Not, Box::new(operand)),
                 position,
             });
         }
-        self.is_expression()
-    }
-
-    fn nested(&mut self, parse: fn(&mut Self) -> SqlResult<Expr>) -> SqlResult<Expr> {
-        self.depth += 1;
-        if self.depth > MAX_NESTING {
-            return Err(too_deep(self.position()));
-        }
-        let result = parse(self);
-        self.depth -= 1;
-        result
-    }
-
-    fn is_expression(&mut self) -> SqlResult<Expr> {
-        let mut expr = self.comparison()?;
-        loop {
-            let position = expr.position;
-            if self.take_word("isnull") {
-                expr = Expr {
-                    kind: ExprKind::IsNull {
-                        expr: Box::new(expr),
-                        negated: false,
-                    },
-                    position,
-                };
-                continue;
-            }
-            if self.take_word("notnull") {
-                expr = Expr {
-                    kind: ExprKind::IsNull {
-                        expr: Box::new(expr),
-                        negated: true,
-                    },
-                    position,
-                };
-                continue;
-            }
-            if !self.take_word("is") {
-                return Ok(expr);
-            }
-            let negated = self.take_word("not");
-            let kind = if self.take_word("null") {
-                ExprKind::IsNull {
-                    expr: Box::new(expr),
-                    negated,
-                }
-            } else if self.take_word("true") {
-                truth(expr, TruthTest::True, negated)
-            } else if self.take_word("false") {
-                truth(expr, TruthTest::False, negated)
-            } else if self.take_word("unknown") {
-                truth(expr, TruthTest::Unknown, negated)
-            } else if self.take_word("distinct") {
-                self.expect_word("from")?;
-                let right = self.comparison()?;
-                ExprKind::IsDistinctFrom {
-                    left: Box::new(expr),
-                    right: Box::new(right),
-                    negated,
-                }
-            } else {
-                return Err(self.unexpected());
-            };
-            expr = Expr { kind, position };
-        }
-    }
-
-    fn comparison(&mut self) -> SqlResult<Expr> {
-        let left = self.pattern_expression()?;
-        let Some(operator) = self.comparison_operator() else {
-            return Ok(left);
-        };
-        self.at += 1;
-        let right = self.pattern_expression()?;
-        let expr = Self::binary(left, operator, right);
-        if self.comparison_operator().is_some() {
-            return Err(self.unexpected());
-        }
-        Ok(expr)
-    }
-
-    fn comparison_operator(&self) -> Option<BinaryOperator> {
-        let TokenKind::Operator(symbol) = self.peek_kind() else {
-            return None;
-        };
-        Some(match symbol.as_str() {
-            "=" => BinaryOperator::Equal,
-            "<>" | "!=" => BinaryOperator::NotEqual,
-            "<" => BinaryOperator::Less,
-            "<=" => BinaryOperator::LessOrEqual,
-            ">" => BinaryOperator::Greater,
-            ">=" => BinaryOperator::GreaterOrEqual,
-            _ => return None,
-        })
-    }
-
-    fn pattern_expression(&mut self) -> SqlResult<Expr> {
-        let expr = self.other_operator_expression()?;
-        let position = expr.position;
-        let negated = if self.is_word("not")
-            && ["between", "in", "like", "ilike", "similar"]
-                .iter()
-                .any(|word| self.is_word_at(1, word))
-        {
-            self.at += 1;
-            true
-        } else {
-            false
-        };
-        let kind = if self.take_word("between") {
-            if self.is_word("symmetric") || self.is_word("asymmetric") {
-                return Err(self.not_supported("BETWEEN SYMMETRIC"));
-            }
-            let low = self.other_operator_expression()?;
-            self.expect_word("and")?;
-            let high = self.other_operator_expression()?;
-            ExprKind::Between {
-                expr: Box::new(expr),
-                low: Box::new(low),
-                high: Box::new(high),
-                negated,
-            }
-        } else if self.take_word("in") {
-            self.expect(&TokenKind::LeftParen)?;
-            if self.is_word("select") {
-                return Err(self.not_supported("subqueries"));
-            }
-            let mut list = vec![self.expression()?];
-            while self.take(&TokenKind::Comma) {
-                list.push(self.expression()?);
-            }
-            self.expect(&TokenKind::RightParen)?;
-            ExprKind::InList {
-                expr: Box::new(expr),
-                list,
-                negated,
-            }
-        } else if self.is_word("like") || self.is_word("ilike") {
-            let case_insensitive = self.is_word("ilike");
-            self.at += 1;
-            let pattern = self.other_operator_expression()?;
-            if self.is_word("escape") {
-                return Err(self.not_supported("LIKE ... ESCAPE"));
-            }
-            ExprKind::Like {
-                expr: Box::new(expr),
-                pattern: Box::new(pattern),
-                negated,
-                case_insensitive,
-            }
-        } else if self.is_word("similar") {
-            return Err(self.not_supported("SIMILAR TO"));
-        } else {
-            return Ok(expr);
-        };
-        Ok(Expr { kind, position })
-    }
-
-    fn other_operator_expression(&mut self) -> SqlResult<Expr> {
-        let mut left = self.additive()?;
-        loop {
-            let TokenKind::Operator(symbol) = self.peek_kind() else {
-                return Ok(left);
-            };
-            match symbol.as_str() {
-                "||" => {
-                    self.at += 1;
-                    let right = self.additive()?;
-                    left = Self::binary(left, BinaryOperator::Concat, right);
-                }
-                "=" | "<>" | "!=" | "<" | "<=" | ">" | ">=" => return Ok(left),
-                other => {
-                    return Err(SqlError::new(
-                        SqlState::UNDEFINED_FUNCTION,
-                        format!("operator does not exist: {other}"),
-                    )
-                    .at(self.position()));
-                }
-            }
-        }
-    }
-
-    fn additive(&mut self) -> SqlResult<Expr> {
-        let mut left = self.multiplicative()?;
-        loop {
-            let operator = if self.take_operator("+") {
-                BinaryOperator::Add
-            } else if self.take_operator("-") {
-                BinaryOperator::Subtract
-            } else {
-                return Ok(left);
-            };
-            let right = self.multiplicative()?;
-            left = Self::binary(left, operator, right);
-        }
-    }
-
-    fn multiplicative(&mut self) -> SqlResult<Expr> {
-        let mut left = self.power()?;
-        loop {
-            let operator = if self.take_operator("*") {
-                BinaryOperator::Multiply
-            } else if self.take_operator("/") {
-                BinaryOperator::Divide
-            } else if self.take_operator("%") {
-                BinaryOperator::Modulo
-            } else {
-                return Ok(left);
-            };
-            let right = self.power()?;
-            left = Self::binary(left, operator, right);
-        }
-    }
-
-    fn power(&mut self) -> SqlResult<Expr> {
-        let mut left = self.unary()?;
-        while self.take_operator("^") {
-            let right = self.unary()?;
-            left = Self::binary(left, BinaryOperator::Power, right);
-        }
-        Ok(left)
-    }
-
-    fn unary(&mut self) -> SqlResult<Expr> {
-        let position = self.position();
         let operator = if self.take_operator("-") {
             UnaryOperator::Minus
         } else if self.take_operator("+") {
@@ -1207,7 +997,7 @@ impl<'t> Parser<'t> {
         } else {
             return self.postfix();
         };
-        let operand = self.nested(Self::unary)?;
+        let operand = self.expression_above(Level::Unary)?;
         if operator == UnaryOperator::Minus
             && let ExprKind::Literal(literal) = &operand.kind
         {
@@ -1232,6 +1022,208 @@ impl<'t> Parser<'t> {
             kind: ExprKind::Unary(operator, Box::new(operand)),
             position,
         })
+    }
+
+    fn infix_level(&self) -> Option<Level> {
+        match self.peek_kind() {
+            TokenKind::Word(word) => match word.as_str() {
+                "or" => Some(Level::Or),
+                "and" => Some(Level::And),
+                "is" | "isnull" | "notnull" => Some(Level::Is),
+                "between" | "in" | "like" | "ilike" | "similar" => Some(Level::Pattern),
+                "not"
+                    if ["between", "in", "like", "ilike", "similar"]
+                        .iter()
+                        .any(|word| self.is_word_at(1, word)) =>
+                {
+                    Some(Level::Pattern)
+                }
+                _ => None,
+            },
+            TokenKind::Operator(symbol) => Some(match symbol.as_str() {
+                "=" | "<>" | "!=" | "<" | "<=" | ">" | ">=" => Level::Comparison,
+                "+" | "-" => Level::Additive,
+                "*" | "/" | "%" => Level::Multiplicative,
+                "^" => Level::Power,
+                _ => Level::Other,
+            }),
+            _ => None,
+        }
+    }
+
+    fn infix(&mut self, left: Expr, level: Level) -> SqlResult<Expr> {
+        match level {
+            Level::Or => {
+                self.at += 1;
+                let right = self.expression_above(Level::And)?;
+                Ok(Self::binary(left, BinaryOperator::Or, right))
+            }
+            Level::And => {
+                self.at += 1;
+                let right = self.expression_above(Level::Not)?;
+                Ok(Self::binary(left, BinaryOperator::And, right))
+            }
+            Level::Is => self.is_test(left),
+            Level::Comparison => {
+                let operator = self
+                    .comparison_operator()
+                    .ok_or_else(|| self.unexpected())?;
+                self.at += 1;
+                let right = self.expression_above(Level::Pattern)?;
+                if self.infix_level() == Some(Level::Comparison) {
+                    return Err(self.unexpected());
+                }
+                Ok(Self::binary(left, operator, right))
+            }
+            Level::Pattern => self.pattern(left),
+            Level::Other => {
+                if !self.take_operator("||") {
+                    let TokenKind::Operator(symbol) = self.peek_kind() else {
+                        return Err(self.unexpected());
+                    };
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_FUNCTION,
+                        format!("operator does not exist: {symbol}"),
+                    )
+                    .at(self.position()));
+                }
+                let right = self.expression_above(Level::Additive)?;
+                Ok(Self::binary(left, BinaryOperator::Concat, right))
+            }
+            Level::Additive => {
+                let operator = if self.take_operator("+") {
+                    BinaryOperator::Add
+                } else {
+                    self.at += 1;
+                    BinaryOperator::Subtract
+                };
+                let right = self.expression_above(Level::Multiplicative)?;
+                Ok(Self::binary(left, operator, right))
+            }
+            Level::Multiplicative => {
+                let operator = if self.take_operator("*") {
+                    BinaryOperator::Multiply
+                } else if self.take_operator("/") {
+                    BinaryOperator::Divide
+                } else {
+                    self.at += 1;
+                    BinaryOperator::Modulo
+                };
+                let right = self.expression_above(Level::Power)?;
+                Ok(Self::binary(left, operator, right))
+            }
+            Level::Power => {
+                self.at += 1;
+                let right = self.expression_above(Level::Unary)?;
+                Ok(Self::binary(left, BinaryOperator::Power, right))
+            }
+            Level::Not | Level::Unary => Err(self.unexpected()),
+        }
+    }
+
+    fn is_test(&mut self, expr: Expr) -> SqlResult<Expr> {
+        let position = expr.position;
+        if self.is_word("isnull") || self.is_word("notnull") {
+            let negated = self.is_word("notnull");
+            self.at += 1;
+            return Ok(Expr {
+                kind: ExprKind::IsNull {
+                    expr: Box::new(expr),
+                    negated,
+                },
+                position,
+            });
+        }
+        self.expect_word("is")?;
+        let negated = self.take_word("not");
+        let kind = if self.take_word("null") {
+            ExprKind::IsNull {
+                expr: Box::new(expr),
+                negated,
+            }
+        } else if self.take_word("true") {
+            truth(expr, TruthTest::True, negated)
+        } else if self.take_word("false") {
+            truth(expr, TruthTest::False, negated)
+        } else if self.take_word("unknown") {
+            truth(expr, TruthTest::Unknown, negated)
+        } else if self.take_word("distinct") {
+            self.expect_word("from")?;
+            let right = self.expression_above(Level::Comparison)?;
+            ExprKind::IsDistinctFrom {
+                left: Box::new(expr),
+                right: Box::new(right),
+                negated,
+            }
+        } else {
+            return Err(self.unexpected());
+        };
+        Ok(Expr { kind, position })
+    }
+
+    fn comparison_operator(&self) -> Option<BinaryOperator> {
+        let TokenKind::Operator(symbol) = self.peek_kind() else {
+            return None;
+        };
+        Some(match symbol.as_str() {
+            "=" => BinaryOperator::Equal,
+            "<>" | "!=" => BinaryOperator::NotEqual,
+            "<" => BinaryOperator::Less,
+            "<=" => BinaryOperator::LessOrEqual,
+            ">" => BinaryOperator::Greater,
+            ">=" => BinaryOperator::GreaterOrEqual,
+            _ => return None,
+        })
+    }
+
+    fn pattern(&mut self, expr: Expr) -> SqlResult<Expr> {
+        let position = expr.position;
+        let negated = self.take_word("not");
+        let kind = if self.take_word("between") {
+            if self.is_word("symmetric") || self.is_word("asymmetric") {
+                return Err(self.not_supported("BETWEEN SYMMETRIC"));
+            }
+            let low = self.expression_above(Level::Other)?;
+            self.expect_word("and")?;
+            let high = self.expression_above(Level::Other)?;
+            ExprKind::Between {
+                expr: Box::new(expr),
+                low: Box::new(low),
+                high: Box::new(high),
+                negated,
+            }
+        } else if self.take_word("in") {
+            self.expect(&TokenKind::LeftParen)?;
+            if self.is_word("select") {
+                return Err(self.not_supported("subqueries"));
+            }
+            let mut list = vec![self.expression()?];
+            while self.take(&TokenKind::Comma) {
+                list.push(self.expression()?);
+            }
+            self.expect(&TokenKind::RightParen)?;
+            ExprKind::InList {
+                expr: Box::new(expr),
+                list,
+                negated,
+            }
+        } else if self.is_word("like") || self.is_word("ilike") {
+            let case_insensitive = self.is_word("ilike");
+            self.at += 1;
+            let pattern = self.expression_above(Level::Other)?;
+            if self.is_word("escape") {
+                return Err(self.not_supported("LIKE ... ESCAPE"));
+            }
+            ExprKind::Like {
+                expr: Box::new(expr),
+                pattern: Box::new(pattern),
+                negated,
+                case_insensitive,
+            }
+        } else {
+            return Err(self.not_supported("SIMILAR TO"));
+        };
+        Ok(Expr { kind, position })
     }
 
     fn postfix(&mut self) -> SqlResult<Expr> {
@@ -1480,13 +1472,7 @@ impl<'t> Parser<'t> {
     }
 
     fn binary_operand(&mut self) -> SqlResult<Expr> {
-        self.depth += 1;
-        if self.depth > MAX_NESTING {
-            return Err(too_deep(self.position()));
-        }
-        let result = self.other_operator_expression();
-        self.depth -= 1;
-        result
+        self.expression_above(Level::Other)
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::ast::Statement;
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::execute;
+use crate::execute::{self, TableCache};
 use crate::lexer::tokenize;
 use crate::parser::Parser;
 use crate::store::{KeyValueStore, KeyValueWrite};
@@ -72,6 +72,7 @@ enum Block<'s, S: KeyValueStore + 's> {
 pub struct Session<'s, S: KeyValueStore + 's> {
     store: &'s S,
     block: Block<'s, S>,
+    tables: TableCache,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -88,6 +89,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         Self {
             store,
             block: Block::None,
+            tables: TableCache::default(),
         }
     }
 
@@ -156,22 +158,25 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             ));
         }
         let result = match statement {
-            Statement::Select(select) => self.read(|reader| execute::select(reader, select)),
-            Statement::CreateTable(create) => self.write("CREATE TABLE", |writer| {
-                execute::create_table(writer, create)
+            Statement::Select(select) => {
+                self.read(|reader, tables| execute::select(reader, tables, select))
+            }
+            Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
+                execute::create_table(writer, tables, create)
             }),
-            Statement::DropTable { names, if_exists } => self.write("DROP TABLE", |writer| {
-                execute::drop_tables(writer, names, *if_exists)
+            Statement::DropTable { names, if_exists } => self
+                .write("DROP TABLE", |writer, tables| {
+                    execute::drop_tables(writer, tables, names, *if_exists)
+                }),
+            Statement::Insert(insert) => self.write("INSERT", |writer, tables| {
+                execute::insert(writer, tables, insert)
             }),
-            Statement::Insert(insert) => {
-                self.write("INSERT", |writer| execute::insert(writer, insert))
-            }
-            Statement::Update(update) => {
-                self.write("UPDATE", |writer| execute::update(writer, update))
-            }
-            Statement::Delete(delete) => {
-                self.write("DELETE", |writer| execute::delete(writer, delete))
-            }
+            Statement::Update(update) => self.write("UPDATE", |writer, tables| {
+                execute::update(writer, tables, update)
+            }),
+            Statement::Delete(delete) => self.write("DELETE", |writer, tables| {
+                execute::delete(writer, tables, delete)
+            }),
             Statement::Begin { .. } | Statement::Commit | Statement::Rollback => {
                 return Err(SqlError::new(
                     SqlState::INTERNAL_ERROR,
@@ -187,14 +192,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
 
     fn read(
         &mut self,
-        body: impl FnOnce(&dyn crate::store::KeyValueRead) -> SqlResult<QueryResult>,
+        body: impl FnOnce(&dyn crate::store::KeyValueRead, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
+        let tables = &mut self.tables;
         match &self.block {
-            Block::Writing(writer) => body(writer),
-            Block::Reading(reader) => body(reader),
+            Block::Writing(writer) => body(writer, tables),
+            Block::Reading(reader) => body(reader, tables),
             Block::None | Block::Failed => {
                 let reader = self.store.begin_read()?;
-                body(&reader)
+                body(&reader, tables)
             }
         }
     }
@@ -202,17 +208,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     fn write(
         &mut self,
         command: &str,
-        body: impl FnOnce(&mut dyn KeyValueWrite) -> SqlResult<QueryResult>,
+        body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
+        let tables = &mut self.tables;
         match &mut self.block {
-            Block::Writing(writer) => body(writer),
+            Block::Writing(writer) => body(writer, tables),
             Block::Reading(_) => Err(SqlError::new(
                 SqlState::READ_ONLY_SQL_TRANSACTION,
                 format!("cannot execute {command} in a read-only transaction"),
             )),
             Block::None | Block::Failed => {
                 let mut writer = self.store.begin_write()?;
-                match body(&mut writer) {
+                match body(&mut writer, tables) {
                     Ok(result) => {
                         writer.commit()?;
                         Ok(result)

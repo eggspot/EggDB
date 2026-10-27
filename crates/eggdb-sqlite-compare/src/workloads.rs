@@ -297,19 +297,20 @@ pub(crate) fn durable_commit() -> Result<Vec<Metric>, String> {
     ))
 }
 
-fn prepare<'c>(sqlite: &'c Connection, sql: &str) -> Result<Statement<'c>, String> {
+pub(crate) fn prepare<'c>(sqlite: &'c Connection, sql: &str) -> Result<Statement<'c>, String> {
     sqlite
         .prepare(sql)
         .map_err(failed("prepare a SQLite statement"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RatioGate {
+pub(crate) enum RatioGate {
     Gated,
+    GatedWithin(u32),
     Reported,
 }
 
-fn paired_metrics(
+pub(crate) fn paired_metrics(
     benchmark: &'static str,
     measured: measure::Paired,
     gate: RatioGate,
@@ -318,6 +319,9 @@ fn paired_metrics(
     let ratio = match gate {
         RatioGate::Gated => {
             Metric::ceiling(benchmark, RATIO, measured.ratio, RATIO_TOLERANCE_PERCENT)
+        }
+        RatioGate::GatedWithin(percent) => {
+            Metric::ceiling(benchmark, RATIO, measured.ratio, percent)
         }
         RatioGate::Reported => Metric::reported(benchmark, RATIO, measured.ratio),
     };

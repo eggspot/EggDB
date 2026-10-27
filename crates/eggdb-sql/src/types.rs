@@ -275,17 +275,18 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
             integer_value(parsed, sql_type).map_err(|_| input_out_of_range(text, sql_type))
         }
         SqlType::Real | SqlType::Double => {
-            let lower = trimmed.to_ascii_lowercase();
-            let unsigned = lower.trim_start_matches(['+', '-']);
-            let special = matches!(unsigned, "nan" | "inf" | "infinity");
+            let unsigned = trimmed.trim_start_matches(['+', '-']);
+            let special = ["nan", "inf", "infinity"]
+                .iter()
+                .any(|word| unsigned.eq_ignore_ascii_case(word));
             let looks_numeric = !unsigned.is_empty()
                 && unsigned
                     .bytes()
-                    .all(|byte| byte.is_ascii_digit() || b".e+-".contains(&byte));
+                    .all(|byte| byte.is_ascii_digit() || b".eE+-".contains(&byte));
             if !special && !looks_numeric {
                 return Err(invalid());
             }
-            let parsed: f64 = lower.parse().map_err(|_| invalid())?;
+            let parsed: f64 = trimmed.parse().map_err(|_| invalid())?;
             if parsed.is_infinite() && !special {
                 return Err(input_out_of_range(text, sql_type));
             }
@@ -353,7 +354,10 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
         return Ok(Value::Null);
     };
     if target.is_string() {
-        if source.is_string() || conversion == Conversion::Explicit {
+        if let Value::Text(text) = value {
+            return assign_string(text, target, conversion);
+        }
+        if conversion == Conversion::Explicit {
             let text = value.to_text().unwrap_or_default();
             return assign_string(text, target, conversion);
         }

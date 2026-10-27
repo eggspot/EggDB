@@ -97,6 +97,11 @@ impl fmt::Display for SqlState {
 /// and optionally a detail, a hint and the position in the statement text it refers to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlError {
+    report: Box<Report>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Report {
     state: SqlState,
     message: String,
     detail: Option<String>,
@@ -111,11 +116,13 @@ impl SqlError {
     /// An error with this SQLSTATE and primary message.
     pub fn new(state: SqlState, message: impl Into<String>) -> Self {
         Self {
-            state,
-            message: message.into(),
-            detail: None,
-            hint: None,
-            position: None,
+            report: Box::new(Report {
+                state,
+                message: message.into(),
+                detail: None,
+                hint: None,
+                position: None,
+            }),
         }
     }
 
@@ -131,58 +138,62 @@ impl SqlError {
 
     /// The same error with a detail line.
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
+        self.report.detail = Some(detail.into());
         self
     }
 
     /// The same error with a hint line.
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
+        self.report.hint = Some(hint.into());
         self
     }
 
     pub(crate) fn at(mut self, position: usize) -> Self {
-        self.position = Some(position);
+        self.report.position = Some(position);
         self
     }
 
     pub(crate) fn at_if_unplaced(mut self, position: usize) -> Self {
-        if self.position.is_none() {
-            self.position = Some(position);
+        if self.report.position.is_none() {
+            self.report.position = Some(position);
         }
         self
     }
 
     /// The SQLSTATE code.
     pub fn state(&self) -> SqlState {
-        self.state
+        self.report.state
     }
 
     /// The primary message, such as `relation "users" does not exist`.
     pub fn message(&self) -> &str {
-        &self.message
+        &self.report.message
     }
 
     /// The detail line, when there is one.
     pub fn detail(&self) -> Option<&str> {
-        self.detail.as_deref()
+        self.report.detail.as_deref()
     }
 
     /// The hint line, when there is one.
     pub fn hint(&self) -> Option<&str> {
-        self.hint.as_deref()
+        self.report.hint.as_deref()
     }
 
     /// The byte offset in the text given to [`Session::execute`](crate::Session::execute) that
     /// the error refers to, when it refers to one.
     pub fn position(&self) -> Option<usize> {
-        self.position
+        self.report.position
     }
 }
 
 impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} (SQLSTATE {})", self.message, self.state)
+        write!(
+            f,
+            "{} (SQLSTATE {})",
+            self.report.message, self.report.state
+        )
     }
 }
 

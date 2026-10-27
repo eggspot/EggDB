@@ -9,7 +9,9 @@
 //!
 //! The ratios of point gets, ordered scans and batched puts that never wait for the disk are
 //! gated against the `ratio_to_sqlite` lines of `benchmarks/baseline.txt`: they fail 50% above
-//! the line after one retry. `eggdb-bench` gates its ratios the same way at 30% (D80), but two
+//! the line after one retry. The SQL workloads run the same SQL text on both, without prepared
+//! statements on either side; their ratios fail 15% above the line, since their gap to SQLite is
+//! known and scheduled (D98) and may only shrink. `eggdb-bench` gates its ratios the same way at 30% (D80), but two
 //! engines respond differently to each CI runner's processor, so their ratio moves more between
 //! runs. Batched puts in the `Normal` mode and the durable commit, one commit per put waiting for
 //! the disk, depend on the disk more than on either engine and are reported only. `--update`
@@ -27,6 +29,9 @@ mod harness;
 #[path = "../../eggdb-bench/src/measure.rs"]
 #[allow(dead_code)]
 mod measure;
+#[path = "../../eggdb/src/cli/sql_store.rs"]
+mod sql_store;
+mod sql_workloads;
 mod stores;
 mod workloads;
 
@@ -35,12 +40,14 @@ use std::process::ExitCode;
 
 type Workload = fn() -> Result<Vec<crate::baseline::Metric>, String>;
 
-const WORKLOADS: [(&str, Workload); 5] = [
+const WORKLOADS: [(&str, Workload); 7] = [
     (workloads::GET, workloads::get),
     (workloads::SCAN, workloads::scan),
     (workloads::BATCH_PUT, workloads::batch_put),
     (workloads::BATCH_PUT_NORMAL, workloads::batch_put_normal),
     (workloads::DURABLE_COMMIT, workloads::durable_commit),
+    (sql_workloads::POINT_SELECT, sql_workloads::point_select),
+    (sql_workloads::BULK_INSERT, sql_workloads::bulk_insert),
 ];
 
 fn main() -> ExitCode {

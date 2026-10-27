@@ -892,3 +892,32 @@ fn hostile_input_returns_errors_and_never_panics() {
         }
     }
 }
+
+#[test]
+fn operators_bind_with_postgresql_precedence() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT 1 + 2 * 3 - 4 / 2, 2 * 3 ^ 2, -2 ^ 2, 10 - 2 - 3, 2 ^ 3 ^ 2"
+        ),
+        "?column?|?column?|?column?|?column?|?column?\n5|18|4|5|64\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT NOT 1 = 2, true OR false AND false, NOT false AND false, 'a' || 'b' = 'ab'"
+        ),
+        "?column?|?column?|?column?|?column?\nt|t|f|t\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT 1 BETWEEN 0 AND 2 AND true, 3 NOT BETWEEN 1 + 1 AND 2 * 2, 1 + 1 IN (2, 3) = true, NULL IS NULL = true, 2 NOTNULL"
+        ),
+        "?column?|?column?|?column?|?column?|?column?\nt|f|t|t|t\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "SELECT 1 = NOT true"), "42601");
+    assert_eq!(state(&mut session, "SELECT 1 @@ 2"), "42883");
+}

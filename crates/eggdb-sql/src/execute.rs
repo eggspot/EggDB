@@ -14,6 +14,8 @@ use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 const MAX_COLUMNS: usize = 1600;
 const DELETE_BATCH: usize = 1024;
@@ -26,18 +28,44 @@ fn undefined_table(name: &Name) -> SqlError {
     .at(name.position)
 }
 
-pub(crate) fn load_table(
-    reader: &dyn KeyValueRead,
-    name: &str,
-) -> SqlResult<Option<TableDefinition>> {
-    match reader.get(&table_key(name))? {
-        Some(bytes) => TableDefinition::decode(name, &bytes).map(Some),
-        None => Ok(None),
-    }
+const CACHED_TABLES: usize = 256;
+
+#[derive(Default)]
+pub(crate) struct TableCache {
+    entries: HashMap<String, (Vec<u8>, Arc<TableDefinition>)>,
 }
 
-fn require_table(reader: &dyn KeyValueRead, name: &Name) -> SqlResult<TableDefinition> {
-    load_table(reader, &name.text)?.ok_or_else(|| undefined_table(name))
+impl TableCache {
+    fn table(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        name: &str,
+    ) -> SqlResult<Option<Arc<TableDefinition>>> {
+        let Some(bytes) = reader.get(&table_key(name))? else {
+            return Ok(None);
+        };
+        if let Some((cached_bytes, table)) = self.entries.get(name)
+            && *cached_bytes == bytes
+        {
+            return Ok(Some(Arc::clone(table)));
+        }
+        let table = Arc::new(TableDefinition::decode(name, &bytes)?);
+        if self.entries.len() >= CACHED_TABLES {
+            self.entries.clear();
+        }
+        self.entries
+            .insert(name.to_owned(), (bytes, Arc::clone(&table)));
+        Ok(Some(table))
+    }
+
+    fn require(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        name: &Name,
+    ) -> SqlResult<Arc<TableDefinition>> {
+        self.table(reader, &name.text)?
+            .ok_or_else(|| undefined_table(name))
+    }
 }
 
 fn scope_of<'a>(table: &'a TableDefinition, reference: &'a TableReference) -> Scope<'a> {
@@ -49,6 +77,7 @@ fn scope_of<'a>(table: &'a TableDefinition, reference: &'a TableReference) -> Sc
 
 pub(crate) fn create_table(
     writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
     create: &CreateTable,
 ) -> SqlResult<QueryResult> {
     if create.columns.len() > MAX_COLUMNS {
@@ -111,7 +140,7 @@ pub(crate) fn create_table(
     for &index in &primary_key {
         columns[index].not_null = true;
     }
-    if load_table(writer, &create.name.text)?.is_some() {
+    if tables.table(writer, &create.name.text)?.is_some() {
         if create.if_not_exists {
             return Ok(QueryResult::command("CREATE TABLE").with_notice(format!(
                 "NOTICE:  relation \"{}\" already exists, skipping",
@@ -170,12 +199,13 @@ fn check_default(expr: &Expr) -> SqlResult<()> {
 
 pub(crate) fn drop_tables(
     writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
     names: &[Name],
     if_exists: bool,
 ) -> SqlResult<QueryResult> {
     let mut result = QueryResult::command("DROP TABLE");
     for name in names {
-        let Some(table) = load_table(writer, &name.text)? else {
+        let Some(table) = tables.table(writer, &name.text)? else {
             if if_exists {
                 result = result.with_notice(format!(
                     "NOTICE:  table \"{}\" does not exist, skipping",
@@ -267,8 +297,9 @@ fn default_value(column: &Column) -> SqlResult<Value> {
 }
 
 fn assign(value: Value, column: &Column) -> SqlResult<Value> {
-    let source = value.type_name();
+    let source = value.sql_type();
     convert(value, column.sql_type, Conversion::Assignment).map_err(|error| {
+        let source = source.map_or_else(|| "unknown".to_owned(), SqlType::name);
         if error.state() == SqlState::CANNOT_COERCE {
             SqlError::new(
                 SqlState::DATATYPE_MISMATCH,
@@ -369,8 +400,12 @@ fn target_columns(table: &TableDefinition, names: &[Name]) -> SqlResult<Vec<usiz
     Ok(indexes)
 }
 
-pub(crate) fn insert(writer: &mut dyn KeyValueWrite, insert: &Insert) -> SqlResult<QueryResult> {
-    let table = require_table(writer, &insert.table.name)?;
+pub(crate) fn insert(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &Insert,
+) -> SqlResult<QueryResult> {
+    let table = tables.require(writer, &insert.table.name)?;
     let scope = scope_of(&table, &insert.table);
     let targets = match &insert.columns {
         Some(names) => target_columns(&table, names)?,
@@ -674,9 +709,13 @@ enum SortKey<'a> {
     Expr(&'a Expr),
 }
 
-pub(crate) fn select(reader: &dyn KeyValueRead, select: &Select) -> SqlResult<QueryResult> {
+pub(crate) fn select(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    select: &Select,
+) -> SqlResult<QueryResult> {
     let table = match &select.from {
-        Some(reference) => Some(require_table(reader, &reference.name)?),
+        Some(reference) => Some(tables.require(reader, &reference.name)?),
         None => None,
     };
     let scope = match (&table, &select.from) {
@@ -838,8 +877,12 @@ fn check_sortable(
     Ok(())
 }
 
-pub(crate) fn update(writer: &mut dyn KeyValueWrite, update: &Update) -> SqlResult<QueryResult> {
-    let table = require_table(writer, &update.table.name)?;
+pub(crate) fn update(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    update: &Update,
+) -> SqlResult<QueryResult> {
+    let table = tables.require(writer, &update.table.name)?;
     let scope = scope_of(&table, &update.table);
     let names: Vec<Name> = update
         .assignments
@@ -917,8 +960,12 @@ pub(crate) fn update(writer: &mut dyn KeyValueWrite, update: &Update) -> SqlResu
     })
 }
 
-pub(crate) fn delete(writer: &mut dyn KeyValueWrite, delete: &Delete) -> SqlResult<QueryResult> {
-    let table = require_table(writer, &delete.table.name)?;
+pub(crate) fn delete(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    delete: &Delete,
+) -> SqlResult<QueryResult> {
+    let table = tables.require(writer, &delete.table.name)?;
     let scope = scope_of(&table, &delete.table);
     if let Some(filter) = &delete.filter {
         check_columns(filter, scope)?;
