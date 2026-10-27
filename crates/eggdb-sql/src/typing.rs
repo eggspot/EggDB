@@ -96,7 +96,7 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
             | "clock_timestamp",
             [],
         ) => Some(SqlType::TimestampTz(None)),
-        ("localtimestamp", []) => Some(SqlType::Timestamp(None)),
+        ("localtimestamp" | "mysql_now" | "mysql_utc_now", []) => Some(SqlType::Timestamp(None)),
         ("current_date", []) => Some(SqlType::Date),
         ("extract", [_, _]) => Some(SqlType::Numeric(None)),
         ("date_part", [_, _]) => Some(SqlType::Double),

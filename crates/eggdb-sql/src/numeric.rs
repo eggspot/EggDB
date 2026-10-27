@@ -967,8 +967,10 @@ impl Numeric {
         let end = 4 + count * 4;
         let body = bytes.get(4..end)?;
         let limbs: Vec<u32> = body
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| u32::from_le_bytes(*chunk))
             .collect();
         if limbs.iter().any(|&limb| u64::from(limb) >= BASE) || limbs.last() == Some(&0) {
             return None;
@@ -1410,7 +1412,11 @@ mod tests {
             let whole = random.digits(whole_length);
             let fraction_length = (random.next() % 6) as usize;
             let fraction = random.digits(fraction_length);
-            let sign = if random.next() % 2 == 0 { "-" } else { "" };
+            let sign = if random.next().is_multiple_of(2) {
+                "-"
+            } else {
+                ""
+            };
             values.push(n(&format!("{sign}{whole}.{fraction}")));
         }
         for left in &values {

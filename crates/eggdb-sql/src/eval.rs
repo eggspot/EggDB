@@ -736,6 +736,12 @@ impl Evaluator<'_> {
                 Ok(Value::TimestampTz(now))
             }
             ("clock_timestamp", []) => Ok(Value::TimestampTz(now)),
+            ("mysql_now", []) => datetime::utc_to_local(now).map(|local| {
+                Value::Timestamp(local - local.rem_euclid(datetime::MICROS_PER_SECOND))
+            }),
+            ("mysql_utc_now", []) => Ok(Value::Timestamp(
+                now - now.rem_euclid(datetime::MICROS_PER_SECOND),
+            )),
             ("localtimestamp", []) => datetime::utc_to_local(now).map(Value::Timestamp),
             ("current_date", []) => datetime::utc_to_local(now)
                 .map(|local| Value::Date(datetime::timestamp_to_date(local))),
@@ -965,14 +971,12 @@ fn numeric_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         | ("round" | "trunc", [_, Value::Null]) => Ok(Value::Null),
         ("round", [Value::Numeric(number)]) => number.rounded(0).map(Value::Numeric),
         ("trunc", [Value::Numeric(number)]) => number.truncated(0).map(Value::Numeric),
-        ("round", [Value::Numeric(number), count]) => match places(count) {
-            Some(count) => number.rounded(count).map(Value::Numeric),
-            None => return None,
-        },
-        ("trunc", [Value::Numeric(number), count]) => match places(count) {
-            Some(count) => number.truncated(count).map(Value::Numeric),
-            None => return None,
-        },
+        ("round", [Value::Numeric(number), count]) => {
+            number.rounded(places(count)?).map(Value::Numeric)
+        }
+        ("trunc", [Value::Numeric(number), count]) => {
+            number.truncated(places(count)?).map(Value::Numeric)
+        }
         ("round" | "trunc", [whole, count])
             if whole.as_integer().is_some() && places(count).is_some() =>
         {

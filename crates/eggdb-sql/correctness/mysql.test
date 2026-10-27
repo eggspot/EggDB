@@ -104,7 +104,7 @@ rows
 SELECT flag, small, big, ratio, price, code, ok FROM types
 ----
 flag|small|big|ratio|price|code|ok
-1|7|9007199254740993|0.5|2.5|abc|0
+1|7|9007199254740993|0.5|2.50|abc|0
 SELECT 1
 
 error 22003 1264

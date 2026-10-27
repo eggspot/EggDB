@@ -238,8 +238,21 @@ impl Value {
         }
     }
 
+    /// The value as [`Value::to_text`] prints it, with a `timestamp with time zone` shown at
+    /// `offset_seconds` east of UTC instead of the running statement's time zone.
+    pub fn to_text_at(&self, offset_seconds: i32) -> Option<String> {
+        match self {
+            Self::TimestampTz(micros) => {
+                Some(datetime::format_timestamptz_at(*micros, offset_seconds))
+            }
+            other => other.to_text(),
+        }
+    }
+
     /// The value as PostgreSQL prints it in text form: `t` and `f` for booleans, floating
-    /// point in the shortest form that reads back exactly, and `None` for NULL.
+    /// point in the shortest form that reads back exactly, dates and times in the ISO style
+    /// (a `timestamp with time zone` in the time zone of the statement running on this thread,
+    /// else UTC), and `None` for NULL.
     pub fn to_text(&self) -> Option<String> {
         Some(match self {
             Self::Null => return None,

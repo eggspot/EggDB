@@ -533,8 +533,11 @@ impl<'t> Parser<'t> {
             "clob" | "nclob" => SqlType::Text,
             "long" if !self.is_word("raw") => SqlType::Text,
             "boolean" | "bool" => SqlType::Boolean,
-            "date" | "timestamp" | "interval" | "raw" | "long" | "blob" | "bfile" | "rowid"
-            | "urowid" | "xmltype" | "json" | "vector" | "sdo_geometry" => {
+            "date" => SqlType::Timestamp(Some(0)),
+            "timestamp" => self.oracle_timestamp(start)?,
+            "json" => SqlType::Jsonb,
+            "interval" | "raw" | "long" | "blob" | "bfile" | "rowid" | "urowid" | "xmltype"
+            | "vector" | "sdo_geometry" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()
@@ -602,9 +605,32 @@ impl<'t> Parser<'t> {
         Ok(Some(length))
     }
 
+    fn oracle_timestamp(&mut self, position: usize) -> SqlResult<SqlType> {
+        let mut precision = 6;
+        if self.take(&TokenKind::LeftParen) {
+            let digits = self.oracle_type_argument()?;
+            self.expect(&TokenKind::RightParen)?;
+            if !(0..=9).contains(&digits) {
+                return Err(SqlError::new(
+                    SqlState::INVALID_TABLE_DEFINITION,
+                    "datetime/interval precision is out of range",
+                )
+                .at(position));
+            }
+            precision = digits.min(6) as u8;
+        }
+        if self.take_word("with") {
+            self.take_word("local");
+            self.expect_word("time")?;
+            self.expect_word("zone")?;
+            return Ok(SqlType::TimestampTz(Some(precision)));
+        }
+        Ok(SqlType::Timestamp(Some(precision)))
+    }
+
     fn oracle_number(&mut self) -> SqlResult<SqlType> {
         if !self.take(&TokenKind::LeftParen) {
-            return Ok(SqlType::Double);
+            return Ok(SqlType::Numeric(None));
         }
         let position = self.position();
         let precision = if self.take_operator("*") {
@@ -625,12 +651,16 @@ impl<'t> Parser<'t> {
             )
             .at(position));
         }
+        let exact = SqlType::Numeric(Some(crate::types::NumericModifier {
+            precision: precision as u16,
+            scale: scale as i16,
+        }));
         Ok(match (precision, scale) {
-            (_, scale) if scale > 0 => SqlType::Double,
+            (_, scale) if scale != 0 => exact,
             (1..=4, _) => SqlType::SmallInt,
             (5..=9, _) => SqlType::Integer,
             (10..=18, _) => SqlType::BigInt,
-            _ => SqlType::Double,
+            _ => exact,
         })
     }
 
@@ -696,7 +726,21 @@ impl<'t> Parser<'t> {
                     }
                 }
                 "sysdate" | "systimestamp" | "current_date" | "current_timestamp"
-                | "localtimestamp" => return Err(self.not_supported("date and time values")),
+                | "localtimestamp" => {
+                    self.at += 1;
+                    let clock = match word.as_ref() {
+                        "sysdate" | "current_date" => "mysql_now",
+                        "localtimestamp" => "localtimestamp",
+                        _ => "now",
+                    };
+                    Expr {
+                        kind: ExprKind::Function {
+                            name: clock.to_owned(),
+                            arguments: Vec::new(),
+                        },
+                        position,
+                    }
+                }
                 "rowid" | "level" | "prior" | "uid" => {
                     return Err(self.not_supported(&word.to_ascii_uppercase()));
                 }
@@ -801,8 +845,8 @@ impl<'t> Parser<'t> {
             "least" => ("oracle_least", 1, usize::MAX),
             "to_char" => ("oracle_to_char", 1, 2),
             "to_number" => ("oracle_to_number", 1, 2),
-            "sysdate" | "systimestamp" | "to_date" | "to_timestamp" | "add_months"
-            | "months_between" | "last_day" | "next_day" | "extract" => {
+            "to_date" | "to_timestamp" | "add_months" | "months_between" | "last_day"
+            | "next_day" => {
                 return Err(self.not_supported("date and time values"));
             }
             "listagg" => return Err(self.not_supported("LISTAGG")),

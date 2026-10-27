@@ -288,6 +288,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         Arc::make_mut(&mut self.settings).set(name, Some(value))
     }
 
+    /// How far east of UTC the session's `TimeZone` is, in seconds: what a `timestamp with
+    /// time zone` is shown in. A zone EggDB cannot resolve yet (a named region) counts as UTC.
+    pub fn time_zone_offset_seconds(&self) -> i32 {
+        crate::datetime::time_zone_offset(&self.settings.get("TimeZone").unwrap_or_default())
+            .unwrap_or(0)
+    }
+
     /// The value of the run-time parameter `name`, as `SHOW name` gives it.
     pub fn parameter(&self, name: &str) -> SqlResult<String> {
         self.settings.get(name)

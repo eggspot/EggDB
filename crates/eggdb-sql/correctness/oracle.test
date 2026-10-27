@@ -865,7 +865,6 @@ CREATE TABLE late_identity (name VARCHAR2(10) PRIMARY KEY, id NUMBER(10) GENERAT
 
 ok
 CREATE TABLE stamps (d DATE)
-... differs
 
 error 42601 906
 CREATE TABLE no_length (v VARCHAR2)

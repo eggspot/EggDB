@@ -213,7 +213,7 @@ appearance, and names fold to upper case in result columns.
 
 ```rust
 use eggdb::Database;
-use eggdb::sql::{Dialect, Parameter, Value};
+use eggdb::sql::{Dialect, Numeric, Parameter, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     # let path = std::env::temp_dir().join(format!("eggdb-guide-oracle-{}.db", std::process::id()));
@@ -235,7 +235,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rows.extend(result.rows);
         true
     })?;
-    assert_eq!(rows, vec![vec![Value::Text("ALLEN".into()), Value::Double(300.0)]]);
+    assert_eq!(rows, vec![vec![Value::Text("ALLEN".into()), Value::Numeric(Numeric::parse("300.00")?)]]);
+    assert_eq!(Dialect::Oracle.value_text(&rows[0][1]).as_deref(), Some("300"));
     if let Err(error) = sql.execute("SELECT * FROM missing", &mut |_| {}) {
         assert_eq!(error.to_string(), "ORA-00942: table or view does not exist");
     }

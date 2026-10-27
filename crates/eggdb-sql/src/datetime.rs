@@ -495,7 +495,10 @@ pub(crate) fn format_timestamp(micros: i64) -> String {
 }
 
 pub(crate) fn format_timestamptz(micros: i64) -> String {
-    let offset = session_offset();
+    format_timestamptz_at(micros, session_offset())
+}
+
+pub(crate) fn format_timestamptz_at(micros: i64, offset: i32) -> String {
     format_local(to_local(micros, offset), Some(offset))
 }
 
@@ -651,7 +654,7 @@ pub(crate) fn extract(
     let seconds_with_fraction = i128::from(of_day % (60 * MICROS_PER_SECOND));
     let whole = |value: i64| Ok(Numeric::from_i64(value));
     match field {
-        Field::Microseconds => whole((of_day % (60 * MICROS_PER_SECOND)) as i64),
+        Field::Microseconds => whole(of_day % (60 * MICROS_PER_SECOND)),
         Field::Milliseconds => numeric_of(seconds_with_fraction, 3),
         Field::Second => numeric_of(seconds_with_fraction, 6),
         Field::Minute => whole(of_day / (60 * MICROS_PER_SECOND) % 60),
