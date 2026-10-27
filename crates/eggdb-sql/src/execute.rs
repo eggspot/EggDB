@@ -1226,10 +1226,12 @@ fn unsorted_rows(
         return Ok(output);
     }
     let mut skipped = 0;
-    let mut seen = HashSet::new();
+    let mut seen = window.distinct.then(HashSet::new);
     source.for_each(&mut |row| {
         let projected = projection.project_owned(row)?;
-        if window.distinct && !first_time_seen(&mut seen, &projected, memory)? {
+        if let Some(seen) = &mut seen
+            && !first_time_seen(seen, &projected, memory)?
+        {
             return Ok(true);
         }
         if skipped < window.skip {
@@ -1255,10 +1257,12 @@ fn sorted_rows(
 ) -> SqlResult<Vec<Vec<Value>>> {
     let scope = source.scope;
     let mut rows = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = window.distinct.then(HashSet::new);
     source.for_each(&mut |row| {
         let output = projection.project(&row)?;
-        if window.distinct && !first_time_seen(&mut seen, &output, memory)? {
+        if let Some(seen) = &mut seen
+            && !first_time_seen(seen, &output, memory)?
+        {
             return Ok(true);
         }
         let evaluator = Evaluator { scope, row: &row };

@@ -202,10 +202,22 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
 }
 
 pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
-    if matches!(expr.kind, ExprKind::Aggregate { .. }) {
-        return Some(expr);
+    match &expr.kind {
+        ExprKind::Aggregate { .. } => Some(expr),
+        ExprKind::Literal(_) | ExprKind::Column { .. } | ExprKind::Slot { .. } => None,
+        ExprKind::Unary(_, operand)
+        | ExprKind::IsNull { expr: operand, .. }
+        | ExprKind::IsTruth { expr: operand, .. }
+        | ExprKind::Cast { expr: operand, .. } => first_aggregate(operand),
+        ExprKind::Binary(_, left, right)
+        | ExprKind::IsDistinctFrom { left, right, .. }
+        | ExprKind::Like {
+            expr: left,
+            pattern: right,
+            ..
+        } => first_aggregate(left).or_else(|| first_aggregate(right)),
+        _ => children(expr).into_iter().find_map(first_aggregate),
     }
-    children(expr).into_iter().find_map(first_aggregate)
 }
 
 pub(crate) fn reject_aggregates(expr: &Expr, clause: &str) -> SqlResult<()> {
