@@ -81,8 +81,8 @@ names are cut to 63 bytes, and `public.name` is the same table as `name`.
 columns, `42P07` a table that exists, `23505` a duplicate primary key (with
 `Key (id)=(1) already exists.`), `23502` a NULL in a `NOT NULL` column, `22P02` text that is
 not a number, `42804` and `42883` type mismatches, `25P02` statements in a failed block, `0A000`
-what is not supported yet. Nesting deeper than 64 levels fails with `54001` instead of
-exhausting the stack.
+what is not supported yet. An expression nested, or a chain of operators, deeper than 64 levels fails with `54001`
+instead of exhausting the stack.
 
 **Transactions.** Outside a block every statement is its own transaction: it commits whole or
 not at all, so a multi-row `INSERT` that hits a duplicate key leaves no row behind. `BEGIN`

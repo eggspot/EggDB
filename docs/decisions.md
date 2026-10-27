@@ -4049,8 +4049,9 @@ else valid in PostgreSQL fails with SQLSTATE `0A000` and a hint, never with anot
 
 **Other choices.** The parser climbs precedence in one loop (PostgreSQL's table: `OR`, `AND`,
 `NOT`, `IS`, comparisons, `BETWEEN`/`IN`/`LIKE`, other operators, `+ -`, `* / %`, `^`, unary
-minus, `::`) and refuses nesting deeper than 64 levels with `54001`, so hostile SQL cannot
-exhaust the stack (D9). Errors carry a byte position; the CLI turns it into a line and a caret.
+minus, `::`) and refuses nesting, or a chain of operators, deeper than 64 levels with `54001`,
+so hostile SQL cannot exhaust the stack in the parser, the evaluator or when the tree is freed
+(D9). Errors carry a byte position; the CLI turns it into a line and a caret.
 A session caches decoded table definitions, checked against the stored bytes on every use, so a
 definition changed by another session is never used stale. Quoted constants take the type
 their context needs, as PostgreSQL's `unknown` type does. `UPDATE` deletes every moved key before

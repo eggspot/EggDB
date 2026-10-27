@@ -610,6 +610,22 @@ fn syntax_errors_name_the_token_and_its_position() {
     assert_eq!(fails(&mut session, &minus).state().code(), "54001");
     let not = format!("SELECT {} true", "NOT ".repeat(5000));
     assert_eq!(fails(&mut session, &not).state().code(), "54001");
+    let sum = format!("SELECT 1{}", " + 1".repeat(100_000));
+    assert_eq!(fails(&mut session, &sum).state().code(), "54001");
+    let conjunction = format!("SELECT true{}", " AND true".repeat(100_000));
+    assert_eq!(fails(&mut session, &conjunction).state().code(), "54001");
+    let longest_sum = format!("SELECT 1{}", " + 1".repeat(60));
+    assert_eq!(last(&mut session, &longest_sum), "?column?\n61\nSELECT 1");
+    let mut tallest = String::from("1");
+    for _ in 0..40 {
+        tallest = format!("1 + 1 * ({tallest})");
+        let sql = format!("SELECT {tallest}");
+        if let Err(error) = run(&mut session, &sql) {
+            assert_eq!(error.state().code(), "54001", "{error}");
+        }
+    }
+    let wide = format!("SELECT 1 IN ({})", vec!["2"; 50_000].join(", "));
+    assert_eq!(last(&mut session, &wide), "?column?\nf\nSELECT 1");
 }
 
 #[test]

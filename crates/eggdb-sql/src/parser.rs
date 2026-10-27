@@ -959,10 +959,21 @@ impl<'t> Parser<'t> {
     }
 
     fn expression_from(&mut self, least: Level) -> SqlResult<Expr> {
+        let entry_depth = self.depth;
+        let result = self.operator_chain(least);
+        self.depth = entry_depth;
+        result
+    }
+
+    fn operator_chain(&mut self, least: Level) -> SqlResult<Expr> {
         let mut left = self.prefix(least)?;
         while let Some(level) = self.infix_level() {
             if level < least {
                 break;
+            }
+            self.depth += 1;
+            if self.depth > MAX_NESTING {
+                return Err(too_deep(self.position()));
             }
             left = self.infix(left, level)?;
         }
@@ -1530,7 +1541,7 @@ fn too_deep(position: usize) -> SqlError {
         SqlState::STATEMENT_TOO_COMPLEX,
         "stack depth limit exceeded",
     )
-    .with_hint("The statement nests expressions more than 64 levels deep.")
+    .with_hint("The statement nests expressions, or chains operators, more than 64 levels deep.")
     .at(position)
 }
 
