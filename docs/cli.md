@@ -436,9 +436,10 @@ UTF-8, so its lines are valid entries too.
 
 `eggdb sql` runs SQL statements on the file: from `-c "<sql>"`, from a script file, or from
 stdin (a script of `-`, or none at all when stdin is not a terminal). This release runs the
-first part of the PostgreSQL dialect: tables with a primary key, `INSERT`, `SELECT` with
-`WHERE`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE` and transaction blocks, with the
-integer, floating-point, boolean and text types. [sql.md](sql.md) lists exactly what runs and
+first parts of the PostgreSQL dialect: tables with a primary key, `INSERT`, `SELECT` with
+`WHERE`, inner, left and cross joins, `GROUP BY` with aggregates, `HAVING`, `DISTINCT`,
+`ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE` and transaction blocks, with the integer,
+floating-point, boolean and text types. [sql.md](sql.md) lists exactly what runs and
 what comes next.
 
 ```sh

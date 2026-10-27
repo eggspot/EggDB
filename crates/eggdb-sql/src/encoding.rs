@@ -306,19 +306,30 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
 }
 
 pub(crate) fn decode_row(bytes: &[u8], columns: &[Column]) -> SqlResult<Vec<Value>> {
+    let mut values = Vec::with_capacity(columns.len());
+    decode_row_into(bytes, columns, None, &mut values)?;
+    Ok(values)
+}
+
+pub(crate) fn decode_row_into(
+    bytes: &[u8],
+    columns: &[Column],
+    needed: Option<&[bool]>,
+    out: &mut Vec<Value>,
+) -> SqlResult<()> {
     let mut reader = Reader::new(bytes, "row");
     reader.version()?;
     let count = reader.count()?;
     if count > columns.len() {
         return Err(reader.damaged());
     }
-    let mut values = Vec::with_capacity(columns.len());
-    for column in &columns[..count] {
+    for (index, column) in columns[..count].iter().enumerate() {
         let tag = reader.byte()?;
         if tag != 0 && tag != value_tag(column.sql_type) {
             return Err(reader.damaged());
         }
-        values.push(match tag {
+        let wanted = needed.is_none_or(|needed| needed.get(index).copied().unwrap_or(true));
+        out.push(match tag {
             0 => Value::Null,
             1 => Value::SmallInt(i16::from_le_bytes(reader.array()?)),
             2 => Value::Integer(i32::from_le_bytes(reader.array()?)),
@@ -330,13 +341,19 @@ pub(crate) fn decode_row(bytes: &[u8], columns: &[Column]) -> SqlResult<Vec<Valu
                 1 => Value::Boolean(true),
                 _ => return Err(reader.damaged()),
             },
-            7 => Value::Text(reader.text()?),
+            7 if wanted => Value::Text(reader.text()?),
+            7 => {
+                reader.skip_text()?;
+                Value::Null
+            }
             _ => return Err(reader.damaged()),
         });
     }
     reader.finish()?;
-    values.resize(columns.len(), Value::Null);
-    Ok(values)
+    for _ in count..columns.len() {
+        out.push(Value::Null);
+    }
+    Ok(())
 }
 
 fn value_tag(sql_type: SqlType) -> u8 {
@@ -436,6 +453,12 @@ impl<'b> Reader<'b> {
         let length = self.count()?;
         let bytes = self.take(length)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| self.damaged())
+    }
+
+    fn skip_text(&mut self) -> SqlResult<()> {
+        let length = self.count()?;
+        self.take(length)?;
+        Ok(())
     }
 
     fn finish(&self) -> SqlResult<()> {

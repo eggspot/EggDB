@@ -63,6 +63,8 @@ include.
 | `sqlite_compare.durable_commit` | one put in its own transaction, waiting for the disk | `Full` / `FULL` | reported |
 | `sqlite_compare.sql_point_select` | `SELECT name, score FROM people WHERE id = N` as SQL text, parsed and run each time, over 100,000 rows (`bigint PRIMARY KEY` in EggDB, `INTEGER PRIMARY KEY` in SQLite) | `Normal` / `NORMAL` | 15% above the line (D99) |
 | `sqlite_compare.sql_bulk_insert` | one row of 100-row `INSERT ... VALUES` statements, 1,000 rows per `BEGIN ... COMMIT`, as SQL text | `Off` / `OFF` | 15% above the line (D99) |
+| `sqlite_compare.sql_join` | `SELECT count(*), sum(o.amount) FROM orders o JOIN people p ON p.id = o.person_id WHERE p.score > 100` as SQL text: 10,000 orders, each joined to one of 10,000 people by primary key | `Normal` / `NORMAL` | 15% above the line (D100) |
+| `sqlite_compare.sql_group_by` | `SELECT bucket, count(*), sum(amount), min(amount), max(amount) FROM orders GROUP BY bucket` as SQL text: 10,000 rows in 100 groups | `Normal` / `NORMAL` | 15% above the line (D100) |
 
 The band is wider than the 30% of EggDB's other ratios because two engines respond differently
 to each CI runner's processor: seven runs gave point gets from 0.60 to 0.83 and scans from 0.35

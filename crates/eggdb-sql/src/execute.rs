@@ -1,20 +1,26 @@
+use crate::aggregate::{self, shape_of};
 use crate::ast::{
     BinaryOperator, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource, InsertValue, Name,
-    Select, SelectItem, TableReference, Update,
+    OrderItem, Select, SelectItem, TableReference, Update,
 };
 use crate::encoding::{
-    Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, encode_key_value, encode_meta,
-    encode_row, encode_row_into, meta_key, prefix_end, rows_prefix, table_key,
+    Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, decode_row_into,
+    encode_key_value, encode_meta, encode_row, encode_row_into, meta_key, prefix_end, rows_prefix,
+    table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::eval::{Evaluator, Scope, check_columns, compare_truth, output_name};
+use crate::eval::{
+    Evaluator, Scope, Source, check_columns, compare_truth, output_name, reject_aggregates,
+};
+use crate::join::{self, JoinedRows, RowCountHints};
 use crate::lexer::tokenize;
+use crate::memory::WorkMemory;
 use crate::parser::{LiteralRows, LiteralToken, Parser};
 use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
-use crate::types::{Conversion, SqlType, Value, compare_values, convert};
+use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const DELETE_BATCH: usize = 1024;
@@ -38,6 +44,7 @@ struct CachedTable {
 #[derive(Default)]
 pub(crate) struct TableCache {
     entries: HashMap<String, CachedTable>,
+    row_counts: RowCountHints,
 }
 
 impl TableCache {
@@ -88,10 +95,11 @@ impl TableCache {
 }
 
 fn scope_of<'a>(table: &'a TableDefinition, reference: &'a TableReference) -> Scope<'a> {
-    Scope {
-        table: Some(table),
+    Scope::One(Source {
+        table,
         label: reference.alias.as_deref().unwrap_or(&table.name),
-    }
+        offset: 0,
+    })
 }
 
 pub(crate) fn create_table(
@@ -205,6 +213,7 @@ fn multiple_primary_keys(create: &CreateTable, position: usize) -> SqlError {
 }
 
 fn check_default(expr: &Expr) -> SqlResult<()> {
+    reject_aggregates(expr, "DEFAULT expressions")?;
     check_columns(expr, Scope::empty()).map_err(|error| {
         if error.state() == SqlState::UNDEFINED_COLUMN || error.state() == SqlState::UNDEFINED_TABLE
         {
@@ -428,10 +437,7 @@ pub(crate) fn insert(
         Some(names) => target_columns(&table, names)?,
         None => (0..table.columns.len()).collect(),
     };
-    let returning = match &insert.returning {
-        Some(items) => Some(Projection::new(items, scope)?),
-        None => None,
-    };
+    let returning = returning(&insert.returning, scope)?;
     let empty_row: Vec<Vec<InsertValue>> = vec![Vec::new()];
     let rows = match &insert.source {
         InsertSource::Values(rows) => rows,
@@ -455,6 +461,13 @@ pub(crate) fn insert(
                 "INSERT has more target columns than expressions",
                 insert.table.name.position,
             ));
+        }
+    }
+    if let InsertSource::Values(rows) = &insert.source {
+        for value in rows.iter().flatten() {
+            if let InsertValue::Expr(expr) = value {
+                reject_aggregates(expr, "VALUES")?;
+            }
         }
     }
     let constants = Evaluator {
@@ -598,6 +611,21 @@ enum ProjectedItem<'a> {
     Expr(&'a Expr),
 }
 
+fn returning<'a>(
+    items: &'a Option<Vec<SelectItem>>,
+    scope: Scope<'a>,
+) -> SqlResult<Option<Projection<'a>>> {
+    let Some(items) = items else {
+        return Ok(None);
+    };
+    for item in items {
+        if let SelectItem::Expr { expr, .. } = item {
+            reject_aggregates(expr, "RETURNING")?;
+        }
+    }
+    Projection::new(items, scope).map(Some)
+}
+
 impl<'a> Projection<'a> {
     fn new(items: &'a [SelectItem], scope: Scope<'a>) -> SqlResult<Self> {
         let mut columns = Vec::with_capacity(items.len());
@@ -608,27 +636,40 @@ impl<'a> Projection<'a> {
                     qualifier,
                     position,
                 } => {
-                    let Some(table) = scope.table else {
+                    if matches!(scope, Scope::Empty) {
                         return Err(SqlError::syntax(
                             "SELECT * with no tables specified is not valid",
                             *position,
                         ));
-                    };
-                    if let Some(qualifier) = qualifier
-                        && qualifier != scope.label
-                    {
-                        return Err(SqlError::new(
-                            SqlState::UNDEFINED_TABLE,
-                            format!("missing FROM-clause entry for table \"{qualifier}\""),
-                        )
-                        .at(*position));
                     }
-                    for (index, column) in table.columns.iter().enumerate() {
-                        columns.push(OutputColumn {
-                            name: column.name.clone(),
-                            sql_type: Some(column.sql_type),
-                        });
-                        projected.push(ProjectedItem::Column(index));
+                    let offsets: Vec<usize> = match qualifier {
+                        None => scope.star(),
+                        Some(qualifier) => {
+                            let source = scope
+                                .sources()
+                                .iter()
+                                .find(|source| source.label == qualifier)
+                                .ok_or_else(|| {
+                                    SqlError::new(
+                                        SqlState::UNDEFINED_TABLE,
+                                        format!(
+                                            "missing FROM-clause entry for table \"{qualifier}\""
+                                        ),
+                                    )
+                                    .at(*position)
+                                })?;
+                            (source.offset..source.offset + source.table.columns.len()).collect()
+                        }
+                    };
+                    for offset in offsets {
+                        if let Some((source, index)) = scope.source_of(offset) {
+                            let column = &source.table.columns[index];
+                            columns.push(OutputColumn {
+                                name: column.name.clone(),
+                                sql_type: Some(column.sql_type),
+                            });
+                            projected.push(ProjectedItem::Column(offset));
+                        }
                     }
                 }
                 SelectItem::Expr { expr, alias } => {
@@ -637,16 +678,13 @@ impl<'a> Projection<'a> {
                         ExprKind::Column { qualifier, name } => scope
                             .column(qualifier.as_deref(), name, expr.position)
                             .ok()
-                            .and_then(|index| {
-                                scope
-                                    .table
-                                    .map(|table| (index, table.columns[index].sql_type))
-                            }),
+                            .map(|offset| (offset, scope.column_type(offset))),
+                        ExprKind::Slot { index, sql_type } => Some((*index, *sql_type)),
                         _ => None,
                     };
                     columns.push(OutputColumn {
                         name: alias.clone().unwrap_or_else(|| output_name(expr)),
-                        sql_type: column.map(|(_, sql_type)| sql_type),
+                        sql_type: column.and_then(|(_, sql_type)| sql_type),
                     });
                     projected.push(match column {
                         Some((index, _)) => ProjectedItem::Column(index),
@@ -655,7 +693,15 @@ impl<'a> Projection<'a> {
                 }
             }
         }
-        let mut taken = vec![false; scope.table.map_or(0, |table| table.columns.len())];
+        let width = projected
+            .iter()
+            .filter_map(|item| match item {
+                ProjectedItem::Column(index) => Some(index + 1),
+                ProjectedItem::Expr(_) => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let mut taken = vec![false; width];
         let each_column_once = projected.iter().all(|item| match item {
             ProjectedItem::Column(index) => !std::mem::replace(&mut taken[*index], true),
             ProjectedItem::Expr(_) => false,
@@ -703,6 +749,25 @@ impl<'a> Projection<'a> {
         }
     }
 
+    fn output_of(&self, expr: &Expr) -> Option<usize> {
+        let column = match &expr.kind {
+            ExprKind::Column { qualifier, name } => self
+                .scope
+                .column(qualifier.as_deref(), name, expr.position)
+                .ok(),
+            ExprKind::Slot { index, .. } => Some(*index),
+            _ => None,
+        };
+        if let Some(column) = column {
+            return (0..self.items.len()).find(|&index| self.source_column(index) == Some(column));
+        }
+        let shape = shape_of(expr);
+        self.items.iter().position(|item| match item {
+            ProjectedItem::Expr(projected) => shape_of(projected) == shape,
+            ProjectedItem::Column(_) => false,
+        })
+    }
+
     fn project_owned(&self, mut row: Vec<Value>) -> SqlResult<Vec<Value>> {
         if !self.each_column_once {
             return self.project(&row);
@@ -711,7 +776,9 @@ impl<'a> Projection<'a> {
             .items
             .iter()
             .map(|item| match item {
-                ProjectedItem::Column(index) => std::mem::replace(&mut row[*index], Value::Null),
+                ProjectedItem::Column(index) => row
+                    .get_mut(*index)
+                    .map_or(Value::Null, |value| std::mem::replace(value, Value::Null)),
                 ProjectedItem::Expr(_) => Value::Null,
             })
             .collect())
@@ -725,7 +792,7 @@ impl<'a> Projection<'a> {
         self.items
             .iter()
             .map(|item| match item {
-                ProjectedItem::Column(index) => Ok(row[*index].clone()),
+                ProjectedItem::Column(index) => Ok(row.get(*index).cloned().unwrap_or(Value::Null)),
                 ProjectedItem::Expr(expr) => evaluator.eval(expr, None),
             })
             .collect()
@@ -851,6 +918,7 @@ fn row_count(expr: Option<&Expr>, clause: &str) -> SqlResult<Option<u64>> {
         scope: Scope::empty(),
         row: &[],
     };
+    reject_aggregates(expr, clause)?;
     check_columns(expr, Scope::empty()).map_err(|_| {
         SqlError::syntax(
             format!("argument of {clause} must not contain variables"),
@@ -886,25 +954,15 @@ enum SortKey<'a> {
     Expr(&'a Expr),
 }
 
-pub(crate) fn select(
-    reader: &dyn KeyValueRead,
-    tables: &mut TableCache,
-    select: &Select,
-) -> SqlResult<QueryResult> {
-    let table = match &select.from {
-        Some(reference) => Some(tables.require(reader, &reference.name)?),
-        None => None,
-    };
-    let scope = match (&table, &select.from) {
-        (Some(table), Some(reference)) => scope_of(table, reference),
-        _ => Scope::empty(),
-    };
-    let projection = Projection::new(&select.items, scope)?;
-    if let Some(filter) = &select.filter {
-        check_columns(filter, scope)?;
-    }
-    let mut sort_keys = Vec::new();
-    for item in &select.order_by {
+fn sort_keys<'e>(
+    order_by: &[OrderItem],
+    expressions: &[&'e Expr],
+    projection: &Projection<'_>,
+    scope: Scope<'_>,
+    distinct: bool,
+) -> SqlResult<Vec<SortKey<'e>>> {
+    let mut keys = Vec::with_capacity(order_by.len());
+    for (item, &expr) in order_by.iter().zip(expressions) {
         let key = match &item.expr.kind {
             ExprKind::Literal(crate::ast::Literal::Integer(position)) => {
                 let index = usize::try_from(*position)
@@ -926,59 +984,207 @@ pub(crate) fn select(
                 SortKey::Output(projection.output_named(name, item.expr.position)?)
             }
             _ => {
-                check_columns(&item.expr, scope)?;
-                SortKey::Expr(&item.expr)
+                check_columns(expr, scope)?;
+                if distinct {
+                    let index = projection.output_of(expr).ok_or_else(|| {
+                        SqlError::new(
+                            SqlState::INVALID_COLUMN_REFERENCE,
+                            "for SELECT DISTINCT, ORDER BY expressions must appear in select list",
+                        )
+                        .at(item.expr.position)
+                    })?;
+                    SortKey::Output(index)
+                } else {
+                    SortKey::Expr(expr)
+                }
             }
         };
-        sort_keys.push(key);
+        keys.push(key);
     }
+    Ok(keys)
+}
+
+pub(crate) fn select(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    select: &Select,
+) -> SqlResult<QueryResult> {
+    let first = match &select.from {
+        Some(from) => Some(tables.require(reader, &from.first.name)?),
+        None => None,
+    };
+    let mut definitions: Vec<Arc<TableDefinition>> = Vec::new();
+    if let (Some(from), Some(first)) = (&select.from, &first)
+        && !from.joins.is_empty()
+    {
+        definitions.push(Arc::clone(first));
+        for join in &from.joins {
+            definitions.push(tables.require(reader, &join.table.name)?);
+        }
+    }
+    let joined = match &select.from {
+        Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions)?),
+        _ => None,
+    };
+    let scope = match (&select.from, &joined, &first) {
+        (_, Some(joined), _) => Scope::Many(&joined.sources),
+        (Some(from), None, Some(table)) => scope_of(table, &from.first),
+        _ => Scope::empty(),
+    };
+    if let Some(filter) = &select.filter {
+        reject_aggregates(filter, "WHERE")?;
+        check_columns(filter, scope)?;
+    }
+    let grouping = if aggregate::is_aggregate_query(select) {
+        Some(aggregate::analyze(select, scope)?)
+    } else {
+        None
+    };
+    let (items, post_scope) = match &grouping {
+        Some(grouping) => (grouping.items.as_slice(), Scope::empty()),
+        None => (select.items.as_slice(), scope),
+    };
+    let projection = Projection::new(items, post_scope)?;
+    let order_expressions: Vec<&Expr> = select
+        .order_by
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            grouping
+                .as_ref()
+                .and_then(|grouping| grouping.order[index].as_ref())
+                .unwrap_or(&item.expr)
+        })
+        .collect();
+    let sort_keys = sort_keys(
+        &select.order_by,
+        &order_expressions,
+        &projection,
+        post_scope,
+        select.distinct,
+    )?;
     let limit = row_count(select.limit.as_ref(), "LIMIT")?;
     let offset = row_count(select.offset.as_ref(), "OFFSET")?.unwrap_or(0);
-    let skip = usize::try_from(offset).unwrap_or(usize::MAX);
-    let take = limit.map_or(usize::MAX, |limit| {
-        usize::try_from(limit).unwrap_or(usize::MAX)
-    });
-    let source = SourceRows {
-        reader,
-        table: table.as_deref(),
-        scope,
-        filter: select.filter.as_ref(),
+    let window = Window {
+        skip: usize::try_from(offset).unwrap_or(usize::MAX),
+        take: limit.map_or(usize::MAX, |limit| {
+            usize::try_from(limit).unwrap_or(usize::MAX)
+        }),
+        distinct: select.distinct,
     };
+    let mut memory = WorkMemory::new();
+    let bound_filter = match (&joined, &select.filter) {
+        (Some(_), Some(filter)) => Some(aggregate::bind(filter, scope)?),
+        _ => None,
+    };
+    let rows = match (&joined, first.as_deref()) {
+        (Some(joined), _) => {
+            let first = joined.sources.list[0];
+            let first_key = select
+                .filter
+                .as_ref()
+                .and_then(|filter| point_key(first.table, Scope::One(first), filter));
+            RowSource::Joined(JoinedRows::new(
+                reader,
+                joined,
+                first_key,
+                joined.needed_columns(select),
+                joined.filters_by_level(bound_filter.as_ref()),
+                &mut tables.row_counts,
+                &mut memory,
+            )?)
+        }
+        (None, Some(table)) => RowSource::Table(table),
+        (None, None) => RowSource::Nothing,
+    };
+    let mut source = SourceRows {
+        reader,
+        rows,
+        scope,
+        filter: if joined.is_some() {
+            None
+        } else {
+            select.filter.as_ref()
+        },
+    };
+    if let Some(grouping) = &grouping {
+        let groups = grouping.run(
+            scope,
+            &mut |visit| source.for_each_borrowed(visit),
+            &mut memory,
+        )?;
+        source = SourceRows {
+            reader,
+            rows: RowSource::Rows(groups),
+            scope: post_scope,
+            filter: None,
+        };
+    }
     let output = if sort_keys.is_empty() {
-        unsorted_rows(&source, &projection, skip, take)?
+        unsorted_rows(&mut source, &projection, window, &mut memory)?
     } else {
         sorted_rows(
-            &source,
+            &mut source,
             &select.order_by,
             &projection,
             &sort_keys,
-            skip,
-            take,
+            window,
+            &mut memory,
         )?
     };
     let tag = format!("SELECT {}", output.len());
     Ok(QueryResult::rows(tag, projection.columns, output))
 }
 
+#[derive(Clone, Copy)]
+struct Window {
+    skip: usize,
+    take: usize,
+    distinct: bool,
+}
+
+enum RowSource<'a> {
+    Nothing,
+    Table(&'a TableDefinition),
+    Joined(JoinedRows<'a>),
+    Rows(Vec<Vec<Value>>),
+}
+
 struct SourceRows<'a> {
     reader: &'a dyn KeyValueRead,
-    table: Option<&'a TableDefinition>,
+    rows: RowSource<'a>,
     scope: Scope<'a>,
     filter: Option<&'a Expr>,
 }
 
 impl SourceRows<'_> {
-    fn for_each(&self, visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()> {
-        match self.table {
-            Some(table) => for_each_matching_row(
-                self.reader,
-                table,
-                self.scope,
-                self.filter,
-                &mut |_, row| visit(row),
-            ),
-            None => {
-                if filter_matches(self.scope, self.filter, &[])? {
+    fn has_rows_to_read(&self) -> bool {
+        !matches!(self.rows, RowSource::Nothing)
+    }
+
+    fn for_each(&mut self, visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()> {
+        let (reader, scope, filter) = (self.reader, self.scope, self.filter);
+        match &mut self.rows {
+            RowSource::Table(table) => {
+                for_each_matching_row(reader, table, scope, filter, &mut |_, row| visit(row))
+            }
+            RowSource::Joined(joined) => joined.for_each(&mut |row| {
+                if filter_matches(scope, filter, row)? {
+                    visit(row.to_vec())
+                } else {
+                    Ok(true)
+                }
+            }),
+            RowSource::Rows(rows) => {
+                for row in std::mem::take(rows) {
+                    if !visit(row)? {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            RowSource::Nothing => {
+                if filter_matches(scope, filter, &[])? {
                     visit(Vec::new())?;
                 }
                 Ok(())
@@ -987,43 +1193,112 @@ impl SourceRows<'_> {
     }
 }
 
+impl SourceRows<'_> {
+    fn for_each_borrowed(
+        &mut self,
+        visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
+        let (reader, scope, filter) = (self.reader, self.scope, self.filter);
+        match &mut self.rows {
+            RowSource::Joined(joined) => joined.for_each(&mut |row| {
+                if filter_matches(scope, filter, row)? {
+                    visit(row)
+                } else {
+                    Ok(true)
+                }
+            }),
+            RowSource::Table(table)
+                if filter.is_none_or(|filter| point_key(table, scope, filter).is_none()) =>
+            {
+                let prefix = rows_prefix(table.id);
+                let mut row = Vec::with_capacity(table.columns.len());
+                reader.scan(
+                    &prefix,
+                    &prefix_end(&prefix),
+                    ScanDirection::Forward,
+                    &mut |_, bytes| {
+                        row.clear();
+                        decode_row_into(bytes, &table.columns, None, &mut row)?;
+                        if filter_matches(scope, filter, &row)? {
+                            visit(&row)
+                        } else {
+                            Ok(true)
+                        }
+                    },
+                )
+            }
+            _ => self.for_each(&mut |row| visit(&row)),
+        }
+    }
+}
+
+fn first_time_seen(
+    seen: &mut HashSet<Vec<u8>>,
+    row: &[Value],
+    memory: &mut WorkMemory,
+) -> SqlResult<bool> {
+    let mut key = Vec::new();
+    for value in row {
+        equality_key(&mut key, value);
+    }
+    if seen.contains(&key) {
+        return Ok(false);
+    }
+    memory.charge(key.len() + 32)?;
+    seen.insert(key);
+    Ok(true)
+}
+
 fn unsorted_rows(
-    source: &SourceRows<'_>,
+    source: &mut SourceRows<'_>,
     projection: &Projection<'_>,
-    skip: usize,
-    take: usize,
+    window: Window,
+    memory: &mut WorkMemory,
 ) -> SqlResult<Vec<Vec<Value>>> {
     let mut output = Vec::new();
-    if take == 0 && source.table.is_some() {
+    if window.take == 0 && source.has_rows_to_read() {
         return Ok(output);
     }
     let mut skipped = 0;
+    let mut seen = window.distinct.then(HashSet::new);
     source.for_each(&mut |row| {
         let projected = projection.project_owned(row)?;
-        if skipped < skip {
+        if let Some(seen) = &mut seen
+            && !first_time_seen(seen, &projected, memory)?
+        {
+            return Ok(true);
+        }
+        if skipped < window.skip {
             skipped += 1;
             return Ok(true);
         }
-        if output.len() < take {
+        if output.len() < window.take {
+            memory.charge_row(&projected)?;
             output.push(projected);
         }
-        Ok(output.len() < take)
+        Ok(output.len() < window.take)
     })?;
     Ok(output)
 }
 
 fn sorted_rows(
-    source: &SourceRows<'_>,
-    order_by: &[crate::ast::OrderItem],
+    source: &mut SourceRows<'_>,
+    order_by: &[OrderItem],
     projection: &Projection<'_>,
     sort_keys: &[SortKey<'_>],
-    skip: usize,
-    take: usize,
+    window: Window,
+    memory: &mut WorkMemory,
 ) -> SqlResult<Vec<Vec<Value>>> {
     let scope = source.scope;
     let mut rows = Vec::new();
+    let mut seen = window.distinct.then(HashSet::new);
     source.for_each(&mut |row| {
         let output = projection.project(&row)?;
+        if let Some(seen) = &mut seen
+            && !first_time_seen(seen, &output, memory)?
+        {
+            return Ok(true);
+        }
         let evaluator = Evaluator { scope, row: &row };
         let mut keys = Vec::with_capacity(sort_keys.len());
         for key in sort_keys {
@@ -1032,6 +1307,8 @@ fn sorted_rows(
                 SortKey::Expr(expr) => evaluator.eval(expr, None)?,
             });
         }
+        memory.charge_row(&output)?;
+        memory.charge_row(&keys)?;
         rows.push((keys, output));
         Ok(true)
     })?;
@@ -1072,16 +1349,13 @@ fn sorted_rows(
     });
     Ok(rows
         .into_iter()
-        .skip(skip)
-        .take(take)
+        .skip(window.skip)
+        .take(window.take)
         .map(|(_, row)| row)
         .collect())
 }
 
-fn check_sortable(
-    order_by: &[crate::ast::OrderItem],
-    rows: &[(Vec<Value>, Vec<Value>)],
-) -> SqlResult<()> {
+fn check_sortable(order_by: &[OrderItem], rows: &[(Vec<Value>, Vec<Value>)]) -> SqlResult<()> {
     for (index, item) in order_by.iter().enumerate() {
         let mut seen: Option<&Value> = None;
         for (keys, _) in rows {
@@ -1132,16 +1406,15 @@ pub(crate) fn update(
     })?;
     for (_, value) in &update.assignments {
         if let InsertValue::Expr(expr) = value {
+            reject_aggregates(expr, "UPDATE")?;
             check_columns(expr, scope)?;
         }
     }
     if let Some(filter) = &update.filter {
+        reject_aggregates(filter, "WHERE")?;
         check_columns(filter, scope)?;
     }
-    let returning = match &update.returning {
-        Some(items) => Some(Projection::new(items, scope)?),
-        None => None,
-    };
+    let returning = returning(&update.returning, scope)?;
     let matched = matching_rows(writer, &table, scope, update.filter.as_ref())?;
     let mut changes = Vec::with_capacity(matched.len());
     for (old_key, old_row) in matched {
@@ -1191,12 +1464,10 @@ pub(crate) fn delete(
     let table = tables.require(writer, &delete.table.name)?;
     let scope = scope_of(&table, &delete.table);
     if let Some(filter) = &delete.filter {
+        reject_aggregates(filter, "WHERE")?;
         check_columns(filter, scope)?;
     }
-    let returning = match &delete.returning {
-        Some(items) => Some(Projection::new(items, scope)?),
-        None => None,
-    };
+    let returning = returning(&delete.returning, scope)?;
     let matched = matching_rows(writer, &table, scope, delete.filter.as_ref())?;
     let mut result_rows = Vec::new();
     for (key, row) in &matched {

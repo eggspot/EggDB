@@ -113,9 +113,14 @@ expect_exit 3 "$eggdb" sql shop.db -c "SELECT * FROM nope"
 grep -q 'relation "nope" does not exist' last.err || fail "eggdb sql error said $(cat last.err)"
 expect_exit 3 "$eggdb" sql shop.db -c "BEGIN; DELETE FROM items WHERE id = 1; INSERT INTO items VALUES (2, 'dup', 1)"
 expect_output '2' sh -c "\"$eggdb\" sql shop.db -c 'SELECT id FROM items' | grep -c '^ *[0-9]'"
+expect_exit 0 "$eggdb" sql shop.db -c "CREATE TABLE sales (id integer PRIMARY KEY, item_id integer, quantity integer); INSERT INTO sales VALUES (1, 1, 3), (2, 1, 4), (3, 2, 1), (4, 9, 5)"
+expect_output 'egg|2|7' sh -c "\"$eggdb\" sql shop.db -c 'SELECT i.name, count(*), sum(s.quantity) FROM items i JOIN sales s ON s.item_id = i.id GROUP BY i.id ORDER BY 3 DESC' | sed -n 3p | tr -d ' '"
+expect_output '2' sh -c "\"$eggdb\" sql shop.db -c 'SELECT i.name, s.quantity FROM items i LEFT JOIN sales s ON s.item_id = i.id AND s.quantity > 3' | sed -n '3,\$p' | grep -c '^ *[a-z]'"
+expect_exit 3 "$eggdb" sql shop.db -c "SELECT name, count(*) FROM items GROUP BY price"
+grep -q '42803' last.err || fail "eggdb sql grouping error said $(cat last.err)"
 expect_exit 2 "$eggdb" sql shop.db -c "SELECT 1" extra.sql
 expect_exit 0 "$eggdb" check shop.db
-pass "sql: create, script, stdin, an error, a rolled-back block, usage"
+pass "sql: create, script, stdin, a join with GROUP BY, errors, a rolled-back block, usage"
 
 cp "$samples/v0.2.0.db" "$samples/v0.2.0-log-to-replay.db" .
 expect_exit 0 "$eggdb" check v0.2.0.db

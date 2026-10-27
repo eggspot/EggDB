@@ -428,6 +428,37 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
     }
 }
 
+pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Null => out.push(0),
+        Value::Boolean(flag) => {
+            out.push(1);
+            out.push(u8::from(*flag));
+        }
+        Value::Text(text) => {
+            out.push(2);
+            out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            out.extend_from_slice(text.as_bytes());
+        }
+        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) => {
+            out.push(3);
+            out.extend_from_slice(&value.as_integer().unwrap_or(0).to_le_bytes());
+        }
+        Value::Real(_) | Value::Double(_) => {
+            let number = value.as_float().unwrap_or(f64::NAN);
+            if number.is_nan() {
+                out.push(4);
+            } else if number.fract() == 0.0 && number.abs() < 9.0e18 {
+                out.push(3);
+                out.extend_from_slice(&(number as i64).to_le_bytes());
+            } else {
+                out.push(5);
+                out.extend_from_slice(&number.to_bits().to_le_bytes());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Conversion, SqlType, Value, convert, parse_input};

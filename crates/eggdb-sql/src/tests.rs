@@ -572,11 +572,11 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
     let store = MemoryStore::default();
     let mut session = with_people(&store);
     for sql in [
-        "SELECT count(*) FROM people",
-        "SELECT * FROM people a JOIN people b ON a.id = b.id",
-        "SELECT * FROM people, people",
-        "SELECT age FROM people GROUP BY age",
-        "SELECT DISTINCT age FROM people",
+        "SELECT * FROM people a RIGHT JOIN people b ON a.id = b.id",
+        "SELECT * FROM people a NATURAL JOIN people b",
+        "SELECT string_agg(name, ',') FROM people",
+        "SELECT age FROM people GROUP BY ROLLUP (age)",
+        "SELECT DISTINCT ON (age) age FROM people",
         "SELECT * FROM people UNION SELECT * FROM people",
         "SELECT (SELECT 1)",
         "SELECT $1",
@@ -897,6 +897,27 @@ fn hostile_input_returns_errors_and_never_panics() {
         "[",
         "]",
         "coalesce(",
+        "JOIN",
+        "LEFT JOIN",
+        "CROSS JOIN",
+        "INNER JOIN people q",
+        "ON",
+        "USING (id)",
+        "p",
+        "people p",
+        "p.*",
+        "p.id",
+        "q.id",
+        "GROUP BY",
+        "HAVING",
+        "DISTINCT",
+        "count(*)",
+        "count(",
+        "sum(",
+        "avg(",
+        "min(",
+        "max(",
+        "FROM people p JOIN people q ON p.id = q.id",
     ];
     let mut random = Seeded(0xDEAD_BEEF_CAFE_F00D);
     for _ in 0..20_000 {
@@ -1161,4 +1182,529 @@ fn rows_without_a_key_stop_at_the_last_row_identifier_in_one_statement_or_many()
     assert_eq!(last(&mut session, "INSERT INTO t VALUES (2)"), "INSERT 0 1");
     assert_eq!(state(&mut session, "INSERT INTO t VALUES (3)"), "54000");
     assert_eq!(last(&mut session, "SELECT a FROM t"), "a\n1\n2\nSELECT 2");
+}
+
+fn with_orders(store: &MemoryStore) -> Session<'_, MemoryStore> {
+    let mut session = with_people(store);
+    last(
+        &mut session,
+        "CREATE TABLE orders (id integer PRIMARY KEY, person_id integer, amount integer, note text);
+         INSERT INTO orders VALUES (10, 1, 100, 'a'), (11, 1, 50, NULL), (12, 3, 70, 'c'), (13, NULL, 5, 'x'), (14, 9, 1, 'orphan');
+         CREATE TABLE a (k integer, x text);
+         INSERT INTO a VALUES (1, 'a1'), (2, 'a2'), (NULL, 'an');
+         CREATE TABLE b (k integer, y text);
+         INSERT INTO b VALUES (2, 'b2'), (3, 'b3'), (NULL, 'bn');",
+    );
+    session
+}
+
+#[test]
+fn inner_and_left_joins_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = with_orders(&store);
+    let cases = [
+        (
+            "SELECT p.name, o.amount FROM people p JOIN orders o ON o.person_id = p.id ORDER BY o.id",
+            "name|amount\nalice|100\nalice|50\ncarol|70\nSELECT 3",
+        ),
+        (
+            "SELECT p.name, o.amount FROM people AS p INNER JOIN orders AS o ON p.id = o.person_id ORDER BY o.amount",
+            "name|amount\nalice|50\ncarol|70\nalice|100\nSELECT 3",
+        ),
+        (
+            "SELECT p.name, o.id FROM people p LEFT JOIN orders o ON o.person_id = p.id ORDER BY p.id, o.id",
+            "name|id\nalice|10\nalice|11\nbob|NULL\ncarol|12\ndave|NULL\nSELECT 5",
+        ),
+        (
+            "SELECT p.name, o.id FROM people p LEFT OUTER JOIN orders o ON o.person_id = p.id AND o.amount > 60 ORDER BY p.id",
+            "name|id\nalice|10\nbob|NULL\ncarol|12\ndave|NULL\nSELECT 4",
+        ),
+        (
+            "SELECT p.name, o.id FROM people p LEFT JOIN orders o ON o.person_id = p.id WHERE o.amount > 60 ORDER BY p.id",
+            "name|id\nalice|10\ncarol|12\nSELECT 2",
+        ),
+        (
+            "SELECT p.name FROM people p LEFT JOIN orders o ON o.person_id = p.id WHERE o.id IS NULL ORDER BY 1",
+            "name\nbob\ndave\nSELECT 2",
+        ),
+        (
+            "SELECT a.x, b.y FROM a JOIN b ON a.k = b.k",
+            "x|y\na2|b2\nSELECT 1",
+        ),
+        (
+            "SELECT a.x, b.y FROM a LEFT JOIN b ON a.k = b.k ORDER BY a.x",
+            "x|y\na1|NULL\na2|b2\nan|NULL\nSELECT 3",
+        ),
+        (
+            "SELECT a.x, b.y FROM a JOIN b ON a.k = b.k WHERE b.y <> 'b2'",
+            "x|y\nSELECT 0",
+        ),
+        (
+            "SELECT a.x, b.y FROM a LEFT JOIN b ON a.k = b.k WHERE b.y IS NULL ORDER BY 1",
+            "x|y\na1|NULL\nan|NULL\nSELECT 2",
+        ),
+        (
+            "SELECT p.name FROM orders o JOIN people p ON p.id = o.person_id WHERE p.age > 35 ORDER BY 1",
+            "name\ncarol\nSELECT 1",
+        ),
+        (
+            "SELECT o.id, p.name FROM orders o LEFT JOIN people p ON p.id = o.person_id WHERE p.name IS NULL ORDER BY 1",
+            "id|name\n13|NULL\n14|NULL\nSELECT 2",
+        ),
+        (
+            "SELECT a.x, b.y FROM a JOIN b ON a.k + 0 = b.k",
+            "x|y\na2|b2\nSELECT 1",
+        ),
+        (
+            "SELECT a.x, b.y FROM a JOIN b ON a.k < b.k ORDER BY 1, 2",
+            "x|y\na1|b2\na1|b3\na2|b3\nSELECT 3",
+        ),
+        (
+            "SELECT * FROM a JOIN b ON a.k = b.k",
+            "k|x|k|y\n2|a2|2|b2\nSELECT 1",
+        ),
+        (
+            "SELECT * FROM a JOIN b USING (k)",
+            "k|x|y\n2|a2|b2\nSELECT 1",
+        ),
+        (
+            "SELECT * FROM a LEFT JOIN b USING (k) ORDER BY x",
+            "k|x|y\n1|a1|NULL\n2|a2|b2\nNULL|an|NULL\nSELECT 3",
+        ),
+        (
+            "SELECT k, a.k, b.k FROM a LEFT JOIN b USING (k) ORDER BY x",
+            "k|k|k\n1|1|NULL\n2|2|2\nNULL|NULL|NULL\nSELECT 3",
+        ),
+        (
+            "SELECT o.*, p.name FROM orders o JOIN people p ON p.id = o.person_id WHERE o.id = 12",
+            "id|person_id|amount|note|name\n12|3|70|c|carol\nSELECT 1",
+        ),
+        (
+            "SELECT p.name, o.id, a.x FROM people p JOIN orders o ON o.person_id = p.id LEFT JOIN a ON a.k = p.id ORDER BY o.id",
+            "name|id|x\nalice|10|a1\nalice|11|a1\ncarol|12|NULL\nSELECT 3",
+        ),
+        (
+            "SELECT p.name FROM people p JOIN orders o ON o.person_id = p.id ORDER BY o.amount",
+            "name\nalice\ncarol\nalice\nSELECT 3",
+        ),
+        (
+            "SELECT a.x, b.y FROM a CROSS JOIN b ORDER BY 1, 2 LIMIT 2",
+            "x|y\na1|b2\na1|b3\nSELECT 2",
+        ),
+        (
+            "SELECT a.x, b.y FROM a, b WHERE a.k = b.k",
+            "x|y\na2|b2\nSELECT 1",
+        ),
+        (
+            "SELECT a.x, p.name FROM a, b JOIN people p ON p.id = b.k WHERE a.k = 1 ORDER BY 2",
+            "x|name\na1|bob\na1|carol\nSELECT 2",
+        ),
+        (
+            "SELECT p.name, q.name FROM people p JOIN people q ON q.id = p.id + 1 WHERE p.id = 1",
+            "name|name\nalice|bob\nSELECT 1",
+        ),
+        (
+            "SELECT o.id, p.name FROM orders o LEFT JOIN people p ON p.id = o.person_id ORDER BY o.id",
+            "id|name\n10|alice\n11|alice\n12|carol\n13|NULL\n14|NULL\nSELECT 5",
+        ),
+        (
+            "SELECT p.name FROM people p JOIN orders o ON o.person_id = p.id AND o.note = p.name ORDER BY 1",
+            "name\nSELECT 0",
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(last(&mut session, sql), expected, "{sql}");
+    }
+}
+
+#[test]
+fn join_errors_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = with_orders(&store);
+    let error = fails(
+        &mut session,
+        "SELECT id FROM people p JOIN orders o ON o.person_id = p.id",
+    );
+    assert_eq!(error.state().code(), "42702");
+    assert_eq!(error.message(), "column reference \"id\" is ambiguous");
+    assert_eq!(error.position(), Some(7));
+    let error = fails(
+        &mut session,
+        "SELECT x.id FROM people p JOIN orders o ON true",
+    );
+    assert_eq!(error.state().code(), "42P01");
+    assert_eq!(error.message(), "missing FROM-clause entry for table \"x\"");
+    let error = fails(
+        &mut session,
+        "SELECT * FROM a, b JOIN people p ON a.k = p.id",
+    );
+    assert_eq!(error.state().code(), "42P01");
+    assert_eq!(
+        error.message(),
+        "invalid reference to FROM-clause entry for table \"a\""
+    );
+    assert!(error.hint().is_some());
+    let cases = [
+        ("SELECT p.nope FROM people p JOIN orders o ON true", "42703"),
+        ("SELECT * FROM people JOIN people ON true", "42712"),
+        ("SELECT * FROM people p JOIN orders p ON true", "42712"),
+        ("SELECT * FROM a JOIN b USING (nope)", "42703"),
+        ("SELECT * FROM people JOIN orders USING (amount)", "42703"),
+        ("SELECT * FROM orders JOIN people USING (amount)", "42703"),
+        ("SELECT * FROM people JOIN orders USING (id, id)", "42701"),
+        ("SELECT * FROM people p JOIN orders o USING (name)", "42703"),
+        ("SELECT * FROM people p JOIN orders o ON 1", "42804"),
+        (
+            "SELECT * FROM people p JOIN orders o ON p.name = o.id",
+            "42883",
+        ),
+        ("SELECT * FROM people JOIN orders ON count(*) > 1", "42803"),
+        ("SELECT * FROM a JOIN b", "42601"),
+        ("SELECT * FROM a CROSS JOIN b ON true", "42601"),
+        (
+            "SELECT * FROM a JOIN b ON b.k = c.k JOIN people c ON true",
+            "42P01",
+        ),
+        ("SELECT * FROM a RIGHT JOIN b ON true", "0A000"),
+        ("SELECT * FROM a FULL JOIN b ON true", "0A000"),
+        ("SELECT * FROM a NATURAL JOIN b", "0A000"),
+        ("SELECT * FROM a JOIN (SELECT 1) s ON true", "0A000"),
+        ("SELECT * FROM nope JOIN a ON true", "42P01"),
+        ("SELECT * FROM a JOIN nope ON true", "42P01"),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(state(&mut session, sql), expected, "{sql}");
+    }
+    let many = format!(
+        "SELECT count(*) FROM a{}",
+        (0..70).map(|n| format!(", a a{n}")).collect::<String>()
+    );
+    assert_eq!(state(&mut session, &many), "54000");
+    let mismatch = fails(
+        &mut session,
+        "CREATE TABLE c (k text); SELECT * FROM a JOIN c USING (k)",
+    );
+    assert_eq!(mismatch.state().code(), "42883");
+    assert_eq!(
+        mismatch.message(),
+        "operator does not exist: integer = text"
+    );
+}
+
+#[test]
+fn group_by_and_aggregates_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = with_orders(&store);
+    let cases = [
+        (
+            "SELECT person_id, count(*), sum(amount), min(note), max(amount) FROM orders GROUP BY person_id ORDER BY person_id",
+            "person_id|count|sum|min|max\n1|2|150|a|100\n3|1|70|c|70\n9|1|1|orphan|1\nNULL|1|5|x|5\nSELECT 4",
+        ),
+        (
+            "SELECT count(*), count(age), sum(age), min(name), max(score) FROM people",
+            "count|count|sum|min|max\n4|3|96|alice|NaN\nSELECT 1",
+        ),
+        (
+            "SELECT avg(score) FROM people WHERE id < 4",
+            "avg\n8.375\nSELECT 1",
+        ),
+        ("SELECT avg(age::float8) FROM people", "avg\n32\nSELECT 1"),
+        (
+            "SELECT count(*), count(age), sum(age), avg(score), min(age), max(name) FROM people WHERE id > 100",
+            "count|count|sum|avg|min|max\n0|0|NULL|NULL|NULL|NULL\nSELECT 1",
+        ),
+        (
+            "SELECT age, count(*) FROM people WHERE id > 100 GROUP BY age",
+            "age|count\nSELECT 0",
+        ),
+        (
+            "SELECT person_id, sum(amount) AS total FROM orders GROUP BY person_id HAVING sum(amount) > 10 ORDER BY total DESC",
+            "person_id|total\n1|150\n3|70\nSELECT 2",
+        ),
+        (
+            "SELECT count(*) FROM people HAVING count(*) > 10",
+            "count\nSELECT 0",
+        ),
+        (
+            "SELECT person_id FROM orders GROUP BY person_id ORDER BY count(*) DESC, person_id",
+            "person_id\n1\n3\n9\nNULL\nSELECT 4",
+        ),
+        (
+            "SELECT age > 28 AS old, count(*) FROM people GROUP BY 1 ORDER BY 1",
+            "old|count\nf|1\nt|2\nNULL|1\nSELECT 3",
+        ),
+        (
+            "SELECT age > 28 AS old, count(*) FROM people GROUP BY old ORDER BY old",
+            "old|count\nf|1\nt|2\nNULL|1\nSELECT 3",
+        ),
+        (
+            "SELECT age / 10 AS decade, count(*) FROM people GROUP BY age / 10 ORDER BY decade",
+            "decade|count\n2|1\n3|1\n4|1\nNULL|1\nSELECT 4",
+        ),
+        (
+            "SELECT count(*) * 2 + 1 AS n, max(amount) - min(amount) AS spread FROM orders",
+            "n|spread\n11|99\nSELECT 1",
+        ),
+        (
+            "SELECT p.id, p.name, count(o.id) FROM people p LEFT JOIN orders o ON o.person_id = p.id GROUP BY p.id ORDER BY p.id",
+            "id|name|count\n1|alice|2\n2|bob|0\n3|carol|1\n4|dave|0\nSELECT 4",
+        ),
+        (
+            "SELECT p.name, sum(o.amount) FROM people p JOIN orders o ON o.person_id = p.id GROUP BY p.name ORDER BY 2",
+            "name|sum\ncarol|70\nalice|150\nSELECT 2",
+        ),
+        (
+            "SELECT count(DISTINCT person_id), count(person_id), count(DISTINCT amount > 10) FROM orders",
+            "count|count|count\n3|4|2\nSELECT 1",
+        ),
+        (
+            "SELECT sum(DISTINCT amount / 50), sum(ALL amount / 50) FROM orders",
+            "sum|sum\n3|4\nSELECT 1",
+        ),
+        ("SELECT DISTINCT active FROM people", "active\nt\nSELECT 1"),
+        (
+            "SELECT DISTINCT person_id FROM orders ORDER BY person_id",
+            "person_id\n1\n3\n9\nNULL\nSELECT 4",
+        ),
+        (
+            "SELECT DISTINCT person_id IS NULL AS missing FROM orders ORDER BY person_id IS NULL",
+            "missing\nf\nt\nSELECT 2",
+        ),
+        (
+            "SELECT DISTINCT a.k FROM a, b ORDER BY 1 LIMIT 2 OFFSET 1",
+            "k\n2\nNULL\nSELECT 2",
+        ),
+        ("SELECT count(*)", "count\n1\nSELECT 1"),
+        ("SELECT count(*) WHERE false", "count\n0\nSELECT 1"),
+        (
+            "SELECT person_id AS who, count(*) FROM orders GROUP BY who HAVING person_id = 1",
+            "who|count\n1|2\nSELECT 1",
+        ),
+        (
+            "SELECT max(score), min(score) FROM people",
+            "max|min\nNaN|7.5\nSELECT 1",
+        ),
+        (
+            "SELECT p.age + 1, count(*) FROM people p GROUP BY age + 1 ORDER BY 1",
+            "?column?|count\n26|1\n31|1\n42|1\nNULL|1\nSELECT 4",
+        ),
+        (
+            "SELECT a.x || '!', count(*) FROM a JOIN b ON a.k = b.k GROUP BY x || '!'",
+            "?column?|count\na2!|1\nSELECT 1",
+        ),
+        (
+            "SELECT * FROM people GROUP BY id ORDER BY id LIMIT 1",
+            "id|name|age|score|active\n1|alice|30|9.25|t\nSELECT 1",
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(last(&mut session, sql), expected, "{sql}");
+    }
+}
+
+#[test]
+fn grouping_errors_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = with_orders(&store);
+    let error = fails(
+        &mut session,
+        "SELECT name, count(*) FROM people GROUP BY age",
+    );
+    assert_eq!(error.state().code(), "42803");
+    assert_eq!(
+        error.message(),
+        "column \"people.name\" must appear in the GROUP BY clause or be used in an aggregate function"
+    );
+    assert_eq!(error.position(), Some(7));
+    let error = fails(
+        &mut session,
+        "SELECT p.name, count(*) FROM people p JOIN orders o ON true GROUP BY o.id",
+    );
+    assert_eq!(
+        error.message(),
+        "column \"p.name\" must appear in the GROUP BY clause or be used in an aggregate function"
+    );
+    let cases = [
+        ("SELECT count(*) FROM people GROUP BY count(*)", "42803"),
+        ("SELECT count(*) FROM people GROUP BY 1", "42803"),
+        ("SELECT * FROM people WHERE count(*) > 1", "42803"),
+        ("SELECT sum(count(*)) FROM people", "42803"),
+        ("SELECT name FROM people HAVING count(*) > 1", "42803"),
+        ("SELECT name FROM people ORDER BY count(*)", "42803"),
+        ("SELECT sum(name) FROM people", "42883"),
+        ("SELECT avg(name) FROM people", "42883"),
+        ("SELECT min(active) FROM people", "42883"),
+        ("SELECT avg(age) FROM people", "0A000"),
+        ("SELECT avg(age + 1) FROM people", "0A000"),
+        ("SELECT sum(*) FROM people", "42809"),
+        ("SELECT count() FROM people", "42809"),
+        ("SELECT count(age, name) FROM people", "42883"),
+        ("SELECT age FROM people GROUP BY 6", "42P10"),
+        ("SELECT age FROM people GROUP BY 0", "42P10"),
+        ("SELECT age FROM people GROUP BY nope", "42703"),
+        (
+            "SELECT DISTINCT person_id FROM orders ORDER BY amount",
+            "42P10",
+        ),
+        ("SELECT DISTINCT ON (person_id) amount FROM orders", "0A000"),
+        ("SELECT age FROM people GROUP BY ROLLUP (age)", "0A000"),
+        ("SELECT age FROM people GROUP BY ()", "0A000"),
+        ("SELECT string_agg(name, ',') FROM people", "0A000"),
+        ("SELECT count(*) OVER () FROM people", "0A000"),
+        ("SELECT count(*) FILTER (WHERE true) FROM people", "0A000"),
+        ("UPDATE people SET age = count(*)", "42803"),
+        ("UPDATE people SET age = 1 WHERE count(*) > 1", "42803"),
+        ("DELETE FROM people WHERE count(*) > 1", "42803"),
+        ("DELETE FROM people RETURNING count(*)", "42803"),
+        ("INSERT INTO people VALUES (count(*), 'x')", "42803"),
+        ("SELECT 1 LIMIT count(*)", "42803"),
+        ("CREATE TABLE d (n int DEFAULT count(*))", "42803"),
+        (
+            "SELECT count(*) FROM people GROUP BY name HAVING 1",
+            "42804",
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(state(&mut session, sql), expected, "{sql}");
+    }
+}
+
+#[test]
+fn sums_keep_postgresql_result_types() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE n (i integer, b bigint, r real, d double precision);
+         INSERT INTO n VALUES (2147483647, 9223372036854775807, 1.5, 1e308), (1, 1, 2.25, 1e308)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT sum(i), sum(r), sum(b) FROM n WHERE i = 1"
+        ),
+        "sum|sum|sum\n1|2.25|1\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT sum(i) FROM n"),
+        "sum\n2147483648\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT sum(b) FROM n WHERE i = 1 HAVING sum(b) > 0 AND sum(b) IS NOT NULL ORDER BY sum(b)"
+        ),
+        "sum\n1\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "SELECT sum(b) FROM n"), "0A000");
+    assert_eq!(
+        state(&mut session, "SELECT sum(b) / 2 FROM n WHERE i = 1"),
+        "0A000"
+    );
+    assert_eq!(state(&mut session, "SELECT sum(d) FROM n"), "22003");
+    assert_eq!(
+        last(&mut session, "SELECT sum(d) FROM n WHERE i = 1"),
+        "sum\n1e+308\nSELECT 1"
+    );
+}
+
+#[test]
+fn every_join_method_agrees_on_random_tables() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE l (id integer PRIMARY KEY, k integer, v text);
+         CREATE TABLE r (id integer PRIMARY KEY, k integer, w integer);
+         CREATE TABLE h (k integer, w integer)",
+    );
+    let mut random = Seeded(0x9E37_79B9_7F4A_7C15);
+    let value = |random: &mut Seeded| {
+        if random.below(6) == 0 {
+            "NULL".to_owned()
+        } else {
+            random.below(12).to_string()
+        }
+    };
+    for id in 0..60 {
+        let k = value(&mut random);
+        last(
+            &mut session,
+            &format!("INSERT INTO l VALUES ({id}, {k}, 'v{id}')"),
+        );
+        let k = value(&mut random);
+        let w = value(&mut random);
+        last(
+            &mut session,
+            &format!("INSERT INTO r VALUES ({id}, {k}, {w}); INSERT INTO h VALUES ({k}, {w})"),
+        );
+    }
+    for kind in ["JOIN", "LEFT JOIN"] {
+        let methods = [
+            format!("SELECT l.id, r.w FROM l {kind} r ON r.k = l.k ORDER BY 1, 2"),
+            format!("SELECT l.id, r.w FROM l {kind} r ON l.k = r.k + 0 ORDER BY 1, 2"),
+            format!("SELECT l.id, r.w FROM l {kind} r USING (k) ORDER BY 1, 2"),
+            format!("SELECT l.id, h.w FROM l {kind} h ON h.k = l.k ORDER BY 1, 2"),
+        ];
+        let expected = last(&mut session, &methods[0]);
+        for sql in &methods[1..] {
+            assert_eq!(last(&mut session, sql), expected, "{sql}");
+        }
+        let by_key = [
+            format!("SELECT l.v, r.w FROM l {kind} r ON r.id = l.k ORDER BY 1, 2"),
+            format!("SELECT l.v, r.w FROM l {kind} r ON r.id + 0 = l.k ORDER BY 1, 2"),
+        ];
+        assert_eq!(
+            last(&mut session, &by_key[0]),
+            last(&mut session, &by_key[1]),
+            "{kind}"
+        );
+        for id in (0..60).step_by(7) {
+            let looked_up = format!(
+                "SELECT l.v, r.w FROM l {kind} r ON r.id = l.k WHERE l.id = {id} ORDER BY 1, 2"
+            );
+            let scanned = format!(
+                "SELECT l.v, r.w FROM l {kind} r ON r.id + 0 = l.k WHERE l.id + 0 = {id} ORDER BY 1, 2"
+            );
+            assert_eq!(
+                last(&mut session, &looked_up),
+                last(&mut session, &scanned),
+                "{looked_up}"
+            );
+        }
+    }
+    let grouped = last(
+        &mut session,
+        "SELECT k, count(*), count(w), sum(w), min(w), max(w) FROM r GROUP BY k ORDER BY k",
+    );
+    let mut groups: BTreeMap<Option<i64>, Vec<Option<i64>>> = BTreeMap::new();
+    let rows = last(&mut session, "SELECT k, w FROM r");
+    for line in rows.lines().skip(1).filter(|line| line.contains('|')) {
+        let mut cells = line.split('|').map(|cell| cell.parse::<i64>().ok());
+        let k = cells.next().flatten();
+        let w = cells.next().flatten();
+        groups.entry(k).or_default().push(w);
+    }
+    let mut text = "k|count|count|sum|min|max\n".to_owned();
+    let shown = |value: Option<i64>| value.map_or("NULL".to_owned(), |value| value.to_string());
+    let ordered: Vec<_> = groups
+        .iter()
+        .filter(|(k, _)| k.is_some())
+        .chain(groups.iter().filter(|(k, _)| k.is_none()))
+        .collect();
+    for (k, values) in &ordered {
+        let present: Vec<i64> = values.iter().flatten().copied().collect();
+        let sum = (!present.is_empty()).then(|| present.iter().sum::<i64>());
+        text.push_str(&format!(
+            "{}|{}|{}|{}|{}|{}\n",
+            shown(**k),
+            values.len(),
+            present.len(),
+            shown(sum),
+            shown(present.iter().min().copied()),
+            shown(present.iter().max().copied()),
+        ));
+    }
+    text.push_str(&format!("SELECT {}", ordered.len()));
+    assert_eq!(grouped, text);
 }

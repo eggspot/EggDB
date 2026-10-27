@@ -8,17 +8,84 @@ use crate::types::{
 use std::cmp::Ordering;
 
 #[derive(Clone, Copy)]
-pub(crate) struct Scope<'a> {
-    pub(crate) table: Option<&'a TableDefinition>,
+pub(crate) struct Source<'a> {
+    pub(crate) table: &'a TableDefinition,
     pub(crate) label: &'a str,
+    pub(crate) offset: usize,
 }
 
-impl Scope<'_> {
+pub(crate) struct Sources<'a> {
+    pub(crate) list: Vec<Source<'a>>,
+    pub(crate) merged: Vec<usize>,
+    pub(crate) out_of_reach: Vec<&'a str>,
+    pub(crate) star: Vec<usize>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Scope<'a> {
+    Empty,
+    One(Source<'a>),
+    Many(&'a Sources<'a>),
+}
+
+fn missing_column(qualifier: Option<&str>, name: &str, position: usize) -> SqlError {
+    let shown = match qualifier {
+        Some(qualifier) => format!("{qualifier}.{name}"),
+        None => name.to_owned(),
+    };
+    SqlError::new(
+        SqlState::UNDEFINED_COLUMN,
+        format!("column \"{shown}\" does not exist"),
+    )
+    .at(position)
+}
+
+fn missing_table(qualifier: &str, position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::UNDEFINED_TABLE,
+        format!("missing FROM-clause entry for table \"{qualifier}\""),
+    )
+    .at(position)
+}
+
+impl<'a> Scope<'a> {
     pub(crate) fn empty() -> Scope<'static> {
-        Scope {
-            table: None,
-            label: "",
+        Scope::Empty
+    }
+
+    pub(crate) fn sources(&self) -> &[Source<'a>] {
+        match self {
+            Scope::Empty => &[],
+            Scope::One(source) => std::slice::from_ref(source),
+            Scope::Many(sources) => &sources.list,
         }
+    }
+
+    pub(crate) fn width(&self) -> usize {
+        self.sources()
+            .last()
+            .map_or(0, |source| source.offset + source.table.columns.len())
+    }
+
+    pub(crate) fn star(&self) -> Vec<usize> {
+        match self {
+            Scope::Many(sources) => sources.star.clone(),
+            _ => (0..self.width()).collect(),
+        }
+    }
+
+    pub(crate) fn source_of(&self, offset: usize) -> Option<(&Source<'a>, usize)> {
+        self.sources().iter().find_map(|source| {
+            offset
+                .checked_sub(source.offset)
+                .filter(|&index| index < source.table.columns.len())
+                .map(|index| (source, index))
+        })
+    }
+
+    pub(crate) fn column_type(&self, offset: usize) -> Option<SqlType> {
+        self.source_of(offset)
+            .map(|(source, index)| source.table.columns[index].sql_type)
     }
 
     pub(crate) fn column(
@@ -27,28 +94,140 @@ impl Scope<'_> {
         name: &str,
         position: usize,
     ) -> SqlResult<usize> {
-        if let Some(qualifier) = qualifier
-            && (self.table.is_none() || qualifier != self.label)
-        {
-            return Err(SqlError::new(
-                SqlState::UNDEFINED_TABLE,
-                format!("missing FROM-clause entry for table \"{qualifier}\""),
-            )
-            .at(position));
+        match self {
+            Scope::Empty => match qualifier {
+                Some(qualifier) => Err(missing_table(qualifier, position)),
+                None => Err(missing_column(None, name, position)),
+            },
+            Scope::One(source) => {
+                if let Some(qualifier) = qualifier
+                    && qualifier != source.label
+                {
+                    return Err(missing_table(qualifier, position));
+                }
+                source
+                    .table
+                    .column_index(name)
+                    .map(|index| source.offset + index)
+                    .ok_or_else(|| missing_column(qualifier, name, position))
+            }
+            Scope::Many(sources) => sources.column(qualifier, name, position),
         }
-        self.table
-            .and_then(|table| table.column_index(name))
-            .ok_or_else(|| {
-                let shown = match qualifier {
-                    Some(qualifier) => format!("{qualifier}.{name}"),
-                    None => name.to_owned(),
-                };
-                SqlError::new(
-                    SqlState::UNDEFINED_COLUMN,
-                    format!("column \"{shown}\" does not exist"),
+    }
+}
+
+impl Sources<'_> {
+    fn column(&self, qualifier: Option<&str>, name: &str, position: usize) -> SqlResult<usize> {
+        if let Some(qualifier) = qualifier {
+            let Some(source) = self.list.iter().find(|source| source.label == qualifier) else {
+                if self.out_of_reach.contains(&qualifier) {
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_TABLE,
+                        format!("invalid reference to FROM-clause entry for table \"{qualifier}\""),
+                    )
+                    .with_hint(format!(
+                        "There is an entry for table \"{qualifier}\", but it cannot be referenced from this part of the query."
+                    ))
+                    .at(position));
+                }
+                return Err(missing_table(qualifier, position));
+            };
+            return source
+                .table
+                .column_index(name)
+                .map(|index| source.offset + index)
+                .ok_or_else(|| missing_column(Some(qualifier), name, position));
+        }
+        let mut found = None;
+        for source in &self.list {
+            let Some(index) = source.table.column_index(name) else {
+                continue;
+            };
+            let offset = source.offset + index;
+            if self.merged.contains(&offset) {
+                continue;
+            }
+            if found.is_some() {
+                return Err(SqlError::new(
+                    SqlState::AMBIGUOUS_COLUMN,
+                    format!("column reference \"{name}\" is ambiguous"),
                 )
-                .at(position)
-            })
+                .at(position));
+            }
+            found = Some(offset);
+        }
+        found.ok_or_else(|| missing_column(None, name, position))
+    }
+}
+
+pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
+    match &expr.kind {
+        ExprKind::Literal(_) | ExprKind::Column { .. } | ExprKind::Slot { .. } => Vec::new(),
+        ExprKind::Unary(_, operand)
+        | ExprKind::IsNull { expr: operand, .. }
+        | ExprKind::IsTruth { expr: operand, .. }
+        | ExprKind::Cast { expr: operand, .. } => vec![operand],
+        ExprKind::Binary(_, left, right)
+        | ExprKind::IsDistinctFrom { left, right, .. }
+        | ExprKind::Like {
+            expr: left,
+            pattern: right,
+            ..
+        } => vec![left, right],
+        ExprKind::Between {
+            expr, low, high, ..
+        } => vec![expr, low, high],
+        ExprKind::InList { expr, list, .. } => {
+            let mut all = vec![expr.as_ref()];
+            all.extend(list);
+            all
+        }
+        ExprKind::And(operands) | ExprKind::Or(operands) => operands.iter().collect(),
+        ExprKind::Case {
+            operand,
+            branches,
+            otherwise,
+        } => {
+            let mut all: Vec<&Expr> = operand.iter().map(AsRef::as_ref).collect();
+            for (condition, result) in branches {
+                all.push(condition);
+                all.push(result);
+            }
+            all.extend(otherwise.iter().map(AsRef::as_ref));
+            all
+        }
+        ExprKind::Function { arguments, .. } => arguments.iter().collect(),
+        ExprKind::Aggregate { argument, .. } => argument.iter().map(AsRef::as_ref).collect(),
+    }
+}
+
+pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
+    match &expr.kind {
+        ExprKind::Aggregate { .. } => Some(expr),
+        ExprKind::Literal(_) | ExprKind::Column { .. } | ExprKind::Slot { .. } => None,
+        ExprKind::Unary(_, operand)
+        | ExprKind::IsNull { expr: operand, .. }
+        | ExprKind::IsTruth { expr: operand, .. }
+        | ExprKind::Cast { expr: operand, .. } => first_aggregate(operand),
+        ExprKind::Binary(_, left, right)
+        | ExprKind::IsDistinctFrom { left, right, .. }
+        | ExprKind::Like {
+            expr: left,
+            pattern: right,
+            ..
+        } => first_aggregate(left).or_else(|| first_aggregate(right)),
+        _ => children(expr).into_iter().find_map(first_aggregate),
+    }
+}
+
+pub(crate) fn reject_aggregates(expr: &Expr, clause: &str) -> SqlResult<()> {
+    match first_aggregate(expr) {
+        Some(found) => Err(SqlError::new(
+            SqlState::GROUPING_ERROR,
+            format!("aggregate functions are not allowed in {clause}"),
+        )
+        .at(found.position)),
+        None => Ok(()),
     }
 }
 
@@ -105,6 +284,10 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
         ExprKind::Function { arguments, .. } => arguments
             .iter()
             .try_for_each(|argument| check_columns(argument, scope)),
+        ExprKind::Aggregate { argument, .. } => argument
+            .as_deref()
+            .map_or(Ok(()), |argument| check_columns(argument, scope)),
+        ExprKind::Slot { .. } => Ok(()),
     }
 }
 
@@ -112,6 +295,7 @@ pub(crate) fn output_name(expr: &Expr) -> String {
     match &expr.kind {
         ExprKind::Column { name, .. } => name.clone(),
         ExprKind::Function { name, .. } => name.clone(),
+        ExprKind::Aggregate { function, .. } => function.name().to_owned(),
         ExprKind::Cast { expr, sql_type } => match &expr.kind {
             ExprKind::Column { .. } | ExprKind::Function { .. } | ExprKind::Cast { .. } => {
                 output_name(expr)
@@ -281,6 +465,13 @@ impl Evaluator<'_> {
                 }
             }
             ExprKind::Function { name, arguments } => self.function(name, arguments),
+            ExprKind::Slot { index, .. } => {
+                Ok(self.row.get(*index).cloned().unwrap_or(Value::Null))
+            }
+            ExprKind::Aggregate { .. } => Err(SqlError::new(
+                SqlState::GROUPING_ERROR,
+                "aggregate functions are not allowed here",
+            )),
         }
     }
 
@@ -322,8 +513,9 @@ impl Evaluator<'_> {
                     .scope
                     .column(qualifier.as_deref(), name, expr.position)
                     .ok()?;
-                self.scope.table.map(|table| table.columns[index].sql_type)
+                self.scope.column_type(index)
             }
+            ExprKind::Slot { sql_type, .. } => *sql_type,
             ExprKind::Cast { sql_type, .. } => Some(*sql_type),
             ExprKind::Unary(UnaryOperator::Minus | UnaryOperator::Plus, operand) => {
                 self.declared_type(operand)

@@ -52,8 +52,14 @@ impl SqlState {
     pub const UNDEFINED_COLUMN: Self = Self(*b"42703");
     /// `42704` undefined_object.
     pub const UNDEFINED_OBJECT: Self = Self(*b"42704");
+    /// `42712` duplicate_alias.
+    pub const DUPLICATE_ALIAS: Self = Self(*b"42712");
+    /// `42803` grouping_error.
+    pub const GROUPING_ERROR: Self = Self(*b"42803");
     /// `42804` datatype_mismatch.
     pub const DATATYPE_MISMATCH: Self = Self(*b"42804");
+    /// `42809` wrong_object_type.
+    pub const WRONG_OBJECT_TYPE: Self = Self(*b"42809");
     /// `42846` cannot_coerce.
     pub const CANNOT_COERCE: Self = Self(*b"42846");
     /// `42883` undefined_function.

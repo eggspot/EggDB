@@ -4190,3 +4190,105 @@ a Mac, since CI's `compare` job runs on Linux only (D94); the Linux lines are th
 direct `INSERT` path, the stated price of the speed; Linux peak memory moves within its lines
 (3,053,568 bytes for `--version`, 5,687,296 for a `get`, about 10 KB above them, from the larger
 binary the loader maps), which stay as they are.
+
+## D100 Joins and GROUP BY in the SQL core: left-to-right joins by key lookup, hash table or nested loop, grouping in a hash table, a 1 GiB bound per statement, and the join's gap to SQLite gated and scheduled — Decided by research (build loop, 2026-10-27); plan item 19b, refines D98, applies D7, D6 and D9
+**What runs.** `SELECT` takes inner, left and cross joins (`ON`, `USING`, comma joins, aliases,
+`alias.name`, `alias.*`), `GROUP BY` with `count`, `sum`, `avg`, `min` and `max` (with
+`DISTINCT`), `HAVING` and `SELECT DISTINCT`, with PostgreSQL's results and SQLSTATEs from its
+documentation (the SELECT reference and "Aggregate Functions"): `42702` ambiguous columns,
+`42712` a table named twice, `42803` ungrouped columns and misplaced aggregates, `42809`,
+`42P10`. `RIGHT`, `FULL` and `NATURAL` joins, subqueries in `FROM`, `GROUPING SETS`, window
+functions and the other aggregates answer `0A000`.
+
+**How it runs.** A `FROM` list is a chain of tables joined left to right as written; a `JOIN`
+binds tighter than a comma, so an `ON` sees only the tables since the last comma. The first table
+streams (by key when `WHERE` fixes its primary key); each later table is read once when the
+statement starts: by its primary key per row when the `ON`/`USING` equalities fix all of it,
+into a hash table when they equate plain columns of the same type family (integers, floats,
+text, booleans, so equal values hash equally), or into a list for a nested loop otherwise. The
+whole `ON` condition is evaluated on every candidate, so the access path never changes a
+result. Column references in conditions, grouping keys and aggregate arguments are bound to row
+offsets when the statement is planned. Groups live in a hash table keyed by an encoding under
+which values that compare equal are equal bytes; aggregates and `HAVING`, select items and
+`ORDER BY` items are rewritten over the group's row (keys, then carried columns and aggregate
+results), which is where `42803` is decided.
+
+**Decided by research.**
+- `avg` over integer types and `sum` over `bigint` return `numeric` in PostgreSQL, which EggDB
+  does not have yet. `avg` over integers fails with `0A000` (at planning when the argument's type
+  is known, else at the first value) and a hint to cast; returning `double precision` would print
+  `2.5` where PostgreSQL prints `2.5000000000000000`, a different answer. `sum(bigint)` runs where
+  its value prints the same as `numeric`'s: a whole select item, a whole `ORDER BY` item, or a side
+  of a comparison, while the sum fits in 64 bits; inside arithmetic, or past 64 bits, `0A000`.
+- PostgreSQL's functional dependency rule is implemented: when a table's whole primary key is
+  grouped, its other columns may be used ungrouped, taken from the group's first row. Leaving it
+  out would fail statements PostgreSQL runs with `42803`, which is not a `0A000`.
+- Groups and `DISTINCT` rows come out in first-seen order, which is deterministic but not
+  promised, as in PostgreSQL.
+- What a statement holds (right-hand tables of joins, groups, distinct values, sorted rows and
+  the result) is counted, and past 1 GiB the statement fails with `53200` and a hint, so hostile
+  input such as a huge cross join cannot exhaust the process (D9). Spilling to disk comes later.
+- The benchmarks live in `eggdb-sqlite-compare` only, as `ratio_to_sqlite` lines: the same SQL
+  text on both engines is the D7 measure, and `eggdb-bench` has no SQL harness to compare with.
+
+**Speed (D7).** `sqlite_compare.sql_group_by` (four aggregates over 10,000 rows in 100 groups)
+and `sqlite_compare.sql_join` (10,000 orders joined to people by primary key, filtered and
+summed) were first measured at 1.32 and 4.35 times SQLite 3.54.1's time on an Apple-silicon Mac.
+A first round (column references bound to row offsets at planning, reused key buffers) brought
+them to 1.06 and 3.5, and gating that gap was not accepted under D7, so a profile-driven second
+round closed it. The profile showed about 70% of the join's time in the storage engine's point
+lookups, one B+tree descent per order. Changes, in order:
+- only the columns a statement names are decoded: the others are skipped without building a
+  `String` (join 4.3 to 2.8);
+- a table joined by its primary key while the first table is scanned is read once into a hash
+  table on that key, up to 64 MiB, instead of one lookup per row, falling back to lookups past
+  that bound; a first table read by its key still uses lookups (2.8 to 1.2);
+- hash tables keep their rows in one flat array with chained entries and an integer-keyed map
+  for single integer keys (with a per-statement random seed), rows decode into reused buffers,
+  the first table's row buffer is reused, and an `ON` that is exactly the key equality is not
+  evaluated again (1.2 to 1.04);
+- each `AND` part of `WHERE` is evaluated as soon as the tables it names are joined;
+- `GROUP BY` without keys skips hashing, a single-table scan feeding groups decodes into one
+  reused buffer instead of a vector per row, and aggregates check argument types only for
+  values whose type is not always valid (group by 1.13 to 0.94).
+
+Measured on the Mac: `sql_join` 0.99 and `sql_group_by` 0.94. On CI's Linux runners, after a last round (inner-join `WHERE` parts applied while the hash
+table is built; single integer `GROUP BY` keys in an integer map with a seeded 64-bit
+finalizer), `sql_group_by` measures 0.86 (its line is 0.900, above the measured value by the
+spread its earlier runs showed) and `sql_join` 1.40 (from 3.78-3.93; its line is 1.396).
+
+**The Linux join under D7, decided by research.** The gap of about 1.4 on Linux is not shown to be
+unavoidable, and the same code reaches 0.99 on the Mac, so D7's exception is not claimed and D7
+is not met on Linux for this line. As with D99 and D94 (issue #52), the pull request merges under
+a schedule, not a waiver. It improves the Linux ratio about 2.7 times and makes no existing line
+worse. The line is gated at today's value (15% ceiling, may only shrink), and D99's condition
+applies unchanged: at most 1.0 on macOS and Linux before v0.3.0, or a D7 research recorded here.
+Allocation count is not the cause: a test in the compare crate counts the allocations of one
+statement on its own thread and finds 152 for the join over 10,000 rows (189 before its hash
+table was sized from the row count seen at the same commit) and 717 for the `GROUP BY`, a
+statement's worth rather than one per row, and it fails if they pass 300 and 1,000. With that
+sizing the Linux join measured 1.36. The next steps are profiles on Linux x86-64 (`perf`)
+before any change: the hash build (`values`, `next` and the map grow without a reserve, and glibc's allocator costs more
+than Apple's for small vectors), `Value` clones and drops per probe, and the probe loop's branch
+misses against SQLite's rowid seeks on the same machine. They are item 19e.
+
+Both lines are gated with the 15% ceiling of D99's SQL lines and may only shrink. The known
+cost of the hash choice without table statistics: joining a small filtered first table to a
+very large table by its key reads up to 64 MiB of the large one before it falls back to
+lookups; statistics come later. **The Linux point-select line, decided by research.** On CI's Linux runners
+`sql_point_select` measured 0.92-1.04 across eight runs of this pull request, against a line of
+0.851 taken from one run of #55; main's own run after #55 merged measured 0.905, and the runners'
+absolute times vary from 1.43 to 2.66 µs per select with the ratio moving with them. A
+deterministic A/B on an Apple-silicon Mac, the same harness with main's `eggdb-sql` sources
+swapped in, measured the single-table point select at 1,321 ns per select on this branch and
+1,323 ns on main (best of 7 runs of 100,000 selects): the SQL layer's point-select path did not
+get slower. Research concluded that the 0.851 line was a low sample, and that widening only that
+line to 0.910 (limit 1.047, above every observed run) with this record is justified, where an
+unexplained loosening would not be. The macOS line stays at 1.226, and D99's condition (at most
+1.0 before v0.3.0) is unchanged.
+
+**Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to {M:,} bytes on
+aarch64 macOS (+{M-1198032:,}, +{(M-1198032)/1198032*100:.1f}%) for the join planner and executor, the hash join, column pruning,
+the grouping rewrite and the aggregate states; start time and peak memory stay within their lines (1,671,168 and 2,359,296
+bytes peak). On x86-64 Linux it grows from 1,461,576 to 1,595,088 bytes (+133,512, +9.1%) with the
+hash join and column pruning; peak memory stays within its lines.

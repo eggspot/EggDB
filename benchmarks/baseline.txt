@@ -51,7 +51,7 @@ linux btree.scan_reverse ratio_to_std_btreemap 5.586
 linux database.open ratio_to_store_open 1.002
 linux database.read ratio_to_store_read 1.006
 linux database.write ratio_to_store_commit 0.997
-linux footprint.binary stripped_release_bytes 1461576
+linux footprint.binary stripped_release_bytes 1595088
 linux footprint.open_and_get peak_resident_bytes 5670912
 linux footprint.open_and_get ratio_to_a_program_that_exits_at_once 1.421
 linux footprint.start peak_resident_bytes 3043328
@@ -64,7 +64,9 @@ linux sqlite_compare.batch_put ratio_to_sqlite 0.606
 linux sqlite_compare.get ratio_to_sqlite 0.691
 linux sqlite_compare.scan ratio_to_sqlite 0.390
 linux sqlite_compare.sql_bulk_insert ratio_to_sqlite 0.833
-linux sqlite_compare.sql_point_select ratio_to_sqlite 0.851
+linux sqlite_compare.sql_group_by ratio_to_sqlite 0.900
+linux sqlite_compare.sql_join ratio_to_sqlite 1.396
+linux sqlite_compare.sql_point_select ratio_to_sqlite 0.910
 linux transaction.read ratio_to_btree_get 1.004
 linux transaction.write ratio_to_page_cache_commit 1.024
 macos btree.delete ratio_to_std_btreemap 2.226
@@ -75,7 +77,7 @@ macos btree.scan_reverse ratio_to_std_btreemap 7.586
 macos database.open ratio_to_store_open 1.004
 macos database.read ratio_to_store_read 1.023
 macos database.write ratio_to_store_commit 1.009
-macos footprint.binary stripped_release_bytes 1198032
+macos footprint.binary stripped_release_bytes 1297376
 macos footprint.open_and_get peak_resident_bytes 2310144
 macos footprint.open_and_get ratio_to_a_program_that_exits_at_once 1.046
 macos footprint.start peak_resident_bytes 1654784
@@ -88,6 +90,8 @@ macos sqlite_compare.batch_put ratio_to_sqlite 0.693
 macos sqlite_compare.get ratio_to_sqlite 0.752
 macos sqlite_compare.scan ratio_to_sqlite 0.584
 macos sqlite_compare.sql_bulk_insert ratio_to_sqlite 0.885
+macos sqlite_compare.sql_group_by ratio_to_sqlite 0.939
+macos sqlite_compare.sql_join ratio_to_sqlite 0.990
 macos sqlite_compare.sql_point_select ratio_to_sqlite 1.226
 macos transaction.read ratio_to_btree_get 1.0
 macos transaction.write ratio_to_page_cache_commit 1.035
