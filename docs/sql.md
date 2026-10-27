@@ -11,9 +11,12 @@ Run it with [`eggdb sql`](cli.md#eggdb-sql):
 eggdb sql --create shop.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL, price double precision)"
 eggdb sql shop.db -c "INSERT INTO items VALUES (1, 'egg', 0.25), (2, 'bread', 2.5) RETURNING id"
 eggdb sql shop.db -c "SELECT name, price * 2 AS doubled FROM items WHERE price > 1 ORDER BY name"
+eggdb sql shop.db -c "CREATE TABLE sales (id integer PRIMARY KEY, item_id integer, quantity integer)"
+eggdb sql shop.db -c "SELECT i.name, count(s.id), sum(s.quantity) FROM items i LEFT JOIN sales s ON s.item_id = i.id GROUP BY i.id ORDER BY 3 DESC"
 ```
 
-This is part 1 of the SQL core (roadmap item 19). What comes next is listed at the end.
+These are the first parts of the SQL core (roadmap items 19 and 19b). What comes next is listed
+at the end.
 
 ## What runs today
 
@@ -25,9 +28,29 @@ This is part 1 of the SQL core (roadmap item 19). What comes next is listed at t
   one transaction.
 - `INSERT INTO name [(columns)] VALUES (...), (...) | DEFAULT VALUES [RETURNING items]`, with
   `DEFAULT` in a values list.
-- `SELECT items [FROM name [[AS] alias]] [WHERE expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
-  `ORDER BY` takes an output column's number or alias, or any expression over the table; a
-  `SELECT` without `FROM` returns one row.
+- `SELECT [ALL | DISTINCT] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY expr, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
+  `ORDER BY` takes an output column's number or alias, or any expression over the tables (with
+  `DISTINCT`, only expressions in the select list, else `42P10`); a `SELECT` without `FROM`
+  returns one row.
+- **Joins**: `a [INNER] JOIN b ON cond`, `a LEFT [OUTER] JOIN b ON cond`, `JOIN ... USING (columns)`,
+  `a CROSS JOIN b` and `FROM a, b`, chained left to right, each table with an optional alias.
+  Columns are named `name` or `alias.name`; `alias.*` expands one table and `*` all of them,
+  with a `USING` column once, first, as PostgreSQL does. A left join extends a left row that
+  matches nothing with NULLs; conditions in `ON` decide the match, conditions in `WHERE`
+  filter afterwards. A `JOIN` binds tighter than a comma, so `FROM a, b JOIN c ON ...` cannot
+  name `a` in its `ON` (`42P01`, "invalid reference to FROM-clause entry").
+- **Grouping**: `GROUP BY` takes expressions over the tables, an output column's number, or an
+  output alias that is not also an input column. Every column the select list, `HAVING` or
+  `ORDER BY` uses outside an aggregate must be grouped (`42803`), except the columns of a table
+  whose whole primary key is grouped, as PostgreSQL allows. A query with an aggregate or
+  `HAVING` and no `GROUP BY` returns one row, even over no rows. Groups come out in no promised
+  order; use `ORDER BY`.
+- **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`, each with `DISTINCT` or
+  `ALL`. They skip NULLs; `count` of nothing is 0, the others are NULL. Result types are
+  PostgreSQL's: `count` is `bigint`; `sum` of `smallint` or `integer` is `bigint`, of `real` is
+  `real`, of `double precision` is `double precision`; `avg` of a float is `double precision`;
+  `min` and `max` keep their argument's type and order NaN above every number, as `ORDER BY`
+  does. `sum` and `avg` of text, and `min` and `max` of booleans, fail with `42883`, as there.
 - `UPDATE name [[AS] alias] SET column = expr | DEFAULT, ... [WHERE expr] [RETURNING items]`.
   Changing a primary key moves the row; the uniqueness check runs after every row moved, so
   `UPDATE t SET id = id + 1` succeeds (PostgreSQL may refuse it, depending on the order it
@@ -79,7 +102,9 @@ names are cut to 63 bytes, and `public.name` is the same table as `name`.
 
 **Errors** carry PostgreSQL's SQLSTATE codes and messages, with the position they refer to:
 `42601` syntax errors (`syntax error at or near "x"`), `42P01` unknown tables, `42703` unknown
-columns, `42P07` a table that exists, `23505` a duplicate primary key (with
+columns, `42702` an ambiguous column, `42712` a table named twice in `FROM`, `42803` an ungrouped
+column or an aggregate where none is allowed (`WHERE`, `ON`, `GROUP BY`, `UPDATE`, `VALUES`,
+`RETURNING`, `DEFAULT`, `LIMIT`), `42809` `sum(*)` and `count()`, `42P07` a table that exists, `23505` a duplicate primary key (with
 `Key (id)=(1) already exists.`), `23502` a NULL in a `NOT NULL` column, `22P02` text that is
 not a number, `42804` and `42883` type mismatches, `25P02` statements in a failed block, `0A000`
 what is not supported yet. An expression nested, or a chain of operators or casts, deeper than 64 levels fails with
@@ -132,9 +157,27 @@ exports into a new file, or into a file without SQL tables.
 
 ## Limits of this part
 - One statement at a time is planned by simple rules: a `WHERE` that fixes every primary-key
-  column with `=` reads one row; anything else reads the whole table. Each statement's result
+  column with `=` reads one row (in a join, of the first table); anything else reads the whole
+  table. Each statement's result
   is built in memory before it prints (a `SELECT` without `ORDER BY` holds only the rows it
   returns; `ORDER BY` holds every matching row and sorts them, with no top-N for `LIMIT` yet).
+- Joins read the first table row by row and every later table once: a table whose whole
+  primary key the `ON` or `USING` equalities fix is read by key for each row; one joined by
+  other equalities of plain columns of the same kind of type (integers, floats, text, booleans)
+  is held in a hash table; anything else is held in memory and tried against each row. Joins go
+  left to right as written, with no reordering, and `WHERE` is applied to the joined rows
+  (except a key lookup on the first table). `GROUP BY` holds one entry per group, `DISTINCT` one
+  per distinct row or value. What a statement holds this way (joined tables, groups, distinct
+  rows, sorted rows and its result) is counted, and past 1 GiB the statement fails with `53200`
+  (`out of memory`) instead of exhausting the process; nothing spills to disk yet.
+- `avg` of `smallint`, `integer` or `bigint` returns PostgreSQL's `numeric`, which is not
+  supported yet: it fails with `0A000` and a hint to write `avg(x::double precision)`. `sum` of
+  `bigint` is also `numeric` there: it runs where its value prints the same (a select item, an
+  `ORDER BY` item, either side of a comparison) while the sum fits in a `bigint`, and fails with
+  `0A000` inside arithmetic or past 64 bits.
+- `RIGHT`, `FULL` and `NATURAL` joins, subqueries in `FROM`, `LATERAL`, `DISTINCT ON`,
+  `GROUPING SETS`, `ROLLUP` and `CUBE`, window functions, `FILTER`, ordered aggregates and the
+  other aggregates (`string_agg`, `bool_and`, `array_agg`, ...) fail with `0A000`.
   When the output stops being read (`eggdb sql ... | head`), the command stops before the next
   statement.
 - `UPDATE` and `DELETE` collect the rows they change before changing them, in memory.
@@ -156,13 +199,15 @@ exports into a new file, or into a file without SQL tables.
 - Speed: a point `SELECT` by primary key takes about 1.2 times SQLite's time on an
   Apple-silicon Mac (0.85 on CI's Linux runners), and multi-row `INSERT`s of constants about 0.9
   times (0.83 on Linux), measured with the same SQL text on both and gated so they can only improve; the rest of
-  the point-select gap is roadmap item 19e (D99).
+  the point-select gap is roadmap item 19e (D99). A `GROUP BY` with four aggregates over 10,000
+  rows takes about 1.06 times SQLite's time, and a 10,000-row join by primary key about 3.5
+  times, gated the same way and scheduled in item 19e (D100).
 
 ## Next parts (roadmap)
-- Joins: inner and left joins (`JOIN ... ON`, `USING`, comma joins).
-- `GROUP BY` with `count`, `sum`, `avg`, `min`, `max`, `HAVING`, and `DISTINCT`.
 - Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.
 - The `numeric`, `timestamp` and `json`/`jsonb` types, and `serial`/identity columns.
-- Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
-  cache.
+- Point `SELECT`s and joins as fast as SQLite's everywhere: an AST that borrows the SQL text, a
+  plan cache, decoding only the columns a query reads, and `WHERE` conditions evaluated inside
+  the join.
+- `RIGHT` and `FULL` joins, subqueries, and the other aggregates.
 - Then `eggdb shell`, the PostgreSQL wire protocol, and the other dialects (items 20 to 25).
