@@ -5,10 +5,11 @@ use crate::encoding::{
 };
 use crate::error::SqlResult;
 use crate::eval::{Evaluator, Scope, check_columns};
-use crate::indexes::row_key_of_entry;
+use crate::indexes::{entry_key, row_key_of_entry};
 use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 const MOST_RANGES: usize = 256;
 
@@ -300,33 +301,72 @@ fn with(prefix: &[u8], tail: &[u8]) -> Vec<u8> {
     key
 }
 
+#[derive(Default)]
+struct ColumnBounds {
+    equal: Option<(Vec<Vec<u8>>, bool)>,
+    lower: Option<(Vec<u8>, bool)>,
+    upper: Option<(Vec<u8>, bool)>,
+    prefix: Option<Vec<u8>>,
+}
+
+fn bounds_by_column(found: Vec<Predicate>) -> BTreeMap<usize, ColumnBounds> {
+    let mut bounds: BTreeMap<usize, ColumnBounds> = BTreeMap::new();
+    for predicate in found {
+        let column = bounds.entry(predicate.column).or_default();
+        match predicate.bound {
+            Bound::Equal(values) if column.equal.is_none() => {
+                let has_null = values.iter().any(Value::is_null);
+                let mut keys: Vec<Vec<u8>> = values.iter().map(encoded).collect();
+                keys.sort();
+                keys.dedup();
+                column.equal = Some((keys, has_null));
+            }
+            Bound::Lower(value, inclusive) if column.lower.is_none() => {
+                column.lower = Some((encoded(&value), inclusive));
+            }
+            Bound::Upper(value, inclusive) if column.upper.is_none() => {
+                column.upper = Some((encoded(&value), inclusive));
+            }
+            Bound::Prefix(text) if column.prefix.is_none() => {
+                let mut start = encoded(&Value::Text(text));
+                start.truncate(start.len().saturating_sub(2));
+                column.prefix = Some(start);
+            }
+            _ => {}
+        }
+    }
+    bounds
+}
+
 fn candidate(
+    table: &TableDefinition,
     key: KeyChoice,
-    prefix: Vec<u8>,
     columns: &[usize],
     unique: bool,
-    order_columns: Vec<usize>,
-    found: &[Predicate],
+    bounds: &BTreeMap<usize, ColumnBounds>,
 ) -> Option<Candidate> {
-    let mut points = vec![prefix];
+    let first = columns.first().and_then(|column| bounds.get(column))?;
+    if first.equal.is_none()
+        && first.lower.is_none()
+        && first.upper.is_none()
+        && first.prefix.is_none()
+    {
+        return None;
+    }
+    let mut points = vec![key_prefix(table, key)];
     let mut equal = 0;
     let mut single = true;
     let mut has_null = false;
     let mut conditions = Vec::new();
     for &column in columns {
-        let Some(values) = found.iter().find_map(|predicate| match &predicate.bound {
-            Bound::Equal(values) if predicate.column == column => Some(values),
-            _ => None,
-        }) else {
+        let Some((keys, nulls)) = bounds.get(&column).and_then(|bounds| bounds.equal.as_ref())
+        else {
             break;
         };
-        let mut keys: Vec<Vec<u8>> = values.iter().map(encoded).collect();
-        keys.sort();
-        keys.dedup();
         if points.len().saturating_mul(keys.len()) > MOST_RANGES {
             break;
         }
-        has_null |= values.iter().any(Value::is_null);
+        has_null |= *nulls;
         single &= keys.len() == 1;
         points = points
             .iter()
@@ -337,30 +377,23 @@ fn candidate(
     }
     let mut lower = None;
     let mut upper = None;
-    let mut like = None;
-    if let Some(&column) = columns.get(equal) {
-        for predicate in found.iter().filter(|predicate| predicate.column == column) {
-            match &predicate.bound {
-                Bound::Lower(value, inclusive) if lower.is_none() => {
-                    lower = Some((encoded(value), *inclusive));
-                    conditions.push((column, if *inclusive { ">=" } else { ">" }));
-                }
-                Bound::Upper(value, inclusive) if upper.is_none() => {
-                    upper = Some((encoded(value), *inclusive));
-                    conditions.push((column, if *inclusive { "<=" } else { "<" }));
-                }
-                Bound::Prefix(text) if like.is_none() => like = Some(text.clone()),
-                _ => {}
-            }
+    if let Some(&column) = columns.get(equal)
+        && let Some(found) = bounds.get(&column)
+    {
+        lower = found.lower.clone();
+        upper = found.upper.clone();
+        if let Some((_, inclusive)) = &lower {
+            conditions.push((column, if *inclusive { ">=" } else { ">" }));
+        }
+        if let Some((_, inclusive)) = &upper {
+            conditions.push((column, if *inclusive { "<=" } else { "<" }));
         }
         if lower.is_none()
             && upper.is_none()
-            && let Some(text) = &like
+            && let Some(start) = &found.prefix
         {
-            let mut start = encoded(&Value::Text(text.clone()));
-            start.truncate(start.len().saturating_sub(2));
             lower = Some((start.clone(), true));
-            upper = Some((prefix_end(&start), false));
+            upper = Some((prefix_end(start), false));
             conditions.push((column, ">="));
             conditions.push((column, "<"));
         }
@@ -396,7 +429,7 @@ fn candidate(
         width: columns.len(),
         ranges,
         conditions,
-        order_columns,
+        order_columns: key_columns(table, key),
     })
 }
 
@@ -463,29 +496,17 @@ pub(crate) fn plan(
             predicates(part, table, scope, &mut found);
         }
     }
-    let mut keys = Vec::new();
+    let mut keys: Vec<(KeyChoice, &[usize], bool)> = Vec::new();
     if !table.primary_key.is_empty() {
-        keys.push((KeyChoice::Primary, table.primary_key.clone(), true));
+        keys.push((KeyChoice::Primary, &table.primary_key, true));
     }
     for (position, index) in table.indexes.iter().enumerate() {
-        keys.push((
-            KeyChoice::Index(position),
-            index.columns.clone(),
-            index.unique,
-        ));
+        keys.push((KeyChoice::Index(position), &index.columns, index.unique));
     }
+    let bounds = bounds_by_column(found);
     let best = keys
         .iter()
-        .filter_map(|(key, columns, unique)| {
-            candidate(
-                *key,
-                key_prefix(table, *key),
-                columns,
-                *unique,
-                key_columns(table, *key),
-                &found,
-            )
-        })
+        .filter_map(|(key, columns, unique)| candidate(table, *key, columns, *unique, &bounds))
         .max_by(|left, right| left.score().cmp(&right.score()));
     if let Some(best) = best {
         let direction = order
@@ -572,7 +593,7 @@ pub(crate) fn read_ranges(
                     let found = reader.get_with(&row_key, &mut |bytes| {
                         decode_row_into(bytes, &table.columns, None, &mut row)
                     })?;
-                    if !found {
+                    if !found || entry_key(table, index, &row, &row_key) != entry {
                         return Err(crate::encoding::corrupt("index entry"));
                     }
                     going = visit(&row_key, row)?;

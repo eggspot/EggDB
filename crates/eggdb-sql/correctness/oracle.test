@@ -993,3 +993,22 @@ DROP INDEX staff_dept_ix
 
 ok
 DROP TABLE staff
+
+chapter "CREATE INDEX": PostgreSQL's ONLY, USING, NULLS FIRST and COLLATE are not Oracle syntax
+ok
+CREATE TABLE gated (a NUMBER(9))
+
+error 42601
+CREATE INDEX g ON ONLY gated (a)
+
+error 42601
+CREATE INDEX g ON gated USING btree (a)
+
+error 42601
+CREATE INDEX g ON gated (a NULLS FIRST)
+
+error 42601
+CREATE INDEX g ON gated (a COLLATE binary)
+
+ok
+DROP TABLE gated

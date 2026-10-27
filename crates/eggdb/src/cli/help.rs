@@ -245,8 +245,8 @@ Results print as aligned tables, like psql. Each statement outside BEGIN ... COM
 transaction; in Oracle's dialect the first change starts a transaction that COMMIT, ROLLBACK
 or DDL ends, and the run commits it at the end, as SQL*Plus does. The first failing statement
 stops the run with exit 3 and the dialect's error on stderr; statements before it stay
-committed, and a block left open is rolled back. Indexes, more types and the rest come next
-(docs/sql.md).
+committed, and a block left open is rolled back. CREATE INDEX and UNIQUE speed up WHERE and
+ORDER BY in every dialect; more types and the rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
       --dialect <name>  postgresql (default), mysql, sqlite or oracle

@@ -680,3 +680,25 @@ DROP INDEX by_team ON members
 
 ok
 DROP TABLE members
+
+chapter "CREATE INDEX Statement": PostgreSQL's ONLY, USING after the table, NULLS FIRST and COLLATE are not MySQL syntax
+ok
+CREATE TABLE gated (a INT)
+
+error 42000 1064
+CREATE INDEX g ON ONLY gated (a)
+
+error 42000 1064
+CREATE INDEX g ON gated USING btree (a)
+
+error 42000 1064
+CREATE INDEX g ON gated (a NULLS FIRST)
+
+error 42000 1064
+CREATE INDEX g ON gated (a COLLATE binary)
+
+error 42000 1064
+CREATE INDEX g ON gated (a) WHERE a > 0
+
+ok
+DROP TABLE gated

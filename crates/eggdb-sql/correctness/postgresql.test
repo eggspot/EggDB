@@ -1126,3 +1126,16 @@ CREATE INDEX CONCURRENTLY ON accounts (score)
 
 ok
 DROP TABLE accounts
+
+chapter sql-createindex: ONLY, USING, NULLS and the C collation
+ok
+CREATE TABLE gated (a integer)
+
+ok
+CREATE INDEX g ON ONLY gated USING btree (a COLLATE "C" DESC NULLS FIRST)
+
+error 0A000
+CREATE INDEX g2 ON gated (a COLLATE "de_DE")
+
+ok
+DROP TABLE gated

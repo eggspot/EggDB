@@ -640,3 +640,113 @@ fn hostile_index_statements_return_errors_and_never_panic() {
         assert!(session.check_indexes().is_ok(), "{dialect:?}");
     }
 }
+
+fn entry_of(prefix: &[u8], value: i32, id: i32) -> Vec<u8> {
+    let mut key = prefix.to_vec();
+    crate::encoding::encode_key_value(&mut key, &crate::Value::Integer(value));
+    crate::encoding::encode_key_value(&mut key, &crate::Value::Integer(id));
+    key
+}
+
+#[test]
+fn an_index_entry_that_disagrees_with_its_row_is_damage_not_a_wrong_answer() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    numbered(&mut session, 50);
+    last(
+        &mut session,
+        "CREATE INDEX t_b ON t (b); CREATE TABLE u (id integer PRIMARY KEY, t_b integer); INSERT INTO u VALUES (1, 7)",
+    );
+    let mut damaged = store.snapshot();
+    let prefix = damaged
+        .keys()
+        .find(|key| key[5] == 0x04)
+        .map(|key| key[..14].to_vec())
+        .unwrap();
+    assert!(damaged.remove(&entry_of(&prefix, 8, 8)).is_some());
+    damaged.insert(entry_of(&prefix, 7, 8), Vec::new());
+    store.restore(damaged);
+    for query in [
+        "SELECT id FROM t WHERE b = 7",
+        "SELECT t.id FROM u JOIN t ON t.b = u.t_b WHERE u.id = 1",
+    ] {
+        let error = fails(&mut session, query);
+        assert_eq!(error.state().code(), "XX001", "{query}: {error}");
+    }
+    assert_eq!(session.check_indexes().unwrap_err().state().code(), "XX001");
+}
+
+#[test]
+fn a_catalog_with_a_table_number_twice_or_a_name_that_is_not_utf8_is_damaged() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    numbered(&mut session, 3);
+    let good = store.snapshot();
+    let mut table_key = crate::encoding::NAMESPACE.to_vec();
+    table_key.push(0x02);
+    let definition = good
+        .get(&[table_key.as_slice(), b"t"].concat())
+        .unwrap()
+        .clone();
+    let mut twice = good.clone();
+    twice.insert([table_key.as_slice(), b"t2"].concat(), definition.clone());
+    store.restore(twice);
+    assert_eq!(session.check_indexes().unwrap_err().state().code(), "XX001");
+    assert_eq!(
+        fails(&mut session, "CREATE INDEX t_b ON t (b)")
+            .state()
+            .code(),
+        "XX001"
+    );
+    let mut not_utf8 = good.clone();
+    not_utf8.insert([table_key.as_slice(), &[0xFF]].concat(), definition);
+    store.restore(not_utf8);
+    assert_eq!(session.check_indexes().unwrap_err().state().code(), "XX001");
+    store.restore(good);
+    assert!(session.check_indexes().is_ok());
+}
+
+#[test]
+fn postgresql_index_syntax_is_a_syntax_error_in_the_other_dialects() {
+    for (dialect, create) in [
+        (Dialect::MySql, "CREATE TABLE g (a INT)"),
+        (Dialect::Sqlite, "CREATE TABLE g (a INTEGER)"),
+        (Dialect::Oracle, "CREATE TABLE g (a NUMBER(9))"),
+    ] {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        last(&mut session, create);
+        for sql in [
+            "CREATE INDEX i ON ONLY g (a)",
+            "CREATE INDEX i ON g USING btree (a)",
+            "CREATE INDEX i ON g (a NULLS FIRST)",
+        ] {
+            let error = fails(&mut session, sql);
+            let shown = error.to_string();
+            let expected = match dialect {
+                Dialect::MySql => {
+                    shown.contains("You have an error in your SQL syntax")
+                        && error.vendor_code() == Some(1064)
+                }
+                Dialect::Sqlite => {
+                    shown.ends_with(": syntax error") && error.vendor_code() == Some(1)
+                }
+                _ => {
+                    shown.contains("SQL command not properly ended")
+                        && error.vendor_code() == Some(933)
+                }
+            };
+            assert!(expected, "{dialect:?} {sql}: {shown}");
+        }
+    }
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    last(&mut session, "CREATE TABLE g (a TEXT)");
+    let nocase = fails(&mut session, "CREATE INDEX i ON g (a COLLATE NOCASE)");
+    assert_eq!(nocase.state().code(), "0A000");
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    assert_eq!(
+        fails(&mut mysql, "CREATE INDEX i ON g (a COLLATE utf8mb4_bin)").vendor_code(),
+        Some(1064)
+    );
+}

@@ -486,6 +486,13 @@ the same as a full scan's: a test runs random queries and changes with and witho
 compares them. A constant that converts to the column's type inexactly (`int_column > 2.5`)
 and `OR` do not use an index yet.
 
+**Size of an entry.** An index entry's key is 14 bytes, then the indexed values (a number is
+its width plus one byte, a text value its UTF-8 length plus three bytes), then the row's primary
+key encoded the same way. It must fit the store's largest key, an eighth of a page: 512 bytes
+with the default 4 KiB pages ([embedded.md](embedded.md)). A longer entry fails the statement
+with `54000` (`a key of 522 bytes is longer than the 512 bytes a key may have with this page
+size`), so index long text columns only with a larger page size.
+
 **Checking.** `Session::check_indexes` (the embedded API) reads every table and checks that each
 row has exactly its entries, no entry lacks a row, every entry decodes and no unique index holds
 a value twice; a disagreement is `XX001` naming the index, repaired by dropping and creating it

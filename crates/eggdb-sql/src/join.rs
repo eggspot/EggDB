@@ -10,7 +10,7 @@ use crate::eval::{
     Evaluator, Scope, Source, Sources, check_columns, children, compare_truth, reject_aggregates,
 };
 use crate::hash_index::HashIndex;
-use crate::indexes::row_key_of_entry;
+use crate::indexes::{entry_key, row_key_of_entry};
 use crate::memory::WorkMemory;
 use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert};
@@ -571,7 +571,7 @@ impl<'a> JoinedRows<'a> {
         for (index, shape) in joined.shapes.iter().enumerate() {
             let table = shape.source.table;
             let offset = shape.source.offset;
-            let step_needed = std::mem::take(&mut needed[index + 1]);
+            let mut step_needed = std::mem::take(&mut needed[index + 1]);
             let scope = Scope::Many(&shape.visible);
             let pairs = equality_pairs(shape);
             let own = offset..offset + table.columns.len();
@@ -706,6 +706,13 @@ impl<'a> JoinedRows<'a> {
                 })?;
                 Access::Scan(rows)
             };
+            if let Access::IndexLookup { position, .. } = &access {
+                for &column in &table.indexes[*position].columns {
+                    if let Some(slot) = step_needed.get_mut(column) {
+                        *slot = true;
+                    }
+                }
+            }
             let prefix = rows_prefix(table.id);
             steps.push(Step {
                 prefix_length: prefix.len(),
@@ -864,13 +871,18 @@ impl<'a> JoinedRows<'a> {
         self.reader
             .scan(&start, &end, ScanDirection::Forward, &mut |entry, _| {
                 let key = row_key_of_entry(table, index, entry)?;
+                let base = row.len();
                 let mut found = false;
                 self.reader.get_with(&key, &mut |bytes| {
                     decode_row_into(bytes, &table.columns, Some(&step.needed), row)?;
                     found = true;
                     Ok(())
                 })?;
-                if !found {
+                let matches = found
+                    && row
+                        .get(base..)
+                        .is_some_and(|inner| entry_key(table, index, inner, &key) == entry);
+                if !matches {
                     return Err(crate::encoding::corrupt("index entry"));
                 }
                 going = attempt(row)?;

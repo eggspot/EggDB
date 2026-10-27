@@ -32,9 +32,12 @@ impl Parser<'_> {
             self.index_method()?;
         }
         self.expect_word("on")?;
-        self.take_word("only");
+        let postgresql = !self.mysql() && !self.sqlite() && !self.oracle();
+        if postgresql {
+            self.take_word("only");
+        }
         let table = self.table_name()?;
-        if !self.mysql() {
+        if postgresql {
             self.index_method()?;
         }
         let columns = self.index_column_list(unique)?;
@@ -88,9 +91,12 @@ impl Parser<'_> {
             } else if self.oracle() && self.is_word("compute") {
                 self.at += 1;
                 self.expect_word("statistics")?;
-            } else if self.is_word("where") {
+            } else if self.is_word("where") && !self.mysql() && !self.oracle() {
                 return Err(self.not_supported("partial indexes (CREATE INDEX ... WHERE)"));
-            } else if self.is_word("include") || self.is_word("with") || self.is_word("tablespace")
+            } else if !self.mysql()
+                && !self.sqlite()
+                && !self.oracle()
+                && (self.is_word("include") || self.is_word("with") || self.is_word("tablespace"))
             {
                 return Err(self.not_supported("index options"));
             } else {
@@ -136,14 +142,20 @@ impl Parser<'_> {
             if self.peek_kind() == &TokenKind::LeftParen {
                 return Err(self.not_supported("indexes on expressions"));
             }
-            if self.take_word("collate") {
+            let postgresql = !self.mysql() && !self.sqlite() && !self.oracle();
+            if (postgresql || self.sqlite()) && self.take_word("collate") {
                 let collation = self.label()?;
-                if !(collation.eq_ignore_ascii_case("binary") || collation == "C") {
+                let byte_order = if self.sqlite() {
+                    collation.eq_ignore_ascii_case("binary")
+                } else {
+                    collation == "C" || collation == "POSIX"
+                };
+                if !byte_order {
                     return Err(self.not_supported("index columns with a collation"));
                 }
             }
             let _ = self.take_word("asc") || self.take_word("desc");
-            if self.take_word("nulls") && !self.take_word("first") {
+            if postgresql && self.take_word("nulls") && !self.take_word("first") {
                 self.expect_word("last")?;
             }
             if columns.iter().any(|known: &Name| known.text == column.text) {

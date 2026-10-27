@@ -192,15 +192,22 @@ fn duplicate_in_backfill(
 pub(crate) fn every_table(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableDefinition>> {
     let prefix = table_key("");
     let end = prefix_end(&prefix);
-    let mut tables = Vec::new();
+    let mut tables: Vec<TableDefinition> = Vec::new();
+    let mut numbers = std::collections::HashSet::new();
     let mut failure = None;
     reader.scan(&prefix, &end, ScanDirection::Forward, &mut |key, value| {
-        let Some(name) = key.get(prefix.len()..) else {
+        let Some(name) = key
+            .get(prefix.len()..)
+            .and_then(|name| std::str::from_utf8(name).ok())
+        else {
             failure = Some(corrupt("table definition"));
             return Ok(false);
         };
-        let name = String::from_utf8_lossy(name).into_owned();
-        match TableDefinition::decode(&name, value) {
+        match TableDefinition::decode(name, value) {
+            Ok(table) if !numbers.insert(table.id) => {
+                failure = Some(corrupt("table definition"));
+                Ok(false)
+            }
             Ok(table) => {
                 tables.push(table);
                 Ok(true)

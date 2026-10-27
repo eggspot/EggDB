@@ -962,3 +962,22 @@ DROP INDEX pets_kind_age
 
 ok
 DROP TABLE pets
+
+chapter lang_createindex.html: PostgreSQL's ONLY, USING and NULLS FIRST are not SQLite syntax; COLLATE takes SQLite's names
+ok
+CREATE TABLE gated (a INTEGER)
+
+error 42601 1
+CREATE INDEX g ON ONLY gated (a)
+
+error 42601 1
+CREATE INDEX g ON gated USING btree (a)
+
+error 42601 1
+CREATE INDEX g ON gated (a NULLS FIRST)
+
+ok
+CREATE INDEX g ON gated (a COLLATE BINARY DESC)
+
+ok
+DROP TABLE gated
