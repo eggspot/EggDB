@@ -31,10 +31,12 @@ pub struct ColumnSchema {
 
 impl TableSchema {
     /// The `CREATE TABLE` statement that makes this table in `dialect`, ended by `;`:
-    /// SQLite's type names and `INTEGER PRIMARY KEY` in SQLite's, otherwise PostgreSQL's.
+    /// SQLite's type names and `INTEGER PRIMARY KEY` in SQLite's, Oracle's types and upper-case
+    /// names in Oracle's, otherwise PostgreSQL's.
     pub fn create_statement_in(&self, dialect: crate::Dialect) -> String {
         match dialect {
             crate::Dialect::Sqlite => format!("{};", crate::session::sqlite_create_text(self)),
+            crate::Dialect::Oracle => format!("{};", crate::session::oracle_create_text(self)),
             _ => self.create_statement(),
         }
     }

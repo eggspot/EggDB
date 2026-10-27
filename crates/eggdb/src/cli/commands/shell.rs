@@ -130,7 +130,8 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         };
         let color_err = shell.color_err;
         let file = shell.file.clone();
-        (exit, shell.sql.close(), color_err, file)
+        let committed = super::sql::commit_on_exit(&mut shell.sql);
+        (exit, committed.and_then(|()| shell.sql.close()), color_err, file)
     };
     let mut exit = exit?;
     match left_open {
@@ -863,6 +864,8 @@ fn print_sql_error(
     for (index, line) in error_lines(error, text).iter().enumerate() {
         let prefix = if line.starts_with("Error:") {
             "Error:"
+        } else if line.starts_with("ORA-") {
+            line.get(..10).unwrap_or("ORA-")
         } else {
             "ERROR:"
         };

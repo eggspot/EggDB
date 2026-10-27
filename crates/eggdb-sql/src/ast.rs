@@ -17,6 +17,7 @@ pub(crate) enum Statement {
     Reset { name: Option<String> },
     MySql(MySqlStatement),
     Pragma(Pragma),
+    Truncate(TableReference),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -208,6 +209,7 @@ pub(crate) struct Select {
     pub(crate) order_by: Vec<OrderItem>,
     pub(crate) limit: Option<Expr>,
     pub(crate) offset: Option<Expr>,
+    pub(crate) source_row_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,6 +366,10 @@ pub(crate) enum ExprKind {
         arguments: Vec<Expr>,
     },
     SqliteFunction {
+        name: &'static str,
+        arguments: Vec<Expr>,
+    },
+    OracleFunction {
         name: &'static str,
         arguments: Vec<Expr>,
     },

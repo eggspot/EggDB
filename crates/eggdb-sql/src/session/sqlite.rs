@@ -22,7 +22,7 @@ const SCHEMA_COLUMNS: [(&str, SqlType); 5] = [
 const JOURNAL_MODES: [&str; 6] = ["delete", "truncate", "persist", "memory", "wal", "off"];
 
 #[derive(Default)]
-struct Scratch(BTreeMap<Vec<u8>, Vec<u8>>);
+pub(super) struct Scratch(BTreeMap<Vec<u8>, Vec<u8>>);
 
 impl KeyValueRead for Scratch {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {

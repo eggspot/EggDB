@@ -11,18 +11,24 @@ pub enum Dialect {
     /// SQLite's SQL, as sqlite.org documents it: type affinity, `INTEGER PRIMARY KEY` row ids,
     /// `PRAGMA`s, SQLite's functions and SQLite's error messages and result codes.
     Sqlite,
+    /// Oracle Database's SQL, as Oracle's SQL Language Reference documents it: `DUAL`,
+    /// `ROWNUM`, `FETCH FIRST`, Oracle's types and functions, the empty string as NULL, upper-case
+    /// identifiers, implicit transactions and `ORA-` errors. EggDB does not speak Oracle's wire
+    /// protocol.
+    Oracle,
 }
 
 impl Dialect {
     /// Every dialect, in the order the roadmap brought them.
-    pub const ALL: [Self; 3] = [Self::PostgreSql, Self::MySql, Self::Sqlite];
+    pub const ALL: [Self; 4] = [Self::PostgreSql, Self::MySql, Self::Sqlite, Self::Oracle];
 
-    /// The dialect's name as `--dialect` takes it: `postgresql`, `mysql` or `sqlite`.
+    /// The dialect's name as `--dialect` takes it: `postgresql`, `mysql`, `sqlite` or `oracle`.
     pub fn name(self) -> &'static str {
         match self {
             Self::PostgreSql => "postgresql",
             Self::MySql => "mysql",
             Self::Sqlite => "sqlite",
+            Self::Oracle => "oracle",
         }
     }
 
@@ -33,13 +39,15 @@ impl Dialect {
             "postgresql" | "postgres" | "pg" => Some(Self::PostgreSql),
             "mysql" | "mariadb" => Some(Self::MySql),
             "sqlite" | "sqlite3" => Some(Self::Sqlite),
+            "oracle" => Some(Self::Oracle),
             _ => None,
         }
     }
 
     /// `value` as this dialect's clients print it in text form: PostgreSQL's `t` and `f` for
     /// booleans, MySQL's and SQLite's `1` and `0`, SQLite's floating point with 15 significant
-    /// digits and a decimal point (`2.0`), and `None` for NULL.
+    /// digits and a decimal point (`2.0`), Oracle's `TRUE` and `FALSE` and its numbers without a
+    /// leading zero (`.5`), and `None` for NULL.
     pub fn value_text(self, value: &crate::Value) -> Option<String> {
         match (self, value) {
             (Self::MySql | Self::Sqlite, crate::Value::Boolean(flag)) => {
@@ -50,6 +58,15 @@ impl Dialect {
             }
             (Self::Sqlite, crate::Value::Double(number)) => {
                 crate::sqlite_functions::real_text(*number)
+            }
+            (Self::Oracle, crate::Value::Boolean(flag)) => {
+                Some(if *flag { "TRUE" } else { "FALSE" }.into())
+            }
+            (Self::Oracle, crate::Value::Real(number)) => {
+                Some(crate::oracle_functions::number_text(f64::from(*number)))
+            }
+            (Self::Oracle, crate::Value::Double(number)) => {
+                Some(crate::oracle_functions::number_text(*number))
             }
             _ => value.to_text(),
         }

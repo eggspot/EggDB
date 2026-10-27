@@ -3,10 +3,11 @@ use crate::memory_store::MemoryStore;
 use crate::session::{QueryResult, Session};
 use crate::tests::render;
 
-const SUITES: [(&str, &str); 3] = [
+const SUITES: [(&str, &str); 4] = [
     ("postgresql", include_str!("../correctness/postgresql.test")),
     ("mysql", include_str!("../correctness/mysql.test")),
     ("sqlite", include_str!("../correctness/sqlite.test")),
+    ("oracle", include_str!("../correctness/oracle.test")),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,8 +229,23 @@ fn the_sqlite_dialect_behaves_as_its_documentation_describes() {
 }
 
 #[test]
+fn the_oracle_dialect_behaves_as_its_sql_language_reference_documents() {
+    match run_suite("oracle") {
+        Ok((cases, differences)) => {
+            assert!(cases >= 80, "only {cases} cases");
+            assert!(differences * 10 < cases, "{differences} known differences");
+        }
+        Err(problems) => panic!(
+            "{} cases disagree:\n{}",
+            problems.len(),
+            problems.join("\n")
+        ),
+    }
+}
+
+#[test]
 fn the_suite_runner_takes_only_dialects_it_knows() {
-    assert!(run_suite("oracle").is_err());
+    assert!(run_suite("db2").is_err());
     assert_eq!(
         parse("rows\nSELECT 1").map(|cases| cases.len()),
         Err("line 1: a rows case needs ---- and its output".to_owned())

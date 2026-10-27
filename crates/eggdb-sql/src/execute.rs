@@ -1367,6 +1367,22 @@ pub(crate) fn select(
             select.filter.as_ref()
         },
     };
+    if let Some(count) = select.source_row_limit {
+        let wanted = usize::try_from(count).unwrap_or(usize::MAX);
+        let mut kept = Vec::new();
+        if wanted > 0 {
+            source.for_each(&mut |row| {
+                kept.push(row);
+                Ok(kept.len() < wanted)
+            })?;
+        }
+        source = SourceRows {
+            reader,
+            rows: RowSource::Rows(kept),
+            scope,
+            filter: None,
+        };
+    }
     if let Some(grouping) = &grouping {
         let groups = grouping.run(
             scope,
@@ -1714,6 +1730,20 @@ pub(crate) fn update(
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
         None => QueryResult::command(tag),
     })
+}
+
+pub(crate) fn truncate(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &TableReference,
+) -> SqlResult<QueryResult> {
+    let every_row = Delete {
+        table: table.clone(),
+        filter: None,
+        returning: None,
+    };
+    delete(writer, tables, &every_row)?;
+    Ok(QueryResult::command("TRUNCATE TABLE".to_owned()))
 }
 
 pub(crate) fn delete(

@@ -1,5 +1,9 @@
 mod mysql;
+mod oracle;
 mod sqlite;
+
+pub use oracle::ORACLE_COMPATIBLE_VERSION;
+pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved};
 
 pub use sqlite::SQLITE_COMPATIBLE_VERSION;
 pub(crate) use sqlite::is_schema_table;
@@ -12,7 +16,7 @@ use crate::ast::{
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::{Token, TokenKind, swap_uniform_case};
 use crate::session::Parameter;
 use crate::settings::Settings;
 use crate::types::SqlType;
@@ -246,11 +250,16 @@ impl<'t> Parser<'t> {
         self.dialect == Dialect::Sqlite
     }
 
+    fn oracle(&self) -> bool {
+        self.dialect == Dialect::Oracle
+    }
+
     fn reserved(&self, word: &str) -> bool {
         match self.dialect {
             Dialect::PostgreSql => is_reserved(word),
             Dialect::MySql => mysql::is_reserved(word),
             Dialect::Sqlite => sqlite::is_reserved(word),
+            Dialect::Oracle => oracle::is_reserved(word),
         }
     }
 
@@ -258,6 +267,7 @@ impl<'t> Parser<'t> {
         is_clause_word(word)
             || self.mysql() && mysql::is_clause_word(word)
             || self.sqlite() && sqlite::is_clause_word(word)
+            || self.oracle() && oracle::is_clause_word(word)
     }
 
     pub(crate) fn with_context(
@@ -295,7 +305,7 @@ impl<'t> Parser<'t> {
     }
 
     pub(crate) fn literal_rows(&mut self) -> Option<LiteralRows<'t>> {
-        if !self.is_word("insert") || !self.is_word_at(1, "into") {
+        if self.oracle() || !self.is_word("insert") || !self.is_word_at(1, "into") {
             return None;
         }
         let start = self.at;
@@ -507,6 +517,16 @@ impl<'t> Parser<'t> {
             }
             return Ok(table);
         }
+        if self.oracle() && self.peek_kind() == &TokenKind::Dot {
+            if swap_uniform_case(&name.text) != self.oracle_user() {
+                return Err(SqlError::not_supported(
+                    "schemas other than the session user's are not supported yet",
+                )
+                .at(name.position));
+            }
+            self.at += 1;
+            return self.name();
+        }
         if self.peek_kind() == &TokenKind::Dot {
             if name.text == "public" {
                 self.at += 1;
@@ -528,6 +548,11 @@ impl<'t> Parser<'t> {
         }
         if self.sqlite()
             && let Some(statement) = self.sqlite_statement()?
+        {
+            return Ok(statement);
+        }
+        if self.oracle()
+            && let Some(statement) = self.oracle_statement()?
         {
             return Ok(statement);
         }
@@ -986,6 +1011,8 @@ impl<'t> Parser<'t> {
                 let end = self.tokens[self.at.saturating_sub(1)].end;
                 let source = self.text.get(start..end).unwrap_or("").to_owned();
                 column.default = Some((expr, source));
+            } else if self.oracle() && self.is_word("generated") {
+                self.oracle_identity(&mut column)?;
             } else if ["unique", "check", "references", "generated", "collate"]
                 .iter()
                 .any(|word| self.is_word(word))
@@ -1005,6 +1032,9 @@ impl<'t> Parser<'t> {
         }
         if self.sqlite() {
             return self.sqlite_type().map(|(sql_type, _)| sql_type);
+        }
+        if self.oracle() {
+            return self.oracle_type();
         }
         let token = self.peek();
         let word: &str = match &token.kind {
@@ -1281,7 +1311,11 @@ impl<'t> Parser<'t> {
 
     fn delete(&mut self) -> SqlResult<Statement> {
         self.at += 1;
-        self.expect_word("from")?;
+        if self.oracle() {
+            self.take_word("from");
+        } else {
+            self.expect_word("from")?;
+        }
         let table = self.table_reference()?;
         if self.is_word("using") {
             return Err(self.not_supported("DELETE ... USING"));
@@ -1319,7 +1353,7 @@ impl<'t> Parser<'t> {
         let called = matches!(self.peek_kind(), TokenKind::Word(_))
             && self.peek_kind_at(1) == &TokenKind::LeftParen;
         let items = if self.is_clause_end() && !(self.sqlite() && called) {
-            if self.sqlite() {
+            if self.sqlite() || self.oracle() {
                 return Err(self.unexpected());
             }
             Vec::new()
@@ -1330,15 +1364,21 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("SELECT INTO"));
         }
         let from = if self.take_word("from") {
-            if self.mysql() && self.take_word("dual") {
+            if self.mysql() && self.take_word("dual") || self.oracle() && self.oracle_dual() {
                 None
             } else {
                 Some(self.joined_tables()?)
             }
+        } else if self.oracle() {
+            return Err(self.oracle_from_expected());
         } else {
             None
         };
-        let filter = self.filter()?;
+        let (filter, source_row_limit) = if self.oracle() {
+            oracle::split_rownum(self.filter()?)?
+        } else {
+            (self.filter()?, None)
+        };
         let group_by = if self.take_word("group") {
             self.expect_word("by")?;
             self.group_by()?
@@ -1354,8 +1394,15 @@ impl<'t> Parser<'t> {
         if self.is_word("window") {
             return Err(self.not_supported("WINDOW"));
         }
-        if self.is_word("union") || self.is_word("intersect") || self.is_word("except") {
-            return Err(self.not_supported("UNION, INTERSECT and EXCEPT"));
+        if self.is_word("union")
+            || self.is_word("intersect")
+            || self.is_word("except")
+            || self.oracle() && self.is_word("minus")
+        {
+            return Err(self.not_supported("UNION, INTERSECT, MINUS and EXCEPT"));
+        }
+        if self.oracle() && (self.is_word("connect") || self.is_word("start")) {
+            return Err(self.not_supported("hierarchical queries (CONNECT BY)"));
         }
         let mut order_by = Vec::new();
         if self.take_word("order") {
@@ -1394,6 +1441,19 @@ impl<'t> Parser<'t> {
         let mut limit = None;
         let mut offset = None;
         loop {
+            if self.oracle() && self.is_word("limit") {
+                return Err(SqlError::syntax(
+                    "SQL command not properly ended",
+                    self.position(),
+                ));
+            }
+            if self.oracle() && self.is_word("fetch") {
+                if limit.is_some() {
+                    return Err(self.unexpected());
+                }
+                limit = Some(self.oracle_fetch()?);
+                continue;
+            }
             if self.take_word("limit") {
                 if limit.is_some() {
                     return Err(SqlError::syntax(
@@ -1426,6 +1486,12 @@ impl<'t> Parser<'t> {
                     ));
                 }
                 offset = Some(self.expression()?);
+                if self.oracle() {
+                    offset = offset.map(oracle::not_below_zero);
+                    if !self.take_word("rows") {
+                        self.expect_word("row")?;
+                    }
+                }
                 let _ = self.take_word("rows") || self.take_word("row");
             } else if self.is_word("fetch") {
                 return Err(self.not_supported("FETCH FIRST"));
@@ -1439,6 +1505,14 @@ impl<'t> Parser<'t> {
             limit = limit.map(sqlite::without_negative_limit);
             offset = offset.map(sqlite::without_negative_offset);
         }
+        if self.oracle() {
+            oracle::reject_rownum_outside_where(
+                &items,
+                &group_by,
+                having.as_ref(),
+                &order_by,
+            )?;
+        }
         Ok(Select {
             distinct,
             items,
@@ -1449,6 +1523,7 @@ impl<'t> Parser<'t> {
             order_by,
             limit,
             offset,
+            source_row_limit,
         })
     }
 
@@ -1585,6 +1660,8 @@ impl<'t> Parser<'t> {
             && let ExprKind::Literal(Literal::String(text)) = &expr.kind
         {
             Some(text.clone())
+        } else if self.oracle() && !matches!(expr.kind, ExprKind::Column { .. }) {
+            Some(oracle::label(&self.source_text(first_token)))
         } else if (self.mysql() || self.sqlite()) && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(self.source_text(first_token))
         } else {
@@ -1824,6 +1901,9 @@ impl<'t> Parser<'t> {
                     .at(self.position()));
                 }
                 let right = self.expression_above(Level::Additive)?;
+                if self.oracle() {
+                    return Ok(oracle::concatenation(left, right));
+                }
                 Ok(Self::binary(left, BinaryOperator::Concat, right))
             }
             Level::Additive => {
@@ -1846,6 +1926,9 @@ impl<'t> Parser<'t> {
                     BinaryOperator::Modulo
                 };
                 let right = self.expression_above(Level::Power)?;
+                if self.oracle() && operator == BinaryOperator::Divide {
+                    return Ok(oracle::division(left, right));
+                }
                 if self.sqlite() && operator != BinaryOperator::Multiply {
                     return Ok(Self::binary(left, operator, sqlite::null_if_zero(right)));
                 }
@@ -2034,6 +2117,11 @@ impl<'t> Parser<'t> {
         {
             return Ok(expr);
         }
+        if self.oracle()
+            && let Some(expr) = self.oracle_primary(&token.kind, position)?
+        {
+            return Ok(expr);
+        }
         match &token.kind {
             TokenKind::Integer(digits) => {
                 self.at += 1;
@@ -2042,7 +2130,7 @@ impl<'t> Parser<'t> {
                     Err(_) => literal(Literal::Decimal((*digits).to_owned())),
                 }
             }
-            TokenKind::Decimal(text) if self.mysql() || self.sqlite() => {
+            TokenKind::Decimal(text) if self.mysql() || self.sqlite() || self.oracle() => {
                 self.at += 1;
                 Ok(Expr {
                     kind: ExprKind::Cast {
@@ -2217,7 +2305,13 @@ impl<'t> Parser<'t> {
         {
             return Ok(expr);
         }
+        if self.oracle()
+            && let Some(expr) = self.oracle_function(&name)?
+        {
+            return Ok(expr);
+        }
         if !self.sqlite()
+            && !self.oracle()
             && let Some(expr) = self.session_function(&name)?
         {
             return Ok(expr);

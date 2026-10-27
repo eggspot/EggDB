@@ -3,7 +3,7 @@ use crate::cli::args::{CommandName, ResultMode, SqlSource};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use eggdb::sql::Store as DatabaseStore;
-use eggdb_sql::{Dialect, QueryResult, SqlError, SqlState, Value};
+use eggdb_sql::{Dialect, QueryResult, SqlError, SqlState, TransactionStatus, Value};
 
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
@@ -44,6 +44,9 @@ impl Session<'_> {
                 exit_for(&error)
             }
         };
+        if let Err(error) = commit_on_exit(&mut session) {
+            print_error(&mut self.messages, &error, &text);
+        }
         match session.close() {
             Ok(true) if exit == Exit::Done => self.messages.text(
                 "WARNING:  the SQL ended inside a transaction block (BEGIN without COMMIT); it was rolled back\n",
@@ -89,6 +92,17 @@ impl Session<'_> {
     }
 }
 
+pub(super) fn commit_on_exit(
+    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
+) -> Result<(), SqlError> {
+    if session.dialect() == Dialect::Oracle
+        && session.transaction_status() == TransactionStatus::InBlock
+    {
+        session.execute("COMMIT", &mut |_| {})?;
+    }
+    Ok(())
+}
+
 pub(super) fn exit_for(error: &SqlError) -> Exit {
     match error.state() {
         SqlState::DATA_CORRUPTED => Exit::Damaged,
@@ -102,6 +116,8 @@ pub(super) fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &st
     for (index, line) in lines.iter().enumerate() {
         let prefix = if line.starts_with("Error:") {
             "Error:"
+        } else if line.starts_with("ORA-") {
+            line.get(..10).unwrap_or("ORA-")
         } else {
             "ERROR:"
         };
@@ -124,6 +140,9 @@ pub(crate) fn error_lines(error: &SqlError, text: &str) -> Vec<String> {
             format!("Error: {}", error.message()),
             format!("Result code: {name} ({code})"),
         ];
+    }
+    if error.vendor() == Some(Dialect::Oracle) {
+        return vec![error.to_string()];
     }
     if let Some(code) = error.vendor_code() {
         return vec![format!(
