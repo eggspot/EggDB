@@ -780,7 +780,9 @@ until they are fixed:
   `LATERAL`, `FULL JOIN ... USING` and `EXPLAIN` of a query with subqueries answer `0A000`. A
   derived table, a `WITH` query and the operands of a set operation are held in memory, counted
   with the statement's other rows against the 1 GiB limit, and a correlated subquery keeps up
-  to 32 MiB of results by outer value.
+  to 32 MiB of results by outer value. An `IN` list of constants is compared item by item (a list of
+  more than 256 items is not used to choose a key range either), so a very long list against
+  many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
 - `NATURAL` joins, `DISTINCT ON`,
   `GROUPING SETS`, `ROLLUP` and `CUBE`, window functions, `FILTER`, ordered aggregates and the
   other aggregates (`string_agg`, `bool_and`, `array_agg`, ...) fail with `0A000`.

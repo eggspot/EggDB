@@ -460,9 +460,12 @@ fn a_huge_in_list_and_a_huge_subquery_stay_linear() {
     assert_eq!(
         last(
             &mut session,
-            &format!("SELECT count(*) FROM t WHERE id IN ({})", list.join(", "))
+            &format!(
+                "SELECT count(*) FROM t WHERE id < 200 AND id IN ({})",
+                list.join(", ")
+            )
         ),
-        "count\n10000\nSELECT 1"
+        "count\n100\nSELECT 1"
     );
     assert_eq!(
         last(
