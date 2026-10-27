@@ -22,7 +22,7 @@ use crate::interval::IntervalFields;
 use crate::lexer::{Token, TokenKind, swap_uniform_case};
 use crate::session::Parameter;
 use crate::settings::Settings;
-use crate::types::{NumericModifier, SqlType};
+use crate::types::{NumericModifier, SqlType, Value};
 use std::borrow::Cow;
 
 const MAX_NESTING: usize = 64;
@@ -149,7 +149,8 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 24] = [
     "jsonb_array_length",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 7] = [
+const INTERNAL_FUNCTIONS: [&str; 8] = [
+    "mysql_curtime",
     "mysql_greatest",
     "mysql_least",
     "mysql_now",
@@ -791,15 +792,24 @@ impl<'t> Parser<'t> {
             }),
             position,
         };
-        Ok(match declared_type {
-            Some(sql_type) => Expr {
+        Ok(match (declared_type, literal.kind) {
+            (Some(SqlType::Bytea), ExprKind::Literal(Literal::String(text))) => Expr {
+                kind: ExprKind::Constant {
+                    value: Value::Bytea(
+                        crate::bytea::parse(&text).map_err(|error| error.at(position))?,
+                    ),
+                    sql_type: Some(SqlType::Bytea),
+                },
+                position,
+            },
+            (Some(sql_type), kind) => Expr {
                 kind: ExprKind::Cast {
-                    expr: Box::new(literal),
+                    expr: Box::new(Expr { kind, position }),
                     sql_type,
                 },
                 position,
             },
-            None => literal,
+            (None, kind) => Expr { kind, position },
         })
     }
 

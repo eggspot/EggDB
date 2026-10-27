@@ -547,7 +547,7 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
         SqlType::Interval { fields, precision } => Interval::parse(text, fields)
             .and_then(|interval| interval.with_modifier(fields, precision))
             .map(Value::Interval),
-        SqlType::Bytea => crate::bytea::parse(text).map(Value::Bytea),
+        SqlType::Bytea => crate::bytea::from_text(text).map(Value::Bytea),
         SqlType::Uuid => crate::bytea::parse_uuid(text).map(Value::Uuid),
         SqlType::Numeric(modifier) => numeric_value(Numeric::parse(text)?, modifier),
         SqlType::Date => datetime::parse_date(text).map(Value::Date),
@@ -754,6 +754,7 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
                 text
             }
             Value::Boolean(flag) => flag.to_string(),
+            Value::Bytea(bytes) => crate::bytea::to_text(&bytes)?,
             other => other.to_text().unwrap_or_default(),
         };
         return assign_string(text, target, conversion);

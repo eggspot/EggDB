@@ -333,7 +333,7 @@ impl Cursor<'_> {
         std::str::from_utf8(&self.bytes[start..self.at]).unwrap_or("")
     }
 
-    fn number(&mut self) -> Option<Number> {
+    fn number(&mut self) -> Result<Number, Failure> {
         let negative = match self.peek() {
             Some(b'-') => {
                 self.at += 1;
@@ -345,7 +345,7 @@ impl Cursor<'_> {
             }
             _ => false,
         };
-        let (whole, count) = self.digits()?;
+        let (whole, count) = self.digits().ok_or(Failure::Range)?;
         let has_point = self.peek() == Some(b'.');
         let mut fraction = 0.0;
         if has_point {
@@ -353,12 +353,12 @@ impl Cursor<'_> {
             let before = self.at;
             fraction = self.fraction();
             if count == 0 && self.at == before {
-                return None;
+                return Err(Failure::Syntax);
             }
         } else if count == 0 {
-            return None;
+            return Err(Failure::Syntax);
         }
-        Some(Number {
+        Ok(Number {
             negative,
             whole: if negative { -whole } else { whole },
             fraction: if negative { -fraction } else { fraction },
@@ -443,7 +443,7 @@ fn postgres_style(text: &str, fields: Option<IntervalFields>) -> Result<Totals, 
             }
             return Err(Failure::Syntax);
         }
-        let number = cursor.number().ok_or(Failure::Syntax)?;
+        let number = cursor.number()?;
         anything = true;
         if cursor.peek() == Some(b':') {
             let micros = clock_micros(&mut cursor, &number)?;
@@ -527,7 +527,7 @@ fn iso_8601(text: &str) -> Result<Totals, Failure> {
             cursor.at += 1;
             continue;
         }
-        let number = cursor.number().ok_or(Failure::Syntax)?;
+        let number = cursor.number()?;
         let designator = cursor.peek().ok_or(Failure::Syntax)?.to_ascii_uppercase();
         cursor.at += 1;
         let unit = match (designator, in_time) {
@@ -1075,6 +1075,8 @@ mod tests {
             "178956971 years",
             "9999999999999999999 hours",
             "1:60",
+            "18446744073709551616 days",
+            "P99999999999999999999D",
         ] {
             let error = Interval::parse(text, None).expect_err(text);
             assert_eq!(error.state().code(), "22015", "{text}: {error}");

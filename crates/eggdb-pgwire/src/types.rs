@@ -426,6 +426,25 @@ fn invalid_binary(number: usize, oid: u32) -> SqlError {
     )
 }
 
+const MAX_BYTEA_BYTES: usize = 1_000_000_000;
+
+fn bytea_text(bytes: &[u8]) -> Result<String, SqlError> {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    if bytes.len() > MAX_BYTEA_BYTES {
+        return Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            format!("a bytea value cannot exceed {MAX_BYTEA_BYTES} bytes"),
+        ));
+    }
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("\\x");
+    for &byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0F)]));
+    }
+    Ok(out)
+}
+
 fn invalid_utf8() -> SqlError {
     SqlError::new(
         SqlState::CHARACTER_NOT_IN_REPERTOIRE,
@@ -538,7 +557,7 @@ pub fn decode_parameter(
                 months: i32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
             })
         }
-        BYTEA_OID => Value::Bytea(bytes.to_vec()),
+        BYTEA_OID => return bytea_text(bytes),
         UUID_OID => {
             let mut uuid = [0u8; 16];
             uuid.copy_from_slice(fixed(16)?);

@@ -405,6 +405,31 @@ fn time_and_blob_columns_use_their_mysql_types_in_text_and_binary() {
     client.command(0x17, &execute);
     let reply = client.next_reply();
     assert!(matches!(reply, Reply::Ok { affected: 1, .. }), "{reply:?}");
+    for (id, kind, value) in [
+        (3i32, 253u8, b"\\x41".to_vec()),
+        (4, 0xFC, b"C:\\dir".to_vec()),
+        (5, 254, br#"{"a": "\\u0041"}"#.to_vec()),
+    ] {
+        let mut execute = insert.to_le_bytes().to_vec();
+        execute.extend_from_slice(&[0, 1, 0, 0, 0, 0, 1, 3, 0, kind, 0]);
+        execute.extend_from_slice(&id.to_le_bytes());
+        execute.push(value.len() as u8);
+        execute.extend_from_slice(&value);
+        client.command(0x17, &execute);
+        let reply = client.next_reply();
+        assert!(matches!(reply, Reply::Ok { affected: 1, .. }), "{reply:?}");
+    }
+    assert_eq!(
+        texts(&client.query(
+            "SELECT id, LENGTH(body), body, CONCAT('x', body) FROM clips WHERE id IN (1, 3, 4, 5) ORDER BY id"
+        )),
+        vec![
+            vec!["1", "3", "abc", "xabc"],
+            vec!["3", "4", "\\x41", "x\\x41"],
+            vec!["4", "6", "C:\\dir", "xC:\\dir"],
+            vec!["5", "16", r#"{"a": "\\u0041"}"#, r#"x{"a": "\\u0041"}"#],
+        ]
+    );
     let reply = client.query("SELECT starts, body, LENGTH(body) FROM clips WHERE id = 1");
     let Reply::Rows { columns, .. } = &reply else {
         panic!("{reply:?}")

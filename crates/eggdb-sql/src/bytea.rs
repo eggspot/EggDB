@@ -2,6 +2,90 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::{SqlType, Value, integer_value, without_trailing_spaces};
 
 pub(crate) const MAX_BYTES: usize = 1_000_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextForm {
+    PostgresqlInput,
+    AsIs,
+    Hexadecimal,
+}
+
+thread_local! {
+    static TEXT_FORM: std::cell::Cell<TextForm> = const {
+        std::cell::Cell::new(TextForm::PostgresqlInput)
+    };
+}
+
+pub(crate) struct TextFormGuard(TextForm);
+
+impl Drop for TextFormGuard {
+    fn drop(&mut self) {
+        TEXT_FORM.with(|form| form.set(self.0));
+    }
+}
+
+pub(crate) fn enter_dialect(dialect: crate::Dialect) -> TextFormGuard {
+    let form = match dialect {
+        crate::Dialect::PostgreSql => TextForm::PostgresqlInput,
+        crate::Dialect::MySql | crate::Dialect::Sqlite => TextForm::AsIs,
+        crate::Dialect::Oracle => TextForm::Hexadecimal,
+    };
+    TextFormGuard(TEXT_FORM.with(|current| current.replace(form)))
+}
+
+fn text_form() -> TextForm {
+    TEXT_FORM.with(std::cell::Cell::get)
+}
+
+fn invalid_hex_number() -> SqlError {
+    SqlError::new(SqlState::INVALID_TEXT_REPRESENTATION, "invalid hex number")
+        .with_oracle_code(1465)
+}
+
+fn oracle_hex(text: &str) -> SqlResult<Vec<u8>> {
+    let digits = text.as_bytes();
+    let mut out = Vec::with_capacity(digits.len().div_ceil(2));
+    let (first, rest) = digits.split_at(digits.len() % 2);
+    if let [only] = first {
+        out.push(hex_value(*only).ok_or_else(invalid_hex_number)?);
+    }
+    for pair in rest.as_chunks::<2>().0 {
+        let high = hex_value(pair[0]).ok_or_else(invalid_hex_number)?;
+        let low = hex_value(pair[1]).ok_or_else(invalid_hex_number)?;
+        out.push(high << 4 | low);
+    }
+    Ok(out)
+}
+
+pub(crate) fn from_text(text: &str) -> SqlResult<Vec<u8>> {
+    match text_form() {
+        TextForm::PostgresqlInput => parse(text),
+        TextForm::AsIs => {
+            check_size(text.len())?;
+            Ok(text.as_bytes().to_vec())
+        }
+        TextForm::Hexadecimal => oracle_hex(text),
+    }
+}
+
+pub(crate) fn to_text(bytes: &[u8]) -> SqlResult<String> {
+    match text_form() {
+        TextForm::PostgresqlInput => {
+            check_size(bytes.len().saturating_mul(2))?;
+            Ok(format_hex(bytes))
+        }
+        TextForm::AsIs => String::from_utf8(bytes.to_vec()).map_err(|_| {
+            SqlError::new(
+                SqlState::CHARACTER_NOT_IN_REPERTOIRE,
+                "invalid byte sequence for encoding \"UTF8\"",
+            )
+        }),
+        TextForm::Hexadecimal => {
+            check_size(bytes.len().saturating_mul(2))?;
+            Ok(format_hex(bytes)[2..].to_ascii_uppercase())
+        }
+    }
+}
 const BASE64_LINE: usize = 76;
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

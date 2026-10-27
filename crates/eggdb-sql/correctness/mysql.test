@@ -927,3 +927,23 @@ SELECT gen_random_uuid()
 ok
 INSERT INTO t31 (id, t) VALUES (2, '838:59:59')
 ... differs
+
+ok
+INSERT INTO t31 (id, b) VALUES (3, '\\x41'), (4, '\\001'), (5, 'a\\b')
+
+rows
+SELECT id, LENGTH(b), CONCAT('x', b) = 'xabc', LENGTH(CONCAT(b, b)) FROM t31 ORDER BY id
+----
+id|LENGTH(b)|CONCAT('x', b) = 'xabc'|LENGTH(CONCAT(b, b))
+1|3|1|6
+3|4|0|8
+4|4|0|8
+5|3|0|6
+SELECT 4
+
+rows
+SELECT CURTIME() IS NOT NULL, CURRENT_TIME IS NOT NULL, CURRENT_TIME() <= '24:00:00'
+----
+CURTIME() IS NOT NULL|CURRENT_TIME IS NOT NULL|CURRENT_TIME() <= '24:00:00'
+1|1|1
+SELECT 1

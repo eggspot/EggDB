@@ -801,6 +801,10 @@ impl Evaluator<'_> {
             ("mysql_now", []) => datetime::utc_to_local(now).map(|local| {
                 Value::Timestamp(local - local.rem_euclid(datetime::MICROS_PER_SECOND))
             }),
+            ("mysql_curtime", []) => datetime::utc_to_local(now).map(|local| {
+                let of_day = datetime::time_of_timestamp(local);
+                Value::Time(of_day - of_day.rem_euclid(datetime::MICROS_PER_SECOND))
+            }),
             ("mysql_utc_now", []) => Ok(Value::Timestamp(
                 now - now.rem_euclid(datetime::MICROS_PER_SECOND),
             )),
@@ -1005,6 +1009,11 @@ impl Evaluator<'_> {
                 Value::Numeric(number) => Ok(Value::Numeric(number.absolute())),
                 _ => Err(unknown()),
             },
+            ("concat_or_null", _)
+                if values.iter().any(|value| matches!(value, Value::Bytea(_))) =>
+            {
+                mysql_binary_concat(&values)
+            }
             ("concat_or_null", _) => {
                 let mut joined = String::new();
                 for value in &values {
@@ -1041,6 +1050,26 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "justify_days" | "justify_hours" | "justify_interval" => &[INTERVAL],
         _ => return None,
     })
+}
+
+fn mysql_binary_concat(values: &[Value]) -> SqlResult<Value> {
+    let mut joined = Vec::new();
+    for value in values {
+        let text;
+        let bytes = match value {
+            Value::Null => return Ok(Value::Null),
+            Value::Bytea(bytes) => bytes.as_slice(),
+            other => {
+                text = crate::dialect::Dialect::MySql
+                    .value_text(other)
+                    .unwrap_or_default();
+                text.as_bytes()
+            }
+        };
+        crate::bytea::check_size(joined.len().saturating_add(bytes.len()))?;
+        joined.extend_from_slice(bytes);
+    }
+    Ok(Value::Bytea(joined))
 }
 
 fn as_text_if_character(value: Value) -> Value {

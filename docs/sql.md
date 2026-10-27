@@ -124,8 +124,9 @@ What it reads, on top of the statements of "What runs today":
   and a malformed or impossible date error 1292. On the wire, `DECIMAL` columns are
   `MYSQL_TYPE_NEWDECIMAL`, dates `DATE`, `DATETIME` and `TIMESTAMP` and times `TIME` (packed in
   the binary protocol), `JSON` columns `MYSQL_TYPE_JSON`, and `bytea` columns `MYSQL_TYPE_BLOB`
-  with the binary collation and their raw bytes; a bound parameter whose bytes are not UTF-8 is
-  a `bytea`.
+  with the binary collation and their raw bytes; a bound parameter sent as a `BLOB`, or whose
+  bytes are not UTF-8, is a `bytea`, and a string given to a binary column is stored as its bytes.
+  `CURTIME()` and `CURRENT_TIME` give the local time to the second.
 - **Date and time functions**: `NOW()`, `SYSDATE()`, `CURRENT_TIMESTAMP[()]`, `LOCALTIME`,
   `LOCALTIMESTAMP` (the session's local time, to the second), `UTC_TIMESTAMP()`, `CURDATE()` and
   `CURRENT_DATE`, also as a column's `DEFAULT`; `EXTRACT(unit FROM d)` with MySQL's units
@@ -882,7 +883,7 @@ until they are fixed:
   must reach 1.0 before v0.3.0 (item 19e, D100).
 
 ## Known differences from MySQL
-The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 180 cases from the MySQL 8.0
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 183 cases from the MySQL 8.0
 Reference Manual's documented behaviour) marks these as differing until they are fixed:
 - `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`, and decimal constants
   outside a `DECIMAL` column are doubles (`0.1 + 0.2` is `0.30000000000000004`); stored into a
@@ -905,9 +906,11 @@ And more, not in the suite yet:
 - `CHAR(n)` is `varchar(n)`: trailing spaces a value is given are kept, where MySQL removes them
   when the value is read (D113).
 - `BINARY(n)` is not padded with zero bytes and `VARBINARY(n)` and the `BLOB` sizes do not limit
-  a value's length; a string with a backslash given to a `BLOB` column reads the backslash as
-  PostgreSQL's `bytea` escape (`\\` or `\ooo`). `eggdb sql` shows a blob as MySQL's client does
-  with `--binary-as-hex` (`0x616263`); the wire carries its bytes (D113).
+  a value's length. A string given to a binary column is stored as its bytes, as in MySQL, and
+  `CONCAT` with a binary argument gives binary bytes; `UPPER`, `LOWER`, `SUBSTRING`, `LIKE` and
+  comparisons with a text column answer an error on a binary value instead of treating it as a
+  binary string. `eggdb sql` shows a blob as MySQL's client does with `--binary-as-hex`
+  (`0x616263`); the wire carries its bytes (D113).
 - `UPDATE` reports rows matched, as with `CLIENT_FOUND_ROWS`, not rows changed.
 - `BIGINT UNSIGNED` is refused; `UNSIGNED` columns accept negative values.
 - `SET` remembers session variables without applying them (`sql_mode`, `time_zone`,
@@ -972,7 +975,7 @@ And more, not in the suite yet:
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 216 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 219 cases from Oracle's SQL
 Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
   primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
@@ -996,8 +999,9 @@ And more, not in the suite yet:
 - `VARCHAR2(n BYTE)` counts characters, and `ORA-12899` gives the maximum but not the column's
   name or the actual length. A `CHAR` compared with a `VARCHAR2` value ignores the `CHAR`'s
   trailing blanks (PostgreSQL's rule) where Oracle pads the shorter value only between two
-  `CHAR`s. A string given to a `RAW` or `BLOB` is stored as its bytes, where Oracle reads it as
-  hexadecimal digits; `HEXTORAW`, `RAWTOHEX`, `UTL_RAW` and `DBMS_LOB` are missing.
+  `CHAR`s. A string given to a `RAW` or `BLOB` is read as hexadecimal digits, as `HEXTORAW`
+  does (an odd count gets a leading zero, another character is `ORA-01465`); the functions
+  `HEXTORAW`, `RAWTOHEX`, `UTL_RAW` and `DBMS_LOB` are missing.
   `INTERVAL YEAR TO MONTH` and
   `INTERVAL DAY TO SECOND` answer `0A000` (D113).
 - A statement that fails after it wrote rows rolls back the whole transaction, where Oracle

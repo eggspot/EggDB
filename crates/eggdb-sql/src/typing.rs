@@ -120,7 +120,7 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
             Some(SqlType::INTERVAL)
         }
         ("current_time", []) => Some(SqlType::TimeTz(None)),
-        ("localtime", []) => Some(SqlType::Time(None)),
+        ("localtime" | "mysql_curtime", []) => Some(SqlType::Time(None)),
         ("gen_random_uuid", []) => Some(SqlType::Uuid),
         ("encode", [_, _]) => Some(SqlType::Text),
         ("decode", [_, _]) => Some(SqlType::Bytea),

@@ -80,6 +80,7 @@ fn text_of(value: &Value) -> Option<String> {
         Value::Real(number) => Some(number_text(f64::from(*number))),
         Value::Double(number) => Some(number_text(*number)),
         Value::Boolean(flag) => Some(if *flag { "TRUE" } else { "FALSE" }.to_owned()),
+        Value::Bytea(_) => crate::Dialect::Oracle.value_text(value),
         other => other.to_text(),
     }
 }

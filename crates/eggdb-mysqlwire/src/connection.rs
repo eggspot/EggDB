@@ -4,8 +4,8 @@ use crate::packets::{
     ParameterType, Payload, SERVER_CAPABILITIES, STATUS_AUTOCOMMIT, STATUS_IN_TRANSACTION,
     STATUS_MORE_RESULTS, TYPE_BLOB, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON,
     TYPE_LONG, TYPE_LONGLONG, TYPE_NEWDECIMAL, TYPE_SHORT, TYPE_TIME, TYPE_TIMESTAMP, TYPE_TINY,
-    TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet, err_packet,
-    ok_packet, parse_command, parse_execute, parse_handshake_response,
+    TYPE_TINY_BLOB, TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet,
+    err_packet, ok_packet, parse_command, parse_execute, parse_handshake_response,
 };
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
@@ -634,8 +634,14 @@ fn text_row(row: &[Value]) -> Vec<u8> {
     payload.0
 }
 
-fn parameter_of(value: BoundValue) -> Result<Parameter, SqlError> {
+fn is_binary_type(kind: u8) -> bool {
+    (TYPE_TINY_BLOB..=TYPE_BLOB).contains(&kind)
+}
+
+fn parameter_of(value: BoundValue, kind: Option<u8>) -> Result<Parameter, SqlError> {
+    let binary = kind.is_some_and(is_binary_type);
     let (declared_type, value) = match value {
+        BoundValue::Bytes(bytes) if binary => (Some(SqlType::Bytea), Some(hex_text(&bytes))),
         BoundValue::Null => (None, None),
         BoundValue::Integer(number) => (Some(SqlType::BigInt), Some(number.to_string())),
         BoundValue::Unsigned(number) => (None, Some(number.to_string())),
@@ -661,10 +667,12 @@ fn parameter_of(value: BoundValue) -> Result<Parameter, SqlError> {
 }
 
 fn hex_text(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(2 + bytes.len() * 2);
     out.push_str("\\x");
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+    for &byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0F)]));
     }
     out
 }
@@ -1057,6 +1065,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 "Got a packet bigger than 'max_allowed_packet' bytes",
             );
         }
+        let kinds: Vec<u8> = types.iter().map(|(kind, _)| *kind).collect();
         if let Some(prepared) = self.statements.get_mut(&statement) {
             prepared.types = types;
         }
@@ -1066,7 +1075,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 Some(bytes) if value != BoundValue::Null => BoundValue::Bytes(bytes),
                 _ => value,
             };
-            match parameter_of(value) {
+            match parameter_of(value, kinds.get(index).copied()) {
                 Ok(parameter) => parameters.push(parameter),
                 Err(error) => return self.sql_error(&error),
             }

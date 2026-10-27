@@ -224,7 +224,7 @@ fn converted(
             row.into_iter()
                 .zip(columns.iter().zip(texts))
                 .map(|(value, (column, &as_text))| {
-                    if as_text {
+                    if as_text && !matches!(value, Value::Bytea(_)) {
                         return Ok(Dialect::MySql
                             .value_text(&value)
                             .map_or(Value::Null, Value::Text));

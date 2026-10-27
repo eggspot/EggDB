@@ -22,7 +22,9 @@ use std::sync::Arc;
 /// extended query protocol passes it: the type the client declared, if any, and the value's
 /// text, or `None` for NULL. The text is read as a quoted constant would be: of the declared
 /// type, or of the type its place in the statement calls for, following PostgreSQL's rules
-/// for constants of unknown type.
+/// for constants of unknown type. A parameter declared `bytea` is written in PostgreSQL's
+/// `bytea` input form (`\x` and hexadecimal digits) in every dialect, so any bytes can be
+/// bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
     /// The parameter's type, when the client declared one.
@@ -562,6 +564,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         loop {
             let settings = Arc::clone(&self.settings);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
+            let _bytes = crate::bytea::enter_dialect(self.dialect);
             let mut parser = Parser::new(text, &tokens)
                 .with_context(parameters, &settings)
                 .in_dialect(self.dialect)

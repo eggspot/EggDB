@@ -3150,7 +3150,9 @@ fn hostile_item_31_statements_never_panic_in_any_dialect() {
 
 #[test]
 fn item_31_types_and_functions_stay_in_their_dialects() {
-    let refused: [(crate::Dialect, &str); 14] = [
+    let refused: [(crate::Dialect, &str); 16] = [
+        (crate::Dialect::MySql, "SELECT mysql_curtime()"),
+        (crate::Dialect::PostgreSql, "SELECT mysql_curtime()"),
         (crate::Dialect::MySql, "SELECT encode('a', 'hex')"),
         (crate::Dialect::MySql, "SELECT gen_random_uuid()"),
         (crate::Dialect::MySql, "SELECT justify_days(1)"),
@@ -3201,7 +3203,7 @@ fn item_31_types_and_functions_stay_in_their_dialects() {
     run(&mut oracle, "INSERT INTO o VALUES (1, 'ab', '0a')").unwrap();
     assert_eq!(
         last(&mut oracle, "SELECT c, LENGTH(c), r FROM o WHERE c = 'ab'"),
-        "C|LENGTH(C)|R\nab  |4|\\x3061\nSELECT 1"
+        "C|LENGTH(C)|R\nab  |4|\\x0a\nSELECT 1"
     );
 }
 
@@ -3323,5 +3325,77 @@ fn item_31_values_behave_as_postgresql_documents() {
             "SELECT code || '|', length(code) FROM c ORDER BY id"
         ),
         "?column?|length\nab||2\nx||1\nSELECT 2"
+    );
+}
+
+#[test]
+fn mysql_and_oracle_read_strings_given_to_binary_columns_by_their_own_rules() {
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    run(
+        &mut mysql,
+        "CREATE TABLE bl (id INT PRIMARY KEY, b BLOB, t TEXT)",
+    )
+    .unwrap();
+    run(
+        &mut mysql,
+        "INSERT INTO bl VALUES (1, 'abc', 'x'), (3, '\\\\x41', NULL), (4, '\\\\001', NULL), (5, 'a\\\\b', NULL)",
+    )
+    .unwrap();
+    assert_eq!(
+        last(
+            &mut mysql,
+            "SELECT id, b, LENGTH(b), CONCAT('x', b), CONCAT(b, b), CONCAT(b, NULL) FROM bl ORDER BY id"
+        ),
+        "id|b|LENGTH(b)|CONCAT('x', b)|CONCAT(b, b)|CONCAT(b, NULL)\n\
+         1|\\x616263|3|\\x78616263|\\x616263616263|NULL\n\
+         3|\\x5c783431|4|\\x785c783431|\\x5c7834315c783431|NULL\n\
+         4|\\x5c303031|4|\\x785c303031|\\x5c3030315c303031|NULL\n\
+         5|\\x615c62|3|\\x78615c62|\\x615c62615c62|NULL\n\
+         SELECT 4"
+    );
+    assert_eq!(
+        last(
+            &mut mysql,
+            "SELECT id FROM bl WHERE b = 'abc' OR b = '\\\\x41' ORDER BY id"
+        ),
+        "id\n1\n3\nSELECT 2"
+    );
+    let parameters = [crate::Parameter {
+        declared_type: Some(crate::SqlType::Bytea),
+        value: Some("\\x00ff".into()),
+    }];
+    mysql
+        .execute_prepared(
+            "INSERT INTO bl (id, b) VALUES (6, ?)",
+            &parameters,
+            &mut |_| true,
+        )
+        .unwrap();
+    assert_eq!(
+        last(&mut mysql, "SELECT LENGTH(b), b FROM bl WHERE id = 6"),
+        "LENGTH(b)|b\n2|\\x00ff\nSELECT 1"
+    );
+    let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);
+    run(
+        &mut oracle,
+        "CREATE TABLE r (id NUMBER PRIMARY KEY, r RAW(8))",
+    )
+    .unwrap();
+    run(&mut oracle, "INSERT INTO r VALUES (1, '0a')").unwrap();
+    run(&mut oracle, "INSERT INTO r VALUES (2, 'ABC')").unwrap();
+    assert_eq!(
+        last(
+            &mut oracle,
+            "SELECT r, LENGTH(r) FROM r WHERE r = '0A' OR r = 'abc' ORDER BY id"
+        ),
+        "R|LENGTH(R)\n\\x0a|2\n\\x0abc|4\nSELECT 2"
+    );
+    let error = fails(&mut oracle, "INSERT INTO r VALUES (3, 'zz')");
+    assert_eq!(error.vendor_code(), Some(1465), "{error}");
+    let mut postgresql = Session::new(&store);
+    assert_eq!(
+        last(&mut postgresql, "SELECT '\\x41'::bytea, 'a\\\\b'::bytea"),
+        "bytea|bytea\n\\x41|\\x615c62\nSELECT 1"
     );
 }

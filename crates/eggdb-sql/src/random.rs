@@ -1,14 +1,16 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use std::sync::OnceLock;
 
-/// A function that fills its buffer with unpredictable bytes from a cryptographically secure
-/// generator, or fails.
+/// A function that fills the whole of its buffer with unpredictable bytes from a
+/// cryptographically secure generator, or fails; it must never leave part of the buffer
+/// unfilled and succeed.
 pub type RandomSource = fn(&mut [u8]) -> std::io::Result<()>;
 
 static SOURCE: OnceLock<RandomSource> = OnceLock::new();
 
-/// Sets the process's source of random bytes; the first call wins and later calls change
-/// nothing. Until it is set, `gen_random_uuid()` answers SQLSTATE `0A000`.
+/// Sets the process's source of random bytes. The first registration wins for the life of
+/// the process: later calls change nothing, whichever source they pass. Until one is set,
+/// `gen_random_uuid()` answers SQLSTATE `0A000`.
 pub fn set_random_source(source: RandomSource) {
     let _ = SOURCE.set(source);
 }

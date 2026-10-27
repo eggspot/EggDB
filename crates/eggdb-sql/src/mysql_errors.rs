@@ -193,6 +193,11 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             SqlState::MYSQL_INTEGRITY,
             format!("Column '{name}' cannot be null"),
         ),
+        "22021" => translated(
+            1366,
+            SqlState::MYSQL_GENERAL,
+            "Incorrect string value: the bytes are not UTF-8".to_owned(),
+        ),
         "22001" => translated(
             1406,
             SqlState::STRING_DATA_RIGHT_TRUNCATION,
