@@ -431,7 +431,9 @@ impl Evaluator<'_> {
     fn eval_unplaced(&self, expr: &Expr, hint: Option<SqlType>) -> SqlResult<Value> {
         match &expr.kind {
             ExprKind::Literal(literal) => literal_value(literal, hint),
-            ExprKind::SessionValue { name, value } if value.is_empty() && *name == "current_schema" => {
+            ExprKind::SessionValue { name, value }
+                if value.is_empty() && *name == "current_schema" =>
+            {
                 Ok(Value::Null)
             }
             ExprKind::SessionValue { value, .. } => Ok(Value::Text(value.clone())),

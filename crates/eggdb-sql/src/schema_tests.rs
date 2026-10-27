@@ -1,5 +1,5 @@
 use crate::memory_store::MemoryStore;
-use crate::tests::render;
+use crate::tests::{fuzz, render};
 use crate::{Dialect, Session, SqlError};
 
 fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
@@ -216,20 +216,20 @@ fn view_chains_stop_at_32_levels() {
     let mut session = Session::new(&store);
     last(
         &mut session,
-        "CREATE TABLE t (a int); INSERT INTO t VALUES (1); CREATE VIEW v0 AS SELECT a FROM t",
+        "CREATE TABLE t (a int); INSERT INTO t VALUES (1); CREATE VIEW v1 AS SELECT a FROM t",
     );
-    for level in 1..=33 {
-        let created = run(
+    for level in 2..=32 {
+        last(
             &mut session,
             &format!("CREATE VIEW v{level} AS SELECT a FROM v{}", level - 1),
         );
-        if level <= 31 {
-            created.unwrap();
-        } else {
-            assert!(created.is_err() || level == 32 || level == 33, "{level}");
-        }
     }
-    assert_eq!(last(&mut session, "SELECT a FROM v30"), "a\n1\nSELECT 1");
+    assert_eq!(last(&mut session, "SELECT a FROM v31"), "a\n1\nSELECT 1");
+    assert_eq!(last(&mut session, "SELECT a FROM v32"), "a\n1\nSELECT 1");
+    let error = fails(&mut session, "CREATE VIEW v33 AS SELECT a FROM v32");
+    assert_eq!(error.state().code(), "54001", "{error}");
+    let error = fails(&mut session, "SELECT * FROM (SELECT a FROM v32) AS deeper");
+    assert_eq!(error.state().code(), "54001", "{error}");
 }
 
 #[test]
@@ -485,4 +485,298 @@ fn oracle_views_and_comments_follow_oracle() {
         Some(955)
     );
     last(&mut session, "DROP VIEW v");
+}
+
+struct Seeded(u64);
+
+impl Seeded {
+    fn below(&mut self, bound: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % bound
+    }
+}
+
+const VIEW_QUERIES: [&str; 8] = [
+    "SELECT a, b, c FROM t WHERE b > 3",
+    "SELECT t.a, u.d FROM t JOIN u ON u.b = t.b",
+    "SELECT t.a, u.d FROM t LEFT JOIN u ON u.b = t.b WHERE t.c <> 'x'",
+    "SELECT b, count(*) AS n, sum(a) AS total FROM t GROUP BY b",
+    "SELECT a FROM t WHERE b IN (SELECT b FROM u WHERE d > 2)",
+    "SELECT b FROM t UNION SELECT b FROM u",
+    "SELECT DISTINCT c FROM t",
+    "SELECT * FROM t WHERE a % 2 = 0",
+];
+
+fn ordered(session: &mut Session<'_, MemoryStore>, from: &str) -> String {
+    let columns = last(session, &format!("SELECT * FROM {from} LIMIT 0"));
+    let width = columns
+        .lines()
+        .next()
+        .map_or(1, |line| line.split('|').count());
+    let order: Vec<String> = (1..=width).map(|position| position.to_string()).collect();
+    last(
+        session,
+        &format!("SELECT * FROM {from} ORDER BY {}", order.join(", ")),
+    )
+}
+
+#[test]
+fn a_view_answers_as_its_query_on_random_data_with_and_without_indexes() {
+    for seed in 1..=6u64 {
+        for indexed in [false, true] {
+            let store = MemoryStore::default();
+            let mut session = Session::new(&store);
+            let mut random = Seeded(seed * 7919);
+            last(
+                &mut session,
+                "CREATE TABLE t (a integer PRIMARY KEY, b integer, c text); \
+                 CREATE TABLE u (id integer PRIMARY KEY, b integer, d integer)",
+            );
+            if indexed {
+                last(
+                    &mut session,
+                    "CREATE INDEX t_b ON t (b); CREATE INDEX u_b ON u (b)",
+                );
+            }
+            for id in 0..60 {
+                let b = random.below(8);
+                let c = ["x", "y", "z"][random.below(3) as usize];
+                last(
+                    &mut session,
+                    &format!("INSERT INTO t VALUES ({id}, {b}, '{c}')"),
+                );
+                if random.below(2) == 0 {
+                    let d = random.below(5);
+                    last(
+                        &mut session,
+                        &format!("INSERT INTO u VALUES ({id}, {b}, {d})"),
+                    );
+                }
+            }
+            for (number, query) in VIEW_QUERIES.iter().enumerate() {
+                last(&mut session, &format!("CREATE VIEW v{number} AS {query}"));
+                let through_view = ordered(&mut session, &format!("v{number}"));
+                let inline = ordered(&mut session, &format!("({query}) AS inline_query"));
+                assert_eq!(
+                    through_view, inline,
+                    "seed {seed}, indexed {indexed}: {query}"
+                );
+                let filtered = last(
+                    &mut session,
+                    &format!(
+                        "SELECT count(*) FROM v{number} AS v JOIN t ON t.a >= 0 WHERE t.a < 5"
+                    ),
+                );
+                let filtered_inline = last(
+                    &mut session,
+                    &format!(
+                        "SELECT count(*) FROM ({query}) AS v JOIN t ON t.a >= 0 WHERE t.a < 5"
+                    ),
+                );
+                assert_eq!(filtered, filtered_inline, "{query}");
+            }
+            session.check_indexes().unwrap();
+        }
+    }
+}
+
+#[test]
+fn hostile_schema_view_and_comment_statements_never_panic() {
+    for dialect in [
+        Dialect::PostgreSql,
+        Dialect::MySql,
+        Dialect::Sqlite,
+        Dialect::Oracle,
+    ] {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        let _ = run(&mut session, "CREATE TABLE t (a int PRIMARY KEY, b int)");
+        let fragments = [
+            "CREATE SCHEMA",
+            "CREATE SCHEMA IF NOT EXISTS s",
+            "DROP SCHEMA",
+            "s",
+            "s.t",
+            "s.v",
+            "public.t",
+            "main.t",
+            "temp.t",
+            "EGGDB.t",
+            "\"\u{0}\"",
+            "\"a\u{1}b\"",
+            "CASCADE",
+            "RESTRICT",
+            "ALTER SCHEMA s RENAME TO r",
+            "ALTER TABLE t SET SCHEMA s",
+            "SET search_path = s, public",
+            "SET search_path TO ''",
+            "SELECT set_config('search_path', 's', false)",
+            "SELECT current_schema()",
+            "SELECT current_schemas(false)",
+            "CREATE VIEW v AS",
+            "CREATE OR REPLACE VIEW v",
+            "CREATE OR REPLACE FORCE VIEW v",
+            "CREATE ALGORITHM=MERGE DEFINER=`a`@`b` SQL SECURITY DEFINER VIEW v",
+            "CREATE VIEW IF NOT EXISTS v",
+            "(x, y)",
+            "AS SELECT * FROM t",
+            "AS SELECT a FROM v",
+            "SELECT * FROM v",
+            "WITH CHECK OPTION",
+            "WITH READ ONLY",
+            "DROP VIEW",
+            "DROP VIEW IF EXISTS v",
+            "ALTER VIEW v RENAME TO w",
+            "COMMENT ON TABLE t IS",
+            "COMMENT ON COLUMN t.a IS",
+            "COMMENT ON VIEW v IS",
+            "COMMENT ON SCHEMA s IS",
+            "COMMENT ON INDEX i IS",
+            "COMMENT ON CONSTRAINT c ON t IS",
+            "'text'",
+            "NULL",
+            "GRANT SELECT ON t TO r",
+            "REVOKE ALL ON SCHEMA public FROM PUBLIC",
+            "ALTER DEFAULT PRIVILEGES",
+            "CREATE EXTENSION IF NOT EXISTS plpgsql",
+            "SHOW CREATE VIEW v",
+            "SHOW FULL TABLES",
+            "SELECT * FROM user_views",
+            "SELECT * FROM user_tab_comments",
+            "FROM (t JOIN t AS x ON x.a = t.a)",
+            "(",
+            ")",
+            ",",
+            ";",
+        ];
+        fuzz(&mut session, &fragments);
+        session.check_indexes().unwrap();
+    }
+}
+
+#[test]
+fn deep_and_wide_view_graphs_stay_bounded() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE t (a int); INSERT INTO t VALUES (1)",
+    );
+    last(&mut session, "CREATE VIEW w0 AS SELECT a FROM t");
+    let create = |level: usize| {
+        let previous = level - 1;
+        format!(
+            "CREATE VIEW w{level} AS SELECT x.a FROM w{previous} x JOIN w{previous} y ON x.a = y.a"
+        )
+    };
+    for level in 1..=9 {
+        last(&mut session, &create(level));
+    }
+    let error = fails(&mut session, &create(10));
+    assert_eq!(error.state().code(), "54001", "{error}");
+    let error = fails(&mut session, "SELECT * FROM w9 a JOIN w9 b ON a.a = b.a");
+    assert_eq!(error.state().code(), "54001", "{error}");
+    assert_eq!(last(&mut session, "SELECT a FROM w9"), "a\n1\nSELECT 1");
+}
+
+fn overwrite(store: &MemoryStore, key: &[u8], value: &[u8]) {
+    use crate::store::{KeyValueStore, KeyValueWrite};
+    let mut writer = store.begin_write().unwrap();
+    writer.put(key, value).unwrap();
+    writer.commit().unwrap();
+}
+
+#[test]
+fn damaged_schema_view_and_comment_records_are_errors_never_panics() {
+    use crate::encoding::{
+        CommentKind, comment_key, dependency_key, schema_key, sequence_key, table_key,
+    };
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE SCHEMA app; CREATE TABLE app.t (a int); CREATE VIEW app.v AS SELECT a FROM app.t; \
+         COMMENT ON TABLE app.t IS 'x'",
+    );
+    let mut view = {
+        use crate::store::{KeyValueRead, KeyValueStore};
+        store
+            .begin_read()
+            .unwrap()
+            .get(&table_key("app\0v"))
+            .unwrap()
+            .unwrap()
+    };
+    let last_byte = view.len() - 1;
+    view[last_byte] ^= 0xFF;
+    overwrite(&store, &table_key("app\0v"), &view);
+    let error = fails(&mut session, "SELECT * FROM app.v");
+    assert!(
+        ["XX001", "0A000"].contains(&error.state().code()),
+        "{error}"
+    );
+    overwrite(
+        &store,
+        &table_key("app\0v"),
+        &[8, 0, 0, 1, b' ', 1, 1, b'a', 0, 0, 0],
+    );
+    assert_eq!(code(&mut session, "SELECT * FROM app.v"), "XX001");
+    overwrite(&store, &schema_key("app"), &[1, 2, 3]);
+    assert_eq!(code(&mut session, "CREATE TABLE app.u (a int)"), "XX001");
+    overwrite(&store, &schema_key("app"), &[1]);
+    overwrite(
+        &store,
+        &comment_key("app\0t", CommentKind::Column, "a"),
+        &[1, 0xC3, 0x28],
+    );
+    let listed = session.tables();
+    assert!(listed.is_err_and(|error| error.state().code() == "XX001"));
+    overwrite(
+        &store,
+        &comment_key("app\0t", CommentKind::Column, "a"),
+        &[1, b'y'],
+    );
+    overwrite(&store, &dependency_key("app\0t", "\u{0}\u{0}"), &[1]);
+    let error = fails(&mut session, "DROP TABLE app.t CASCADE");
+    assert!(
+        ["XX001", "0A000"].contains(&error.state().code()),
+        "{error}"
+    );
+    overwrite(&store, &table_key("app\0\0z"), &[1, 0, 0, 0, 0, 0, 0]);
+    let error = fails(&mut session, "DROP SCHEMA app CASCADE");
+    assert_eq!(error.state().code(), "XX001", "{error}");
+    overwrite(&store, &sequence_key("bad\0s"), &[1]);
+    let _ = run(&mut session, "SELECT nextval('bad.s')");
+}
+
+#[test]
+fn schema_and_view_changes_roll_back_as_one_transaction() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE t (a int)");
+    last(
+        &mut session,
+        "BEGIN; CREATE SCHEMA app; CREATE TABLE app.t (a int); CREATE VIEW v AS SELECT a FROM app.t; \
+         COMMENT ON VIEW v IS 'gone'; ROLLBACK",
+    );
+    assert_eq!(code(&mut session, "SELECT * FROM v"), "42P01");
+    assert_eq!(code(&mut session, "SELECT * FROM app.t"), "42P01");
+    last(&mut session, "CREATE SCHEMA app");
+    assert_eq!(
+        last(&mut session, "CREATE VIEW v AS SELECT a FROM t"),
+        "CREATE VIEW"
+    );
+    let failed = run(
+        &mut session,
+        "BEGIN; DROP VIEW v; DROP SCHEMA app; CREATE TABLE app.t (a int); SELECT 1/0",
+    );
+    assert!(failed.is_err());
+    last(&mut session, "ROLLBACK");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM v"),
+        "count\n0\nSELECT 1"
+    );
+    last(&mut session, "CREATE TABLE app.t (a int)");
 }

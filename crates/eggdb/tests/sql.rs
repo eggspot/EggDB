@@ -365,6 +365,71 @@ fn a_killed_process_never_rewinds_a_sequence_or_breaks_a_foreign_key() {
 }
 
 #[test]
+fn a_killed_process_leaves_each_schema_with_its_table_and_view_or_none_of_them() {
+    const ROUNDS: usize = 300;
+    let mut script = String::new();
+    for round in 0..ROUNDS {
+        script.push_str(&format!(
+            "BEGIN;\nCREATE SCHEMA s{round};\nCREATE TABLE s{round}.t (a int PRIMARY KEY);\nINSERT INTO s{round}.t VALUES ({round});\nCREATE VIEW s{round}.v AS SELECT a FROM s{round}.t;\nCOMMENT ON VIEW s{round}.v IS 'round {round}';\nCOMMIT;\n"
+        ));
+        if round % 3 == 2 {
+            script.push_str(&format!(
+                "BEGIN;\nDROP SCHEMA s{} CASCADE;\nCOMMIT;\n",
+                round - 1
+            ));
+        }
+    }
+    let mut complete_seen = 0;
+    for delay_ms in [0u64, 100, 300, 700, 1_500] {
+        let file = TempPath::new("sql-schema-killed");
+        Database::open(file.path()).unwrap().close().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .arg("sql")
+            .arg(file.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let bytes = script.clone().into_bytes();
+        let writer = std::thread::spawn(move || {
+            let _ = input.write_all(&bytes);
+        });
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        let db = Database::open(file.path()).unwrap();
+        let store = db.sql_store();
+        let mut session = store.session(eggdb::sql::Dialect::PostgreSql);
+        for round in 0..ROUNDS {
+            let mut through_view = Vec::new();
+            let view = session.execute(&format!("SELECT a FROM s{round}.v"), &mut |result| {
+                through_view.push(result)
+            });
+            let table = session.execute(&format!("SELECT a FROM s{round}.t"), &mut |_| {});
+            assert_eq!(
+                view.is_ok(),
+                table.is_ok(),
+                "after {delay_ms} ms: schema s{round} kept a table without its view or the reverse"
+            );
+            if view.is_ok() {
+                assert_eq!(through_view[0].rows.len(), 1);
+                complete_seen += 1;
+            }
+        }
+        session.check_indexes().unwrap();
+        drop(session);
+        assert_eq!(db.check().unwrap().leaked_pages, 0);
+    }
+    assert!(
+        complete_seen > 0,
+        "no run committed a schema before it was killed"
+    );
+}
+
+#[test]
 fn the_mysql_dialect_reads_mysql_and_reports_mysql_errors() {
     let file = TempPath::new("sql-mysql");
     let created = eggdb_sql(

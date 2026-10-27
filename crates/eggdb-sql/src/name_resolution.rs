@@ -1,7 +1,7 @@
 use crate::ast::{
     AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
-    FromClause, Insert, InsertSource, InsertValue, JoinCondition, Name, OnDuplicate,
-    Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
+    FromClause, Insert, InsertSource, InsertValue, JoinCondition, Name, OnDuplicate, Query, Select,
+    SelectItem, SetExpr, Statement, TableReference, Update,
 };
 use crate::dialect::Dialect;
 use crate::encoding::ViewDefinition;
@@ -32,6 +32,8 @@ pub(crate) struct Resolver<'a> {
     walk_expressions: bool,
     selects: usize,
     depth: usize,
+    levels: usize,
+    recorded_at: usize,
     stack: Vec<String>,
     paths: Vec<Vec<String>>,
     resolution: Resolution,
@@ -94,6 +96,8 @@ impl<'a> Resolver<'a> {
             walk_expressions,
             selects: 0,
             depth: 0,
+            levels: 0,
+            recorded_at: 0,
             stack: Vec::new(),
             paths: vec![path],
             resolution: Resolution::default(),
@@ -193,14 +197,29 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    fn nested_query(
+        &mut self,
+        query: &mut Query,
+        ctes: &mut Vec<String>,
+        position: usize,
+    ) -> SqlResult<()> {
+        self.depth += 1;
+        self.levels += 1;
+        let walked = if self.depth > MAX_NESTING || self.levels > MAX_QUERY_NESTING {
+            Err(nested_too_deep(position))
+        } else {
+            self.walk_query(query, ctes)
+        };
+        self.depth -= 1;
+        self.levels -= 1;
+        walked
+    }
+
     fn walk_query(&mut self, query: &mut Query, ctes: &mut Vec<String>) -> SqlResult<()> {
         let base = ctes.len();
         for table in &mut query.with {
             ctes.push(table.name.text.clone());
-            self.enter(table.name.position)?;
-            let walked = self.walk_query(&mut table.query, ctes);
-            self.depth -= 1;
-            walked?;
+            self.nested_query(&mut table.query, ctes, table.name.position)?;
         }
         let mut bodies: Vec<&mut SetExpr> = vec![&mut query.body];
         while let Some(body) = bodies.pop() {
@@ -211,10 +230,8 @@ impl<'a> Resolver<'a> {
                     bodies.push(&mut operation.left);
                 }
                 SetExpr::Query(inner) => {
-                    self.enter(inner.position)?;
-                    let walked = self.walk_query(inner, ctes);
-                    self.depth -= 1;
-                    walked?;
+                    let position = inner.position;
+                    self.nested_query(inner, ctes, position)?;
                 }
             }
         }
@@ -281,7 +298,8 @@ impl<'a> Resolver<'a> {
                 if let Some(operand) = subquery.test.operand_mut() {
                     self.walk_expr(operand, ctes)?;
                 }
-                self.walk_query(&mut subquery.query, ctes)
+                let position = subquery.query.position;
+                self.nested_query(&mut subquery.query, ctes, position)
             }
             ExprKind::SessionValue { name, value } if *name == "current_schema" => {
                 *value = schemas::current_schema(self.reader)?.unwrap_or_default();
@@ -301,7 +319,9 @@ impl<'a> Resolver<'a> {
     }
 
     fn record(&mut self, name: &str) {
-        if self.stack.is_empty() && !self.resolution.references.iter().any(|known| known == name) {
+        if self.stack.len() == self.recorded_at
+            && !self.resolution.references.iter().any(|known| known == name)
+        {
             self.resolution.references.push(name.to_owned());
         }
     }
@@ -312,10 +332,7 @@ impl<'a> Resolver<'a> {
         ctes: &mut Vec<String>,
     ) -> SqlResult<()> {
         if let Some(derived) = &mut reference.derived {
-            self.enter(reference.name.position)?;
-            let walked = self.walk_query(&mut derived.query, ctes);
-            self.depth -= 1;
-            return walked;
+            return self.nested_query(&mut derived.query, ctes, reference.name.position);
         }
         if ctes.contains(&reference.name.text) {
             return Ok(());
@@ -353,7 +370,7 @@ impl<'a> Resolver<'a> {
             )
             .at(position));
         }
-        let query_depth = self.stack.len() + 1;
+        let query_depth = self.levels + 1;
         if query_depth > MAX_QUERY_NESTING {
             return Err(nested_too_deep(position));
         }
@@ -383,9 +400,11 @@ impl<'a> Resolver<'a> {
         self.paths.push(path);
         let walk_expressions = std::mem::replace(&mut self.walk_expressions, true);
         self.depth += 1;
+        self.levels += 1;
         let mut ctes = Vec::new();
         let walked = self.walk_query(&mut query, &mut ctes);
         self.depth -= 1;
+        self.levels -= 1;
         self.walk_expressions = walk_expressions;
         self.paths.pop();
         self.stack.pop();
@@ -478,11 +497,16 @@ fn narrowed(
 pub(crate) fn resolve_view_body(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
+    view: &str,
     query: &mut Query,
     path: Vec<String>,
     settings: Option<&Settings>,
 ) -> SqlResult<Resolution> {
     let mut resolver = Resolver::new(reader, tables, settings, true)?.with_path(path)?;
+    resolver.stack.push(view.to_owned());
+    resolver.recorded_at = 1;
+    resolver.levels = 1;
+    resolver.depth = 1;
     resolver.query(query)?;
     Ok(resolver.finish())
 }

@@ -116,12 +116,13 @@ pub(crate) struct ViewContext<'a> {
 pub(crate) fn describe(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
+    view: &str,
     query: &mut Query,
     path: Vec<String>,
     context: &ViewContext<'_>,
 ) -> SqlResult<(Vec<OutputColumn>, Resolution)> {
     let resolution =
-        name_resolution::resolve_view_body(reader, tables, query, path, context.settings)?;
+        name_resolution::resolve_view_body(reader, tables, view, query, path, context.settings)?;
     let result = crate::execute::query(reader, tables, query, true)?;
     Ok((result.columns.unwrap_or_default(), resolution))
 }
@@ -177,7 +178,8 @@ pub(crate) fn create_view(
     }
     let path = schemas::relation_path(writer)?;
     let mut query = create.query.clone();
-    let (output, resolution) = describe(writer, tables, &mut query, path.clone(), context)?;
+    let (output, resolution) =
+        describe(writer, tables, &internal, &mut query, path.clone(), context)?;
     if resolution.expanded.contains(&internal) || resolution.references.contains(&internal) {
         return Err(SqlError::new(
             SqlState::INVALID_OBJECT_DEFINITION,
@@ -586,7 +588,7 @@ fn still_valid(
         name_resolution::parse_view(view, settings, crate::parser::Nesting::default())
             .map_err(|error| error.message().to_owned())?;
     let path = view.search_path.clone();
-    let (output, _) = describe(reader, tables, &mut query, path, &context)
+    let (output, _) = describe(reader, tables, &view.name, &mut query, path, &context)
         .map_err(|error| error.with_names_displayed().message().to_owned())?;
     if output.len() < view.columns.len() {
         return Err("the view would lose columns".to_owned());

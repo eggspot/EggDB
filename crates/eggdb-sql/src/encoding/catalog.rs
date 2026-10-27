@@ -222,3 +222,126 @@ impl ViewDefinition {
 pub(crate) fn is_view_record(bytes: &[u8]) -> bool {
     bytes.first() == Some(&VIEW_FORMAT_VERSION)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ViewColumn, ViewDefinition, decode_comment, decode_schema, encode_comment, encode_schema,
+        is_view_record,
+    };
+    use crate::encoding::{Column, TableDefinition};
+    use crate::types::SqlType;
+
+    fn view() -> ViewDefinition {
+        ViewDefinition {
+            name: "app\0v".into(),
+            dialect: crate::Dialect::PostgreSql,
+            query: "SELECT a, b FROM app.t".into(),
+            columns: vec![
+                ViewColumn {
+                    name: "a".into(),
+                    sql_type: Some(SqlType::Integer),
+                },
+                ViewColumn {
+                    name: "b".into(),
+                    sql_type: None,
+                },
+            ],
+            search_path: vec!["app".into(), "public".into()],
+            references: vec!["app\0t".into(), "t".into()],
+            expands_wildcard: true,
+        }
+    }
+
+    fn schema_table() -> TableDefinition {
+        TableDefinition {
+            id: 9,
+            name: "app\0t".into(),
+            columns: vec![Column {
+                name: "a".into(),
+                sql_type: SqlType::Integer,
+                not_null: false,
+                default: None,
+                auto_increment: false,
+            }],
+            ..TableDefinition::default()
+        }
+    }
+
+    #[test]
+    fn views_round_trip_and_every_truncation_is_damage() {
+        let bytes = view().encode();
+        assert!(is_view_record(&bytes));
+        assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), view());
+        for cut in 0..bytes.len() {
+            assert!(ViewDefinition::decode("app\0v", &bytes[..cut]).is_err());
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(ViewDefinition::decode("app\0v", &longer).is_err());
+    }
+
+    #[test]
+    fn hostile_view_bytes_are_errors_never_panics_or_huge_allocations() {
+        let bytes = view().encode();
+        for at in 0..bytes.len() {
+            for value in [0u8, 1, 2, 3, 4, 7, 8, 0x7F, 0x80, 0xFE, 0xFF] {
+                let mut changed = bytes.clone();
+                changed[at] = value;
+                let _ = ViewDefinition::decode("app\0v", &changed);
+            }
+        }
+        let huge = [
+            8u8, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
+        ];
+        assert!(ViewDefinition::decode("v", &huge).is_err());
+        for name in ["\0v", "v\0", "public\0v", "a\0b\0c"] {
+            let error = ViewDefinition::decode(name, &bytes).unwrap_err();
+            assert_eq!(error.state().code(), "XX001");
+        }
+    }
+
+    #[test]
+    fn a_table_in_a_schema_is_version_7_which_older_releases_refuse_by_name() {
+        let table = schema_table();
+        let bytes = table.encode();
+        assert_eq!(bytes[0], 7, "releases that read up to version 6 refuse it");
+        assert_eq!(TableDefinition::decode("app\0t", &bytes).unwrap(), table);
+        assert!(TableDefinition::decode("t", &bytes).is_err());
+        let mut public = schema_table();
+        public.name = "t".into();
+        let plain = public.encode();
+        assert_eq!(plain[0], 1, "a public table keeps its exact bytes");
+        assert!(TableDefinition::decode("app\0t", &plain).is_err());
+        for cut in 0..bytes.len() {
+            assert!(TableDefinition::decode("app\0t", &bytes[..cut]).is_err());
+        }
+        for name in ["\0t", "t\0", "public\0t", "a\0b\0c"] {
+            assert!(TableDefinition::decode(name, &bytes).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_view_record_read_as_a_table_names_the_view() {
+        let error = TableDefinition::decode("app\0v", &view().encode()).unwrap_err();
+        assert_eq!(error.state().code(), "42809");
+    }
+
+    #[test]
+    fn schema_and_comment_records_round_trip_and_refuse_damage() {
+        decode_schema("app", &encode_schema()).unwrap();
+        assert!(decode_schema("app", &[]).is_err());
+        assert!(decode_schema("app", &[1, 0]).is_err());
+        assert_eq!(
+            decode_schema("app", &[2]).unwrap_err().state().code(),
+            "0A000"
+        );
+        assert!(decode_schema("", &encode_schema()).is_err());
+        assert!(decode_schema("a\0b", &encode_schema()).is_err());
+        assert_eq!(decode_comment(&encode_comment("hello")).unwrap(), "hello");
+        assert_eq!(decode_comment(&encode_comment("")).unwrap(), "");
+        assert!(decode_comment(&[]).is_err());
+        assert!(decode_comment(&[1, 0xFF, 0xFE]).is_err());
+        assert_eq!(decode_comment(&[9]).unwrap_err().state().code(), "0A000");
+    }
+}
