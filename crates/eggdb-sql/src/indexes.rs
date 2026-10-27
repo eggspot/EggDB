@@ -83,7 +83,7 @@ pub(crate) fn unique_conflict(
         &mut |entry, _| match row_key_of_entry(table, index, entry) {
             Ok(key) if key == own_row_key => Ok(true),
             Ok(key) => {
-                found = Some(key);
+                found = Some((entry.to_vec(), key));
                 Ok(false)
             }
             Err(error) => {
@@ -92,10 +92,18 @@ pub(crate) fn unique_conflict(
             }
         },
     )?;
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(found),
+    if let Some(error) = failure {
+        return Err(error);
     }
+    let Some((entry, key)) = found else {
+        return Ok(None);
+    };
+    let bytes = reader.get(&key)?.ok_or_else(|| corrupt("index entry"))?;
+    let other = decode_row(&bytes, &table.columns)?;
+    if entry_key(table, index, &other, &key) != entry {
+        return Err(corrupt("index entry"));
+    }
+    Ok(Some(key))
 }
 
 pub(crate) fn first_unique_conflict(
@@ -187,7 +195,11 @@ pub(crate) fn every_table(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableDefin
     let mut tables = Vec::new();
     let mut failure = None;
     reader.scan(&prefix, &end, ScanDirection::Forward, &mut |key, value| {
-        let name = String::from_utf8_lossy(&key[prefix.len()..]).into_owned();
+        let Some(name) = key.get(prefix.len()..) else {
+            failure = Some(corrupt("table definition"));
+            return Ok(false);
+        };
+        let name = String::from_utf8_lossy(name).into_owned();
         match TableDefinition::decode(&name, value) {
             Ok(table) => {
                 tables.push(table);
@@ -441,6 +453,8 @@ pub(crate) fn create_index(
         return Ok(result);
     }
     let position = define_index(&others, &mut definition, &create.index, dialect, false)?;
+    let leftover = index_prefix(definition.id, definition.indexes[position].id);
+    delete_index_entries(writer, &leftover, &prefix_end(&leftover))?;
     let mut memory = WorkMemory::new();
     backfill(
         writer,
@@ -482,15 +496,18 @@ pub(crate) fn delete_index_entries(
     start: &[u8],
     end: &[u8],
 ) -> SqlResult<()> {
+    let mut start = start.to_vec();
     loop {
         let mut keys = Vec::new();
-        writer.scan(start, end, ScanDirection::Forward, &mut |key, _| {
+        writer.scan(&start, end, ScanDirection::Forward, &mut |key, _| {
             keys.push(key.to_vec());
             Ok(keys.len() < DELETE_BATCH)
         })?;
-        if keys.is_empty() {
+        let Some(last) = keys.last() else {
             return Ok(());
-        }
+        };
+        start = last.clone();
+        start.push(0);
         for key in &keys {
             writer.delete(key)?;
         }
