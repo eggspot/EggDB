@@ -8,20 +8,29 @@ const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
 pub(crate) struct WorkMemory {
     used: usize,
+    limit: usize,
 }
 
 impl WorkMemory {
     pub(crate) fn new() -> Self {
-        Self { used: 0 }
+        Self::with_limit(WORK_MEMORY_LIMIT)
+    }
+
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self { used: 0, limit }
+    }
+
+    pub(crate) fn used(&self) -> usize {
+        self.used
     }
 
     pub(crate) fn charge(&mut self, bytes: usize) -> SqlResult<()> {
         self.used = self.used.saturating_add(bytes);
-        if self.used > WORK_MEMORY_LIMIT {
+        if self.used > self.limit {
             return Err(SqlError::new(SqlState::OUT_OF_MEMORY, "out of memory")
                 .with_detail(format!(
                     "The statement needs more than {} MiB to hold its joined tables, groups, distinct rows, sorted rows and result.",
-                    WORK_MEMORY_LIMIT >> 20
+                    self.limit >> 20
                 ))
                 .with_hint(
                     "Narrow the statement with WHERE or LIMIT; spilling to disk is not supported yet.",

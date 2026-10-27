@@ -1635,6 +1635,19 @@ fn every_join_method_agrees_on_random_tables() {
             last(&mut session, &by_key[1]),
             "{kind}"
         );
+        for id in (0..60).step_by(7) {
+            let looked_up = format!(
+                "SELECT l.v, r.w FROM l {kind} r ON r.id = l.k WHERE l.id = {id} ORDER BY 1, 2"
+            );
+            let scanned = format!(
+                "SELECT l.v, r.w FROM l {kind} r ON r.id + 0 = l.k WHERE l.id + 0 = {id} ORDER BY 1, 2"
+            );
+            assert_eq!(
+                last(&mut session, &looked_up),
+                last(&mut session, &scanned),
+                "{looked_up}"
+            );
+        }
     }
     let grouped = last(
         &mut session,

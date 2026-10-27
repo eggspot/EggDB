@@ -161,12 +161,16 @@ exports into a new file, or into a file without SQL tables.
   table. Each statement's result
   is built in memory before it prints (a `SELECT` without `ORDER BY` holds only the rows it
   returns; `ORDER BY` holds every matching row and sorts them, with no top-N for `LIMIT` yet).
-- Joins read the first table row by row and every later table once: a table whose whole
-  primary key the `ON` or `USING` equalities fix is read by key for each row; one joined by
-  other equalities of plain columns of the same kind of type (integers, floats, text, booleans)
-  is held in a hash table; anything else is held in memory and tried against each row. Joins go
-  left to right as written, with no reordering, and `WHERE` is applied to the joined rows
-  (except a key lookup on the first table). `GROUP BY` holds one entry per group, `DISTINCT` one
+- Joins read the first table row by row and every later table once. A table whose whole
+  primary key the `ON` or `USING` equalities fix is read by key for each row when the first
+  table is read by its key, and otherwise held in a hash table on that key while it fits in
+  64 MiB (else read by key); one joined by other equalities of plain columns of the same kind of
+  type (integers, floats, text, booleans) is held in a hash table; anything else is held in
+  memory and tried against each row. Only the columns a statement names are decoded. So a join
+  of a small filtered table with a very large one by its key reads up to 64 MiB of the large one
+  before falling back to lookups; table statistics come later. Joins go
+  left to right as written, with no reordering, and each `AND` part of `WHERE` is applied as soon as
+  the tables it names are joined. `GROUP BY` holds one entry per group, `DISTINCT` one
   per distinct row or value. What a statement holds this way (joined tables, groups, distinct
   rows, sorted rows and its result) is counted, and past 1 GiB the statement fails with `53200`
   (`out of memory`) instead of exhausting the process; nothing spills to disk yet.
@@ -201,14 +205,13 @@ exports into a new file, or into a file without SQL tables.
   Apple-silicon Mac (0.85 on CI's Linux runners), and multi-row `INSERT`s of constants about 0.9
   times (0.83 on Linux), measured with the same SQL text on both and gated so they can only improve; the rest of
   the point-select gap is roadmap item 19e (D99). A `GROUP BY` with four aggregates over 10,000
-  rows takes about 1.06 times SQLite's time, and a 10,000-row join by primary key about 3.5
-  times, gated the same way and scheduled in item 19e (D100).
+  rows takes about 0.94 times SQLite's time, and a 10,000-row join by primary key about 0.99
+  times, gated the same way (D100).
 
 ## Next parts (roadmap)
 - Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.
 - The `numeric`, `timestamp` and `json`/`jsonb` types, and `serial`/identity columns.
-- Point `SELECT`s and joins as fast as SQLite's everywhere: an AST that borrows the SQL text, a
-  plan cache, decoding only the columns a query reads, and `WHERE` conditions evaluated inside
-  the join.
+- Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
+  cache; table statistics for choosing between key lookups and hash joins.
 - `RIGHT` and `FULL` joins, subqueries, and the other aggregates.
 - Then `eggdb shell`, the PostgreSQL wire protocol, and the other dialects (items 20 to 25).

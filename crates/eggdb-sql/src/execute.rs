@@ -4,8 +4,9 @@ use crate::ast::{
     OrderItem, Select, SelectItem, TableReference, Update,
 };
 use crate::encoding::{
-    Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, encode_key_value, encode_meta,
-    encode_row, encode_row_into, meta_key, prefix_end, rows_prefix, table_key,
+    Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, decode_row_into,
+    encode_key_value, encode_meta, encode_row, encode_row_into, meta_key, prefix_end, rows_prefix,
+    table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
@@ -1082,7 +1083,14 @@ pub(crate) fn select(
                 .filter
                 .as_ref()
                 .and_then(|filter| point_key(first.table, Scope::One(first), filter));
-            RowSource::Joined(JoinedRows::new(reader, joined, first_key, &mut memory)?)
+            RowSource::Joined(JoinedRows::new(
+                reader,
+                joined,
+                first_key,
+                joined.needed_columns(select),
+                joined.filters_by_level(bound_filter.as_ref()),
+                &mut memory,
+            )?)
         }
         (None, Some(table)) => RowSource::Table(table),
         (None, None) => RowSource::Nothing,
@@ -1091,7 +1099,11 @@ pub(crate) fn select(
         reader,
         rows,
         scope,
-        filter: bound_filter.as_ref().or(select.filter.as_ref()),
+        filter: if joined.is_some() {
+            None
+        } else {
+            select.filter.as_ref()
+        },
     };
     if let Some(grouping) = &grouping {
         let groups = grouping.run(
@@ -1184,7 +1196,7 @@ impl SourceRows<'_> {
         &mut self,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<()> {
-        let (scope, filter) = (self.scope, self.filter);
+        let (reader, scope, filter) = (self.reader, self.scope, self.filter);
         match &mut self.rows {
             RowSource::Joined(joined) => joined.for_each(&mut |row| {
                 if filter_matches(scope, filter, row)? {
@@ -1193,6 +1205,26 @@ impl SourceRows<'_> {
                     Ok(true)
                 }
             }),
+            RowSource::Table(table)
+                if filter.is_none_or(|filter| point_key(table, scope, filter).is_none()) =>
+            {
+                let prefix = rows_prefix(table.id);
+                let mut row = Vec::with_capacity(table.columns.len());
+                reader.scan(
+                    &prefix,
+                    &prefix_end(&prefix),
+                    ScanDirection::Forward,
+                    &mut |_, bytes| {
+                        row.clear();
+                        decode_row_into(bytes, &table.columns, None, &mut row)?;
+                        if filter_matches(scope, filter, &row)? {
+                            visit(&row)
+                        } else {
+                            Ok(true)
+                        }
+                    },
+                )
+            }
             _ => self.for_each(&mut |row| visit(&row)),
         }
     }

@@ -653,7 +653,25 @@ impl Call {
     }
 
     fn add(&self, accumulator: &mut Accumulator, value: Value) -> SqlResult<()> {
-        if let Some(sql_type) = value.sql_type() {
+        let always_valid = matches!(
+            (self.function, &value),
+            (AggregateFunction::Count, _)
+                | (
+                    AggregateFunction::Sum,
+                    Value::SmallInt(_) | Value::Integer(_) | Value::Real(_) | Value::Double(_)
+                )
+                | (AggregateFunction::Avg, Value::Real(_) | Value::Double(_))
+                | (
+                    AggregateFunction::Min | AggregateFunction::Max,
+                    Value::SmallInt(_)
+                        | Value::Integer(_)
+                        | Value::BigInt(_)
+                        | Value::Real(_)
+                        | Value::Double(_)
+                        | Value::Text(_)
+                )
+        );
+        if !always_valid && let Some(sql_type) = value.sql_type() {
             check_argument_type(self.function, sql_type, self.exact_bigint_allowed)?;
         }
         match accumulator {
@@ -780,7 +798,12 @@ impl Grouping {
                 equality_key(&mut key, &value);
                 key_values.push(value);
             }
-            let at = match index.get(key.as_slice()) {
+            let found = if self.keys.is_empty() && !groups.is_empty() {
+                Some(&0)
+            } else {
+                index.get(key.as_slice())
+            };
+            let at = match found {
                 Some(&at) => at,
                 None => {
                     memory.charge_row(&key_values)?;

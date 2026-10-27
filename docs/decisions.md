@@ -4231,26 +4231,36 @@ results), which is where `42803` is decided.
 - The benchmarks live in `eggdb-sqlite-compare` only, as `ratio_to_sqlite` lines: the same SQL
   text on both engines is the D7 measure, and `eggdb-bench` has no SQL harness to compare with.
 
-**Speed (D7).** On an Apple-silicon Mac, `sqlite_compare.sql_group_by` (four aggregates over
-10,000 rows in 100 groups) takes 1.06 times SQLite 3.54.1's time and `sqlite_compare.sql_join`
-(10,000 orders joined to people by primary key, filtered and summed) 3.5 times, after binding
-column references at planning (group by 1.32 to 1.06, join 4.3 to 3.6), reading key lookups into
-a reused buffer and moving looked-up rows instead of cloning them. The join's remaining cost is
-avoidable: every lookup decodes the whole right-hand row, text included, and evaluates `WHERE` on
-the joined row, where SQLite reads only the columns it needs. As with D99, research decided to
-merge, gate and schedule: both ratios are gated at today's values with the 15% ceiling, the Linux
-lines from the first CI run, and the D99 condition extends to them: before v0.3.0 each ratio is
-at most 1.0 on macOS and Linux, or a D7 research shows the remainder is the unavoidable price of
-correctness or security. The work joins roadmap item 19e, cheapest first: decoding only the
-columns a statement reads, reused row buffers and no per-row type conversion when the key types
-match, `WHERE` conjuncts evaluated inside the join step, a cursor kept between lookups in key
-order, and merge joins. CI's Linux runner measured the join at 3.78-3.93 and the group-by at
-1.04-1.06. The point-select line is not moved: on the Mac it measured 1.32-1.41 against its 1.23
-while the untouched key-value `get` drifted as much (0.75 to 0.82), but on Linux it measured
-0.96-0.99 against 0.85 while `get` did not drift, so part of it is a real cost of the wider
-`SELECT` path (a larger statement, the grouping and join checks); two allocations it added are
-already removed (0.99 to 0.96). The rest is open and joins item 19e: it stays inside its 15% gate
-and is investigated with a profile before any line moves.
+**Speed (D7).** `sqlite_compare.sql_group_by` (four aggregates over 10,000 rows in 100 groups)
+and `sqlite_compare.sql_join` (10,000 orders joined to people by primary key, filtered and
+summed) were first measured at 1.32 and 4.35 times SQLite 3.54.1's time on an Apple-silicon Mac.
+A first round (column references bound to row offsets at planning, reused key buffers) brought
+them to 1.06 and 3.5, and gating that gap was not accepted under D7, so a profile-driven second
+round closed it. The profile showed about 70% of the join's time in the storage engine's point
+lookups, one B+tree descent per order. Changes, in order:
+- only the columns a statement names are decoded: the others are skipped without building a
+  `String` (join 4.3 to 2.8);
+- a table joined by its primary key while the first table is scanned is read once into a hash
+  table on that key, up to 64 MiB, instead of one lookup per row, falling back to lookups past
+  that bound; a first table read by its key still uses lookups (2.8 to 1.2);
+- hash tables keep their rows in one flat array with chained entries and an integer-keyed map
+  for single integer keys (with a per-statement random seed), rows decode into reused buffers,
+  the first table's row buffer is reused, and an `ON` that is exactly the key equality is not
+  evaluated again (1.2 to 1.04);
+- each `AND` part of `WHERE` is evaluated as soon as the tables it names are joined;
+- `GROUP BY` without keys skips hashing, a single-table scan feeding groups decodes into one
+  reused buffer instead of a vector per row, and aggregates check argument types only for
+  values whose type is not always valid (group by 1.13 to 0.94).
+
+Measured on the Mac: `sql_join` 0.99 and `sql_group_by` 0.94; the Linux lines come from CI.
+Both lines are gated with the 15% ceiling of D99's SQL lines and may only shrink. The known
+cost of the hash choice without table statistics: joining a small filtered first table to a
+very large table by its key reads up to 64 MiB of the large one before it falls back to
+lookups; statistics come later. The point-select line is not moved: on Linux it measures about
+0.96 against its 0.85 line while the key-value `get` did not drift, so part of it is a real
+cost of the wider `SELECT` path. A profile shows the time in parsing, allocation and the one
+B+tree lookup, with no single new cost; two allocations this part had added are removed. The
+rest joins item 19e, and the line stays where it is.
 
 **Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to 1,280,800 bytes on
 aarch64 macOS (+82,768, +6.9%) for the join planner and executor, the grouping rewrite and the

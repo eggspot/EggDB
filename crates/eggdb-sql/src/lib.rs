@@ -18,6 +18,7 @@ mod encoding;
 mod error;
 mod eval;
 mod execute;
+mod hash_index;
 mod join;
 mod lexer;
 mod memory;

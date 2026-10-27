@@ -1,16 +1,20 @@
 use crate::aggregate::bind;
-use crate::ast::{BinaryOperator, Expr, ExprKind, FromClause, JoinCondition, JoinKind};
-use crate::encoding::{TableDefinition, decode_row, encode_key_value, prefix_end, rows_prefix};
+use crate::ast::{
+    BinaryOperator, Expr, ExprKind, FromClause, JoinCondition, JoinKind, Select, SelectItem,
+};
+use crate::encoding::{
+    TableDefinition, decode_row_into, encode_key_value, prefix_end, rows_prefix,
+};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
-    Evaluator, Scope, Source, Sources, check_columns, compare_truth, reject_aggregates,
+    Evaluator, Scope, Source, Sources, check_columns, children, compare_truth, reject_aggregates,
 };
+use crate::hash_index::HashIndex;
 use crate::memory::WorkMemory;
 use crate::store::{KeyValueRead, ScanDirection};
-use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert, equality_key};
+use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert};
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(crate) struct JoinedFrom<'a> {
@@ -216,17 +220,8 @@ pub(crate) fn resolve<'a>(
 
 enum Access {
     Lookup(Vec<usize>),
-    Hash {
-        probe: Vec<usize>,
-        buckets: HashMap<Vec<u8>, Vec<usize>>,
-        rows: Vec<Vec<Value>>,
-    },
+    Hash { probe: Vec<usize>, index: HashIndex },
     Scan(Vec<Vec<Value>>),
-}
-
-enum Right<'r> {
-    Owned(Vec<Value>),
-    Borrowed(&'r [Value]),
 }
 
 struct Step<'a> {
@@ -234,6 +229,7 @@ struct Step<'a> {
     prefix_length: usize,
     preserves_left: bool,
     table: &'a TableDefinition,
+    needed: Vec<bool>,
     on: Option<Expr>,
     using: &'a [(usize, usize)],
     scope: Scope<'a>,
@@ -243,8 +239,11 @@ struct Step<'a> {
 pub(crate) struct JoinedRows<'a> {
     reader: &'a dyn KeyValueRead,
     first: &'a TableDefinition,
+    first_needed: Vec<bool>,
     first_key: Option<Vec<u8>>,
+    width: usize,
     steps: Vec<Step<'a>>,
+    filters: Vec<Vec<Expr>>,
 }
 
 fn equality_pairs(shape: &StepShape<'_>) -> Vec<(usize, usize)> {
@@ -296,6 +295,7 @@ fn equality_pairs(shape: &StepShape<'_>) -> Vec<(usize, usize)> {
 fn scan_table(
     reader: &dyn KeyValueRead,
     table: &TableDefinition,
+    needed: &[bool],
     visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>,
 ) -> SqlResult<()> {
     let prefix = rows_prefix(table.id);
@@ -303,20 +303,95 @@ fn scan_table(
         &prefix,
         &prefix_end(&prefix),
         ScanDirection::Forward,
-        &mut |_, bytes| visit(decode_row(bytes, &table.columns)?),
+        &mut |_, bytes| {
+            let mut row = Vec::with_capacity(table.columns.len());
+            decode_row_into(bytes, &table.columns, Some(needed), &mut row)?;
+            visit(row)
+        },
     )
 }
 
-fn key_of(row: &[Value], offsets: &[usize], key: &mut Vec<u8>) -> bool {
-    key.clear();
-    for &offset in offsets {
-        let value = &row[offset];
-        if value.is_null() {
-            return false;
-        }
-        equality_key(key, value);
+const LOOKUP_HASH_LIMIT: usize = 64 << 20;
+
+fn build_hash(
+    reader: &dyn KeyValueRead,
+    shape: &StepShape<'_>,
+    pairs: &[(usize, usize)],
+    needed: &[bool],
+    limit: Option<usize>,
+    memory: &mut WorkMemory,
+) -> SqlResult<Option<HashIndex>> {
+    let scope = Scope::Many(&shape.visible);
+    let integer = |offset: usize| {
+        scope
+            .column_type(offset)
+            .is_some_and(|sql_type| type_family(sql_type) == 0)
+    };
+    let integer_keys = matches!(pairs, [(outer, inner)] if integer(*outer) && integer(*inner));
+    let offset = shape.source.offset;
+    let build: Vec<usize> = pairs.iter().map(|&(_, inner)| inner - offset).collect();
+    let mut index = HashIndex::new(integer_keys, shape.source.table.columns.len());
+    let mut bounded = limit.map(WorkMemory::with_limit);
+    let mut over = false;
+    let table = shape.source.table;
+    let prefix = rows_prefix(table.id);
+    let mut row = Vec::with_capacity(table.columns.len());
+    let outcome = reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |_, bytes| {
+            row.clear();
+            decode_row_into(bytes, &table.columns, Some(needed), &mut row)?;
+            match &mut bounded {
+                Some(local) => {
+                    if index.insert(&mut row, &build, local).is_err() {
+                        over = true;
+                        return Ok(false);
+                    }
+                }
+                None => index.insert(&mut row, &build, memory)?,
+            }
+            Ok(true)
+        },
+    );
+    outcome?;
+    if over {
+        return Ok(None);
     }
-    true
+    if let Some(local) = bounded {
+        memory.charge(local.used())?;
+    }
+    Ok(Some(index))
+}
+
+fn same_key_encoding(left: Option<SqlType>, right: SqlType) -> bool {
+    match left {
+        Some(SqlType::Varchar(_) | SqlType::Text) => right.is_string(),
+        Some(left) => left == right,
+        None => false,
+    }
+}
+
+fn conjuncts_of(expr: &Expr) -> Vec<&Expr> {
+    match &expr.kind {
+        ExprKind::And(operands) => operands.iter().collect(),
+        _ => vec![expr],
+    }
+}
+
+fn is_lookup_equality(expr: &Expr, exact: &[(usize, usize)]) -> bool {
+    let ExprKind::Binary(BinaryOperator::Equal, left, right) = &expr.kind else {
+        return false;
+    };
+    let (ExprKind::Slot { index: a, .. }, ExprKind::Slot { index: b, .. }) =
+        (&left.kind, &right.kind)
+    else {
+        return false;
+    };
+    exact
+        .iter()
+        .any(|&(outer, inner)| (outer, inner) == (*a, *b) || (outer, inner) == (*b, *a))
 }
 
 impl<'a> JoinedRows<'a> {
@@ -324,12 +399,17 @@ impl<'a> JoinedRows<'a> {
         reader: &'a dyn KeyValueRead,
         joined: &'a JoinedFrom<'a>,
         first_key: Option<Vec<u8>>,
+        mut needed: Vec<Vec<bool>>,
+        filters: Vec<Vec<Expr>>,
         memory: &mut WorkMemory,
     ) -> SqlResult<Self> {
+        let outer_is_scanned = first_key.is_none();
         let mut steps = Vec::with_capacity(joined.shapes.len());
-        for shape in &joined.shapes {
+        for (index, shape) in joined.shapes.iter().enumerate() {
             let table = shape.source.table;
             let offset = shape.source.offset;
+            let step_needed = std::mem::take(&mut needed[index + 1]);
+            let scope = Scope::Many(&shape.visible);
             let pairs = equality_pairs(shape);
             let lookup: Option<Vec<usize>> = if table.primary_key.is_empty() {
                 None
@@ -345,31 +425,67 @@ impl<'a> JoinedRows<'a> {
                     })
                     .collect()
             };
+            let mut on = shape
+                .on
+                .map(|on| bind(on, Scope::Many(&shape.visible)))
+                .transpose()?;
+            let mut using = shape.using.as_slice();
             let access = if let Some(lefts) = lookup {
-                Access::Lookup(lefts)
-            } else if !pairs.is_empty() {
-                let probe: Vec<usize> = pairs.iter().map(|&(outer, _)| outer).collect();
-                let build: Vec<usize> = pairs.iter().map(|&(_, inner)| inner - offset).collect();
-                let mut buckets: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
-                let mut rows = Vec::new();
-                let mut key = Vec::new();
-                scan_table(reader, table, &mut |row| {
-                    if key_of(&row, &build, &mut key) {
-                        memory.charge_row(&row)?;
-                        memory.charge(key.len())?;
-                        buckets.entry(key.clone()).or_default().push(rows.len());
-                        rows.push(row);
+                let exact: Vec<(usize, usize)> = table
+                    .primary_key
+                    .iter()
+                    .zip(&lefts)
+                    .filter(|&(&index, &outer)| {
+                        same_key_encoding(scope.column_type(outer), table.columns[index].sql_type)
+                    })
+                    .map(|(&index, &outer)| (outer, offset + index))
+                    .collect();
+                if exact.len() == lefts.len() {
+                    if on.as_ref().is_some_and(|on| {
+                        conjuncts_of(on)
+                            .iter()
+                            .all(|conjunct| is_lookup_equality(conjunct, &exact))
+                    }) {
+                        on = None;
                     }
-                    Ok(true)
-                })?;
+                    if using.iter().all(|pair| exact.contains(pair)) {
+                        using = &[];
+                    }
+                }
+                let probe_build: Vec<(usize, usize)> = lefts
+                    .iter()
+                    .zip(&table.primary_key)
+                    .map(|(&outer, &index)| (outer, offset + index))
+                    .collect();
+                let bounded = if outer_is_scanned {
+                    build_hash(
+                        reader,
+                        shape,
+                        &probe_build,
+                        &step_needed,
+                        Some(LOOKUP_HASH_LIMIT),
+                        memory,
+                    )?
+                } else {
+                    None
+                };
+                match bounded {
+                    Some(index) => Access::Hash {
+                        probe: lefts,
+                        index,
+                    },
+                    None => Access::Lookup(lefts),
+                }
+            } else if !pairs.is_empty() {
+                let index = build_hash(reader, shape, &pairs, &step_needed, None, memory)?
+                    .unwrap_or_else(|| HashIndex::new(false, table.columns.len()));
                 Access::Hash {
-                    probe,
-                    buckets,
-                    rows,
+                    probe: pairs.iter().map(|&(outer, _)| outer).collect(),
+                    index,
                 }
             } else {
                 let mut rows = Vec::new();
-                scan_table(reader, table, &mut |row| {
+                scan_table(reader, table, &step_needed, &mut |row| {
                     memory.charge_row(&row)?;
                     rows.push(row);
                     Ok(true)
@@ -382,20 +498,21 @@ impl<'a> JoinedRows<'a> {
                 key: RefCell::new(prefix),
                 preserves_left: shape.kind == JoinKind::Left,
                 table,
-                on: shape
-                    .on
-                    .map(|on| bind(on, Scope::Many(&shape.visible)))
-                    .transpose()?,
-                using: &shape.using,
-                scope: Scope::Many(&shape.visible),
+                needed: step_needed,
+                on,
+                using,
+                scope,
                 access,
             });
         }
         Ok(Self {
             reader,
             first: joined.sources.list[0].table,
+            first_needed: std::mem::take(&mut needed[0]),
             first_key,
+            width: Scope::Many(&joined.sources).width(),
             steps,
+            filters,
         })
     }
 
@@ -403,20 +520,47 @@ impl<'a> JoinedRows<'a> {
         &self,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<()> {
+        let mut row = Vec::with_capacity(self.width);
+        let columns = &self.first.columns;
         if let Some(key) = &self.first_key {
-            let mut found = None;
+            let mut found = false;
             self.reader.get_with(key, &mut |bytes| {
-                found = Some(decode_row(bytes, &self.first.columns)?);
+                decode_row_into(bytes, columns, Some(&self.first_needed), &mut row)?;
+                found = true;
                 Ok(())
             })?;
-            if let Some(mut row) = found {
+            if found {
                 self.extend(0, &mut row, visit)?;
             }
             return Ok(());
         }
-        scan_table(self.reader, self.first, &mut |mut row| {
-            self.extend(0, &mut row, visit)
-        })
+        let prefix = rows_prefix(self.first.id);
+        self.reader.scan(
+            &prefix,
+            &prefix_end(&prefix),
+            ScanDirection::Forward,
+            &mut |_, bytes| {
+                row.clear();
+                decode_row_into(bytes, columns, Some(&self.first_needed), &mut row)?;
+                self.extend(0, &mut row, visit)
+            },
+        )
+    }
+
+    fn passes(&self, level: usize, row: &[Value]) -> SqlResult<bool> {
+        let Some(filters) = self.filters.get(level) else {
+            return Ok(true);
+        };
+        let evaluator = Evaluator {
+            scope: Scope::empty(),
+            row,
+        };
+        for filter in filters {
+            if evaluator.boolean(filter, "WHERE")? != Some(true) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn extend(
@@ -425,16 +569,15 @@ impl<'a> JoinedRows<'a> {
         row: &mut Vec<Value>,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<bool> {
+        if !self.passes(level, row)? {
+            return Ok(true);
+        }
         let Some(step) = self.steps.get(level) else {
             return visit(row);
         };
         let base = row.len();
         let mut matched = false;
-        let mut attempt = |row: &mut Vec<Value>, right: Right<'_>| -> SqlResult<bool> {
-            match right {
-                Right::Owned(values) => row.extend(values),
-                Right::Borrowed(values) => row.extend_from_slice(values),
-            }
+        let mut attempt = |row: &mut Vec<Value>| -> SqlResult<bool> {
             let keep_going = if step.matches(row)? {
                 matched = true;
                 self.extend(level + 1, row, visit)?
@@ -446,31 +589,26 @@ impl<'a> JoinedRows<'a> {
         };
         match &step.access {
             Access::Lookup(lefts) => {
-                if let Some(right) = self.lookup(step, lefts, row)?
-                    && !attempt(row, Right::Owned(right))?
-                {
+                if self.lookup(step, lefts, row)? && !attempt(row)? {
                     return Ok(false);
                 }
             }
-            Access::Hash {
-                probe,
-                buckets,
-                rows,
-            } => {
-                let mut key = Vec::new();
-                if key_of(row, probe, &mut key)
-                    && let Some(candidates) = buckets.get(&key)
-                {
-                    for &candidate in candidates {
-                        if !attempt(row, Right::Borrowed(&rows[candidate]))? {
-                            return Ok(false);
-                        }
+            Access::Hash { probe, index } => {
+                let mut key = step.key.borrow_mut();
+                let mut at = index.first(row, probe, &mut key);
+                drop(key);
+                while !HashIndex::is_end(at) {
+                    row.extend_from_slice(index.row(at));
+                    if !attempt(row)? {
+                        return Ok(false);
                     }
+                    at = index.following(at);
                 }
             }
             Access::Scan(rows) => {
                 for right in rows {
-                    if !attempt(row, Right::Borrowed(right))? {
+                    row.extend_from_slice(right);
+                    if !attempt(row)? {
                         return Ok(false);
                     }
                 }
@@ -485,36 +623,34 @@ impl<'a> JoinedRows<'a> {
         Ok(true)
     }
 
-    fn lookup(
-        &self,
-        step: &Step<'_>,
-        lefts: &[usize],
-        row: &[Value],
-    ) -> SqlResult<Option<Vec<Value>>> {
+    fn lookup(&self, step: &Step<'_>, lefts: &[usize], row: &mut Vec<Value>) -> SqlResult<bool> {
         let table = step.table;
         let mut key = step.key.borrow_mut();
         key.truncate(step.prefix_length);
         for (&index, &left) in table.primary_key.iter().zip(lefts) {
             let original = &row[left];
             if original.is_null() {
-                return Ok(None);
+                return Ok(false);
             }
-            let Ok(converted) = convert(
-                original.clone(),
-                table.columns[index].sql_type,
-                Conversion::Assignment,
-            ) else {
-                return Ok(None);
+            let sql_type = table.columns[index].sql_type;
+            if original.sql_type() == Some(sql_type)
+                || (sql_type.is_string() && matches!(original, Value::Text(_)))
+            {
+                encode_key_value(&mut key, original);
+                continue;
+            }
+            let Ok(converted) = convert(original.clone(), sql_type, Conversion::Assignment) else {
+                return Ok(false);
             };
             if compare_values(&converted, original) != Ordering::Equal {
-                return Ok(None);
+                return Ok(false);
             }
             encode_key_value(&mut key, &converted);
         }
-        let key = key.as_slice();
-        let mut found = None;
-        self.reader.get_with(key, &mut |bytes| {
-            found = Some(decode_row(bytes, &table.columns)?);
+        let mut found = false;
+        self.reader.get_with(key.as_slice(), &mut |bytes| {
+            decode_row_into(bytes, &table.columns, Some(&step.needed), row)?;
+            found = true;
             Ok(())
         })?;
         Ok(found)
@@ -536,5 +672,89 @@ impl Step<'_> {
             row,
         };
         Ok(evaluator.boolean(on, "JOIN/ON")? == Some(true))
+    }
+}
+
+fn visit_exprs<'e>(expr: &'e Expr, visit: &mut dyn FnMut(&'e Expr)) {
+    visit(expr);
+    for child in children(expr) {
+        visit_exprs(child, visit);
+    }
+}
+
+impl JoinedFrom<'_> {
+    pub(crate) fn needed_columns(&self, select: &Select) -> Vec<Vec<bool>> {
+        let list = &self.sources.list;
+        let mut needed: Vec<Vec<bool>> = list
+            .iter()
+            .map(|source| vec![false; source.table.columns.len()])
+            .collect();
+        let mut mark = |qualifier: Option<&str>, name: &str| {
+            for (source, columns) in list.iter().zip(needed.iter_mut()) {
+                if qualifier.is_some_and(|qualifier| qualifier != source.label) {
+                    continue;
+                }
+                match name {
+                    "*" => columns.iter_mut().for_each(|column| *column = true),
+                    _ => {
+                        if let Some(index) = source.table.column_index(name) {
+                            columns[index] = true;
+                        }
+                    }
+                }
+            }
+        };
+        let mut exprs: Vec<&Expr> = Vec::new();
+        for item in &select.items {
+            match item {
+                SelectItem::Wildcard { qualifier, .. } => mark(qualifier.as_deref(), "*"),
+                SelectItem::Expr { expr, .. } => exprs.push(expr),
+            }
+        }
+        exprs.extend(select.filter.iter());
+        exprs.extend(select.group_by.iter());
+        exprs.extend(select.having.iter());
+        exprs.extend(select.order_by.iter().map(|item| &item.expr));
+        if let Some(from) = &select.from {
+            for join in &from.joins {
+                match &join.condition {
+                    JoinCondition::On(expr) => exprs.push(expr),
+                    JoinCondition::Using(names) => {
+                        for name in names {
+                            mark(None, &name.text);
+                        }
+                    }
+                    JoinCondition::Always => {}
+                }
+            }
+        }
+        for expr in exprs {
+            visit_exprs(expr, &mut |node| {
+                if let ExprKind::Column { qualifier, name } = &node.kind {
+                    mark(qualifier.as_deref(), name);
+                }
+            });
+        }
+        needed
+    }
+
+    pub(crate) fn filters_by_level(&self, filter: Option<&Expr>) -> Vec<Vec<Expr>> {
+        let list = &self.sources.list;
+        let mut levels: Vec<Vec<Expr>> = vec![Vec::new(); list.len()];
+        let Some(filter) = filter else {
+            return levels;
+        };
+        for conjunct in conjuncts_of(filter) {
+            let mut level = 0;
+            visit_exprs(conjunct, &mut |node| {
+                if let ExprKind::Slot { index, .. } = node.kind
+                    && let Some(source) = list.iter().rposition(|source| source.offset <= index)
+                {
+                    level = level.max(source);
+                }
+            });
+            levels[level].push(conjunct.clone());
+        }
+        levels
     }
 }
