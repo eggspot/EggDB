@@ -3,8 +3,8 @@ use crate::ast::{
     Select, SelectItem, TableReference, Update,
 };
 use crate::encoding::{
-    Column, TableDefinition, decode_meta, decode_row, encode_key_value, encode_meta, encode_row,
-    meta_key, prefix_end, rows_prefix, table_key,
+    Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, encode_key_value, encode_meta,
+    encode_row, meta_key, prefix_end, rows_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, check_columns, compare_truth, output_name};
@@ -17,7 +17,6 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const MAX_COLUMNS: usize = 1600;
 const DELETE_BATCH: usize = 1024;
 
 fn undefined_table(name: &Name) -> SqlError {
@@ -620,7 +619,11 @@ fn filter_matches(scope: Scope<'_>, filter: Option<&Expr>, row: &[Value]) -> Sql
 
 fn conjuncts<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
     match &expr.kind {
-        ExprKind::And(operands) => out.extend(operands),
+        ExprKind::And(operands) => {
+            for operand in operands {
+                conjuncts(operand, out);
+            }
+        }
         _ => out.push(expr),
     }
 }

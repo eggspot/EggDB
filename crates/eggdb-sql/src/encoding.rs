@@ -8,6 +8,7 @@ const ROW_SPACE: u8 = 0x03;
 const FORMAT_VERSION: u8 = 1;
 const PRESENT: u8 = 0x01;
 const NULL_IN_KEY: u8 = 0x02;
+pub(crate) const MAX_COLUMNS: usize = 1600;
 
 pub(crate) fn meta_key() -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
@@ -127,6 +128,9 @@ impl TableDefinition {
         reader.version()?;
         let id = reader.u32()?;
         let count = reader.count()?;
+        if count > MAX_COLUMNS {
+            return Err(reader.damaged());
+        }
         let mut columns = Vec::new();
         for _ in 0..count {
             let name = reader.text()?;
