@@ -47,7 +47,10 @@ pub(crate) fn rebuild(
     child: &mut dyn FnMut(&Expr) -> SqlResult<Expr>,
 ) -> SqlResult<Expr> {
     let kind = match &expr.kind {
-        ExprKind::Literal(_) | ExprKind::Column { .. } | ExprKind::Slot { .. } => expr.kind.clone(),
+        ExprKind::Literal(_)
+        | ExprKind::Column { .. }
+        | ExprKind::Slot { .. }
+        | ExprKind::SessionValue { .. } => expr.kind.clone(),
         ExprKind::Unary(operator, operand) => ExprKind::Unary(*operator, Box::new(child(operand)?)),
         ExprKind::And(operands) => {
             ExprKind::And(operands.iter().map(&mut *child).collect::<SqlResult<_>>()?)
@@ -193,6 +196,23 @@ fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             .and_then(|offset| scope.column_type(offset)),
         ExprKind::Cast { sql_type, .. } => Some(*sql_type),
         _ => None,
+    }
+}
+
+fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option<SqlType> {
+    match function {
+        AggregateFunction::Count => Some(SqlType::BigInt),
+        AggregateFunction::Avg => Some(SqlType::Double),
+        AggregateFunction::Sum => match argument? {
+            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt => Some(SqlType::BigInt),
+            SqlType::Real => Some(SqlType::Real),
+            SqlType::Double => Some(SqlType::Double),
+            _ => None,
+        },
+        AggregateFunction::Min | AggregateFunction::Max => match argument? {
+            SqlType::Varchar(_) => Some(SqlType::Text),
+            other => Some(other),
+        },
     }
 }
 
@@ -425,10 +445,13 @@ impl Analyzer<'_> {
                         self.calls.len() - 1
                     }
                 };
+                let argument_type = argument
+                    .as_deref()
+                    .and_then(|argument| static_type(argument, self.scope));
                 Ok(Expr {
                     kind: ExprKind::Slot {
                         index: self.group_column_slot(GroupColumn::Aggregate(call)),
-                        sql_type: None,
+                        sql_type: result_type(*function, argument_type),
                     },
                     position: expr.position,
                 })

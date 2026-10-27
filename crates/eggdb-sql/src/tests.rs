@@ -579,7 +579,6 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "SELECT DISTINCT ON (age) age FROM people",
         "SELECT * FROM people UNION SELECT * FROM people",
         "SELECT (SELECT 1)",
-        "SELECT $1",
         "WITH x AS (SELECT 1) SELECT * FROM x",
         "INSERT INTO people SELECT * FROM people",
         "ALTER TABLE people ADD COLUMN x int",
@@ -1707,4 +1706,253 @@ fn every_join_method_agrees_on_random_tables() {
     }
     text.push_str(&format!("SELECT {}", ordered.len()));
     assert_eq!(grouped, text);
+}
+
+fn parameter(declared_type: Option<crate::SqlType>, value: Option<&str>) -> crate::Parameter {
+    crate::Parameter {
+        declared_type,
+        value: value.map(str::to_owned),
+    }
+}
+
+fn run_prepared(
+    session: &mut Session<'_, MemoryStore>,
+    sql: &str,
+    parameters: &[crate::Parameter],
+) -> Result<Vec<String>, SqlError> {
+    let mut outputs = Vec::new();
+    session.execute_prepared(sql, parameters, &mut |result| {
+        outputs.push(render(&result));
+        true
+    })?;
+    Ok(outputs)
+}
+
+#[test]
+fn parameters_take_text_values_typed_by_their_place_or_their_declaration() {
+    use crate::SqlType;
+    let store = MemoryStore::default();
+    let mut session = with_people(&store);
+    let prepared = session
+        .prepare("SELECT name FROM people WHERE id = $1 OR age > $3", &[])
+        .unwrap();
+    assert_eq!(prepared.parameter_count, 3);
+    assert!(!prepared.is_empty);
+    assert!(session.prepare(" ; ", &[]).unwrap().is_empty);
+    assert_eq!(
+        run_prepared(
+            &mut session,
+            "SELECT name FROM people WHERE id = $1",
+            &[parameter(None, Some("2"))],
+        )
+        .unwrap(),
+        ["name\nbob\nSELECT 1"]
+    );
+    assert_eq!(
+        run_prepared(
+            &mut session,
+            "INSERT INTO people (id, name, age) VALUES ($1, $2, $3)",
+            &[
+                parameter(Some(SqlType::Integer), Some("9")),
+                parameter(None, Some("it's $1")),
+                parameter(None, None),
+            ],
+        )
+        .unwrap(),
+        ["INSERT 0 1"]
+    );
+    assert_eq!(
+        last(&mut session, "SELECT name, age FROM people WHERE id = 9"),
+        "name|age\nit's $1|NULL\nSELECT 1"
+    );
+    assert_eq!(
+        run_prepared(
+            &mut session,
+            "SELECT $1::int + $2",
+            &[
+                parameter(None, Some("40")),
+                parameter(Some(SqlType::BigInt), Some("2"))
+            ],
+        )
+        .unwrap(),
+        ["?column?\n42\nSELECT 1"]
+    );
+    let error = run_prepared(
+        &mut session,
+        "SELECT name FROM people WHERE id = $1",
+        &[parameter(Some(SqlType::Integer), Some("x"))],
+    )
+    .unwrap_err();
+    assert_eq!(error.state().code(), "22P02");
+    let error = run_prepared(&mut session, "SELECT $2", &[parameter(None, Some("1"))]).unwrap_err();
+    assert_eq!(error.state().code(), "42P02");
+    let error = session.prepare("SELECT 1; SELECT 2", &[]).unwrap_err();
+    assert_eq!(error.state().code(), "42601");
+    let error = session.prepare("SELECT $0", &[]).unwrap_err();
+    assert_eq!(error.state().code(), "42P02");
+    assert_eq!(state(&mut session, "SELECT $1"), "42P02");
+}
+
+#[test]
+fn describe_gives_parameter_types_and_column_types_without_running() {
+    use crate::{SqlType, TransactionStatus};
+    let store = MemoryStore::default();
+    let mut session = with_people(&store);
+    let description = session
+        .describe(
+            "SELECT p.id, upper(name), age + 1, score * 2, id = $2, count(*), sum(age), avg(score), max(name) FROM people p WHERE id > $1 GROUP BY p.id, name, age, score",
+            &[Some(SqlType::Integer)],
+        )
+        .unwrap();
+    assert_eq!(description.parameter_types, [Some(SqlType::Integer), None]);
+    let types: Vec<Option<SqlType>> = description
+        .columns
+        .unwrap()
+        .iter()
+        .map(|column| column.sql_type)
+        .collect();
+    assert_eq!(
+        types,
+        [
+            Some(SqlType::Integer),
+            Some(SqlType::Text),
+            Some(SqlType::Integer),
+            Some(SqlType::Double),
+            Some(SqlType::Boolean),
+            Some(SqlType::BigInt),
+            Some(SqlType::BigInt),
+            Some(SqlType::Double),
+            Some(SqlType::Text),
+        ]
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM people"),
+        "count\n4\nSELECT 1"
+    );
+    let returning = session
+        .describe("DELETE FROM people WHERE id = $1 RETURNING name", &[])
+        .unwrap();
+    assert_eq!(returning.columns.unwrap()[0].name, "name");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM people"),
+        "count\n4\nSELECT 1"
+    );
+    assert_eq!(
+        session
+            .describe("INSERT INTO people (id, name) VALUES (7, 'x')", &[])
+            .unwrap()
+            .columns,
+        None
+    );
+    assert_eq!(session.describe("BEGIN", &[]).unwrap().columns, None);
+    assert_eq!(
+        session
+            .describe("SELECT * FROM nope", &[])
+            .unwrap_err()
+            .state()
+            .code(),
+        "42P01"
+    );
+    last(&mut session, "BEGIN");
+    assert_eq!(session.transaction_status(), TransactionStatus::InBlock);
+    assert_eq!(state(&mut session, "SELECT * FROM nope"), "42P01");
+    assert_eq!(session.transaction_status(), TransactionStatus::Failed);
+    assert_eq!(
+        session
+            .describe("SELECT 1", &[])
+            .unwrap_err()
+            .state()
+            .code(),
+        "25P02"
+    );
+    assert_eq!(session.describe("ROLLBACK", &[]).unwrap().columns, None);
+    last(&mut session, "ROLLBACK");
+    assert_eq!(session.transaction_status(), TransactionStatus::Idle);
+}
+
+#[test]
+fn set_show_and_reset_remember_run_time_parameters() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session.identify("ada", "shop");
+    assert_eq!(
+        last(&mut session, "SHOW server_version_num"),
+        "server_version_num\n160000\nSHOW"
+    );
+    assert_eq!(last(&mut session, "SET extra_float_digits = 3"), "SET");
+    assert_eq!(
+        last(&mut session, "SHOW extra_float_digits"),
+        "extra_float_digits\n3\nSHOW"
+    );
+    assert_eq!(last(&mut session, "SET datestyle TO iso, mdy"), "SET");
+    assert_eq!(
+        last(&mut session, "SHOW DateStyle"),
+        "DateStyle\niso, mdy\nSHOW"
+    );
+    assert_eq!(last(&mut session, "SET TIME ZONE 'Europe/Paris'"), "SET");
+    assert_eq!(session.parameter("timezone").unwrap(), "Europe/Paris");
+    assert_eq!(last(&mut session, "SET client_encoding = 'utf-8'"), "SET");
+    assert_eq!(
+        state(&mut session, "SET client_encoding = 'LATIN1'"),
+        "0A000"
+    );
+    assert_eq!(state(&mut session, "SET server_version = '1'"), "55P02");
+    assert_eq!(state(&mut session, "SET no_such_thing = 1"), "42704");
+    assert_eq!(state(&mut session, "SHOW no_such_thing"), "42704");
+    assert_eq!(
+        state(&mut session, "SET LOCAL statement_timeout = 0"),
+        "0A000"
+    );
+    assert_eq!(last(&mut session, "SET myapp.tenant = 'blue'"), "SET");
+    assert_eq!(
+        last(&mut session, "SHOW myapp.tenant"),
+        "myapp.tenant\nblue\nSHOW"
+    );
+    assert_eq!(
+        last(&mut session, "SET statement_timeout TO DEFAULT"),
+        "SET"
+    );
+    assert_eq!(last(&mut session, "RESET ALL"), "RESET");
+    assert_eq!(session.parameter("extra_float_digits").unwrap(), "1");
+    assert_eq!(session.parameter("session_authorization").unwrap(), "ada");
+    assert_eq!(state(&mut session, "SHOW myapp.tenant"), "42704");
+    assert!(last(&mut session, "SHOW ALL").lines().count() > 20);
+    let reported: Vec<&str> = session
+        .reported_parameters()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    for name in [
+        "server_version",
+        "client_encoding",
+        "DateStyle",
+        "TimeZone",
+        "integer_datetimes",
+        "standard_conforming_strings",
+    ] {
+        assert!(reported.contains(&name), "{name}");
+    }
+}
+
+#[test]
+fn session_functions_report_the_user_the_database_and_the_version() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session.identify("ada", "shop");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT current_user, session_user, user, current_database(), current_schema()"
+        ),
+        "current_user|session_user|current_user|current_database|current_schema\nada|ada|ada|shop|public\nSELECT 1"
+    );
+    let version = last(&mut session, "SELECT version()");
+    assert!(
+        version.starts_with("version\nPostgreSQL 16.0 compatible (EggDB "),
+        "{version}"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT current_setting('server_encoding')"),
+        "current_setting\nUTF8\nSELECT 1"
+    );
 }

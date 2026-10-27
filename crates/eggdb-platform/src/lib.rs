@@ -21,7 +21,10 @@
 //!   [`CachePadded`] against false sharing;
 //! - [`terminal`]: whether a standard stream is a terminal, whether it takes colours, and a
 //!   [`terminal::RawTerminal`] for full-screen programs that restores the terminal on exit;
-//! - [`process`]: running a child process and learning the most memory it held.
+//! - [`process`]: running a child process and learning the most memory it held;
+//! - [`secure_random`]: unpredictable bytes from the operating system for salts and nonces;
+//! - [`stop_signals`]: `Ctrl-C` and `SIGTERM` turned into a flag a server reads to stop
+//!   gracefully.
 //!
 //! Each trait has an implementation backed by the operating system ([`OsFileSystem`],
 //! [`OsIoQueue`], [`OsNetwork`], [`SystemClock`], [`OsMemory`], [`OsCpus`]) and a
@@ -101,11 +104,13 @@ mod os_terminal_windows;
 mod os_wait_status;
 pub mod process;
 mod rng;
+pub mod secure_random;
 mod sim_cpus;
 mod sim_fs;
 mod sim_io;
 mod sim_memory;
 mod sim_net;
+pub mod stop_signals;
 pub mod terminal;
 mod threads;
 mod topology;

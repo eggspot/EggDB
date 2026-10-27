@@ -5,6 +5,8 @@ use crate::ast::{
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind};
+use crate::session::Parameter;
+use crate::settings::Settings;
 use crate::types::SqlType;
 use std::borrow::Cow;
 
@@ -110,6 +112,25 @@ pub(crate) struct Parser<'t> {
     tokens: &'t [Token<'t>],
     at: usize,
     depth: usize,
+    parameters: Parameters<'t>,
+    settings: Option<&'t Settings>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Parameters<'t> {
+    Absent,
+    Values(&'t [Parameter]),
+    Types(&'t [Option<SqlType>]),
+}
+
+const MAX_PARAMETER_NUMBER: u32 = 65535;
+
+pub(crate) fn parameter_number(digits: &str) -> Option<usize> {
+    digits
+        .parse::<u32>()
+        .ok()
+        .filter(|number| (1..=MAX_PARAMETER_NUMBER).contains(number))
+        .map(|number| number as usize)
 }
 
 pub(crate) fn is_reserved(word: &str) -> bool {
@@ -195,7 +216,19 @@ impl<'t> Parser<'t> {
             tokens,
             at: 0,
             depth: 0,
+            parameters: Parameters::Absent,
+            settings: None,
         }
+    }
+
+    pub(crate) fn with_context(
+        mut self,
+        parameters: Parameters<'t>,
+        settings: &'t Settings,
+    ) -> Self {
+        self.parameters = parameters;
+        self.settings = Some(settings);
+        self
     }
 
     pub(crate) fn skip_empty_statements(&mut self) {
@@ -440,12 +473,244 @@ impl<'t> Parser<'t> {
             }
             "with" => Err(self.not_supported("WITH")),
             "values" | "table" => Err(self.not_supported("a VALUES or TABLE statement")),
-            "alter" | "truncate" | "savepoint" | "release" | "explain" | "copy" | "set"
-            | "show" | "grant" | "revoke" | "prepare" | "execute" | "analyze" | "vacuum" => {
+            "set" => self.set(),
+            "show" => self.show(),
+            "reset" => self.reset(),
+            "alter" | "truncate" | "savepoint" | "release" | "explain" | "copy" | "grant"
+            | "revoke" | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen"
+            | "notify" | "unlisten" | "deallocate" => {
                 Err(self.not_supported(&word.to_ascii_uppercase()))
             }
             _ => Err(self.unexpected()),
         }
+    }
+
+    fn parameter_name(&mut self) -> SqlResult<String> {
+        let mut name = match self.peek_kind() {
+            TokenKind::Word(word) => word.as_ref().to_owned(),
+            TokenKind::QuotedIdentifier(name) => name.clone(),
+            _ => return Err(self.unexpected()),
+        };
+        self.at += 1;
+        while self.take(&TokenKind::Dot) {
+            let part = match self.peek_kind() {
+                TokenKind::Word(word) => word.as_ref().to_owned(),
+                TokenKind::QuotedIdentifier(name) => name.clone(),
+                _ => return Err(self.unexpected()),
+            };
+            self.at += 1;
+            name.push('.');
+            name.push_str(&part);
+        }
+        Ok(name)
+    }
+
+    fn setting_value(&mut self) -> SqlResult<Option<String>> {
+        if self.take_word("default") {
+            return Ok(None);
+        }
+        let mut parts = Vec::new();
+        loop {
+            let negative = self.take_operator("-");
+            let part = match self.peek_kind() {
+                TokenKind::Word(word) => word.as_ref().to_owned(),
+                TokenKind::QuotedIdentifier(name) => name.clone(),
+                TokenKind::String(text) => text.as_ref().to_owned(),
+                TokenKind::Integer(digits) | TokenKind::Decimal(digits) => (*digits).to_owned(),
+                _ => return Err(self.unexpected()),
+            };
+            self.at += 1;
+            parts.push(if negative { format!("-{part}") } else { part });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(Some(parts.join(", ")))
+    }
+
+    fn set(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        if self.is_word("local") {
+            return Err(self.not_supported("SET LOCAL"));
+        }
+        let _ = self.take_word("session");
+        if self.is_word("characteristics") || self.is_word("transaction") {
+            return Err(self.not_supported("SET TRANSACTION"));
+        }
+        if self.is_word("role") || self.is_word("authorization") || self.is_word("constraints") {
+            return Err(self.not_supported(&format!(
+                "SET {}",
+                self.text
+                    .get(self.peek().start..self.peek().end)
+                    .unwrap_or("")
+                    .to_ascii_uppercase()
+            )));
+        }
+        let name = if self.is_word("time") && self.is_word_at(1, "zone") {
+            self.at += 2;
+            if self.take_word("local") {
+                return Ok(Statement::Set {
+                    name: "TimeZone".into(),
+                    value: None,
+                });
+            }
+            return Ok(Statement::Set {
+                name: "TimeZone".into(),
+                value: self.setting_value()?,
+            });
+        } else if self.take_word("names") {
+            "client_encoding".to_owned()
+        } else {
+            let name = self.parameter_name()?;
+            if !self.take_word("to") && !self.take_operator("=") {
+                return Err(self.unexpected());
+            }
+            name
+        };
+        Ok(Statement::Set {
+            name,
+            value: self.setting_value()?,
+        })
+    }
+
+    fn show(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        if self.take_word("all") {
+            return Ok(Statement::Show { name: None });
+        }
+        let name = if self.is_word("time") && self.is_word_at(1, "zone") {
+            self.at += 2;
+            "TimeZone".to_owned()
+        } else if self.is_word("transaction") && self.is_word_at(1, "isolation") {
+            self.at += 2;
+            self.expect_word("level")?;
+            "transaction_isolation".to_owned()
+        } else if self.is_word("session") && self.is_word_at(1, "authorization") {
+            self.at += 2;
+            "session_authorization".to_owned()
+        } else {
+            self.parameter_name()?
+        };
+        Ok(Statement::Show { name: Some(name) })
+    }
+
+    fn reset(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        if self.take_word("all") {
+            return Ok(Statement::Reset { name: None });
+        }
+        let name = if self.is_word("time") && self.is_word_at(1, "zone") {
+            self.at += 2;
+            "TimeZone".to_owned()
+        } else {
+            self.parameter_name()?
+        };
+        Ok(Statement::Reset { name: Some(name) })
+    }
+
+    fn parameter(&mut self, digits: &str, position: usize) -> SqlResult<Expr> {
+        self.at += 1;
+        let missing = || {
+            SqlError::new(
+                SqlState::UNDEFINED_PARAMETER,
+                format!("there is no parameter ${digits}"),
+            )
+            .at(position)
+        };
+        let number = parameter_number(digits).ok_or_else(missing)?;
+        let (declared_type, value) = match self.parameters {
+            Parameters::Absent => return Err(missing()),
+            Parameters::Values(values) => {
+                let parameter = values.get(number - 1).ok_or_else(missing)?;
+                (parameter.declared_type, parameter.value.clone())
+            }
+            Parameters::Types(types) => (types.get(number - 1).copied().flatten(), None),
+        };
+        let literal = Expr {
+            kind: ExprKind::Literal(match value {
+                Some(text) => Literal::String(text),
+                None => Literal::Null,
+            }),
+            position,
+        };
+        Ok(match declared_type {
+            Some(sql_type) => Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(literal),
+                    sql_type,
+                },
+                position,
+            },
+            None => literal,
+        })
+    }
+
+    fn session_value(&mut self, name: &'static str, position: usize) -> SqlResult<Expr> {
+        let defaults;
+        let settings = match self.settings {
+            Some(settings) => settings,
+            None => {
+                defaults = Settings::default();
+                &defaults
+            }
+        };
+        let value = match name {
+            "version" => format!(
+                "PostgreSQL {} compatible (EggDB {})",
+                crate::settings::POSTGRESQL_COMPATIBLE_VERSION,
+                env!("CARGO_PKG_VERSION")
+            ),
+            "current_database" | "current_catalog" => settings.database.clone(),
+            "current_schema" => "public".to_owned(),
+            _ => settings.get("session_authorization")?,
+        };
+        Ok(Expr {
+            kind: ExprKind::SessionValue { name, value },
+            position,
+        })
+    }
+
+    fn session_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
+        let known: &'static str = match name.text.as_str() {
+            "version" => "version",
+            "current_database" => "current_database",
+            "current_schema" => "current_schema",
+            "current_user" => "current_user",
+            "session_user" => "session_user",
+            "current_setting" => "current_setting",
+            _ => return Ok(None),
+        };
+        self.expect(&TokenKind::LeftParen)?;
+        if known == "current_setting" {
+            let TokenKind::String(setting) = self.peek_kind() else {
+                return Err(
+                    self.not_supported("current_setting with an argument other than a constant")
+                );
+            };
+            self.at += 1;
+            if self.take(&TokenKind::Comma) {
+                return Err(self.not_supported("current_setting with missing_ok"));
+            }
+            self.expect(&TokenKind::RightParen)?;
+            let defaults;
+            let settings = match self.settings {
+                Some(settings) => settings,
+                None => {
+                    defaults = Settings::default();
+                    &defaults
+                }
+            };
+            let value = settings.get(setting)?;
+            return Ok(Some(Expr {
+                kind: ExprKind::SessionValue {
+                    name: "current_setting",
+                    value,
+                },
+                position: name.position,
+            }));
+        }
+        self.expect(&TokenKind::RightParen)?;
+        self.session_value(known, name.position).map(Some)
     }
 
     fn transaction_noise(&mut self) {
@@ -1553,9 +1818,7 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 literal(Literal::String(text.as_ref().to_owned()))
             }
-            TokenKind::Parameter => {
-                Err(SqlError::not_supported("parameters ($1) are not supported yet").at(position))
-            }
+            TokenKind::Parameter(digits) => self.parameter(digits, position),
             TokenKind::LeftParen => {
                 self.at += 1;
                 if self.is_word("select") || self.is_word("values") {
@@ -1599,8 +1862,25 @@ impl<'t> Parser<'t> {
                 }
                 "current_date" | "current_time" | "current_timestamp" | "localtime"
                 | "localtimestamp" => Err(self.not_supported("date and time values")),
-                "current_user" | "session_user" | "user" => {
-                    Err(self.not_supported("roles and users"))
+                "current_user" | "session_user" | "user" | "current_role" => {
+                    self.at += 1;
+                    let name = if word == "session_user" {
+                        "session_user"
+                    } else {
+                        "current_user"
+                    };
+                    self.session_value(name, position)
+                }
+                "current_catalog" | "current_schema"
+                    if self.peek_kind_at(1) != &TokenKind::LeftParen =>
+                {
+                    self.at += 1;
+                    let name = if word == "current_catalog" {
+                        "current_catalog"
+                    } else {
+                        "current_schema"
+                    };
+                    self.session_value(name, position)
                 }
                 "interval" | "timestamp" | "date" | "time" | "numeric" | "decimal" | "json"
                 | "jsonb"
@@ -1673,6 +1953,9 @@ impl<'t> Parser<'t> {
     }
 
     fn function(&mut self, name: Name) -> SqlResult<Expr> {
+        if let Some(expr) = self.session_function(&name)? {
+            return Ok(expr);
+        }
         if let Some(function) = AggregateFunction::named(&name.text) {
             return self.aggregate(name, function);
         }

@@ -162,7 +162,10 @@ impl Sources<'_> {
 
 pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
     match &expr.kind {
-        ExprKind::Literal(_) | ExprKind::Column { .. } | ExprKind::Slot { .. } => Vec::new(),
+        ExprKind::Literal(_)
+        | ExprKind::Column { .. }
+        | ExprKind::Slot { .. }
+        | ExprKind::SessionValue { .. } => Vec::new(),
         ExprKind::Unary(_, operand)
         | ExprKind::IsNull { expr: operand, .. }
         | ExprKind::IsTruth { expr: operand, .. }
@@ -204,7 +207,10 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
 pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
     match &expr.kind {
         ExprKind::Aggregate { .. } => Some(expr),
-        ExprKind::Literal(_) | ExprKind::Column { .. } | ExprKind::Slot { .. } => None,
+        ExprKind::Literal(_)
+        | ExprKind::Column { .. }
+        | ExprKind::Slot { .. }
+        | ExprKind::SessionValue { .. } => None,
         ExprKind::Unary(_, operand)
         | ExprKind::IsNull { expr: operand, .. }
         | ExprKind::IsTruth { expr: operand, .. }
@@ -287,7 +293,7 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
         ExprKind::Aggregate { argument, .. } => argument
             .as_deref()
             .map_or(Ok(()), |argument| check_columns(argument, scope)),
-        ExprKind::Slot { .. } => Ok(()),
+        ExprKind::Slot { .. } | ExprKind::SessionValue { .. } => Ok(()),
     }
 }
 
@@ -295,6 +301,7 @@ pub(crate) fn output_name(expr: &Expr) -> String {
     match &expr.kind {
         ExprKind::Column { name, .. } => name.clone(),
         ExprKind::Function { name, .. } => name.clone(),
+        ExprKind::SessionValue { name, .. } => (*name).to_owned(),
         ExprKind::Aggregate { function, .. } => function.name().to_owned(),
         ExprKind::Cast { expr, sql_type } => match &expr.kind {
             ExprKind::Column { .. } | ExprKind::Function { .. } | ExprKind::Cast { .. } => {
@@ -329,6 +336,7 @@ impl Evaluator<'_> {
     fn eval_unplaced(&self, expr: &Expr, hint: Option<SqlType>) -> SqlResult<Value> {
         match &expr.kind {
             ExprKind::Literal(literal) => literal_value(literal, hint),
+            ExprKind::SessionValue { value, .. } => Ok(Value::Text(value.clone())),
             ExprKind::Column { qualifier, name } => {
                 let index = self
                     .scope
@@ -517,6 +525,7 @@ impl Evaluator<'_> {
             }
             ExprKind::Slot { sql_type, .. } => *sql_type,
             ExprKind::Cast { sql_type, .. } => Some(*sql_type),
+            ExprKind::SessionValue { .. } => Some(SqlType::Text),
             ExprKind::Unary(UnaryOperator::Minus | UnaryOperator::Plus, operand) => {
                 self.declared_type(operand)
             }

@@ -1,10 +1,71 @@
 use crate::ast::Statement;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
-use crate::lexer::tokenize;
-use crate::parser::{LiteralRows, Parser};
+use crate::lexer::{Token, TokenKind, tokenize};
+use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
+use crate::settings::Settings;
 use crate::store::{KeyValueStore, KeyValueWrite};
 use crate::types::{SqlType, Value};
+use std::sync::Arc;
+
+/// A value bound to a parameter placeholder `$n` of a prepared statement, as PostgreSQL's
+/// extended query protocol passes it: the type the client declared, if any, and the value's
+/// text, or `None` for NULL. The text is read as a quoted constant would be: of the declared
+/// type, or of the type its place in the statement calls for, following PostgreSQL's rules
+/// for constants of unknown type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parameter {
+    /// The parameter's type, when the client declared one.
+    pub declared_type: Option<SqlType>,
+    /// The value in text form, or `None` for NULL.
+    pub value: Option<String>,
+}
+
+/// Where a session stands toward transactions, as PostgreSQL's `ReadyForQuery` message
+/// reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionStatus {
+    /// Outside a transaction block (`I`).
+    Idle,
+    /// Inside a `BEGIN` block (`T`).
+    InBlock,
+    /// Inside a block in which a statement failed: every statement fails until `ROLLBACK`
+    /// (`E`).
+    Failed,
+}
+
+/// What a prepared statement takes and gives back, before it runs: PostgreSQL's
+/// `ParameterDescription` and `RowDescription`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatementDescription {
+    /// One entry per parameter `$1..$n`: its declared type, or `None` when neither the client
+    /// declared it nor this release infers it.
+    pub parameter_types: Vec<Option<SqlType>>,
+    /// The columns of the rows it returns, or `None` when it returns no rows.
+    pub columns: Option<Vec<OutputColumn>>,
+}
+
+/// The outline of a statement text checked for a prepared statement: how many parameters it
+/// takes and whether it is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedStatement {
+    /// The number of parameters: the highest `$n` used, or the number of declared types if
+    /// that is higher.
+    pub parameter_count: usize,
+    /// Whether the text holds no statement at all.
+    pub is_empty: bool,
+}
+
+fn highest_parameter(tokens: &[Token<'_>]) -> usize {
+    tokens
+        .iter()
+        .filter_map(|token| match token.kind {
+            TokenKind::Parameter(digits) => parameter_number(digits),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
 
 /// A column of a statement's result.
 #[derive(Debug, Clone, PartialEq)]
@@ -12,7 +73,10 @@ pub struct OutputColumn {
     /// The column's name, as PostgreSQL names it: the column, the alias, the function, or
     /// `?column?`.
     pub name: String,
-    /// The column's type when it is a table column, so a client can align numbers right.
+    /// The column's type when it is known before the rows are read: a table column, a cast,
+    /// a constant, an aggregate, or an operator or function whose result type is fixed by its
+    /// operands. A client aligns numbers right by it, and a protocol describes the column
+    /// with it.
     pub sql_type: Option<SqlType>,
 }
 
@@ -80,6 +144,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     store: &'s S,
     block: Block<'s, S>,
     tables: TableCache,
+    settings: Arc<Settings>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -97,6 +162,172 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             store,
             block: Block::None,
             tables: TableCache::default(),
+            settings: Arc::new(Settings::default()),
+        }
+    }
+
+    /// Names the user this session runs as and the database it reaches, which
+    /// `current_user`, `current_database()` and `session_authorization` report.
+    pub fn identify(&mut self, user: &str, database: &str) {
+        let settings = Arc::make_mut(&mut self.settings);
+        settings.set_session_user(user);
+        settings.database = database.to_owned();
+    }
+
+    /// Sets the run-time parameter `name` (case-insensitive) as `SET name = value` would, for
+    /// the parameters a client sends when it connects.
+    pub fn set_parameter(&mut self, name: &str, value: &str) -> SqlResult<()> {
+        Arc::make_mut(&mut self.settings).set(name, Some(value))
+    }
+
+    /// The value of the run-time parameter `name`, as `SHOW name` gives it.
+    pub fn parameter(&self, name: &str) -> SqlResult<String> {
+        self.settings.get(name)
+    }
+
+    /// The run-time parameters a PostgreSQL server reports to its clients when they connect
+    /// and whenever they change (`server_version`, `client_encoding`, `DateStyle`, ...), with
+    /// their values.
+    pub fn reported_parameters(&self) -> Vec<(&'static str, String)> {
+        self.settings.reported()
+    }
+
+    /// Where the session stands toward transactions.
+    pub fn transaction_status(&self) -> TransactionStatus {
+        match self.block {
+            Block::None => TransactionStatus::Idle,
+            Block::Writing(_) | Block::Reading(_) => TransactionStatus::InBlock,
+            Block::Failed => TransactionStatus::Failed,
+        }
+    }
+
+    /// Checks `text` as the text of a prepared statement: at most one statement, valid
+    /// syntax, and `$n` placeholders numbered 1 to 65535. Nothing runs and the catalog is not
+    /// read. `declared_types` are the parameter types the client gave.
+    pub fn prepare(
+        &self,
+        text: &str,
+        declared_types: &[Option<SqlType>],
+    ) -> SqlResult<PreparedStatement> {
+        let tokens = tokenize(text)?;
+        let mut parser = Parser::new(text, &tokens)
+            .with_context(Parameters::Types(declared_types), &self.settings);
+        parser.skip_empty_statements();
+        if parser.at_end() {
+            return Ok(PreparedStatement {
+                parameter_count: declared_types.len(),
+                is_empty: true,
+            });
+        }
+        if parser.literal_rows().is_none() {
+            parser.statement()?;
+        }
+        parser.skip_empty_statements();
+        if !parser.at_end() {
+            return Err(SqlError::syntax(
+                "cannot insert multiple commands into a prepared statement",
+                parser.position(),
+            ));
+        }
+        Ok(PreparedStatement {
+            parameter_count: highest_parameter(&tokens).max(declared_types.len()),
+            is_empty: false,
+        })
+    }
+
+    /// Describes the one statement in `text` without running it: its parameters' types and
+    /// the columns of the rows it returns, reading the catalog as the statement would. Inside
+    /// a failed block it fails as every statement does.
+    pub fn describe(
+        &mut self,
+        text: &str,
+        declared_types: &[Option<SqlType>],
+    ) -> SqlResult<StatementDescription> {
+        let tokens = tokenize(text)?;
+        let mut parameter_types = declared_types.to_vec();
+        parameter_types.resize(highest_parameter(&tokens).max(declared_types.len()), None);
+        let mut parser = Parser::new(text, &tokens)
+            .with_context(Parameters::Types(declared_types), &self.settings);
+        parser.skip_empty_statements();
+        if parser.at_end() {
+            return Ok(StatementDescription {
+                parameter_types,
+                columns: None,
+            });
+        }
+        let statement = match parser.literal_rows() {
+            Some(_) => None,
+            None => Some(parser.statement()?),
+        };
+        let Some(statement) = statement else {
+            return Ok(StatementDescription {
+                parameter_types,
+                columns: None,
+            });
+        };
+        if matches!(
+            statement,
+            Statement::Begin { .. } | Statement::Commit | Statement::Rollback
+        ) {
+            return Ok(StatementDescription {
+                parameter_types,
+                columns: None,
+            });
+        }
+        if matches!(self.block, Block::Failed) {
+            return Err(aborted_block());
+        }
+        let columns = match &statement {
+            Statement::Select(select) => self
+                .read(|reader, tables| execute::select(reader, tables, select, true))
+                .map(|result| result.columns),
+            Statement::Insert(insert) => self.read(|reader, tables| {
+                execute::returning_columns(reader, tables, &insert.table, &insert.returning)
+            }),
+            Statement::Update(update) => self.read(|reader, tables| {
+                execute::returning_columns(reader, tables, &update.table, &update.returning)
+            }),
+            Statement::Delete(delete) => self.read(|reader, tables| {
+                execute::returning_columns(reader, tables, &delete.table, &delete.returning)
+            }),
+            Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),
+            _ => Ok(None),
+        };
+        match columns {
+            Ok(columns) => Ok(StatementDescription {
+                parameter_types,
+                columns,
+            }),
+            Err(error) => {
+                self.fail_block();
+                Err(error)
+            }
+        }
+    }
+
+    /// Runs the one statement of a prepared statement with values for its parameters, as
+    /// [`Session::execute_while`] runs statements. `parameters` holds one value per `$n`.
+    pub fn execute_prepared(
+        &mut self,
+        text: &str,
+        parameters: &[Parameter],
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+    ) -> SqlResult<()> {
+        self.run_text(text, Parameters::Values(parameters), on_result)
+    }
+
+    fn show_columns(&self, name: Option<&str>) -> Vec<OutputColumn> {
+        let text_column = |name: &str| OutputColumn {
+            name: name.to_owned(),
+            sql_type: Some(SqlType::Text),
+        };
+        match name {
+            Some(name) => vec![text_column(&Settings::name_of(name))],
+            None => vec![
+                text_column("name"),
+                text_column("setting"),
+                text_column("description"),
+            ],
         }
     }
 
@@ -125,6 +356,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         text: &str,
         on_result: &mut dyn FnMut(QueryResult) -> bool,
     ) -> SqlResult<()> {
+        self.run_text(text, Parameters::Absent, on_result)
+    }
+
+    fn run_text(
+        &mut self,
+        text: &str,
+        parameters: Parameters<'_>,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+    ) -> SqlResult<()> {
         let tokens = match tokenize(text) {
             Ok(tokens) => tokens,
             Err(error) => {
@@ -132,7 +372,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 return Err(error);
             }
         };
-        let mut parser = Parser::new(text, &tokens);
+        let settings = Arc::clone(&self.settings);
+        let mut parser = Parser::new(text, &tokens).with_context(parameters, &settings);
         loop {
             parser.skip_empty_statements();
             if parser.at_end() {
@@ -191,8 +432,19 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
         let result = match statement {
             Statement::Select(select) => {
-                self.read(|reader, tables| execute::select(reader, tables, select))
+                self.read(|reader, tables| execute::select(reader, tables, select, false))
             }
+            Statement::Set { name, value } => Arc::make_mut(&mut self.settings)
+                .set(name, value.as_deref())
+                .map(|()| QueryResult::command("SET")),
+            Statement::Reset { name: Some(name) } => Arc::make_mut(&mut self.settings)
+                .set(name, None)
+                .map(|()| QueryResult::command("RESET")),
+            Statement::Reset { name: None } => {
+                Arc::make_mut(&mut self.settings).reset_all();
+                Ok(QueryResult::command("RESET"))
+            }
+            Statement::Show { name } => self.show(name.as_deref()),
             Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
                 execute::create_table(writer, tables, create)
             }),
@@ -222,6 +474,29 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         result
     }
 
+    fn show(&self, name: Option<&str>) -> SqlResult<QueryResult> {
+        let rows = match name {
+            Some(name) => vec![vec![Value::Text(self.settings.get(name)?)]],
+            None => self
+                .settings
+                .all()
+                .into_iter()
+                .map(|(name, setting, description)| {
+                    vec![
+                        Value::Text(name),
+                        Value::Text(setting),
+                        Value::Text(description),
+                    ]
+                })
+                .collect(),
+        };
+        Ok(QueryResult::rows(
+            "SHOW".to_owned(),
+            self.show_columns(name),
+            rows,
+        ))
+    }
+
     fn insert_literal_rows(&mut self, rows: &LiteralRows<'_>) -> SqlResult<QueryResult> {
         if matches!(self.block, Block::Failed) {
             return Err(aborted_block());
@@ -235,10 +510,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         result
     }
 
-    fn read(
+    fn read<T>(
         &mut self,
-        body: impl FnOnce(&dyn crate::store::KeyValueRead, &mut TableCache) -> SqlResult<QueryResult>,
-    ) -> SqlResult<QueryResult> {
+        body: impl FnOnce(&dyn crate::store::KeyValueRead, &mut TableCache) -> SqlResult<T>,
+    ) -> SqlResult<T> {
         let tables = &mut self.tables;
         match &self.block {
             Block::Writing(writer) => body(writer, tables),

@@ -72,6 +72,10 @@ impl SqlState {
     pub const INVALID_COLUMN_REFERENCE: Self = Self(*b"42P10");
     /// `42P16` invalid_table_definition.
     pub const INVALID_TABLE_DEFINITION: Self = Self(*b"42P16");
+    /// `42P02` undefined_parameter: a `$n` without a value.
+    pub const UNDEFINED_PARAMETER: Self = Self(*b"42P02");
+    /// `42P18` indeterminate_datatype.
+    pub const INDETERMINATE_DATATYPE: Self = Self(*b"42P18");
     /// `53200` out_of_memory.
     pub const OUT_OF_MEMORY: Self = Self(*b"53200");
     /// `54000` program_limit_exceeded.
@@ -82,6 +86,8 @@ impl SqlState {
     pub const STATEMENT_TOO_COMPLEX: Self = Self(*b"54001");
     /// `55P03` lock_not_available: another writer holds the database.
     pub const LOCK_NOT_AVAILABLE: Self = Self(*b"55P03");
+    /// `55P02` cant_change_runtime_param.
+    pub const CANT_CHANGE_RUNTIME_PARAM: Self = Self(*b"55P02");
     /// `58030` io_error.
     pub const IO_ERROR: Self = Self(*b"58030");
     /// `XX000` internal_error.

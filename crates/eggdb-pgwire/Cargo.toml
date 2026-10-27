@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-pgwire"
+description = "EggDB's server for the PostgreSQL wire protocol v3: startup, SCRAM-SHA-256 authentication, the simple and extended query protocols, on loopback listeners only for now (D102)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-platform = { path = "../eggdb-platform" }
+eggdb-sql = { path = "../eggdb-sql" }

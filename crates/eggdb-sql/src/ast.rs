@@ -12,6 +12,9 @@ pub(crate) enum Statement {
     Begin { read_only: bool },
     Commit,
     Rollback,
+    Set { name: String, value: Option<String> },
+    Show { name: Option<String> },
+    Reset { name: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -299,5 +302,9 @@ pub(crate) enum ExprKind {
     Slot {
         index: usize,
         sql_type: Option<SqlType>,
+    },
+    SessionValue {
+        name: &'static str,
+        value: String,
     },
 }
