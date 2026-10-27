@@ -135,6 +135,16 @@ pub(crate) fn create_view(
 ) -> SqlResult<QueryResult> {
     let dialect = context.dialect;
     let result = QueryResult::command("CREATE VIEW");
+    if create.text.len() > crate::encoding::MAX_VIEW_TEXT {
+        return Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            format!(
+                "a view's query can be at most {} bytes",
+                crate::encoding::MAX_VIEW_TEXT
+            ),
+        )
+        .at(create.name.position));
+    }
     let internal = schemas::creation_name(writer, &create.name)?;
     crate::constraints::check_identifier(&Name {
         text: internal.clone(),
@@ -277,6 +287,7 @@ fn view_columns(
         columns.push(ViewColumn {
             name,
             sql_type: column.sql_type,
+            source: column.name.clone(),
         });
     }
     if columns.is_empty() {
@@ -423,7 +434,7 @@ pub(crate) fn drop_dependent_views(
             .notices
             .push(format!("NOTICE:  drop cascades to view {}", display(&view)));
         if queue.is_empty() {
-            queue = dependents(writer, referenced, CASCADE_BATCH)?;
+            queue = dependents(writer, referenced, usize::MAX)?;
             queue.retain(|name| !seen.contains(name));
         }
     }

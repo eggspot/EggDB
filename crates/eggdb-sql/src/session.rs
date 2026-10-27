@@ -23,14 +23,13 @@ use std::sync::Arc;
 fn walks_expressions(tokens: &[Token<'_>]) -> bool {
     let mut selects = 0;
     for token in tokens {
-        if let TokenKind::Word(word) = &token.kind {
-            if word.eq_ignore_ascii_case("select") {
-                selects += 1;
-            } else if word.eq_ignore_ascii_case("current_schema")
-                || word.eq_ignore_ascii_case("current_schemas")
-            {
+        match &token.kind {
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("select") => selects += 1,
+            TokenKind::Word(word) if word.starts_with("current_schema") => return true,
+            TokenKind::QuotedIdentifier(name) if name.starts_with("current_schema") => {
                 return true;
             }
+            _ => {}
         }
     }
     selects > 1
@@ -220,6 +219,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     statement_uses_sequences: bool,
     statement_walks_expressions: bool,
     search_path_cache: crate::schemas::PathCache,
+    search_path_at_begin: Option<String>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -250,6 +250,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             statement_uses_sequences: false,
             statement_walks_expressions: true,
             search_path_cache: crate::schemas::PathCache::default(),
+            search_path_at_begin: None,
         }
     }
 
@@ -1224,12 +1225,27 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 } else {
                     Block::Writing(self.store.begin_write()?)
                 };
+                if self.dialect == Dialect::PostgreSql {
+                    self.search_path_at_begin = self.settings.get("search_path").ok();
+                }
                 Ok(QueryResult::command("BEGIN"))
             }
         }
     }
 
+    fn restore_search_path(&mut self) {
+        if let Some(path) = self.search_path_at_begin.take()
+            && self.settings.get("search_path").ok().as_deref() != Some(path.as_str())
+        {
+            let _ = Arc::make_mut(&mut self.settings).set("search_path", Some(&path));
+        }
+    }
+
     fn commit(&mut self) -> SqlResult<QueryResult> {
+        if matches!(self.block, Block::Failed) {
+            self.restore_search_path();
+        }
+        self.search_path_at_begin = None;
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 writer.commit()?;
@@ -1246,6 +1262,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn rollback(&mut self) -> SqlResult<QueryResult> {
+        self.restore_search_path();
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 writer.rollback()?;

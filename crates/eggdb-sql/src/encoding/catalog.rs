@@ -13,6 +13,7 @@ const RECORD_VERSION: u8 = 1;
 const NO_TYPE: u8 = 0;
 pub(crate) const MAX_SEARCH_PATH: usize = 64;
 pub(crate) const MAX_VIEW_REFERENCES: usize = 4096;
+pub(crate) const MAX_VIEW_TEXT: usize = 1 << 20;
 
 pub(crate) fn schema_key(name: &str) -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
@@ -108,6 +109,7 @@ pub(crate) fn decode_comment(bytes: &[u8]) -> SqlResult<String> {
 pub(crate) struct ViewColumn {
     pub(crate) name: String,
     pub(crate) sql_type: Option<SqlType>,
+    pub(crate) source: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,6 +135,7 @@ impl ViewDefinition {
                 Some(sql_type) => put_type(&mut out, sql_type),
                 None => out.push(NO_TYPE),
             }
+            put_bytes(&mut out, column.source.as_bytes());
         }
         put_varint(&mut out, self.search_path.len() as u64);
         for schema in &self.search_path {
@@ -158,7 +161,11 @@ impl ViewDefinition {
         };
         let query = reader.text()?;
         let count = reader.count()?;
-        if count == 0 || count > MAX_COLUMNS || query.trim().is_empty() {
+        if count == 0
+            || count > MAX_COLUMNS
+            || query.trim().is_empty()
+            || query.len() > MAX_VIEW_TEXT
+        {
             return Err(reader.damaged());
         }
         let mut columns: Vec<ViewColumn> = Vec::with_capacity(count);
@@ -170,12 +177,14 @@ impl ViewDefinition {
             } else {
                 Some(reader.sql_type(true, true)?)
             };
+            let source = reader.name()?;
             if columns.iter().any(|known| known.name == column) {
                 return Err(reader.damaged());
             }
             columns.push(ViewColumn {
                 name: column,
                 sql_type,
+                source,
             });
         }
         let path_length = reader.count()?;
@@ -237,10 +246,12 @@ mod tests {
                 ViewColumn {
                     name: "a".into(),
                     sql_type: Some(SqlType::Integer),
+                    source: "a".into(),
                 },
                 ViewColumn {
                     name: "b".into(),
                     sql_type: None,
+                    source: "?column?".into(),
                 },
             ],
             search_path: vec!["app".into(), "public".into()],
@@ -339,5 +350,39 @@ mod tests {
         assert!(decode_comment(&[]).is_err());
         assert!(decode_comment(&[1, 0xFF, 0xFE]).is_err());
         assert_eq!(decode_comment(&[9]).unwrap_err().state().code(), "0A000");
+    }
+
+    #[test]
+    fn a_zero_byte_in_a_stored_column_index_or_constraint_name_is_damage() {
+        let damaged = |table: &TableDefinition| {
+            TableDefinition::decode(&table.name, &table.encode())
+                .is_err_and(|error| error.state().code() == "XX001")
+        };
+        let mut column = schema_table();
+        column.columns[0].name = "a\0b".into();
+        assert!(damaged(&column));
+        let mut index = schema_table();
+        index.indexes = vec![crate::encoding::IndexDefinition {
+            id: 1,
+            name: "app\0t_a_idx".into(),
+            unique: false,
+            columns: vec![0],
+        }];
+        assert!(damaged(&index));
+        let mut key = schema_table();
+        key.primary_key = vec![0];
+        key.primary_key_name = Some("app\0t_pkey".into());
+        assert!(damaged(&key));
+        let mut check = schema_table();
+        check.checks = vec![crate::encoding::CheckConstraint {
+            name: "app\0t_a_check".into(),
+            dialect: crate::Dialect::PostgreSql,
+            expression: "a > 0".into(),
+        }];
+        assert!(damaged(&check));
+        let mut fine = schema_table();
+        fine.primary_key = vec![0];
+        assert_eq!(fine.primary_key_constraint_name(), "t_pkey");
+        assert!(!damaged(&fine));
     }
 }

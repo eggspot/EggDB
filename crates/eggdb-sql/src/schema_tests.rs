@@ -797,3 +797,168 @@ fn a_view_cannot_keep_a_parameter_of_the_statement_that_created_it() {
     assert_eq!(error.state().code(), "42P02", "{error}");
     assert_eq!(code(&mut session, "SELECT * FROM v"), "42P01");
 }
+
+#[test]
+fn generated_names_in_a_schema_carry_no_schema_and_can_be_dropped() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE SCHEMA app; CREATE TABLE app.t (id int PRIMARY KEY, v int UNIQUE, w int CHECK (w > 0)); \
+         CREATE INDEX ON app.t (w); CREATE TABLE app.c (id int REFERENCES app.t (id))",
+    );
+    let tables = session.tables().unwrap();
+    let t = tables.iter().find(|table| table.name == "app.t").unwrap();
+    let names: Vec<&str> = t.indexes.iter().map(|index| index.name.as_str()).collect();
+    assert_eq!(names, ["t_v_key", "t_w_idx"]);
+    let statements = t.index_statements_in(Dialect::PostgreSql);
+    assert!(
+        statements.contains(" ON app.t (") && !statements.contains('\0'),
+        "{statements}"
+    );
+    let refused = fails(&mut session, "INSERT INTO app.c VALUES (9)");
+    assert!(refused.message().contains("\"c_id_fkey\""), "{refused}");
+    let refused = fails(&mut session, "INSERT INTO app.t VALUES (1, 1, 0)");
+    assert!(refused.message().contains("\"t_w_check\""), "{refused}");
+    let refused = fails(&mut session, "DROP TABLE app.t");
+    assert_eq!(
+        refused.detail(),
+        Some("constraint c_id_fkey on table app.c depends on table app.t")
+    );
+    last(&mut session, "ALTER TABLE app.c DROP CONSTRAINT c_id_fkey");
+    last(&mut session, "ALTER TABLE app.t DROP CONSTRAINT t_pkey");
+    last(&mut session, "ALTER TABLE app.t DROP CONSTRAINT t_v_key");
+    last(&mut session, "ALTER TABLE app.t DROP CONSTRAINT t_w_check");
+    last(&mut session, "DROP INDEX app.t_w_idx");
+}
+
+#[test]
+fn view_text_is_capped_and_its_expansion_budgeted_per_statement() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE t (a int); INSERT INTO t VALUES (1)",
+    );
+    let list: Vec<String> = (0..200_000).map(|number| number.to_string()).collect();
+    let huge = format!(
+        "CREATE VIEW too_big AS SELECT a FROM t WHERE a IN ({})",
+        list.join(",")
+    );
+    assert!(huge.len() > 1 << 20);
+    assert_eq!(code(&mut session, &huge), "54000");
+    let list: Vec<String> = (0..100_000).map(|number| number.to_string()).collect();
+    last(
+        &mut session,
+        &format!(
+            "CREATE VIEW big AS SELECT a FROM t WHERE a IN ({})",
+            list.join(",")
+        ),
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM big"),
+        "count\n1\nSELECT 1"
+    );
+    let copies: Vec<&str> = (0..120).map(|_| "SELECT a FROM big").collect();
+    let error = fails(&mut session, &copies.join(" UNION ALL "));
+    assert_eq!(error.state().code(), "54000", "{error}");
+    assert!(error.message().contains("bytes of view text"), "{error}");
+}
+
+#[test]
+fn quoted_current_schema_calls_follow_the_search_path() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE SCHEMA s; CREATE TABLE s.t (a text); SET search_path = s",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT \"current_schema\"(), \"current_schemas\"(false)"
+        ),
+        "current_schema|current_schemas\ns|{s}\nSELECT 1"
+    );
+    last(&mut session, "INSERT INTO t VALUES (\"current_schema\"())");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM t WHERE a = current_schema() AND a IN (SELECT \"current_schema\"())"
+        ),
+        "count\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn set_schema_refuses_index_names_the_target_schema_already_uses() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE SCHEMA s; CREATE TABLE s.a (x int); CREATE INDEX i ON s.a (x); \
+         CREATE TABLE b (x int); CREATE INDEX i ON b (x)",
+    );
+    assert_eq!(code(&mut session, "ALTER TABLE b SET SCHEMA s"), "42P07");
+    last(
+        &mut session,
+        "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE s.p_pkey (x int)",
+    );
+    assert_eq!(code(&mut session, "ALTER TABLE p SET SCHEMA s"), "42P07");
+    last(&mut session, "DROP INDEX i; ALTER TABLE b SET SCHEMA s");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM s.b"),
+        "count\n0\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_rolled_back_block_restores_the_search_path() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SCHEMA q; SET search_path = public");
+    last(&mut session, "BEGIN; SET search_path = q; ROLLBACK");
+    assert_eq!(
+        last(&mut session, "SHOW search_path"),
+        "search_path\npublic\nSHOW"
+    );
+    last(&mut session, "BEGIN; SET search_path = q; COMMIT");
+    assert_eq!(
+        last(&mut session, "SHOW search_path"),
+        "search_path\nq\nSHOW"
+    );
+    assert!(run(&mut session, "BEGIN; SET search_path = public; SELECT 1/0").is_err());
+    last(&mut session, "ROLLBACK");
+    assert_eq!(
+        last(&mut session, "SHOW search_path"),
+        "search_path\nq\nSHOW"
+    );
+}
+
+#[test]
+fn star_views_over_a_recreated_table_match_columns_by_name_in_mysql_and_again_in_sqlite() {
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut mysql,
+        "CREATE TABLE t (a INT, b TEXT); CREATE VIEW v AS SELECT * FROM t; \
+         CREATE VIEW w (x, y) AS SELECT * FROM t; DROP TABLE t; \
+         CREATE TABLE t (b TEXT, a INT, c INT); INSERT INTO t VALUES ('x', 5, 7)",
+    );
+    assert_eq!(last(&mut mysql, "SELECT * FROM v"), "a|b\n5|x\nSELECT 1");
+    assert_eq!(last(&mut mysql, "SELECT * FROM w"), "x|y\n5|x\nSELECT 1");
+    last(&mut mysql, "DROP TABLE t; CREATE TABLE t (b TEXT)");
+    assert_eq!(
+        fails(&mut mysql, "SELECT * FROM v").vendor_code(),
+        Some(1356)
+    );
+    let store = MemoryStore::default();
+    let mut sqlite = Session::with_dialect(&store, Dialect::Sqlite);
+    last(
+        &mut sqlite,
+        "CREATE TABLE t (a INT, b TEXT); CREATE VIEW v AS SELECT * FROM t; DROP TABLE t; \
+         CREATE TABLE t (b TEXT, a INT); INSERT INTO t VALUES ('x', 5)",
+    );
+    assert_eq!(last(&mut sqlite, "SELECT * FROM v"), "b|a\nx|5\nSELECT 1");
+    assert_eq!(last(&mut sqlite, "SELECT a FROM v"), "a\n5\nSELECT 1");
+}

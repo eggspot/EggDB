@@ -72,7 +72,7 @@ fn key_name(table: &TableDefinition, key: KeyChoice, dialect: Dialect) -> String
     match (key, dialect) {
         (KeyChoice::Index(position), _) => table.indexes[position].name.clone(),
         (KeyChoice::Primary, Dialect::MySql) => "PRIMARY".to_owned(),
-        (KeyChoice::Primary, _) => format!("{}_pkey", table.name),
+        (KeyChoice::Primary, _) => table.primary_key_constraint_name(),
     }
 }
 

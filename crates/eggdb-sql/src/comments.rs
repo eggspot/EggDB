@@ -253,21 +253,25 @@ pub(crate) fn move_owner(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -
     let old = comments_prefix(from);
     let new = comments_prefix(to);
     let mut moved = Vec::new();
+    let mut memory = crate::memory::WorkMemory::new();
     writer.scan(
         &old,
         &prefix_end(&old),
         ScanDirection::Forward,
         &mut |key, value| {
+            memory.charge(key.len() + value.len() + 64)?;
             moved.push((key[old.len()..].to_vec(), value.to_vec()));
-            Ok(moved.len() < MOST_COMMENT_BYTES)
+            Ok(true)
         },
     )?;
     crate::store::delete_prefix(writer, &new)?;
-    crate::store::delete_prefix(writer, &old)?;
     for (rest, value) in moved {
-        let mut key = new.clone();
-        key.extend_from_slice(&rest);
-        writer.put(&key, &value)?;
+        let mut from_key = old.clone();
+        from_key.extend_from_slice(&rest);
+        writer.delete(&from_key)?;
+        let mut to_key = new.clone();
+        to_key.extend_from_slice(&rest);
+        writer.put(&to_key, &value)?;
     }
     Ok(())
 }

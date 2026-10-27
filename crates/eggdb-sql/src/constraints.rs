@@ -827,8 +827,10 @@ pub(crate) fn define_check(
                 .map(|column| column.text.clone())
                 .or_else(|| first_column_named(expr, table));
             let base = match column {
-                Some(column) => format!("{}_{column}_check", table.name),
-                None => format!("{}_check", table.name),
+                Some(column) => {
+                    format!("{}_{column}_check", crate::schemas::base_name(&table.name))
+                }
+                None => format!("{}_check", crate::schemas::base_name(&table.name)),
             };
             generated_name(table, base)
         }
@@ -1027,7 +1029,10 @@ pub(crate) fn define_foreign_key(
         }
         None => {
             let names = column_names(table, &columns).join("_");
-            generated_name(table, format!("{}_{names}_fkey", table.name))
+            generated_name(
+                table,
+                format!("{}_{names}_fkey", crate::schemas::base_name(&table.name)),
+            )
         }
     };
     for (&child_column, &parent_column) in columns.iter().zip(&parent_columns) {

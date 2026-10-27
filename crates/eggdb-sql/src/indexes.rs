@@ -258,11 +258,14 @@ fn generated_name(
     let columns: Vec<&str> = spec.columns.iter().map(|name| name.text.as_str()).collect();
     let stem = match dialect {
         Dialect::MySql => columns.first().copied().unwrap_or("key").to_owned(),
-        Dialect::Sqlite => format!("sqlite_autoindex_{}", table.name),
+        Dialect::Sqlite => format!(
+            "sqlite_autoindex_{}",
+            crate::schemas::base_name(&table.name)
+        ),
         Dialect::Oracle => "sys_c".to_owned(),
         Dialect::PostgreSql => format!(
             "{}_{}_{}",
-            table.name,
+            crate::schemas::base_name(&table.name),
             columns.join("_"),
             if constraint { "key" } else { "idx" }
         ),

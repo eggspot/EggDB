@@ -176,6 +176,8 @@ fn apply(
                 position: schema.position,
             };
             refuse_with_dependent_views(writer, name)?;
+            let moving = current(writer, tables, name)?;
+            check_index_names_free(writer, &moving, &schema.text)?;
             rename_table(writer, tables, name, &target, dialect)?;
             *name = target.text;
             Ok(None)
@@ -846,6 +848,51 @@ fn rename_column(
     )
 }
 
+fn index_names_of(table: &TableDefinition) -> Vec<String> {
+    let mut names: Vec<String> = table
+        .indexes
+        .iter()
+        .map(|index| index.name.clone())
+        .collect();
+    if !table.primary_key.is_empty() {
+        names.push(table.primary_key_constraint_name());
+    }
+    names
+}
+
+fn check_index_names_free(
+    writer: &mut dyn KeyValueWrite,
+    table: &TableDefinition,
+    schema: &str,
+) -> SqlResult<()> {
+    let names = index_names_of(table);
+    if names.is_empty() {
+        return Ok(());
+    }
+    let others: Vec<TableDefinition> = indexes::every_table(writer)?
+        .into_iter()
+        .filter(|other| {
+            other.name != table.name && crate::schemas::schema_of(&other.name) == schema
+        })
+        .collect();
+    for name in names {
+        let taken = others
+            .iter()
+            .any(|other| index_names_of(other).contains(&name))
+            || crate::sequences::relation_exists(
+                writer,
+                &crate::schemas::qualified(schema, &name),
+            )?;
+        if taken {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_TABLE,
+                format!("relation \"{name}\" already exists in schema \"{schema}\""),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn refuse_with_dependent_views(writer: &mut dyn KeyValueWrite, name: &str) -> SqlResult<()> {
     match crate::views::first_dependent(writer, name)? {
         Some(view) => Err(crate::views::rename_refused("table", name, &view)),
@@ -1365,7 +1412,7 @@ fn add_constraint(
             let mut new = table.clone();
             new.primary_key = key;
             if let Some(given) = &spec.name
-                && given.text != format!("{}_pkey", table.name)
+                && given.text != format!("{}_pkey", crate::schemas::base_name(&table.name))
             {
                 new.primary_key_name = Some(given.text.clone());
             }

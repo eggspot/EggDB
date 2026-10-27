@@ -819,7 +819,13 @@ derived table. `SELECT *` is expanded when the view is created, so columns added
 later do not appear. `OR REPLACE` keeps the existing columns' names and types and may add
 columns at the end (`42P16` otherwise); a view that would refer to itself, directly or through
 other views, is `42P17`. Views nest to 32 query levels and 1,024 `SELECT`s for a statement and
-everything it expands (`54001`). In PostgreSQL, dropping a table or view that views use is
+everything it expands (`54001`); a view's query text is at most 1 MiB, and a statement expands at
+most 64 MiB of view text in all (`54000`). A view written with `SELECT *` keeps the columns it
+had: PostgreSQL's by position (its tables cannot be dropped or changed under it), MySQL's and
+Oracle's by name, so a table dropped and created again with its columns in another order still
+answers correctly (a missing column is MySQL's 1356 or ORA-04063), and SQLite's expands `*`
+again against the table as it is now. A `BEGIN` block that rolls back restores `search_path`, as
+PostgreSQL restores the settings a rolled-back transaction changed. In PostgreSQL, dropping a table or view that views use is
 `2BP01` unless `CASCADE` (which drops those views), changing or dropping a column a view uses is
 `2BP01`, and renaming a table or view that a view uses is `0A000`. MySQL's `CREATE [OR REPLACE]
 [ALGORITHM = ...] [DEFINER = ...] [SQL SECURITY ...] VIEW` (the clauses are accepted and
@@ -938,7 +944,9 @@ ui app.db` has a query screen (`s`, run with `F5`). Both print results and error
 `eggdb sql` does ([cli.md](cli.md)).
 
 ## Known differences from PostgreSQL
-Schemas and views (D116): views are read-only (no automatically updatable views, `WITH CHECK
+Schemas and views (D116): a view is computed in full each time a statement uses it (no
+condition is pushed into it and its tables' indexes are not used through it), so a point lookup
+through a view over a large table reads the whole view; views are read-only (no automatically updatable views, `WITH CHECK
 OPTION` is `0A000`), there are no materialized, temporary or recursive views, renaming a table
 or view that a view uses is `0A000` (PostgreSQL follows the rename), a view resolves its names
 with the search path it was created with when it is used, where PostgreSQL binds them once, a

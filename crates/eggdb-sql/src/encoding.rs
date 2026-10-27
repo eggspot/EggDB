@@ -282,7 +282,7 @@ impl TableDefinition {
     pub(crate) fn primary_key_constraint_name(&self) -> String {
         self.primary_key_name
             .clone()
-            .unwrap_or_else(|| format!("{}_pkey", self.name))
+            .unwrap_or_else(|| format!("{}_pkey", crate::schemas::base_name(&self.name)))
     }
 
     pub(crate) fn constraint_name_taken(&self, name: &str) -> bool {
@@ -408,6 +408,9 @@ impl TableDefinition {
         let mut columns = Vec::new();
         for _ in 0..count {
             let name = reader.text()?;
+            if name.contains(crate::schemas::QUALIFIER) {
+                return Err(reader.damaged());
+            }
             let sql_type = reader.sql_type(new_types_allowed, more_types_allowed)?;
             let not_null = match reader.byte()? {
                 0 => false,
@@ -530,7 +533,7 @@ fn decode_constraints(
 ) -> SqlResult<DecodedConstraints> {
     let primary_key_name = match reader.byte()? {
         0 => None,
-        1 => Some(reader.name()?),
+        1 => Some(reader.plain_name()?),
         _ => return Err(reader.damaged()),
     };
     let flags = reader.byte()?;
@@ -545,7 +548,7 @@ fn decode_constraints(
     }
     let mut checks = Vec::new();
     for _ in 0..check_count {
-        let name = reader.name()?;
+        let name = reader.plain_name()?;
         let dialect = dialect_of(reader.byte()?).ok_or_else(|| reader.damaged())?;
         let expression = reader.text()?;
         if expression.trim().is_empty() || names.contains(&name) {
@@ -564,7 +567,7 @@ fn decode_constraints(
     }
     let mut foreign_keys = Vec::new();
     for _ in 0..key_count {
-        let name = reader.name()?;
+        let name = reader.plain_name()?;
         let width = reader.count()?;
         if width == 0 || width > MAX_INDEX_COLUMNS {
             return Err(reader.damaged());
@@ -578,9 +581,12 @@ fn decode_constraints(
             key_columns.push(column);
         }
         let parent = reader.name()?;
+        if !crate::schemas::is_well_formed(&parent) {
+            return Err(reader.damaged());
+        }
         let mut parent_columns: Vec<String> = Vec::with_capacity(width);
         for _ in 0..width {
-            let column = reader.name()?;
+            let column = reader.plain_name()?;
             if parent_columns.contains(&column) {
                 return Err(reader.damaged());
             }
@@ -704,7 +710,13 @@ impl SequenceDefinition {
         }
         let owned_by = match reader.byte()? {
             0 => None,
-            1 => Some((reader.name()?, reader.name()?)),
+            1 => {
+                let table = reader.name()?;
+                if !crate::schemas::is_well_formed(&table) {
+                    return Err(reader.damaged());
+                }
+                Some((table, reader.plain_name()?))
+            }
             _ => return Err(reader.damaged()),
         };
         reader.finish()?;
@@ -740,6 +752,9 @@ fn decode_indexes(
     for _ in 0..count {
         let id = reader.u32()?;
         let name = reader.text()?;
+        if name.contains(crate::schemas::QUALIFIER) {
+            return Err(reader.damaged());
+        }
         let unique = match reader.byte()? {
             0 => false,
             1 => true,
@@ -1212,6 +1227,14 @@ impl<'b> Reader<'b> {
     fn name(&mut self) -> SqlResult<String> {
         let name = self.text()?;
         if name.is_empty() {
+            return Err(self.damaged());
+        }
+        Ok(name)
+    }
+
+    fn plain_name(&mut self) -> SqlResult<String> {
+        let name = self.name()?;
+        if name.contains(crate::schemas::QUALIFIER) {
             return Err(self.damaged());
         }
         Ok(name)

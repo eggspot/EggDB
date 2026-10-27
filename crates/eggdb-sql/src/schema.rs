@@ -97,6 +97,29 @@ impl TableSchema {
         }
     }
 
+    /// The `CREATE INDEX` statements that make this table's secondary indexes in `dialect`, each
+    /// ended by `;` and a line break; empty without indexes.
+    pub fn index_statements_in(&self, dialect: crate::Dialect) -> String {
+        let mut out = String::new();
+        for index in &self.indexes {
+            let statement = index.create_statement_in(&self.name, dialect);
+            let statement = if self.schema != crate::schemas::DEFAULT_SCHEMA
+                && dialect == crate::Dialect::PostgreSql
+            {
+                statement.replacen(
+                    &format!(" ON {} (", quoted(&self.name)),
+                    &format!(" ON {} (", self.qualified_name()),
+                    1,
+                )
+            } else {
+                statement
+            };
+            out.push_str(&statement);
+            out.push('\n');
+        }
+        out
+    }
+
     /// The `COMMENT ON` statements that give this table and its columns their comments, each
     /// ended by `;` and a line break; empty without comments.
     pub fn comment_statements(&self) -> String {

@@ -19,6 +19,7 @@ use std::sync::Arc;
 const MAX_QUERY_NESTING: usize = 32;
 const MAX_NESTING: usize = 64;
 const MAX_QUERIES: usize = 1024;
+const MAX_VIEW_TEXT_PER_STATEMENT: usize = 64 << 20;
 
 #[derive(Debug, Default)]
 pub(crate) struct Resolution {
@@ -34,6 +35,7 @@ pub(crate) struct Resolver<'a> {
     settings: Option<&'a Settings>,
     walk_expressions: bool,
     selects: usize,
+    view_bytes: usize,
     depth: usize,
     levels: usize,
     recorded_at: Option<usize>,
@@ -107,6 +109,7 @@ impl<'a> Resolver<'a> {
             settings,
             walk_expressions,
             selects: 0,
+            view_bytes: 0,
             depth: 0,
             levels: 0,
             recorded_at: None,
@@ -400,6 +403,17 @@ impl<'a> Resolver<'a> {
         if query_depth > MAX_QUERY_NESTING {
             return Err(nested_too_deep(position));
         }
+        self.view_bytes = self.view_bytes.saturating_add(view.query.len());
+        if self.view_bytes > MAX_VIEW_TEXT_PER_STATEMENT {
+            return Err(SqlError::new(
+                SqlState::PROGRAM_LIMIT_EXCEEDED,
+                format!(
+                    "a statement can expand at most {MAX_VIEW_TEXT_PER_STATEMENT} bytes of view text"
+                ),
+            )
+            .with_hint("Use the views fewer times in one statement, or make them smaller.")
+            .at(position));
+        }
         let (mut query, selects) = parse_view(
             &view,
             self.settings,
@@ -450,14 +464,7 @@ impl<'a> Resolver<'a> {
             .collect();
         let label = base_name(&view.name).to_owned();
         let derived = if view.expands_wildcard {
-            DerivedTable {
-                query: Query::of_select(
-                    narrowed(query, column_names, &label, view.dialect, position),
-                    position,
-                ),
-                column_names: Vec::new(),
-                dialect: view.dialect,
-            }
+            self.wildcard_view(query, &view, column_names, &label, position)?
         } else {
             DerivedTable {
                 query,
@@ -477,26 +484,97 @@ impl<'a> Resolver<'a> {
     }
 }
 
-fn narrowed(
+impl Resolver<'_> {
+    fn wildcard_view(
+        &mut self,
+        query: Query,
+        view: &ViewDefinition,
+        column_names: Vec<Name>,
+        label: &str,
+        position: usize,
+    ) -> SqlResult<DerivedTable> {
+        match view.dialect {
+            Dialect::PostgreSql => Ok(DerivedTable {
+                query: Query::of_select(
+                    narrowed(query, column_names, label, view.dialect, position),
+                    position,
+                ),
+                column_names: Vec::new(),
+                dialect: view.dialect,
+            }),
+            Dialect::Sqlite => Ok(DerivedTable {
+                query,
+                column_names: Vec::new(),
+                dialect: view.dialect,
+            }),
+            Dialect::MySql | Dialect::Oracle => {
+                let described = crate::execute::query(self.reader, self.tables, &query, true)?;
+                let present = described.columns.unwrap_or_default();
+                if view
+                    .columns
+                    .iter()
+                    .any(|column| !present.iter().any(|found| found.name == column.source))
+                {
+                    return Err(invalid_view(view, self.settings));
+                }
+                Ok(DerivedTable {
+                    query: Query::of_select(by_name(query, view, label, position), position),
+                    column_names: Vec::new(),
+                    dialect: view.dialect,
+                })
+            }
+        }
+    }
+}
+
+fn invalid_view(view: &ViewDefinition, settings: Option<&Settings>) -> SqlError {
+    let name = base_name(&view.name);
+    match view.dialect {
+        Dialect::MySql => SqlError::new(
+            SqlState::MYSQL_GENERAL,
+            format!(
+                "View '{}.{name}' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them",
+                settings.map_or_else(|| "eggdb".to_owned(), |settings| settings.database.clone())
+            ),
+        )
+        .with_vendor_code(1356),
+        _ => SqlError::new(
+            SqlState::INVALID_OBJECT_DEFINITION,
+            format!(
+                "view \"{}\" has errors",
+                crate::lexer::swap_uniform_case(name)
+            ),
+        )
+        .with_oracle_code(4063),
+    }
+}
+
+fn by_name(query: Query, view: &ViewDefinition, label: &str, position: usize) -> Select {
+    let items = view
+        .columns
+        .iter()
+        .map(|column| SelectItem::Expr {
+            expr: Expr {
+                kind: ExprKind::Column {
+                    qualifier: None,
+                    name: column.source.clone(),
+                },
+                position,
+            },
+            alias: Some(column.name.clone()),
+        })
+        .collect();
+    select_from(items, query, Vec::new(), label, view.dialect, position)
+}
+
+fn select_from(
+    items: Vec<SelectItem>,
     query: Query,
     column_names: Vec<Name>,
     label: &str,
     dialect: Dialect,
     position: usize,
 ) -> Select {
-    let items = column_names
-        .iter()
-        .map(|name| SelectItem::Expr {
-            expr: Expr {
-                kind: ExprKind::Column {
-                    qualifier: None,
-                    name: name.text.clone(),
-                },
-                position,
-            },
-            alias: None,
-        })
-        .collect();
     Select {
         distinct: false,
         items,
@@ -523,6 +601,29 @@ fn narrowed(
         offset: None,
         source_row_limit: None,
     }
+}
+
+fn narrowed(
+    query: Query,
+    column_names: Vec<Name>,
+    label: &str,
+    dialect: Dialect,
+    position: usize,
+) -> Select {
+    let items = column_names
+        .iter()
+        .map(|name| SelectItem::Expr {
+            expr: Expr {
+                kind: ExprKind::Column {
+                    qualifier: None,
+                    name: name.text.clone(),
+                },
+                position,
+            },
+            alias: None,
+        })
+        .collect();
+    select_from(items, query, column_names, label, dialect, position)
 }
 
 pub(crate) fn resolve_view_body(
