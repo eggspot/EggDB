@@ -4252,7 +4252,11 @@ lookups, one B+tree descent per order. Changes, in order:
   reused buffer instead of a vector per row, and aggregates check argument types only for
   values whose type is not always valid (group by 1.13 to 0.94).
 
-Measured on the Mac: `sql_join` 0.99 and `sql_group_by` 0.94; the Linux lines come from CI.
+Measured on the Mac: `sql_join` 0.99 and `sql_group_by` 0.94. On CI's Linux runner,
+`sql_group_by` measures 0.94-1.16 across two runs of the same commit (its line stays at 1.063)
+and `sql_join` 1.32-1.43 (from 3.78-3.93; its line is lowered to 1.431): the join is not at parity there
+yet, so D99's condition applies to it unchanged (at most 1.0 before v0.3.0, or a D7 research
+recorded here), and it stays in item 19e.
 Both lines are gated with the 15% ceiling of D99's SQL lines and may only shrink. The known
 cost of the hash choice without table statistics: joining a small filtered first table to a
 very large table by its key reads up to 64 MiB of the large one before it falls back to
@@ -4262,8 +4266,8 @@ cost of the wider `SELECT` path. A profile shows the time in parsing, allocation
 B+tree lookup, with no single new cost; two allocations this part had added are removed. The
 rest joins item 19e, and the line stays where it is.
 
-**Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to 1,280,800 bytes on
-aarch64 macOS (+82,768, +6.9%) for the join planner and executor, the grouping rewrite and the
-aggregate states; start time and peak memory stay within their lines (1,671,168 and 2,359,296
-bytes peak). On x86-64 Linux it grows from 1,461,576 to 1,567,192 bytes (+105,616, +7.2%); peak
-memory stays within its lines.
+**Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to 1,297,360 bytes on
+aarch64 macOS (+99,328, +8.3%) for the join planner and executor, the hash join, column pruning,
+the grouping rewrite and the aggregate states; start time and peak memory stay within their lines (1,671,168 and 2,359,296
+bytes peak). On x86-64 Linux it grows from 1,461,576 to 1,582,856 bytes (+121,280, +8.3%) with the
+hash join and column pruning; peak memory stays within its lines.
