@@ -123,7 +123,8 @@ impl Value {
             .map_or_else(|| "unknown".to_owned(), SqlType::name)
     }
 
-    pub(crate) fn as_integer(&self) -> Option<i64> {
+    /// The value as a 64-bit integer, when it is a `smallint`, `integer` or `bigint`.
+    pub fn as_integer(&self) -> Option<i64> {
         match *self {
             Self::SmallInt(value) => Some(value.into()),
             Self::Integer(value) => Some(value.into()),
@@ -132,7 +133,8 @@ impl Value {
         }
     }
 
-    pub(crate) fn as_float(&self) -> Option<f64> {
+    /// The value as a double-precision number, when it is a number of any type.
+    pub fn as_float(&self) -> Option<f64> {
         match *self {
             Self::Real(value) => Some(value.into()),
             Self::Double(value) => Some(value),

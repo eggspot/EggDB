@@ -3,7 +3,7 @@ use crate::cli::args::{CommandName, ResultMode, SqlSource};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use crate::cli::sql_store::DatabaseStore;
-use eggdb_sql::{QueryResult, SqlError, SqlState, Value};
+use eggdb_sql::{Dialect, QueryResult, SqlError, SqlState, Value};
 
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
@@ -15,7 +15,8 @@ impl Session<'_> {
             None,
         )?;
         let store = DatabaseStore(&db);
-        let mut session = eggdb_sql::Session::new(&store);
+        let dialect = self.request.dialect;
+        let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
         let mut printed = Ok(());
         let outcome = {
             let out = &mut self.out;
@@ -25,7 +26,13 @@ impl Session<'_> {
                     messages.text(notice);
                     messages.text("\n");
                 }
-                print_result(out, &result);
+                for warning in &result.warnings {
+                    messages.text(&format!(
+                        "{} {}: {}\n",
+                        warning.level, warning.code, warning.message
+                    ));
+                }
+                print_result(out, &result, dialect);
                 printed = out.line_done();
                 printed.is_ok()
             })
@@ -105,6 +112,13 @@ pub(super) fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &st
 }
 
 pub(crate) fn error_lines(error: &SqlError, text: &str) -> Vec<String> {
+    if let Some(code) = error.vendor_code() {
+        return vec![format!(
+            "ERROR {code} ({}): {}",
+            error.state(),
+            error.message()
+        )];
+    }
     let mut lines = vec![format!("ERROR:  {}", error.message())];
     if let Some(position) = error.position().filter(|&position| position <= text.len()) {
         let (number, line, column) = line_of(text, position);
@@ -138,8 +152,8 @@ fn line_of(text: &str, position: usize) -> (usize, &str, usize) {
     (number, line, column)
 }
 
-fn print_result(out: &mut Output<'_>, result: &QueryResult) {
-    out.text(&result_text(result, ResultMode::Table, None));
+fn print_result(out: &mut Output<'_>, result: &QueryResult, dialect: Dialect) {
+    out.text(&result_text(result, ResultMode::Table, None, dialect));
 }
 
 pub(crate) struct ResultCells {
@@ -148,7 +162,7 @@ pub(crate) struct ResultCells {
     pub(crate) rows: Vec<Vec<Option<String>>>,
 }
 
-pub(crate) fn result_cells(result: &QueryResult) -> Option<ResultCells> {
+pub(crate) fn result_cells(result: &QueryResult, dialect: Dialect) -> Option<ResultCells> {
     let columns = result.columns.as_ref()?;
     let numeric = (0..columns.len())
         .map(|index| {
@@ -178,13 +192,18 @@ pub(crate) fn result_cells(result: &QueryResult) -> Option<ResultCells> {
         rows: result
             .rows
             .iter()
-            .map(|row| row.iter().map(Value::to_text).collect())
+            .map(|row| row.iter().map(|value| dialect.value_text(value)).collect())
             .collect(),
     })
 }
 
-pub(super) fn result_text(result: &QueryResult, mode: ResultMode, width: Option<usize>) -> String {
-    let Some(cells) = result_cells(result) else {
+pub(super) fn result_text(
+    result: &QueryResult,
+    mode: ResultMode,
+    width: Option<usize>,
+    dialect: Dialect,
+) -> String {
+    let Some(cells) = result_cells(result, dialect) else {
         return format!("{}\n", result.tag);
     };
     let mut text = match mode {
