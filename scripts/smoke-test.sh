@@ -182,10 +182,25 @@ connection = pg8000.native.Connection(
 connection.run("INSERT INTO items VALUES (:id, :name)", id=3, name="jam")
 print(connection.run("SELECT name FROM items WHERE id = :id", id=3))
 print(connection.run("SELECT count(*) FROM items WHERE id > :low", low=0))
+from datetime import date, datetime, timezone
+from decimal import Decimal
+connection.run(
+    "CREATE TABLE pg_typed (id serial PRIMARY KEY, price numeric(8,2), day date, at timestamp, zoned timestamptz, doc jsonb)"
+)
+connection.run(
+    "INSERT INTO pg_typed (price, day, at, zoned, doc) VALUES (:price, :day, :at, :zoned, CAST(:doc AS jsonb))",
+    price=Decimal("19.99"),
+    day=date(2024, 2, 29),
+    at=datetime(2024, 2, 29, 13, 45, 1, 500000),
+    zoned=datetime(2024, 2, 29, 13, 45, 1, tzinfo=timezone.utc),
+    doc='{"b": 1, "a": 2}',
+)
+print(connection.run("SELECT id, price, day, at, zoned, doc FROM pg_typed WHERE day = :day", day=date(2024, 2, 29)))
 connection.close()
 PYTHON
-    [ "$(tr -d '\n' < driver.out)" = "[['jam']][[3]]" ] || fail "pg8000 printed $(cat driver.out)"
-    pass "serve: the pg8000 driver runs parameterized queries"
+    expected_pg8000="[['jam']][[3]][[1, Decimal('19.99'), datetime.date(2024, 2, 29), datetime.datetime(2024, 2, 29, 13, 45, 1, 500000), datetime.datetime(2024, 2, 29, 13, 45, 1, tzinfo=datetime.timezone.utc), {'a': 2, 'b': 1}]]"
+    [ "$(tr -d '\n' < driver.out)" = "$expected_pg8000" ] || fail "pg8000 printed $(cat driver.out)"
+    pass "serve: the pg8000 driver runs parameterized queries and round-trips numeric, date, time stamp and jsonb values"
   else
     echo "skip driver: pg8000 is not installed (CI's Linux job installs it)"
   fi
@@ -219,10 +234,23 @@ with connection.cursor() as cursor:
     connection.commit()
     cursor.execute("SELECT name FROM items WHERE id = %s", (5,))
     print(cursor.fetchall())
+    from datetime import date, datetime
+    from decimal import Decimal
+    cursor.execute(
+        "CREATE TABLE my_typed (id INT AUTO_INCREMENT PRIMARY KEY, price DECIMAL(8,2), day DATE, at DATETIME, doc JSON)"
+    )
+    cursor.execute(
+        "INSERT INTO my_typed (price, day, at, doc) VALUES (%s, %s, %s, %s)",
+        (Decimal("19.99"), date(2024, 2, 29), datetime(2024, 2, 29, 13, 45, 1), '{"b": 1, "a": 2}'),
+    )
+    connection.commit()
+    cursor.execute("SELECT price, day, at, doc FROM my_typed WHERE day = %s", (date(2024, 2, 29),))
+    print(cursor.fetchall())
 connection.close()
 PYTHON
-    [ "$(tr -d '\n' < driver.out)" = "(('honey',),)" ] || fail "PyMySQL printed $(cat driver.out)"
-    pass "serve: the PyMySQL driver runs parameterized queries"
+    expected_pymysql="(('honey',),)((Decimal('19.99'), datetime.date(2024, 2, 29), datetime.datetime(2024, 2, 29, 13, 45, 1), '{\"a\": 2, \"b\": 1}'),)"
+    [ "$(tr -d '\n' < driver.out)" = "$expected_pymysql" ] || fail "PyMySQL printed $(cat driver.out)"
+    pass "serve: the PyMySQL driver runs parameterized queries and round-trips DECIMAL, DATE, DATETIME and JSON values"
   else
     echo "skip driver: PyMySQL is not installed (CI's Linux job installs it)"
   fi

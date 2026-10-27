@@ -750,3 +750,157 @@ fn postgresql_index_syntax_is_a_syntax_error_in_the_other_dialects() {
         Some(1064)
     );
 }
+
+fn random_typed_rows(random: &mut Seeded, rows: u64) -> Vec<String> {
+    (0..rows)
+        .map(|id| {
+            let n = match random.below(7) {
+                0 => "NULL".to_owned(),
+                1 => "'NaN'".to_owned(),
+                _ => format!(
+                    "{}.{}",
+                    random.below(9) as i64 - 4,
+                    ["0", "5", "50", "25", "05"][random.below(5) as usize]
+                ),
+            };
+            let d = match random.below(6) {
+                0 => "NULL".to_owned(),
+                _ => format!("'2024-02-{:02}'", 20 + random.below(9)),
+            };
+            let t = match random.below(6) {
+                0 => "NULL".to_owned(),
+                _ => format!(
+                    "'2024-02-28 {:02}:{:02}:00.{}'",
+                    random.below(24),
+                    random.below(3) * 20,
+                    random.below(3)
+                ),
+            };
+            let z = match random.below(6) {
+                0 => "NULL".to_owned(),
+                _ => format!("'1999-12-31 23:00:00+{:02}'", random.below(4)),
+            };
+            format!("({id}, {n}, {d}, {t}, {z})")
+        })
+        .collect()
+}
+
+fn random_typed_condition(random: &mut Seeded) -> String {
+    let number = format!("{}.5", random.below(9) as i64 - 4);
+    let day = format!("'2024-02-{:02}'", 20 + random.below(9));
+    let time = format!("'2024-02-28 {:02}:20:00.1'", random.below(24));
+    match random.below(12) {
+        0 => format!("n = {number}"),
+        1 => format!("n < {number}"),
+        2 => format!("n >= {}", random.below(5)),
+        3 => "n = 'NaN'".to_owned(),
+        4 => format!("d = {day}"),
+        5 => format!("d > {day}"),
+        6 => format!("d BETWEEN {day} AND '2024-02-27'"),
+        7 => format!("t < {time}"),
+        8 => format!("t >= {time} AND n IS NOT NULL"),
+        9 => format!("z = '1999-12-31 21:00:00+00'"),
+        10 => format!("z < '2000-01-01 00:00:00+0{}'", random.below(3)),
+        _ => format!("n IN ({number}, 0.50, 1.5)"),
+    }
+}
+
+#[test]
+fn numeric_and_time_keys_return_the_same_rows_with_and_without_indexes() {
+    let mut random = Seeded(0x5EED_1DE5_0000_0019);
+    for round in 0..4 {
+        let plain_store = MemoryStore::default();
+        let indexed_store = MemoryStore::default();
+        let mut plain = Session::new(&plain_store);
+        let mut indexed = Session::new(&indexed_store);
+        let create = "CREATE TABLE s (id integer PRIMARY KEY, n numeric(6,2), d date, t timestamp, z timestamptz)";
+        last(&mut plain, create);
+        last(&mut indexed, create);
+        let rows = random_typed_rows(&mut random, 40 + round * 30);
+        let insert = format!("INSERT INTO s VALUES {}", rows.join(", "));
+        last(&mut plain, &insert);
+        last(&mut indexed, &insert);
+        last(&mut indexed, "CREATE INDEX s_n ON s (n)");
+        last(&mut indexed, "CREATE INDEX s_d_t ON s (d, t)");
+        last(&mut indexed, "CREATE INDEX s_t ON s (t)");
+        last(&mut indexed, "CREATE INDEX s_z ON s (z)");
+        for (query, index) in [
+            ("SELECT * FROM s WHERE n = 1.5", "s_n"),
+            ("SELECT * FROM s WHERE d = '2024-02-21'", "s_d_t"),
+            ("SELECT * FROM s WHERE t > '2024-02-28 10:00'", "s_t"),
+            ("SELECT * FROM s WHERE z = '2000-01-01 00:00+00'", "s_z"),
+        ] {
+            let plan = last(&mut indexed, &format!("EXPLAIN {query}"));
+            assert!(
+                plan.contains(&format!("using {index} on s")),
+                "{query}: {plan}"
+            );
+        }
+        for _ in 0..120 {
+            let condition = random_typed_condition(&mut random);
+            let queries = [
+                format!("SELECT * FROM s WHERE {condition} ORDER BY id"),
+                format!("SELECT id, n FROM s WHERE {condition} ORDER BY n, id"),
+                format!("SELECT id FROM s WHERE {condition} ORDER BY d DESC, t DESC, id LIMIT 5"),
+                format!("SELECT count(*), sum(n), min(t), max(z) FROM s WHERE {condition}"),
+                format!("SELECT DISTINCT n FROM s WHERE {condition} ORDER BY n"),
+            ];
+            for query in &queries {
+                let expected = run(&mut plain, query).map_err(|error| error.to_string());
+                let found = run(&mut indexed, query).map_err(|error| error.to_string());
+                assert_eq!(found, expected, "{query}");
+            }
+            let change = match random.below(3) {
+                0 => format!("UPDATE s SET n = n + 1 WHERE {condition}"),
+                1 => format!("DELETE FROM s WHERE {condition} AND id % 4 = 0"),
+                _ => {
+                    let id = 1_000 + random.below(1_000_000);
+                    format!(
+                        "INSERT INTO s VALUES ({id}, 1.50, '2024-02-21', '2024-02-28 10:20', '2000-01-01 01:00+02')"
+                    )
+                }
+            };
+            let expected = run(&mut plain, &change).map_err(|error| error.to_string());
+            let found = run(&mut indexed, &change).map_err(|error| error.to_string());
+            assert_eq!(found, expected, "{change}");
+        }
+        assert!(indexed.check_indexes().is_ok());
+    }
+}
+
+#[test]
+fn a_unique_numeric_index_treats_trailing_zeros_as_the_same_value() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE u (id integer PRIMARY KEY, price numeric UNIQUE, doc json, body jsonb)",
+    );
+    last(&mut session, "INSERT INTO u VALUES (1, 1.5, '{}', '{}')");
+    assert_eq!(
+        fails(&mut session, "INSERT INTO u VALUES (2, 1.50, '[]', '[]')")
+            .state()
+            .code(),
+        "23505"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT price FROM u WHERE price = 1.500"),
+        "price\n1.5\nSELECT 1"
+    );
+    assert_eq!(
+        fails(&mut session, "CREATE INDEX u_doc ON u (doc)")
+            .state()
+            .code(),
+        "42704"
+    );
+    assert_eq!(
+        last(&mut session, "CREATE INDEX u_body ON u (body)"),
+        "CREATE INDEX"
+    );
+    assert_eq!(
+        fails(&mut session, "CREATE TABLE v (doc json PRIMARY KEY)")
+            .state()
+            .code(),
+        "42704"
+    );
+}

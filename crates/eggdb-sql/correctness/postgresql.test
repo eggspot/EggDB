@@ -1135,3 +1135,201 @@ CREATE INDEX g2 ON gated (a COLLATE "de_DE")
 
 ok
 DROP TABLE gated
+
+chapter datatype-numeric, "Arbitrary Precision Numbers"
+rows
+SELECT 1.50::numeric, 12.345::numeric(5,2), (-12.345)::numeric(5,2), 'NaN'::numeric, 1e3::numeric, 0.1 + 0.2
+----
+numeric|numeric|numeric|numeric|numeric|?column?
+1.50|12.35|-12.35|NaN|1000|0.3
+SELECT 1
+
+error 22003
+SELECT 1234.5::numeric(5,2)
+
+error 22P02
+SELECT 'twelve'::numeric
+
+rows
+SELECT 1 / 3::numeric, 10 / 4.0, 7.5 % 2, -7.5 % 2, 2.5 * -2.25
+----
+?column?|?column?|?column?|?column?|?column?
+0.33333333333333333333|2.5000000000000000|1.5|-1.5|-5.625
+SELECT 1
+
+error 22012
+SELECT 1.5 / 0
+
+rows
+SELECT round(2.5), round(-2.5), round(1.2345, 2), trunc(-1.99, 1), ceil(-1.1), floor(-1.1), abs(-1.50), round(1250, -2)
+----
+round|round|round|trunc|ceil|floor|abs|round
+3|-3|1.23|-1.9|-1|-2|1.50|1300
+SELECT 1
+
+rows
+SELECT 3::numeric = 3.00, 1.5 < 1.51, 'NaN'::numeric > 1e300, 2 = 2.0, 2.5::integer, (-2.5)::integer
+----
+?column?|?column?|?column?|?column?|int4|int4
+t|t|t|t|3|-3
+SELECT 1
+
+ok
+CREATE TABLE amounts (id integer PRIMARY KEY, amount numeric(8,2), big bigint)
+
+rows
+INSERT INTO amounts VALUES (1, 10.005, 9223372036854775807), (2, -0.5, 9223372036854775807), (3, NULL, 1)
+----
+INSERT 0 3
+
+rows
+SELECT sum(amount), avg(amount), min(amount), max(amount), sum(big), avg(big) FROM amounts
+----
+sum|avg|min|max|sum|avg
+9.51|4.7550000000000000|-0.50|10.01|18446744073709551615|6148914691236517205
+SELECT 1
+
+rows
+SELECT id FROM amounts WHERE amount > 0.5 ORDER BY amount DESC
+----
+id
+1
+SELECT 1
+
+chapter datatype-numeric, "Serial Types"
+ok
+CREATE TABLE serials (id serial PRIMARY KEY, label text)
+
+rows
+INSERT INTO serials (label) VALUES ('a'), ('b') RETURNING id, label
+----
+id|label
+1|a
+2|b
+INSERT 0 2
+
+chapter ddl-identity-columns
+ok
+CREATE TABLE identities (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, label text)
+
+rows
+INSERT INTO identities (label) VALUES ('x') RETURNING id
+----
+id
+1
+INSERT 0 1
+
+error 0A000
+CREATE TABLE stored (a integer, b integer GENERATED ALWAYS AS (a * 2) STORED)
+
+chapter datatype-datetime
+rows
+SELECT '2024-02-29'::date, '0044-03-15 BC'::date, '2024-02-29 13:45:01.123456'::timestamp, '2024-02-29 13:45:01+05:30'::timestamptz, '2024-02-29 13:45:01.5'::timestamp(0)
+----
+date|date|timestamp|timestamptz|timestamp
+2024-02-29|0044-03-15 BC|2024-02-29 13:45:01.123456|2024-02-29 08:15:01+00|2024-02-29 13:45:02
+SELECT 1
+
+error 22008
+SELECT '2023-02-29'::date
+
+error 22007
+SELECT 'not a date'::date
+
+error 22008
+SELECT '294277-01-01'::timestamp
+
+rows
+SELECT DATE '2024-03-01' - DATE '2024-02-01', DATE '2024-02-28' + 1, DATE '2024-03-01' - 1
+----
+?column?|?column?|?column?
+29|2024-02-29|2024-02-29
+SELECT 1
+
+rows
+SELECT TIMESTAMP '2024-01-01 00:00' < TIMESTAMPTZ '2024-01-01 00:00+01', DATE '2024-01-01' = TIMESTAMP '2024-01-01 00:00'
+----
+?column?|?column?
+f|t
+SELECT 1
+
+chapter functions-datetime
+rows
+SELECT extract(year FROM TIMESTAMP '2024-02-29 13:45:01.5'), extract(second FROM TIMESTAMP '2024-02-29 13:45:01.5'), extract(dow FROM DATE '2024-02-29'), date_trunc('month', TIMESTAMP '2024-02-29 13:45:01')
+----
+extract|extract|extract|date_trunc
+2024|1.500000|4|2024-02-01 00:00:00
+SELECT 1
+
+rows
+SELECT date_part('hour', TIMESTAMP '2024-02-29 13:45:01'), extract(epoch FROM TIMESTAMPTZ '1970-01-02 00:00:00+00'), now() IS NOT NULL, current_date IS NOT NULL
+----
+date_part|extract|?column?|?column?
+13|86400.000000|t|t
+SELECT 1
+
+error 0A000
+SELECT extract(hour FROM DATE '2024-02-29')
+
+error 0A000
+SELECT TIMESTAMP '2024-01-02' - TIMESTAMP '2024-01-01'
+
+ok
+CREATE TABLE events (id integer PRIMARY KEY, day date, at timestamp, zoned timestamptz)
+
+rows
+INSERT INTO events VALUES (1, '2024-02-29', '2024-02-29 13:45:01', '2024-02-29 13:45:01Z'), (2, '1999-12-31', '1999-12-31 23:59:59.999999', '2000-01-01 00:00:00+01')
+----
+INSERT 0 2
+
+rows
+SELECT id, day, at, zoned FROM events WHERE day < '2000-01-01' OR zoned > '2024-01-01' ORDER BY at DESC
+----
+id|day|at|zoned
+1|2024-02-29|2024-02-29 13:45:01|2024-02-29 13:45:01+00
+2|1999-12-31|1999-12-31 23:59:59.999999|1999-12-31 23:00:00+00
+SELECT 2
+
+chapter datatype-json, functions-json
+rows
+SELECT '{"b": 1, "a": [1, 2.50]}'::json, '{"b": 1, "a": [1, 2.50], "b": 3}'::jsonb
+----
+json|jsonb
+{"b": 1, "a": [1, 2.50]}|{"a": [1, 2.50], "b": 3}
+SELECT 1
+
+rows
+SELECT '{"a": {"b": [10, "x"]}}'::jsonb -> 'a' -> 'b' -> 1, '{"a": {"b": [10, "x"]}}'::json ->> 'a', '{"a": {"b": [10, "x"]}}'::jsonb #> '{a,b,0}', '{"a": {"b": [10, "x"]}}'::jsonb #>> '{a,b,1}'
+----
+?column?|?column?|?column?|?column?
+"x"|{"b": [10, "x"]}|10|x
+SELECT 1
+
+rows
+SELECT '{"a": 1, "b": [1, 2]}'::jsonb @> '{"b": [2]}', jsonb_typeof('[1]'), json_array_length('[1, 2, 3]'), '[1, 2]'::jsonb -> 5
+----
+?column?|jsonb_typeof|json_array_length|?column?
+t|array|3|NULL
+SELECT 1
+
+error 22P02
+SELECT '{"a": }'::json
+
+error 42883
+SELECT '{"a": 1}'::json = '{"a": 1}'::json
+
+error 22023
+SELECT json_array_length('{}')
+
+ok
+CREATE TABLE docs (id integer PRIMARY KEY, body jsonb, raw json)
+
+rows
+INSERT INTO docs VALUES (1, '{"tags": ["a", "b"], "n": 1}', '{"n":  1}') RETURNING body ->> 'n', raw -> 'n'
+----
+?column?|?column?
+1|1
+INSERT 0 1
+
+error 42704
+CREATE INDEX ON docs (raw)

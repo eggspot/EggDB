@@ -297,6 +297,69 @@ fn prepared_statements_bind_binary_parameters_and_return_binary_rows() {
 }
 
 #[test]
+fn decimal_date_time_and_json_columns_use_their_mysql_types_in_text_and_binary() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    assert!(matches!(
+        client.query(
+            "CREATE TABLE ledger (id INT PRIMARY KEY, amount DECIMAL(8,2), booked DATE, at DATETIME(3), stamp TIMESTAMP, doc JSON)"
+        ),
+        Reply::Ok { .. }
+    ));
+    let inserted = client.query(
+        "INSERT INTO ledger VALUES (1, 19.99, '2024-02-29', '2024-02-29 13:45:01.5', '2024-02-29 00:00:00', '{\"b\": 1, \"a\": 2}')",
+    );
+    assert!(
+        matches!(inserted, Reply::Ok { affected: 1, .. }),
+        "{inserted:?}"
+    );
+    let reply = client.query("SELECT amount, booked, at, stamp, doc FROM ledger");
+    let Reply::Rows { columns, .. } = &reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(
+        columns.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+        vec![246, 10, 12, 7, 245]
+    );
+    assert_eq!(
+        texts(&reply),
+        vec![vec![
+            "19.99",
+            "2024-02-29",
+            "2024-02-29 13:45:01.5",
+            "2024-02-29 00:00:00",
+            "{\"a\": 2, \"b\": 1}"
+        ]]
+    );
+    let (select, columns, parameters) = prepare(
+        &mut client,
+        "SELECT amount, booked, at, stamp FROM ledger WHERE id = ?",
+    );
+    assert_eq!((columns, parameters), (4, 1));
+    let mut execute = select.to_le_bytes().to_vec();
+    execute.extend_from_slice(&[0, 1, 0, 0, 0, 0, 1, 3, 0]);
+    execute.extend_from_slice(&1i32.to_le_bytes());
+    client.command(0x17, &execute);
+    assert_eq!(client.read().unwrap(), vec![4]);
+    for _ in 0..5 {
+        client.read().unwrap();
+    }
+    let row = client.read().unwrap();
+    let mut expected = vec![0u8, 0];
+    expected.extend_from_slice(b"\x0519.99");
+    expected.extend_from_slice(&[4, 0xE8, 0x07, 2, 29]);
+    expected.extend_from_slice(&[11, 0xE8, 0x07, 2, 29, 13, 45, 1]);
+    expected.extend_from_slice(&500_000u32.to_le_bytes());
+    expected.extend_from_slice(&[4, 0xE8, 0x07, 2, 29]);
+    assert_eq!(row, expected);
+    assert_eq!(client.read().unwrap()[0], 0xFE);
+    assert!(matches!(
+        client.query("INSERT INTO ledger (id, amount) VALUES (2, 1234567.5)"),
+        Reply::Err { code: 1264, .. }
+    ));
+}
+
+#[test]
 fn long_data_and_resets_fill_parameters() {
     let server = TestServer::start(8);
     let mut client = Client::login(server.address);

@@ -1005,6 +1005,7 @@ fn json_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     let (text, binary) = match values {
         [Value::Json(text)] => (text, false),
         [Value::Jsonb(text)] => (text, true),
+        [Value::Text(text)] => (text, name.starts_with("jsonb")),
         [Value::Null]
             if [
                 "json_typeof",

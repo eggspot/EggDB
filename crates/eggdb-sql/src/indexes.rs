@@ -342,6 +342,18 @@ fn next_index_id(table: &TableDefinition) -> SqlResult<u32> {
         .ok_or_else(|| too_many_indexes(table))
 }
 
+pub(crate) fn check_orderable(sql_type: SqlType, position: usize) -> SqlResult<()> {
+    if sql_type == SqlType::Json {
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_OBJECT,
+            "data type json has no default operator class for access method \"btree\"",
+        )
+        .with_hint("Use jsonb, whose values can be compared and indexed.")
+        .at(position));
+    }
+    Ok(())
+}
+
 pub(crate) fn define_index(
     tables: &[TableDefinition],
     table: &mut TableDefinition,
@@ -364,6 +376,7 @@ pub(crate) fn define_index(
             )
             .at(name.position));
         }
+        check_orderable(table.columns[column].sql_type, name.position)?;
         columns.push(column);
     }
     let given = match (&spec.name, dialect) {

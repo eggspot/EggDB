@@ -534,7 +534,7 @@ impl<'t> Parser<'t> {
         }
         if precision > 65 {
             return Err(SqlError::new(
-                SqlState::INVALID_PARAMETER_VALUE,
+                SqlState::MYSQL_SYNTAX_OR_ACCESS,
                 format!("Too-big precision {precision} specified. Maximum is 65."),
             )
             .with_vendor_code(1426)
@@ -542,7 +542,7 @@ impl<'t> Parser<'t> {
         }
         if scale > 30 || scale > precision {
             return Err(SqlError::new(
-                SqlState::INVALID_PARAMETER_VALUE,
+                SqlState::MYSQL_SYNTAX_OR_ACCESS,
                 format!("Too big scale {scale} specified. Maximum is 30."),
             )
             .with_vendor_code(1425)
@@ -560,7 +560,7 @@ impl<'t> Parser<'t> {
             None => Ok(0),
             Some(digits @ 0..=6) => Ok(digits as u8),
             Some(digits) => Err(SqlError::new(
-                SqlState::INVALID_PARAMETER_VALUE,
+                SqlState::MYSQL_SYNTAX_OR_ACCESS,
                 format!("Too-big precision {digits} specified. Maximum is 6."),
             )
             .with_vendor_code(1426)

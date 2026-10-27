@@ -891,7 +891,7 @@ mod tests {
         encode_row, prefix_end, skip_key_values,
     };
     use crate::encoding::Column;
-    use crate::types::{SqlType, Value, compare_values};
+    use crate::types::{NumericModifier, SqlType, Value, compare_values};
 
     struct Seeded(u64);
 
@@ -1268,6 +1268,222 @@ mod tests {
                 SqlType::Real,
                 SqlType::BigInt,
             ];
+            if let Ok(used) = decode_key_values(&bytes, types, &mut values) {
+                assert_eq!(skip_key_values(&bytes, types), Ok(used));
+            }
+        }
+    }
+
+    fn typed_columns() -> Vec<Column> {
+        let column = |name: &str, sql_type| Column {
+            name: name.into(),
+            sql_type,
+            not_null: false,
+            default: None,
+            auto_increment: false,
+        };
+        vec![
+            Column {
+                auto_increment: true,
+                not_null: true,
+                ..column("id", SqlType::BigInt)
+            },
+            column(
+                "price",
+                SqlType::Numeric(Some(NumericModifier {
+                    precision: 10,
+                    scale: 2,
+                })),
+            ),
+            column("ratio", SqlType::Numeric(None)),
+            column("day", SqlType::Date),
+            column("at", SqlType::Timestamp(Some(3))),
+            column("zoned", SqlType::TimestampTz(None)),
+            column("doc", SqlType::Json),
+            column("body", SqlType::Jsonb),
+        ]
+    }
+
+    fn typed_table(indexes: bool) -> TableDefinition {
+        TableDefinition {
+            id: 9,
+            name: "typed".into(),
+            columns: typed_columns(),
+            primary_key: vec![0],
+            indexes: if indexes {
+                vec![IndexDefinition {
+                    id: 1,
+                    name: "typed_day".into(),
+                    unique: false,
+                    columns: vec![3, 1],
+                }]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    #[test]
+    fn a_table_with_the_new_types_is_version_4_and_round_trips() {
+        for indexes in [false, true] {
+            let table = typed_table(indexes);
+            let encoded = table.encode();
+            assert_eq!(encoded[0], 4);
+            assert_eq!(TableDefinition::decode("typed", &encoded), Ok(table));
+            for cut in 0..encoded.len() {
+                assert!(damaged(&encoded[..cut]), "cut at {cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn version_4_pins_the_bytes_of_every_new_type() {
+        let encoded = typed_table(false).encode();
+        let expected: &[u8] = &[
+            4, 9, 0, 0, 0, 8, 2, b'i', b'd', 3, 1, 2, 5, b'p', b'r', b'i', b'c', b'e', 9, 10, 0, 2,
+            0, 0, 0, 5, b'r', b'a', b't', b'i', b'o', 9, 0, 0, 0, 0, 0, 0, 3, b'd', b'a', b'y', 10,
+            0, 0, 2, b'a', b't', 11, 3, 0, 0, 5, b'z', b'o', b'n', b'e', b'd', 12, 0xFF, 0, 0, 3,
+            b'd', b'o', b'c', 13, 0, 0, 4, b'b', b'o', b'd', b'y', 14, 0, 0, 1, 0, 0,
+        ];
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn damaged_or_misplaced_type_tags_are_errors() {
+        let good = typed_table(false).encode();
+        let price_tag = 18;
+        assert_eq!(good[price_tag], 9);
+        let mut unknown = good.clone();
+        unknown[price_tag] = 15;
+        assert!(damaged(&unknown));
+        for older in [1, 2, 3] {
+            let mut older_version = good.clone();
+            older_version[0] = older;
+            assert!(damaged(&older_version), "version {older}");
+        }
+        let mut precision = good.clone();
+        precision[price_tag + 1] = 0xE9;
+        precision[price_tag + 2] = 0x03;
+        assert!(damaged(&precision), "precision 1001");
+        let mut scale_without_precision = good.clone();
+        scale_without_precision[price_tag + 1] = 0;
+        assert!(damaged(&scale_without_precision));
+        let at_precision = good.iter().position(|&byte| byte == 11).unwrap() + 1;
+        let mut fraction = good.clone();
+        fraction[at_precision] = 7;
+        assert!(damaged(&fraction));
+        let mut plain = two_columns([false, false], vec![0]).encode();
+        plain[0] = 4;
+        plain.push(0);
+        assert!(damaged(&plain), "version 4 without a new type");
+        let mut random = Seeded(0xBAD_F00D_0000_0004);
+        for _ in 0..20_000 {
+            let mut bytes = good.clone();
+            for _ in 0..1 + random.next() % 4 {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            let _ = TableDefinition::decode("typed", &bytes);
+        }
+    }
+
+    fn typed_values() -> Vec<Value> {
+        vec![
+            Value::BigInt(1),
+            Value::Numeric(crate::numeric::Numeric::parse("-12.50").unwrap()),
+            Value::Numeric(crate::numeric::Numeric::parse("NaN").unwrap()),
+            Value::Date(-2_451_545),
+            Value::Timestamp(crate::datetime::END_TIMESTAMP - 1),
+            Value::TimestampTz(crate::datetime::MIN_TIMESTAMP),
+            Value::Json("{\"a\": [1, 2]}".into()),
+            Value::Jsonb("{\"a\": [1, 2]}".into()),
+        ]
+    }
+
+    #[test]
+    fn rows_of_the_new_types_round_trip_and_hostile_bytes_are_damage() {
+        let columns = typed_columns();
+        let values = typed_values();
+        let encoded = encode_row(&values);
+        assert_eq!(decode_row(&encoded, &columns), Ok(values));
+        for cut in 0..encoded.len() {
+            assert!(decode_row(&encoded[..cut], &columns).is_err());
+        }
+        let date_at = encoded.iter().position(|&byte| byte == 10).unwrap();
+        let mut early = encoded.clone();
+        early[date_at + 1..date_at + 5].copy_from_slice(&(-2_451_546i32).to_le_bytes());
+        assert!(decode_row(&early, &columns).is_err());
+        let mut random = Seeded(0x0DD_C0DE_0000_0019);
+        for _ in 0..20_000 {
+            let mut bytes = encoded.clone();
+            for _ in 0..1 + random.next() % 4 {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            if let Ok(decoded) = decode_row(&bytes, &columns) {
+                assert_eq!(decoded.len(), columns.len());
+            }
+        }
+    }
+
+    #[test]
+    fn keys_of_the_new_types_keep_their_order_and_decode_back() {
+        let mut random = Seeded(0x1D1E_5EED_0000_0019);
+        let types = [
+            SqlType::Numeric(None),
+            SqlType::Date,
+            SqlType::Timestamp(None),
+            SqlType::TimestampTz(None),
+            SqlType::Jsonb,
+        ];
+        let value = |random: &mut Seeded, kind: usize| -> Value {
+            let bits = random.next();
+            match kind {
+                0 => {
+                    let text = format!(
+                        "{}{}.{}",
+                        if bits % 2 == 0 { "-" } else { "" },
+                        bits % 1000,
+                        (bits >> 20) % 100
+                    );
+                    Value::Numeric(crate::numeric::Numeric::parse(&text).unwrap())
+                }
+                1 => Value::Date((bits % 4_000_000) as i32 - 2_000_000),
+                2 => Value::Timestamp((bits >> 8) as i64 - (1 << 54)),
+                3 => Value::TimestampTz((bits >> 8) as i64 - (1 << 54)),
+                _ => Value::Jsonb(format!("[{}]", bits % 50)),
+            }
+        };
+        for (kind, sql_type) in types.iter().enumerate() {
+            for _ in 0..2_000 {
+                let left = value(&mut random, kind);
+                let right = value(&mut random, kind);
+                assert_eq!(
+                    key_of(&left).cmp(&key_of(&right)),
+                    compare_values(&left, &right),
+                    "{left:?} vs {right:?}"
+                );
+                let mut key = key_of(&left);
+                key.push(7);
+                let mut decoded = Vec::new();
+                let used = decode_key_values(&key, [*sql_type], &mut decoded).unwrap();
+                assert_eq!(used, key.len() - 1);
+                assert_eq!(skip_key_values(&key, [*sql_type]), Ok(used));
+                assert_eq!(
+                    compare_values(&decoded[0], &left),
+                    std::cmp::Ordering::Equal
+                );
+                for cut in 0..used {
+                    let mut partial = Vec::new();
+                    assert!(decode_key_values(&key[..cut], [*sql_type], &mut partial).is_err());
+                }
+            }
+        }
+        let mut hostile = Seeded(0xFACE_0000_0019);
+        for _ in 0..20_000 {
+            let length = (hostile.next() % 16) as usize;
+            let bytes: Vec<u8> = (0..length).map(|_| hostile.next() as u8).collect();
+            let mut values = Vec::new();
             if let Ok(used) = decode_key_values(&bytes, types, &mut values) {
                 assert_eq!(skip_key_values(&bytes, types), Ok(used));
             }

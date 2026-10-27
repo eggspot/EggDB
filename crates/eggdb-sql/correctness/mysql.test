@@ -702,3 +702,54 @@ CREATE INDEX g ON gated (a) WHERE a > 0
 
 ok
 DROP TABLE gated
+
+chapter "Fixed-Point Types (Exact Value) - DECIMAL, NUMERIC", "Date and Time Data Types", "The JSON Data Type"
+ok
+CREATE TABLE ledger (id INT AUTO_INCREMENT PRIMARY KEY, amount DECIMAL(10,2), booked DATE, at DATETIME, stamp TIMESTAMP, doc JSON)
+
+rows
+INSERT INTO ledger (amount, booked, at, stamp, doc) VALUES (19.995, '2024-02-29', '2024-02-29 13:45:01', '2024-02-29 13:45:01', '{"b": 1, "a": 2}')
+----
+INSERT 0 1
+
+rows
+SELECT amount, booked, at, stamp, doc FROM ledger
+----
+amount|booked|at|stamp|doc
+20.00|2024-02-29|2024-02-29 13:45:01|2024-02-29 13:45:01|{"a": 2, "b": 1}
+SELECT 1
+
+error 22003 1264
+INSERT INTO ledger (amount) VALUES (123456789.5)
+
+error 22007 1292
+INSERT INTO ledger (booked) VALUES ('2023-02-29')
+
+rows
+SELECT id FROM ledger WHERE booked = '2024-02-29' AND amount = 20
+----
+id
+1
+SELECT 1
+
+rows
+DESCRIBE ledger
+----
+Field|Type|Null|Key|Default|Extra
+id|int|NO|PRI|NULL|auto_increment
+amount|decimal(10,2)|YES||NULL|
+booked|date|YES||NULL|
+at|datetime|YES||NULL|
+stamp|timestamp|YES||NULL|
+doc|json|YES||NULL|
+SELECT 6
+
+rows
+SELECT NOW() IS NOT NULL, CURDATE() IS NOT NULL, CURRENT_TIMESTAMP IS NOT NULL
+----
+NOW() IS NOT NULL|CURDATE() IS NOT NULL|CURRENT_TIMESTAMP IS NOT NULL
+1|1|1
+SELECT 1
+
+error 42000 1426
+CREATE TABLE toobig (d DECIMAL(66,2))
