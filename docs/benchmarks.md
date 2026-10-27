@@ -97,12 +97,12 @@ of five runs of GitHub's `ubuntu-latest` x86-64 runners, whose hardware varies b
 | batch put, `Off` | 0.69 | 1.58 µs | 2.28 µs | 0.61 |
 | batch put, `Normal` | 1.13 | 24.0 µs | 21.3 µs | 1.07 |
 | durable commit | about 1.0 | 4.2 ms | 4.1 ms | 0.92 |
-| SQL point select | 1.90 | 1.95 µs | 1.02 µs | from CI |
-| SQL bulk insert, per row | 3.32 | 1.14 µs | 0.34 µs | from CI |
+| SQL point select | 1.90 | 1.95 µs | 1.02 µs | 1.25 |
+| SQL bulk insert, per row | 3.32 | 1.14 µs | 0.34 µs | 2.63 |
 
 | | macOS | Linux |
 |-|-------|-------|
-| Binary size | 1,164,944 bytes (933,312 before SQL, D99) | from CI (1,133,296 before SQL) |
+| Binary size | 1,164,944 bytes (933,312 before SQL, D99) | 1,420,120 bytes (1,133,296 before SQL) |
 | `eggdb --version` | 1.48 ms, 0.97 × a program that exits at once | 0.78 ms, 1.02 × |
 | `eggdb get` on a 10,000-entry file | 1.28 ms, 1.05 × | 1.08 ms, 1.42 × |
 | Peak memory, `--version` | 1,654,784 bytes | 2,484,224 bytes |

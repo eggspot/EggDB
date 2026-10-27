@@ -51,10 +51,10 @@ linux btree.scan_reverse ratio_to_std_btreemap 5.586
 linux database.open ratio_to_store_open 1.002
 linux database.read ratio_to_store_read 1.006
 linux database.write ratio_to_store_commit 0.997
-linux footprint.binary stripped_release_bytes 1133296
-linux footprint.open_and_get peak_resident_bytes 5103616
+linux footprint.binary stripped_release_bytes 1420120
+linux footprint.open_and_get peak_resident_bytes 5670912
 linux footprint.open_and_get ratio_to_a_program_that_exits_at_once 1.421
-linux footprint.start peak_resident_bytes 2484224
+linux footprint.start peak_resident_bytes 3043328
 linux footprint.start ratio_to_a_program_that_exits_at_once 1.017
 linux large_value.get ratio_to_copying_the_value 1.902
 linux large_value.put ratio_to_writing_the_value_twice 9.343
@@ -63,6 +63,8 @@ linux page_cache.hit ratio_to_reference 0.37
 linux sqlite_compare.batch_put ratio_to_sqlite 0.606
 linux sqlite_compare.get ratio_to_sqlite 0.691
 linux sqlite_compare.scan ratio_to_sqlite 0.390
+linux sqlite_compare.sql_bulk_insert ratio_to_sqlite 2.633
+linux sqlite_compare.sql_point_select ratio_to_sqlite 1.254
 linux transaction.read ratio_to_btree_get 1.004
 linux transaction.write ratio_to_page_cache_commit 1.024
 macos btree.delete ratio_to_std_btreemap 2.226

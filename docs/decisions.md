@@ -4100,10 +4100,15 @@ insert-if-absent in the B+tree, an append path for inserts at the rightmost leaf
 reused across statements.
 
 **Binary size (D6).** The stripped release `eggdb` grows from 933,312 to 1,164,944 bytes on
-aarch64 macOS (+231,632, +24.8%); the Linux line is taken from CI. The reason is the SQL core
+aarch64 macOS (+231,632, +24.8%) and from 1,133,296 to 1,420,120 on x86-64 Linux (+286,824, +25.3%).
+The reason is the SQL core
 itself: the lexer, parser and evaluator, PostgreSQL's float input and shortest-form output
 (`f64` parsing and formatting the binary did not carry before), Unicode case mapping for
-`lower`, `upper` and `ILIKE`, and every error message. Start time and peak memory did not move
-(the footprint lines stay). Shrinking it joins the speed item above: a table-driven parser and
+`lower`, `upper` and `ILIKE`, and every error message. On macOS, start time and peak memory did
+not move. On Linux the static binary's peak memory grows with it, though `--version` runs no SQL:
+from 2,484,224 to 3,043,328 bytes for `eggdb --version` and from 5,103,616 to 5,670,912 for a
+`get`, because the loader touches the pages of the larger binary it relocates; those two lines
+move with the binary and the start-time ratios stay within their gates. The Linux SQL ratios
+are 1.25 for point selects and 2.63 for bulk inserts, gated the same way. Shrinking it joins the speed item above: a table-driven parser and
 fewer monomorphised paths are the first candidates, and a build profile without SQL comes with
 D34's profiles.
