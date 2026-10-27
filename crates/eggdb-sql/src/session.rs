@@ -694,7 +694,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 && insert.rollback_on_conflict
                 && let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None)
             {
-                let _ = writer.rollback();
+                writer.rollback()?;
             }
         }
         if self.mysql()

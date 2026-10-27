@@ -143,6 +143,13 @@ pub(crate) fn rebuild(
                 .map(&mut *child)
                 .collect::<SqlResult<_>>()?,
         },
+        ExprKind::SqliteFunction { name, arguments } => ExprKind::SqliteFunction {
+            name,
+            arguments: arguments
+                .iter()
+                .map(&mut *child)
+                .collect::<SqlResult<_>>()?,
+        },
         ExprKind::Aggregate {
             function,
             argument,

@@ -363,6 +363,10 @@ pub(crate) enum ExprKind {
         name: String,
         arguments: Vec<Expr>,
     },
+    SqliteFunction {
+        name: &'static str,
+        arguments: Vec<Expr>,
+    },
     Aggregate {
         function: AggregateFunction,
         argument: Option<Box<Expr>>,

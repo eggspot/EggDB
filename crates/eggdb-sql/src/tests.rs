@@ -2215,6 +2215,42 @@ fn hostile_sqlite_input_returns_errors_and_never_panics() {
         "0",
     ];
     fuzz(&mut session, &fragments);
+    let error = run(
+        &mut session,
+        "SELECT replace(replace(printf('%1000s', ''), ' ', printf('%1000s', '')), ' ', printf('%1000s', '') || printf('%1000s', ''))",
+    )
+    .expect_err("about 2 GB");
+    assert_eq!(error.to_string(), "Error: string or blob too big");
+    assert_eq!(error.vendor_code(), Some(18));
+}
+
+#[test]
+fn sqlite_functions_stay_inside_the_sqlite_dialect() {
+    let store = MemoryStore::default();
+    let mut postgresql = Session::new(&store);
+    let error = run(&mut postgresql, "SELECT sqlite_upper('abc')").expect_err("postgresql");
+    assert_eq!(
+        error.message(),
+        "function sqlite_upper(text) does not exist"
+    );
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    let error = run(&mut mysql, "SELECT sqlite_typeof(1)").expect_err("mysql");
+    assert_eq!(
+        error.message(),
+        "FUNCTION eggdb.sqlite_typeof does not exist"
+    );
+    let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    for sql in ["SELECT sqlite_upper('abc')", "SELECT sqlite_truth(1)"] {
+        let error = run(&mut sqlite, sql).expect_err(sql);
+        assert!(
+            error.message().starts_with("no such function: sqlite_"),
+            "{sql}: {error}"
+        );
+    }
+    assert_eq!(
+        last(&mut sqlite, "SELECT upper('abc')"),
+        "upper('abc')\nABC\nSELECT 1"
+    );
 }
 
 #[test]

@@ -803,6 +803,20 @@ cid|name|type|notnull|dflt_value|pk
 SELECT 4
 
 rows
+PRAGMA table_info('KV')
+----
+cid|name|type|notnull|dflt_value|pk
+0|k|TEXT|0|NULL|1
+1|v|INTEGER|1|NULL|0
+SELECT 2
+
+error 42P16 1
+CREATE TABLE sqlite_master (x)
+
+error 42P16 1
+CREATE TABLE IF NOT EXISTS sqlite_stuff (x)
+
+rows
 PRAGMA table_info(missing)
 ----
 cid|name|type|notnull|dflt_value|pk

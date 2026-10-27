@@ -162,6 +162,11 @@ What it reads, on top of the statements of "What runs today":
   `COMMIT`, `END`, `ROLLBACK`, with SQLite's errors for a `BEGIN` inside a transaction and a
   `COMMIT` or `ROLLBACK` outside one; a failing statement inside a transaction leaves it open,
   and `INSERT OR ROLLBACK` rolls it back.
+- **Names starting with `sqlite_`** are reserved, as in SQLite: `CREATE TABLE sqlite_x` is
+  refused with `object name reserved for internal use`.
+- **Length limit**: a function result longer than 1,000,000,000 bytes (SQLite's default
+  `SQLITE_MAX_LENGTH`) is refused with `string or blob too big` (`SQLITE_TOOBIG`, 18) before it
+  is built.
 - **The schema table**: `sqlite_schema` and `sqlite_master` (with `type`, `name`, `tbl_name`,
   `rootpage` and `sql`) list the tables; `sqlite_temp_schema`/`sqlite_temp_master` are empty.
 - **PRAGMAs**: `table_info(t)`, `table_list[(t)]`, `foreign_keys`, `user_version`,
@@ -477,7 +482,7 @@ And more, not in the suite yet:
 - `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`, `double` for `DECIMAL`).
 
 ## Known differences from SQLite
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 152 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 155 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - A column has one type: the affinity's. SQLite's columns may hold any storage class, so a

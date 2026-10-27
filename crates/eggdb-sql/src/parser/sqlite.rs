@@ -99,6 +99,13 @@ fn function(name: &str, arguments: Vec<Expr>, position: usize) -> Expr {
     }
 }
 
+fn sqlite_function(name: &'static str, arguments: Vec<Expr>, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::SqliteFunction { name, arguments },
+        position,
+    }
+}
+
 fn text_value(value: String, position: usize) -> Expr {
     Expr {
         kind: ExprKind::SessionValue {
@@ -148,13 +155,14 @@ pub(super) fn without_negative_offset(offset: Expr) -> Expr {
 
 pub(super) fn scalar_min_max(expr: Expr) -> Expr {
     match expr.kind {
-        ExprKind::Function { name, arguments } if name == "min" || name == "max" => Expr {
-            kind: ExprKind::Function {
-                name: format!("sqlite_{name}"),
-                arguments,
-            },
-            position: expr.position,
-        },
+        ExprKind::Function { name, arguments } if name == "min" || name == "max" => {
+            let internal = if name == "min" {
+                "sqlite_min"
+            } else {
+                "sqlite_max"
+            };
+            sqlite_function(internal, arguments, expr.position)
+        }
         kind => Expr {
             kind,
             position: expr.position,
@@ -183,7 +191,7 @@ fn is_boolean_valued(expr: &Expr) -> bool {
         | ExprKind::InList { .. }
         | ExprKind::Like { .. }
         | ExprKind::Literal(Literal::Null | Literal::Boolean(_)) => true,
-        ExprKind::Function { name, .. } => name == "sqlite_truth",
+        ExprKind::SqliteFunction { name, .. } => *name == "sqlite_truth",
         _ => false,
     }
 }
@@ -296,7 +304,7 @@ impl<'t> Parser<'t> {
             return expr;
         }
         let position = expr.position;
-        function("sqlite_truth", vec![expr], position)
+        sqlite_function("sqlite_truth", vec![expr], position)
     }
 
     pub(super) fn sqlite_statement(&mut self) -> SqlResult<Option<Statement>> {
@@ -588,6 +596,14 @@ impl<'t> Parser<'t> {
         primary_key: &Option<(Vec<Name>, usize)>,
         integer_columns: &[bool],
     ) -> SqlResult<()> {
+        if table.text.starts_with("sqlite_") {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                format!("object name reserved for internal use: {}", table.text),
+            )
+            .with_sqlite_code(1)
+            .at(table.position));
+        }
         if let Some((names, _)) = primary_key
             && let [only] = names.as_slice()
             && let Some(index) = columns
@@ -750,10 +766,12 @@ impl<'t> Parser<'t> {
 
     pub(super) fn sqlite_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let position = name.position;
-        let (internal, counts): (&str, &[usize]) = match name.text.as_str() {
-            "sqlite_version" | "last_insert_rowid" | "changes" | "total_changes" | "random" => {
-                (name.text.as_str(), &[0])
-            }
+        let (internal, counts): (&'static str, &[usize]) = match name.text.as_str() {
+            "sqlite_version" => ("sqlite_version", &[0]),
+            "last_insert_rowid" => ("last_insert_rowid", &[0]),
+            "changes" => ("changes", &[0]),
+            "total_changes" => ("total_changes", &[0]),
+            "random" => ("sqlite_random", &[0]),
             "ifnull" => ("coalesce", &[2]),
             "coalesce" => ("coalesce", &[]),
             "nullif" => ("nullif", &[2]),
@@ -803,7 +821,7 @@ impl<'t> Parser<'t> {
                 self.sqlite_settings(|settings| settings.sqlite.total_changes),
                 position,
             ),
-            "random" => function("sqlite_random", arguments, position),
+            "sqlite_random" => sqlite_function("sqlite_random", arguments, position),
             "iif" => {
                 let mut arguments = arguments.into_iter();
                 let (Some(condition), Some(then), Some(otherwise)) =
@@ -839,6 +857,7 @@ impl<'t> Parser<'t> {
                     }
                 }
             }
+            _ if internal.starts_with("sqlite_") => sqlite_function(internal, arguments, position),
             _ => function(internal, arguments, position),
         };
         Ok(Some(expr))

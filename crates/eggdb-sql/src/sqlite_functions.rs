@@ -6,6 +6,20 @@ use std::hash::{BuildHasher, Hasher};
 
 const SIGNIFICANT_DIGITS: usize = 15;
 
+pub(crate) const MAX_TEXT_BYTES: usize = 1_000_000_000;
+
+fn too_big() -> SqlError {
+    SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "string or blob too big").with_sqlite_code(18)
+}
+
+fn within_limit(bytes: usize) -> SqlResult<()> {
+    if bytes > MAX_TEXT_BYTES {
+        Err(too_big())
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn real_text(value: f64) -> Option<String> {
     if value.is_nan() {
         return None;
@@ -233,7 +247,11 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
         ),
         "sqlite_random" => Value::BigInt(random_integer()),
         _ if any_null && name == "sqlite_hex" => Value::Text(String::new()),
-        "sqlite_quote" => Value::Text(quoted(first)),
+        "sqlite_quote" => {
+            let length = text_of(first).map_or(4, |text| text.len());
+            within_limit(length.saturating_mul(2).saturating_add(2))?;
+            Value::Text(quoted(first))
+        }
         "sqlite_min" | "sqlite_max" => {
             if any_null {
                 return Ok(Value::Null);
@@ -251,7 +269,7 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
         }
         "sqlite_printf" => match text(0) {
             None => Value::Null,
-            Some(format) => Value::Text(printf(&format, values.get(1..).unwrap_or(&[]))),
+            Some(format) => Value::Text(printf(&format, values.get(1..).unwrap_or(&[]))?),
         },
         _ if any_null => Value::Null,
         "sqlite_length" => Value::BigInt(text(0).unwrap_or_default().chars().count() as i64),
@@ -277,7 +295,13 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             if pattern.is_empty() {
                 Value::Text(subject)
             } else {
-                Value::Text(subject.replace(&pattern, &text(2).unwrap_or_default()))
+                let replacement = text(2).unwrap_or_default();
+                if replacement.len() > pattern.len() {
+                    let found = subject.matches(pattern.as_str()).count();
+                    let growth = found.saturating_mul(replacement.len() - pattern.len());
+                    within_limit(subject.len().saturating_add(growth))?;
+                }
+                Value::Text(subject.replace(&pattern, &replacement))
             }
         }
         "sqlite_instr" => {
@@ -295,6 +319,7 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
         }
         "sqlite_hex" => {
             let bytes = text(0).unwrap_or_default();
+            within_limit(bytes.len().saturating_mul(2))?;
             Value::Text(bytes.bytes().map(|byte| format!("{byte:02X}")).collect())
         }
         _ => {
@@ -403,7 +428,7 @@ fn general_form(value: f64, precision: usize, upper: bool) -> String {
     }
 }
 
-fn printf(format: &str, arguments: &[Value]) -> String {
+fn printf(format: &str, arguments: &[Value]) -> SqlResult<String> {
     let characters: Vec<char> = format.chars().collect();
     let mut next = arguments.iter();
     let mut out = String::new();
@@ -524,9 +549,10 @@ fn printf(format: &str, arguments: &[Value]) -> String {
                 continue;
             }
         };
+        within_limit(out.len().saturating_add(piece.len()))?;
         out.push_str(&piece);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -575,8 +601,8 @@ mod tests {
             Value::Null,
         ];
         assert_eq!(
-            printf("%d|%5.2f|%q|%Q|%-4s|%%", &args),
-            "42| 1.23|it''s|NULL|    |%"
+            printf("%d|%5.2f|%q|%Q|%-4s|%%", &args).as_deref(),
+            Ok("42| 1.23|it''s|NULL|    |%")
         );
         assert_eq!(
             printf(
@@ -587,9 +613,31 @@ mod tests {
                     Value::Double(1234.5),
                     Value::Double(0.0001)
                 ]
-            ),
-            "-0042 ff 1.234500e+03 0.0001"
+            )
+            .as_deref(),
+            Ok("-0042 ff 1.234500e+03 0.0001")
         );
         assert_eq!(call("sqlite_printf", &[Value::Null]), Ok(Value::Null));
+    }
+
+    #[test]
+    fn results_past_the_length_limit_are_refused_before_they_are_built() {
+        let subject = Value::Text(" ".repeat(1000));
+        let replacement = Value::Text("x".repeat(2_000_000));
+        let error = call(
+            "sqlite_replace",
+            &[subject.clone(), Value::Text(" ".into()), replacement],
+        )
+        .expect_err("2 GB");
+        assert_eq!(error.message(), "string or blob too big");
+        assert_eq!(error.vendor_code(), Some(18));
+        assert_eq!(
+            call(
+                "sqlite_replace",
+                &[subject, Value::Text(" ".into()), Value::Text("ab".into())]
+            )
+            .map(|value| value.to_text().map(|text| text.len())),
+            Ok(Some(2000))
+        );
     }
 }

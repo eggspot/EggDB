@@ -232,6 +232,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let pragma_done = || QueryResult::command("PRAGMA");
         Ok(match (pragma.name.as_str(), argument) {
             ("table_info", Some(table)) => {
+                let table = table.to_lowercase();
                 let tables = self.read(|reader, _| read_tables(reader))?;
                 let rows = match tables.iter().find(|schema| schema.name == table) {
                     Some(schema) => schema
@@ -268,7 +269,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 rows.push(table_list_row("main", "sqlite_schema", 5));
                 rows.push(table_list_row("temp", "sqlite_temp_schema", 5));
                 if let Some(only) = only {
-                    rows.retain(|row| row[1] == Value::Text(only.to_owned()));
+                    rows.retain(|row| row[1] == Value::Text(only.to_lowercase()));
                 }
                 rows_result(table_list_columns(), rows)
             }
