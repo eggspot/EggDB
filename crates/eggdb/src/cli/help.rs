@@ -247,7 +247,8 @@ transaction; in Oracle's dialect the first change starts a transaction that COMM
 or DDL ends, and the run commits it at the end, as SQL*Plus does. The first failing statement
 stops the run with exit 3 and the dialect's error on stderr; statements before it stay
 committed, and a block left open is rolled back. CREATE INDEX and UNIQUE speed up WHERE and
-ORDER BY in every dialect; more types and the rest come next (docs/sql.md).
+ORDER BY in every dialect. Views (CREATE VIEW) work in every dialect, schemas with
+search_path in PostgreSQL's and COMMENT ON in PostgreSQL's and Oracle's; more types and the rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
       --dialect <name>  postgresql (default), mysql, sqlite or oracle

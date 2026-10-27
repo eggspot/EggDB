@@ -785,6 +785,66 @@ name` and `DROP PRIMARY KEY`.
 thousand rows at a time within the statement's transaction; `ADD COLUMN` with a default rewrites
 the rows in place; the other actions change only the definition (D114).
 
+## Schemas, views and comments
+
+**Schemas** (D116), in the PostgreSQL dialect: `CREATE SCHEMA [IF NOT EXISTS] name
+[AUTHORIZATION role]`, `DROP SCHEMA [IF EXISTS] name [, ...] [CASCADE | RESTRICT]` (`2BP01`
+while it holds objects unless `CASCADE`, which drops them, the views that use them in other
+schemas and the foreign keys that reference them), `ALTER SCHEMA name RENAME TO new` and `OWNER
+TO` (accepted). Tables, views, sequences and indexes live in a schema; write `schema.name`
+anywhere a table name goes (`app.t`, `public.t`, `REFERENCES app.t (id)`, `nextval('app.s')`,
+`OWNED BY app.t.id`, `DROP INDEX app.i`, `COMMENT ON COLUMN app.t.c`), and move a table with
+`ALTER TABLE t SET SCHEMA s`. `public` always exists and cannot be dropped or renamed;
+`pg_catalog`, `information_schema` and names starting with `pg_` are reserved (`42939`). Errors:
+`3F000 schema "x" does not exist`, `42P06 schema "x" already exists`, and messages show
+qualified names as `app.t`.
+
+Unqualified names follow `search_path`, a session setting (default `"$user", public`): `SET
+search_path [TO | =] app, public`, `RESET search_path`, `SHOW search_path`, `SELECT
+pg_catalog.set_config('search_path', '', false)` (constant arguments only), `current_schema()`
+and `current_schemas(bool)` (shown as `{pg_catalog,app,public}`). A name is looked up in each
+schema of the path that exists, in order; `pg_catalog` is searched first for functions
+(`pg_catalog.nextval`, `pg_catalog.set_config` and the other functions that exist). New objects
+are created in the first schema of the path that exists (`3F000 no schema has been selected to
+create in` when there is none). The other dialects have one schema: SQLite's `main.t` (`temp.t`
+is `0A000`: no temporary tables yet), Oracle's `USER.t` for the session's user (another schema
+is ORA-00942), MySQL's `db.t` for the connected database.
+
+**Views**, in every dialect: `CREATE [OR REPLACE] VIEW name [(columns)] AS query`, `DROP VIEW
+[IF EXISTS] name [, ...] [CASCADE | RESTRICT]`, and in PostgreSQL `ALTER VIEW [IF EXISTS] name
+RENAME TO new | SET SCHEMA s | OWNER TO role`. A view may use joins, groups, subqueries, `WITH`,
+set operations and other views; it is read-only (`INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` on
+it are `0A000`). Its query is checked when it is created and expanded where it is used, as a
+derived table. `SELECT *` is expanded when the view is created, so columns added to the table
+later do not appear. `OR REPLACE` keeps the existing columns' names and types and may add
+columns at the end (`42P16` otherwise); a view that would refer to itself, directly or through
+other views, is `42P17`. Views nest to 32 query levels and 1,024 `SELECT`s for a statement and
+everything it expands (`54001`). In PostgreSQL, dropping a table or view that views use is
+`2BP01` unless `CASCADE` (which drops those views), changing or dropping a column a view uses is
+`2BP01`, and renaming a table or view that a view uses is `0A000`. MySQL's `CREATE [OR REPLACE]
+[ALGORITHM = ...] [DEFINER = ...] [SQL SECURITY ...] VIEW` (the clauses are accepted and
+ignored), `SHOW CREATE VIEW` and `SHOW FULL TABLES` (`VIEW`); SQLite's `CREATE VIEW [IF NOT
+EXISTS] [main.]name`; Oracle's `CREATE [OR REPLACE] [[NO] FORCE] VIEW ... [WITH READ ONLY]` and
+`USER_VIEWS`/`ALL_VIEWS`. In MySQL, SQLite and Oracle a table dropped or changed under a view
+leaves the view, which fails when used, as those databases do. Views have no privileges yet
+(EggDB has no roles).
+
+**Comments**: `COMMENT ON TABLE | VIEW | SEQUENCE | INDEX | SCHEMA name IS 'text'`, `COMMENT ON
+COLUMN table.column IS 'text'`, `COMMENT ON CONSTRAINT name ON table IS 'text'` and `COMMENT ON
+EXTENSION` (accepted) in PostgreSQL; `IS NULL` removes a comment. Oracle has `COMMENT ON TABLE`
+and `COMMENT ON COLUMN`, listed by `USER_TAB_COMMENTS` and `USER_COL_COMMENTS`; MySQL keeps the
+`COMMENT 'text'` column option and `COMMENT = 'text'` table option and shows them in `SHOW
+CREATE TABLE` and `SHOW FULL COLUMNS`. The shell's `.schema` prints them as `COMMENT ON`
+statements. A comment goes with its object when the object is dropped or renamed.
+`obj_description` and `col_description` come with item 37.
+
+**What `pg_dump` writes.** Besides the above, `GRANT`, `REVOKE` and `ALTER DEFAULT PRIVILEGES`
+are accepted with a warning and ignored (EggDB has no roles yet), `CREATE EXTENSION [IF NOT
+EXISTS] plpgsql [WITH SCHEMA ...]` does nothing (another extension is `0A000`), the `SET`
+parameters of its scripts are accepted, and view text with parenthesized joins (`FROM ((a JOIN
+b ON ...) JOIN c ON ...)`) runs. `CREATE MATERIALIZED VIEW`, `CREATE TYPE`, `CREATE DOMAIN` and
+`WITH CHECK OPTION` are `0A000` with a message naming them.
+
 ## How SQL is stored
 
 SQL lives in the database's one ordered key space, under keys that begin with the five bytes
@@ -798,6 +858,9 @@ SQL lives in the database's one ordered key space, under keys that begin with th
 | prefix, `0x04`, table number, index number (4 bytes each, big-endian), indexed values, primary key | empty: one entry of a secondary index |
 | prefix, `0x05`, sequence name | the sequence: its type, start, increment, bounds, cache, last value, whether it was called, cycle and owner (D114) |
 | prefix, `0x06`, parent table name (length-prefixed), child table name | empty: the child has a foreign key to the parent (D114) |
+| prefix, `0x07`, schema name | the schema: a version byte (D116) |
+| prefix, `0x08`, relation name (length-prefixed), view name | `0x01`: the view uses the relation (D116) |
+| prefix, `0x09`, owner name (length-prefixed), kind byte, part name | a comment: a version byte and its text (D116) |
 
 A table definition is written in format version 1, or version 2 when it has an
 `AUTO_INCREMENT` column, and in version 3 only when it has secondary indexes: version 3 adds
@@ -824,7 +887,13 @@ name, the parent's column names, the `ON DELETE` and `ON UPDATE` actions as one 
 that owns a sequence (`OWNED BY`), is written in version 6 too, with a flags byte after the
 primary key's name saying so, so that an older release refuses it by name instead of deleting a
 referenced row or dropping the table without its sequence. Other tables keep their version and
-bytes; an older release refuses a version 6 table by name.
+bytes; an older release refuses a version 6 table by name. A table in a schema other than
+`public` is stored under its schema's name, a zero byte and its name, and written in version 7
+(D116): the version 6 layout with the constraints part always present; `public` tables keep
+their names, versions and bytes, and an older release refuses a version 7 table by name. A view
+is stored under its name in the same key space as version 8: its dialect, a flag for `*` in its
+select list, its query text, its columns with their types, the schemas of the search path when
+it was created and the relations it names; an older release refuses it by name.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
@@ -869,6 +938,14 @@ ui app.db` has a query screen (`s`, run with `F5`). Both print results and error
 `eggdb sql` does ([cli.md](cli.md)).
 
 ## Known differences from PostgreSQL
+Schemas and views (D116): views are read-only (no automatically updatable views, `WITH CHECK
+OPTION` is `0A000`), there are no materialized, temporary or recursive views, renaming a table
+or view that a view uses is `0A000` (PostgreSQL follows the rename), a view resolves its names
+with the search path it was created with when it is used, where PostgreSQL binds them once, a
+column `DEFAULT nextval('s')` finds an unqualified `s` through the search path when it runs, and
+messages name objects outside `public` as `schema.name`. There are no roles, so `GRANT`,
+`REVOKE` and owners are accepted and ignored; `current_schemas` returns text, not `name[]`.
+
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
 checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
 until they are fixed:
@@ -999,7 +1076,12 @@ until they are fixed:
   must reach 1.0 before v0.3.0 (item 19e, D100).
 
 ## Known differences from MySQL
-The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 205 cases from the MySQL 8.0
+A view is read-only, `SHOW CREATE VIEW` shows the query as it was written (MySQL rewrites it),
+a view that used `SELECT *` keeps the columns it had when it was created (as MySQL's do), and
+`CREATE DATABASE`, `DROP DATABASE` and `USE` of another database are not supported yet: a
+server serves one database.
+
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 223 cases from the MySQL 8.0
 Reference Manual's documented behaviour) marks these as differing until they are fixed:
 - `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`, and decimal constants
   outside a `DECIMAL` column are doubles (`0.1 + 0.2` is `0.30000000000000004`); stored into a
@@ -1050,7 +1132,7 @@ And more, not in the suite yet:
   creating one makes no index on the child's columns (InnoDB makes one).
 
 ## Known differences from SQLite
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 217 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 234 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
@@ -1093,7 +1175,7 @@ And more, not in the suite yet:
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 236 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 254 cases from Oracle's SQL
 Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
   primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
