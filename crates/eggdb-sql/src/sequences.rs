@@ -477,7 +477,7 @@ fn owner_of(
     Ok(Some((table.name.clone(), column.text.clone())))
 }
 
-fn relation_exists(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
+pub(crate) fn relation_exists(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
     Ok(reader.get(&table_key(name))?.is_some() || reader.get(&sequence_key(name))?.is_some())
 }
 
@@ -757,6 +757,17 @@ pub(crate) fn rename_owner(
         }
         writer.put(&sequence_key(&name), &sequence.encode())?;
     }
+    forget_loaded();
+    Ok(())
+}
+
+pub(crate) fn move_sequence(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -> SqlResult<()> {
+    let Some(bytes) = writer.get(&sequence_key(from))? else {
+        return Ok(());
+    };
+    writer.delete(&sequence_key(from))?;
+    writer.put(&sequence_key(to), &bytes)?;
+    crate::comments::move_owner(writer, from, to)?;
     forget_loaded();
     Ok(())
 }

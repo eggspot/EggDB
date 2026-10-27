@@ -476,6 +476,15 @@ impl Parser<'_> {
             actions.push(AlterAction::Accepted);
             return Ok(());
         }
+        if self.postgresql() && self.is_word("set") && self.is_word_at(1, "schema") {
+            self.at += 2;
+            let schema = self.name()?;
+            actions.push(AlterAction::SetSchema(crate::schemas::schema_named(
+                &schema.text,
+                schema.position,
+            )?));
+            return Ok(());
+        }
         if self.mysql() && (self.is_word("modify") || self.is_word("change")) {
             let change = self.take_word("change");
             if !change {

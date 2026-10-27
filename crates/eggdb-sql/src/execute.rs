@@ -6,9 +6,9 @@ use crate::ast::{
 use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
 use crate::encoding::{
-    Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, decode_row_into,
-    encode_key_value, encode_meta, encode_row, encode_row_into, meta_key, prefix_end, rows_prefix,
-    table_key,
+    Column, MAX_COLUMNS, TableDefinition, ViewDefinition, decode_meta, decode_row, decode_row_into,
+    encode_key_value, encode_meta, encode_row, encode_row_into, is_view_record, meta_key,
+    prefix_end, rows_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
@@ -45,8 +45,14 @@ const CACHED_TABLES: usize = 256;
 
 struct CachedTable {
     bytes: Vec<u8>,
-    table: Arc<TableDefinition>,
+    relation: Relation,
     checked_at: Option<u64>,
+}
+
+#[derive(Clone)]
+pub(crate) enum Relation {
+    Table(Arc<TableDefinition>),
+    View(Arc<ViewDefinition>),
 }
 
 #[derive(Default)]
@@ -56,20 +62,20 @@ pub(crate) struct TableCache {
 }
 
 impl TableCache {
-    pub(crate) fn table(
+    pub(crate) fn relation(
         &mut self,
         reader: &dyn KeyValueRead,
         name: &str,
-    ) -> SqlResult<Option<Arc<TableDefinition>>> {
+    ) -> SqlResult<Option<Relation>> {
         if crate::temp_tables::is_temp_table(name) {
-            return Ok(crate::temp_tables::temp_definition(name));
+            return Ok(crate::temp_tables::temp_definition(name).map(Relation::Table));
         }
         let version = reader.committed_version();
         if let Some(cached) = self.entries.get(name)
             && version.is_some()
             && cached.checked_at == version
         {
-            return Ok(Some(Arc::clone(&cached.table)));
+            return Ok(Some(cached.relation.clone()));
         }
         let Some(bytes) = reader.get(&table_key(name))? else {
             return Ok(None);
@@ -78,9 +84,13 @@ impl TableCache {
             && cached.bytes == bytes
         {
             cached.checked_at = version;
-            return Ok(Some(Arc::clone(&cached.table)));
+            return Ok(Some(cached.relation.clone()));
         }
-        let table = Arc::new(TableDefinition::decode(name, &bytes)?);
+        let relation = if is_view_record(&bytes) {
+            Relation::View(Arc::new(ViewDefinition::decode(name, &bytes)?))
+        } else {
+            Relation::Table(Arc::new(TableDefinition::decode(name, &bytes)?))
+        };
         if self.entries.len() >= CACHED_TABLES {
             self.entries.clear();
         }
@@ -88,11 +98,41 @@ impl TableCache {
             name.to_owned(),
             CachedTable {
                 bytes,
-                table: Arc::clone(&table),
+                relation: relation.clone(),
                 checked_at: version,
             },
         );
-        Ok(Some(table))
+        Ok(Some(relation))
+    }
+
+    pub(crate) fn table(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        name: &str,
+    ) -> SqlResult<Option<Arc<TableDefinition>>> {
+        match self.relation(reader, name)? {
+            Some(Relation::Table(table)) => Ok(Some(table)),
+            Some(Relation::View(_)) => Err(crate::views::not_a_table(name)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn require_target(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        name: &Name,
+        verb: &str,
+    ) -> SqlResult<Arc<TableDefinition>> {
+        match self
+            .relation(reader, &name.text)
+            .map_err(|error| error.at_if_unplaced(name.position))?
+        {
+            Some(Relation::Table(table)) => Ok(table),
+            Some(Relation::View(_)) => {
+                Err(crate::views::not_updatable(&name.text, verb).at(name.position))
+            }
+            None => Err(undefined_table(name)),
+        }
     }
 
     pub(crate) fn require(
@@ -100,7 +140,8 @@ impl TableCache {
         reader: &dyn KeyValueRead,
         name: &Name,
     ) -> SqlResult<Arc<TableDefinition>> {
-        self.table(reader, &name.text)?
+        self.table(reader, &name.text)
+            .map_err(|error| error.at_if_unplaced(name.position))?
             .ok_or_else(|| undefined_table(name))
     }
 }
@@ -192,9 +233,7 @@ pub(crate) fn create_table(
         indexes::check_orderable(columns[index].sql_type, position)?;
     }
     check_auto_increment(create, &columns, &primary_key)?;
-    if tables.table(writer, &create.name.text)?.is_some()
-        || crate::sequences::read(writer, &create.name.text)?.is_some()
-    {
+    if crate::sequences::relation_exists(writer, &create.name.text)? {
         if create.if_not_exists {
             return Ok(QueryResult::command("CREATE TABLE").with_notice(format!(
                 "NOTICE:  relation \"{}\" already exists, skipping",
@@ -271,6 +310,7 @@ pub(crate) fn create_table(
     }
     table.referenced = !constraints::referencing_tables(writer, &table.name)?.is_empty();
     writer.put(&meta_key(), &encode_meta(following))?;
+    crate::comments::forget_owner(writer, &table.name)?;
     writer.put(&table_key(&table.name), &table.encode())?;
     constraints::register_references(writer, tables, &table)?;
     Ok(QueryResult::command("CREATE TABLE"))
@@ -363,6 +403,16 @@ pub(crate) fn drop_tables(
         let Some(dropped) = tables.table(writer, &name.text)? else {
             continue;
         };
+        if dialect == Dialect::PostgreSql {
+            crate::views::drop_dependent_views(
+                writer,
+                tables,
+                &dropped.name,
+                "table",
+                cascade,
+                &mut result,
+            )?;
+        }
         if dropped.owns_sequence {
             result = release_owned_sequences(writer, tables, &dropped, names, cascade, result)?;
         }
@@ -428,6 +478,7 @@ pub(crate) fn drop_tables(
         indexes::delete_every_index_entry(writer, &table)?;
         constraints::unregister_references(writer, tables, &table)?;
         crate::sequences::drop_owned_by(writer, tables, &table.name, None)?;
+        crate::comments::forget_owner(writer, &table.name)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)
@@ -775,7 +826,7 @@ pub(crate) fn insert(
         None
     };
     let insert = prepared.as_ref().unwrap_or(insert);
-    let table = tables.require(writer, &insert.table.name)?;
+    let table = tables.require_target(writer, &insert.table.name, "insert into")?;
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
@@ -1311,7 +1362,7 @@ pub(crate) fn insert_literals(
     tables: &mut TableCache,
     insert: &LiteralRows<'_>,
 ) -> SqlResult<QueryResult> {
-    let table = tables.require(writer, &insert.table.name)?;
+    let table = tables.require_target(writer, &insert.table.name, "insert into")?;
     if insert.width > table.columns.len() {
         return Err(SqlError::syntax(
             "INSERT has more expressions than target columns",
@@ -2638,7 +2689,7 @@ pub(crate) fn update(
         None
     };
     let update = prepared.as_ref().unwrap_or(update);
-    let table = tables.require(writer, &update.table.name)?;
+    let table = tables.require_target(writer, &update.table.name, "update")?;
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
@@ -2760,7 +2811,7 @@ pub(crate) fn truncate(
     tables: &mut TableCache,
     table: &TableReference,
 ) -> SqlResult<QueryResult> {
-    let definition = tables.require(writer, &table.name)?;
+    let definition = tables.require_target(writer, &table.name, "truncate")?;
     if constraints::is_referenced(&definition) {
         for child in constraints::referencing_tables(writer, &definition.name)? {
             if child != definition.name {
@@ -2799,7 +2850,7 @@ pub(crate) fn delete(
         None
     };
     let delete = prepared.as_ref().unwrap_or(delete);
-    let table = tables.require(writer, &delete.table.name)?;
+    let table = tables.require_target(writer, &delete.table.name, "delete from")?;
     let scope = scope_of(&table, &delete.table);
     if let Some(filter) = &delete.filter {
         reject_aggregates(filter, "WHERE")?;

@@ -5,6 +5,10 @@ use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
 use crate::types::{NumericModifier, SqlType, Value};
 
+mod catalog;
+
+pub(crate) use catalog::*;
+
 pub(crate) const NAMESPACE: &[u8] = &[0xFF, b'S', b'Q', b'L', 0x00];
 const META_SPACE: u8 = 0x01;
 const TABLE_SPACE: u8 = 0x02;
@@ -16,6 +20,8 @@ const INDEXES_FORMAT_VERSION: u8 = 3;
 const TYPES_FORMAT_VERSION: u8 = 4;
 const MORE_TYPES_FORMAT_VERSION: u8 = 5;
 const CONSTRAINTS_FORMAT_VERSION: u8 = 6;
+const SCHEMA_FORMAT_VERSION: u8 = 7;
+pub(crate) const VIEW_FORMAT_VERSION: u8 = 8;
 const SEQUENCE_SPACE: u8 = 0x05;
 const REFERENCE_SPACE: u8 = 0x06;
 const NO_PRECISION: u8 = 0xFF;
@@ -287,7 +293,9 @@ impl TableDefinition {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self.has_constraints() {
+        let version = if crate::schemas::is_qualified(&self.name) {
+            SCHEMA_FORMAT_VERSION
+        } else if self.has_constraints() {
             CONSTRAINTS_FORMAT_VERSION
         } else if self
             .columns
@@ -380,7 +388,15 @@ impl TableDefinition {
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "table definition");
-        let version = reader.version_up_to(CONSTRAINTS_FORMAT_VERSION)?;
+        let version = reader.version_up_to(VIEW_FORMAT_VERSION)?;
+        if version == VIEW_FORMAT_VERSION {
+            return Err(crate::views::not_a_table(name));
+        }
+        if (version == SCHEMA_FORMAT_VERSION) != crate::schemas::is_qualified(name)
+            || !crate::schemas::is_well_formed(name)
+        {
+            return Err(reader.damaged());
+        }
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
         let more_types_allowed = version >= MORE_TYPES_FORMAT_VERSION;
@@ -392,36 +408,7 @@ impl TableDefinition {
         let mut columns = Vec::new();
         for _ in 0..count {
             let name = reader.text()?;
-            let sql_type = match reader.byte()? {
-                1 => SqlType::SmallInt,
-                2 => SqlType::Integer,
-                3 => SqlType::BigInt,
-                4 => SqlType::Real,
-                5 => SqlType::Double,
-                6 => SqlType::Boolean,
-                7 => SqlType::Text,
-                8 => match reader.u32()? {
-                    0 => SqlType::Varchar(None),
-                    length => SqlType::Varchar(Some(length)),
-                },
-                9 if new_types_allowed => reader.numeric_type()?,
-                10 if new_types_allowed => SqlType::Date,
-                11 if new_types_allowed => SqlType::Timestamp(reader.precision()?),
-                12 if new_types_allowed => SqlType::TimestampTz(reader.precision()?),
-                13 if new_types_allowed => SqlType::Json,
-                14 if new_types_allowed => SqlType::Jsonb,
-                15 if more_types_allowed => SqlType::Time(reader.precision()?),
-                16 if more_types_allowed => SqlType::TimeTz(reader.precision()?),
-                17 if more_types_allowed => reader.interval_type()?,
-                18 if more_types_allowed => SqlType::Bytea,
-                19 if more_types_allowed => SqlType::Uuid,
-                20 if more_types_allowed => match reader.u32()? {
-                    0 => SqlType::Bpchar(None),
-                    length if length <= MAX_CHARACTER_LENGTH => SqlType::Bpchar(Some(length)),
-                    _ => return Err(reader.damaged()),
-                },
-                _ => return Err(reader.damaged()),
-            };
+            let sql_type = reader.sql_type(new_types_allowed, more_types_allowed)?;
             let not_null = match reader.byte()? {
                 0 => false,
                 1 => true,
@@ -455,9 +442,10 @@ impl TableDefinition {
         }
         let indexes = match version {
             INDEXES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), false)?,
-            TYPES_FORMAT_VERSION | MORE_TYPES_FORMAT_VERSION | CONSTRAINTS_FORMAT_VERSION => {
-                decode_indexes(&mut reader, columns.len(), true)?
-            }
+            TYPES_FORMAT_VERSION
+            | MORE_TYPES_FORMAT_VERSION
+            | CONSTRAINTS_FORMAT_VERSION
+            | SCHEMA_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
@@ -1235,6 +1223,43 @@ impl<'b> Reader<'b> {
         String::from_utf8(bytes.to_vec()).map_err(|_| self.damaged())
     }
 
+    fn sql_type(
+        &mut self,
+        new_types_allowed: bool,
+        more_types_allowed: bool,
+    ) -> SqlResult<SqlType> {
+        Ok(match self.byte()? {
+            1 => SqlType::SmallInt,
+            2 => SqlType::Integer,
+            3 => SqlType::BigInt,
+            4 => SqlType::Real,
+            5 => SqlType::Double,
+            6 => SqlType::Boolean,
+            7 => SqlType::Text,
+            8 => match self.u32()? {
+                0 => SqlType::Varchar(None),
+                length => SqlType::Varchar(Some(length)),
+            },
+            9 if new_types_allowed => self.numeric_type()?,
+            10 if new_types_allowed => SqlType::Date,
+            11 if new_types_allowed => SqlType::Timestamp(self.precision()?),
+            12 if new_types_allowed => SqlType::TimestampTz(self.precision()?),
+            13 if new_types_allowed => SqlType::Json,
+            14 if new_types_allowed => SqlType::Jsonb,
+            15 if more_types_allowed => SqlType::Time(self.precision()?),
+            16 if more_types_allowed => SqlType::TimeTz(self.precision()?),
+            17 if more_types_allowed => self.interval_type()?,
+            18 if more_types_allowed => SqlType::Bytea,
+            19 if more_types_allowed => SqlType::Uuid,
+            20 if more_types_allowed => match self.u32()? {
+                0 => SqlType::Bpchar(None),
+                length if length <= MAX_CHARACTER_LENGTH => SqlType::Bpchar(Some(length)),
+                _ => return Err(self.damaged()),
+            },
+            _ => return Err(self.damaged()),
+        })
+    }
+
     fn numeric_type(&mut self) -> SqlResult<SqlType> {
         let precision = u16::from_le_bytes(self.array()?);
         let scale = i16::from_le_bytes(self.array()?);
@@ -1706,10 +1731,10 @@ mod tests {
     #[test]
     fn a_newer_table_definition_version_is_refused_by_name() {
         let mut newer = with_indexes([true, false]).encode();
-        newer[0] = 7;
+        newer[0] = 9;
         let error = TableDefinition::decode("t", &newer).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
-        assert!(error.message().contains("format version 7"), "{error}");
+        assert!(error.message().contains("format version 9"), "{error}");
     }
 
     fn with_indexes(auto: [bool; 2]) -> TableDefinition {

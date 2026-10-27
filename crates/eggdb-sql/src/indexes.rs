@@ -196,6 +196,9 @@ pub(crate) fn every_table(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableDefin
     let mut numbers = std::collections::HashSet::new();
     let mut failure = None;
     reader.scan(&prefix, &end, ScanDirection::Forward, &mut |key, value| {
+        if crate::encoding::is_view_record(value) {
+            return Ok(true);
+        }
         let Some(name) = key
             .get(prefix.len()..)
             .and_then(|name| std::str::from_utf8(name).ok())
@@ -234,10 +237,15 @@ fn name_taken(
         return table.index_named(name).is_some();
     }
     let relation = matches!(dialect, Dialect::PostgreSql | Dialect::Sqlite);
+    let schema = crate::schemas::schema_of(&table.name);
     table.index_named(name).is_some()
         || tables
             .iter()
-            .any(|other| other.index_named(name).is_some() || relation && other.name == name)
+            .filter(|other| crate::schemas::schema_of(&other.name) == schema)
+            .any(|other| {
+                other.index_named(name).is_some()
+                    || relation && crate::schemas::base_name(&other.name) == name
+            })
 }
 
 fn generated_name(
@@ -564,15 +572,31 @@ pub(crate) fn drop_index(
             Some(table) => {
                 let definition = tables.require(writer, table)?;
                 definition
-                    .index_named(&name.text)
+                    .index_named(crate::schemas::base_name(&name.text))
                     .is_some()
                     .then(|| (*definition).clone())
             }
             None => {
-                let mut holders: Vec<TableDefinition> = every_table(writer)?
-                    .into_iter()
-                    .filter(|table| table.index_named(&name.text).is_some())
-                    .collect();
+                let index = crate::schemas::base_name(&name.text);
+                let schemas_to_search = match name.text.split_once(crate::schemas::QUALIFIER) {
+                    Some((schema, _)) => vec![schema.to_owned()],
+                    None => crate::schemas::relation_path(writer)?,
+                };
+                let every = every_table(writer)?;
+                let mut holders: Vec<TableDefinition> = Vec::new();
+                for schema in &schemas_to_search {
+                    holders = every
+                        .iter()
+                        .filter(|table| {
+                            crate::schemas::schema_of(&table.name) == schema
+                                && table.index_named(index).is_some()
+                        })
+                        .cloned()
+                        .collect();
+                    if !holders.is_empty() {
+                        break;
+                    }
+                }
                 if holders.len() > 1 {
                     return Err(SqlError::not_supported(format!(
                         "index name \"{}\" is used by more than one table: drop it with MySQL's DROP INDEX {} ON table",
@@ -595,14 +619,21 @@ pub(crate) fn drop_index(
             }
             return Err(index_missing(name, dialect));
         };
+        let index_name = crate::schemas::base_name(&name.text);
         let Some(position) = definition
             .indexes
             .iter()
-            .position(|index| index.name == name.text)
+            .position(|index| index.name == index_name)
         else {
             return Err(index_missing(name, dialect));
         };
         let index = definition.indexes.remove(position);
+        crate::comments::forget_part(
+            writer,
+            &definition.name,
+            crate::encoding::CommentKind::Index,
+            &index.name,
+        )?;
         let prefix = index_prefix(definition.id, index.id);
         delete_index_entries(writer, &prefix, &prefix_end(&prefix))?;
         writer.put(&table_key(&definition.name), &definition.encode())?;

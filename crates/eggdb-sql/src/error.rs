@@ -128,6 +128,12 @@ impl SqlState {
     pub const INVALID_RECURSION: Self = Self(*b"42P19");
     /// `42P16` invalid_table_definition.
     pub const INVALID_TABLE_DEFINITION: Self = Self(*b"42P16");
+    /// `42P06` duplicate_schema.
+    pub const DUPLICATE_SCHEMA: Self = Self(*b"42P06");
+    /// `42939` reserved_name: a name kept for the system, such as `pg_catalog`.
+    pub const RESERVED_NAME: Self = Self(*b"42939");
+    /// `42P17` invalid_object_definition, such as a view that refers to itself.
+    pub const INVALID_OBJECT_DEFINITION: Self = Self(*b"42P17");
     /// `42P02` undefined_parameter: a `$n` without a value.
     pub const UNDEFINED_PARAMETER: Self = Self(*b"42P02");
     /// `42P18` indeterminate_datatype.
@@ -263,6 +269,21 @@ impl SqlError {
 
     pub(crate) fn table(&self) -> Option<&str> {
         self.report.table.as_deref()
+    }
+
+    pub(crate) fn with_names_displayed(mut self) -> Self {
+        let report = &mut self.report;
+        for text in [&mut report.message]
+            .into_iter()
+            .chain(report.detail.as_mut())
+            .chain(report.hint.as_mut())
+            .chain(report.table.as_mut())
+        {
+            if text.contains(crate::schemas::QUALIFIER) {
+                *text = crate::schemas::display(text);
+            }
+        }
+        self
     }
 
     /// The same error with a MySQL error number, such as `1146`.

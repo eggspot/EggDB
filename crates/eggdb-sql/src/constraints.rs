@@ -246,10 +246,15 @@ fn check_failed(table: &TableDefinition, check: &CheckConstraint, row: &[Value])
 }
 
 pub(crate) fn check_identifier(name: &crate::ast::Name) -> SqlResult<()> {
-    if name.text.contains(crate::temp_tables::TEMP_TABLE_MARKER) {
+    if name.text.contains(crate::temp_tables::TEMP_TABLE_MARKER)
+        || !crate::schemas::is_well_formed(&name.text)
+    {
         return Err(SqlError::new(
             SqlState::INVALID_NAME,
-            format!("invalid name \"{}\"", name.text.escape_default()),
+            format!(
+                "invalid name \"{}\"",
+                crate::schemas::display(&name.text).escape_default()
+            ),
         )
         .at(name.position));
     }

@@ -128,6 +128,9 @@ pub(crate) fn read_tables(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableSchem
     let mut tables = Vec::new();
     let mut failure = None;
     reader.scan(&prefix, &end, ScanDirection::Forward, &mut |key, value| {
+        if crate::encoding::is_view_record(value) {
+            return Ok(true);
+        }
         let name = String::from_utf8_lossy(&key[prefix.len()..]).into_owned();
         match TableDefinition::decode(&name, value) {
             Ok(definition) => tables.push(schema_of(&definition)),
