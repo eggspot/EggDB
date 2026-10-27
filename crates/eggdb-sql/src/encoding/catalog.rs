@@ -11,6 +11,8 @@ const DEPENDENCY_SPACE: u8 = 0x08;
 const COMMENT_SPACE: u8 = 0x09;
 const RECORD_VERSION: u8 = 1;
 const NO_TYPE: u8 = 0;
+const WILDCARD_FLAG: u8 = 1;
+const COLUMN_LIST_FLAG: u8 = 2;
 pub(crate) const MAX_SEARCH_PATH: usize = 64;
 pub(crate) const MAX_VIEW_REFERENCES: usize = 4096;
 pub(crate) const MAX_VIEW_TEXT: usize = 1 << 20;
@@ -121,12 +123,20 @@ pub(crate) struct ViewDefinition {
     pub(crate) search_path: Vec<String>,
     pub(crate) references: Vec<String>,
     pub(crate) expands_wildcard: bool,
+    pub(crate) has_column_list: bool,
 }
 
 impl ViewDefinition {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = vec![VIEW_FORMAT_VERSION, dialect_code(self.dialect)];
-        out.push(u8::from(self.expands_wildcard));
+        let mut flags = 0;
+        if self.expands_wildcard {
+            flags |= WILDCARD_FLAG;
+        }
+        if self.has_column_list {
+            flags |= COLUMN_LIST_FLAG;
+        }
+        out.push(flags);
         put_bytes(&mut out, self.query.as_bytes());
         put_varint(&mut out, self.columns.len() as u64);
         for column in &self.columns {
@@ -154,11 +164,10 @@ impl ViewDefinition {
             return Err(reader.damaged());
         }
         let dialect = dialect_of(reader.byte()?).ok_or_else(|| reader.damaged())?;
-        let expands_wildcard = match reader.byte()? {
-            0 => false,
-            1 => true,
-            _ => return Err(reader.damaged()),
-        };
+        let flags = reader.byte()?;
+        if flags & !(WILDCARD_FLAG | COLUMN_LIST_FLAG) != 0 {
+            return Err(reader.damaged());
+        }
         let query = reader.text()?;
         let count = reader.count()?;
         if count == 0
@@ -170,14 +179,14 @@ impl ViewDefinition {
         }
         let mut columns: Vec<ViewColumn> = Vec::with_capacity(count);
         for _ in 0..count {
-            let column = reader.name()?;
+            let column = reader.plain_name()?;
             let sql_type = if reader.bytes.get(reader.at) == Some(&NO_TYPE) {
                 reader.byte()?;
                 None
             } else {
                 Some(reader.sql_type(true, true)?)
             };
-            let source = reader.name()?;
+            let source = reader.plain_name()?;
             if columns.iter().any(|known| known.name == column) {
                 return Err(reader.damaged());
             }
@@ -219,7 +228,8 @@ impl ViewDefinition {
             columns,
             search_path,
             references,
-            expands_wildcard,
+            expands_wildcard: flags & WILDCARD_FLAG != 0,
+            has_column_list: flags & COLUMN_LIST_FLAG != 0,
         })
     }
 }
@@ -257,6 +267,7 @@ mod tests {
             search_path: vec!["app".into(), "public".into()],
             references: vec!["app\0t".into(), "t".into()],
             expands_wildcard: true,
+            has_column_list: true,
         }
     }
 
@@ -306,6 +317,44 @@ mod tests {
             let error = ViewDefinition::decode(name, &bytes).unwrap_err();
             assert_eq!(error.state().code(), "XX001");
         }
+    }
+
+    #[test]
+    fn view_flags_round_trip_and_unknown_flags_are_damage() {
+        for (expands_wildcard, has_column_list, flags) in [
+            (false, false, 0u8),
+            (true, false, 1),
+            (false, true, 2),
+            (true, true, 3),
+        ] {
+            let mut flagged = view();
+            flagged.expands_wildcard = expands_wildcard;
+            flagged.has_column_list = has_column_list;
+            let bytes = flagged.encode();
+            assert_eq!(bytes[2], flags);
+            assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), flagged);
+        }
+        let mut bytes = view().encode();
+        for unknown in [4u8, 8, 0x80, 0xFF] {
+            bytes[2] = unknown;
+            let error = ViewDefinition::decode("app\0v", &bytes).unwrap_err();
+            assert_eq!(error.state().code(), "XX001");
+        }
+    }
+
+    #[test]
+    fn a_zero_byte_in_a_view_column_name_or_its_source_name_is_damage() {
+        let damaged = |view: &ViewDefinition| {
+            ViewDefinition::decode(&view.name, &view.encode())
+                .is_err_and(|error| error.state().code() == "XX001")
+        };
+        let mut name = view();
+        name.columns[0].name = "a\0b".into();
+        assert!(damaged(&name));
+        let mut source = view();
+        source.columns[1].source = "app\0b".into();
+        assert!(damaged(&source));
+        assert!(!damaged(&view()));
     }
 
     #[test]

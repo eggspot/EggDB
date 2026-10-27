@@ -962,3 +962,142 @@ fn star_views_over_a_recreated_table_match_columns_by_name_in_mysql_and_again_in
     assert_eq!(last(&mut sqlite, "SELECT * FROM v"), "b|a\nx|5\nSELECT 1");
     assert_eq!(last(&mut sqlite, "SELECT a FROM v"), "a\n5\nSELECT 1");
 }
+
+#[test]
+fn a_sqlite_star_view_with_a_column_list_renames_by_position_and_fails_when_the_shape_changes() {
+    let store = MemoryStore::default();
+    let mut sqlite = Session::with_dialect(&store, Dialect::Sqlite);
+    last(
+        &mut sqlite,
+        "CREATE TABLE t (a INT, b TEXT); INSERT INTO t VALUES (1, 'p'); \
+         CREATE VIEW w (x, y) AS SELECT * FROM t",
+    );
+    assert_eq!(last(&mut sqlite, "SELECT * FROM w"), "x|y\n1|p\nSELECT 1");
+    assert_eq!(last(&mut sqlite, "SELECT x FROM w"), "x\n1\nSELECT 1");
+    last(
+        &mut sqlite,
+        "DROP TABLE t; CREATE TABLE t (c TEXT, d INT); INSERT INTO t VALUES ('q', 2)",
+    );
+    assert_eq!(
+        last(&mut sqlite, "SELECT x, y FROM w"),
+        "x|y\nq|2\nSELECT 1"
+    );
+    last(&mut sqlite, "ALTER TABLE t ADD COLUMN e INT");
+    let error = fails(&mut sqlite, "SELECT * FROM w");
+    assert_eq!(error.message(), "expected 2 columns for 'w' but got 3");
+    assert_eq!(error.vendor_code(), Some(1));
+    last(&mut sqlite, "DROP TABLE t; CREATE TABLE t (a INT)");
+    assert_eq!(
+        fails(&mut sqlite, "SELECT x FROM w").message(),
+        "expected 2 columns for 'w' but got 1"
+    );
+    last(
+        &mut sqlite,
+        "DROP TABLE t; CREATE TABLE t (a INT, b TEXT, c INT); INSERT INTO t VALUES (1, 'p', 3); \
+         CREATE VIEW v AS SELECT * FROM t",
+    );
+    assert_eq!(
+        last(&mut sqlite, "SELECT * FROM v"),
+        "a|b|c\n1|p|3\nSELECT 1"
+    );
+}
+
+#[test]
+fn star_views_over_sources_sharing_a_column_name_work_in_mysql_and_oracle() {
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut mysql,
+        "CREATE TABLE a (id INT, v INT); CREATE TABLE b (id INT, w INT); \
+         INSERT INTO a VALUES (1, 10); INSERT INTO b VALUES (1, 20); \
+         CREATE VIEW w (x, y, z, q) AS SELECT * FROM a JOIN b ON a.id = b.id",
+    );
+    assert_eq!(
+        last(&mut mysql, "SELECT * FROM w"),
+        "x|y|z|q\n1|10|1|20\nSELECT 1"
+    );
+    last(
+        &mut mysql,
+        "DROP TABLE a; DROP TABLE b; CREATE TABLE a (id INT, v INT); \
+         CREATE TABLE b (id INT, w INT); INSERT INTO a VALUES (2, 30); INSERT INTO b VALUES (2, 40)",
+    );
+    assert_eq!(
+        last(&mut mysql, "SELECT z, q, x FROM w"),
+        "z|q|x\n2|40|2\nSELECT 1"
+    );
+    last(
+        &mut mysql,
+        "DROP TABLE b; CREATE TABLE b (w INT, id INT); INSERT INTO b VALUES (50, 2)",
+    );
+    assert_eq!(
+        last(&mut mysql, "SELECT * FROM w"),
+        "x|y|z|q\n2|30|2|50\nSELECT 1"
+    );
+    last(&mut mysql, "DROP TABLE b; CREATE TABLE b (id INT)");
+    assert_eq!(
+        fails(&mut mysql, "SELECT * FROM w").vendor_code(),
+        Some(1356)
+    );
+
+    let store = MemoryStore::default();
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    last(
+        &mut oracle,
+        "CREATE TABLE a (id NUMBER(9), v NUMBER(9)); CREATE TABLE b (id NUMBER(9), w NUMBER(9)); \
+         INSERT INTO a VALUES (1, 10); INSERT INTO b VALUES (1, 20); \
+         CREATE VIEW w (x, y, z, q) AS SELECT * FROM a JOIN b ON a.id = b.id",
+    );
+    assert_eq!(
+        last(&mut oracle, "SELECT * FROM w"),
+        "X|Y|Z|Q\n1|10|1|20\nSELECT 1"
+    );
+    last(
+        &mut oracle,
+        "DROP TABLE a; DROP TABLE b; CREATE TABLE a (id NUMBER(9), v NUMBER(9)); \
+         CREATE TABLE b (id NUMBER(9), w NUMBER(9)); \
+         INSERT INTO a VALUES (2, 30); INSERT INTO b VALUES (2, 40)",
+    );
+    assert_eq!(
+        last(&mut oracle, "SELECT q, z FROM w"),
+        "Q|Z\n40|2\nSELECT 1"
+    );
+    last(&mut oracle, "DROP TABLE b; CREATE TABLE b (id NUMBER(9))");
+    assert_eq!(
+        fails(&mut oracle, "SELECT * FROM w").vendor_code(),
+        Some(4063)
+    );
+}
+
+#[test]
+fn a_mysql_star_view_matches_source_columns_case_insensitively() {
+    let store = MemoryStore::default();
+    let mut postgres = Session::new(&store);
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut postgres,
+        "CREATE TABLE t (\"ID\" int, \"Name\" text); INSERT INTO t VALUES (1, 'p')",
+    );
+    last(&mut mysql, "CREATE VIEW v AS SELECT * FROM t");
+    assert_eq!(
+        last(&mut mysql, "SELECT * FROM v"),
+        "ID|Name\n1|p\nSELECT 1"
+    );
+    last(&mut mysql, "DROP TABLE t");
+    last(
+        &mut postgres,
+        "CREATE TABLE t (name text, id int); INSERT INTO t VALUES ('q', 2)",
+    );
+    assert_eq!(
+        last(&mut mysql, "SELECT * FROM v"),
+        "ID|Name\n2|q\nSELECT 1"
+    );
+    last(&mut mysql, "DROP TABLE t");
+    last(
+        &mut postgres,
+        "CREATE TABLE t (id int, \"ID\" int, \"Name\" text); INSERT INTO t VALUES (3, 4, 'r')",
+    );
+    assert_eq!(
+        last(&mut mysql, "SELECT * FROM v"),
+        "ID|Name\n4|r\nSELECT 1"
+    );
+}

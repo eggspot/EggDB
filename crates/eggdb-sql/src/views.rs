@@ -225,6 +225,7 @@ pub(crate) fn create_view(
         search_path: path,
         references: resolution.references,
         expands_wildcard: selects_wildcard(&create.query),
+        has_column_list: !create.columns.is_empty(),
     };
     let bytes = view.encode();
     if ViewDefinition::decode(&internal, &bytes).is_err() {

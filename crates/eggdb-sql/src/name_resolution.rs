@@ -1,3 +1,4 @@
+use crate::OutputColumn;
 use crate::ast::{
     AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
     FromClause, Insert, InsertSource, InsertValue, JoinCondition, Name, OnDuplicate, Query, Select,
@@ -502,29 +503,86 @@ impl Resolver<'_> {
                 column_names: Vec::new(),
                 dialect: view.dialect,
             }),
+            Dialect::Sqlite if view.has_column_list => {
+                let present = self.output_columns(&query)?;
+                if present.len() != column_names.len() {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_OBJECT_DEFINITION,
+                        format!(
+                            "expected {} columns for '{label}' but got {}",
+                            column_names.len(),
+                            present.len()
+                        ),
+                    )
+                    .at(position));
+                }
+                Ok(DerivedTable {
+                    query,
+                    column_names,
+                    dialect: view.dialect,
+                })
+            }
             Dialect::Sqlite => Ok(DerivedTable {
                 query,
                 column_names: Vec::new(),
                 dialect: view.dialect,
             }),
             Dialect::MySql | Dialect::Oracle => {
-                let described = crate::execute::query(self.reader, self.tables, &query, true)?;
-                let present = described.columns.unwrap_or_default();
-                if view
-                    .columns
-                    .iter()
-                    .any(|column| !present.iter().any(|found| found.name == column.source))
-                {
-                    return Err(invalid_view(view, self.settings));
-                }
+                let present = self.output_columns(&query)?;
+                let sources = source_positions(view, &present)
+                    .ok_or_else(|| invalid_view(view, self.settings))?;
                 Ok(DerivedTable {
-                    query: Query::of_select(by_name(query, view, label, position), position),
+                    query: Query::of_select(
+                        by_source_position(query, view, &present, &sources, label, position),
+                        position,
+                    ),
                     column_names: Vec::new(),
                     dialect: view.dialect,
                 })
             }
         }
     }
+
+    fn output_columns(&mut self, query: &Query) -> SqlResult<Vec<OutputColumn>> {
+        let described = crate::execute::query(self.reader, self.tables, query, true)?;
+        Ok(described.columns.unwrap_or_default())
+    }
+}
+
+fn same_column_name(dialect: Dialect, left: &str, right: &str) -> bool {
+    match dialect {
+        Dialect::MySql => left
+            .chars()
+            .flat_map(char::to_lowercase)
+            .eq(right.chars().flat_map(char::to_lowercase)),
+        _ => left == right,
+    }
+}
+
+fn source_positions(view: &ViewDefinition, present: &[OutputColumn]) -> Option<Vec<usize>> {
+    let unchanged = present.len() == view.columns.len()
+        && present
+            .iter()
+            .zip(&view.columns)
+            .all(|(found, column)| found.name == column.source);
+    if unchanged {
+        return Some((0..present.len()).collect());
+    }
+    let mut claimed = vec![false; present.len()];
+    let mut positions = Vec::with_capacity(view.columns.len());
+    for column in &view.columns {
+        let unclaimed = |matches: &dyn Fn(&str) -> bool| {
+            present
+                .iter()
+                .enumerate()
+                .position(|(index, found)| !claimed[index] && matches(&found.name))
+        };
+        let position = unclaimed(&|name| name == column.source)
+            .or_else(|| unclaimed(&|name| same_column_name(view.dialect, name, &column.source)))?;
+        claimed[position] = true;
+        positions.push(position);
+    }
+    Some(positions)
 }
 
 fn invalid_view(view: &ViewDefinition, settings: Option<&Settings>) -> SqlError {
@@ -549,22 +607,51 @@ fn invalid_view(view: &ViewDefinition, settings: Option<&Settings>) -> SqlError 
     }
 }
 
-fn by_name(query: Query, view: &ViewDefinition, label: &str, position: usize) -> Select {
-    let items = view
-        .columns
+fn by_source_position(
+    query: Query,
+    view: &ViewDefinition,
+    present: &[OutputColumn],
+    sources: &[usize],
+    label: &str,
+    position: usize,
+) -> Select {
+    let mut renamed: Vec<Name> = present
         .iter()
-        .map(|column| SelectItem::Expr {
+        .enumerate()
+        .map(|(index, column)| Name {
+            text: format!(
+                "{}{}{index}",
+                column.name,
+                crate::temp_tables::TEMP_TABLE_MARKER
+            ),
+            position,
+        })
+        .collect();
+    for (column, source) in view.columns.iter().zip(sources) {
+        if let Some(name) = renamed.get_mut(*source) {
+            name.text.clone_from(&column.name);
+        }
+    }
+    let items = column_items(
+        view.columns.iter().map(|column| column.name.as_str()),
+        position,
+    );
+    select_from(items, query, renamed, label, view.dialect, position)
+}
+
+fn column_items<'n>(names: impl Iterator<Item = &'n str>, position: usize) -> Vec<SelectItem> {
+    names
+        .map(|name| SelectItem::Expr {
             expr: Expr {
                 kind: ExprKind::Column {
                     qualifier: None,
-                    name: column.source.clone(),
+                    name: name.to_owned(),
                 },
                 position,
             },
-            alias: Some(column.name.clone()),
+            alias: None,
         })
-        .collect();
-    select_from(items, query, Vec::new(), label, view.dialect, position)
+        .collect()
 }
 
 fn select_from(
@@ -610,19 +697,7 @@ fn narrowed(
     dialect: Dialect,
     position: usize,
 ) -> Select {
-    let items = column_names
-        .iter()
-        .map(|name| SelectItem::Expr {
-            expr: Expr {
-                kind: ExprKind::Column {
-                    qualifier: None,
-                    name: name.text.clone(),
-                },
-                position,
-            },
-            alias: None,
-        })
-        .collect();
+    let items = column_items(column_names.iter().map(|name| name.text.as_str()), position);
     select_from(items, query, column_names, label, dialect, position)
 }
 
