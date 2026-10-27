@@ -54,7 +54,7 @@ eggdb <command> <file> [arguments] [options]
 The command comes first and the file second; options may go anywhere after the command, and
 `--` ends them, so `eggdb get app.db -- -k` reads the key `-k`.
 
-**Only `create`, `put --create`, `import --create` and `sql --create` make a database file.** A wrong path such
+**Only `create`, `put --create`, `import --create`, `sql --create` and `serve --create` make a database file.** A wrong path such
 as `app.bd` is an error that says how to create the file, never a new empty database that later
 reads as "empty".
 

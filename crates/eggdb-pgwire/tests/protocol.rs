@@ -445,3 +445,34 @@ fn a_slow_client_is_cut_off_at_the_authentication_timeout() {
     let (mut working, _) = Client::login(server.address);
     assert_eq!(tags(&working.query("SELECT 1")), "TDCZ");
 }
+
+#[test]
+fn unsupported_startup_settings_and_function_calls_are_answered_without_hanging() {
+    let server = TestServer::start(8);
+    let mut client = Client::connect(server.address);
+    client.send_startup(
+        196_608,
+        &[
+            ("user", USER),
+            ("database", DATABASE),
+            ("client_encoding", "LATIN1"),
+            ("_pq_.unknown_option", "1"),
+        ],
+    );
+    assert_eq!(client.authenticate(common::PASSWORD).tag, b'R');
+    let greeting = client.read_until_ready();
+    assert_eq!(greeting[0].tag, b'v');
+    assert!(
+        greeting
+            .iter()
+            .any(|message| message.text() == "client_encoding\0UTF8")
+    );
+    client.send(b'F', &[0, 0, 0, 1]);
+    let answer = client.read_until_ready();
+    assert_eq!(
+        (tags(&answer), answer[0].code()),
+        ("EZ".to_owned(), "0A000".to_owned())
+    );
+    client.send(b'd', b"stray copy data");
+    assert_eq!(tags(&client.query("SELECT 1")), "TDCZ");
+}

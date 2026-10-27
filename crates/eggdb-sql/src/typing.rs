@@ -70,9 +70,15 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
             static_type(argument, scope).filter(|sql_type| sql_type.is_numeric())
         }
         ("nullif", [left, _]) => static_type(left, scope),
-        ("coalesce", arguments) => arguments
-            .iter()
-            .find_map(|argument| static_type(argument, scope)),
+        ("coalesce", [first, rest @ ..]) => {
+            let first_type = static_type(first, scope)?;
+            rest.iter()
+                .all(|argument| {
+                    matches!(argument.kind, ExprKind::Literal(Literal::Null))
+                        || static_type(argument, scope) == Some(first_type)
+                })
+                .then_some(first_type)
+        }
         _ => None,
     }
 }

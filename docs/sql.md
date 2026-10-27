@@ -117,7 +117,7 @@ non-ASCII passwords.
   `START TRANSACTION`, `COMMIT`/`END`, `ROLLBACK`/`ABORT`.
 - `SET [SESSION] name {TO | =} value | DEFAULT`, `SET TIME ZONE`, `SET NAMES`, `RESET name | ALL`,
   `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding` takes `UTF8`
-  only; settings EggDB does not apply yet, such as `statement_timeout` and `search_path`, are
+  (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply yet, such as `statement_timeout` and `search_path`, are
   remembered and shown; `SET LOCAL` and `SET TRANSACTION` are not supported yet.
 - `$1`, `$2`, …: parameters, given through the PostgreSQL protocol's extended query messages
   (D104); outside it, `$1` is `42P02` (there is no parameter `$1`).

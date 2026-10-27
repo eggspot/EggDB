@@ -1956,3 +1956,23 @@ fn session_functions_report_the_user_the_database_and_the_version() {
         "current_setting\nUTF8\nSELECT 1"
     );
 }
+
+#[test]
+fn coalesce_has_a_static_type_only_when_its_arguments_agree() {
+    use crate::SqlType;
+    let store = MemoryStore::default();
+    let mut session = with_people(&store);
+    let description = session
+        .describe(
+            "SELECT coalesce(age, 0::smallint), coalesce(id, score), coalesce(name, NULL) FROM people",
+            &[],
+        )
+        .unwrap();
+    let types: Vec<Option<SqlType>> = description
+        .columns
+        .unwrap()
+        .iter()
+        .map(|column| column.sql_type)
+        .collect();
+    assert_eq!(types, [Some(SqlType::SmallInt), None, Some(SqlType::Text)]);
+}

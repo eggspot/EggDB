@@ -56,7 +56,7 @@ const KNOWN: &[Known] = &[
         default: fixed_text!("UTF8"),
         change: Change::Utf8Only,
         reported: true,
-        description: "Sets the client's character set encoding; EggDB speaks UTF8 only.",
+        description: "Sets the client's character set encoding; EggDB speaks UTF8 (SQL_ASCII passes its bytes through).",
     },
     Known {
         name: "client_min_messages",
@@ -283,15 +283,18 @@ impl Settings {
             Some(value) => match known.change {
                 Change::Free => value.to_owned(),
                 Change::Utf8Only => {
-                    let accepted = ["utf8", "utf-8", "unicode"]
+                    if value.eq_ignore_ascii_case("sql_ascii") {
+                        "SQL_ASCII".to_owned()
+                    } else if ["utf8", "utf-8", "unicode"]
                         .iter()
-                        .any(|spelling| value.eq_ignore_ascii_case(spelling));
-                    if !accepted {
+                        .any(|spelling| value.eq_ignore_ascii_case(spelling))
+                    {
+                        "UTF8".to_owned()
+                    } else {
                         return Err(SqlError::not_supported(format!(
                             "client_encoding {value} is not supported; EggDB speaks UTF8 only"
                         )));
                     }
-                    "UTF8".to_owned()
                 }
                 Change::OnOnly => {
                     if !["on", "true", "yes", "1"]

@@ -487,13 +487,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         }
     }
     for (name, value) in settings {
-        if let Err(error) = session.set_parameter(&name, &value)
-            && error.state() != SqlState::UNDEFINED_OBJECT
-        {
-            report_error(&mut wire, Severity::Fatal, &error, None);
-            let _ = wire.flush();
-            return;
-        }
+        let _ = session.set_parameter(&name, &value);
     }
     if startup.minor > 0 || !unrecognized_options.is_empty() {
         wire.outbox
@@ -611,15 +605,19 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 FrontendMessage::Flush => self.wire.flush().is_ok(),
                 FrontendMessage::Terminate => false,
                 FrontendMessage::Other(b'd' | b'c' | b'f') => true,
-                FrontendMessage::Other(b'F') => self.extended(|_| {
-                    Err((
-                        SqlError::new(
+                FrontendMessage::Other(b'F') => {
+                    report_error(
+                        &mut self.wire,
+                        Severity::Error,
+                        &SqlError::new(
                             SqlState::FEATURE_NOT_SUPPORTED,
                             "the function call protocol is not supported",
                         ),
                         None,
-                    ))
-                }),
+                    );
+                    self.ready_for_query();
+                    self.wire.flush().is_ok()
+                }
                 FrontendMessage::AuthenticationResponse(_) | FrontendMessage::Other(_) => {
                     fatal(
                         &mut self.wire,
