@@ -550,10 +550,14 @@ fn create_and_drop_table_follow_postgresql() {
     );
     assert_eq!(state(&mut session, "CREATE TABLE u (a numeric)"), "0A000");
     assert_eq!(
-        state(&mut session, "CREATE TABLE u (a int UNIQUE)"),
+        state(&mut session, "CREATE TABLE u (a int CHECK (a > 0))"),
         "0A000"
     );
-    assert_eq!(state(&mut session, "CREATE INDEX i ON t (x)"), "0A000");
+    assert_eq!(state(&mut session, "CREATE INDEX i ON t (nosuch)"), "42703");
+    assert_eq!(
+        last(&mut session, "CREATE INDEX i ON t (x)"),
+        "CREATE INDEX"
+    );
     assert_eq!(last(&mut session, "DROP TABLE t"), "DROP TABLE");
     assert_eq!(state(&mut session, "DROP TABLE t"), "42P01");
     assert_eq!(last(&mut session, "DROP TABLE IF EXISTS t"), "DROP TABLE");

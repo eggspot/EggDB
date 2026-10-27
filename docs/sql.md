@@ -100,8 +100,12 @@ What it reads, on top of the statements of "What runs today":
   `DESCRIBE`/`SHOW COLUMNS`, `SHOW CREATE TABLE`, `SHOW VARIABLES [LIKE ...]`, `SHOW WARNINGS`,
   `SHOW COUNT(*) WARNINGS`, `USE`, `SET` of session and user variables (`SET NAMES`, `SET
   autocommit`, `SET @x = ...`), `START TRANSACTION`, `LOCK TABLES`/`UNLOCK TABLES` (accepted),
-  table options such as `ENGINE=` and `DEFAULT CHARSET=` and non-unique `KEY`/`INDEX` entries
-  (accepted and ignored).
+  table options such as `ENGINE=` and `DEFAULT CHARSET=`; `KEY`/`INDEX` and `UNIQUE [KEY]`
+  entries and `UNIQUE` columns make indexes (an unnamed one is named after its first column,
+  then `_2`, `_3`), and `CREATE [UNIQUE] INDEX name [USING BTREE] ON t (...)`, `DROP INDEX name
+  ON t`, `SHOW INDEX|INDEXES|KEYS FROM t` and `EXPLAIN SELECT` (MySQL's columns: `type` `ALL`,
+  `const`, `ref`, `range` or `index`, the `key`, and `Extra`) work as in MySQL; `SHOW CREATE
+  TABLE` lists the keys and `DESCRIBE` marks `UNI` and `MUL` columns.
 - **Types** as the engine's: `TINYINT(1)` and `BOOLEAN` are booleans (shown as `1` and `0`),
   `TINYINT` and `SMALLINT` are `smallint`, `MEDIUMINT` and `INT` are `integer`, `BIGINT` is
   `bigint`, `UNSIGNED` takes the next wider type, `FLOAT` is `real`, `DOUBLE`, `REAL`,
@@ -170,8 +174,15 @@ What it reads, on top of the statements of "What runs today":
   is built.
 - **The schema table**: `sqlite_schema` and `sqlite_master` (with `type`, `name`, `tbl_name`,
   `rootpage` and `sql`) list the tables; `sqlite_temp_schema`/`sqlite_temp_master` are empty.
-- **PRAGMAs**: `table_info(t)`, `table_list[(t)]`, `foreign_keys`, `user_version`,
-  `journal_mode`, `synchronous` and `encoding`; unknown PRAGMAs do nothing, as in SQLite.
+- **PRAGMAs**: `table_info(t)`, `table_list[(t)]`, `index_list(t)`, `index_info(i)`,
+  `foreign_keys`, `user_version`, `journal_mode`, `synchronous` and `encoding`; unknown PRAGMAs
+  do nothing, as in SQLite.
+- **Indexes**: `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON t (...)`, `DROP INDEX [IF
+  EXISTS] name`, `UNIQUE` columns and table constraints (indexes named
+  `sqlite_autoindex_t_N`, and listed in `sqlite_schema` with their `sql`), and `EXPLAIN QUERY
+  PLAN` with SQLite's lines (`SCAN t`, `SEARCH t USING INDEX i (a=? AND b>?)`, `SEARCH t USING
+  INTEGER PRIMARY KEY (rowid=?)`, `USE TEMP B-TREE FOR ORDER BY`). A duplicate is `UNIQUE
+  constraint failed: t.a` with `SQLITE_CONSTRAINT_UNIQUE` (2067).
 - **Expressions**: `||`, `==`, `IS`/`IS NOT` between any two values, `LIKE` ignoring ASCII
   case, `GLOB` with `*` and `?`, integers as conditions (`WHERE active`, `NOT 0`), `TRUE` and
   `FALSE` as 1 and 0, comparisons giving 1 and 0, division and remainder by zero giving NULL,
@@ -230,6 +241,12 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   PRECISION` and `BINARY_DOUBLE` as `double precision`, `BINARY_FLOAT` as `real`,
   `INTEGER`/`INT`/`SMALLINT` (Oracle's `NUMBER(38)`) as `bigint`, `CLOB`, `NCLOB` and `LONG` as
   `text`, and `BOOLEAN` (23ai). `DATE`, `TIMESTAMP`, `RAW` and `BLOB` wait for their types.
+- **Indexes**: `CREATE [UNIQUE] INDEX name ON t (...)` with `TABLESPACE`, `ONLINE`, `LOGGING`
+  and `COMPUTE STATISTICS` accepted, `DROP INDEX name`, `UNIQUE` columns and `CONSTRAINT name
+  UNIQUE (...)` (an unnamed one is `SYS_C` and seven digits), `USER_INDEXES`/`ALL_INDEXES`
+  (`INDEX_NAME`, `INDEX_TYPE`, `TABLE_NAME`, `UNIQUENESS`) and
+  `USER_IND_COLUMNS`/`ALL_IND_COLUMNS`; `ORA-00001` for a duplicate, `ORA-01452` when `CREATE
+  UNIQUE INDEX` finds one, `ORA-00955` for a name in use and `ORA-01418` for a missing index.
 - **Identity columns**: `GENERATED [ALWAYS | BY DEFAULT [ON NULL]] AS IDENTITY` on the first
   column of the primary key, numbered as MySQL's `AUTO_INCREMENT` (D106).
 - **Statements**: `CREATE TABLE` (also `IF NOT EXISTS`), `DROP TABLE [IF EXISTS] t [CASCADE
@@ -319,9 +336,16 @@ the fast path always applies, since the server checks every password itself).
 ## What runs today
 
 **Statements**
-- `CREATE TABLE [IF NOT EXISTS] name (column type [NOT NULL | NULL | PRIMARY KEY | DEFAULT expr] ..., [PRIMARY KEY (columns)])`.
+- `CREATE TABLE [IF NOT EXISTS] name (column type [NOT NULL | NULL | PRIMARY KEY | UNIQUE | DEFAULT expr] ..., [PRIMARY KEY (columns)], [UNIQUE (columns)] ...)`.
   A table without a primary key keeps its rows in insertion order under a hidden row number.
-  `CONSTRAINT name` before a constraint is accepted. At most 1,600 columns, as in PostgreSQL.
+  `CONSTRAINT name` names a `UNIQUE` constraint's index (otherwise `table_column_key`). At
+  most 1,600 columns, as in PostgreSQL.
+- `CREATE [UNIQUE] INDEX [IF NOT EXISTS] [name] ON table [USING btree | hash] (column [ASC | DESC] [NULLS FIRST | LAST], ...)`
+  and `DROP INDEX [IF EXISTS] name [, ...] [RESTRICT]`: secondary indexes, described under
+  [Indexes](#indexes). An unnamed index is `table_columns_idx`.
+- `EXPLAIN statement` for `SELECT`, `UPDATE` and `DELETE`: the plan as PostgreSQL prints it
+  without costs (`Seq Scan on t`, `Index Scan using t_b on t`, `Index Scan Backward ...`,
+  `Sort`, `Limit`, `Nested Loop`, `Hash Join`).
 - `DROP TABLE [IF EXISTS] name [, ...] [RESTRICT]`: removes the definition and every row, in
   one transaction.
 - `INSERT INTO name [(columns)] VALUES (...), (...) | DEFAULT VALUES [RETURNING items]`, with
@@ -410,8 +434,8 @@ names are cut to 63 bytes, and `public.name` is the same table as `name`.
 `42601` syntax errors (`syntax error at or near "x"`), `42P01` unknown tables, `42703` unknown
 columns, `42702` an ambiguous column, `42712` a table named twice in `FROM`, `42803` an ungrouped
 column or an aggregate where none is allowed (`WHERE`, `ON`, `GROUP BY`, `UPDATE`, `VALUES`,
-`RETURNING`, `DEFAULT`, `LIMIT`), `42809` `sum(*)` and `count()`, `42P07` a table that exists, `23505` a duplicate primary key (with
-`Key (id)=(1) already exists.`), `23502` a NULL in a `NOT NULL` column, `22P02` text that is
+`RETURNING`, `DEFAULT`, `LIMIT`), `42809` `sum(*)` and `count()`, `42P07` a table or index name that exists, `42704` an index that does not, `23505` a duplicate primary key or unique value (with
+`Key (id)=(1) already exists.`, and `could not create unique index` when `CREATE UNIQUE INDEX` finds one), `23502` a NULL in a `NOT NULL` column, `22P02` text that is
 not a number, `42804` and `42883` type mismatches, `25P02` statements in a failed block, `0A000`
 what is not supported yet. An expression nested, or a chain of operators or casts, deeper than 64 levels fails with
 `54001` instead of exhausting the stack; `AND` and `OR` chains of any length are fine.
@@ -428,6 +452,52 @@ a block rolls the block back at once and the session answers `25P02` until `ROLL
 of a failed block reports `ROLLBACK`, as PostgreSQL does. DDL is transactional: a rolled-back
 block that created a table leaves no table.
 
+## Indexes
+
+A secondary index keeps one entry per row: the indexed columns' values in the same
+order-preserving encoding as primary keys, then the row's primary key (or hidden row number),
+so equal values sort in primary key order (D109). Entries are written in the same transaction
+as their rows by every `INSERT` (with `IGNORE`, `REPLACE` and upserts), `UPDATE`, `DELETE` and
+`TRUNCATE`, so a crash or a rollback never leaves an index that disagrees with its table.
+`CREATE INDEX` on a table that has rows fills the index in the same transaction, a thousand rows
+at a time within the statement's 1 GiB work memory; `DROP INDEX` and `DROP TABLE` remove the
+entries.
+
+**Uniqueness.** A unique index (`UNIQUE` on a column or a table, `CREATE UNIQUE INDEX`, MySQL's
+`UNIQUE KEY`) refuses two rows with the same values, and allows any number of rows with a NULL
+in an indexed column, as PostgreSQL, MySQL and SQLite do. It is checked across the whole
+statement: a multi-row `INSERT` that repeats a value fails whole, and an `UPDATE` checks after
+every row moved, so swapping two unique values in one `UPDATE` works. `CREATE UNIQUE INDEX` on
+a table that already holds a value twice fails and leaves nothing behind.
+
+**When an index is used.** Without statistics, the planner follows fixed rules: for each of the
+primary key and the indexes it takes the longest leading run of columns compared with
+constants by `=`, `IN (list)` or `IS NULL`, then a range on the next column (`<`, `<=`, `>`,
+`>=`, `BETWEEN`, or `LIKE 'prefix%'` where `LIKE` is case-sensitive), and picks, in order, a
+unique key fully matched by `=`, the longest equality run, a range, then the primary key over
+an index. `ORDER BY` columns that follow the matched columns in a key, all ascending or all
+descending, read the key in order (backward for `DESC`) and skip the sort; with `LIMIT` the
+read stops early, and with no `WHERE` an index is read in order when the query has a `LIMIT`.
+`ORDER BY` with `NULLS FIRST` on an ascending column (or `NULLS LAST` on a descending one) still
+sorts unless the column is `NOT NULL`. A join looks rows of its inner table up through an index
+on its join columns when the outer side is a key lookup or the inner table does not fit the
+64 MiB hash table. Every other condition still filters the rows an index finds, so results are
+the same as a full scan's: a test runs random queries and changes with and without indexes and
+compares them. A constant that converts to the column's type inexactly (`int_column > 2.5`)
+and `OR` do not use an index yet.
+
+**Size of an entry.** An index entry's key is 14 bytes, then the indexed values (a number is
+its width plus one byte, a text value its UTF-8 length plus three bytes), then the row's primary
+key encoded the same way. It must fit the store's largest key, an eighth of a page: 512 bytes
+with the default 4 KiB pages ([embedded.md](embedded.md)). A longer entry fails the statement
+with `54000` (`a key of 522 bytes is longer than the 512 bytes a key may have with this page
+size`), so index long text columns only with a larger page size.
+
+**Checking.** `Session::check_indexes` (the embedded API) reads every table and checks that each
+row has exactly its entries, no entry lacks a row, every entry decodes and no unique index holds
+a value twice; a disagreement is `XX001` naming the index, repaired by dropping and creating it
+again. `eggdb check` checks the file's pages and keys and does not run it.
+
 ## How SQL is stored
 
 SQL lives in the database's one ordered key space, under keys that begin with the five bytes
@@ -438,6 +508,13 @@ SQL lives in the database's one ordered key space, under keys that begin with th
 | prefix, `0x01` | the catalog's format version and the next table number |
 | prefix, `0x02`, table name | the table's definition: its number, columns, types, `NOT NULL`, defaults and primary key |
 | prefix, `0x03`, table number (4 bytes, big-endian), primary key | the row |
+| prefix, `0x04`, table number, index number (4 bytes each, big-endian), indexed values, primary key | empty: one entry of a secondary index |
+
+A table definition is written in format version 1, or version 2 when it has an
+`AUTO_INCREMENT` column, and in version 3 only when it has secondary indexes: version 3 adds
+after the primary key a count of indexes and, for each, its number, name, whether it is unique
+and its column numbers (D109). Tables without indexes keep their bytes, so older releases
+still read them; an older release refuses a version 3 table by name rather than misreading it.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
@@ -480,12 +557,23 @@ until they are fixed:
   are missing (`42883`, or `42601` for the SQL-standard syntax and for `left`/`right`, which
   parse as join keywords; roadmap: the rest of PostgreSQL's string functions, below).
 
-- One statement at a time is planned by simple rules: a `WHERE` that fixes every primary-key
-  column with `=` reads one row (in a join, of the first table); anything else reads the whole
-  table. Each statement's result
+- One statement at a time is planned by simple rules without statistics ([Indexes](#indexes)):
+  a `WHERE` that fixes every primary-key column with `=` reads one row (in a join, of the first
+  table), conditions on a leading part of the primary key or an index read that range, and
+  anything else reads the whole table. Each statement's result
   is built in memory before it prints (a `SELECT` without `ORDER BY` holds only the rows it
-  returns; `ORDER BY` holds every matching row and sorts them, with no top-N for `LIMIT` yet).
-- Joins read the first table row by row and every later table once. A table whose whole
+  returns; `ORDER BY` holds every matching row and sorts them, with no top-N for `LIMIT` yet,
+  unless a key gives the order).
+- Indexes: partial indexes (`WHERE`), indexes on expressions, `INCLUDE`, `CONCURRENTLY`,
+  `NULLS [NOT] DISTINCT` and index methods other than B-tree answer `0A000`; `USING hash` makes
+  an ordinary index. `DESC` and `NULLS FIRST` in an index are accepted and the index is kept in
+  ascending order, which serves `ORDER BY ... DESC` by reading it backward. An index name is
+  checked against tables and other indexes when the index is made, not when a table is made.
+  `DROP INDEX` also drops the index of a `UNIQUE` constraint, which PostgreSQL refuses
+  (`2BP01`). `EXPLAIN` prints the plan's nodes without costs, conditions or `Filter` lines, and
+  `EXPLAIN ANALYZE` and `EXPLAIN (options)` answer `0A000`.
+- Joins read the first table row by row and every later table once, except a table read
+  through an index on its join columns, which is read once per row. A table whose whole
   primary key the `ON` or `USING` equalities fix is read by key for each row when the first
   table is read by its key, and otherwise held in a hash table on that key while it fits in
   64 MiB (else read by key); one joined by other equalities of plain columns of the same kind of
@@ -556,11 +644,19 @@ And more, not in the suite yet:
 - `SET` remembers session variables without applying them (`sql_mode`, `time_zone`,
   `transaction_isolation`: every transaction is serializable); `SET GLOBAL` is refused.
 - `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`, `double` for `DECIMAL`).
+- Indexes: a key on a column prefix (`KEY k (name(10))`) indexes the whole value, and a
+  `UNIQUE` one answers 1235; `FULLTEXT` and `SPATIAL` keys answer 1235. `SHOW INDEX` gives
+  `Cardinality` and `Sub_part` as `NULL`, and `EXPLAIN` gives `key_len`, `ref` and `rows` as
+  `NULL`. `ALTER TABLE ... ADD INDEX` waits for `ALTER TABLE`.
 
 ## Known differences from SQLite
 The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 155 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
+- Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
+  on expressions answer an error; `ON CONFLICT (columns) DO ...` applies to a conflict on any
+  unique key, not only the one named; `sqlite_schema.sql` of an index is regenerated from the
+  catalog.
 - A column has one type: the affinity's. SQLite's columns may hold any storage class, so a
   `NUMERIC` column given `7` keeps the integer `7` where EggDB keeps the real `7.0`, and an
   `INTEGER` column given `'abc'` keeps the text where EggDB answers `datatype mismatch`.
@@ -596,6 +692,8 @@ And more, not in the suite yet:
 ## Known differences from Oracle
 The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 164 cases from Oracle's SQL
 Language Reference, never Oracle's software) marks these as differing until they are fixed:
+- `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
+  primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
 - `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`,
   and `FETCH ... PERCENT` and `WITH TIES`.
 - `LISTAGG`, `MINUS` and the other set operators, and `MERGE`.
@@ -622,13 +720,12 @@ And more, not in the suite yet:
   removed outside quotes, close to SQL*Plus's headings; `SELECT *` from `USER_TABLES` shows the
   three columns above, not Oracle's fifty.
 - Not supported yet: subqueries and views, `CONNECT BY`, outer joins with `(+)`, `RIGHT` and
-  `FULL` joins, `ALTER TABLE`, indexes, `UNIQUE`, `CHECK` and foreign keys, PL/SQL (`BEGIN ...
+  `FULL` joins, `ALTER TABLE`, `CHECK` and foreign keys, PL/SQL (`BEGIN ...
   END`, procedures, packages), `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms,
   database links, `ROWID`, the date, regular-expression, analytic and XML functions, `NLS_`
   settings, and schemas other than the session user's.
 
 ## Next parts (roadmap)
-- Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.
 - The `numeric`, `timestamp` and `json`/`jsonb` types, and `serial`/identity columns.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.

@@ -65,6 +65,15 @@ fn create_statement(table: &TableSchema) -> String {
             .collect();
         lines.push(format!("  PRIMARY KEY ({})", key.join(",")));
     }
+    for index in &table.indexes {
+        let columns: Vec<String> = index.columns.iter().map(|name| backticked(name)).collect();
+        lines.push(format!(
+            "  {}KEY {} ({})",
+            if index.unique { "UNIQUE " } else { "" },
+            backticked(&index.name),
+            columns.join(",")
+        ));
+    }
     format!(
         "CREATE TABLE {} (\n{}\n) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
         backticked(&table.name),
@@ -103,6 +112,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             MySqlStatement::ShowCreateTable(_) => {
                 Some(vec![text_column("Table"), text_column("Create Table")])
             }
+            MySqlStatement::ShowIndex(_) => Some(index_columns()),
             MySqlStatement::ShowVariables { .. } | MySqlStatement::ShowStatus => {
                 Some(vec![text_column("Variable_name"), text_column("Value")])
             }
@@ -157,11 +167,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     if !matches_pattern(&column.name, like.as_deref())? {
                         continue;
                     }
-                    let key = if schema.primary_key.contains(&column.name) {
-                        "PRI"
-                    } else {
-                        ""
-                    };
+                    let key = column_key(&schema, &column.name);
                     rows.push(vec![
                         Value::Text(column.name.clone()),
                         Value::Text(mysql_type_name(column.sql_type)),
@@ -182,6 +188,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     ]);
                 }
                 Ok(rows_result(columns_columns(), rows))
+            }
+            MySqlStatement::ShowIndex(table) => {
+                let schema = self.table_schema(table)?;
+                Ok(rows_result(index_columns(), index_rows(&schema)))
             }
             MySqlStatement::ShowCreateTable(table) => {
                 let schema = self.table_schema(table)?;
@@ -328,6 +338,93 @@ fn unquoted(default: &str) -> String {
         .strip_prefix('\'')
         .and_then(|rest| rest.strip_suffix('\''))
         .map_or_else(|| default.to_owned(), |inner| inner.replace("''", "'"))
+}
+
+fn column_key(table: &TableSchema, column: &str) -> &'static str {
+    if table.primary_key.iter().any(|name| name == column) {
+        return "PRI";
+    }
+    let leading = |unique: bool| {
+        table.indexes.iter().any(|index| {
+            index.columns.first().is_some_and(|first| first == column)
+                && (!unique || index.unique && index.columns.len() == 1)
+        })
+    };
+    if leading(true) {
+        "UNI"
+    } else if leading(false) {
+        "MUL"
+    } else {
+        ""
+    }
+}
+
+fn index_columns() -> Vec<OutputColumn> {
+    [
+        ("Table", false),
+        ("Non_unique", true),
+        ("Key_name", false),
+        ("Seq_in_index", true),
+        ("Column_name", false),
+        ("Collation", false),
+        ("Cardinality", true),
+        ("Sub_part", true),
+        ("Packed", false),
+        ("Null", false),
+        ("Index_type", false),
+        ("Comment", false),
+        ("Index_comment", false),
+        ("Visible", false),
+        ("Expression", false),
+    ]
+    .into_iter()
+    .map(|(name, number)| {
+        if number {
+            number_column(name)
+        } else {
+            text_column(name)
+        }
+    })
+    .collect()
+}
+
+fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
+    let primary = (!table.primary_key.is_empty()).then_some(("PRIMARY", true, &table.primary_key));
+    let keys = primary.into_iter().chain(
+        table
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.unique, &index.columns)),
+    );
+    let mut rows = Vec::new();
+    for (name, unique, columns) in keys {
+        for (position, column) in columns.iter().enumerate() {
+            let nullable = table
+                .columns
+                .iter()
+                .find(|known| &known.name == column)
+                .is_some_and(|known| !known.not_null);
+            let text = |text: &str| Value::Text(text.to_owned());
+            rows.push(vec![
+                text(&table.name),
+                Value::BigInt(i64::from(!unique)),
+                text(name),
+                Value::BigInt(position as i64 + 1),
+                text(column),
+                text("A"),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                text(if nullable { "YES" } else { "" }),
+                text("BTREE"),
+                text(""),
+                text(""),
+                text("YES"),
+                Value::Null,
+            ]);
+        }
+    }
+    rows
 }
 
 fn columns_columns() -> Vec<OutputColumn> {

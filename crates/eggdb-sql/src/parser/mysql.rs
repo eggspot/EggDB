@@ -1,7 +1,7 @@
 use super::{Level, Parser};
 use crate::ast::{
-    AssignedValue, Assignment, BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal,
-    MySqlStatement, Name, OnDuplicate, Statement, UnaryOperator, VariableTarget,
+    AssignedValue, Assignment, BinaryOperator, ColumnDefinition, Expr, ExprKind, IndexSpec,
+    Literal, MySqlStatement, Name, OnDuplicate, Statement, UnaryOperator, VariableTarget,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -183,7 +183,11 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.describe()?
             }
-            "explain" if !self.is_word_at(1, "select") => {
+            "explain"
+                if !self.is_word_at(1, "select")
+                    && !self.is_word_at(1, "update")
+                    && !self.is_word_at(1, "delete") =>
+            {
                 self.at += 1;
                 self.describe()?
             }
@@ -271,6 +275,13 @@ impl<'t> Parser<'t> {
                 full,
                 like: self.like_pattern()?,
             }
+        } else if self.take_word("index") || self.take_word("indexes") || self.take_word("keys") {
+            if !(self.take_word("from") || self.take_word("in")) {
+                return Err(self.unexpected());
+            }
+            let table = self.table_name()?;
+            self.skip_database_qualifier()?;
+            MySqlStatement::ShowIndex(table)
         } else if self.is_word("create") && self.is_word_at(1, "table") {
             self.at += 2;
             MySqlStatement::ShowCreateTable(self.table_name()?)
@@ -568,8 +579,9 @@ impl<'t> Parser<'t> {
         } else if self.is_word("key") {
             self.at += 1;
             column.primary_key = true;
-        } else if self.is_word("unique") {
-            return Err(self.not_supported("UNIQUE columns (unique indexes come with item 19c)"));
+        } else if self.take_word("unique") {
+            self.take_word("key");
+            column.unique = Some(None);
         } else if self.is_word("on") && self.is_word_at(1, "update") {
             return Err(self.not_supported("ON UPDATE"));
         } else if self.is_word("default") {
@@ -586,33 +598,29 @@ impl<'t> Parser<'t> {
         Ok(true)
     }
 
-    pub(super) fn mysql_index_entry(&mut self) -> SqlResult<bool> {
+    pub(super) fn mysql_index_entry(&mut self) -> SqlResult<Option<IndexSpec>> {
         if !(self.is_word("key") || self.is_word("index")) {
             if self.is_word("fulltext") || self.is_word("spatial") {
                 return Err(self.not_supported("FULLTEXT and SPATIAL indexes"));
             }
-            return Ok(false);
+            return Ok(None);
         }
+        let position = self.position();
         self.at += 1;
-        if self.peek_kind() != &TokenKind::LeftParen {
-            self.name()?;
-        }
-        self.index_columns()?;
+        let name = if self.peek_kind() != &TokenKind::LeftParen && !self.is_word("using") {
+            Some(self.name()?)
+        } else {
+            None
+        };
         self.index_options()?;
-        Ok(true)
-    }
-
-    fn index_columns(&mut self) -> SqlResult<()> {
-        self.expect(&TokenKind::LeftParen)?;
-        loop {
-            self.name()?;
-            self.optional_width()?;
-            let _ = self.take_word("asc") || self.take_word("desc");
-            if !self.take(&TokenKind::Comma) {
-                break;
-            }
-        }
-        self.expect(&TokenKind::RightParen)
+        let columns = self.index_column_list(false)?;
+        self.index_options()?;
+        Ok(Some(IndexSpec {
+            name,
+            unique: false,
+            columns,
+            position,
+        }))
     }
 
     fn index_options(&mut self) -> SqlResult<()> {

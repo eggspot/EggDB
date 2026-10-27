@@ -322,10 +322,7 @@ impl<'t> Parser<'t> {
                 Statement::Begin { read_only: false }
             }
             "replace" if self.is_word_at(1, "into") => self.insert()?,
-            "create" if self.is_word_at(1, "index") || self.is_word_at(1, "unique") => {
-                return Err(self.not_supported("CREATE INDEX"));
-            }
-            "attach" | "detach" | "vacuum" | "reindex" | "savepoint" | "release" => {
+            "attach" | "detach" | "vacuum" | "reindex" | "savepoint" | "release" | "analyze" => {
                 return Err(self.not_supported(&word.to_ascii_uppercase()));
             }
             _ => return Ok(None),
@@ -460,6 +457,7 @@ impl<'t> Parser<'t> {
             primary_key: false,
             default: None,
             auto_increment: false,
+            unique: None,
         };
         let mut autoincrement = None;
         loop {
@@ -502,6 +500,9 @@ impl<'t> Parser<'t> {
                     _ => expr,
                 };
                 column.default = Some((expr, source));
+            } else if self.take_word("unique") {
+                self.sqlite_conflict_clause()?;
+                column.unique = Some(None);
             } else if self.take_word("references") {
                 self.foreign_key_clause()?;
             } else if self.is_word("collate") {
@@ -510,12 +511,12 @@ impl<'t> Parser<'t> {
                 if !collation.eq_ignore_ascii_case("binary") {
                     return Err(self.not_supported("COLLATE other than BINARY"));
                 }
-            } else if ["unique", "check", "generated", "as"]
+            } else if ["check", "generated", "as"]
                 .iter()
                 .any(|word| self.is_word(word))
             {
                 return Err(self.not_supported(
-                    "a column constraint other than PRIMARY KEY, NOT NULL, DEFAULT and REFERENCES",
+                    "a column constraint other than PRIMARY KEY, UNIQUE, NOT NULL, DEFAULT and REFERENCES",
                 ));
             } else {
                 break;

@@ -14,11 +14,13 @@ pub(crate) struct MemoryStore {
     committed: RefCell<Rc<Map>>,
     commits: Cell<u64>,
     writing: Cell<bool>,
+    reads: Rc<Cell<u64>>,
 }
 
 pub(crate) struct MemoryRead {
     map: Rc<Map>,
     version: u64,
+    reads: Rc<Cell<u64>>,
 }
 
 pub(crate) struct MemoryWrite<'s> {
@@ -27,6 +29,7 @@ pub(crate) struct MemoryWrite<'s> {
 }
 
 fn scan_map(
+    reads: &Cell<u64>,
     map: &Map,
     start: &[u8],
     end: &[u8],
@@ -42,6 +45,7 @@ fn scan_map(
         ScanDirection::Backward => Box::new(range.rev()),
     };
     for (key, value) in entries {
+        reads.set(reads.get() + 1);
         if !visit(key, value)? {
             break;
         }
@@ -53,10 +57,20 @@ impl MemoryStore {
     pub(crate) fn snapshot(&self) -> Map {
         self.committed.borrow().as_ref().clone()
     }
+
+    pub(crate) fn entries_read(&self) -> u64 {
+        self.reads.get()
+    }
+
+    pub(crate) fn restore(&self, map: Map) {
+        *self.committed.borrow_mut() = Rc::new(map);
+        self.commits.set(self.commits.get() + 1);
+    }
 }
 
 impl KeyValueRead for MemoryRead {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.reads.set(self.reads.get() + 1);
         Ok(self.map.get(key).cloned())
     }
 
@@ -71,12 +85,13 @@ impl KeyValueRead for MemoryRead {
         direction: ScanDirection,
         visit: &mut EntryVisitor<'_>,
     ) -> SqlResult<()> {
-        scan_map(&self.map, start, end, direction, visit)
+        scan_map(&self.reads, &self.map, start, end, direction, visit)
     }
 }
 
 impl KeyValueRead for MemoryWrite<'_> {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.store.reads.set(self.store.reads.get() + 1);
         Ok(self.map.get(key).cloned())
     }
 
@@ -87,7 +102,7 @@ impl KeyValueRead for MemoryWrite<'_> {
         direction: ScanDirection,
         visit: &mut EntryVisitor<'_>,
     ) -> SqlResult<()> {
-        scan_map(&self.map, start, end, direction, visit)
+        scan_map(&self.store.reads, &self.map, start, end, direction, visit)
     }
 }
 
@@ -126,6 +141,7 @@ impl KeyValueStore for MemoryStore {
         Ok(MemoryRead {
             map: Rc::clone(&self.committed.borrow()),
             version: self.commits.get(),
+            reads: Rc::clone(&self.reads),
         })
     }
 

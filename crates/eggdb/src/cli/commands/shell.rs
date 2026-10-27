@@ -589,9 +589,17 @@ impl<'s> Shell<'s> {
                 found
             }
         };
+        let dialect = self.sql.dialect();
         let text: String = chosen
             .iter()
-            .map(|table| format!("{}\n", table.create_statement_in(self.sql.dialect())))
+            .map(|table| {
+                let mut text = format!("{}\n", table.create_statement_in(dialect));
+                for index in &table.indexes {
+                    text.push_str(&index.create_statement_in(&table.name, dialect));
+                    text.push('\n');
+                }
+                text
+            })
             .collect();
         self.print(console, &text);
         Step::Continue(Exit::Done)

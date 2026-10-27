@@ -442,6 +442,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),
             Statement::MySql(statement) => self.describe_mysql(statement),
             Statement::Pragma(pragma) => Ok(self.pragma_columns(pragma)),
+            Statement::Explain(explain) => {
+                Ok(Some(crate::explain::columns(explain.style, self.dialect)))
+            }
             _ => Ok(None),
         };
         let columns = columns.map(|columns| {
@@ -494,6 +497,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// block, with the block's own changes).
     pub fn tables(&mut self) -> SqlResult<Vec<crate::schema::TableSchema>> {
         self.read(|reader, _| crate::schema::read_tables(reader))
+    }
+
+    /// Checks every table's secondary indexes against its rows, as this session sees them:
+    /// each row has exactly its entries, no entry is left without a row, every entry decodes,
+    /// and a unique index holds no value twice. A disagreement fails with SQLSTATE `XX001`
+    /// naming the index; rebuilding it (`DROP INDEX` then `CREATE INDEX`) repairs it.
+    pub fn check_indexes(&mut self) -> SqlResult<crate::indexes::IndexCheck> {
+        self.read(|reader, _| crate::indexes::check_indexes(reader))
     }
 
     /// Whether a `BEGIN` block is open, failed or not.
@@ -709,9 +720,29 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Ok(QueryResult::command("RESET"))
             }
             Statement::Show { name } => self.show(name.as_deref()),
-            Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
-                execute::create_table(writer, tables, create)
-            }),
+            Statement::CreateTable(create) => {
+                let dialect = self.dialect;
+                self.write("CREATE TABLE", |writer, tables| {
+                    execute::create_table(writer, tables, create, dialect)
+                })
+            }
+            Statement::CreateIndex(create) => {
+                let dialect = self.dialect;
+                self.write("CREATE INDEX", |writer, tables| {
+                    crate::indexes::create_index(writer, tables, create, dialect)
+                })
+            }
+            Statement::DropIndex(drop) => {
+                let dialect = self.dialect;
+                self.write("DROP INDEX", |writer, tables| {
+                    crate::indexes::drop_index(writer, tables, drop, dialect)
+                })
+            }
+            Statement::Explain(explain) => {
+                let dialect = self.dialect;
+                self.read(|reader, tables| execute::explain(reader, tables, &explain.statement))
+                    .map(|query| crate::explain::render(&query, explain.style, dialect))
+            }
             Statement::DropTable { names, if_exists } => self
                 .write("DROP TABLE", |writer, tables| {
                     execute::drop_tables(writer, tables, names, *if_exists)
@@ -753,7 +784,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         (self.mysql() || self.oracle())
             && matches!(
                 statement,
-                Statement::CreateTable(_) | Statement::DropTable { .. } | Statement::Truncate(_)
+                Statement::CreateTable(_)
+                    | Statement::DropTable { .. }
+                    | Statement::Truncate(_)
+                    | Statement::CreateIndex(_)
+                    | Statement::DropIndex(_)
             )
     }
 
@@ -843,7 +878,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         if keep_open
                             && !matches!(
                                 command,
-                                "CREATE TABLE" | "DROP TABLE" | "TRUNCATE TABLE"
+                                "CREATE TABLE"
+                                    | "DROP TABLE"
+                                    | "TRUNCATE TABLE"
+                                    | "CREATE INDEX"
+                                    | "DROP INDEX"
                             ) =>
                     {
                         self.block = Block::Writing(writer);

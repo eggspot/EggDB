@@ -169,6 +169,7 @@ struct Report {
     position: Option<usize>,
     vendor_code: Option<u16>,
     vendor: Option<crate::Dialect>,
+    table: Option<String>,
 }
 
 /// The result of SQL operations.
@@ -186,6 +187,7 @@ impl SqlError {
                 position: None,
                 vendor_code: None,
                 vendor: None,
+                table: None,
             }),
         }
     }
@@ -222,6 +224,15 @@ impl SqlError {
             self.report.position = Some(position);
         }
         self
+    }
+
+    pub(crate) fn with_table(mut self, table: &str) -> Self {
+        self.report.table = Some(table.to_owned());
+        self
+    }
+
+    pub(crate) fn table(&self) -> Option<&str> {
+        self.report.table.as_deref()
     }
 
     /// The same error with a MySQL error number, such as `1146`.

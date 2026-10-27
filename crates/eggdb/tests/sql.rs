@@ -224,6 +224,69 @@ fn a_killed_process_leaves_the_whole_transaction_or_none_of_it() {
 }
 
 #[test]
+fn a_killed_process_never_leaves_an_index_that_disagrees_with_its_rows() {
+    let mut script = String::from(
+        "CREATE TABLE items (id bigint PRIMARY KEY, code text UNIQUE, grp integer);\nCREATE INDEX items_grp ON items (grp);\n",
+    );
+    for id in 0..3_000 {
+        if id % 150 == 0 {
+            script.push_str("BEGIN;\n");
+        }
+        script.push_str(&format!(
+            "INSERT INTO items VALUES ({id}, 'code {id}', {});\n",
+            id % 17
+        ));
+        if id % 7 == 3 {
+            script.push_str(&format!(
+                "UPDATE items SET grp = grp + 1, code = 'moved {id}' WHERE id = {};\n",
+                id - 2
+            ));
+        }
+        if id % 11 == 5 {
+            script.push_str(&format!("DELETE FROM items WHERE id = {};\n", id - 4));
+        }
+        if id % 150 == 149 {
+            script.push_str("COMMIT;\n");
+        }
+    }
+    let mut entries_seen = 0;
+    for delay_ms in [0u64, 120, 300, 600, 1_000] {
+        let file = TempPath::new("sql-index-killed");
+        Database::open(file.path()).unwrap().close().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .arg("sql")
+            .arg(file.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let bytes = script.clone().into_bytes();
+        let writer = std::thread::spawn(move || {
+            let _ = input.write_all(&bytes);
+        });
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        let db = Database::open(file.path()).unwrap();
+        let store = db.sql_store();
+        let mut session = store.session(eggdb::sql::Dialect::PostgreSql);
+        match session.check_indexes() {
+            Ok(check) => entries_seen = entries_seen.max(check.entries),
+            Err(error) => panic!("after {delay_ms} ms: {error}"),
+        }
+        drop(session);
+        assert_eq!(db.check().unwrap().leaked_pages, 0);
+    }
+    assert!(
+        entries_seen > 0,
+        "no run committed a row before it was killed"
+    );
+}
+
+#[test]
 fn the_mysql_dialect_reads_mysql_and_reports_mysql_errors() {
     let file = TempPath::new("sql-mysql");
     let created = eggdb_sql(

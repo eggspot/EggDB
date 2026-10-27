@@ -3,6 +3,7 @@ use crate::ast::{
     BinaryOperator, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource, InsertValue, Name,
     OnDuplicate, OrderItem, Select, SelectItem, TableReference, Update,
 };
+use crate::dialect::Dialect;
 use crate::encoding::{
     Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, decode_row_into,
     encode_key_value, encode_meta, encode_row, encode_row_into, meta_key, prefix_end, rows_prefix,
@@ -13,11 +14,13 @@ use crate::eval::{
     Evaluator, Scope, Source, check_columns, children_mut, compare_truth, output_name,
     reject_aggregates,
 };
+use crate::indexes;
 use crate::join::{self, JoinedRows, RowCountHints};
 use crate::lexer::tokenize;
 use crate::memory::WorkMemory;
 use crate::mysql_errors::Warning;
 use crate::parser::{LiteralRows, LiteralToken, Parser};
+use crate::plan::{self, Access, OrderRequest, Path};
 use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
@@ -51,7 +54,7 @@ pub(crate) struct TableCache {
 }
 
 impl TableCache {
-    fn table(
+    pub(crate) fn table(
         &mut self,
         reader: &dyn KeyValueRead,
         name: &str,
@@ -87,7 +90,7 @@ impl TableCache {
         Ok(Some(table))
     }
 
-    fn require(
+    pub(crate) fn require(
         &mut self,
         reader: &dyn KeyValueRead,
         name: &Name,
@@ -109,6 +112,7 @@ pub(crate) fn create_table(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     create: &CreateTable,
+    dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     if create.columns.len() > MAX_COLUMNS {
         return Err(SqlError::new(
@@ -195,15 +199,41 @@ pub(crate) fn create_table(
             "the database has used every table identifier",
         )
     })?;
-    let table = TableDefinition {
+    let mut table = TableDefinition {
         id: next_id,
         name: create.name.text.clone(),
         columns,
         primary_key,
+        indexes: Vec::new(),
     };
+    let specs = unique_columns(create).chain(create.indexes.iter().cloned());
+    let mut others = None;
+    for spec in specs {
+        if others.is_none() {
+            others = Some(indexes::every_table(writer)?);
+        }
+        indexes::define_index(
+            others.as_deref().unwrap_or(&[]),
+            &mut table,
+            &spec,
+            dialect,
+            spec.unique,
+        )?;
+    }
     writer.put(&meta_key(), &encode_meta(following))?;
     writer.put(&table_key(&table.name), &table.encode())?;
     Ok(QueryResult::command("CREATE TABLE"))
+}
+
+fn unique_columns(create: &CreateTable) -> impl Iterator<Item = crate::ast::IndexSpec> + '_ {
+    create.columns.iter().filter_map(|column| {
+        column.unique.as_ref().map(|name| crate::ast::IndexSpec {
+            name: name.clone(),
+            unique: true,
+            columns: vec![column.name.clone()],
+            position: column.name.position,
+        })
+    })
 }
 
 fn check_auto_increment(
@@ -293,6 +323,7 @@ pub(crate) fn drop_tables(
                 writer.delete(key)?;
             }
         }
+        indexes::delete_every_index_entry(writer, &table)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)
@@ -434,6 +465,7 @@ fn duplicate_key(table: &TableDefinition, row: &[Value]) -> SqlError {
         names.join(", "),
         values.join(", ")
     ))
+    .with_table(&table.name)
 }
 
 fn target_columns(table: &TableDefinition, names: &[Name]) -> SqlResult<Vec<usize>> {
@@ -529,26 +561,31 @@ pub(crate) fn insert(
                 None => default_value(column)?,
             });
         }
-        if stored.try_insert(writer, &mut row)? {
-            affected += 1;
-        } else {
-            match (&insert.on_duplicate, &updates) {
+        match stored.try_insert(writer, &mut row)? {
+            None => affected += 1,
+            Some(conflict) => match (&insert.on_duplicate, &updates) {
                 (OnDuplicate::Ignore, _) => warnings.push(Warning {
                     level: "Warning",
                     code: 1062,
-                    message: crate::mysql_errors::translate(duplicate_key(&table, &row), "", "")
+                    message: crate::mysql_errors::translate(conflict.error(&table, &row), "", "")
                         .message()
                         .to_owned(),
                 }),
                 (OnDuplicate::Replace, _) => {
-                    writer.put(&stored.key, &stored.encoded)?;
-                    affected += 2;
+                    let mut conflict = Some(conflict);
+                    while let Some(found) = conflict {
+                        delete_row(writer, &table, &found.row_key)?;
+                        affected += 1;
+                        conflict = stored.try_insert(writer, &mut row)?;
+                    }
+                    affected += 1;
                 }
                 (OnDuplicate::Update(_), Some(updates)) => {
-                    affected += stored.update_existing(writer, scope, updates, &row)?;
+                    affected +=
+                        stored.update_existing(writer, scope, updates, &row, &conflict.row_key)?;
                 }
-                _ => return Err(duplicate_key(&table, &row)),
-            }
+                _ => return Err(conflict.error(&table, &row)),
+            },
         }
         if let Some(projection) = &returning {
             result_rows.push(projection.project(&row)?);
@@ -605,6 +642,53 @@ fn point_inserted_values(expr: &mut Expr, table: &TableDefinition) -> SqlResult<
         point_inserted_values(child, table)?;
     }
     Ok(())
+}
+
+struct Conflict {
+    index: Option<usize>,
+    row_key: Vec<u8>,
+}
+
+impl Conflict {
+    fn error(&self, table: &TableDefinition, row: &[Value]) -> SqlError {
+        match self.index {
+            None => duplicate_key(table, row),
+            Some(position) => indexes::unique_violation(table, &table.indexes[position], row),
+        }
+    }
+}
+
+fn delete_row(
+    writer: &mut dyn KeyValueWrite,
+    table: &TableDefinition,
+    row_key: &[u8],
+) -> SqlResult<()> {
+    if !table.indexes.is_empty() {
+        let bytes = writer
+            .get(row_key)?
+            .ok_or_else(|| crate::encoding::corrupt("row"))?;
+        let row = decode_row(&bytes, &table.columns)?;
+        indexes::delete_entries(writer, table, &row, row_key)?;
+    }
+    writer.delete(row_key)?;
+    Ok(())
+}
+
+fn put_row_checked(
+    writer: &mut dyn KeyValueWrite,
+    table: &TableDefinition,
+    row: &[Value],
+    row_key: &[u8],
+) -> SqlResult<()> {
+    if let Some((position, _)) = indexes::first_unique_conflict(writer, table, row, row_key)? {
+        return Err(indexes::unique_violation(
+            table,
+            &table.indexes[position],
+            row,
+        ));
+    }
+    writer.put(row_key, &encode_row(row))?;
+    indexes::put_entries(writer, table, row, row_key)
 }
 
 struct StoredRows<'a> {
@@ -700,10 +784,11 @@ impl<'a> StoredRows<'a> {
         scope: Scope<'_>,
         updates: &[(usize, Expr)],
         inserted: &[Value],
+        existing_key: &[u8],
     ) -> SqlResult<usize> {
         let table = self.table;
         let existing_bytes = writer
-            .get(&self.key)?
+            .get(existing_key)?
             .ok_or_else(|| crate::encoding::corrupt("row"))?;
         let existing = decode_row(&existing_bytes, &table.columns)?;
         let mut combined = existing.clone();
@@ -723,12 +808,27 @@ impl<'a> StoredRows<'a> {
             return Ok(0);
         }
         check_not_null(table, &combined)?;
-        let new_key = row_key(table, &combined);
-        let encoded = encode_row(&combined);
-        if new_key == self.key {
-            writer.put(&self.key, &encoded)?;
+        let new_key = if table.primary_key.is_empty() {
+            existing_key.to_vec()
         } else {
-            writer.delete(&self.key)?;
+            row_key(table, &combined)
+        };
+        if !table.indexes.is_empty() {
+            indexes::delete_entries(writer, table, &existing, existing_key)?;
+            if new_key != existing_key {
+                writer.delete(existing_key)?;
+                if writer.get(&new_key)?.is_some() {
+                    return Err(duplicate_key(table, &combined));
+                }
+            }
+            put_row_checked(writer, table, &combined, &new_key)?;
+            return Ok(2);
+        }
+        let encoded = encode_row(&combined);
+        if new_key == existing_key {
+            writer.put(existing_key, &encoded)?;
+        } else {
+            writer.delete(existing_key)?;
             if !writer.put_if_absent(&new_key, &encoded)? {
                 return Err(duplicate_key(table, &combined));
             }
@@ -737,14 +837,17 @@ impl<'a> StoredRows<'a> {
     }
 
     fn insert(&mut self, writer: &mut dyn KeyValueWrite, row: &mut [Value]) -> SqlResult<()> {
-        if self.try_insert(writer, row)? {
-            Ok(())
-        } else {
-            Err(duplicate_key(self.table, row))
+        match self.try_insert(writer, row)? {
+            None => Ok(()),
+            Some(conflict) => Err(conflict.error(self.table, row)),
         }
     }
 
-    fn try_insert(&mut self, writer: &mut dyn KeyValueWrite, row: &mut [Value]) -> SqlResult<bool> {
+    fn try_insert(
+        &mut self,
+        writer: &mut dyn KeyValueWrite,
+        row: &mut [Value],
+    ) -> SqlResult<Option<Conflict>> {
         let table = self.table;
         if self.auto_increment.is_some() {
             self.fill_auto_increment(writer, row)?;
@@ -763,18 +866,53 @@ impl<'a> StoredRows<'a> {
                 .checked_add(1)
                 .map_or(NextRowId::Exhausted, NextRowId::Next);
             self.key.extend_from_slice(&id.to_be_bytes());
+            if let Some(conflict) = self.unique_conflict(writer, row)? {
+                return Ok(Some(conflict));
+            }
             writer.put(&self.key, &self.encoded)?;
+            indexes::put_entries(writer, table, row, &self.key)?;
             self.last_rowid = i64::try_from(id).ok();
-            return Ok(true);
+            return Ok(None);
         }
         for &index in &table.primary_key {
             encode_key_value(&mut self.key, &row[index]);
         }
-        let inserted = writer.put_if_absent(&self.key, &self.encoded)?;
-        if inserted && let Some(index) = self.auto_increment {
+        let inserted = if table.indexes.is_empty() {
+            writer.put_if_absent(&self.key, &self.encoded)?
+        } else if writer.get(&self.key)?.is_some() {
+            false
+        } else if let Some(conflict) = self.unique_conflict(writer, row)? {
+            return Ok(Some(conflict));
+        } else {
+            writer.put(&self.key, &self.encoded)?;
+            indexes::put_entries(writer, table, row, &self.key)?;
+            true
+        };
+        if !inserted {
+            return Ok(Some(Conflict {
+                index: None,
+                row_key: self.key.clone(),
+            }));
+        }
+        if let Some(index) = self.auto_increment {
             self.last_rowid = row[index].as_integer();
         }
-        Ok(inserted)
+        Ok(None)
+    }
+
+    fn unique_conflict(
+        &self,
+        reader: &dyn KeyValueRead,
+        row: &[Value],
+    ) -> SqlResult<Option<Conflict>> {
+        Ok(
+            indexes::first_unique_conflict(reader, self.table, row, &self.key)?.map(
+                |(position, row_key)| Conflict {
+                    index: Some(position),
+                    row_key,
+                },
+            ),
+        )
     }
 }
 
@@ -1103,24 +1241,39 @@ fn for_each_matching_row(
     table: &TableDefinition,
     scope: Scope<'_>,
     filter: Option<&Expr>,
+    access: &Access,
     visit: &mut RowVisitor<'_>,
 ) -> SqlResult<()> {
-    if let Some(filter) = filter
-        && let Some(key) = point_key(table, scope, filter)
-    {
+    if let Path::Point(key) = &access.path {
         let mut found = None;
-        reader.get_with(&key, &mut |bytes| {
+        reader.get_with(key, &mut |bytes| {
             found = Some(decode_row(bytes, &table.columns)?);
             Ok(())
         })?;
         if let Some(row) = found {
             let filter_is_the_key = table.primary_key.len() == 1
-                && matches!(filter.kind, ExprKind::Binary(BinaryOperator::Equal, ..));
-            if filter_is_the_key || filter_matches(scope, Some(filter), &row)? {
-                visit(&key, row)?;
+                && filter.is_some_and(|filter| {
+                    matches!(filter.kind, ExprKind::Binary(BinaryOperator::Equal, ..))
+                });
+            if filter_is_the_key || filter_matches(scope, filter, &row)? {
+                visit(key, row)?;
             }
         }
         return Ok(());
+    }
+    if let Path::Ranges {
+        key,
+        ranges,
+        backward,
+    } = &access.path
+    {
+        return plan::read_ranges(reader, table, *key, ranges, *backward, &mut |key, row| {
+            if filter_matches(scope, filter, &row)? {
+                visit(key, row)
+            } else {
+                Ok(true)
+            }
+        });
     }
     let prefix = rows_prefix(table.id);
     reader.scan(
@@ -1137,14 +1290,32 @@ fn for_each_matching_row(
     )
 }
 
+fn planned_access(
+    table: &TableDefinition,
+    scope: Scope<'_>,
+    filter: Option<&Expr>,
+    order: Option<&OrderRequest>,
+) -> Access {
+    if let Some(key) = filter.and_then(|filter| point_key(table, scope, filter)) {
+        return Access::point(key);
+    }
+    match (filter, order) {
+        (None, None) => Access::scan(),
+        _ => plan::plan(table, scope, filter, order),
+    }
+}
+
 fn matching_rows(
     reader: &dyn KeyValueRead,
     table: &TableDefinition,
     scope: Scope<'_>,
     filter: Option<&Expr>,
 ) -> SqlResult<Vec<(Vec<u8>, Vec<Value>)>> {
+    let access = planned_access(table, scope, filter, None);
+    let mut memory = WorkMemory::new();
     let mut rows = Vec::new();
-    for_each_matching_row(reader, table, scope, filter, &mut |key, row| {
+    for_each_matching_row(reader, table, scope, filter, &access, &mut |key, row| {
+        memory.charge(WorkMemory::row_bytes(&row) + key.len())?;
         rows.push((key.to_vec(), row));
         Ok(true)
     })?;
@@ -1262,6 +1433,70 @@ pub(crate) fn select(
     select: &Select,
     columns_only: bool,
 ) -> SqlResult<QueryResult> {
+    select_or_explain(reader, tables, select, columns_only, None)
+}
+
+pub(crate) struct ExplainedSource {
+    pub(crate) table: Arc<TableDefinition>,
+    pub(crate) label: String,
+    pub(crate) access: Access,
+    pub(crate) join: Option<join::JoinMethod>,
+}
+
+#[derive(Default)]
+pub(crate) struct ExplainedQuery {
+    pub(crate) sources: Vec<ExplainedSource>,
+    pub(crate) sorted: bool,
+    pub(crate) limited: bool,
+    pub(crate) filtered: bool,
+}
+
+pub(crate) fn explain(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    statement: &crate::ast::Statement,
+) -> SqlResult<ExplainedQuery> {
+    let mut out = ExplainedQuery::default();
+    let (reference, filter) = match statement {
+        crate::ast::Statement::Select(query) => {
+            select_or_explain(reader, tables, query, false, Some(&mut out))?;
+            return Ok(out);
+        }
+        crate::ast::Statement::Update(update) => (&update.table, update.filter.as_ref()),
+        crate::ast::Statement::Delete(delete) => (&delete.table, delete.filter.as_ref()),
+        _ => {
+            return Err(SqlError::not_supported(
+                "EXPLAIN of a statement other than SELECT, UPDATE or DELETE",
+            ));
+        }
+    };
+    let table = tables.require(reader, &reference.name)?;
+    let scope = scope_of(&table, reference);
+    if let Some(filter) = filter {
+        reject_aggregates(filter, "WHERE")?;
+        check_columns(filter, scope)?;
+    }
+    let access = plan::plan(&table, scope, filter, None);
+    out.filtered = filter.is_some();
+    out.sources.push(ExplainedSource {
+        label: reference
+            .alias
+            .clone()
+            .unwrap_or_else(|| table.name.clone()),
+        table: Arc::clone(&table),
+        access,
+        join: None,
+    });
+    Ok(out)
+}
+
+fn select_or_explain(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    select: &Select,
+    columns_only: bool,
+    explain: Option<&mut ExplainedQuery>,
+) -> SqlResult<QueryResult> {
     let first = match &select.from {
         Some(from) => Some(tables.require(reader, &from.first.name)?),
         None => None,
@@ -1325,6 +1560,51 @@ pub(crate) fn select(
     }
     let limit = row_count(select.limit.as_ref(), "LIMIT")?;
     let offset = row_count(select.offset.as_ref(), "OFFSET")?.unwrap_or(0);
+    if let Some(out) = explain {
+        out.limited = limit.is_some();
+        out.filtered = select.filter.is_some();
+        out.sorted = !sort_keys.is_empty();
+        if let Some(joined) = &joined {
+            let methods = joined.methods();
+            for (position, source) in joined.sources.list.iter().enumerate() {
+                let access = match (position, &select.filter) {
+                    (0, Some(filter))
+                        if point_key(source.table, Scope::One(*source), filter).is_some() =>
+                    {
+                        plan::plan(source.table, Scope::One(*source), Some(filter), None)
+                    }
+                    _ => Access::scan(),
+                };
+                out.sources.push(ExplainedSource {
+                    table: Arc::clone(&definitions[position]),
+                    label: source.label.to_owned(),
+                    access,
+                    join: position
+                        .checked_sub(1)
+                        .and_then(|step| methods.get(step).copied()),
+                });
+            }
+        } else if let (Some(from), Some(table)) = (&select.from, &first) {
+            let order = if grouping.is_none() && select.source_row_limit.is_none() {
+                order_request(select, &sort_keys, &projection, scope, table)
+            } else {
+                None
+            };
+            let access = plan::plan(table, scope, select.filter.as_ref(), order.as_ref());
+            out.sorted &= !(access.ordered && order.is_some());
+            out.sources.push(ExplainedSource {
+                table: Arc::clone(table),
+                label: from
+                    .first
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| table.name.clone()),
+                access,
+                join: None,
+            });
+        }
+        return Ok(QueryResult::command("EXPLAIN"));
+    }
     let window = Window {
         skip: usize::try_from(offset).unwrap_or(usize::MAX),
         take: limit.map_or(usize::MAX, |limit| {
@@ -1337,6 +1617,7 @@ pub(crate) fn select(
         (Some(_), Some(filter)) => Some(aggregate::bind(filter, scope)?),
         _ => None,
     };
+    let mut ordered = false;
     let rows = match (&joined, first.as_deref()) {
         (Some(joined), _) => {
             let first = joined.sources.list[0];
@@ -1354,7 +1635,16 @@ pub(crate) fn select(
                 &mut memory,
             )?)
         }
-        (None, Some(table)) => RowSource::Table(table),
+        (None, Some(table)) => {
+            let order = if grouping.is_none() && select.source_row_limit.is_none() {
+                order_request(select, &sort_keys, &projection, scope, table)
+            } else {
+                None
+            };
+            let access = planned_access(table, scope, select.filter.as_ref(), order.as_ref());
+            ordered = access.ordered && order.is_some();
+            RowSource::Table(table, access)
+        }
         (None, None) => RowSource::Nothing,
     };
     let mut source = SourceRows {
@@ -1390,7 +1680,7 @@ pub(crate) fn select(
             filter: None,
         };
     }
-    let output = if sort_keys.is_empty() {
+    let output = if sort_keys.is_empty() || ordered {
         unsorted_rows(&mut source, &projection, window, &mut memory)?
     } else {
         sorted_rows(
@@ -1404,6 +1694,39 @@ pub(crate) fn select(
     };
     let tag = format!("SELECT {}", output.len());
     Ok(QueryResult::rows(tag, projection.columns, output))
+}
+
+fn order_request(
+    select: &Select,
+    sort_keys: &[SortKey<'_>],
+    projection: &Projection<'_>,
+    scope: Scope<'_>,
+    table: &TableDefinition,
+) -> Option<OrderRequest> {
+    if sort_keys.is_empty() {
+        return None;
+    }
+    let mut columns = Vec::with_capacity(sort_keys.len());
+    for (item, key) in select.order_by.iter().zip(sort_keys) {
+        let column = match key {
+            SortKey::Output(index) => projection.source_column(*index)?,
+            SortKey::Expr(expr) => match &expr.kind {
+                ExprKind::Column { qualifier, name } => scope
+                    .column(qualifier.as_deref(), name, expr.position)
+                    .ok()?,
+                _ => return None,
+            },
+        };
+        let nulls_first = item.nulls_first.unwrap_or(item.descending);
+        if nulls_first != item.descending && !table.columns.get(column)?.not_null {
+            return None;
+        }
+        columns.push((column, item.descending));
+    }
+    Some(OrderRequest {
+        columns,
+        limited: select.limit.is_some(),
+    })
 }
 
 pub(crate) fn first_rows(
@@ -1431,7 +1754,7 @@ struct Window {
 
 enum RowSource<'a> {
     Nothing,
-    Table(&'a TableDefinition),
+    Table(&'a TableDefinition, Access),
     Joined(JoinedRows<'a>),
     Rows(Vec<Vec<Value>>),
 }
@@ -1451,8 +1774,10 @@ impl SourceRows<'_> {
     fn for_each(&mut self, visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()> {
         let (reader, scope, filter) = (self.reader, self.scope, self.filter);
         match &mut self.rows {
-            RowSource::Table(table) => {
-                for_each_matching_row(reader, table, scope, filter, &mut |_, row| visit(row))
+            RowSource::Table(table, access) => {
+                for_each_matching_row(reader, table, scope, filter, access, &mut |_, row| {
+                    visit(row)
+                })
             }
             RowSource::Joined(joined) => joined.for_each(&mut |row| {
                 if filter_matches(scope, filter, row)? {
@@ -1493,9 +1818,7 @@ impl SourceRows<'_> {
                     Ok(true)
                 }
             }),
-            RowSource::Table(table)
-                if filter.is_none_or(|filter| point_key(table, scope, filter).is_none()) =>
-            {
+            RowSource::Table(table, access) if access.path == Path::Scan => {
                 let prefix = rows_prefix(table.id);
                 let mut row = Vec::with_capacity(table.columns.len());
                 reader.scan(
@@ -1702,7 +2025,12 @@ pub(crate) fn update(
     }
     let returning = returning(&update.returning, scope)?;
     let matched = matching_rows(writer, &table, scope, update.filter.as_ref())?;
-    let mut changes = Vec::with_capacity(matched.len());
+    let mut changes: Vec<(Vec<u8>, Vec<u8>, Vec<Value>)> = Vec::with_capacity(matched.len());
+    let mut old_rows = Vec::with_capacity(if table.indexes.is_empty() {
+        0
+    } else {
+        matched.len()
+    });
     for (old_key, old_row) in matched {
         let evaluator = Evaluator {
             scope,
@@ -1718,9 +2046,15 @@ pub(crate) fn update(
         } else {
             row_key(&table, &new_row)
         };
+        if !table.indexes.is_empty() {
+            old_rows.push(old_row);
+        }
         changes.push((old_key, new_key, new_row));
     }
-    for (old_key, new_key, _) in &changes {
+    for (position, (old_key, new_key, _)) in changes.iter().enumerate() {
+        if let Some(old_row) = old_rows.get(position) {
+            indexes::delete_entries(writer, &table, old_row, old_key)?;
+        }
         if old_key != new_key {
             writer.delete(old_key)?;
         }
@@ -1730,7 +2064,11 @@ pub(crate) fn update(
         if old_key != new_key && writer.get(new_key)?.is_some() {
             return Err(duplicate_key(&table, new_row));
         }
-        writer.put(new_key, &encode_row(new_row))?;
+        if table.indexes.is_empty() {
+            writer.put(new_key, &encode_row(new_row))?;
+        } else {
+            put_row_checked(writer, &table, new_row, new_key)?;
+        }
         if let Some(projection) = &returning {
             result_rows.push(projection.project(new_row)?);
         }
@@ -1771,6 +2109,9 @@ pub(crate) fn delete(
     let matched = matching_rows(writer, &table, scope, delete.filter.as_ref())?;
     let mut result_rows = Vec::new();
     for (key, row) in &matched {
+        if !table.indexes.is_empty() {
+            indexes::delete_entries(writer, &table, row, key)?;
+        }
         writer.delete(key)?;
         if let Some(projection) = &returning {
             result_rows.push(projection.project(row)?);

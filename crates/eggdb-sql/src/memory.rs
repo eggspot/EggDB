@@ -39,7 +39,11 @@ impl WorkMemory {
         Ok(())
     }
 
-    pub(crate) fn charge_row(&mut self, row: &[Value]) -> SqlResult<()> {
+    pub(crate) fn release(&mut self, bytes: usize) {
+        self.used = self.used.saturating_sub(bytes);
+    }
+
+    pub(crate) fn row_bytes(row: &[Value]) -> usize {
         let text: usize = row
             .iter()
             .map(|value| match value {
@@ -47,7 +51,11 @@ impl WorkMemory {
                 _ => 0,
             })
             .sum();
-        self.charge(ROW_OVERHEAD + row.len() * VALUE_SIZE + text)
+        ROW_OVERHEAD + row.len() * VALUE_SIZE + text
+    }
+
+    pub(crate) fn charge_row(&mut self, row: &[Value]) -> SqlResult<()> {
+        self.charge(Self::row_bytes(row))
     }
 }
 

@@ -140,6 +140,13 @@ fn text_literal(text: String) -> InsertValue {
     })
 }
 
+fn null_literal() -> InsertValue {
+    InsertValue::Expr(Expr {
+        kind: ExprKind::Literal(Literal::Null),
+        position: 0,
+    })
+}
+
 fn integer_literal(number: i64) -> InsertValue {
     InsertValue::Expr(Expr {
         kind: ExprKind::Literal(Literal::Integer(number)),
@@ -177,6 +184,24 @@ fn table_list_columns() -> Vec<OutputColumn> {
         column("ncol", Some(SqlType::BigInt)),
         column("wr", Some(SqlType::BigInt)),
         column("strict", Some(SqlType::BigInt)),
+    ]
+}
+
+fn index_list_columns() -> Vec<OutputColumn> {
+    vec![
+        column("seq", Some(SqlType::BigInt)),
+        column("name", Some(SqlType::Text)),
+        column("unique", Some(SqlType::BigInt)),
+        column("origin", Some(SqlType::Text)),
+        column("partial", Some(SqlType::BigInt)),
+    ]
+}
+
+fn index_info_columns() -> Vec<OutputColumn> {
+    vec![
+        column("seqno", Some(SqlType::BigInt)),
+        column("cid", Some(SqlType::BigInt)),
+        column("name", Some(SqlType::Text)),
     ]
 }
 
@@ -218,6 +243,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         match pragma.name.as_str() {
             "table_info" if pragma.argument.is_some() => Some(table_info_columns()),
             "table_list" => Some(table_list_columns()),
+            "index_list" if pragma.argument.is_some() => Some(index_list_columns()),
+            "index_info" if pragma.argument.is_some() => Some(index_info_columns()),
             "foreign_keys" | "user_version" | "synchronous" if !pragma.assigned => {
                 Some(vec![column(&pragma.name, Some(SqlType::BigInt))])
             }
@@ -259,6 +286,54 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     None => Vec::new(),
                 };
                 rows_result(table_info_columns(), rows)
+            }
+            ("index_list", Some(table)) => {
+                let table = table.to_lowercase();
+                let tables = self.read(|reader, _| read_tables(reader))?;
+                let rows = tables
+                    .iter()
+                    .filter(|schema| schema.name == table)
+                    .flat_map(|schema| schema.indexes.iter().rev())
+                    .enumerate()
+                    .map(|(seq, index)| {
+                        vec![
+                            Value::BigInt(seq as i64),
+                            Value::Text(index.name.clone()),
+                            Value::BigInt(i64::from(index.unique)),
+                            Value::Text(
+                                if index.name.starts_with("sqlite_autoindex_") {
+                                    "u"
+                                } else {
+                                    "c"
+                                }
+                                .to_owned(),
+                            ),
+                            Value::BigInt(0),
+                        ]
+                    })
+                    .collect();
+                rows_result(index_list_columns(), rows)
+            }
+            ("index_info", Some(name)) => {
+                let tables = self.read(|reader, _| read_tables(reader))?;
+                let mut rows = Vec::new();
+                for schema in &tables {
+                    for index in schema.indexes.iter().filter(|index| index.name == name) {
+                        for (seqno, column) in index.columns.iter().enumerate() {
+                            let cid = schema
+                                .columns
+                                .iter()
+                                .position(|known| &known.name == column)
+                                .map_or(-1, |position| position as i64);
+                            rows.push(vec![
+                                Value::BigInt(seqno as i64),
+                                Value::BigInt(cid),
+                                Value::Text(column.clone()),
+                            ]);
+                        }
+                    }
+                }
+                rows_result(index_info_columns(), rows)
             }
             ("table_list", only) => {
                 let tables = self.read(|reader, _| read_tables(reader))?;
@@ -366,25 +441,48 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     primary_key: false,
                     default: None,
                     auto_increment: false,
+                    unique: None,
                 })
                 .collect(),
             primary_key: None,
+            indexes: Vec::new(),
         };
-        execute::create_table(&mut scratch, &mut cache, &create)?;
+        execute::create_table(
+            &mut scratch,
+            &mut cache,
+            &create,
+            crate::Dialect::PostgreSql,
+        )?;
         if !tables.is_empty() {
-            let rows = tables
-                .iter()
-                .enumerate()
-                .map(|(index, table)| {
-                    vec![
-                        text_literal("table".to_owned()),
+            let mut rootpage = 1;
+            let mut rows = Vec::new();
+            for table in &tables {
+                rootpage += 1;
+                rows.push(vec![
+                    text_literal("table".to_owned()),
+                    text_literal(table.name.clone()),
+                    text_literal(table.name.clone()),
+                    integer_literal(rootpage),
+                    text_literal(create_text(table)),
+                ]);
+                for index in &table.indexes {
+                    rootpage += 1;
+                    let sql = if index.name.starts_with("sqlite_autoindex_") {
+                        null_literal()
+                    } else {
+                        let statement =
+                            index.create_statement_in(&table.name, crate::Dialect::Sqlite);
+                        text_literal(statement.trim_end_matches(';').to_owned())
+                    };
+                    rows.push(vec![
+                        text_literal("index".to_owned()),
+                        text_literal(index.name.clone()),
                         text_literal(table.name.clone()),
-                        text_literal(table.name.clone()),
-                        integer_literal(index as i64 + 2),
-                        text_literal(create_text(table)),
-                    ]
-                })
-                .collect();
+                        integer_literal(rootpage),
+                        sql,
+                    ]);
+                }
+            }
             let insert = Insert {
                 table: TableReference {
                     name: Name {

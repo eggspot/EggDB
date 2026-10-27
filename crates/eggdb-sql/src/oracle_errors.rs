@@ -99,6 +99,10 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
             Some((2260, "table can have only one primary key".to_owned()))
         }
         "42P16" => Some((3001, format!("unimplemented feature: {message}"))),
+        "23505" if message.starts_with("could not create unique index") => Some((
+            1452,
+            "cannot CREATE UNIQUE INDEX; duplicate keys found".to_owned(),
+        )),
         "23505" => Some((1, format!("unique constraint ({user}.{first}) violated"))),
         "23502" if first_word(text) == "update" => Some((
             1407,

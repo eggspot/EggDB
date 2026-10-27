@@ -890,3 +890,94 @@ PRAGMA encoding
 encoding
 UTF-8
 SELECT 1
+
+chapter lang_createindex.html, lang_dropindex.html, eqp.html, pragma.html#pragma_index_list
+ok
+CREATE TABLE pets (id INTEGER PRIMARY KEY, name TEXT UNIQUE, kind TEXT, age INTEGER)
+
+ok
+CREATE INDEX IF NOT EXISTS pets_kind_age ON pets (kind, age)
+
+ok
+CREATE INDEX IF NOT EXISTS pets_kind_age ON pets (age)
+
+rows
+INSERT INTO pets VALUES (1, 'rex', 'dog', 3), (2, 'tom', 'cat', 5), (3, NULL, 'cat', 2), (4, NULL, 'dog', 9)
+----
+INSERT 0 4
+
+error 23505 2067
+INSERT INTO pets VALUES (5, 'rex', 'cat', 1)
+
+rows
+INSERT OR IGNORE INTO pets VALUES (5, 'rex', 'cat', 1)
+----
+INSERT 0 0
+
+rows
+SELECT name FROM pets WHERE kind = 'cat' AND age > 1 ORDER BY age
+----
+name
+NULL
+tom
+SELECT 2
+
+rows
+EXPLAIN QUERY PLAN SELECT * FROM pets WHERE kind = 'dog'
+----
+id|parent|notused|detail
+2|0|0|SEARCH pets USING INDEX pets_kind_age (kind=?)
+SELECT 1
+
+rows
+PRAGMA index_list(pets)
+----
+seq|name|unique|origin|partial
+0|pets_kind_age|0|c|0
+1|sqlite_autoindex_pets_1|1|u|0
+SELECT 2
+
+rows
+PRAGMA index_info(pets_kind_age)
+----
+seqno|cid|name
+0|2|kind
+1|3|age
+SELECT 2
+
+error 42P07 1
+CREATE INDEX pets_kind_age ON pets (age)
+
+error 23505 2067
+CREATE UNIQUE INDEX pets_kind ON pets (kind)
+
+error 42704 1
+DROP INDEX no_such_index
+
+ok
+DROP INDEX IF EXISTS no_such_index
+
+ok
+DROP INDEX pets_kind_age
+
+ok
+DROP TABLE pets
+
+chapter lang_createindex.html: PostgreSQL's ONLY, USING and NULLS FIRST are not SQLite syntax; COLLATE takes SQLite's names
+ok
+CREATE TABLE gated (a INTEGER)
+
+error 42601 1
+CREATE INDEX g ON ONLY gated (a)
+
+error 42601 1
+CREATE INDEX g ON gated USING btree (a)
+
+error 42601 1
+CREATE INDEX g ON gated (a NULLS FIRST)
+
+ok
+CREATE INDEX g ON gated (a COLLATE BINARY DESC)
+
+ok
+DROP TABLE gated

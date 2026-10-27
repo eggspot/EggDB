@@ -91,6 +91,7 @@ macos sqlite_compare.get ratio_to_sqlite 0.752
 macos sqlite_compare.scan ratio_to_sqlite 0.584
 macos sqlite_compare.sql_bulk_insert ratio_to_sqlite 0.885
 macos sqlite_compare.sql_group_by ratio_to_sqlite 0.939
+macos sqlite_compare.sql_indexed_lookup ratio_to_sqlite 1.951
 macos sqlite_compare.sql_join ratio_to_sqlite 0.990
 macos sqlite_compare.sql_point_select ratio_to_sqlite 1.226
 macos transaction.read ratio_to_btree_get 1.0
