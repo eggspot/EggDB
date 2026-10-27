@@ -40,12 +40,12 @@ struct StatementSequences {
 }
 
 thread_local! {
-    static STATEMENT: RefCell<Option<StatementSequences>> = const { RefCell::new(None) };
+    static STATEMENT: RefCell<Vec<StatementSequences>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool) {
     STATEMENT.with(|state| {
-        *state.borrow_mut() = Some(StatementSequences {
+        state.borrow_mut().push(StatementSequences {
             dialect,
             loaded: HashMap::new(),
             all_loaded: false,
@@ -59,7 +59,7 @@ pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool) {
 }
 
 pub(crate) fn leave() -> (SessionSequences, Vec<SequenceAdvance>) {
-    let Some(state) = STATEMENT.with(|state| state.borrow_mut().take()) else {
+    let Some(state) = STATEMENT.with(|state| state.borrow_mut().pop()) else {
         return (SessionSequences::default(), Vec::new());
     };
     let StatementSequences {
@@ -84,7 +84,7 @@ pub(crate) fn leave() -> (SessionSequences, Vec<SequenceAdvance>) {
 }
 
 fn with_state<T>(body: impl FnOnce(&mut StatementSequences) -> SqlResult<T>) -> SqlResult<T> {
-    STATEMENT.with(|state| match state.borrow_mut().as_mut() {
+    STATEMENT.with(|state| match state.borrow_mut().last_mut() {
         Some(state) => body(state),
         None => Err(SqlError::not_supported(
             "sequence functions outside a statement of a session",
@@ -92,18 +92,14 @@ fn with_state<T>(body: impl FnOnce(&mut StatementSequences) -> SqlResult<T>) -> 
     })
 }
 
-pub(crate) fn load_if_wanted(reader: &dyn KeyValueRead) -> SqlResult<()> {
-    let wanted = STATEMENT.with(|state| state.borrow().as_ref().is_some_and(|state| state.wanted));
+pub(crate) fn load_for_sequence_calls(reader: &dyn KeyValueRead) -> SqlResult<()> {
+    let wanted = STATEMENT.with(|state| state.borrow().last().is_some_and(|state| state.wanted));
     if wanted { load_all(reader) } else { Ok(()) }
 }
 
 pub(crate) fn load_all(reader: &dyn KeyValueRead) -> SqlResult<()> {
-    let needed = STATEMENT.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .is_some_and(|state| !state.all_loaded)
-    });
+    let needed =
+        STATEMENT.with(|state| state.borrow().last().is_some_and(|state| !state.all_loaded));
     if !needed {
         return Ok(());
     }
@@ -143,7 +139,7 @@ pub(crate) fn load_all(reader: &dyn KeyValueRead) -> SqlResult<()> {
 
 pub(crate) fn save_changed(writer: &mut dyn KeyValueWrite) -> SqlResult<()> {
     let changed: Vec<(String, SequenceDefinition)> = STATEMENT.with(|state| {
-        state.borrow().as_ref().map_or_else(Vec::new, |state| {
+        state.borrow().last().map_or_else(Vec::new, |state| {
             state
                 .changed
                 .iter()
@@ -165,9 +161,9 @@ pub(crate) fn save_changed(writer: &mut dyn KeyValueWrite) -> SqlResult<()> {
     Ok(())
 }
 
-pub(crate) fn forget_pending_after_commit() {
+pub(crate) fn mark_changes_committed() {
     STATEMENT.with(|state| {
-        if let Some(state) = state.borrow_mut().as_mut() {
+        if let Some(state) = state.borrow_mut().last_mut() {
             state.changed.clear();
             state.set_explicitly.clear();
         }
@@ -176,7 +172,7 @@ pub(crate) fn forget_pending_after_commit() {
 
 pub(crate) fn forget_loaded() {
     STATEMENT.with(|state| {
-        if let Some(state) = state.borrow_mut().as_mut() {
+        if let Some(state) = state.borrow_mut().last_mut() {
             state.loaded.retain(|name, _| state.changed.contains(name));
             state.all_loaded = false;
         }
@@ -792,15 +788,13 @@ fn mark_changed(state: &mut StatementSequences, name: &str) {
 }
 
 fn next_value(name: &str, sequence: &mut SequenceDefinition, dialect: Dialect) -> SqlResult<i64> {
-    if !sequence.is_called {
-        sequence.is_called = true;
-        return Ok(sequence.last_value);
-    }
     let ascending = sequence.increment > 0;
-    let next = sequence
-        .last_value
-        .checked_add(sequence.increment)
-        .filter(|&next| next >= sequence.min && next <= sequence.max);
+    let candidate = if sequence.is_called {
+        sequence.last_value.checked_add(sequence.increment)
+    } else {
+        Some(sequence.last_value)
+    };
+    let next = candidate.filter(|&next| next >= sequence.min && next <= sequence.max);
     let value = match next {
         Some(next) => next,
         None if sequence.cycle => {
@@ -843,6 +837,7 @@ fn next_value(name: &str, sequence: &mut SequenceDefinition, dialect: Dialect) -
         }
     };
     sequence.last_value = value;
+    sequence.is_called = true;
     Ok(value)
 }
 

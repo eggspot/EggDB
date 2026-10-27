@@ -768,7 +768,8 @@ and `CHECK constraint failed: name` (an unnamed check is named by its text); MyS
   [CASCADE | RESTRICT]` drops a check, foreign key, unique constraint or the primary key.
 - `OWNER TO role` is accepted and does nothing, as `pg_dump` writes it.
 
-MySQL's spellings: `ADD [COLUMN]`, `DROP [COLUMN]`, `MODIFY [COLUMN] definition` and `CHANGE
+In MySQL a `REFERENCES` clause on a column is parsed and ignored, as MySQL does; write `FOREIGN
+KEY (column) REFERENCES ...`. MySQL's spellings: `ADD [COLUMN]`, `DROP [COLUMN]`, `MODIFY [COLUMN] definition` and `CHANGE
 [COLUMN] old definition` (the whole definition is replaced, as in MySQL), `ALTER [COLUMN] c SET
 DEFAULT | DROP DEFAULT`, `RENAME [TO | AS] name`, `RENAME COLUMN`, `ADD [CONSTRAINT [name]]
 PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK`, `DROP PRIMARY KEY`, `DROP FOREIGN KEY name`, `DROP

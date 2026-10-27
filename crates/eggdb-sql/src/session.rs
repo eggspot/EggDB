@@ -592,8 +592,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let _constraints = crate::constraints::enter(
                 self.dialect,
                 !self.sqlite() || self.settings.sqlite.foreign_keys,
-                &self.settings.database,
-                &self.oracle_user(),
+                if self.mysql() {
+                    self.settings.database.clone()
+                } else {
+                    String::new()
+                },
+                if self.oracle() {
+                    self.oracle_user()
+                } else {
+                    String::new()
+                },
             );
             if let Some(rows) = parser.literal_rows() {
                 resume = parser.resume_point();
@@ -980,7 +988,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
         let body = |writer: &mut dyn KeyValueWrite, tables: &mut TableCache| {
-            sequences::load_if_wanted(writer)?;
+            sequences::load_for_sequence_calls(writer)?;
             let result = body(writer, tables)?;
             sequences::save_changed(writer)?;
             Ok(result)
@@ -1031,7 +1039,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     }
                     Ok(result) => {
                         writer.commit()?;
-                        sequences::forget_pending_after_commit();
+                        sequences::mark_changes_committed();
                         Ok(result)
                     }
                     Err(error) => {
@@ -1067,7 +1075,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Block::Writing(writer) => {
                 writer.commit()?;
                 self.pending_sequences.clear();
-                sequences::forget_pending_after_commit();
+                sequences::mark_changes_committed();
                 Ok(QueryResult::command("COMMIT"))
             }
             Block::Reading(_) => Ok(QueryResult::command("COMMIT")),

@@ -177,7 +177,11 @@ impl Parser<'_> {
         let kind = if self.take_word("check") {
             self.check_body()?
         } else if self.take_word("references") {
-            ConstraintKind::ForeignKey(self.references_body(vec![column.name.clone()])?)
+            let key = self.references_body(vec![column.name.clone()])?;
+            if self.mysql() {
+                return Ok(true);
+            }
+            ConstraintKind::ForeignKey(key)
         } else {
             return Ok(false);
         };
@@ -216,13 +220,9 @@ impl Parser<'_> {
     }
 
     fn oracle_bound(&mut self) -> SqlResult<Option<i64>> {
-        let position = self.position();
         match self.signed_integer() {
             Ok(value) => Ok(Some(value)),
-            Err(error) if error.state() == SqlState::NUMERIC_VALUE_OUT_OF_RANGE => {
-                let _ = position;
-                Ok(None)
-            }
+            Err(error) if error.state() == SqlState::NUMERIC_VALUE_OUT_OF_RANGE => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -666,10 +666,12 @@ impl Parser<'_> {
             return Ok(());
         }
         let mysql_kind = self.mysql()
-            && (self.take_word("foreign") && self.expect_word("key").is_ok()
-                || self.take_word("check")
-                || self.take_word("index")
-                || self.take_word("key"));
+            && if self.take_word("foreign") {
+                self.expect_word("key")?;
+                true
+            } else {
+                self.take_word("check") || self.take_word("index") || self.take_word("key")
+            };
         if mysql_kind || self.take_word("constraint") {
             let if_exists =
                 if self.postgresql() && self.is_word("if") && self.is_word_at(1, "exists") {

@@ -58,7 +58,14 @@ fn current(
 }
 
 fn save(writer: &mut dyn KeyValueWrite, table: &TableDefinition) -> SqlResult<()> {
-    writer.put(&table_key(&table.name), &table.encode())
+    let bytes = table.encode();
+    if TableDefinition::decode(&table.name, &bytes).is_err() {
+        return Err(SqlError::not_supported(format!(
+            "this change would leave table \"{}\" with a definition EggDB cannot store",
+            table.name
+        )));
+    }
+    writer.put(&table_key(&table.name), &bytes)
 }
 
 pub(crate) fn alter_table(
@@ -587,6 +594,12 @@ fn drop_column(
     if new.primary_key.is_empty() {
         new.primary_key_name = None;
     }
+    let first_key = new.primary_key.first().copied();
+    for (position, column) in new.columns.iter_mut().enumerate() {
+        if column.auto_increment && first_key != Some(position) {
+            column.auto_increment = false;
+        }
+    }
     new.indexes = table
         .indexes
         .iter()
@@ -790,8 +803,6 @@ fn set_not_null(
         return save(writer, &table);
     }
     if !table.columns[index].not_null {
-        let pairs = [(index, Value::Null)];
-        let _ = pairs;
         let prefix = rows_prefix(table.id);
         let mut found_null = false;
         let columns = table.columns.clone();

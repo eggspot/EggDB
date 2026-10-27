@@ -186,7 +186,9 @@ pub(crate) fn create_table(
         indexes::check_orderable(columns[index].sql_type, position)?;
     }
     check_auto_increment(create, &columns, &primary_key)?;
-    if tables.table(writer, &create.name.text)?.is_some() {
+    if tables.table(writer, &create.name.text)?.is_some()
+        || crate::sequences::read(writer, &create.name.text)?.is_some()
+    {
         if create.if_not_exists {
             return Ok(QueryResult::command("CREATE TABLE").with_notice(format!(
                 "NOTICE:  relation \"{}\" already exists, skipping",

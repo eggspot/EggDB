@@ -43,14 +43,14 @@ impl Drop for ContextGuard {
 pub(crate) fn enter(
     dialect: Dialect,
     foreign_keys: bool,
-    database: &str,
-    owner: &str,
+    database: String,
+    owner: String,
 ) -> ContextGuard {
     let context = Context {
         dialect,
         foreign_keys,
-        database: database.to_owned(),
-        owner: owner.to_owned(),
+        database,
+        owner,
     };
     ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
 }
