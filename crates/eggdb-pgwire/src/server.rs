@@ -119,6 +119,7 @@ pub(crate) struct Shared<'a> {
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) secret: [u8; 32],
     pub(crate) unauthenticated: AtomicUsize,
+    pub(crate) ended_by_stop: AtomicUsize,
 }
 
 pub(crate) struct Slot<'c>(&'c AtomicUsize);
@@ -143,8 +144,8 @@ pub(crate) fn take_slot(counter: &AtomicUsize, limit: usize) -> Option<Slot<'_>>
 /// [`ServerConfig::max_connections`] at once. Every client authenticates with SCRAM-SHA-256 as
 /// [`ServerConfig::user`]. When `stop` turns true the server accepts no more connections, lets
 /// each finish the message it is running, ends it with `57P01 admin_shutdown`, rolls back any
-/// open block, and returns once every connection has ended, with the number of connections
-/// that were open when the stop came. `log` receives one line per event worth an operator's
+/// open block, and returns once every connection has ended, with the number of authenticated
+/// connections the stop ended. `log` receives one line per event worth an operator's
 /// attention, such as a failed password: the client's address, two spaces, and PostgreSQL's
 /// wording of what happened.
 pub fn serve<S: KeyValueStore + Sync>(
@@ -164,11 +165,12 @@ pub fn serve<S: KeyValueStore + Sync>(
         throttle: AuthenticationThrottle::new(),
         secret,
         unauthenticated: AtomicUsize::new(0),
+        ended_by_stop: AtomicUsize::new(0),
     };
     let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);
     let next_process_id = AtomicU32::new(1);
-    let open_at_stop = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         while !stop() {
             let (stream, peer) = match listener.accept() {
                 Ok(accepted) => accepted,
@@ -217,9 +219,8 @@ pub fn serve<S: KeyValueStore + Sync>(
                 }
             }
         }
-        active.load(Ordering::Acquire)
     });
-    Ok(open_at_stop)
+    Ok(shared.ended_by_stop.load(Ordering::Acquire))
 }
 
 fn run_connection<S: KeyValueStore>(

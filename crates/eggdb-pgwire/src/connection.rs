@@ -457,6 +457,7 @@ fn tag_with_count(tag: &str, count: usize) -> String {
 /// One client connection, from its startup packet to its end.
 pub(crate) struct Connection<'a, 's, S: KeyValueStore + 's> {
     wire: Wire<'a>,
+    shared: &'a Shared<'a>,
     session: Session<'s, S>,
     reported: Vec<(&'static str, String)>,
     statements: HashMap<String, PreparedEntry>,
@@ -547,6 +548,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         .backend_key_data(process_id, i32::from_be_bytes(secret));
     let mut connection = Connection {
         wire,
+        shared,
         session,
         reported,
         statements: HashMap::new(),
@@ -575,6 +577,9 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             let (tag, body) = match self.wire.read_message(MAX_MESSAGE_BYTES) {
                 Ok(message) => message,
                 Err(WireError::Stopping) => {
+                    self.shared
+                        .ended_by_stop
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     fatal(
                         &mut self.wire,
                         SqlState::ADMIN_SHUTDOWN,
