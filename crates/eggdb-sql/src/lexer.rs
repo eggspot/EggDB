@@ -1,3 +1,5 @@
+mod sqlite;
+
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use std::borrow::Cow;
@@ -13,6 +15,7 @@ pub(crate) enum TokenKind<'t> {
     String(Cow<'t, str>),
     Parameter(&'t str),
     Placeholder,
+    NumberedParameter(usize),
     Variable(Cow<'t, str>),
     Operator(&'t str),
     LeftParen,
@@ -45,6 +48,8 @@ pub(crate) fn tokenize_in(text: &str, dialect: Dialect) -> SqlResult<Vec<Token<'
         at: 0,
         dialect,
         open_executable_comments: 0,
+        named_parameters: Vec::new(),
+        highest_parameter: 0,
     };
     let mut tokens = Vec::with_capacity(text.len() / 4 + 2);
     loop {
@@ -69,6 +74,8 @@ struct Lexer<'t> {
     at: usize,
     dialect: Dialect,
     open_executable_comments: usize,
+    named_parameters: Vec<(&'t str, usize)>,
+    highest_parameter: usize,
 }
 
 const MYSQL_OPERATORS: [&str; 22] = [
@@ -109,6 +116,10 @@ impl<'t> Lexer<'t> {
     }
 
     fn skip_space_and_comments(&mut self) -> SqlResult<()> {
+        if self.dialect == Dialect::Sqlite {
+            self.skip_sqlite_space_and_comments();
+            return Ok(());
+        }
         let mysql = self.dialect == Dialect::MySql;
         loop {
             match (self.peek(0), self.peek(1)) {
@@ -182,6 +193,9 @@ impl<'t> Lexer<'t> {
         let Some(byte) = self.peek(0) else {
             return Ok(TokenKind::End);
         };
+        if self.dialect == Dialect::Sqlite && byte == b'[' {
+            return self.bracket_identifier();
+        }
         let single = match byte {
             b'(' => Some(TokenKind::LeftParen),
             b')' => Some(TokenKind::RightParen),
@@ -198,6 +212,10 @@ impl<'t> Lexer<'t> {
         if self.dialect == Dialect::MySql {
             return self.next_mysql_kind(byte);
         }
+        if self.dialect == Dialect::Sqlite {
+            return self.next_sqlite_kind(byte);
+        }
+
         match byte {
             b':' if self.peek(1) == Some(b':') => {
                 self.at += 2;

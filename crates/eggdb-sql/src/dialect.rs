@@ -8,36 +8,48 @@ pub enum Dialect {
     /// MySQL's SQL, as its reference manual documents it, with MySQL's error numbers and
     /// messages.
     MySql,
+    /// SQLite's SQL, as sqlite.org documents it: type affinity, `INTEGER PRIMARY KEY` row ids,
+    /// `PRAGMA`s, SQLite's functions and SQLite's error messages and result codes.
+    Sqlite,
 }
 
 impl Dialect {
     /// Every dialect, in the order the roadmap brought them.
-    pub const ALL: [Self; 2] = [Self::PostgreSql, Self::MySql];
+    pub const ALL: [Self; 3] = [Self::PostgreSql, Self::MySql, Self::Sqlite];
 
-    /// The dialect's name as `--dialect` takes it: `postgresql` or `mysql`.
+    /// The dialect's name as `--dialect` takes it: `postgresql`, `mysql` or `sqlite`.
     pub fn name(self) -> &'static str {
         match self {
             Self::PostgreSql => "postgresql",
             Self::MySql => "mysql",
+            Self::Sqlite => "sqlite",
         }
     }
 
-    /// The dialect named `name` (case-insensitive), accepting `postgres`, `pg` and `mariadb`
-    /// as other names.
+    /// The dialect named `name` (case-insensitive), accepting `postgres`, `pg`, `mariadb` and
+    /// `sqlite3` as other names.
     pub fn named(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "postgresql" | "postgres" | "pg" => Some(Self::PostgreSql),
             "mysql" | "mariadb" => Some(Self::MySql),
+            "sqlite" | "sqlite3" => Some(Self::Sqlite),
             _ => None,
         }
     }
 
     /// `value` as this dialect's clients print it in text form: PostgreSQL's `t` and `f` for
-    /// booleans, MySQL's `1` and `0`, and `None` for NULL.
+    /// booleans, MySQL's and SQLite's `1` and `0`, SQLite's floating point with 15 significant
+    /// digits and a decimal point (`2.0`), and `None` for NULL.
     pub fn value_text(self, value: &crate::Value) -> Option<String> {
         match (self, value) {
-            (Self::MySql, crate::Value::Boolean(flag)) => {
+            (Self::MySql | Self::Sqlite, crate::Value::Boolean(flag)) => {
                 Some(if *flag { "1" } else { "0" }.into())
+            }
+            (Self::Sqlite, crate::Value::Real(number)) => {
+                crate::sqlite_functions::real_text(f64::from(*number))
+            }
+            (Self::Sqlite, crate::Value::Double(number)) => {
+                crate::sqlite_functions::real_text(*number)
             }
             _ => value.to_text(),
         }

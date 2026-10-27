@@ -1,4 +1,5 @@
 mod mysql;
+mod sqlite;
 
 use crate::ast::{MySqlStatement, Statement};
 use crate::dialect::Dialect;
@@ -69,6 +70,7 @@ fn highest_parameter(tokens: &[Token<'_>]) -> usize {
         .iter()
         .filter_map(|token| match token.kind {
             TokenKind::Parameter(digits) => parameter_number(digits),
+            TokenKind::NumberedParameter(number) => Some(number),
             _ => None,
         })
         .max()
@@ -106,6 +108,10 @@ pub struct QueryResult {
     /// The first value an `AUTO_INCREMENT` column was given by this statement, which MySQL's
     /// `LAST_INSERT_ID()` returns afterwards.
     pub last_insert_id: Option<u64>,
+    /// The row id of the last row this statement inserted into a table with SQLite's row ids:
+    /// its `INTEGER PRIMARY KEY` (given or assigned), or the hidden row id of a table without
+    /// a primary key. SQLite's `last_insert_rowid()` returns it afterwards.
+    pub last_insert_rowid: Option<i64>,
 }
 
 impl QueryResult {
@@ -117,6 +123,7 @@ impl QueryResult {
             notices: Vec::new(),
             warnings: Vec::new(),
             last_insert_id: None,
+            last_insert_rowid: None,
         }
     }
 
@@ -128,6 +135,7 @@ impl QueryResult {
             notices: Vec::new(),
             warnings: Vec::new(),
             last_insert_id: None,
+            last_insert_rowid: None,
         }
     }
 
@@ -227,7 +235,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.dialect == Dialect::MySql
     }
 
+    fn sqlite(&self) -> bool {
+        self.dialect == Dialect::Sqlite
+    }
+
     fn in_dialect(&mut self, text: &str, error: SqlError) -> SqlError {
+        if self.sqlite() {
+            return crate::sqlite_errors::translate(error, text);
+        }
         if !self.mysql() {
             return error;
         }
@@ -375,6 +390,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             return Err(aborted_block());
         }
         let columns = match &statement {
+            Statement::Select(select)
+                if self.sqlite()
+                    && select
+                        .from
+                        .as_ref()
+                        .is_some_and(|from| crate::parser::is_schema_table(&from.first)) =>
+            {
+                self.select_schema(select, true)
+                    .map(|result| result.columns)
+            }
             Statement::Select(select) => self
                 .read(|reader, tables| execute::select(reader, tables, select, true))
                 .map(|result| result.columns),
@@ -389,6 +414,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),
             Statement::MySql(statement) => self.describe_mysql(statement),
+            Statement::Pragma(pragma) => Ok(self.pragma_columns(pragma)),
             _ => Ok(None),
         };
         match columns {
@@ -397,9 +423,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 columns,
             }),
             Err(error) => {
-                if !self.mysql() {
-                    self.fail_block();
-                }
+                self.fail_block_in_postgresql();
                 Err(error)
             }
         }
@@ -476,7 +500,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let tokens = match tokenize_in(text, self.dialect) {
             Ok(tokens) => tokens,
             Err(error) => {
-                self.fail_block_unless_mysql();
+                self.fail_block_in_postgresql();
                 return Err(error);
             }
         };
@@ -505,7 +529,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let statement = match parsed {
                 Ok(statement) => statement,
                 Err(error) => {
-                    self.fail_block_unless_mysql();
+                    self.fail_block_in_postgresql();
                     return Err(error);
                 }
             };
@@ -524,6 +548,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn after_statement(&mut self, mut result: QueryResult, diagnostic: bool) -> QueryResult {
+        if self.sqlite() {
+            self.sqlite_after_statement(&mut result);
+            return result;
+        }
         if !self.mysql() {
             return result;
         }
@@ -542,8 +570,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         result
     }
 
-    fn fail_block_unless_mysql(&mut self) {
-        if !self.mysql() {
+    fn fail_block_in_postgresql(&mut self) {
+        if self.dialect == Dialect::PostgreSql {
             self.fail_block();
         }
     }
@@ -568,6 +596,29 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn run(&mut self, statement: &Statement) -> SqlResult<QueryResult> {
+        if self.sqlite() {
+            match statement {
+                Statement::Begin { .. } if self.in_block() => {
+                    return Err(sqlite::transaction_error(
+                        SqlState::ACTIVE_SQL_TRANSACTION,
+                        "cannot start a transaction within a transaction",
+                    ));
+                }
+                Statement::Commit if !self.in_block() => {
+                    return Err(sqlite::transaction_error(
+                        SqlState::NO_ACTIVE_SQL_TRANSACTION,
+                        "cannot commit - no transaction is active",
+                    ));
+                }
+                Statement::Rollback if !self.in_block() => {
+                    return Err(sqlite::transaction_error(
+                        SqlState::NO_ACTIVE_SQL_TRANSACTION,
+                        "cannot rollback - no transaction is active",
+                    ));
+                }
+                _ => {}
+            }
+        }
         match statement {
             Statement::Begin { read_only } => return self.begin(*read_only),
             Statement::Commit => return self.commit(),
@@ -588,6 +639,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
         let result = match statement {
             Statement::MySql(statement) => self.run_mysql(statement),
+            Statement::Pragma(pragma) => self.run_pragma(pragma),
+            Statement::Select(select)
+                if self.sqlite()
+                    && select
+                        .from
+                        .as_ref()
+                        .is_some_and(|from| crate::parser::is_schema_table(&from.first)) =>
+            {
+                self.select_schema(select, false)
+            }
             Statement::Select(select) => {
                 self.read(|reader, tables| execute::select(reader, tables, select, false))
             }
@@ -626,7 +687,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
         };
         if result.is_err() {
-            self.fail_block_unless_mysql();
+            self.fail_block_in_postgresql();
+            if let Statement::Insert(insert) = statement
+                && insert.rollback_on_conflict
+                && let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None)
+            {
+                let _ = writer.rollback();
+            }
         }
         if self.mysql()
             && matches!(
@@ -671,7 +738,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             execute::insert_literals(writer, tables, rows)
         });
         if result.is_err() {
-            self.fail_block_unless_mysql();
+            self.fail_block_in_postgresql();
         }
         result
     }
@@ -699,7 +766,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let keep_open = !self.autocommit();
         let tables = &mut self.tables;
         match &mut self.block {
-            Block::Writing(writer) if self.dialect == Dialect::MySql => {
+            Block::Writing(writer) if self.dialect != Dialect::PostgreSql => {
                 let mut tracked = TrackedWrite {
                     inner: writer,
                     wrote: false,

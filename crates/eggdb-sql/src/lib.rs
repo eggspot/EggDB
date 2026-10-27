@@ -1,4 +1,4 @@
-//! EggDB's SQL core: the PostgreSQL and MySQL dialects on any ordered key-value store.
+//! EggDB's SQL core: the PostgreSQL, MySQL and SQLite dialects on any ordered key-value store.
 //!
 //! [`Session`] runs SQL text, statement by statement, over a [`KeyValueStore`]: one writer
 //! and snapshot readers over byte-string keys in order, which `eggdb::Database` provides. The
@@ -30,6 +30,8 @@ mod parser;
 mod schema;
 mod session;
 mod settings;
+mod sqlite_errors;
+mod sqlite_functions;
 mod store;
 mod types;
 mod typing;
@@ -45,12 +47,14 @@ pub use dialect::Dialect;
 pub use error::{SqlError, SqlResult, SqlState};
 pub use mysql_errors::Warning;
 pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
+pub use parser::SQLITE_COMPATIBLE_VERSION;
 pub use schema::{ColumnSchema, TableSchema, quoted};
 pub use session::{
     OutputColumn, Parameter, PreparedStatement, QueryResult, Session, StatementDescription,
     TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
+pub use sqlite_errors::sqlite_result_code_name;
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, StoreFailure,
 };

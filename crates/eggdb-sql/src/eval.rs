@@ -676,6 +676,13 @@ impl Evaluator<'_> {
     }
 
     fn function(&self, name: &str, arguments: &[Expr]) -> SqlResult<Value> {
+        if name.starts_with("sqlite_") && !arguments.is_empty() || name == "sqlite_random" {
+            let values = arguments
+                .iter()
+                .map(|argument| self.eval(argument, None))
+                .collect::<SqlResult<Vec<Value>>>()?;
+            return crate::sqlite_functions::call(name, &values);
+        }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
         for argument in arguments {

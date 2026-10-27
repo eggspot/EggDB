@@ -16,6 +16,14 @@ pub(crate) enum Statement {
     Show { name: Option<String> },
     Reset { name: Option<String> },
     MySql(MySqlStatement),
+    Pragma(Pragma),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Pragma {
+    pub(crate) name: String,
+    pub(crate) argument: Option<String>,
+    pub(crate) assigned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +124,7 @@ pub(crate) struct Insert {
     pub(crate) source: InsertSource,
     pub(crate) returning: Option<Vec<SelectItem>>,
     pub(crate) on_duplicate: OnDuplicate,
+    pub(crate) rollback_on_conflict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
