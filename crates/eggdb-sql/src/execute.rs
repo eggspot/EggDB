@@ -291,6 +291,11 @@ fn multiple_primary_keys(create: &CreateTable, position: usize) -> SqlError {
 
 fn check_default(expr: &Expr) -> SqlResult<()> {
     reject_aggregates(expr, "DEFAULT expressions")?;
+    if crate::subquery::mentions_subquery(expr) {
+        return Err(
+            SqlError::not_supported("cannot use subquery in DEFAULT expression").at(expr.position),
+        );
+    }
     check_columns(expr, Scope::empty()).map_err(|error| {
         if error.state() == SqlState::UNDEFINED_COLUMN || error.state() == SqlState::UNDEFINED_TABLE
         {
@@ -506,11 +511,74 @@ fn target_columns(table: &TableDefinition, names: &[Name]) -> SqlResult<Vec<usiz
     Ok(indexes)
 }
 
+fn returning_exprs(items: &mut Option<Vec<SelectItem>>) -> impl Iterator<Item = &mut Expr> {
+    items.iter_mut().flatten().filter_map(|item| match item {
+        SelectItem::Expr { expr, .. } => Some(expr),
+        SelectItem::Wildcard { .. } => None,
+    })
+}
+
+fn insert_exprs(insert: &mut Insert) -> Vec<&mut Expr> {
+    let mut exprs: Vec<&mut Expr> = Vec::new();
+    if let InsertSource::Values(rows) = &mut insert.source {
+        for value in rows.iter_mut().flatten() {
+            if let InsertValue::Expr(expr) = value {
+                exprs.push(expr);
+            }
+        }
+    }
+    exprs.extend(returning_exprs(&mut insert.returning));
+    exprs
+}
+
+fn update_exprs(update: &mut Update) -> Vec<&mut Expr> {
+    let mut exprs: Vec<&mut Expr> = Vec::new();
+    for (_, value) in &mut update.assignments {
+        if let InsertValue::Expr(expr) = value {
+            exprs.push(expr);
+        }
+    }
+    exprs.extend(update.filter.iter_mut());
+    exprs.extend(returning_exprs(&mut update.returning));
+    exprs
+}
+
+fn delete_exprs(delete: &mut Delete) -> Vec<&mut Expr> {
+    let mut exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();
+    exprs.extend(returning_exprs(&mut delete.returning));
+    exprs
+}
+
+fn with_subqueries_run<T: Clone>(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    statement: &T,
+    target: &TableReference,
+    values_only: bool,
+    exprs: fn(&mut T) -> Vec<&mut Expr>,
+) -> SqlResult<Option<T>> {
+    let mut copy = statement.clone();
+    let found = exprs(&mut copy);
+    if !found.iter().any(|expr| crate::subquery::mentions_subquery(expr)) {
+        return Ok(None);
+    }
+    let table = tables.require(reader, &target.name)?;
+    let scope = if values_only {
+        Scope::empty()
+    } else {
+        scope_of(&table, target)
+    };
+    crate::subquery::prepare_in_place(reader, tables, found, scope)?;
+    Ok(Some(copy))
+}
+
 pub(crate) fn insert(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
+    let prepared = with_subqueries_run(writer, tables, insert, &insert.table, true, insert_exprs)?;
+    let insert = prepared.as_ref().unwrap_or(insert);
     let table = tables.require(writer, &insert.table.name)?;
     let scope = scope_of(&table, &insert.table);
     let targets = match &insert.columns {
@@ -2173,6 +2241,8 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
+    let prepared = with_subqueries_run(writer, tables, update, &update.table, false, update_exprs)?;
+    let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require(writer, &update.table.name)?;
     let scope = scope_of(&table, &update.table);
     let names: Vec<Name> = update
@@ -2285,6 +2355,8 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
+    let prepared = with_subqueries_run(writer, tables, delete, &delete.table, false, delete_exprs)?;
+    let delete = prepared.as_ref().unwrap_or(delete);
     let table = tables.require(writer, &delete.table.name)?;
     let scope = scope_of(&table, &delete.table);
     if let Some(filter) = &delete.filter {

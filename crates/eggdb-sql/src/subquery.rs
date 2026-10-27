@@ -190,7 +190,11 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, subquery: &Subquery) -> SqlRes
                 )
             })?
             .rows(*template, evaluator.row)?,
-        SubqueryState::Unprepared => return Err(internal("a subquery was not prepared")),
+        SubqueryState::Unprepared => {
+            return Err(SqlError::not_supported(
+                "a subquery in this part of a statement is not supported yet",
+            ));
+        }
     };
     let truth = |found: Option<bool>| Ok(found.map_or(Value::Null, Value::Boolean));
     match &subquery.test {
@@ -476,7 +480,7 @@ fn select_expressions(select: &Select) -> Vec<&Expr> {
     exprs
 }
 
-fn mentions_subquery(expr: &Expr) -> bool {
+pub(crate) fn mentions_subquery(expr: &Expr) -> bool {
     matches!(expr.kind, ExprKind::Subquery(_)) || children(expr).into_iter().any(mentions_subquery)
 }
 
@@ -497,6 +501,43 @@ pub(crate) fn needs_preparation(select: &Select) -> bool {
         || select_expressions(select)
             .into_iter()
             .any(mentions_subquery)
+}
+
+pub(crate) fn prepare_in_place(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    exprs: Vec<&mut Expr>,
+    scope: Scope<'_>,
+) -> SqlResult<()> {
+    let _shared = crate::memory::share_statement_memory();
+    let names = TempTableNames::default();
+    let env = Env {
+        reader,
+        names: &names,
+        columns_only: false,
+    };
+    let mut templates = Vec::new();
+    let mut correlated = false;
+    for expr in exprs {
+        rewrite(
+            &env,
+            tables,
+            expr,
+            scope,
+            None,
+            None,
+            &mut templates,
+            &mut correlated,
+        )?;
+        if !templates.is_empty() {
+            return Err(SqlError::not_supported(
+                "a subquery that refers to the rows being changed is not supported yet",
+            )
+            .with_hint("Compute the values with a SELECT first, or use a subquery that stands alone.")
+            .at(expr.position));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn run_select(

@@ -457,8 +457,9 @@ UTF-8, so its lines are valid entries too.
 `eggdb sql` runs SQL statements on the file: from `-c "<sql>"`, from a script file, or from
 stdin (a script of `-`, or none at all when stdin is not a terminal). This release runs the
 first parts of the PostgreSQL dialect: tables with a primary key, `INSERT`, `SELECT` with
-`WHERE`, inner, left and cross joins, `GROUP BY` with aggregates, `HAVING`, `DISTINCT`,
-`ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE` and transaction blocks, with the integer,
+`WHERE`, inner, left, right, full and cross joins, subqueries, `WITH` queries, `UNION`,
+`INTERSECT` and `EXCEPT`, `GROUP BY` with aggregates, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT`
+and `OFFSET`, `UPDATE`, `DELETE` and transaction blocks, with the integer,
 floating-point, exact `numeric`, boolean, text, `date`, `timestamp`, `timestamptz`, `json` and
 `jsonb` types and `serial` and identity columns. `--dialect mysql` reads MySQL's SQL instead, on the
 same tables, and reports errors as MySQL does (`ERROR 1146 (42S02): Table 'eggdb.t' doesn't
