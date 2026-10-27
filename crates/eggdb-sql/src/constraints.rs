@@ -573,6 +573,9 @@ fn apply_action(
         key.on_delete
     };
     let child = &link.child;
+    if action == ReferentialAction::SetDefault && crate::sequences::mentions_nextval(child) {
+        crate::sequences::load_all(writer)?;
+    }
     let pairs: Vec<(usize, Value)> = key.columns.iter().copied().zip(old_key).collect();
     let checks = if matches!(
         action,

@@ -381,6 +381,12 @@ pub(crate) fn output_name(expr: &Expr) -> String {
 
 fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
     match &expr.kind {
+        ExprKind::Function { name, arguments } if name == "regclass_cast" => {
+            match arguments.first().map(name_and_whether_it_names_a_value) {
+                Some((name, true)) => (name, true),
+                _ => ("regclass".to_owned(), false),
+            }
+        }
         ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }

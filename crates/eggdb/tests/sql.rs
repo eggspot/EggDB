@@ -287,6 +287,81 @@ fn a_killed_process_never_leaves_an_index_that_disagrees_with_its_rows() {
 }
 
 #[test]
+fn a_killed_process_never_rewinds_a_sequence_or_breaks_a_foreign_key() {
+    let mut script = String::from(
+        "CREATE SEQUENCE ids;\nCREATE TABLE parents (id bigint PRIMARY KEY DEFAULT nextval('ids'), label text CHECK (label <> ''));\nCREATE TABLE children (id bigint PRIMARY KEY DEFAULT nextval('ids'), pid bigint REFERENCES parents ON DELETE CASCADE);\n",
+    );
+    for round in 0..1_500 {
+        if round % 50 == 0 {
+            script.push_str("BEGIN;\n");
+        }
+        script.push_str("INSERT INTO parents (label) VALUES ('p');\n");
+        script.push_str("INSERT INTO children (pid) VALUES ((SELECT max(id) FROM parents));\n");
+        script.push_str("INSERT INTO children (pid) VALUES ((SELECT min(id) FROM parents));\n");
+        if round % 7 == 3 {
+            script.push_str("DELETE FROM parents WHERE id = (SELECT min(id) FROM parents);\n");
+        }
+        if round % 50 == 49 {
+            script.push_str("COMMIT;\n");
+        }
+        if round % 13 == 0 {
+            script.push_str("BEGIN;\nSELECT nextval('ids');\nROLLBACK;\n");
+        }
+    }
+    let mut highest_seen = 0;
+    for delay_ms in [0u64, 150, 400, 800, 1_500] {
+        let file = TempPath::new("sql-sequence-killed");
+        Database::open(file.path()).unwrap().close().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .arg("sql")
+            .arg(file.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let bytes = script.clone().into_bytes();
+        let writer = std::thread::spawn(move || {
+            let _ = input.write_all(&bytes);
+        });
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        let db = Database::open(file.path()).unwrap();
+        let store = db.sql_store();
+        let mut session = store.session(eggdb::sql::Dialect::PostgreSql);
+        let mut results = Vec::new();
+        let outcome = session.execute(
+            "SELECT coalesce(max(id), 0) FROM parents; SELECT coalesce(max(id), 0) FROM children; SELECT count(*) FROM children c LEFT JOIN parents p ON c.pid = p.id WHERE p.id IS NULL AND c.pid IS NOT NULL; SELECT nextval('ids')",
+            &mut |result| results.push(result),
+        );
+        match outcome {
+            Ok(()) => {
+                let number = |at: usize| results[at].rows[0][0].as_integer().unwrap();
+                let highest = number(0).max(number(1));
+                assert_eq!(number(2), 0, "after {delay_ms} ms: a child lost its parent");
+                assert!(
+                    number(3) > highest,
+                    "after {delay_ms} ms: nextval gave {} after {highest} was stored",
+                    number(3)
+                );
+                highest_seen = highest_seen.max(highest);
+            }
+            Err(error) => assert!(
+                error.state().code() == "42P01",
+                "after {delay_ms} ms: {error}"
+            ),
+        }
+        session.check_indexes().unwrap();
+        drop(session);
+        assert_eq!(db.check().unwrap().leaked_pages, 0);
+    }
+    assert!(highest_seen > 0, "no run committed a row before it was killed");
+}
+
+#[test]
 fn the_mysql_dialect_reads_mysql_and_reports_mysql_errors() {
     let file = TempPath::new("sql-mysql");
     let created = eggdb_sql(

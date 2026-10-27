@@ -2342,4 +2342,163 @@ mod tests {
         assert_eq!(prefix_end(&[1, 2]), vec![1, 3]);
         assert_eq!(prefix_end(&[1, 0xFF]), vec![2]);
     }
+
+    fn constrained_table() -> TableDefinition {
+        let mut table = with_indexes([false, false]);
+        table.primary_key_name = Some("t_key".into());
+        table.checks = vec![super::CheckConstraint {
+            name: "t_id_check".into(),
+            dialect: crate::Dialect::MySql,
+            expression: "`id` > 0".into(),
+        }];
+        table.foreign_keys = vec![super::ForeignKey {
+            name: "t_name_fkey".into(),
+            columns: vec![1, 0],
+            parent: "parent".into(),
+            parent_columns: vec!["code".into(), "id".into()],
+            on_delete: crate::ast::ReferentialAction::Cascade,
+            on_update: crate::ast::ReferentialAction::SetDefault,
+            deferrable: true,
+        }];
+        table
+    }
+
+    #[test]
+    fn constraints_are_written_in_format_version_6_and_read_back() {
+        let table = constrained_table();
+        let bytes = table.encode();
+        assert_eq!(bytes[0], 6);
+        assert_eq!(TableDefinition::decode("t", &bytes).unwrap(), table);
+        for kept in [
+            with_indexes([false, false]),
+            two_columns([true, false], vec![0, 1]),
+            typed_table(true),
+            item_31_table(),
+        ] {
+            let bytes = kept.encode();
+            assert!(bytes[0] < 6);
+            assert_eq!(TableDefinition::decode(&kept.name, &bytes).unwrap(), kept);
+        }
+        let mut only_checks = with_indexes([false, false]);
+        only_checks.checks = constrained_table().checks;
+        assert_eq!(
+            TableDefinition::decode("t", &only_checks.encode()).unwrap(),
+            only_checks
+        );
+    }
+
+    #[test]
+    fn damaged_constraint_definitions_are_refused_without_panicking() {
+        let bytes = constrained_table().encode();
+        for cut in 0..bytes.len() {
+            assert!(damaged(&bytes[..cut]), "cut at {cut}");
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(damaged(&longer));
+        let mut without = with_indexes([false, false]).encode();
+        without[0] = 6;
+        without.extend_from_slice(&[0, 0, 0]);
+        assert!(damaged(&without));
+        let mut duplicate = constrained_table();
+        duplicate.foreign_keys[0].name = "t_id_check".into();
+        assert!(damaged(&duplicate.encode()));
+        let mut clashing = constrained_table();
+        clashing.checks[0].name = "both".into();
+        assert!(damaged(&clashing.encode()));
+        let mut out_of_range = constrained_table();
+        out_of_range.foreign_keys[0].columns = vec![1, 9];
+        assert!(damaged(&out_of_range.encode()));
+        let mut empty_name = constrained_table();
+        empty_name.checks[0].name.clear();
+        assert!(damaged(&empty_name.encode()));
+        let mut empty_check = constrained_table();
+        empty_check.checks[0].expression = " ".into();
+        assert!(damaged(&empty_check.encode()));
+        let mut keyless = constrained_table();
+        keyless.primary_key.clear();
+        assert!(damaged(&keyless.encode()));
+        let flags_at = bytes.len() - 1;
+        for (at, values) in [
+            (flags_at, [2u8, 0xFF]),
+            (flags_at - 1, [5, 0xFF]),
+            (flags_at - 2, [5, 0x80]),
+        ] {
+            for value in values {
+                let mut changed = bytes.clone();
+                changed[at] = value;
+                assert!(damaged(&changed), "byte {at} = {value}");
+            }
+        }
+        let mut random = Seeded(0x5EED_C0DE);
+        for _ in 0..20_000 {
+            let mut changed = bytes.clone();
+            let at = (random.next() as usize) % changed.len();
+            changed[at] = random.next() as u8;
+            let _ = TableDefinition::decode("t", &changed);
+        }
+    }
+
+    fn sequence() -> super::SequenceDefinition {
+        super::SequenceDefinition {
+            sql_type: SqlType::Integer,
+            start: 5,
+            increment: -3,
+            min: -100,
+            max: 50,
+            cache: 20,
+            cycle: true,
+            last_value: 8,
+            is_called: true,
+            owned_by: Some(("t".into(), "id".into())),
+        }
+    }
+
+    #[test]
+    fn sequences_are_read_back_and_damaged_ones_refused() {
+        let bytes = sequence().encode();
+        assert_eq!(super::SequenceDefinition::decode(&bytes).unwrap(), sequence());
+        let mut unowned = sequence();
+        unowned.owned_by = None;
+        unowned.is_called = false;
+        assert_eq!(
+            super::SequenceDefinition::decode(&unowned.encode()).unwrap(),
+            unowned
+        );
+        for cut in 0..bytes.len() {
+            assert!(super::SequenceDefinition::decode(&bytes[..cut]).is_err());
+        }
+        let mut newer = bytes.clone();
+        newer[0] = 2;
+        assert_eq!(
+            super::SequenceDefinition::decode(&newer)
+                .unwrap_err()
+                .state()
+                .code(),
+            "0A000"
+        );
+        let invalid = |change: fn(&mut super::SequenceDefinition)| {
+            let mut changed = sequence();
+            change(&mut changed);
+            super::SequenceDefinition::decode(&changed.encode()).is_err()
+        };
+        assert!(invalid(|sequence| sequence.increment = 0));
+        assert!(invalid(|sequence| sequence.cache = 0));
+        assert!(invalid(|sequence| sequence.min = sequence.max));
+        assert!(invalid(|sequence| sequence.start = 51));
+        assert!(invalid(|sequence| sequence.max = i64::from(i32::MAX) + 1));
+        assert!(invalid(|sequence| sequence.sql_type = SqlType::Text));
+        assert!(invalid(|sequence| sequence.owned_by = Some((String::new(), "id".into()))));
+        let flags_at = 1 + 1 + 6 * 8;
+        let mut flags = bytes.clone();
+        flags[flags_at] = 4;
+        assert!(super::SequenceDefinition::decode(&flags).is_err());
+        let mut random = Seeded(0xA11_5EC);
+        for _ in 0..20_000 {
+            let mut changed = bytes.clone();
+            let at = (random.next() as usize) % changed.len();
+            changed[at] = random.next() as u8;
+            let _ = super::SequenceDefinition::decode(&changed);
+        }
+    }
 }

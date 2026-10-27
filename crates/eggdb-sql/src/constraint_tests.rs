@@ -305,7 +305,7 @@ fn sequences_follow_postgresql() {
             &mut session,
             "SELECT 's'::regclass, 'public.\"S\"'::regclass"
         ),
-        "regclass_cast|regclass_cast\ns|\"S\"\nSELECT 1"
+        "regclass|regclass\ns|\"S\"\nSELECT 1"
     );
     last(&mut session, "DROP SEQUENCE s, fresh");
     assert_eq!(
@@ -620,4 +620,299 @@ fn hostile_constraint_statements_never_panic() {
         fuzz(&mut session, &fragments);
         session.check_indexes().unwrap();
     }
+}
+
+#[test]
+fn prepared_sequence_calls_describe_without_running() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SEQUENCE s");
+    let description = session.describe("SELECT nextval('s')", &[]).unwrap();
+    assert_eq!(
+        description.columns.unwrap()[0].sql_type,
+        Some(crate::SqlType::BigInt)
+    );
+    assert_eq!(last(&mut session, "SELECT nextval('s')"), "nextval\n1\nSELECT 1");
+}
+
+struct Seeded(u64);
+
+impl Seeded {
+    fn below(&mut self, bound: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % bound
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Action {
+    Cascade,
+    SetNull,
+    SetDefault,
+    Restrict,
+    NoAction,
+}
+
+impl Action {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Cascade => "CASCADE",
+            Self::SetNull => "SET NULL",
+            Self::SetDefault => "SET DEFAULT",
+            Self::Restrict => "RESTRICT",
+            Self::NoAction => "NO ACTION",
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct Model {
+    parents: std::collections::BTreeSet<i64>,
+    children: std::collections::BTreeMap<i64, Option<i64>>,
+}
+
+impl Model {
+    fn referencing(&self, parent: i64) -> Vec<i64> {
+        self.children
+            .iter()
+            .filter(|(_, pid)| **pid == Some(parent))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    fn remove_or_move(&mut self, old: i64, new: Option<i64>, action: Action) -> bool {
+        let children = self.referencing(old);
+        if children.is_empty() {
+            return true;
+        }
+        match action {
+            Action::Restrict | Action::NoAction => false,
+            Action::Cascade => {
+                for child in children {
+                    match new {
+                        Some(new) => {
+                            self.children.insert(child, Some(new));
+                        }
+                        None => {
+                            self.children.remove(&child);
+                        }
+                    }
+                }
+                true
+            }
+            Action::SetNull => {
+                for child in children {
+                    self.children.insert(child, None);
+                }
+                true
+            }
+            Action::SetDefault => {
+                if !self.parents.contains(&0) {
+                    return false;
+                }
+                for child in children {
+                    self.children.insert(child, Some(0));
+                }
+                true
+            }
+        }
+    }
+
+    fn apply(&mut self, operation: &Operation, action: Action) -> bool {
+        let mut next = self.clone();
+        let ok = match *operation {
+            Operation::InsertParent(id) => next.parents.insert(id),
+            Operation::InsertChild(id, pid) => {
+                !next.children.contains_key(&id)
+                    && pid.is_none_or(|pid| next.parents.contains(&pid))
+                    && next.children.insert(id, pid).is_none()
+            }
+            Operation::DeleteParent(id) => {
+                next.parents.remove(&id) && next.remove_or_move(id, None, action)
+                    || !self.parents.contains(&id)
+            }
+            Operation::UpdateParent(old, new) => {
+                if !next.parents.contains(&old) {
+                    true
+                } else if old == new {
+                    true
+                } else if next.parents.contains(&new) {
+                    false
+                } else {
+                    next.parents.remove(&old);
+                    next.parents.insert(new);
+                    next.remove_or_move(old, Some(new), action)
+                }
+            }
+            Operation::UpdateChild(id, pid) => {
+                if !next.children.contains_key(&id) {
+                    true
+                } else if pid.is_some_and(|pid| !next.parents.contains(&pid)) {
+                    false
+                } else {
+                    next.children.insert(id, pid);
+                    true
+                }
+            }
+        };
+        if ok {
+            *self = next;
+        }
+        ok
+    }
+}
+
+enum Operation {
+    InsertParent(i64),
+    InsertChild(i64, Option<i64>),
+    DeleteParent(i64),
+    UpdateParent(i64, i64),
+    UpdateChild(i64, Option<i64>),
+}
+
+impl Operation {
+    fn sql(&self) -> String {
+        let shown = |pid: Option<i64>| pid.map_or_else(|| "NULL".to_owned(), |pid| pid.to_string());
+        match self {
+            Self::InsertParent(id) => format!("INSERT INTO p VALUES ({id})"),
+            Self::InsertChild(id, pid) => format!("INSERT INTO c VALUES ({id}, {})", shown(*pid)),
+            Self::DeleteParent(id) => format!("DELETE FROM p WHERE id = {id}"),
+            Self::UpdateParent(old, new) => format!("UPDATE p SET id = {new} WHERE id = {old}"),
+            Self::UpdateChild(id, pid) => {
+                format!("UPDATE c SET pid = {} WHERE id = {id}", shown(*pid))
+            }
+        }
+    }
+}
+
+fn table_state(session: &mut Session<'_, MemoryStore>) -> Model {
+    let mut model = Model::default();
+    let mut outputs = Vec::new();
+    session
+        .execute("SELECT id FROM p; SELECT id, pid FROM c", &mut |result| {
+            outputs.push(result)
+        })
+        .unwrap();
+    for row in &outputs[0].rows {
+        model.parents.insert(row[0].as_integer().unwrap());
+    }
+    for row in &outputs[1].rows {
+        model
+            .children
+            .insert(row[0].as_integer().unwrap(), row[1].as_integer());
+    }
+    model
+}
+
+#[test]
+fn referential_actions_agree_with_a_model_with_and_without_an_index() {
+    for action in [
+        Action::Cascade,
+        Action::SetNull,
+        Action::SetDefault,
+        Action::Restrict,
+        Action::NoAction,
+    ] {
+        for indexed in [false, true] {
+            let store = MemoryStore::default();
+            let mut session = Session::new(&store);
+            last(
+                &mut session,
+                &format!(
+                    "CREATE TABLE p (id int PRIMARY KEY);
+                     CREATE TABLE c (id int PRIMARY KEY, pid int DEFAULT 0 REFERENCES p ON DELETE {0} ON UPDATE {0});
+                     INSERT INTO p VALUES (0)",
+                    action.sql()
+                ),
+            );
+            if indexed {
+                last(&mut session, "CREATE INDEX c_pid ON c (pid)");
+            }
+            let mut model = Model::default();
+            model.parents.insert(0);
+            let mut random = Seeded(0x00C0_FFEE + indexed as u64);
+            for step in 0..600 {
+                let value = |random: &mut Seeded| random.below(12) as i64;
+                let maybe = |random: &mut Seeded| {
+                    let pid = random.below(14) as i64;
+                    (pid < 12).then_some(pid)
+                };
+                let operation = match random.below(5) {
+                    0 => Operation::InsertParent(value(&mut random)),
+                    1 => Operation::InsertChild(random.below(40) as i64, maybe(&mut random)),
+                    2 => Operation::DeleteParent(value(&mut random)),
+                    3 => Operation::UpdateParent(value(&mut random), value(&mut random)),
+                    _ => Operation::UpdateChild(random.below(40) as i64, maybe(&mut random)),
+                };
+                let sql = operation.sql();
+                let expected = model.apply(&operation, action);
+                let found = run(&mut session, &sql);
+                assert_eq!(
+                    found.is_ok(),
+                    expected,
+                    "{} indexed={indexed} step {step}: {sql}: {found:?}",
+                    action.sql()
+                );
+                let state = table_state(&mut session);
+                assert_eq!(state.parents, model.parents, "{sql}");
+                assert_eq!(state.children, model.children, "{sql}");
+            }
+            session.check_indexes().unwrap();
+        }
+    }
+}
+
+#[test]
+fn constraint_bounds_hold() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE chain (id int PRIMARY KEY, parent int REFERENCES chain ON DELETE CASCADE)",
+    );
+    let mut script = String::from("INSERT INTO chain VALUES (0, NULL)");
+    for id in 1..2_000 {
+        script.push_str(&format!(", ({id}, {})", id - 1));
+    }
+    last(&mut session, &script);
+    assert_eq!(last(&mut session, "DELETE FROM chain WHERE id = 0"), "DELETE 1");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM chain"),
+        "count\n0\nSELECT 1"
+    );
+    last(&mut session, "CREATE TABLE many (a int)");
+    let mut checks = String::new();
+    for number in 0..crate::encoding::MAX_CONSTRAINTS {
+        checks.push_str(&format!(
+            "ALTER TABLE many ADD CONSTRAINT c{number} CHECK (a <> {number});"
+        ));
+    }
+    run(&mut session, &checks).unwrap();
+    assert_eq!(
+        fails(&mut session, "ALTER TABLE many ADD CHECK (a > -1)")
+            .state()
+            .code(),
+        "54000"
+    );
+    assert_eq!(
+        fails(&mut session, "INSERT INTO many VALUES (1000)")
+            .state()
+            .code(),
+        "23514"
+    );
+    last(&mut session, "INSERT INTO many VALUES (5000)");
+    let long = "n".repeat(20_000);
+    last(
+        &mut session,
+        &format!("CREATE TABLE named (a int CONSTRAINT {long} CHECK (a > 0))"),
+    );
+    let error = fails(&mut session, "INSERT INTO named VALUES (0)");
+    assert_eq!(error.state().code(), "23514");
+    assert!(error.message().contains(&"n".repeat(63)), "{error}");
+    let nested = format!("CREATE TABLE deep (a int CHECK ({}a > 0{}))", "(".repeat(5_000), ")".repeat(5_000));
+    assert_eq!(fails(&mut session, &nested).state().code(), "54001");
+    let explained = last(&mut session, "EXPLAIN SELECT * FROM chain WHERE id = 1");
+    assert!(explained.contains("chain"), "{explained}");
 }
