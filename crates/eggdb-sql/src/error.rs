@@ -46,6 +46,8 @@ impl SqlState {
     pub const NAME_TOO_LONG: Self = Self(*b"42622");
     /// `42701` duplicate_column.
     pub const DUPLICATE_COLUMN: Self = Self(*b"42701");
+    /// `42702` ambiguous_column.
+    pub const AMBIGUOUS_COLUMN: Self = Self(*b"42702");
     /// `42703` undefined_column.
     pub const UNDEFINED_COLUMN: Self = Self(*b"42703");
     /// `42704` undefined_object.

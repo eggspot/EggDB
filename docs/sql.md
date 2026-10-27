@@ -55,7 +55,8 @@ division by zero fails with `22012`; floating-point results that overflow fail; 
 `double precision` print in the shortest form that reads back exactly, with an exponent from
 `1e+15` (`1e+06` for `real`), `NaN` and `Infinity`; `NaN` equals itself and sorts above every
 other number. Assigning a longer string to `varchar(n)` fails with `22001` unless the excess is
-spaces, and a cast truncates. A quoted constant such as `'42'` takes the type its context needs
+spaces, and a cast truncates; a value of any type assigned to a text column is stored as its
+text (`true` as `true`). A quoted constant such as `'42'` takes the type its context needs
 (`WHERE id = '42'`, `INSERT INTO t (flag) VALUES ('yes')`), as PostgreSQL's "unknown" type does.
 
 **Expressions**
@@ -81,8 +82,8 @@ names are cut to 63 bytes, and `public.name` is the same table as `name`.
 columns, `42P07` a table that exists, `23505` a duplicate primary key (with
 `Key (id)=(1) already exists.`), `23502` a NULL in a `NOT NULL` column, `22P02` text that is
 not a number, `42804` and `42883` type mismatches, `25P02` statements in a failed block, `0A000`
-what is not supported yet. An expression nested, or a chain of operators, deeper than 64 levels fails with `54001`
-instead of exhausting the stack.
+what is not supported yet. An expression nested, or a chain of operators or casts, deeper than 64 levels fails with
+`54001` instead of exhausting the stack; `AND` and `OR` chains of any length are fine.
 
 **Transactions.** Outside a block every statement is its own transaction: it commits whole or
 not at all, so a multi-row `INSERT` that hits a duplicate key leaves no row behind. `BEGIN`

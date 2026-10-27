@@ -971,9 +971,11 @@ impl<'t> Parser<'t> {
             if level < least {
                 break;
             }
-            self.depth += 1;
-            if self.depth > MAX_NESTING {
-                return Err(too_deep(self.position()));
+            if !matches!(level, Level::Or | Level::And) {
+                self.depth += 1;
+                if self.depth > MAX_NESTING {
+                    return Err(too_deep(self.position()));
+                }
             }
             left = self.infix(left, level)?;
         }
@@ -986,6 +988,29 @@ impl<'t> Parser<'t> {
             kind: ExprKind::Binary(operator, Box::new(left), Box::new(right)),
             position,
         }
+    }
+
+    fn joined(left: Expr, right: Expr, level: Level) -> Expr {
+        let position = left.position;
+        let kind = match (left.kind, level) {
+            (ExprKind::Or(mut operands), Level::Or) => {
+                operands.push(right);
+                ExprKind::Or(operands)
+            }
+            (ExprKind::And(mut operands), Level::And) => {
+                operands.push(right);
+                ExprKind::And(operands)
+            }
+            (kind, _) => {
+                let operands = vec![Expr { kind, position }, right];
+                if level == Level::Or {
+                    ExprKind::Or(operands)
+                } else {
+                    ExprKind::And(operands)
+                }
+            }
+        };
+        Expr { kind, position }
     }
 
     fn prefix(&mut self, least: Level) -> SqlResult<Expr> {
@@ -1067,12 +1092,12 @@ impl<'t> Parser<'t> {
             Level::Or => {
                 self.at += 1;
                 let right = self.expression_above(Level::And)?;
-                Ok(Self::binary(left, BinaryOperator::Or, right))
+                Ok(Self::joined(left, right, Level::Or))
             }
             Level::And => {
                 self.at += 1;
                 let right = self.expression_above(Level::Not)?;
-                Ok(Self::binary(left, BinaryOperator::And, right))
+                Ok(Self::joined(left, right, Level::And))
             }
             Level::Is => self.is_test(left),
             Level::Comparison => {
@@ -1238,9 +1263,20 @@ impl<'t> Parser<'t> {
     }
 
     fn postfix(&mut self) -> SqlResult<Expr> {
+        let entry_depth = self.depth;
+        let result = self.casts();
+        self.depth = entry_depth;
+        result
+    }
+
+    fn casts(&mut self) -> SqlResult<Expr> {
         let mut expr = self.primary()?;
         loop {
             if self.take(&TokenKind::DoubleColon) {
+                self.depth += 1;
+                if self.depth > MAX_NESTING {
+                    return Err(too_deep(self.position()));
+                }
                 let sql_type = self.sql_type()?;
                 let position = expr.position;
                 expr = Expr {
@@ -1348,10 +1384,19 @@ impl<'t> Parser<'t> {
                 "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8" | "real"
                 | "float4" | "float8" | "boolean" | "bool" | "text" | "varchar" | "double"
                     if matches!(self.peek_kind_at(1), TokenKind::String(_))
-                        || (word == "double" && self.is_word_at(1, "precision")) =>
+                        || (word == "double"
+                            && self.is_word_at(1, "precision")
+                            && matches!(self.peek_kind_at(2), TokenKind::String(_))) =>
                 {
                     let sql_type = self.sql_type()?;
-                    let operand = self.primary()?;
+                    let TokenKind::String(text) = self.peek_kind() else {
+                        return Err(self.unexpected());
+                    };
+                    let operand = Expr {
+                        kind: ExprKind::Literal(Literal::String(text.clone())),
+                        position: self.position(),
+                    };
+                    self.at += 1;
                     Ok(Expr {
                         kind: ExprKind::Cast {
                             expr: Box::new(operand),

@@ -83,6 +83,9 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
             check_columns(expr, scope)?;
             list.iter().try_for_each(|item| check_columns(item, scope))
         }
+        ExprKind::And(operands) | ExprKind::Or(operands) => operands
+            .iter()
+            .try_for_each(|operand| check_columns(operand, scope)),
         ExprKind::Case {
             operand,
             branches,
@@ -149,6 +152,26 @@ impl Evaluator<'_> {
                 Ok(self.row.get(index).cloned().unwrap_or(Value::Null))
             }
             ExprKind::Unary(operator, operand) => self.unary(*operator, operand, hint),
+            ExprKind::And(operands) => {
+                let mut result = Some(true);
+                for operand in operands {
+                    result = and(result, self.boolean(operand, "AND")?);
+                    if result == Some(false) {
+                        break;
+                    }
+                }
+                Ok(truth_value(result))
+            }
+            ExprKind::Or(operands) => {
+                let mut result = Some(false);
+                for operand in operands {
+                    result = or(result, self.boolean(operand, "OR")?);
+                    if result == Some(true) {
+                        break;
+                    }
+                }
+                Ok(truth_value(result))
+            }
             ExprKind::Binary(operator, left, right) => self.binary(*operator, left, right),
             ExprKind::IsNull { expr, negated } => {
                 Ok(Value::Boolean(self.eval(expr, None)?.is_null() != *negated))
@@ -353,25 +376,12 @@ impl Evaluator<'_> {
 
     fn binary(&self, operator: BinaryOperator, left: &Expr, right: &Expr) -> SqlResult<Value> {
         match operator {
-            BinaryOperator::And => {
-                let left = self.boolean(left, "AND")?;
-                if left == Some(false) {
-                    return Ok(Value::Boolean(false));
-                }
-                Ok(truth_value(and(left, self.boolean(right, "AND")?)))
-            }
-            BinaryOperator::Or => {
-                let left = self.boolean(left, "OR")?;
-                if left == Some(true) {
-                    return Ok(Value::Boolean(true));
-                }
-                Ok(truth_value(or(left, self.boolean(right, "OR")?)))
-            }
             BinaryOperator::Concat => {
                 let left = self.eval(left, Some(SqlType::Text))?;
                 let right = self.eval(right, Some(SqlType::Text))?;
                 let either_text = matches!(left, Value::Text(_)) || matches!(right, Value::Text(_));
-                if !either_text {
+                let either_null = left.is_null() || right.is_null();
+                if !either_text && !either_null {
                     return Err(no_operator("||", &left, &right));
                 }
                 match (left.to_text(), right.to_text()) {
@@ -419,10 +429,13 @@ impl Evaluator<'_> {
     }
 
     fn function(&self, name: &str, arguments: &[Expr]) -> SqlResult<Value> {
-        let values = arguments
-            .iter()
-            .map(|argument| self.eval(argument, None))
-            .collect::<SqlResult<Vec<_>>>()?;
+        let mut values = Vec::with_capacity(arguments.len());
+        let mut hint = None;
+        for argument in arguments {
+            let value = self.eval(argument, hint)?;
+            hint = hint.or_else(|| self.type_of(&value, argument));
+            values.push(value);
+        }
         let unknown = || {
             let types: Vec<String> = values.iter().map(Value::type_name).collect();
             SqlError::new(
@@ -491,7 +504,7 @@ pub(crate) fn literal_value(literal: &Literal, hint: Option<SqlType>) -> SqlResu
             _ => Ok(Value::Text(text.clone())),
         },
         Literal::Decimal(text) => match hint {
-            Some(sql_type) if sql_type.is_float() => decimal_literal(text, sql_type, false),
+            Some(sql_type) if sql_type.is_float() => decimal_literal(text, SqlType::Double, false),
             _ => Err(numeric_not_supported(text)),
         },
     }
@@ -677,8 +690,12 @@ fn arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResul
     if result.is_infinite() && a.is_finite() && b.is_finite() {
         return Err(float_overflow());
     }
-    let shrinks = matches!(operator, BinaryOperator::Multiply | BinaryOperator::Divide);
-    if shrinks && result == 0.0 && a != 0.0 && b.is_finite() {
+    let underflowed = match operator {
+        BinaryOperator::Multiply => a != 0.0 && b != 0.0,
+        BinaryOperator::Divide => a != 0.0 && b.is_finite(),
+        _ => false,
+    };
+    if underflowed && result == 0.0 {
         return Err(SqlError::new(
             SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
             "value out of range: underflow",

@@ -121,8 +121,6 @@ pub(crate) enum BinaryOperator {
     LessOrEqual,
     Greater,
     GreaterOrEqual,
-    And,
-    Or,
 }
 
 impl BinaryOperator {
@@ -141,8 +139,6 @@ impl BinaryOperator {
             Self::LessOrEqual => "<=",
             Self::Greater => ">",
             Self::GreaterOrEqual => ">=",
-            Self::And => "AND",
-            Self::Or => "OR",
         }
     }
 }
@@ -184,6 +180,8 @@ pub(crate) enum ExprKind {
         name: String,
     },
     Unary(UnaryOperator, Box<Expr>),
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
     Binary(BinaryOperator, Box<Expr>, Box<Expr>),
     IsNull {
         expr: Box<Expr>,

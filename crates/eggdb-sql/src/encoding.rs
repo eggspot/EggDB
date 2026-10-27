@@ -154,6 +154,9 @@ impl TableDefinition {
                 1 => Some(reader.text()?),
                 _ => return Err(reader.damaged()),
             };
+            if columns.iter().any(|column: &Column| column.name == name) {
+                return Err(reader.damaged());
+            }
             columns.push(Column {
                 name,
                 sql_type,
@@ -165,7 +168,7 @@ impl TableDefinition {
         let mut primary_key = Vec::new();
         for _ in 0..key_count {
             let index = usize::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
-            if index >= columns.len() {
+            if index >= columns.len() || primary_key.contains(&index) {
                 return Err(reader.damaged());
             }
             primary_key.push(index);
@@ -288,16 +291,20 @@ pub(crate) fn encode_row(values: &[Value]) -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_row(bytes: &[u8], column_count: usize) -> SqlResult<Vec<Value>> {
+pub(crate) fn decode_row(bytes: &[u8], columns: &[Column]) -> SqlResult<Vec<Value>> {
     let mut reader = Reader::new(bytes, "row");
     reader.version()?;
     let count = reader.count()?;
-    if count > column_count {
+    if count > columns.len() {
         return Err(reader.damaged());
     }
-    let mut values = Vec::with_capacity(column_count);
-    for _ in 0..count {
-        values.push(match reader.byte()? {
+    let mut values = Vec::with_capacity(columns.len());
+    for column in &columns[..count] {
+        let tag = reader.byte()?;
+        if tag != 0 && tag != value_tag(column.sql_type) {
+            return Err(reader.damaged());
+        }
+        values.push(match tag {
             0 => Value::Null,
             1 => Value::SmallInt(i16::from_le_bytes(reader.array()?)),
             2 => Value::Integer(i32::from_le_bytes(reader.array()?)),
@@ -314,8 +321,15 @@ pub(crate) fn decode_row(bytes: &[u8], column_count: usize) -> SqlResult<Vec<Val
         });
     }
     reader.finish()?;
-    values.resize(column_count, Value::Null);
+    values.resize(columns.len(), Value::Null);
     Ok(values)
+}
+
+fn value_tag(sql_type: SqlType) -> u8 {
+    match sql_type {
+        SqlType::Varchar(_) => type_tag(SqlType::Text),
+        other => type_tag(other),
+    }
 }
 
 fn put_varint(out: &mut Vec<u8>, mut value: u64) {
@@ -508,6 +522,26 @@ mod tests {
 
     #[test]
     fn rows_round_trip_and_short_rows_read_as_null() {
+        let types = [
+            SqlType::Text,
+            SqlType::SmallInt,
+            SqlType::Integer,
+            SqlType::BigInt,
+            SqlType::Real,
+            SqlType::Double,
+            SqlType::Boolean,
+            SqlType::Varchar(Some(9)),
+            SqlType::Integer,
+        ];
+        let columns: Vec<Column> = types
+            .iter()
+            .map(|&sql_type| Column {
+                name: String::new(),
+                sql_type,
+                not_null: false,
+                default: None,
+            })
+            .collect();
         let values = vec![
             Value::Null,
             Value::SmallInt(-3),
@@ -519,13 +553,14 @@ mod tests {
             Value::Text("héllo".into()),
         ];
         let encoded = encode_row(&values);
-        assert_eq!(decode_row(&encoded, 8), Ok(values.clone()));
+        assert_eq!(decode_row(&encoded, &columns[..8]), Ok(values.clone()));
         let mut longer = values;
         longer.push(Value::Null);
-        assert_eq!(decode_row(&encoded, 9), Ok(longer));
-        assert!(decode_row(&encoded, 7).is_err());
+        assert_eq!(decode_row(&encoded, &columns), Ok(longer));
+        assert!(decode_row(&encoded, &columns[..7]).is_err());
+        assert!(decode_row(&encoded, &columns[1..]).is_err());
         for cut in 0..encoded.len() {
-            assert!(decode_row(&encoded[..cut], 8).is_err());
+            assert!(decode_row(&encoded[..cut], &columns[..8]).is_err());
         }
     }
 

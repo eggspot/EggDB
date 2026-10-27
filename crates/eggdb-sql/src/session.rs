@@ -103,7 +103,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// error, whose [`position`](SqlError::position) is a byte offset into `text`. Statements
     /// before it keep their effects: committed outside a block, pending inside one.
     pub fn execute(&mut self, text: &str, on_result: &mut dyn FnMut(QueryResult)) -> SqlResult<()> {
-        let tokens = tokenize(text)?;
+        let tokens = match tokenize(text) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                self.fail_block();
+                return Err(error);
+            }
+        };
         let mut parser = Parser::new(text, &tokens);
         loop {
             parser.skip_empty_statements();

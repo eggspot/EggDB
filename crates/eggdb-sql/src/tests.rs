@@ -308,10 +308,18 @@ fn inserts_check_constraints_and_return_rows() {
     assert_eq!(
         state(
             &mut session,
-            "INSERT INTO people (id, name) VALUES (9, true)"
+            "INSERT INTO people (id, name) VALUES ('9'::text, 'x')"
         ),
         "42804"
     );
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO people (id, name) VALUES (90, 42), (91, true) RETURNING name"
+        ),
+        "name\n42\ntrue\nINSERT 0 2"
+    );
+    last(&mut session, "DELETE FROM people WHERE id >= 90");
     assert_eq!(
         state(&mut session, "INSERT INTO people (id, nope) VALUES (9, 1)"),
         "42703"
@@ -613,7 +621,17 @@ fn syntax_errors_name_the_token_and_its_position() {
     let sum = format!("SELECT 1{}", " + 1".repeat(100_000));
     assert_eq!(fails(&mut session, &sum).state().code(), "54001");
     let conjunction = format!("SELECT true{}", " AND true".repeat(100_000));
-    assert_eq!(fails(&mut session, &conjunction).state().code(), "54001");
+    assert_eq!(last(&mut session, &conjunction), "?column?\nt\nSELECT 1");
+    let disjunction = format!("SELECT false{}", " OR 1 = 2".repeat(100_000));
+    assert_eq!(last(&mut session, &disjunction), "?column?\nf\nSELECT 1");
+    let casts = format!("SELECT 1{}", "::int".repeat(100_000));
+    assert_eq!(fails(&mut session, &casts).state().code(), "54001");
+    let typed = format!("SELECT {}'1'", "double precision ".repeat(100_000));
+    assert_eq!(fails(&mut session, &typed).state().code(), "42601");
+    assert_eq!(
+        last(&mut session, "SELECT double precision '1.5', integer '7'"),
+        "float8|int4\n1.5|7\nSELECT 1"
+    );
     let longest_sum = format!("SELECT 1{}", " + 1".repeat(60));
     assert_eq!(last(&mut session, &longest_sum), "?column?\n61\nSELECT 1");
     let mut tallest = String::from("1");
@@ -936,4 +954,60 @@ fn operators_bind_with_postgresql_precedence() {
     );
     assert_eq!(state(&mut session, "SELECT 1 = NOT true"), "42601");
     assert_eq!(state(&mut session, "SELECT 1 @@ 2"), "42883");
+}
+
+#[test]
+fn review_cases_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT 2.0::float8 * 0, 0 * 1e-300::float8, NULL || NULL, nullif(1, '1'), true::text"
+        ),
+        "?column?|?column?|?column?|nullif|text\n0|0|NULL|NULL|true\nSELECT 1"
+    );
+    assert_eq!(
+        state(&mut session, "SELECT 1e-300::float8 * 1e-300::float8"),
+        "22003"
+    );
+    last(
+        &mut session,
+        "CREATE TABLE r (id int PRIMARY KEY, x real, label text); INSERT INTO r VALUES (1, 0.1, 'b'), (2, 0.5, 'A')",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT id FROM r WHERE x = 0.1"),
+        "id\nSELECT 0"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT id FROM r WHERE x = 0.5"),
+        "id\n2\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT x * 1.1 FROM r WHERE id = 1"),
+        "?column?\n0.11000000163912774\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT lower(label) FROM r ORDER BY lower"),
+        "lower\na\nb\nSELECT 2"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT label, label FROM r ORDER BY label"),
+        "label|label\nA|A\nb|b\nSELECT 2"
+    );
+    assert_eq!(
+        state(
+            &mut session,
+            "SELECT id AS label, label FROM r ORDER BY label"
+        ),
+        "42702"
+    );
+    last(&mut session, "BEGIN; INSERT INTO r VALUES (3, 1, 'c')");
+    assert_eq!(state(&mut session, "SELECT 'unterminated"), "42601");
+    assert_eq!(state(&mut session, "SELECT 1"), "25P02");
+    assert_eq!(last(&mut session, "COMMIT"), "ROLLBACK");
+    assert_eq!(
+        last(&mut session, "SELECT id FROM r WHERE id = 3"),
+        "id\nSELECT 0"
+    );
 }

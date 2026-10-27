@@ -354,14 +354,12 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
         return Ok(Value::Null);
     };
     if target.is_string() {
-        if let Value::Text(text) = value {
-            return assign_string(text, target, conversion);
-        }
-        if conversion == Conversion::Explicit {
-            let text = value.to_text().unwrap_or_default();
-            return assign_string(text, target, conversion);
-        }
-        return Err(mismatch(source, target));
+        let text = match value {
+            Value::Text(text) => text,
+            Value::Boolean(flag) => flag.to_string(),
+            other => other.to_text().unwrap_or_default(),
+        };
+        return assign_string(text, target, conversion);
     }
     if source.is_string() {
         return match (conversion, value) {

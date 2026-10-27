@@ -555,6 +555,46 @@ impl<'a> Projection<'a> {
         })
     }
 
+    fn output_named(&self, name: &str, position: usize) -> SqlResult<usize> {
+        let mut found: Option<(usize, Option<usize>)> = None;
+        for (index, column) in self.columns.iter().enumerate() {
+            if column.name != name {
+                continue;
+            }
+            let source = self.source_column(index);
+            match found {
+                None => found = Some((index, source)),
+                Some((_, earlier)) if earlier.is_some() && earlier == source => {}
+                Some(_) => {
+                    return Err(SqlError::new(
+                        SqlState::AMBIGUOUS_COLUMN,
+                        format!("ORDER BY \"{name}\" is ambiguous"),
+                    )
+                    .at(position));
+                }
+            }
+        }
+        found.map(|(index, _)| index).ok_or_else(|| {
+            SqlError::new(
+                SqlState::UNDEFINED_COLUMN,
+                format!("column \"{name}\" does not exist"),
+            )
+            .at(position)
+        })
+    }
+
+    fn source_column(&self, index: usize) -> Option<usize> {
+        match &self.items[index] {
+            ProjectedItem::Column(column) => Some(*column),
+            ProjectedItem::Expr(expr) => match &expr.kind {
+                ExprKind::Column { qualifier, name } => {
+                    self.scope.column(qualifier.as_deref(), name, 0).ok()
+                }
+                _ => None,
+            },
+        }
+    }
+
     fn project(&self, row: &[Value]) -> SqlResult<Vec<Value>> {
         let evaluator = Evaluator {
             scope: self.scope,
@@ -579,11 +619,9 @@ fn filter_matches(scope: Scope<'_>, filter: Option<&Expr>, row: &[Value]) -> Sql
 }
 
 fn conjuncts<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
-    if let ExprKind::Binary(BinaryOperator::And, left, right) = &expr.kind {
-        conjuncts(left, out);
-        conjuncts(right, out);
-    } else {
-        out.push(expr);
+    match &expr.kind {
+        ExprKind::And(operands) => out.extend(operands),
+        _ => out.push(expr),
     }
 }
 
@@ -640,7 +678,7 @@ fn matching_rows(
     let mut rows = Vec::new();
     if let Some(key) = filter.and_then(|filter| point_key(table, scope, filter)) {
         if let Some(bytes) = reader.get(&key)? {
-            let row = decode_row(&bytes, table.columns.len())?;
+            let row = decode_row(&bytes, &table.columns)?;
             if filter_matches(scope, filter, &row)? {
                 rows.push((key, row));
             }
@@ -656,7 +694,7 @@ fn matching_rows(
         &prefix_end(&prefix),
         ScanDirection::Forward,
         &mut |key, bytes| {
-            let row = decode_row(bytes, table.columns.len())?;
+            let row = decode_row(bytes, &table.columns)?;
             if filter_matches(scope, filter, &row)? {
                 rows.push((key.to_vec(), row));
             }
@@ -745,20 +783,8 @@ pub(crate) fn select(
             ExprKind::Column {
                 qualifier: None,
                 name,
-            } if projection
-                .columns
-                .iter()
-                .any(|column| &column.name == name)
-                && select.items.iter().any(|item| {
-                    matches!(item, SelectItem::Expr { alias: Some(alias), .. } if alias == name)
-                }) =>
-            {
-                let index = projection
-                    .columns
-                    .iter()
-                    .position(|column| &column.name == name)
-                    .unwrap_or(0);
-                SortKey::Output(index)
+            } if projection.columns.iter().any(|column| &column.name == name) => {
+                SortKey::Output(projection.output_named(name, item.expr.position)?)
             }
             _ => {
                 check_columns(&item.expr, scope)?;
