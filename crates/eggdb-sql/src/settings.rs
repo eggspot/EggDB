@@ -239,6 +239,7 @@ pub(crate) struct Settings {
     values: BTreeMap<&'static str, String>,
     custom: BTreeMap<String, String>,
     pub(crate) database: String,
+    pub(crate) mysql: crate::mysql_variables::MySqlVariables,
 }
 
 impl Default for Settings {
@@ -250,6 +251,7 @@ impl Default for Settings {
                 .collect(),
             custom: BTreeMap::new(),
             database: "eggdb".to_owned(),
+            mysql: crate::mysql_variables::MySqlVariables::default(),
         }
     }
 }

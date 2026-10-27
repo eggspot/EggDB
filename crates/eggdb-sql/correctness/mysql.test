@@ -1,0 +1,588 @@
+chapter "Schema Object Names", "CREATE TABLE Statement", "Using AUTO_INCREMENT"
+ok
+CREATE TABLE `users` (`id` INT NOT NULL AUTO_INCREMENT, `name` VARCHAR(50) NOT NULL, `age` INT DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+
+rows
+INSERT INTO users (name, age) VALUES ('ann', 31), ('bob', NULL)
+----
+INSERT 0 2
+
+rows
+SELECT LAST_INSERT_ID()
+----
+LAST_INSERT_ID()
+1
+SELECT 1
+
+rows
+SELECT `id`, `name` FROM `users` ORDER BY `id`
+----
+id|name
+1|ann
+2|bob
+SELECT 2
+
+rows
+SELECT id FROM USERS WHERE NAME = 'bob'
+----
+id
+2
+SELECT 1
+
+rows
+INSERT INTO users VALUES (10, 'cy', 20)
+----
+INSERT 0 1
+
+rows
+INSERT INTO users (id, name) VALUES (NULL, 'di'), (0, 'ed')
+----
+INSERT 0 2
+
+rows
+SELECT LAST_INSERT_ID(), @@last_insert_id
+----
+LAST_INSERT_ID()|@@last_insert_id
+11|11
+SELECT 1
+
+rows
+SELECT id, name FROM users WHERE id > 10 ORDER BY id
+----
+id|name
+11|di
+12|ed
+SELECT 2
+
+error 42000 1075
+CREATE TABLE two_auto (a INT AUTO_INCREMENT, b INT AUTO_INCREMENT, PRIMARY KEY (a))
+
+error 42S21 1060
+CREATE TABLE twice (a INT, a INT)
+
+error 42S01 1050
+CREATE TABLE users (id INT PRIMARY KEY)
+
+ok
+CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY)
+
+rows
+SHOW WARNINGS
+----
+Level|Code|Message
+Note|1050|Table 'users' already exists
+SELECT 1
+
+ok
+CREATE TABLE `order` (`key` INT PRIMARY KEY, `desc` TEXT, KEY `by_desc` (`desc`(10)))
+
+rows
+INSERT INTO `order` VALUES (1, 'one')
+----
+INSERT 0 1
+
+rows
+SELECT `key`, `desc` FROM `order`
+----
+key|desc
+1|one
+SELECT 1
+
+ok
+CREATE TABLE user (id INT UNSIGNED NOT NULL PRIMARY KEY COMMENT 'the id') COMMENT = 'people'
+
+chapter "Data Types", "Numeric Data Types", "String Data Types"
+ok
+CREATE TABLE types (id INT(11) NOT NULL PRIMARY KEY, flag TINYINT(1), small TINYINT, big BIGINT, ratio DOUBLE, price DECIMAL(10,2), code CHAR(3), note TEXT, ok BOOLEAN)
+
+rows
+INSERT INTO types (id, flag, small, big, ratio, price, code, ok) VALUES (1, TRUE, 7, 9007199254740993, 0.5, 2.5, 'abc', FALSE)
+----
+INSERT 0 1
+
+rows
+SELECT flag, small, big, ratio, price, code, ok FROM types
+----
+flag|small|big|ratio|price|code|ok
+1|7|9007199254740993|0.5|2.5|abc|0
+SELECT 1
+
+error 22003 1264
+INSERT INTO types (id, small) VALUES (2, 70000)
+
+error 22001 1406
+INSERT INTO types (id, code) VALUES (3, 'abcd')
+
+rows
+DESCRIBE users
+----
+Field|Type|Null|Key|Default|Extra
+id|int|NO|PRI|NULL|auto_increment
+name|varchar(50)|NO||NULL|
+age|int|YES||NULL|
+SELECT 3
+
+rows
+SHOW COLUMNS FROM users LIKE 'na%'
+----
+Field|Type|Null|Key|Default|Extra
+name|varchar(50)|NO||NULL|
+SELECT 1
+
+chapter "String Literals", "Comments", "Keywords and Reserved Words"
+rows
+SELECT "double", 'it''s', 'a\'b', 'c\\d', 'x\ty' = 'x	y'
+----
+double|it's|a'b|c\d|'x\ty' = 'x	y'
+double|it's|a'b|c\d|1
+SELECT 1
+
+rows
+SELECT 1 # the rest is a comment
+----
+1
+1
+SELECT 1
+
+rows
+SELECT 1 /*!40101 + 1 */ AS two, 1--1 AS three
+----
+two|three
+2|2
+SELECT 1
+
+rows
+SELECT 1 -- a comment needs a space after the dashes
+----
+1
+1
+SELECT 1
+
+rows
+SELECT TRUE, FALSE, NULL
+----
+TRUE|FALSE|NULL
+1|0|NULL
+SELECT 1
+
+rows
+SELECT 1 FROM DUAL
+----
+1
+1
+SELECT 1
+
+chapter "Arithmetic Operators", "Comparison Functions and Operators", "Logical Operators"
+rows
+SELECT 7 DIV 2, 7 MOD 3, 7 % 3, -7 DIV 2
+----
+7 DIV 2|7 MOD 3|7 % 3|-7 DIV 2
+3|1|1|-3
+SELECT 1
+
+rows
+SELECT 7 / 2
+----
+7 / 2
+3.5000
+SELECT 1
+... differs
+
+rows
+SELECT 1 / 0
+----
+1 / 0
+NULL
+SELECT 1
+... differs
+
+rows
+SELECT 1 <=> 1, NULL <=> NULL, 1 <=> NULL, NULL = NULL
+----
+1 <=> 1|NULL <=> NULL|1 <=> NULL|NULL = NULL
+1|1|0|NULL
+SELECT 1
+
+rows
+SELECT 1 = 1 || 1 = 2, 1 = 1 && 1 = 2, !(1 = 2), 1 != 2
+----
+1 = 1 || 1 = 2|1 = 1 && 1 = 2|!(1 = 2)|1 != 2
+1|0|1|1
+SELECT 1
+
+rows
+SELECT 'a' = 'A'
+----
+'a' = 'A'
+1
+SELECT 1
+... differs
+
+rows
+SELECT 2 BETWEEN 1 AND 3, 5 IN (1, 5), 'abc' LIKE 'a%'
+----
+2 BETWEEN 1 AND 3|5 IN (1, 5)|'abc' LIKE 'a%'
+1|1|1
+SELECT 1
+
+chapter "Flow Control Functions", "String Functions and Operators", "Information Functions"
+rows
+SELECT IFNULL(NULL, 'a'), IFNULL(2, 3), IF(1 > 0, 'yes', 'no')
+----
+IFNULL(NULL, 'a')|IFNULL(2, 3)|IF(1 > 0, 'yes', 'no')
+a|2|yes
+SELECT 1
+
+rows
+SELECT CONCAT('a', 1, 'b'), CONCAT('a', NULL), CONCAT(TRUE, 2.5)
+----
+CONCAT('a', 1, 'b')|CONCAT('a', NULL)|CONCAT(TRUE, 2.5)
+a1b|NULL|12.5
+SELECT 1
+
+rows
+SELECT LENGTH('héllo'), CHAR_LENGTH('héllo'), UPPER('abc'), UCASE('d'), LOWER('ABC'), LCASE('E')
+----
+LENGTH('héllo')|CHAR_LENGTH('héllo')|UPPER('abc')|UCASE('d')|LOWER('ABC')|LCASE('E')
+6|5|ABC|D|abc|e
+SELECT 1
+
+rows
+SELECT DATABASE(), SCHEMA(), VERSION(), CURRENT_USER(), CONNECTION_ID()
+----
+DATABASE()|SCHEMA()|VERSION()|CURRENT_USER()|CONNECTION_ID()
+eggdb|eggdb|8.0.36-EggDB|eggdb@localhost|1
+SELECT 1
+
+error 42000 1305
+SELECT nosuch(1)
+
+error 42000 1582
+SELECT IFNULL(1)
+
+chapter "SELECT Statement", "LIMIT Query Optimization", "JOIN Clause"
+rows
+SELECT name FROM users ORDER BY id LIMIT 1, 2
+----
+name
+bob
+cy
+SELECT 2
+
+rows
+SELECT name FROM users ORDER BY id LIMIT 2 OFFSET 3
+----
+name
+di
+ed
+SELECT 2
+
+rows
+SELECT u.name, t.code FROM users AS u JOIN types AS t ON t.id = u.id
+----
+name|code
+ann|abc
+SELECT 1
+
+rows
+SELECT COUNT(*), MAX(id) FROM users
+----
+COUNT(*)|MAX(id)
+5|12
+SELECT 1
+
+rows
+SELECT * FROM eggdb.users WHERE id = 1
+----
+id|name|age
+1|ann|31
+SELECT 1
+
+error 42000 1066
+SELECT * FROM users u JOIN users u ON u.id = u.id
+
+error 23000 1052
+SELECT id FROM users, types
+
+chapter "INSERT ... ON DUPLICATE KEY UPDATE Statement", "REPLACE Statement", "INSERT Statement"
+rows
+INSERT INTO users (id, name, age) VALUES (1, 'ann', 32) ON DUPLICATE KEY UPDATE age = VALUES(age)
+----
+INSERT 0 2
+
+rows
+INSERT INTO users (id, name, age) VALUES (1, 'ann', 32) ON DUPLICATE KEY UPDATE age = VALUES(age)
+----
+INSERT 0 0
+
+rows
+INSERT INTO users (id, name) VALUES (2, 'x'), (13, 'fay') ON DUPLICATE KEY UPDATE age = 50, name = CONCAT(name, '!')
+----
+INSERT 0 3
+
+rows
+SELECT id, name, age FROM users WHERE id IN (1, 2, 13) ORDER BY id
+----
+id|name|age
+1|ann|32
+2|bob!|50
+13|fay|NULL
+SELECT 3
+
+rows
+REPLACE INTO users VALUES (2, 'bea', 40)
+----
+INSERT 0 2
+
+rows
+REPLACE users (id, name) VALUES (14, 'gus')
+----
+INSERT 0 1
+
+rows
+SELECT name, age FROM users WHERE id = 2
+----
+name|age
+bea|40
+SELECT 1
+
+rows
+INSERT IGNORE INTO users VALUES (1, 'dup', 1), (15, 'hal', 1)
+----
+INSERT 0 1
+
+rows
+SHOW WARNINGS
+----
+Level|Code|Message
+Warning|1062|Duplicate entry '1' for key 'users.PRIMARY'
+SELECT 1
+
+rows
+SHOW COUNT(*) WARNINGS
+----
+@@session.warning_count
+1
+SELECT 1
+
+error 23000 1062
+INSERT INTO users VALUES (1, 'x', 1)
+
+rows
+SHOW WARNINGS
+----
+Level|Code|Message
+Error|1062|Duplicate entry '1' for key 'users.PRIMARY'
+SELECT 1
+
+error 23000 1048
+INSERT INTO users (id, name) VALUES (50, NULL)
+
+error 21S01 1136
+INSERT INTO users (id, name) VALUES (51)
+
+error 42S22 1054
+INSERT INTO users (nope) VALUES (1)
+
+chapter "Server Error Message Reference", "DROP TABLE Statement"
+error 42S02 1146
+SELECT * FROM missing
+
+error 42S22 1054
+SELECT nope FROM users
+
+error 42000 1064
+SELEKT 1
+
+error 42000 1064
+SELECT * FROM
+
+error 42S02 1051
+DROP TABLE missing
+
+ok
+DROP TABLE IF EXISTS missing
+
+rows
+SHOW WARNINGS
+----
+Level|Code|Message
+Note|1051|Unknown table 'eggdb.missing'
+SELECT 1
+
+chapter "START TRANSACTION, COMMIT, and ROLLBACK Statements", "Statements That Cause an Implicit Commit"
+ok
+START TRANSACTION
+
+ok
+INSERT INTO users VALUES (100, 'tx', 1)
+
+ok
+ROLLBACK
+
+rows
+SELECT COUNT(*) FROM users WHERE id = 100
+----
+COUNT(*)
+0
+SELECT 1
+
+ok
+BEGIN
+
+ok
+INSERT INTO users VALUES (101, 'kept', 1)
+
+error 42S02 1146
+SELECT * FROM missing
+
+ok
+COMMIT
+
+rows
+SELECT name FROM users WHERE id = 101
+----
+name
+kept
+SELECT 1
+
+ok
+SET autocommit = 0
+
+ok
+INSERT INTO users VALUES (102, 'undone', 1)
+
+ok
+ROLLBACK
+
+rows
+SELECT COUNT(*) FROM users WHERE id = 102
+----
+COUNT(*)
+0
+SELECT 1
+
+ok
+INSERT INTO users VALUES (103, 'committed by DDL', 1)
+
+ok
+CREATE TABLE implicit (id INT PRIMARY KEY)
+
+ok
+ROLLBACK
+
+ok
+SET autocommit = 1
+
+rows
+SELECT name FROM users WHERE id = 103
+----
+name
+committed by DDL
+SELECT 1
+
+ok
+COMMIT
+
+chapter "SHOW Statements", "USE Statement", "SET Syntax for Variable Assignment", "Server System Variables"
+rows
+SHOW TABLES
+----
+Tables_in_eggdb
+implicit
+order
+types
+user
+users
+SELECT 5
+
+rows
+SHOW FULL TABLES LIKE 'us%'
+----
+Tables_in_eggdb|Table_type
+user|BASE TABLE
+users|BASE TABLE
+SELECT 2
+
+rows
+SHOW DATABASES
+----
+Database
+eggdb
+SELECT 1
+
+ok
+USE eggdb
+
+error 42000 1049
+USE other
+
+rows
+SELECT @@version_comment LIMIT 1
+----
+@@version_comment
+EggDB
+SELECT 1
+
+rows
+SELECT @@max_allowed_packet, @@session.autocommit, @@SESSION.sql_mode
+----
+@@max_allowed_packet|@@session.autocommit|@@SESSION.sql_mode
+67108864|1|ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+SELECT 1
+
+rows
+SHOW VARIABLES LIKE 'max_allowed_packet'
+----
+Variable_name|Value
+max_allowed_packet|67108864
+SELECT 1
+
+rows
+SHOW SESSION VARIABLES LIKE 'character\_set\_c%'
+----
+Variable_name|Value
+character_set_client|utf8mb4
+character_set_connection|utf8mb4
+SELECT 2
+
+ok
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci
+
+ok
+SET SESSION sql_mode = 'ANSI', @@session.wait_timeout = 60, time_zone = '+00:00'
+
+rows
+SELECT @@sql_mode, @@wait_timeout, @@time_zone
+----
+@@sql_mode|@@wait_timeout|@@time_zone
+ANSI|60|+00:00
+SELECT 1
+
+ok
+SET @a = 5, @b = 'x'
+
+rows
+SELECT @a, @b, @c
+----
+@a|@b|@c
+5|x|NULL
+SELECT 1
+
+error HY000 1193
+SELECT @@no_such_variable
+
+error 42000 1231
+SET autocommit = 'maybe'
+
+error HY000 1238
+SET @@version = 'x'
+
+ok
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED
+
+ok
+LOCK TABLES users WRITE, types READ
+
+ok
+UNLOCK TABLES

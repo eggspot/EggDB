@@ -122,6 +122,24 @@ impl SqlState {
     pub const INTERNAL_ERROR: Self = Self(*b"XX000");
     /// `XX001` data_corrupted.
     pub const DATA_CORRUPTED: Self = Self(*b"XX001");
+    /// `42S01`: MySQL's base table or view already exists.
+    pub const MYSQL_TABLE_EXISTS: Self = Self(*b"42S01");
+    /// `42S02`: MySQL's base table or view not found.
+    pub const MYSQL_TABLE_NOT_FOUND: Self = Self(*b"42S02");
+    /// `42S21`: MySQL's column already exists.
+    pub const MYSQL_COLUMN_EXISTS: Self = Self(*b"42S21");
+    /// `42S22`: MySQL's column not found.
+    pub const MYSQL_COLUMN_NOT_FOUND: Self = Self(*b"42S22");
+    /// `42000`: MySQL's syntax error or access rule violation.
+    pub const MYSQL_SYNTAX_OR_ACCESS: Self = Self(*b"42000");
+    /// `23000`: MySQL's integrity constraint violation.
+    pub const MYSQL_INTEGRITY: Self = Self(*b"23000");
+    /// `21S01`: MySQL's insert value list does not match the column list.
+    pub const MYSQL_VALUE_COUNT: Self = Self(*b"21S01");
+    /// `HY000`: MySQL's general error.
+    pub const MYSQL_GENERAL: Self = Self(*b"HY000");
+    /// `08S01`: MySQL's communication link failure.
+    pub const MYSQL_COMMUNICATION: Self = Self(*b"08S01");
 
     /// The code as text, such as `"42601"`.
     pub fn code(&self) -> &str {
@@ -149,6 +167,7 @@ struct Report {
     detail: Option<String>,
     hint: Option<String>,
     position: Option<usize>,
+    vendor_code: Option<u16>,
 }
 
 /// The result of SQL operations.
@@ -164,6 +183,7 @@ impl SqlError {
                 detail: None,
                 hint: None,
                 position: None,
+                vendor_code: None,
             }),
         }
     }
@@ -202,6 +222,18 @@ impl SqlError {
         self
     }
 
+    /// The same error with a database's own error number, such as MySQL's `1146`.
+    pub fn with_vendor_code(mut self, code: u16) -> Self {
+        self.report.vendor_code = Some(code);
+        self
+    }
+
+    /// The database's own error number, when the dialect has them: MySQL's `1146` for a
+    /// missing table, `1064` for a syntax error and so on.
+    pub fn vendor_code(&self) -> Option<u16> {
+        self.report.vendor_code
+    }
+
     /// The SQLSTATE code.
     pub fn state(&self) -> SqlState {
         self.report.state
@@ -231,6 +263,13 @@ impl SqlError {
 
 impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(code) = self.report.vendor_code {
+            return write!(
+                f,
+                "ERROR {code} ({}): {}",
+                self.report.state, self.report.message
+            );
+        }
         write!(
             f,
             "{} (SQLSTATE {})",

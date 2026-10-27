@@ -15,6 +15,56 @@ pub(crate) enum Statement {
     Set { name: String, value: Option<String> },
     Show { name: Option<String> },
     Reset { name: Option<String> },
+    MySql(MySqlStatement),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MySqlStatement {
+    ShowTables {
+        full: bool,
+        like: Option<String>,
+    },
+    ShowDatabases {
+        like: Option<String>,
+    },
+    ShowColumns {
+        table: Name,
+        full: bool,
+        like: Option<String>,
+    },
+    ShowCreateTable(Name),
+    ShowVariables {
+        like: Option<String>,
+    },
+    ShowStatus,
+    ShowWarnings {
+        errors_only: bool,
+    },
+    ShowCount {
+        errors_only: bool,
+    },
+    Use(Name),
+    Set(Vec<Assignment>),
+    Accepted(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum VariableTarget {
+    System(String),
+    User(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AssignedValue {
+    Word(String),
+    Default,
+    Expr(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Assignment {
+    pub(crate) target: VariableTarget,
+    pub(crate) value: AssignedValue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +88,7 @@ pub(crate) struct ColumnDefinition {
     pub(crate) not_null: bool,
     pub(crate) primary_key: bool,
     pub(crate) default: Option<(Expr, String)>,
+    pub(crate) auto_increment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +115,15 @@ pub(crate) struct Insert {
     pub(crate) columns: Option<Vec<Name>>,
     pub(crate) source: InsertSource,
     pub(crate) returning: Option<Vec<SelectItem>>,
+    pub(crate) on_duplicate: OnDuplicate,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OnDuplicate {
+    Fail,
+    Ignore,
+    Replace,
+    Update(Vec<(Name, Expr)>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
