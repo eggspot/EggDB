@@ -73,7 +73,7 @@ macos btree.scan_reverse ratio_to_std_btreemap 7.586
 macos database.open ratio_to_store_open 1.004
 macos database.read ratio_to_store_read 1.023
 macos database.write ratio_to_store_commit 1.009
-macos footprint.binary stripped_release_bytes 933312
+macos footprint.binary stripped_release_bytes 1164944
 macos footprint.open_and_get peak_resident_bytes 2310144
 macos footprint.open_and_get ratio_to_a_program_that_exits_at_once 1.046
 macos footprint.start peak_resident_bytes 1654784
