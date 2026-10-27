@@ -1,7 +1,7 @@
 use crate::aggregate::{self, shape_of};
 use crate::ast::{
     BinaryOperator, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource, InsertValue, Name,
-    OrderItem, Select, SelectItem, TableReference, Update,
+    OnDuplicate, OrderItem, Select, SelectItem, TableReference, Update,
 };
 use crate::encoding::{
     Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, decode_row_into,
@@ -10,11 +10,13 @@ use crate::encoding::{
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
-    Evaluator, Scope, Source, check_columns, compare_truth, output_name, reject_aggregates,
+    Evaluator, Scope, Source, check_columns, children_mut, compare_truth, output_name,
+    reject_aggregates,
 };
 use crate::join::{self, JoinedRows, RowCountHints};
 use crate::lexer::tokenize;
 use crate::memory::WorkMemory;
+use crate::mysql_errors::Warning;
 use crate::parser::{LiteralRows, LiteralToken, Parser};
 use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
@@ -146,6 +148,7 @@ pub(crate) fn create_table(
             sql_type: definition.sql_type,
             not_null: definition.not_null,
             default: definition.default.as_ref().map(|(_, text)| text.clone()),
+            auto_increment: definition.auto_increment,
         });
     }
     if let Some((names, position)) = &create.primary_key {
@@ -168,6 +171,7 @@ pub(crate) fn create_table(
     for &index in &primary_key {
         columns[index].not_null = true;
     }
+    check_auto_increment(create, &columns, &primary_key)?;
     if tables.table(writer, &create.name.text)?.is_some() {
         if create.if_not_exists {
             return Ok(QueryResult::command("CREATE TABLE").with_notice(format!(
@@ -200,6 +204,36 @@ pub(crate) fn create_table(
     writer.put(&meta_key(), &encode_meta(following))?;
     writer.put(&table_key(&table.name), &table.encode())?;
     Ok(QueryResult::command("CREATE TABLE"))
+}
+
+fn check_auto_increment(
+    create: &CreateTable,
+    columns: &[Column],
+    primary_key: &[usize],
+) -> SqlResult<()> {
+    let auto: Vec<usize> = (0..columns.len())
+        .filter(|&index| columns[index].auto_increment)
+        .collect();
+    let Some(&first) = auto.first() else {
+        return Ok(());
+    };
+    let integer = matches!(
+        columns[first].sql_type,
+        SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
+    );
+    if auto.len() > 1
+        || primary_key.first() != Some(&first)
+        || !integer
+        || columns[first].default.is_some()
+    {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "Incorrect table definition; there can be only one auto column and it must be defined as a key",
+        )
+        .with_hint("EggDB needs the AUTO_INCREMENT column to be an integer, without a DEFAULT, and the first column of the primary key.")
+        .at(create.columns[first].name.position));
+    }
+    Ok(())
 }
 
 fn multiple_primary_keys(create: &CreateTable, position: usize) -> SqlError {
@@ -475,8 +509,14 @@ pub(crate) fn insert(
         scope: Scope::empty(),
         row: &[],
     };
+    let updates = match &insert.on_duplicate {
+        OnDuplicate::Update(assignments) => Some(resolved_updates(&table, scope, assignments)?),
+        _ => None,
+    };
     let mut stored = StoredRows::new(&table);
     let mut result_rows = Vec::new();
+    let mut affected = 0usize;
+    let mut warnings = Vec::new();
     for values in rows {
         let mut row = Vec::with_capacity(table.columns.len());
         for (index, column) in table.columns.iter().enumerate() {
@@ -489,16 +529,81 @@ pub(crate) fn insert(
                 None => default_value(column)?,
             });
         }
-        stored.insert(writer, &row)?;
+        if stored.try_insert(writer, &mut row)? {
+            affected += 1;
+        } else {
+            match (&insert.on_duplicate, &updates) {
+                (OnDuplicate::Ignore, _) => warnings.push(Warning {
+                    level: "Warning",
+                    code: 1062,
+                    message: crate::mysql_errors::translate(duplicate_key(&table, &row), "", "")
+                        .message()
+                        .to_owned(),
+                }),
+                (OnDuplicate::Replace, _) => {
+                    writer.put(&stored.key, &stored.encoded)?;
+                    affected += 2;
+                }
+                (OnDuplicate::Update(_), Some(updates)) => {
+                    affected += stored.update_existing(writer, scope, updates, &row)?;
+                }
+                _ => return Err(duplicate_key(&table, &row)),
+            }
+        }
         if let Some(projection) = &returning {
             result_rows.push(projection.project(&row)?);
         }
     }
-    let tag = format!("INSERT 0 {}", rows.len());
-    Ok(match returning {
+    let tag = format!("INSERT 0 {affected}");
+    let mut result = match returning {
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
         None => QueryResult::command(tag),
-    })
+    };
+    result.warnings = warnings;
+    result.last_insert_id = stored.first_generated;
+    Ok(result)
+}
+
+fn resolved_updates(
+    table: &TableDefinition,
+    scope: Scope<'_>,
+    assignments: &[(Name, Expr)],
+) -> SqlResult<Vec<(usize, Expr)>> {
+    let mut updates = Vec::with_capacity(assignments.len());
+    for (name, expr) in assignments {
+        let index = target_columns(table, std::slice::from_ref(name))?[0];
+        let mut expr = expr.clone();
+        point_inserted_values(&mut expr, table)?;
+        reject_aggregates(&expr, "ON DUPLICATE KEY UPDATE")?;
+        check_columns(&expr, scope)?;
+        updates.push((index, expr));
+    }
+    Ok(updates)
+}
+
+fn point_inserted_values(expr: &mut Expr, table: &TableDefinition) -> SqlResult<()> {
+    if let ExprKind::Function { name, arguments } = &expr.kind
+        && name == "values"
+        && let [argument] = arguments.as_slice()
+        && let ExprKind::Column { name: column, .. } = &argument.kind
+    {
+        let index = table.column_index(column).ok_or_else(|| {
+            SqlError::new(
+                SqlState::UNDEFINED_COLUMN,
+                format!("column \"{column}\" does not exist"),
+            )
+            .at(argument.position)
+        })?;
+        expr.kind = ExprKind::Slot {
+            index: table.columns.len() + index,
+            sql_type: Some(table.columns[index].sql_type),
+        };
+        return Ok(());
+    }
+    for child in children_mut(expr) {
+        point_inserted_values(child, table)?;
+    }
+    Ok(())
 }
 
 struct StoredRows<'a> {
@@ -507,6 +612,9 @@ struct StoredRows<'a> {
     prefix_length: usize,
     encoded: Vec<u8>,
     next_row_id: NextRowId,
+    auto_increment: Option<usize>,
+    next_auto_value: Option<i64>,
+    first_generated: Option<u64>,
 }
 
 enum NextRowId {
@@ -524,11 +632,120 @@ impl<'a> StoredRows<'a> {
             key,
             encoded: Vec::new(),
             next_row_id: NextRowId::Unknown,
+            auto_increment: table.auto_increment_column(),
+            next_auto_value: None,
+            first_generated: None,
         }
     }
 
-    fn insert(&mut self, writer: &mut dyn KeyValueWrite, row: &[Value]) -> SqlResult<()> {
+    fn highest_auto_value(&self, reader: &dyn KeyValueRead, index: usize) -> SqlResult<i64> {
+        let prefix = rows_prefix(self.table.id);
+        let mut last = None;
+        reader.scan(
+            &prefix,
+            &prefix_end(&prefix),
+            ScanDirection::Backward,
+            &mut |_, value| {
+                last = Some(value.to_vec());
+                Ok(false)
+            },
+        )?;
+        let Some(bytes) = last else {
+            return Ok(0);
+        };
+        let row = decode_row(&bytes, &self.table.columns)?;
+        Ok(row
+            .get(index)
+            .and_then(Value::as_integer)
+            .unwrap_or(0)
+            .max(0))
+    }
+
+    fn fill_auto_increment(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        row: &mut [Value],
+    ) -> SqlResult<()> {
+        let Some(index) = self.auto_increment else {
+            return Ok(());
+        };
+        let column = &self.table.columns[index];
+        let given = row[index].as_integer();
+        let next = match self.next_auto_value {
+            Some(next) => next,
+            None => self
+                .highest_auto_value(reader, index)?
+                .checked_add(1)
+                .ok_or_else(|| auto_increment_exhausted(column))?,
+        };
+        match given {
+            None | Some(0) => {
+                row[index] = convert(Value::BigInt(next), column.sql_type, Conversion::Assignment)
+                    .map_err(|_| auto_increment_exhausted(column))?;
+                self.first_generated.get_or_insert(next as u64);
+                self.next_auto_value = next.checked_add(1);
+            }
+            Some(value) if value >= next => self.next_auto_value = value.checked_add(1),
+            Some(_) => self.next_auto_value = Some(next),
+        }
+        Ok(())
+    }
+
+    fn update_existing(
+        &mut self,
+        writer: &mut dyn KeyValueWrite,
+        scope: Scope<'_>,
+        updates: &[(usize, Expr)],
+        inserted: &[Value],
+    ) -> SqlResult<usize> {
         let table = self.table;
+        let existing_bytes = writer
+            .get(&self.key)?
+            .ok_or_else(|| crate::encoding::corrupt("row"))?;
+        let existing = decode_row(&existing_bytes, &table.columns)?;
+        let mut combined = existing.clone();
+        combined.extend_from_slice(inserted);
+        for (index, expr) in updates {
+            let column = &table.columns[*index];
+            let value = Evaluator {
+                scope,
+                row: &combined,
+            }
+            .eval(expr, Some(column.sql_type))?;
+            combined[*index] =
+                assign(value, column).map_err(|error| error.at_if_unplaced(expr.position))?;
+        }
+        combined.truncate(table.columns.len());
+        if combined == existing {
+            return Ok(0);
+        }
+        check_not_null(table, &combined)?;
+        let new_key = row_key(table, &combined);
+        let encoded = encode_row(&combined);
+        if new_key == self.key {
+            writer.put(&self.key, &encoded)?;
+        } else {
+            writer.delete(&self.key)?;
+            if !writer.put_if_absent(&new_key, &encoded)? {
+                return Err(duplicate_key(table, &combined));
+            }
+        }
+        Ok(2)
+    }
+
+    fn insert(&mut self, writer: &mut dyn KeyValueWrite, row: &mut [Value]) -> SqlResult<()> {
+        if self.try_insert(writer, row)? {
+            Ok(())
+        } else {
+            Err(duplicate_key(self.table, row))
+        }
+    }
+
+    fn try_insert(&mut self, writer: &mut dyn KeyValueWrite, row: &mut [Value]) -> SqlResult<bool> {
+        let table = self.table;
+        if self.auto_increment.is_some() {
+            self.fill_auto_increment(writer, row)?;
+        }
         check_not_null(table, row)?;
         self.encoded.clear();
         encode_row_into(&mut self.encoded, row);
@@ -543,16 +760,25 @@ impl<'a> StoredRows<'a> {
                 .checked_add(1)
                 .map_or(NextRowId::Exhausted, NextRowId::Next);
             self.key.extend_from_slice(&id.to_be_bytes());
-            return writer.put(&self.key, &self.encoded);
+            writer.put(&self.key, &self.encoded)?;
+            return Ok(true);
         }
         for &index in &table.primary_key {
             encode_key_value(&mut self.key, &row[index]);
         }
-        if !writer.put_if_absent(&self.key, &self.encoded)? {
-            return Err(duplicate_key(table, row));
-        }
-        Ok(())
+        writer.put_if_absent(&self.key, &self.encoded)
     }
+}
+
+fn auto_increment_exhausted(column: &Column) -> SqlError {
+    SqlError::new(
+        SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+        format!(
+            "the AUTO_INCREMENT column \"{}\" has used every value of type {}",
+            column.name,
+            column.sql_type.name()
+        ),
+    )
 }
 
 fn literal_value(literal: &LiteralToken<'_>, column: &Column, position: usize) -> SqlResult<Value> {
@@ -595,9 +821,11 @@ pub(crate) fn insert_literals(
                 None => default_value(column)?,
             });
         }
-        stored.insert(writer, &row)?;
+        stored.insert(writer, &mut row)?;
     }
-    Ok(QueryResult::command(format!("INSERT 0 {}", insert.rows)))
+    let mut result = QueryResult::command(format!("INSERT 0 {}", insert.rows));
+    result.last_insert_id = stored.first_generated;
+    Ok(result)
 }
 
 struct Projection<'a> {

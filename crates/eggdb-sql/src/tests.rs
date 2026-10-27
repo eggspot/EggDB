@@ -918,6 +918,10 @@ fn hostile_input_returns_errors_and_never_panics() {
         "max(",
         "FROM people p JOIN people q ON p.id = q.id",
     ];
+    fuzz(&mut session, &fragments);
+}
+
+fn fuzz(session: &mut Session<'_, MemoryStore>, fragments: &[&str]) {
     let mut random = Seeded(0xDEAD_BEEF_CAFE_F00D);
     for _ in 0..20_000 {
         let length = 1 + random.below(14);
@@ -926,13 +930,13 @@ fn hostile_input_returns_errors_and_never_panics() {
             sql.push_str(fragments[random.below(fragments.len() as u64) as usize]);
             sql.push(' ');
         }
-        if let Err(error) = run(&mut session, &sql)
+        if let Err(error) = run(session, &sql)
             && let Some(position) = error.position()
         {
             assert!(position <= sql.len(), "{sql}: {error}");
         }
         if session.in_block() {
-            let _ = run(&mut session, "ROLLBACK");
+            let _ = run(session, "ROLLBACK");
         }
     }
     let mut bytes = Seeded(7);
@@ -940,11 +944,139 @@ fn hostile_input_returns_errors_and_never_panics() {
         let length = random.below(40) as usize;
         let raw: Vec<u8> = (0..length).map(|_| bytes.next() as u8).collect();
         let sql = String::from_utf8_lossy(&raw);
-        let _ = run(&mut session, &sql);
+        let _ = run(session, &sql);
         if session.in_block() {
-            let _ = run(&mut session, "ROLLBACK");
+            let _ = run(session, "ROLLBACK");
         }
     }
+}
+
+#[test]
+fn hostile_mysql_input_returns_errors_and_never_panics() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::MySql);
+    last(
+        &mut session,
+        "CREATE TABLE `people` (`id` INT NOT NULL AUTO_INCREMENT, name VARCHAR(20) NOT NULL, age TINYINT, score DOUBLE, PRIMARY KEY (`id`)) ENGINE=InnoDB;
+         INSERT INTO people (name, age, score) VALUES ('alice', 30, 9.25), (\"bob\", NULL, NULL);",
+    );
+    let fragments = [
+        "SELECT",
+        "INSERT INTO people VALUES",
+        "INSERT IGNORE INTO people",
+        "REPLACE INTO people",
+        "INSERT INTO people (name) VALUE",
+        "ON DUPLICATE KEY UPDATE",
+        "age = VALUES(age)",
+        "VALUES(",
+        "(",
+        ")",
+        ",",
+        ";",
+        "'",
+        "\"",
+        "'a\\'b'",
+        "\"x\\n\"",
+        "'\\",
+        "\\",
+        "`",
+        "`people`",
+        "``",
+        "`a``b`",
+        "/*!",
+        "/*!40101",
+        "*/",
+        "/*",
+        "#",
+        "\n",
+        "--",
+        "-- ",
+        "@",
+        "@@",
+        "@a",
+        "@@version",
+        "@@session.",
+        "@@global.sql_mode",
+        ":=",
+        "?",
+        "1",
+        "0",
+        "2.5",
+        "1e400",
+        "99999999999999999999",
+        "-",
+        "/",
+        "%",
+        "DIV",
+        "MOD",
+        "<=>",
+        "&&",
+        "||",
+        "!",
+        "=",
+        "NULL",
+        "TRUE",
+        "people",
+        "id",
+        "name",
+        "WHERE",
+        "ORDER BY",
+        "LIMIT",
+        "LIMIT 1, 1",
+        "OFFSET",
+        "AND",
+        "IN",
+        "LIKE",
+        "IF(",
+        "IFNULL(",
+        "CONCAT(",
+        "LENGTH(",
+        "LAST_INSERT_ID()",
+        "DATABASE()",
+        "CREATE TABLE t (",
+        "INT AUTO_INCREMENT",
+        "PRIMARY KEY",
+        "KEY k (",
+        "TINYINT(1)",
+        "VARCHAR(",
+        "UNSIGNED",
+        "ENGINE=InnoDB",
+        "DEFAULT CHARSET=utf8mb4",
+        "COMMENT 'c'",
+        "DROP TABLE",
+        "UPDATE people SET",
+        "DELETE FROM",
+        "SHOW TABLES",
+        "SHOW FULL TABLES LIKE",
+        "SHOW COLUMNS FROM",
+        "SHOW CREATE TABLE",
+        "SHOW VARIABLES LIKE",
+        "SHOW WARNINGS",
+        "SHOW COUNT(*) WARNINGS",
+        "DESCRIBE",
+        "DESC",
+        "USE",
+        "eggdb",
+        "eggdb.people",
+        "SET",
+        "SET NAMES utf8mb4",
+        "SET autocommit =",
+        "SET SESSION",
+        "SET @x =",
+        "START TRANSACTION",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "LOCK TABLES",
+        "UNLOCK TABLES",
+        "WRITE",
+        "FROM DUAL",
+        "JOIN",
+        "\u{0}",
+        "é",
+        ".",
+    ];
+    fuzz(&mut session, &fragments);
 }
 
 #[test]

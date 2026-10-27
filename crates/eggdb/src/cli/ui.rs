@@ -343,7 +343,7 @@ impl Source for DatabaseSource {
         let outcome = session.execute(text, &mut |result| {
             run.tags.push(result.tag.clone());
             run.notices.extend(result.notices.iter().cloned());
-            if let Some(cells) = result_cells(&result) {
+            if let Some(cells) = result_cells(&result, eggdb_sql::Dialect::PostgreSql) {
                 run.table = Some(SqlTable {
                     columns: cells.columns,
                     numeric: cells.numeric,

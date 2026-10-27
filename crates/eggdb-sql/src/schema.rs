@@ -25,6 +25,8 @@ pub struct ColumnSchema {
     pub not_null: bool,
     /// The text of its `DEFAULT` expression, when it has one.
     pub default: Option<String>,
+    /// Whether MySQL's `AUTO_INCREMENT` numbers its rows.
+    pub auto_increment: bool,
 }
 
 impl TableSchema {
@@ -106,6 +108,7 @@ fn schema_of(definition: &TableDefinition) -> TableSchema {
                 sql_type: column.sql_type,
                 not_null: column.not_null,
                 default: column.default.clone(),
+                auto_increment: column.auto_increment,
             })
             .collect(),
         primary_key: definition

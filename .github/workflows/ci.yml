@@ -51,11 +51,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
-      - name: Install psql and the pg8000 driver for the smoke test (test tooling, never shipped)
+      - name: Install psql, mysql and the pg8000 and PyMySQL drivers for the smoke test (test tooling, never shipped)
         run: |
           command -v psql || { sudo apt-get update && sudo apt-get install -y postgresql-client; }
+          command -v mysql || { sudo apt-get update && sudo apt-get install -y mysql-client; }
           python3 -m venv "$RUNNER_TEMP/pg-driver"
-          "$RUNNER_TEMP/pg-driver/bin/pip" install --quiet pg8000==1.31.2
+          "$RUNNER_TEMP/pg-driver/bin/pip" install --quiet pg8000==1.31.2 PyMySQL==1.1.1
           echo "EGGDB_SMOKE_PYTHON=$RUNNER_TEMP/pg-driver/bin/python" >> "$GITHUB_ENV"
       - name: Smoke test the eggdb command
         run: cargo build -p eggdb && scripts/smoke-test.sh target/debug/eggdb
@@ -141,10 +142,10 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-cross-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL server and the embedded API for each target
+      - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL and MySQL servers and the embedded API for each target
         run: |
           for target in $TARGETS; do
-            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-pgwire -p eggdb --all-targets --target "$target" -- -D warnings
+            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb --all-targets --target "$target" -- -D warnings
           done
 
   bench:

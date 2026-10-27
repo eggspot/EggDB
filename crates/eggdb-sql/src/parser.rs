@@ -1,8 +1,12 @@
+mod mysql;
+
 use crate::ast::{
     AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, Expr, ExprKind,
     FromClause, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind, Literal, Name,
-    OrderItem, Select, SelectItem, Statement, TableReference, TruthTest, UnaryOperator, Update,
+    OnDuplicate, OrderItem, Select, SelectItem, Statement, TableReference, TruthTest,
+    UnaryOperator, Update,
 };
+use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind};
 use crate::session::Parameter;
@@ -114,6 +118,8 @@ pub(crate) struct Parser<'t> {
     depth: usize,
     parameters: Parameters<'t>,
     settings: Option<&'t Settings>,
+    dialect: Dialect,
+    placeholders_seen: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -218,7 +224,29 @@ impl<'t> Parser<'t> {
             depth: 0,
             parameters: Parameters::Absent,
             settings: None,
+            dialect: Dialect::PostgreSql,
+            placeholders_seen: 0,
         }
+    }
+
+    pub(crate) fn in_dialect(mut self, dialect: Dialect) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
+    fn mysql(&self) -> bool {
+        self.dialect == Dialect::MySql
+    }
+
+    fn reserved(&self, word: &str) -> bool {
+        match self.dialect {
+            Dialect::PostgreSql => is_reserved(word),
+            Dialect::MySql => mysql::is_reserved(word),
+        }
+    }
+
+    fn clause_word(&self, word: &str) -> bool {
+        is_clause_word(word) || self.mysql() && mysql::is_clause_word(word)
     }
 
     pub(crate) fn with_context(
@@ -229,6 +257,16 @@ impl<'t> Parser<'t> {
         self.parameters = parameters;
         self.settings = Some(settings);
         self
+    }
+
+    pub(crate) fn resuming_at(mut self, (at, placeholders_seen): (usize, usize)) -> Self {
+        self.at = at;
+        self.placeholders_seen = placeholders_seen;
+        self
+    }
+
+    pub(crate) fn resume_point(&self) -> (usize, usize) {
+        (self.at, self.placeholders_seen)
     }
 
     pub(crate) fn skip_empty_statements(&mut self) {
@@ -420,7 +458,7 @@ impl<'t> Parser<'t> {
     fn name(&mut self) -> SqlResult<Name> {
         let token = self.peek();
         let text = match &token.kind {
-            TokenKind::Word(word) if !is_reserved(word) => word.as_ref().to_owned(),
+            TokenKind::Word(word) if !self.reserved(word) => word.as_ref().to_owned(),
             TokenKind::QuotedIdentifier(name) => name.clone(),
             _ => return Err(self.unexpected()),
         };
@@ -433,6 +471,12 @@ impl<'t> Parser<'t> {
 
     fn table_name(&mut self) -> SqlResult<Name> {
         let name = self.name()?;
+        if self.mysql() && self.peek_kind() == &TokenKind::Dot {
+            self.at += 1;
+            let table = self.name()?;
+            self.check_database(&name)?;
+            return Ok(table);
+        }
         if self.peek_kind() == &TokenKind::Dot {
             if name.text == "public" {
                 self.at += 1;
@@ -447,6 +491,11 @@ impl<'t> Parser<'t> {
     }
 
     fn statement_body(&mut self) -> SqlResult<Statement> {
+        if self.mysql()
+            && let Some(statement) = self.mysql_statement()?
+        {
+            return Ok(statement);
+        }
         let TokenKind::Word(word) = self.peek_kind() else {
             return Err(self.unexpected());
         };
@@ -813,6 +862,7 @@ impl<'t> Parser<'t> {
                 } else {
                     return Err(self.table_constraint_not_supported());
                 }
+            } else if self.mysql() && self.mysql_index_entry()? {
             } else if self.is_word("unique")
                 || self.is_word("check")
                 || self.is_word("foreign")
@@ -828,6 +878,9 @@ impl<'t> Parser<'t> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
+        if self.mysql() {
+            self.mysql_table_options()?;
+        }
         if self.is_word("partition") || self.is_word("inherits") || self.is_word("with") {
             return Err(self.not_supported("table options"));
         }
@@ -862,8 +915,12 @@ impl<'t> Parser<'t> {
             not_null: false,
             primary_key: false,
             default: None,
+            auto_increment: false,
         };
         loop {
+            if self.mysql() && self.mysql_column_option(&mut column)? {
+                continue;
+            }
             if self.take_word("constraint") {
                 self.name()?;
             }
@@ -896,6 +953,9 @@ impl<'t> Parser<'t> {
     }
 
     pub(crate) fn sql_type(&mut self) -> SqlResult<SqlType> {
+        if self.mysql() {
+            return self.mysql_type();
+        }
         let token = self.peek();
         let word: &str = match &token.kind {
             TokenKind::Word(word) => word,
@@ -1031,13 +1091,26 @@ impl<'t> Parser<'t> {
     }
 
     fn at_bare_alias(&self) -> bool {
-        matches!(self.peek_kind(), TokenKind::Word(word) if !is_reserved(word) && !is_clause_word(word))
+        matches!(self.peek_kind(), TokenKind::Word(word) if !self.reserved(word) && !self.clause_word(word))
             || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_))
     }
 
     fn insert(&mut self) -> SqlResult<Statement> {
+        let replace = self.is_word("replace");
         self.at += 1;
-        self.expect_word("into")?;
+        let mut on_duplicate = if replace {
+            OnDuplicate::Replace
+        } else {
+            OnDuplicate::Fail
+        };
+        if self.mysql() {
+            if !replace && self.take_word("ignore") {
+                on_duplicate = OnDuplicate::Ignore;
+            }
+            self.take_word("into");
+        } else {
+            self.expect_word("into")?;
+        }
         let table = self.table_reference()?;
         let columns = if self.peek_kind() == &TokenKind::LeftParen
             && !self.is_word_at(1, "select")
@@ -1053,7 +1126,7 @@ impl<'t> Parser<'t> {
         let source = if self.take_word("default") {
             self.expect_word("values")?;
             InsertSource::DefaultValues
-        } else if self.take_word("values") {
+        } else if self.take_word("values") || self.mysql() && self.take_word("value") {
             let mut rows = Vec::new();
             loop {
                 self.expect(&TokenKind::LeftParen)?;
@@ -1076,15 +1149,23 @@ impl<'t> Parser<'t> {
         } else {
             return Err(self.unexpected());
         };
+        if self.mysql() && self.is_word("on") {
+            on_duplicate = self.on_duplicate_key_update(on_duplicate)?;
+        }
         if self.is_word("on") {
             return Err(self.not_supported("ON CONFLICT"));
         }
-        let returning = self.returning()?;
+        let returning = if self.mysql() {
+            None
+        } else {
+            self.returning()?
+        };
         Ok(Statement::Insert(Insert {
             table,
             columns,
             source,
             returning,
+            on_duplicate,
         }))
     }
 
@@ -1183,7 +1264,11 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("SELECT INTO"));
         }
         let from = if self.take_word("from") {
-            Some(self.joined_tables()?)
+            if self.mysql() && self.take_word("dual") {
+                None
+            } else {
+                Some(self.joined_tables()?)
+            }
         } else {
             None
         };
@@ -1259,6 +1344,13 @@ impl<'t> Parser<'t> {
                 } else {
                     self.expression()?
                 });
+                if self.mysql() && self.take(&TokenKind::Comma) {
+                    if offset.is_some() {
+                        return Err(self.unexpected());
+                    }
+                    offset = limit.take();
+                    limit = Some(self.expression()?);
+                }
             } else if self.take_word("offset") {
                 if offset.is_some() {
                     return Err(SqlError::syntax(
@@ -1270,7 +1362,7 @@ impl<'t> Parser<'t> {
                 let _ = self.take_word("rows") || self.take_word("row");
             } else if self.is_word("fetch") {
                 return Err(self.not_supported("FETCH FIRST"));
-            } else if self.is_word("for") {
+            } else if self.is_word("for") || self.mysql() && self.is_word("lock") {
                 return Err(self.not_supported("row locking (FOR UPDATE, FOR SHARE)"));
             } else {
                 break;
@@ -1375,7 +1467,7 @@ impl<'t> Parser<'t> {
         matches!(
             self.peek_kind(),
             TokenKind::Semicolon | TokenKind::End | TokenKind::RightParen
-        ) || matches!(self.peek_kind(), TokenKind::Word(word) if is_clause_word(word) || word == "from")
+        ) || matches!(self.peek_kind(), TokenKind::Word(word) if self.clause_word(word) || word == "from")
     }
 
     fn select_items(&mut self) -> SqlResult<Vec<SelectItem>> {
@@ -1397,7 +1489,7 @@ impl<'t> Parser<'t> {
                 position,
             });
         }
-        if (matches!(self.peek_kind(), TokenKind::Word(word) if !is_reserved(word))
+        if (matches!(self.peek_kind(), TokenKind::Word(word) if !self.reserved(word))
             || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_)))
             && self.peek_kind_at(1) == &TokenKind::Dot
             && matches!(self.peek_kind_at(2), TokenKind::Operator(op) if *op == "*")
@@ -1409,21 +1501,39 @@ impl<'t> Parser<'t> {
                 position,
             });
         }
+        let first_token = self.at;
         let expr = self.expression()?;
-        let alias = if self.take_word("as") {
-            Some(self.label()?)
-        } else if matches!(self.peek_kind(), TokenKind::Word(word) if !is_reserved(word) && !is_clause_word(word))
+        let alias = if self.take_word("as")
+            || matches!(self.peek_kind(), TokenKind::Word(word) if !self.reserved(word) && !self.clause_word(word))
             || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_))
+            || self.mysql() && matches!(self.peek_kind(), TokenKind::String(_))
         {
-            Some(self.name()?.text)
+            Some(self.label()?)
+        } else if self.mysql()
+            && let ExprKind::Literal(Literal::String(text)) = &expr.kind
+        {
+            Some(text.clone())
+        } else if self.mysql() && !matches!(expr.kind, ExprKind::Column { .. }) {
+            Some(self.source_text(first_token))
         } else {
             None
         };
         Ok(SelectItem::Expr { expr, alias })
     }
 
+    fn source_text(&self, first_token: usize) -> String {
+        let start = self.tokens[first_token].start;
+        let end = self.tokens[self.at.saturating_sub(1)].end.max(start);
+        self.text.get(start..end).unwrap_or("").to_owned()
+    }
+
     fn label(&mut self) -> SqlResult<String> {
         match self.peek_kind() {
+            TokenKind::String(text) if self.mysql() => {
+                let text = text.as_ref().to_owned();
+                self.at += 1;
+                Ok(text)
+            }
             TokenKind::Word(word) => {
                 let word = word.as_ref().to_owned();
                 self.at += 1;
@@ -1510,6 +1620,13 @@ impl<'t> Parser<'t> {
 
     fn prefix(&mut self, least: Level) -> SqlResult<Expr> {
         let position = self.position();
+        if self.mysql() && self.take_operator("!") {
+            let operand = self.expression_above(Level::Unary)?;
+            return Ok(Expr {
+                kind: ExprKind::Unary(UnaryOperator::Not, Box::new(operand)),
+                position,
+            });
+        }
         if self.is_word("not") {
             if least > Level::Not {
                 return Err(self.unexpected());
@@ -1556,6 +1673,11 @@ impl<'t> Parser<'t> {
     }
 
     fn infix_level(&self) -> Option<Level> {
+        if self.mysql()
+            && let Some(level) = self.mysql_infix_level()
+        {
+            return Some(level);
+        }
         match self.peek_kind() {
             TokenKind::Word(word) => match word.as_ref() {
                 "or" => Some(Level::Or),
@@ -1583,6 +1705,9 @@ impl<'t> Parser<'t> {
     }
 
     fn infix(&mut self, left: Expr, level: Level) -> SqlResult<Expr> {
+        if self.mysql() && self.mysql_infix_level().is_some() {
+            return self.mysql_infix(left, level);
+        }
         match level {
             Level::Or => {
                 self.at += 1;
@@ -1796,6 +1921,12 @@ impl<'t> Parser<'t> {
     fn primary(&mut self) -> SqlResult<Expr> {
         let token = self.peek();
         let position = token.start;
+        if self.mysql()
+            && let TokenKind::Word(word) = &token.kind
+            && let Some(expr) = self.mysql_primary(word, position)?
+        {
+            return Ok(expr);
+        }
         let literal = |literal| {
             Ok(Expr {
                 kind: ExprKind::Literal(literal),
@@ -1810,6 +1941,19 @@ impl<'t> Parser<'t> {
                     Err(_) => literal(Literal::Decimal((*digits).to_owned())),
                 }
             }
+            TokenKind::Decimal(text) if self.mysql() => {
+                self.at += 1;
+                Ok(Expr {
+                    kind: ExprKind::Cast {
+                        expr: Box::new(Expr {
+                            kind: ExprKind::Literal(Literal::Decimal((*text).to_owned())),
+                            position,
+                        }),
+                        sql_type: SqlType::Double,
+                    },
+                    position,
+                })
+            }
             TokenKind::Decimal(text) => {
                 self.at += 1;
                 literal(Literal::Decimal((*text).to_owned()))
@@ -1818,7 +1962,13 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 literal(Literal::String(text.as_ref().to_owned()))
             }
-            TokenKind::Parameter(digits) => self.parameter(digits, position),
+            TokenKind::Parameter(digits) if !self.mysql() => self.parameter(digits, position),
+            TokenKind::Placeholder => {
+                self.placeholders_seen += 1;
+                let digits = self.placeholders_seen.to_string();
+                self.parameter(&digits, position)
+            }
+            TokenKind::Variable(name) => self.mysql_variable(name, position),
             TokenKind::LeftParen => {
                 self.at += 1;
                 if self.is_word("select") || self.is_word("values") {
@@ -1915,7 +2065,7 @@ impl<'t> Parser<'t> {
                         position,
                     })
                 }
-                _ if is_reserved(word) => Err(self.unexpected()),
+                _ if self.reserved(word) => Err(self.unexpected()),
                 _ => self.column_or_function(),
             },
             _ => Err(self.unexpected()),
@@ -1953,6 +2103,11 @@ impl<'t> Parser<'t> {
     }
 
     fn function(&mut self, name: Name) -> SqlResult<Expr> {
+        if self.mysql()
+            && let Some(expr) = self.mysql_function(&name)?
+        {
+            return Ok(expr);
+        }
         if let Some(expr) = self.session_function(&name)? {
             return Ok(expr);
         }

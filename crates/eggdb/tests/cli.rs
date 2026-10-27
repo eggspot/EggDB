@@ -122,8 +122,8 @@ Commands:
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, from a file or stdin; see --create
-  sql    <file> [script]        run SQL (PostgreSQL dialect) from -c, a script or stdin
-  serve  <file>                 serve the file to PostgreSQL clients (psql, drivers); see --listen
+  sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
+  serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   help   [command]              this text, or one command's help
   version                       print the version

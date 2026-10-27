@@ -187,6 +187,7 @@ impl<'s> Shell<'s> {
         } else {
             (None, None)
         };
+        let dialect = request.dialect;
         Self {
             mode: request.shell.mode.unwrap_or(ResultMode::Table),
             color_out: interactive && uses_color(request.color, terminal.stdout_color),
@@ -196,7 +197,7 @@ impl<'s> Shell<'s> {
             file,
             stem,
             db,
-            sql: eggdb_sql::Session::new(store),
+            sql: eggdb_sql::Session::with_dialect(store, dialect),
             buffer: String::new(),
             entry: String::new(),
             timer: false,
@@ -411,7 +412,7 @@ impl<'s> Shell<'s> {
             for notice in &result.notices {
                 self.print_notice(console, notice);
             }
-            let text = result_text(result, mode, width);
+            let text = result_text(result, mode, width, self.sql.dialect());
             if !self.print(console, &text) {
                 return Step::Quit;
             }
@@ -606,7 +607,8 @@ impl<'s> Shell<'s> {
   scan [--prefix p] [--from a] [--to b] [-r] [-n count] [-k]
   check                        read every page and report the file's health
   stats                        size, pages, last commit and log
-SQL: PostgreSQL dialect, statements ended by ; (docs/sql.md); BEGIN spans prompts:
+SQL: the PostgreSQL dialect, or MySQL's with --dialect mysql, statements ended by ;
+  (docs/sql.md); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
   'delete' starts a DELETE statement here; the key-value command is 'del'.
 Shell commands:

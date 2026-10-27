@@ -222,3 +222,44 @@ fn a_killed_process_leaves_the_whole_transaction_or_none_of_it() {
         }
     }
 }
+
+#[test]
+fn the_mysql_dialect_reads_mysql_and_reports_mysql_errors() {
+    let file = TempPath::new("sql-mysql");
+    let created = eggdb_sql(
+        file.path(),
+        &[
+            "--create",
+            "--dialect",
+            "mysql",
+            "-c",
+            "CREATE TABLE `items` (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20)); INSERT INTO items (name) VALUES (\"egg\"), ('jam'); SELECT id, name FROM items LIMIT 1, 1",
+        ],
+        b"",
+    );
+    assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
+    assert!(
+        text(&created.stdout).contains(" 2 | jam"),
+        "{}",
+        text(&created.stdout)
+    );
+    let missing = eggdb_sql(
+        file.path(),
+        &["--dialect", "mysql", "-c", "SELECT * FROM missing"],
+        b"",
+    );
+    assert_eq!(missing.status.code(), Some(3));
+    assert_eq!(
+        text(&missing.stderr),
+        "ERROR 1146 (42S02): Table 'eggdb.missing' doesn't exist\n"
+    );
+    let postgresql = eggdb_sql(
+        file.path(),
+        &["-c", "SELECT name FROM items WHERE id = 1"],
+        b"",
+    );
+    assert!(text(&postgresql.stdout).contains("egg"));
+    let unknown = eggdb_sql(file.path(), &["--dialect", "oracle", "-c", "SELECT 1"], b"");
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(text(&unknown.stderr).contains("--dialect takes postgresql or mysql, not 'oracle'"));
+}

@@ -1,3 +1,4 @@
+use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use std::borrow::Cow;
 
@@ -11,6 +12,8 @@ pub(crate) enum TokenKind<'t> {
     Decimal(&'t str),
     String(Cow<'t, str>),
     Parameter(&'t str),
+    Placeholder,
+    Variable(Cow<'t, str>),
     Operator(&'t str),
     LeftParen,
     RightParen,
@@ -32,10 +35,16 @@ pub(crate) struct Token<'t> {
 }
 
 pub(crate) fn tokenize(text: &str) -> SqlResult<Vec<Token<'_>>> {
+    tokenize_in(text, Dialect::PostgreSql)
+}
+
+pub(crate) fn tokenize_in(text: &str, dialect: Dialect) -> SqlResult<Vec<Token<'_>>> {
     let mut lexer = Lexer {
         text,
         bytes: text.as_bytes(),
         at: 0,
+        dialect,
+        open_executable_comments: 0,
     };
     let mut tokens = Vec::with_capacity(text.len() / 4 + 2);
     loop {
@@ -58,6 +67,17 @@ struct Lexer<'t> {
     text: &'t str,
     bytes: &'t [u8],
     at: usize,
+    dialect: Dialect,
+    open_executable_comments: usize,
+}
+
+const MYSQL_OPERATORS: [&str; 22] = [
+    "<=>", "<=", ">=", "<>", "!=", "<<", ">>", "&&", "||", ":=", "->", "=", "<", ">", "+", "-",
+    "*", "/", "%", "!", "&", "|",
+];
+
+fn starts_mysql_comment_after_dashes(next: Option<u8>) -> bool {
+    next.is_none_or(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
 }
 
 fn is_identifier_start(byte: u8) -> bool {
@@ -89,9 +109,25 @@ impl<'t> Lexer<'t> {
     }
 
     fn skip_space_and_comments(&mut self) -> SqlResult<()> {
+        let mysql = self.dialect == Dialect::MySql;
         loop {
             match (self.peek(0), self.peek(1)) {
                 (Some(byte), _) if byte.is_ascii_whitespace() => self.at += 1,
+                (Some(b'*'), Some(b'/')) if self.open_executable_comments > 0 => {
+                    self.open_executable_comments -= 1;
+                    self.at += 2;
+                }
+                (Some(b'/'), Some(b'*')) if mysql && self.peek(2) == Some(b'!') => {
+                    self.at += 3;
+                    self.digits();
+                    self.open_executable_comments += 1;
+                }
+                (Some(b'-'), Some(b'-'))
+                    if mysql && !starts_mysql_comment_after_dashes(self.peek(2)) =>
+                {
+                    return Ok(());
+                }
+                (Some(b'#'), _) if mysql => self.skip_line(),
                 (Some(b'-'), Some(b'-')) => {
                     while let Some(byte) = self.peek(0) {
                         if byte == b'\n' {
@@ -103,6 +139,15 @@ impl<'t> Lexer<'t> {
                 (Some(b'/'), Some(b'*')) => self.skip_block_comment()?,
                 _ => return Ok(()),
             }
+        }
+    }
+
+    fn skip_line(&mut self) {
+        while let Some(byte) = self.peek(0) {
+            if byte == b'\n' {
+                break;
+            }
+            self.at += 1;
         }
     }
 
@@ -150,6 +195,9 @@ impl<'t> Lexer<'t> {
             self.at += 1;
             return Ok(kind);
         }
+        if self.dialect == Dialect::MySql {
+            return self.next_mysql_kind(byte);
+        }
         match byte {
             b':' if self.peek(1) == Some(b':') => {
                 self.at += 2;
@@ -182,6 +230,160 @@ impl<'t> Lexer<'t> {
                 ))
             }
         }
+    }
+
+    fn next_mysql_kind(&mut self, byte: u8) -> SqlResult<TokenKind<'t>> {
+        match byte {
+            b'.' if self.peek(1).is_some_and(|next| next.is_ascii_digit()) => self.number(),
+            b'.' => {
+                self.at += 1;
+                Ok(TokenKind::Dot)
+            }
+            b'0'..=b'9' => self.number(),
+            b'\'' | b'"' => self.mysql_string(byte),
+            b'`' => self.backtick_identifier(),
+            b'?' => {
+                self.at += 1;
+                Ok(TokenKind::Placeholder)
+            }
+            b'@' => self.variable(),
+            b':' if self.peek(1) != Some(b'=') => {
+                self.at += 1;
+                Ok(TokenKind::Colon)
+            }
+            _ if is_identifier_start(byte) => Ok(self.word()),
+            _ => {
+                let rest = &self.text[self.at..];
+                if let Some(operator) = MYSQL_OPERATORS
+                    .iter()
+                    .find(|operator| rest.starts_with(**operator))
+                {
+                    let operator = &self.text[self.at..self.at + operator.len()];
+                    self.at += operator.len();
+                    return Ok(TokenKind::Operator(operator));
+                }
+                let character = rest.chars().next().unwrap_or('?');
+                Err(SqlError::syntax(
+                    format!("syntax error at or near \"{character}\""),
+                    self.at,
+                ))
+            }
+        }
+    }
+
+    fn mysql_string(&mut self, quote: u8) -> SqlResult<TokenKind<'t>> {
+        let start = self.at;
+        self.at += 1;
+        if let Some(length) = self.bytes[self.at..]
+            .iter()
+            .position(|&byte| byte == quote || byte == b'\\')
+            && self.bytes[self.at + length] == quote
+            && self.bytes.get(self.at + length + 1) != Some(&quote)
+        {
+            let value = &self.text[self.at..self.at + length];
+            self.at += length + 1;
+            return Ok(TokenKind::String(Cow::Borrowed(value)));
+        }
+        let mut value = String::new();
+        loop {
+            let Some(character) = self
+                .text
+                .get(self.at..)
+                .and_then(|rest| rest.chars().next())
+            else {
+                return Err(unterminated(self.text, start, "quoted string"));
+            };
+            self.at += character.len_utf8();
+            if character == char::from(quote) {
+                if self.peek(0) == Some(quote) {
+                    self.at += 1;
+                    value.push(character);
+                    continue;
+                }
+                return Ok(TokenKind::String(Cow::Owned(value)));
+            }
+            if character != '\\' {
+                value.push(character);
+                continue;
+            }
+            let Some(escaped) = self
+                .text
+                .get(self.at..)
+                .and_then(|rest| rest.chars().next())
+            else {
+                return Err(unterminated(self.text, start, "quoted string"));
+            };
+            self.at += escaped.len_utf8();
+            match escaped {
+                '0' => value.push('\0'),
+                'b' => value.push('\u{8}'),
+                'n' => value.push('\n'),
+                'r' => value.push('\r'),
+                't' => value.push('\t'),
+                'Z' => value.push('\u{1a}'),
+                '%' | '_' => {
+                    value.push('\\');
+                    value.push(escaped);
+                }
+                other => value.push(other),
+            }
+        }
+    }
+
+    fn backtick_identifier(&mut self) -> SqlResult<TokenKind<'t>> {
+        let start = self.at;
+        self.at += 1;
+        let mut name = String::new();
+        loop {
+            let Some(character) = self
+                .text
+                .get(self.at..)
+                .and_then(|rest| rest.chars().next())
+            else {
+                return Err(unterminated(self.text, start, "quoted identifier"));
+            };
+            self.at += character.len_utf8();
+            if character == '`' {
+                if self.peek(0) == Some(b'`') {
+                    self.at += 1;
+                    name.push('`');
+                } else {
+                    break;
+                }
+            } else {
+                name.push(character);
+            }
+        }
+        if name.is_empty() {
+            return Err(SqlError::syntax(
+                "zero-length delimited identifier at or near \"``\"",
+                start,
+            ));
+        }
+        Ok(TokenKind::QuotedIdentifier(truncated_identifier(
+            name.to_lowercase(),
+        )))
+    }
+
+    fn variable(&mut self) -> SqlResult<TokenKind<'t>> {
+        let start = self.at;
+        self.at += 1;
+        if self.peek(0) == Some(b'@') {
+            self.at += 1;
+        }
+        let name_start = self.at;
+        while self.peek(0).is_some_and(is_identifier_part) {
+            self.at += 1;
+        }
+        if self.at == name_start {
+            return Err(SqlError::syntax(
+                format!("syntax error at or near \"{}\"", &self.text[start..self.at]),
+                start,
+            ));
+        }
+        Ok(TokenKind::Variable(Cow::Owned(
+            self.text[start..self.at].to_ascii_lowercase(),
+        )))
     }
 
     fn word(&mut self) -> TokenKind<'t> {

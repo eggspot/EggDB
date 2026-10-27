@@ -79,11 +79,12 @@ impl CommandName {
                 )
             }
             OptionName::Listen
+            | OptionName::MysqlListen
             | OptionName::User
             | OptionName::PasswordFile
             | OptionName::Database
             | OptionName::MaxConnections => self == Self::Serve,
-            OptionName::Command => matches!(self, Self::Sql | Self::Shell),
+            OptionName::Command | OptionName::Dialect => matches!(self, Self::Sql | Self::Shell),
             OptionName::KeepGoing | OptionName::Mode => self == Self::Shell,
             OptionName::OnConflict | OptionName::DryRun => self == Self::Import,
             OptionName::Prefix
@@ -166,6 +167,8 @@ enum OptionName {
     DryRun,
     Command,
     Listen,
+    MysqlListen,
+    Dialect,
     User,
     PasswordFile,
     Database,
@@ -197,6 +200,8 @@ impl OptionName {
             b"dry-run" => Self::DryRun,
             b"command" => Self::Command,
             b"listen" => Self::Listen,
+            b"mysql-listen" => Self::MysqlListen,
+            b"dialect" => Self::Dialect,
             b"user" => Self::User,
             b"password-file" => Self::PasswordFile,
             b"database" => Self::Database,
@@ -265,6 +270,7 @@ pub(crate) struct Request {
     pub(crate) on_conflict: ConflictPolicy,
     pub(crate) dry_run: bool,
     pub(crate) sql: Option<SqlSource>,
+    pub(crate) dialect: eggdb_sql::Dialect,
     pub(crate) serve: ServeOptions,
     pub(crate) shell: ShellOptions,
 }
@@ -305,6 +311,7 @@ impl ResultMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ServeOptions {
     pub(crate) listen: Option<SocketAddr>,
+    pub(crate) mysql_listen: Option<SocketAddr>,
     pub(crate) user: Option<String>,
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
@@ -501,6 +508,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         on_conflict: ConflictPolicy::Error,
         dry_run: false,
         sql: None,
+        dialect: eggdb_sql::Dialect::PostgreSql,
         serve: ServeOptions::default(),
         shell: ShellOptions::default(),
     };
@@ -576,7 +584,22 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.sql = Some(SqlSource::Command(text.to_owned()));
             }
             OptionName::Listen => {
-                request.serve.listen = Some(parse_listen(value).map_err(usage)?);
+                request.serve.listen =
+                    Some(parse_listen(&option.spelled, value, 5432).map_err(usage)?);
+            }
+            OptionName::MysqlListen => {
+                request.serve.mysql_listen =
+                    Some(parse_listen(&option.spelled, value, 3306).map_err(usage)?);
+            }
+            OptionName::Dialect => {
+                let name = value.to_str().unwrap_or_default();
+                request.dialect = eggdb_sql::Dialect::named(name).ok_or_else(|| {
+                    usage(format!(
+                        "{} takes postgresql or mysql, not '{}'",
+                        option.spelled,
+                        shown(value)
+                    ))
+                })?;
             }
             OptionName::User => {
                 request.serve.user = Some(parse_name(&option.spelled, value).map_err(usage)?);
@@ -739,10 +762,11 @@ fn parse_format(value: &OsStr) -> Result<Format, String> {
     }
 }
 
-fn parse_listen(value: &OsStr) -> Result<SocketAddr, String> {
+fn parse_listen(option: &str, value: &OsStr, port: u16) -> Result<SocketAddr, String> {
     let refused = || {
         format!(
-            "--listen needs an address and port such as 127.0.0.1:5432, [::1]:5432 or 5433, not '{}'",
+            "{option} needs an address and port such as 127.0.0.1:{port}, [::1]:{port} or {}, not '{}'",
+            port + 1,
             shown(value)
         )
     };

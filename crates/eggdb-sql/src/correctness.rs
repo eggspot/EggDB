@@ -1,8 +1,12 @@
+use crate::dialect::Dialect;
 use crate::memory_store::MemoryStore;
-use crate::session::Session;
+use crate::session::{QueryResult, Session};
 use crate::tests::render;
 
-const SUITES: [(&str, &str); 1] = [("postgresql", include_str!("../correctness/postgresql.test"))];
+const SUITES: [(&str, &str); 2] = [
+    ("postgresql", include_str!("../correctness/postgresql.test")),
+    ("mysql", include_str!("../correctness/mysql.test")),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Expected {
@@ -40,6 +44,15 @@ fn parse(suite: &str) -> Result<Vec<Case>, String> {
             None if header == "ok" => Expected::Success,
             None if header == "rows" => Expected::Output(String::new()),
             Some(("error", state)) if state.len() == 5 => Expected::Failure(state.to_owned()),
+            Some(("error", state_and_code))
+                if state_and_code.len() > 6
+                    && state_and_code.as_bytes()[5] == b' '
+                    && state_and_code[6..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit()) =>
+            {
+                Expected::Failure(state_and_code.to_owned())
+            }
             _ => return Err(format!("line {line}: unknown header '{header}'")),
         };
         let mut sql = Vec::new();
@@ -82,26 +95,54 @@ fn parse(suite: &str) -> Result<Vec<Case>, String> {
     Ok(cases)
 }
 
+fn rendered(result: &QueryResult, dialect: Dialect) -> String {
+    if dialect == Dialect::PostgreSql {
+        return render(result);
+    }
+    let mut out = String::new();
+    if let Some(columns) = &result.columns {
+        let names: Vec<&str> = columns.iter().map(|column| column.name.as_str()).collect();
+        out.push_str(&names.join("|"));
+        out.push('\n');
+        for row in &result.rows {
+            let cells: Vec<String> = row
+                .iter()
+                .map(|value| dialect.value_text(value).unwrap_or_else(|| "NULL".into()))
+                .collect();
+            out.push_str(&cells.join("|"));
+            out.push('\n');
+        }
+    }
+    out.push_str(&result.tag);
+    out
+}
+
 fn outcome(session: &mut Session<'_, MemoryStore>, sql: &str) -> Expected {
     let mut last = None;
-    match session.execute(sql, &mut |result| last = Some(render(&result))) {
+    let dialect = session.dialect();
+    match session.execute(sql, &mut |result| last = Some(rendered(&result, dialect))) {
         Ok(()) => Expected::Output(last.unwrap_or_default()),
-        Err(error) => Expected::Failure(error.state().code().to_owned()),
+        Err(error) => Expected::Failure(match error.vendor_code() {
+            Some(code) => format!("{} {code}", error.state().code()),
+            None => error.state().code().to_owned(),
+        }),
     }
 }
 
 fn agrees(expected: &Expected, found: &Expected) -> bool {
-    match expected {
-        Expected::Success => matches!(found, Expected::Output(_)),
-        other => other == found,
+    match (expected, found) {
+        (Expected::Success, Expected::Output(_)) => true,
+        (Expected::Failure(wanted), Expected::Failure(found)) if wanted.len() == 5 => {
+            found.starts_with(wanted.as_str())
+        }
+        (other, found) => other == found,
     }
 }
 
 fn session_for<'s>(dialect: &str, store: &'s MemoryStore) -> Option<Session<'s, MemoryStore>> {
-    match dialect {
-        "postgresql" => Some(Session::new(store)),
-        _ => None,
-    }
+    Dialect::named(dialect)
+        .filter(|found| found.name() == dialect)
+        .map(|found| Session::with_dialect(store, found))
 }
 
 fn run_suite(dialect: &str) -> Result<(usize, usize), Vec<String>> {
@@ -122,7 +163,7 @@ fn run_suite(dialect: &str) -> Result<(usize, usize), Vec<String>> {
             differences += 1;
             if agreed {
                 problems.push(format!(
-                    "line {} ({}): now matches PostgreSQL; remove '... differs' and its entry in docs/sql.md: {}",
+                    "line {} ({}): now matches {dialect}'s documented behaviour; remove '... differs' and its entry in docs/sql.md: {}",
                     case.line, case.chapter, case.sql
                 ));
             }
@@ -145,6 +186,21 @@ fn the_postgresql_dialect_behaves_as_its_manual_documents() {
     match run_suite("postgresql") {
         Ok((cases, differences)) => {
             assert!(cases >= 150, "only {cases} cases");
+            assert!(differences * 10 < cases, "{differences} known differences");
+        }
+        Err(problems) => panic!(
+            "{} cases disagree:\n{}",
+            problems.len(),
+            problems.join("\n")
+        ),
+    }
+}
+
+#[test]
+fn the_mysql_dialect_behaves_as_its_reference_manual_documents() {
+    match run_suite("mysql") {
+        Ok((cases, differences)) => {
+            assert!(cases >= 60, "only {cases} cases");
             assert!(differences * 10 < cases, "{differences} known differences");
         }
         Err(problems) => panic!(

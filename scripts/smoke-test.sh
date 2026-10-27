@@ -132,7 +132,7 @@ if [ "${OS:-}" = Windows_NT ]; then
 else
   printf 'pg-secret\n' > password.txt
   "$eggdb" sql --create pg.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL)" > /dev/null
-  "$eggdb" serve pg.db --listen 127.0.0.1:0 --password-file password.txt > serve.out 2> serve.err &
+  "$eggdb" serve pg.db --listen 127.0.0.1:0 --mysql-listen 127.0.0.1:0 --password-file password.txt > serve.out 2> serve.err &
   server_pid=$!
   for _ in $(seq 1 50); do
     [ -s serve.out ] && break
@@ -176,6 +176,43 @@ PYTHON
     pass "serve: the pg8000 driver runs parameterized queries"
   else
     echo "skip driver: pg8000 is not installed (CI's Linux job installs it)"
+  fi
+  mysql_port=$(sed -n 's/.*"mysql_port":\([0-9]*\).*/\1/p' serve.out | head -n 1)
+  [ -n "$mysql_port" ] || fail "eggdb serve printed no MySQL port: $(cat serve.out)"
+  if command -v mysql > /dev/null 2>&1; then
+    mysql_client() {
+      MYSQL_PWD="$1" mysql -h 127.0.0.1 -P "$mysql_port" -u eggdb -D pg --batch --skip-column-names --connect-timeout=10 -e "$2"
+    }
+    mysql_client pg-secret "INSERT INTO items VALUES (4, 'tea'); SELECT \`name\` FROM items WHERE id = 4; SELECT @@version_comment" \
+      > mysql.out 2> mysql.err || fail "mysql failed: $(cat mysql.err)"
+    [ "$(tr '\n' ' ' < mysql.out)" = "tea EggDB " ] || fail "mysql printed $(cat mysql.out)"
+    mysql_client pg-secret "SELECT * FROM missing" > mysql.out 2> mysql.err && fail "mysql ran a query on a missing table"
+    grep -q "ERROR 1146 (42S02).*Table 'pg.missing' doesn't exist" mysql.err || fail "mysql error said $(cat mysql.err)"
+    mysql_client wrong "SELECT 1" > mysql.out 2> mysql.err && fail "mysql connected with a wrong password"
+    grep -q 'ERROR 1045' mysql.err || fail "a wrong MySQL password said $(cat mysql.err)"
+    pass "serve: mysql inserts and selects; errors and a wrong password are refused"
+  else
+    echo "skip mysql: the mysql client is not on PATH (CI's Linux job installs mysql-client)"
+  fi
+  if command -v "$python" > /dev/null 2>&1 && "$python" -c 'import pymysql' > /dev/null 2>&1; then
+    "$python" - "$mysql_port" > driver.out 2> driver.err << 'PYTHON' || fail "PyMySQL failed: $(cat driver.err)"
+import sys
+import pymysql
+
+connection = pymysql.connect(
+    host="127.0.0.1", port=int(sys.argv[1]), user="eggdb", password="pg-secret", database="pg"
+)
+with connection.cursor() as cursor:
+    cursor.execute("INSERT INTO items VALUES (%s, %s)", (5, "honey"))
+    connection.commit()
+    cursor.execute("SELECT name FROM items WHERE id = %s", (5,))
+    print(cursor.fetchall())
+connection.close()
+PYTHON
+    [ "$(tr -d '\n' < driver.out)" = "(('honey',),)" ] || fail "PyMySQL printed $(cat driver.out)"
+    pass "serve: the PyMySQL driver runs parameterized queries"
+  else
+    echo "skip driver: PyMySQL is not installed (CI's Linux job installs it)"
   fi
   kill -TERM "$server_pid"
   status=0

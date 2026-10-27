@@ -57,45 +57,36 @@ impl Session<'_> {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             DEFAULT_PORT,
         ));
-        let listener = match eggdb_pgwire::listen_on_loopback(address) {
-            Ok(listener) => listener,
-            Err(ListenError::NotLoopback(address)) => {
-                return Err(Failure::Database {
-                    message: format!(
-                        "cannot listen on {address}: it is not a loopback address. Until EggDB speaks TLS, serve listens only on this machine (127.0.0.1, ::1 or another 127.x address), so no password crosses a network in the clear."
-                    ),
-                    try_command: Some(format!(
-                        "eggdb serve {} --listen 127.0.0.1:{}",
-                        self.file,
-                        address.port()
-                    )),
-                    exit: Exit::Usage,
-                });
-            }
-            Err(ListenError::Io(error)) => {
-                let in_use = error.kind() == std::io::ErrorKind::AddrInUse;
-                return Err(Failure::Database {
-                    message: if in_use {
-                        format!(
-                            "cannot listen on {address}: address already in use. Another server is listening there (often PostgreSQL itself); pick another port, or port 0 for any free one."
-                        )
-                    } else {
-                        format!("cannot listen on {address}: {error}")
-                    },
-                    try_command: in_use.then(|| {
-                        format!(
-                            "eggdb serve {} --listen {}",
-                            self.file,
-                            SocketAddr::new(address.ip(), address.port().wrapping_add(1))
-                        )
-                    }),
-                    exit: Exit::DatabaseError,
-                });
-            }
+        let listener = self.listener(
+            "--listen",
+            "PostgreSQL",
+            address,
+            eggdb_pgwire::listen_on_loopback(address).map_err(|error| match error {
+                ListenError::NotLoopback(_) => None,
+                ListenError::Io(error) => Some(error),
+            }),
+        )?;
+        let mysql_listener = match options.mysql_listen {
+            Some(address) => Some(self.listener(
+                "--mysql-listen",
+                "MySQL",
+                address,
+                eggdb_mysqlwire::listen_on_loopback(address).map_err(|error| match error {
+                    eggdb_mysqlwire::ListenError::NotLoopback(_) => None,
+                    eggdb_mysqlwire::ListenError::Io(error) => Some(error),
+                }),
+            )?),
+            None => None,
         };
         let bound = listener.local_addr().map_err(|error| {
             Failure::database(format!("cannot listen: {error}"), Exit::DatabaseError)
         })?;
+        let mysql_bound = match &mysql_listener {
+            Some(listener) => Some(listener.local_addr().map_err(|error| {
+                Failure::database(format!("cannot listen: {error}"), Exit::DatabaseError)
+            })?),
+            None => None,
+        };
         let mut salt = [0u8; SCRAM_SALT_BYTES];
         secure_random::fill(&mut salt).map_err(|error| {
             Failure::database(
@@ -104,6 +95,9 @@ impl Session<'_> {
             )
         })?;
         let verifier = ScramVerifier::derive(password.as_bytes(), &salt, MIN_SCRAM_ITERATIONS);
+        let mysql_credentials = mysql_listener
+            .as_ref()
+            .map(|_| eggdb_mysqlwire::MySqlCredentials::derive(password.as_bytes()));
         drop(password);
         let read_only = self.request.read_only;
         let access = if read_only {
@@ -123,11 +117,19 @@ impl Session<'_> {
             max_connections: options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
             authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
         };
-        self.print_listening(bound, &config, read_only);
+        let mysql_config = mysql_credentials.map(|credentials| eggdb_mysqlwire::ServerConfig {
+            user: config.user.clone(),
+            credentials,
+            database: config.database.clone(),
+            max_connections: config.max_connections,
+            authentication_timeout: eggdb_mysqlwire::DEFAULT_AUTHENTICATION_TIMEOUT,
+        });
+        self.print_listening(bound, mysql_bound, &config, read_only);
         self.out.finish()?;
         let _ = stop_signals::watch();
         let store = DatabaseStore(&db);
         let (events, received) = std::sync::mpsc::channel::<String>();
+        let mysql_events = events.clone();
         let served = std::thread::scope(|scope| {
             let server = scope.spawn(|| {
                 let log = move |line: &str| {
@@ -135,17 +137,33 @@ impl Session<'_> {
                 };
                 eggdb_pgwire::serve(&store, &listener, &config, &stop_signals::requested, &log)
             });
+            let mysql_server = scope.spawn(|| match (&mysql_listener, &mysql_config) {
+                (Some(listener), Some(config)) => {
+                    let log = move |line: &str| {
+                        let _ = mysql_events.send(stamped(&format!("mysql {line}")));
+                    };
+                    eggdb_mysqlwire::serve(&store, listener, config, &stop_signals::requested, &log)
+                }
+                _ => {
+                    drop(mysql_events);
+                    Ok(0)
+                }
+            });
             for line in received {
                 self.messages.text(&line);
                 let _ = self.messages.finish();
             }
-            server.join().unwrap_or_else(|_| {
+            let unexpected = || {
                 Err(std::io::Error::other(
                     "the server thread stopped unexpectedly",
                 ))
-            })
+            };
+            let postgresql = server.join().unwrap_or_else(|_| unexpected());
+            let mysql = mysql_server.join().unwrap_or_else(|_| unexpected());
+            postgresql.and_then(|open| mysql.map(|mysql_open| open + mysql_open))
         });
         drop(listener);
+        drop(mysql_listener);
         let open = served.map_err(|error| {
             Failure::database(format!("the server failed: {error}"), Exit::DatabaseError)
         })?;
@@ -170,27 +188,93 @@ impl Session<'_> {
         Ok(Exit::Done)
     }
 
-    fn print_listening(&mut self, bound: SocketAddr, config: &ServerConfig, read_only: bool) {
+    fn listener(
+        &self,
+        option: &str,
+        protocol: &str,
+        address: SocketAddr,
+        opened: Result<std::net::TcpListener, Option<std::io::Error>>,
+    ) -> Result<std::net::TcpListener, Failure> {
+        match opened {
+            Ok(listener) => Ok(listener),
+            Err(None) => Err(Failure::Database {
+                message: format!(
+                    "cannot listen on {address}: it is not a loopback address. Until EggDB speaks TLS, serve listens only on this machine (127.0.0.1, ::1 or another 127.x address), so no password crosses a network in the clear."
+                ),
+                try_command: Some(format!(
+                    "eggdb serve {} {option} 127.0.0.1:{}",
+                    self.file,
+                    address.port()
+                )),
+                exit: Exit::Usage,
+            }),
+            Err(Some(error)) => {
+                let in_use = error.kind() == std::io::ErrorKind::AddrInUse;
+                Err(Failure::Database {
+                    message: if in_use {
+                        format!(
+                            "cannot listen on {address}: address already in use. Another server is listening there (often {protocol} itself); pick another port, or port 0 for any free one."
+                        )
+                    } else {
+                        format!("cannot listen on {address}: {error}")
+                    },
+                    try_command: in_use.then(|| {
+                        format!(
+                            "eggdb serve {} {option} {}",
+                            self.file,
+                            SocketAddr::new(address.ip(), address.port().wrapping_add(1))
+                        )
+                    }),
+                    exit: Exit::DatabaseError,
+                })
+            }
+        }
+    }
+
+    fn print_listening(
+        &mut self,
+        bound: SocketAddr,
+        mysql_bound: Option<SocketAddr>,
+        config: &ServerConfig,
+        read_only: bool,
+    ) {
         let host = bound.ip().to_string();
         let url_host = match bound.ip() {
             IpAddr::V6(_) => format!("[{host}]"),
             IpAddr::V4(_) => host.clone(),
         };
+        let mysql_line = mysql_bound.map_or_else(String::new, |mysql| {
+            let mysql_host = mysql.ip().to_string();
+            format!(
+                "  mysql        listening on {mysql} (MySQL protocol): mysql -h {mysql_host} -P {} -u {} -p {}\n",
+                mysql.port(),
+                config.user,
+                config.database
+            )
+        });
         match self.format {
-            Format::Json => self.out.text(
-                &JsonObject::new()
+            Format::Json => {
+                let mut object = JsonObject::new()
                     .string("listening", &bound.to_string())
                     .string("host", &host)
-                    .number("port", u64::from(bound.port()))
+                    .number("port", u64::from(bound.port()));
+                if let Some(mysql) = mysql_bound {
+                    object = object
+                        .string("mysql_listening", &mysql.to_string())
+                        .number("mysql_port", u64::from(mysql.port()));
+                }
+                self.out.text(
+                    &object
                     .string("file", &self.file_display)
                     .string("database", &config.database)
                     .string("user", &config.user)
                     .number("max_connections", config.max_connections as u64)
                     .boolean("read_only", read_only)
                     .line(),
-            ),
+                );
+            }
             _ => self.out.text(&format!(
-                "listening on {bound} (PostgreSQL protocol; loopback only until EggDB has TLS)\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n  connect      psql postgresql://{}@{url_host}:{}/{}\n  stop         Ctrl-C\n",
+                "listening on {bound} (PostgreSQL protocol; loopback only until EggDB has TLS)\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n  connect      psql postgresql://{}@{url_host}:{}/{}\n{mysql_line}  stop         Ctrl-C\n",
                 config.database,
                 self.file,
                 if read_only { "read-only" } else { "for writing" },

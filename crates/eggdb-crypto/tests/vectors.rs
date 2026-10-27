@@ -1,10 +1,10 @@
 //! The published test vectors of every algorithm in `eggdb-crypto` (D35): FIPS 180-4 and NIST for
-//! SHA-256, RFC 4231 for HMAC-SHA-256, RFC 7914 and the widely published password/salt vectors
+//! SHA-256 and SHA-1, RFC 4231 for HMAC-SHA-256, RFC 7914 and the widely published password/salt vectors
 //! for PBKDF2-HMAC-SHA-256, RFC 4648 for Base64.
 
 use eggdb_crypto::{
-    Base64Error, HmacSha256, Sha256, base64_decode, base64_encode, constant_time_eq, hmac_sha256,
-    pbkdf2_hmac_sha256, sha256,
+    Base64Error, HmacSha256, Sha1, Sha256, base64_decode, base64_encode, constant_time_eq,
+    hmac_sha256, pbkdf2_hmac_sha256, sha1, sha256,
 };
 
 fn hex(bytes: &[u8]) -> String {
@@ -230,4 +230,61 @@ fn constant_time_eq_compares_bytes_and_lengths() {
     assert!(!constant_time_eq(b"secret", b"secreT"));
     assert!(!constant_time_eq(b"Secret", b"secret"));
     assert!(!constant_time_eq(b"secret", b"secrets"));
+}
+
+#[test]
+fn sha1_matches_the_fips_180_examples() {
+    let cases: [(&[u8], &str); 3] = [
+        (b"", "da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+        (b"abc", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+        (
+            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1",
+        ),
+    ];
+    for (message, digest) in cases {
+        assert_eq!(hex(&sha1(message)), digest);
+    }
+}
+
+#[test]
+fn sha1_of_a_million_a_matches_the_nist_long_message() {
+    let mut hash = Sha1::new();
+    let chunk = [b'a'; 1000];
+    for _ in 0..1000 {
+        hash.update(&chunk);
+    }
+    assert_eq!(
+        hex(&hash.finish()),
+        "34aa973cd4c4daa4f61eeb2bdbad27316534016f"
+    );
+}
+
+#[test]
+fn sha1_pads_correctly_at_every_block_boundary() {
+    let cases = [
+        (55, "c1c8bbdc22796e28c0e15163d20899b65621d65a"),
+        (56, "c2db330f6083854c99d4b5bfb6e8f29f201be699"),
+        (63, "03f09f5b158a7a8cdad920bddc29b81c18a551f5"),
+        (64, "0098ba824b5c16427bd7a1122a5a442a25ec644d"),
+        (65, "11655326c708d70319be2610e8a57d9a5b959d3b"),
+        (127, "89d95fa32ed44a7c610b7ee38517ddf57e0bb975"),
+        (128, "ad5b3fdbcb526778c2839d2f151ea753995e26a0"),
+    ];
+    for (length, digest) in cases {
+        assert_eq!(hex(&sha1(&vec![b'a'; length])), digest, "{length} bytes");
+    }
+}
+
+#[test]
+fn sha1_gives_the_same_digest_however_the_message_is_split() {
+    let message: Vec<u8> = (0..300u32).map(|index| (index * 7 % 251) as u8).collect();
+    let whole = sha1(&message);
+    for split in [1, 3, 55, 56, 63, 64, 65, 128, 200] {
+        let mut hash = Sha1::new();
+        for chunk in message.chunks(split) {
+            hash.update(chunk);
+        }
+        assert_eq!(hash.finish(), whole, "chunks of {split}");
+    }
 }

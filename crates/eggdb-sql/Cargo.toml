@@ -1,6 +1,6 @@
 [package]
 name = "eggdb-sql"
-description = "EggDB's SQL core: the PostgreSQL dialect's parser, a catalog and tables on any ordered key-value store, and a session that runs statements."
+description = "EggDB's SQL core: the PostgreSQL and MySQL dialects' parser, a catalog and tables on any ordered key-value store, and a session that runs statements."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

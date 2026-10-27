@@ -6,6 +6,10 @@ const META_SPACE: u8 = 0x01;
 const TABLE_SPACE: u8 = 0x02;
 const ROW_SPACE: u8 = 0x03;
 const FORMAT_VERSION: u8 = 1;
+const AUTO_INCREMENT_FORMAT_VERSION: u8 = 2;
+const DEFAULT_ABSENT: u8 = 0;
+const DEFAULT_EXPRESSION: u8 = 1;
+const DEFAULT_AUTO_INCREMENT: u8 = 2;
 const PRESENT: u8 = 0x01;
 const NULL_IN_KEY: u8 = 0x02;
 pub(crate) const MAX_COLUMNS: usize = 1600;
@@ -87,6 +91,7 @@ pub(crate) struct Column {
     pub(crate) sql_type: SqlType,
     pub(crate) not_null: bool,
     pub(crate) default: Option<String>,
+    pub(crate) auto_increment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,8 +107,17 @@ impl TableDefinition {
         self.columns.iter().position(|column| column.name == name)
     }
 
+    pub(crate) fn auto_increment_column(&self) -> Option<usize> {
+        self.columns.iter().position(|column| column.auto_increment)
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut out = vec![FORMAT_VERSION];
+        let version = if self.auto_increment_column().is_some() {
+            AUTO_INCREMENT_FORMAT_VERSION
+        } else {
+            FORMAT_VERSION
+        };
+        let mut out = vec![version];
         out.extend_from_slice(&self.id.to_le_bytes());
         put_varint(&mut out, self.columns.len() as u64);
         for column in &self.columns {
@@ -114,11 +128,12 @@ impl TableDefinition {
             }
             out.push(u8::from(column.not_null));
             match &column.default {
+                _ if column.auto_increment => out.push(DEFAULT_AUTO_INCREMENT),
                 Some(text) => {
-                    out.push(1);
+                    out.push(DEFAULT_EXPRESSION);
                     put_bytes(&mut out, text.as_bytes());
                 }
-                None => out.push(0),
+                None => out.push(DEFAULT_ABSENT),
             }
         }
         put_varint(&mut out, self.primary_key.len() as u64);
@@ -130,7 +145,7 @@ impl TableDefinition {
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "table definition");
-        reader.version()?;
+        let version = reader.version_up_to(AUTO_INCREMENT_FORMAT_VERSION)?;
         let id = reader.u32()?;
         let count = reader.count()?;
         if count > MAX_COLUMNS {
@@ -158,9 +173,10 @@ impl TableDefinition {
                 1 => true,
                 _ => return Err(reader.damaged()),
             };
-            let default = match reader.byte()? {
-                0 => None,
-                1 => Some(reader.text()?),
+            let (default, auto_increment) = match reader.byte()? {
+                DEFAULT_ABSENT => (None, false),
+                DEFAULT_EXPRESSION => (Some(reader.text()?), false),
+                DEFAULT_AUTO_INCREMENT if version == AUTO_INCREMENT_FORMAT_VERSION => (None, true),
                 _ => return Err(reader.damaged()),
             };
             if columns.iter().any(|column: &Column| column.name == name) {
@@ -171,6 +187,7 @@ impl TableDefinition {
                 sql_type,
                 not_null,
                 default,
+                auto_increment,
             });
         }
         let key_count = reader.count()?;
@@ -184,6 +201,16 @@ impl TableDefinition {
         }
         reader.finish()?;
         if columns.is_empty() && !primary_key.is_empty() {
+            return Err(reader.damaged());
+        }
+        let auto_columns = columns
+            .iter()
+            .filter(|column| column.auto_increment)
+            .count();
+        let auto_first_key = primary_key
+            .first()
+            .is_some_and(|&first| columns[first].auto_increment);
+        if version == AUTO_INCREMENT_FORMAT_VERSION && (auto_columns != 1 || !auto_first_key) {
             return Err(reader.damaged());
         }
         Ok(Self {
@@ -392,8 +419,12 @@ impl<'b> Reader<'b> {
     }
 
     fn version(&mut self) -> SqlResult<()> {
+        self.version_up_to(FORMAT_VERSION).map(|_| ())
+    }
+
+    fn version_up_to(&mut self, newest: u8) -> SqlResult<u8> {
         match self.byte()? {
-            FORMAT_VERSION => Ok(()),
+            version @ FORMAT_VERSION..=u8::MAX if version <= newest => Ok(version),
             version => Err(SqlError::new(
                 SqlState::FEATURE_NOT_SUPPORTED,
                 format!(
@@ -577,6 +608,7 @@ mod tests {
                 sql_type,
                 not_null: false,
                 default: None,
+                auto_increment: false,
             })
             .collect();
         let values = vec![
@@ -612,12 +644,14 @@ mod tests {
                     sql_type: SqlType::BigInt,
                     not_null: true,
                     default: None,
+                    auto_increment: false,
                 },
                 Column {
                     name: "name".into(),
                     sql_type: SqlType::Varchar(Some(20)),
                     not_null: false,
                     default: Some("'x'".into()),
+                    auto_increment: false,
                 },
             ],
             primary_key: vec![0],
@@ -627,6 +661,83 @@ mod tests {
         for cut in 0..encoded.len() {
             assert!(TableDefinition::decode("t", &encoded[..cut]).is_err());
         }
+    }
+
+    fn two_columns(auto: [bool; 2], primary_key: Vec<usize>) -> TableDefinition {
+        TableDefinition {
+            id: 7,
+            name: "t".into(),
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    sql_type: SqlType::BigInt,
+                    not_null: true,
+                    default: None,
+                    auto_increment: auto[0],
+                },
+                Column {
+                    name: "name".into(),
+                    sql_type: SqlType::Varchar(Some(20)),
+                    not_null: false,
+                    default: (!auto[1]).then(|| "'x'".to_owned()),
+                    auto_increment: auto[1],
+                },
+            ],
+            primary_key,
+        }
+    }
+
+    fn damaged(bytes: &[u8]) -> bool {
+        TableDefinition::decode("t", bytes).is_err_and(|error| error.state().code() == "XX001")
+    }
+
+    #[test]
+    fn a_table_without_auto_increment_stays_version_1_byte_for_byte() {
+        let encoded = two_columns([false, false], vec![0]).encode();
+        assert_eq!(
+            encoded,
+            [
+                1, 7, 0, 0, 0, 2, 2, b'i', b'd', 3, 1, 0, 4, b'n', b'a', b'm', b'e', 8, 20, 0, 0,
+                0, 0, 1, 3, b'\'', b'x', b'\'', 1, 0,
+            ]
+        );
+        let mut auto_marker = encoded.clone();
+        assert_eq!(auto_marker[11], 0);
+        auto_marker[11] = 2;
+        assert!(damaged(&auto_marker));
+    }
+
+    #[test]
+    fn an_auto_increment_table_is_version_2_and_round_trips() {
+        let table = two_columns([true, false], vec![0]);
+        let encoded = table.encode();
+        assert_eq!(encoded[0], 2);
+        assert_eq!(encoded[11], 2);
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(table));
+        for cut in 0..encoded.len() {
+            assert!(TableDefinition::decode("t", &encoded[..cut]).is_err());
+        }
+    }
+
+    #[test]
+    fn version_2_definitions_with_a_wrong_auto_increment_column_are_damaged() {
+        let mut no_auto = two_columns([false, false], vec![0]).encode();
+        no_auto[0] = 2;
+        assert!(damaged(&no_auto));
+        assert!(damaged(&two_columns([true, true], vec![0]).encode()));
+        assert!(damaged(&two_columns([false, true], vec![0]).encode()));
+        assert!(damaged(&two_columns([false, true], vec![0, 1]).encode()));
+        assert!(damaged(&two_columns([true, false], Vec::new()).encode()));
+        assert!(!damaged(&two_columns([true, false], vec![0, 1]).encode()));
+    }
+
+    #[test]
+    fn a_newer_table_definition_version_is_refused_by_name() {
+        let mut newer = two_columns([true, false], vec![0]).encode();
+        newer[0] = 3;
+        let error = TableDefinition::decode("t", &newer).unwrap_err();
+        assert_eq!(error.state().code(), "0A000");
+        assert!(error.message().contains("format version 3"), "{error}");
     }
 
     #[test]

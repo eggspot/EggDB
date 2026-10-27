@@ -204,6 +204,50 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
+pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
+    match &mut expr.kind {
+        ExprKind::Literal(_)
+        | ExprKind::Column { .. }
+        | ExprKind::Slot { .. }
+        | ExprKind::SessionValue { .. } => Vec::new(),
+        ExprKind::Unary(_, operand)
+        | ExprKind::IsNull { expr: operand, .. }
+        | ExprKind::IsTruth { expr: operand, .. }
+        | ExprKind::Cast { expr: operand, .. } => vec![operand],
+        ExprKind::Binary(_, left, right)
+        | ExprKind::IsDistinctFrom { left, right, .. }
+        | ExprKind::Like {
+            expr: left,
+            pattern: right,
+            ..
+        } => vec![left, right],
+        ExprKind::Between {
+            expr, low, high, ..
+        } => vec![expr, low, high],
+        ExprKind::InList { expr, list, .. } => {
+            let mut all = vec![expr.as_mut()];
+            all.extend(list.iter_mut());
+            all
+        }
+        ExprKind::And(operands) | ExprKind::Or(operands) => operands.iter_mut().collect(),
+        ExprKind::Case {
+            operand,
+            branches,
+            otherwise,
+        } => {
+            let mut all: Vec<&mut Expr> = operand.iter_mut().map(AsMut::as_mut).collect();
+            for (condition, result) in branches {
+                all.push(condition);
+                all.push(result);
+            }
+            all.extend(otherwise.iter_mut().map(AsMut::as_mut));
+            all
+        }
+        ExprKind::Function { arguments, .. } => arguments.iter_mut().collect(),
+        ExprKind::Aggregate { argument, .. } => argument.iter_mut().map(AsMut::as_mut).collect(),
+    }
+}
+
 pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
     match &expr.kind {
         ExprKind::Aggregate { .. } => Some(expr),
@@ -684,6 +728,20 @@ impl Evaluator<'_> {
                 Value::Double(number) => Ok(Value::Double(number.abs())),
                 _ => Err(unknown()),
             },
+            ("concat_or_null", _) => {
+                let mut joined = String::new();
+                for value in &values {
+                    match crate::dialect::Dialect::MySql.value_text(value) {
+                        Some(text) => joined.push_str(&text),
+                        None => return Ok(Value::Null),
+                    }
+                }
+                Ok(Value::Text(joined))
+            }
+            ("octet_length", [Value::Null]) => Ok(Value::Null),
+            ("octet_length", [Value::Text(text)]) => {
+                integer_value(text.len() as i64, SqlType::Integer)
+            }
             ("length" | "char_length" | "character_length", [Value::Text(text)]) => {
                 integer_value(text.chars().count() as i64, SqlType::Integer)
             }
@@ -936,7 +994,7 @@ fn power(base: f64, exponent: f64) -> SqlResult<Value> {
     Ok(Value::Double(result))
 }
 
-fn like(text: &str, pattern: &str) -> SqlResult<bool> {
+pub(crate) fn like(text: &str, pattern: &str) -> SqlResult<bool> {
     let text: Vec<char> = text.chars().collect();
     let mut tokens = Vec::new();
     let mut chars = pattern.chars();

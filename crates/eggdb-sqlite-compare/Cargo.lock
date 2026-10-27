@@ -22,6 +22,7 @@ dependencies = [
 name = "eggdb"
 version = "0.1.0"
 dependencies = [
+ "eggdb-mysqlwire",
  "eggdb-pgwire",
  "eggdb-platform",
  "eggdb-sql",
@@ -32,6 +33,15 @@ dependencies = [
 [[package]]
 name = "eggdb-crypto"
 version = "0.1.0"
+
+[[package]]
+name = "eggdb-mysqlwire"
+version = "0.1.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-platform",
+ "eggdb-sql",
+]
 
 [[package]]
 name = "eggdb-pgwire"
