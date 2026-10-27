@@ -299,9 +299,20 @@ impl Parser<'_> {
                 if self.take_word("none") {
                     options.owned_by = Some(None);
                 } else {
-                    let table = self.table_name()?;
-                    self.expect(&TokenKind::Dot)?;
-                    let column = self.name()?;
+                    let mut parts = vec![self.name()?];
+                    while parts.len() < 3 && self.take(&TokenKind::Dot) {
+                        parts.push(self.name()?);
+                    }
+                    let column = parts.pop().ok_or_else(|| self.unexpected())?;
+                    let table = parts.pop().ok_or_else(|| self.unexpected())?;
+                    if let Some(schema) = parts.pop()
+                        && schema.text != "public"
+                    {
+                        return Err(SqlError::not_supported(
+                            "schemas other than public are not supported yet",
+                        )
+                        .at(schema.position));
+                    }
                     options.owned_by = Some(Some((table, column)));
                 }
             } else {

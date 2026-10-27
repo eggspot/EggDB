@@ -125,10 +125,16 @@ pub(crate) fn create_table(
             format!("tables can have at most {MAX_COLUMNS} columns"),
         ));
     }
+    constraints::check_identifier(&create.name)?;
     let mut columns: Vec<Column> = Vec::new();
     let mut primary_key = Vec::new();
     let mut primary_key_position = None;
     for (index, definition) in create.columns.iter().enumerate() {
+        constraints::check_identifier(&definition.name)?;
+        if let Some((_, text)) = &definition.default {
+            crate::sequences::check_default_sequences(writer, text)
+                .map_err(|error| error.at_if_unplaced(definition.name.position))?;
+        }
         if columns
             .iter()
             .any(|column| column.name == definition.name.text)
@@ -263,9 +269,10 @@ pub(crate) fn create_table(
     for (spec, key) in foreign_keys {
         constraints::define_foreign_key(writer, tables, &mut table, spec, key, dialect)?;
     }
+    table.referenced = !constraints::referencing_tables(writer, &table.name)?.is_empty();
     writer.put(&meta_key(), &encode_meta(following))?;
     writer.put(&table_key(&table.name), &table.encode())?;
-    constraints::register_references(writer, &table)?;
+    constraints::register_references(writer, tables, &table)?;
     Ok(QueryResult::command("CREATE TABLE"))
 }
 
@@ -353,8 +360,11 @@ pub(crate) fn drop_tables(
 ) -> SqlResult<QueryResult> {
     let mut result = QueryResult::command("DROP TABLE");
     for name in names {
-        if tables.table(writer, &name.text)?.is_none() {
+        let Some(dropped) = tables.table(writer, &name.text)? else {
             continue;
+        };
+        if dropped.owns_sequence {
+            result = release_owned_sequences(writer, tables, &dropped, names, cascade, result)?;
         }
         for child in constraints::referencing_tables(writer, &name.text)? {
             if child == name.text || names.iter().any(|dropped| dropped.text == child) {
@@ -376,12 +386,12 @@ pub(crate) fn drop_tables(
             if !cascade {
                 return Err(dependent_table(&name.text, &child, &dependent[0], dialect));
             }
-            constraints::unregister_references(writer, &definition)?;
+            constraints::unregister_references(writer, tables, &definition)?;
             definition
                 .foreign_keys
                 .retain(|key| key.parent != name.text);
             writer.put(&table_key(&definition.name), &definition.encode())?;
-            constraints::register_references(writer, &definition)?;
+            constraints::register_references(writer, tables, &definition)?;
             for constraint in &dependent {
                 result = result.with_notice(format!(
                     "NOTICE:  drop cascades to constraint {constraint} on table {child}"
@@ -416,8 +426,8 @@ pub(crate) fn drop_tables(
             }
         }
         indexes::delete_every_index_entry(writer, &table)?;
-        constraints::unregister_references(writer, &table)?;
-        crate::sequences::drop_owned_by(writer, &table.name, None)?;
+        constraints::unregister_references(writer, tables, &table)?;
+        crate::sequences::drop_owned_by(writer, tables, &table.name, None)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)
@@ -425,6 +435,54 @@ pub(crate) fn drop_tables(
 
 #[cold]
 #[inline(never)]
+fn release_owned_sequences(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    dropped: &TableDefinition,
+    names: &[Name],
+    cascade: bool,
+    mut result: QueryResult,
+) -> SqlResult<QueryResult> {
+    for (sequence, definition) in crate::sequences::every_sequence(writer)? {
+        if definition
+            .owned_by
+            .as_ref()
+            .is_none_or(|(owner, _)| *owner != dropped.name)
+        {
+            continue;
+        }
+        for (table, column) in crate::sequences::every_default_referring(writer, &sequence)? {
+            if names.iter().any(|name| name.text == table) {
+                continue;
+            }
+            if !cascade {
+                return Err(SqlError::new(
+                    SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+                    format!(
+                        "cannot drop table {} because other objects depend on it",
+                        dropped.name
+                    ),
+                )
+                .with_detail(format!(
+                    "default value for column {column} of table {table} depends on sequence {sequence}"
+                ))
+                .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
+            }
+            if let Some(user) = tables.table(writer, &table)? {
+                let mut user = (*user).clone();
+                if let Some(index) = user.column_index(&column) {
+                    user.columns[index].default = None;
+                }
+                writer.put(&table_key(&user.name), &user.encode())?;
+                result = result.with_notice(format!(
+                    "NOTICE:  drop cascades to default value for column {column} of table {table}"
+                ));
+            }
+        }
+    }
+    Ok(result)
+}
+
 pub(crate) fn dependent_table(
     parent: &str,
     child: &str,
@@ -772,7 +830,7 @@ pub(crate) fn insert(
     let mut stored = StoredRows::new(&table);
     stored.checks = Some(&checks);
     stored.track = !matches!(insert.on_duplicate, OnDuplicate::Fail | OnDuplicate::Ignore)
-        && constraints::is_referenced(writer, &table)?;
+        && constraints::is_referenced(&table);
     let mut inserted_children = ChildRows::new(&table);
     let mut result_rows = Vec::new();
     let mut affected = 0usize;
@@ -2585,7 +2643,7 @@ pub(crate) fn update(
         crate::sequences::load_all(writer)?;
     }
     let checks = PreparedChecks::of(&table)?;
-    let referenced = constraints::is_referenced(writer, &table)?;
+    let referenced = constraints::is_referenced(&table);
     let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
     let scope = scope_of(&table, &update.table);
     let names: Vec<Name> = update
@@ -2703,7 +2761,7 @@ pub(crate) fn truncate(
     table: &TableReference,
 ) -> SqlResult<QueryResult> {
     let definition = tables.require(writer, &table.name)?;
-    if constraints::is_referenced(writer, &definition)? {
+    if constraints::is_referenced(&definition) {
         for child in constraints::referencing_tables(writer, &definition.name)? {
             if child != definition.name {
                 return Err(SqlError::not_supported(
@@ -2760,7 +2818,7 @@ pub(crate) fn delete(
         }
     }
     let count = matched.len();
-    if constraints::is_referenced(writer, &table)? {
+    if constraints::is_referenced(&table) {
         let changes: Vec<RowChange> = matched
             .into_iter()
             .map(|(_, row)| RowChange {

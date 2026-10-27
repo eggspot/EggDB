@@ -317,6 +317,7 @@ fn sequences_follow_postgresql() {
 #[test]
 fn sequence_functions_stay_in_postgresql() {
     let store = MemoryStore::default();
+    last(&mut Session::new(&store), "CREATE SEQUENCE s");
     for dialect in [Dialect::MySql, Dialect::Sqlite, Dialect::Oracle] {
         let mut session = Session::with_dialect(&store, dialect);
         for sql in [
@@ -951,4 +952,283 @@ fn foreign_keys_refuse_definitions_their_encoding_cannot_hold() {
     );
     assert_eq!(fails(&mut session, &sql).state().code(), "54011");
     session.tables().unwrap();
+}
+
+fn definition_version(store: &MemoryStore, table: &str) -> u8 {
+    use crate::store::{KeyValueRead, KeyValueStore};
+    store
+        .begin_read()
+        .unwrap()
+        .get(&crate::encoding::table_key(table))
+        .unwrap()
+        .unwrap()[0]
+}
+
+#[test]
+fn self_references_protect_their_parent_key_in_every_dialect() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE sd (id int PRIMARY KEY, p int REFERENCES sd ON DELETE CASCADE, q int);
+         INSERT INTO sd VALUES (1, NULL, 0), (2, 1, 0);",
+    );
+    let error = fails(&mut session, "ALTER TABLE sd DROP COLUMN id");
+    assert_eq!(error.state().code(), "2BP01");
+    assert_eq!(
+        error.message(),
+        "cannot drop column id of table sd because other objects depend on it"
+    );
+    last(&mut session, "ALTER TABLE sd DROP COLUMN id CASCADE");
+    last(&mut session, "INSERT INTO sd VALUES (7, 0)");
+    session.tables().unwrap();
+    assert_eq!(definition_version(&store, "sd"), 1);
+    last(
+        &mut session,
+        "CREATE TABLE sr (id int PRIMARY KEY, p int REFERENCES sr)",
+    );
+    assert_eq!(
+        fails(&mut session, "ALTER TABLE sr DROP CONSTRAINT sr_pkey")
+            .state()
+            .code(),
+        "2BP01"
+    );
+    last(
+        &mut session,
+        "ALTER TABLE sr DROP CONSTRAINT sr_pkey CASCADE",
+    );
+    last(&mut session, "INSERT INTO sr VALUES (1, 99)");
+    session.tables().unwrap();
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut mysql,
+        "CREATE TABLE ms (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES ms (id))",
+    );
+    let error = fails(&mut mysql, "ALTER TABLE ms DROP PRIMARY KEY");
+    assert_eq!(error.vendor_code(), Some(1553));
+    assert!(error.message().contains("'PRIMARY'"), "{error}");
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    last(
+        &mut oracle,
+        "CREATE TABLE os32 (id NUMBER(5) PRIMARY KEY, p NUMBER(5) REFERENCES os32 (id))",
+    );
+    assert_eq!(
+        fails(&mut oracle, "ALTER TABLE os32 DROP PRIMARY KEY").vendor_code(),
+        Some(2273)
+    );
+    assert_eq!(
+        fails(&mut oracle, "ALTER TABLE os32 DROP COLUMN id").vendor_code(),
+        Some(12992)
+    );
+}
+
+#[test]
+fn changing_a_key_column_type_keeps_foreign_keys_sound() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE p3 (id int PRIMARY KEY); CREATE TABLE c3 (pid int REFERENCES p3);
+         INSERT INTO p3 VALUES (1); INSERT INTO c3 VALUES (1);",
+    );
+    let error = fails(&mut session, "ALTER TABLE c3 ALTER COLUMN pid TYPE text");
+    assert_eq!(error.state().code(), "42804");
+    assert_eq!(
+        error.message(),
+        "foreign key constraint \"c3_pid_fkey\" cannot be implemented"
+    );
+    assert_eq!(
+        fails(&mut session, "ALTER TABLE p3 ALTER COLUMN id TYPE text")
+            .state()
+            .code(),
+        "42804"
+    );
+    last(&mut session, "ALTER TABLE c3 ALTER COLUMN pid TYPE bigint");
+    last(
+        &mut session,
+        "ALTER TABLE p3 ALTER COLUMN id TYPE numeric(5,1)",
+    );
+    assert_eq!(
+        fails(&mut session, "INSERT INTO c3 VALUES (2)")
+            .state()
+            .code(),
+        "23503"
+    );
+    last(
+        &mut session,
+        "CREATE TABLE s3 (id int PRIMARY KEY, up int REFERENCES s3)",
+    );
+    assert_eq!(
+        fails(&mut session, "ALTER TABLE s3 ALTER COLUMN up TYPE text")
+            .state()
+            .code(),
+        "42804"
+    );
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    last(
+        &mut mysql,
+        "CREATE TABLE mp (id INT PRIMARY KEY); CREATE TABLE mc (id INT PRIMARY KEY, pid INT, CONSTRAINT mfk FOREIGN KEY (pid) REFERENCES mp (id))",
+    );
+    assert_eq!(
+        fails(&mut mysql, "ALTER TABLE mc MODIFY pid VARCHAR(10)").vendor_code(),
+        Some(3780)
+    );
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    last(&mut oracle, "CREATE TABLE op3 (id NUMBER(5) PRIMARY KEY)");
+    last(
+        &mut oracle,
+        "CREATE TABLE oc3 (id NUMBER(5) PRIMARY KEY, pid NUMBER(5) REFERENCES op3 (id))",
+    );
+    assert_eq!(
+        fails(&mut oracle, "ALTER TABLE oc3 MODIFY (pid VARCHAR2(10))").vendor_code(),
+        Some(2267)
+    );
+}
+
+#[test]
+fn referenced_parents_and_sequence_owners_are_written_for_this_release_only() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE plain (id int PRIMARY KEY);
+         CREATE TABLE parent (id int PRIMARY KEY);
+         CREATE TABLE owner (id int);
+         CREATE SEQUENCE owned OWNED BY owner.id;",
+    );
+    assert_eq!(definition_version(&store, "parent"), 1);
+    assert_eq!(definition_version(&store, "owner"), 6);
+    last(
+        &mut session,
+        "CREATE TABLE child (pid int REFERENCES parent)",
+    );
+    assert_eq!(definition_version(&store, "parent"), 6);
+    assert_eq!(definition_version(&store, "child"), 6);
+    assert_eq!(definition_version(&store, "plain"), 1);
+    last(
+        &mut session,
+        "ALTER TABLE child DROP CONSTRAINT child_pid_fkey",
+    );
+    assert_eq!(definition_version(&store, "parent"), 1);
+    last(
+        &mut session,
+        "ALTER TABLE child ADD FOREIGN KEY (pid) REFERENCES parent",
+    );
+    last(&mut session, "ALTER TABLE parent RENAME TO parent2");
+    assert_eq!(definition_version(&store, "parent2"), 6);
+    last(&mut session, "ALTER TABLE owner RENAME TO owner2");
+    assert_eq!(definition_version(&store, "owner2"), 6);
+    last(&mut session, "DROP SEQUENCE owned");
+    assert_eq!(definition_version(&store, "owner2"), 1);
+    last(&mut session, "DROP TABLE child");
+    let parent = session
+        .tables()
+        .unwrap()
+        .into_iter()
+        .find(|table| table.name == "parent2")
+        .unwrap();
+    assert_eq!(parent.primary_key, ["id"]);
+    use crate::store::{KeyValueRead, KeyValueStore};
+    let bytes = store
+        .begin_read()
+        .unwrap()
+        .get(&crate::encoding::table_key("parent2"))
+        .unwrap()
+        .unwrap();
+    let decoded = crate::encoding::TableDefinition::decode("parent2", &bytes).unwrap();
+    assert!(!decoded.referenced);
+    assert_eq!(decoded.primary_key_name.as_deref(), Some("parent_pkey"));
+}
+
+#[test]
+fn sequence_review_fixes_hold() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE o1 (id int); CREATE SEQUENCE os OWNED BY o1.id;
+         CREATE TABLE o2 (id int DEFAULT nextval('os'), v int);",
+    );
+    assert_eq!(fails(&mut session, "DROP TABLE o1").state().code(), "2BP01");
+    last(&mut session, "DROP TABLE o1 CASCADE");
+    last(&mut session, "INSERT INTO o2 (v) VALUES (1)");
+    assert_eq!(
+        last(&mut session, "SELECT id FROM o2"),
+        "id\nNULL\nSELECT 1"
+    );
+    assert_eq!(
+        fails(
+            &mut session,
+            "CREATE TABLE o3 (id int DEFAULT nextval('missing'))"
+        )
+        .state()
+        .code(),
+        "42P01"
+    );
+    last(&mut session, "CREATE SEQUENCE s");
+    assert_eq!(
+        last(&mut session, "SELECT setval('s', NULL)"),
+        "setval\nNULL\nSELECT 1"
+    );
+    last(&mut session, "SELECT setval('s', 100)");
+    let error = fails(&mut session, "ALTER SEQUENCE s MAXVALUE 50");
+    assert_eq!(
+        error.message(),
+        "RESTART value (100) cannot be greater than MAXVALUE (50)"
+    );
+    last(
+        &mut session,
+        "CREATE TABLE uses (a bigint DEFAULT currval('s'), b int CHECK (b < nextval('s')))",
+    );
+    last(&mut session, "INSERT INTO uses (b) VALUES (1)");
+    assert_eq!(
+        fails(&mut session, "CREATE TABLE \"bad\u{1}name\" (a int)")
+            .state()
+            .code(),
+        "42602"
+    );
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut mysql, "CREATE TABLE mr (a INT)");
+    assert_eq!(
+        fails(&mut mysql, "ALTER TABLE mr RENAME COLUMN nope TO b").vendor_code(),
+        Some(1054)
+    );
+}
+
+#[test]
+fn a_rolled_back_sequence_never_rewinds_what_another_transaction_saved() {
+    let store = MemoryStore::default();
+    let mut first = Session::new(&store);
+    last(&mut first, "CREATE SEQUENCE s");
+    last(&mut first, "BEGIN");
+    last(&mut first, "SELECT setval('s', 500)");
+    last(&mut first, "ROLLBACK");
+    assert_eq!(
+        last(&mut first, "SELECT nextval('s')"),
+        "nextval\n501\nSELECT 1"
+    );
+    let advances = vec![crate::sequences::SequenceAdvance {
+        name: "s".into(),
+        sequence: crate::encoding::SequenceDefinition {
+            sql_type: crate::SqlType::BigInt,
+            start: 1,
+            increment: 1,
+            min: 1,
+            max: i64::MAX,
+            cache: 1,
+            cycle: false,
+            last_value: 7,
+            is_called: true,
+            owned_by: None,
+        },
+        before: (1, false),
+    }];
+    use crate::store::KeyValueStore;
+    let mut writer = store.begin_write().unwrap();
+    crate::sequences::reapply(&mut writer, &advances).unwrap();
+    crate::store::KeyValueWrite::commit(writer).unwrap();
+    assert_eq!(
+        last(&mut first, "SELECT nextval('s')"),
+        "nextval\n502\nSELECT 1"
+    );
 }

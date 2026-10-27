@@ -229,6 +229,8 @@ pub(crate) struct TableDefinition {
     pub(crate) primary_key_name: Option<String>,
     pub(crate) checks: Vec<CheckConstraint>,
     pub(crate) foreign_keys: Vec<ForeignKey>,
+    pub(crate) referenced: bool,
+    pub(crate) owns_sequence: bool,
 }
 
 fn dialect_code(dialect: crate::Dialect) -> u8 {
@@ -264,7 +266,11 @@ impl TableDefinition {
     }
 
     pub(crate) fn has_constraints(&self) -> bool {
-        self.primary_key_name.is_some() || !self.checks.is_empty() || !self.foreign_keys.is_empty()
+        self.primary_key_name.is_some()
+            || !self.checks.is_empty()
+            || !self.foreign_keys.is_empty()
+            || self.referenced
+            || self.owns_sequence
     }
 
     pub(crate) fn primary_key_constraint_name(&self) -> String {
@@ -348,6 +354,7 @@ impl TableDefinition {
             }
             None => out.push(0),
         }
+        out.push(u8::from(self.referenced) | (u8::from(self.owns_sequence) << 1));
         put_varint(out, self.checks.len() as u64);
         for check in &self.checks {
             put_bytes(out, check.name.as_bytes());
@@ -490,7 +497,13 @@ impl TableDefinition {
         {
             return Err(reader.damaged());
         }
-        let (primary_key_name, checks, foreign_keys) = constraints.unwrap_or_default();
+        let DecodedConstraints {
+            primary_key_name,
+            checks,
+            foreign_keys,
+            referenced,
+            owns_sequence,
+        } = constraints.unwrap_or_default();
         if primary_key_name.is_some() && primary_key.is_empty() {
             return Err(reader.damaged());
         }
@@ -503,6 +516,8 @@ impl TableDefinition {
             primary_key_name,
             checks,
             foreign_keys,
+            referenced,
+            owns_sequence,
         };
         if version == CONSTRAINTS_FORMAT_VERSION && !table.has_constraints() {
             return Err(reader.damaged());
@@ -511,7 +526,14 @@ impl TableDefinition {
     }
 }
 
-type DecodedConstraints = (Option<String>, Vec<CheckConstraint>, Vec<ForeignKey>);
+#[derive(Default)]
+struct DecodedConstraints {
+    primary_key_name: Option<String>,
+    checks: Vec<CheckConstraint>,
+    foreign_keys: Vec<ForeignKey>,
+    referenced: bool,
+    owns_sequence: bool,
+}
 
 fn decode_constraints(
     reader: &mut Reader<'_>,
@@ -523,6 +545,10 @@ fn decode_constraints(
         1 => Some(reader.name()?),
         _ => return Err(reader.damaged()),
     };
+    let flags = reader.byte()?;
+    if flags > 3 {
+        return Err(reader.damaged());
+    }
     let mut names: Vec<String> = indexes.iter().map(|index| index.name.clone()).collect();
     names.extend(primary_key_name.iter().cloned());
     let check_count = reader.count()?;
@@ -595,7 +621,13 @@ fn decode_constraints(
             deferrable,
         });
     }
-    Ok((primary_key_name, checks, foreign_keys))
+    Ok(DecodedConstraints {
+        primary_key_name,
+        checks,
+        foreign_keys,
+        referenced: flags & 1 == 1,
+        owns_sequence: flags & 2 == 2,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -633,6 +665,8 @@ impl SequenceDefinition {
             && self.max <= high
             && self.min <= self.start
             && self.start <= self.max
+            && self.min <= self.last_value
+            && self.last_value <= self.max
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -2378,6 +2412,25 @@ mod tests {
             let bytes = kept.encode();
             assert!(bytes[0] < 6);
             assert_eq!(TableDefinition::decode(&kept.name, &bytes).unwrap(), kept);
+        }
+        for (referenced, owns_sequence) in [(true, false), (false, true), (true, true)] {
+            let mut flagged = with_indexes([false, false]);
+            flagged.referenced = referenced;
+            flagged.owns_sequence = owns_sequence;
+            let bytes = flagged.encode();
+            assert_eq!(
+                bytes[0], 6,
+                "a release that reads up to version 5 refuses it by name"
+            );
+            assert_eq!(TableDefinition::decode("t", &bytes).unwrap(), flagged);
+            let flags_at = bytes.len() - 3;
+            assert_eq!(
+                bytes[flags_at],
+                u8::from(referenced) | (u8::from(owns_sequence) << 1)
+            );
+            let mut unknown = bytes.clone();
+            unknown[flags_at] = 4;
+            assert!(damaged(&unknown));
         }
         let mut only_checks = with_indexes([false, false]);
         only_checks.checks = constrained_table().checks;

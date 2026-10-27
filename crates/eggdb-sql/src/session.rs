@@ -608,7 +608,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 self.enter_sequences(false);
                 let result = self.insert_literal_rows(&rows);
                 self.leave_sequences();
+                let settled = self.settle_sequences();
                 let result = self.after_statement(result?, false);
+                settled?;
                 if !on_result(result) {
                     return Ok(());
                 }
@@ -636,7 +638,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             self.enter_sequences(uses_sequences);
             let result = self.run(&statement);
             self.leave_sequences();
+            let settled = self.settle_sequences();
             let result = self.after_statement(result?, diagnostic);
+            settled?;
             if !on_result(result) {
                 return Ok(());
             }
@@ -656,27 +660,37 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let (values, advances) = sequences::leave();
         self.sequence_values = values;
         self.statement_uses_sequences = false;
-        for advance in advances {
-            self.pending_sequences
-                .retain(|pending| pending.name != advance.name);
+        for mut advance in advances {
+            if let Some(earlier) = self
+                .pending_sequences
+                .iter()
+                .position(|pending| pending.name == advance.name)
+            {
+                advance.before = self.pending_sequences.remove(earlier).before;
+            }
             self.pending_sequences.push(advance);
         }
-        self.settle_sequences();
     }
 
-    fn settle_sequences(&mut self) {
+    fn settle_sequences(&mut self) -> SqlResult<()> {
         if self.pending_sequences.is_empty() || matches!(self.block, Block::Writing(_)) {
-            return;
+            return Ok(());
         }
         let pending = std::mem::take(&mut self.pending_sequences);
-        if let Ok(mut writer) = self.store.begin_write() {
-            match sequences::reapply(&mut writer, &pending) {
-                Ok(()) => {
-                    let _ = writer.commit();
-                }
-                Err(_) => {
-                    let _ = writer.rollback();
-                }
+        let mut writer = self.store.begin_write().map_err(|error| {
+            SqlError::new(
+                error.state(),
+                format!(
+                    "the sequence values a rolled-back transaction used could not be saved again: {}",
+                    error.message()
+                ),
+            )
+        })?;
+        match sequences::reapply(&mut writer, &pending) {
+            Ok(()) => writer.commit(),
+            Err(error) => {
+                let _ = writer.rollback();
+                Err(error)
             }
         }
     }
@@ -721,7 +735,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Block::Writing(writer) => writer.rollback()?,
             Block::Reading(_) | Block::Failed | Block::None => {}
         }
-        self.settle_sequences();
+        self.settle_sequences()?;
         Ok(was_open)
     }
 

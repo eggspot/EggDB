@@ -245,6 +245,17 @@ fn check_failed(table: &TableDefinition, check: &CheckConstraint, row: &[Value])
     }
 }
 
+pub(crate) fn check_identifier(name: &crate::ast::Name) -> SqlResult<()> {
+    if name.text.contains(crate::temp_tables::TEMP_TABLE_MARKER) {
+        return Err(SqlError::new(
+            SqlState::INVALID_NAME,
+            format!("invalid name \"{}\"", name.text.escape_default()),
+        )
+        .at(name.position));
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_check(check: &CheckConstraint) -> SqlResult<Expr> {
     let damaged = || crate::encoding::corrupt("check constraint");
     let tokens = tokenize_in(&check.expression, check.dialect).map_err(|_| damaged())?;
@@ -321,20 +332,68 @@ pub(crate) fn referencing_tables(
 
 pub(crate) fn register_references(
     writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
     child: &TableDefinition,
 ) -> SqlResult<()> {
     for key in &child.foreign_keys {
         writer.put(&reference_key(&key.parent, &child.name), &[])?;
     }
-    Ok(())
+    refresh_parents(writer, tables, child)
 }
 
 pub(crate) fn unregister_references(
     writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
     child: &TableDefinition,
 ) -> SqlResult<()> {
     for key in &child.foreign_keys {
         writer.delete(&reference_key(&key.parent, &child.name))?;
+    }
+    refresh_parents(writer, tables, child)
+}
+
+fn refresh_parents(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    child: &TableDefinition,
+) -> SqlResult<()> {
+    let mut done: Vec<&str> = Vec::new();
+    for key in &child.foreign_keys {
+        if !done.contains(&key.parent.as_str()) {
+            done.push(&key.parent);
+            refresh_flags(writer, tables, &key.parent)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn flags_of(reader: &dyn KeyValueRead, name: &str) -> SqlResult<(bool, bool)> {
+    let referenced = !referencing_tables(reader, name)?.is_empty();
+    let owns_sequence = crate::sequences::every_sequence(reader)?
+        .iter()
+        .any(|(_, sequence)| {
+            sequence
+                .owned_by
+                .as_ref()
+                .is_some_and(|(table, _)| table == name)
+        });
+    Ok((referenced, owns_sequence))
+}
+
+pub(crate) fn refresh_flags(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+) -> SqlResult<()> {
+    let Some(table) = tables.table(writer, name)? else {
+        return Ok(());
+    };
+    let (referenced, owns_sequence) = flags_of(writer, name)?;
+    if table.referenced != referenced || table.owns_sequence != owns_sequence {
+        let mut table = (*table).clone();
+        table.referenced = referenced;
+        table.owns_sequence = owns_sequence;
+        writer.put(&crate::encoding::table_key(name), &table.encode())?;
     }
     Ok(())
 }
@@ -487,11 +546,8 @@ pub(crate) struct RowChange {
     pub(crate) new: Option<Vec<Value>>,
 }
 
-pub(crate) fn is_referenced(reader: &dyn KeyValueRead, table: &TableDefinition) -> SqlResult<bool> {
-    if !foreign_keys_enforced() {
-        return Ok(false);
-    }
-    Ok(!referencing_tables(reader, &table.name)?.is_empty())
+pub(crate) fn is_referenced(table: &TableDefinition) -> bool {
+    foreign_keys_enforced() && table.referenced
 }
 
 pub(crate) fn propagate(
@@ -728,6 +784,9 @@ pub(crate) fn define_check(
     text: &str,
     dialect: Dialect,
 ) -> SqlResult<usize> {
+    if let Some(name) = &spec.name {
+        check_identifier(name)?;
+    }
     if table.checks.len() >= MAX_CONSTRAINTS {
         return Err(too_many_constraints(table));
     }
@@ -794,11 +853,44 @@ fn invalid_key(message: String) -> SqlError {
     SqlError::new(SqlState::INVALID_FOREIGN_KEY, message)
 }
 
-fn compatible(child: SqlType, parent: SqlType) -> bool {
+pub(crate) fn compatible(child: SqlType, parent: SqlType) -> bool {
     child == parent
         || (child.is_numeric() && parent.is_numeric())
         || (child.is_character() && parent.is_character())
         || std::mem::discriminant(&child) == std::mem::discriminant(&parent)
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn incompatible_key(
+    name: &str,
+    (child, child_type): (&str, SqlType),
+    (parent, parent_type): (&str, SqlType),
+    dialect: Dialect,
+) -> SqlError {
+    match dialect {
+        Dialect::MySql => SqlError::new(
+            SqlState::MYSQL_GENERAL,
+            format!(
+                "Referencing column '{child}' and referenced column '{parent}' in foreign key constraint '{name}' are incompatible."
+            ),
+        )
+        .with_vendor_code(3780),
+        Dialect::Oracle => SqlError::new(
+            SqlState::DATATYPE_MISMATCH,
+            "column type incompatible with referenced column type",
+        )
+        .with_oracle_code(2267),
+        _ => SqlError::new(
+            SqlState::DATATYPE_MISMATCH,
+            format!("foreign key constraint \"{name}\" cannot be implemented"),
+        )
+        .with_detail(format!(
+            "Key columns \"{child}\" and \"{parent}\" are of incompatible types: {} and {}.",
+            child_type.name(),
+            parent_type.name()
+        )),
+    }
 }
 
 pub(crate) fn define_foreign_key(
@@ -809,6 +901,9 @@ pub(crate) fn define_foreign_key(
     key: &ForeignKeySpec,
     dialect: Dialect,
 ) -> SqlResult<usize> {
+    if let Some(name) = &spec.name {
+        check_identifier(name)?;
+    }
     if table.foreign_keys.len() >= MAX_CONSTRAINTS {
         return Err(too_many_constraints(table));
     }
@@ -934,17 +1029,12 @@ pub(crate) fn define_foreign_key(
         let child_type = table.columns[child_column].sql_type;
         let parent_type = parent.columns[parent_column].sql_type;
         if !compatible(child_type, parent_type) {
-            return Err(SqlError::new(
-                SqlState::DATATYPE_MISMATCH,
-                format!("foreign key constraint \"{name}\" cannot be implemented"),
-            )
-            .with_detail(format!(
-                "Key columns \"{}\" and \"{}\" are of incompatible types: {} and {}.",
-                table.columns[child_column].name,
-                parent.columns[parent_column].name,
-                child_type.name(),
-                parent_type.name()
-            )));
+            return Err(incompatible_key(
+                &name,
+                (&table.columns[child_column].name, child_type),
+                (&parent.columns[parent_column].name, parent_type),
+                dialect,
+            ));
         }
     }
     for action in [key.on_delete, key.on_update] {

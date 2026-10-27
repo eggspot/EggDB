@@ -84,6 +84,8 @@ impl SqlState {
     pub const INVALID_FOREIGN_KEY: Self = Self(*b"42830");
     /// `3F000` invalid_schema_name.
     pub const INVALID_SCHEMA_NAME: Self = Self(*b"3F000");
+    /// `42602` invalid_name.
+    pub const INVALID_NAME: Self = Self(*b"42602");
     /// `25001` active_sql_transaction.
     pub const ACTIVE_SQL_TRANSACTION: Self = Self(*b"25001");
     /// `25006` read_only_sql_transaction.

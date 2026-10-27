@@ -25,7 +25,7 @@ pub(crate) struct SessionSequences {
 pub(crate) struct SequenceAdvance {
     pub(crate) name: String,
     pub(crate) sequence: SequenceDefinition,
-    pub(crate) set_explicitly: bool,
+    pub(crate) before: (i64, bool),
 }
 
 struct StatementSequences {
@@ -34,10 +34,12 @@ struct StatementSequences {
     all_loaded: bool,
     wanted: bool,
     changed: Vec<String>,
-    set_explicitly: Vec<String>,
+    before: HashMap<String, (i64, bool)>,
     session: SessionSequences,
     memory: WorkMemory,
 }
+
+const MAX_IDENTIFIER_BYTES: usize = 63;
 
 thread_local! {
     static STATEMENT: RefCell<Vec<StatementSequences>> = const { RefCell::new(Vec::new()) };
@@ -51,7 +53,7 @@ pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool) {
             all_loaded: false,
             wanted,
             changed: Vec::new(),
-            set_explicitly: Vec::new(),
+            before: HashMap::new(),
             session,
             memory: WorkMemory::new(),
         });
@@ -65,7 +67,7 @@ pub(crate) fn leave() -> (SessionSequences, Vec<SequenceAdvance>) {
     let StatementSequences {
         mut loaded,
         changed,
-        set_explicitly,
+        before,
         session,
         ..
     } = state;
@@ -73,10 +75,11 @@ pub(crate) fn leave() -> (SessionSequences, Vec<SequenceAdvance>) {
         .into_iter()
         .filter_map(|name| {
             let sequence = loaded.remove(&name).flatten()?;
+            let before = before.get(&name).copied()?;
             Some(SequenceAdvance {
-                set_explicitly: set_explicitly.contains(&name),
                 name,
                 sequence,
+                before,
             })
         })
         .collect();
@@ -130,7 +133,12 @@ pub(crate) fn load_all(reader: &dyn KeyValueRead) -> SqlResult<()> {
     with_state(|state| {
         for (name, sequence) in found {
             state.memory.charge(name.len() + 128)?;
-            state.loaded.entry(name).or_insert(Some(sequence));
+            if !state.loaded.contains_key(&name) {
+                state
+                    .before
+                    .insert(name.clone(), (sequence.last_value, sequence.is_called));
+                state.loaded.insert(name, Some(sequence));
+            }
         }
         state.all_loaded = true;
         Ok(())
@@ -165,7 +173,13 @@ pub(crate) fn mark_changes_committed() {
     STATEMENT.with(|state| {
         if let Some(state) = state.borrow_mut().last_mut() {
             state.changed.clear();
-            state.set_explicitly.clear();
+            for (name, sequence) in &state.loaded {
+                if let Some(sequence) = sequence {
+                    state
+                        .before
+                        .insert(name.clone(), (sequence.last_value, sequence.is_called));
+                }
+            }
         }
     });
 }
@@ -179,13 +193,20 @@ pub(crate) fn forget_loaded() {
     });
 }
 
+pub(crate) fn mentions_sequence_call(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["nextval", "currval", "setval", "lastval"]
+        .iter()
+        .any(|name| lower.contains(name))
+}
+
 pub(crate) fn mentions_nextval(table: &TableDefinition) -> bool {
-    table.columns.iter().any(|column| {
-        column
-            .default
-            .as_ref()
-            .is_some_and(|text| text.to_ascii_lowercase().contains("nextval"))
-    })
+    table
+        .columns
+        .iter()
+        .filter_map(|column| column.default.as_deref())
+        .chain(table.checks.iter().map(|check| check.expression.as_str()))
+        .any(mentions_sequence_call)
 }
 
 pub(crate) fn read(reader: &dyn KeyValueRead, name: &str) -> SqlResult<Option<SequenceDefinition>> {
@@ -392,6 +413,26 @@ fn apply_options(
         sequence.last_value = value;
         sequence.is_called = false;
     }
+    if sequence.last_value < sequence.min {
+        return Err(invalid(
+            format!(
+                "RESTART value ({}) cannot be less than MINVALUE ({})",
+                sequence.last_value, sequence.min
+            ),
+            Some((4006, "START WITH cannot be less than MINVALUE")),
+            dialect,
+        ));
+    }
+    if sequence.last_value > sequence.max {
+        return Err(invalid(
+            format!(
+                "RESTART value ({}) cannot be greater than MAXVALUE ({})",
+                sequence.last_value, sequence.max
+            ),
+            Some((4008, "START WITH cannot be more than MAXVALUE")),
+            dialect,
+        ));
+    }
     if let Some(cache) = options.cache {
         if cache < 1 {
             return Err(invalid(
@@ -447,6 +488,7 @@ pub(crate) fn create_sequence(
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     let name = &create.name.text;
+    crate::constraints::check_identifier(&create.name)?;
     if relation_exists(writer, name)? {
         if create.if_not_exists {
             return Ok(QueryResult::command("CREATE SEQUENCE").with_notice(format!(
@@ -484,6 +526,9 @@ pub(crate) fn create_sequence(
     }
     writer.put(&sequence_key(name), &sequence.encode())?;
     forget_loaded();
+    if let Some((owner, _)) = &sequence.owned_by {
+        crate::constraints::refresh_flags(writer, tables, owner)?;
+    }
     Ok(QueryResult::command("CREATE SEQUENCE"))
 }
 
@@ -503,6 +548,7 @@ pub(crate) fn alter_sequence(
         return Err(missing_sequence(name, dialect).at(alter.name.position));
     };
     if let Some(to) = &alter.rename {
+        crate::constraints::check_identifier(to)?;
         if relation_exists(writer, &to.text)? {
             return Err(SqlError::new(
                 SqlState::DUPLICATE_TABLE,
@@ -522,12 +568,31 @@ pub(crate) fn alter_sequence(
         return Ok(QueryResult::command("ALTER SEQUENCE"));
     }
     apply_options(&mut sequence, &alter.options, false, dialect)?;
+    let old_owner = sequence.owned_by.clone();
     if let Some(owned_by) = &alter.options.owned_by {
         sequence.owned_by = owner_of(writer, tables, owned_by)?;
     }
     writer.put(&sequence_key(name), &sequence.encode())?;
     forget_loaded();
+    for (owner, _) in old_owner.iter().chain(sequence.owned_by.iter()) {
+        crate::constraints::refresh_flags(writer, tables, owner)?;
+    }
     Ok(QueryResult::command("ALTER SEQUENCE"))
+}
+
+pub(crate) fn check_default_sequences(reader: &dyn KeyValueRead, text: &str) -> SqlResult<()> {
+    if !mentions_sequence_call(text) {
+        return Ok(());
+    }
+    for name in default_sequence_names(text) {
+        if read(reader, &name)?.is_none() {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_TABLE,
+                format!("relation \"{name}\" does not exist"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn default_sequence_names(text: &str) -> Vec<String> {
@@ -644,7 +709,11 @@ pub(crate) fn drop_sequences(
                 ));
             }
         }
+        let owner = read(writer, &name.text)?.and_then(|sequence| sequence.owned_by);
         writer.delete(&sequence_key(&name.text))?;
+        if let Some((owner, _)) = owner {
+            crate::constraints::refresh_flags(writer, tables, &owner)?;
+        }
     }
     forget_loaded();
     Ok(result)
@@ -652,6 +721,7 @@ pub(crate) fn drop_sequences(
 
 pub(crate) fn drop_owned_by(
     writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
     table: &str,
     column: Option<&str>,
 ) -> SqlResult<()> {
@@ -664,7 +734,7 @@ pub(crate) fn drop_owned_by(
         }
     }
     forget_loaded();
-    Ok(())
+    crate::constraints::refresh_flags(writer, tables, table)
 }
 
 pub(crate) fn rename_owner(
@@ -743,6 +813,15 @@ pub(crate) fn regclass_name(text: &str) -> SqlResult<String> {
             return Err(invalid());
         }
     }
+    for part in &mut parts {
+        if part.len() > MAX_IDENTIFIER_BYTES {
+            let mut end = MAX_IDENTIFIER_BYTES;
+            while !part.is_char_boundary(end) {
+                end -= 1;
+            }
+            part.truncate(end);
+        }
+    }
     match parts.as_slice() {
         [name] => Ok(name.clone()),
         [schema, name] if schema == "public" || schema == "pg_catalog" => Ok(name.clone()),
@@ -778,10 +857,9 @@ fn loaded<'s>(
         Some(Some(sequence)) => Ok(sequence),
         Some(None) => Err(missing_sequence(name, dialect)),
         None if state.all_loaded => Err(missing_sequence(name, dialect)),
-        None => Err(SqlError::new(
-            SqlState::INTERNAL_ERROR,
-            format!("sequence \"{name}\" was not loaded for this statement"),
-        )),
+        None => Err(SqlError::not_supported(format!(
+            "sequence \"{name}\" used where this statement does not read sequences"
+        ))),
     }
 }
 
@@ -907,6 +985,9 @@ fn lastval() -> SqlResult<Value> {
 }
 
 fn setval(name: &str, value: &Value, is_called: &Value) -> SqlResult<Value> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
     let Some(number) = value.as_integer() else {
         return Err(SqlError::new(
             SqlState::UNDEFINED_FUNCTION,
@@ -943,9 +1024,6 @@ fn setval(name: &str, value: &Value, is_called: &Value) -> SqlResult<Value> {
         sequence.last_value = number;
         sequence.is_called = called;
         mark_changed(state, name);
-        if !state.set_explicitly.iter().any(|known| known == name) {
-            state.set_explicitly.push(name.to_owned());
-        }
         if called {
             state.session.currval.insert(name.to_owned(), number);
         }
@@ -998,29 +1076,14 @@ pub(crate) fn reapply(
             continue;
         };
         let wanted = &advance.sequence;
-        let same = current.sql_type == wanted.sql_type
+        let untouched = current.sql_type == wanted.sql_type
             && current.increment == wanted.increment
             && current.min == wanted.min
             && current.max == wanted.max
-            && current.cycle == wanted.cycle;
-        if !same {
-            continue;
-        }
-        let position = |sequence: &SequenceDefinition| {
-            i128::from(sequence.last_value)
-                + if sequence.is_called {
-                    i128::from(sequence.increment)
-                } else {
-                    0
-                }
-        };
-        let ahead = if wanted.increment > 0 {
-            position(wanted) > position(&current)
-        } else {
-            position(wanted) < position(&current)
-        };
-        if advance.set_explicitly || ahead {
-            let mut updated = current.clone();
+            && current.cycle == wanted.cycle
+            && (current.last_value, current.is_called) == advance.before;
+        if untouched {
+            let mut updated = current;
             updated.last_value = wanted.last_value;
             updated.is_called = wanted.is_called;
             writer.put(&sequence_key(&advance.name), &updated.encode())?;

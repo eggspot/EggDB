@@ -60,6 +60,8 @@ fn current(
 }
 
 fn save(writer: &mut dyn KeyValueWrite, table: &TableDefinition) -> SqlResult<()> {
+    let mut table = table.clone();
+    (table.referenced, table.owns_sequence) = constraints::flags_of(writer, &table.name)?;
     let bytes = table.encode();
     if TableDefinition::decode(&table.name, &bytes).is_err() {
         return Err(SqlError::not_supported(format!(
@@ -153,7 +155,7 @@ fn apply(
                 return Err(match dialect {
                     Dialect::Oracle => SqlError::new(
                         SqlState::UNDEFINED_OBJECT,
-                        "cannot drop constraint  - nonexistent constraint",
+                        "cannot drop constraint - nonexistent constraint",
                     )
                     .with_oracle_code(2441),
                     _ => SqlError::new(
@@ -194,6 +196,9 @@ fn rebuild(
     duplicate_name: Option<String>,
 ) -> SqlResult<TableDefinition> {
     new.id = next_table_id(writer)?;
+    if has_rows(writer, &new)? {
+        return Err(crate::encoding::corrupt("table numbering"));
+    }
     let checks = PreparedChecks::of(&new)?;
     let prefix = rows_prefix(old.id);
     let end = prefix_end(&prefix);
@@ -331,6 +336,10 @@ fn add_column(
     dialect: Dialect,
 ) -> SqlResult<Option<String>> {
     let mut table = current(writer, tables, name)?;
+    constraints::check_identifier(&definition.name)?;
+    if let Some((_, text)) = &definition.default {
+        crate::sequences::check_default_sequences(writer, text)?;
+    }
     if table.column_index(&definition.name.text).is_some() {
         if if_not_exists {
             return Ok(Some(format!(
@@ -423,9 +432,6 @@ fn referencing_keys(
 ) -> SqlResult<Vec<ReferencingKey>> {
     let mut found = Vec::new();
     for child in constraints::referencing_tables(writer, &table.name)? {
-        if child == table.name {
-            continue;
-        }
         let Some(definition) = tables.table(writer, &child)? else {
             continue;
         };
@@ -442,28 +448,65 @@ fn referencing_keys(
     Ok(found)
 }
 
+enum Dropping<'d> {
+    Column(&'d str),
+    Index(&'d str),
+    PrimaryKey(&'d str),
+}
+
 #[cold]
 #[inline(never)]
-fn depends_error(what: &str, constraint: &str, child: &str, dialect: Dialect) -> SqlError {
-    match dialect {
-        Dialect::Oracle => SqlError::new(
+fn depends_error(
+    dropping: &Dropping<'_>,
+    table: &str,
+    constraint: &str,
+    child: &str,
+    dialect: Dialect,
+) -> SqlError {
+    match (dialect, dropping) {
+        (Dialect::Oracle, Dropping::Column(_)) => SqlError::new(
             SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
-            "unique/primary keys in table referenced by foreign keys",
+            "cannot drop parent key column",
+        )
+        .with_oracle_code(12992),
+        (Dialect::Oracle, _) => SqlError::new(
+            SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+            "this unique/primary key is referenced by some foreign keys",
         )
         .with_oracle_code(2273),
-        Dialect::MySql => SqlError::new(
+        (Dialect::MySql, Dropping::Column(column)) => SqlError::new(
             SqlState::MYSQL_GENERAL,
-            format!("Cannot drop index '{what}': needed in a foreign key constraint"),
+            format!(
+                "Cannot drop column '{column}': needed in a foreign key constraint '{constraint}' of table '{child}'"
+            ),
+        )
+        .with_vendor_code(1846),
+        (Dialect::MySql, Dropping::Index(index)) => SqlError::new(
+            SqlState::MYSQL_GENERAL,
+            format!("Cannot drop index '{index}': needed in a foreign key constraint"),
         )
         .with_vendor_code(1553),
-        _ => SqlError::new(
-            SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
-            format!("cannot drop {what} because other objects depend on it"),
+        (Dialect::MySql, Dropping::PrimaryKey(_)) => SqlError::new(
+            SqlState::MYSQL_GENERAL,
+            "Cannot drop index 'PRIMARY': needed in a foreign key constraint",
         )
-        .with_detail(format!(
-            "constraint {constraint} on table {child} depends on {what}"
-        ))
-        .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+        .with_vendor_code(1553),
+        _ => {
+            let what = match dropping {
+                Dropping::Column(column) => format!("column {column} of table {table}"),
+                Dropping::Index(name) | Dropping::PrimaryKey(name) => {
+                    format!("constraint {name} on table {table}")
+                }
+            };
+            SqlError::new(
+                SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+                format!("cannot drop {what} because other objects depend on it"),
+            )
+            .with_detail(format!(
+                "constraint {constraint} on table {child} depends on {what}"
+            ))
+            .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")
+        }
     }
 }
 
@@ -474,12 +517,12 @@ fn drop_foreign_keys_on(
     names: &[String],
 ) -> SqlResult<()> {
     let mut definition = current(writer, tables, child)?;
-    constraints::unregister_references(writer, &definition)?;
+    constraints::unregister_references(writer, tables, &definition)?;
     definition
         .foreign_keys
         .retain(|key| !names.contains(&key.name));
     save(writer, &definition)?;
-    constraints::register_references(writer, &definition)
+    constraints::register_references(writer, tables, &definition)
 }
 
 fn release_dependents(
@@ -487,17 +530,56 @@ fn release_dependents(
     tables: &mut TableCache,
     table: &TableDefinition,
     columns: &[String],
-    what: &str,
+    dropping: &Dropping<'_>,
     cascade: bool,
     dialect: Dialect,
 ) -> SqlResult<Vec<String>> {
     let mut notices = Vec::new();
+    let same_set = |left: &[String], right: &[String]| {
+        left.len() == right.len() && left.iter().all(|name| right.contains(name))
+    };
+    let names_of = |indices: &[usize]| -> Vec<String> {
+        indices
+            .iter()
+            .filter_map(|&index| table.columns.get(index))
+            .map(|column| column.name.clone())
+            .collect()
+    };
+    let keys_after: Vec<Vec<String>> = match dropping {
+        Dropping::Column(_) => Vec::new(),
+        Dropping::PrimaryKey(_) => table
+            .indexes
+            .iter()
+            .filter(|index| index.unique)
+            .map(|index| names_of(&index.columns))
+            .collect(),
+        Dropping::Index(name) => table
+            .indexes
+            .iter()
+            .filter(|index| index.unique && index.name != *name)
+            .map(|index| names_of(&index.columns))
+            .chain((!table.primary_key.is_empty()).then(|| names_of(&table.primary_key)))
+            .collect(),
+    };
     for (child, constraint, parent_columns) in referencing_keys(writer, tables, table)? {
-        if !parent_columns.iter().any(|column| columns.contains(column)) {
+        let depends = match dropping {
+            Dropping::Column(_) => parent_columns.iter().any(|column| columns.contains(column)),
+            _ => {
+                same_set(&parent_columns, columns)
+                    && !keys_after.iter().any(|key| same_set(&parent_columns, key))
+            }
+        };
+        if !depends {
             continue;
         }
         if !cascade {
-            return Err(depends_error(what, &constraint, &child.name, dialect));
+            return Err(depends_error(
+                dropping,
+                &table.name,
+                &constraint,
+                &child.name,
+                dialect,
+            ));
         }
         drop_foreign_keys_on(
             writer,
@@ -587,13 +669,14 @@ fn drop_column(
             tables,
             &table,
             std::slice::from_ref(&column.text),
-            &format!("column {} of table {}", column.text, table.name),
+            &Dropping::Column(&column.text),
             cascade,
             dialect,
         )?
     } else {
         Vec::new()
     };
+    let table = current(writer, tables, name)?;
     let mut new = table.clone();
     new.columns.remove(index);
     new.primary_key = remap(&table.primary_key, index).unwrap_or_default();
@@ -621,6 +704,7 @@ fn drop_column(
     new.foreign_keys = table
         .foreign_keys
         .iter()
+        .filter(|key| key.parent != table.name || !key.parent_columns.contains(&column.text))
         .filter_map(|key| {
             remap(&key.columns, index).map(|columns| crate::encoding::ForeignKey {
                 columns,
@@ -628,7 +712,7 @@ fn drop_column(
             })
         })
         .collect();
-    constraints::unregister_references(writer, &table)?;
+    constraints::unregister_references(writer, tables, &table)?;
     let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
         if index < row.len() {
             row.remove(index);
@@ -636,8 +720,8 @@ fn drop_column(
         Ok(row)
     };
     let rebuilt = rebuild(writer, &table, new, &mut map, None)?;
-    constraints::register_references(writer, &rebuilt)?;
-    crate::sequences::drop_owned_by(writer, &table.name, Some(&column.text))?;
+    constraints::register_references(writer, tables, &rebuilt)?;
+    crate::sequences::drop_owned_by(writer, tables, &table.name, Some(&column.text))?;
     Ok(notices.into_iter().next())
 }
 
@@ -650,7 +734,19 @@ fn rename_column(
     dialect: Dialect,
 ) -> SqlResult<()> {
     let mut table = current(writer, tables, name)?;
-    let index = column_index(&table, from, dialect)?;
+    constraints::check_identifier(to)?;
+    let index = match table.column_index(&from.text) {
+        Some(index) => index,
+        None if dialect == Dialect::MySql => {
+            return Err(SqlError::new(
+                SqlState::MYSQL_COLUMN_NOT_FOUND,
+                format!("Unknown column '{}' in '{}'", from.text, table.name),
+            )
+            .with_vendor_code(1054)
+            .at(from.position));
+        }
+        None => column_index(&table, from, dialect)?,
+    };
     if table.column_index(&to.text).is_some() {
         return Err(duplicate_column(&table, to));
     }
@@ -705,6 +801,7 @@ fn rename_table(
     dialect: Dialect,
 ) -> SqlResult<()> {
     let mut table = current(writer, tables, name)?;
+    constraints::check_identifier(to)?;
     if to.text == table.name {
         return Ok(());
     }
@@ -738,7 +835,7 @@ fn rename_table(
         .at(to.position));
     }
     let children = constraints::referencing_tables(writer, &table.name)?;
-    constraints::unregister_references(writer, &table)?;
+    constraints::unregister_references(writer, tables, &table)?;
     let old_name = table.name.clone();
     if !table.primary_key.is_empty() && table.primary_key_name.is_none() {
         table.primary_key_name = Some(table.primary_key_constraint_name());
@@ -751,7 +848,7 @@ fn rename_table(
     }
     writer.delete(&table_key(&old_name))?;
     save(writer, &table)?;
-    constraints::register_references(writer, &table)?;
+    constraints::register_references(writer, tables, &table)?;
     for child in children {
         if child == old_name {
             continue;
@@ -764,9 +861,10 @@ fn rename_table(
         }
         writer.delete(&reference_key(&old_name, &child))?;
         save(writer, &definition)?;
-        constraints::register_references(writer, &definition)?;
+        constraints::register_references(writer, tables, &definition)?;
     }
-    crate::sequences::rename_owner(writer, &old_name, None, &to.text)
+    crate::sequences::rename_owner(writer, &old_name, None, &to.text)?;
+    constraints::refresh_flags(writer, tables, &to.text)
 }
 
 fn set_default(
@@ -779,8 +877,9 @@ fn set_default(
 ) -> SqlResult<()> {
     let mut table = current(writer, tables, name)?;
     let index = column_index(&table, column, dialect)?;
-    if let Some((expr, _)) = default {
+    if let Some((expr, text)) = default {
         execute::check_default_expr(expr)?;
+        crate::sequences::check_default_sequences(writer, text)?;
     }
     let target = &mut table.columns[index];
     target.default = default.map(|(_, text)| text.clone());
@@ -909,7 +1008,109 @@ fn set_type(
         }
         Ok(row)
     };
+    check_key_types(writer, tables, &new, index, dialect)?;
     rebuild(writer, &table, new, &mut map, None)?;
+    revalidate_keys(writer, tables, name, &column.text)
+}
+
+fn check_key_types(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    new: &TableDefinition,
+    index: usize,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let column = &new.columns[index];
+    for key in &new.foreign_keys {
+        for (position, &child_column) in key.columns.iter().enumerate() {
+            if child_column != index {
+                continue;
+            }
+            let parent = if key.parent == new.name {
+                Some(Arc::new(new.clone()))
+            } else {
+                tables.table(writer, &key.parent)?
+            };
+            let Some(parent) = parent else {
+                continue;
+            };
+            let Some(parent_column) = key
+                .parent_columns
+                .get(position)
+                .and_then(|name| parent.column_index(name))
+            else {
+                continue;
+            };
+            let parent_type = parent.columns[parent_column].sql_type;
+            if !constraints::compatible(column.sql_type, parent_type) {
+                return Err(constraints::incompatible_key(
+                    &key.name,
+                    (&column.name, column.sql_type),
+                    (&parent.columns[parent_column].name, parent_type),
+                    dialect,
+                ));
+            }
+        }
+    }
+    for child_name in constraints::referencing_tables(writer, &new.name)? {
+        let child = if child_name == new.name {
+            Some(Arc::new(new.clone()))
+        } else {
+            tables.table(writer, &child_name)?
+        };
+        let Some(child) = child else {
+            continue;
+        };
+        for key in child
+            .foreign_keys
+            .iter()
+            .filter(|key| key.parent == new.name)
+        {
+            for (position, parent_column) in key.parent_columns.iter().enumerate() {
+                if *parent_column != column.name {
+                    continue;
+                }
+                let Some(&child_column) = key.columns.get(position) else {
+                    continue;
+                };
+                let child_type = child.columns[child_column].sql_type;
+                if !constraints::compatible(child_type, column.sql_type) {
+                    return Err(constraints::incompatible_key(
+                        &key.name,
+                        (&child.columns[child_column].name, child_type),
+                        (&column.name, column.sql_type),
+                        dialect,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn revalidate_keys(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &str,
+) -> SqlResult<()> {
+    let table = current(writer, tables, name)?;
+    if let Some(index) = table.column_index(column) {
+        for position in 0..table.foreign_keys.len() {
+            if table.foreign_keys[position].columns.contains(&index) {
+                constraints::validate_existing(writer, tables, &table, None, Some(position))?;
+            }
+        }
+    }
+    for child_name in constraints::referencing_tables(writer, name)? {
+        let child = current(writer, tables, &child_name)?;
+        for position in 0..child.foreign_keys.len() {
+            let key = &child.foreign_keys[position];
+            if key.parent == name && key.parent_columns.iter().any(|parent| parent == column) {
+                constraints::validate_existing(writer, tables, &child, None, Some(position))?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -946,8 +1147,9 @@ fn redefine(
         set_not_null(writer, tables, name, &column.name, true, dialect)?;
         table = current(writer, tables, name)?;
     }
-    if let Some((expr, _)) = &column.default {
+    if let Some((expr, text)) = &column.default {
         execute::check_default_expr(expr)?;
+        crate::sequences::check_default_sequences(writer, text)?;
     }
     let target = &mut table.columns[index];
     target.not_null = column.not_null || in_key;
@@ -1032,10 +1234,7 @@ fn add_constraint(
                 constraints::define_foreign_key(writer, tables, &mut table, spec, key, dialect)?;
             constraints::validate_existing(writer, tables, &table, None, Some(position))?;
             save(writer, &table)?;
-            writer.put(
-                &reference_key(&table.foreign_keys[position].parent, &table.name),
-                &[],
-            )
+            constraints::register_references(writer, tables, &table)
         }
         ConstraintKind::Unique(columns) => {
             let create = CreateIndex {
@@ -1127,7 +1326,7 @@ fn drop_primary_key(
         tables,
         &table,
         &key_columns,
-        &format!("constraint {constraint} on table {}", table.name),
+        &Dropping::PrimaryKey(&constraint),
         cascade,
         dialect,
     )?;
@@ -1168,10 +1367,10 @@ fn drop_constraint(
         .iter()
         .position(|key| key.name == constraint.text)
     {
-        constraints::unregister_references(writer, &table)?;
+        constraints::unregister_references(writer, tables, &table)?;
         table.foreign_keys.remove(position);
         save(writer, &table)?;
-        constraints::register_references(writer, &table)?;
+        constraints::register_references(writer, tables, &table)?;
         return Ok(None);
     }
     if !table.primary_key.is_empty()
@@ -1198,7 +1397,7 @@ fn drop_constraint(
                 tables,
                 &table,
                 &columns,
-                &format!("constraint {} on table {}", index.name, table.name),
+                &Dropping::Index(&index.name),
                 cascade,
                 dialect,
             )?;
@@ -1231,7 +1430,7 @@ fn drop_constraint(
         .with_vendor_code(1091),
         Dialect::Oracle => SqlError::new(
             SqlState::UNDEFINED_OBJECT,
-            "cannot drop constraint  - nonexistent constraint",
+            "cannot drop constraint - nonexistent constraint",
         )
         .with_oracle_code(2443),
         _ => SqlError::new(
