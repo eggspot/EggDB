@@ -25,6 +25,10 @@ name = "eggdb-platform"
 version = "0.1.0"
 
 [[package]]
+name = "eggdb-sql"
+version = "0.1.0"
+
+[[package]]
 name = "eggdb-storage"
 version = "0.1.0"
 dependencies = [
