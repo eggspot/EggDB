@@ -1,6 +1,7 @@
 use crate::ast::{AggregateFunction, BinaryOperator, Expr, ExprKind, Literal, Select, SelectItem};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, check_columns, first_aggregate, output_name};
+use crate::hash_index::SeededIntegerHash;
 use crate::memory::WorkMemory;
 use crate::types::{SqlType, Value, compare_values, equality_key, float_overflow};
 use std::cmp::Ordering;
@@ -706,6 +707,17 @@ impl Call {
     }
 }
 
+fn integer_group_key(value: &Value) -> Option<i64> {
+    match value {
+        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) => value.as_integer(),
+        Value::Real(_) | Value::Double(_) => {
+            let number = value.as_float().unwrap_or(f64::NAN);
+            (number.fract() == 0.0 && number.abs() < 9.0e18).then_some(number as i64)
+        }
+        _ => None,
+    }
+}
+
 fn add_to_sum(sum: &mut Sum, value: &Value) -> SqlResult<()> {
     let wide_input = matches!(value, Value::BigInt(_));
     let float = || value.as_float().unwrap_or(f64::NAN);
@@ -776,6 +788,7 @@ impl Grouping {
         memory: &mut WorkMemory,
     ) -> SqlResult<Vec<Vec<Value>>> {
         let mut index: HashMap<Vec<u8>, usize> = HashMap::new();
+        let mut integer_index: HashMap<i64, usize, SeededIntegerHash> = HashMap::default();
         let mut groups: Vec<Group> = Vec::new();
         let mut key = Vec::new();
         let mut key_values = Vec::with_capacity(self.keys.len());
@@ -801,13 +814,25 @@ impl Grouping {
             let evaluator = Evaluator { scope, row };
             key.clear();
             key_values.clear();
-            for expr in &self.keys {
+            let mut integer_key = None;
+            if let [expr] = self.keys.as_slice() {
                 let value = evaluator.eval(expr, None)?;
-                equality_key(&mut key, &value);
+                integer_key = integer_group_key(&value);
+                if integer_key.is_none() {
+                    equality_key(&mut key, &value);
+                }
                 key_values.push(value);
+            } else {
+                for expr in &self.keys {
+                    let value = evaluator.eval(expr, None)?;
+                    equality_key(&mut key, &value);
+                    key_values.push(value);
+                }
             }
             let found = if self.keys.is_empty() && !groups.is_empty() {
                 Some(&0)
+            } else if let Some(integer_key) = integer_key {
+                integer_index.get(&integer_key)
             } else {
                 index.get(key.as_slice())
             };
@@ -817,7 +842,10 @@ impl Grouping {
                     memory.charge_row(&key_values)?;
                     memory.charge(key.len() + self.calls.len() * 64)?;
                     groups.push(new_group(key_values.clone(), row));
-                    index.insert(key.clone(), groups.len() - 1);
+                    match integer_key {
+                        Some(integer_key) => integer_index.insert(integer_key, groups.len() - 1),
+                        None => index.insert(key.clone(), groups.len() - 1),
+                    };
                     groups.len() - 1
                 }
             };
