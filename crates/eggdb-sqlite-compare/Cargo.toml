@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 eggdb = { path = "../eggdb" }
+eggdb-sql = { path = "../eggdb-sql" }
 rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled"] }
 
 [lints.rust]

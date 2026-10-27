@@ -49,6 +49,23 @@ impl<'db> ReadTransaction<'db> {
         self.inner.get(tree, key.as_ref()).map_err(Error::storage)
     }
 
+    /// Calls `read` with the value stored under `key` where it lies, without copying it out,
+    /// and returns what `read` returns, or `None` when the key is absent. The database is held
+    /// while `read` runs, so `read` must not use the same database: beginning, using or
+    /// dropping one of its transactions inside it deadlocks.
+    pub fn get_with<R>(
+        &self,
+        key: impl AsRef<[u8]>,
+        read: impl FnOnce(&[u8]) -> R,
+    ) -> Result<Option<R>> {
+        let Some(tree) = &self.tree else {
+            return Ok(None);
+        };
+        self.inner
+            .get_with(tree, key.as_ref(), read)
+            .map_err(Error::storage)
+    }
+
     /// The entries with keys in `range`, in key order; `.rev()` gives them largest key first.
     /// See [`Scan`] and [`KeyRange`].
     pub fn scan(&self, range: impl KeyRange) -> Scan<'_> {
@@ -138,6 +155,22 @@ impl<'db> WriteTransaction<'db> {
         self.inner.get(tree, key.as_ref()).map_err(Error::storage)
     }
 
+    /// Calls `read` with the value stored under `key`, this transaction's changes included,
+    /// where it lies, and returns what `read` returns, or `None` when the key is absent. As
+    /// with [`ReadTransaction::get_with`], `read` must not use the same database.
+    pub fn get_with<R>(
+        &self,
+        key: impl AsRef<[u8]>,
+        read: impl FnOnce(&[u8]) -> R,
+    ) -> Result<Option<R>> {
+        let Some(tree) = &self.tree else {
+            return Ok(None);
+        };
+        self.inner
+            .get_with(tree, key.as_ref(), read)
+            .map_err(Error::storage)
+    }
+
     /// The entries with keys in `range`, this transaction's changes included, in key order;
     /// `.rev()` gives them largest key first. See [`Scan`] and [`KeyRange`].
     pub fn scan(&self, range: impl KeyRange) -> Scan<'_> {
@@ -172,6 +205,42 @@ impl<'db> WriteTransaction<'db> {
             }
         };
         self.inner.put(&tree, key, value).map_err(Error::storage)
+    }
+
+    /// Stores `value` under `key` only when `key` is absent, and returns whether it stored
+    /// it; a key that is there keeps its value. It finds the place for the key once, where a
+    /// [`get`](Self::get) followed by a [`put`](Self::put) searches twice. Limits and failures
+    /// are those of [`put`](Self::put).
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-put-if-absent-{}.db", std::process::id()));
+    /// let db = eggdb::Database::open(&path)?;
+    /// let mut tx = db.begin_write()?;
+    /// assert!(tx.put_if_absent("a", "1")?);
+    /// assert!(!tx.put_if_absent("a", "2")?);
+    /// assert_eq!(tx.get("a")?, Some(b"1".to_vec()));
+    /// tx.commit()?;
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn put_if_absent(
+        &mut self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+    ) -> Result<bool> {
+        let (key, value) = (key.as_ref(), value.as_ref());
+        let tree = match self.tree {
+            Some(tree) => tree,
+            None => {
+                self.inner.check_fits(key, value).map_err(Error::storage)?;
+                self.create_tree()?
+            }
+        };
+        self.inner
+            .put_if_absent(&tree, key, value)
+            .map_err(Error::storage)
     }
 
     /// Removes `key` and its value, and returns whether the key was there.

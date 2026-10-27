@@ -3984,3 +3984,209 @@ log through a segment header alone could drop the two header syncs; it changes t
 it is a candidate for after v0.2.0. The research also rejected larger default segments (seven
 of about 1 MiB would hold this commit's log), which would add megabytes to every small file
 (D6, D14) to fit one benchmark's commit size.
+
+## D98 The SQL core, part 1: a storage-agnostic `eggdb-sql` crate, SQL in a reserved key prefix, order-preserving primary keys, PostgreSQL's errors and blocks — Decided by research (build loop, 2026-10-27); plan item 19 part 1, refines D2, D10, D19, D20, D30 and D32
+**What runs.** `eggdb sql <file> [-c <sql> | <script> | -]` runs the first part of the
+PostgreSQL dialect: `CREATE TABLE` with a primary key, `NOT NULL` and `DEFAULT`, `DROP TABLE`,
+`INSERT` (several rows, `DEFAULT`, `RETURNING`), `SELECT` with `WHERE`, `ORDER BY`, `LIMIT` and
+`OFFSET`, `UPDATE`, `DELETE`, and `BEGIN`/`COMMIT`/`ROLLBACK`, over `smallint`, `integer`,
+`bigint`, `real`, `double precision`, `boolean`, `text` and `varchar(n)`, with three-valued logic,
+PostgreSQL's operator precedence, casts, `CASE` and a few functions ([sql.md](sql.md)). Anything
+else valid in PostgreSQL fails with SQLSTATE `0A000` and a hint, never with another answer.
+
+**Decided by research:**
+1. **Crate direction.** `eggdb-sql` depends on neither `eggdb` nor `eggdb-storage`: it defines
+   `KeyValueRead` (get, an ordered double-ended range scan through a visitor), `KeyValueWrite`
+   (put, delete, commit, rollback) and `KeyValueStore` (begin a snapshot or the writer), and its
+   `Session` is generic over them. The `eggdb` package depends on it and adapts
+   `Database`'s transactions in the CLI (`cli/sql_store.rs`, which `eggdb-sqlite-compare` also
+   compiles). *Why:* Cargo forbids `eggdb-sql` depending on the `eggdb` library while the `eggdb`
+   binary in the same package depends on `eggdb-sql`; moving the binary to its own package would
+   break the CLI tests, the release workflow and the smoke test for no gain, and building on
+   `eggdb-storage` directly would duplicate `Database`'s writer slot and catalog tree. The same
+   core can later run over a collection (item 26), a remote store or a test map. The library does
+   not export SQL yet (`eggdb::sql`), so the traits stay free to change when collections land.
+2. **Where SQL lives.** In the database's one key space under the prefix `0xff 'S' 'Q' 'L' 0x00`
+   (`eggdb_sql::RESERVED_KEY_PREFIX`): `0x01` the catalog's version and next table number,
+   `0x02` + name the table definitions, `0x03` + a 4-byte big-endian table number + the primary
+   key the rows. Table numbers keep row keys short and let a rename or a drop and re-create never
+   rewrite rows; B+tree prefix truncation (D82) makes the shared prefix cost almost nothing per
+   row. The prefix is documented as reserved, not blocked in `put`, since blocking needs a change
+   to `Database`; `scan`, `export` and the UI show those keys as they are. When collections
+   land, these keys move once, atomically, into a collection named `sql` by an upgrade step
+   (D20's online upgrades), and the encodings below do not change.
+3. **Primary keys sort as bytes.** Per column a marker byte (`0x01` for a value, `0x02` for NULL,
+   kept for unique indexes, which allow NULLs and sort them last as PostgreSQL does), then
+   integers big-endian at their declared width with the sign bit flipped, `real` and
+   `double precision` as IEEE 754 bits with negatives inverted (`-0` stored as `0`, every NaN as
+   one NaN above infinity, PostgreSQL's order), booleans as one byte, and text as UTF-8 with
+   `0x00` escaped as `0x00 0xff` and ended by `0x00 0x01`. Text orders by bytes, PostgreSQL's `C`
+   collation; ICU-style collations come with D30 and their sort keys under a new key version. A
+   seeded test checks byte order equals value order for every type. Tables without a primary key
+   use an 8-byte row number, one more than the table's last.
+4. **Rows and definitions are versioned.** A row is a version byte, the column count and per
+   column a type byte (0 for NULL) and the value, so a row reads without its definition (for
+   `check` and export later), and a short row reads its missing trailing columns as NULL, leaving
+   room for `ADD COLUMN`. Definitions carry a version byte too. Every read is strict: damage is
+   `XX001`, an unknown version `0A000`, never a panic.
+5. **`numeric` waits.** `numeric` and `decimal` columns fail with `0A000`, and so do decimal
+   constants such as `1.5` (PostgreSQL types them `numeric`) except where a `real` or
+   `double precision` is expected: a float column, a comparison with one, a cast. An `i128`
+   version would be thrown away, since D19 requires PostgreSQL's exact arbitrary precision, and
+   silently reading `1.5` as a float would give different sums than PostgreSQL.
+6. **Transactions.** Outside a block each statement is one transaction (a read snapshot for
+   `SELECT`, the writer otherwise), committed whole or rolled back. `BEGIN` takes the writer at
+   once, waiting up to the write timeout and failing with `55P03`; `BEGIN READ ONLY` takes a
+   snapshot and refuses writes with `25006`. A failure inside a block rolls it back at once and
+   the session answers `25P02` until `ROLLBACK`; `COMMIT` of a failed block reports `ROLLBACK`.
+   Savepoints are a later part (D32).
+7. **The command.** `eggdb sql` reads `-c` (given once), a script, or stdin; it prints psql's
+   aligned format and command tags, stops at the first failing statement with exit 3 (4 for
+   damage, 5 for busy) and PostgreSQL's `ERROR`/`LINE`/caret/`DETAIL`/`HINT` lines plus the
+   SQLSTATE, and rolls back a block the script left open with a warning. Statements before a
+   failure stay committed, as with psql's `ON_ERROR_STOP`. Usage mistakes (both `-c` and a
+   script, an unreadable script, SQL that is not UTF-8) exit 2.
+
+**Other choices.** The parser climbs precedence in one loop (PostgreSQL's table: `OR`, `AND`,
+`NOT`, `IS`, comparisons, `BETWEEN`/`IN`/`LIKE`, other operators, `+ -`, `* / %`, `^`, unary
+minus, `::`) and refuses nesting, or a chain of operators, deeper than 64 levels with `54001`,
+so hostile SQL cannot exhaust the stack in the parser, the evaluator or when the tree is freed
+(D9). Errors carry a byte position; the CLI turns it into a line and a caret.
+A session caches decoded table definitions, checked against the stored bytes on every use, so a
+definition changed by another session is never used stale. Quoted constants take the type
+their context needs, as PostgreSQL's `unknown` type does. `UPDATE` deletes every moved key before
+writing the new ones, so `SET id = id + 1` succeeds where PostgreSQL may refuse it by visit order.
+
+**Tests.** Unit tests for the lexer, the float output, input parsing, conversions, `LIKE` and the
+encodings (byte order equals value order, seeded, for every type; every truncation of a row or a
+definition is an error); an end-to-end suite written from PostgreSQL's documentation (arithmetic,
+three-valued logic, precedence, every statement, constraints and their SQLSTATEs, blocks and the
+aborted state, `0A000` for what is not supported); a model test of 3,000 random statements
+against a `BTreeMap`; a seeded fuzzer of 25,000 hostile statements built from SQL fragments and
+random bytes that must return errors, never panic; a model test on a real file across reopens;
+and process tests of `eggdb sql` (output, scripts, stdin, errors and exit codes, a failed block
+leaving no table, and a process killed at five moments of a 20,000-row transaction leaving all
+of it or none). The smoke test runs `eggdb sql` on every release target.
+
+## D99 SQL is slower than SQLite for now: gated, scheduled and not waived; the binary grows by the SQL core — Decided by research (build loop, 2026-10-27); applies D7 and D6 to D98
+**The gap.** `eggdb-sqlite-compare` runs the same SQL text on both databases, with no prepared
+statements on either side (rusqlite's `query_row` and `execute_batch` prepare every time):
+`sqlite_compare.sql_point_select`, `SELECT name, score FROM people WHERE id = N` over 100,000
+rows, takes 1.90 times SQLite 3.54.1's time on an Apple-silicon Mac (1.95 against 1.02 µs), and
+`sqlite_compare.sql_bulk_insert`, 1,000-row transactions of 100-row `INSERT`s with durability
+`Off`, 3.3 times (1.14 against 0.34 µs per row). The causes are measured and avoidable, so
+D7's exception does not apply:
+- point select: about a quarter of the time is allocation (tokens owning strings, a boxed AST,
+  row and key vectors), parsing about 0.5 µs, and the definition and row lookups plus the
+  snapshot about 0.55 µs;
+- bulk insert: the engine's duplicate-key get and put of a sequential key cost about 0.53 µs of
+  1.14 per row (0.40 for the put alone, measured through the embedded API), where SQLite
+  appends to a rowid B-tree in one descent; even a free SQL layer would be about 1.5 times.
+
+This part already cut what was cheap: one precedence-climbing loop instead of fourteen nested
+calls (2.56 to 1.9 for point selects), boxed errors, reserved words as a match, cached table
+definitions and fewer copies.
+
+**Decided by research: merge, gate, schedule (as D94 did for issue #52).** D7 is not waived. The
+pull request adds a new crate and new measurements and changes no existing hot path, and blocking
+it would leave the gap unmeasured. The two ratios are gated at today's values with a 15% ceiling,
+not the 50% of the other comparisons, since their gap is known and may only shrink; the Linux
+lines come from the first CI run. **Condition:** before v0.3.0 is released, both ratios must be at most 1.0 on macOS and on the Linux runners,
+or a D7 research must show the remainder is the unavoidable, minimised price of correctness or
+security, recorded here. The work is the roadmap item "SQL point SELECT and bulk INSERT at least
+as fast as SQLite", right after the SQL core's next part, with these fixes to try: an
+allocation-free lexer and an AST arena or a plan cache keyed by statement text, a single-descent
+insert-if-absent in the B+tree, an append path for inserts at the rightmost leaf, and a snapshot
+reused across statements.
+
+**Binary size (D6).** The stripped release `eggdb` grows from 933,312 to 1,164,944 bytes on
+aarch64 macOS (+231,632, +24.8%) and from 1,133,296 to 1,420,120 on x86-64 Linux (+286,824, +25.3%).
+The reason is the SQL core
+itself: the lexer, parser and evaluator, PostgreSQL's float input and shortest-form output
+(`f64` parsing and formatting the binary did not carry before), Unicode case mapping for
+`lower`, `upper` and `ILIKE`, and every error message. On macOS, start time and peak memory did
+not move. On Linux the static binary's peak memory grows with it, though `--version` runs no SQL:
+from 2,484,224 to 3,043,328 bytes for `eggdb --version` and from 5,103,616 to 5,670,912 for a
+`get`, because the loader touches the pages of the larger binary it relocates; those two lines
+move with the binary and the start-time ratios stay within their gates. The Linux SQL ratios
+are 1.25 for point selects and 2.63 for bulk inserts, gated the same way. Shrinking it joins the speed item above: a table-driven parser and
+fewer monomorphised paths are the first candidates, and a build profile without SQL comes with
+D34's profiles.
+
+**Closing the gap, first round (review fix, 2026-10-27).** The independent review blocked the pull
+request on D7, so this part now closes most of the gap instead of only gating it. Measured with
+`eggdb-sqlite-compare` on the same Apple-silicon Mac, `sql_point_select` went from 1.95 to 1.23
+(1.27 against 1.04 µs) and `sql_bulk_insert` from 3.16 to 1.74 (0.61 against 0.35 µs per row).
+On CI's Linux runner, point selects went from 1.25 to 0.85, now faster than SQLite (2.31 against
+2.68 µs), and bulk inserts from 2.63 to 1.67 (1.20 against 0.72 µs per row); the four ratio
+lines are lowered to these values, the Linux ones from that CI run as before. What changed, each measured with a profile first:
+- A table's cached definition carries the commit it was checked at: a read whose snapshot sees
+  the same commit (`KeyValueRead::committed_version`, the commit stamp) uses it without reading
+  the definition again, which had been a whole B+tree lookup per statement. A writer, which
+  also sees its own changes, still checks the stored bytes.
+- Tokens borrow the SQL text (`Cow` only where a word folds case or a string has escapes), and
+  the token list is sized once.
+- Rows stream from the scan into the result instead of being collected twice; plain column
+  outputs are moved, not cloned; a point lookup reads its row in place (`get_with`, new on both
+  transactions of the embedded API) and does not evaluate a `WHERE` that is exactly its key
+  again; key buffers are sized once.
+- `INSERT` stores a row with `put_if_absent`, new on `WriteTransaction` and in the B+tree, which
+  finds the key's place once where a `get` and a `put` searched twice, and reuses its key and
+  row buffers.
+- A B+tree split sizes its candidate split points without building them and moves the entries
+  into the two halves instead of copying them: `btree.put` makes 309,577 allocations per
+  100,000 puts instead of 605,766 (its count line is updated), and every other `eggdb-bench`
+  line is unchanged.
+
+*Decided by research (D7, a research subagent, 2026-10-27):* the remainder is **avoidable**, not
+the price of correctness or security. About 40% of the engine's put in this workload is leaf
+splits that still decode the whole leaf into one allocation per entry, and the parser builds an
+AST of owned strings; nothing in the remaining cost is checking that SQLite skips. The next
+fixes, in order: an append split at the rightmost leaf that keeps the left page's cells where
+they are, an AST that borrows the SQL text, a direct path that encodes `INSERT ... VALUES`
+rows from tokens, and a plan cache for statements that differ only in their constants. The
+research's merge recommendation: merge with both ratios gated at the new values (the gate still
+fails 15% above them) and the v0.3.0 condition above unchanged, the same position D94 and the
+first version of this decision took, because the pull request changes no existing hot path for
+the worse and blocking it leaves the remaining gap unmeasured. Roadmap item 19e stays open
+with these fixes.
+
+**Binary size, second round (D6).** The new engine calls and the faster SQL paths add 16,560
+bytes on aarch64 macOS (1,164,944 to 1,181,504, +1.4%): `put_if_absent` and `get_with` on both
+transactions are generic over the key type, and the borrowed tokens, streamed rows and moved
+outputs are new code beside the old; on x86-64 Linux the binary grows by 24,576 bytes (1,420,120
+to 1,444,696, +1.7%), while its peak memory stays within its lines (3,010,560 bytes for
+`--version`, 5,638,144 for a `get`, both slightly below them). That is the stated price of the
+speed above; both footprint size lines are updated.
+
+**Closing the gap, second round (2026-10-27).** The coordinator's review would not accept bulk
+inserts gated at 1.7 times SQLite's time, since the research above found the rest avoidable, so
+this part goes on with that research's fixes in order until `sql_bulk_insert` is at most 1.0:
+- *An append split that does not decode the leaf.* A key appended past the last key of the
+  rightmost leaf, when it does not fit, now starts a new right leaf holding only that key; the
+  old leaf keeps its cells and takes the separator as its high fence, rewritten in one pass with
+  the prefix that fence gives it (`Shape::take_high_fence`). This is the split point the general
+  split already chose for that case, so the pages are byte for byte what it wrote (a test
+  compares the rewrite with a full encode of the same node), the leaves of a sequential load
+  stay full, and the file format is unchanged.
+- *Appends without a descent.* A write transaction remembers the path to the rightmost leaf
+  after a put that appended there; the next put of a larger key goes straight to that leaf. Any
+  other put, any delete and every split forget it, so the path is only reused while nothing can
+  have moved it. A model test mixes appends, inserts in the middle, overflow values and deletes.
+- *`INSERT ... VALUES` without an AST.* When every value is a plain constant (a number, with an
+  optional minus, a string, `NULL`, `TRUE` or `FALSE`), there is no column list, `RETURNING` or
+  `ON CONFLICT`, and all rows have the same length, the session checks the statement's tokens
+  once and stores each row straight from them, evaluating each constant exactly as the parser's
+  literal would be. Anything else takes the general path. A differential test runs 3,000
+  random statements both ways (the general one forced by a column list) and compares every
+  result, error, position and the final table.
+
+`sql_bulk_insert` went from 1.74 to **0.89** on the Apple-silicon Mac (0.31 against 0.34 µs per
+row), and on CI's Linux runner from 1.67 to **0.83**; both lines are lowered to these values. The AST that borrows the SQL text and the plan cache were not
+needed for the insert target and remain for point selects, which stay at 1.23 on macOS and 0.85
+to 0.94 on Linux. The macOS `ratio_to_sqlite` lines are enforced only when the compare crate is run by hand on
+a Mac, since CI's `compare` job runs on Linux only (D94); the Linux lines are the ones CI gates. The binary grows by another 16,528 bytes on macOS (1,181,504 to 1,198,032,
++1.4%) and 16,880 on x86-64 Linux (1,444,696 to 1,461,576, +1.2%) for the append path and the
+direct `INSERT` path, the stated price of the speed; Linux peak memory moves within its lines
+(3,053,568 bytes for `--version`, 5,687,296 for a `get`, about 10 KB above them, from the larger
+binary the loader maps), which stay as they are.

@@ -550,6 +550,64 @@ impl Shape {
         self.free() >= SLOT + LEAF_CELL_HEADER + suffix_len + value.cell_bytes()
     }
 
+    pub(crate) fn fits_with_high_fence(&self, body: &[u8], high: &[u8]) -> bool {
+        let prefix = common_prefix(self.low_suffix(body), high);
+        let page_size = self.body_len + PAGE_HEADER_SIZE;
+        self.is_leaf()
+            && !self.has_high_fence()
+            && self.used_bytes() + high.len() - prefix <= page_size + prefix * self.count
+    }
+
+    pub(crate) fn take_high_fence(&self, body: &mut [u8], high: &[u8]) -> Result<(), FormatError> {
+        if !self.fits_with_high_fence(body, high) {
+            return Err(self.corrupt("a high fence key does not fit in the page"));
+        }
+        let old = body.to_vec();
+        let low = self.low_suffix(&old);
+        if high <= low {
+            return Err(self.corrupt("a high fence key is not above the low fence key"));
+        }
+        let prefix = common_prefix(low, high);
+        body[..FENCES].fill(0);
+        write_u16(body, COUNT, self.count as u16);
+        write_u16(body, PREFIX_LEN, prefix as u16);
+        write_u16(body, LOW_LEN, low.len() as u16);
+        write_u16(body, HIGH_LEN, high.len() as u16);
+        let mut at = FENCES;
+        for part in [low, &high[prefix..]] {
+            body[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        }
+        let slots = at;
+        let mut cell_start = body.len();
+        for index in 0..self.count {
+            let cell = self.cell_at(&old, index)?;
+            if cell.key.get(..prefix) != Some(&high[..prefix]) || cell.key >= high {
+                return Err(self.corrupt("a key is not below the new high fence key"));
+            }
+            let suffix = &cell.key[prefix..];
+            let value = if cell.overflow {
+                LeafValue::Overflow(
+                    cell.payload
+                        .try_into()
+                        .map_err(|_| self.corrupt("a large value's reference is not 16 bytes"))?,
+                )
+            } else {
+                LeafValue::Inline(cell.payload)
+            };
+            cell_start -= LEAF_CELL_HEADER + suffix.len() + value.cell_bytes();
+            value.write_cell(body, cell_start, suffix);
+            write_u16(
+                body,
+                slots + index * SLOT,
+                (cell_start + PAGE_HEADER_SIZE) as u16,
+            );
+        }
+        body[slots + self.count * SLOT..cell_start].fill(0);
+        write_u32(body, CELL_START, (cell_start + PAGE_HEADER_SIZE) as u32);
+        Ok(())
+    }
+
     pub(crate) fn inner_fits(&self, suffix_len: usize) -> bool {
         self.free() >= SLOT + INNER_CELL_HEADER + suffix_len
     }
@@ -792,7 +850,7 @@ impl Node {
         Ok(())
     }
 
-    pub(crate) fn split(&self, page_size: usize, inserted: usize) -> Option<Split> {
+    pub(crate) fn split(self, page_size: usize, inserted: usize) -> Option<Split> {
         let count = self.keys.len();
         if count < 2 {
             return None;
@@ -812,24 +870,19 @@ impl Node {
         if self.level != 0 {
             candidates.push(0);
         }
-        candidates
+        let (at, separator) = candidates
             .into_iter()
-            .find_map(|at| self.split_at(at, page_size))
+            .find_map(|at| self.separator_fitting(at, page_size).map(|sep| (at, sep)))?;
+        Some(self.split_at(at, separator))
     }
 
     fn middle(&self) -> usize {
-        let sizes: Vec<usize> = self
-            .keys
-            .iter()
-            .enumerate()
-            .map(|(index, key)| {
-                key.len() + self.values.get(index).map_or(8, StoredValue::cell_bytes)
-            })
-            .collect();
-        let total: usize = sizes.iter().sum();
+        let total: usize = (0..self.keys.len())
+            .map(|index| self.entry_bytes(index))
+            .sum();
         let mut running = 0;
-        for (index, size) in sizes.iter().enumerate() {
-            running += size;
+        for index in 0..self.keys.len() {
+            running += self.entry_bytes(index);
             if running * 2 >= total {
                 return index + 1;
             }
@@ -837,58 +890,70 @@ impl Node {
         self.keys.len() / 2
     }
 
-    fn split_at(&self, at: usize, page_size: usize) -> Option<Split> {
-        let (left, separator, right) = if self.level == 0 {
-            let separator = shortest_separator(&self.keys[at - 1], &self.keys[at]);
-            let left = self.part(self.low.clone(), Some(separator.clone()), 0..at, Vec::new());
-            let right = self.part(
-                separator.clone(),
-                self.high.clone(),
-                at..self.keys.len(),
-                Vec::new(),
-            );
-            (left, separator, right)
-        } else {
-            let separator = self.keys[at].clone();
-            let left = self.part(
-                self.low.clone(),
-                Some(separator.clone()),
-                0..at,
-                self.children[..=at].to_vec(),
-            );
-            let right = self.part(
-                separator.clone(),
-                self.high.clone(),
-                at + 1..self.keys.len(),
-                self.children[at + 1..].to_vec(),
-            );
-            (left, separator, right)
-        };
-        (left.size() <= page_size && right.size() <= page_size).then_some(Split {
-            left,
-            separator,
-            right,
-        })
+    fn entry_bytes(&self, index: usize) -> usize {
+        self.keys[index].len() + self.values.get(index).map_or(8, StoredValue::cell_bytes)
     }
 
-    fn part(
-        &self,
-        low: Vec<u8>,
-        high: Option<Vec<u8>>,
-        range: std::ops::Range<usize>,
-        children: Vec<u64>,
-    ) -> Self {
-        Self {
-            level: self.level,
-            low,
-            high,
-            keys: self.keys[range.clone()].to_vec(),
-            values: if self.level == 0 {
-                self.values[range].to_vec()
+    fn separator_fitting(&self, at: usize, page_size: usize) -> Option<Vec<u8>> {
+        let (separator, right_keys) = if self.level == 0 {
+            (
+                shortest_separator(&self.keys[at - 1], &self.keys[at]),
+                at..self.keys.len(),
+            )
+        } else {
+            (self.keys[at].clone(), at + 1..self.keys.len())
+        };
+        let values = |range: std::ops::Range<usize>| {
+            if self.level == 0 {
+                &self.values[range]
             } else {
-                Vec::new()
-            },
-            children,
+                &[]
+            }
+        };
+        let left_size = size_of(
+            self.level,
+            &self.low,
+            Some(&separator),
+            &self.keys[..at],
+            values(0..at),
+        );
+        let right_size = size_of(
+            self.level,
+            &separator,
+            self.high.as_deref(),
+            &self.keys[right_keys.clone()],
+            values(right_keys),
+        );
+        (left_size <= page_size && right_size <= page_size).then_some(separator)
+    }
+
+    fn split_at(mut self, at: usize, separator: Vec<u8>) -> Split {
+        let right_from = if self.level == 0 { at } else { at + 1 };
+        let right_keys = self.keys.split_off(right_from);
+        let right_values = if self.level == 0 {
+            self.values.split_off(at)
+        } else {
+            Vec::new()
+        };
+        let right_children = if self.level == 0 {
+            Vec::new()
+        } else {
+            self.keys.truncate(at);
+            self.children.split_off(at + 1)
+        };
+        let right = Self {
+            level: self.level,
+            low: separator.clone(),
+            high: self.high.take(),
+            keys: right_keys,
+            values: right_values,
+            children: right_children,
+        };
+        self.high = Some(separator.clone());
+        Split {
+            left: self,
+            separator,
+            right,
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::btree::{BTree, TreeReport};
+use crate::btree::{AppendHint, BTree, TreeReport};
 use crate::cursor::{Cursor, KeyAndValue, KeyAndValueLen};
 use crate::error::StorageError;
 use crate::format::{NO_PAGE, Superblock};
@@ -111,6 +111,7 @@ impl<F: File> Store<F> {
             finished: false,
             began_after: state.last_commit,
             catalog_root: state.cache.superblock().catalog_root,
+            append_hint: AppendHint::default(),
         })
     }
 
@@ -361,6 +362,7 @@ pub struct WriteTransaction<'s, F: File> {
     finished: bool,
     began_after: CommitStamp,
     catalog_root: u64,
+    append_hint: AppendHint,
 }
 
 impl<F: File> WriteTransaction<'_, F> {
@@ -447,12 +449,31 @@ impl<F: File> WriteTransaction<'_, F> {
     /// Stores `value` under `key` in `tree` (see [`BTree::put`]). A key or value over the
     /// limits is refused with nothing changed; any other error rolls the transaction back.
     pub fn put(&mut self, tree: &BTree, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        self.change(|cache| tree.put(cache, key, value))
+        let mut hint = std::mem::take(&mut self.append_hint);
+        let stored = self.change(|cache| tree.put_hinted(cache, key, value, &mut hint));
+        self.append_hint = hint;
+        stored
+    }
+
+    /// Stores `value` under `key` in `tree` only when `key` is absent, and returns whether it
+    /// stored it (see [`BTree::put_if_absent`]). Errors are those of
+    /// [`WriteTransaction::put`].
+    pub fn put_if_absent(
+        &mut self,
+        tree: &BTree,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, StorageError> {
+        let mut hint = std::mem::take(&mut self.append_hint);
+        let stored = self.change(|cache| tree.put_if_absent_hinted(cache, key, value, &mut hint));
+        self.append_hint = hint;
+        stored
     }
 
     /// Removes `key` from `tree` and returns whether it was there (see [`BTree::delete`]). An
     /// error rolls the transaction back.
     pub fn delete(&mut self, tree: &BTree, key: &[u8]) -> Result<bool, StorageError> {
+        self.append_hint.forget();
         self.change(|cache| tree.delete(cache, key))
     }
 

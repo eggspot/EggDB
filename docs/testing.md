@@ -188,7 +188,8 @@ through the `eggdb` command; the smoke test reads the samples with each release 
 ## The release smoke test (D96)
 `scripts/smoke-test.sh <binary>` runs a built `eggdb` through every command: create, put (text,
 hex, stdin, a 3 MB value), get, del, scan options, check, stats, an export and import round
-trip, the sample files, `eggdb ui --help`, the refusal without a terminal, and, where `script(1)`
+trip, `eggdb sql` (a new table, a script, stdin, an error, a rolled-back block), the sample
+files, `eggdb ui --help`, the refusal without a terminal, and, where `script(1)`
 gives it a pseudo-terminal (Linux and macOS), a scripted `eggdb ui` session that moves, deletes a
 key through the confirmation and quits, after which the file must show the delete and pass
 `check`. CI runs it against the debug binary on Linux, macOS and Windows; the release workflow

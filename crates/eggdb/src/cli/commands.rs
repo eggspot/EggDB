@@ -11,6 +11,7 @@ use eggdb_storage::{BTree, PageSize, StorageError};
 use std::io::Read;
 use std::ops::Bound;
 
+mod sql;
 mod transfer;
 
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
@@ -89,6 +90,7 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
         CommandName::Ui => session.ui(),
         CommandName::Export => session.export(),
         CommandName::Import => session.import(),
+        CommandName::Sql => session.sql(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -551,7 +553,7 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
             ),
             Access::Write { .. } => Failure::Database {
                 message: format!(
-                    "cannot open {file}: no such file. Create it with `eggdb create {file}`, or pass --create to put."
+                    "cannot open {file}: no such file. Create it with `eggdb create {file}`, or pass --create to put or sql."
                 ),
                 try_command: Some(format!("eggdb create {file}")),
                 exit: Exit::DatabaseError,

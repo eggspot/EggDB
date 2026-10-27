@@ -4,7 +4,9 @@ use crate::format::{NO_PAGE, PageSize};
 use crate::overflow;
 use crate::page_cache::{PageCache, PageMut, PageSource, TreePage};
 use crate::page_set::PageSet;
-use crate::tree_page::{self, CellRef, LeafValue, MAX_HEIGHT, Node, Shape, StoredValue};
+use crate::tree_page::{
+    self, CellRef, LeafValue, MAX_HEIGHT, Node, Shape, StoredValue, shortest_separator,
+};
 use eggdb_platform::File;
 use std::ops::Bound;
 
@@ -58,6 +60,12 @@ pub struct TreeReport {
     pub overflow_values: u64,
     /// Overflow pages holding those values.
     pub overflow_pages: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Existing {
+    Replace,
+    Keep,
 }
 
 pub(crate) enum FoundValue<'a> {
@@ -238,8 +246,87 @@ impl BTree {
         key: &[u8],
         value: &[u8],
     ) -> Result<(), StorageError> {
+        self.store_entry(
+            cache,
+            key,
+            value,
+            Existing::Replace,
+            &mut AppendHint::default(),
+        )
+        .map(|_| ())
+    }
+
+    /// Stores `value` under `key` only when `key` is absent, in the same single descent as
+    /// [`BTree::put`], and returns whether it stored it. A key that is there keeps its value.
+    /// Errors are those of [`BTree::put`].
+    pub fn put_if_absent<F: File>(
+        &self,
+        cache: &PageCache<F>,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, StorageError> {
+        self.store_entry(
+            cache,
+            key,
+            value,
+            Existing::Keep,
+            &mut AppendHint::default(),
+        )
+    }
+
+    pub(crate) fn put_hinted<F: File>(
+        &self,
+        cache: &PageCache<F>,
+        key: &[u8],
+        value: &[u8],
+        hint: &mut AppendHint,
+    ) -> Result<(), StorageError> {
+        self.store_entry(cache, key, value, Existing::Replace, hint)
+            .map(|_| ())
+    }
+
+    pub(crate) fn put_if_absent_hinted<F: File>(
+        &self,
+        cache: &PageCache<F>,
+        key: &[u8],
+        value: &[u8],
+        hint: &mut AppendHint,
+    ) -> Result<bool, StorageError> {
+        self.store_entry(cache, key, value, Existing::Keep, hint)
+    }
+
+    fn store_entry<F: File>(
+        &self,
+        cache: &PageCache<F>,
+        key: &[u8],
+        value: &[u8],
+        existing: Existing,
+        hint: &mut AppendHint,
+    ) -> Result<bool, StorageError> {
         Self::check_fits(cache, key, value)?;
         let inline = fits_inline(cache.page_size(), key, value);
+        if let Some((path, depth)) = hint.take(self.root) {
+            let page = cache.write_keeping_check(path[depth])?;
+            let shape = shape_of_mut(&page)?;
+            let appends = shape.is_leaf()
+                && !shape.has_high_fence()
+                && shape.count > 0
+                && key > shape.cell_at(&page, shape.count - 1)?.key;
+            if appends {
+                let index = shape.count;
+                return insert_at(
+                    cache,
+                    (&path, depth),
+                    page,
+                    shape,
+                    index,
+                    Entry { key, value, inline },
+                    hint,
+                )
+                .map(|()| true);
+            }
+            drop(page);
+        }
         let mut path = [NO_PAGE; MAX_HEIGHT as usize];
         let mut depth = 0;
         let mut page_id = self.root;
@@ -261,12 +348,13 @@ impl BTree {
         let mut shape = shape_of_mut(&page)?;
         let suffix = shape.key_suffix(&page, key)?;
         let index = match shape.search(&page, suffix)? {
+            Ok(_) if existing == Existing::Keep => return Ok(false),
             Ok(index) => {
                 let cell = shape.cell_at(&page, index)?;
                 let replaced = shape.overflow_reference(&cell)?;
                 if inline && replaced.is_none() && cell.payload.len() == value.len() {
                     shape.overwrite_value(&mut page, index, value)?;
-                    return Ok(());
+                    return Ok(true);
                 }
                 if let Some(reference) = replaced {
                     overflow::free_value(cache, &reference, key)?;
@@ -276,31 +364,16 @@ impl BTree {
             }
             Err(index) => index,
         };
-        let written = if inline {
-            None
-        } else {
-            Some(overflow::write_value(cache, key, value)?)
-        };
-        let stored = match &written {
-            None => LeafValue::Inline(value),
-            Some(reference) => LeafValue::Overflow(reference.encode()),
-        };
-        if shape.leaf_fits(suffix.len(), &stored) {
-            shape.insert_leaf(&mut page, index, suffix, &stored);
-            drop(page);
-        } else {
-            let mut node = Node::decode(&shape, &page)?;
-            node.keys.insert(index, key.to_vec());
-            node.values.insert(
-                index,
-                match written {
-                    None => StoredValue::Inline(value.to_vec()),
-                    Some(reference) => StoredValue::Overflow(reference),
-                },
-            );
-            store(cache, &path[..=depth], page, node, index)?;
-        }
-        Ok(())
+        insert_at(
+            cache,
+            (&path, depth),
+            page,
+            shape,
+            index,
+            Entry { key, value, inline },
+            hint,
+        )?;
+        Ok(true)
     }
 
     /// Removes `key` and its value, and returns whether the key was there. A key that is not
@@ -656,6 +729,7 @@ fn store<F: File>(
         node.encode(page_id, &mut page)?;
         return Ok(());
     }
+    let level = node.level;
     let split = node
         .split(page_size, inserted)
         .ok_or(FormatError::CorruptTree {
@@ -664,14 +738,32 @@ fn store<F: File>(
         })?;
     let parents = &path[..path.len().saturating_sub(1)];
     let Some(&parent_id) = parents.last() else {
-        return split_root(cache, page, node.level, split);
+        return split_root(cache, page, level, split);
     };
     let right_id = new_page(cache, &split.right)?;
     split.left.encode(page_id, &mut page)?;
     drop(page);
+    link_split(
+        cache,
+        parents,
+        parent_id,
+        page_id,
+        split.separator,
+        right_id,
+    )
+}
+
+fn link_split<F: File>(
+    cache: &PageCache<F>,
+    parents: &[u64],
+    parent_id: u64,
+    page_id: u64,
+    separator: Vec<u8>,
+    right_id: u64,
+) -> Result<(), StorageError> {
     let mut parent = cache.write_keeping_check(parent_id)?;
     let mut shape = shape_of_mut(&parent)?;
-    let suffix = shape.key_suffix(&parent, &split.separator)?;
+    let suffix = shape.key_suffix(&parent, &separator)?;
     let index = match shape.search(&parent, suffix)? {
         Ok(_) => return Err(shape.corrupt("a separator is already in the parent").into()),
         Err(index) => index,
@@ -692,9 +784,116 @@ fn store<F: File>(
         return Ok(());
     }
     let mut node = Node::decode(&shape, &parent)?;
-    node.keys.insert(index, split.separator);
+    node.keys.insert(index, separator);
     node.children.insert(index + 1, right_id);
     store(cache, parents, parent, node, index)
+}
+
+#[derive(Default)]
+pub(crate) struct AppendHint {
+    rightmost: Option<(u64, [u64; MAX_HEIGHT as usize], usize)>,
+}
+
+impl AppendHint {
+    fn take(&mut self, root: u64) -> Option<([u64; MAX_HEIGHT as usize], usize)> {
+        match self.rightmost.take() {
+            Some((hinted_root, path, depth)) if hinted_root == root => Some((path, depth)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn forget(&mut self) {
+        self.rightmost = None;
+    }
+}
+
+struct Entry<'e> {
+    key: &'e [u8],
+    value: &'e [u8],
+    inline: bool,
+}
+
+fn insert_at<F: File>(
+    cache: &PageCache<F>,
+    (path, depth): (&[u64; MAX_HEIGHT as usize], usize),
+    mut page: PageMut<'_>,
+    mut shape: Shape,
+    index: usize,
+    entry: Entry<'_>,
+    hint: &mut AppendHint,
+) -> Result<(), StorageError> {
+    let Entry { key, value, inline } = entry;
+    let suffix = shape.key_suffix(&page, key)?;
+    let written = if inline {
+        None
+    } else {
+        Some(overflow::write_value(cache, key, value)?)
+    };
+    let stored = match &written {
+        None => LeafValue::Inline(value),
+        Some(reference) => LeafValue::Overflow(reference.encode()),
+    };
+    let stored_value = || match written {
+        None => StoredValue::Inline(value.to_vec()),
+        Some(reference) => StoredValue::Overflow(reference),
+    };
+    let appended = index == shape.count && !shape.has_high_fence();
+    if shape.leaf_fits(suffix.len(), &stored) {
+        shape.insert_leaf(&mut page, index, suffix, &stored);
+        drop(page);
+        if appended {
+            hint.rightmost = Some((path[0], *path, depth));
+        }
+    } else if depth > 0
+        && appended
+        && let Some((separator, right_id)) =
+            split_off_appended(cache, &mut page, &shape, key, stored_value())?
+    {
+        let page_id = page.page_id();
+        drop(page);
+        link_split(
+            cache,
+            &path[..depth],
+            path[depth - 1],
+            page_id,
+            separator,
+            right_id,
+        )?;
+    } else {
+        let mut node = Node::decode(&shape, &page)?;
+        node.keys.insert(index, key.to_vec());
+        node.values.insert(index, stored_value());
+        store(cache, &path[..=depth], page, node, index)?;
+    }
+    Ok(())
+}
+
+fn split_off_appended<F: File>(
+    cache: &PageCache<F>,
+    page: &mut PageMut<'_>,
+    shape: &Shape,
+    key: &[u8],
+    stored: StoredValue,
+) -> Result<Option<(Vec<u8>, u64)>, StorageError> {
+    if shape.count == 0 || shape.has_high_fence() {
+        return Ok(None);
+    }
+    let last = shape.cell_at(page, shape.count - 1)?.key;
+    let separator = shortest_separator(last, key);
+    if !shape.fits_with_high_fence(page, &separator) {
+        return Ok(None);
+    }
+    let right = Node {
+        level: 0,
+        low: separator.clone(),
+        high: None,
+        keys: vec![key.to_vec()],
+        values: vec![stored],
+        children: Vec::new(),
+    };
+    let right_id = new_page(cache, &right)?;
+    shape.take_high_fence(page, &separator)?;
+    Ok(Some((separator, right_id)))
 }
 
 fn split_root<F: File>(

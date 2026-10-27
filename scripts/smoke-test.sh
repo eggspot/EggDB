@@ -102,6 +102,21 @@ expect_exit 3 "$eggdb" import copy.db app.jsonl
 expect_exit 0 "$eggdb" import copy.db app.jsonl --on-conflict skip
 pass "export and import round trip"
 
+expect_exit 0 "$eggdb" sql --create shop.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL, price double precision)"
+printf '%s\n' "INSERT INTO items VALUES (1, 'egg', 0.25), (2, 'bread', 2.5);" "UPDATE items SET price = price * 2 WHERE id = 1;" > shop.sql
+expect_exit 0 "$eggdb" sql shop.db shop.sql
+expect_output 'egg|0.5' sh -c "\"$eggdb\" sql shop.db -c 'SELECT name, price FROM items WHERE id = 1' | sed -n 3p | tr -d ' '"
+printf 'SELECT name FROM items ORDER BY price DESC LIMIT 1;\n' > top.sql
+expect_exit 0 "$eggdb" sql shop.db - < top.sql
+grep -q 'bread' last.out || fail "eggdb sql from stdin printed $(cat last.out)"
+expect_exit 3 "$eggdb" sql shop.db -c "SELECT * FROM nope"
+grep -q 'relation "nope" does not exist' last.err || fail "eggdb sql error said $(cat last.err)"
+expect_exit 3 "$eggdb" sql shop.db -c "BEGIN; DELETE FROM items WHERE id = 1; INSERT INTO items VALUES (2, 'dup', 1)"
+expect_output '2' sh -c "\"$eggdb\" sql shop.db -c 'SELECT id FROM items' | grep -c '^ *[0-9]'"
+expect_exit 2 "$eggdb" sql shop.db -c "SELECT 1" extra.sql
+expect_exit 0 "$eggdb" check shop.db
+pass "sql: create, script, stdin, an error, a rolled-back block, usage"
+
 cp "$samples/v0.2.0.db" "$samples/v0.2.0-log-to-replay.db" .
 expect_exit 0 "$eggdb" check v0.2.0.db
 expect_output 'Grace Hopper' "$eggdb" get v0.2.0.db user:2

@@ -2,7 +2,7 @@
 
 `eggdb` works with an EggDB database file from a shell, a script or an AI agent: create a file,
 store, read and remove values, list entries in key order, check the file's health, see its
-statistics, and export it to a text file that another database imports. It opens the file in
+statistics, export it to a text file that another database imports, and run SQL on it. It opens the file in
 its own process, like `sqlite3`: there is no server. The design behind every choice here is
 [ux/cli.md](ux/cli.md) (D15, D90, D93); the embedded Rust API is [embedded.md](embedded.md).
 Installing it is downloading one file: see the README, "Install".
@@ -23,6 +23,8 @@ eggdb stats app.db
 eggdb ui app.db                              # browse it full screen; q quits
 eggdb export app.db backup.jsonl             # every entry, as JSON lines
 eggdb import --create copy.db backup.jsonl   # and back, into a new file
+eggdb sql app.db -c "CREATE TABLE users (id integer PRIMARY KEY, name text)"
+eggdb sql app.db -c "SELECT name FROM users WHERE id = 1"
 ```
 
 ## Commands
@@ -43,19 +45,20 @@ eggdb <command> <file> [arguments] [options]
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below) |
 | `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below) |
+| `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect (below, and [sql.md](sql.md)) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
 The command comes first and the file second; options may go anywhere after the command, and
 `--` ends them, so `eggdb get app.db -- -k` reads the key `-k`.
 
-**Only `create`, `put --create` and `import --create` make a database file.** A wrong path such
+**Only `create`, `put --create`, `import --create` and `sql --create` make a database file.** A wrong path such
 as `app.bd` is an error that says how to create the file, never a new empty database that later
 reads as "empty".
 
 **Read-only commands share the file.** `get`, `scan`, `check`, `stats` and `export` can run
 together, and next to an application that has the file open read-only. A program that has it
-open for writing keeps them out, and `put`, `del` and `import` wait for nobody: they exit 5 at
+open for writing keeps them out, and `put`, `del`, `import` and `sql` wait for nobody: they exit 5 at
 once when the file is open anywhere (see "Exit codes").
 
 **Large values.** `put` sizes its page cache to the value, so any value up to 1 GiB works
@@ -429,14 +432,67 @@ anything after the trailer, or a `version` above 1 (made by a newer EggDB: upgra
 `scan --format json` prints entry lines in the same spelling, except that it writes text for any
 UTF-8, so its lines are valid entries too.
 
+## `eggdb sql`
+
+`eggdb sql` runs SQL statements on the file: from `-c "<sql>"`, from a script file, or from
+stdin (a script of `-`, or none at all when stdin is not a terminal). This release runs the
+first part of the PostgreSQL dialect: tables with a primary key, `INSERT`, `SELECT` with
+`WHERE`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE` and transaction blocks, with the
+integer, floating-point, boolean and text types. [sql.md](sql.md) lists exactly what runs and
+what comes next.
+
+```sh
+eggdb sql --create shop.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL, price double precision)"
+eggdb sql shop.db -c "INSERT INTO items VALUES (1, 'egg', 0.25), (2, 'bread', 2.5)"
+eggdb sql shop.db -c "SELECT * FROM items ORDER BY price DESC"
+eggdb sql shop.db schema.sql
+cat queries.sql | eggdb sql shop.db
+```
+
+Results print as `psql` prints them, in its aligned format: a centred header, numbers
+right-aligned, NULL as an empty cell and a row count; other statements print their command tag
+(`INSERT 0 2`, `UPDATE 1`, `CREATE TABLE`).
+
+```
+ id | name  | price
+----+-------+-------
+  2 | bread |   2.5
+  1 | egg   |  0.25
+(2 rows)
+
+```
+
+- Statements run in order, each in its own transaction unless `BEGIN` opened a block; a block
+  is one write transaction until `COMMIT` or `ROLLBACK`, and SQL left open at the end is rolled
+  back with a warning on stderr.
+- The first statement that fails stops the run: stderr gets the error as PostgreSQL words it,
+  with the line and a caret under the place it refers to, any detail and hint, and the
+  SQLSTATE code, and the exit code is 3 (4 when the file is damaged, 5 when it is busy).
+  Statements before it keep their effects: committed outside a block, rolled back inside one.
+
+```
+ERROR:  relation "nope" does not exist
+LINE 1: SELECT * FROM nope
+                      ^
+SQLSTATE:  42P01
+```
+
+- SQL keeps its tables in the same file as every other key, under keys that start with the bytes
+  `0xff 'S' 'Q' 'L' 0x00` (D98). `eggdb scan`, `export`, `import` and `check` see and carry
+  them like any other key; writing keys with that prefix through `put` or the embedded API
+  changes the tables underneath SQL.
+- `-c` takes UTF-8 text, given once (put several statements in it, separated by semicolons);
+  `-c` and a script together, a script that cannot be read, or SQL that is not UTF-8 are usage
+  errors (exit 2).
+
 ## Exit codes and errors
 
 | Code | Meaning |
 |------|---------|
 | 0 | done; `check` found no damage |
 | 1 | not found: `get` or `del` of a key that is not there |
-| 2 | usage: unknown command or option, missing argument, bad hex, an unreadable `@file` or export file, a command not in this release |
-| 3 | database error: no such file, not an EggDB file, written by a newer EggDB, permission denied, I/O failure, key or value too large, disk full; an export that is not valid, or a key already there (`import`); an output file that exists (`export`) |
+| 2 | usage: unknown command or option, missing argument, bad hex, an unreadable `@file`, export file or SQL script, a command not in this release |
+| 3 | database error: no such file, not an EggDB file, written by a newer EggDB, permission denied, I/O failure, key or value too large, disk full; an export that is not valid, or a key already there (`import`); an output file that exists (`export`); a SQL statement that failed (`sql`) |
 | 4 | damaged: `check` found damage, or any command read a damaged page |
 | 5 | busy: another program has the file open |
 
@@ -451,7 +507,7 @@ Errors go to stderr as `eggdb: <what happened>: <why>. <what to do>`, never as a
 and add a `try:` line when the fix is a command:
 
 ```
-eggdb: cannot open app.db: no such file. Create it with `eggdb create app.db`, or pass --create to put.
+eggdb: cannot open app.db: no such file. Create it with `eggdb create app.db`, or pass --create to put or sql.
   try: eggdb create app.db
 eggdb: unknown option '--reverse' for eggdb get
   usage: eggdb get <file> <key>
