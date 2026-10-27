@@ -237,6 +237,32 @@ pub(crate) struct Settings {
     custom: BTreeMap<String, String>,
     pub(crate) database: String,
     pub(crate) mysql: crate::mysql_variables::MySqlVariables,
+    pub(crate) sqlite: SqliteState,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SqliteState {
+    pub(crate) last_insert_rowid: i64,
+    pub(crate) changes: i64,
+    pub(crate) total_changes: i64,
+    pub(crate) user_version: i64,
+    pub(crate) foreign_keys: bool,
+    pub(crate) journal_mode: &'static str,
+    pub(crate) synchronous: i64,
+}
+
+impl Default for SqliteState {
+    fn default() -> Self {
+        Self {
+            last_insert_rowid: 0,
+            changes: 0,
+            total_changes: 0,
+            user_version: 0,
+            foreign_keys: false,
+            journal_mode: "wal",
+            synchronous: 2,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -249,6 +275,7 @@ impl Default for Settings {
             custom: BTreeMap::new(),
             database: "eggdb".to_owned(),
             mysql: crate::mysql_variables::MySqlVariables::default(),
+            sqlite: SqliteState::default(),
         }
     }
 }

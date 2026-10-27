@@ -2108,3 +2108,225 @@ fn coalesce_has_a_static_type_only_when_its_arguments_agree() {
         .collect();
     assert_eq!(types, [Some(SqlType::SmallInt), None, Some(SqlType::Text)]);
 }
+
+#[test]
+fn hostile_sqlite_input_returns_errors_and_never_panics() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    last(
+        &mut session,
+        "CREATE TABLE people (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, age INT, score REAL);
+         INSERT INTO people (name, age, score) VALUES ('alice', 30, 9.25), ('bob', NULL, NULL);",
+    );
+    let fragments = [
+        "SELECT",
+        "INSERT INTO people VALUES",
+        "INSERT OR REPLACE INTO people",
+        "INSERT OR IGNORE INTO people",
+        "INSERT OR ROLLBACK INTO people",
+        "REPLACE INTO people",
+        "ON CONFLICT",
+        "ON CONFLICT(id) DO UPDATE SET age = excluded.age",
+        "DO NOTHING",
+        "excluded.",
+        "PRAGMA",
+        "PRAGMA table_info(",
+        "PRAGMA user_version =",
+        "PRAGMA table_list",
+        "sqlite_master",
+        "sqlite_schema",
+        "FROM sqlite_schema",
+        "WITHOUT ROWID",
+        "STRICT",
+        "CREATE TABLE t (",
+        "INTEGER PRIMARY KEY",
+        "AUTOINCREMENT",
+        "REFERENCES people(id)",
+        "BEGIN IMMEDIATE",
+        "END",
+        "COMMIT",
+        "ROLLBACK",
+        "(",
+        ")",
+        ",",
+        ";",
+        "'",
+        "\"",
+        "`",
+        "[",
+        "]",
+        "[a b]",
+        "\"x\"\"y\"",
+        "/*",
+        "*/",
+        "--",
+        "\n",
+        "?",
+        "?1",
+        "?32767",
+        "?0",
+        ":name",
+        "@v",
+        "$x",
+        ":",
+        "$",
+        "x'00'",
+        "||",
+        "==",
+        "!=",
+        "<>",
+        "IS",
+        "IS NOT",
+        "GLOB",
+        "'a*'",
+        "'[a]'",
+        "LIKE",
+        "LIMIT",
+        "LIMIT -1",
+        "OFFSET",
+        "1, 2",
+        "WHERE",
+        "NOT",
+        "1",
+        "-9223372036854775808",
+        "1e999",
+        "0.5",
+        "NULL",
+        "TRUE",
+        "printf('%",
+        "printf('%*.*f', 1000000, 99999, 1.5)",
+        "printf('%s%d%q%Q%c%x%e%g'",
+        "substr('abc', -9223372036854775808, -9223372036854775808)",
+        "round(1e308, 30)",
+        "iif(",
+        "typeof(",
+        "quote(",
+        "hex(",
+        "instr(",
+        "max(1, 'a', NULL)",
+        "last_insert_rowid()",
+        "changes()",
+        "id",
+        "name",
+        "people",
+        "*",
+        "/",
+        "%",
+        "0",
+    ];
+    fuzz(&mut session, &fragments);
+    let error = run(
+        &mut session,
+        "SELECT replace(replace(printf('%1000s', ''), ' ', printf('%1000s', '')), ' ', printf('%1000s', '') || printf('%1000s', ''))",
+    )
+    .expect_err("about 2 GB");
+    assert_eq!(error.to_string(), "Error: string or blob too big");
+    assert_eq!(error.vendor_code(), Some(18));
+}
+
+#[test]
+fn sqlite_functions_stay_inside_the_sqlite_dialect() {
+    let store = MemoryStore::default();
+    let mut postgresql = Session::new(&store);
+    let error = run(&mut postgresql, "SELECT sqlite_upper('abc')").expect_err("postgresql");
+    assert_eq!(
+        error.message(),
+        "function sqlite_upper(text) does not exist"
+    );
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    let error = run(&mut mysql, "SELECT sqlite_typeof(1)").expect_err("mysql");
+    assert_eq!(
+        error.message(),
+        "FUNCTION eggdb.sqlite_typeof does not exist"
+    );
+    let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    for sql in ["SELECT sqlite_upper('abc')", "SELECT sqlite_truth(1)"] {
+        let error = run(&mut sqlite, sql).expect_err(sql);
+        assert!(
+            error.message().starts_with("no such function: sqlite_"),
+            "{sql}: {error}"
+        );
+    }
+    assert_eq!(
+        last(&mut sqlite, "SELECT upper('abc')"),
+        "upper('abc')\nABC\nSELECT 1"
+    );
+}
+
+#[test]
+fn sqlite_parameters_number_like_sqlite_and_unbound_ones_are_null() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    let prepared = session
+        .prepare("SELECT ?, ?5, :a, @b, :a, ?", &[])
+        .expect("prepares");
+    assert_eq!(prepared.parameter_count, 8);
+    let parameters: Vec<crate::Parameter> = ["one", "two", "three"]
+        .into_iter()
+        .map(|value| crate::Parameter {
+            declared_type: None,
+            value: Some(value.to_owned()),
+        })
+        .collect();
+    let mut rows = Vec::new();
+    session
+        .execute_prepared("SELECT ?, ?2, ?3, ?4", &parameters, &mut |result| {
+            rows.extend(result.rows);
+            true
+        })
+        .expect("runs");
+    assert_eq!(
+        rows,
+        vec![vec![
+            crate::Value::Text("one".into()),
+            crate::Value::Text("two".into()),
+            crate::Value::Text("three".into()),
+            crate::Value::Null,
+        ]]
+    );
+    let error = session
+        .prepare("SELECT ?40000", &[])
+        .expect_err("out of range");
+    assert_eq!(
+        error.to_string(),
+        "Error: variable number must be between ?1 and ?32766"
+    );
+}
+
+#[test]
+fn sqlite_errors_print_in_sqlite_style_with_result_codes() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    last(
+        &mut session,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, c TEXT NOT NULL)",
+    );
+    let cases = [
+        ("SELECT * FORM t", "near \"FORM\": syntax error", 1),
+        ("SELECT * FROM nowhere", "no such table: nowhere", 1),
+        ("CREATE TABLE t (x)", "table t already exists", 1),
+        (
+            "INSERT INTO t (id) VALUES (1)",
+            "NOT NULL constraint failed: t.c",
+            1299,
+        ),
+        (
+            "INSERT INTO t (nope) VALUES (1)",
+            "table t has no column named nope",
+            1,
+        ),
+    ];
+    for (sql, message, code) in cases {
+        let error = run(&mut session, sql).expect_err(sql);
+        assert_eq!(error.to_string(), format!("Error: {message}"), "{sql}");
+        assert_eq!(error.vendor_code(), Some(code), "{sql}");
+        assert_eq!(error.vendor(), Some(crate::Dialect::Sqlite), "{sql}");
+    }
+    last(&mut session, "INSERT INTO t VALUES (1, 'a')");
+    let error = run(&mut session, "INSERT INTO t VALUES (1, 'b')").expect_err("duplicate");
+    assert_eq!(error.message(), "UNIQUE constraint failed: t.id");
+    assert_eq!(
+        error.vendor_code().and_then(crate::sqlite_result_code_name),
+        Some("SQLITE_CONSTRAINT_PRIMARYKEY")
+    );
+}

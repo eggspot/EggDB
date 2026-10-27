@@ -2,7 +2,7 @@ use super::{Access, Session};
 use crate::cli::args::{CommandName, ExportFile, Format};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject, TimeStyle};
-use crate::cli::sql_store::DatabaseStore;
+use eggdb::sql::Store as DatabaseStore;
 use eggdb_pgwire::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError, MIN_SCRAM_ITERATIONS,
     SCRAM_SALT_BYTES, ScramVerifier, ServerConfig,

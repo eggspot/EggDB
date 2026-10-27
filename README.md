@@ -39,7 +39,8 @@ and `eggdb ui`, a full-screen terminal UI, and `eggdb sql` runs the first parts 
 dialect on the same file: tables, joins, `GROUP BY` with aggregates ([docs/sql.md](docs/sql.md)).
 `eggdb serve` serves the file to psql and PostgreSQL drivers, and with `--mysql-listen` to the
 `mysql` client and MySQL drivers in MySQL's SQL, on loopback only until EggDB has TLS, with one
-writer at a time. What is in it and what
+writer at a time. `eggdb sql --dialect sqlite` and the embedded API run SQLite's SQL on the same
+file. What is in it and what
 is not: [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md);
 what is tested and what is not: [docs/correctness.md](docs/correctness.md); the plan:
 [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).

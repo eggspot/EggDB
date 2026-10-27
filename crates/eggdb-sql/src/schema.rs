@@ -30,6 +30,15 @@ pub struct ColumnSchema {
 }
 
 impl TableSchema {
+    /// The `CREATE TABLE` statement that makes this table in `dialect`, ended by `;`:
+    /// SQLite's type names and `INTEGER PRIMARY KEY` in SQLite's, otherwise PostgreSQL's.
+    pub fn create_statement_in(&self, dialect: crate::Dialect) -> String {
+        match dialect {
+            crate::Dialect::Sqlite => format!("{};", crate::session::sqlite_create_text(self)),
+            _ => self.create_statement(),
+        }
+    }
+
     /// The `CREATE TABLE` statement that makes this table, ended by `;`.
     pub fn create_statement(&self) -> String {
         let mut parts: Vec<String> = self

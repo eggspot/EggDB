@@ -7,7 +7,6 @@ mod jsonl;
 mod output;
 mod render;
 mod reports;
-pub(crate) mod sql_store;
 mod ui;
 
 use args::{CommandName, Invocation};

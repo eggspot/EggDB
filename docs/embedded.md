@@ -157,6 +157,55 @@ fn main() -> eggdb::Result<()> {
 - A write transaction's scans include its own changes. A scan borrows its transaction, so
   nothing changes under it.
 
+## SQL
+`eggdb::sql` runs SQL on the same file, in PostgreSQL's, MySQL's or SQLite's dialect, all on
+the same tables ([sql.md](sql.md)). `db.sql_store()` gives the database as a SQL store, and
+`store.session(dialect)` a session on it; `execute` runs statements separated by semicolons and
+hands each result to a closure. The session's transactions are the database's write
+transactions, so a SQL `BEGIN` holds the one writer until `COMMIT` or `ROLLBACK`.
+
+```rust
+use eggdb::Database;
+use eggdb::sql::{Dialect, Parameter, Value};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    # let path = std::env::temp_dir().join(format!("eggdb-guide-sql-{}.db", std::process::id()));
+    let db = Database::open(&path)?;
+    let store = db.sql_store();
+    let mut sql = store.session(Dialect::Sqlite);
+    sql.execute(
+        "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+         INSERT INTO users (name) VALUES ('Ada'), ('Grace')",
+        &mut |_| {},
+    )?;
+    let mut names = Vec::new();
+    sql.execute("SELECT name FROM users ORDER BY id", &mut |result| {
+        names.extend(result.rows.into_iter().map(|row| row[0].clone()));
+    })?;
+    assert_eq!(names, vec![Value::Text("Ada".into()), Value::Text("Grace".into())]);
+    let second = [Parameter { declared_type: None, value: Some("2".into()) }];
+    let mut found = Vec::new();
+    sql.execute_prepared("SELECT name FROM users WHERE id = ?", &second, &mut |result| {
+        found.extend(result.rows);
+        true
+    })?;
+    assert_eq!(found, vec![vec![Value::Text("Grace".into())]]);
+    if let Err(error) = sql.execute("SELECT * FROM missing", &mut |_| {}) {
+        assert_eq!(error.to_string(), "Error: no such table: missing");
+        assert_eq!(error.vendor_code(), Some(1));
+    }
+    sql.close()?;
+    db.close()?;
+    # std::fs::remove_file(&path)?;
+    Ok(())
+}
+```
+
+`execute_prepared` binds parameter values as text, read as a constant of the type their place
+calls for; in SQLite's dialect a parameter left without a value is NULL, as in SQLite. Errors
+are `eggdb::sql::SqlError`s in the session's dialect: SQLite's message and extended result code
+here, MySQL's numbers in MySQL's, SQLSTATEs in all three.
+
 ## Durability
 | Mode | A commit returns after | A power loss can |
 |------|------------------------|------------------|

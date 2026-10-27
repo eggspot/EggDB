@@ -168,6 +168,7 @@ struct Report {
     hint: Option<String>,
     position: Option<usize>,
     vendor_code: Option<u16>,
+    vendor: Option<crate::Dialect>,
 }
 
 /// The result of SQL operations.
@@ -184,6 +185,7 @@ impl SqlError {
                 hint: None,
                 position: None,
                 vendor_code: None,
+                vendor: None,
             }),
         }
     }
@@ -222,16 +224,32 @@ impl SqlError {
         self
     }
 
-    /// The same error with a database's own error number, such as MySQL's `1146`.
+    /// The same error with a MySQL error number, such as `1146`.
     pub fn with_vendor_code(mut self, code: u16) -> Self {
         self.report.vendor_code = Some(code);
+        self.report.vendor = Some(crate::Dialect::MySql);
+        self
+    }
+
+    /// The same error with a SQLite extended result code, such as `1555`
+    /// (`SQLITE_CONSTRAINT_PRIMARYKEY`); [`crate::sqlite_result_code_name`] names it.
+    pub fn with_sqlite_code(mut self, code: u16) -> Self {
+        self.report.vendor_code = Some(code);
+        self.report.vendor = Some(crate::Dialect::Sqlite);
         self
     }
 
     /// The database's own error number, when the dialect has them: MySQL's `1146` for a
-    /// missing table, `1064` for a syntax error and so on.
+    /// missing table, SQLite's extended result code `1` (`SQLITE_ERROR`) for a syntax error,
+    /// and so on.
     pub fn vendor_code(&self) -> Option<u16> {
         self.report.vendor_code
+    }
+
+    /// The dialect whose numbering [`SqlError::vendor_code`] follows: MySQL's error numbers
+    /// or SQLite's result codes.
+    pub fn vendor(&self) -> Option<crate::Dialect> {
+        self.report.vendor
     }
 
     /// The SQLSTATE code.
@@ -263,6 +281,9 @@ impl SqlError {
 
 impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.report.vendor == Some(crate::Dialect::Sqlite) {
+            return write!(f, "Error: {}", self.report.message);
+        }
         if let Some(code) = self.report.vendor_code {
             return write!(
                 f,

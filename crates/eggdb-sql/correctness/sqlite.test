@@ -1,0 +1,892 @@
+chapter "CREATE TABLE", "ROWIDs and the INTEGER PRIMARY KEY"
+ok
+CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)
+
+rows
+INSERT INTO users (name, age) VALUES ('ann', 31), ('bob', NULL)
+----
+INSERT 0 2
+
+rows
+SELECT last_insert_rowid()
+----
+last_insert_rowid()
+2
+SELECT 1
+
+rows
+SELECT id, name, age FROM users ORDER BY id
+----
+id|name|age
+1|ann|31
+2|bob|NULL
+SELECT 2
+
+rows
+INSERT INTO users VALUES (10, 'cy', 20)
+----
+INSERT 0 1
+
+rows
+SELECT last_insert_rowid()
+----
+last_insert_rowid()
+10
+SELECT 1
+
+rows
+INSERT INTO users (id, name) VALUES (NULL, 'di')
+----
+INSERT 0 1
+
+rows
+SELECT id FROM users WHERE name = 'di'
+----
+id
+11
+SELECT 1
+
+rows
+SELECT changes(), total_changes()
+----
+changes()|total_changes()
+1|4
+SELECT 1
+
+error 23505 1555
+INSERT INTO users VALUES (1, 'dup', 0)
+
+error 23502 1299
+INSERT INTO users (age) VALUES (5)
+
+ok
+CREATE TABLE IF NOT EXISTS users (x)
+
+error 42P07 1
+CREATE TABLE users (x)
+
+ok
+CREATE TABLE "Mixed Case" ([first col] TEXT, `second` INTEGER)
+
+rows
+SELECT "FIRST COL", [Second] FROM [mixed case]
+----
+first col|second
+SELECT 0
+
+ok
+CREATE TABLE counters (name TEXT PRIMARY KEY, hits INTEGER DEFAULT 0) WITHOUT ROWID
+
+ok
+CREATE TABLE seq (id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT)
+
+rows
+INSERT INTO seq (note) VALUES ('a'), ('b')
+----
+INSERT 0 2
+
+rows
+SELECT * FROM seq
+----
+id|note
+1|a
+2|b
+SELECT 2
+
+error 42P16 1
+CREATE TABLE bad (id INT PRIMARY KEY AUTOINCREMENT)
+
+ok
+CREATE TABLE strict_table (a INTEGER, b TEXT) STRICT
+
+ok
+CREATE TABLE children (id INTEGER PRIMARY KEY, parent INTEGER REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (parent) REFERENCES users(id))
+
+ok
+DROP TABLE children
+
+ok
+DROP TABLE IF EXISTS children
+
+error 42P01 1
+DROP TABLE children
+
+chapter "Datatypes In SQLite": type affinity
+ok
+CREATE TABLE affinity (i INTEGER, t TEXT, r REAL, n NUMERIC, v VARCHAR(3), f FLOAT, d DOUBLE PRECISION, c CHARACTER(20), b BOOLEAN)
+
+rows
+INSERT INTO affinity VALUES (1, 'one', 1.5, 2.5, 'longer than three', 2, 3, 'c', TRUE)
+----
+INSERT 0 1
+
+rows
+SELECT typeof(i), typeof(t), typeof(r), typeof(v), typeof(f), typeof(b) FROM affinity
+----
+typeof(i)|typeof(t)|typeof(r)|typeof(v)|typeof(f)|typeof(b)
+integer|text|real|text|real|integer
+SELECT 1
+
+rows
+SELECT v, f, d, b FROM affinity
+----
+v|f|d|b
+longer than three|2.0|3.0|1
+SELECT 1
+
+rows
+INSERT INTO affinity (i, t) VALUES ('42', 42)
+----
+INSERT 0 1
+
+rows
+SELECT typeof(i), i, typeof(t), t FROM affinity WHERE i = 42
+----
+typeof(i)|i|typeof(t)|t
+integer|42|text|42
+SELECT 1
+
+rows
+SELECT typeof(1), typeof(1.0), typeof('x'), typeof(NULL), typeof(1 < 2)
+----
+typeof(1)|typeof(1.0)|typeof('x')|typeof(NULL)|typeof(1 < 2)
+integer|real|text|null|integer
+SELECT 1
+
+rows
+SELECT n FROM affinity WHERE i = 1
+----
+n
+2.5
+SELECT 1
+
+rows
+INSERT INTO affinity (n) VALUES (7)
+----
+INSERT 0 1
+
+rows
+SELECT n, typeof(n) FROM affinity WHERE n = 7
+----
+n|typeof(n)
+7|integer
+SELECT 1
+... differs
+
+rows
+INSERT INTO affinity (i) VALUES ('abc')
+----
+INSERT 0 1
+... differs
+
+ok
+CREATE TABLE untyped (a, b)
+
+rows
+INSERT INTO untyped VALUES (1.5, -2.5)
+----
+INSERT 0 1
+
+rows
+SELECT a, b, a || b FROM untyped
+----
+a|b|a || b
+1.5|-2.5|1.5-2.5
+SELECT 1
+
+chapter "SQL Language Expressions": literals, operators and NULL
+rows
+SELECT 1 + 2 * 3, 7 / 2, 7 % 3, 7.0 / 2
+----
+1 + 2 * 3|7 / 2|7 % 3|7.0 / 2
+7|3|1|3.5
+SELECT 1
+
+rows
+SELECT 1 / 0, 5 % 0
+----
+1 / 0|5 % 0
+NULL|NULL
+SELECT 1
+
+rows
+SELECT 'a' || 'b' || 1
+----
+'a' || 'b' || 1
+ab1
+SELECT 1
+
+rows
+SELECT 1 == 1, 1 = 2, 1 <> 2, 1 != 1
+----
+1 == 1|1 = 2|1 <> 2|1 != 1
+1|0|1|0
+SELECT 1
+
+rows
+SELECT TRUE, FALSE, NOT 0, NOT 5
+----
+TRUE|FALSE|NOT 0|NOT 5
+1|0|1|0
+SELECT 1
+
+rows
+SELECT NULL IS NULL, 1 IS 1, NULL IS 1, 2 IS NOT 3
+----
+NULL IS NULL|1 IS 1|NULL IS 1|2 IS NOT 3
+1|1|0|1
+SELECT 1
+
+rows
+SELECT 1 AND 0, 1 OR 0, NULL AND 0, NULL OR 1
+----
+1 AND 0|1 OR 0|NULL AND 0|NULL OR 1
+0|1|0|1
+SELECT 1
+
+rows
+SELECT 5 BETWEEN 1 AND 10, 3 IN (1, 2, 3), 4 NOT IN (1, 2)
+----
+5 BETWEEN 1 AND 10|3 IN (1, 2, 3)|4 NOT IN (1, 2)
+1|1|1
+SELECT 1
+
+rows
+SELECT 'Hello' LIKE 'hello', 'abc' LIKE 'a%', 'abc' LIKE 'a_c', 'abc' NOT LIKE 'b%'
+----
+'Hello' LIKE 'hello'|'abc' LIKE 'a%'|'abc' LIKE 'a_c'|'abc' NOT LIKE 'b%'
+1|1|1|1
+SELECT 1
+
+rows
+SELECT 'Hello' GLOB 'H*', 'Hello' GLOB 'h*', 'abc' GLOB 'a?c', 'abc' NOT GLOB 'x*'
+----
+'Hello' GLOB 'H*'|'Hello' GLOB 'h*'|'abc' GLOB 'a?c'|'abc' NOT GLOB 'x*'
+1|0|1|1
+SELECT 1
+
+rows
+SELECT CASE WHEN 1 THEN 'yes' ELSE 'no' END, CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' END
+----
+CASE WHEN 1 THEN 'yes' ELSE 'no' END|CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' END
+yes|two
+SELECT 1
+
+rows
+SELECT CAST('12' AS INTEGER) + 1, CAST(3 AS TEXT) || 'x', CAST(1 AS REAL)
+----
+CAST('12' AS INTEGER) + 1|CAST(3 AS TEXT) || 'x'|CAST(1 AS REAL)
+13|3x|1.0
+SELECT 1
+
+rows
+SELECT 0.1 + 0.2, 1e20, 1.0 / 3, 100.0
+----
+0.1 + 0.2|1e20|1.0 / 3|100.0
+0.3|1.0e+20|0.333333333333333|100.0
+SELECT 1
+
+rows
+SELECT -9223372036854775808, 9223372036854775807
+----
+-9223372036854775808|9223372036854775807
+-9223372036854775808|9223372036854775807
+SELECT 1
+
+rows
+SELECT 1 AS "a b", 2 b, 3 'c'
+----
+a b|b|c
+1|2|3
+SELECT 1
+
+error 42601 1
+SELECT 1 FORM users
+
+error 42601 1
+SELECT
+
+error 42601 1
+SELECT 'unterminated
+
+error 42P01 1
+SELECT * FROM missing
+
+error 42703 1
+SELECT nope FROM users
+
+error 42883 1
+SELECT nosuchfunction(1)
+
+error 42883 1
+SELECT substr()
+
+chapter "Built-In Scalar SQL Functions"
+rows
+SELECT ifnull(NULL, 'x'), coalesce(NULL, NULL, 3), nullif(1, 1), nullif(1, 2)
+----
+ifnull(NULL, 'x')|coalesce(NULL, NULL, 3)|nullif(1, 1)|nullif(1, 2)
+x|3|NULL|1
+SELECT 1
+
+rows
+SELECT iif(1 > 2, 'a', 'b'), iif(NULL, 'a', 'b')
+----
+iif(1 > 2, 'a', 'b')|iif(NULL, 'a', 'b')
+b|b
+SELECT 1
+
+rows
+SELECT length('héllo'), length(12345), length(NULL)
+----
+length('héllo')|length(12345)|length(NULL)
+5|5|NULL
+SELECT 1
+
+rows
+SELECT substr('hello', 2, 3), substr('hello', -3), substring('hello', 0, 2), substr('hello', 4, -2)
+----
+substr('hello', 2, 3)|substr('hello', -3)|substring('hello', 0, 2)|substr('hello', 4, -2)
+ell|llo|h|el
+SELECT 1
+
+rows
+SELECT upper('abc'), lower('ABC'), upper('é')
+----
+upper('abc')|lower('ABC')|upper('é')
+ABC|abc|é
+SELECT 1
+
+rows
+SELECT trim('  x  '), ltrim('  x'), rtrim('x  '), trim('xxaxx', 'x')
+----
+trim('  x  ')|ltrim('  x')|rtrim('x  ')|trim('xxaxx', 'x')
+x|x|x|a
+SELECT 1
+
+rows
+SELECT replace('banana', 'an', 'AN'), replace('abc', '', 'x'), instr('banana', 'nan'), instr('abc', 'z')
+----
+replace('banana', 'an', 'AN')|replace('abc', '', 'x')|instr('banana', 'nan')|instr('abc', 'z')
+bANANa|abc|3|0
+SELECT 1
+
+rows
+SELECT abs(-5), abs(-2.5), abs(NULL)
+----
+abs(-5)|abs(-2.5)|abs(NULL)
+5|2.5|NULL
+SELECT 1
+
+rows
+SELECT round(2.5), round(-2.5), round(3.14159, 2), round(7)
+----
+round(2.5)|round(-2.5)|round(3.14159, 2)|round(7)
+3.0|-3.0|3.14|7.0
+SELECT 1
+
+rows
+SELECT max(1, 5, 3), min(4, 2, 8), max(1, NULL), min('b', 'a')
+----
+max(1, 5, 3)|min(4, 2, 8)|max(1, NULL)|min('b', 'a')
+5|2|NULL|a
+SELECT 1
+
+rows
+SELECT typeof(random())
+----
+typeof(random())
+integer
+SELECT 1
+
+rows
+SELECT hex('abc'), hex(10), hex(NULL)
+----
+hex('abc')|hex(10)|hex(NULL)
+616263|3130|
+SELECT 1
+
+rows
+SELECT quote('it''s'), quote(5), quote(NULL), quote(1.5)
+----
+quote('it''s')|quote(5)|quote(NULL)|quote(1.5)
+'it''s'|5|NULL|1.5
+SELECT 1
+
+rows
+SELECT printf('%d items at %.2f', 3, 9.5), format('%5s|%-5s|', 'ab', 'cd'), printf('%05d', 42)
+----
+printf('%d items at %.2f', 3, 9.5)|format('%5s|%-5s|', 'ab', 'cd')|printf('%05d', 42)
+3 items at 9.50|   ab|cd   ||00042
+SELECT 1
+
+rows
+SELECT printf('%q', 'it''s'), printf('%Q', NULL), printf('%x', 255), printf('%%')
+----
+printf('%q', 'it''s')|printf('%Q', NULL)|printf('%x', 255)|printf('%%')
+it''s|NULL|ff|%
+SELECT 1
+
+rows
+SELECT like('a%', 'ABC'), glob('a*', 'ABC')
+----
+like('a%', 'ABC')|glob('a*', 'ABC')
+1|0
+SELECT 1
+
+rows
+SELECT sqlite_version()
+----
+sqlite_version()
+3.46.0
+SELECT 1
+
+error 42883 1
+SELECT ifnull(1)
+
+rows
+SELECT date('now') IS NOT NULL
+----
+date('now') IS NOT NULL
+1
+SELECT 1
+... differs
+
+chapter "SELECT": filtering, grouping, ordering and LIMIT
+ok
+CREATE TABLE items (id INTEGER PRIMARY KEY, kind TEXT, price REAL, active INTEGER)
+
+rows
+INSERT INTO items (kind, price, active) VALUES ('a', 1.5, 1), ('b', 2.0, 0), ('a', 3.0, 1), ('c', NULL, 1), ('b', 4.5, 1)
+----
+INSERT 0 5
+
+rows
+SELECT id FROM items WHERE active ORDER BY id
+----
+id
+1
+3
+4
+5
+SELECT 4
+
+rows
+SELECT id FROM items WHERE NOT active
+----
+id
+2
+SELECT 1
+
+rows
+SELECT kind, count(*), sum(price), avg(price), min(price), max(price) FROM items GROUP BY kind ORDER BY kind
+----
+kind|count(*)|sum(price)|avg(price)|min(price)|max(price)
+a|2|4.5|2.25|1.5|3.0
+b|2|6.5|3.25|2.0|4.5
+c|1|NULL|NULL|NULL|NULL
+SELECT 3
+
+rows
+SELECT kind, count(*) AS n FROM items GROUP BY kind HAVING count(*) > 1 ORDER BY n DESC, kind
+----
+kind|n
+a|2
+b|2
+SELECT 2
+
+rows
+SELECT id FROM items ORDER BY id LIMIT 2 OFFSET 1
+----
+id
+2
+3
+SELECT 2
+
+rows
+SELECT id FROM items ORDER BY id LIMIT 1, 2
+----
+id
+2
+3
+SELECT 2
+
+rows
+SELECT id FROM items ORDER BY id LIMIT -1 OFFSET 3
+----
+id
+4
+5
+SELECT 2
+
+rows
+SELECT DISTINCT kind FROM items ORDER BY kind DESC
+----
+kind
+c
+b
+a
+SELECT 3
+
+rows
+SELECT count(*) FROM items WHERE price IS NULL
+----
+count(*)
+1
+SELECT 1
+
+rows
+SELECT i.id, u.name FROM items i JOIN users u ON u.id = i.id ORDER BY i.id
+----
+id|name
+1|ann
+2|bob
+SELECT 2
+
+rows
+SELECT count(*) FROM items, users
+----
+count(*)
+20
+SELECT 1
+
+rows
+SELECT id FROM items WHERE kind = ?
+----
+id
+SELECT 0
+
+rows
+SELECT ?1, :name, @other, $third
+----
+?1|:name|@other|$third
+NULL|NULL|NULL|NULL
+SELECT 1
+
+chapter "INSERT", "The ON CONFLICT Clause", "UPSERT", "REPLACE"
+ok
+CREATE TABLE kv (k TEXT PRIMARY KEY, v INTEGER NOT NULL)
+
+rows
+INSERT INTO kv VALUES ('a', 1), ('b', 2)
+----
+INSERT 0 2
+
+rows
+INSERT OR IGNORE INTO kv VALUES ('a', 100), ('c', 3)
+----
+INSERT 0 1
+
+rows
+INSERT OR REPLACE INTO kv VALUES ('a', 10)
+----
+INSERT 0 2
+
+rows
+REPLACE INTO kv VALUES ('b', 20)
+----
+INSERT 0 2
+
+rows
+SELECT * FROM kv ORDER BY k
+----
+k|v
+a|10
+b|20
+c|3
+SELECT 3
+
+rows
+INSERT INTO kv VALUES ('a', 5) ON CONFLICT (k) DO UPDATE SET v = v + excluded.v
+----
+INSERT 0 2
+
+rows
+INSERT INTO kv VALUES ('d', 4) ON CONFLICT DO NOTHING
+----
+INSERT 0 1
+
+rows
+INSERT INTO kv VALUES ('d', 40) ON CONFLICT(k) DO NOTHING
+----
+INSERT 0 0
+
+rows
+SELECT k, v FROM kv WHERE k IN ('a', 'd') ORDER BY k
+----
+k|v
+a|15
+d|4
+SELECT 2
+
+error 23505 1555
+INSERT OR ABORT INTO kv VALUES ('a', 0)
+
+error 23505 1555
+INSERT OR FAIL INTO kv VALUES ('a', 0)
+
+rows
+INSERT INTO kv (k, v) VALUES ('e', 5) RETURNING k, v * 2
+----
+k|v * 2
+e|10
+INSERT 0 1
+
+error 23502 1299
+INSERT INTO kv DEFAULT VALUES
+
+chapter "UPDATE", "DELETE"
+rows
+UPDATE kv SET v = v + 1 WHERE k = 'e'
+----
+UPDATE 1
+
+rows
+SELECT changes()
+----
+changes()
+1
+SELECT 1
+
+rows
+DELETE FROM kv WHERE v > 10
+----
+DELETE 2
+
+rows
+SELECT changes()
+----
+changes()
+2
+SELECT 1
+
+rows
+UPDATE kv SET v = 0 WHERE k = 'none'
+----
+UPDATE 0
+
+error 23502 1299
+UPDATE kv SET v = NULL
+
+chapter "BEGIN TRANSACTION", "COMMIT", "ROLLBACK"
+rows
+BEGIN DEFERRED TRANSACTION
+----
+BEGIN
+
+rows
+INSERT INTO kv VALUES ('t1', 1)
+----
+INSERT 0 1
+
+error 23505 1555
+INSERT INTO kv VALUES ('t1', 2)
+
+rows
+SELECT count(*) FROM kv WHERE k = 't1'
+----
+count(*)
+1
+SELECT 1
+
+rows
+ROLLBACK
+----
+ROLLBACK
+
+rows
+SELECT count(*) FROM kv WHERE k = 't1'
+----
+count(*)
+0
+SELECT 1
+
+rows
+BEGIN IMMEDIATE
+----
+BEGIN
+
+error 25001 1
+BEGIN EXCLUSIVE
+
+rows
+INSERT INTO kv VALUES ('t2', 2)
+----
+INSERT 0 1
+
+rows
+END TRANSACTION
+----
+COMMIT
+
+rows
+SELECT v FROM kv WHERE k = 't2'
+----
+v
+2
+SELECT 1
+
+error 25P01 1
+COMMIT
+
+error 25P01 1
+ROLLBACK
+
+rows
+BEGIN
+----
+BEGIN
+
+rows
+INSERT INTO kv VALUES ('t3', 3)
+----
+INSERT 0 1
+
+error 23505 1555
+INSERT OR ROLLBACK INTO kv VALUES ('t2', 0)
+
+rows
+SELECT count(*) FROM kv WHERE k = 't3'
+----
+count(*)
+0
+SELECT 1
+
+error 25P01 1
+COMMIT
+
+chapter "The Schema Table", "PRAGMA Statements"
+rows
+SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name = 'kv'
+----
+type|name|tbl_name|sql
+table|kv|kv|CREATE TABLE kv (k TEXT PRIMARY KEY, v INTEGER NOT NULL)
+SELECT 1
+
+rows
+SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name LIKE 'item%'
+----
+count(*)
+1
+SELECT 1
+
+rows
+SELECT name FROM sqlite_temp_master
+----
+name
+SELECT 0
+
+rows
+SELECT typeof(rootpage) FROM sqlite_schema WHERE name = 'users'
+----
+typeof(rootpage)
+integer
+SELECT 1
+
+rows
+PRAGMA table_info(users)
+----
+cid|name|type|notnull|dflt_value|pk
+0|id|INTEGER|0|NULL|1
+1|name|TEXT|1|NULL|0
+2|age|INTEGER|0|NULL|0
+SELECT 3
+
+rows
+PRAGMA table_info('items')
+----
+cid|name|type|notnull|dflt_value|pk
+0|id|INTEGER|0|NULL|1
+1|kind|TEXT|0|NULL|0
+2|price|REAL|0|NULL|0
+3|active|INTEGER|0|NULL|0
+SELECT 4
+
+rows
+PRAGMA table_info('KV')
+----
+cid|name|type|notnull|dflt_value|pk
+0|k|TEXT|0|NULL|1
+1|v|INTEGER|1|NULL|0
+SELECT 2
+
+error 42P16 1
+CREATE TABLE sqlite_master (x)
+
+error 42P16 1
+CREATE TABLE IF NOT EXISTS sqlite_stuff (x)
+
+rows
+PRAGMA table_info(missing)
+----
+cid|name|type|notnull|dflt_value|pk
+SELECT 0
+
+rows
+PRAGMA main.table_info(counters)
+----
+cid|name|type|notnull|dflt_value|pk
+0|name|TEXT|0|NULL|1
+1|hits|INTEGER|0|0|0
+SELECT 2
+
+rows
+PRAGMA table_list(kv)
+----
+schema|name|type|ncol|wr|strict
+main|kv|table|2|0|0
+SELECT 1
+
+rows
+PRAGMA foreign_keys
+----
+foreign_keys
+0
+SELECT 1
+
+ok
+PRAGMA foreign_keys = ON
+
+rows
+PRAGMA foreign_keys
+----
+foreign_keys
+1
+SELECT 1
+
+ok
+PRAGMA user_version = 7
+
+rows
+PRAGMA user_version
+----
+user_version
+7
+SELECT 1
+
+rows
+PRAGMA journal_mode = WAL
+----
+journal_mode
+wal
+SELECT 1
+
+ok
+PRAGMA synchronous = NORMAL
+
+rows
+PRAGMA synchronous
+----
+synchronous
+1
+SELECT 1
+
+ok
+PRAGMA no_such_pragma
+
+rows
+PRAGMA encoding
+----
+encoding
+UTF-8
+SELECT 1

@@ -142,6 +142,7 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
                 .then_some(first_type)
         }
         ExprKind::Function { name, arguments } => function_type(name, arguments, scope),
+        ExprKind::SqliteFunction { .. } => None,
         ExprKind::Aggregate { .. } => None,
     }
 }

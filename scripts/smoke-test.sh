@@ -123,6 +123,12 @@ expect_exit 2 "$eggdb" sql shop.db -c "SELECT 1" extra.sql
 expect_exit 0 "$eggdb" check shop.db
 pass "sql: create, script, stdin, a join with GROUP BY, errors, a rolled-back block, usage"
 
+expect_exit 0 "$eggdb" sql --dialect sqlite shop.db -c "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('a'), ('b'); INSERT OR REPLACE INTO notes VALUES (1, 'c')"
+expect_output '2|b' sh -c "\"$eggdb\" sql --dialect sqlite shop.db -c 'SELECT id, body FROM notes WHERE NOT id - 2' | sed -n 3p | tr -d ' '"
+expect_exit 3 "$eggdb" sql --dialect sqlite shop.db -c "SELECT * FROM nowhere"
+grep -q 'Error: no such table: nowhere' last.err || fail "eggdb sql --dialect sqlite error said $(cat last.err)"
+pass "sql --dialect sqlite: row ids, OR REPLACE, integer conditions, SQLite's errors"
+
 expect_exit 2 env -u EGGDB_PASSWORD "$eggdb" serve shop.db
 grep -q 'serve needs a password' last.err || fail "eggdb serve without a password said $(cat last.err)"
 expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 0.0.0.0:5432

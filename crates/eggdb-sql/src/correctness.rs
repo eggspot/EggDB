@@ -3,9 +3,10 @@ use crate::memory_store::MemoryStore;
 use crate::session::{QueryResult, Session};
 use crate::tests::render;
 
-const SUITES: [(&str, &str); 2] = [
+const SUITES: [(&str, &str); 3] = [
     ("postgresql", include_str!("../correctness/postgresql.test")),
     ("mysql", include_str!("../correctness/mysql.test")),
+    ("sqlite", include_str!("../correctness/sqlite.test")),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +202,21 @@ fn the_mysql_dialect_behaves_as_its_reference_manual_documents() {
     match run_suite("mysql") {
         Ok((cases, differences)) => {
             assert!(cases >= 60, "only {cases} cases");
+            assert!(differences * 10 < cases, "{differences} known differences");
+        }
+        Err(problems) => panic!(
+            "{} cases disagree:\n{}",
+            problems.len(),
+            problems.join("\n")
+        ),
+    }
+}
+
+#[test]
+fn the_sqlite_dialect_behaves_as_its_documentation_describes() {
+    match run_suite("sqlite") {
+        Ok((cases, differences)) => {
+            assert!(cases >= 80, "only {cases} cases");
             assert!(differences * 10 < cases, "{differences} known differences");
         }
         Err(problems) => panic!(

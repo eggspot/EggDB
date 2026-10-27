@@ -561,6 +561,7 @@ pub(crate) fn insert(
     };
     result.warnings = warnings;
     result.last_insert_id = stored.first_generated;
+    result.last_insert_rowid = stored.last_rowid;
     Ok(result)
 }
 
@@ -615,6 +616,7 @@ struct StoredRows<'a> {
     auto_increment: Option<usize>,
     next_auto_value: Option<i64>,
     first_generated: Option<u64>,
+    last_rowid: Option<i64>,
 }
 
 enum NextRowId {
@@ -635,6 +637,7 @@ impl<'a> StoredRows<'a> {
             auto_increment: table.auto_increment_column(),
             next_auto_value: None,
             first_generated: None,
+            last_rowid: None,
         }
     }
 
@@ -761,12 +764,17 @@ impl<'a> StoredRows<'a> {
                 .map_or(NextRowId::Exhausted, NextRowId::Next);
             self.key.extend_from_slice(&id.to_be_bytes());
             writer.put(&self.key, &self.encoded)?;
+            self.last_rowid = i64::try_from(id).ok();
             return Ok(true);
         }
         for &index in &table.primary_key {
             encode_key_value(&mut self.key, &row[index]);
         }
-        writer.put_if_absent(&self.key, &self.encoded)
+        let inserted = writer.put_if_absent(&self.key, &self.encoded)?;
+        if inserted && let Some(index) = self.auto_increment {
+            self.last_rowid = row[index].as_integer();
+        }
+        Ok(inserted)
     }
 }
 
@@ -825,6 +833,7 @@ pub(crate) fn insert_literals(
     }
     let mut result = QueryResult::command(format!("INSERT 0 {}", insert.rows));
     result.last_insert_id = stored.first_generated;
+    result.last_insert_rowid = stored.last_rowid;
     Ok(result)
 }
 

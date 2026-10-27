@@ -1,4 +1,8 @@
 mod mysql;
+mod sqlite;
+
+pub use sqlite::SQLITE_COMPATIBLE_VERSION;
+pub(crate) use sqlite::is_schema_table;
 
 use crate::ast::{
     AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, Expr, ExprKind,
@@ -238,15 +242,22 @@ impl<'t> Parser<'t> {
         self.dialect == Dialect::MySql
     }
 
+    fn sqlite(&self) -> bool {
+        self.dialect == Dialect::Sqlite
+    }
+
     fn reserved(&self, word: &str) -> bool {
         match self.dialect {
             Dialect::PostgreSql => is_reserved(word),
             Dialect::MySql => mysql::is_reserved(word),
+            Dialect::Sqlite => sqlite::is_reserved(word),
         }
     }
 
     fn clause_word(&self, word: &str) -> bool {
-        is_clause_word(word) || self.mysql() && mysql::is_clause_word(word)
+        is_clause_word(word)
+            || self.mysql() && mysql::is_clause_word(word)
+            || self.sqlite() && sqlite::is_clause_word(word)
     }
 
     pub(crate) fn with_context(
@@ -318,9 +329,16 @@ impl<'t> Parser<'t> {
                         tokens.get(at + 1)?.kind,
                         TokenKind::Integer(_) | TokenKind::Decimal(_)
                     )
+                    && !(self.sqlite() && matches!(tokens.get(at + 1)?.kind, TokenKind::Decimal(_)))
                 {
                     at += 2;
-                } else if is_plain_literal(&tokens.get(at)?.kind) {
+                } else if is_plain_literal(&tokens.get(at)?.kind)
+                    && !(self.sqlite()
+                        && matches!(
+                            tokens.get(at)?.kind,
+                            TokenKind::Word(_) | TokenKind::Decimal(_)
+                        ))
+                {
                     at += 1;
                 } else {
                     return None;
@@ -477,6 +495,18 @@ impl<'t> Parser<'t> {
             self.check_database(&name)?;
             return Ok(table);
         }
+        if self.sqlite() && self.peek_kind() == &TokenKind::Dot {
+            self.at += 1;
+            let table = self.name()?;
+            if name.text != "main" {
+                return Err(SqlError::new(
+                    SqlState::INVALID_CATALOG_NAME,
+                    format!("unknown database {}", name.text),
+                )
+                .at(name.position));
+            }
+            return Ok(table);
+        }
         if self.peek_kind() == &TokenKind::Dot {
             if name.text == "public" {
                 self.at += 1;
@@ -493,6 +523,11 @@ impl<'t> Parser<'t> {
     fn statement_body(&mut self) -> SqlResult<Statement> {
         if self.mysql()
             && let Some(statement) = self.mysql_statement()?
+        {
+            return Ok(statement);
+        }
+        if self.sqlite()
+            && let Some(statement) = self.sqlite_statement()?
         {
             return Ok(statement);
         }
@@ -846,8 +881,10 @@ impl<'t> Parser<'t> {
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
         let mut primary_key = None;
+        let mut integer_columns = Vec::new();
         loop {
-            if self.is_word("primary") || self.is_word("constraint") {
+            if self.sqlite() && self.sqlite_ignored_table_constraint()? {
+            } else if self.is_word("primary") || self.is_word("constraint") {
                 let position = self.position();
                 if self.take_word("constraint") {
                     self.name()?;
@@ -859,6 +896,9 @@ impl<'t> Parser<'t> {
                         return Err(multiple_primary_keys(&name, position));
                     }
                     primary_key = Some((key, position));
+                    if self.sqlite() {
+                        self.sqlite_conflict_clause()?;
+                    }
                 } else {
                     return Err(self.table_constraint_not_supported());
                 }
@@ -870,6 +910,10 @@ impl<'t> Parser<'t> {
                 || self.is_word("like")
             {
                 return Err(self.table_constraint_not_supported());
+            } else if self.sqlite() {
+                let (column, exact_integer) = self.sqlite_column_definition()?;
+                integer_columns.push(exact_integer);
+                columns.push(column);
             } else {
                 columns.push(self.column_definition()?);
             }
@@ -880,6 +924,9 @@ impl<'t> Parser<'t> {
         self.expect(&TokenKind::RightParen)?;
         if self.mysql() {
             self.mysql_table_options()?;
+        }
+        if self.sqlite() {
+            self.sqlite_table_finish(&name, &mut columns, &primary_key, &integer_columns)?;
         }
         if self.is_word("partition") || self.is_word("inherits") || self.is_word("with") {
             return Err(self.not_supported("table options"));
@@ -955,6 +1002,9 @@ impl<'t> Parser<'t> {
     pub(crate) fn sql_type(&mut self) -> SqlResult<SqlType> {
         if self.mysql() {
             return self.mysql_type();
+        }
+        if self.sqlite() {
+            return self.sqlite_type().map(|(sql_type, _)| sql_type);
         }
         let token = self.peek();
         let word: &str = match &token.kind {
@@ -1103,11 +1153,17 @@ impl<'t> Parser<'t> {
         } else {
             OnDuplicate::Fail
         };
+        let mut rollback_on_conflict = false;
         if self.mysql() {
             if !replace && self.take_word("ignore") {
                 on_duplicate = OnDuplicate::Ignore;
             }
             self.take_word("into");
+        } else if self.sqlite() {
+            if !replace && self.take_word("or") {
+                (on_duplicate, rollback_on_conflict) = self.sqlite_conflict_resolution()?;
+            }
+            self.expect_word("into")?;
         } else {
             self.expect_word("into")?;
         }
@@ -1152,6 +1208,9 @@ impl<'t> Parser<'t> {
         if self.mysql() && self.is_word("on") {
             on_duplicate = self.on_duplicate_key_update(on_duplicate)?;
         }
+        if self.sqlite() && self.is_word("on") {
+            on_duplicate = self.sqlite_upsert()?;
+        }
         if self.is_word("on") {
             return Err(self.not_supported("ON CONFLICT"));
         }
@@ -1166,6 +1225,7 @@ impl<'t> Parser<'t> {
             source,
             returning,
             on_duplicate,
+            rollback_on_conflict,
         }))
     }
 
@@ -1240,7 +1300,8 @@ impl<'t> Parser<'t> {
             if self.is_word("current") {
                 return Err(self.not_supported("WHERE CURRENT OF"));
             }
-            Ok(Some(self.expression()?))
+            let condition = self.expression()?;
+            Ok(Some(self.condition(condition)))
         } else {
             Ok(None)
         }
@@ -1255,7 +1316,12 @@ impl<'t> Parser<'t> {
         if !distinct {
             self.take_word("all");
         }
-        let items = if self.is_clause_end() {
+        let called = matches!(self.peek_kind(), TokenKind::Word(_))
+            && self.peek_kind_at(1) == &TokenKind::LeftParen;
+        let items = if self.is_clause_end() && !(self.sqlite() && called) {
+            if self.sqlite() {
+                return Err(self.unexpected());
+            }
             Vec::new()
         } else {
             self.select_items()?
@@ -1280,7 +1346,8 @@ impl<'t> Parser<'t> {
             Vec::new()
         };
         let having = if self.take_word("having") {
-            Some(self.expression()?)
+            let condition = self.expression()?;
+            Some(self.condition(condition))
         } else {
             None
         };
@@ -1344,7 +1411,7 @@ impl<'t> Parser<'t> {
                 } else {
                     self.expression()?
                 });
-                if self.mysql() && self.take(&TokenKind::Comma) {
+                if (self.mysql() || self.sqlite()) && self.take(&TokenKind::Comma) {
                     if offset.is_some() {
                         return Err(self.unexpected());
                     }
@@ -1367,6 +1434,10 @@ impl<'t> Parser<'t> {
             } else {
                 break;
             }
+        }
+        if self.sqlite() {
+            limit = limit.map(sqlite::without_negative_limit);
+            offset = offset.map(sqlite::without_negative_offset);
         }
         Ok(Select {
             distinct,
@@ -1421,7 +1492,8 @@ impl<'t> Parser<'t> {
                 JoinKind::Comma | JoinKind::Cross => JoinCondition::Always,
                 JoinKind::Inner | JoinKind::Left => {
                     if self.take_word("on") {
-                        JoinCondition::On(self.expression()?)
+                        let condition = self.expression()?;
+                        JoinCondition::On(self.condition(condition))
                     } else if self.take_word("using") {
                         let names = self.name_list()?;
                         if self.is_word("as") {
@@ -1506,14 +1578,14 @@ impl<'t> Parser<'t> {
         let alias = if self.take_word("as")
             || matches!(self.peek_kind(), TokenKind::Word(word) if !self.reserved(word) && !self.clause_word(word))
             || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_))
-            || self.mysql() && matches!(self.peek_kind(), TokenKind::String(_))
+            || (self.mysql() || self.sqlite()) && matches!(self.peek_kind(), TokenKind::String(_))
         {
             Some(self.label()?)
         } else if self.mysql()
             && let ExprKind::Literal(Literal::String(text)) = &expr.kind
         {
             Some(text.clone())
-        } else if self.mysql() && !matches!(expr.kind, ExprKind::Column { .. }) {
+        } else if (self.mysql() || self.sqlite()) && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(self.source_text(first_token))
         } else {
             None
@@ -1529,7 +1601,7 @@ impl<'t> Parser<'t> {
 
     fn label(&mut self) -> SqlResult<String> {
         match self.peek_kind() {
-            TokenKind::String(text) if self.mysql() => {
+            TokenKind::String(text) if self.mysql() || self.sqlite() => {
                 let text = text.as_ref().to_owned();
                 self.at += 1;
                 Ok(text)
@@ -1633,6 +1705,7 @@ impl<'t> Parser<'t> {
             }
             self.at += 1;
             let operand = self.expression_above(Level::Not)?;
+            let operand = self.condition(operand);
             return Ok(Expr {
                 kind: ExprKind::Unary(UnaryOperator::Not, Box::new(operand)),
                 position,
@@ -1678,6 +1751,11 @@ impl<'t> Parser<'t> {
         {
             return Some(level);
         }
+        if self.sqlite()
+            && let Some(level) = self.sqlite_infix_level()
+        {
+            return Some(level);
+        }
         match self.peek_kind() {
             TokenKind::Word(word) => match word.as_ref() {
                 "or" => Some(Level::Or),
@@ -1712,11 +1790,13 @@ impl<'t> Parser<'t> {
             Level::Or => {
                 self.at += 1;
                 let right = self.expression_above(Level::And)?;
+                let (left, right) = (self.condition(left), self.condition(right));
                 Ok(Self::joined(left, right, Level::Or))
             }
             Level::And => {
                 self.at += 1;
                 let right = self.expression_above(Level::Not)?;
+                let (left, right) = (self.condition(left), self.condition(right));
                 Ok(Self::joined(left, right, Level::And))
             }
             Level::Is => self.is_test(left),
@@ -1766,6 +1846,9 @@ impl<'t> Parser<'t> {
                     BinaryOperator::Modulo
                 };
                 let right = self.expression_above(Level::Power)?;
+                if self.sqlite() && operator != BinaryOperator::Multiply {
+                    return Ok(Self::binary(left, operator, sqlite::null_if_zero(right)));
+                }
                 Ok(Self::binary(left, operator, right))
             }
             Level::Power => {
@@ -1811,6 +1894,13 @@ impl<'t> Parser<'t> {
                 right: Box::new(right),
                 negated,
             }
+        } else if self.sqlite() {
+            let right = self.expression_above(Level::Comparison)?;
+            ExprKind::IsDistinctFrom {
+                left: Box::new(expr),
+                right: Box::new(right),
+                negated: !negated,
+            }
         } else {
             return Err(self.unexpected());
         };
@@ -1828,6 +1918,7 @@ impl<'t> Parser<'t> {
             "<=" => BinaryOperator::LessOrEqual,
             ">" => BinaryOperator::Greater,
             ">=" => BinaryOperator::GreaterOrEqual,
+            "==" if self.sqlite() => BinaryOperator::Equal,
             _ => return None,
         })
     }
@@ -1863,8 +1954,12 @@ impl<'t> Parser<'t> {
                 list,
                 negated,
             }
+        } else if self.sqlite() && self.is_word("glob") {
+            self.at += 1;
+            let pattern = self.expression_above(Level::Other)?;
+            return sqlite::glob(expr, pattern, negated);
         } else if self.is_word("like") || self.is_word("ilike") {
-            let case_insensitive = self.is_word("ilike");
+            let case_insensitive = self.is_word("ilike") || self.sqlite();
             self.at += 1;
             let pattern = self.expression_above(Level::Other)?;
             if self.is_word("escape") {
@@ -1933,6 +2028,12 @@ impl<'t> Parser<'t> {
                 position,
             })
         };
+        if self.sqlite()
+            && let TokenKind::Word(word) = &token.kind
+            && let Some(expr) = self.sqlite_primary(word, position)?
+        {
+            return Ok(expr);
+        }
         match &token.kind {
             TokenKind::Integer(digits) => {
                 self.at += 1;
@@ -1941,7 +2042,7 @@ impl<'t> Parser<'t> {
                     Err(_) => literal(Literal::Decimal((*digits).to_owned())),
                 }
             }
-            TokenKind::Decimal(text) if self.mysql() => {
+            TokenKind::Decimal(text) if self.mysql() || self.sqlite() => {
                 self.at += 1;
                 Ok(Expr {
                     kind: ExprKind::Cast {
@@ -1962,7 +2063,10 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 literal(Literal::String(text.as_ref().to_owned()))
             }
-            TokenKind::Parameter(digits) if !self.mysql() => self.parameter(digits, position),
+            TokenKind::Parameter(digits) if !self.mysql() && !self.sqlite() => {
+                self.parameter(digits, position)
+            }
+            TokenKind::NumberedParameter(number) => self.sqlite_parameter(*number, position),
             TokenKind::Placeholder => {
                 self.placeholders_seen += 1;
                 let digits = self.placeholders_seen.to_string();
@@ -2108,11 +2212,23 @@ impl<'t> Parser<'t> {
         {
             return Ok(expr);
         }
-        if let Some(expr) = self.session_function(&name)? {
+        if self.sqlite()
+            && let Some(expr) = self.sqlite_function(&name)?
+        {
+            return Ok(expr);
+        }
+        if !self.sqlite()
+            && let Some(expr) = self.session_function(&name)?
+        {
             return Ok(expr);
         }
         if let Some(function) = AggregateFunction::named(&name.text) {
-            return self.aggregate(name, function);
+            let expr = self.aggregate(name, function)?;
+            return Ok(if self.sqlite() {
+                sqlite::scalar_min_max(expr)
+            } else {
+                expr
+            });
         }
         if AGGREGATES.contains(&name.text.as_str()) {
             return Err(SqlError::not_supported(format!(
@@ -2238,6 +2354,11 @@ impl<'t> Parser<'t> {
         let mut branches = Vec::new();
         while self.take_word("when") {
             let condition = self.expression()?;
+            let condition = if operand.is_none() {
+                self.condition(condition)
+            } else {
+                condition
+            };
             self.expect_word("then")?;
             let result = self.expression()?;
             branches.push((condition, result));
