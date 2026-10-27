@@ -221,13 +221,14 @@ Examples:
 
 const SQL: &str = "\
 Runs SQL statements, separated by semicolons, from -c, from a script file, or from stdin (a
-script of - or none at all), in order. This release runs a first part of the PostgreSQL
-dialect: CREATE TABLE with a PRIMARY KEY, DROP TABLE, INSERT, SELECT with WHERE, ORDER BY,
+script of - or none at all), in order. This release runs the first parts of the PostgreSQL
+dialect: CREATE TABLE with a PRIMARY KEY, DROP TABLE, INSERT, SELECT with WHERE, inner, left
+and cross joins, GROUP BY with count, sum, avg, min and max, HAVING, DISTINCT, ORDER BY,
 LIMIT and OFFSET, UPDATE, DELETE, BEGIN, COMMIT and ROLLBACK, with the integer, floating-point,
 boolean and text types. Results print as aligned tables, like psql. Each statement outside
 BEGIN ... COMMIT is its own transaction. The first failing statement stops the run with exit 3
 and a PostgreSQL-style error on stderr; statements before it stay committed, and a block left
-open is rolled back. Joins, GROUP BY, indexes and more types come next (docs/sql.md).
+open is rolled back. Indexes, more types and the rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
       --create          create the database file if it is missing
