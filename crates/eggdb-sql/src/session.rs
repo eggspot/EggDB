@@ -1,6 +1,8 @@
 mod mysql;
 mod sqlite;
 
+pub(crate) use sqlite::create_text as sqlite_create_text;
+
 use crate::ast::{MySqlStatement, Statement};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};

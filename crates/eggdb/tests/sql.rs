@@ -261,5 +261,54 @@ fn the_mysql_dialect_reads_mysql_and_reports_mysql_errors() {
     assert!(text(&postgresql.stdout).contains("egg"));
     let unknown = eggdb_sql(file.path(), &["--dialect", "oracle", "-c", "SELECT 1"], b"");
     assert_eq!(unknown.status.code(), Some(2));
-    assert!(text(&unknown.stderr).contains("--dialect takes postgresql or mysql, not 'oracle'"));
+    assert!(
+        text(&unknown.stderr).contains("--dialect takes postgresql, mysql or sqlite, not 'oracle'")
+    );
+}
+
+#[test]
+fn the_sqlite_dialect_reads_sqlite_and_reports_sqlite_errors() {
+    let file = TempPath::new("sql-sqlite");
+    let created = eggdb_sql(
+        file.path(),
+        &[
+            "--create",
+            "--dialect",
+            "sqlite",
+            "-c",
+            "CREATE TABLE [items] (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO items (name) VALUES ('egg'), ('jam'); SELECT id, name, typeof(id) FROM items LIMIT 1, 1",
+        ],
+        b"",
+    );
+    assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
+    assert!(
+        text(&created.stdout).contains(" 2 | jam  | integer"),
+        "{}",
+        text(&created.stdout)
+    );
+    let missing = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlite", "-c", "SELECT * FORM items"],
+        b"",
+    );
+    assert_eq!(missing.status.code(), Some(3));
+    assert_eq!(
+        text(&missing.stderr),
+        "Error: near \"FORM\": syntax error\nResult code: SQLITE_ERROR (1)\n"
+    );
+    let schema = eggdb_sql(
+        file.path(),
+        &[
+            "--dialect",
+            "sqlite3",
+            "-c",
+            "SELECT sql FROM sqlite_schema",
+        ],
+        b"",
+    );
+    assert!(
+        text(&schema.stdout).contains("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)"),
+        "{}",
+        text(&schema.stdout)
+    );
 }

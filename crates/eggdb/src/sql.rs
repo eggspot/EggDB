@@ -1,11 +1,57 @@
-use eggdb::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
-use eggdb_sql::{
-    EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, SqlError, SqlResult,
-    StoreFailure,
+//! SQL on a [`Database`]: [`Database::sql_store`] gives a [`Store`], and [`Store::session`]
+//! runs SQL on it in a [`Dialect`]: PostgreSQL's, MySQL's or SQLite's, all on the same tables.
+//! The SQL lives in the database's own key space under [`RESERVED_KEY_PREFIX`], so its
+//! transactions, crash safety and backups are the database's.
+//!
+//! ```
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let path = std::env::temp_dir().join(format!("eggdb-doc-sql-{}.db", std::process::id()));
+//! use eggdb::Database;
+//! use eggdb::sql::{Dialect, Value};
+//!
+//! let db = Database::open(&path)?;
+//! let store = db.sql_store();
+//! let mut sql = store.session(Dialect::Sqlite);
+//! sql.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)", &mut |_| {})?;
+//! sql.execute("INSERT INTO notes (body) VALUES ('first'), ('second')", &mut |_| {})?;
+//! let mut rows = Vec::new();
+//! sql.execute("SELECT id, body FROM notes WHERE id = last_insert_rowid()", &mut |result| {
+//!     rows.extend(result.rows);
+//! })?;
+//! assert_eq!(rows, vec![vec![Value::BigInt(2), Value::Text("second".into())]]);
+//! sql.close()?;
+//! db.close()?;
+//! # std::fs::remove_file(&path)?;
+//! # Ok(()) }
+//! ```
+
+use crate::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
+use eggdb_sql::StoreFailure;
+pub use eggdb_sql::{
+    ColumnSchema, Dialect, OutputColumn, Parameter, QueryResult, RESERVED_KEY_PREFIX, Session,
+    SqlError, SqlResult, SqlState, SqlType, TableSchema, TransactionStatus, Value,
+    sqlite_result_code_name,
 };
+use eggdb_sql::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use std::ops::Bound;
 
-pub(crate) struct DatabaseStore<'db>(pub(crate) &'db Database);
+/// A [`Database`] as the store SQL sessions run on; [`Database::sql_store`] makes one.
+#[derive(Debug, Clone, Copy)]
+pub struct Store<'db>(pub &'db Database);
+
+impl<'db> Store<'db> {
+    /// A SQL session on this database that reads `dialect`, outside any transaction block.
+    pub fn session(&self, dialect: Dialect) -> Session<'_, Store<'db>> {
+        Session::with_dialect(self, dialect)
+    }
+}
+
+impl Database {
+    /// This database as a store for SQL: [`Store::session`] runs SQL on it in any dialect.
+    pub fn sql_store(&self) -> Store<'_> {
+        Store(self)
+    }
+}
 
 const WRITER_BUSY: &str = "another session holds the database's one write transaction; retry once it commits or rolls back (EggDB runs one writer at a time)";
 
@@ -28,7 +74,7 @@ fn store_error(error: Error) -> SqlError {
 }
 
 fn scan_through(
-    mut scan: eggdb::Scan<'_>,
+    mut scan: crate::Scan<'_>,
     direction: ScanDirection,
     visit: &mut EntryVisitor<'_>,
 ) -> SqlResult<()> {
@@ -47,9 +93,13 @@ fn scan_through(
     }
 }
 
-pub(crate) struct SqlSnapshot<'db>(ReadTransaction<'db>);
+/// A snapshot that SQL reads, as [`Store`] gives it.
+#[derive(Debug)]
+pub struct SqlSnapshot<'db>(ReadTransaction<'db>);
 
-pub(crate) struct SqlWriter<'db>(WriteTransaction<'db>);
+/// The write transaction that SQL writes through, as [`Store`] gives it.
+#[derive(Debug)]
+pub struct SqlWriter<'db>(WriteTransaction<'db>);
 
 impl KeyValueRead for SqlSnapshot<'_> {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
@@ -133,7 +183,7 @@ impl KeyValueWrite for SqlWriter<'_> {
     }
 }
 
-impl KeyValueStore for DatabaseStore<'_> {
+impl KeyValueStore for Store<'_> {
     type Read<'s>
         = SqlSnapshot<'s>
     where

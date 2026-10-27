@@ -54,10 +54,10 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
             "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run]"
         }
         CommandName::Sql => {
-            "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql] [--create]"
+            "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite] [--create]"
         }
         CommandName::Shell => {
-            "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql] [--read-only] [--create]"
+            "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite] [--read-only] [--create]"
         }
         CommandName::Serve => {
             "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
@@ -238,13 +238,15 @@ dialect: CREATE TABLE with a PRIMARY KEY, DROP TABLE, INSERT, SELECT with WHERE,
 and cross joins, GROUP BY with count, sum, avg, min and max, HAVING, DISTINCT, ORDER BY,
 LIMIT and OFFSET, UPDATE, DELETE, BEGIN, COMMIT and ROLLBACK, with the integer, floating-point,
 boolean and text types; with --dialect mysql, MySQL's SQL on the same tables, with MySQL's
-errors. Results print as aligned tables, like psql. Each statement outside BEGIN ... COMMIT is
-its own transaction. The first failing statement stops the run with exit 3 and the dialect's
-error on stderr; statements before it stay committed, and a block left open is rolled back.
-Indexes, more types and the rest come next (docs/sql.md).
+errors, and with --dialect sqlite, SQLite's SQL (type affinity, INTEGER PRIMARY KEY row ids,
+PRAGMAs, sqlite_schema), with SQLite's errors and result codes. Results print as aligned
+tables, like psql. Each statement outside BEGIN ... COMMIT is its own transaction. The first
+failing statement stops the run with exit 3 and the dialect's error on stderr; statements
+before it stay committed, and a block left open is rolled back. Indexes, more types and the
+rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
-      --dialect <name>  postgresql (default) or mysql
+      --dialect <name>  postgresql (default), mysql or sqlite
       --create          create the database file if it is missing
 
 Examples:
@@ -256,19 +258,19 @@ Examples:
 ";
 
 const SHELL: &str = "\
-An interactive prompt on one database file: the key-value commands without their
-'eggdb <command> <file>' prefix (put, get, del, scan, check, stats), SQL in the PostgreSQL
-dialect (or MySQL's, with --dialect mysql) until a semicolon, and .help, .tables, .schema,
-.mode, .timer, .quit. Tab completes, Up/Down and Ctrl-R recall the history, which is kept in
-$XDG_STATE_HOME/eggdb/history (EGGDB_HISTORY=<path> moves it; set empty, turns it off). BEGIN
-holds a transaction across prompts until COMMIT or ROLLBACK. With -c, or with stdin not a
-terminal, it runs the text as a batch: plain output, no prompt, and it stops at the first
-failure unless --keep-going.
+An interactive prompt on one database file: the key-value commands without their 'eggdb
+<command> <file>' prefix (put, get, del, scan, check, stats), SQL in the PostgreSQL dialect
+(or MySQL's or SQLite's, with --dialect mysql or sqlite) until a semicolon, and .help,
+.tables, .schema, .mode, .timer, .quit. Tab completes, Up/Down and Ctrl-R recall the history,
+which is kept in $XDG_STATE_HOME/eggdb/history (EGGDB_HISTORY=<path> moves it; set empty,
+turns it off). BEGIN holds a transaction across prompts until COMMIT or ROLLBACK. With -c, or
+with stdin not a terminal, it runs the text as a batch: plain output, no prompt, and it stops
+at the first failure unless --keep-going.
 
   -c, --command <text>   a line to run, repeatable; runs in order, then exits
       --keep-going       run on after a failure, exiting with the first failure's code
       --mode <mode>      table (default), expanded or csv
-      --dialect <name>   SQL in postgresql (default) or mysql
+      --dialect <name>   SQL in postgresql (default), mysql or sqlite
       --read-only        open the file read-only
       --create           create the database file if it is missing
 

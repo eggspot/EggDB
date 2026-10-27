@@ -3,9 +3,9 @@ use super::{Access, execute_on, session_for, uses_color};
 use crate::cli::args::{self, CommandName, Invocation, Request, ResultMode};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
-use crate::cli::sql_store::DatabaseStore;
 use crate::cli::{Console, Terminal, help, report};
 use eggdb::Database;
+use eggdb::sql::Store as DatabaseStore;
 use eggdb_platform::user_files;
 use eggdb_sql::{QueryResult, TableSchema, TransactionStatus};
 use eggdb_ui::{Completion, InlineTerminal, LineEnd, LineReader, LineTerminal};
@@ -585,7 +585,7 @@ impl<'s> Shell<'s> {
         };
         let text: String = chosen
             .iter()
-            .map(|table| format!("{}\n", table.create_statement()))
+            .map(|table| format!("{}\n", table.create_statement_in(self.sql.dialect())))
             .collect();
         self.print(console, &text);
         Step::Continue(Exit::Done)
@@ -607,7 +607,7 @@ impl<'s> Shell<'s> {
   scan [--prefix p] [--from a] [--to b] [-r] [-n count] [-k]
   check                        read every page and report the file's health
   stats                        size, pages, last commit and log
-SQL: the PostgreSQL dialect, or MySQL's with --dialect mysql, statements ended by ;
+SQL: the PostgreSQL dialect, or MySQL's or SQLite's with --dialect, statements ended by ;
   (docs/sql.md); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
   'delete' starts a DELETE statement here; the key-value command is 'del'.
@@ -861,9 +861,14 @@ fn print_sql_error(
 ) {
     let mut messages = Output::new(&mut *console.stderr, color);
     for (index, line) in error_lines(error, text).iter().enumerate() {
-        match line.strip_prefix("ERROR:") {
+        let prefix = if line.starts_with("Error:") {
+            "Error:"
+        } else {
+            "ERROR:"
+        };
+        match line.strip_prefix(prefix) {
             Some(rest) if index == 0 => {
-                messages.styled(Style::Red, "ERROR:");
+                messages.styled(Style::Red, prefix);
                 messages.text(rest);
             }
             _ => messages.text(line),

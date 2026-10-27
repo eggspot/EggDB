@@ -1,6 +1,6 @@
 use super::commands::sql::{error_lines, result_cells};
 use super::render::{self, TimeStyle};
-use super::sql_store::DatabaseStore;
+use eggdb::sql::Store as DatabaseStore;
 use eggdb::{CheckReport, CommitStamp, Database, Options, Scan};
 use eggdb_ui::{
     Change, CheckSummary, CountStep, ErrorKind, KeyRow, Source, SourceError, SqlFailure, SqlRun,

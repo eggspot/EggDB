@@ -2,7 +2,7 @@ use super::{Access, Session};
 use crate::cli::args::{CommandName, ResultMode, SqlSource};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
-use crate::cli::sql_store::DatabaseStore;
+use eggdb::sql::Store as DatabaseStore;
 use eggdb_sql::{Dialect, QueryResult, SqlError, SqlState, Value};
 
 impl Session<'_> {
@@ -100,9 +100,14 @@ pub(super) fn exit_for(error: &SqlError) -> Exit {
 pub(super) fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &str) {
     let lines = error_lines(error, text);
     for (index, line) in lines.iter().enumerate() {
-        match line.strip_prefix("ERROR:") {
+        let prefix = if line.starts_with("Error:") {
+            "Error:"
+        } else {
+            "ERROR:"
+        };
+        match line.strip_prefix(prefix) {
             Some(rest) if index == 0 => {
-                messages.styled(Style::Red, "ERROR:");
+                messages.styled(Style::Red, prefix);
                 messages.text(rest);
             }
             _ => messages.text(line),
@@ -112,6 +117,14 @@ pub(super) fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &st
 }
 
 pub(crate) fn error_lines(error: &SqlError, text: &str) -> Vec<String> {
+    if error.vendor() == Some(Dialect::Sqlite) {
+        let code = error.vendor_code().unwrap_or(1);
+        let name = eggdb_sql::sqlite_result_code_name(code).unwrap_or("SQLITE_ERROR");
+        return vec![
+            format!("Error: {}", error.message()),
+            format!("Result code: {name} ({code})"),
+        ];
+    }
     if let Some(code) = error.vendor_code() {
         return vec![format!(
             "ERROR {code} ({}): {}",
@@ -367,8 +380,8 @@ fn table_line(cells: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::line_of;
-    use crate::cli::sql_store::DatabaseStore;
     use eggdb::Database;
+    use eggdb::sql::Store as DatabaseStore;
     use eggdb_sql::{QueryResult, Session};
     use std::collections::BTreeMap;
 
