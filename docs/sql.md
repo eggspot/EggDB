@@ -144,7 +144,8 @@ row number instead.
 A row is a format version byte, the column count, and per column a type byte (0 for NULL) and
 the value. A row shorter than its table reads its missing trailing columns as NULL, which leaves
 room for `ALTER TABLE ... ADD COLUMN` without rewriting rows. Every definition and row is read
-strictly: a damaged one is an error (`XX001`, exit code 4), never a panic. `eggdb check` checks
+strictly: a damaged one is an error (`XX001`, exit code 4), never a panic; a text column that a
+join does not name is skipped by its length without checking its UTF-8. `eggdb check` checks
 the file's pages and keys, not SQL rows and definitions, so it can pass on a file whose SQL
 data is damaged; restore such a table from a backup or an export.
 
