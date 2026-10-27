@@ -1,5 +1,6 @@
 use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
 use std::cmp::Ordering;
 
@@ -39,6 +40,26 @@ pub enum SqlType {
     /// `jsonb`: JSON in its normalized form (keys sorted, the last duplicate kept, whitespace
     /// and number formats canonical).
     Jsonb,
+    /// `time(p) without time zone`: a time of day from 00:00:00 to 24:00:00 to the microsecond,
+    /// rounded to `p` fractional digits when `p` is given.
+    Time(Option<u8>),
+    /// `time(p) with time zone` (`timetz`): a time of day and its offset from UTC.
+    TimeTz(Option<u8>),
+    /// `interval fields(p)`: a span of months, days and microseconds, truncated to `fields`
+    /// and rounded to `p` fractional digits of a second when they are given.
+    Interval {
+        /// The fields kept, as in `interval year to month`.
+        fields: Option<IntervalFields>,
+        /// The fractional digits of a second kept, 0 to 6.
+        precision: Option<u8>,
+    },
+    /// `bytea`: a string of bytes of any length.
+    Bytea,
+    /// `uuid`: a 128-bit universally unique identifier (RFC 9562).
+    Uuid,
+    /// `character(n)` (`char(n)`, `bpchar`): a string padded with spaces to `n` characters,
+    /// whose trailing spaces do not count when it is compared; no limit without `n`.
+    Bpchar(Option<u32>),
 }
 
 /// The precision and scale of a `numeric(p, s)` column.
@@ -78,6 +99,20 @@ impl SqlType {
             }
             Self::Json => "json".into(),
             Self::Jsonb => "jsonb".into(),
+            Self::Time(precision) => {
+                format!("time{} without time zone", precision_suffix(precision))
+            }
+            Self::TimeTz(precision) => {
+                format!("time{} with time zone", precision_suffix(precision))
+            }
+            Self::Interval { fields, precision } => {
+                let fields = fields.map_or(String::new(), |fields| format!(" {}", fields.name()));
+                format!("interval{fields}{}", precision_suffix(precision))
+            }
+            Self::Bytea => "bytea".into(),
+            Self::Uuid => "uuid".into(),
+            Self::Bpchar(None) => "bpchar".into(),
+            Self::Bpchar(Some(length)) => format!("character({length})"),
         }
     }
 
@@ -97,6 +132,12 @@ impl SqlType {
             Self::TimestampTz(_) => "timestamptz",
             Self::Json => "json",
             Self::Jsonb => "jsonb",
+            Self::Time(_) => "time",
+            Self::TimeTz(_) => "timetz",
+            Self::Interval { .. } => "interval",
+            Self::Bytea => "bytea",
+            Self::Uuid => "uuid",
+            Self::Bpchar(_) => "bpchar",
         }
     }
 
@@ -117,6 +158,13 @@ impl SqlType {
             Self::Numeric(_) => Self::Numeric(None),
             Self::Timestamp(_) => Self::Timestamp(None),
             Self::TimestampTz(_) => Self::TimestampTz(None),
+            Self::Time(_) => Self::Time(None),
+            Self::TimeTz(_) => Self::TimeTz(None),
+            Self::Interval { .. } => Self::Interval {
+                fields: None,
+                precision: None,
+            },
+            Self::Bpchar(_) => Self::Bpchar(None),
             other => other,
         }
     }
@@ -136,6 +184,15 @@ impl SqlType {
     pub(crate) fn is_string(self) -> bool {
         matches!(self, Self::Text | Self::Varchar(_))
     }
+
+    pub(crate) fn is_character(self) -> bool {
+        self.is_string() || matches!(self, Self::Bpchar(_))
+    }
+
+    pub(crate) const INTERVAL: Self = Self::Interval {
+        fields: None,
+        precision: None,
+    };
 
     fn integer_range(self) -> Option<(i64, i64)> {
         match self {
@@ -178,6 +235,24 @@ pub enum Value {
     Json(String),
     /// A `jsonb` value: its normalized text.
     Jsonb(String),
+    /// A `time without time zone`: microseconds since midnight, 0 to 86,400,000,000
+    /// (24:00:00).
+    Time(i64),
+    /// A `time with time zone`.
+    TimeTz {
+        /// Microseconds since midnight in the value's own offset, 0 to 86,400,000,000.
+        micros: i64,
+        /// The offset east of UTC, in seconds.
+        offset_seconds: i32,
+    },
+    /// An `interval`.
+    Interval(Interval),
+    /// A `bytea`.
+    Bytea(Vec<u8>),
+    /// A `uuid`, as its 16 bytes.
+    Uuid([u8; 16]),
+    /// A `character(n)`: its text, padded with spaces to the column's length.
+    Bpchar(String),
 }
 
 impl Value {
@@ -198,6 +273,12 @@ impl Value {
             Self::TimestampTz(_) => SqlType::TimestampTz(None),
             Self::Json(_) => SqlType::Json,
             Self::Jsonb(_) => SqlType::Jsonb,
+            Self::Time(_) => SqlType::Time(None),
+            Self::TimeTz { .. } => SqlType::TimeTz(None),
+            Self::Interval(_) => SqlType::INTERVAL,
+            Self::Bytea(_) => SqlType::Bytea,
+            Self::Uuid(_) => SqlType::Uuid,
+            Self::Bpchar(_) => SqlType::Bpchar(None),
         })
     }
 
@@ -263,13 +344,39 @@ impl Value {
             Self::BigInt(value) => value.to_string(),
             Self::Real(value) => format_float(f64::from(*value), format!("{value:e}"), 6),
             Self::Double(value) => format_float(*value, format!("{value:e}"), 15),
-            Self::Text(text) | Self::Json(text) | Self::Jsonb(text) => text.clone(),
+            Self::Text(text) | Self::Json(text) | Self::Jsonb(text) | Self::Bpchar(text) => {
+                text.clone()
+            }
             Self::Numeric(value) => value.to_string(),
             Self::Date(days) => datetime::format_date(*days),
             Self::Timestamp(micros) => datetime::format_timestamp(*micros),
             Self::TimestampTz(micros) => datetime::format_timestamptz(*micros),
+            Self::Time(micros) => datetime::format_time(*micros),
+            Self::TimeTz {
+                micros,
+                offset_seconds,
+            } => datetime::format_time_tz(*micros, *offset_seconds),
+            Self::Interval(interval) => interval.to_string(),
+            Self::Bytea(bytes) => crate::bytea::format_hex(bytes),
+            Self::Uuid(bytes) => crate::bytea::format_uuid(bytes),
         })
     }
+
+    pub(crate) fn character_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Bpchar(text) => Some(without_trailing_spaces(text)),
+            _ => None,
+        }
+    }
+}
+
+fn precision_suffix(precision: Option<u8>) -> String {
+    precision.map_or(String::new(), |precision| format!("({precision})"))
+}
+
+pub(crate) fn without_trailing_spaces(text: &str) -> &str {
+    text.trim_end_matches(' ')
 }
 
 fn format_float(value: f64, scientific: String, fixed_below_exponent: i32) -> String {
@@ -423,9 +530,25 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
                 Err(invalid())
             }
         }
-        SqlType::Text | SqlType::Varchar(_) => {
+        SqlType::Text | SqlType::Varchar(_) | SqlType::Bpchar(_) => {
             assign_string(text.to_owned(), sql_type, Conversion::Assignment)
         }
+        SqlType::Time(precision) => {
+            let (micros, _) = datetime::parse_time_of_day(text, false)?;
+            Ok(Value::Time(time_value(micros, precision)))
+        }
+        SqlType::TimeTz(precision) => {
+            let (micros, offset_seconds) = datetime::parse_time_of_day(text, true)?;
+            Ok(Value::TimeTz {
+                micros: time_value(micros, precision),
+                offset_seconds,
+            })
+        }
+        SqlType::Interval { fields, precision } => Interval::parse(text, fields)
+            .and_then(|interval| interval.with_modifier(fields, precision))
+            .map(Value::Interval),
+        SqlType::Bytea => crate::bytea::from_text(text).map(Value::Bytea),
+        SqlType::Uuid => crate::bytea::parse_uuid(text).map(Value::Uuid),
         SqlType::Numeric(modifier) => numeric_value(Numeric::parse(text)?, modifier),
         SqlType::Date => datetime::parse_date(text).map(Value::Date),
         SqlType::Timestamp(precision) => {
@@ -449,6 +572,64 @@ pub(crate) fn numeric_value(value: Numeric, modifier: Option<NumericModifier>) -
             .with_modifier(i64::from(modifier.precision), i64::from(modifier.scale))
             .map(Value::Numeric),
     }
+}
+
+fn time_value(micros: i64, precision: Option<u8>) -> i64 {
+    precision.map_or(micros, |precision| datetime::round_time(micros, precision))
+}
+
+fn convert_time(value: &Value, target: SqlType) -> Option<SqlResult<Value>> {
+    let local_time = |micros: i64| datetime::utc_to_local(micros).map(datetime::time_of_timestamp);
+    Some(match (target, value) {
+        (SqlType::Time(precision), Value::Time(micros)) => {
+            Ok(Value::Time(time_value(*micros, precision)))
+        }
+        (SqlType::Time(precision), Value::TimeTz { micros, .. }) => {
+            Ok(Value::Time(time_value(*micros, precision)))
+        }
+        (SqlType::Time(precision), Value::Timestamp(micros)) => Ok(Value::Time(time_value(
+            datetime::time_of_timestamp(*micros),
+            precision,
+        ))),
+        (SqlType::Time(precision), Value::TimestampTz(micros)) => {
+            local_time(*micros).map(|micros| Value::Time(time_value(micros, precision)))
+        }
+        (SqlType::Time(precision), Value::Interval(interval)) => Ok(Value::Time(time_value(
+            datetime::wrap_time(i128::from(interval.micros)),
+            precision,
+        ))),
+        (
+            SqlType::TimeTz(precision),
+            Value::TimeTz {
+                micros,
+                offset_seconds,
+            },
+        ) => Ok(Value::TimeTz {
+            micros: time_value(*micros, precision),
+            offset_seconds: *offset_seconds,
+        }),
+        (SqlType::TimeTz(precision), Value::Time(micros)) => Ok(Value::TimeTz {
+            micros: time_value(*micros, precision),
+            offset_seconds: datetime::session_offset(),
+        }),
+        (SqlType::TimeTz(precision), Value::TimestampTz(micros)) => {
+            local_time(*micros).map(|local| Value::TimeTz {
+                micros: time_value(local, precision),
+                offset_seconds: datetime::session_offset(),
+            })
+        }
+        (SqlType::Interval { fields, precision }, Value::Interval(interval)) => interval
+            .with_modifier(fields, precision)
+            .map(Value::Interval),
+        (SqlType::Interval { fields, precision }, Value::Time(micros)) => Interval {
+            months: 0,
+            days: 0,
+            micros: *micros,
+        }
+        .with_modifier(fields, precision)
+        .map(Value::Interval),
+        _ => return None,
+    })
 }
 
 fn timestamp_value(micros: i64, precision: Option<u8>, zoned: bool) -> SqlResult<Value> {
@@ -512,6 +693,9 @@ pub(crate) enum Conversion {
 }
 
 fn assign_string(text: String, sql_type: SqlType, conversion: Conversion) -> SqlResult<Value> {
+    if let SqlType::Bpchar(length) = sql_type {
+        return padded(text, length, conversion);
+    }
     let SqlType::Varchar(Some(limit)) = sql_type else {
         return Ok(Value::Text(text));
     };
@@ -530,21 +714,57 @@ fn assign_string(text: String, sql_type: SqlType, conversion: Conversion) -> Sql
     ))
 }
 
+fn padded(text: String, length: Option<u32>, conversion: Conversion) -> SqlResult<Value> {
+    let Some(length) = length else {
+        return Ok(Value::Bpchar(text));
+    };
+    let length = length as usize;
+    match text.char_indices().nth(length) {
+        Some((cut, _)) => {
+            if conversion == Conversion::Explicit || text[cut..].chars().all(|c| c == ' ') {
+                let mut text = text;
+                text.truncate(cut);
+                Ok(Value::Bpchar(text))
+            } else {
+                Err(SqlError::new(
+                    SqlState::STRING_DATA_RIGHT_TRUNCATION,
+                    format!("value too long for type character({length})"),
+                ))
+            }
+        }
+        None => {
+            let count = text.chars().count();
+            let mut text = text;
+            text.extend(std::iter::repeat_n(' ', length - count));
+            Ok(Value::Bpchar(text))
+        }
+    }
+}
+
 pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> SqlResult<Value> {
     let Some(source) = value.sql_type() else {
         return Ok(Value::Null);
     };
-    if target.is_string() {
+    if target.is_character() {
         let text = match value {
             Value::Text(text) => text,
+            Value::Bpchar(text) if matches!(target, SqlType::Bpchar(_)) => text,
+            Value::Bpchar(mut text) => {
+                text.truncate(without_trailing_spaces(&text).len());
+                text
+            }
             Value::Boolean(flag) => flag.to_string(),
+            Value::Bytea(bytes) => crate::bytea::to_text(&bytes)?,
             other => other.to_text().unwrap_or_default(),
         };
         return assign_string(text, target, conversion);
     }
-    if source.is_string() {
+    if source.is_character() {
         return match (conversion, value) {
             (Conversion::Explicit, Value::Text(text)) => parse_input(&text, target),
+            (Conversion::Explicit, Value::Bpchar(text)) => {
+                parse_input(without_trailing_spaces(&text), target)
+            }
             _ => Err(mismatch(source, target)),
         };
     }
@@ -553,8 +773,14 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     {
         return converted;
     }
+    if let Some(converted) = convert_time(&value, target) {
+        return converted;
+    }
     match (target, &value) {
-        (SqlType::Json, Value::Json(_)) | (SqlType::Jsonb, Value::Jsonb(_)) => Ok(value),
+        (SqlType::Json, Value::Json(_))
+        | (SqlType::Jsonb, Value::Jsonb(_))
+        | (SqlType::Bytea, Value::Bytea(_))
+        | (SqlType::Uuid, Value::Uuid(_)) => Ok(value),
         (SqlType::Json, Value::Jsonb(text)) => Ok(Value::Json(text.clone())),
         (SqlType::Jsonb, Value::Json(text)) => crate::json::normalize(text).map(Value::Jsonb),
         (SqlType::Numeric(modifier), _) if source.is_numeric() => {
@@ -637,9 +863,16 @@ pub(crate) fn comparable(left: SqlType, right: SqlType) -> bool {
         return false;
     }
     (left.is_numeric() && right.is_numeric())
-        || (left.is_string() && right.is_string())
+        || (left.is_character() && right.is_character())
         || (left.is_datetime() && right.is_datetime())
-        || left == right
+        || left.without_modifier() == right.without_modifier()
+}
+
+fn time_tz_order(micros: i64, offset: i32) -> (i64, std::cmp::Reverse<i32>) {
+    (
+        datetime::time_tz_utc(micros, offset),
+        std::cmp::Reverse(offset),
+    )
 }
 
 fn instant(value: &Value, zoned: bool) -> i128 {
@@ -669,6 +902,26 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
         (Value::Text(a), Value::Text(b)) | (Value::Json(a), Value::Json(b)) => {
             a.as_bytes().cmp(b.as_bytes())
         }
+        (Value::Bpchar(_), _) | (_, Value::Bpchar(_)) => {
+            match (left.character_text(), right.character_text()) {
+                (Some(a), Some(b)) => a.as_bytes().cmp(b.as_bytes()),
+                _ => Ordering::Equal,
+            }
+        }
+        (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
+        (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
+        (Value::Time(a), Value::Time(b)) => a.cmp(b),
+        (
+            Value::TimeTz {
+                micros: a,
+                offset_seconds: a_offset,
+            },
+            Value::TimeTz {
+                micros: b,
+                offset_seconds: b_offset,
+            },
+        ) => time_tz_order(*a, *a_offset).cmp(&time_tz_order(*b, *b_offset)),
+        (Value::Interval(a), Value::Interval(b)) => a.compare(*b),
         (Value::Jsonb(a), Value::Jsonb(b)) => crate::json::comparable(a)
             .as_bytes()
             .cmp(crate::json::comparable(b).as_bytes()),
@@ -704,10 +957,36 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
             out.push(1);
             out.push(u8::from(*flag));
         }
-        Value::Text(text) => {
+        Value::Text(_) | Value::Bpchar(_) => {
+            let text = value.character_text().unwrap_or_default();
             out.push(2);
             out.extend_from_slice(&(text.len() as u64).to_le_bytes());
             out.extend_from_slice(text.as_bytes());
+        }
+        Value::Bytea(bytes) => {
+            out.push(10);
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+        Value::Uuid(bytes) => {
+            out.push(11);
+            out.extend_from_slice(bytes);
+        }
+        Value::Time(micros) => {
+            out.push(12);
+            out.extend_from_slice(&micros.to_le_bytes());
+        }
+        Value::TimeTz {
+            micros,
+            offset_seconds,
+        } => {
+            out.push(13);
+            out.extend_from_slice(&datetime::time_tz_utc(*micros, *offset_seconds).to_le_bytes());
+            out.extend_from_slice(&offset_seconds.to_le_bytes());
+        }
+        Value::Interval(interval) => {
+            out.push(14);
+            out.extend_from_slice(&interval.span().to_le_bytes());
         }
         Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) => {
             out.push(3);

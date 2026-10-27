@@ -200,14 +200,7 @@ pub(crate) fn result_cells(result: &QueryResult, dialect: Dialect) -> Option<Res
         .map(|index| {
             columns[index]
                 .sql_type
-                .map(|sql_type| {
-                    !matches!(
-                        sql_type,
-                        eggdb_sql::SqlType::Text
-                            | eggdb_sql::SqlType::Varchar(_)
-                            | eggdb_sql::SqlType::Boolean
-                    )
-                })
+                .map(right_aligned)
                 .or_else(|| {
                     result
                         .rows
@@ -373,13 +366,23 @@ fn csv_text(cells: &ResultCells) -> String {
     text
 }
 
+fn right_aligned(sql_type: eggdb_sql::SqlType) -> bool {
+    !matches!(
+        sql_type,
+        eggdb_sql::SqlType::Text
+            | eggdb_sql::SqlType::Varchar(_)
+            | eggdb_sql::SqlType::Boolean
+            | eggdb_sql::SqlType::Bpchar(_)
+            | eggdb_sql::SqlType::Bytea
+            | eggdb_sql::SqlType::Uuid
+            | eggdb_sql::SqlType::Time(_)
+            | eggdb_sql::SqlType::TimeTz(_)
+            | eggdb_sql::SqlType::Interval { .. }
+    )
+}
+
 fn is_number(value: &Value) -> bool {
-    value.sql_type().is_some_and(|sql_type| {
-        !matches!(
-            sql_type,
-            eggdb_sql::SqlType::Text | eggdb_sql::SqlType::Boolean | eggdb_sql::SqlType::Varchar(_)
-        )
-    })
+    value.sql_type().is_some_and(right_aligned)
 }
 
 fn centered(text: &str, width: usize) -> String {

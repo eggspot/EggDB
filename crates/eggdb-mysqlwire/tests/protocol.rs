@@ -381,6 +381,88 @@ fn decimal_date_time_and_json_columns_use_their_mysql_types_in_text_and_binary()
 }
 
 #[test]
+fn time_and_blob_columns_use_their_mysql_types_in_text_and_binary() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    assert!(matches!(
+        client.query(
+            "CREATE TABLE clips (id INT PRIMARY KEY, starts TIME(3), body BLOB, tag VARBINARY(16))"
+        ),
+        Reply::Ok { .. }
+    ));
+    let inserted = client.query("INSERT INTO clips VALUES (1, '10:30:15.25', 'abc', 'x')");
+    assert!(
+        matches!(inserted, Reply::Ok { affected: 1, .. }),
+        "{inserted:?}"
+    );
+    let (insert, _, parameters) =
+        prepare(&mut client, "INSERT INTO clips (id, body) VALUES (?, ?)");
+    assert_eq!(parameters, 2);
+    let mut execute = insert.to_le_bytes().to_vec();
+    execute.extend_from_slice(&[0, 1, 0, 0, 0, 0, 1, 3, 0, 0xFC, 0]);
+    execute.extend_from_slice(&2i32.to_le_bytes());
+    execute.extend_from_slice(&[3, 0xFF, 0x00, b'a']);
+    client.command(0x17, &execute);
+    let reply = client.next_reply();
+    assert!(matches!(reply, Reply::Ok { affected: 1, .. }), "{reply:?}");
+    for (id, kind, value) in [
+        (3i32, 253u8, b"\\x41".to_vec()),
+        (4, 0xFC, b"C:\\dir".to_vec()),
+        (5, 254, br#"{"a": "\\u0041"}"#.to_vec()),
+    ] {
+        let mut execute = insert.to_le_bytes().to_vec();
+        execute.extend_from_slice(&[0, 1, 0, 0, 0, 0, 1, 3, 0, kind, 0]);
+        execute.extend_from_slice(&id.to_le_bytes());
+        execute.push(value.len() as u8);
+        execute.extend_from_slice(&value);
+        client.command(0x17, &execute);
+        let reply = client.next_reply();
+        assert!(matches!(reply, Reply::Ok { affected: 1, .. }), "{reply:?}");
+    }
+    assert_eq!(
+        texts(&client.query(
+            "SELECT id, LENGTH(body), body, CONCAT('x', body) FROM clips WHERE id IN (1, 3, 4, 5) ORDER BY id"
+        )),
+        vec![
+            vec!["1", "3", "abc", "xabc"],
+            vec!["3", "4", "\\x41", "x\\x41"],
+            vec!["4", "6", "C:\\dir", "xC:\\dir"],
+            vec!["5", "16", r#"{"a": "\\u0041"}"#, r#"x{"a": "\\u0041"}"#],
+        ]
+    );
+    let reply = client.query("SELECT starts, body, LENGTH(body) FROM clips WHERE id = 1");
+    let Reply::Rows { columns, .. } = &reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(
+        columns.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+        vec![11, 252, 3]
+    );
+    assert_eq!(texts(&reply), vec![vec!["10:30:15.25", "abc", "3"]]);
+    assert_eq!(
+        texts(&client.query("SELECT LENGTH(body) FROM clips WHERE id = 2")),
+        vec![vec!["3"]]
+    );
+    let (select, columns, parameters) =
+        prepare(&mut client, "SELECT starts, body FROM clips WHERE id = ?");
+    assert_eq!((columns, parameters), (2, 1));
+    let mut execute = select.to_le_bytes().to_vec();
+    execute.extend_from_slice(&[0, 1, 0, 0, 0, 0, 1, 3, 0]);
+    execute.extend_from_slice(&1i32.to_le_bytes());
+    client.command(0x17, &execute);
+    assert_eq!(client.read().unwrap(), vec![2]);
+    for _ in 0..3 {
+        client.read().unwrap();
+    }
+    let row = client.read().unwrap();
+    let mut expected = vec![0u8, 0];
+    expected.extend_from_slice(&[12, 0, 0, 0, 0, 0, 10, 30, 15]);
+    expected.extend_from_slice(&250_000u32.to_le_bytes());
+    expected.extend_from_slice(b"\x03abc");
+    assert_eq!(row, expected);
+}
+
+#[test]
 fn long_data_and_resets_fill_parameters() {
     let server = TestServer::start(8);
     let mut client = Client::login(server.address);

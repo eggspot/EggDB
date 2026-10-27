@@ -47,7 +47,8 @@ impl Dialect {
     /// `value` as this dialect's clients print it in text form: PostgreSQL's `t` and `f` for
     /// booleans, MySQL's and SQLite's `1` and `0`, SQLite's floating point with 15 significant
     /// digits and a decimal point (`2.0`), Oracle's `TRUE` and `FALSE` and its numbers without a
-    /// leading zero (`.5`), and `None` for NULL.
+    /// leading zero (`.5`), a `bytea` as MySQL's client shows it (`0x6162`), as Oracle's
+    /// (`6162`) or as SQLite's (its bytes as text), and `None` for NULL.
     pub fn value_text(self, value: &crate::Value) -> Option<String> {
         match (self, value) {
             (Self::MySql | Self::Sqlite, crate::Value::Boolean(flag)) => {
@@ -73,6 +74,16 @@ impl Dialect {
                 Some(whole) => whole.to_string(),
                 None => crate::sqlite_functions::real_text(number.to_f64())?,
             }),
+            (Self::MySql, crate::Value::Bytea(bytes)) => Some(format!(
+                "0x{}",
+                crate::bytea::format_hex(bytes)[2..].to_ascii_uppercase()
+            )),
+            (Self::Oracle, crate::Value::Bytea(bytes)) => {
+                Some(crate::bytea::format_hex(bytes)[2..].to_ascii_uppercase())
+            }
+            (Self::Sqlite, crate::Value::Bytea(bytes)) => {
+                Some(String::from_utf8_lossy(bytes).into_owned())
+            }
             (Self::MySql | Self::Sqlite | Self::Oracle, crate::Value::TimestampTz(micros)) => {
                 Some(match crate::datetime::utc_to_local(*micros) {
                     Ok(local) => crate::datetime::format_timestamp(local),

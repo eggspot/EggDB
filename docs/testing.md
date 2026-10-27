@@ -236,6 +236,22 @@ and `numeric_and_time_keys_return_the_same_rows_with_and_without_indexes` compar
 over `numeric`, `date`, `timestamp` and `timestamptz` keys with and without indexes, through
 updates, deletes and inserts.
 
+## Times, intervals, bytes, UUIDs and padded text (D113)
+Interval arithmetic is checked against a plain reference on 5,000 random pairs: sums,
+differences, negation, doubling and the three `justify` functions keep the length in
+microseconds that `i128` arithmetic gives, comparison agrees with it, and every value prints and
+reads back exactly, the extremes of all three fields included. Month-end clamping, `age`'s
+borrowing, overflow at the ends of each field and multiplication by NaN, infinities and huge
+factors have their own cases. `bytea`'s `encode` and `decode` round-trip random bytes in every
+format, the UUID reader is given every accepted and a list of refused forms, and the PostgreSQL
+protocol's binary reader gets 20,000 random byte strings for each new type.
+`hostile_item_31_statements_never_panic_in_any_dialect` runs 20,000 statements built from the
+new syntax in each dialect; `interval_character_bytea_uuid_and_time_keys_return_the_same_rows_with_and_without_indexes`
+compares queries and changes over the six new types with and without indexes, and
+`unique_indexes_follow_the_equality_of_intervals_and_characters` checks that equal values
+(`'1 mon'` and `'30 days'`, `'a'` and `'a  '`, a UUID in two spellings) are one key. Version 5
+table definitions, rows and keys are pinned, cut at every length, and fuzzed like version 4's.
+
 ## The shell and the query screen (D105)
 The shell's line editor runs against a scripted terminal (`crates/eggdb-ui/src/line.rs`):
 readline keys, `Ctrl-C` and `Ctrl-D`, history recall with the draft kept, `Ctrl-R`, completion

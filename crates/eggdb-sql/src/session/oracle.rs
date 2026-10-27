@@ -78,6 +78,11 @@ fn oracle_type_name(sql_type: SqlType) -> &'static str {
         SqlType::Timestamp(_) => "TIMESTAMP",
         SqlType::TimestampTz(_) => "TIMESTAMP WITH TIME ZONE",
         SqlType::Json | SqlType::Jsonb => "JSON",
+        SqlType::Bpchar(_) => "CHAR",
+        SqlType::Bytea => "BLOB",
+        SqlType::Time(_) | SqlType::TimeTz(_) | SqlType::Interval { .. } | SqlType::Uuid => {
+            "VARCHAR2"
+        }
     }
 }
 
@@ -102,6 +107,9 @@ fn length_of(sql_type: SqlType) -> i64 {
         SqlType::Timestamp(_) => 11,
         SqlType::TimestampTz(_) => 13,
         SqlType::Json | SqlType::Jsonb => 8200,
+        SqlType::Bpchar(length) => length.map_or(2000, i64::from),
+        SqlType::Bytea => 4000,
+        SqlType::Time(_) | SqlType::TimeTz(_) | SqlType::Interval { .. } | SqlType::Uuid => 64,
     }
 }
 
@@ -109,6 +117,7 @@ fn type_text(sql_type: SqlType) -> String {
     match (sql_type, precision_of(sql_type)) {
         (_, Some(precision)) => format!("NUMBER({precision})"),
         (SqlType::Varchar(Some(length)), _) => format!("VARCHAR2({length} CHAR)"),
+        (SqlType::Bpchar(Some(length)), _) => format!("CHAR({length} CHAR)"),
         (SqlType::Numeric(Some(modifier)), _) => {
             format!("NUMBER({},{})", modifier.precision, modifier.scale)
         }

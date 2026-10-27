@@ -593,8 +593,8 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "WITH x AS (DELETE FROM people RETURNING id) SELECT * FROM x",
         "INSERT INTO people SELECT * FROM people",
         "ALTER TABLE people ADD COLUMN x int",
-        "CREATE TABLE ts (t time)",
-        "CREATE TABLE js (j interval)",
+        "CREATE TABLE ts (t money)",
+        "CREATE TABLE js (j inet)",
         "SAVEPOINT a",
     ] {
         let error = fails(&mut session, sql);
@@ -2990,5 +2990,412 @@ fn extract_takes_each_dialects_own_units() {
             "SELECT date_trunc('century', TIMESTAMP '0050-01-01 BC'), date_trunc('millennium', DATE '0100-01-01 BC')"
         ),
         "date_trunc|date_trunc\n0100-01-01 00:00:00 BC|1000-01-01 00:00:00+00 BC\nSELECT 1"
+    );
+}
+
+#[test]
+fn hostile_item_31_statements_never_panic_in_any_dialect() {
+    let shared = [
+        "SELECT",
+        "INSERT INTO more VALUES (",
+        "UPDATE more SET",
+        "WHERE",
+        "FROM more",
+        "ORDER BY",
+        "GROUP BY",
+        "i",
+        "c",
+        "b",
+        "t",
+        "(",
+        ")",
+        ",",
+        "+",
+        "-",
+        "*",
+        "/",
+        "||",
+        "=",
+        "<",
+        "1",
+        "-1",
+        "1e308",
+        "-1e308",
+        "'NaN'",
+        "'Infinity'",
+        "9223372036854775807",
+        "2147483647",
+        "'1 day'",
+        "'-2147483648 days'",
+        "'2147483647 mons'",
+        "'178956970 years 7 mons'",
+        "'-9223372036854775808 microseconds'",
+        "'P1Y2M3DT4H5M6.5S'",
+        "'1-2'",
+        "'1 2:03:04'",
+        "'24:00:00'",
+        "'23:59:59.9999999'",
+        "'25:00'",
+        "'10:00+15:59'",
+        "'\\x0aff'",
+        "'\\x0'",
+        "'\\377\\\\'",
+        "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'",
+        "'{a0eebc999c0b4ef8bb6d6bb9bd380a11}'",
+        "'ab  '",
+        "length(",
+        "octet_length(",
+        "substring(",
+        "CAST(",
+        "AS",
+        "TIME",
+        "CHAR(3)",
+        "CREATE INDEX ON more (i)",
+        "CREATE INDEX ON more (c, b)",
+        "max(i)",
+        "min(c)",
+        "count(DISTINCT i)",
+    ];
+    let per_dialect: [(crate::Dialect, &str, &[&str]); 4] = [
+        (
+            crate::Dialect::PostgreSql,
+            "CREATE TABLE more (id serial PRIMARY KEY, i interval, c char(4), b bytea, t time(3), z timetz, u uuid)",
+            &[
+                "interval",
+                "interval(2)",
+                "interval year to month",
+                "interval day to second(3)",
+                "YEAR",
+                "DAY TO SECOND",
+                "MONTH",
+                "TO",
+                "::interval",
+                "::time",
+                "::timetz",
+                "::bytea",
+                "::uuid",
+                "::bpchar",
+                "::char(2)",
+                "::text",
+                "time '",
+                "timetz",
+                "bytea",
+                "uuid",
+                "bpchar",
+                "character(",
+                "justify_days(",
+                "justify_hours(",
+                "justify_interval(",
+                "age(",
+                "gen_random_uuid()",
+                "encode(",
+                "decode(",
+                "get_byte(",
+                "'hex'",
+                "'base64'",
+                "'escape'",
+                "'aGVsbG8='",
+                "extract(epoch from",
+                "date_part('hour',",
+                "current_time",
+                "localtime",
+                "now()",
+                "TIMESTAMP '2024-01-31'",
+                "DATE '2024-02-29'",
+                "FROM",
+                "FOR",
+                "SET TimeZone = 'UTC+05:30'",
+            ],
+        ),
+        (
+            crate::Dialect::MySql,
+            "CREATE TABLE more (id INT AUTO_INCREMENT PRIMARY KEY, i TIME, c CHAR(4), b BLOB, t TIME(3), z VARBINARY(8), u BINARY(16))",
+            &[
+                "TIME(7)",
+                "BLOB",
+                "VARBINARY(",
+                "BINARY(",
+                "LONGBLOB",
+                "LENGTH(",
+                "TIME '10:00'",
+                "INTERVAL '1' DAY",
+            ],
+        ),
+        (
+            crate::Dialect::Sqlite,
+            "CREATE TABLE more (id INTEGER PRIMARY KEY, i TEXT, c CHARACTER(4), b TEXT, t TIME, z TEXT, u TEXT)",
+            &["BLOB", "typeof(", "substr(", "hex("],
+        ),
+        (
+            crate::Dialect::Oracle,
+            "CREATE TABLE more (id NUMBER PRIMARY KEY, i NUMBER, c CHAR(4), b RAW(16), t BLOB, z LONG RAW, u NCHAR(3))",
+            &[
+                "RAW(",
+                "BLOB",
+                "LONG RAW",
+                "NCHAR(",
+                "FROM dual",
+                "INTERVAL",
+            ],
+        ),
+    ];
+    for (dialect, create, extra) in per_dialect {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        run(&mut session, create).unwrap_or_else(|error| panic!("{dialect:?}: {error}"));
+        let fragments: Vec<&str> = shared.iter().chain(extra.iter()).copied().collect();
+        fuzz(&mut session, &fragments);
+    }
+}
+
+#[test]
+fn item_31_types_and_functions_stay_in_their_dialects() {
+    let refused: [(crate::Dialect, &str); 16] = [
+        (crate::Dialect::MySql, "SELECT mysql_curtime()"),
+        (crate::Dialect::PostgreSql, "SELECT mysql_curtime()"),
+        (crate::Dialect::MySql, "SELECT encode('a', 'hex')"),
+        (crate::Dialect::MySql, "SELECT gen_random_uuid()"),
+        (crate::Dialect::MySql, "SELECT justify_days(1)"),
+        (crate::Dialect::MySql, "SELECT CAST('a' AS uuid)"),
+        (crate::Dialect::MySql, "SELECT interval '1 day'"),
+        (crate::Dialect::Sqlite, "SELECT get_byte('a', 0)"),
+        (crate::Dialect::Sqlite, "SELECT age('2024-01-01')"),
+        (crate::Dialect::Sqlite, "SELECT time '10:00'"),
+        (crate::Dialect::Sqlite, "CREATE TABLE b (x BLOB)"),
+        (crate::Dialect::Oracle, "SELECT gen_random_uuid() FROM dual"),
+        (crate::Dialect::Oracle, "SELECT time '10:00' FROM dual"),
+        (crate::Dialect::Oracle, "SELECT bytea 'x' FROM dual"),
+        (
+            crate::Dialect::Oracle,
+            "CREATE TABLE i (x INTERVAL DAY TO SECOND)",
+        ),
+        (crate::Dialect::PostgreSql, "CREATE TABLE r (x raw(4))"),
+    ];
+    for (dialect, sql) in refused {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        let outcome = run(&mut session, sql);
+        assert!(outcome.is_err(), "{dialect:?} {sql}: {outcome:?}");
+    }
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    run(
+        &mut mysql,
+        "CREATE TABLE m (id INT PRIMARY KEY, t TIME, b BLOB, v VARBINARY(4))",
+    )
+    .unwrap();
+    run(
+        &mut mysql,
+        "INSERT INTO m VALUES (1, '10:30:15', 'abc', 'x')",
+    )
+    .unwrap();
+    assert_eq!(
+        last(&mut mysql, "SELECT t, b, LENGTH(b), v FROM m"),
+        "t|b|LENGTH(b)|v\n10:30:15|\\x616263|3|\\x78\nSELECT 1"
+    );
+    assert!(run(&mut mysql, "CREATE TABLE n (v VARBINARY)").is_err());
+    let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);
+    run(
+        &mut oracle,
+        "CREATE TABLE o (id NUMBER PRIMARY KEY, c CHAR(4), r RAW(4))",
+    )
+    .unwrap();
+    run(&mut oracle, "INSERT INTO o VALUES (1, 'ab', '0a')").unwrap();
+    assert_eq!(
+        last(&mut oracle, "SELECT c, LENGTH(c), r FROM o WHERE c = 'ab'"),
+        "C|LENGTH(C)|R\nab  |4|\\x0a\nSELECT 1"
+    );
+}
+
+#[test]
+fn item_31_values_behave_as_postgresql_documents() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let cases = [
+        (
+            "SELECT interval '1 year 2 mons 3 days 04:05:06', interval 'P1Y2M3DT4H5M6S', interval '-1 day +02:00:00'",
+            "interval|interval|interval\n1 year 2 mons 3 days 04:05:06|1 year 2 mons 3 days 04:05:06|-1 days +02:00:00\nSELECT 1",
+        ),
+        (
+            "SELECT timestamp '2024-01-31' + interval '1 month', timestamp '2023-03-31' - interval '1 month', date '2024-02-29' + interval '1 year'",
+            "?column?|?column?|?column?\n2024-02-29 00:00:00|2023-02-28 00:00:00|2025-02-28 00:00:00\nSELECT 1",
+        ),
+        (
+            "SELECT interval '1 mon' = interval '30 days', interval '1 day' = interval '24 hours', interval '1 mon' < interval '31 days'",
+            "?column?|?column?|?column?\nt|t|t\nSELECT 1",
+        ),
+        (
+            "SELECT interval '1 mon' * 1.5, interval '3 days' / 2, interval '1 day' * 2, 2 * interval '1 hour'",
+            "?column?|?column?|?column?|?column?\n1 mon 15 days|1 day 12:00:00|2 days|02:00:00\nSELECT 1",
+        ),
+        (
+            "SELECT time '24:00:00', time '10:00' + interval '15 hours', time '10:00' - time '09:30', date '2024-01-01' + time '10:00'",
+            "time|?column?|?column?|?column?\n24:00:00|01:00:00|00:30:00|2024-01-01 10:00:00\nSELECT 1",
+        ),
+        (
+            "SELECT '\\x0aff'::bytea, 'a\\\\b\\001'::bytea, encode('\\x00ff'::bytea, 'escape'), length('\\x0102'::bytea), 'a'::bytea || 'b'::bytea",
+            "bytea|bytea|encode|length|?column?\n\\x0aff|\\x615c6201|\\000\\377|2|\\x6162\nSELECT 1",
+        ),
+        (
+            "SELECT 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid = '{a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11}'::uuid",
+            "?column?\nt\nSELECT 1",
+        ),
+        (
+            "SELECT 'ab'::char(4) || '|', length('ab  '::char(4)), octet_length('ab'::char(4)), 'ab'::char(4) = 'ab  ', 'ab'::char(4)::text || '|'",
+            "?column?|length|octet_length|?column?|?column?\nab||2|4|t|ab|\nSELECT 1",
+        ),
+        (
+            "SELECT extract(epoch from interval '1 year'), extract(hour from time '13:45'), date_part('minute', interval '01:30:00')",
+            "extract|extract|date_part\n31557600.000000|13|30\nSELECT 1",
+        ),
+        (
+            "SELECT justify_hours(interval '27 hours'), justify_interval(interval '1 mon -1 hour'), age(timestamp '2024-03-01', timestamp '2023-01-31')",
+            "justify_hours|justify_interval|age\n1 day 03:00:00|29 days 23:00:00|1 year 1 mon 1 day\nSELECT 1",
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(last(&mut session, sql), expected, "{sql}");
+    }
+    let errors = [
+        ("SELECT '\\x0'::bytea", "22023"),
+        ("SELECT '\\x0g'::bytea", "22023"),
+        ("SELECT 'a\\b'::bytea", "22P02"),
+        ("SELECT 'x'::uuid", "22P02"),
+        ("SELECT time '24:00:01'", "22008"),
+        ("SELECT interval '1 fortnight'", "22007"),
+        ("SELECT interval '2147483648 days'", "22015"),
+        (
+            "SELECT interval '2147483647 days' + interval '1 day'",
+            "22008",
+        ),
+        ("SELECT interval '1 day' * 'NaN'::float8", "22008"),
+        ("SELECT interval '1 day' * 1e308", "22008"),
+        ("SELECT interval '1 day' / 0", "22012"),
+        ("SELECT -interval '-178956970 years -8 mons'", "22008"),
+        (
+            "SELECT timestamp '294276-12-31' + interval '1 day'",
+            "22008",
+        ),
+        ("SELECT get_byte('\\x01'::bytea, 1)", "2202E"),
+        ("SELECT encode('\\x01'::bytea, 'rot13')", "22023"),
+        ("SELECT decode('abc', 'hex')", "22023"),
+        ("SELECT substring('abc', 1, -1)", "22011"),
+        (
+            "SELECT 'abcde'::char(3) = 'abc', CAST('abcdef' AS varchar(2))",
+            "",
+        ),
+        ("SELECT interval '1 day' + 1", "42883"),
+        (
+            "SELECT time '10:00' + date '2024-01-01' - time '01:00'",
+            "42883",
+        ),
+        ("SELECT '\\x01'::bytea || 1", "42883"),
+        (
+            "SELECT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid = 'x'",
+            "22P02",
+        ),
+        (
+            "SELECT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid < 1",
+            "42883",
+        ),
+    ];
+    for (sql, state) in errors {
+        if state.is_empty() {
+            assert!(run(&mut session, sql).is_ok(), "{sql}");
+            continue;
+        }
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state().code(), state, "{sql}: {error}");
+    }
+    run(
+        &mut session,
+        "CREATE TABLE c (id integer PRIMARY KEY, code char(3))",
+    )
+    .unwrap();
+    assert_eq!(
+        fails(&mut session, "INSERT INTO c VALUES (1, 'abcd')")
+            .state()
+            .code(),
+        "22001"
+    );
+    run(&mut session, "INSERT INTO c VALUES (1, 'ab   '), (2, 'x')").unwrap();
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT code || '|', length(code) FROM c ORDER BY id"
+        ),
+        "?column?|length\nab||2\nx||1\nSELECT 2"
+    );
+}
+
+#[test]
+fn mysql_and_oracle_read_strings_given_to_binary_columns_by_their_own_rules() {
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    run(
+        &mut mysql,
+        "CREATE TABLE bl (id INT PRIMARY KEY, b BLOB, t TEXT)",
+    )
+    .unwrap();
+    run(
+        &mut mysql,
+        "INSERT INTO bl VALUES (1, 'abc', 'x'), (3, '\\\\x41', NULL), (4, '\\\\001', NULL), (5, 'a\\\\b', NULL)",
+    )
+    .unwrap();
+    assert_eq!(
+        last(
+            &mut mysql,
+            "SELECT id, b, LENGTH(b), CONCAT('x', b), CONCAT(b, b), CONCAT(b, NULL) FROM bl ORDER BY id"
+        ),
+        "id|b|LENGTH(b)|CONCAT('x', b)|CONCAT(b, b)|CONCAT(b, NULL)\n\
+         1|\\x616263|3|\\x78616263|\\x616263616263|NULL\n\
+         3|\\x5c783431|4|\\x785c783431|\\x5c7834315c783431|NULL\n\
+         4|\\x5c303031|4|\\x785c303031|\\x5c3030315c303031|NULL\n\
+         5|\\x615c62|3|\\x78615c62|\\x615c62615c62|NULL\n\
+         SELECT 4"
+    );
+    assert_eq!(
+        last(
+            &mut mysql,
+            "SELECT id FROM bl WHERE b = 'abc' OR b = '\\\\x41' ORDER BY id"
+        ),
+        "id\n1\n3\nSELECT 2"
+    );
+    let parameters = [crate::Parameter {
+        declared_type: Some(crate::SqlType::Bytea),
+        value: Some("\\x00ff".into()),
+    }];
+    mysql
+        .execute_prepared(
+            "INSERT INTO bl (id, b) VALUES (6, ?)",
+            &parameters,
+            &mut |_| true,
+        )
+        .unwrap();
+    assert_eq!(
+        last(&mut mysql, "SELECT LENGTH(b), b FROM bl WHERE id = 6"),
+        "LENGTH(b)|b\n2|\\x00ff\nSELECT 1"
+    );
+    let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);
+    run(
+        &mut oracle,
+        "CREATE TABLE r (id NUMBER PRIMARY KEY, r RAW(8))",
+    )
+    .unwrap();
+    run(&mut oracle, "INSERT INTO r VALUES (1, '0a')").unwrap();
+    run(&mut oracle, "INSERT INTO r VALUES (2, 'ABC')").unwrap();
+    assert_eq!(
+        last(
+            &mut oracle,
+            "SELECT r, LENGTH(r) FROM r WHERE r = '0A' OR r = 'abc' ORDER BY id"
+        ),
+        "R|LENGTH(R)\n\\x0a|2\n\\x0abc|4\nSELECT 2"
+    );
+    let error = fails(&mut oracle, "INSERT INTO r VALUES (3, 'zz')");
+    assert_eq!(error.vendor_code(), Some(1465), "{error}");
+    let mut postgresql = Session::new(&store);
+    assert_eq!(
+        last(&mut postgresql, "SELECT '\\x41'::bytea, 'a\\\\b'::bytea"),
+        "bytea|bytea\n\\x41|\\x615c62\nSELECT 1"
     );
 }

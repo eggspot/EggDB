@@ -152,6 +152,7 @@ fn run_suite(dialect: &str) -> Result<(usize, usize), Vec<String>> {
         return Err(vec![format!("no suite for the dialect {dialect}")]);
     };
     let cases = parse(suite).map_err(|problem| vec![problem])?;
+    crate::memory_store::use_seeded_random_bytes();
     let store = MemoryStore::default();
     let Some(mut session) = session_for(dialect, &store) else {
         return Err(vec![format!("no session for the dialect {dialect}")]);

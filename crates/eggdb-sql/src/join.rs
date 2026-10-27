@@ -56,13 +56,18 @@ fn type_family(sql_type: SqlType) -> u8 {
     match sql_type {
         SqlType::SmallInt | SqlType::Integer | SqlType::BigInt => 0,
         SqlType::Real | SqlType::Double => 1,
-        SqlType::Text | SqlType::Varchar(_) => 2,
+        SqlType::Text | SqlType::Varchar(_) | SqlType::Bpchar(_) => 2,
         SqlType::Boolean => 3,
         SqlType::Numeric(_) => 4,
         SqlType::Date | SqlType::Timestamp(_) => 5,
         SqlType::TimestampTz(_) => 6,
         SqlType::Json => 7,
         SqlType::Jsonb => 8,
+        SqlType::Time(_) => 9,
+        SqlType::TimeTz(_) => 10,
+        SqlType::Interval { .. } => 11,
+        SqlType::Bytea => 12,
+        SqlType::Uuid => 13,
     }
 }
 

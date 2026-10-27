@@ -2,10 +2,10 @@ use crate::auth::{CACHING_SHA2_PASSWORD, MYSQL_NATIVE_PASSWORD, NONCE_BYTES};
 use crate::packets::{
     BoundValue, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, ColumnDefinition, Command,
     ParameterType, Payload, SERVER_CAPABILITIES, STATUS_AUTOCOMMIT, STATUS_IN_TRANSACTION,
-    STATUS_MORE_RESULTS, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON, TYPE_LONG,
-    TYPE_LONGLONG, TYPE_NEWDECIMAL, TYPE_SHORT, TYPE_TIMESTAMP, TYPE_TINY, TYPE_VAR_STRING,
-    UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet, err_packet, ok_packet, parse_command,
-    parse_execute, parse_handshake_response,
+    STATUS_MORE_RESULTS, TYPE_BLOB, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON,
+    TYPE_LONG, TYPE_LONGLONG, TYPE_NEWDECIMAL, TYPE_SHORT, TYPE_TIME, TYPE_TIMESTAMP, TYPE_TINY,
+    TYPE_TINY_BLOB, TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet,
+    err_packet, ok_packet, parse_command, parse_execute, parse_handshake_response,
 };
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
@@ -352,6 +352,8 @@ enum ValueClass {
     DateTime,
     Timestamp,
     Json,
+    Time,
+    Bytes,
 }
 
 fn class_of_type(sql_type: SqlType) -> ValueClass {
@@ -360,7 +362,14 @@ fn class_of_type(sql_type: SqlType) -> ValueClass {
         SqlType::Real | SqlType::Double => ValueClass::Float,
         SqlType::Numeric(_) => ValueClass::Decimal,
         SqlType::Boolean => ValueClass::Boolean,
-        SqlType::Text | SqlType::Varchar(_) => ValueClass::Text,
+        SqlType::Text
+        | SqlType::Varchar(_)
+        | SqlType::Bpchar(_)
+        | SqlType::TimeTz(_)
+        | SqlType::Interval { .. }
+        | SqlType::Uuid => ValueClass::Text,
+        SqlType::Time(_) => ValueClass::Time,
+        SqlType::Bytea => ValueClass::Bytes,
         SqlType::Date => ValueClass::Date,
         SqlType::Timestamp(_) => ValueClass::DateTime,
         SqlType::TimestampTz(_) => ValueClass::Timestamp,
@@ -449,6 +458,12 @@ fn column_for(
             precision.unwrap_or(0),
         ),
         Some(SqlType::Json | SqlType::Jsonb) => (TYPE_JSON, u32::MAX, 0),
+        Some(SqlType::Time(precision)) => (
+            TYPE_TIME,
+            temporal_length(precision) - 9,
+            precision.unwrap_or(0),
+        ),
+        Some(SqlType::Bytea) => (TYPE_BLOB, 65_535, 0),
         _ => (TYPE_VAR_STRING, 262_140, 0),
     };
     ColumnDefinition {
@@ -500,10 +515,24 @@ fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Result<Vec<u8>, Sq
                 let text = Dialect::MySql.value_text(value).unwrap_or_default();
                 values.bytes(&packed_temporal(&text)?);
             }
-            _ => {
-                let text = Dialect::MySql.value_text(value).unwrap_or_default();
-                values.length_encoded_bytes(text.as_bytes());
-            }
+            TYPE_TIME => match value {
+                Value::Time(micros) => {
+                    values.bytes(&packed_time(*micros));
+                }
+                other => {
+                    let text = Dialect::MySql.value_text(other).unwrap_or_default();
+                    values.length_encoded_bytes(text.as_bytes());
+                }
+            },
+            _ => match value {
+                Value::Bytea(bytes) => {
+                    values.length_encoded_bytes(bytes);
+                }
+                other => {
+                    let text = Dialect::MySql.value_text(other).unwrap_or_default();
+                    values.length_encoded_bytes(text.as_bytes());
+                }
+            },
         }
     }
     let mut payload = Payload::new();
@@ -563,9 +592,36 @@ fn packed_temporal(text: &str) -> Result<Vec<u8>, SqlError> {
     Ok(out)
 }
 
+fn packed_time(micros: i64) -> Vec<u8> {
+    const MICROS_PER_SECOND: i64 = 1_000_000;
+    let seconds = micros / MICROS_PER_SECOND;
+    let fraction = (micros % MICROS_PER_SECOND) as u32;
+    let days = (seconds / 86_400) as u32;
+    let (hour, minute, second) = (
+        (seconds / 3600 % 24) as u8,
+        (seconds / 60 % 60) as u8,
+        (seconds % 60) as u8,
+    );
+    if micros == 0 {
+        return vec![0];
+    }
+    let mut out = vec![0u8, 0];
+    out.extend_from_slice(&days.to_le_bytes());
+    out.extend_from_slice(&[hour, minute, second]);
+    if fraction != 0 {
+        out.extend_from_slice(&fraction.to_le_bytes());
+    }
+    out[0] = (out.len() - 1) as u8;
+    out
+}
+
 fn text_row(row: &[Value]) -> Vec<u8> {
     let mut payload = Payload::new();
     for value in row {
+        if let Value::Bytea(bytes) = value {
+            payload.length_encoded_bytes(bytes);
+            continue;
+        }
         match Dialect::MySql.value_text(value) {
             Some(text) => {
                 payload.length_encoded_bytes(text.as_bytes());
@@ -578,12 +634,21 @@ fn text_row(row: &[Value]) -> Vec<u8> {
     payload.0
 }
 
-fn parameter_of(value: BoundValue) -> Result<Parameter, SqlError> {
+fn is_binary_type(kind: u8) -> bool {
+    (TYPE_TINY_BLOB..=TYPE_BLOB).contains(&kind)
+}
+
+fn parameter_of(value: BoundValue, kind: Option<u8>) -> Result<Parameter, SqlError> {
+    let binary = kind.is_some_and(is_binary_type);
     let (declared_type, value) = match value {
+        BoundValue::Bytes(bytes) if binary => (Some(SqlType::Bytea), Some(hex_text(&bytes))),
         BoundValue::Null => (None, None),
         BoundValue::Integer(number) => (Some(SqlType::BigInt), Some(number.to_string())),
         BoundValue::Unsigned(number) => (None, Some(number.to_string())),
         BoundValue::Float(number) => (Some(SqlType::Double), Some(float_text(number))),
+        BoundValue::Bytes(bytes) if std::str::from_utf8(&bytes).is_err() => {
+            (Some(SqlType::Bytea), Some(hex_text(&bytes)))
+        }
         BoundValue::Bytes(bytes) => (
             None,
             Some(String::from_utf8(bytes).map_err(|_| {
@@ -599,6 +664,17 @@ fn parameter_of(value: BoundValue) -> Result<Parameter, SqlError> {
         declared_type,
         value,
     })
+}
+
+fn hex_text(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("\\x");
+    for &byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0F)]));
+    }
+    out
 }
 
 fn float_text(number: f64) -> String {
@@ -989,6 +1065,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 "Got a packet bigger than 'max_allowed_packet' bytes",
             );
         }
+        let kinds: Vec<u8> = types.iter().map(|(kind, _)| *kind).collect();
         if let Some(prepared) = self.statements.get_mut(&statement) {
             prepared.types = types;
         }
@@ -998,7 +1075,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 Some(bytes) if value != BoundValue::Null => BoundValue::Bytes(bytes),
                 _ => value,
             };
-            match parameter_of(value) {
+            match parameter_of(value, kinds.get(index).copied()) {
                 Ok(parameter) => parameters.push(parameter),
                 Err(error) => return self.sql_error(&error),
             }

@@ -44,6 +44,12 @@ impl SqlState {
     pub const DATETIME_FIELD_OVERFLOW: Self = Self(*b"22008");
     /// `22023` invalid_parameter_value.
     pub const INVALID_PARAMETER_VALUE: Self = Self(*b"22023");
+    /// `22011` substring_error.
+    pub const SUBSTRING_ERROR: Self = Self(*b"22011");
+    /// `22015` interval_field_overflow.
+    pub const INTERVAL_FIELD_OVERFLOW: Self = Self(*b"22015");
+    /// `2202E` array_subscript_error.
+    pub const ARRAY_SUBSCRIPT_ERROR: Self = Self(*b"2202E");
     /// `22012` division_by_zero.
     pub const DIVISION_BY_ZERO: Self = Self(*b"22012");
     /// `22019` invalid_escape_character.

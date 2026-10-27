@@ -363,7 +363,6 @@ SELECT substring('alphabet' from 3 for 2)
 substring
 ph
 SELECT 1
-... differs
 
 rows
 SELECT trim('  x  '), ltrim('  x'), rtrim('x  '), btrim('xxaxx', 'x')
@@ -1269,8 +1268,12 @@ SELECT 1
 error 0A000
 SELECT extract(hour FROM DATE '2024-02-29')
 
-error 0A000
+rows
 SELECT TIMESTAMP '2024-01-02' - TIMESTAMP '2024-01-01'
+----
+?column?
+1 day
+SELECT 1
 
 ok
 CREATE TABLE events (id integer PRIMARY KEY, day date, at timestamp, zoned timestamptz)
@@ -1732,3 +1735,196 @@ SELECT * FROM sq_dept FULL JOIN sq_emp USING (id)
 
 error 0A000
 SELECT * FROM sq_dept, LATERAL (SELECT 1) x
+
+chapter datatype-datetime, "Time Types" and "Interval Input", "Interval Output"
+rows
+SELECT time '04:05:06.789', time '04:05 PM', time '24:00:00', time with time zone '04:05:06+02', '10:00:00.123456'::time(2)
+----
+time|time|time|timetz|time
+04:05:06.789|16:05:00|24:00:00|04:05:06+02|10:00:00.12
+SELECT 1
+
+error 22008
+SELECT time '24:00:00.000001'
+
+error 22007
+SELECT time 'noon-ish'
+
+rows
+SELECT interval '1 day 02:03:04', interval '1 year 2 months', interval 'P1Y2M3DT4H5M6S', interval '-1 day +02:03:04', interval '1.5 years'
+----
+interval|interval|interval|interval|interval
+1 day 02:03:04|1 year 2 mons|1 year 2 mons 3 days 04:05:06|-1 days +02:03:04|1 year 6 mons
+SELECT 1
+
+rows
+SELECT interval '3 4:05:06', interval '1-2', interval '2 weeks ago', interval '1' day, interval '1 year 2 mons 3 days' year to month
+----
+interval|interval|interval|interval|interval
+3 days 04:05:06|1 year 2 mons|-14 days|1 day|1 year 2 mons
+SELECT 1
+
+rows
+SELECT interval(2) '01:02:03.456789', interval '1 day 01:02:03' hour to minute
+----
+interval|interval
+01:02:03.46|1 day 01:02:00
+SELECT 1
+
+error 22015
+SELECT interval '2147483648 days'
+
+error 22007
+SELECT interval '1 fortnight'
+
+chapter functions-datetime, "Date/Time Operators" with intervals
+rows
+SELECT date '2001-09-28' + interval '1 hour', timestamp '2001-09-28 01:00' + interval '23 hours', time '01:00' + interval '3 hours', date '2001-10-01' - interval '1 hour'
+----
+?column?|?column?|?column?|?column?
+2001-09-28 01:00:00|2001-09-29 00:00:00|04:00:00|2001-09-30 23:00:00
+SELECT 1
+
+rows
+SELECT - interval '23 hours', interval '1 day' + interval '1 hour', interval '1 day' - interval '1 hour', 900 * interval '1 second', interval '1 hour' / 1.5
+----
+?column?|?column?|?column?|?column?|?column?
+-23:00:00|1 day 01:00:00|1 day -01:00:00|00:15:00|00:40:00
+SELECT 1
+
+rows
+SELECT timestamp '2001-09-29 03:00' - timestamp '2001-09-27 12:00', time '05:00' - time '03:00', date '2001-09-28' + time '03:00'
+----
+?column?|?column?|?column?
+1 day 15:00:00|02:00:00|2001-09-28 03:00:00
+SELECT 1
+
+rows
+SELECT timestamp '2024-01-31' + interval '1 month', date '2023-03-31' - interval '1 month', timestamp '2024-02-29' + interval '1 year'
+----
+?column?|?column?|?column?
+2024-02-29 00:00:00|2023-02-28 00:00:00|2025-02-28 00:00:00
+SELECT 1
+
+rows
+SELECT interval '1 mon' = interval '30 days', interval '1 day' = interval '24 hours', interval '1 year' > interval '364 days'
+----
+?column?|?column?|?column?
+t|t|f
+SELECT 1
+
+rows
+SELECT justify_days(interval '35 days'), justify_hours(interval '27 hours'), justify_interval(interval '1 mon -1 hour')
+----
+justify_days|justify_hours|justify_interval
+1 mon 5 days|1 day 03:00:00|29 days 23:00:00
+SELECT 1
+
+rows
+SELECT age(timestamp '2001-04-10', timestamp '1957-06-13'), age('2001-04-10', timestamp '1957-06-13'), justify_days('35 days')
+----
+age|age|justify_days
+43 years 9 mons 27 days|43 years 9 mons 27 days|1 mon 5 days
+SELECT 1
+
+rows
+SELECT extract(hour from interval '4 hours 3 minutes'), extract(epoch from interval '5 days 3 hours'), date_part('month', interval '2 years 3 months'), extract(minute from time '17:12:28.5')
+----
+extract|extract|date_part|extract
+4|442800.000000|3|12
+SELECT 1
+
+error 22008
+SELECT interval '2147483647 days' + interval '1 day'
+
+error 22008
+SELECT timestamp '294276-12-31' + interval '1 day'
+
+error 22012
+SELECT interval '1 day' / 0
+
+chapter datatype-binary, functions-binarystring
+rows
+SELECT '\xDEADBEEF'::bytea, 'abc \153\154\155 \052\251\124'::bytea, '\x'::bytea
+----
+bytea|bytea|bytea
+\xdeadbeef|\x616263206b6c6d202aa954|\x
+SELECT 1
+
+error 22023
+SELECT '\x123'::bytea
+
+error 22P02
+SELECT 'a\b'::bytea
+
+rows
+SELECT '\x123456'::bytea || '\x789a00bcde'::bytea, length('\x1234567890'::bytea), octet_length('\x123456'::bytea), get_byte('\x1234567890'::bytea, 4), substring('\x1234567890'::bytea from 2 for 3)
+----
+?column?|length|octet_length|get_byte|substring
+\x123456789a00bcde|5|3|144|\x345678
+SELECT 1
+
+rows
+SELECT encode('123\000\001', 'base64'), decode('MTIzAAE=', 'base64'), encode('\x1234'::bytea, 'hex'), encode('a\000\\b'::bytea, 'escape')
+----
+encode|decode|encode|encode
+MTIzAAE=|\x3132330001|1234|a\000\\b
+SELECT 1
+
+error 2202E
+SELECT get_byte('\x12'::bytea, 1)
+
+error 22023
+SELECT decode('MTIzAAE', 'base64')
+
+chapter datatype-uuid
+rows
+SELECT 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid, '{a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11}'::uuid, 'a0eebc999c0b4ef8bb6d6bb9bd380a11'::uuid, 'a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11'::uuid
+----
+uuid|uuid|uuid|uuid
+a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11
+SELECT 1
+
+error 22P02
+SELECT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a1'::uuid
+
+rows
+SELECT length(gen_random_uuid()::text), substring(gen_random_uuid()::text from 15 for 1)
+----
+length|substring
+36|4
+SELECT 1
+
+chapter datatype-character: character(n)
+rows
+SELECT 'ok'::char(4) || '|', length('ok  '::char(4)), octet_length('ok'::char(4)), 'ok'::char(4) = 'ok  '::char(2), 'too long'::char(3)
+----
+?column?|length|octet_length|?column?|bpchar
+ok||2|4|t|too
+SELECT 1
+
+ok
+CREATE TABLE test1 (a character(4))
+
+ok
+INSERT INTO test1 VALUES ('ok')
+
+rows
+SELECT a, char_length(a) FROM test1
+----
+a|char_length
+ok  |2
+SELECT 1
+
+error 22001
+INSERT INTO test1 VALUES ('too long')
+
+ok
+INSERT INTO test1 VALUES ('ok3   ')
+
+rows
+SELECT count(*) FROM test1 WHERE a = 'ok'
+----
+count
+1
+SELECT 1

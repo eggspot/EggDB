@@ -83,6 +83,11 @@ pub(crate) fn sqlite_type_name(sql_type: SqlType) -> &'static str {
         SqlType::Timestamp(_) => "DATETIME",
         SqlType::TimestampTz(_) => "TIMESTAMP",
         SqlType::Json | SqlType::Jsonb => "JSON",
+        SqlType::Bpchar(_) => "CHARACTER",
+        SqlType::Bytea => "BLOB",
+        SqlType::Time(_) | SqlType::TimeTz(_) => "TIME",
+        SqlType::Interval { .. } => "INTERVAL",
+        SqlType::Uuid => "UUID",
     }
 }
 

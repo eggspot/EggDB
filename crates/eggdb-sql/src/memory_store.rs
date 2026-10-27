@@ -9,6 +9,26 @@ use std::rc::Rc;
 
 type Map = BTreeMap<Vec<u8>, Vec<u8>>;
 
+static RANDOM_STATE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+
+fn seeded_random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
+    use std::sync::atomic::Ordering;
+    for byte in bytes {
+        let mut state = RANDOM_STATE.load(Ordering::Relaxed);
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        RANDOM_STATE.store(state, Ordering::Relaxed);
+        *byte = state as u8;
+    }
+    Ok(())
+}
+
+pub(crate) fn use_seeded_random_bytes() {
+    crate::set_random_source(seeded_random_bytes);
+}
+
 #[derive(Default)]
 pub(crate) struct MemoryStore {
     committed: RefCell<Rc<Map>>,

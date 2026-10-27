@@ -423,6 +423,119 @@ fn numeric_date_time_and_json_values_round_trip_in_text_and_binary() {
 }
 
 #[test]
+fn time_interval_bytea_uuid_and_character_values_round_trip_in_text_and_binary() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query(
+        "CREATE TABLE more (id serial PRIMARY KEY, at time, zoned timetz, span interval, raw bytea, tag uuid, code char(4))",
+    );
+    client.send(
+        b'P',
+        &parse(
+            "",
+            "INSERT INTO more (at, zoned, span, raw, tag, code) VALUES ($1, $2, $3, $4, $5, $6)",
+            &[1083, 1266, 1186, 17, 2950, 1042],
+        ),
+    );
+    let at = 45_296_789_000i64.to_be_bytes();
+    let mut zoned = 3_600_000_000i64.to_be_bytes().to_vec();
+    zoned.extend_from_slice(&(-7200i32).to_be_bytes());
+    let mut span = (-1i64).to_be_bytes().to_vec();
+    span.extend_from_slice(&3i32.to_be_bytes());
+    span.extend_from_slice(&14i32.to_be_bytes());
+    let raw = [0u8, 0xFF, b'\\', 0x01];
+    let tag: Vec<u8> = (0u8..16).collect();
+    client.send(
+        b'B',
+        &bind(
+            "",
+            "",
+            &[1],
+            &[
+                Some(&at),
+                Some(&zoned),
+                Some(&span),
+                Some(&raw),
+                Some(&tag),
+                Some(b"ab"),
+            ],
+            &[],
+        ),
+    );
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12CZ", "{answer:?}");
+    client.send(
+        b'P',
+        &parse(
+            "read",
+            "SELECT at, zoned, span, raw, tag, code FROM more",
+            &[],
+        ),
+    );
+    client.send(b'B', &bind("text", "read", &[], &[], &[0]));
+    client.send(b'D', b"Ptext\0");
+    client.send(b'E', &execute("text", 0));
+    client.send(b'B', &bind("binary", "read", &[], &[], &[1]));
+    client.send(b'E', &execute("binary", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12TDC2DCZ", "{answer:?}");
+    assert_eq!(
+        answer[2].column_types(),
+        [
+            ("at".to_owned(), 1083, 0),
+            ("zoned".to_owned(), 1266, 0),
+            ("span".to_owned(), 1186, 0),
+            ("raw".to_owned(), 17, 0),
+            ("tag".to_owned(), 2950, 0),
+            ("code".to_owned(), 1042, 0),
+        ]
+    );
+    assert_eq!(
+        answer[3].row(),
+        [
+            Some("12:34:56.789".to_owned()),
+            Some("01:00:00+02".to_owned()),
+            Some("1 year 2 mons 3 days -00:00:00.000001".to_owned()),
+            Some("\\x00ff5c01".to_owned()),
+            Some("00010203-0405-0607-0809-0a0b0c0d0e0f".to_owned()),
+            Some("ab  ".to_owned()),
+        ]
+    );
+    assert_eq!(
+        answer[6].raw_row(),
+        [
+            Some(at.to_vec()),
+            Some(zoned),
+            Some(span),
+            Some(raw.to_vec()),
+            Some(tag),
+            Some(b"ab  ".to_vec()),
+        ]
+    );
+    for (oid, bad) in [
+        (1083u32, (-1i64).to_be_bytes().to_vec()),
+        (1083, 86_400_000_001i64.to_be_bytes().to_vec()),
+        (1266, vec![0; 11]),
+        (
+            1266,
+            [vec![0; 8], 57_600i32.to_be_bytes().to_vec()].concat(),
+        ),
+        (1186, vec![0; 15]),
+        (2950, vec![0; 17]),
+    ] {
+        client.send(b'P', &parse("", "SELECT $1", &[oid]));
+        client.send(b'B', &bind("", "", &[1], &[Some(&bad)], &[]));
+        client.send(b'E', &execute("", 0));
+        client.send(b'S', b"");
+        let answer = client.read_until_ready();
+        assert_eq!(tags(&answer), "1EZ", "{oid}: {answer:?}");
+    }
+}
+
+#[test]
 fn portals_return_rows_in_batches_and_errors_skip_to_sync() {
     let server = TestServer::start(8);
     let (mut client, _) = Client::login(server.address);

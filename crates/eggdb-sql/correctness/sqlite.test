@@ -1088,3 +1088,8 @@ SELECT 5
 
 error 42883
 SELECT greatest(1, 2)
+
+chapter "Datatypes In SQLite": BLOB columns
+ok
+CREATE TABLE b31 (x BLOB)
+... differs

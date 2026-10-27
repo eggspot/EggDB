@@ -899,3 +899,51 @@ SELECT 4
 
 error 42000 1064
 SELECT * FROM sq_dept FULL JOIN sq_emp ON true
+
+chapter "The TIME Type", "The BINARY and VARBINARY Types", "The BLOB and TEXT Types"
+ok
+CREATE TABLE t31 (id INT PRIMARY KEY, t TIME, f TIME(3), b BLOB, v VARBINARY(8))
+
+ok
+INSERT INTO t31 VALUES (1, '10:30:15', '10:30:15.1234', 'abc', 'xy')
+
+rows
+SELECT t, f, LENGTH(b), b = 'abc' FROM t31
+----
+t|f|LENGTH(b)|b = 'abc'
+10:30:15|10:30:15.123|3|1
+SELECT 1
+
+rows
+SELECT TIME '23:59:59'
+----
+TIME '23:59:59'
+23:59:59
+SELECT 1
+
+error 42000 1305
+SELECT gen_random_uuid()
+
+ok
+INSERT INTO t31 (id, t) VALUES (2, '838:59:59')
+... differs
+
+ok
+INSERT INTO t31 (id, b) VALUES (3, '\\x41'), (4, '\\001'), (5, 'a\\b')
+
+rows
+SELECT id, LENGTH(b), CONCAT('x', b) = 'xabc', LENGTH(CONCAT(b, b)) FROM t31 ORDER BY id
+----
+id|LENGTH(b)|CONCAT('x', b) = 'xabc'|LENGTH(CONCAT(b, b))
+1|3|1|6
+3|4|0|8
+4|4|0|8
+5|3|0|6
+SELECT 4
+
+rows
+SELECT CURTIME() IS NOT NULL, CURRENT_TIME IS NOT NULL, CURRENT_TIME() <= '24:00:00'
+----
+CURTIME() IS NOT NULL|CURRENT_TIME IS NOT NULL|CURRENT_TIME() <= '24:00:00'
+1|1|1
+SELECT 1

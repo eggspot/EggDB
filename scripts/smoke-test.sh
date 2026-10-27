@@ -196,11 +196,25 @@ connection.run(
     doc='{"b": 1, "a": 2}',
 )
 print(connection.run("SELECT id, price, day, at, zoned, doc FROM pg_typed WHERE day = :day", day=date(2024, 2, 29)))
+from datetime import time, timedelta
+from uuid import UUID
+connection.run(
+    "CREATE TABLE pg_more (id serial PRIMARY KEY, raw bytea, tag uuid, starts time, span interval, code char(4))"
+)
+connection.run(
+    "INSERT INTO pg_more (raw, tag, starts, span, code) VALUES (:raw, :tag, :starts, :span, :code)",
+    raw=b"\x00\xffab",
+    tag=UUID("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"),
+    starts=time(12, 34, 56, 789000),
+    span=timedelta(days=1, hours=2),
+    code="ab",
+)
+print(connection.run("SELECT raw, tag, starts, span, code FROM pg_more WHERE tag = :tag", tag=UUID("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")))
 connection.close()
 PYTHON
-    expected_pg8000="[['jam']][[3]][[1, Decimal('19.99'), datetime.date(2024, 2, 29), datetime.datetime(2024, 2, 29, 13, 45, 1, 500000), datetime.datetime(2024, 2, 29, 13, 45, 1, tzinfo=datetime.timezone.utc), {'a': 2, 'b': 1}]]"
+    expected_pg8000="[['jam']][[3]][[1, Decimal('19.99'), datetime.date(2024, 2, 29), datetime.datetime(2024, 2, 29, 13, 45, 1, 500000), datetime.datetime(2024, 2, 29, 13, 45, 1, tzinfo=datetime.timezone.utc), {'a': 2, 'b': 1}]][[b'\\x00\\xffab', UUID('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'), datetime.time(12, 34, 56, 789000), datetime.timedelta(days=1, seconds=7200), 'ab  ']]"
     [ "$(tr -d '\n' < driver.out)" = "$expected_pg8000" ] || fail "pg8000 printed $(cat driver.out)"
-    pass "serve: the pg8000 driver runs parameterized queries and round-trips numeric, date, time stamp and jsonb values"
+    pass "serve: the pg8000 driver runs parameterized queries and round-trips numeric, date, time stamp, jsonb, bytea, uuid, time, interval and character values"
   else
     echo "skip driver: pg8000 is not installed (CI's Linux job installs it)"
   fi
@@ -246,11 +260,19 @@ with connection.cursor() as cursor:
     connection.commit()
     cursor.execute("SELECT price, day, at, doc FROM my_typed WHERE day = %s", (date(2024, 2, 29),))
     print(cursor.fetchall())
+    from datetime import time
+    cursor.execute("CREATE TABLE my_more (id INT PRIMARY KEY, starts TIME(6), body BLOB)")
+    cursor.execute(
+        "INSERT INTO my_more VALUES (%s, %s, %s)", (1, time(12, 34, 56, 789000), "abc")
+    )
+    connection.commit()
+    cursor.execute("SELECT starts, body FROM my_more WHERE id = %s", (1,))
+    print(cursor.fetchall())
 connection.close()
 PYTHON
-    expected_pymysql="(('honey',),)((Decimal('19.99'), datetime.date(2024, 2, 29), datetime.datetime(2024, 2, 29, 13, 45, 1), '{\"a\": 2, \"b\": 1}'),)"
+    expected_pymysql="(('honey',),)((Decimal('19.99'), datetime.date(2024, 2, 29), datetime.datetime(2024, 2, 29, 13, 45, 1), '{\"a\": 2, \"b\": 1}'),)((datetime.timedelta(seconds=45296, microseconds=789000), b'abc'),)"
     [ "$(tr -d '\n' < driver.out)" = "$expected_pymysql" ] || fail "PyMySQL printed $(cat driver.out)"
-    pass "serve: the PyMySQL driver runs parameterized queries and round-trips DECIMAL, DATE, DATETIME and JSON values"
+    pass "serve: the PyMySQL driver runs parameterized queries and round-trips DECIMAL, DATE, DATETIME, JSON, TIME and BLOB values"
   else
     echo "skip driver: PyMySQL is not installed (CI's Linux job installs it)"
   fi

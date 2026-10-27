@@ -18,10 +18,11 @@ use crate::ast::{
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::interval::IntervalFields;
 use crate::lexer::{Token, TokenKind, swap_uniform_case};
 use crate::session::Parameter;
 use crate::settings::Settings;
-use crate::types::{NumericModifier, SqlType};
+use crate::types::{NumericModifier, SqlType, Value};
 use std::borrow::Cow;
 
 const MAX_NESTING: usize = 64;
@@ -121,7 +122,18 @@ fn is_plain_literal(kind: &TokenKind<'_>) -> bool {
     ) || matches!(kind, TokenKind::Word(word) if word == "null" || word == "true" || word == "false")
 }
 
-const POSTGRESQL_ONLY_FUNCTIONS: [&str; 13] = [
+const POSTGRESQL_ONLY_FUNCTIONS: [&str; 24] = [
+    "current_time",
+    "localtime",
+    "justify_days",
+    "justify_hours",
+    "justify_interval",
+    "age",
+    "gen_random_uuid",
+    "encode",
+    "decode",
+    "get_byte",
+    "substring",
     "now",
     "transaction_timestamp",
     "statement_timestamp",
@@ -137,7 +149,8 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 13] = [
     "jsonb_array_length",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 7] = [
+const INTERNAL_FUNCTIONS: [&str; 8] = [
+    "mysql_curtime",
     "mysql_greatest",
     "mysql_least",
     "mysql_now",
@@ -779,15 +792,24 @@ impl<'t> Parser<'t> {
             }),
             position,
         };
-        Ok(match declared_type {
-            Some(sql_type) => Expr {
+        Ok(match (declared_type, literal.kind) {
+            (Some(SqlType::Bytea), ExprKind::Literal(Literal::String(text))) => Expr {
+                kind: ExprKind::Constant {
+                    value: Value::Bytea(
+                        crate::bytea::parse(&text).map_err(|error| error.at(position))?,
+                    ),
+                    sql_type: Some(SqlType::Bytea),
+                },
+                position,
+            },
+            (Some(sql_type), kind) => Expr {
                 kind: ExprKind::Cast {
-                    expr: Box::new(literal),
+                    expr: Box::new(Expr { kind, position }),
                     sql_type,
                 },
                 position,
             },
-            None => literal,
+            (None, kind) => Expr { kind, position },
         })
     }
 
@@ -1131,7 +1153,9 @@ impl<'t> Parser<'t> {
 
     fn typed_literal_allowed(&self, word: &str) -> bool {
         match word {
-            "numeric" | "decimal" | "timestamptz" | "json" | "jsonb" => self.postgresql(),
+            "numeric" | "decimal" | "timestamptz" | "json" | "jsonb" | "timetz" | "interval"
+            | "bytea" | "uuid" | "bpchar" | "char" | "character" => self.postgresql(),
+            "time" => self.postgresql() || self.mysql(),
             "date" | "timestamp" => !self.sqlite(),
             _ => true,
         }
@@ -1228,10 +1252,88 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn typed_literal_with_modifiers(&self, word: &str) -> bool {
+        let with_precision = matches!(self.peek_kind_at(1), TokenKind::LeftParen)
+            && matches!(self.peek_kind_at(2), TokenKind::Integer(_))
+            && matches!(self.peek_kind_at(3), TokenKind::RightParen);
+        let zone_at = if with_precision { 4 } else { 1 };
+        let zoned = matches!(word, "time" | "timestamp")
+            && (self.is_word_at(zone_at, "with") || self.is_word_at(zone_at, "without"))
+            && self.is_word_at(zone_at + 1, "time")
+            && self.is_word_at(zone_at + 2, "zone");
+        let string_at = if zoned { zone_at + 3 } else { zone_at };
+        matches!(
+            word,
+            "time" | "timestamp" | "interval" | "timetz" | "timestamptz"
+        ) && self.postgresql()
+            && (with_precision || zoned)
+            && matches!(self.peek_kind_at(string_at), TokenKind::String(_))
+    }
+
+    fn interval_fields(&mut self) -> SqlResult<Option<IntervalFields>> {
+        const FIELDS: [&str; 6] = ["year", "month", "day", "hour", "minute", "second"];
+        let Some(first) = FIELDS.into_iter().find(|field| self.is_word(field)) else {
+            return Ok(None);
+        };
+        let position = self.position();
+        self.at += 1;
+        let last = if self.is_word("to") {
+            self.at += 1;
+            let last = FIELDS.into_iter().find(|field| self.is_word(field));
+            if last.is_none() {
+                return Err(self.unexpected());
+            }
+            self.at += 1;
+            last
+        } else {
+            None
+        };
+        IntervalFields::from_words(first, last)
+            .map(Some)
+            .ok_or_else(|| SqlError::syntax("syntax error at or near \"to\"", position))
+    }
+
+    fn interval_type(&mut self, position: usize) -> SqlResult<SqlType> {
+        if self.peek_kind() == &TokenKind::LeftParen {
+            let precision = self.time_precision(position, "interval")?;
+            return Ok(SqlType::Interval {
+                fields: None,
+                precision,
+            });
+        }
+        let fields = self.interval_fields()?;
+        let precision = if fields.is_none_or(IntervalFields::ends_in_seconds) {
+            self.time_precision(position, "interval")?
+        } else {
+            None
+        };
+        Ok(SqlType::Interval { fields, precision })
+    }
+
+    fn character_length(&mut self, position: usize) -> SqlResult<Option<u32>> {
+        match self.type_modifier()? {
+            None => Ok(None),
+            Some(length @ 1..=10_485_760) => Ok(Some(length as u32)),
+            Some(length) if length < 1 => Err(SqlError::new(
+                SqlState::INVALID_TEXT_REPRESENTATION,
+                "length for type char must be at least 1",
+            )
+            .at(position)),
+            Some(_) => Err(SqlError::new(
+                SqlState::INVALID_TEXT_REPRESENTATION,
+                "length for type char cannot exceed 10485760",
+            )
+            .at(position)),
+        }
+    }
+
     fn timestamp_type(&mut self, word: &str, position: usize) -> SqlResult<SqlType> {
         let precision = self.time_precision(position, word)?;
         if word == "timestamptz" {
             return Ok(SqlType::TimestampTz(precision));
+        }
+        if word == "timetz" {
+            return Ok(SqlType::TimeTz(precision));
         }
         let zoned = if self.is_word("with") && self.is_word_at(1, "time") {
             self.at += 2;
@@ -1245,10 +1347,11 @@ impl<'t> Parser<'t> {
         } else {
             false
         };
-        Ok(if zoned {
-            SqlType::TimestampTz(precision)
-        } else {
-            SqlType::Timestamp(precision)
+        Ok(match (word, zoned) {
+            ("time", true) => SqlType::TimeTz(precision),
+            ("time", false) => SqlType::Time(precision),
+            (_, true) => SqlType::TimestampTz(precision),
+            (_, false) => SqlType::Timestamp(precision),
         })
     }
 
@@ -1302,8 +1405,15 @@ impl<'t> Parser<'t> {
             "timestamp" | "timestamptz" => self.timestamp_type(word, token.start)?,
             "json" => SqlType::Json,
             "jsonb" => SqlType::Jsonb,
-            "time" | "timetz" | "interval" | "uuid" | "bytea" | "character" | "char" | "bpchar"
-            | "money" | "inet" | "cidr" | "xml" | "bit" | "point" => {
+            "time" | "timetz" => self.timestamp_type(word, token.start)?,
+            "interval" => self.interval_type(token.start)?,
+            "uuid" => SqlType::Uuid,
+            "bytea" => SqlType::Bytea,
+            "character" | "char" => {
+                SqlType::Bpchar(Some(self.character_length(token.start)?.unwrap_or(1)))
+            }
+            "bpchar" => SqlType::Bpchar(self.character_length(token.start)?),
+            "money" | "inet" | "cidr" | "xml" | "bit" | "point" => {
                 return Err(
                     SqlError::not_supported(format!("type {word} is not supported yet"))
                         .at(token.start),
@@ -2372,7 +2482,8 @@ impl<'t> Parser<'t> {
                     self.clock_function(word, position)
                 }
                 "current_time" | "localtime" if self.postgresql() => {
-                    Err(self.not_supported("type time"))
+                    self.at += 1;
+                    self.clock_function(word, position)
                 }
                 "current_user" | "session_user" | "user" | "current_role" => {
                     self.at += 1;
@@ -2394,19 +2505,26 @@ impl<'t> Parser<'t> {
                     };
                     self.session_value(name, position)
                 }
-                "interval" | "time" if matches!(self.peek_kind_at(1), TokenKind::String(_)) => Err(
-                    SqlError::not_supported(format!("type {word} is not supported yet"))
-                        .at(position),
-                ),
+                "interval" | "time"
+                    if !self.typed_literal_allowed(word)
+                        && matches!(self.peek_kind_at(1), TokenKind::String(_)) =>
+                {
+                    Err(
+                        SqlError::not_supported(format!("type {word} is not supported yet"))
+                            .at(position),
+                    )
+                }
                 "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8" | "real"
                 | "float4" | "float8" | "boolean" | "bool" | "text" | "varchar" | "double"
                 | "numeric" | "decimal" | "date" | "timestamp" | "timestamptz" | "json"
-                | "jsonb"
+                | "jsonb" | "time" | "timetz" | "interval" | "bytea" | "uuid" | "bpchar"
+                | "char" | "character"
                     if self.typed_literal_allowed(word)
                         && (matches!(self.peek_kind_at(1), TokenKind::String(_))
                             || (word == "double"
                                 && self.is_word_at(1, "precision")
-                                && matches!(self.peek_kind_at(2), TokenKind::String(_)))) =>
+                                && matches!(self.peek_kind_at(2), TokenKind::String(_)))
+                            || self.typed_literal_with_modifiers(word)) =>
                 {
                     let sql_type = if self.mysql() && word == "timestamp" {
                         self.at += 1;
@@ -2422,6 +2540,22 @@ impl<'t> Parser<'t> {
                         position: self.position(),
                     };
                     self.at += 1;
+                    let sql_type = match sql_type {
+                        SqlType::Interval {
+                            fields: None,
+                            precision,
+                        } if self.postgresql() => {
+                            let fields = self.interval_fields()?;
+                            let precision = match fields {
+                                Some(fields) if fields.ends_in_seconds() && precision.is_none() => {
+                                    self.time_precision(position, "interval")?
+                                }
+                                _ => precision,
+                            };
+                            SqlType::Interval { fields, precision }
+                        }
+                        other => other,
+                    };
                     Ok(Expr {
                         kind: ExprKind::Cast {
                             expr: Box::new(operand),
@@ -2562,6 +2696,9 @@ impl<'t> Parser<'t> {
             )
             .at(name.position));
         }
+        if text == "substring" && self.postgresql() {
+            return self.substring(name);
+        }
         if !self.sqlite()
             && !self.oracle()
             && let Some(expr) = self.session_function(&name)?
@@ -2600,6 +2737,35 @@ impl<'t> Parser<'t> {
         if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
             return Err(self.not_supported("window and aggregate clauses"));
         }
+        Ok(Expr {
+            kind: ExprKind::Function {
+                name: name.text,
+                arguments,
+            },
+            position: name.position,
+        })
+    }
+
+    fn substring(&mut self, name: Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut arguments = vec![self.expression()?];
+        if self.take_word("from") {
+            arguments.push(self.expression()?);
+            if self.take_word("for") {
+                arguments.push(self.expression()?);
+            }
+        } else if self.take_word("for") {
+            arguments.push(Expr {
+                kind: ExprKind::Literal(Literal::Integer(1)),
+                position: name.position,
+            });
+            arguments.push(self.expression()?);
+        } else {
+            while self.take(&TokenKind::Comma) {
+                arguments.push(self.expression()?);
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
         Ok(Expr {
             kind: ExprKind::Function {
                 name: name.text,

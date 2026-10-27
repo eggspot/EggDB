@@ -485,8 +485,17 @@ impl<'t> Parser<'t> {
                 }
             }
             "text" | "tinytext" | "mediumtext" | "longtext" => SqlType::Text,
-            "time" | "year" | "blob" | "tinyblob" | "mediumblob" | "longblob" | "binary"
-            | "varbinary" | "bit" | "enum" | "set" | "geometry" | "point" => {
+            "time" => SqlType::Time(Some(self.fractional_digits(width, token.start)?)),
+            "blob" | "tinyblob" | "mediumblob" | "longblob" => SqlType::Bytea,
+            "binary" => {
+                width.map_or(Ok(1), |length| self.length(length, token.start))?;
+                SqlType::Bytea
+            }
+            "varbinary" => {
+                self.required_length(width, token.start)?;
+                SqlType::Bytea
+            }
+            "year" | "bit" | "enum" | "set" | "geometry" | "point" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()
@@ -911,11 +920,27 @@ impl<'t> Parser<'t> {
                 clock_call(name, position)
             }
             "current_time" => {
-                return Err(self.not_supported("type TIME"));
+                self.at += 1;
+                if called {
+                    self.empty_or_precision()?;
+                }
+                clock_call("mysql_curtime", position)
             }
             _ => return Ok(None),
         };
         Ok(Some(expr))
+    }
+
+    fn empty_or_precision(&mut self) -> SqlResult<()> {
+        self.expect(&TokenKind::LeftParen)?;
+        if !self.take(&TokenKind::RightParen) {
+            let TokenKind::Integer(_) = self.peek_kind() else {
+                return Err(self.unexpected());
+            };
+            self.at += 1;
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(())
     }
 
     fn empty_arguments(&mut self) -> SqlResult<()> {
@@ -972,7 +997,11 @@ impl<'t> Parser<'t> {
                 };
                 return Ok(Some(clock_call(clock, position)));
             }
-            "curtime" | "utc_date" | "unix_timestamp" => {
+            "curtime" => {
+                self.empty_or_precision()?;
+                return Ok(Some(clock_call("mysql_curtime", position)));
+            }
+            "utc_date" | "unix_timestamp" => {
                 return Err(self.not_supported("this date and time function"));
             }
             "ifnull" => "coalesce",

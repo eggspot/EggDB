@@ -1,10 +1,12 @@
 //! PostgreSQL's type OIDs for EggDB's SQL types, and values in their text and binary forms.
 
 use crate::messages::{ColumnDescription, Format};
-use eggdb_sql::{OutputColumn, SqlError, SqlState, SqlType, Value};
+use eggdb_sql::{Interval, OutputColumn, SqlError, SqlState, SqlType, Value};
 
 /// `bool`.
 pub const BOOL_OID: u32 = 16;
+/// `bytea`.
+pub const BYTEA_OID: u32 = 17;
 /// `name`.
 pub const NAME_OID: u32 = 19;
 /// `int8`.
@@ -33,11 +35,21 @@ pub const DATE_OID: u32 = 1082;
 pub const TIMESTAMP_OID: u32 = 1114;
 /// `timestamptz`.
 pub const TIMESTAMPTZ_OID: u32 = 1184;
+/// `time`.
+pub const TIME_OID: u32 = 1083;
+/// `interval`.
+pub const INTERVAL_OID: u32 = 1186;
+/// `timetz`.
+pub const TIMETZ_OID: u32 = 1266;
+/// `uuid`.
+pub const UUID_OID: u32 = 2950;
 /// `numeric`.
 pub const NUMERIC_OID: u32 = 1700;
 /// `jsonb`.
 pub const JSONB_OID: u32 = 3802;
 
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+const MAX_OFFSET: i32 = 15 * 3600 + 59 * 60 + 59;
 const NUMERIC_POSITIVE: u16 = 0x0000;
 const NUMERIC_NEGATIVE: u16 = 0x4000;
 const NUMERIC_NAN: u16 = 0xC000;
@@ -61,6 +73,12 @@ pub fn oid_of(sql_type: SqlType) -> u32 {
         SqlType::TimestampTz(_) => TIMESTAMPTZ_OID,
         SqlType::Json => JSON_OID,
         SqlType::Jsonb => JSONB_OID,
+        SqlType::Time(_) => TIME_OID,
+        SqlType::TimeTz(_) => TIMETZ_OID,
+        SqlType::Interval { .. } => INTERVAL_OID,
+        SqlType::Bytea => BYTEA_OID,
+        SqlType::Uuid => UUID_OID,
+        SqlType::Bpchar(_) => BPCHAR_OID,
     }
 }
 
@@ -75,7 +93,16 @@ pub fn sql_type_of(oid: u32) -> Option<SqlType> {
         INT8_OID => SqlType::BigInt,
         FLOAT4_OID => SqlType::Real,
         FLOAT8_OID => SqlType::Double,
-        TEXT_OID | NAME_OID | BPCHAR_OID => SqlType::Text,
+        TEXT_OID | NAME_OID => SqlType::Text,
+        BPCHAR_OID => SqlType::Bpchar(None),
+        TIME_OID => SqlType::Time(None),
+        TIMETZ_OID => SqlType::TimeTz(None),
+        INTERVAL_OID => SqlType::Interval {
+            fields: None,
+            precision: None,
+        },
+        BYTEA_OID => SqlType::Bytea,
+        UUID_OID => SqlType::Uuid,
         VARCHAR_OID => SqlType::Varchar(None),
         NUMERIC_OID => SqlType::Numeric(None),
         DATE_OID => SqlType::Date,
@@ -92,7 +119,9 @@ fn type_size(oid: u32) -> i16 {
         BOOL_OID => 1,
         INT2_OID => 2,
         INT4_OID | FLOAT4_OID | DATE_OID => 4,
-        INT8_OID | FLOAT8_OID | TIMESTAMP_OID | TIMESTAMPTZ_OID => 8,
+        INT8_OID | FLOAT8_OID | TIMESTAMP_OID | TIMESTAMPTZ_OID | TIME_OID => 8,
+        TIMETZ_OID => 12,
+        INTERVAL_OID | UUID_OID => 16,
         _ => -1,
     }
 }
@@ -122,8 +151,14 @@ pub fn describe_columns(
                         + 4
                 }
                 Some(
-                    SqlType::Timestamp(Some(precision)) | SqlType::TimestampTz(Some(precision)),
+                    SqlType::Timestamp(Some(precision))
+                    | SqlType::TimestampTz(Some(precision))
+                    | SqlType::Time(Some(precision))
+                    | SqlType::TimeTz(Some(precision)),
                 ) => i32::from(precision),
+                Some(SqlType::Bpchar(Some(length))) => {
+                    i32::try_from(length).map_or(-1, |length| length.saturating_add(4))
+                }
                 _ => -1,
             };
             ColumnDescription {
@@ -214,6 +249,38 @@ pub fn encode_value(
         },
         TIMESTAMP_OID | TIMESTAMPTZ_OID => match value {
             Value::Timestamp(micros) | Value::TimestampTz(micros) => micros.to_be_bytes().to_vec(),
+            _ => return Err(cannot_send(value, oid)),
+        },
+        TIME_OID => match value {
+            Value::Time(micros) => micros.to_be_bytes().to_vec(),
+            _ => return Err(cannot_send(value, oid)),
+        },
+        TIMETZ_OID => match value {
+            Value::TimeTz {
+                micros,
+                offset_seconds,
+            } => {
+                let mut bytes = micros.to_be_bytes().to_vec();
+                bytes.extend_from_slice(&offset_seconds.wrapping_neg().to_be_bytes());
+                bytes
+            }
+            _ => return Err(cannot_send(value, oid)),
+        },
+        INTERVAL_OID => match value {
+            Value::Interval(interval) => {
+                let mut bytes = interval.micros.to_be_bytes().to_vec();
+                bytes.extend_from_slice(&interval.days.to_be_bytes());
+                bytes.extend_from_slice(&interval.months.to_be_bytes());
+                bytes
+            }
+            _ => return Err(cannot_send(value, oid)),
+        },
+        BYTEA_OID => match value {
+            Value::Bytea(bytes) => bytes.clone(),
+            _ => return Err(cannot_send(value, oid)),
+        },
+        UUID_OID => match value {
+            Value::Uuid(bytes) => bytes.to_vec(),
             _ => return Err(cannot_send(value, oid)),
         },
         JSONB_OID => {
@@ -359,6 +426,25 @@ fn invalid_binary(number: usize, oid: u32) -> SqlError {
     )
 }
 
+const MAX_BYTEA_BYTES: usize = 1_000_000_000;
+
+fn bytea_text(bytes: &[u8]) -> Result<String, SqlError> {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    if bytes.len() > MAX_BYTEA_BYTES {
+        return Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            format!("a bytea value cannot exceed {MAX_BYTEA_BYTES} bytes"),
+        ));
+    }
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("\\x");
+    for &byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0F)]));
+    }
+    Ok(out)
+}
+
 fn invalid_utf8() -> SqlError {
     SqlError::new(
         SqlState::CHARACTER_NOT_IN_REPERTOIRE,
@@ -436,6 +522,47 @@ pub fn decode_parameter(
                 Value::TimestampTz(micros)
             }
         }
+        TIME_OID => {
+            let mut word = [0u8; 8];
+            word.copy_from_slice(fixed(8)?);
+            let micros = i64::from_be_bytes(word);
+            if !(0..=MICROS_PER_DAY).contains(&micros) {
+                return Err(invalid_binary(number, oid));
+            }
+            Value::Time(micros)
+        }
+        TIMETZ_OID => {
+            let bytes = fixed(12)?;
+            let mut word = [0u8; 8];
+            word.copy_from_slice(&bytes[..8]);
+            let micros = i64::from_be_bytes(word);
+            let west = i32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+            if !(0..=MICROS_PER_DAY).contains(&micros)
+                || !(-MAX_OFFSET..=MAX_OFFSET).contains(&west)
+            {
+                return Err(invalid_binary(number, oid));
+            }
+            Value::TimeTz {
+                micros,
+                offset_seconds: -west,
+            }
+        }
+        INTERVAL_OID => {
+            let bytes = fixed(16)?;
+            let mut word = [0u8; 8];
+            word.copy_from_slice(&bytes[..8]);
+            Value::Interval(Interval {
+                micros: i64::from_be_bytes(word),
+                days: i32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+                months: i32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            })
+        }
+        BYTEA_OID => return bytea_text(bytes),
+        UUID_OID => {
+            let mut uuid = [0u8; 16];
+            uuid.copy_from_slice(fixed(16)?);
+            Value::Uuid(uuid)
+        }
         JSONB_OID => match bytes.split_first() {
             Some((&JSONB_VERSION, rest)) => return text(rest),
             _ => return Err(invalid_binary(number, oid)),
@@ -504,7 +631,11 @@ mod tests {
             "22021"
         );
         assert_eq!(
-            state(decode_parameter(&[0; 8], 1186, Format::Binary, 1)),
+            state(decode_parameter(&[0; 8], INTERVAL_OID, Format::Binary, 1)),
+            "22P03"
+        );
+        assert_eq!(
+            state(decode_parameter(&[0; 8], 790, Format::Binary, 1)),
             "0A000"
         );
         assert_eq!(
@@ -550,6 +681,58 @@ mod tests {
             encode_value(&Value::Integer(3), TEXT_OID, Format::Binary, 0).unwrap(),
             Some(b"3".to_vec())
         );
+    }
+
+    #[test]
+    fn item_31_values_round_trip_through_their_binary_forms() {
+        let values = [
+            (Value::Time(0), TIME_OID),
+            (Value::Time(86_400_000_000), TIME_OID),
+            (
+                Value::TimeTz {
+                    micros: 1,
+                    offset_seconds: -(15 * 3600 + 59 * 60 + 59),
+                },
+                TIMETZ_OID,
+            ),
+            (
+                Value::Interval(Interval {
+                    months: i32::MIN,
+                    days: i32::MAX,
+                    micros: i64::MIN,
+                }),
+                INTERVAL_OID,
+            ),
+            (Value::Bytea(vec![0, 0xFF, b'\\']), BYTEA_OID),
+            (Value::Bytea(Vec::new()), BYTEA_OID),
+            (Value::Uuid([0xA5; 16]), UUID_OID),
+            (Value::Bpchar("ab  ".into()), BPCHAR_OID),
+        ];
+        for (value, oid) in values {
+            let bytes = encode_value(&value, oid, Format::Binary, 0)
+                .unwrap()
+                .unwrap();
+            let text = decode_parameter(&bytes, oid, Format::Binary, 1).unwrap();
+            assert_eq!(Some(text), value.to_text_at(0), "{value:?}");
+            assert_eq!(oid_of(value.sql_type().unwrap()), oid);
+            assert_eq!(
+                sql_type_of(oid).map(SqlType::name),
+                value.sql_type().map(SqlType::name)
+            );
+        }
+        let mut random = 0x0B1A_5EED_0000_0031u64;
+        for _ in 0..20_000 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let length = (random % 20) as usize;
+            let bytes: Vec<u8> = (0..length)
+                .map(|shift| (random >> (shift % 8 * 8)) as u8)
+                .collect();
+            for oid in [TIME_OID, TIMETZ_OID, INTERVAL_OID, BYTEA_OID, UUID_OID] {
+                let _ = decode_parameter(&bytes, oid, Format::Binary, 1);
+            }
+        }
     }
 
     fn numeric(text: &str) -> Value {
