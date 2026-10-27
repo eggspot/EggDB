@@ -33,6 +33,7 @@ stops. The details of every test are in [testing.md](testing.md); this page is t
 | `check` finds damage | Crafted pages and chains that must fail `check`, and a check after every case of the tests above. | testing.md |
 | Files from v0.2.0 stay readable | Two sample files written by v0.2.0, one checkpointed and one with three commits still in its log, and a v0.2.0 export, are committed and pinned by their bytes. CI opens, reads, scans, checks, replays, writes to and imports them on every change. | `crates/eggdb/tests/sample_files.rs`, testing.md, "Files from released versions" (D96) |
 | The released binaries work | A smoke test runs every command, an export and import round trip, the sample files and a scripted `eggdb ui` session in a pseudo-terminal against each release binary on its own platform. | `scripts/smoke-test.sh`, testing.md "The release smoke test" (D96) |
+| The PostgreSQL protocol | The cryptography against its published vectors (FIPS 180-4 and NIST for SHA-256, RFC 4231 for HMAC, RFC 7914 for PBKDF2, RFC 7677's SCRAM exchange); every message codec, truncated and inconsistent messages refused; a client written in the tests speaks the protocol over a real loopback socket: startup and encryption requests, SCRAM with right and wrong passwords and unknown users, simple and extended queries with text and binary parameters, errors with SQLSTATE and position, failed blocks until `ROLLBACK`, row limits, two connections and a waiting writer, the connection limit, the authentication timeout and a graceful stop; a seeded fuzzer of mutated messages (20,000 cases per run through the parsers and SCRAM, 80 over sockets before and after authentication); `eggdb serve` as a process (password sources, loopback refusal, `SIGTERM`); and in CI, psql (create, insert, join, errors, a wrong password) and the pg8000 driver (parameterized queries) against the real binary. | `crates/eggdb-crypto/tests/vectors.rs`, `crates/eggdb-pgwire/tests/`, `crates/eggdb/tests/serve.rs`, `scripts/smoke-test.sh`, testing.md "Hostile protocol messages" (D103) |
 | One writer, locked files | Two processes opening one file; `get` and `put` refused with exit 5 while another program has the file open for writing, and `get` working beside a reader; locks released when a handle closes, even while a child process starts. | `crates/eggdb/tests/lock_across_processes.rs`, `cli_busy.rs` (D95) |
 
 ## Where it runs in CI
@@ -56,6 +57,14 @@ stops. The details of every test are in [testing.md](testing.md); this page is t
   disk or a virtual machine that acknowledges writes it hasn't stored can lose commits.
 - **A real process killed in the middle of a commit.** That is covered by the simulator, which
   stops at every I/O operation; no test kills a running `eggdb` process during a write.
+- **The PostgreSQL protocol's limits.** No TLS, so `eggdb serve` listens on loopback only
+  (D102); no query cancellation, `COPY`, `LISTEN`/`NOTIFY` or catalog queries, and psql's `\d`
+  commands fail with an error. A multi-statement `Query` and an extended-protocol pipeline do
+  not run in one implicit transaction: outside `BEGIN`, each statement commits on its own. Only
+  psql and pg8000 are run in CI; other drivers and GUI tools are not tested yet. The SCRAM code
+  had no external security audit; D35's second, security-focused review is done by a review
+  agent, not a person. Timing side channels are limited to constant-time comparisons of the
+  proof and nonce; PBKDF2 and HMAC are not hardened against cache-timing attacks.
 - **More than one writer.** v0.2.0 has one writer at a time by design (D76); concurrent writers
   come with M3.
 - **`Off` after a power loss**, which promises nothing.

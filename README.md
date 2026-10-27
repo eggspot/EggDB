@@ -37,7 +37,8 @@ Everything above is the goal; the first release people can use is smaller. v0.2.
 embedded, crash-safe, transactional key-value store: one file, a Rust API, the `eggdb` command
 and `eggdb ui`, a full-screen terminal UI, and `eggdb sql` runs the first parts of the PostgreSQL
 dialect on the same file: tables, joins, `GROUP BY` with aggregates ([docs/sql.md](docs/sql.md)).
-There is no server or network protocol yet, and one writer at a time. What is in it and what
+`eggdb serve` serves the file to psql and PostgreSQL drivers, on loopback only until EggDB has
+TLS, with one writer at a time. What is in it and what
 is not: [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md);
 what is tested and what is not: [docs/correctness.md](docs/correctness.md); the plan:
 [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
@@ -71,6 +72,9 @@ eggdb scan app.db --format json | jq .key    # for scripts and agents
 eggdb check app.db                           # "ok: every page passed its checksum …"
 eggdb export app.db backup.jsonl             # every entry as JSON lines; import loads it
 eggdb ui app.db                              # browse and edit it full screen; q quits
+eggdb sql shop.db --create -c "CREATE TABLE items (id integer PRIMARY KEY, name text)"
+EGGDB_PASSWORD=choose-one eggdb serve shop.db  # PostgreSQL protocol on 127.0.0.1:5432
+PGPASSWORD=choose-one psql -h 127.0.0.1 -U eggdb shop -c "SELECT * FROM items"
 ```
 
 Every command, the output formats, exit codes and the UI's keys: [docs/cli.md](docs/cli.md).

@@ -8,7 +8,8 @@ samples=$(cd "$(dirname "$0")/../crates/eggdb/tests/data" && pwd)
 [ -x "$eggdb" ] || { echo "smoke test: $eggdb is not an executable" >&2; exit 2; }
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+server_pid=""
+trap '[ -z "$server_pid" ] || kill "$server_pid" 2> /dev/null || true; rm -rf "$work"' EXIT
 cd "$work"
 export TERM=xterm-256color
 unset NO_COLOR
@@ -121,6 +122,70 @@ grep -q '42803' last.err || fail "eggdb sql grouping error said $(cat last.err)"
 expect_exit 2 "$eggdb" sql shop.db -c "SELECT 1" extra.sql
 expect_exit 0 "$eggdb" check shop.db
 pass "sql: create, script, stdin, a join with GROUP BY, errors, a rolled-back block, usage"
+
+expect_exit 2 env -u EGGDB_PASSWORD "$eggdb" serve shop.db
+grep -q 'serve needs a password' last.err || fail "eggdb serve without a password said $(cat last.err)"
+expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 0.0.0.0:5432
+grep -q 'not a loopback address' last.err || fail "eggdb serve on 0.0.0.0 said $(cat last.err)"
+if [ "${OS:-}" = Windows_NT ]; then
+  echo "skip serve with clients: stopping a server gracefully needs SIGTERM, which Windows lacks"
+else
+  printf 'pg-secret\n' > password.txt
+  "$eggdb" sql --create pg.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL)" > /dev/null
+  "$eggdb" serve pg.db --listen 127.0.0.1:0 --password-file password.txt > serve.out 2> serve.err &
+  server_pid=$!
+  for _ in $(seq 1 50); do
+    [ -s serve.out ] && break
+    sleep 0.1
+  done
+  port=$(sed -n 's/.*"port":\([0-9]*\).*/\1/p' serve.out | head -n 1)
+  [ -n "$port" ] || fail "eggdb serve printed no port: $(cat serve.out) $(cat serve.err)"
+  if command -v psql > /dev/null 2>&1; then
+    export PGPASSWORD=pg-secret PGCONNECT_TIMEOUT=10
+    connection="host=127.0.0.1 port=$port user=eggdb dbname=pg"
+    psql "$connection" -v ON_ERROR_STOP=1 -At \
+      -c "INSERT INTO items VALUES (1, 'egg'), (2, 'bread')" \
+      -c "CREATE TABLE sales (id integer PRIMARY KEY, item_id integer, quantity integer)" \
+      -c "INSERT INTO sales VALUES (1, 1, 3), (2, 2, 1), (3, 1, 4)" \
+      -c "SELECT i.name, sum(s.quantity) FROM items i JOIN sales s ON s.item_id = i.id GROUP BY i.name ORDER BY i.name" \
+      > psql.out 2> psql.err || fail "psql failed: $(cat psql.err)"
+    [ "$(tail -n 2 psql.out | tr '\n' ' ')" = "bread|1 egg|7 " ] || fail "psql printed $(cat psql.out)"
+    psql "$connection" -At -c 'SELECT * FROM missing' > psql.out 2> psql.err && fail "psql ran a query on a missing table"
+    grep -q 'relation "missing" does not exist' psql.err || fail "psql error said $(cat psql.err)"
+    PGPASSWORD=wrong psql "$connection" -At -c 'SELECT 1' > psql.out 2> psql.err && fail "psql connected with a wrong password"
+    grep -q 'password authentication failed' psql.err || fail "a wrong password said $(cat psql.err)"
+    pass "serve: psql creates, inserts and joins; errors and a wrong password are refused"
+  else
+    echo "skip psql: psql is not on PATH (CI's Linux job installs postgresql-client)"
+  fi
+  python="${EGGDB_SMOKE_PYTHON:-python3}"
+  if command -v "$python" > /dev/null 2>&1 && "$python" -c 'import pg8000' > /dev/null 2>&1; then
+    "$python" - "$port" > driver.out 2> driver.err << 'PYTHON' || fail "pg8000 failed: $(cat driver.err)"
+import sys
+import pg8000.native
+
+connection = pg8000.native.Connection(
+    "eggdb", host="127.0.0.1", port=int(sys.argv[1]), database="pg", password="pg-secret"
+)
+connection.run("INSERT INTO items VALUES (:id, :name)", id=3, name="jam")
+print(connection.run("SELECT name FROM items WHERE id = :id", id=3))
+print(connection.run("SELECT count(*) FROM items WHERE id > :low", low=0))
+connection.close()
+PYTHON
+    [ "$(tr -d '\n' < driver.out)" = "[['jam']][[3]]" ] || fail "pg8000 printed $(cat driver.out)"
+    pass "serve: the pg8000 driver runs parameterized queries"
+  else
+    echo "skip driver: pg8000 is not installed (CI's Linux job installs it)"
+  fi
+  kill -TERM "$server_pid"
+  status=0
+  wait "$server_pid" || status=$?
+  server_pid=""
+  [ "$status" -eq 0 ] || fail "eggdb serve exited $status after SIGTERM: $(cat serve.err)"
+  grep -q '"stopped":true' serve.out || fail "eggdb serve printed $(cat serve.out)"
+  expect_exit 0 "$eggdb" check pg.db
+  pass "serve: listens on loopback, stops on SIGTERM with exit 0, leaves the file healthy"
+fi
 
 cp "$samples/v0.2.0.db" "$samples/v0.2.0-log-to-replay.db" .
 expect_exit 0 "$eggdb" check v0.2.0.db

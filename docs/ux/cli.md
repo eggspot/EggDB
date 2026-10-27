@@ -477,3 +477,37 @@ as written, it did this, and the sections above were updated where they changed:
     skip`; the empty key appears as `""`, and a key longer than 64 bytes is cut with its length.
     Progress (`imported 1,204,000 entries…`) is redrawn on stderr once a second, only on a
     terminal.
+
+## 14. `eggdb serve`: the file over the PostgreSQL protocol (item 21, D102, D103)
+
+`eggdb serve <file>` keeps the grammar of section 1 (command, file, options) and reuses
+`--create` and `--read-only` as `put`, `import`, `sql` and `ui` define them. Designed by Claude
+Fable. The choices:
+
+1. **One `--listen <address>`**, not `--host` and `--port`: a listener is one address. A bare
+   port means `127.0.0.1:port`, since that is what people type; `localhost` is a spelling of
+   `127.0.0.1` with no name lookup, so a hosts file cannot turn it into a refused address.
+   The default port is PostgreSQL's 5432, so `psql -h 127.0.0.1` needs no `-p`; a port already
+   taken (often by PostgreSQL itself) is exit 3 with a `try:` line naming the next port. Port 0
+   takes any free port for CI.
+2. **Loopback only** until TLS exists (owner rule, D102): any other address is a usage error
+   whose message says why (no password in the clear) and what to type instead.
+3. **The password never comes from the command line** (`ps` shows it): `EGGDB_PASSWORD`, or
+   `--password-file` (first line; `-` is stdin, as everywhere in this grammar). When both are
+   set the option wins, as a libpq parameter beats `PGPASSWORD`. The password is kept only as
+   its SCRAM verifier after startup. Missing both is a usage error that names both ways.
+4. **The database name is the file stem** (`app.db` is `app`), what a psql user would guess;
+   `--database` overrides it. Other names get PostgreSQL's own `3D000` error, so tools
+   understand.
+5. **Startup is a report** in the style of `stats`: a fixed first line `listening on <address>`
+   with the address actually bound, then labelled facts and a ready-to-paste
+   `psql postgresql://…` URI, which psql, drivers and GUIs all accept. In a pipe it is one JSON
+   line (section 4's rule), so scripts read the port with `jq`, never a regex.
+6. **stderr is a log** while serving: failures only (authentication, unknown database, too many
+   connections), each with a UTC time, the client address and PostgreSQL's own wording,
+   without the `eggdb:` prefix, which stays for the server's own errors.
+7. **Stopping is success**: Ctrl-C or SIGTERM finishes statements, rolls back open
+   transactions, prints `stopped` and exits 0, so a supervising script's `wait` sees a clean
+   stop; a second Ctrl-C ends the process at once (exit 130).
+8. **The file is open for writing the whole time**, so every other `eggdb` command gets the
+   busy message and exit 5 meanwhile; `--read-only` serves beside readers instead.

@@ -126,3 +126,6 @@ its full title with its status.
 - [D99](decisions/D099.md) SQL is slower than SQLite for now: gated, scheduled and not waived; the binary grows by the SQL core (superseded in part by D101)
 - [D100](decisions/D100.md) Joins and GROUP BY in the SQL core: left-to-right joins by key lookup, hash table or nested loop, grouping in a hash table, a 1 GiB bound per statement, and the join's gap to SQLite gated and scheduled (superseded in part by D101)
 - [D101](decisions/D101.md) Benchmarks are reported on pull requests and only a slowdown of more than 2x blocks; one final `check` job is the required check and auto-merge is allowed
+- [D102](decisions/D102.md) Every listener binds only to loopback or a local socket until EggDB's own TLS exists (owner rule, an exception to D22)
+- [D103](decisions/D103.md) The PostgreSQL server: an `eggdb-pgwire` crate, a thread per connection, SCRAM-SHA-256 with our own `eggdb-crypto`, one user whose verifier is derived at startup
+- [D104](decisions/D104.md) SQL takes `$n` parameters as text bound at parse time, describes statements without running them, and keeps PostgreSQL's run-time parameters
