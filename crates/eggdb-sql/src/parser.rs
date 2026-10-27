@@ -1506,12 +1506,7 @@ impl<'t> Parser<'t> {
             offset = offset.map(sqlite::without_negative_offset);
         }
         if self.oracle() {
-            oracle::reject_rownum_outside_where(
-                &items,
-                &group_by,
-                having.as_ref(),
-                &order_by,
-            )?;
+            oracle::reject_rownum_outside_where(&items, &group_by, having.as_ref(), &order_by)?;
         }
         Ok(Select {
             distinct,

@@ -841,7 +841,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 match body(&mut writer, tables) {
                     Ok(result)
                         if keep_open
-                            && !matches!(command, "CREATE TABLE" | "DROP TABLE" | "TRUNCATE TABLE") =>
+                            && !matches!(
+                                command,
+                                "CREATE TABLE" | "DROP TABLE" | "TRUNCATE TABLE"
+                            ) =>
                     {
                         self.block = Block::Writing(writer);
                         Ok(result)

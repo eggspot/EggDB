@@ -454,7 +454,9 @@ fn rounded_toward(value: &Value, up: bool) -> SqlResult<Value> {
     Ok(match number_of(value)? {
         None => Value::Null,
         Some(Number::Integer(number)) => Value::BigInt(number),
-        Some(Number::Float(number)) => Value::Double(if up { number.ceil() } else { number.floor() }),
+        Some(Number::Float(number)) => {
+            Value::Double(if up { number.ceil() } else { number.floor() })
+        }
     })
 }
 
@@ -841,7 +843,10 @@ mod tests {
     #[test]
     fn substr_and_instr_count_characters_from_either_end() {
         assert_eq!(
-            call("oracle_substr", &[text("ABCDEFG"), Value::BigInt(-3), Value::BigInt(2)]),
+            call(
+                "oracle_substr",
+                &[text("ABCDEFG"), Value::BigInt(-3), Value::BigInt(2)]
+            ),
             Ok(text("EF"))
         );
         assert_eq!(
@@ -851,14 +856,24 @@ mod tests {
         assert_eq!(
             call(
                 "oracle_instr",
-                &[text("CORPORATE FLOOR"), text("OR"), Value::BigInt(-3), Value::BigInt(2)]
+                &[
+                    text("CORPORATE FLOOR"),
+                    text("OR"),
+                    Value::BigInt(-3),
+                    Value::BigInt(2)
+                ]
             ),
             Ok(Value::BigInt(2))
         );
         assert_eq!(
             call(
                 "oracle_instr",
-                &[text("CORPORATE FLOOR"), text("OR"), Value::BigInt(3), Value::BigInt(2)]
+                &[
+                    text("CORPORATE FLOOR"),
+                    text("OR"),
+                    Value::BigInt(3),
+                    Value::BigInt(2)
+                ]
             ),
             Ok(Value::BigInt(14))
         );

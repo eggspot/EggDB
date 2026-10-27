@@ -1,5 +1,6 @@
 //! SQL on a [`Database`]: [`Database::sql_store`] gives a [`Store`], and [`Store::session`]
-//! runs SQL on it in a [`Dialect`]: PostgreSQL's, MySQL's or SQLite's, all on the same tables.
+//! runs SQL on it in a [`Dialect`]: PostgreSQL's, MySQL's, SQLite's or Oracle's, all on the same
+//! tables.
 //! The SQL lives in the database's own key space under [`RESERVED_KEY_PREFIX`], so its
 //! transactions, crash safety and backups are the database's.
 //!

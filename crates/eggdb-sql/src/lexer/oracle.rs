@@ -164,11 +164,10 @@ impl<'t> Lexer<'t> {
         }
         self.highest_parameter += 1;
         if self.highest_parameter > MAX_ORACLE_BIND_VARIABLES {
-            return Err(SqlError::new(
-                SqlState::PROGRAM_LIMIT_EXCEEDED,
-                "too many bind variables",
-            )
-            .at(start));
+            return Err(
+                SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "too many bind variables")
+                    .at(start),
+            );
         }
         self.named_parameters.push((name, self.highest_parameter));
         Ok(TokenKind::NumberedParameter(self.highest_parameter))

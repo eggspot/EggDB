@@ -201,9 +201,7 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
         }
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. } => {
-            arguments.iter().collect()
-        }
+        | ExprKind::OracleFunction { arguments, .. } => arguments.iter().collect(),
         ExprKind::Aggregate { argument, .. } => argument.iter().map(AsRef::as_ref).collect(),
     }
 }
@@ -249,9 +247,7 @@ pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         }
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. } => {
-            arguments.iter_mut().collect()
-        }
+        | ExprKind::OracleFunction { arguments, .. } => arguments.iter_mut().collect(),
         ExprKind::Aggregate { argument, .. } => argument.iter_mut().map(AsMut::as_mut).collect(),
     }
 }
@@ -341,11 +337,9 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
         }
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. } => {
-            arguments
-                .iter()
-                .try_for_each(|argument| check_columns(argument, scope))
-        }
+        | ExprKind::OracleFunction { arguments, .. } => arguments
+            .iter()
+            .try_for_each(|argument| check_columns(argument, scope)),
         ExprKind::Aggregate { argument, .. } => argument
             .as_deref()
             .map_or(Ok(()), |argument| check_columns(argument, scope)),
@@ -363,9 +357,7 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
-        | ExprKind::OracleFunction { name, .. } => {
-            ((*name).to_owned(), true)
-        }
+        | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
         ExprKind::Aggregate { function, .. } => (function.name().to_owned(), true),
         ExprKind::Cast { expr, sql_type } => match name_and_whether_it_names_a_value(expr) {
             (name, true) => (name, true),

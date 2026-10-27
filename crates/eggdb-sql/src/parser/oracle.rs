@@ -557,7 +557,10 @@ impl<'t> Parser<'t> {
     fn oracle_length(&mut self, required: bool) -> SqlResult<Option<u32>> {
         if !self.take(&TokenKind::LeftParen) {
             if required {
-                return Err(SqlError::syntax("missing left parenthesis", self.position()));
+                return Err(SqlError::syntax(
+                    "missing left parenthesis",
+                    self.position(),
+                ));
             }
             return Ok(None);
         }
@@ -833,21 +836,21 @@ fn decode(arguments: Vec<Expr>, position: usize) -> Expr {
     };
     let rest: Vec<Expr> = arguments.collect();
     let mut branches = Vec::new();
-    let mut pairs = rest.chunks_exact(2);
-    for pair in pairs.by_ref() {
+    let (pairs, remainder) = rest.as_chunks::<2>();
+    for [compared, result] in pairs {
         branches.push((
             Expr {
                 kind: ExprKind::IsDistinctFrom {
                     left: Box::new(subject.clone()),
-                    right: Box::new(pair[0].clone()),
+                    right: Box::new(compared.clone()),
                     negated: true,
                 },
                 position,
             },
-            pair[1].clone(),
+            result.clone(),
         ));
     }
-    let otherwise = pairs.remainder().first().cloned().map(Box::new);
+    let otherwise = remainder.first().cloned().map(Box::new);
     Expr {
         kind: ExprKind::Case {
             operand: None,

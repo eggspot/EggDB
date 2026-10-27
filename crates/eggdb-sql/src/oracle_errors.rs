@@ -95,15 +95,11 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
         }
         "42702" => Some((918, "column ambiguously defined".to_owned())),
         "42701" => Some((957, "duplicate column name".to_owned())),
-        "42P16" if message.starts_with("multiple primary keys") => Some((
-            2260,
-            "table can have only one primary key".to_owned(),
-        )),
+        "42P16" if message.starts_with("multiple primary keys") => {
+            Some((2260, "table can have only one primary key".to_owned()))
+        }
         "42P16" => Some((3001, format!("unimplemented feature: {message}"))),
-        "23505" => Some((
-            1,
-            format!("unique constraint ({user}.{first}) violated"),
-        )),
+        "23505" => Some((1, format!("unique constraint ({user}.{first}) violated"))),
         "23502" if first_word(text) == "update" => Some((
             1407,
             format!("cannot update {} to NULL", not_null_target(&names, user)),
@@ -128,7 +124,10 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
             "resource busy and acquire with NOWAIT specified or timeout expired".to_owned(),
         )),
         "42P02" => Some((1008, "not all variables bound".to_owned())),
-        "54000" => Some((1489, "result of string concatenation is too long".to_owned())),
+        "54000" => Some((
+            1489,
+            "result of string concatenation is too long".to_owned(),
+        )),
         _ => None,
     };
     let Some((code, wording)) = translated else {

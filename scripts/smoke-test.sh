@@ -129,6 +129,12 @@ expect_exit 3 "$eggdb" sql --dialect sqlite shop.db -c "SELECT * FROM nowhere"
 grep -q 'Error: no such table: nowhere' last.err || fail "eggdb sql --dialect sqlite error said $(cat last.err)"
 pass "sql --dialect sqlite: row ids, OR REPLACE, integer conditions, SQLite's errors"
 
+expect_exit 0 "$eggdb" sql --dialect oracle shop.db -c "CREATE TABLE orders (id NUMBER(9) PRIMARY KEY, item VARCHAR2(20)); INSERT INTO orders VALUES (1, 'egg'); INSERT INTO orders VALUES (2, '')"
+expect_output '1|EGG' sh -c "\"$eggdb\" sql --dialect oracle shop.db -c 'SELECT id, UPPER(item) FROM orders WHERE item IS NOT NULL' | sed -n 3p | tr -d ' '"
+expect_exit 3 "$eggdb" sql --dialect oracle shop.db -c "SELECT * FROM nowhere"
+grep -q 'ORA-00942: table or view does not exist' last.err || fail "eggdb sql --dialect oracle error said $(cat last.err)"
+pass "sql --dialect oracle: '' as NULL, upper-case names, commit at exit, ORA- errors"
+
 expect_exit 2 env -u EGGDB_PASSWORD "$eggdb" serve shop.db
 grep -q 'serve needs a password' last.err || fail "eggdb serve without a password said $(cat last.err)"
 expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 0.0.0.0:5432
