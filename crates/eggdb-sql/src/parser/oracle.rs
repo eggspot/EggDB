@@ -394,8 +394,17 @@ impl<'t> Parser<'t> {
                 let name = self.table_name()?;
                 Statement::Truncate(TableReference::named(name, None))
             }
-            "create" | "drop" | "alter" if self.is_word_at(1, "sequence") => {
-                return Err(self.not_supported("sequences (CREATE SEQUENCE, NEXTVAL, CURRVAL)"));
+            "create" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.create_sequence()?
+            }
+            "alter" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.alter_sequence()?
+            }
+            "drop" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.drop_sequence()?
             }
             "merge" => return Err(self.not_supported("MERGE")),
             "begin" | "declare" => {
@@ -424,13 +433,15 @@ impl<'t> Parser<'t> {
             false
         };
         let name = self.table_name()?;
-        if self.take_word("cascade") {
+        let cascade = self.take_word("cascade");
+        if cascade {
             self.expect_word("constraints")?;
         }
         self.take_word("purge");
         Ok(Statement::DropTable {
             names: vec![name],
             if_exists,
+            cascade,
         })
     }
 
@@ -749,11 +760,6 @@ impl<'t> Parser<'t> {
                 }
                 "rowid" | "level" | "prior" | "uid" => {
                     return Err(self.not_supported(&word.to_ascii_uppercase()));
-                }
-                _ if matches!(self.peek_kind_at(1), TokenKind::Dot)
-                    && (self.is_word_at(2, "nextval") || self.is_word_at(2, "currval")) =>
-                {
-                    return Err(self.not_supported("sequences (CREATE SEQUENCE, NEXTVAL, CURRVAL)"));
                 }
                 _ => return Ok(None),
             },

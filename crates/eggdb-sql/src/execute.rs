@@ -1,8 +1,9 @@
 use crate::aggregate::{self, shape_of};
 use crate::ast::{
-    BinaryOperator, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource, InsertValue, Name,
-    OnDuplicate, OrderItem, Select, SelectItem, TableReference, Update,
+    BinaryOperator, ConstraintKind, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource,
+    InsertValue, Name, OnDuplicate, OrderItem, Select, SelectItem, TableReference, Update,
 };
+use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
 use crate::encoding::{
     Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, decode_row_into,
@@ -124,10 +125,16 @@ pub(crate) fn create_table(
             format!("tables can have at most {MAX_COLUMNS} columns"),
         ));
     }
+    constraints::check_identifier(&create.name)?;
     let mut columns: Vec<Column> = Vec::new();
     let mut primary_key = Vec::new();
     let mut primary_key_position = None;
     for (index, definition) in create.columns.iter().enumerate() {
+        constraints::check_identifier(&definition.name)?;
+        if let Some((_, text)) = &definition.default {
+            crate::sequences::check_default_sequences(writer, text)
+                .map_err(|error| error.at_if_unplaced(definition.name.position))?;
+        }
         if columns
             .iter()
             .any(|column| column.name == definition.name.text)
@@ -185,7 +192,9 @@ pub(crate) fn create_table(
         indexes::check_orderable(columns[index].sql_type, position)?;
     }
     check_auto_increment(create, &columns, &primary_key)?;
-    if tables.table(writer, &create.name.text)?.is_some() {
+    if tables.table(writer, &create.name.text)?.is_some()
+        || crate::sequences::read(writer, &create.name.text)?.is_some()
+    {
         if create.if_not_exists {
             return Ok(QueryResult::command("CREATE TABLE").with_notice(format!(
                 "NOTICE:  relation \"{}\" already exists, skipping",
@@ -213,7 +222,7 @@ pub(crate) fn create_table(
         name: create.name.text.clone(),
         columns,
         primary_key,
-        indexes: Vec::new(),
+        ..TableDefinition::default()
     };
     let specs = unique_columns(create).chain(create.indexes.iter().cloned());
     let mut others = None;
@@ -229,8 +238,41 @@ pub(crate) fn create_table(
             spec.unique,
         )?;
     }
+    if let Some(name) = &create.primary_key_name
+        && !table.primary_key.is_empty()
+        && *name.text != table.primary_key_constraint_name()
+    {
+        if table.constraint_name_taken(&name.text) {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_TABLE,
+                format!("relation \"{}\" already exists", name.text),
+            )
+            .at(name.position));
+        }
+        table.primary_key_name = Some(name.text.clone());
+    }
+    let specs = create
+        .columns
+        .iter()
+        .flat_map(|column| column.constraints.iter())
+        .chain(create.constraints.iter());
+    let mut foreign_keys = Vec::new();
+    for spec in specs {
+        match &spec.kind {
+            ConstraintKind::Check { expr, text } => {
+                constraints::define_check(&mut table, spec, expr, text, dialect)?;
+            }
+            ConstraintKind::ForeignKey(key) => foreign_keys.push((spec, key)),
+            ConstraintKind::PrimaryKey(_) | ConstraintKind::Unique(_) => {}
+        }
+    }
+    for (spec, key) in foreign_keys {
+        constraints::define_foreign_key(writer, tables, &mut table, spec, key, dialect)?;
+    }
+    table.referenced = !constraints::referencing_tables(writer, &table.name)?.is_empty();
     writer.put(&meta_key(), &encode_meta(following))?;
     writer.put(&table_key(&table.name), &table.encode())?;
+    constraints::register_references(writer, tables, &table)?;
     Ok(QueryResult::command("CREATE TABLE"))
 }
 
@@ -286,6 +328,10 @@ fn multiple_primary_keys(create: &CreateTable, position: usize) -> SqlError {
     .at(position)
 }
 
+pub(crate) fn check_default_expr(expr: &Expr) -> SqlResult<()> {
+    check_default(expr)
+}
+
 fn check_default(expr: &Expr) -> SqlResult<()> {
     reject_aggregates(expr, "DEFAULT expressions")?;
     if crate::subquery::mentions_subquery(expr) {
@@ -309,8 +355,50 @@ pub(crate) fn drop_tables(
     tables: &mut TableCache,
     names: &[Name],
     if_exists: bool,
+    cascade: bool,
+    dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     let mut result = QueryResult::command("DROP TABLE");
+    for name in names {
+        let Some(dropped) = tables.table(writer, &name.text)? else {
+            continue;
+        };
+        if dropped.owns_sequence {
+            result = release_owned_sequences(writer, tables, &dropped, names, cascade, result)?;
+        }
+        for child in constraints::referencing_tables(writer, &name.text)? {
+            if child == name.text || names.iter().any(|dropped| dropped.text == child) {
+                continue;
+            }
+            let Some(definition) = tables.table(writer, &child)? else {
+                continue;
+            };
+            let mut definition = (*definition).clone();
+            let dependent: Vec<String> = definition
+                .foreign_keys
+                .iter()
+                .filter(|key| key.parent == name.text)
+                .map(|key| key.name.clone())
+                .collect();
+            if dependent.is_empty() || dialect == Dialect::Sqlite {
+                continue;
+            }
+            if !cascade {
+                return Err(dependent_table(&name.text, &child, &dependent[0], dialect));
+            }
+            constraints::unregister_references(writer, tables, &definition)?;
+            definition
+                .foreign_keys
+                .retain(|key| key.parent != name.text);
+            writer.put(&table_key(&definition.name), &definition.encode())?;
+            constraints::register_references(writer, tables, &definition)?;
+            for constraint in &dependent {
+                result = result.with_notice(format!(
+                    "NOTICE:  drop cascades to constraint {constraint} on table {child}"
+                ));
+            }
+        }
+    }
     for name in names {
         let Some(table) = tables.table(writer, &name.text)? else {
             if if_exists {
@@ -338,9 +426,91 @@ pub(crate) fn drop_tables(
             }
         }
         indexes::delete_every_index_entry(writer, &table)?;
+        constraints::unregister_references(writer, tables, &table)?;
+        crate::sequences::drop_owned_by(writer, tables, &table.name, None)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)
+}
+
+#[cold]
+#[inline(never)]
+fn release_owned_sequences(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    dropped: &TableDefinition,
+    names: &[Name],
+    cascade: bool,
+    mut result: QueryResult,
+) -> SqlResult<QueryResult> {
+    for (sequence, definition) in crate::sequences::every_sequence(writer)? {
+        if definition
+            .owned_by
+            .as_ref()
+            .is_none_or(|(owner, _)| *owner != dropped.name)
+        {
+            continue;
+        }
+        for (table, column) in crate::sequences::every_default_referring(writer, &sequence)? {
+            if names.iter().any(|name| name.text == table) {
+                continue;
+            }
+            if !cascade {
+                return Err(SqlError::new(
+                    SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+                    format!(
+                        "cannot drop table {} because other objects depend on it",
+                        dropped.name
+                    ),
+                )
+                .with_detail(format!(
+                    "default value for column {column} of table {table} depends on sequence {sequence}"
+                ))
+                .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
+            }
+            if let Some(user) = tables.table(writer, &table)? {
+                let mut user = (*user).clone();
+                if let Some(index) = user.column_index(&column) {
+                    user.columns[index].default = None;
+                }
+                writer.put(&table_key(&user.name), &user.encode())?;
+                result = result.with_notice(format!(
+                    "NOTICE:  drop cascades to default value for column {column} of table {table}"
+                ));
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub(crate) fn dependent_table(
+    parent: &str,
+    child: &str,
+    constraint: &str,
+    dialect: Dialect,
+) -> SqlError {
+    match dialect {
+        Dialect::MySql => SqlError::new(
+            SqlState::MYSQL_GENERAL,
+            format!(
+                "Cannot drop table '{parent}' referenced by a foreign key constraint '{constraint}' on table '{child}'."
+            ),
+        )
+        .with_vendor_code(3730),
+        Dialect::Oracle => SqlError::new(
+            SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+            "unique/primary keys in table referenced by foreign keys",
+        )
+        .with_oracle_code(2449),
+        _ => SqlError::new(
+            SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+            format!("cannot drop table {parent} because other objects depend on it"),
+        )
+        .with_detail(format!(
+            "constraint {constraint} on table {child} depends on table {parent}"
+        ))
+        .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+    }
 }
 
 fn row_key(table: &TableDefinition, row: &[Value]) -> Vec<u8> {
@@ -471,8 +641,8 @@ fn duplicate_key(table: &TableDefinition, row: &[Value]) -> SqlError {
     SqlError::new(
         SqlState::UNIQUE_VIOLATION,
         format!(
-            "duplicate key value violates unique constraint \"{}_pkey\"",
-            table.name
+            "duplicate key value violates unique constraint \"{}\"",
+            table.primary_key_constraint_name()
         ),
     )
     .with_detail(format!(
@@ -606,6 +776,10 @@ pub(crate) fn insert(
     };
     let insert = prepared.as_ref().unwrap_or(insert);
     let table = tables.require(writer, &insert.table.name)?;
+    if crate::sequences::mentions_nextval(&table) {
+        crate::sequences::load_all(writer)?;
+    }
+    let checks = PreparedChecks::of(&table)?;
     let scope = scope_of(&table, &insert.table);
     let targets = match &insert.columns {
         Some(names) => target_columns(&table, names)?,
@@ -654,6 +828,10 @@ pub(crate) fn insert(
         _ => None,
     };
     let mut stored = StoredRows::new(&table);
+    stored.checks = Some(&checks);
+    stored.track = !matches!(insert.on_duplicate, OnDuplicate::Fail | OnDuplicate::Ignore)
+        && constraints::is_referenced(&table);
+    let mut inserted_children = ChildRows::new(&table);
     let mut result_rows = Vec::new();
     let mut affected = 0usize;
     let mut warnings = Vec::new();
@@ -670,7 +848,10 @@ pub(crate) fn insert(
             });
         }
         match stored.try_insert(writer, &mut row)? {
-            None => affected += 1,
+            None => {
+                affected += 1;
+                inserted_children.push(&row)?;
+            }
             Some(conflict) => match (&insert.on_duplicate, &updates) {
                 (OnDuplicate::Ignore, _) => warnings.push(Warning {
                     level: "Warning",
@@ -682,10 +863,18 @@ pub(crate) fn insert(
                 (OnDuplicate::Replace, _) => {
                     let mut conflict = Some(conflict);
                     while let Some(found) = conflict {
-                        delete_row(writer, &table, &found.row_key)?;
+                        let removed = delete_row(writer, &table, &found.row_key)?;
+                        if stored.track {
+                            stored.changes.push(RowChange {
+                                table: Arc::clone(&table),
+                                old: removed,
+                                new: None,
+                            });
+                        }
                         affected += 1;
                         conflict = stored.try_insert(writer, &mut row)?;
                     }
+                    inserted_children.push(&row)?;
                     affected += 1;
                 }
                 (OnDuplicate::Update(_), Some(updates)) => {
@@ -699,15 +888,58 @@ pub(crate) fn insert(
             result_rows.push(projection.project(&row)?);
         }
     }
+    let changes = std::mem::take(&mut stored.changes);
+    let first_generated = stored.first_generated;
+    let last_rowid = stored.last_rowid;
+    drop(stored);
+    for change in &changes {
+        if let Some(new) = &change.new {
+            constraints::check_parents(writer, tables, &table, new, Some(&change.old))?;
+        }
+    }
+    constraints::propagate(writer, tables, changes)?;
+    inserted_children.check(writer, tables)?;
     let tag = format!("INSERT 0 {affected}");
     let mut result = match returning {
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
         None => QueryResult::command(tag),
     };
     result.warnings = warnings;
-    result.last_insert_id = stored.first_generated;
-    result.last_insert_rowid = stored.last_rowid;
+    result.last_insert_id = first_generated;
+    result.last_insert_rowid = last_rowid;
     Ok(result)
+}
+
+struct ChildRows<'t> {
+    table: &'t TableDefinition,
+    rows: Vec<Vec<Value>>,
+    memory: WorkMemory,
+}
+
+impl<'t> ChildRows<'t> {
+    fn new(table: &'t TableDefinition) -> Self {
+        Self {
+            table,
+            rows: Vec::new(),
+            memory: WorkMemory::new(),
+        }
+    }
+
+    fn push(&mut self, row: &[Value]) -> SqlResult<()> {
+        if self.table.foreign_keys.is_empty() {
+            return Ok(());
+        }
+        self.memory.charge_row(row)?;
+        self.rows.push(row.to_vec());
+        Ok(())
+    }
+
+    fn check(&self, reader: &dyn KeyValueRead, tables: &mut TableCache) -> SqlResult<()> {
+        for row in &self.rows {
+            constraints::check_parents(reader, tables, self.table, row, None)?;
+        }
+        Ok(())
+    }
 }
 
 fn resolved_updates(
@@ -770,16 +1002,16 @@ fn delete_row(
     writer: &mut dyn KeyValueWrite,
     table: &TableDefinition,
     row_key: &[u8],
-) -> SqlResult<()> {
+) -> SqlResult<Vec<Value>> {
+    let bytes = writer
+        .get(row_key)?
+        .ok_or_else(|| crate::encoding::corrupt("row"))?;
+    let row = decode_row(&bytes, &table.columns)?;
     if !table.indexes.is_empty() {
-        let bytes = writer
-            .get(row_key)?
-            .ok_or_else(|| crate::encoding::corrupt("row"))?;
-        let row = decode_row(&bytes, &table.columns)?;
         indexes::delete_entries(writer, table, &row, row_key)?;
     }
     writer.delete(row_key)?;
-    Ok(())
+    Ok(row)
 }
 
 fn put_row_checked(
@@ -799,7 +1031,7 @@ fn put_row_checked(
     indexes::put_entries(writer, table, row, row_key)
 }
 
-struct StoredRows<'a> {
+pub(crate) struct StoredRows<'a> {
     table: &'a TableDefinition,
     key: Vec<u8>,
     prefix_length: usize,
@@ -809,6 +1041,9 @@ struct StoredRows<'a> {
     next_auto_value: Option<i64>,
     first_generated: Option<u64>,
     last_rowid: Option<i64>,
+    checks: Option<&'a PreparedChecks>,
+    track: bool,
+    changes: Vec<RowChange>,
 }
 
 enum NextRowId {
@@ -818,7 +1053,7 @@ enum NextRowId {
 }
 
 impl<'a> StoredRows<'a> {
-    fn new(table: &'a TableDefinition) -> Self {
+    pub(crate) fn new(table: &'a TableDefinition) -> Self {
         let key = rows_prefix(table.id);
         Self {
             table,
@@ -830,6 +1065,9 @@ impl<'a> StoredRows<'a> {
             next_auto_value: None,
             first_generated: None,
             last_rowid: None,
+            checks: None,
+            track: false,
+            changes: Vec::new(),
         }
     }
 
@@ -917,6 +1155,16 @@ impl<'a> StoredRows<'a> {
             return Ok(0);
         }
         check_not_null(table, &combined)?;
+        if let Some(checks) = self.checks {
+            checks.check(table, &combined)?;
+        }
+        if self.track || !table.foreign_keys.is_empty() {
+            self.changes.push(RowChange {
+                table: Arc::new(table.clone()),
+                old: existing.clone(),
+                new: Some(combined.clone()),
+            });
+        }
         let new_key = if table.primary_key.is_empty() {
             existing_key.to_vec()
         } else {
@@ -945,7 +1193,11 @@ impl<'a> StoredRows<'a> {
         Ok(2)
     }
 
-    fn insert(&mut self, writer: &mut dyn KeyValueWrite, row: &mut [Value]) -> SqlResult<()> {
+    pub(crate) fn insert(
+        &mut self,
+        writer: &mut dyn KeyValueWrite,
+        row: &mut [Value],
+    ) -> SqlResult<()> {
         match self.try_insert(writer, row)? {
             None => Ok(()),
             Some(conflict) => Err(conflict.error(self.table, row)),
@@ -962,6 +1214,9 @@ impl<'a> StoredRows<'a> {
             self.fill_auto_increment(writer, row)?;
         }
         check_not_null(table, row)?;
+        if let Some(checks) = self.checks {
+            checks.check(table, row)?;
+        }
         self.encoded.clear();
         encode_row_into(&mut self.encoded, row);
         self.key.truncate(self.prefix_length);
@@ -1063,7 +1318,13 @@ pub(crate) fn insert_literals(
             insert.table.name.position,
         ));
     }
+    if crate::sequences::mentions_nextval(&table) {
+        crate::sequences::load_all(writer)?;
+    }
+    let checks = PreparedChecks::of(&table)?;
     let mut stored = StoredRows::new(&table);
+    stored.checks = Some(&checks);
+    let mut children = ChildRows::new(&table);
     let mut literals = Vec::with_capacity(insert.width);
     let mut row = Vec::with_capacity(table.columns.len());
     let mut at = insert.first_row();
@@ -1077,10 +1338,15 @@ pub(crate) fn insert_literals(
             });
         }
         stored.insert(writer, &mut row)?;
+        children.push(&row)?;
     }
+    let first_generated = stored.first_generated;
+    let last_rowid = stored.last_rowid;
+    drop(stored);
+    children.check(writer, tables)?;
     let mut result = QueryResult::command(format!("INSERT 0 {}", insert.rows));
-    result.last_insert_id = stored.first_generated;
-    result.last_insert_rowid = stored.last_rowid;
+    result.last_insert_id = first_generated;
+    result.last_insert_rowid = last_rowid;
     Ok(result)
 }
 
@@ -1352,6 +1618,103 @@ fn point_key(table: &TableDefinition, scope: Scope<'_>, filter: &Expr) -> Option
 }
 
 type RowVisitor<'v> = dyn FnMut(&[u8], Vec<Value>) -> SqlResult<bool> + 'v;
+pub(crate) fn for_each_row_with(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+    pairs: &[(usize, Value)],
+    visit: &mut RowVisitor<'_>,
+) -> SqlResult<()> {
+    let equalities: Vec<Expr> = pairs
+        .iter()
+        .filter_map(|(index, value)| {
+            let column = table.columns.get(*index)?;
+            Some(Expr {
+                kind: ExprKind::Binary(
+                    BinaryOperator::Equal,
+                    Box::new(Expr {
+                        kind: ExprKind::Column {
+                            qualifier: None,
+                            name: column.name.clone(),
+                        },
+                        position: 0,
+                    }),
+                    Box::new(Expr {
+                        kind: ExprKind::Constant {
+                            sql_type: value.sql_type(),
+                            value: value.clone(),
+                        },
+                        position: 0,
+                    }),
+                ),
+                position: 0,
+            })
+        })
+        .collect();
+    let filter = Expr {
+        kind: ExprKind::And(equalities),
+        position: 0,
+    };
+    let scope = Scope::One(Source {
+        table,
+        label: &table.name,
+        offset: 0,
+    });
+    let access = planned_access(table, scope, Some(&filter), None);
+    for_each_matching_row(reader, table, scope, Some(&filter), &access, visit)
+}
+
+pub(crate) fn delete_stored_row(
+    writer: &mut dyn KeyValueWrite,
+    table: &TableDefinition,
+    row_key: &[u8],
+    row: &[Value],
+) -> SqlResult<()> {
+    if !table.indexes.is_empty() {
+        indexes::delete_entries(writer, table, row, row_key)?;
+    }
+    writer.delete(row_key)?;
+    Ok(())
+}
+
+pub(crate) fn replace_stored_row(
+    writer: &mut dyn KeyValueWrite,
+    table: &TableDefinition,
+    old_key: &[u8],
+    old_row: &[Value],
+    new_row: &[Value],
+) -> SqlResult<()> {
+    let new_key = if table.primary_key.is_empty() {
+        old_key.to_vec()
+    } else {
+        row_key(table, new_row)
+    };
+    if !table.indexes.is_empty() {
+        indexes::delete_entries(writer, table, old_row, old_key)?;
+    }
+    if new_key != old_key {
+        writer.delete(old_key)?;
+        if writer.get(&new_key)?.is_some() {
+            return Err(duplicate_key(table, new_row));
+        }
+    }
+    if table.indexes.is_empty() {
+        writer.put(&new_key, &encode_row(new_row))
+    } else {
+        put_row_checked(writer, table, new_row, &new_key)
+    }
+}
+
+pub(crate) fn assign_to(value: Value, column: &Column) -> SqlResult<Value> {
+    assign(value, column)
+}
+
+pub(crate) fn default_of(column: &Column) -> SqlResult<Value> {
+    default_value(column)
+}
+
+pub(crate) fn check_not_null_of(table: &TableDefinition, row: &[Value]) -> SqlResult<()> {
+    check_not_null(table, row)
+}
 
 fn for_each_matching_row(
     reader: &dyn KeyValueRead,
@@ -2276,6 +2639,12 @@ pub(crate) fn update(
     };
     let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require(writer, &update.table.name)?;
+    if crate::sequences::mentions_nextval(&table) {
+        crate::sequences::load_all(writer)?;
+    }
+    let checks = PreparedChecks::of(&table)?;
+    let referenced = constraints::is_referenced(&table);
+    let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
     let scope = scope_of(&table, &update.table);
     let names: Vec<Name> = update
         .assignments
@@ -2313,11 +2682,7 @@ pub(crate) fn update(
     let returning = returning(&update.returning, scope)?;
     let matched = matching_rows(writer, &table, scope, update.filter.as_ref())?;
     let mut changes: Vec<(Vec<u8>, Vec<u8>, Vec<Value>)> = Vec::with_capacity(matched.len());
-    let mut old_rows = Vec::with_capacity(if table.indexes.is_empty() {
-        0
-    } else {
-        matched.len()
-    });
+    let mut old_rows = Vec::with_capacity(if keep_old { matched.len() } else { 0 });
     for (old_key, old_row) in matched {
         let evaluator = Evaluator {
             scope,
@@ -2329,18 +2694,23 @@ pub(crate) fn update(
             new_row[index] = assigned_value(&evaluator, value, &table.columns[index])?;
         }
         check_not_null(&table, &new_row)?;
+        if !checks.is_empty() {
+            checks.check(&table, &new_row)?;
+        }
         let new_key = if table.primary_key.is_empty() {
             old_key.clone()
         } else {
             row_key(&table, &new_row)
         };
-        if !table.indexes.is_empty() {
+        if keep_old {
             old_rows.push(old_row);
         }
         changes.push((old_key, new_key, new_row));
     }
     for (position, (old_key, new_key, _)) in changes.iter().enumerate() {
-        if let Some(old_row) = old_rows.get(position) {
+        if !table.indexes.is_empty()
+            && let Some(old_row) = old_rows.get(position)
+        {
             indexes::delete_entries(writer, &table, old_row, old_key)?;
         }
         if old_key != new_key {
@@ -2361,6 +2731,23 @@ pub(crate) fn update(
             result_rows.push(projection.project(new_row)?);
         }
     }
+    if referenced {
+        let propagated: Vec<RowChange> = changes
+            .iter()
+            .zip(&old_rows)
+            .map(|((_, _, new_row), old_row)| RowChange {
+                table: Arc::clone(&table),
+                old: old_row.clone(),
+                new: Some(new_row.clone()),
+            })
+            .collect();
+        constraints::propagate(writer, tables, propagated)?;
+    }
+    if !table.foreign_keys.is_empty() {
+        for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
+            constraints::check_parents(writer, tables, &table, new_row, Some(old_row))?;
+        }
+    }
     let tag = format!("UPDATE {}", changes.len());
     Ok(match returning {
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
@@ -2373,6 +2760,23 @@ pub(crate) fn truncate(
     tables: &mut TableCache,
     table: &TableReference,
 ) -> SqlResult<QueryResult> {
+    let definition = tables.require(writer, &table.name)?;
+    if constraints::is_referenced(&definition) {
+        for child in constraints::referencing_tables(writer, &definition.name)? {
+            if child != definition.name {
+                return Err(SqlError::not_supported(
+                    "cannot truncate a table referenced in a foreign key constraint",
+                )
+                .with_detail(format!(
+                    "Table \"{child}\" references \"{}\".",
+                    definition.name
+                ))
+                .with_hint(format!(
+                    "Truncate table \"{child}\" at the same time, or use TRUNCATE ... CASCADE."
+                )));
+            }
+        }
+    }
     let every_row = Delete {
         table: table.clone(),
         filter: None,
@@ -2413,7 +2817,19 @@ pub(crate) fn delete(
             result_rows.push(projection.project(row)?);
         }
     }
-    let tag = format!("DELETE {}", matched.len());
+    let count = matched.len();
+    if constraints::is_referenced(&table) {
+        let changes: Vec<RowChange> = matched
+            .into_iter()
+            .map(|(_, row)| RowChange {
+                table: Arc::clone(&table),
+                old: row,
+                new: None,
+            })
+            .collect();
+        constraints::propagate(writer, tables, changes)?;
+    }
+    let tag = format!("DELETE {count}");
     Ok(match returning {
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
         None => QueryResult::command(tag),

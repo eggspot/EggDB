@@ -458,11 +458,17 @@ impl<'t> Parser<'t> {
             default: None,
             auto_increment: false,
             unique: None,
+            constraints: Vec::new(),
         };
         let mut autoincrement = None;
         loop {
-            if self.take_word("constraint") {
-                self.name()?;
+            let constraint = if self.take_word("constraint") {
+                Some(self.name()?)
+            } else {
+                None
+            };
+            if self.column_constraint(&mut column, constraint)? {
+                continue;
             }
             if self.take_word("primary") {
                 self.expect_word("key")?;
@@ -503,20 +509,15 @@ impl<'t> Parser<'t> {
             } else if self.take_word("unique") {
                 self.sqlite_conflict_clause()?;
                 column.unique = Some(None);
-            } else if self.take_word("references") {
-                self.foreign_key_clause()?;
             } else if self.is_word("collate") {
                 self.at += 1;
                 let collation = self.label()?;
                 if !collation.eq_ignore_ascii_case("binary") {
                     return Err(self.not_supported("COLLATE other than BINARY"));
                 }
-            } else if ["check", "generated", "as"]
-                .iter()
-                .any(|word| self.is_word(word))
-            {
+            } else if ["generated", "as"].iter().any(|word| self.is_word(word)) {
                 return Err(self.not_supported(
-                    "a column constraint other than PRIMARY KEY, UNIQUE, NOT NULL, DEFAULT and REFERENCES",
+                    "a column constraint other than PRIMARY KEY, UNIQUE, NOT NULL, DEFAULT, CHECK and REFERENCES",
                 ));
             } else {
                 break;
@@ -533,61 +534,6 @@ impl<'t> Parser<'t> {
             .at(position));
         }
         Ok((column, exact_integer))
-    }
-
-    fn foreign_key_clause(&mut self) -> SqlResult<()> {
-        self.name()?;
-        if self.peek_kind() == &TokenKind::LeftParen {
-            self.name_list()?;
-        }
-        loop {
-            if self.take_word("on") {
-                if !self.take_word("delete") {
-                    self.expect_word("update")?;
-                }
-                if self.take_word("set") {
-                    if !self.take_word("null") {
-                        self.expect_word("default")?;
-                    }
-                } else if self.take_word("no") {
-                    self.expect_word("action")?;
-                } else if !(self.take_word("cascade") || self.take_word("restrict")) {
-                    return Err(self.unexpected());
-                }
-            } else if self.take_word("match") {
-                self.label()?;
-            } else if self.is_word("not") && self.is_word_at(1, "deferrable") {
-                self.at += 2;
-                self.deferrable_tail()?;
-            } else if self.take_word("deferrable") {
-                self.deferrable_tail()?;
-            } else {
-                return Ok(());
-            }
-        }
-    }
-
-    fn deferrable_tail(&mut self) -> SqlResult<()> {
-        if self.take_word("initially") && !self.take_word("deferred") {
-            self.expect_word("immediate")?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn sqlite_ignored_table_constraint(&mut self) -> SqlResult<bool> {
-        let start = self.at;
-        if self.take_word("constraint") {
-            self.name()?;
-        }
-        if self.take_word("foreign") {
-            self.expect_word("key")?;
-            self.name_list()?;
-            self.expect_word("references")?;
-            self.foreign_key_clause()?;
-            return Ok(true);
-        }
-        self.at = start;
-        Ok(false)
     }
 
     pub(super) fn sqlite_table_finish(

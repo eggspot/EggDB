@@ -212,6 +212,79 @@ fn simple_queries_run_statements_and_a_join() {
 }
 
 #[test]
+fn a_pg_dump_script_with_sequences_and_constraints_runs_as_one_simple_query() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    let script = "SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+SET default_tablespace = '';
+SET default_table_access_method = heap;
+CREATE TABLE public.parents (
+    id integer NOT NULL,
+    name text
+);
+ALTER TABLE public.parents OWNER TO postgres;
+CREATE SEQUENCE public.parents_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.parents_id_seq OWNER TO postgres;
+ALTER SEQUENCE public.parents_id_seq OWNED BY public.parents.id;
+CREATE TABLE public.kids (
+    id integer NOT NULL,
+    parent_id integer NOT NULL,
+    age integer
+);
+ALTER TABLE ONLY public.parents ALTER COLUMN id SET DEFAULT nextval('public.parents_id_seq'::regclass);
+INSERT INTO public.parents VALUES (1, 'ann');
+INSERT INTO public.parents VALUES (2, 'bo');
+INSERT INTO public.kids VALUES (1, 1, 4);
+SELECT pg_catalog.setval('public.parents_id_seq', 2, true);
+ALTER TABLE ONLY public.parents
+    ADD CONSTRAINT parents_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.kids
+    ADD CONSTRAINT kids_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.kids
+    ADD CONSTRAINT kids_age_check CHECK ((age >= 0));
+CREATE INDEX kids_parent_idx ON public.kids USING btree (parent_id);
+ALTER TABLE ONLY public.kids
+    ADD CONSTRAINT kids_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES public.parents(id) ON DELETE CASCADE;
+";
+    let answer = client.query(script);
+    assert!(!tags(&answer).contains('E'), "{answer:?}");
+    assert_eq!(ready_status(&answer), b'I');
+    assert_eq!(
+        rows(&client.query("INSERT INTO parents (name) VALUES ('cy') RETURNING id")),
+        [vec![Some("3".into())]]
+    );
+    let refused = client.query("INSERT INTO kids VALUES (2, 9, 1)");
+    assert_eq!(refused[0].code(), "23503");
+    assert_eq!(
+        refused[0].field(b'D').as_deref(),
+        Some("Key (parent_id)=(9) is not present in table \"parents\".")
+    );
+    assert_eq!(
+        client.query("INSERT INTO kids VALUES (2, 1, -1)")[0].code(),
+        "23514"
+    );
+    client.query("DELETE FROM parents WHERE id = 1");
+    assert_eq!(
+        rows(&client.query("SELECT count(*) FROM kids")),
+        [vec![Some("0".into())]]
+    );
+}
+
+#[test]
 fn errors_carry_their_sqlstate_and_position_and_blocks_fail_until_rollback() {
     let server = TestServer::start(8);
     let (mut client, _) = Client::login(server.address);

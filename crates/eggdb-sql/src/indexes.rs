@@ -451,6 +451,16 @@ pub(crate) fn create_index(
     create: &CreateIndex,
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
+    create_index_as(writer, tables, create, dialect, false)
+}
+
+pub(crate) fn create_index_as(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    create: &CreateIndex,
+    dialect: Dialect,
+    constraint: bool,
+) -> SqlResult<QueryResult> {
     let table = tables.require(writer, &create.table)?;
     let mut definition = (*table).clone();
     let others: Vec<TableDefinition> = every_table(writer)?
@@ -472,7 +482,7 @@ pub(crate) fn create_index(
         result.notices = notice;
         return Ok(result);
     }
-    let position = define_index(&others, &mut definition, &create.index, dialect, false)?;
+    let position = define_index(&others, &mut definition, &create.index, dialect, constraint)?;
     let leftover = index_prefix(definition.id, definition.indexes[position].id);
     delete_index_entries(writer, &leftover, &prefix_end(&leftover))?;
     let mut memory = WorkMemory::new();

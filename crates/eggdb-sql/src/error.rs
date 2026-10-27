@@ -70,6 +70,22 @@ impl SqlState {
     pub const NOT_NULL_VIOLATION: Self = Self(*b"23502");
     /// `23505` unique_violation.
     pub const UNIQUE_VIOLATION: Self = Self(*b"23505");
+    /// `23503` foreign_key_violation.
+    pub const FOREIGN_KEY_VIOLATION: Self = Self(*b"23503");
+    /// `23514` check_violation.
+    pub const CHECK_VIOLATION: Self = Self(*b"23514");
+    /// `2200H` sequence_generator_limit_exceeded.
+    pub const SEQUENCE_GENERATOR_LIMIT_EXCEEDED: Self = Self(*b"2200H");
+    /// `2BP01` dependent_objects_still_exist.
+    pub const DEPENDENT_OBJECTS_STILL_EXIST: Self = Self(*b"2BP01");
+    /// `42710` duplicate_object.
+    pub const DUPLICATE_OBJECT: Self = Self(*b"42710");
+    /// `42830` invalid_foreign_key.
+    pub const INVALID_FOREIGN_KEY: Self = Self(*b"42830");
+    /// `3F000` invalid_schema_name.
+    pub const INVALID_SCHEMA_NAME: Self = Self(*b"3F000");
+    /// `42602` invalid_name.
+    pub const INVALID_NAME: Self = Self(*b"42602");
     /// `25001` active_sql_transaction.
     pub const ACTIVE_SQL_TRANSACTION: Self = Self(*b"25001");
     /// `25006` read_only_sql_transaction.

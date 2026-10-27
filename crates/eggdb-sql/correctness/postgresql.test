@@ -1928,3 +1928,251 @@ SELECT count(*) FROM test1 WHERE a = 'ok'
 count
 1
 SELECT 1
+
+chapter "5.5. Constraints": check constraints, not-null, unique, primary keys and foreign keys
+ok
+CREATE TABLE products (product_no integer PRIMARY KEY, name text, price numeric CONSTRAINT positive_price CHECK (price > 0), discounted_price numeric CHECK (discounted_price > 0), CHECK (price > discounted_price))
+
+ok
+INSERT INTO products VALUES (1, 'egg', 2, 1), (2, 'nothing', NULL, NULL)
+
+error 23514
+INSERT INTO products VALUES (3, 'free', 0, NULL)
+
+error 23514
+INSERT INTO products VALUES (3, 'odd', 2, 3)
+
+error 23514
+UPDATE products SET discounted_price = -1 WHERE product_no = 1
+
+rows
+SELECT product_no, price FROM products ORDER BY product_no
+----
+product_no|price
+1|2
+2|NULL
+SELECT 2
+
+ok
+CREATE TABLE orders32 (order_id integer PRIMARY KEY, product_no integer REFERENCES products (product_no), quantity integer)
+
+ok
+INSERT INTO orders32 VALUES (1, 1, 5), (2, NULL, 1)
+
+error 23503
+INSERT INTO orders32 VALUES (3, 7, 1)
+
+error 23503
+DELETE FROM products WHERE product_no = 1
+
+ok
+CREATE TABLE order_items (product_no integer REFERENCES products ON DELETE RESTRICT, order_id integer REFERENCES orders32 ON DELETE CASCADE, quantity integer, PRIMARY KEY (product_no, order_id))
+
+ok
+INSERT INTO order_items VALUES (1, 1, 2), (2, 1, 1)
+
+ok
+DELETE FROM orders32 WHERE order_id = 1
+
+rows
+SELECT count(*) FROM order_items
+----
+count
+0
+SELECT 1
+
+error 42P01
+CREATE TABLE t1 (a integer PRIMARY KEY, b integer REFERENCES products32_missing)
+
+error 42830
+CREATE TABLE t1 (a integer, b text REFERENCES products (name))
+
+error 2BP01
+DROP TABLE products
+
+ok
+CREATE TABLE tree32 (node_id integer PRIMARY KEY, parent_id integer REFERENCES tree32 ON DELETE SET NULL, name text)
+
+ok
+INSERT INTO tree32 VALUES (1, NULL, 'root'), (2, 1, 'leaf')
+
+rows
+DELETE FROM tree32 WHERE node_id = 1 RETURNING node_id
+----
+node_id
+1
+DELETE 1
+
+rows
+SELECT node_id, parent_id FROM tree32
+----
+node_id|parent_id
+2|NULL
+SELECT 1
+
+chapter "5.7. Modifying Tables": ALTER TABLE
+ok
+ALTER TABLE products ADD COLUMN description text DEFAULT 'none'
+
+rows
+SELECT product_no, description FROM products ORDER BY product_no
+----
+product_no|description
+1|none
+2|none
+SELECT 2
+
+ok
+ALTER TABLE products ADD CHECK (name <> '')
+
+error 23514
+ALTER TABLE products ADD CONSTRAINT some_name CHECK (product_no > 1)
+
+ok
+ALTER TABLE products ADD CONSTRAINT some_name UNIQUE (name)
+
+error 23505
+INSERT INTO products (product_no, name) VALUES (9, 'egg')
+
+ok
+ALTER TABLE products DROP CONSTRAINT some_name
+
+error 42704
+ALTER TABLE products DROP CONSTRAINT some_name
+
+ok
+ALTER TABLE products ALTER COLUMN description SET NOT NULL
+
+ok
+ALTER TABLE products ALTER COLUMN description DROP NOT NULL
+
+ok
+ALTER TABLE products ALTER COLUMN description SET DEFAULT 'tbd'
+
+ok
+ALTER TABLE products ALTER COLUMN description DROP DEFAULT
+
+ok
+ALTER TABLE products RENAME COLUMN description TO notes
+
+ok
+ALTER TABLE products DROP COLUMN notes
+
+error 42703
+ALTER TABLE products DROP COLUMN notes
+
+ok
+ALTER TABLE products DROP COLUMN IF EXISTS notes
+
+ok
+ALTER TABLE products ALTER COLUMN price TYPE numeric(10,2)
+
+ok
+ALTER TABLE tree32 RENAME TO forest32
+
+rows
+SELECT count(*) FROM forest32
+----
+count
+1
+SELECT 1
+
+chapter "9.17. Sequence Manipulation Functions", "CREATE SEQUENCE", "ALTER SEQUENCE", "DROP SEQUENCE"
+ok
+CREATE SEQUENCE serial32 START 101
+
+rows
+SELECT nextval('serial32'), nextval('serial32')
+----
+nextval|nextval
+101|102
+SELECT 1
+
+rows
+SELECT currval('serial32'), lastval()
+----
+currval|lastval
+102|102
+SELECT 1
+
+rows
+SELECT setval('serial32', 42), nextval('serial32')
+----
+setval|nextval
+42|43
+SELECT 1
+
+rows
+SELECT setval('serial32', 42, false), nextval('serial32')
+----
+setval|nextval
+42|42
+SELECT 1
+
+ok
+CREATE SEQUENCE never32
+
+error 55000
+SELECT currval('never32')
+
+error 2200H
+CREATE SEQUENCE tiny32 AS smallint START 32767; SELECT nextval('tiny32'), nextval('tiny32')
+
+ok
+CREATE SEQUENCE cycle32 MINVALUE 1 MAXVALUE 2 CYCLE
+
+rows
+SELECT nextval('cycle32'), nextval('cycle32'), nextval('cycle32')
+----
+nextval|nextval|nextval
+1|2|1
+SELECT 1
+
+error 22023
+CREATE SEQUENCE bad32 INCREMENT 0
+
+error 22023
+CREATE SEQUENCE bad32 MINVALUE 10 MAXVALUE 1
+
+error 42P07
+CREATE SEQUENCE products
+
+ok
+ALTER SEQUENCE serial32 RESTART WITH 7 INCREMENT BY 3
+
+rows
+SELECT nextval('serial32'), nextval('serial32')
+----
+nextval|nextval
+7|10
+SELECT 1
+
+ok
+CREATE TABLE distributors (did integer DEFAULT nextval('serial32') PRIMARY KEY, name varchar(40))
+
+rows
+INSERT INTO distributors (name) VALUES ('a'), ('b') RETURNING did
+----
+did
+13
+16
+INSERT 0 2
+
+error 2BP01
+DROP SEQUENCE serial32
+
+ok
+DROP SEQUENCE serial32 CASCADE
+
+ok
+DROP SEQUENCE IF EXISTS serial32
+
+error 42P01
+SELECT nextval('serial32')
+
+rows
+SELECT 'never32'::regclass
+----
+regclass
+never32
+SELECT 1

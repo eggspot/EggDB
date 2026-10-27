@@ -1,3 +1,4 @@
+mod constraints;
 mod indexes;
 mod mysql;
 mod oracle;
@@ -122,7 +123,11 @@ fn is_plain_literal(kind: &TokenKind<'_>) -> bool {
     ) || matches!(kind, TokenKind::Word(word) if word == "null" || word == "true" || word == "false")
 }
 
-const POSTGRESQL_ONLY_FUNCTIONS: [&str; 24] = [
+const POSTGRESQL_ONLY_FUNCTIONS: [&str; 28] = [
+    "nextval",
+    "currval",
+    "lastval",
+    "setval",
     "current_time",
     "localtime",
     "justify_days",
@@ -149,7 +154,10 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 24] = [
     "jsonb_array_length",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 8] = [
+const INTERNAL_FUNCTIONS: [&str; 11] = [
+    "regclass_cast",
+    "oracle_nextval",
+    "oracle_currval",
     "mysql_curtime",
     "mysql_greatest",
     "mysql_least",
@@ -637,6 +645,14 @@ impl<'t> Parser<'t> {
             "show" => self.show(),
             "reset" => self.reset(),
             "explain" => self.explain(),
+            "alter" if self.is_word_at(1, "table") => {
+                self.at += 1;
+                self.alter_table()
+            }
+            "alter" if self.postgresql() && self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.alter_sequence()
+            }
             "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
             | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
             | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),
@@ -927,6 +943,9 @@ impl<'t> Parser<'t> {
         if self.at_index_definition() {
             return self.create_index();
         }
+        if self.postgresql() && self.is_word("sequence") {
+            return self.create_sequence();
+        }
         if self.is_word("temp") || self.is_word("temporary") || self.is_word("unlogged") {
             return Err(self.not_supported("CREATE TEMPORARY or UNLOGGED TABLE"));
         }
@@ -970,14 +989,23 @@ impl<'t> Parser<'t> {
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
         let mut primary_key = None;
+        let mut primary_key_name = None;
         let mut indexes = Vec::new();
+        let mut constraints = Vec::new();
         let mut integer_columns = Vec::new();
         loop {
-            if self.sqlite() && self.sqlite_ignored_table_constraint()? {
-            } else if self.is_word("primary") || self.is_word("constraint") {
+            if self.is_word("primary") || self.is_word("constraint") {
                 let position = self.position();
                 let constraint = if self.take_word("constraint") {
-                    Some(self.name()?)
+                    if self.mysql()
+                        && (self.is_word("primary")
+                            || self.at_table_constraint()
+                            || self.is_word("unique"))
+                    {
+                        None
+                    } else {
+                        Some(self.name()?)
+                    }
                 } else {
                     None
                 };
@@ -990,12 +1018,18 @@ impl<'t> Parser<'t> {
                         return Err(multiple_primary_keys(&name, position));
                     }
                     primary_key = Some((key, position));
+                    primary_key_name = constraint;
                     if self.sqlite() {
                         self.sqlite_conflict_clause()?;
                     }
+                } else if self.at_table_constraint() {
+                    constraints.push(self.table_constraint_body(constraint, position)?);
                 } else {
                     return Err(self.table_constraint_not_supported());
                 }
+            } else if self.at_table_constraint() {
+                let position = self.position();
+                constraints.push(self.table_constraint_body(None, position)?);
             } else if self.is_word("unique") {
                 let position = self.position();
                 indexes.push(self.unique_constraint(None, position)?);
@@ -1003,11 +1037,7 @@ impl<'t> Parser<'t> {
                 && let Some(index) = self.mysql_index_entry()?
             {
                 indexes.push(index);
-            } else if self.is_word("check")
-                || self.is_word("foreign")
-                || self.is_word("exclude")
-                || self.is_word("like")
-            {
+            } else if self.is_word("exclude") || self.is_word("like") {
                 return Err(self.table_constraint_not_supported());
             } else if self.sqlite() {
                 let (column, exact_integer) = self.sqlite_column_definition()?;
@@ -1035,12 +1065,16 @@ impl<'t> Parser<'t> {
             if_not_exists,
             columns,
             primary_key,
+            primary_key_name,
             indexes,
+            constraints,
         }))
     }
 
     fn table_constraint_not_supported(&self) -> SqlError {
-        self.not_supported("a table constraint other than PRIMARY KEY and UNIQUE")
+        self.not_supported(
+            "a table constraint other than PRIMARY KEY, UNIQUE, CHECK and FOREIGN KEY",
+        )
     }
 
     fn unique_constraint(
@@ -1100,6 +1134,7 @@ impl<'t> Parser<'t> {
             default: None,
             auto_increment: serial.is_some(),
             unique: None,
+            constraints: Vec::new(),
         };
         loop {
             if self.mysql() && self.mysql_column_option(&mut column)? {
@@ -1110,7 +1145,8 @@ impl<'t> Parser<'t> {
             } else {
                 None
             };
-            if self.take_word("unique") {
+            if self.column_constraint(&mut column, constraint.clone())? {
+            } else if self.take_word("unique") {
                 if self.is_word("nulls") {
                     return Err(self.not_supported("UNIQUE NULLS [NOT] DISTINCT"));
                 }
@@ -1134,12 +1170,12 @@ impl<'t> Parser<'t> {
                 self.oracle_identity(&mut column)?;
             } else if self.postgresql() && self.is_word("generated") {
                 self.postgresql_identity(&mut column)?;
-            } else if ["check", "references", "generated", "collate"]
+            } else if ["generated", "collate"]
                 .iter()
                 .any(|word| self.is_word(word))
             {
                 return Err(self.not_supported(
-                    "a column constraint other than PRIMARY KEY, UNIQUE, NOT NULL and DEFAULT",
+                    "a column constraint other than PRIMARY KEY, UNIQUE, NOT NULL, DEFAULT, CHECK and REFERENCES",
                 ));
             } else {
                 return Ok(column);
@@ -1468,6 +1504,9 @@ impl<'t> Parser<'t> {
         if self.is_word("index") {
             return self.drop_index();
         }
+        if self.postgresql() && self.is_word("sequence") {
+            return self.drop_sequence();
+        }
         if !self.take_word("table") {
             return match self.peek_kind() {
                 TokenKind::Word(word) => {
@@ -1486,11 +1525,15 @@ impl<'t> Parser<'t> {
         while self.take(&TokenKind::Comma) {
             names.push(self.table_name()?);
         }
-        if self.is_word("cascade") {
-            return Err(self.not_supported("DROP TABLE ... CASCADE"));
+        let cascade = !self.sqlite() && self.take_word("cascade");
+        if !cascade {
+            self.take_word("restrict");
         }
-        self.take_word("restrict");
-        Ok(Statement::DropTable { names, if_exists })
+        Ok(Statement::DropTable {
+            names,
+            if_exists,
+            cascade,
+        })
     }
 
     fn table_reference(&mut self) -> SqlResult<TableReference> {
@@ -2346,6 +2389,17 @@ impl<'t> Parser<'t> {
                 if self.depth > MAX_NESTING {
                     return Err(too_deep(self.position()));
                 }
+                if self.postgresql() && self.is_regclass_type() {
+                    let position = expr.position;
+                    expr = Expr {
+                        kind: ExprKind::Function {
+                            name: "regclass_cast".to_owned(),
+                            arguments: vec![expr],
+                        },
+                        position,
+                    };
+                    continue;
+                }
                 let sql_type = self.sql_type()?;
                 let position = expr.position;
                 expr = Expr {
@@ -2571,10 +2625,51 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn is_regclass_type(&mut self) -> bool {
+        let qualified = self.is_word("pg_catalog") && self.peek_kind_at(1) == &TokenKind::Dot;
+        let at = if qualified { 2 } else { 0 };
+        if !self.is_word_at(at, "regclass") {
+            return false;
+        }
+        self.at += at + 1;
+        true
+    }
+
     fn column_or_function(&mut self) -> SqlResult<Expr> {
         let first = self.name()?;
         if self.peek_kind() == &TokenKind::LeftParen {
             return self.function(first);
+        }
+        if self.postgresql()
+            && first.text == "pg_catalog"
+            && self.peek_kind() == &TokenKind::Dot
+            && self.peek_kind_at(2) == &TokenKind::LeftParen
+        {
+            self.at += 1;
+            let name = self.name()?;
+            return self.function(name);
+        }
+        if self.oracle()
+            && self.peek_kind() == &TokenKind::Dot
+            && (self.is_word_at(1, "nextval") || self.is_word_at(1, "currval"))
+            && self.peek_kind_at(2) != &TokenKind::LeftParen
+        {
+            let function = if self.is_word_at(1, "nextval") {
+                "oracle_nextval"
+            } else {
+                "oracle_currval"
+            };
+            self.at += 2;
+            return Ok(Expr {
+                kind: ExprKind::Function {
+                    name: function.to_owned(),
+                    arguments: vec![Expr {
+                        kind: ExprKind::Literal(Literal::String(first.text)),
+                        position: first.position,
+                    }],
+                },
+                position: first.position,
+            });
         }
         if self.take(&TokenKind::Dot) {
             if self.is_operator("*") {

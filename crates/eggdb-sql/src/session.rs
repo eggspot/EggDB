@@ -13,10 +13,20 @@ use crate::execute::{self, TableCache};
 use crate::lexer::{Token, TokenKind, tokenize_in};
 use crate::mysql_errors::{self, Warning};
 use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
+use crate::sequences::{self, SequenceAdvance, SessionSequences};
 use crate::settings::Settings;
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
+
+fn mentions_sequence_functions(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|token| {
+        matches!(&token.kind, TokenKind::Word(word)
+            if ["nextval", "setval", "currval", "lastval"]
+                .iter()
+                .any(|name| word.eq_ignore_ascii_case(name)))
+    })
+}
 
 /// A value bound to a parameter placeholder `$n` of a prepared statement, as PostgreSQL's
 /// extended query protocol passes it: the type the client declared, if any, and the value's
@@ -183,6 +193,9 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     settings: Arc<Settings>,
     dialect: Dialect,
     warnings: Vec<Warning>,
+    sequence_values: SessionSequences,
+    pending_sequences: Vec<SequenceAdvance>,
+    statement_uses_sequences: bool,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -208,6 +221,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             settings: Arc::new(Settings::default()),
             dialect,
             warnings: Vec::new(),
+            sequence_values: SessionSequences::default(),
+            pending_sequences: Vec::new(),
+            statement_uses_sequences: false,
         }
     }
 
@@ -573,17 +589,39 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             if parser.at_end() {
                 return Ok(());
             }
+            let _constraints = crate::constraints::enter(
+                self.dialect,
+                !self.sqlite() || self.settings.sqlite.foreign_keys,
+                if self.mysql() {
+                    self.settings.database.clone()
+                } else {
+                    String::new()
+                },
+                if self.oracle() {
+                    self.oracle_user()
+                } else {
+                    String::new()
+                },
+            );
             if let Some(rows) = parser.literal_rows() {
                 resume = parser.resume_point();
-                let result = self.insert_literal_rows(&rows)?;
-                let result = self.after_statement(result, false);
+                self.enter_sequences(false);
+                let result = self.insert_literal_rows(&rows);
+                self.leave_sequences();
+                let settled = self.settle_sequences();
+                let result = self.after_statement(result?, false);
+                settled?;
                 if !on_result(result) {
                     return Ok(());
                 }
                 continue;
             }
+            let first_token = parser.resume_point().0;
             let parsed = parser.statement();
             resume = parser.resume_point();
+            let uses_sequences = tokens
+                .get(first_token..resume.0.min(tokens.len()))
+                .is_some_and(mentions_sequence_functions);
             let statement = match parsed {
                 Ok(statement) => statement,
                 Err(error) => {
@@ -597,10 +635,62 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     MySqlStatement::ShowWarnings { .. } | MySqlStatement::ShowCount { .. }
                 )
             );
-            let result = self.run(&statement)?;
-            let result = self.after_statement(result, diagnostic);
+            self.enter_sequences(uses_sequences);
+            let result = self.run(&statement);
+            self.leave_sequences();
+            let settled = self.settle_sequences();
+            let result = self.after_statement(result?, diagnostic);
+            settled?;
             if !on_result(result) {
                 return Ok(());
+            }
+        }
+    }
+
+    fn enter_sequences(&mut self, uses_sequences: bool) {
+        self.statement_uses_sequences = uses_sequences;
+        sequences::enter(
+            std::mem::take(&mut self.sequence_values),
+            self.dialect,
+            uses_sequences,
+        );
+    }
+
+    fn leave_sequences(&mut self) {
+        let (values, advances) = sequences::leave();
+        self.sequence_values = values;
+        self.statement_uses_sequences = false;
+        for mut advance in advances {
+            if let Some(earlier) = self
+                .pending_sequences
+                .iter()
+                .position(|pending| pending.name == advance.name)
+            {
+                advance.before = self.pending_sequences.remove(earlier).before;
+            }
+            self.pending_sequences.push(advance);
+        }
+    }
+
+    fn settle_sequences(&mut self) -> SqlResult<()> {
+        if self.pending_sequences.is_empty() || matches!(self.block, Block::Writing(_)) {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending_sequences);
+        let mut writer = self.store.begin_write().map_err(|error| {
+            SqlError::new(
+                error.state(),
+                format!(
+                    "the sequence values a rolled-back transaction used could not be saved again: {}",
+                    error.message()
+                ),
+            )
+        })?;
+        match sequences::reapply(&mut writer, &pending) {
+            Ok(()) => writer.commit(),
+            Err(error) => {
+                let _ = writer.rollback();
+                Err(error)
             }
         }
     }
@@ -645,6 +735,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Block::Writing(writer) => writer.rollback()?,
             Block::Reading(_) | Block::Failed | Block::None => {}
         }
+        self.settle_sequences()?;
         Ok(was_open)
     }
 
@@ -719,11 +810,47 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Truncate(table) => self.write("TRUNCATE TABLE", |writer, tables| {
                 execute::truncate(writer, tables, table)
             }),
+            Statement::Select(select) if self.statement_uses_sequences => self
+                .write("nextval()", |writer, tables| {
+                    execute::select(writer, tables, select, false)
+                }),
+            Statement::Query(query) if self.statement_uses_sequences => self
+                .write("nextval()", |writer, tables| {
+                    execute::query(writer, tables, query, false)
+                }),
             Statement::Select(select) => {
                 self.read(|reader, tables| execute::select(reader, tables, select, false))
             }
             Statement::Query(query) => {
                 self.read(|reader, tables| execute::query(reader, tables, query, false))
+            }
+            Statement::CreateSequence(create) => {
+                let dialect = self.dialect;
+                self.write("CREATE SEQUENCE", |writer, tables| {
+                    sequences::create_sequence(writer, tables, create, dialect)
+                })
+            }
+            Statement::AlterSequence(alter) => {
+                let dialect = self.dialect;
+                self.write("ALTER SEQUENCE", |writer, tables| {
+                    sequences::alter_sequence(writer, tables, alter, dialect)
+                })
+            }
+            Statement::DropSequence {
+                names,
+                if_exists,
+                cascade,
+            } => {
+                let dialect = self.dialect;
+                self.write("DROP SEQUENCE", |writer, tables| {
+                    sequences::drop_sequences(writer, tables, names, *if_exists, *cascade, dialect)
+                })
+            }
+            Statement::AlterTable(alter) => {
+                let dialect = self.dialect;
+                self.write("ALTER TABLE", |writer, tables| {
+                    crate::alter::alter_table(writer, tables, alter, dialect)
+                })
             }
             Statement::Set { name, value } => Arc::make_mut(&mut self.settings)
                 .set(name, value.as_deref())
@@ -759,10 +886,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 self.read(|reader, tables| execute::explain(reader, tables, &explain.statement))
                     .map(|query| crate::explain::render(&query, explain.style, dialect))
             }
-            Statement::DropTable { names, if_exists } => self
-                .write("DROP TABLE", |writer, tables| {
-                    execute::drop_tables(writer, tables, names, *if_exists)
-                }),
+            Statement::DropTable {
+                names,
+                if_exists,
+                cascade,
+            } => {
+                let dialect = self.dialect;
+                self.write("DROP TABLE", |writer, tables| {
+                    execute::drop_tables(writer, tables, names, *if_exists, *cascade, dialect)
+                })
+            }
             Statement::Insert(insert) => self.write("INSERT", |writer, tables| {
                 execute::insert(writer, tables, insert)
             }),
@@ -805,6 +938,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     | Statement::Truncate(_)
                     | Statement::CreateIndex(_)
                     | Statement::DropIndex(_)
+                    | Statement::CreateSequence(_)
+                    | Statement::AlterSequence(_)
+                    | Statement::DropSequence { .. }
+                    | Statement::AlterTable(_)
             )
     }
 
@@ -864,6 +1001,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         command: &str,
         body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
+        let body = |writer: &mut dyn KeyValueWrite, tables: &mut TableCache| {
+            sequences::load_for_sequence_calls(writer)?;
+            let result = body(writer, tables)?;
+            sequences::save_changed(writer)?;
+            Ok(result)
+        };
         let keep_open = !self.autocommit();
         let tables = &mut self.tables;
         match &mut self.block {
@@ -899,6 +1042,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                                     | "TRUNCATE TABLE"
                                     | "CREATE INDEX"
                                     | "DROP INDEX"
+                                    | "CREATE SEQUENCE"
+                                    | "ALTER SEQUENCE"
+                                    | "DROP SEQUENCE"
+                                    | "ALTER TABLE"
                             ) =>
                     {
                         self.block = Block::Writing(writer);
@@ -906,6 +1053,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     }
                     Ok(result) => {
                         writer.commit()?;
+                        sequences::mark_changes_committed();
                         Ok(result)
                     }
                     Err(error) => {
@@ -940,6 +1088,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 writer.commit()?;
+                self.pending_sequences.clear();
+                sequences::mark_changes_committed();
                 Ok(QueryResult::command("COMMIT"))
             }
             Block::Reading(_) => Ok(QueryResult::command("COMMIT")),

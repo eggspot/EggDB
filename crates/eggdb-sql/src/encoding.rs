@@ -1,3 +1,4 @@
+use crate::ast::ReferentialAction;
 use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::{Interval, IntervalFields};
@@ -14,6 +15,9 @@ const AUTO_INCREMENT_FORMAT_VERSION: u8 = 2;
 const INDEXES_FORMAT_VERSION: u8 = 3;
 const TYPES_FORMAT_VERSION: u8 = 4;
 const MORE_TYPES_FORMAT_VERSION: u8 = 5;
+const CONSTRAINTS_FORMAT_VERSION: u8 = 6;
+const SEQUENCE_SPACE: u8 = 0x05;
+const REFERENCE_SPACE: u8 = 0x06;
 const NO_PRECISION: u8 = 0xFF;
 const DEFAULT_ABSENT: u8 = 0;
 const DEFAULT_EXPRESSION: u8 = 1;
@@ -24,6 +28,31 @@ pub(crate) const MAX_COLUMNS: usize = 1600;
 pub(crate) const MAX_INDEX_COLUMNS: usize = 32;
 pub(crate) const MAX_INDEXES: usize = 1024;
 pub(crate) const MAX_CHARACTER_LENGTH: u32 = 10_485_760;
+pub(crate) const MAX_CONSTRAINTS: usize = 1024;
+
+pub(crate) fn sequence_key(name: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(SEQUENCE_SPACE);
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+pub(crate) fn sequences_prefix() -> Vec<u8> {
+    sequence_key("")
+}
+
+pub(crate) fn references_prefix(parent: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(REFERENCE_SPACE);
+    put_bytes(&mut key, parent.as_bytes());
+    key
+}
+
+pub(crate) fn reference_key(parent: &str, child: &str) -> Vec<u8> {
+    let mut key = references_prefix(parent);
+    key.extend_from_slice(child.as_bytes());
+    key
+}
 
 pub(crate) fn meta_key() -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
@@ -173,12 +202,54 @@ pub(crate) struct IndexDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CheckConstraint {
+    pub(crate) name: String,
+    pub(crate) dialect: crate::Dialect,
+    pub(crate) expression: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ForeignKey {
+    pub(crate) name: String,
+    pub(crate) columns: Vec<usize>,
+    pub(crate) parent: String,
+    pub(crate) parent_columns: Vec<String>,
+    pub(crate) on_delete: ReferentialAction,
+    pub(crate) on_update: ReferentialAction,
+    pub(crate) deferrable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct TableDefinition {
     pub(crate) id: u32,
     pub(crate) name: String,
     pub(crate) columns: Vec<Column>,
     pub(crate) primary_key: Vec<usize>,
     pub(crate) indexes: Vec<IndexDefinition>,
+    pub(crate) primary_key_name: Option<String>,
+    pub(crate) checks: Vec<CheckConstraint>,
+    pub(crate) foreign_keys: Vec<ForeignKey>,
+    pub(crate) referenced: bool,
+    pub(crate) owns_sequence: bool,
+}
+
+fn dialect_code(dialect: crate::Dialect) -> u8 {
+    match dialect {
+        crate::Dialect::PostgreSql => 0,
+        crate::Dialect::MySql => 1,
+        crate::Dialect::Sqlite => 2,
+        crate::Dialect::Oracle => 3,
+    }
+}
+
+fn dialect_of(code: u8) -> Option<crate::Dialect> {
+    Some(match code {
+        0 => crate::Dialect::PostgreSql,
+        1 => crate::Dialect::MySql,
+        2 => crate::Dialect::Sqlite,
+        3 => crate::Dialect::Oracle,
+        _ => return None,
+    })
 }
 
 impl TableDefinition {
@@ -194,8 +265,31 @@ impl TableDefinition {
         self.indexes.iter().find(|index| index.name == name)
     }
 
+    pub(crate) fn has_constraints(&self) -> bool {
+        self.primary_key_name.is_some()
+            || !self.checks.is_empty()
+            || !self.foreign_keys.is_empty()
+            || self.referenced
+            || self.owns_sequence
+    }
+
+    pub(crate) fn primary_key_constraint_name(&self) -> String {
+        self.primary_key_name
+            .clone()
+            .unwrap_or_else(|| format!("{}_pkey", self.name))
+    }
+
+    pub(crate) fn constraint_name_taken(&self, name: &str) -> bool {
+        self.checks.iter().any(|check| check.name == name)
+            || self.foreign_keys.iter().any(|key| key.name == name)
+            || self.indexes.iter().any(|index| index.name == name)
+            || (!self.primary_key.is_empty() && self.primary_key_constraint_name() == name)
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self
+        let version = if self.has_constraints() {
+            CONSTRAINTS_FORMAT_VERSION
+        } else if self
             .columns
             .iter()
             .any(|column| is_version_5_type(column.sql_type))
@@ -246,12 +340,47 @@ impl TableDefinition {
                 }
             }
         }
+        if version >= CONSTRAINTS_FORMAT_VERSION {
+            self.encode_constraints(&mut out);
+        }
         out
+    }
+
+    fn encode_constraints(&self, out: &mut Vec<u8>) {
+        match &self.primary_key_name {
+            Some(name) => {
+                out.push(1);
+                put_bytes(out, name.as_bytes());
+            }
+            None => out.push(0),
+        }
+        out.push(u8::from(self.referenced) | (u8::from(self.owns_sequence) << 1));
+        put_varint(out, self.checks.len() as u64);
+        for check in &self.checks {
+            put_bytes(out, check.name.as_bytes());
+            out.push(dialect_code(check.dialect));
+            put_bytes(out, check.expression.as_bytes());
+        }
+        put_varint(out, self.foreign_keys.len() as u64);
+        for key in &self.foreign_keys {
+            put_bytes(out, key.name.as_bytes());
+            put_varint(out, key.columns.len() as u64);
+            for &column in &key.columns {
+                put_varint(out, column as u64);
+            }
+            put_bytes(out, key.parent.as_bytes());
+            for column in &key.parent_columns {
+                put_bytes(out, column.as_bytes());
+            }
+            out.push(key.on_delete.code());
+            out.push(key.on_update.code());
+            out.push(u8::from(key.deferrable));
+        }
     }
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "table definition");
-        let version = reader.version_up_to(MORE_TYPES_FORMAT_VERSION)?;
+        let version = reader.version_up_to(CONSTRAINTS_FORMAT_VERSION)?;
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
         let more_types_allowed = version >= MORE_TYPES_FORMAT_VERSION;
@@ -326,10 +455,15 @@ impl TableDefinition {
         }
         let indexes = match version {
             INDEXES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), false)?,
-            TYPES_FORMAT_VERSION | MORE_TYPES_FORMAT_VERSION => {
+            TYPES_FORMAT_VERSION | MORE_TYPES_FORMAT_VERSION | CONSTRAINTS_FORMAT_VERSION => {
                 decode_indexes(&mut reader, columns.len(), true)?
             }
             _ => Vec::new(),
+        };
+        let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
+            Some(decode_constraints(&mut reader, &columns, &indexes)?)
+        } else {
+            None
         };
         reader.finish()?;
         let newest_type_needed = if more_types_allowed {
@@ -338,6 +472,7 @@ impl TableDefinition {
             is_version_4_type
         };
         if new_types_allowed
+            && version < CONSTRAINTS_FORMAT_VERSION
             && !columns
                 .iter()
                 .any(|column| newest_type_needed(column.sql_type))
@@ -362,13 +497,245 @@ impl TableDefinition {
         {
             return Err(reader.damaged());
         }
-        Ok(Self {
+        let DecodedConstraints {
+            primary_key_name,
+            checks,
+            foreign_keys,
+            referenced,
+            owns_sequence,
+        } = constraints.unwrap_or_default();
+        if primary_key_name.is_some() && primary_key.is_empty() {
+            return Err(reader.damaged());
+        }
+        let table = Self {
             id,
             name: name.to_owned(),
             columns,
             primary_key,
             indexes,
-        })
+            primary_key_name,
+            checks,
+            foreign_keys,
+            referenced,
+            owns_sequence,
+        };
+        if version == CONSTRAINTS_FORMAT_VERSION && !table.has_constraints() {
+            return Err(reader.damaged());
+        }
+        Ok(table)
+    }
+}
+
+#[derive(Default)]
+struct DecodedConstraints {
+    primary_key_name: Option<String>,
+    checks: Vec<CheckConstraint>,
+    foreign_keys: Vec<ForeignKey>,
+    referenced: bool,
+    owns_sequence: bool,
+}
+
+fn decode_constraints(
+    reader: &mut Reader<'_>,
+    columns: &[Column],
+    indexes: &[IndexDefinition],
+) -> SqlResult<DecodedConstraints> {
+    let primary_key_name = match reader.byte()? {
+        0 => None,
+        1 => Some(reader.name()?),
+        _ => return Err(reader.damaged()),
+    };
+    let flags = reader.byte()?;
+    if flags > 3 {
+        return Err(reader.damaged());
+    }
+    let mut names: Vec<String> = indexes.iter().map(|index| index.name.clone()).collect();
+    names.extend(primary_key_name.iter().cloned());
+    let check_count = reader.count()?;
+    if check_count > MAX_CONSTRAINTS {
+        return Err(reader.damaged());
+    }
+    let mut checks = Vec::new();
+    for _ in 0..check_count {
+        let name = reader.name()?;
+        let dialect = dialect_of(reader.byte()?).ok_or_else(|| reader.damaged())?;
+        let expression = reader.text()?;
+        if expression.trim().is_empty() || names.contains(&name) {
+            return Err(reader.damaged());
+        }
+        names.push(name.clone());
+        checks.push(CheckConstraint {
+            name,
+            dialect,
+            expression,
+        });
+    }
+    let key_count = reader.count()?;
+    if key_count > MAX_CONSTRAINTS {
+        return Err(reader.damaged());
+    }
+    let mut foreign_keys = Vec::new();
+    for _ in 0..key_count {
+        let name = reader.name()?;
+        let width = reader.count()?;
+        if width == 0 || width > MAX_INDEX_COLUMNS {
+            return Err(reader.damaged());
+        }
+        let mut key_columns = Vec::with_capacity(width);
+        for _ in 0..width {
+            let column = usize::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+            if column >= columns.len() || key_columns.contains(&column) {
+                return Err(reader.damaged());
+            }
+            key_columns.push(column);
+        }
+        let parent = reader.name()?;
+        let mut parent_columns: Vec<String> = Vec::with_capacity(width);
+        for _ in 0..width {
+            let column = reader.name()?;
+            if parent_columns.contains(&column) {
+                return Err(reader.damaged());
+            }
+            parent_columns.push(column);
+        }
+        let on_delete =
+            ReferentialAction::from_code(reader.byte()?).ok_or_else(|| reader.damaged())?;
+        let on_update =
+            ReferentialAction::from_code(reader.byte()?).ok_or_else(|| reader.damaged())?;
+        let deferrable = match reader.byte()? {
+            0 => false,
+            1 => true,
+            _ => return Err(reader.damaged()),
+        };
+        if names.contains(&name) {
+            return Err(reader.damaged());
+        }
+        names.push(name.clone());
+        foreign_keys.push(ForeignKey {
+            name,
+            columns: key_columns,
+            parent,
+            parent_columns,
+            on_delete,
+            on_update,
+            deferrable,
+        });
+    }
+    Ok(DecodedConstraints {
+        primary_key_name,
+        checks,
+        foreign_keys,
+        referenced: flags & 1 == 1,
+        owns_sequence: flags & 2 == 2,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SequenceDefinition {
+    pub(crate) sql_type: SqlType,
+    pub(crate) start: i64,
+    pub(crate) increment: i64,
+    pub(crate) min: i64,
+    pub(crate) max: i64,
+    pub(crate) cache: i64,
+    pub(crate) cycle: bool,
+    pub(crate) last_value: i64,
+    pub(crate) is_called: bool,
+    pub(crate) owned_by: Option<(String, String)>,
+}
+
+pub(crate) fn integer_type_range(sql_type: SqlType) -> Option<(i64, i64)> {
+    match sql_type {
+        SqlType::SmallInt => Some((i64::from(i16::MIN), i64::from(i16::MAX))),
+        SqlType::Integer => Some((i64::from(i32::MIN), i64::from(i32::MAX))),
+        SqlType::BigInt => Some((i64::MIN, i64::MAX)),
+        _ => None,
+    }
+}
+
+impl SequenceDefinition {
+    pub(crate) fn valid(&self) -> bool {
+        let Some((low, high)) = integer_type_range(self.sql_type) else {
+            return false;
+        };
+        self.increment != 0
+            && self.cache >= 1
+            && low <= self.min
+            && self.min < self.max
+            && self.max <= high
+            && self.min <= self.start
+            && self.start <= self.max
+            && self.min <= self.last_value
+            && self.last_value <= self.max
+    }
+
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut out = vec![FORMAT_VERSION];
+        out.push(type_tag(self.sql_type));
+        for number in [
+            self.start,
+            self.increment,
+            self.min,
+            self.max,
+            self.cache,
+            self.last_value,
+        ] {
+            out.extend_from_slice(&number.to_le_bytes());
+        }
+        out.push(u8::from(self.cycle) | (u8::from(self.is_called) << 1));
+        match &self.owned_by {
+            Some((table, column)) => {
+                out.push(1);
+                put_bytes(&mut out, table.as_bytes());
+                put_bytes(&mut out, column.as_bytes());
+            }
+            None => out.push(0),
+        }
+        out
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> SqlResult<Self> {
+        let mut reader = Reader::new(bytes, "sequence");
+        reader.version()?;
+        let sql_type = match reader.byte()? {
+            1 => SqlType::SmallInt,
+            2 => SqlType::Integer,
+            3 => SqlType::BigInt,
+            _ => return Err(reader.damaged()),
+        };
+        let mut number = || -> SqlResult<i64> { Ok(i64::from_le_bytes(reader.array()?)) };
+        let start = number()?;
+        let increment = number()?;
+        let min = number()?;
+        let max = number()?;
+        let cache = number()?;
+        let last_value = number()?;
+        let flags = reader.byte()?;
+        if flags > 3 {
+            return Err(reader.damaged());
+        }
+        let owned_by = match reader.byte()? {
+            0 => None,
+            1 => Some((reader.name()?, reader.name()?)),
+            _ => return Err(reader.damaged()),
+        };
+        reader.finish()?;
+        let sequence = Self {
+            sql_type,
+            start,
+            increment,
+            min,
+            max,
+            cache,
+            cycle: flags & 1 == 1,
+            last_value,
+            is_called: flags & 2 == 2,
+            owned_by,
+        };
+        if !sequence.valid() {
+            return Err(reader.damaged());
+        }
+        Ok(sequence)
     }
 }
 
@@ -854,6 +1221,14 @@ impl<'b> Reader<'b> {
         Ok(count as usize)
     }
 
+    fn name(&mut self) -> SqlResult<String> {
+        let name = self.text()?;
+        if name.is_empty() {
+            return Err(self.damaged());
+        }
+        Ok(name)
+    }
+
     fn text(&mut self) -> SqlResult<String> {
         let length = self.count()?;
         let bytes = self.take(length)?;
@@ -1249,6 +1624,7 @@ mod tests {
             ],
             primary_key: vec![0],
             indexes: Vec::new(),
+            ..TableDefinition::default()
         };
         let encoded = table.encode();
         assert_eq!(TableDefinition::decode("t", &encoded), Ok(table));
@@ -1279,6 +1655,7 @@ mod tests {
             ],
             primary_key,
             indexes: Vec::new(),
+            ..TableDefinition::default()
         }
     }
 
@@ -1329,10 +1706,10 @@ mod tests {
     #[test]
     fn a_newer_table_definition_version_is_refused_by_name() {
         let mut newer = with_indexes([true, false]).encode();
-        newer[0] = 6;
+        newer[0] = 7;
         let error = TableDefinition::decode("t", &newer).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
-        assert!(error.message().contains("format version 6"), "{error}");
+        assert!(error.message().contains("format version 7"), "{error}");
     }
 
     fn with_indexes(auto: [bool; 2]) -> TableDefinition {
@@ -1527,6 +1904,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            ..TableDefinition::default()
         }
     }
 
@@ -1740,6 +2118,7 @@ mod tests {
                 unique: false,
                 columns: vec![3, 6],
             }],
+            ..TableDefinition::default()
         }
     }
 
@@ -1996,5 +2375,188 @@ mod tests {
     fn a_prefix_end_is_the_first_key_after_every_key_with_the_prefix() {
         assert_eq!(prefix_end(&[1, 2]), vec![1, 3]);
         assert_eq!(prefix_end(&[1, 0xFF]), vec![2]);
+    }
+
+    fn constrained_table() -> TableDefinition {
+        let mut table = with_indexes([false, false]);
+        table.primary_key_name = Some("t_key".into());
+        table.checks = vec![super::CheckConstraint {
+            name: "t_id_check".into(),
+            dialect: crate::Dialect::MySql,
+            expression: "`id` > 0".into(),
+        }];
+        table.foreign_keys = vec![super::ForeignKey {
+            name: "t_name_fkey".into(),
+            columns: vec![1, 0],
+            parent: "parent".into(),
+            parent_columns: vec!["code".into(), "id".into()],
+            on_delete: crate::ast::ReferentialAction::Cascade,
+            on_update: crate::ast::ReferentialAction::SetDefault,
+            deferrable: true,
+        }];
+        table
+    }
+
+    #[test]
+    fn constraints_are_written_in_format_version_6_and_read_back() {
+        let table = constrained_table();
+        let bytes = table.encode();
+        assert_eq!(bytes[0], 6);
+        assert_eq!(TableDefinition::decode("t", &bytes).unwrap(), table);
+        for kept in [
+            with_indexes([false, false]),
+            two_columns([true, false], vec![0, 1]),
+            typed_table(true),
+            item_31_table(),
+        ] {
+            let bytes = kept.encode();
+            assert!(bytes[0] < 6);
+            assert_eq!(TableDefinition::decode(&kept.name, &bytes).unwrap(), kept);
+        }
+        for (referenced, owns_sequence) in [(true, false), (false, true), (true, true)] {
+            let mut flagged = with_indexes([false, false]);
+            flagged.referenced = referenced;
+            flagged.owns_sequence = owns_sequence;
+            let bytes = flagged.encode();
+            assert_eq!(
+                bytes[0], 6,
+                "a release that reads up to version 5 refuses it by name"
+            );
+            assert_eq!(TableDefinition::decode("t", &bytes).unwrap(), flagged);
+            let flags_at = bytes.len() - 3;
+            assert_eq!(
+                bytes[flags_at],
+                u8::from(referenced) | (u8::from(owns_sequence) << 1)
+            );
+            let mut unknown = bytes.clone();
+            unknown[flags_at] = 4;
+            assert!(damaged(&unknown));
+        }
+        let mut only_checks = with_indexes([false, false]);
+        only_checks.checks = constrained_table().checks;
+        assert_eq!(
+            TableDefinition::decode("t", &only_checks.encode()).unwrap(),
+            only_checks
+        );
+    }
+
+    #[test]
+    fn damaged_constraint_definitions_are_refused_without_panicking() {
+        let bytes = constrained_table().encode();
+        for cut in 0..bytes.len() {
+            assert!(damaged(&bytes[..cut]), "cut at {cut}");
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(damaged(&longer));
+        let mut without = with_indexes([false, false]).encode();
+        without[0] = 6;
+        without.extend_from_slice(&[0, 0, 0]);
+        assert!(damaged(&without));
+        let mut duplicate = constrained_table();
+        duplicate.foreign_keys[0].name = "t_id_check".into();
+        assert!(damaged(&duplicate.encode()));
+        let mut clashing = constrained_table();
+        clashing.checks[0].name = "both".into();
+        assert!(damaged(&clashing.encode()));
+        let mut out_of_range = constrained_table();
+        out_of_range.foreign_keys[0].columns = vec![1, 9];
+        assert!(damaged(&out_of_range.encode()));
+        let mut empty_name = constrained_table();
+        empty_name.checks[0].name.clear();
+        assert!(damaged(&empty_name.encode()));
+        let mut empty_check = constrained_table();
+        empty_check.checks[0].expression = " ".into();
+        assert!(damaged(&empty_check.encode()));
+        let mut keyless = constrained_table();
+        keyless.primary_key.clear();
+        assert!(damaged(&keyless.encode()));
+        let flags_at = bytes.len() - 1;
+        for (at, values) in [
+            (flags_at, [2u8, 0xFF]),
+            (flags_at - 1, [5, 0xFF]),
+            (flags_at - 2, [5, 0x80]),
+        ] {
+            for value in values {
+                let mut changed = bytes.clone();
+                changed[at] = value;
+                assert!(damaged(&changed), "byte {at} = {value}");
+            }
+        }
+        let mut random = Seeded(0x5EED_C0DE);
+        for _ in 0..20_000 {
+            let mut changed = bytes.clone();
+            let at = (random.next() as usize) % changed.len();
+            changed[at] = random.next() as u8;
+            let _ = TableDefinition::decode("t", &changed);
+        }
+    }
+
+    fn sequence() -> super::SequenceDefinition {
+        super::SequenceDefinition {
+            sql_type: SqlType::Integer,
+            start: 5,
+            increment: -3,
+            min: -100,
+            max: 50,
+            cache: 20,
+            cycle: true,
+            last_value: 8,
+            is_called: true,
+            owned_by: Some(("t".into(), "id".into())),
+        }
+    }
+
+    #[test]
+    fn sequences_are_read_back_and_damaged_ones_refused() {
+        let bytes = sequence().encode();
+        assert_eq!(
+            super::SequenceDefinition::decode(&bytes).unwrap(),
+            sequence()
+        );
+        let mut unowned = sequence();
+        unowned.owned_by = None;
+        unowned.is_called = false;
+        assert_eq!(
+            super::SequenceDefinition::decode(&unowned.encode()).unwrap(),
+            unowned
+        );
+        for cut in 0..bytes.len() {
+            assert!(super::SequenceDefinition::decode(&bytes[..cut]).is_err());
+        }
+        let mut newer = bytes.clone();
+        newer[0] = 2;
+        assert_eq!(
+            super::SequenceDefinition::decode(&newer)
+                .unwrap_err()
+                .state()
+                .code(),
+            "0A000"
+        );
+        let invalid = |change: fn(&mut super::SequenceDefinition)| {
+            let mut changed = sequence();
+            change(&mut changed);
+            super::SequenceDefinition::decode(&changed.encode()).is_err()
+        };
+        assert!(invalid(|sequence| sequence.increment = 0));
+        assert!(invalid(|sequence| sequence.cache = 0));
+        assert!(invalid(|sequence| sequence.min = sequence.max));
+        assert!(invalid(|sequence| sequence.start = 51));
+        assert!(invalid(|sequence| sequence.max = i64::from(i32::MAX) + 1));
+        assert!(invalid(|sequence| sequence.sql_type = SqlType::Text));
+        assert!(invalid(
+            |sequence| sequence.owned_by = Some((String::new(), "id".into()))
+        ));
+        let flags_at = 1 + 1 + 6 * 8;
+        let mut flags = bytes.clone();
+        flags[flags_at] = 4;
+        assert!(super::SequenceDefinition::decode(&flags).is_err());
+        let mut random = Seeded(0xA11_5EC);
+        for _ in 0..20_000 {
+            let mut changed = bytes.clone();
+            let at = (random.next() as usize) % changed.len();
+            changed[at] = random.next() as u8;
+            let _ = super::SequenceDefinition::decode(&changed);
+        }
     }
 }

@@ -6,24 +6,182 @@ use std::sync::Arc;
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Statement {
     CreateTable(CreateTable),
-    DropTable { names: Vec<Name>, if_exists: bool },
+    DropTable {
+        names: Vec<Name>,
+        if_exists: bool,
+        cascade: bool,
+    },
     Insert(Insert),
     Select(Select),
     Query(Box<Query>),
     Update(Update),
     Delete(Delete),
-    Begin { read_only: bool },
+    Begin {
+        read_only: bool,
+    },
     Commit,
     Rollback,
-    Set { name: String, value: Option<String> },
-    Show { name: Option<String> },
-    Reset { name: Option<String> },
+    Set {
+        name: String,
+        value: Option<String>,
+    },
+    Show {
+        name: Option<String>,
+    },
+    Reset {
+        name: Option<String>,
+    },
     MySql(MySqlStatement),
     Pragma(Pragma),
     Truncate(TableReference),
     CreateIndex(CreateIndex),
     DropIndex(DropIndex),
     Explain(Explain),
+    CreateSequence(CreateSequence),
+    AlterSequence(AlterSequence),
+    DropSequence {
+        names: Vec<Name>,
+        if_exists: bool,
+        cascade: bool,
+    },
+    AlterTable(AlterTable),
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct SequenceOptions {
+    pub(crate) sql_type: Option<(SqlType, usize)>,
+    pub(crate) increment: Option<i64>,
+    pub(crate) min: Option<Option<i64>>,
+    pub(crate) max: Option<Option<i64>>,
+    pub(crate) start: Option<i64>,
+    pub(crate) restart: Option<Option<i64>>,
+    pub(crate) cache: Option<i64>,
+    pub(crate) cycle: Option<bool>,
+    pub(crate) owned_by: Option<Option<(Name, Name)>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateSequence {
+    pub(crate) name: Name,
+    pub(crate) if_not_exists: bool,
+    pub(crate) options: SequenceOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterSequence {
+    pub(crate) name: Name,
+    pub(crate) if_exists: bool,
+    pub(crate) options: SequenceOptions,
+    pub(crate) rename: Option<Name>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ReferentialAction {
+    #[default]
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+impl ReferentialAction {
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::NoAction => 0,
+            Self::Restrict => 1,
+            Self::Cascade => 2,
+            Self::SetNull => 3,
+            Self::SetDefault => 4,
+        }
+    }
+
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => Self::NoAction,
+            1 => Self::Restrict,
+            2 => Self::Cascade,
+            3 => Self::SetNull,
+            4 => Self::SetDefault,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ForeignKeySpec {
+    pub(crate) columns: Vec<Name>,
+    pub(crate) parent: Name,
+    pub(crate) parent_columns: Option<Vec<Name>>,
+    pub(crate) on_delete: ReferentialAction,
+    pub(crate) on_update: ReferentialAction,
+    pub(crate) deferrable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ConstraintKind {
+    PrimaryKey(Vec<Name>),
+    Unique(Vec<Name>),
+    Check { expr: Expr, text: String },
+    ForeignKey(ForeignKeySpec),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ConstraintSpec {
+    pub(crate) name: Option<Name>,
+    pub(crate) kind: ConstraintKind,
+    pub(crate) position: usize,
+    pub(crate) column: Option<Name>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterTable {
+    pub(crate) name: Name,
+    pub(crate) if_exists: bool,
+    pub(crate) actions: Vec<AlterAction>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum AlterAction {
+    AddColumn {
+        column: ColumnDefinition,
+        if_not_exists: bool,
+    },
+    DropColumn {
+        name: Name,
+        if_exists: bool,
+        cascade: bool,
+    },
+    RenameColumn {
+        from: Name,
+        to: Name,
+    },
+    RenameTable(Name),
+    SetDefault {
+        column: Name,
+        default: Option<(Expr, String)>,
+    },
+    SetNotNull {
+        column: Name,
+        not_null: bool,
+    },
+    SetType {
+        column: Name,
+        sql_type: SqlType,
+    },
+    Redefine {
+        old_name: Name,
+        column: ColumnDefinition,
+    },
+    AddConstraint(ConstraintSpec),
+    DropConstraint {
+        name: Name,
+        if_exists: bool,
+        cascade: bool,
+    },
+    DropPrimaryKey(usize),
+    Accepted,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,7 +287,9 @@ pub(crate) struct CreateTable {
     pub(crate) if_not_exists: bool,
     pub(crate) columns: Vec<ColumnDefinition>,
     pub(crate) primary_key: Option<(Vec<Name>, usize)>,
+    pub(crate) primary_key_name: Option<Name>,
     pub(crate) indexes: Vec<IndexSpec>,
+    pub(crate) constraints: Vec<ConstraintSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +301,7 @@ pub(crate) struct ColumnDefinition {
     pub(crate) default: Option<(Expr, String)>,
     pub(crate) auto_increment: bool,
     pub(crate) unique: Option<Option<Name>>,
+    pub(crate) constraints: Vec<ConstraintSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

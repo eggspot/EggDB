@@ -91,6 +91,9 @@ fn arithmetic_type(
 }
 
 fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<SqlType> {
+    if let Some(sql_type) = crate::sequences::result_type(name) {
+        return Some(sql_type);
+    }
     match (name, arguments) {
         ("length" | "char_length" | "character_length", [_]) => Some(SqlType::Integer),
         ("lower" | "upper", [_]) => Some(SqlType::Text),
