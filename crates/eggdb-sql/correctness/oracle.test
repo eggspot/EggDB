@@ -1175,3 +1175,63 @@ SELECT 1
 
 error 22P02 1465
 INSERT INTO c31 (id, r) VALUES (3, 'xyz')
+
+chapter "CREATE SEQUENCE", "Sequence Pseudocolumns", "constraint", "ALTER TABLE"
+ok
+CREATE SEQUENCE customers_seq START WITH 1000 INCREMENT BY 1 NOCACHE NOCYCLE
+
+ok
+CREATE TABLE dept32 (deptno NUMBER(4) CONSTRAINT dept32_pk PRIMARY KEY, dname VARCHAR2(14))
+
+ok
+CREATE TABLE emp32 (empno NUMBER(6) PRIMARY KEY, deptno NUMBER(4) CONSTRAINT emp32_fk REFERENCES dept32 (deptno) ON DELETE CASCADE, sal NUMBER(7,2) CONSTRAINT emp32_sal_ck CHECK (sal > 0))
+
+ok
+INSERT INTO dept32 VALUES (10, 'ACCOUNTING')
+
+ok
+INSERT INTO emp32 VALUES (customers_seq.NEXTVAL, 10, 100)
+
+rows
+SELECT customers_seq.CURRVAL AS cur FROM dual
+----
+CUR
+1000
+SELECT 1
+
+error 23503 2291
+INSERT INTO emp32 VALUES (customers_seq.NEXTVAL, 99, 100)
+
+error 23514 2290
+INSERT INTO emp32 VALUES (customers_seq.NEXTVAL, 10, -5)
+
+error 2BP01 2449
+DROP TABLE dept32
+
+ok
+ALTER TABLE emp32 ADD (comm NUMBER(7,2))
+
+ok
+ALTER TABLE emp32 MODIFY (comm NUMBER(9,2) DEFAULT 0)
+
+ok
+ALTER TABLE emp32 RENAME COLUMN comm TO bonus
+
+ok
+ALTER TABLE emp32 DROP COLUMN bonus
+
+ok
+DELETE FROM dept32
+
+rows
+SELECT COUNT(*) FROM emp32
+----
+COUNT(*)
+0
+SELECT 1
+
+ok
+DROP SEQUENCE customers_seq
+
+error 42P01 2289
+SELECT customers_seq.NEXTVAL FROM dual

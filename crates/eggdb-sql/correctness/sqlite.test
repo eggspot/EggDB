@@ -1093,3 +1093,69 @@ chapter "Datatypes In SQLite": BLOB columns
 ok
 CREATE TABLE b31 (x BLOB)
 ... differs
+
+chapter "SQLite Foreign Key Support", "CREATE TABLE: CHECK constraints", "ALTER TABLE"
+ok
+PRAGMA foreign_keys = OFF
+
+ok
+CREATE TABLE artist32 (artistid INTEGER PRIMARY KEY, artistname TEXT)
+
+ok
+CREATE TABLE track32 (trackid INTEGER PRIMARY KEY, trackname TEXT, trackartist INTEGER REFERENCES artist32 (artistid) ON DELETE CASCADE)
+
+ok
+INSERT INTO track32 VALUES (1, 'orphan', 99)
+
+ok
+PRAGMA foreign_keys = ON
+
+error 23503
+INSERT INTO track32 VALUES (2, 'orphan too', 98)
+
+ok
+INSERT INTO artist32 VALUES (1, 'Dean Martin')
+
+ok
+INSERT INTO track32 VALUES (11, 'That''s Amore', 1), (12, 'Christmas Blues', 1)
+
+ok
+DELETE FROM artist32 WHERE artistid = 1
+
+rows
+SELECT trackid FROM track32 ORDER BY trackid
+----
+trackid
+1
+SELECT 1
+
+ok
+CREATE TABLE stock32 (item TEXT, qty INTEGER CHECK (qty >= 0))
+
+error 23514
+INSERT INTO stock32 VALUES ('egg', -1)
+
+ok
+ALTER TABLE stock32 ADD COLUMN note TEXT DEFAULT 'none'
+
+rows
+INSERT INTO stock32 (item, qty) VALUES ('egg', 1) RETURNING note
+----
+note
+none
+INSERT 0 1
+
+ok
+ALTER TABLE stock32 RENAME COLUMN note TO memo
+
+ok
+ALTER TABLE stock32 DROP COLUMN memo
+
+ok
+ALTER TABLE stock32 RENAME TO stock32b
+
+error 42601
+ALTER TABLE stock32b ALTER COLUMN qty SET NOT NULL
+
+ok
+PRAGMA foreign_keys = OFF
