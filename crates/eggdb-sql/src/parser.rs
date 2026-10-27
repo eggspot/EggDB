@@ -6,6 +6,7 @@ use crate::ast::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind};
 use crate::types::SqlType;
+use std::borrow::Cow;
 
 const MAX_NESTING: usize = 64;
 
@@ -39,6 +40,68 @@ enum Level {
     Multiplicative,
     Power,
     Unary,
+}
+
+pub(crate) enum LiteralToken<'t> {
+    Null,
+    Boolean(bool),
+    Integer(i64),
+    Decimal(Cow<'t, str>),
+    String(&'t str),
+}
+
+pub(crate) struct LiteralRows<'t> {
+    pub(crate) table: TableReference,
+    pub(crate) width: usize,
+    pub(crate) rows: usize,
+    tokens: &'t [Token<'t>],
+}
+
+impl<'t> LiteralRows<'t> {
+    pub(crate) fn first_row(&self) -> usize {
+        0
+    }
+
+    pub(crate) fn next_row(&self, at: &mut usize, row: &mut Vec<(usize, LiteralToken<'t>)>) {
+        row.clear();
+        *at += 1;
+        while row.len() < self.width {
+            let token = &self.tokens[*at];
+            let (negative, number) = match &token.kind {
+                TokenKind::Operator(_) => (true, &self.tokens[*at + 1]),
+                _ => (false, token),
+            };
+            let value = match (&number.kind, negative) {
+                (TokenKind::Integer(digits), false) => match digits.parse::<i64>() {
+                    Ok(value) => LiteralToken::Integer(value),
+                    Err(_) => LiteralToken::Decimal(Cow::Borrowed(digits)),
+                },
+                (TokenKind::Integer(digits), true) => match digits.parse::<i64>() {
+                    Ok(value) => LiteralToken::Integer(-value),
+                    Err(_) if *digits == "9223372036854775808" => LiteralToken::Integer(i64::MIN),
+                    Err(_) => LiteralToken::Decimal(Cow::Owned(format!("-{digits}"))),
+                },
+                (TokenKind::Decimal(text), false) => LiteralToken::Decimal(Cow::Borrowed(text)),
+                (TokenKind::Decimal(text), true) => {
+                    LiteralToken::Decimal(Cow::Owned(format!("-{text}")))
+                }
+                (TokenKind::String(text), _) => LiteralToken::String(text),
+                (TokenKind::Word(word), _) if word == "true" => LiteralToken::Boolean(true),
+                (TokenKind::Word(word), _) if word == "false" => LiteralToken::Boolean(false),
+                _ => LiteralToken::Null,
+            };
+            row.push((token.start, value));
+            *at += if negative { 3 } else { 2 };
+        }
+        *at += 1;
+    }
+}
+
+fn is_plain_literal(kind: &TokenKind<'_>) -> bool {
+    matches!(
+        kind,
+        TokenKind::Integer(_) | TokenKind::Decimal(_) | TokenKind::String(_)
+    ) || matches!(kind, TokenKind::Word(word) if word == "null" || word == "true" || word == "false")
 }
 
 pub(crate) struct Parser<'t> {
@@ -146,6 +209,84 @@ impl<'t> Parser<'t> {
 
     pub(crate) fn position(&self) -> usize {
         self.peek().start
+    }
+
+    pub(crate) fn literal_rows(&mut self) -> Option<LiteralRows<'t>> {
+        if !self.is_word("insert") || !self.is_word_at(1, "into") {
+            return None;
+        }
+        let start = self.at;
+        self.at += 2;
+        let found = self.literal_rows_after_into();
+        if found.is_none() {
+            self.at = start;
+        }
+        found
+    }
+
+    fn literal_rows_after_into(&mut self) -> Option<LiteralRows<'t>> {
+        let table = self.table_reference().ok()?;
+        if table.alias.is_some() || !self.is_word("values") {
+            return None;
+        }
+        let first = self.at + 1;
+        let tokens = self.tokens;
+        let mut at = first;
+        let mut width = None;
+        let mut rows = 0;
+        loop {
+            if tokens.get(at)?.kind != TokenKind::LeftParen {
+                return None;
+            }
+            at += 1;
+            let mut count = 0;
+            loop {
+                if matches!(tokens.get(at)?.kind, TokenKind::Operator("-"))
+                    && matches!(
+                        tokens.get(at + 1)?.kind,
+                        TokenKind::Integer(_) | TokenKind::Decimal(_)
+                    )
+                {
+                    at += 2;
+                } else if is_plain_literal(&tokens.get(at)?.kind) {
+                    at += 1;
+                } else {
+                    return None;
+                }
+                count += 1;
+                match tokens.get(at)?.kind {
+                    TokenKind::Comma => at += 1,
+                    TokenKind::RightParen => {
+                        at += 1;
+                        break;
+                    }
+                    _ => return None,
+                }
+            }
+            if width.is_some_and(|width| width != count) {
+                return None;
+            }
+            width = Some(count);
+            rows += 1;
+            match tokens.get(at)?.kind {
+                TokenKind::Comma => at += 1,
+                TokenKind::Semicolon => {
+                    self.at = at + 1;
+                    break;
+                }
+                TokenKind::End => {
+                    self.at = at;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        Some(LiteralRows {
+            table,
+            width: width?,
+            rows,
+            tokens: &tokens[first..],
+        })
     }
 
     pub(crate) fn statement(&mut self) -> SqlResult<Statement> {

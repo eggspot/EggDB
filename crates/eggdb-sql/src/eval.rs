@@ -499,14 +499,22 @@ pub(crate) fn literal_value(literal: &Literal, hint: Option<SqlType>) -> SqlResu
             Ok(small) => Value::Integer(small),
             Err(_) => Value::BigInt(*number),
         }),
-        Literal::String(text) => match hint {
-            Some(sql_type) if !sql_type.is_string() => parse_input(text, sql_type),
-            _ => Ok(Value::Text(text.clone())),
-        },
-        Literal::Decimal(text) => match hint {
-            Some(sql_type) if sql_type.is_float() => decimal_literal(text, SqlType::Double, false),
-            _ => Err(numeric_not_supported(text)),
-        },
+        Literal::String(text) => string_constant(text, hint),
+        Literal::Decimal(text) => decimal_constant(text, hint),
+    }
+}
+
+pub(crate) fn string_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Value> {
+    match hint {
+        Some(sql_type) if !sql_type.is_string() => parse_input(text, sql_type),
+        _ => Ok(Value::Text(text.to_owned())),
+    }
+}
+
+pub(crate) fn decimal_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Value> {
+    match hint {
+        Some(sql_type) if sql_type.is_float() => decimal_literal(text, SqlType::Double, false),
+        _ => Err(numeric_not_supported(text)),
     }
 }
 

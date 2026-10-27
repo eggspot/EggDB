@@ -1048,3 +1048,87 @@ fn a_cached_definition_follows_a_drop_and_a_new_table_of_the_same_name() {
     last(&mut other, "DROP TABLE t");
     assert_eq!(state(&mut session, "SELECT * FROM t"), "42P01");
 }
+
+#[test]
+fn literal_inserts_take_the_direct_path_and_match_the_general_one() {
+    const TABLE: &str = "CREATE TABLE t (k bigint PRIMARY KEY, s smallint, d double precision, r real, b boolean, x text NOT NULL DEFAULT 'none', v varchar(3))";
+    const VALUES: [&str; 26] = [
+        "1",
+        "-1",
+        "32767",
+        "32768",
+        "-32769",
+        "9223372036854775807",
+        "9223372036854775808",
+        "-9223372036854775808",
+        "99999999999999999999",
+        "1.5",
+        "-2.5e3",
+        ".5",
+        "1e400",
+        "'abc'",
+        "'12'",
+        "'x''y'",
+        "E'a\\nb'",
+        "''",
+        "'true'",
+        "'NaN'",
+        "null",
+        "true",
+        "false",
+        "$$q$$",
+        "'-0'",
+        "'1.5'",
+    ];
+    const COLUMNS: [&str; 7] = ["k", "s", "d", "r", "b", "x", "v"];
+    let direct_store = MemoryStore::default();
+    let general_store = MemoryStore::default();
+    let mut direct = Session::new(&direct_store);
+    let mut general = Session::new(&general_store);
+    last(&mut direct, TABLE);
+    last(&mut general, TABLE);
+    let mut random = Seeded(41);
+    for round in 0..3000u64 {
+        let width = 1 + (random.next() % 7) as usize;
+        let rows = 1 + (random.next() % 3) as usize;
+        let mut tuples = Vec::new();
+        for row in 0..rows {
+            let mut cells = vec![format!("{}", (round * 3 + row as u64) % 2500)];
+            for _ in 1..width {
+                cells.push(VALUES[(random.next() % VALUES.len() as u64) as usize].to_owned());
+            }
+            if random.next().is_multiple_of(10) {
+                cells[0] = VALUES[(random.next() % VALUES.len() as u64) as usize].to_owned();
+            }
+            tuples.push(format!("({})", cells.join(", ")));
+        }
+        let values = tuples.join(", ");
+        let direct_sql = format!("INSERT INTO t VALUES {values}");
+        let general_sql = format!(
+            "INSERT INTO t ({}) VALUES {values}",
+            COLUMNS[..width].join(", ")
+        );
+        let shift = general_sql.len() - direct_sql.len();
+        let outcome = |session: &mut Session<'_, MemoryStore>, sql: &str, shift: usize| {
+            run(session, sql).map_err(|error| {
+                (
+                    error.state(),
+                    error.message().to_owned(),
+                    error
+                        .position()
+                        .map(|position| position.saturating_sub(shift)),
+                )
+            })
+        };
+        assert_eq!(
+            outcome(&mut direct, &direct_sql, 0),
+            outcome(&mut general, &general_sql, shift),
+            "{direct_sql}"
+        );
+    }
+    let everything = "SELECT * FROM t ORDER BY k";
+    assert_eq!(
+        run(&mut direct, everything).unwrap(),
+        run(&mut general, everything).unwrap()
+    );
+}

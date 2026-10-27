@@ -2,7 +2,7 @@ use crate::ast::Statement;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
 use crate::lexer::tokenize;
-use crate::parser::Parser;
+use crate::parser::{LiteralRows, Parser};
 use crate::store::{KeyValueStore, KeyValueWrite};
 use crate::types::{SqlType, Value};
 
@@ -53,6 +53,13 @@ impl QueryResult {
         self.notices.push(notice);
         self
     }
+}
+
+fn aborted_block() -> SqlError {
+    SqlError::new(
+        SqlState::IN_FAILED_SQL_TRANSACTION,
+        "current transaction is aborted, commands ignored until end of transaction block",
+    )
 }
 
 enum Block<'s, S: KeyValueStore + 's> {
@@ -131,6 +138,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             if parser.at_end() {
                 return Ok(());
             }
+            if let Some(rows) = parser.literal_rows() {
+                let result = self.insert_literal_rows(&rows)?;
+                if !on_result(result) {
+                    return Ok(());
+                }
+                continue;
+            }
             let parsed = parser.statement();
             let statement = match parsed {
                 Ok(statement) => statement,
@@ -173,10 +187,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             _ => {}
         }
         if matches!(self.block, Block::Failed) {
-            return Err(SqlError::new(
-                SqlState::IN_FAILED_SQL_TRANSACTION,
-                "current transaction is aborted, commands ignored until end of transaction block",
-            ));
+            return Err(aborted_block());
         }
         let result = match statement {
             Statement::Select(select) => {
@@ -205,6 +216,19 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 ));
             }
         };
+        if result.is_err() {
+            self.fail_block();
+        }
+        result
+    }
+
+    fn insert_literal_rows(&mut self, rows: &LiteralRows<'_>) -> SqlResult<QueryResult> {
+        if matches!(self.block, Block::Failed) {
+            return Err(aborted_block());
+        }
+        let result = self.write("INSERT", |writer, tables| {
+            execute::insert_literals(writer, tables, rows)
+        });
         if result.is_err() {
             self.fail_block();
         }
@@ -256,10 +280,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
 
     fn begin(&mut self, read_only: bool) -> SqlResult<QueryResult> {
         match self.block {
-            Block::Failed => Err(SqlError::new(
-                SqlState::IN_FAILED_SQL_TRANSACTION,
-                "current transaction is aborted, commands ignored until end of transaction block",
-            )),
+            Block::Failed => Err(aborted_block()),
             Block::Writing(_) | Block::Reading(_) => Ok(QueryResult::command("BEGIN")
                 .with_notice("WARNING:  there is already a transaction in progress".into())),
             Block::None => {

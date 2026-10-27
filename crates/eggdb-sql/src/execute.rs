@@ -9,7 +9,7 @@ use crate::encoding::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, check_columns, compare_truth, output_name};
 use crate::lexer::tokenize;
-use crate::parser::Parser;
+use crate::parser::{LiteralRows, LiteralToken, Parser};
 use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};
@@ -457,11 +457,8 @@ pub(crate) fn insert(
         scope: Scope::empty(),
         row: &[],
     };
-    let mut next_row_id = None;
+    let mut stored = StoredRows::new(&table);
     let mut result_rows = Vec::new();
-    let mut key = rows_prefix(table.id);
-    let prefix_length = key.len();
-    let mut encoded = Vec::new();
     for values in rows {
         let mut row = Vec::with_capacity(table.columns.len());
         for (index, column) in table.columns.iter().enumerate() {
@@ -474,26 +471,7 @@ pub(crate) fn insert(
                 None => default_value(column)?,
             });
         }
-        check_not_null(&table, &row)?;
-        encoded.clear();
-        encode_row_into(&mut encoded, &row);
-        key.truncate(prefix_length);
-        if table.primary_key.is_empty() {
-            let id = match next_row_id {
-                Some(id) => id,
-                None => next_hidden_row_id(writer, &table)?,
-            };
-            next_row_id = Some(id.saturating_add(1));
-            key.extend_from_slice(&id.to_be_bytes());
-            writer.put(&key, &encoded)?;
-        } else {
-            for &index in &table.primary_key {
-                encode_key_value(&mut key, &row[index]);
-            }
-            if !writer.put_if_absent(&key, &encoded)? {
-                return Err(duplicate_key(&table, &row));
-            }
-        }
+        stored.insert(writer, &row)?;
         if let Some(projection) = &returning {
             result_rows.push(projection.project(&row)?);
         }
@@ -503,6 +481,96 @@ pub(crate) fn insert(
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
         None => QueryResult::command(tag),
     })
+}
+
+struct StoredRows<'a> {
+    table: &'a TableDefinition,
+    key: Vec<u8>,
+    prefix_length: usize,
+    encoded: Vec<u8>,
+    next_row_id: Option<u64>,
+}
+
+impl<'a> StoredRows<'a> {
+    fn new(table: &'a TableDefinition) -> Self {
+        let key = rows_prefix(table.id);
+        Self {
+            table,
+            prefix_length: key.len(),
+            key,
+            encoded: Vec::new(),
+            next_row_id: None,
+        }
+    }
+
+    fn insert(&mut self, writer: &mut dyn KeyValueWrite, row: &[Value]) -> SqlResult<()> {
+        let table = self.table;
+        check_not_null(table, row)?;
+        self.encoded.clear();
+        encode_row_into(&mut self.encoded, row);
+        self.key.truncate(self.prefix_length);
+        if table.primary_key.is_empty() {
+            let id = match self.next_row_id {
+                Some(id) => id,
+                None => next_hidden_row_id(writer, table)?,
+            };
+            self.next_row_id = Some(id.saturating_add(1));
+            self.key.extend_from_slice(&id.to_be_bytes());
+            return writer.put(&self.key, &self.encoded);
+        }
+        for &index in &table.primary_key {
+            encode_key_value(&mut self.key, &row[index]);
+        }
+        if !writer.put_if_absent(&self.key, &self.encoded)? {
+            return Err(duplicate_key(table, row));
+        }
+        Ok(())
+    }
+}
+
+fn literal_value(literal: &LiteralToken<'_>, column: &Column, position: usize) -> SqlResult<Value> {
+    let hint = Some(column.sql_type);
+    let value = match literal {
+        LiteralToken::Null => Ok(Value::Null),
+        LiteralToken::Boolean(flag) => Ok(Value::Boolean(*flag)),
+        LiteralToken::Integer(number) => {
+            crate::eval::literal_value(&crate::ast::Literal::Integer(*number), hint)
+        }
+        LiteralToken::Decimal(text) => crate::eval::decimal_constant(text, hint),
+        LiteralToken::String(text) => crate::eval::string_constant(text, hint),
+    }
+    .map_err(|error| error.at_if_unplaced(position))?;
+    assign(value, column).map_err(|error| error.at_if_unplaced(position))
+}
+
+pub(crate) fn insert_literals(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &LiteralRows<'_>,
+) -> SqlResult<QueryResult> {
+    let table = tables.require(writer, &insert.table.name)?;
+    if insert.width > table.columns.len() {
+        return Err(SqlError::syntax(
+            "INSERT has more expressions than target columns",
+            insert.table.name.position,
+        ));
+    }
+    let mut stored = StoredRows::new(&table);
+    let mut literals = Vec::with_capacity(insert.width);
+    let mut row = Vec::with_capacity(table.columns.len());
+    let mut at = insert.first_row();
+    for _ in 0..insert.rows {
+        insert.next_row(&mut at, &mut literals);
+        row.clear();
+        for (index, column) in table.columns.iter().enumerate() {
+            row.push(match literals.get(index) {
+                Some((position, literal)) => literal_value(literal, column, *position)?,
+                None => default_value(column)?,
+            });
+        }
+        stored.insert(writer, &row)?;
+    }
+    Ok(QueryResult::command(format!("INSERT 0 {}", insert.rows)))
 }
 
 struct Projection<'a> {
