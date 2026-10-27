@@ -108,11 +108,14 @@ impl<'a> Scope<'a> {
                 {
                     return Err(missing_table(qualifier, position));
                 }
-                source
+                let index = source
                     .table
                     .column_index(name)
-                    .map(|index| source.offset + index)
-                    .ok_or_else(|| missing_column(qualifier, name, position))
+                    .ok_or_else(|| missing_column(qualifier, name, position))?;
+                if crate::temp_tables::is_repeated(source.table, name) {
+                    return Err(crate::temp_tables::ambiguous(name, position));
+                }
+                Ok(source.offset + index)
             }
             Scope::Many(sources) => sources.column(qualifier, name, position),
         }
@@ -135,17 +138,23 @@ impl Sources<'_> {
                 }
                 return Err(missing_table(qualifier, position));
             };
-            return source
+            let index = source
                 .table
                 .column_index(name)
-                .map(|index| source.offset + index)
-                .ok_or_else(|| missing_column(Some(qualifier), name, position));
+                .ok_or_else(|| missing_column(Some(qualifier), name, position))?;
+            if crate::temp_tables::is_repeated(source.table, name) {
+                return Err(crate::temp_tables::ambiguous(name, position));
+            }
+            return Ok(source.offset + index);
         }
         let mut found = None;
         for source in &self.list {
             let Some(index) = source.table.column_index(name) else {
                 continue;
             };
+            if crate::temp_tables::is_repeated(source.table, name) {
+                return Err(crate::temp_tables::ambiguous(name, position));
+            }
             let offset = source.offset + index;
             if self.merged.contains(&offset) {
                 continue;
@@ -168,7 +177,10 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
         ExprKind::Literal(_)
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. } => Vec::new(),
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => Vec::new(),
+        ExprKind::Subquery(subquery) => subquery.test.operand().into_iter().collect(),
         ExprKind::Unary(_, operand)
         | ExprKind::IsNull { expr: operand, .. }
         | ExprKind::IsTruth { expr: operand, .. }
@@ -214,7 +226,10 @@ pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         ExprKind::Literal(_)
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. } => Vec::new(),
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => Vec::new(),
+        ExprKind::Subquery(subquery) => subquery.test.operand_mut().into_iter().collect(),
         ExprKind::Unary(_, operand)
         | ExprKind::IsNull { expr: operand, .. }
         | ExprKind::IsTruth { expr: operand, .. }
@@ -261,7 +276,9 @@ pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
         ExprKind::Literal(_)
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. } => None,
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => None,
         ExprKind::Unary(_, operand)
         | ExprKind::IsNull { expr: operand, .. }
         | ExprKind::IsTruth { expr: operand, .. }
@@ -346,7 +363,14 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
         ExprKind::Aggregate { argument, .. } => argument
             .as_deref()
             .map_or(Ok(()), |argument| check_columns(argument, scope)),
-        ExprKind::Slot { .. } | ExprKind::SessionValue { .. } => Ok(()),
+        ExprKind::Slot { .. }
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => Ok(()),
+        ExprKind::Subquery(subquery) => subquery
+            .test
+            .operand()
+            .map_or(Ok(()), |operand| check_columns(operand, scope)),
     }
 }
 
@@ -367,6 +391,13 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
             (_, false) => (sql_type.internal_name().to_owned(), false),
         },
         ExprKind::Case { .. } => ("case".into(), false),
+        ExprKind::Subquery(subquery) => match crate::subquery::output_column(expr) {
+            Some(column) if !matches!(subquery.test, crate::ast::SubqueryTest::Scalar) => {
+                (column.name, false)
+            }
+            Some(column) => (column.name, true),
+            None => ("?column?".into(), false),
+        },
         ExprKind::Literal(Literal::Boolean(_)) => ("bool".into(), false),
         _ => ("?column?".into(), false),
     }
@@ -382,6 +413,7 @@ fn is_unknown_literal(expr: &Expr) -> bool {
 pub(crate) struct Evaluator<'a> {
     pub(crate) scope: Scope<'a>,
     pub(crate) row: &'a [Value],
+    pub(crate) correlation: Option<&'a crate::subquery::Correlation<'a>>,
 }
 
 impl Evaluator<'_> {
@@ -565,6 +597,11 @@ impl Evaluator<'_> {
                 SqlState::GROUPING_ERROR,
                 "aggregate functions are not allowed here",
             )),
+            ExprKind::Subquery(subquery) => crate::subquery::evaluate(self, subquery),
+            ExprKind::Constant { value, .. } => Ok(value.clone()),
+            ExprKind::OuterColumn { .. } => Err(SqlError::not_supported(
+                "a subquery that refers to the outer query here is not supported yet",
+            )),
         }
     }
 
@@ -608,7 +645,10 @@ impl Evaluator<'_> {
                     .ok()?;
                 self.scope.column_type(index)
             }
-            ExprKind::Slot { sql_type, .. } => *sql_type,
+            ExprKind::Slot { sql_type, .. }
+            | ExprKind::Constant { sql_type, .. }
+            | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
+            ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
             ExprKind::Cast { sql_type, .. } => Some(*sql_type),
             ExprKind::SessionValue { .. } => Some(SqlType::Text),
             ExprKind::Unary(UnaryOperator::Minus | UnaryOperator::Plus, operand) => {
@@ -893,11 +933,13 @@ impl Evaluator<'_> {
             return result;
         }
         match (name, values.as_slice()) {
-            ("coalesce", [_, ..]) => Ok(values
-                .iter()
-                .find(|value| !value.is_null())
-                .cloned()
-                .unwrap_or(Value::Null)),
+            ("coalesce", [_, ..]) => {
+                let found = values.iter().find(|value| !value.is_null());
+                found.map_or(Ok(Value::Null), |value| in_common_type(value, &values))
+            }
+            ("greatest" | "least" | "mysql_greatest" | "mysql_least", [_, ..]) => {
+                extreme(name, &values)
+            }
             ("nullif", [left, right]) => {
                 if compare_truth(left, right, "=")? == Some(true) {
                     Ok(Value::Null)
@@ -949,6 +991,41 @@ impl Evaluator<'_> {
             ("upper", [Value::Text(text)]) => Ok(Value::Text(text.to_uppercase())),
             _ => Err(unknown()),
         }
+    }
+}
+
+fn extreme(name: &str, values: &[Value]) -> SqlResult<Value> {
+    let mysql = name.starts_with("mysql_");
+    if mysql && values.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+    let symbol = if name.ends_with("greatest") { ">" } else { "<" };
+    let mut best: Option<&Value> = None;
+    for value in values.iter().filter(|value| !value.is_null()) {
+        best = match best {
+            Some(current) if compare_truth(value, current, symbol)? != Some(true) => Some(current),
+            _ => Some(value),
+        };
+    }
+    best.map_or(Ok(Value::Null), |value| in_common_type(value, values))
+}
+
+fn in_common_type(chosen: &Value, values: &[Value]) -> SqlResult<Value> {
+    let mut common: Option<SqlType> = None;
+    for sql_type in values.iter().filter_map(Value::sql_type) {
+        common = match common {
+            None => Some(sql_type),
+            Some(known) => match crate::set_operations::common_type(known, sql_type) {
+                Some(found) => Some(found),
+                None => return Ok(chosen.clone()),
+            },
+        };
+    }
+    match common {
+        Some(sql_type) if chosen.sql_type() != Some(sql_type) && !sql_type.is_string() => {
+            convert(chosen.clone(), sql_type, Conversion::Explicit)
+        }
+        _ => Ok(chosen.clone()),
     }
 }
 
@@ -1199,7 +1276,7 @@ pub(crate) fn truth_value(truth: Option<bool>) -> Value {
     truth.map_or(Value::Null, Value::Boolean)
 }
 
-fn and(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+pub(crate) fn and(left: Option<bool>, right: Option<bool>) -> Option<bool> {
     match (left, right) {
         (Some(false), _) | (_, Some(false)) => Some(false),
         (Some(true), Some(true)) => Some(true),
@@ -1207,7 +1284,7 @@ fn and(left: Option<bool>, right: Option<bool>) -> Option<bool> {
     }
 }
 
-fn or(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+pub(crate) fn or(left: Option<bool>, right: Option<bool>) -> Option<bool> {
     match (left, right) {
         (Some(true), _) | (_, Some(true)) => Some(true),
         (Some(false), Some(false)) => Some(false),

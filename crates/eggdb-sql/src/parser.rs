@@ -1,6 +1,7 @@
 mod indexes;
 mod mysql;
 mod oracle;
+mod query;
 mod sqlite;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
@@ -12,8 +13,8 @@ pub(crate) use sqlite::is_schema_table;
 use crate::ast::{
     AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, Expr, ExprKind,
     FromClause, IndexSpec, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind,
-    Literal, Name, OnDuplicate, OrderItem, Select, SelectItem, Statement, TableReference,
-    TruthTest, UnaryOperator, Update,
+    Literal, Name, OnDuplicate, Select, SelectItem, Statement, TableReference, TruthTest,
+    UnaryOperator, Update,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -136,7 +137,9 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 13] = [
     "jsonb_array_length",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 5] = [
+const INTERNAL_FUNCTIONS: [&str; 7] = [
+    "mysql_greatest",
+    "mysql_least",
     "mysql_now",
     "mysql_utc_now",
     "mysql_extract",
@@ -146,7 +149,7 @@ const INTERNAL_FUNCTIONS: [&str; 5] = [
 
 const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
 
-const NOT_IN_SQLITE: [&str; 4] = ["trunc", "ceil", "ceiling", "floor"];
+const NOT_IN_SQLITE: [&str; 6] = ["trunc", "ceil", "ceiling", "floor", "greatest", "least"];
 
 pub(crate) struct Parser<'t> {
     text: &'t str,
@@ -157,6 +160,8 @@ pub(crate) struct Parser<'t> {
     settings: Option<&'t Settings>,
     dialect: Dialect,
     placeholders_seen: usize,
+    query_depth: usize,
+    queries: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -263,6 +268,8 @@ impl<'t> Parser<'t> {
             settings: None,
             dialect: Dialect::PostgreSql,
             placeholders_seen: 0,
+            query_depth: 0,
+            queries: 0,
         }
     }
 
@@ -585,6 +592,9 @@ impl<'t> Parser<'t> {
         {
             return Ok(statement);
         }
+        if !self.sqlite() && self.peek_kind() == &TokenKind::LeftParen {
+            return self.query_statement();
+        }
         let TokenKind::Word(word) = self.peek_kind() else {
             return Err(self.unexpected());
         };
@@ -592,7 +602,7 @@ impl<'t> Parser<'t> {
             "create" => self.create(),
             "drop" => self.drop(),
             "insert" => self.insert(),
-            "select" => self.select().map(Statement::Select),
+            "select" | "with" => self.query_statement(),
             "update" => self.update(),
             "delete" => self.delete(),
             "begin" | "start" => self.begin(),
@@ -609,7 +619,6 @@ impl<'t> Parser<'t> {
                 }
                 Ok(Statement::Rollback)
             }
-            "with" => Err(self.not_supported("WITH")),
             "values" | "table" => Err(self.not_supported("a VALUES or TABLE statement")),
             "set" => self.set(),
             "show" => self.show(),
@@ -1376,7 +1385,13 @@ impl<'t> Parser<'t> {
 
     fn table_reference(&mut self) -> SqlResult<TableReference> {
         if self.peek_kind() == &TokenKind::LeftParen {
-            return Err(self.not_supported("a subquery in FROM"));
+            if self.at_derived_table() {
+                return self.derived_table();
+            }
+            return Err(self.not_supported("parenthesized joins in FROM"));
+        }
+        if self.is_word("lateral") && !self.sqlite() {
+            return Err(self.not_supported("LATERAL"));
         }
         if self.is_word("only") {
             self.at += 1;
@@ -1390,7 +1405,7 @@ impl<'t> Parser<'t> {
         if self.peek_kind() == &TokenKind::LeftParen && alias.is_some() {
             return Err(self.not_supported("column aliases in FROM"));
         }
-        Ok(TableReference { name, alias })
+        Ok(TableReference::named(name, alias))
     }
 
     fn at_bare_alias(&self) -> bool {
@@ -1564,7 +1579,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn select(&mut self) -> SqlResult<Select> {
+    fn select_clauses(&mut self) -> SqlResult<Select> {
         self.at += 1;
         let distinct = self.take_word("distinct");
         if distinct && self.is_word("on") {
@@ -1621,119 +1636,11 @@ impl<'t> Parser<'t> {
         if self.is_word("window") {
             return Err(self.not_supported("WINDOW"));
         }
-        if self.is_word("union")
-            || self.is_word("intersect")
-            || self.is_word("except")
-            || self.oracle() && self.is_word("minus")
-        {
-            return Err(self.not_supported("UNION, INTERSECT, MINUS and EXCEPT"));
-        }
         if self.oracle() && (self.is_word("connect") || self.is_word("start")) {
             return Err(self.not_supported("hierarchical queries (CONNECT BY)"));
         }
-        let mut order_by = Vec::new();
-        if self.take_word("order") {
-            self.expect_word("by")?;
-            loop {
-                let expr = self.expression()?;
-                let descending = if self.take_word("desc") {
-                    true
-                } else {
-                    self.take_word("asc");
-                    false
-                };
-                if self.is_word("using") {
-                    return Err(self.not_supported("ORDER BY ... USING"));
-                }
-                let nulls_first = if self.take_word("nulls") {
-                    if self.take_word("first") {
-                        Some(true)
-                    } else {
-                        self.expect_word("last")?;
-                        Some(false)
-                    }
-                } else {
-                    None
-                };
-                order_by.push(OrderItem {
-                    expr,
-                    descending,
-                    nulls_first,
-                });
-                if !self.take(&TokenKind::Comma) {
-                    break;
-                }
-            }
-        }
-        let mut limit = None;
-        let mut offset = None;
-        loop {
-            if self.oracle() && self.is_word("limit") {
-                return Err(SqlError::syntax(
-                    "SQL command not properly ended",
-                    self.position(),
-                ));
-            }
-            if self.oracle() && self.is_word("fetch") {
-                if limit.is_some() {
-                    return Err(self.unexpected());
-                }
-                limit = Some(self.oracle_fetch()?);
-                continue;
-            }
-            if self.take_word("limit") {
-                if limit.is_some() {
-                    return Err(SqlError::syntax(
-                        "multiple LIMIT clauses not allowed",
-                        self.tokens[self.at - 1].start,
-                    ));
-                }
-                limit = Some(if self.is_word("all") {
-                    let position = self.position();
-                    self.at += 1;
-                    Expr {
-                        kind: ExprKind::Literal(Literal::Null),
-                        position,
-                    }
-                } else {
-                    self.expression()?
-                });
-                if (self.mysql() || self.sqlite()) && self.take(&TokenKind::Comma) {
-                    if offset.is_some() {
-                        return Err(self.unexpected());
-                    }
-                    offset = limit.take();
-                    limit = Some(self.expression()?);
-                }
-            } else if self.take_word("offset") {
-                if offset.is_some() {
-                    return Err(SqlError::syntax(
-                        "multiple OFFSET clauses not allowed",
-                        self.tokens[self.at - 1].start,
-                    ));
-                }
-                offset = Some(self.expression()?);
-                if self.oracle() {
-                    offset = offset.map(oracle::not_below_zero);
-                    if !self.take_word("rows") {
-                        self.expect_word("row")?;
-                    }
-                }
-                let _ = self.take_word("rows") || self.take_word("row");
-            } else if self.is_word("fetch") {
-                return Err(self.not_supported("FETCH FIRST"));
-            } else if self.is_word("for") || self.mysql() && self.is_word("lock") {
-                return Err(self.not_supported("row locking (FOR UPDATE, FOR SHARE)"));
-            } else {
-                break;
-            }
-        }
-        if self.sqlite() {
-            limit = limit.map(sqlite::without_negative_limit);
-            offset = offset.map(sqlite::without_negative_offset);
-        }
         if self.oracle() {
-            oracle::reject_rownum_outside_where(&items, &group_by, having.as_ref(), &order_by)?;
+            oracle::reject_rownum_outside_where(&items, &group_by, having.as_ref(), &[])?;
         }
         Ok(Select {
             distinct,
@@ -1742,9 +1649,9 @@ impl<'t> Parser<'t> {
             filter,
             group_by,
             having,
-            order_by,
-            limit,
-            offset,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
             source_row_limit,
         })
     }
@@ -1767,8 +1674,14 @@ impl<'t> Parser<'t> {
                 self.take_word("outer");
                 self.expect_word("join")?;
                 JoinKind::Left
-            } else if self.is_word("right") || self.is_word("full") {
-                return Err(self.not_supported("RIGHT and FULL joins"));
+            } else if self.take_word("right") {
+                self.take_word("outer");
+                self.expect_word("join")?;
+                JoinKind::Right
+            } else if !self.mysql() && self.take_word("full") {
+                self.take_word("outer");
+                self.expect_word("join")?;
+                JoinKind::Full
             } else if self.is_word("natural") {
                 return Err(self.not_supported("NATURAL joins"));
             } else {
@@ -1787,7 +1700,7 @@ impl<'t> Parser<'t> {
             let table = self.table_reference()?;
             let condition = match kind {
                 JoinKind::Comma | JoinKind::Cross => JoinCondition::Always,
-                JoinKind::Inner | JoinKind::Left => {
+                JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
                     if self.take_word("on") {
                         let condition = self.expression()?;
                         JoinCondition::On(self.condition(condition))
@@ -2104,6 +2017,9 @@ impl<'t> Parser<'t> {
                     .comparison_operator()
                     .ok_or_else(|| self.unexpected())?;
                 self.at += 1;
+                if self.at_quantified() {
+                    return self.quantified_comparison(left, operator);
+                }
                 let right = self.expression_above(Level::Pattern)?;
                 if self.infix_level() == Some(Level::Comparison) {
                     return Err(self.unexpected());
@@ -2267,10 +2183,11 @@ impl<'t> Parser<'t> {
                 negated,
             }
         } else if self.take_word("in") {
-            self.expect(&TokenKind::LeftParen)?;
-            if self.is_word("select") {
-                return Err(self.not_supported("subqueries"));
+            if self.at_subquery() {
+                return self
+                    .subquery_expression(crate::ast::SubqueryTest::In { expr, negated }, position);
             }
+            self.expect(&TokenKind::LeftParen)?;
             let mut list = vec![self.expression()?];
             while self.take(&TokenKind::Comma) {
                 list.push(self.expression()?);
@@ -2405,10 +2322,13 @@ impl<'t> Parser<'t> {
                 self.parameter(&digits, position)
             }
             TokenKind::Variable(name) => self.mysql_variable(name, position),
+            TokenKind::LeftParen if self.at_subquery() => {
+                self.subquery_expression(crate::ast::SubqueryTest::Scalar, position)
+            }
             TokenKind::LeftParen => {
                 self.at += 1;
-                if self.is_word("select") || self.is_word("values") {
-                    return Err(self.not_supported("subqueries"));
+                if self.is_word("values") {
+                    return Err(self.not_supported("a VALUES list in an expression"));
                 }
                 let mut expr = self.expression()?;
                 if self.peek_kind() == &TokenKind::Comma {
@@ -2438,7 +2358,8 @@ impl<'t> Parser<'t> {
                 "cast" => self.cast(),
                 "case" => self.case(),
                 "exists" if self.peek_kind_at(1) == &TokenKind::LeftParen => {
-                    Err(self.not_supported("EXISTS"))
+                    self.at += 1;
+                    self.subquery_expression(crate::ast::SubqueryTest::Exists, position)
                 }
                 "array" | "row"
                     if self.peek_kind_at(1) == &TokenKind::LeftParen

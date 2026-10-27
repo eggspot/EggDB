@@ -81,7 +81,22 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
     let names = quoted_names(&message);
     let first = names.first().map_or(String::new(), |name| shown(name));
     let translated = match error.state().code() {
+        "42601" if message.starts_with("subquery must return only one column") => {
+            Some((913, "too many values".to_owned()))
+        }
+        "42601" if message.ends_with("query must have the same number of columns") => Some((
+            1789,
+            "query block has incorrect number of result columns".to_owned(),
+        )),
         "42601" => Some(syntax_code(&error, text)),
+        "21000" => Some((
+            1427,
+            "single-row subquery returns more than one row".to_owned(),
+        )),
+        "42804" if message.contains(" types ") && message.ends_with("cannot be matched") => Some((
+            1790,
+            "expression must have same datatype as corresponding expression".to_owned(),
+        )),
         "42622" => Some((972, "identifier is too long".to_owned())),
         "42P01" => Some((942, "table or view does not exist".to_owned())),
         "42P07" => Some((955, "name is already used by an existing object".to_owned())),

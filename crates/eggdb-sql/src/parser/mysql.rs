@@ -981,6 +981,8 @@ impl<'t> Parser<'t> {
             "lcase" => "lower",
             "concat" => "concat_or_null",
             "if" => "if",
+            "greatest" => "mysql_greatest",
+            "least" => "mysql_least",
             _ => return Ok(None),
         };
         self.expect(&TokenKind::LeftParen)?;
@@ -1002,6 +1004,7 @@ impl<'t> Parser<'t> {
         };
         if expected.is_some_and(|count| count != arguments.len())
             || renamed == "concat_or_null" && arguments.is_empty()
+            || renamed.starts_with("mysql_") && arguments.len() < 2
         {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,

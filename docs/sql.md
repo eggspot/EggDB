@@ -15,7 +15,7 @@ eggdb sql shop.db -c "CREATE TABLE sales (id integer PRIMARY KEY, item_id intege
 eggdb sql shop.db -c "SELECT i.name, count(s.id), sum(s.quantity) FROM items i LEFT JOIN sales s ON s.item_id = i.id GROUP BY i.id ORDER BY 3 DESC"
 ```
 
-These are the first parts of the SQL core (roadmap items 19 and 19b). What comes next is listed
+These are the first parts of the SQL core (roadmap items 19, 19b and 30). What comes next is listed
 at the end. The same tables also speak MySQL's SQL: see "The MySQL dialect" and "Connecting with
 mysql" below (roadmap item 22, D106), SQLite's: see "The SQLite dialect" (item 24, D107), and
 Oracle's: see "The Oracle dialect" (item 25, D108).
@@ -127,6 +127,12 @@ What it reads, on top of the statements of "What runs today":
   (`MICROSECOND` to `YEAR`, `WEEK` in mode 0, and the compound units `SECOND_MICROSECOND` to
   `YEAR_MONTH`) as integers; another unit is error 1064. `TIMESTAMP '...'` and `DATE '...'`
   literals. A binary-protocol row with a date outside years 0 to 9999 is error 1292.
+- **Subqueries, `WITH` and set operations** as in "What runs today", with MySQL's rules: a
+  derived table needs an alias (error 1248) and unique column names (error 1060), `WITH RECURSIVE` stops after 1,000 steps (error 3636,
+  `cte_max_recursion_depth`'s default), there is no `FULL JOIN` (`FULL` is not a keyword, 1064)
+  and no `MINUS`, a set operation of numbers and strings gives strings, and the errors are 1242
+  ("Subquery returns more than 1 row"), 1241 ("Operand should contain 1 column(s)") and 1222.
+  `GREATEST` and `LEAST` are NULL when any argument is.
 - **Functions and operators**: `IFNULL`, `IF`, `CONCAT`, `LENGTH` (bytes), `CHAR_LENGTH`,
   `UPPER`/`UCASE`, `LOWER`/`LCASE`, `COALESCE`, `NULLIF`, `ABS`, `DATABASE()`, `SCHEMA()`,
   `VERSION()`, `USER()`, `CURRENT_USER()`, `CONNECTION_ID()`, `LAST_INSERT_ID()`, `@@var`
@@ -204,6 +210,14 @@ What it reads, on top of the statements of "What runs today":
   case, `GLOB` with `*` and `?`, integers as conditions (`WHERE active`, `NOT 0`), `TRUE` and
   `FALSE` as 1 and 0, comparisons giving 1 and 0, division and remainder by zero giving NULL,
   and result columns named by their text (`SELECT count(*)` gives a column `count(*)`).
+- **Compound selects and subqueries**: `UNION [ALL]`, `INTERSECT` and `EXCEPT`, all of one
+  precedence, left to right, without parentheses around operands and without `INTERSECT ALL`;
+  values keep their own types (`SELECT 1 UNION SELECT '1'` is two rows). A scalar subquery
+  gives its first row, as SQLite's does. `WITH` names a recursive query with or without
+  `RECURSIVE`; `RIGHT` and `FULL` joins as SQLite 3.39 added them; no `ANY`/`ALL` and no
+  `greatest`/`least` (`max` and `min` take several arguments). Errors: "sub-select returns 2
+  columns - expected 1", "SELECTs to the left and right of UNION do not have the same number of
+  result columns".
 - **Functions**: `ifnull`, `nullif`, `coalesce`, `iif`, `typeof`, `length`, `substr` and
   `substring`, `upper`, `lower` (ASCII only, as SQLite's), `trim`, `ltrim`, `rtrim`, `replace`,
   `instr`, `abs`, `round`, scalar `min` and `max`, `random`, `hex`, `quote`, `printf` and
@@ -282,6 +296,13 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `COMMIT` or `ROLLBACK`; `CREATE TABLE`, `DROP TABLE` and `TRUNCATE TABLE` commit what is open
   before and after them. `eggdb sql` and `eggdb shell` commit an open transaction when they
   end, as SQL*Plus does on exit; the embedded API rolls it back on `close` unless you commit.
+- **Subqueries, subquery factoring and set operators**: `UNION [ALL]`, `INTERSECT [ALL]`,
+  `MINUS [ALL]` and `EXCEPT [ALL]` (23ai), all of one precedence, left to right; `WITH name
+  (columns) AS (...)` is recursive when it names itself (no `RECURSIVE` keyword); `RIGHT` and
+  `FULL [OUTER] JOIN`; derived tables without column lists, and with unique column names
+  (`ORA-00918` otherwise). Errors: `ORA-01427` (single-row
+  subquery returns more than one row), `ORA-00913` (too many values), `ORA-01789` and
+  `ORA-01790` (a set operator's columns differ in number or type).
 - **Functions**: `NVL`, `NVL2`, `COALESCE`, `NULLIF`, `DECODE` (NULL matches NULL, the first argument
   evaluated once, up to 255 arguments as in Oracle), `CONCAT`,
   `LENGTH`, `SUBSTR` and `INSTR` (negative positions count from the end), `UPPER`, `LOWER`,
@@ -380,13 +401,53 @@ the fast path always applies, since the server checks every password itself).
   `ORDER BY` takes an output column's number or alias, or any expression over the tables (with
   `DISTINCT`, only expressions in the select list, else `42P10`); a `SELECT` without `FROM`
   returns one row.
-- **Joins**: `a [INNER] JOIN b ON cond`, `a LEFT [OUTER] JOIN b ON cond`, `JOIN ... USING (columns)`,
+- **Joins**: `a [INNER] JOIN b ON cond`, `a LEFT [OUTER] JOIN b ON cond`, `a RIGHT [OUTER] JOIN
+  b ON cond`, `a FULL [OUTER] JOIN b ON cond`, `JOIN ... USING (columns)`,
   `a CROSS JOIN b` and `FROM a, b`, chained left to right, each table with an optional alias.
+  A right join keeps every row of its right table, a full join every row of both; the rows of
+  the right table that matched nothing come after the others, extended with NULLs. With
+  `RIGHT JOIN ... USING`, the `USING` column is the right table's; `FULL JOIN ... USING`
+  answers `0A000` (write `ON` and `coalesce`).
   Columns are named `name` or `alias.name`; `alias.*` expands one table and `*` all of them,
   with a `USING` column once, first, as PostgreSQL does. A left join extends a left row that
   matches nothing with NULLs; conditions in `ON` decide the match, conditions in `WHERE`
   filter afterwards. A `JOIN` binds tighter than a comma, so `FROM a, b JOIN c ON ...` cannot
   name `a` in its `ON` (`42P01`, "invalid reference to FROM-clause entry").
+- **Subqueries**: a scalar subquery `(SELECT ...)` anywhere a value goes (NULL when it returns
+  no row, `21000` "more than one row returned by a subquery used as an expression" when it
+  returns two, `42601` when it has more than one column); `expr [NOT] IN (SELECT ...)`,
+  `[NOT] EXISTS (SELECT ...)` and `expr op ANY | SOME | ALL (SELECT ...)` with `=`, `<>`, `<`,
+  `<=`, `>`, `>=`, in three-valued logic as the manual describes (`x NOT IN` a list holding a
+  NULL is never true; `ALL` over no rows is true, `ANY` false). A subquery in `FROM`,
+  `(SELECT ...) [AS] alias [(column, ...)]`, is a derived table; the alias may be left out.
+  A derived table or `WITH` query may have two columns of one name (`SELECT * FROM t x, t y`):
+  `*` returns both, and naming that column is `42702` ("column reference "a" is ambiguous").
+  A subquery may name the columns of the query around it (a correlated subquery) in its own
+  select list, `WHERE`, `HAVING` and `JOIN ... ON`, and stand in that query's select list,
+  `WHERE` or `ORDER BY` (in a grouped query, in `WHERE` only); it then runs once for each
+  distinct set of the outer values it names, read by key or index where its conditions allow,
+  and the others run once per statement; an `EXISTS` whose outer references are only
+  `inner = outer` conditions in `WHERE` runs once, into a hash set the outer rows look up. `INSERT ... VALUES`, `UPDATE` and `DELETE` take subqueries
+  that do not name the changed table's columns.
+- **`WITH` queries**: `WITH name [(columns)] AS [[NOT] MATERIALIZED] (query), ...` before a
+  query or a subquery, each name visible to the ones after it and to the query; every `WITH`
+  query is run once and its rows kept for the statement, however often it is named.
+  `WITH RECURSIVE name (columns) AS (non-recursive-term UNION [ALL] recursive-term)` repeats the
+  recursive term over the rows the last step added until a step adds none (`UNION` drops rows
+  seen before); a recursion still adding rows after 1,000,000 steps fails with `54001`.
+- **Set operations**: `query UNION | INTERSECT | EXCEPT [ALL | DISTINCT] query`, with operands in
+  parentheses (which may have their own `ORDER BY` and `LIMIT`), `INTERSECT` binding tighter
+  than `UNION` and `EXCEPT`, and `ORDER BY`, `LIMIT` and `OFFSET` after the last operand applying
+  to the whole result; `ORDER BY` there takes result columns by name or number (an expression is
+  `0A000`, as in PostgreSQL). Columns take one type by the manual's `UNION` rules: integers
+  widen to `bigint`, then `numeric`, `real`, `double precision`; `varchar` and `text` give
+  `text`; `date`, `timestamp`, `timestamptz` widen in that order; a constant string or NULL
+  takes the other side's type; anything else is `42804` ("UNION types integer and boolean
+  cannot be matched"); different column counts are `42601`. The result is named after the first
+  operand. Duplicates are found by value, NULLs equal, as `DISTINCT` does.
+- **Conditional expressions**: `CASE` (simple and searched), `coalesce`, `nullif`, `greatest`
+  and `least` (which skip NULLs); `coalesce`, `greatest` and `least` give the common type of
+  their arguments.
 - **Grouping**: `GROUP BY` takes expressions over the tables, an output column's number, or an
   output alias that is not also an input column. Every column the select list, `HAVING` or
   `ORDER BY` uses outside an aggregate must be grouped (`42803`), except the columns of a table
@@ -651,7 +712,8 @@ ui app.db` has a query screen (`s`, run with `F5`). Both print results and error
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
 checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
 until they are fixed:
-- `RIGHT` and `FULL` joins answer `0A000` (roadmap: "Next parts" below).
+- `VALUES` as a query (`WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL ...)`) answers `0A000`;
+  write `SELECT 1`.
 - The string functions `substr`, `substring(... FROM ... FOR ...)`, `trim`, `ltrim`, `rtrim`,
   `btrim`, `replace`, `concat`, `position(... IN ...)`, `left`, `right`, `repeat` and `reverse`
   are missing (`42883`, or `42601` for the SQL-standard syntax and for `left`/`right`, which
@@ -697,8 +759,8 @@ until they are fixed:
   31), so `timestamp - timestamp` and `+ interval` answer `0A000`. Named time zones act as UTC
   (above). `now()` is the statement's start time, where PostgreSQL's is the transaction's.
   `to_char`, `to_date`, `to_timestamp`, `age` and `make_date` are missing (`42883`).
-- Values of different types that one expression returns row by row (`coalesce(numeric_column,
-  double_column)`) are grouped and made distinct by their value where a `numeric` is exactly a
+- Values of different types that one expression returns row by row (`CASE` branches of
+  `numeric` and `double precision`) are grouped and made distinct by their value where a `numeric` is exactly a
   `double precision` (`2.5`); a `numeric` such as `0.1` and the double nearest it compare equal
   but group apart. PostgreSQL gives such an expression one type before it runs.
 - `jsonb`'s `?`, `?|`, `?&`, `-`, `||` and `#-` operators, the JSON builder, aggregate, set and
@@ -709,7 +771,26 @@ until they are fixed:
   to it also takes the next number, `GENERATED ALWAYS` accepts a given value, the number of a
   deleted last row is given again, and the column must be the first of the primary key (named
   sequences are item 32).
-- `RIGHT`, `FULL` and `NATURAL` joins, subqueries in `FROM`, `LATERAL`, `DISTINCT ON`,
+- Subqueries and `WITH` (item 30, D112): a correlated subquery may name only the query
+  directly around it (a name two or more levels out is `0A000`), and stand only in the select
+  list, `WHERE` or `ORDER BY`, and in a query with `GROUP BY` or aggregates only in `WHERE`
+  (elsewhere `0A000`); an aggregate inside a subquery whose argument names only the outer
+  query's columns (`SELECT (SELECT sum(t.b) FROM u) FROM t`), which belongs to the outer query
+  in PostgreSQL and SQLite, answers `0A000`; a correlated subquery runs once per distinct outer
+  value, so one over a million distinct values runs a million times, with no statement timeout
+  yet (item 19e); a derived table
+  or `WITH` query cannot name the outer query's columns, and `UPDATE`, `DELETE` and `INSERT`
+  cannot have a correlated subquery (`0A000`). Subqueries nest at most 32 levels and a statement
+  holds at most 1,024 `SELECT`s (`54001`). Every `WITH` query runs, even one nothing names, and
+  `MATERIALIZED` and `NOT MATERIALIZED` change nothing; data-modifying `WITH` queries, `SEARCH`
+  and `CYCLE`, `ANY`/`ALL` over an array or a list, row constructors (`(a, b) IN (SELECT ...)`),
+  `LATERAL`, `FULL JOIN ... USING` and `EXPLAIN` of a query with subqueries answer `0A000`. A
+  derived table, a `WITH` query and the operands of a set operation are held in memory, counted
+  with the statement's other rows against the 1 GiB limit, and a correlated subquery keeps up
+  to 32 MiB of results by outer value. An `IN` list of constants is compared item by item (a list of
+  more than 256 items is not used to choose a key range either), so a very long list against
+  many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
+- `NATURAL` joins, `DISTINCT ON`,
   `GROUPING SETS`, `ROLLUP` and `CUBE`, window functions, `FILTER`, ordered aggregates and the
   other aggregates (`string_agg`, `bool_and`, `array_agg`, ...) fail with `0A000`.
   When the output stops being read (`eggdb sql ... | head`), the command stops before the next
@@ -736,7 +817,7 @@ until they are fixed:
   must reach 1.0 before v0.3.0 (item 19e, D100).
 
 ## Known differences from MySQL
-The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 151 cases from the MySQL 8.0
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 174 cases from the MySQL 8.0
 Reference Manual's documented behaviour) marks these as differing until they are fixed:
 - `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`, and decimal constants
   outside a `DECIMAL` column are doubles (`0.1 + 0.2` is `0.30000000000000004`); stored into a
@@ -775,7 +856,7 @@ And more, not in the suite yet:
   `NULL`. `ALTER TABLE ... ADD INDEX` waits for `ALTER TABLE`.
 
 ## Known differences from SQLite
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 180 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 197 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
@@ -811,18 +892,18 @@ And more, not in the suite yet:
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
-  generated columns, views, triggers, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `WITH`, subqueries,
+  generated columns, views, triggers, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
   window functions, `group_concat` and `total`, the JSON and math functions, `GLOB` character
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 193 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 212 cases from Oracle's SQL
 Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
   primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
 - `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`,
   and `FETCH ... PERCENT` and `WITH TIES`.
-- `LISTAGG`, `MINUS` and the other set operators, and `MERGE`.
+- `LISTAGG` and `MERGE`.
 - Sequences (`CREATE SEQUENCE`, `seq.NEXTVAL`, `seq.CURRVAL`, `DROP SEQUENCE`): they need
   state kept in the file, a file-format change of their own (D108).
 - An identity column that is not the first column of the primary key.
@@ -848,8 +929,7 @@ And more, not in the suite yet:
 - Result columns of expressions are named after the expression in upper case with spaces
   removed outside quotes, close to SQL*Plus's headings; `SELECT *` from `USER_TABLES` shows the
   three columns above, not Oracle's fifty.
-- Not supported yet: subqueries and views, `CONNECT BY`, outer joins with `(+)`, `RIGHT` and
-  `FULL` joins, `ALTER TABLE`, `CHECK` and foreign keys, PL/SQL (`BEGIN ...
+- Not supported yet: views, `CONNECT BY`, outer joins with `(+)`, `ALTER TABLE`, `CHECK` and foreign keys, PL/SQL (`BEGIN ...
   END`, procedures, packages), `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms,
   database links, `ROWID`, the regular-expression, analytic and XML functions, `NLS_`
   settings, and schemas other than the session user's.
@@ -858,7 +938,8 @@ And more, not in the suite yet:
 - `interval` (item 31), named sequences (item 32) and the rest of the JSON functions (item 36).
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
-- `RIGHT` and `FULL` joins, subqueries, and the other aggregates.
+- `LATERAL`, `FULL JOIN ... USING`, correlated subqueries in grouped queries, and the other
+  aggregates.
 - The rest of PostgreSQL's string functions (`substr`, `trim`, `replace`, `concat`, `position`,
   `left`, `right`, ...) and the SQL-standard `substring(... FROM ... FOR ...)` syntax.
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,

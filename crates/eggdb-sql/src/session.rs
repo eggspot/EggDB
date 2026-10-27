@@ -436,6 +436,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Select(select) => self
                 .read(|reader, tables| execute::select(reader, tables, select, true))
                 .map(|result| result.columns),
+            Statement::Query(query) => self
+                .read(|reader, tables| execute::query(reader, tables, query, true))
+                .map(|result| result.columns),
             Statement::Insert(insert) => self.read(|reader, tables| {
                 execute::returning_columns(reader, tables, &insert.table, &insert.returning)
             }),
@@ -715,6 +718,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Select(select) => {
                 self.read(|reader, tables| execute::select(reader, tables, select, false))
+            }
+            Statement::Query(query) => {
+                self.read(|reader, tables| execute::query(reader, tables, query, false))
             }
             Statement::Set { name, value } => Arc::make_mut(&mut self.settings)
                 .set(name, value.as_deref())

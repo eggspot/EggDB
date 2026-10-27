@@ -13,7 +13,7 @@ use crate::hash_index::HashIndex;
 use crate::indexes::{entry_key, row_key_of_entry};
 use crate::memory::WorkMemory;
 use crate::store::{KeyValueRead, ScanDirection};
-use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert};
+use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert, equality_key};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -136,6 +136,14 @@ pub(crate) fn resolve<'a>(
                 check_columns(expr, Scope::Many(&visible))?;
                 on = Some(expr);
             }
+            JoinCondition::Using(names) if join.kind == JoinKind::Full => {
+                let position = names.first().map_or(0, |name| name.position);
+                return Err(
+                    SqlError::not_supported("FULL JOIN with USING is not supported yet")
+                        .with_hint("Write the join with ON and COALESCE the joined columns.")
+                        .at(position),
+                );
+            }
             JoinCondition::Using(names) => {
                 let left = sources_between(&list, group_start..right_index, &merged);
                 for (at, name) in names.iter().enumerate() {
@@ -199,11 +207,16 @@ pub(crate) fn resolve<'a>(
         } else {
             let lefts: Vec<usize> = using.iter().map(|&(left, _)| left).collect();
             let rights: Vec<usize> = using.iter().map(|&(_, right)| right).collect();
-            let mut reordered = lefts.clone();
+            let (shown, hidden) = if join.kind == JoinKind::Right {
+                (&rights, &lefts)
+            } else {
+                (&lefts, &rights)
+            };
+            let mut reordered = shown.clone();
             reordered.extend(group_star.iter().filter(|offset| !lefts.contains(offset)));
             reordered.extend(columns_of(&right).filter(|offset| !rights.contains(offset)));
             group_star = reordered;
-            merged.extend(rights);
+            merged.extend(hidden.iter().copied());
         }
         shapes.push(StepShape {
             kind: join.kind,
@@ -305,15 +318,70 @@ impl JoinedFrom<'_> {
 
 enum Access {
     Lookup(Vec<usize>),
-    IndexLookup { position: usize, lefts: Vec<usize> },
-    Hash { probe: Vec<usize>, index: HashIndex },
+    IndexLookup {
+        position: usize,
+        lefts: Vec<usize>,
+    },
+    Hash {
+        probe: Vec<usize>,
+        index: HashIndex,
+    },
     Scan(Vec<Vec<Value>>),
+    Preserved {
+        rows: Vec<Vec<Value>>,
+        probe: Vec<usize>,
+        ids: HashMap<Vec<u8>, Vec<usize>>,
+        matched: RefCell<Vec<bool>>,
+    },
+}
+
+fn equality_bytes(row: &[Value], offsets: &[usize], key: &mut Vec<u8>) -> bool {
+    key.clear();
+    for &offset in offsets {
+        match row.get(offset) {
+            Some(value) if !value.is_null() => equality_key(key, value),
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn preserved_rows(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+    needed: &[bool],
+    pairs: &[(usize, usize)],
+    offset: usize,
+    memory: &mut WorkMemory,
+) -> SqlResult<Access> {
+    let build: Vec<usize> = pairs.iter().map(|&(_, inner)| inner - offset).collect();
+    let mut rows = Vec::new();
+    let mut ids: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+    let mut key = Vec::new();
+    scan_table(reader, table, needed, &mut |row| {
+        memory.charge_row(&row)?;
+        memory.charge(1)?;
+        if !build.is_empty() && equality_bytes(&row, &build, &mut key) {
+            memory.charge(key.len() + 40)?;
+            ids.entry(key.clone()).or_default().push(rows.len());
+        }
+        rows.push(row);
+        Ok(true)
+    })?;
+    Ok(Access::Preserved {
+        matched: RefCell::new(vec![false; rows.len()]),
+        rows,
+        probe: pairs.iter().map(|&(outer, _)| outer).collect(),
+        ids,
+    })
 }
 
 struct Step<'a> {
     key: RefCell<Vec<u8>>,
     prefix_length: usize,
+    offset: usize,
     preserves_left: bool,
+    preserves_right: bool,
     table: &'a TableDefinition,
     needed: Vec<bool>,
     on: Option<Expr>,
@@ -503,6 +571,7 @@ fn build_hash(
             let evaluator = Evaluator {
                 scope: Scope::empty(),
                 row: &row,
+                correlation: None,
             };
             for condition in keep {
                 if evaluator.boolean(condition, "WHERE")? != Some(true) {
@@ -600,7 +669,10 @@ impl<'a> JoinedRows<'a> {
                 .map(|on| bind(on, Scope::Many(&shape.visible)))
                 .transpose()?;
             let mut using = shape.using.as_slice();
-            let access = if let Some(lefts) = lookup {
+            let preserves_right = matches!(shape.kind, JoinKind::Right | JoinKind::Full);
+            let access = if preserves_right {
+                preserved_rows(reader, table, &step_needed, &pairs, offset, memory)?
+            } else if let Some(lefts) = lookup {
                 let exact: Vec<(usize, usize)> = table
                     .primary_key
                     .iter()
@@ -722,7 +794,9 @@ impl<'a> JoinedRows<'a> {
             steps.push(Step {
                 prefix_length: prefix.len(),
                 key: RefCell::new(prefix),
-                preserves_left: shape.kind == JoinKind::Left,
+                offset,
+                preserves_left: matches!(shape.kind, JoinKind::Left | JoinKind::Full),
+                preserves_right,
                 table,
                 needed: step_needed,
                 on,
@@ -761,6 +835,7 @@ impl<'a> JoinedRows<'a> {
             return Ok(());
         }
         let prefix = rows_prefix(self.first.id);
+        let mut going = true;
         self.reader.scan(
             &prefix,
             &prefix_end(&prefix),
@@ -768,9 +843,44 @@ impl<'a> JoinedRows<'a> {
             &mut |_, bytes| {
                 row.clear();
                 decode_row_into(bytes, columns, Some(&self.first_needed), &mut row)?;
-                self.extend(0, &mut row, visit)
+                going = self.extend(0, &mut row, visit)?;
+                Ok(going)
             },
-        )
+        )?;
+        if going {
+            self.unmatched_right_rows(visit)?;
+        }
+        Ok(())
+    }
+
+    fn unmatched_right_rows(
+        &self,
+        visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
+        for (level, step) in self.steps.iter().enumerate() {
+            let Access::Preserved { rows, matched, .. } = &step.access else {
+                continue;
+            };
+            if !step.preserves_right {
+                continue;
+            }
+            let unmatched: Vec<usize> = matched
+                .try_borrow()
+                .map_err(|_| SqlError::new(SqlState::INTERNAL_ERROR, "a join was re-entered"))?
+                .iter()
+                .enumerate()
+                .filter(|(_, matched)| !**matched)
+                .map(|(id, _)| id)
+                .collect();
+            for id in unmatched {
+                let mut row = vec![Value::Null; step.offset];
+                row.extend_from_slice(&rows[id]);
+                if !self.extend(level + 1, &mut row, visit)? {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn passes(&self, level: usize, row: &[Value]) -> SqlResult<bool> {
@@ -780,6 +890,7 @@ impl<'a> JoinedRows<'a> {
         let evaluator = Evaluator {
             scope: Scope::empty(),
             row,
+            correlation: None,
         };
         for filter in filters {
             if evaluator.boolean(filter, "WHERE")? != Some(true) {
@@ -813,6 +924,61 @@ impl<'a> JoinedRows<'a> {
             row.truncate(base);
             Ok(keep_going)
         };
+        if let Access::Preserved {
+            rows,
+            probe,
+            ids,
+            matched: flags,
+        } = &step.access
+        {
+            let mut found_any = false;
+            let mut try_row = |id: usize, row: &mut Vec<Value>| -> SqlResult<bool> {
+                let Some(right) = rows.get(id) else {
+                    return Ok(true);
+                };
+                row.extend_from_slice(right);
+                let keep_going = if step.matches(row)? {
+                    found_any = true;
+                    if let Ok(mut flags) = flags.try_borrow_mut()
+                        && let Some(flag) = flags.get_mut(id)
+                    {
+                        *flag = true;
+                    }
+                    self.extend(level + 1, row, visit)?
+                } else {
+                    true
+                };
+                row.truncate(base);
+                Ok(keep_going)
+            };
+            if probe.is_empty() {
+                for id in 0..rows.len() {
+                    if !try_row(id, row)? {
+                        return Ok(false);
+                    }
+                }
+            } else {
+                let mut key = step.key.borrow_mut();
+                let candidates = if equality_bytes(row, probe, &mut key) {
+                    ids.get(key.as_slice())
+                } else {
+                    None
+                };
+                drop(key);
+                for &id in candidates.into_iter().flatten() {
+                    if !try_row(id, row)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            if !found_any && step.preserves_left {
+                row.resize(base + step.table.columns.len(), Value::Null);
+                let keep_going = self.extend(level + 1, row, visit)?;
+                row.truncate(base);
+                return Ok(keep_going);
+            }
+            return Ok(true);
+        }
         match &step.access {
             Access::Lookup(lefts) => {
                 if self.lookup(step, lefts, row)? && !attempt(row)? {
@@ -844,6 +1010,7 @@ impl<'a> JoinedRows<'a> {
                     }
                 }
             }
+            Access::Preserved { .. } => {}
         }
         if !matched && step.preserves_left {
             row.resize(base + step.table.columns.len(), Value::Null);
@@ -956,6 +1123,7 @@ impl Step<'_> {
         let evaluator = Evaluator {
             scope: self.scope,
             row,
+            correlation: None,
         };
         Ok(evaluator.boolean(on, "JOIN/ON")? == Some(true))
     }
@@ -1024,12 +1192,23 @@ impl JoinedFrom<'_> {
         needed
     }
 
+    pub(crate) fn preserves_right(&self) -> bool {
+        self.shapes
+            .iter()
+            .any(|shape| matches!(shape.kind, JoinKind::Right | JoinKind::Full))
+    }
+
     pub(crate) fn filters_by_level(&self, filter: Option<&Expr>) -> Vec<Vec<Expr>> {
         let list = &self.sources.list;
         let mut levels: Vec<Vec<Expr>> = vec![Vec::new(); list.len()];
         let Some(filter) = filter else {
             return levels;
         };
+        let lowest = self
+            .shapes
+            .iter()
+            .rposition(|shape| matches!(shape.kind, JoinKind::Right | JoinKind::Full))
+            .map_or(0, |index| index + 1);
         for conjunct in conjuncts_of(filter) {
             let mut level = 0;
             visit_exprs(conjunct, &mut |node| {
@@ -1039,7 +1218,7 @@ impl JoinedFrom<'_> {
                     level = level.max(source);
                 }
             });
-            levels[level].push(conjunct.clone());
+            levels[level.max(lowest)].push(conjunct.clone());
         }
         levels
     }

@@ -50,7 +50,16 @@ pub(crate) fn rebuild(
         ExprKind::Literal(_)
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. } => expr.kind.clone(),
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => expr.kind.clone(),
+        ExprKind::Subquery(subquery) => {
+            let mut rebuilt = subquery.clone();
+            if let Some(operand) = rebuilt.test.operand_mut() {
+                *operand = child(operand)?;
+            }
+            ExprKind::Subquery(rebuilt)
+        }
         ExprKind::Unary(operator, operand) => ExprKind::Unary(*operator, Box::new(child(operand)?)),
         ExprKind::And(operands) => {
             ExprKind::And(operands.iter().map(&mut *child).collect::<SqlResult<_>>()?)
@@ -830,7 +839,11 @@ impl Grouping {
             seen: self.calls.iter().map(|_| HashSet::new()).collect(),
         };
         feed(&mut |row| {
-            let evaluator = Evaluator { scope, row };
+            let evaluator = Evaluator {
+                scope,
+                row,
+                correlation: None,
+            };
             key.clear();
             key_values.clear();
             let mut integer_key = None;
@@ -918,6 +931,7 @@ impl Grouping {
                 let evaluator = Evaluator {
                     scope: Scope::empty(),
                     row: &row,
+                    correlation: None,
                 };
                 if evaluator.boolean(having, "HAVING")? != Some(true) {
                     continue;

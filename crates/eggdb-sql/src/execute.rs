@@ -23,6 +23,7 @@ use crate::parser::{LiteralRows, LiteralToken, Parser};
 use crate::plan::{self, Access, OrderRequest, Path};
 use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
+use crate::subquery::Correlation;
 use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
 use crate::typing;
 use std::cmp::Ordering;
@@ -59,6 +60,9 @@ impl TableCache {
         reader: &dyn KeyValueRead,
         name: &str,
     ) -> SqlResult<Option<Arc<TableDefinition>>> {
+        if crate::temp_tables::is_temp_table(name) {
+            return Ok(crate::temp_tables::temp_definition(name));
+        }
         let version = reader.committed_version();
         if let Some(cached) = self.entries.get(name)
             && version.is_some()
@@ -284,6 +288,11 @@ fn multiple_primary_keys(create: &CreateTable, position: usize) -> SqlError {
 
 fn check_default(expr: &Expr) -> SqlResult<()> {
     reject_aggregates(expr, "DEFAULT expressions")?;
+    if crate::subquery::mentions_subquery(expr) {
+        return Err(
+            SqlError::not_supported("cannot use subquery in DEFAULT expression").at(expr.position),
+        );
+    }
     check_columns(expr, Scope::empty()).map_err(|error| {
         if error.state() == SqlState::UNDEFINED_COLUMN || error.state() == SqlState::UNDEFINED_TABLE
         {
@@ -386,6 +395,7 @@ fn default_value(column: &Column) -> SqlResult<Value> {
     let evaluator = Evaluator {
         scope: Scope::empty(),
         row: &[],
+        correlation: None,
     };
     let value = evaluator
         .eval(&expr, Some(column.sql_type))
@@ -498,11 +508,103 @@ fn target_columns(table: &TableDefinition, names: &[Name]) -> SqlResult<Vec<usiz
     Ok(indexes)
 }
 
+fn returning_exprs(items: &mut Option<Vec<SelectItem>>) -> impl Iterator<Item = &mut Expr> {
+    items.iter_mut().flatten().filter_map(|item| match item {
+        SelectItem::Expr { expr, .. } => Some(expr),
+        SelectItem::Wildcard { .. } => None,
+    })
+}
+
+fn returning_mentions_subquery(items: &Option<Vec<SelectItem>>) -> bool {
+    items.iter().flatten().any(|item| match item {
+        SelectItem::Expr { expr, .. } => crate::subquery::mentions_subquery(expr),
+        SelectItem::Wildcard { .. } => false,
+    })
+}
+
+fn value_mentions_subquery(value: &InsertValue) -> bool {
+    matches!(value, InsertValue::Expr(expr) if crate::subquery::mentions_subquery(expr))
+}
+
+fn insert_mentions_subquery(insert: &Insert) -> bool {
+    let values = match &insert.source {
+        InsertSource::Values(rows) => rows.iter().flatten().any(value_mentions_subquery),
+        InsertSource::DefaultValues => false,
+    };
+    values || returning_mentions_subquery(&insert.returning)
+}
+
+fn update_mentions_subquery(update: &Update) -> bool {
+    update
+        .assignments
+        .iter()
+        .any(|(_, value)| value_mentions_subquery(value))
+        || update.filter.iter().any(crate::subquery::mentions_subquery)
+        || returning_mentions_subquery(&update.returning)
+}
+
+fn insert_exprs(insert: &mut Insert) -> Vec<&mut Expr> {
+    let mut exprs: Vec<&mut Expr> = Vec::new();
+    if let InsertSource::Values(rows) = &mut insert.source {
+        for value in rows.iter_mut().flatten() {
+            if let InsertValue::Expr(expr) = value {
+                exprs.push(expr);
+            }
+        }
+    }
+    exprs.extend(returning_exprs(&mut insert.returning));
+    exprs
+}
+
+fn update_exprs(update: &mut Update) -> Vec<&mut Expr> {
+    let mut exprs: Vec<&mut Expr> = Vec::new();
+    for (_, value) in &mut update.assignments {
+        if let InsertValue::Expr(expr) = value {
+            exprs.push(expr);
+        }
+    }
+    exprs.extend(update.filter.iter_mut());
+    exprs.extend(returning_exprs(&mut update.returning));
+    exprs
+}
+
+fn delete_exprs(delete: &mut Delete) -> Vec<&mut Expr> {
+    let mut exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();
+    exprs.extend(returning_exprs(&mut delete.returning));
+    exprs
+}
+
+fn with_subqueries_run<T: Clone>(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    statement: &T,
+    target: &TableReference,
+    values_only: bool,
+    exprs: fn(&mut T) -> Vec<&mut Expr>,
+) -> SqlResult<Option<T>> {
+    let mut copy = statement.clone();
+    let found = exprs(&mut copy);
+    let table = tables.require(reader, &target.name)?;
+    let scope = if values_only {
+        Scope::empty()
+    } else {
+        scope_of(&table, target)
+    };
+    crate::subquery::prepare_in_place(reader, tables, found, scope)?;
+    Ok(Some(copy))
+}
+
 pub(crate) fn insert(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
+    let prepared = if insert_mentions_subquery(insert) {
+        with_subqueries_run(writer, tables, insert, &insert.table, true, insert_exprs)?
+    } else {
+        None
+    };
+    let insert = prepared.as_ref().unwrap_or(insert);
     let table = tables.require(writer, &insert.table.name)?;
     let scope = scope_of(&table, &insert.table);
     let targets = match &insert.columns {
@@ -545,6 +647,7 @@ pub(crate) fn insert(
     let constants = Evaluator {
         scope: Scope::empty(),
         row: &[],
+        correlation: None,
     };
     let updates = match &insert.on_duplicate {
         OnDuplicate::Update(assignments) => Some(resolved_updates(&table, scope, assignments)?),
@@ -803,6 +906,7 @@ impl<'a> StoredRows<'a> {
             let value = Evaluator {
                 scope,
                 row: &combined,
+                correlation: None,
             }
             .eval(expr, Some(column.sql_type))?;
             combined[*index] =
@@ -985,6 +1089,7 @@ struct Projection<'a> {
     items: Vec<ProjectedItem<'a>>,
     scope: Scope<'a>,
     each_column_once: bool,
+    correlation: Option<&'a Correlation<'a>>,
 }
 
 enum ProjectedItem<'a> {
@@ -1046,7 +1151,7 @@ impl<'a> Projection<'a> {
                         if let Some((source, index)) = scope.source_of(offset) {
                             let column = &source.table.columns[index];
                             columns.push(OutputColumn {
-                                name: column.name.clone(),
+                                name: crate::temp_tables::display_name(&column.name).to_owned(),
                                 sql_type: Some(column.sql_type),
                             });
                             projected.push(ProjectedItem::Column(offset));
@@ -1095,6 +1200,7 @@ impl<'a> Projection<'a> {
             items: projected,
             scope,
             each_column_once,
+            correlation: None,
         })
     }
 
@@ -1172,6 +1278,7 @@ impl<'a> Projection<'a> {
         let evaluator = Evaluator {
             scope: self.scope,
             row,
+            correlation: self.correlation,
         };
         self.items
             .iter()
@@ -1187,7 +1294,11 @@ fn filter_matches(scope: Scope<'_>, filter: Option<&Expr>, row: &[Value]) -> Sql
     let Some(filter) = filter else {
         return Ok(true);
     };
-    let evaluator = Evaluator { scope, row };
+    let evaluator = Evaluator {
+        scope,
+        row,
+        correlation: None,
+    };
     Ok(evaluator.boolean(filter, "WHERE")? == Some(true))
 }
 
@@ -1224,6 +1335,7 @@ fn point_key(table: &TableDefinition, scope: Scope<'_>, filter: &Expr) -> Option
     let constants = Evaluator {
         scope: Scope::empty(),
         row: &[],
+        correlation: None,
     };
     let mut key = rows_prefix(table.id);
     for &index in &table.primary_key {
@@ -1327,13 +1439,14 @@ fn matching_rows(
     Ok(rows)
 }
 
-fn row_count(expr: Option<&Expr>, clause: &str) -> SqlResult<Option<u64>> {
+pub(crate) fn row_count(expr: Option<&Expr>, clause: &str) -> SqlResult<Option<u64>> {
     let Some(expr) = expr else {
         return Ok(None);
     };
     let constants = Evaluator {
         scope: Scope::empty(),
         row: &[],
+        correlation: None,
     };
     reject_aggregates(expr, clause)?;
     check_columns(expr, Scope::empty()).map_err(|_| {
@@ -1438,7 +1551,93 @@ pub(crate) fn select(
     select: &Select,
     columns_only: bool,
 ) -> SqlResult<QueryResult> {
-    select_or_explain(reader, tables, select, columns_only, None)
+    if crate::subquery::needs_preparation(select) {
+        return crate::subquery::run_select(reader, tables, select, columns_only);
+    }
+    select_or_explain(reader, tables, select, columns_only, None, None)
+}
+
+pub(crate) fn query(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    query: &crate::ast::Query,
+    columns_only: bool,
+) -> SqlResult<QueryResult> {
+    crate::subquery::run_statement(reader, tables, query, columns_only)
+}
+
+pub(crate) fn select_prepared(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    select: &Select,
+    columns_only: bool,
+    correlation: Option<&Correlation<'_>>,
+) -> SqlResult<QueryResult> {
+    select_or_explain(reader, tables, select, columns_only, None, correlation)
+}
+
+fn correlated_unsupported(where_: &str, position: usize) -> SqlError {
+    SqlError::not_supported(format!(
+        "a subquery that refers to the outer query in {where_} is not supported yet"
+    ))
+    .at(position)
+}
+
+fn split_correlated(select: &Select) -> SqlResult<Option<(Select, Expr)>> {
+    let correlated = crate::subquery::mentions_correlated;
+    if let Some(from) = &select.from {
+        for join in &from.joins {
+            if let crate::ast::JoinCondition::On(on) = &join.condition
+                && correlated(on)
+            {
+                return Err(correlated_unsupported("a JOIN condition", on.position));
+            }
+        }
+    }
+    if let Some(key) = select.group_by.iter().find(|key| correlated(key)) {
+        return Err(correlated_unsupported("GROUP BY", key.position));
+    }
+    if aggregate::is_aggregate_query(select) {
+        let items = select.items.iter().filter_map(|item| match item {
+            SelectItem::Expr { expr, .. } => Some(expr),
+            SelectItem::Wildcard { .. } => None,
+        });
+        let mut later = items
+            .chain(select.having.iter())
+            .chain(select.order_by.iter().map(|item| &item.expr));
+        if let Some(expr) = later.find(|expr| correlated(expr)) {
+            return Err(correlated_unsupported(
+                "the select list, HAVING or ORDER BY of a grouped query",
+                expr.position,
+            ));
+        }
+    }
+    let Some(filter) = &select.filter else {
+        return Ok(None);
+    };
+    if !correlated(filter) {
+        return Ok(None);
+    }
+    let position = filter.position;
+    let parts = match &filter.kind {
+        ExprKind::And(parts) => parts.clone(),
+        _ => vec![filter.clone()],
+    };
+    let (late, early): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(correlated);
+    let joined = |mut parts: Vec<Expr>| match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        _ => Some(Expr {
+            kind: ExprKind::And(parts),
+            position,
+        }),
+    };
+    let mut early_select = select.clone();
+    early_select.filter = joined(early);
+    match joined(late) {
+        Some(late) => Ok(Some((early_select, late))),
+        None => Ok(None),
+    }
 }
 
 pub(crate) struct ExplainedSource {
@@ -1463,8 +1662,13 @@ pub(crate) fn explain(
 ) -> SqlResult<ExplainedQuery> {
     let mut out = ExplainedQuery::default();
     let (reference, filter) = match statement {
+        crate::ast::Statement::Select(query) if crate::subquery::needs_preparation(query) => {
+            return Err(SqlError::not_supported(
+                "EXPLAIN of a query with subqueries or derived tables",
+            ));
+        }
         crate::ast::Statement::Select(query) => {
-            select_or_explain(reader, tables, query, false, Some(&mut out))?;
+            select_or_explain(reader, tables, query, false, Some(&mut out), None)?;
             return Ok(out);
         }
         crate::ast::Statement::Update(update) => (&update.table, update.filter.as_ref()),
@@ -1501,7 +1705,19 @@ fn select_or_explain(
     select: &Select,
     columns_only: bool,
     explain: Option<&mut ExplainedQuery>,
+    correlation: Option<&Correlation<'_>>,
 ) -> SqlResult<QueryResult> {
+    let split = match correlation {
+        Some(_) => split_correlated(select)?,
+        None => None,
+    };
+    let (select, late) = match &split {
+        Some((early, late)) => (early, Some(late)),
+        None => (select, None),
+    };
+    if let Some(late) = late {
+        reject_aggregates(late, "WHERE")?;
+    }
     let first = match &select.from {
         Some(from) => Some(tables.require(reader, &from.first.name)?),
         None => None,
@@ -1537,7 +1753,11 @@ fn select_or_explain(
         Some(grouping) => (grouping.items.as_slice(), Scope::empty()),
         None => (select.items.as_slice(), scope),
     };
-    let projection = Projection::new(items, post_scope)?;
+    let mut projection = Projection::new(items, post_scope)?;
+    projection.correlation = correlation;
+    if let Some(late) = late {
+        check_columns(late, scope)?;
+    }
     let order_expressions: Vec<&Expr> = select
         .order_by
         .iter()
@@ -1629,6 +1849,7 @@ fn select_or_explain(
             let first_key = select
                 .filter
                 .as_ref()
+                .filter(|_| !joined.preserves_right())
                 .and_then(|filter| point_key(first.table, Scope::One(first), filter));
             RowSource::Joined(JoinedRows::new(
                 reader,
@@ -1661,6 +1882,8 @@ fn select_or_explain(
         } else {
             select.filter.as_ref()
         },
+        late,
+        correlation,
     };
     if let Some(count) = select.source_row_limit {
         let wanted = usize::try_from(count).unwrap_or(usize::MAX);
@@ -1670,6 +1893,8 @@ fn select_or_explain(
             rows: RowSource::Rows(kept),
             scope,
             filter: None,
+            late: None,
+            correlation,
         };
     }
     if let Some(grouping) = &grouping {
@@ -1683,6 +1908,8 @@ fn select_or_explain(
             rows: RowSource::Rows(groups),
             scope: post_scope,
             filter: None,
+            late: None,
+            correlation,
         };
     }
     let output = if sort_keys.is_empty() || ordered {
@@ -1769,6 +1996,8 @@ struct SourceRows<'a> {
     rows: RowSource<'a>,
     scope: Scope<'a>,
     filter: Option<&'a Expr>,
+    late: Option<&'a Expr>,
+    correlation: Option<&'a Correlation<'a>>,
 }
 
 impl SourceRows<'_> {
@@ -1777,6 +2006,28 @@ impl SourceRows<'_> {
     }
 
     fn for_each(&mut self, visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()> {
+        let Some(late) = self.late else {
+            return self.for_each_early(visit);
+        };
+        let (scope, correlation) = (self.scope, self.correlation);
+        self.for_each_early(&mut |row| {
+            let evaluator = Evaluator {
+                scope,
+                row: &row,
+                correlation,
+            };
+            if evaluator.boolean(late, "WHERE")? == Some(true) {
+                visit(row)
+            } else {
+                Ok(true)
+            }
+        })
+    }
+
+    fn for_each_early(
+        &mut self,
+        visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
         let (reader, scope, filter) = (self.reader, self.scope, self.filter);
         match &mut self.rows {
             RowSource::Table(table, access) => {
@@ -1814,6 +2065,9 @@ impl SourceRows<'_> {
         &mut self,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<()> {
+        if self.late.is_some() {
+            return self.for_each(&mut |row| visit(&row));
+        }
         let (reader, scope, filter) = (self.reader, self.scope, self.filter);
         match &mut self.rows {
             RowSource::Joined(joined) => joined.for_each(&mut |row| {
@@ -1904,6 +2158,7 @@ fn sorted_rows(
     memory: &mut WorkMemory,
 ) -> SqlResult<Vec<Vec<Value>>> {
     let scope = source.scope;
+    let correlation = source.correlation;
     let mut rows = Vec::new();
     let mut seen = window.distinct.then(HashSet::new);
     source.for_each(&mut |row| {
@@ -1913,7 +2168,11 @@ fn sorted_rows(
         {
             return Ok(true);
         }
-        let evaluator = Evaluator { scope, row: &row };
+        let evaluator = Evaluator {
+            scope,
+            row: &row,
+            correlation,
+        };
         let mut keys = Vec::with_capacity(sort_keys.len());
         for key in sort_keys {
             keys.push(match key {
@@ -1927,46 +2186,63 @@ fn sorted_rows(
         Ok(true)
     })?;
     check_sortable(order_by, &rows)?;
-    rows.sort_by(|(left, _), (right, _)| {
-        for (index, item) in order_by.iter().enumerate() {
-            let nulls_first = item.nulls_first.unwrap_or(item.descending);
-            let ordering = match (&left[index], &right[index]) {
-                (Value::Null, Value::Null) => Ordering::Equal,
-                (Value::Null, _) => {
-                    if nulls_first {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                }
-                (_, Value::Null) => {
-                    if nulls_first {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Less
-                    }
-                }
-                (a, b) => {
-                    let ordering = compare_values(a, b);
-                    if item.descending {
-                        ordering.reverse()
-                    } else {
-                        ordering
-                    }
-                }
-            };
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-        }
-        Ordering::Equal
-    });
+    rows.sort_by(|(left, _), (right, _)| compare_sort_keys(order_by, left, right));
     Ok(rows
         .into_iter()
         .skip(window.skip)
         .take(window.take)
         .map(|(_, row)| row)
         .collect())
+}
+
+pub(crate) fn order_rows(rows: &mut Vec<Vec<Value>>, order_by: &[OrderItem], keys: &[usize]) {
+    let mut keyed: Vec<(Vec<Value>, Vec<Value>)> = std::mem::take(rows)
+        .into_iter()
+        .map(|row| {
+            let picked = keys
+                .iter()
+                .map(|&index| row.get(index).cloned().unwrap_or(Value::Null))
+                .collect();
+            (picked, row)
+        })
+        .collect();
+    keyed.sort_by(|(left, _), (right, _)| compare_sort_keys(order_by, left, right));
+    *rows = keyed.into_iter().map(|(_, row)| row).collect();
+}
+
+fn compare_sort_keys(order_by: &[OrderItem], left: &[Value], right: &[Value]) -> Ordering {
+    for (index, item) in order_by.iter().enumerate() {
+        let nulls_first = item.nulls_first.unwrap_or(item.descending);
+        let ordering = match (&left[index], &right[index]) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Null, _) => {
+                if nulls_first {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (_, Value::Null) => {
+                if nulls_first {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (a, b) => {
+                let ordering = compare_values(a, b);
+                if item.descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
+            }
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
 }
 
 fn check_sortable(order_by: &[OrderItem], rows: &[(Vec<Value>, Vec<Value>)]) -> SqlResult<()> {
@@ -1993,6 +2269,12 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
+    let prepared = if update_mentions_subquery(update) {
+        with_subqueries_run(writer, tables, update, &update.table, false, update_exprs)?
+    } else {
+        None
+    };
+    let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require(writer, &update.table.name)?;
     let scope = scope_of(&table, &update.table);
     let names: Vec<Name> = update
@@ -2040,6 +2322,7 @@ pub(crate) fn update(
         let evaluator = Evaluator {
             scope,
             row: &old_row,
+            correlation: None,
         };
         let mut new_row = old_row.clone();
         for ((_, value), &index) in update.assignments.iter().zip(&targets) {
@@ -2104,6 +2387,14 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
+    let prepared = if delete.filter.iter().any(crate::subquery::mentions_subquery)
+        || returning_mentions_subquery(&delete.returning)
+    {
+        with_subqueries_run(writer, tables, delete, &delete.table, false, delete_exprs)?
+    } else {
+        None
+    };
+    let delete = prepared.as_ref().unwrap_or(delete);
     let table = tables.require(writer, &delete.table.name)?;
     let scope = scope_of(&table, &delete.table);
     if let Some(filter) = &delete.filter {

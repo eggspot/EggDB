@@ -767,3 +767,135 @@ SELECT EXTRACT(EPOCH FROM NOW())
 
 error 42000 1305
 SELECT TRUNC(1.5)
+
+chapter "Subqueries", "Set Operations with UNION, INTERSECT, and EXCEPT", "WITH (Common Table Expressions)", "JOIN Clause"
+ok
+CREATE TABLE sq_dept (id INT PRIMARY KEY, name VARCHAR(20) NOT NULL)
+
+ok
+INSERT INTO sq_dept VALUES (1, 'sales'), (2, 'research'), (3, 'empty')
+
+ok
+CREATE TABLE sq_emp (id INT PRIMARY KEY, dept INT, pay DECIMAL(8,2))
+
+ok
+INSERT INTO sq_emp VALUES (1, 1, 100), (2, 1, 80), (3, 2, 120), (4, NULL, 50)
+
+rows
+SELECT name FROM sq_dept d WHERE EXISTS (SELECT 1 FROM sq_emp e WHERE e.dept = d.id) ORDER BY name
+----
+name
+research
+sales
+SELECT 2
+
+rows
+SELECT name FROM sq_dept WHERE id NOT IN (SELECT dept FROM sq_emp WHERE dept IS NOT NULL)
+----
+name
+empty
+SELECT 1
+
+rows
+SELECT 9 NOT IN (SELECT dept FROM sq_emp), 1 IN (SELECT dept FROM sq_emp)
+----
+9 NOT IN (SELECT dept FROM sq_emp)|1 IN (SELECT dept FROM sq_emp)
+NULL|1
+SELECT 1
+
+rows
+SELECT d.name, (SELECT count(*) FROM sq_emp e WHERE e.dept = d.id) AS staff FROM sq_dept d ORDER BY d.id
+----
+name|staff
+sales|2
+research|1
+empty|0
+SELECT 3
+
+error 21000 1242
+SELECT (SELECT id FROM sq_emp)
+
+error 21000 1241
+SELECT (SELECT id, pay FROM sq_emp WHERE id = 1)
+
+rows
+SELECT id FROM sq_emp WHERE pay > ALL (SELECT pay FROM sq_emp WHERE dept = 1)
+----
+id
+3
+SELECT 1
+
+rows
+SELECT t.dept, t.total FROM (SELECT dept, SUM(pay) AS total FROM sq_emp GROUP BY dept) AS t WHERE t.total > 100 ORDER BY t.dept
+----
+dept|total
+1|180.00
+2|120.00
+SELECT 2
+
+error 42000 1248
+SELECT * FROM (SELECT 1)
+
+rows
+SELECT id FROM sq_dept UNION SELECT dept FROM sq_emp WHERE dept IS NOT NULL ORDER BY id DESC LIMIT 2
+----
+id
+3
+2
+SELECT 2
+
+rows
+SELECT id FROM sq_dept INTERSECT SELECT dept FROM sq_emp ORDER BY id
+----
+id
+1
+2
+SELECT 2
+
+rows
+SELECT id FROM sq_dept EXCEPT SELECT dept FROM sq_emp
+----
+id
+3
+SELECT 1
+
+rows
+SELECT 1 AS x UNION SELECT 'a'
+----
+x
+1
+a
+SELECT 2
+
+error 21000 1222
+SELECT 1, 2 UNION SELECT 3
+
+rows
+WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 10) SELECT SUM(n) FROM t
+----
+SUM(n)
+55
+SELECT 1
+
+error HY000 3636
+WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t) SELECT COUNT(*) FROM t
+
+rows
+SELECT GREATEST(1, 5, 3), LEAST(2, NULL), GREATEST('b', 'a')
+----
+GREATEST(1, 5, 3)|LEAST(2, NULL)|GREATEST('b', 'a')
+5|NULL|b
+SELECT 1
+
+rows
+SELECT d.name, e.id FROM sq_emp e RIGHT JOIN sq_dept d ON d.id = e.dept ORDER BY d.id, e.id
+----
+name|id
+sales|1
+sales|2
+research|3
+empty|NULL
+SELECT 4
+
+error 42000 1064
+SELECT * FROM sq_dept FULL JOIN sq_emp ON true

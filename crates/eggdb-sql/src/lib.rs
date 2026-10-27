@@ -8,7 +8,8 @@
 //! safety and backups cover SQL data as they cover every other key.
 //!
 //! These are the first parts of the SQL core: tables with primary keys, `INSERT`, `SELECT`
-//! with `WHERE`, inner, left and cross joins, `GROUP BY` with `count`, `sum`, `avg`, `min` and
+//! with `WHERE`, inner, left, right, full and cross joins, subqueries, `WITH` queries and set
+//! operations, `GROUP BY` with `count`, `sum`, `avg`, `min` and
 //! `max`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE`,
 //! transaction blocks, and the integer, floating-point, exact `numeric`, boolean, text, `date`,
 //! `timestamp`, `timestamptz`, `json` and `jsonb` types. Everything
@@ -39,10 +40,13 @@ mod parser;
 mod plan;
 mod schema;
 mod session;
+mod set_operations;
 mod settings;
 mod sqlite_errors;
 mod sqlite_functions;
 mod store;
+mod subquery;
+mod temp_tables;
 mod types;
 mod typing;
 
@@ -52,6 +56,8 @@ mod correctness;
 mod index_tests;
 #[cfg(test)]
 mod memory_store;
+#[cfg(test)]
+mod subquery_tests;
 #[cfg(test)]
 mod tests;
 

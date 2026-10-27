@@ -200,15 +200,29 @@ through the `eggdb` command; the smoke test reads the samples with each release 
   ignored test `write_the_v0_2_0_log_sample` wrote it, and refuses to run while the file exists.
 
 ## SQL against the manual (D105)
-`crates/eggdb-sql/correctness/postgresql.test` holds 251 cases, each a header (`ok`, `rows` with
+`crates/eggdb-sql/correctness/postgresql.test` holds 308 cases, each a header (`ok`, `rows` with
 the expected output after `----`, or `error <SQLSTATE>`), its SQL, and the PostgreSQL manual's
 chapter it comes from on a `chapter` line. They run in order in one session over the in-memory
 store, so later cases see the tables earlier ones made. The runner (`src/correctness.rs`) takes
-the dialect's name; each later dialect adds its own file. `mysql.test` (151 cases from the MySQL
+the dialect's name; each later dialect adds its own file. `mysql.test` (174 cases from the MySQL
 8.0 Reference Manual, D106) may name MySQL's error number after the SQLSTATE (`error 42S02
 1146`), and the runner then checks both. A case marked `... differs` is a known
 difference, listed in sql.md: the runner checks that it still differs, so fixing the engine
 fails the suite until the mark and the doc line go. At most one case in ten may be marked.
+
+## Subqueries, set operations and outer joins (D112)
+`src/subquery_tests.rs` builds two small random tables with NULLs in 24 seeded rounds, once
+without and once with secondary indexes, and requires every form of one question to give the
+same rows as a reference computed in the test: `EXISTS`, `IN`, `= ANY`, an inner join and a
+`DISTINCT` join; `NOT EXISTS` and an anti-join through a derived table; `NOT IN` in three-valued
+logic (a NULL on either side) and `NOT (= ANY)`; a correlated `NOT IN`; `< ANY`, `> ALL`, `<>
+ALL`; a correlated scalar `count` against a grouped left join; `UNION [ALL]`, `INTERSECT [ALL]`
+and `EXCEPT [ALL]` against a multiset reference; `FULL` joins and their `RIGHT JOIN ... UNION
+ALL ... NOT EXISTS` form. It also nests subqueries and derived tables up to their limits in a
+debug build's test thread, runs a 50,000-item `IN` list and 20,000-row subqueries within a time
+bound, stops a runaway recursion and a doubling one by their limits, keeps `MINUS`, `FULL JOIN`,
+`ANY`, `INTERSECT ALL` and parenthesised operands in their dialects, and fuzzes 20,000
+statements built from subquery, `WITH`, set-operation and join fragments in each dialect.
 
 ## Typed values: numbers, dates and JSON (D111)
 The exact decimal is checked against a schoolbook decimal reference written in its tests (400

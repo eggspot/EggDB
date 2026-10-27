@@ -655,7 +655,11 @@ fn execute_sends_values_as_the_statement_description_said() {
     client.query("CREATE TABLE items (id integer PRIMARY KEY); INSERT INTO items VALUES (1)");
     client.send(
         b'P',
-        &parse("s", "SELECT coalesce(NULL, id) FROM items", &[]),
+        &parse(
+            "s",
+            "SELECT CASE WHEN id > 0 THEN id ELSE 1.5 END FROM items",
+            &[],
+        ),
     );
     client.send(b'D', b"Ss\0");
     client.send(b'B', &bind("", "s", &[], &[], &[1]));
@@ -666,6 +670,46 @@ fn execute_sends_values_as_the_statement_description_said() {
     let (_, oid, _) = answer[2].column_types()[0].clone();
     assert_eq!(oid, 25);
     assert_eq!(answer[4].raw_row(), [Some(b"1".to_vec())]);
+}
+
+#[test]
+fn set_operations_and_subqueries_describe_their_column_types() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query(
+        "CREATE TABLE items (id integer PRIMARY KEY, price numeric(6,2)); INSERT INTO items VALUES (1, 2.50), (2, NULL)",
+    );
+    let answer = client.query(
+        "SELECT id FROM items UNION SELECT 2.5 ORDER BY 1; SELECT (SELECT max(price) FROM items) AS top, EXISTS (SELECT 1 FROM items WHERE price IS NULL) AS gap, x.id FROM (SELECT id FROM items WHERE id = 2) x",
+    );
+    let descriptions: Vec<Vec<(String, u32, i16)>> = answer
+        .iter()
+        .filter(|message| message.tag == b'T')
+        .map(|message| message.column_types())
+        .collect();
+    let oids: Vec<Vec<u32>> = descriptions
+        .iter()
+        .map(|columns| columns.iter().map(|(_, oid, _)| *oid).collect())
+        .collect();
+    assert_eq!(oids, [vec![1700], vec![1700, 16, 23]]);
+    let rows: Vec<Vec<Option<Vec<u8>>>> = answer
+        .iter()
+        .filter(|message| message.tag == b'D')
+        .map(|message| message.raw_row())
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            vec![Some(b"1".to_vec())],
+            vec![Some(b"2".to_vec())],
+            vec![Some(b"2.5".to_vec())],
+            vec![
+                Some(b"2.50".to_vec()),
+                Some(b"t".to_vec()),
+                Some(b"2".to_vec())
+            ],
+        ]
+    );
 }
 
 #[test]

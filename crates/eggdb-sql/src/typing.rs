@@ -117,14 +117,19 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
             }
         }
         ("nullif", [left, _]) => static_type(left, scope),
-        ("coalesce", [first, rest @ ..]) => {
-            let first_type = static_type(first, scope)?;
-            rest.iter()
-                .all(|argument| {
-                    matches!(argument.kind, ExprKind::Literal(Literal::Null))
-                        || static_type(argument, scope) == Some(first_type)
-                })
-                .then_some(first_type)
+        ("coalesce" | "greatest" | "least" | "mysql_greatest" | "mysql_least", [_, ..]) => {
+            let mut common: Option<SqlType> = None;
+            for argument in arguments {
+                if is_untyped_literal(argument) {
+                    continue;
+                }
+                let found = static_type(argument, scope)?;
+                common = Some(match common {
+                    None => found,
+                    Some(known) => crate::set_operations::common_type(known, found)?,
+                });
+            }
+            common
         }
         _ => None,
     }
@@ -148,7 +153,10 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             .column(qualifier.as_deref(), name, expr.position)
             .ok()
             .and_then(|offset| scope.column_type(offset)),
-        ExprKind::Slot { sql_type, .. } => *sql_type,
+        ExprKind::Slot { sql_type, .. }
+        | ExprKind::Constant { sql_type, .. }
+        | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
+        ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
         ExprKind::Cast { sql_type, .. } => Some(*sql_type),
         ExprKind::SessionValue { .. } => Some(SqlType::Text),
         ExprKind::Unary(UnaryOperator::Not, _)

@@ -1,4 +1,6 @@
-use crate::types::SqlType;
+use crate::dialect::Dialect;
+use crate::types::{SqlType, Value};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
@@ -7,6 +9,7 @@ pub(crate) enum Statement {
     DropTable { names: Vec<Name>, if_exists: bool },
     Insert(Insert),
     Select(Select),
+    Query(Box<Query>),
     Update(Update),
     Delete(Delete),
     Begin { read_only: bool },
@@ -144,6 +147,183 @@ pub(crate) struct ColumnDefinition {
 pub(crate) struct TableReference {
     pub(crate) name: Name,
     pub(crate) alias: Option<String>,
+    pub(crate) derived: Option<Box<DerivedTable>>,
+}
+
+impl TableReference {
+    pub(crate) fn named(name: Name, alias: Option<String>) -> Self {
+        Self {
+            name,
+            alias,
+            derived: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DerivedTable {
+    pub(crate) query: Query,
+    pub(crate) column_names: Vec<Name>,
+    pub(crate) dialect: Dialect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Query {
+    pub(crate) with: Vec<CommonTable>,
+    pub(crate) recursive: bool,
+    pub(crate) body: SetExpr,
+    pub(crate) order_by: Vec<OrderItem>,
+    pub(crate) limit: Option<Expr>,
+    pub(crate) offset: Option<Expr>,
+    pub(crate) position: usize,
+}
+
+impl Query {
+    pub(crate) fn of_select(select: Select, position: usize) -> Self {
+        Self {
+            with: Vec::new(),
+            recursive: false,
+            body: SetExpr::Select(Box::new(select)),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            position,
+        }
+    }
+
+    pub(crate) fn plain_select(&self) -> Option<&Select> {
+        match &self.body {
+            SetExpr::Select(select)
+                if self.with.is_empty()
+                    && self.order_by.is_empty()
+                    && self.limit.is_none()
+                    && self.offset.is_none() =>
+            {
+                Some(select)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CommonTable {
+    pub(crate) name: Name,
+    pub(crate) column_names: Vec<Name>,
+    pub(crate) query: Query,
+    pub(crate) dialect: Dialect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SetExpr {
+    Select(Box<Select>),
+    Operation(Box<SetOperation>),
+    Query(Box<Query>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetOperator {
+    Union,
+    Intersect,
+    Except,
+}
+
+impl SetOperator {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Union => "UNION",
+            Self::Intersect => "INTERSECT",
+            Self::Except => "EXCEPT",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SetOperation {
+    pub(crate) operator: SetOperator,
+    pub(crate) all: bool,
+    pub(crate) left: SetExpr,
+    pub(crate) right: SetExpr,
+    pub(crate) dialect: Dialect,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Subquery {
+    pub(crate) test: SubqueryTest,
+    pub(crate) query: Query,
+    pub(crate) state: SubqueryState,
+    pub(crate) dialect: Dialect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SubqueryTest {
+    Scalar,
+    Exists,
+    In {
+        expr: Expr,
+        negated: bool,
+    },
+    Compare {
+        expr: Expr,
+        operator: BinaryOperator,
+        all: bool,
+    },
+}
+
+impl SubqueryTest {
+    pub(crate) fn operand(&self) -> Option<&Expr> {
+        match self {
+            Self::Scalar | Self::Exists => None,
+            Self::In { expr, .. } | Self::Compare { expr, .. } => Some(expr),
+        }
+    }
+
+    pub(crate) fn operand_mut(&mut self) -> Option<&mut Expr> {
+        match self {
+            Self::Scalar | Self::Exists => None,
+            Self::In { expr, .. } | Self::Compare { expr, .. } => Some(expr),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SubqueryState {
+    Unprepared,
+    Rows(Arc<SubqueryRows>),
+    Correlated {
+        template: usize,
+        sql_type: Option<SqlType>,
+    },
+}
+
+impl PartialEq for SubqueryState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unprepared, Self::Unprepared) => true,
+            (Self::Rows(left), Self::Rows(right)) => Arc::ptr_eq(left, right),
+            (
+                Self::Correlated {
+                    template: left,
+                    sql_type: left_type,
+                },
+                Self::Correlated {
+                    template: right,
+                    sql_type: right_type,
+                },
+            ) => left == right && left_type == right_type,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SubqueryRows {
+    pub(crate) sql_type: Option<SqlType>,
+    pub(crate) values: Vec<Value>,
+    pub(crate) rows: usize,
+    pub(crate) hashed: std::sync::OnceLock<Option<crate::subquery::HashedValues>>,
+    pub(crate) _held: crate::memory::HeldMemory,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -214,6 +394,8 @@ pub(crate) struct OrderItem {
 pub(crate) enum JoinKind {
     Inner,
     Left,
+    Right,
+    Full,
     Cross,
     Comma,
 }
@@ -437,5 +619,14 @@ pub(crate) enum ExprKind {
     SessionValue {
         name: &'static str,
         value: String,
+    },
+    Subquery(Box<Subquery>),
+    OuterColumn {
+        index: usize,
+        sql_type: Option<SqlType>,
+    },
+    Constant {
+        value: Value,
+        sql_type: Option<SqlType>,
     },
 }

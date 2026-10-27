@@ -583,14 +583,14 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
     let store = MemoryStore::default();
     let mut session = with_people(&store);
     for sql in [
-        "SELECT * FROM people a RIGHT JOIN people b ON a.id = b.id",
+        "SELECT * FROM people a FULL JOIN people b USING (id)",
         "SELECT * FROM people a NATURAL JOIN people b",
         "SELECT string_agg(name, ',') FROM people",
         "SELECT age FROM people GROUP BY ROLLUP (age)",
         "SELECT DISTINCT ON (age) age FROM people",
-        "SELECT * FROM people UNION SELECT * FROM people",
-        "SELECT (SELECT 1)",
-        "WITH x AS (SELECT 1) SELECT * FROM x",
+        "SELECT * FROM people, LATERAL (SELECT 1) x",
+        "SELECT 1 = ANY (ARRAY[1])",
+        "WITH x AS (DELETE FROM people RETURNING id) SELECT * FROM x",
         "INSERT INTO people SELECT * FROM people",
         "ALTER TABLE people ADD COLUMN x int",
         "CREATE TABLE ts (t time)",
@@ -932,7 +932,7 @@ fn hostile_input_returns_errors_and_never_panics() {
     fuzz(&mut session, &fragments);
 }
 
-fn fuzz(session: &mut Session<'_, MemoryStore>, fragments: &[&str]) {
+pub(crate) fn fuzz(session: &mut Session<'_, MemoryStore>, fragments: &[&str]) {
     let mut random = Seeded(0xDEAD_BEEF_CAFE_F00D);
     for _ in 0..20_000 {
         let length = 1 + random.below(14);
@@ -1507,10 +1507,10 @@ fn join_errors_follow_postgresql() {
             "SELECT * FROM a JOIN b ON b.k = c.k JOIN people c ON true",
             "42P01",
         ),
-        ("SELECT * FROM a RIGHT JOIN b ON true", "0A000"),
-        ("SELECT * FROM a FULL JOIN b ON true", "0A000"),
+        ("SELECT * FROM a FULL JOIN b USING (k)", "0A000"),
+        ("SELECT * FROM a, LATERAL (SELECT 1) s", "0A000"),
         ("SELECT * FROM a NATURAL JOIN b", "0A000"),
-        ("SELECT * FROM a JOIN (SELECT 1) s ON true", "0A000"),
+        ("SELECT * FROM a JOIN (a JOIN b ON true) ON true", "0A000"),
         ("SELECT * FROM nope JOIN a ON true", "42P01"),
         ("SELECT * FROM a JOIN nope ON true", "42P01"),
     ];
@@ -2102,13 +2102,13 @@ fn session_functions_report_the_user_the_database_and_the_version() {
 }
 
 #[test]
-fn coalesce_has_a_static_type_only_when_its_arguments_agree() {
+fn coalesce_has_the_common_type_of_its_arguments() {
     use crate::SqlType;
     let store = MemoryStore::default();
     let mut session = with_people(&store);
     let description = session
         .describe(
-            "SELECT coalesce(age, 0::smallint), coalesce(id, score), coalesce(name, NULL) FROM people",
+            "SELECT coalesce(age, 0::smallint), coalesce(id, score), coalesce(name, NULL), coalesce(name, active) FROM people",
             &[],
         )
         .unwrap();
@@ -2118,7 +2118,15 @@ fn coalesce_has_a_static_type_only_when_its_arguments_agree() {
         .iter()
         .map(|column| column.sql_type)
         .collect();
-    assert_eq!(types, [Some(SqlType::SmallInt), None, Some(SqlType::Text)]);
+    assert_eq!(
+        types,
+        [
+            Some(SqlType::SmallInt),
+            Some(SqlType::Double),
+            Some(SqlType::Text),
+            None
+        ]
+    );
 }
 
 #[test]
