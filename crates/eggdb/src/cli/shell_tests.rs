@@ -162,3 +162,19 @@ fn expanded_mode_prints_one_record_per_block() {
         "-[ RECORD 1 ]-\nid   | 1\nname | Ada\n\n"
     );
 }
+
+#[test]
+fn backslashes_and_tabs_in_sql_reach_the_table_unchanged() {
+    let directory = TempDirectory::new("shell-backslash");
+    let file = created(&directory);
+    let script = "create table t (id integer primary key, path text);\n\
+        insert into t values (1, 'C:\\dir\\file\tend');\n\
+        select path from t;\n";
+    let ran = shell(&file, &["--mode", "csv"], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert!(
+        text(&ran.stdout).ends_with("path\nC:\\dir\\file\tend\n"),
+        "{}",
+        text(&ran.stdout)
+    );
+}

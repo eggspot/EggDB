@@ -850,4 +850,29 @@ mod tests {
         assert!(top.contains("rows 1–13/40 · cols 1–2/5"), "{top}");
         screen.close();
     }
+
+    #[test]
+    fn a_paste_into_the_query_editor_runs_as_the_text_pasted() {
+        let (file, db) = database("query-paste");
+        let mut screen = Screen::new(DatabaseSource::new(db, "t.db".to_owned(), Options::new()));
+        screen.keys(&["s"]);
+        screen.terminal.push(eggdb_ui::Event::Paste(
+            "CREATE TABLE p (id integer PRIMARY KEY, path text);\r\nINSERT INTO p VALUES (1, 'C:\\dir\\file\tend\u{1b}');"
+                .to_owned(),
+        ));
+        let pasted = screen.keys(&["F5"]);
+        assert!(pasted.contains("INSERT 0 1"), "{pasted}");
+        assert!(pasted.contains("'C:\\dir\\file end');"), "{pasted}");
+        screen.close();
+        let db = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));
+        let store = super::DatabaseStore(&db);
+        let mut session = eggdb_sql::Session::new(&store);
+        let mut stored = None;
+        session
+            .execute("SELECT path FROM p", &mut |result| {
+                stored = result.rows.first().and_then(|row| row[0].to_text());
+            })
+            .unwrap_or_else(|error| panic!("select: {error}"));
+        assert_eq!(stored.as_deref(), Some("C:\\dir\\file\tend"));
+    }
 }

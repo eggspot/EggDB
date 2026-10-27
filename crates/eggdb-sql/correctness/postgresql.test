@@ -489,8 +489,9 @@ INSERT INTO people (id, name, age) VALUES (10, 'x', 40000)
 error 42804
 INSERT INTO people (id, name, active) VALUES (10, 'x', 5)
 
-error 0A000
+ok
 CREATE TABLE things (id integer PRIMARY KEY, price numeric)
+... differs
 
 rows
 SELECT count(*) FROM people

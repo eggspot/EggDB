@@ -125,7 +125,7 @@ impl<S: Source> Ui<S> {
         if let Some(query) = self.query.as_mut()
             && query.focus == QueryFocus::Editor
         {
-            query.editor.paste(pasted);
+            query.editor.paste_as_text(pasted);
         }
         self.follow_query_cursor();
     }
@@ -324,7 +324,7 @@ impl<S: Source> Ui<S> {
             self.put_right(frame, cols, 1, &reminder, role);
         }
         for (index, (_, line)) in query.editor.visible_lines(editor_rows).enumerate() {
-            let segments = [(line.to_owned(), Role::Plain)];
+            let segments = [(text::shown_in_cells(line), Role::Plain)];
             let row = 2 + index as u16;
             self.draw_segments(
                 frame,

@@ -1,6 +1,7 @@
 use crate::decoder::InputDecoder;
 use crate::editor::{Editor, Lines, Outcome};
 use crate::terminal::{Event, KeyCode, KeyEvent, Modifiers};
+use crate::text::{shown_in_cells, without_controls};
 use crate::width::{char_width, text_width};
 use eggdb_platform::terminal::{Input, RawTerminal};
 use std::collections::VecDeque;
@@ -8,7 +9,6 @@ use std::io;
 use std::time::Duration;
 
 const ESCAPE_WAIT: Duration = Duration::from_millis(25);
-const MOST_HISTORY_ENTRIES: usize = 1000;
 const MOST_LISTED_CANDIDATES: usize = 200;
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
@@ -133,12 +133,19 @@ pub struct LineReader {
 }
 
 impl LineReader {
+    /// The most history entries a reader keeps, and a history file holds.
+    pub const MOST_HISTORY_ENTRIES: usize = 1000;
+
     /// A reader that starts with `history`, oldest first; `styled` draws the prompt bold and
     /// listings dim.
     pub fn new(history: Vec<String>, styled: bool) -> Self {
-        let skip = history.len().saturating_sub(MOST_HISTORY_ENTRIES);
+        let skip = history.len().saturating_sub(Self::MOST_HISTORY_ENTRIES);
         Self {
-            history: history.into_iter().skip(skip).collect(),
+            history: history
+                .into_iter()
+                .skip(skip)
+                .map(|entry| without_controls(&entry))
+                .collect(),
             styled,
             pending: VecDeque::new(),
             carried: String::new(),
@@ -153,14 +160,15 @@ impl LineReader {
     /// Adds `entry` to the history unless it is empty, starts with a space or repeats the
     /// newest entry; returns whether it was added.
     pub fn remember(&mut self, entry: &str) -> bool {
+        let entry = without_controls(entry);
         if entry.trim().is_empty()
             || entry.starts_with(' ')
-            || self.history.last().is_some_and(|last| last == entry)
+            || self.history.last().is_some_and(|last| *last == entry)
         {
             return false;
         }
-        self.history.push(entry.to_owned());
-        if self.history.len() > MOST_HISTORY_ENTRIES {
+        self.history.push(entry);
+        if self.history.len() > Self::MOST_HISTORY_ENTRIES {
             self.history.remove(0);
         }
         true
@@ -175,7 +183,7 @@ impl LineReader {
         complete: &mut dyn FnMut(&str, usize) -> Completion,
     ) -> io::Result<LineEnd> {
         if let Some(line) = self.pending.pop_front() {
-            let shown = format!("{}{line}\r\n", self.prompt_text(prompt));
+            let shown = format!("{}{}\r\n", self.prompt_text(prompt), shown_in_cells(&line));
             terminal.write(shown.as_bytes())?;
             return Ok(LineEnd::Line(line));
         }
@@ -313,13 +321,13 @@ impl LineReader {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut parts = text.split('\n');
         let first = parts.next().unwrap_or_default();
-        editor.paste_on_one_line(first);
+        editor.paste_as_text(first);
         let rest: Vec<&str> = parts.collect();
         let (last, middle) = rest.split_last()?;
         for line in middle {
-            self.pending.push_back((*line).to_owned());
+            self.pending.push_back(without_controls(line));
         }
-        self.carried = (*last).to_owned();
+        self.carried = without_controls(last);
         Some(editor.text().to_owned())
     }
 
@@ -422,7 +430,7 @@ impl LineReader {
                 let label = format!(
                     "({}reverse-i-search)'{}': ",
                     if failed { "failed " } else { "" },
-                    search.query
+                    shown_in_cells(&search.query)
                 );
                 let found = search
                     .found
@@ -445,7 +453,7 @@ impl LineReader {
         };
         let room = cols.saturating_sub(text_width(&prompt) + 1).max(1);
         let pan = if search.is_some() { 0 } else { editor.pan() };
-        let shown = cells_window(&text, pan, room);
+        let shown = cells_window(&shown_in_cells(&text), pan, room);
         let mut out = format!("\r{styled_prompt}{shown}\x1b[K\r");
         let to = text_width(&prompt) + if search.is_some() { 0 } else { cursor_cells };
         if to > 0 {
@@ -726,6 +734,35 @@ mod tests {
         assert_eq!(read(&mut reader, Vec::new()), line("from t"));
         let events = vec![key(KeyCode::Enter)];
         assert_eq!(read(&mut reader, events), line("where"));
+    }
+
+    #[test]
+    fn a_paste_is_taken_as_text_with_backslashes_and_tabs_and_without_escapes() {
+        let mut reader = LineReader::new(Vec::new(), false);
+        let pasted = "insert into t values (1, 'C:\\dir\\file');";
+        let events = vec![Event::Paste(pasted.into()), key(KeyCode::Enter)];
+        assert_eq!(read(&mut reader, events), line(pasted));
+        let events = vec![Event::Paste(
+            "a\tb\u{1b}[31m\0\r\nc\\d\te\u{1b}]0;x\u{7}\nf".into(),
+        )];
+        let mut script = Script::new(events);
+        let first = reader.read_line(&mut script, "> ", &mut |_, _| Completion::default());
+        assert_eq!(first.ok(), Some(line("a\tb[31m")));
+        let second = reader.read_line(&mut script, "> ", &mut |_, _| Completion::default());
+        assert_eq!(second.ok(), Some(line("c\\d\te]0;x")));
+        let written = String::from_utf8_lossy(&script.written).into_owned();
+        assert!(!written.contains("\u{1b}]0") && !written.contains("\u{1b}[31m"));
+        assert!(!script.written.contains(&b'\t'));
+        let events = vec![key(KeyCode::Enter)];
+        assert_eq!(read(&mut reader, events), line("f"));
+    }
+
+    #[test]
+    fn history_entries_lose_control_characters() {
+        let mut reader = LineReader::new(vec!["a\u{1b}[2Jb".into()], false);
+        assert_eq!(reader.history(), ["a[2Jb"]);
+        assert!(reader.remember("x\u{1b}y\tz"));
+        assert_eq!(reader.history().last().map(String::as_str), Some("xy\tz"));
     }
 
     #[test]

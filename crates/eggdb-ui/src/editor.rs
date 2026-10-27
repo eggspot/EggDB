@@ -158,6 +158,14 @@ impl Editor {
         self.insert(&spelled, false)
     }
 
+    pub(crate) fn paste_as_text(&mut self, pasted: &str) -> Outcome {
+        let kept = text::without_controls(&line_feeds(pasted));
+        if kept.contains('\n') {
+            self.lines = Lines::Multi;
+        }
+        self.insert(&kept, false)
+    }
+
     pub(crate) fn paste_on_one_line(&mut self, pasted: &str) -> Outcome {
         self.insert(&text::escaped(line_feeds(pasted).as_bytes()), false)
     }

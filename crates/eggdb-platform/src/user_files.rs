@@ -33,16 +33,27 @@ pub fn create_private_directory(directory: &Path) -> io::Result<()> {
     builder.create(directory)
 }
 
-/// Opens `path` for appending, creating it when it is missing; on Unix a file it creates has
-/// mode 0600.
+/// Opens `path` for appending, creating it when it is missing; on Unix the file has mode 0600
+/// afterwards, also when it existed with a looser one.
 pub fn open_private_append(path: &Path) -> io::Result<File> {
-    private_options().append(true).open(path)
+    owner_only(private_options().append(true).open(path)?)
 }
 
 /// Opens `path` for writing from the start, emptying it, creating it when it is missing; on
-/// Unix a file it creates has mode 0600.
+/// Unix the file has mode 0600 afterwards.
 pub fn open_private_rewrite(path: &Path) -> io::Result<File> {
-    private_options().write(true).truncate(true).open(path)
+    owner_only(private_options().write(true).truncate(true).open(path)?)
+}
+
+fn owner_only(file: File) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if file.metadata()?.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(file)
 }
 
 fn private_options() -> OpenOptions {
@@ -82,6 +93,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            drop(open_private_append(&path).unwrap());
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }

@@ -83,7 +83,7 @@ const FUNCTIONS: [&str; 13] = [
 const TABLE_KEYWORDS: [&str; 5] = ["FROM", "JOIN", "INTO", "UPDATE", "TABLE"];
 const KEY_CANDIDATES: usize = 50;
 const LONGEST_STEM: usize = 24;
-const MOST_HISTORY_ENTRIES: usize = 1000;
+const MOST_HISTORY_BYTES: usize = 1 << 20;
 const HISTORY_VARIABLE: &str = "EGGDB_HISTORY";
 
 enum Step {
@@ -306,7 +306,8 @@ impl<'s> Shell<'s> {
                         let entry = std::mem::take(&mut self.entry);
                         let quits = matches!(entry.trim(), ".quit" | ".exit");
                         if !quits && reader.remember(&entry) {
-                            self.append_history(console, &entry);
+                            let kept = reader.history().last().cloned().unwrap_or_default();
+                            self.append_history(console, &kept);
                         }
                     }
                     if matches!(step, Step::Quit) {
@@ -834,10 +835,12 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
         let Ok(file) = std::fs::File::open(path) else {
             return;
         };
-        if BufReader::new(file).lines().count() <= MOST_HISTORY_ENTRIES {
+        if BufReader::new(file).lines().count() <= LineReader::MOST_HISTORY_ENTRIES {
             return;
         }
-        let skip = history.len().saturating_sub(MOST_HISTORY_ENTRIES);
+        let skip = history
+            .len()
+            .saturating_sub(LineReader::MOST_HISTORY_ENTRIES);
         let text: String = history[skip..]
             .iter()
             .map(|entry| format!("{}\n", escape_entry(entry)))
@@ -937,10 +940,24 @@ fn history_location() -> (Option<PathBuf>, Option<String>) {
 }
 
 fn read_history(path: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };
-    text.lines().map(unescape_entry).collect()
+    history_entries(&bytes)
+}
+
+fn history_entries(bytes: &[u8]) -> Vec<String> {
+    let start = bytes.len().saturating_sub(MOST_HISTORY_BYTES);
+    let mut kept = &bytes[start..];
+    if start > 0 {
+        let first_break = kept.iter().position(|&byte| byte == b'\n');
+        kept = first_break.map_or(&[][..], |at| &kept[at + 1..]);
+    }
+    kept.split(|&byte| byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| !line.is_empty())
+        .map(|line| unescape_entry(&String::from_utf8_lossy(line)))
+        .collect()
 }
 
 fn escape_entry(entry: &str) -> String {
@@ -1125,7 +1142,10 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Open, escape_entry, prompt_stem, scan_sql, split_words, unescape_entry};
+    use super::{
+        MOST_HISTORY_BYTES, Open, escape_entry, history_entries, prompt_stem, scan_sql,
+        split_words, unescape_entry,
+    };
     use std::path::Path;
 
     #[test]
@@ -1171,6 +1191,17 @@ mod tests {
         let entry = "select 'a\\b'\nfrom t;";
         assert_eq!(escape_entry(entry), "select 'a\\\\b'\\nfrom t;");
         assert_eq!(unescape_entry(&escape_entry(entry)), entry);
+    }
+
+    #[test]
+    fn a_history_file_is_read_from_its_last_mebibyte_and_lossily() {
+        assert_eq!(
+            history_entries(b"a\nb\xff\r\n\nc\\nd\n"),
+            ["a", "b\u{fffd}", "c\nd"]
+        );
+        let mut big = vec![b'x'; MOST_HISTORY_BYTES];
+        big.extend_from_slice(b"\nlast\n");
+        assert_eq!(history_entries(&big), ["last"]);
     }
 
     #[test]

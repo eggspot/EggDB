@@ -232,8 +232,8 @@ ui app.db` has a query screen (`s`, run with `F5`). Both print results and error
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
 checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
 until they are fixed:
-- Decimal constants (`1.5`, `10.0 / 4`) and `avg` of integers are `numeric` in PostgreSQL, which
-  is not supported yet (`0A000`; roadmap: the `numeric` type, item 19's next parts).
+- Decimal constants (`1.5`, `10.0 / 4`), `numeric` columns and `avg` of integers are `numeric` in
+  PostgreSQL, which is not supported yet (`0A000`; roadmap: the `numeric` type, item 19's next parts).
 - `RIGHT` and `FULL` joins answer `0A000` (roadmap: "Next parts" below).
 - The string functions `substr`, `substring(... FROM ... FOR ...)`, `trim`, `ltrim`, `rtrim`,
   `btrim`, `replace`, `concat`, `position(... IN ...)`, `left`, `right`, `repeat` and `reverse`
