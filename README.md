@@ -77,6 +77,27 @@ EGGDB_PASSWORD=choose-one eggdb serve shop.db  # PostgreSQL protocol on 127.0.0.
 PGPASSWORD=choose-one psql -h 127.0.0.1 -U eggdb shop -c "SELECT * FROM items"
 ```
 
+Or work in one session, with history and tab completion:
+
+```
+$ eggdb shell shop.db
+EggDB 0.2.0: shop.db, open read-write (1 table)
+Type .help for help. SQL ends with ; and .quit or Ctrl-D quits.
+shop=> insert into items values (1, 'egg'), (2, 'bread');
+INSERT 0 2
+shop=> select name from items order by id;
+ name
+-------
+ egg
+ bread
+(2 rows)
+
+shop=> put greeting hello
+shop=> get greeting
+hello
+shop=> .quit
+```
+
 Every command, the output formats, exit codes and the UI's keys: [docs/cli.md](docs/cli.md).
 
 ### Use it from Rust

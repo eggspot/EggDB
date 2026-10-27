@@ -793,3 +793,14 @@ $ echo $?
    off by `EGGDB_HISTORY`; a multi-line entry is recalled on one line with spaces.
 6. `BEGIN` holds the write transaction across prompts, and key-value commands join it.
 7. Batch mode prints like `eggdb sql` and stops at the first failure unless `--keep-going`.
+
+### As built in v0.2.0 (D105)
+1. **Key-value writes inside a block** fail with the busy error (exit 5) instead of joining the
+   block (decision 6): the block holds the database's one write transaction and the key-value
+   commands open their own. Reads see the last commit.
+2. **The banner** leaves out the key count, which only a full scan gives:
+   `EggDB 0.2.0: app.db, open read-write (2 tables)`.
+3. **Shell and key-value commands** are recognised only at the start of a statement; on a
+   continuation line (`app->`) every line is SQL.
+4. **The expanded header** follows psql's narrow form when the label is wider than the names
+   and values (`-[ RECORD 1 ]-`).

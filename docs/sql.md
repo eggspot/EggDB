@@ -222,7 +222,24 @@ copies SQL keys like any others, so importing an export that holds SQL tables in
 already has SQL tables can give two tables the same number or overwrite the catalog: import SQL
 exports into a new file, or into a file without SQL tables.
 
-## Limits of this part
+## In the shell and the UI
+`eggdb shell app.db` is an interactive prompt for SQL and the key-value commands, with history,
+tab completion over tables, columns and keywords, and `BEGIN` blocks that span prompts; `eggdb
+ui app.db` has a query screen (`s`, run with `F5`). Both print results and errors exactly as
+`eggdb sql` does ([cli.md](cli.md)).
+
+## Known differences from PostgreSQL
+The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
+checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
+until they are fixed:
+- Decimal constants (`1.5`, `10.0 / 4`) and `avg` of integers are `numeric` in PostgreSQL, which
+  is not supported yet (`0A000`; roadmap: the `numeric` type, item 19's next parts).
+- `RIGHT` and `FULL` joins answer `0A000` (roadmap: "Next parts" below).
+- The string functions `substr`, `substring(... FROM ... FOR ...)`, `trim`, `ltrim`, `rtrim`,
+  `btrim`, `replace`, `concat`, `position(... IN ...)`, `left`, `right`, `repeat` and `reverse`
+  are missing (`42883`, or `42601` for the SQL-standard syntax and for `left`/`right`, which
+  parse as join keywords; roadmap: the rest of PostgreSQL's string functions, below).
+
 - One statement at a time is planned by simple rules: a `WHERE` that fixes every primary-key
   column with `=` reads one row (in a join, of the first table); anything else reads the whole
   table. Each statement's result
@@ -282,6 +299,8 @@ exports into a new file, or into a file without SQL tables.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
 - `RIGHT` and `FULL` joins, subqueries, and the other aggregates.
-- Then `eggdb shell` and the other dialects (items 20, 22 to 25); for the PostgreSQL protocol,
+- The rest of PostgreSQL's string functions (`substr`, `trim`, `replace`, `concat`, `position`,
+  `left`, `right`, ...) and the SQL-standard `substring(... FROM ... FOR ...)` syntax.
+- Then the other dialects (items 22 to 25), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, the `pg_catalog` queries of psql's `\d` and GUI tools, `COPY` and query cancellation
   (M6a).

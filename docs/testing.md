@@ -199,14 +199,36 @@ through the `eggdb` command; the smoke test reads the samples with each release 
   a removed one) and no checkpoint, so opening it replays those commits from the log. The
   ignored test `write_the_v0_2_0_log_sample` wrote it, and refuses to run while the file exists.
 
+## SQL against the manual (D105)
+`crates/eggdb-sql/correctness/postgresql.test` holds 186 cases, each a header (`ok`, `rows` with
+the expected output after `----`, or `error <SQLSTATE>`), its SQL, and the PostgreSQL manual's
+chapter it comes from on a `chapter` line. They run in order in one session over the in-memory
+store, so later cases see the tables earlier ones made. The runner (`src/correctness.rs`) takes
+the dialect's name; each later dialect adds its own file. A case marked `... differs` is a known
+difference, listed in sql.md: the runner checks that it still differs, so fixing the engine
+fails the suite until the mark and the doc line go. At most one case in ten may be marked.
+
+## The shell and the query screen (D105)
+The shell's line editor runs against a scripted terminal (`crates/eggdb-ui/src/line.rs`):
+readline keys, `Ctrl-C` and `Ctrl-D`, history recall with the draft kept, `Ctrl-R`, completion
+of one and of many candidates, pastes sent line by line. The shell runs as a batch through the
+CLI's entry point (`crates/eggdb/src/cli/shell_tests.rs`): piped lines mixing key-value commands,
+SQL over several lines and `.` commands, `-c`, `--keep-going` and exit codes, transaction blocks
+across lines, usage errors, expanded output. The query screen runs real SQL on a real file
+through the UI's fake terminal (`crates/eggdb/src/cli/ui.rs`): results, tags, errors with the
+cursor on the caret, history, a block left open and rolled back, and a grid that scrolls in both
+directions.
+
 ## The release smoke test (D96)
 `scripts/smoke-test.sh <binary>` runs a built `eggdb` through every command: create, put (text,
 hex, stdin, a 3 MB value), get, del, scan options, check, stats, an export and import round
-trip, `eggdb sql` (a new table, a script, stdin, an error, a rolled-back block), the sample
+trip, `eggdb sql` (a new table, a script, stdin, an error, a rolled-back block), `eggdb shell` with
+piped lines and `-c` (plain output, the first failure's exit code, `--keep-going`), the sample
 files, `eggdb ui --help`, the refusal without a terminal, and, where `script(1)`
 gives it a pseudo-terminal (Linux and macOS), a scripted `eggdb ui` session that moves, deletes a
 key through the confirmation and quits, after which the file must show the delete and pass
-`check`. CI runs it against the debug binary on Linux, macOS and Windows; the release workflow
+`check`, a query screen run with `F5`, and an interactive `eggdb shell` that runs a statement,
+writes its history file and quits. CI runs it against the debug binary on Linux, macOS and Windows; the release workflow
 runs it against the release binary on every target its runner can execute.
 
 ## Flaky tests and the CI gate (D101)

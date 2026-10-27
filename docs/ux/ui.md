@@ -534,6 +534,16 @@ screen's hints bar at 80 columns reads as stated above.
 5. History is in memory, 100 entries, `Ctrl-P`/`Ctrl-N`.
 6. The main screen's hints bar trades `Enter open` for `s sql` at 80 columns.
 
+### As built in v0.2.0 (D105)
+1. A run happens on the UI's thread, without the spinner: a statement cannot be cancelled in
+   this release, so a worker would only animate the wait. Engine errors show as error lines in
+   the grid's place, not as modals.
+2. The editor's hints bar reads ` F5 run  Tab grid  Ctrl-P/Ctrl-N history  Esc back  F1 help
+   Ctrl-C quit`: `?` and `q` type in the editor, so the hint names the keys that work there.
+3. `Ctrl-P` from a just-run text skips the history entry equal to it, so the first press shows
+   the run before.
+4. A page (`PgUp`/`PgDn`) is the grid's visible rows.
+
 ## Resize
 The terminal layer delivers a `Resize` event; the UI recomputes the layout and redraws. The
 selected key stays selected and visible (the window is re-read with the selection in the same
