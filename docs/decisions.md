@@ -4184,7 +4184,8 @@ this part goes on with that research's fixes in order until `sql_bulk_insert` is
 `sql_bulk_insert` went from 1.74 to **0.89** on the Apple-silicon Mac (0.31 against 0.34 µs per
 row), and on CI's Linux runner from 1.67 to **0.83**; both lines are lowered to these values. The AST that borrows the SQL text and the plan cache were not
 needed for the insert target and remain for point selects, which stay at 1.23 on macOS and 0.85
-to 0.94 on Linux. The binary grows by another 16,528 bytes on macOS (1,181,504 to 1,198,032,
+to 0.94 on Linux. The macOS `ratio_to_sqlite` lines are enforced only when the compare crate is run by hand on
+a Mac, since CI's `compare` job runs on Linux only (D94); the Linux lines are the ones CI gates. The binary grows by another 16,528 bytes on macOS (1,181,504 to 1,198,032,
 +1.4%) and 16,880 on x86-64 Linux (1,444,696 to 1,461,576, +1.2%) for the append path and the
 direct `INSERT` path, the stated price of the speed; Linux peak memory moves within its lines
 (3,053,568 bytes for `--version`, 5,687,296 for a `get`, about 10 KB above them, from the larger
