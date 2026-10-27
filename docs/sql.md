@@ -1132,6 +1132,9 @@ And more, not in the suite yet:
   creating one makes no index on the child's columns (InnoDB makes one).
 
 ## Known differences from SQLite
+Views are read-only (SQLite's are too, without `INSTEAD OF` triggers), `CREATE TEMP VIEW` and
+the `temp` schema are `0A000`, and `sqlite_schema` does not list views yet.
+
 The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 234 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:

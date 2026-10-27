@@ -690,7 +690,7 @@ impl<'t> Parser<'t> {
             }
             "grant" if self.postgresql() => self.grant_or_revoke("GRANT"),
             "revoke" if self.postgresql() => self.grant_or_revoke("REVOKE"),
-            "comment" if !self.sqlite() => self.comment(),
+            "comment" if self.postgresql() || self.oracle() => self.comment(),
             "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
             | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
             | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),

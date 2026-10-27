@@ -187,18 +187,6 @@ pub(crate) fn relation_comment(reader: &dyn KeyValueRead, name: &str) -> SqlResu
     read_comment(reader, &comment_key(name, CommentKind::Relation, ""))
 }
 
-pub(crate) fn column_comment(
-    reader: &dyn KeyValueRead,
-    table: &str,
-    column: &str,
-) -> SqlResult<Option<String>> {
-    read_comment(reader, &comment_key(table, CommentKind::Column, column))
-}
-
-pub(crate) fn schema_comment(reader: &dyn KeyValueRead, schema: &str) -> SqlResult<Option<String>> {
-    read_comment(reader, &schema_comment_key(schema))
-}
-
 pub(crate) fn column_comments(
     reader: &dyn KeyValueRead,
     table: &str,

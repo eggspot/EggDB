@@ -176,6 +176,16 @@ pub(crate) fn create_view(
             .at(create.name.position));
         }
     }
+    let defaults;
+    let settings = match context.settings {
+        Some(settings) => settings,
+        None => {
+            defaults = Settings::default();
+            &defaults
+        }
+    };
+    name_resolution::check_view_text(&create.text, dialect, settings)
+        .map_err(|error| error.at_if_unplaced(create.name.position))?;
     let path = schemas::relation_path(writer)?;
     let mut query = create.query.clone();
     let (output, resolution) =

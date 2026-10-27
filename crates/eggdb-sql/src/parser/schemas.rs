@@ -9,7 +9,6 @@ use crate::schemas::{QUALIFIER, written_qualified};
 
 const MOST_NAMES: usize = 1024;
 
-/// How deep a parse starts: used to parse a view's text where the view is used.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Nesting {
     pub(crate) depth: usize,

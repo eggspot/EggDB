@@ -21,10 +21,6 @@ pub(crate) fn schema_key(name: &str) -> Vec<u8> {
     key
 }
 
-pub(crate) fn schemas_prefix() -> Vec<u8> {
-    schema_key("")
-}
-
 pub(crate) fn encode_schema() -> Vec<u8> {
     vec![RECORD_VERSION]
 }

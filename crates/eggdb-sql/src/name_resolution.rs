@@ -13,6 +13,7 @@ use crate::parser::{Nesting, Parameters, Parser};
 use crate::schemas::{self, DEFAULT_SCHEMA, base_name, display, is_qualified};
 use crate::settings::Settings;
 use crate::store::KeyValueRead;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const MAX_QUERY_NESTING: usize = 32;
@@ -23,6 +24,8 @@ const MAX_QUERIES: usize = 1024;
 pub(crate) struct Resolution {
     pub(crate) references: Vec<String>,
     pub(crate) expanded: Vec<String>,
+    recorded: HashSet<String>,
+    seen_expanded: HashSet<String>,
 }
 
 pub(crate) struct Resolver<'a> {
@@ -53,6 +56,14 @@ fn too_many_queries(position: usize) -> SqlError {
         format!("a statement can hold at most {MAX_QUERIES} SELECTs, counting those of its views"),
     )
     .at(position)
+}
+
+pub(crate) fn check_view_text(text: &str, dialect: Dialect, settings: &Settings) -> SqlResult<()> {
+    let tokens = tokenize_in(text, dialect)?;
+    let mut parser = Parser::new(text, &tokens)
+        .with_context(Parameters::Absent, settings)
+        .in_dialect(dialect);
+    parser.view_query().map(|_| ())
 }
 
 pub(crate) fn parse_view(
@@ -319,8 +330,7 @@ impl<'a> Resolver<'a> {
     }
 
     fn record(&mut self, name: &str) {
-        if self.stack.len() == self.recorded_at
-            && !self.resolution.references.iter().any(|known| known == name)
+        if self.stack.len() == self.recorded_at && self.resolution.recorded.insert(name.to_owned())
         {
             self.resolution.references.push(name.to_owned());
         }
@@ -387,7 +397,7 @@ impl<'a> Resolver<'a> {
         if selects > MAX_QUERIES {
             return Err(too_many_queries(position));
         }
-        if !self.resolution.expanded.contains(&view.name) {
+        if self.resolution.seen_expanded.insert(view.name.clone()) {
             self.resolution.expanded.push(view.name.clone());
         }
         let mut path = Vec::with_capacity(view.search_path.len());
@@ -569,6 +579,9 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut insert.table)?;
+        if !self.walk_expressions {
+            return Ok(());
+        }
         let mut exprs: Vec<&mut Expr> = Vec::new();
         if let InsertSource::Values(rows) = &mut insert.source {
             for row in rows {
@@ -594,6 +607,9 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut update.table)?;
+        if !self.walk_expressions {
+            return Ok(());
+        }
         let mut exprs: Vec<&mut Expr> = update
             .assignments
             .iter_mut()
@@ -615,6 +631,9 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut delete.table)?;
+        if !self.walk_expressions {
+            return Ok(());
+        }
         let mut exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();
         exprs.extend(returning_exprs(&mut delete.returning));
         resolver.expressions(exprs)

@@ -1,8 +1,8 @@
 use crate::ast::Name;
 use crate::dialect::Dialect;
 use crate::encoding::{
-    decode_schema, encode_schema, prefix_end, schema_comment_key, schema_key, schemas_prefix,
-    sequence_key, table_key,
+    decode_schema, encode_schema, prefix_end, schema_comment_key, schema_key, sequence_key,
+    table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
@@ -467,36 +467,6 @@ pub(crate) fn contents(
     Ok(found)
 }
 
-pub(crate) fn every_schema(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
-    let prefix = schemas_prefix();
-    let mut names = vec![DEFAULT_SCHEMA.to_owned()];
-    let mut failure = None;
-    let mut memory = crate::memory::WorkMemory::new();
-    reader.scan(
-        &prefix,
-        &prefix_end(&prefix),
-        ScanDirection::Forward,
-        &mut |key, value| {
-            memory.charge(key.len() + 64)?;
-            let name = std::str::from_utf8(&key[prefix.len()..])
-                .ok()
-                .filter(|name| decode_schema(name, value).is_ok());
-            match name {
-                Some(name) => names.push(name.to_owned()),
-                None => {
-                    failure = Some(crate::encoding::corrupt("schema"));
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        },
-    )?;
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(names),
-    }
-}
-
 pub(crate) fn drop_schemas(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -642,40 +612,45 @@ pub(crate) fn rename_schema(
     if schema_exists(writer, &to.text)? || is_system_schema(&to.text) {
         return Err(duplicate_schema(&to.text, dialect).at(to.position));
     }
-    let found = contents(writer, &from.text, usize::MAX)?;
-    for object in found.relations.iter().chain(&found.sequences) {
-        if let Some(view) = crate::views::first_dependent(writer, object)? {
-            return Err(SqlError::not_supported(format!(
-                "cannot rename schema {} because view {} depends on {}",
-                from.text,
-                display(&view),
-                display(object)
-            ))
-            .with_hint("Drop the view, rename the schema, then create the view again.")
-            .at(from.position));
-        }
-    }
     writer.put(&schema_key(&to.text), &encode_schema())?;
-    for relation in &found.relations {
-        let target = Name {
-            text: qualified(&to.text, base_name(relation)),
-            position: to.position,
-        };
-        let Some(bytes) = writer.get(&table_key(relation))? else {
-            continue;
-        };
-        if crate::encoding::is_view_record(&bytes) {
-            crate::views::move_view(writer, relation, &target.text)?;
-        } else {
-            crate::alter::move_table(writer, tables, relation, &target, dialect)?;
+    loop {
+        let found = contents(writer, &from.text, DROP_BATCH)?;
+        if found.relations.is_empty() && found.sequences.is_empty() {
+            break;
         }
-    }
-    for sequence in &found.sequences {
-        crate::sequences::move_sequence(
-            writer,
-            sequence,
-            &qualified(&to.text, base_name(sequence)),
-        )?;
+        for object in found.relations.iter().chain(&found.sequences) {
+            if let Some(view) = crate::views::first_dependent(writer, object)? {
+                return Err(SqlError::not_supported(format!(
+                    "cannot rename schema {} because view {} depends on {}",
+                    from.text,
+                    display(&view),
+                    display(object)
+                ))
+                .with_hint("Drop the view, rename the schema, then create the view again.")
+                .at(from.position));
+            }
+        }
+        for relation in &found.relations {
+            let target = Name {
+                text: qualified(&to.text, base_name(relation)),
+                position: to.position,
+            };
+            let Some(bytes) = writer.get(&table_key(relation))? else {
+                continue;
+            };
+            if crate::encoding::is_view_record(&bytes) {
+                crate::views::move_view(writer, relation, &target.text)?;
+            } else {
+                crate::alter::move_table(writer, tables, relation, &target, dialect)?;
+            }
+        }
+        for sequence in &found.sequences {
+            crate::sequences::move_sequence(
+                writer,
+                sequence,
+                &qualified(&to.text, base_name(sequence)),
+            )?;
+        }
     }
     crate::comments::move_schema_comment(writer, &from.text, &to.text)?;
     writer.delete(&schema_key(&from.text))?;
