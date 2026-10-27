@@ -179,6 +179,21 @@ INSERT INTO affinity (i) VALUES ('abc')
 INSERT 0 1
 ... differs
 
+ok
+CREATE TABLE untyped (a, b)
+
+rows
+INSERT INTO untyped VALUES (1.5, -2.5)
+----
+INSERT 0 1
+
+rows
+SELECT a, b, a || b FROM untyped
+----
+a|b|a || b
+1.5|-2.5|1.5-2.5
+SELECT 1
+
 chapter "SQL Language Expressions": literals, operators and NULL
 rows
 SELECT 1 + 2 * 3, 7 / 2, 7 % 3, 7.0 / 2

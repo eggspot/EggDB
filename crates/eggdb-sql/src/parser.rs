@@ -329,10 +329,15 @@ impl<'t> Parser<'t> {
                         tokens.get(at + 1)?.kind,
                         TokenKind::Integer(_) | TokenKind::Decimal(_)
                     )
+                    && !(self.sqlite() && matches!(tokens.get(at + 1)?.kind, TokenKind::Decimal(_)))
                 {
                     at += 2;
                 } else if is_plain_literal(&tokens.get(at)?.kind)
-                    && !(self.sqlite() && matches!(tokens.get(at)?.kind, TokenKind::Word(_)))
+                    && !(self.sqlite()
+                        && matches!(
+                            tokens.get(at)?.kind,
+                            TokenKind::Word(_) | TokenKind::Decimal(_)
+                        ))
                 {
                     at += 1;
                 } else {

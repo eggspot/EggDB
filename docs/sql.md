@@ -80,7 +80,7 @@ non-ASCII passwords.
 ## The MySQL dialect
 
 `eggdb sql --dialect mysql` and `eggdb shell --dialect mysql` read MySQL's SQL, and every
-connection through `eggdb serve --mysql-listen` does (D106). Both dialects work on the same
+connection through `eggdb serve --mysql-listen` does (D106). All the dialects work on the same
 tables, so a table made through psql is queried with `mysql` and the other way round.
 
 ```sh
@@ -477,7 +477,7 @@ And more, not in the suite yet:
 - `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`, `double` for `DECIMAL`).
 
 ## Known differences from SQLite
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 149 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 152 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - A column has one type: the affinity's. SQLite's columns may hold any storage class, so a
