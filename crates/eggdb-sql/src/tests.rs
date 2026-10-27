@@ -897,6 +897,27 @@ fn hostile_input_returns_errors_and_never_panics() {
         "[",
         "]",
         "coalesce(",
+        "JOIN",
+        "LEFT JOIN",
+        "CROSS JOIN",
+        "INNER JOIN people q",
+        "ON",
+        "USING (id)",
+        "p",
+        "people p",
+        "p.*",
+        "p.id",
+        "q.id",
+        "GROUP BY",
+        "HAVING",
+        "DISTINCT",
+        "count(*)",
+        "count(",
+        "sum(",
+        "avg(",
+        "min(",
+        "max(",
+        "FROM people p JOIN people q ON p.id = q.id",
     ];
     let mut random = Seeded(0xDEAD_BEEF_CAFE_F00D);
     for _ in 0..20_000 {
@@ -1556,4 +1577,92 @@ fn sums_keep_postgresql_result_types() {
         last(&mut session, "SELECT sum(d) FROM n WHERE i = 1"),
         "sum\n1e+308\nSELECT 1"
     );
+}
+
+#[test]
+fn every_join_method_agrees_on_random_tables() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE l (id integer PRIMARY KEY, k integer, v text);
+         CREATE TABLE r (id integer PRIMARY KEY, k integer, w integer);
+         CREATE TABLE h (k integer, w integer)",
+    );
+    let mut random = Seeded(0x9E37_79B9_7F4A_7C15);
+    let value = |random: &mut Seeded| {
+        if random.below(6) == 0 {
+            "NULL".to_owned()
+        } else {
+            random.below(12).to_string()
+        }
+    };
+    for id in 0..60 {
+        let k = value(&mut random);
+        last(
+            &mut session,
+            &format!("INSERT INTO l VALUES ({id}, {k}, 'v{id}')"),
+        );
+        let k = value(&mut random);
+        let w = value(&mut random);
+        last(
+            &mut session,
+            &format!("INSERT INTO r VALUES ({id}, {k}, {w}); INSERT INTO h VALUES ({k}, {w})"),
+        );
+    }
+    for kind in ["JOIN", "LEFT JOIN"] {
+        let methods = [
+            format!("SELECT l.id, r.w FROM l {kind} r ON r.k = l.k ORDER BY 1, 2"),
+            format!("SELECT l.id, r.w FROM l {kind} r ON l.k = r.k + 0 ORDER BY 1, 2"),
+            format!("SELECT l.id, r.w FROM l {kind} r USING (k) ORDER BY 1, 2"),
+            format!("SELECT l.id, h.w FROM l {kind} h ON h.k = l.k ORDER BY 1, 2"),
+        ];
+        let expected = last(&mut session, &methods[0]);
+        for sql in &methods[1..] {
+            assert_eq!(last(&mut session, sql), expected, "{sql}");
+        }
+        let by_key = [
+            format!("SELECT l.v, r.w FROM l {kind} r ON r.id = l.k ORDER BY 1, 2"),
+            format!("SELECT l.v, r.w FROM l {kind} r ON r.id + 0 = l.k ORDER BY 1, 2"),
+        ];
+        assert_eq!(
+            last(&mut session, &by_key[0]),
+            last(&mut session, &by_key[1]),
+            "{kind}"
+        );
+    }
+    let grouped = last(
+        &mut session,
+        "SELECT k, count(*), count(w), sum(w), min(w), max(w) FROM r GROUP BY k ORDER BY k",
+    );
+    let mut groups: BTreeMap<Option<i64>, Vec<Option<i64>>> = BTreeMap::new();
+    let rows = last(&mut session, "SELECT k, w FROM r");
+    for line in rows.lines().skip(1).filter(|line| line.contains('|')) {
+        let mut cells = line.split('|').map(|cell| cell.parse::<i64>().ok());
+        let k = cells.next().flatten();
+        let w = cells.next().flatten();
+        groups.entry(k).or_default().push(w);
+    }
+    let mut text = "k|count|count|sum|min|max\n".to_owned();
+    let shown = |value: Option<i64>| value.map_or("NULL".to_owned(), |value| value.to_string());
+    let ordered: Vec<_> = groups
+        .iter()
+        .filter(|(k, _)| k.is_some())
+        .chain(groups.iter().filter(|(k, _)| k.is_none()))
+        .collect();
+    for (k, values) in &ordered {
+        let present: Vec<i64> = values.iter().flatten().copied().collect();
+        let sum = (!present.is_empty()).then(|| present.iter().sum::<i64>());
+        text.push_str(&format!(
+            "{}|{}|{}|{}|{}|{}\n",
+            shown(**k),
+            values.len(),
+            present.len(),
+            shown(sum),
+            shown(present.iter().min().copied()),
+            shown(present.iter().max().copied()),
+        ));
+    }
+    text.push_str(&format!("SELECT {}", ordered.len()));
+    assert_eq!(grouped, text);
 }

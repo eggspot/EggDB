@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 pub(crate) type RowFeed<'f> =
-    dyn FnMut(&mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()> + 'f;
+    dyn FnMut(&mut dyn FnMut(&[Value]) -> SqlResult<bool>) -> SqlResult<()> + 'f;
 
 enum Extra {
     Carried(usize),
@@ -158,6 +158,22 @@ pub(crate) fn rebuild(
     })
 }
 
+pub(crate) fn bind(expr: &Expr, scope: Scope<'_>) -> SqlResult<Expr> {
+    match &expr.kind {
+        ExprKind::Column { qualifier, name } => {
+            let offset = scope.column(qualifier.as_deref(), name, expr.position)?;
+            Ok(Expr {
+                kind: ExprKind::Slot {
+                    index: offset,
+                    sql_type: scope.column_type(offset),
+                },
+                position: expr.position,
+            })
+        }
+        _ => rebuild(expr, &mut |child| bind(child, scope)),
+    }
+}
+
 pub(crate) fn shape_of(expr: &Expr) -> Expr {
     let mut stripped = rebuild(expr, &mut |child| Ok(shape_of(child))).unwrap_or(Expr {
         kind: ExprKind::Literal(Literal::Null),
@@ -169,6 +185,7 @@ pub(crate) fn shape_of(expr: &Expr) -> Expr {
 
 fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
     match &expr.kind {
+        ExprKind::Slot { sql_type, .. } => *sql_type,
         ExprKind::Column { qualifier, name } => scope
             .column(qualifier.as_deref(), name, expr.position)
             .ok()
@@ -390,7 +407,10 @@ impl Analyzer<'_> {
                     None => {
                         self.calls.push(Call {
                             function: *function,
-                            argument: argument.as_deref().cloned(),
+                            argument: argument
+                                .as_deref()
+                                .map(|argument| bind(argument, self.scope))
+                                .transpose()?,
                             distinct: *distinct,
                             exact_bigint_allowed,
                             position: expr.position,
@@ -576,6 +596,10 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
                 .map_err(|error| error.at(call.position))?;
         }
     }
+    let keys = keys
+        .iter()
+        .map(|key| bind(key, scope))
+        .collect::<SqlResult<_>>()?;
     Ok(Grouping {
         keys,
         extras: analyzer.extras,
@@ -748,7 +772,7 @@ impl Grouping {
             seen: self.calls.iter().map(|_| HashSet::new()).collect(),
         };
         feed(&mut |row| {
-            let evaluator = Evaluator { scope, row: &row };
+            let evaluator = Evaluator { scope, row };
             key.clear();
             key_values.clear();
             for expr in &self.keys {
@@ -761,7 +785,7 @@ impl Grouping {
                 None => {
                     memory.charge_row(&key_values)?;
                     memory.charge(key.len() + self.calls.len() * 64)?;
-                    groups.push(new_group(key_values.clone(), &row));
+                    groups.push(new_group(key_values.clone(), row));
                     index.insert(key.clone(), groups.len() - 1);
                     groups.len() - 1
                 }

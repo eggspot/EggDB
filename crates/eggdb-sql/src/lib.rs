@@ -7,8 +7,9 @@
 //! safety and backups cover SQL data as they cover every other key.
 //!
 //! This is the first part of the SQL core: tables with primary keys, `INSERT`, `SELECT` with
-//! `WHERE`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE`, transaction blocks, and the
-//! integer, floating-point, boolean and text types. Everything else answers SQLSTATE `0A000`
+//! `WHERE`, inner, left and cross joins, `GROUP BY` with `count`, `sum`, `avg`, `min` and
+//! `max`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE`,
+//! transaction blocks, and the integer, floating-point, boolean and text types. Everything else answers SQLSTATE `0A000`
 //! (feature not supported). The guide is `docs/sql.md` in the repository.
 
 mod aggregate;

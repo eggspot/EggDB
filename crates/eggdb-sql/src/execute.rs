@@ -1007,21 +1007,27 @@ pub(crate) fn select(
     tables: &mut TableCache,
     select: &Select,
 ) -> SqlResult<QueryResult> {
-    let definitions: Vec<Arc<TableDefinition>> = match &select.from {
-        Some(from) => std::iter::once(&from.first)
-            .chain(from.joins.iter().map(|join| &join.table))
-            .map(|reference| tables.require(reader, &reference.name))
-            .collect::<SqlResult<_>>()?,
-        None => Vec::new(),
+    let first = match &select.from {
+        Some(from) => Some(tables.require(reader, &from.first.name)?),
+        None => None,
     };
+    let mut definitions: Vec<Arc<TableDefinition>> = Vec::new();
+    if let (Some(from), Some(first)) = (&select.from, &first)
+        && !from.joins.is_empty()
+    {
+        definitions.push(Arc::clone(first));
+        for join in &from.joins {
+            definitions.push(tables.require(reader, &join.table.name)?);
+        }
+    }
     let joined = match &select.from {
         Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions)?),
         _ => None,
     };
-    let scope = match (&select.from, &joined) {
-        (_, Some(joined)) => Scope::Many(&joined.sources),
-        (Some(from), None) => scope_of(&definitions[0], &from.first),
-        (None, None) => Scope::empty(),
+    let scope = match (&select.from, &joined, &first) {
+        (_, Some(joined), _) => Scope::Many(&joined.sources),
+        (Some(from), None, Some(table)) => scope_of(table, &from.first),
+        _ => Scope::empty(),
     };
     if let Some(filter) = &select.filter {
         reject_aggregates(filter, "WHERE")?;
@@ -1065,7 +1071,11 @@ pub(crate) fn select(
         distinct: select.distinct,
     };
     let mut memory = WorkMemory::new();
-    let rows = match (&joined, definitions.first()) {
+    let bound_filter = match (&joined, &select.filter) {
+        (Some(_), Some(filter)) => Some(aggregate::bind(filter, scope)?),
+        _ => None,
+    };
+    let rows = match (&joined, first.as_deref()) {
         (Some(joined), _) => {
             let first = joined.sources.list[0];
             let first_key = select
@@ -1081,10 +1091,14 @@ pub(crate) fn select(
         reader,
         rows,
         scope,
-        filter: select.filter.as_ref(),
+        filter: bound_filter.as_ref().or(select.filter.as_ref()),
     };
     if let Some(grouping) = &grouping {
-        let groups = grouping.run(scope, &mut |visit| source.for_each(visit), &mut memory)?;
+        let groups = grouping.run(
+            scope,
+            &mut |visit| source.for_each_borrowed(visit),
+            &mut memory,
+        )?;
         source = SourceRows {
             reader,
             rows: RowSource::Rows(groups),
@@ -1141,8 +1155,8 @@ impl SourceRows<'_> {
                 for_each_matching_row(reader, table, scope, filter, &mut |_, row| visit(row))
             }
             RowSource::Joined(joined) => joined.for_each(&mut |row| {
-                if filter_matches(scope, filter, &row)? {
-                    visit(row)
+                if filter_matches(scope, filter, row)? {
+                    visit(row.to_vec())
                 } else {
                     Ok(true)
                 }
@@ -1161,6 +1175,25 @@ impl SourceRows<'_> {
                 }
                 Ok(())
             }
+        }
+    }
+}
+
+impl SourceRows<'_> {
+    fn for_each_borrowed(
+        &mut self,
+        visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
+        let (scope, filter) = (self.scope, self.filter);
+        match &mut self.rows {
+            RowSource::Joined(joined) => joined.for_each(&mut |row| {
+                if filter_matches(scope, filter, row)? {
+                    visit(row)
+                } else {
+                    Ok(true)
+                }
+            }),
+            _ => self.for_each(&mut |row| visit(&row)),
         }
     }
 }

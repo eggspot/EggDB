@@ -1,11 +1,12 @@
 use crate::types::SqlType;
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Statement {
     CreateTable(CreateTable),
     DropTable { names: Vec<Name>, if_exists: bool },
     Insert(Insert),
-    Select(Box<Select>),
+    Select(Select),
     Update(Update),
     Delete(Delete),
     Begin { read_only: bool },

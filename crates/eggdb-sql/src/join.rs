@@ -1,3 +1,4 @@
+use crate::aggregate::bind;
 use crate::ast::{BinaryOperator, Expr, ExprKind, FromClause, JoinCondition, JoinKind};
 use crate::encoding::{TableDefinition, decode_row, encode_key_value, prefix_end, rows_prefix};
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -7,6 +8,7 @@ use crate::eval::{
 use crate::memory::WorkMemory;
 use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert, equality_key};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -222,10 +224,17 @@ enum Access {
     Scan(Vec<Vec<Value>>),
 }
 
+enum Right<'r> {
+    Owned(Vec<Value>),
+    Borrowed(&'r [Value]),
+}
+
 struct Step<'a> {
+    key: RefCell<Vec<u8>>,
+    prefix_length: usize,
     preserves_left: bool,
     table: &'a TableDefinition,
-    on: Option<&'a Expr>,
+    on: Option<Expr>,
     using: &'a [(usize, usize)],
     scope: Scope<'a>,
     access: Access,
@@ -367,10 +376,16 @@ impl<'a> JoinedRows<'a> {
                 })?;
                 Access::Scan(rows)
             };
+            let prefix = rows_prefix(table.id);
             steps.push(Step {
+                prefix_length: prefix.len(),
+                key: RefCell::new(prefix),
                 preserves_left: shape.kind == JoinKind::Left,
                 table,
-                on: shape.on,
+                on: shape
+                    .on
+                    .map(|on| bind(on, Scope::Many(&shape.visible)))
+                    .transpose()?,
                 using: &shape.using,
                 scope: Scope::Many(&shape.visible),
                 access,
@@ -386,7 +401,7 @@ impl<'a> JoinedRows<'a> {
 
     pub(crate) fn for_each(
         &self,
-        visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>,
+        visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<()> {
         if let Some(key) = &self.first_key {
             let mut found = None;
@@ -408,15 +423,18 @@ impl<'a> JoinedRows<'a> {
         &self,
         level: usize,
         row: &mut Vec<Value>,
-        visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>,
+        visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<bool> {
         let Some(step) = self.steps.get(level) else {
-            return visit(row.clone());
+            return visit(row);
         };
         let base = row.len();
         let mut matched = false;
-        let mut attempt = |row: &mut Vec<Value>, right: &[Value]| -> SqlResult<bool> {
-            row.extend_from_slice(right);
+        let mut attempt = |row: &mut Vec<Value>, right: Right<'_>| -> SqlResult<bool> {
+            match right {
+                Right::Owned(values) => row.extend(values),
+                Right::Borrowed(values) => row.extend_from_slice(values),
+            }
             let keep_going = if step.matches(row)? {
                 matched = true;
                 self.extend(level + 1, row, visit)?
@@ -428,8 +446,8 @@ impl<'a> JoinedRows<'a> {
         };
         match &step.access {
             Access::Lookup(lefts) => {
-                if let Some(right) = self.lookup(step.table, lefts, row)?
-                    && !attempt(row, &right)?
+                if let Some(right) = self.lookup(step, lefts, row)?
+                    && !attempt(row, Right::Owned(right))?
                 {
                     return Ok(false);
                 }
@@ -444,7 +462,7 @@ impl<'a> JoinedRows<'a> {
                     && let Some(candidates) = buckets.get(&key)
                 {
                     for &candidate in candidates {
-                        if !attempt(row, &rows[candidate])? {
+                        if !attempt(row, Right::Borrowed(&rows[candidate]))? {
                             return Ok(false);
                         }
                     }
@@ -452,7 +470,7 @@ impl<'a> JoinedRows<'a> {
             }
             Access::Scan(rows) => {
                 for right in rows {
-                    if !attempt(row, right)? {
+                    if !attempt(row, Right::Borrowed(right))? {
                         return Ok(false);
                     }
                 }
@@ -469,11 +487,13 @@ impl<'a> JoinedRows<'a> {
 
     fn lookup(
         &self,
-        table: &TableDefinition,
+        step: &Step<'_>,
         lefts: &[usize],
         row: &[Value],
     ) -> SqlResult<Option<Vec<Value>>> {
-        let mut key = rows_prefix(table.id);
+        let table = step.table;
+        let mut key = step.key.borrow_mut();
+        key.truncate(step.prefix_length);
         for (&index, &left) in table.primary_key.iter().zip(lefts) {
             let original = &row[left];
             if original.is_null() {
@@ -491,8 +511,9 @@ impl<'a> JoinedRows<'a> {
             }
             encode_key_value(&mut key, &converted);
         }
+        let key = key.as_slice();
         let mut found = None;
-        self.reader.get_with(&key, &mut |bytes| {
+        self.reader.get_with(key, &mut |bytes| {
             found = Some(decode_row(bytes, &table.columns)?);
             Ok(())
         })?;
@@ -507,7 +528,7 @@ impl Step<'_> {
                 return Ok(false);
             }
         }
-        let Some(on) = self.on else {
+        let Some(on) = &self.on else {
             return Ok(true);
         };
         let evaluator = Evaluator {

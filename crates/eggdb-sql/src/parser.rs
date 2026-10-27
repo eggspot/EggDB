@@ -420,9 +420,7 @@ impl<'t> Parser<'t> {
             "create" => self.create(),
             "drop" => self.drop(),
             "insert" => self.insert(),
-            "select" => self
-                .select()
-                .map(|select| Statement::Select(Box::new(select))),
+            "select" => self.select().map(Statement::Select),
             "update" => self.update(),
             "delete" => self.delete(),
             "begin" | "start" => self.begin(),

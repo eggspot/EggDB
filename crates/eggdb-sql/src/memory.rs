@@ -41,3 +41,19 @@ impl WorkMemory {
         self.charge(ROW_OVERHEAD + row.len() * VALUE_SIZE + text)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{WORK_MEMORY_LIMIT, WorkMemory};
+    use crate::types::Value;
+
+    #[test]
+    fn a_statement_past_the_limit_fails_with_out_of_memory() {
+        let mut memory = WorkMemory::new();
+        assert!(memory.charge_row(&[Value::Text("x".repeat(100))]).is_ok());
+        let error = memory.charge(WORK_MEMORY_LIMIT).unwrap_err();
+        assert_eq!(error.state().code(), "53200");
+        assert!(error.hint().is_some());
+        assert!(memory.charge(usize::MAX).is_err());
+    }
+}
