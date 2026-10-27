@@ -18,8 +18,10 @@
 //! repository.
 
 mod aggregate;
+mod alter;
 mod ast;
 mod bytea;
+mod constraints;
 mod datetime;
 mod dialect;
 mod encoding;
@@ -43,6 +45,7 @@ mod parser;
 mod plan;
 mod random;
 mod schema;
+mod sequences;
 mod session;
 mod set_operations;
 mod settings;
@@ -55,6 +58,8 @@ mod temporal;
 mod types;
 mod typing;
 
+#[cfg(test)]
+mod constraint_tests;
 #[cfg(test)]
 mod correctness;
 #[cfg(test)]

@@ -1130,7 +1130,7 @@ fn clock_call(name: &str, position: usize) -> Expr {
     }
 }
 
-fn postgresql_source(expr: &Expr) -> Option<String> {
+pub(super) fn postgresql_source(expr: &Expr) -> Option<String> {
     match &expr.kind {
         ExprKind::Function { name, arguments } if arguments.is_empty() => match name.as_str() {
             "mysql_now" => Some("localtimestamp".to_owned()),

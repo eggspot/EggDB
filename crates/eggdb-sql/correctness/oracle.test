@@ -876,7 +876,6 @@ DROP TABLE IF EXISTS no_such_table
 
 ok
 CREATE SEQUENCE emp_seq
-... differs
 
 ok
 MERGE INTO dept d USING emp e ON (d.deptno = e.deptno) WHEN MATCHED THEN UPDATE SET d.dname = 'X'

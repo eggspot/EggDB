@@ -179,7 +179,7 @@ impl TempTables {
             name: name.clone(),
             columns: Vec::with_capacity(columns.len()),
             primary_key: Vec::new(),
-            indexes: Vec::new(),
+            ..TableDefinition::default()
         };
         for (index, (column, column_name)) in columns.iter().zip(unique).enumerate() {
             let sql_type = column.sql_type.unwrap_or_else(|| value_type(&rows, index));

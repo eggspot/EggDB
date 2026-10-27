@@ -956,6 +956,9 @@ impl Evaluator<'_> {
                 "No function matches the given name and argument types. You might need to add explicit type casts.",
             )
         };
+        if let Some(result) = crate::sequences::function(name, &values) {
+            return result;
+        }
         if let Some(result) = self.datetime_function(name, &values) {
             return result;
         }
@@ -1048,6 +1051,14 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "substring" => &[None, Some(SqlType::Integer), Some(SqlType::Integer)],
         "age" => &[TIMESTAMP, TIMESTAMP],
         "justify_days" | "justify_hours" | "justify_interval" => &[INTERVAL],
+        "nextval" | "currval" | "regclass_cast" | "oracle_nextval" | "oracle_currval" => {
+            &[Some(SqlType::Text)]
+        }
+        "setval" => &[
+            Some(SqlType::Text),
+            Some(SqlType::BigInt),
+            Some(SqlType::Boolean),
+        ],
         _ => return None,
     })
 }

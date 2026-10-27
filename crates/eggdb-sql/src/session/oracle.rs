@@ -338,10 +338,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     default: None,
                     auto_increment: false,
                     unique: None,
+                    constraints: Vec::new(),
                 })
                 .collect(),
             primary_key: None,
+            primary_key_name: None,
             indexes: Vec::new(),
+            constraints: Vec::new(),
         };
         execute::create_table(
             &mut scratch,

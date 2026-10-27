@@ -52,6 +52,13 @@ const KNOWN: &[Known] = &[
         description: "Sets the output format for bytea.",
     },
     Known {
+        name: "check_function_bodies",
+        default: fixed_text!("on"),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered; EggDB does not run function bodies yet.",
+    },
+    Known {
         name: "client_encoding",
         default: fixed_text!("UTF8"),
         change: Change::Utf8Only,
@@ -71,6 +78,20 @@ const KNOWN: &[Known] = &[
         change: Change::Free,
         reported: true,
         description: "Sets the display format for date and time values.",
+    },
+    Known {
+        name: "default_table_access_method",
+        default: fixed_text!("heap"),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered; EggDB has one table storage.",
+    },
+    Known {
+        name: "default_tablespace",
+        default: fixed_text!(""),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered; EggDB keeps one data file.",
     },
     Known {
         name: "default_transaction_isolation",
@@ -143,6 +164,13 @@ const KNOWN: &[Known] = &[
         description: "Shows the maximum identifier length.",
     },
     Known {
+        name: "row_security",
+        default: fixed_text!("on"),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered; row security policies are not supported yet.",
+    },
+    Known {
         name: "search_path",
         default: fixed_text!("\"$user\", public"),
         change: Change::Free,
@@ -199,6 +227,13 @@ const KNOWN: &[Known] = &[
         description: "Sets the time zone for displaying and interpreting time stamps.",
     },
     Known {
+        name: "transaction_timeout",
+        default: fixed_text!("0"),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered, not applied yet.",
+    },
+    Known {
         name: "transaction_isolation",
         default: fixed_text!("serializable"),
         change: Change::Fixed,
@@ -211,6 +246,13 @@ const KNOWN: &[Known] = &[
         change: Change::Fixed,
         reported: false,
         description: "Shows whether the current transaction is read-only.",
+    },
+    Known {
+        name: "xmloption",
+        default: fixed_text!("content"),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered; EggDB has no xml type yet.",
     },
 ];
 

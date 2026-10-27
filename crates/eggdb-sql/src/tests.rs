@@ -557,7 +557,7 @@ fn create_and_drop_table_follow_postgresql() {
         "22023"
     );
     assert_eq!(
-        state(&mut session, "CREATE TABLE u (a int CHECK (a > 0))"),
+        state(&mut session, "CREATE TABLE u (a int, EXCLUDE (a WITH =))"),
         "0A000"
     );
     assert_eq!(state(&mut session, "CREATE INDEX i ON t (nosuch)"), "42703");
@@ -592,7 +592,7 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "SELECT 1 = ANY (ARRAY[1])",
         "WITH x AS (DELETE FROM people RETURNING id) SELECT * FROM x",
         "INSERT INTO people SELECT * FROM people",
-        "ALTER TABLE people ADD COLUMN x int",
+        "ALTER TABLE people RENAME CONSTRAINT a TO b",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",
         "SAVEPOINT a",
