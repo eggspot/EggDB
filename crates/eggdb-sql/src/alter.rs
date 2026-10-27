@@ -4,6 +4,7 @@ use crate::ast::{
 };
 use crate::constraints::{self, PreparedChecks};
 use crate::dialect::Dialect;
+use crate::encoding::CommentKind;
 use crate::encoding::{
     Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, encode_meta, encode_row,
     meta_key, prefix_end, reference_key, rows_prefix, table_key,
@@ -97,8 +98,35 @@ pub(crate) fn alter_table(
         if let Some(notice) = apply(writer, tables, &mut name, action, dialect)? {
             result = result.with_notice(notice);
         }
+        if dialect == Dialect::PostgreSql
+            && let Some(change) = column_change(action, &name)
+        {
+            crate::views::check_dependents(writer, tables, &name, &change, None)?;
+        }
+        if let AlterAction::DropColumn { name: column, .. } = action {
+            crate::comments::forget_part(writer, &name, CommentKind::Column, &column.text)?;
+        }
     }
     Ok(result)
+}
+
+fn column_change(action: &AlterAction, table: &str) -> Option<String> {
+    let shown = crate::schemas::display(table);
+    Some(match action {
+        AlterAction::DropColumn { name, .. } => {
+            format!("drop column {} of table {shown}", name.text)
+        }
+        AlterAction::RenameColumn { from, .. } => {
+            format!("rename column {} of table {shown}", from.text)
+        }
+        AlterAction::SetType { column, .. } => {
+            format!("alter type of column {} of table {shown}", column.text)
+        }
+        AlterAction::Redefine { old_name, .. } => {
+            format!("change column {} of table {shown}", old_name.text)
+        }
+        _ => return None,
+    })
 }
 
 fn apply(
@@ -120,11 +148,38 @@ fn apply(
             cascade,
         } => drop_column(writer, tables, name, column, *if_exists, *cascade, dialect),
         AlterAction::RenameColumn { from, to } => {
-            rename_column(writer, tables, name, from, to, dialect).map(|()| None)
+            rename_column(writer, tables, name, from, to, dialect)?;
+            crate::comments::move_part(writer, name, CommentKind::Column, &from.text, &to.text)?;
+            Ok(None)
         }
         AlterAction::RenameTable(to) => {
-            rename_table(writer, tables, name, to, dialect)?;
-            *name = to.text.clone();
+            let target = Name {
+                text: crate::schemas::qualified(crate::schemas::schema_of(name), &to.text),
+                position: to.position,
+            };
+            constraints::check_identifier(to)?;
+            if dialect == Dialect::PostgreSql {
+                refuse_with_dependent_views(writer, name)?;
+            }
+            rename_table(writer, tables, name, &target, dialect)?;
+            *name = target.text;
+            Ok(None)
+        }
+        AlterAction::SetSchema(schema) => {
+            if !crate::schemas::schema_exists(writer, &schema.text)? {
+                return Err(
+                    crate::schemas::missing_schema(&schema.text, dialect).at(schema.position)
+                );
+            }
+            let target = Name {
+                text: crate::schemas::qualified(&schema.text, crate::schemas::base_name(name)),
+                position: schema.position,
+            };
+            refuse_with_dependent_views(writer, name)?;
+            let moving = current(writer, tables, name)?;
+            check_index_names_free(writer, &moving, &schema.text)?;
+            rename_table(writer, tables, name, &target, dialect)?;
+            *name = target.text;
             Ok(None)
         }
         AlterAction::SetDefault { column, default } => {
@@ -793,6 +848,68 @@ fn rename_column(
     )
 }
 
+fn index_names_of(table: &TableDefinition) -> Vec<String> {
+    let mut names: Vec<String> = table
+        .indexes
+        .iter()
+        .map(|index| index.name.clone())
+        .collect();
+    if !table.primary_key.is_empty() {
+        names.push(table.primary_key_constraint_name());
+    }
+    names
+}
+
+fn check_index_names_free(
+    writer: &mut dyn KeyValueWrite,
+    table: &TableDefinition,
+    schema: &str,
+) -> SqlResult<()> {
+    let names = index_names_of(table);
+    if names.is_empty() {
+        return Ok(());
+    }
+    let others: Vec<TableDefinition> = indexes::every_table(writer)?
+        .into_iter()
+        .filter(|other| {
+            other.name != table.name && crate::schemas::schema_of(&other.name) == schema
+        })
+        .collect();
+    for name in names {
+        let taken = others
+            .iter()
+            .any(|other| index_names_of(other).contains(&name))
+            || crate::sequences::relation_exists(
+                writer,
+                &crate::schemas::qualified(schema, &name),
+            )?;
+        if taken {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_TABLE,
+                format!("relation \"{name}\" already exists in schema \"{schema}\""),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn refuse_with_dependent_views(writer: &mut dyn KeyValueWrite, name: &str) -> SqlResult<()> {
+    match crate::views::first_dependent(writer, name)? {
+        Some(view) => Err(crate::views::rename_refused("table", name, &view)),
+        None => Ok(()),
+    }
+}
+
+pub(crate) fn move_table(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    from: &str,
+    to: &Name,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    rename_table(writer, tables, from, to, dialect)
+}
+
 fn rename_table(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -805,9 +922,7 @@ fn rename_table(
     if to.text == table.name {
         return Ok(());
     }
-    if tables.table(writer, &to.text)?.is_some()
-        || crate::sequences::read(writer, &to.text)?.is_some()
-    {
+    if crate::sequences::relation_exists(writer, &to.text)? {
         return Err(match dialect {
             Dialect::MySql => SqlError::new(
                 SqlState::MYSQL_TABLE_EXISTS,
@@ -864,6 +979,7 @@ fn rename_table(
         constraints::register_references(writer, tables, &definition)?;
     }
     crate::sequences::rename_owner(writer, &old_name, None, &to.text)?;
+    crate::comments::move_owner(writer, &old_name, &to.text)?;
     constraints::refresh_flags(writer, tables, &to.text)
 }
 
@@ -1296,7 +1412,7 @@ fn add_constraint(
             let mut new = table.clone();
             new.primary_key = key;
             if let Some(given) = &spec.name
-                && given.text != format!("{}_pkey", table.name)
+                && given.text != format!("{}_pkey", crate::schemas::base_name(&table.name))
             {
                 new.primary_key_name = Some(given.text.clone());
             }

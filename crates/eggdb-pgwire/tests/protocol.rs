@@ -285,6 +285,95 @@ ALTER TABLE ONLY public.kids
 }
 
 #[test]
+fn a_pg_dump_script_with_schemas_views_and_comments_runs_as_one_simple_query() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    let script = "SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+CREATE SCHEMA shop;
+ALTER SCHEMA shop OWNER TO postgres;
+COMMENT ON SCHEMA shop IS 'the shop';
+CREATE EXTENSION IF NOT EXISTS plpgsql WITH SCHEMA pg_catalog;
+COMMENT ON EXTENSION plpgsql IS 'PL/pgSQL procedural language';
+SET default_tablespace = '';
+SET default_table_access_method = heap;
+CREATE TABLE shop.customers (
+    id integer NOT NULL,
+    name text
+);
+ALTER TABLE shop.customers OWNER TO postgres;
+COMMENT ON TABLE shop.customers IS 'who buys';
+COMMENT ON COLUMN shop.customers.name IS 'their name';
+CREATE SEQUENCE shop.customers_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE shop.customers_id_seq OWNER TO postgres;
+ALTER SEQUENCE shop.customers_id_seq OWNED BY shop.customers.id;
+CREATE TABLE public.orders (
+    id integer NOT NULL,
+    customer_id integer,
+    total numeric(10,2)
+);
+ALTER TABLE public.orders OWNER TO postgres;
+CREATE VIEW shop.order_totals AS
+ SELECT c.name,
+    sum(o.total) AS total
+   FROM (shop.customers c
+     JOIN public.orders o ON ((o.customer_id = c.id)))
+  GROUP BY c.name;
+ALTER VIEW shop.order_totals OWNER TO postgres;
+COMMENT ON VIEW shop.order_totals IS 'spend per customer';
+ALTER TABLE ONLY shop.customers ALTER COLUMN id SET DEFAULT nextval('shop.customers_id_seq'::regclass);
+INSERT INTO shop.customers VALUES (1, 'ann');
+INSERT INTO public.orders VALUES (1, 1, 2.50);
+INSERT INTO public.orders VALUES (2, 1, 1.25);
+SELECT pg_catalog.setval('shop.customers_id_seq', 1, true);
+ALTER TABLE ONLY shop.customers
+    ADD CONSTRAINT customers_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES shop.customers(id);
+REVOKE USAGE ON SCHEMA public FROM PUBLIC;
+GRANT ALL ON SCHEMA public TO PUBLIC;
+GRANT SELECT ON TABLE shop.order_totals TO reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA shop GRANT SELECT ON TABLES TO reader;
+";
+    let answer = client.query(script);
+    assert!(!tags(&answer).contains('E'), "{answer:?}");
+    assert_eq!(ready_status(&answer), b'I');
+    assert_eq!(
+        rows(&client.query("SELECT * FROM shop.order_totals")),
+        [vec![Some("ann".into()), Some("3.75".into())]]
+    );
+    assert_eq!(
+        rows(&client.query(
+            "SET search_path = shop, public; INSERT INTO customers (name) VALUES ('bo') RETURNING id"
+        )),
+        [vec![Some("2".into())]]
+    );
+    assert_eq!(
+        client.query("INSERT INTO orders VALUES (3, 9, 1)")[0].code(),
+        "23503"
+    );
+    assert_eq!(client.query("DROP SCHEMA shop")[0].code(), "2BP01");
+    assert_eq!(
+        client.query("CREATE MATERIALIZED VIEW m AS SELECT 1")[0].code(),
+        "0A000"
+    );
+}
+
+#[test]
 fn errors_carry_their_sqlstate_and_position_and_blocks_fail_until_rollback() {
     let server = TestServer::start(8);
     let (mut client, _) = Client::login(server.address);

@@ -594,9 +594,9 @@ impl<'s> Shell<'s> {
             .iter()
             .map(|table| {
                 let mut text = format!("{}\n", table.create_statement_in(dialect));
-                for index in &table.indexes {
-                    text.push_str(&index.create_statement_in(&table.name, dialect));
-                    text.push('\n');
+                text.push_str(&table.index_statements_in(dialect));
+                if dialect == eggdb_sql::Dialect::PostgreSql {
+                    text.push_str(&table.comment_statements());
                 }
                 text
             })

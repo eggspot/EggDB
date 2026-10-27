@@ -21,6 +21,7 @@ mod aggregate;
 mod alter;
 mod ast;
 mod bytea;
+mod comments;
 mod constraints;
 mod datetime;
 mod dialect;
@@ -38,6 +39,7 @@ mod lexer;
 mod memory;
 mod mysql_errors;
 mod mysql_variables;
+mod name_resolution;
 mod numeric;
 mod oracle_errors;
 mod oracle_functions;
@@ -45,6 +47,7 @@ mod parser;
 mod plan;
 mod random;
 mod schema;
+mod schemas;
 mod sequences;
 mod session;
 mod set_operations;
@@ -57,6 +60,7 @@ mod temp_tables;
 mod temporal;
 mod types;
 mod typing;
+mod views;
 
 #[cfg(test)]
 mod constraint_tests;
@@ -66,6 +70,8 @@ mod correctness;
 mod index_tests;
 #[cfg(test)]
 mod memory_store;
+#[cfg(test)]
+mod schema_tests;
 #[cfg(test)]
 mod subquery_tests;
 #[cfg(test)]

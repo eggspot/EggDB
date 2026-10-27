@@ -457,7 +457,8 @@ fn owner_of(
     let Some((table_name, column)) = owned_by else {
         return Ok(None);
     };
-    let table = tables.table(reader, &table_name.text)?.ok_or_else(|| {
+    let resolved = crate::schemas::resolve_relation(reader, &table_name.text)?;
+    let table = tables.table(reader, &resolved)?.ok_or_else(|| {
         SqlError::new(
             SqlState::UNDEFINED_TABLE,
             format!("relation \"{}\" does not exist", table_name.text),
@@ -477,7 +478,7 @@ fn owner_of(
     Ok(Some((table.name.clone(), column.text.clone())))
 }
 
-fn relation_exists(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
+pub(crate) fn relation_exists(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
     Ok(reader.get(&table_key(name))?.is_some() || reader.get(&sequence_key(name))?.is_some())
 }
 
@@ -524,6 +525,7 @@ pub(crate) fn create_sequence(
     if let Some(owned_by) = &create.options.owned_by {
         sequence.owned_by = owner_of(writer, tables, owned_by)?;
     }
+    crate::comments::forget_owner(writer, name)?;
     writer.put(&sequence_key(name), &sequence.encode())?;
     forget_loaded();
     if let Some((owner, _)) = &sequence.owned_by {
@@ -564,6 +566,7 @@ pub(crate) fn alter_sequence(
         }
         writer.delete(&sequence_key(name))?;
         writer.put(&sequence_key(&to.text), &sequence.encode())?;
+        crate::comments::move_owner(writer, name, &to.text)?;
         forget_loaded();
         return Ok(QueryResult::command("ALTER SEQUENCE"));
     }
@@ -585,6 +588,7 @@ pub(crate) fn check_default_sequences(reader: &dyn KeyValueRead, text: &str) -> 
         return Ok(());
     }
     for name in default_sequence_names(text) {
+        let name = sequence_on_path(reader, name)?;
         if read(reader, &name)?.is_none() {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_TABLE,
@@ -711,6 +715,7 @@ pub(crate) fn drop_sequences(
         }
         let owner = read(writer, &name.text)?.and_then(|sequence| sequence.owned_by);
         writer.delete(&sequence_key(&name.text))?;
+        crate::comments::forget_owner(writer, &name.text)?;
         if let Some((owner, _)) = owner {
             crate::constraints::refresh_flags(writer, tables, &owner)?;
         }
@@ -757,6 +762,17 @@ pub(crate) fn rename_owner(
         }
         writer.put(&sequence_key(&name), &sequence.encode())?;
     }
+    forget_loaded();
+    Ok(())
+}
+
+pub(crate) fn move_sequence(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -> SqlResult<()> {
+    let Some(bytes) = writer.get(&sequence_key(from))? else {
+        return Ok(());
+    };
+    writer.delete(&sequence_key(from))?;
+    writer.put(&sequence_key(to), &bytes)?;
+    crate::comments::move_owner(writer, from, to)?;
     forget_loaded();
     Ok(())
 }
@@ -822,22 +838,65 @@ pub(crate) fn regclass_name(text: &str) -> SqlResult<String> {
             part.truncate(end);
         }
     }
+    if parts
+        .iter()
+        .any(|part| part.contains(crate::schemas::QUALIFIER))
+    {
+        return Err(invalid());
+    }
     match parts.as_slice() {
         [name] => Ok(name.clone()),
         [schema, name] if schema == "public" || schema == "pg_catalog" => Ok(name.clone()),
-        [schema, _] => Err(SqlError::new(
-            SqlState::INVALID_SCHEMA_NAME,
-            format!("schema \"{schema}\" does not exist"),
-        )),
+        [schema, name] => Ok(crate::schemas::qualified(schema, name)),
         _ => Err(SqlError::not_supported(
             "cross-database references are not implemented",
         )),
     }
 }
 
+fn on_path(name: String) -> String {
+    if crate::schemas::is_qualified(&name) {
+        return name;
+    }
+    let path = crate::schemas::cached_relation_path();
+    if path.len() == 1 && path[0] == crate::schemas::DEFAULT_SCHEMA {
+        return name;
+    }
+    let found = STATEMENT.with(|state| {
+        let state = state.try_borrow().ok()?;
+        let state = state.last()?;
+        path.iter()
+            .map(|schema| crate::schemas::qualified(schema, &name))
+            .find(|candidate| matches!(state.loaded.get(candidate), Some(Some(_))))
+    });
+    match found {
+        Some(candidate) => candidate,
+        None if path
+            .iter()
+            .any(|schema| schema == crate::schemas::DEFAULT_SCHEMA) =>
+        {
+            name
+        }
+        None => crate::schemas::unreachable_name(&name),
+    }
+}
+
+fn sequence_on_path(reader: &dyn KeyValueRead, name: String) -> SqlResult<String> {
+    if crate::schemas::is_qualified(&name) {
+        return Ok(name);
+    }
+    for schema in crate::schemas::relation_path(reader)? {
+        let candidate = crate::schemas::qualified(&schema, &name);
+        if reader.get(&sequence_key(&candidate))?.is_some() {
+            return Ok(candidate);
+        }
+    }
+    Ok(name)
+}
+
 fn argument_name(value: &Value) -> SqlResult<String> {
     match value {
-        Value::Text(text) => regclass_name(text),
+        Value::Text(text) => regclass_name(text).map(on_path),
         Value::BigInt(_) | Value::Integer(_) | Value::SmallInt(_) => Err(SqlError::not_supported(
             "sequence object identifiers (OIDs) are not supported yet",
         )),
@@ -1047,7 +1106,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("oracle_currval", [Value::Text(name)]) => currval(name),
         ("regclass_cast", [Value::Null]) => Ok(Value::Null),
         ("regclass_cast", [Value::Text(text)]) => {
-            regclass_name(text).map(|name| Value::Text(crate::schema::quoted(&name)))
+            regclass_name(text).map(|name| Value::Text(crate::schemas::quoted_name(&on_path(name))))
         }
         ("regclass_cast", [other]) => Err(SqlError::new(
             SqlState::CANNOT_COERCE,

@@ -12,12 +12,33 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
 use crate::lexer::{Token, TokenKind, tokenize_in};
 use crate::mysql_errors::{self, Warning};
+use crate::name_resolution::Binding;
 use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
 use crate::sequences::{self, SequenceAdvance, SessionSequences};
 use crate::settings::Settings;
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
+
+fn walks_expressions(tokens: &[Token<'_>]) -> bool {
+    let mut selects = 0;
+    for token in tokens {
+        match &token.kind {
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("select") => selects += 1,
+            TokenKind::Word(word) if word.starts_with("current_schema") => return true,
+            TokenKind::QuotedIdentifier(name) if name.starts_with("current_schema") => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    selects > 1
+        || selects == 1
+            && !tokens.first().is_some_and(|token| {
+                matches!(&token.kind, TokenKind::Word(word)
+                    if word.eq_ignore_ascii_case("select") || word.eq_ignore_ascii_case("with"))
+            })
+}
 
 fn mentions_sequence_functions(tokens: &[Token<'_>]) -> bool {
     tokens.iter().any(|token| {
@@ -196,6 +217,9 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     sequence_values: SessionSequences,
     pending_sequences: Vec<SequenceAdvance>,
     statement_uses_sequences: bool,
+    statement_walks_expressions: bool,
+    search_path_cache: crate::schemas::PathCache,
+    search_path_at_begin: Option<String>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -224,6 +248,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             sequence_values: SessionSequences::default(),
             pending_sequences: Vec::new(),
             statement_uses_sequences: false,
+            statement_walks_expressions: true,
+            search_path_cache: crate::schemas::PathCache::default(),
+            search_path_at_begin: None,
         }
     }
 
@@ -272,6 +299,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn in_dialect(&mut self, text: &str, error: SqlError) -> SqlError {
+        let error = error.with_names_displayed();
         if self.sqlite() {
             return crate::sqlite_errors::translate(error, text);
         }
@@ -398,6 +426,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut parameter_types = declared_types.to_vec();
         parameter_types.resize(highest_parameter(&tokens).max(declared_types.len()), None);
         let settings = Arc::clone(&self.settings);
+        let _path = self.enter_search_path(&settings);
         let mut parser = Parser::new(text, &tokens)
             .with_context(Parameters::Types(declared_types), &settings)
             .in_dialect(self.dialect);
@@ -430,7 +459,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         if matches!(self.block, Block::Failed) {
             return Err(aborted_block());
         }
-        let columns = match &statement {
+        let mut statement = statement;
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: true,
+        };
+        let binding = &binding;
+        let columns = match &mut statement {
             Statement::Select(select)
                 if self.sqlite()
                     && select
@@ -452,18 +487,27 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     .map(|result| result.columns)
             }
             Statement::Select(select) => self
-                .read(|reader, tables| execute::select(reader, tables, select, true))
+                .read(|reader, tables| {
+                    binding.select(reader, tables, select)?;
+                    execute::select(reader, tables, select, true)
+                })
                 .map(|result| result.columns),
             Statement::Query(query) => self
-                .read(|reader, tables| execute::query(reader, tables, query, true))
+                .read(|reader, tables| {
+                    binding.query(reader, tables, query)?;
+                    execute::query(reader, tables, query, true)
+                })
                 .map(|result| result.columns),
             Statement::Insert(insert) => self.read(|reader, tables| {
+                binding.insert(reader, tables, insert)?;
                 execute::returning_columns(reader, tables, &insert.table, &insert.returning)
             }),
             Statement::Update(update) => self.read(|reader, tables| {
+                binding.update(reader, tables, update)?;
                 execute::returning_columns(reader, tables, &update.table, &update.returning)
             }),
             Statement::Delete(delete) => self.read(|reader, tables| {
+                binding.delete(reader, tables, delete)?;
                 execute::returning_columns(reader, tables, &delete.table, &delete.returning)
             }),
             Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),
@@ -581,6 +625,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let settings = Arc::clone(&self.settings);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _bytes = crate::bytea::enter_dialect(self.dialect);
+            let _path = self.enter_search_path(&settings);
             let mut parser = Parser::new(text, &tokens)
                 .with_context(parameters, &settings)
                 .in_dialect(self.dialect)
@@ -603,10 +648,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     String::new()
                 },
             );
-            if let Some(rows) = parser.literal_rows() {
+            if let Some(mut rows) = parser.literal_rows() {
                 resume = parser.resume_point();
                 self.enter_sequences(false);
-                let result = self.insert_literal_rows(&rows);
+                let result = self.insert_literal_rows(&mut rows);
                 self.leave_sequences();
                 let settled = self.settle_sequences();
                 let result = self.after_statement(result?, false);
@@ -618,11 +663,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             let first_token = parser.resume_point().0;
             let parsed = parser.statement();
+            let setting_changes = parser.take_setting_changes();
             resume = parser.resume_point();
-            let uses_sequences = tokens
-                .get(first_token..resume.0.min(tokens.len()))
-                .is_some_and(mentions_sequence_functions);
-            let statement = match parsed {
+            let statement_tokens = tokens.get(first_token..resume.0.min(tokens.len()));
+            let uses_sequences = statement_tokens.is_some_and(mentions_sequence_functions);
+            self.statement_walks_expressions = statement_tokens.is_none_or(walks_expressions);
+            let mut statement = match parsed {
                 Ok(statement) => statement,
                 Err(error) => {
                     self.fail_block_in_postgresql();
@@ -636,15 +682,33 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 )
             );
             self.enter_sequences(uses_sequences);
-            let result = self.run(&statement);
+            let result = self.run(&mut statement);
+            _path.remember(&mut self.search_path_cache);
             self.leave_sequences();
             let settled = self.settle_sequences();
+            let result =
+                result.and_then(|result| self.apply_setting_changes(result, &setting_changes));
             let result = self.after_statement(result?, diagnostic);
             settled?;
             if !on_result(result) {
                 return Ok(());
             }
         }
+    }
+
+    fn enter_search_path(&self, settings: &Arc<Settings>) -> crate::schemas::EnteredPath {
+        crate::schemas::enter(settings, self.dialect, &self.search_path_cache)
+    }
+
+    fn apply_setting_changes(
+        &mut self,
+        result: QueryResult,
+        changes: &[(String, String)],
+    ) -> SqlResult<QueryResult> {
+        for (name, value) in changes {
+            Arc::make_mut(&mut self.settings).set(name, Some(value))?;
+        }
+        Ok(result)
     }
 
     fn enter_sequences(&mut self, uses_sequences: bool) {
@@ -696,6 +760,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn after_statement(&mut self, mut result: QueryResult, diagnostic: bool) -> QueryResult {
+        for notice in &mut result.notices {
+            if notice.contains(crate::schemas::QUALIFIER) {
+                *notice = crate::schemas::display(notice);
+            }
+        }
         if self.sqlite() {
             self.sqlite_after_statement(&mut result);
             return result;
@@ -748,7 +817,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
-    fn run(&mut self, statement: &Statement) -> SqlResult<QueryResult> {
+    fn run(&mut self, statement: &mut Statement) -> SqlResult<QueryResult> {
         if self.sqlite() {
             match statement {
                 Statement::Begin { .. } if self.in_block() => {
@@ -786,6 +855,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         {
             self.commit()?;
         }
+        let settings = Arc::clone(&self.settings);
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: self.statement_walks_expressions,
+        };
+        let binding = &binding;
+        let dialect = self.dialect;
         let result = match statement {
             Statement::MySql(statement) => self.run_mysql(statement),
             Statement::Pragma(pragma) => self.run_pragma(pragma),
@@ -808,48 +884,100 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 self.select_dictionary(select, false)
             }
             Statement::Truncate(table) => self.write("TRUNCATE TABLE", |writer, tables| {
+                binding.target(writer, tables, table)?;
                 execute::truncate(writer, tables, table)
             }),
-            Statement::Select(select) if self.statement_uses_sequences => self
-                .write("nextval()", |writer, tables| {
+            Statement::Select(select) if self.statement_uses_sequences => {
+                self.write("nextval()", |writer, tables| {
+                    binding.select(writer, tables, select)?;
                     execute::select(writer, tables, select, false)
-                }),
-            Statement::Query(query) if self.statement_uses_sequences => self
-                .write("nextval()", |writer, tables| {
+                })
+            }
+            Statement::Query(query) if self.statement_uses_sequences => {
+                self.write("nextval()", |writer, tables| {
+                    binding.query(writer, tables, query)?;
                     execute::query(writer, tables, query, false)
-                }),
-            Statement::Select(select) => {
-                self.read(|reader, tables| execute::select(reader, tables, select, false))
-            }
-            Statement::Query(query) => {
-                self.read(|reader, tables| execute::query(reader, tables, query, false))
-            }
-            Statement::CreateSequence(create) => {
-                let dialect = self.dialect;
-                self.write("CREATE SEQUENCE", |writer, tables| {
-                    sequences::create_sequence(writer, tables, create, dialect)
                 })
             }
-            Statement::AlterSequence(alter) => {
-                let dialect = self.dialect;
-                self.write("ALTER SEQUENCE", |writer, tables| {
-                    sequences::alter_sequence(writer, tables, alter, dialect)
-                })
-            }
+            Statement::Select(select) => self.read(|reader, tables| {
+                binding.select(reader, tables, select)?;
+                execute::select(reader, tables, select, false)
+            }),
+            Statement::Query(query) => self.read(|reader, tables| {
+                binding.query(reader, tables, query)?;
+                execute::query(reader, tables, query, false)
+            }),
+            Statement::CreateSequence(create) => self.write("CREATE SEQUENCE", |writer, tables| {
+                create.name.text = crate::schemas::creation_name(writer, &create.name)?;
+                sequences::create_sequence(writer, tables, create, dialect)
+            }),
+            Statement::AlterSequence(alter) => self.write("ALTER SEQUENCE", |writer, tables| {
+                binding.names(writer, tables, std::slice::from_mut(&mut alter.name))?;
+                if let Some(to) = &mut alter.rename {
+                    crate::constraints::check_identifier(to)?;
+                    to.text = crate::schemas::qualified(
+                        crate::schemas::schema_of(&alter.name.text),
+                        &to.text,
+                    );
+                }
+                sequences::alter_sequence(writer, tables, alter, dialect)
+            }),
             Statement::DropSequence {
                 names,
                 if_exists,
                 cascade,
-            } => {
-                let dialect = self.dialect;
-                self.write("DROP SEQUENCE", |writer, tables| {
-                    sequences::drop_sequences(writer, tables, names, *if_exists, *cascade, dialect)
-                })
-            }
-            Statement::AlterTable(alter) => {
-                let dialect = self.dialect;
-                self.write("ALTER TABLE", |writer, tables| {
-                    crate::alter::alter_table(writer, tables, alter, dialect)
+            } => self.write("DROP SEQUENCE", |writer, tables| {
+                binding.names(writer, tables, names)?;
+                sequences::drop_sequences(writer, tables, names, *if_exists, *cascade, dialect)
+            }),
+            Statement::AlterTable(alter) => self.write("ALTER TABLE", |writer, tables| {
+                binding.alter_table(writer, tables, alter)?;
+                crate::alter::alter_table(writer, tables, alter, dialect)
+            }),
+            Statement::CreateSchema {
+                name,
+                if_not_exists,
+            } => self.write("CREATE SCHEMA", |writer, _| {
+                crate::schemas::create_schema(writer, name, *if_not_exists, dialect)
+            }),
+            Statement::DropSchema {
+                names,
+                if_exists,
+                cascade,
+            } => self.write("DROP SCHEMA", |writer, tables| {
+                crate::schemas::drop_schemas(writer, tables, names, *if_exists, *cascade, dialect)
+            }),
+            Statement::RenameSchema { from, to } => self.write("ALTER SCHEMA", |writer, tables| {
+                crate::schemas::rename_schema(writer, tables, from, to, dialect)
+            }),
+            Statement::CreateView(create) => self.write("CREATE VIEW", |writer, tables| {
+                let context = crate::views::ViewContext {
+                    settings: Some(&settings),
+                    dialect,
+                };
+                crate::views::create_view(writer, tables, create, &context)
+            }),
+            Statement::DropView {
+                names,
+                if_exists,
+                cascade,
+            } => self.write("DROP VIEW", |writer, tables| {
+                binding.names(writer, tables, names)?;
+                crate::views::drop_views(writer, tables, names, *if_exists, *cascade, dialect)
+            }),
+            Statement::AlterView(alter) => self.write("ALTER VIEW", |writer, tables| {
+                binding.names(writer, tables, std::slice::from_mut(&mut alter.name))?;
+                crate::views::alter_view(writer, tables, alter, dialect)
+            }),
+            Statement::Comment(comment) => self.write("COMMENT", |writer, tables| {
+                binding.comment(writer, tables, comment)?;
+                crate::comments::comment_on(writer, tables, comment, dialect)
+            }),
+            Statement::Ignored { tag, notice } => {
+                let result = QueryResult::command(*tag);
+                Ok(match notice {
+                    Some(notice) => result.with_notice(notice.clone()),
+                    None => result,
                 })
             }
             Statement::Set { name, value } => Arc::make_mut(&mut self.settings)
@@ -863,46 +991,44 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Ok(QueryResult::command("RESET"))
             }
             Statement::Show { name } => self.show(name.as_deref()),
-            Statement::CreateTable(create) => {
-                let dialect = self.dialect;
-                self.write("CREATE TABLE", |writer, tables| {
-                    execute::create_table(writer, tables, create, dialect)
+            Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
+                binding.create_table(writer, tables, create)?;
+                execute::create_table(writer, tables, create, dialect)
+            }),
+            Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
+                binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
+                crate::indexes::create_index(writer, tables, create, dialect)
+            }),
+            Statement::DropIndex(drop) => self.write("DROP INDEX", |writer, tables| {
+                if let Some(table) = &mut drop.table {
+                    binding.names(writer, tables, std::slice::from_mut(table))?;
+                }
+                crate::indexes::drop_index(writer, tables, drop, dialect)
+            }),
+            Statement::Explain(explain) => self
+                .read(|reader, tables| {
+                    binding.statement(reader, tables, &mut explain.statement)?;
+                    execute::explain(reader, tables, &explain.statement)
                 })
-            }
-            Statement::CreateIndex(create) => {
-                let dialect = self.dialect;
-                self.write("CREATE INDEX", |writer, tables| {
-                    crate::indexes::create_index(writer, tables, create, dialect)
-                })
-            }
-            Statement::DropIndex(drop) => {
-                let dialect = self.dialect;
-                self.write("DROP INDEX", |writer, tables| {
-                    crate::indexes::drop_index(writer, tables, drop, dialect)
-                })
-            }
-            Statement::Explain(explain) => {
-                let dialect = self.dialect;
-                self.read(|reader, tables| execute::explain(reader, tables, &explain.statement))
-                    .map(|query| crate::explain::render(&query, explain.style, dialect))
-            }
+                .map(|query| crate::explain::render(&query, explain.style, dialect)),
             Statement::DropTable {
                 names,
                 if_exists,
                 cascade,
-            } => {
-                let dialect = self.dialect;
-                self.write("DROP TABLE", |writer, tables| {
-                    execute::drop_tables(writer, tables, names, *if_exists, *cascade, dialect)
-                })
-            }
+            } => self.write("DROP TABLE", |writer, tables| {
+                binding.names(writer, tables, names)?;
+                execute::drop_tables(writer, tables, names, *if_exists, *cascade, dialect)
+            }),
             Statement::Insert(insert) => self.write("INSERT", |writer, tables| {
+                binding.insert(writer, tables, insert)?;
                 execute::insert(writer, tables, insert)
             }),
             Statement::Update(update) => self.write("UPDATE", |writer, tables| {
+                binding.update(writer, tables, update)?;
                 execute::update(writer, tables, update)
             }),
             Statement::Delete(delete) => self.write("DELETE", |writer, tables| {
+                binding.delete(writer, tables, delete)?;
                 execute::delete(writer, tables, delete)
             }),
             Statement::Begin { .. } | Statement::Commit | Statement::Rollback => {
@@ -942,6 +1068,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     | Statement::AlterSequence(_)
                     | Statement::DropSequence { .. }
                     | Statement::AlterTable(_)
+                    | Statement::CreateSchema { .. }
+                    | Statement::DropSchema { .. }
+                    | Statement::RenameSchema { .. }
+                    | Statement::CreateView(_)
+                    | Statement::DropView { .. }
+                    | Statement::AlterView(_)
+                    | Statement::Comment(_)
             )
     }
 
@@ -968,11 +1101,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         ))
     }
 
-    fn insert_literal_rows(&mut self, rows: &LiteralRows<'_>) -> SqlResult<QueryResult> {
+    fn insert_literal_rows(&mut self, rows: &mut LiteralRows<'_>) -> SqlResult<QueryResult> {
         if matches!(self.block, Block::Failed) {
             return Err(aborted_block());
         }
+        let settings = Arc::clone(&self.settings);
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: false,
+        };
         let result = self.write("INSERT", |writer, tables| {
+            binding.target(writer, tables, &mut rows.table)?;
             execute::insert_literals(writer, tables, rows)
         });
         if result.is_err() {
@@ -1046,6 +1185,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                                     | "ALTER SEQUENCE"
                                     | "DROP SEQUENCE"
                                     | "ALTER TABLE"
+                                    | "CREATE SCHEMA"
+                                    | "DROP SCHEMA"
+                                    | "ALTER SCHEMA"
+                                    | "CREATE VIEW"
+                                    | "DROP VIEW"
+                                    | "ALTER VIEW"
+                                    | "COMMENT"
                             ) =>
                     {
                         self.block = Block::Writing(writer);
@@ -1079,12 +1225,27 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 } else {
                     Block::Writing(self.store.begin_write()?)
                 };
+                if self.dialect == Dialect::PostgreSql {
+                    self.search_path_at_begin = self.settings.get("search_path").ok();
+                }
                 Ok(QueryResult::command("BEGIN"))
             }
         }
     }
 
+    fn restore_search_path(&mut self) {
+        if let Some(path) = self.search_path_at_begin.take()
+            && self.settings.get("search_path").ok().as_deref() != Some(path.as_str())
+        {
+            let _ = Arc::make_mut(&mut self.settings).set("search_path", Some(&path));
+        }
+    }
+
     fn commit(&mut self) -> SqlResult<QueryResult> {
+        if matches!(self.block, Block::Failed) {
+            self.restore_search_path();
+        }
+        self.search_path_at_begin = None;
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 writer.commit()?;
@@ -1101,6 +1262,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn rollback(&mut self) -> SqlResult<QueryResult> {
+        self.restore_search_path();
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 writer.rollback()?;

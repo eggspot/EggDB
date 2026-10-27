@@ -3,11 +3,13 @@ mod indexes;
 mod mysql;
 mod oracle;
 mod query;
+mod schemas;
 mod sqlite;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved};
 
+pub(crate) use schemas::Nesting;
 pub use sqlite::SQLITE_COMPATIBLE_VERSION;
 pub(crate) use sqlite::is_schema_table;
 
@@ -123,7 +125,9 @@ fn is_plain_literal(kind: &TokenKind<'_>) -> bool {
     ) || matches!(kind, TokenKind::Word(word) if word == "null" || word == "true" || word == "false")
 }
 
-const POSTGRESQL_ONLY_FUNCTIONS: [&str; 28] = [
+const POSTGRESQL_ONLY_FUNCTIONS: [&str; 30] = [
+    "set_config",
+    "current_schemas",
     "nextval",
     "currval",
     "lastval",
@@ -183,6 +187,7 @@ pub(crate) struct Parser<'t> {
     placeholders_seen: usize,
     query_depth: usize,
     queries: usize,
+    setting_changes: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -291,7 +296,12 @@ impl<'t> Parser<'t> {
             placeholders_seen: 0,
             query_depth: 0,
             queries: 0,
+            setting_changes: Vec::new(),
         }
+    }
+
+    pub(crate) fn take_setting_changes(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.setting_changes)
     }
 
     pub(crate) fn in_dialect(mut self, dialect: Dialect) -> Self {
@@ -544,6 +554,13 @@ impl<'t> Parser<'t> {
         let token = self.peek();
         let text = match &token.kind {
             TokenKind::Word(word) if !self.reserved(word) => word.as_ref().to_owned(),
+            TokenKind::QuotedIdentifier(name) if name.contains(crate::schemas::QUALIFIER) => {
+                return Err(SqlError::new(
+                    SqlState::INVALID_NAME,
+                    format!("invalid name \"{}\"", name.escape_default()),
+                )
+                .at(token.start));
+            }
             TokenKind::QuotedIdentifier(name) => name.clone(),
             _ => return Err(self.unexpected()),
         };
@@ -565,6 +582,12 @@ impl<'t> Parser<'t> {
         if self.sqlite() && self.peek_kind() == &TokenKind::Dot {
             self.at += 1;
             let table = self.name()?;
+            if name.text == "temp" {
+                return Err(SqlError::not_supported(
+                    "the temp schema is not supported yet: EggDB has no temporary tables",
+                )
+                .at(name.position));
+            }
             if name.text != "main" {
                 return Err(SqlError::new(
                     SqlState::INVALID_CATALOG_NAME,
@@ -575,24 +598,21 @@ impl<'t> Parser<'t> {
             return Ok(table);
         }
         if self.oracle() && self.peek_kind() == &TokenKind::Dot {
+            self.at += 1;
+            let table = self.name()?;
             if swap_uniform_case(&name.text) != self.oracle_user() {
-                return Err(SqlError::not_supported(
-                    "schemas other than the session user's are not supported yet",
+                return Err(SqlError::new(
+                    SqlState::UNDEFINED_TABLE,
+                    "table or view does not exist",
                 )
+                .with_oracle_code(942)
                 .at(name.position));
             }
-            self.at += 1;
-            return self.name();
+            return Ok(table);
         }
         if self.peek_kind() == &TokenKind::Dot {
-            if name.text == "public" {
-                self.at += 1;
-                return self.name();
-            }
-            return Err(
-                SqlError::not_supported("schemas other than public are not supported yet")
-                    .at(name.position),
-            );
+            self.at += 1;
+            return self.qualified_part(&name);
         }
         Ok(name)
     }
@@ -653,6 +673,24 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.alter_sequence()
             }
+            "alter" if self.postgresql() && self.is_word_at(1, "schema") => {
+                self.at += 1;
+                self.alter_schema()
+            }
+            "alter" if self.postgresql() && self.is_word_at(1, "view") => {
+                self.at += 1;
+                self.alter_view()
+            }
+            "alter"
+                if self.postgresql()
+                    && self.is_word_at(1, "default")
+                    && self.is_word_at(2, "privileges") =>
+            {
+                self.grant_or_revoke("ALTER DEFAULT PRIVILEGES")
+            }
+            "grant" if self.postgresql() => self.grant_or_revoke("GRANT"),
+            "revoke" if self.postgresql() => self.grant_or_revoke("REVOKE"),
+            "comment" if self.postgresql() || self.oracle() => self.comment(),
             "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
             | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
             | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),
@@ -854,6 +892,40 @@ impl<'t> Parser<'t> {
         })
     }
 
+    fn set_config(&mut self, position: usize) -> SqlResult<Expr> {
+        let constant = |parser: &Self| match parser.peek_kind() {
+            TokenKind::String(text) => Ok(text.as_ref().to_owned()),
+            _ => Err(parser.not_supported("set_config with arguments other than constants")),
+        };
+        let setting = constant(self)?;
+        self.at += 1;
+        self.expect(&TokenKind::Comma)?;
+        let value = constant(self)?;
+        self.at += 1;
+        self.expect(&TokenKind::Comma)?;
+        let local = match self.peek_kind() {
+            TokenKind::Word(word) if word == "true" => true,
+            TokenKind::Word(word) if word == "false" => false,
+            _ => return Err(self.not_supported("set_config with arguments other than constants")),
+        };
+        self.at += 1;
+        self.expect(&TokenKind::RightParen)?;
+        if local {
+            return Err(SqlError::not_supported(
+                "set_config with is_local true (SET LOCAL) is not supported yet",
+            )
+            .at(position));
+        }
+        self.setting_changes.push((setting, value.clone()));
+        Ok(Expr {
+            kind: ExprKind::SessionValue {
+                name: "set_config",
+                value,
+            },
+            position,
+        })
+    }
+
     fn session_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let known: &'static str = match name.text.as_str() {
             "version" => "version",
@@ -862,9 +934,34 @@ impl<'t> Parser<'t> {
             "current_user" => "current_user",
             "session_user" => "session_user",
             "current_setting" => "current_setting",
+            "current_schemas" if self.postgresql() => "current_schemas",
+            "set_config" if self.postgresql() => "set_config",
             _ => return Ok(None),
         };
         self.expect(&TokenKind::LeftParen)?;
+        if known == "current_schemas" {
+            let implicit = match self.peek_kind() {
+                TokenKind::Word(word) if word == "true" => "true",
+                TokenKind::Word(word) if word == "false" => "false",
+                _ => {
+                    return Err(self.not_supported(
+                        "current_schemas with an argument other than true or false",
+                    ));
+                }
+            };
+            self.at += 1;
+            self.expect(&TokenKind::RightParen)?;
+            return Ok(Some(Expr {
+                kind: ExprKind::SessionValue {
+                    name: "current_schemas",
+                    value: implicit.to_owned(),
+                },
+                position: name.position,
+            }));
+        }
+        if known == "set_config" {
+            return self.set_config(name.position).map(Some);
+        }
         if known == "current_setting" {
             let TokenKind::String(setting) = self.peek_kind() else {
                 return Err(
@@ -943,6 +1040,33 @@ impl<'t> Parser<'t> {
         if self.at_index_definition() {
             return self.create_index();
         }
+        if self.postgresql() && self.is_word("schema") {
+            return self.create_schema();
+        }
+        if self.postgresql() && self.is_word("extension") {
+            return self.create_extension();
+        }
+        if self.is_word("or") && self.sqlite() {
+            return Err(self.unexpected());
+        }
+        if self.is_word("or") && self.is_word_at(1, "replace") {
+            self.at += 2;
+            return self.create_view(true);
+        }
+        if self.is_word("view")
+            || (self.mysql()
+                && (self.is_word("algorithm") || self.is_word("definer") || self.is_word("sql")))
+            || (self.oracle()
+                && (self.is_word("force")
+                    || (self.is_word("no") && self.is_word_at(1, "force"))
+                    || self.is_word("editioning")
+                    || self.is_word("editionable")
+                    || self.is_word("noneditionable")))
+            || ((self.is_word("temp") || self.is_word("temporary") || self.is_word("recursive"))
+                && self.is_word_at(1, "view"))
+        {
+            return self.create_view(false);
+        }
         if self.postgresql() && self.is_word("sequence") {
             return self.create_sequence();
         }
@@ -960,9 +1084,9 @@ impl<'t> Parser<'t> {
                         | "bitmap"
                         | "fulltext"
                         | "spatial"
-                        | "view"
                         | "sequence"
                         | "schema"
+                        | "domain"
                         | "function"
                         | "type"
                         | "trigger"
@@ -1051,9 +1175,11 @@ impl<'t> Parser<'t> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        if self.mysql() {
-            self.mysql_table_options()?;
-        }
+        let comment = if self.mysql() {
+            self.mysql_table_options()?
+        } else {
+            None
+        };
         if self.sqlite() {
             self.sqlite_table_finish(&name, &mut columns, &primary_key, &integer_columns)?;
         }
@@ -1068,6 +1194,7 @@ impl<'t> Parser<'t> {
             primary_key_name,
             indexes,
             constraints,
+            comment,
         }))
     }
 
@@ -1135,6 +1262,7 @@ impl<'t> Parser<'t> {
             auto_increment: serial.is_some(),
             unique: None,
             constraints: Vec::new(),
+            comment: None,
         };
         loop {
             if self.mysql() && self.mysql_column_option(&mut column)? {
@@ -1504,6 +1632,15 @@ impl<'t> Parser<'t> {
         if self.is_word("index") {
             return self.drop_index();
         }
+        if self.postgresql() && self.is_word("schema") {
+            return self.drop_schema();
+        }
+        if self.is_word("view") {
+            return self.drop_view();
+        }
+        if self.is_word("materialized") && self.is_word_at(1, "view") {
+            return Err(self.not_supported("DROP MATERIALIZED VIEW"));
+        }
         if self.postgresql() && self.is_word("sequence") {
             return self.drop_sequence();
         }
@@ -1809,9 +1946,44 @@ impl<'t> Parser<'t> {
         })
     }
 
+    fn leading_join_group(&mut self) -> SqlResult<FromClause> {
+        let position = self.position();
+        self.expect(&TokenKind::LeftParen)?;
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(SqlError::new(
+                SqlState::STATEMENT_TOO_COMPLEX,
+                "stack depth limit exceeded",
+            )
+            .at(position));
+        }
+        let group = self.joined_tables();
+        self.depth -= 1;
+        let group = group?;
+        self.expect(&TokenKind::RightParen)?;
+        if group.joins.is_empty()
+            || group.joins.iter().any(|join| join.kind == JoinKind::Comma)
+            || self.is_word("as")
+            || self.at_bare_alias()
+        {
+            return Err(SqlError::not_supported(
+                "parenthesized joins in FROM other than a leading join group is not supported yet",
+            )
+            .at(position));
+        }
+        Ok(group)
+    }
+
     fn joined_tables(&mut self) -> SqlResult<FromClause> {
-        let first = self.table_reference()?;
-        let mut joins = Vec::new();
+        let (first, mut joins) = if self.peek_kind() == &TokenKind::LeftParen
+            && !self.at_derived_table()
+            && !self.sqlite()
+        {
+            let group = self.leading_join_group()?;
+            (group.first, group.joins)
+        } else {
+            (self.table_reference()?, Vec::new())
+        };
         loop {
             let kind = if self.take(&TokenKind::Comma) {
                 JoinKind::Comma

@@ -304,14 +304,12 @@ impl Parser<'_> {
                         parts.push(self.name()?);
                     }
                     let column = parts.pop().ok_or_else(|| self.unexpected())?;
-                    let table = parts.pop().ok_or_else(|| self.unexpected())?;
-                    if let Some(schema) = parts.pop()
-                        && schema.text != "public"
-                    {
-                        return Err(SqlError::not_supported(
-                            "schemas other than public are not supported yet",
-                        )
-                        .at(schema.position));
+                    let mut table = parts.pop().ok_or_else(|| self.unexpected())?;
+                    if let Some(schema) = parts.pop() {
+                        table = Name {
+                            text: crate::schemas::written_qualified(&schema.text, &table.text),
+                            position: schema.position,
+                        };
                     }
                     options.owned_by = Some(Some((table, column)));
                 }
@@ -474,6 +472,15 @@ impl Parser<'_> {
             self.expect_word("to")?;
             self.label()?;
             actions.push(AlterAction::Accepted);
+            return Ok(());
+        }
+        if self.postgresql() && self.is_word("set") && self.is_word_at(1, "schema") {
+            self.at += 2;
+            let schema = self.name()?;
+            actions.push(AlterAction::SetSchema(crate::schemas::schema_named(
+                &schema.text,
+                schema.position,
+            )?));
             return Ok(());
         }
         if self.mysql() && (self.is_word("modify") || self.is_word("change")) {

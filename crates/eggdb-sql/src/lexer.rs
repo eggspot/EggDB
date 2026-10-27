@@ -395,6 +395,25 @@ impl<'t> Lexer<'t> {
         if self.peek(0) == Some(b'@') {
             self.at += 1;
         }
+        if let Some(quote @ (b'`' | b'\'' | b'"')) = self.peek(0) {
+            self.at += 1;
+            loop {
+                match self.peek(0) {
+                    None => {
+                        return Err(SqlError::syntax("unterminated quoted account name", start));
+                    }
+                    Some(found) if found == quote && self.peek(1) == Some(quote) => self.at += 2,
+                    Some(found) if found == quote => {
+                        self.at += 1;
+                        break;
+                    }
+                    Some(_) => self.at += 1,
+                }
+            }
+            return Ok(TokenKind::Variable(Cow::Owned(
+                self.text[start..self.at].to_owned(),
+            )));
+        }
         let name_start = self.at;
         while self.peek(0).is_some_and(is_identifier_part) {
             self.at += 1;

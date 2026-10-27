@@ -94,6 +94,13 @@ const KNOWN: &[Known] = &[
         description: "Remembered; EggDB keeps one data file.",
     },
     Known {
+        name: "default_with_oids",
+        default: fixed_text!("off"),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered, for old pg_dump scripts; EggDB tables have no OIDs.",
+    },
+    Known {
         name: "default_transaction_isolation",
         default: fixed_text!("serializable"),
         change: Change::Fixed,
@@ -106,6 +113,13 @@ const KNOWN: &[Known] = &[
         change: Change::Free,
         reported: true,
         description: "Sets the default read-only status of new transactions (remembered, not applied yet).",
+    },
+    Known {
+        name: "escape_string_warning",
+        default: fixed_text!("on"),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered, for old pg_dump scripts.",
     },
     Known {
         name: "extra_float_digits",
@@ -218,6 +232,13 @@ const KNOWN: &[Known] = &[
         change: Change::Free,
         reported: false,
         description: "Remembered, not applied yet.",
+    },
+    Known {
+        name: "synchronize_seqscans",
+        default: fixed_text!("on"),
+        change: Change::Free,
+        reported: false,
+        description: "Remembered, for pg_dump scripts.",
     },
     Known {
         name: "TimeZone",

@@ -1159,3 +1159,64 @@ ALTER TABLE stock32b ALTER COLUMN qty SET NOT NULL
 
 ok
 PRAGMA foreign_keys = OFF
+
+chapter lang_createview, "CREATE VIEW"
+ok
+CREATE TABLE t33 (a INTEGER PRIMARY KEY, b TEXT)
+
+ok
+INSERT INTO t33 VALUES (1, 'one'), (2, 'two')
+
+ok
+CREATE VIEW v33 AS SELECT b FROM t33 WHERE a > 1
+
+ok
+CREATE VIEW IF NOT EXISTS v33 AS SELECT a FROM t33
+
+ok
+CREATE VIEW main.w33 (x) AS SELECT a FROM t33
+
+rows
+SELECT * FROM v33
+----
+b
+two
+SELECT 1
+
+rows
+SELECT x FROM main.w33 ORDER BY x
+----
+x
+1
+2
+SELECT 2
+
+error 42P07
+CREATE VIEW v33 AS SELECT 1
+
+error 0A000
+CREATE TEMP VIEW t33v AS SELECT 1
+
+error 0A000
+SELECT * FROM temp.v33
+
+error 0A000
+DELETE FROM v33
+
+ok
+DROP VIEW v33
+
+error 42P01
+DROP VIEW v33
+
+ok
+DROP VIEW IF EXISTS v33
+
+error 42P01
+SELECT * FROM v33
+
+ok
+DROP VIEW w33
+
+ok
+DROP TABLE t33

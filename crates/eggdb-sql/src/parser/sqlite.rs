@@ -459,6 +459,7 @@ impl<'t> Parser<'t> {
             auto_increment: false,
             unique: None,
             constraints: Vec::new(),
+            comment: None,
         };
         let mut autoincrement = None;
         loop {

@@ -45,6 +45,78 @@ pub(crate) enum Statement {
         cascade: bool,
     },
     AlterTable(AlterTable),
+    CreateSchema {
+        name: Name,
+        if_not_exists: bool,
+    },
+    DropSchema {
+        names: Vec<Name>,
+        if_exists: bool,
+        cascade: bool,
+    },
+    RenameSchema {
+        from: Name,
+        to: Name,
+    },
+    CreateView(Box<CreateView>),
+    DropView {
+        names: Vec<Name>,
+        if_exists: bool,
+        cascade: bool,
+    },
+    AlterView(AlterView),
+    Comment(Comment),
+    Ignored {
+        tag: &'static str,
+        notice: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateView {
+    pub(crate) name: Name,
+    pub(crate) or_replace: bool,
+    pub(crate) if_not_exists: bool,
+    pub(crate) columns: Vec<Name>,
+    pub(crate) query: Query,
+    pub(crate) text: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterView {
+    pub(crate) name: Name,
+    pub(crate) if_exists: bool,
+    pub(crate) action: AlterViewAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterViewAction {
+    RenameTo(Name),
+    SetSchema(Name),
+    Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CommentTarget {
+    Relation { kind: RelationKind, name: Name },
+    Column { table: Name, column: Name },
+    Constraint { table: Name, name: Name },
+    Index(Name),
+    Schema(Name),
+    Extension(Name),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelationKind {
+    Table,
+    View,
+    Sequence,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Comment {
+    pub(crate) target: CommentTarget,
+    pub(crate) text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -181,6 +253,7 @@ pub(crate) enum AlterAction {
         cascade: bool,
     },
     DropPrimaryKey(usize),
+    SetSchema(Name),
     Accepted,
 }
 
@@ -240,6 +313,7 @@ pub(crate) enum MySqlStatement {
         like: Option<String>,
     },
     ShowCreateTable(Name),
+    ShowCreateView(Name),
     ShowIndex(Name),
     ShowVariables {
         like: Option<String>,
@@ -290,6 +364,7 @@ pub(crate) struct CreateTable {
     pub(crate) primary_key_name: Option<Name>,
     pub(crate) indexes: Vec<IndexSpec>,
     pub(crate) constraints: Vec<ConstraintSpec>,
+    pub(crate) comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -302,6 +377,7 @@ pub(crate) struct ColumnDefinition {
     pub(crate) auto_increment: bool,
     pub(crate) unique: Option<Option<Name>>,
     pub(crate) constraints: Vec<ConstraintSpec>,
+    pub(crate) comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

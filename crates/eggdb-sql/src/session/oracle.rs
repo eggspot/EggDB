@@ -38,6 +38,27 @@ const INDEX_COLUMNS: [(&str, SqlType); 6] = [
     ("uniqueness", SqlType::Text),
 ];
 
+const VIEW_COLUMNS: [(&str, SqlType); 4] = [
+    ("owner", SqlType::Text),
+    ("view_name", SqlType::Text),
+    ("text_length", SqlType::BigInt),
+    ("text", SqlType::Text),
+];
+
+const TABLE_COMMENT_COLUMNS: [(&str, SqlType); 4] = [
+    ("owner", SqlType::Text),
+    ("table_name", SqlType::Text),
+    ("table_type", SqlType::Text),
+    ("comments", SqlType::Text),
+];
+
+const COLUMN_COMMENT_COLUMNS: [(&str, SqlType); 4] = [
+    ("owner", SqlType::Text),
+    ("table_name", SqlType::Text),
+    ("column_name", SqlType::Text),
+    ("comments", SqlType::Text),
+];
+
 const INDEX_COLUMN_COLUMNS: [(&str, SqlType); 6] = [
     ("index_owner", SqlType::Text),
     ("index_name", SqlType::Text),
@@ -209,6 +230,94 @@ fn name(text: &str) -> Name {
     }
 }
 
+type ViewComments = (Option<String>, Vec<(String, String)>);
+
+fn optional_text(text: Option<&String>) -> InsertValue {
+    match text {
+        Some(text) => text_literal(text.clone()),
+        None => InsertValue::Expr(Expr {
+            kind: ExprKind::Literal(Literal::Null),
+            position: 0,
+        }),
+    }
+}
+
+fn view_rows(views: &[crate::encoding::ViewDefinition], owner: &str) -> Vec<Vec<InsertValue>> {
+    views
+        .iter()
+        .map(|view| {
+            vec![
+                text_literal(owner.to_owned()),
+                text_literal(swap_uniform_case(&view.name)),
+                number_literal(Some(view.query.len() as i64)),
+                text_literal(view.query.clone()),
+            ]
+        })
+        .collect()
+}
+
+fn table_comment_rows(
+    tables: &[TableSchema],
+    views: &[crate::encoding::ViewDefinition],
+    comments: &[ViewComments],
+    owner: &str,
+) -> Vec<Vec<InsertValue>> {
+    let mut rows: Vec<Vec<InsertValue>> = tables
+        .iter()
+        .map(|table| {
+            vec![
+                text_literal(owner.to_owned()),
+                text_literal(swap_uniform_case(&table.name)),
+                text_literal("TABLE".to_owned()),
+                optional_text(table.comment.as_ref()),
+            ]
+        })
+        .collect();
+    for (view, (comment, _)) in views.iter().zip(comments) {
+        rows.push(vec![
+            text_literal(owner.to_owned()),
+            text_literal(swap_uniform_case(&view.name)),
+            text_literal("VIEW".to_owned()),
+            optional_text(comment.as_ref()),
+        ]);
+    }
+    rows
+}
+
+fn column_comment_rows(
+    tables: &[TableSchema],
+    views: &[crate::encoding::ViewDefinition],
+    comments: &[ViewComments],
+    owner: &str,
+) -> Vec<Vec<InsertValue>> {
+    let mut rows = Vec::new();
+    for table in tables {
+        for column in &table.columns {
+            rows.push(vec![
+                text_literal(owner.to_owned()),
+                text_literal(swap_uniform_case(&table.name)),
+                text_literal(swap_uniform_case(&column.name)),
+                optional_text(column.comment.as_ref()),
+            ]);
+        }
+    }
+    for (view, (_, columns)) in views.iter().zip(comments) {
+        for column in &view.columns {
+            let comment = columns
+                .iter()
+                .find(|(name, _)| *name == column.name)
+                .map(|(_, text)| text);
+            rows.push(vec![
+                text_literal(owner.to_owned()),
+                text_literal(swap_uniform_case(&view.name)),
+                text_literal(swap_uniform_case(&column.name)),
+                optional_text(comment),
+            ]);
+        }
+    }
+    rows
+}
+
 fn table_rows(tables: &[TableSchema], owner: &str) -> Vec<Vec<InsertValue>> {
     tables
         .iter()
@@ -304,9 +413,38 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             ));
         }
         let view = from.first.name.text.clone();
-        let tables = self.read(|reader, _| read_tables(reader))?;
+        let (tables, views, view_comments) = self.read(|reader, _| {
+            let tables: Vec<TableSchema> = read_tables(reader)?
+                .into_iter()
+                .filter(|table| table.schema == crate::schemas::DEFAULT_SCHEMA)
+                .collect();
+            let views: Vec<crate::encoding::ViewDefinition> = crate::views::every_view(reader)?
+                .into_iter()
+                .filter(|view| !crate::schemas::is_qualified(&view.name))
+                .collect();
+            let mut comments = Vec::with_capacity(views.len());
+            for view in &views {
+                comments.push((
+                    crate::comments::relation_comment(reader, &view.name)?,
+                    crate::comments::column_comments(reader, &view.name)?,
+                ));
+            }
+            Ok((tables, views, comments))
+        })?;
         let owner = self.oracle_user();
-        let (columns, mut rows): (&[(&str, SqlType)], _) = if view.ends_with("_ind_columns") {
+        let (columns, mut rows): (&[(&str, SqlType)], _) = if view.ends_with("_views") {
+            (&VIEW_COLUMNS, view_rows(&views, &owner))
+        } else if view.ends_with("_tab_comments") {
+            (
+                &TABLE_COMMENT_COLUMNS,
+                table_comment_rows(&tables, &views, &view_comments, &owner),
+            )
+        } else if view.ends_with("_col_comments") {
+            (
+                &COLUMN_COMMENT_COLUMNS,
+                column_comment_rows(&tables, &views, &view_comments, &owner),
+            )
+        } else if view.ends_with("_ind_columns") {
             (&INDEX_COLUMN_COLUMNS, index_column_rows(&tables, &owner))
         } else if view.ends_with("_indexes") {
             (&INDEX_COLUMNS, index_rows(&tables, &owner))
@@ -326,6 +464,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut scratch = Scratch::default();
         let mut cache = TableCache::default();
         let create = CreateTable {
+            comment: None,
             name: name(&view),
             if_not_exists: false,
             columns: columns
@@ -339,6 +478,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     auto_increment: false,
                     unique: None,
                     constraints: Vec::new(),
+                    comment: None,
                 })
                 .collect(),
             primary_key: None,

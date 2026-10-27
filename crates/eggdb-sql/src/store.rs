@@ -134,3 +134,22 @@ pub trait KeyValueStore {
     /// Begins the write transaction, waiting for another writer as the store does.
     fn begin_write(&self) -> SqlResult<Self::Write<'_>>;
 }
+
+const DELETE_BATCH: usize = 1024;
+
+pub(crate) fn delete_prefix(writer: &mut dyn KeyValueWrite, prefix: &[u8]) -> SqlResult<()> {
+    let end = crate::encoding::prefix_end(prefix);
+    loop {
+        let mut keys = Vec::new();
+        writer.scan(prefix, &end, ScanDirection::Forward, &mut |key, _| {
+            keys.push(key.to_vec());
+            Ok(keys.len() < DELETE_BATCH)
+        })?;
+        if keys.is_empty() {
+            return Ok(());
+        }
+        for key in &keys {
+            writer.delete(key)?;
+        }
+    }
+}

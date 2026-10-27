@@ -246,10 +246,15 @@ fn check_failed(table: &TableDefinition, check: &CheckConstraint, row: &[Value])
 }
 
 pub(crate) fn check_identifier(name: &crate::ast::Name) -> SqlResult<()> {
-    if name.text.contains(crate::temp_tables::TEMP_TABLE_MARKER) {
+    if name.text.contains(crate::temp_tables::TEMP_TABLE_MARKER)
+        || !crate::schemas::is_well_formed(&name.text)
+    {
         return Err(SqlError::new(
             SqlState::INVALID_NAME,
-            format!("invalid name \"{}\"", name.text.escape_default()),
+            format!(
+                "invalid name \"{}\"",
+                crate::schemas::display(&name.text).escape_default()
+            ),
         )
         .at(name.position));
     }
@@ -822,8 +827,10 @@ pub(crate) fn define_check(
                 .map(|column| column.text.clone())
                 .or_else(|| first_column_named(expr, table));
             let base = match column {
-                Some(column) => format!("{}_{column}_check", table.name),
-                None => format!("{}_check", table.name),
+                Some(column) => {
+                    format!("{}_{column}_check", crate::schemas::base_name(&table.name))
+                }
+                None => format!("{}_check", crate::schemas::base_name(&table.name)),
             };
             generated_name(table, base)
         }
@@ -1022,7 +1029,10 @@ pub(crate) fn define_foreign_key(
         }
         None => {
             let names = column_names(table, &columns).join("_");
-            generated_name(table, format!("{}_{names}_fkey", table.name))
+            generated_name(
+                table,
+                format!("{}_{names}_fkey", crate::schemas::base_name(&table.name)),
+            )
         }
     };
     for (&child_column, &parent_column) in columns.iter().zip(&parent_columns) {

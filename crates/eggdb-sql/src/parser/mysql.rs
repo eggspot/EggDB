@@ -285,6 +285,9 @@ impl<'t> Parser<'t> {
         } else if self.is_word("create") && self.is_word_at(1, "table") {
             self.at += 2;
             MySqlStatement::ShowCreateTable(self.table_name()?)
+        } else if self.is_word("create") && self.is_word_at(1, "view") {
+            self.at += 2;
+            MySqlStatement::ShowCreateView(self.table_name()?)
         } else if self.take_word("warnings") || self.take_word("errors") {
             let errors_only = self.tokens[self.at - 1].kind == TokenKind::Word("errors".into());
             if self.take_word("limit") {
@@ -642,9 +645,10 @@ impl<'t> Parser<'t> {
         if self.take_word("auto_increment") {
             column.auto_increment = true;
         } else if self.take_word("comment") {
-            let TokenKind::String(_) = self.peek_kind() else {
+            let TokenKind::String(text) = self.peek_kind() else {
                 return Err(self.unexpected());
             };
+            column.comment = Some(text.as_ref().to_owned());
             self.at += 1;
         } else if self.is_word("key") {
             self.at += 1;
@@ -707,21 +711,33 @@ impl<'t> Parser<'t> {
         }
     }
 
-    pub(super) fn mysql_table_options(&mut self) -> SqlResult<()> {
+    pub(super) fn mysql_table_options(&mut self) -> SqlResult<Option<String>> {
+        let mut comment = None;
         loop {
             let _ = self.take_word("default");
             let Some(option) = self.word_text() else {
-                return Ok(());
+                return Ok(comment);
             };
             if !matches!(self.peek_kind(), TokenKind::Word(_)) {
-                return Ok(());
+                return Ok(comment);
+            }
+            if option == "comment" {
+                self.at += 1;
+                self.take_operator("=");
+                let TokenKind::String(text) = self.peek_kind() else {
+                    return Err(self.unexpected());
+                };
+                comment = Some(text.as_ref().to_owned());
+                self.at += 1;
+                self.take(&TokenKind::Comma);
+                continue;
             }
             match option.as_str() {
                 "engine" | "charset" | "collate" | "auto_increment" | "comment" | "row_format"
                 | "stats_persistent" | "key_block_size" | "avg_row_length" | "checksum"
                 | "pack_keys" | "min_rows" | "max_rows" => self.at += 1,
                 "character" if self.is_word_at(1, "set") => self.at += 2,
-                _ => return Ok(()),
+                _ => return Ok(comment),
             }
             self.take_operator("=");
             match self.peek_kind() {
