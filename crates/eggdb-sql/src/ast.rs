@@ -18,6 +18,43 @@ pub(crate) enum Statement {
     MySql(MySqlStatement),
     Pragma(Pragma),
     Truncate(TableReference),
+    CreateIndex(CreateIndex),
+    DropIndex(DropIndex),
+    Explain(Explain),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexSpec {
+    pub(crate) name: Option<Name>,
+    pub(crate) unique: bool,
+    pub(crate) columns: Vec<Name>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateIndex {
+    pub(crate) index: IndexSpec,
+    pub(crate) table: Name,
+    pub(crate) if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DropIndex {
+    pub(crate) names: Vec<Name>,
+    pub(crate) table: Option<Name>,
+    pub(crate) if_exists: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExplainStyle {
+    Plan,
+    QueryPlan,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Explain {
+    pub(crate) style: ExplainStyle,
+    pub(crate) statement: Box<Statement>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +79,7 @@ pub(crate) enum MySqlStatement {
         like: Option<String>,
     },
     ShowCreateTable(Name),
+    ShowIndex(Name),
     ShowVariables {
         like: Option<String>,
     },
@@ -88,6 +126,7 @@ pub(crate) struct CreateTable {
     pub(crate) if_not_exists: bool,
     pub(crate) columns: Vec<ColumnDefinition>,
     pub(crate) primary_key: Option<(Vec<Name>, usize)>,
+    pub(crate) indexes: Vec<IndexSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +137,7 @@ pub(crate) struct ColumnDefinition {
     pub(crate) primary_key: bool,
     pub(crate) default: Option<(Expr, String)>,
     pub(crate) auto_increment: bool,
+    pub(crate) unique: Option<Option<Name>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

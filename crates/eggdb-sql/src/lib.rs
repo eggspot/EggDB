@@ -21,7 +21,9 @@ mod encoding;
 mod error;
 mod eval;
 mod execute;
+mod explain;
 mod hash_index;
+mod indexes;
 mod join;
 mod lexer;
 mod memory;
@@ -30,6 +32,7 @@ mod mysql_variables;
 mod oracle_errors;
 mod oracle_functions;
 mod parser;
+mod plan;
 mod schema;
 mod session;
 mod settings;
@@ -42,16 +45,19 @@ mod typing;
 #[cfg(test)]
 mod correctness;
 #[cfg(test)]
+mod index_tests;
+#[cfg(test)]
 mod memory_store;
 #[cfg(test)]
 mod tests;
 
 pub use dialect::Dialect;
 pub use error::{SqlError, SqlResult, SqlState};
+pub use indexes::IndexCheck;
 pub use mysql_errors::Warning;
 pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
 pub use parser::{ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION};
-pub use schema::{ColumnSchema, TableSchema, quoted};
+pub use schema::{ColumnSchema, IndexSchema, TableSchema, quoted};
 pub use session::{
     OutputColumn, Parameter, PreparedStatement, QueryResult, Session, StatementDescription,
     TransactionStatus,

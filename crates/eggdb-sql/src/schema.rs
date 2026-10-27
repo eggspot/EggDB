@@ -12,6 +12,42 @@ pub struct TableSchema {
     pub columns: Vec<ColumnSchema>,
     /// The names of the primary key's columns, in key order; empty without a primary key.
     pub primary_key: Vec<String>,
+    /// Its secondary indexes, in the order they were created.
+    pub indexes: Vec<IndexSchema>,
+}
+
+/// A secondary index of a [`TableSchema`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSchema {
+    /// The index's name.
+    pub name: String,
+    /// Whether it refuses two rows with the same non-NULL values.
+    pub unique: bool,
+    /// The names of its columns, in key order.
+    pub columns: Vec<String>,
+}
+
+impl IndexSchema {
+    /// The `CREATE INDEX` statement that makes this index on `table` in `dialect`, ended by `;`.
+    pub fn create_statement_in(&self, table: &str, dialect: crate::Dialect) -> String {
+        let name = |text: &str| match dialect {
+            crate::Dialect::MySql => format!("`{}`", text.replace('`', "``")),
+            crate::Dialect::Oracle => crate::lexer::swap_uniform_case(text),
+            _ => quoted(text),
+        };
+        let columns: Vec<String> = self.columns.iter().map(|column| name(column)).collect();
+        let on = match dialect {
+            crate::Dialect::Oracle => crate::lexer::swap_uniform_case(table),
+            crate::Dialect::MySql => name(table),
+            _ => quoted(table),
+        };
+        format!(
+            "CREATE {}INDEX {} ON {on} ({});",
+            if self.unique { "UNIQUE " } else { "" },
+            name(&self.name),
+            columns.join(", ")
+        )
+    }
 }
 
 /// One column of a [`TableSchema`].
@@ -127,6 +163,20 @@ fn schema_of(definition: &TableDefinition) -> TableSchema {
             .iter()
             .filter_map(|&index| definition.columns.get(index))
             .map(|column| column.name.clone())
+            .collect(),
+        indexes: definition
+            .indexes
+            .iter()
+            .map(|index| IndexSchema {
+                name: index.name.clone(),
+                unique: index.unique,
+                columns: index
+                    .columns
+                    .iter()
+                    .filter_map(|&column| definition.columns.get(column))
+                    .map(|column| column.name.clone())
+                    .collect(),
+            })
             .collect(),
     }
 }

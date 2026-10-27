@@ -9,6 +9,7 @@ const SQLITE_CORRUPT: u16 = 11;
 const SQLITE_MISMATCH: u16 = 20;
 const SQLITE_CONSTRAINT_NOTNULL: u16 = 1299;
 const SQLITE_CONSTRAINT_PRIMARYKEY: u16 = 1555;
+const SQLITE_CONSTRAINT_UNIQUE: u16 = 2067;
 
 const RESULT_CODES: &[(u16, &str)] = &[
     (1, "SQLITE_ERROR"),
@@ -76,10 +77,12 @@ fn syntax(text: &str, position: Option<usize>) -> String {
 }
 
 fn unique_failed(error: &SqlError, names: &[&str]) -> String {
-    let table = names
-        .first()
-        .map(|name| name.strip_suffix("_pkey").unwrap_or(name))
-        .unwrap_or("");
+    let table = error.table().unwrap_or_else(|| {
+        names
+            .first()
+            .map(|name| name.strip_suffix("_pkey").unwrap_or(name))
+            .unwrap_or("")
+    });
     let columns: Vec<String> = error
         .detail()
         .and_then(|detail| detail.strip_prefix("Key ("))
@@ -140,6 +143,13 @@ pub(crate) fn translate(error: SqlError, text: &str) -> SqlError {
             SQLITE_ERROR,
             format!("table \"{first}\" has more than one primary key"),
         ),
+        "23505"
+            if error
+                .table()
+                .is_some_and(|table| first != format!("{table}_pkey")) =>
+        {
+            (SQLITE_CONSTRAINT_UNIQUE, unique_failed(&error, &names))
+        }
         "23505" => (SQLITE_CONSTRAINT_PRIMARYKEY, unique_failed(&error, &names)),
         "23502" => {
             let table = names.get(1).copied().unwrap_or("");

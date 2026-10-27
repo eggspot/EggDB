@@ -1,3 +1,4 @@
+mod indexes;
 mod mysql;
 mod oracle;
 mod sqlite;
@@ -10,9 +11,9 @@ pub(crate) use sqlite::is_schema_table;
 
 use crate::ast::{
     AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, Expr, ExprKind,
-    FromClause, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind, Literal, Name,
-    OnDuplicate, OrderItem, Select, SelectItem, Statement, TableReference, TruthTest,
-    UnaryOperator, Update,
+    FromClause, IndexSpec, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind,
+    Literal, Name, OnDuplicate, OrderItem, Select, SelectItem, Statement, TableReference,
+    TruthTest, UnaryOperator, Update,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -585,11 +586,10 @@ impl<'t> Parser<'t> {
             "set" => self.set(),
             "show" => self.show(),
             "reset" => self.reset(),
-            "alter" | "truncate" | "savepoint" | "release" | "explain" | "copy" | "grant"
-            | "revoke" | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen"
-            | "notify" | "unlisten" | "deallocate" => {
-                Err(self.not_supported(&word.to_ascii_uppercase()))
-            }
+            "explain" => self.explain(),
+            "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
+            | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
+            | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),
             _ => Err(self.unexpected()),
         }
     }
@@ -865,6 +865,9 @@ impl<'t> Parser<'t> {
 
     fn create(&mut self) -> SqlResult<Statement> {
         self.at += 1;
+        if self.at_index_definition() {
+            return self.create_index();
+        }
         if self.is_word("temp") || self.is_word("temporary") || self.is_word("unlogged") {
             return Err(self.not_supported("CREATE TEMPORARY or UNLOGGED TABLE"));
         }
@@ -875,8 +878,10 @@ impl<'t> Parser<'t> {
                 };
                 if matches!(
                     word.as_ref(),
-                    "index"
-                        | "unique"
+                    "unique"
+                        | "bitmap"
+                        | "fulltext"
+                        | "spatial"
                         | "view"
                         | "sequence"
                         | "schema"
@@ -906,15 +911,20 @@ impl<'t> Parser<'t> {
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
         let mut primary_key = None;
+        let mut indexes = Vec::new();
         let mut integer_columns = Vec::new();
         loop {
             if self.sqlite() && self.sqlite_ignored_table_constraint()? {
             } else if self.is_word("primary") || self.is_word("constraint") {
                 let position = self.position();
-                if self.take_word("constraint") {
-                    self.name()?;
-                }
-                if self.take_word("primary") {
+                let constraint = if self.take_word("constraint") {
+                    Some(self.name()?)
+                } else {
+                    None
+                };
+                if self.is_word("unique") {
+                    indexes.push(self.unique_constraint(constraint, position)?);
+                } else if self.take_word("primary") {
                     self.expect_word("key")?;
                     let key = self.name_list()?;
                     if primary_key.is_some() {
@@ -927,9 +937,14 @@ impl<'t> Parser<'t> {
                 } else {
                     return Err(self.table_constraint_not_supported());
                 }
-            } else if self.mysql() && self.mysql_index_entry()? {
-            } else if self.is_word("unique")
-                || self.is_word("check")
+            } else if self.is_word("unique") {
+                let position = self.position();
+                indexes.push(self.unique_constraint(None, position)?);
+            } else if self.mysql()
+                && let Some(index) = self.mysql_index_entry()?
+            {
+                indexes.push(index);
+            } else if self.is_word("check")
                 || self.is_word("foreign")
                 || self.is_word("exclude")
                 || self.is_word("like")
@@ -961,11 +976,44 @@ impl<'t> Parser<'t> {
             if_not_exists,
             columns,
             primary_key,
+            indexes,
         }))
     }
 
     fn table_constraint_not_supported(&self) -> SqlError {
-        self.not_supported("a table constraint other than PRIMARY KEY")
+        self.not_supported("a table constraint other than PRIMARY KEY and UNIQUE")
+    }
+
+    fn unique_constraint(
+        &mut self,
+        constraint: Option<Name>,
+        position: usize,
+    ) -> SqlResult<IndexSpec> {
+        self.expect_word("unique")?;
+        let mut name = constraint;
+        if self.mysql() {
+            let _ = self.take_word("key") || self.take_word("index");
+            if self.peek_kind() != &TokenKind::LeftParen && !self.is_word("using") {
+                name = Some(self.name()?);
+            }
+            if self.is_word("using") {
+                self.at += 1;
+                self.label()?;
+            }
+        }
+        if self.is_word("nulls") {
+            return Err(self.not_supported("UNIQUE NULLS [NOT] DISTINCT"));
+        }
+        let columns = self.index_column_list(true)?;
+        if self.sqlite() {
+            self.sqlite_conflict_clause()?;
+        }
+        Ok(IndexSpec {
+            name,
+            unique: true,
+            columns,
+            position,
+        })
     }
 
     fn name_list(&mut self) -> SqlResult<Vec<Name>> {
@@ -988,15 +1036,23 @@ impl<'t> Parser<'t> {
             primary_key: false,
             default: None,
             auto_increment: false,
+            unique: None,
         };
         loop {
             if self.mysql() && self.mysql_column_option(&mut column)? {
                 continue;
             }
-            if self.take_word("constraint") {
-                self.name()?;
-            }
-            if self.take_word("not") {
+            let constraint = if self.take_word("constraint") {
+                Some(self.name()?)
+            } else {
+                None
+            };
+            if self.take_word("unique") {
+                if self.is_word("nulls") {
+                    return Err(self.not_supported("UNIQUE NULLS [NOT] DISTINCT"));
+                }
+                column.unique = Some(constraint);
+            } else if self.take_word("not") {
                 self.expect_word("null")?;
                 column.not_null = true;
             } else if self.take_word("null") {
@@ -1013,12 +1069,12 @@ impl<'t> Parser<'t> {
                 column.default = Some((expr, source));
             } else if self.oracle() && self.is_word("generated") {
                 self.oracle_identity(&mut column)?;
-            } else if ["unique", "check", "references", "generated", "collate"]
+            } else if ["check", "references", "generated", "collate"]
                 .iter()
                 .any(|word| self.is_word(word))
             {
                 return Err(self.not_supported(
-                    "a column constraint other than PRIMARY KEY, NOT NULL and DEFAULT",
+                    "a column constraint other than PRIMARY KEY, UNIQUE, NOT NULL and DEFAULT",
                 ));
             } else {
                 return Ok(column);
@@ -1126,6 +1182,9 @@ impl<'t> Parser<'t> {
 
     fn drop(&mut self) -> SqlResult<Statement> {
         self.at += 1;
+        if self.is_word("index") {
+            return self.drop_index();
+        }
         if !self.take_word("table") {
             return match self.peek_kind() {
                 TokenKind::Word(word) => {

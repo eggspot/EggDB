@@ -29,6 +29,24 @@ const COLUMN_COLUMNS: [(&str, SqlType); 9] = [
     ("column_id", SqlType::BigInt),
 ];
 
+const INDEX_COLUMNS: [(&str, SqlType); 6] = [
+    ("owner", SqlType::Text),
+    ("index_name", SqlType::Text),
+    ("index_type", SqlType::Text),
+    ("table_owner", SqlType::Text),
+    ("table_name", SqlType::Text),
+    ("uniqueness", SqlType::Text),
+];
+
+const INDEX_COLUMN_COLUMNS: [(&str, SqlType); 6] = [
+    ("index_owner", SqlType::Text),
+    ("index_name", SqlType::Text),
+    ("table_name", SqlType::Text),
+    ("column_name", SqlType::Text),
+    ("column_position", SqlType::BigInt),
+    ("descend", SqlType::Text),
+];
+
 pub(super) fn shown_columns(columns: Vec<OutputColumn>) -> Vec<OutputColumn> {
     columns
         .into_iter()
@@ -198,6 +216,42 @@ fn column_rows(tables: &[TableSchema], owner: &str) -> Vec<Vec<InsertValue>> {
     rows
 }
 
+fn index_rows(tables: &[TableSchema], owner: &str) -> Vec<Vec<InsertValue>> {
+    let mut rows = Vec::new();
+    for table in tables {
+        for index in &table.indexes {
+            rows.push(vec![
+                text_literal(owner.to_owned()),
+                text_literal(swap_uniform_case(&index.name)),
+                text_literal("NORMAL".to_owned()),
+                text_literal(owner.to_owned()),
+                text_literal(swap_uniform_case(&table.name)),
+                text_literal(if index.unique { "UNIQUE" } else { "NONUNIQUE" }.to_owned()),
+            ]);
+        }
+    }
+    rows
+}
+
+fn index_column_rows(tables: &[TableSchema], owner: &str) -> Vec<Vec<InsertValue>> {
+    let mut rows = Vec::new();
+    for table in tables {
+        for index in &table.indexes {
+            for (position, column) in index.columns.iter().enumerate() {
+                rows.push(vec![
+                    text_literal(owner.to_owned()),
+                    text_literal(swap_uniform_case(&index.name)),
+                    text_literal(swap_uniform_case(&table.name)),
+                    text_literal(swap_uniform_case(column)),
+                    number_literal(Some(position as i64 + 1)),
+                    text_literal("ASC".to_owned()),
+                ]);
+            }
+        }
+    }
+    rows
+}
+
 impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     pub(super) fn oracle_user(&self) -> String {
         self.settings
@@ -225,7 +279,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let view = from.first.name.text.clone();
         let tables = self.read(|reader, _| read_tables(reader))?;
         let owner = self.oracle_user();
-        let (columns, mut rows): (&[(&str, SqlType)], _) = if view.contains("_col") {
+        let (columns, mut rows): (&[(&str, SqlType)], _) = if view.ends_with("_ind_columns") {
+            (&INDEX_COLUMN_COLUMNS, index_column_rows(&tables, &owner))
+        } else if view.ends_with("_indexes") {
+            (&INDEX_COLUMNS, index_rows(&tables, &owner))
+        } else if view.contains("_col") {
             (&COLUMN_COLUMNS, column_rows(&tables, &owner))
         } else {
             (&TABLE_COLUMNS, table_rows(&tables, &owner))
@@ -252,11 +310,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     primary_key: false,
                     default: None,
                     auto_increment: false,
+                    unique: None,
                 })
                 .collect(),
             primary_key: None,
+            indexes: Vec::new(),
         };
-        execute::create_table(&mut scratch, &mut cache, &create)?;
+        execute::create_table(
+            &mut scratch,
+            &mut cache,
+            &create,
+            crate::Dialect::PostgreSql,
+        )?;
         if !rows.is_empty() {
             let insert = Insert {
                 table: TableReference {

@@ -5,14 +5,18 @@ pub(crate) const NAMESPACE: &[u8] = &[0xFF, b'S', b'Q', b'L', 0x00];
 const META_SPACE: u8 = 0x01;
 const TABLE_SPACE: u8 = 0x02;
 const ROW_SPACE: u8 = 0x03;
+const INDEX_SPACE: u8 = 0x04;
 const FORMAT_VERSION: u8 = 1;
 const AUTO_INCREMENT_FORMAT_VERSION: u8 = 2;
+const INDEXES_FORMAT_VERSION: u8 = 3;
 const DEFAULT_ABSENT: u8 = 0;
 const DEFAULT_EXPRESSION: u8 = 1;
 const DEFAULT_AUTO_INCREMENT: u8 = 2;
-const PRESENT: u8 = 0x01;
-const NULL_IN_KEY: u8 = 0x02;
+pub(crate) const PRESENT: u8 = 0x01;
+pub(crate) const NULL_IN_KEY: u8 = 0x02;
 pub(crate) const MAX_COLUMNS: usize = 1600;
+pub(crate) const MAX_INDEX_COLUMNS: usize = 32;
+pub(crate) const MAX_INDEXES: usize = 1024;
 
 pub(crate) fn meta_key() -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
@@ -34,6 +38,20 @@ pub(crate) fn rows_prefix(table_id: u32) -> Vec<u8> {
     key.extend_from_slice(NAMESPACE);
     key.push(ROW_SPACE);
     key.extend_from_slice(&table_id.to_be_bytes());
+    key
+}
+
+pub(crate) fn table_indexes_prefix(table_id: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(TYPICAL_KEY_BYTES);
+    key.extend_from_slice(NAMESPACE);
+    key.push(INDEX_SPACE);
+    key.extend_from_slice(&table_id.to_be_bytes());
+    key
+}
+
+pub(crate) fn index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
+    let mut key = table_indexes_prefix(table_id);
+    key.extend_from_slice(&index_id.to_be_bytes());
     key
 }
 
@@ -95,11 +113,20 @@ pub(crate) struct Column {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexDefinition {
+    pub(crate) id: u32,
+    pub(crate) name: String,
+    pub(crate) unique: bool,
+    pub(crate) columns: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TableDefinition {
     pub(crate) id: u32,
     pub(crate) name: String,
     pub(crate) columns: Vec<Column>,
     pub(crate) primary_key: Vec<usize>,
+    pub(crate) indexes: Vec<IndexDefinition>,
 }
 
 impl TableDefinition {
@@ -111,8 +138,14 @@ impl TableDefinition {
         self.columns.iter().position(|column| column.auto_increment)
     }
 
+    pub(crate) fn index_named(&self, name: &str) -> Option<&IndexDefinition> {
+        self.indexes.iter().find(|index| index.name == name)
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self.auto_increment_column().is_some() {
+        let version = if !self.indexes.is_empty() {
+            INDEXES_FORMAT_VERSION
+        } else if self.auto_increment_column().is_some() {
             AUTO_INCREMENT_FORMAT_VERSION
         } else {
             FORMAT_VERSION
@@ -140,12 +173,25 @@ impl TableDefinition {
         for &index in &self.primary_key {
             put_varint(&mut out, index as u64);
         }
+        if version == INDEXES_FORMAT_VERSION {
+            put_varint(&mut out, self.indexes.len() as u64);
+            for index in &self.indexes {
+                out.extend_from_slice(&index.id.to_le_bytes());
+                put_bytes(&mut out, index.name.as_bytes());
+                out.push(u8::from(index.unique));
+                put_varint(&mut out, index.columns.len() as u64);
+                for &column in &index.columns {
+                    put_varint(&mut out, column as u64);
+                }
+            }
+        }
         out
     }
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "table definition");
-        let version = reader.version_up_to(AUTO_INCREMENT_FORMAT_VERSION)?;
+        let version = reader.version_up_to(INDEXES_FORMAT_VERSION)?;
+        let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
         let id = reader.u32()?;
         let count = reader.count()?;
         if count > MAX_COLUMNS {
@@ -176,7 +222,7 @@ impl TableDefinition {
             let (default, auto_increment) = match reader.byte()? {
                 DEFAULT_ABSENT => (None, false),
                 DEFAULT_EXPRESSION => (Some(reader.text()?), false),
-                DEFAULT_AUTO_INCREMENT if version == AUTO_INCREMENT_FORMAT_VERSION => (None, true),
+                DEFAULT_AUTO_INCREMENT if auto_allowed => (None, true),
                 _ => return Err(reader.damaged()),
             };
             if columns.iter().any(|column: &Column| column.name == name) {
@@ -199,6 +245,11 @@ impl TableDefinition {
             }
             primary_key.push(index);
         }
+        let indexes = if version == INDEXES_FORMAT_VERSION {
+            decode_indexes(&mut reader, columns.len())?
+        } else {
+            Vec::new()
+        };
         reader.finish()?;
         if columns.is_empty() && !primary_key.is_empty() {
             return Err(reader.damaged());
@@ -213,13 +264,85 @@ impl TableDefinition {
         if version == AUTO_INCREMENT_FORMAT_VERSION && (auto_columns != 1 || !auto_first_key) {
             return Err(reader.damaged());
         }
+        if (version == INDEXES_FORMAT_VERSION && auto_columns > 1)
+            || (auto_columns == 1 && !auto_first_key)
+        {
+            return Err(reader.damaged());
+        }
         Ok(Self {
             id,
             name: name.to_owned(),
             columns,
             primary_key,
+            indexes,
         })
     }
+}
+
+fn decode_indexes(reader: &mut Reader<'_>, column_count: usize) -> SqlResult<Vec<IndexDefinition>> {
+    let count = reader.count()?;
+    if count == 0 || count > MAX_INDEXES {
+        return Err(reader.damaged());
+    }
+    let mut indexes: Vec<IndexDefinition> = Vec::new();
+    for _ in 0..count {
+        let id = reader.u32()?;
+        let name = reader.text()?;
+        let unique = match reader.byte()? {
+            0 => false,
+            1 => true,
+            _ => return Err(reader.damaged()),
+        };
+        let width = reader.count()?;
+        if width == 0 || width > MAX_INDEX_COLUMNS {
+            return Err(reader.damaged());
+        }
+        let mut columns = Vec::with_capacity(width);
+        for _ in 0..width {
+            let column = usize::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+            if column >= column_count || columns.contains(&column) {
+                return Err(reader.damaged());
+            }
+            columns.push(column);
+        }
+        if name.is_empty()
+            || indexes
+                .iter()
+                .any(|index| index.id == id || index.name == name)
+        {
+            return Err(reader.damaged());
+        }
+        indexes.push(IndexDefinition {
+            id,
+            name,
+            unique,
+            columns,
+        });
+    }
+    Ok(indexes)
+}
+
+pub(crate) fn skip_key_values(
+    key: &[u8],
+    types: impl IntoIterator<Item = SqlType>,
+) -> SqlResult<usize> {
+    let mut reader = Reader::new(key, "index entry");
+    for sql_type in types {
+        reader.skip_key_value(sql_type)?;
+    }
+    Ok(reader.at)
+}
+
+pub(crate) fn decode_key_values(
+    key: &[u8],
+    types: impl IntoIterator<Item = SqlType>,
+    out: &mut Vec<Value>,
+) -> SqlResult<usize> {
+    let mut reader = Reader::new(key, "index entry");
+    for sql_type in types {
+        out.push(reader.key_value(sql_type)?);
+    }
+    Ok(reader.at)
 }
 
 pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
@@ -492,6 +615,90 @@ impl<'b> Reader<'b> {
         Ok(())
     }
 
+    fn skip_key_value(&mut self, sql_type: SqlType) -> SqlResult<()> {
+        match self.byte()? {
+            NULL_IN_KEY => return Ok(()),
+            PRESENT => {}
+            _ => return Err(self.damaged()),
+        }
+        let width = match sql_type {
+            SqlType::Boolean => 1,
+            SqlType::SmallInt => 2,
+            SqlType::Integer | SqlType::Real => 4,
+            SqlType::BigInt | SqlType::Double => 8,
+            SqlType::Text | SqlType::Varchar(_) => {
+                let rest = self.bytes.get(self.at..).unwrap_or(&[]);
+                let mut at = 0;
+                loop {
+                    match (rest.get(at), rest.get(at + 1)) {
+                        (Some(0), Some(0x01)) => break,
+                        (Some(0), Some(0xFF)) => at += 2,
+                        (Some(0), _) | (None, _) => return Err(self.damaged()),
+                        (Some(_), _) => at += 1,
+                    }
+                }
+                at + 2
+            }
+        };
+        self.take(width).map(|_| ())
+    }
+
+    fn key_value(&mut self, sql_type: SqlType) -> SqlResult<Value> {
+        match self.byte()? {
+            NULL_IN_KEY => return Ok(Value::Null),
+            PRESENT => {}
+            _ => return Err(self.damaged()),
+        }
+        Ok(match sql_type {
+            SqlType::Boolean => match self.byte()? {
+                0 => Value::Boolean(false),
+                1 => Value::Boolean(true),
+                _ => return Err(self.damaged()),
+            },
+            SqlType::SmallInt => {
+                Value::SmallInt((u16::from_be_bytes(self.array()?) ^ 0x8000) as i16)
+            }
+            SqlType::Integer => {
+                Value::Integer((u32::from_be_bytes(self.array()?) ^ 0x8000_0000) as i32)
+            }
+            SqlType::BigInt => {
+                Value::BigInt((u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64)
+            }
+            SqlType::Real => {
+                let ordered = u32::from_be_bytes(self.array()?);
+                let bits = if ordered >> 31 == 1 {
+                    ordered & !(1 << 31)
+                } else {
+                    !ordered
+                };
+                Value::Real(f32::from_bits(bits))
+            }
+            SqlType::Double => {
+                let ordered = u64::from_be_bytes(self.array()?);
+                let bits = if ordered >> 63 == 1 {
+                    ordered & !(1 << 63)
+                } else {
+                    !ordered
+                };
+                Value::Double(f64::from_bits(bits))
+            }
+            SqlType::Text | SqlType::Varchar(_) => {
+                let mut bytes = Vec::new();
+                loop {
+                    match self.byte()? {
+                        0 => match self.byte()? {
+                            0x01 => break,
+                            0xFF => bytes.push(0),
+                            _ => return Err(self.damaged()),
+                        },
+                        byte => bytes.push(byte),
+                    }
+                }
+                Value::Text(String::from_utf8(bytes).map_err(|_| self.damaged())?)
+            }
+        })
+    }
+
     fn finish(&self) -> SqlResult<()> {
         if self.at == self.bytes.len() {
             Ok(())
@@ -503,7 +710,10 @@ impl<'b> Reader<'b> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TableDefinition, decode_row, encode_key_value, encode_row, prefix_end};
+    use super::{
+        IndexDefinition, TableDefinition, decode_key_values, decode_row, encode_key_value,
+        encode_row, prefix_end, skip_key_values,
+    };
     use crate::encoding::Column;
     use crate::types::{SqlType, Value, compare_values};
 
@@ -655,6 +865,7 @@ mod tests {
                 },
             ],
             primary_key: vec![0],
+            indexes: Vec::new(),
         };
         let encoded = table.encode();
         assert_eq!(TableDefinition::decode("t", &encoded), Ok(table));
@@ -684,6 +895,7 @@ mod tests {
                 },
             ],
             primary_key,
+            indexes: Vec::new(),
         }
     }
 
@@ -733,11 +945,157 @@ mod tests {
 
     #[test]
     fn a_newer_table_definition_version_is_refused_by_name() {
-        let mut newer = two_columns([true, false], vec![0]).encode();
-        newer[0] = 3;
+        let mut newer = with_indexes([true, false]).encode();
+        newer[0] = 4;
         let error = TableDefinition::decode("t", &newer).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
-        assert!(error.message().contains("format version 3"), "{error}");
+        assert!(error.message().contains("format version 4"), "{error}");
+    }
+
+    fn with_indexes(auto: [bool; 2]) -> TableDefinition {
+        let mut table = two_columns(auto, vec![0]);
+        table.indexes = vec![
+            IndexDefinition {
+                id: 1,
+                name: "t_name_idx".into(),
+                unique: false,
+                columns: vec![1],
+            },
+            IndexDefinition {
+                id: 2,
+                name: "both".into(),
+                unique: true,
+                columns: vec![1, 0],
+            },
+        ];
+        table
+    }
+
+    #[test]
+    fn a_table_with_indexes_is_version_3_and_round_trips_with_or_without_auto_increment() {
+        for auto in [[false, false], [true, false]] {
+            let table = with_indexes(auto);
+            let encoded = table.encode();
+            assert_eq!(encoded[0], 3);
+            assert_eq!(TableDefinition::decode("t", &encoded), Ok(table));
+            for cut in 0..encoded.len() {
+                assert!(damaged(&encoded[..cut]), "cut at {cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn version_3_pins_its_bytes_after_the_version_2_body() {
+        let encoded = with_indexes([false, false]).encode();
+        let body = two_columns([false, false], vec![0]).encode();
+        assert_eq!(encoded[1..body.len()], body[1..]);
+        assert_eq!(
+            encoded[body.len()..],
+            [
+                2, 1, 0, 0, 0, 10, b't', b'_', b'n', b'a', b'm', b'e', b'_', b'i', b'd', b'x', 0,
+                1, 1, 2, 0, 0, 0, 4, b'b', b'o', b't', b'h', 1, 2, 1, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn damaged_index_definitions_are_errors() {
+        let good = with_indexes([false, false]).encode();
+        let tail = two_columns([false, false], vec![0]).encode().len();
+        let mut no_indexes = good[..tail].to_vec();
+        no_indexes[0] = 3;
+        no_indexes.push(0);
+        assert!(damaged(&no_indexes));
+        let mut unique_marker = good.clone();
+        unique_marker[tail + 16] = 2;
+        assert!(damaged(&unique_marker));
+        let mut no_columns = good.clone();
+        no_columns[tail + 17] = 0;
+        assert!(damaged(&no_columns));
+        let mut missing_column = good.clone();
+        missing_column[tail + 18] = 9;
+        assert!(damaged(&missing_column));
+        let mut same_id = good.clone();
+        same_id[tail + 19] = 1;
+        assert!(damaged(&same_id));
+        let mut repeated_column = good.clone();
+        repeated_column[tail + 31] = 1;
+        assert!(damaged(&repeated_column));
+        assert!(damaged(&with_indexes([true, true]).encode()));
+        assert!(damaged(&with_indexes([false, true]).encode()));
+        let mut long = with_indexes([false, false]);
+        long.indexes[0].columns = (0..33).map(|column| column % 2).collect();
+        assert!(damaged(&long.encode()));
+    }
+
+    #[test]
+    fn index_key_values_decode_back_to_what_was_encoded() {
+        let mut random = Seeded(0x0123_4567_89AB_CDEF);
+        let types = [
+            SqlType::SmallInt,
+            SqlType::Integer,
+            SqlType::BigInt,
+            SqlType::Real,
+            SqlType::Double,
+            SqlType::Boolean,
+            SqlType::Text,
+        ];
+        for _ in 0..2_000 {
+            let mut values = Vec::new();
+            let mut key = Vec::new();
+            for (kind, _) in types.iter().enumerate() {
+                let value = if random.next() % 5 == 0 {
+                    Value::Null
+                } else {
+                    random_value(&mut random, kind as u64)
+                };
+                encode_key_value(&mut key, &value);
+                values.push(value);
+            }
+            key.extend_from_slice(&[9, 9]);
+            let mut decoded = Vec::new();
+            let used = decode_key_values(&key, types, &mut decoded).unwrap();
+            assert_eq!(used, key.len() - 2);
+            assert_eq!(skip_key_values(&key, types), Ok(used));
+            for (left, right) in values.iter().zip(&decoded) {
+                assert_eq!(compare_values(left, right), std::cmp::Ordering::Equal);
+                assert_eq!(left.is_null(), right.is_null());
+            }
+            for cut in 0..used {
+                let mut partial = Vec::new();
+                assert!(decode_key_values(&key[..cut], types, &mut partial).is_err());
+                assert!(skip_key_values(&key[..cut], types).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn hostile_index_keys_and_definitions_are_errors_never_panics() {
+        let mut random = Seeded(0xFEED_FACE_0BAD_CAFE);
+        let good = with_indexes([true, false]).encode();
+        for _ in 0..20_000 {
+            let mut bytes = good.clone();
+            let flips = 1 + random.next() % 4;
+            for _ in 0..flips {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            if random.next() % 3 == 0 {
+                let keep = (random.next() as usize) % bytes.len();
+                bytes.truncate(keep);
+            }
+            let _ = TableDefinition::decode("t", &bytes);
+            let mut values = Vec::new();
+            let types = [
+                SqlType::Text,
+                SqlType::Double,
+                SqlType::Real,
+                SqlType::BigInt,
+            ];
+            if let Ok(used) = decode_key_values(&bytes, types, &mut values) {
+                assert_eq!(skip_key_values(&bytes, types), Ok(used));
+            }
+        }
     }
 
     #[test]

@@ -151,14 +151,21 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             let values = error
                 .detail()
                 .and_then(|detail| detail.split_once(")=("))
-                .and_then(|(_, rest)| rest.rsplit_once(") already exists"))
+                .and_then(|(_, rest)| {
+                    rest.rsplit_once(") already exists")
+                        .or_else(|| rest.rsplit_once(") is duplicated"))
+                })
                 .map(|(values, _)| values.replace(", ", "-"))
                 .unwrap_or_default();
-            let table = name.strip_suffix("_pkey").unwrap_or(&name);
+            let key = match error.table() {
+                Some(table) if name != format!("{table}_pkey") => format!("{table}.{name}"),
+                Some(table) => format!("{table}.PRIMARY"),
+                None => format!("{}.PRIMARY", name.strip_suffix("_pkey").unwrap_or(&name)),
+            };
             translated(
                 1062,
                 SqlState::MYSQL_INTEGRITY,
-                format!("Duplicate entry '{values}' for key '{table}.PRIMARY'"),
+                format!("Duplicate entry '{values}' for key '{key}'"),
             )
         }
         "23502" => translated(

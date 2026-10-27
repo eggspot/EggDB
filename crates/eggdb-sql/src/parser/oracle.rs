@@ -14,13 +14,17 @@ pub const ORACLE_COMPATIBLE_VERSION: &str = "23ai";
 
 const MAX_DECODE_ARGUMENTS: usize = 255;
 
-const DICTIONARY_VIEWS: [&str; 6] = [
+const DICTIONARY_VIEWS: [&str; 10] = [
     "user_tables",
     "all_tables",
     "user_tab_columns",
     "all_tab_columns",
     "user_tab_cols",
     "all_tab_cols",
+    "user_indexes",
+    "all_indexes",
+    "user_ind_columns",
+    "all_ind_columns",
 ];
 
 pub(crate) fn is_reserved(word: &str) -> bool {

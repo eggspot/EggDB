@@ -3,13 +3,14 @@ use crate::ast::{
     BinaryOperator, Expr, ExprKind, FromClause, JoinCondition, JoinKind, Select, SelectItem,
 };
 use crate::encoding::{
-    TableDefinition, decode_row_into, encode_key_value, prefix_end, rows_prefix,
+    TableDefinition, decode_row_into, encode_key_value, index_prefix, prefix_end, rows_prefix,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
     Evaluator, Scope, Source, Sources, check_columns, children, compare_truth, reject_aggregates,
 };
 use crate::hash_index::HashIndex;
+use crate::indexes::row_key_of_entry;
 use crate::memory::WorkMemory;
 use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::{Conversion, SqlType, Value, comparable, compare_values, convert};
@@ -219,8 +220,87 @@ pub(crate) fn resolve<'a>(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JoinMethod {
+    PrimaryKey,
+    Index(usize),
+    Hash,
+    Loop,
+}
+
+fn primary_key_lefts(
+    table: &TableDefinition,
+    offset: usize,
+    pairs: &[(usize, usize)],
+) -> Option<Vec<usize>> {
+    if table.primary_key.is_empty() {
+        return None;
+    }
+    table
+        .primary_key
+        .iter()
+        .map(|&index| {
+            pairs
+                .iter()
+                .find(|&&(_, inner)| inner == offset + index)
+                .map(|&(outer, _)| outer)
+        })
+        .collect()
+}
+
+fn index_lefts(
+    table: &TableDefinition,
+    offset: usize,
+    pairs: &[(usize, usize)],
+) -> Option<(usize, Vec<usize>)> {
+    let mut best: Option<(usize, Vec<usize>)> = None;
+    for (position, index) in table.indexes.iter().enumerate() {
+        let lefts: Vec<usize> = index
+            .columns
+            .iter()
+            .map_while(|&column| {
+                pairs
+                    .iter()
+                    .find(|&&(_, inner)| inner == offset + column)
+                    .map(|&(outer, _)| outer)
+            })
+            .collect();
+        let better = match &best {
+            None => !lefts.is_empty(),
+            Some((_, known)) => lefts.len() > known.len(),
+        };
+        if better {
+            best = Some((position, lefts));
+        }
+    }
+    best
+}
+
+impl JoinedFrom<'_> {
+    pub(crate) fn methods(&self) -> Vec<JoinMethod> {
+        self.shapes
+            .iter()
+            .map(|shape| {
+                let pairs = equality_pairs(shape);
+                let table = shape.source.table;
+                let offset = shape.source.offset;
+                if primary_key_lefts(table, offset, &pairs).is_some() {
+                    JoinMethod::PrimaryKey
+                } else if let Some((position, _)) = index_lefts(table, offset, &pairs) {
+                    JoinMethod::Index(position)
+                } else if !pairs.is_empty() {
+                    JoinMethod::Hash
+                } else {
+                    JoinMethod::Loop
+                }
+            })
+            .collect()
+    }
+}
+
 enum Access {
     Lookup(Vec<usize>),
+    IndexLookup { position: usize, lefts: Vec<usize> },
     Hash { probe: Vec<usize>, index: HashIndex },
     Scan(Vec<Vec<Value>>),
 }
@@ -504,19 +584,11 @@ impl<'a> JoinedRows<'a> {
             } else {
                 Vec::new()
             };
-            let lookup: Option<Vec<usize>> = if table.primary_key.is_empty() {
-                None
+            let lookup = primary_key_lefts(table, offset, &pairs);
+            let index_lookup = if lookup.is_none() {
+                index_lefts(table, offset, &pairs)
             } else {
-                table
-                    .primary_key
-                    .iter()
-                    .map(|&index| {
-                        pairs
-                            .iter()
-                            .find(|&&(_, inner)| inner == offset + index)
-                            .map(|&(outer, _)| outer)
-                    })
-                    .collect()
+                None
             };
             let mut on = shape
                 .on
@@ -575,6 +647,33 @@ impl<'a> JoinedRows<'a> {
                         index,
                     },
                     None => Access::Lookup(lefts),
+                }
+            } else if let Some((position, lefts)) = index_lookup {
+                let bounded = if outer_is_scanned {
+                    build_hash(
+                        reader,
+                        shape,
+                        HashBuild {
+                            pairs: &pairs,
+                            needed: &step_needed,
+                            keep: &keep,
+                            limit: Some(LOOKUP_HASH_LIMIT),
+                        },
+                        hints,
+                        memory,
+                    )?
+                } else {
+                    None
+                };
+                if bounded.is_some() && !keep.is_empty() {
+                    filters[index + 1].retain(|filter| !touches_only(filter, &own));
+                }
+                match bounded {
+                    Some(index) => Access::Hash {
+                        probe: pairs.iter().map(|&(outer, _)| outer).collect(),
+                        index,
+                    },
+                    None => Access::IndexLookup { position, lefts },
                 }
             } else if !pairs.is_empty() {
                 let built = build_hash(
@@ -708,6 +807,11 @@ impl<'a> JoinedRows<'a> {
                     return Ok(false);
                 }
             }
+            Access::IndexLookup { position, lefts } => {
+                if !self.index_lookup(step, *position, lefts, row, &mut attempt)? {
+                    return Ok(false);
+                }
+            }
             Access::Hash { probe, index } => {
                 let mut key = step.key.borrow_mut();
                 let mut at = index.first(row, probe, &mut key);
@@ -736,6 +840,43 @@ impl<'a> JoinedRows<'a> {
             return Ok(keep_going);
         }
         Ok(true)
+    }
+
+    fn index_lookup(
+        &self,
+        step: &Step<'_>,
+        position: usize,
+        lefts: &[usize],
+        row: &mut Vec<Value>,
+        attempt: &mut dyn FnMut(&mut Vec<Value>) -> SqlResult<bool>,
+    ) -> SqlResult<bool> {
+        let table = step.table;
+        let index = &table.indexes[position];
+        let mut start = index_prefix(table.id, index.id);
+        for (&column, &left) in index.columns.iter().zip(lefts) {
+            let Some(value) = key_value(&row[left], table.columns[column].sql_type) else {
+                return Ok(true);
+            };
+            encode_key_value(&mut start, &value);
+        }
+        let end = prefix_end(&start);
+        let mut going = true;
+        self.reader
+            .scan(&start, &end, ScanDirection::Forward, &mut |entry, _| {
+                let key = row_key_of_entry(table, index, entry)?;
+                let mut found = false;
+                self.reader.get_with(&key, &mut |bytes| {
+                    decode_row_into(bytes, &table.columns, Some(&step.needed), row)?;
+                    found = true;
+                    Ok(())
+                })?;
+                if !found {
+                    return Err(crate::encoding::corrupt("index entry"));
+                }
+                going = attempt(row)?;
+                Ok(going)
+            })?;
+        Ok(going)
     }
 
     fn lookup(&self, step: &Step<'_>, lefts: &[usize], row: &mut Vec<Value>) -> SqlResult<bool> {
@@ -770,6 +911,19 @@ impl<'a> JoinedRows<'a> {
         })?;
         Ok(found)
     }
+}
+
+fn key_value(original: &Value, sql_type: SqlType) -> Option<Value> {
+    if original.is_null() {
+        return None;
+    }
+    if original.sql_type() == Some(sql_type)
+        || (sql_type.is_string() && matches!(original, Value::Text(_)))
+    {
+        return Some(original.clone());
+    }
+    let converted = convert(original.clone(), sql_type, Conversion::Assignment).ok()?;
+    (compare_values(&converted, original) == Ordering::Equal).then_some(converted)
 }
 
 impl Step<'_> {
