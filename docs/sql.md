@@ -170,6 +170,7 @@ exports into a new file, or into a file without SQL tables.
   per distinct row or value. What a statement holds this way (joined tables, groups, distinct
   rows, sorted rows and its result) is counted, and past 1 GiB the statement fails with `53200`
   (`out of memory`) instead of exhausting the process; nothing spills to disk yet.
+  A `FROM` clause joins at most 64 tables (`54000`).
 - `avg` of `smallint`, `integer` or `bigint` returns PostgreSQL's `numeric`, which is not
   supported yet: it fails with `0A000` and a hint to write `avg(x::double precision)`. `sum` of
   `bigint` is also `numeric` there: it runs where its value prints the same (a select item, an

@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) type RowFeed<'f> =
     dyn FnMut(&mut dyn FnMut(&[Value]) -> SqlResult<bool>) -> SqlResult<()> + 'f;
 
-enum Extra {
+enum GroupColumn {
     Carried(usize),
     Aggregate(usize),
 }
@@ -25,7 +25,7 @@ struct Call {
 
 pub(crate) struct Grouping {
     keys: Vec<Expr>,
-    extras: Vec<Extra>,
+    group_columns: Vec<GroupColumn>,
     calls: Vec<Call>,
     pub(crate) items: Vec<SelectItem>,
     pub(crate) having: Option<Expr>,
@@ -348,23 +348,23 @@ struct Analyzer<'a> {
     key_offsets: Vec<Option<usize>>,
     key_types: Vec<Option<SqlType>>,
     dependent: Vec<std::ops::Range<usize>>,
-    extras: Vec<Extra>,
+    group_columns: Vec<GroupColumn>,
     calls: Vec<Call>,
 }
 
 impl Analyzer<'_> {
-    fn extra_slot(&mut self, extra: Extra) -> usize {
+    fn group_column_slot(&mut self, column: GroupColumn) -> usize {
         let found = self
-            .extras
+            .group_columns
             .iter()
-            .position(|existing| match (existing, &extra) {
-                (Extra::Carried(a), Extra::Carried(b))
-                | (Extra::Aggregate(a), Extra::Aggregate(b)) => a == b,
+            .position(|existing| match (existing, &column) {
+                (GroupColumn::Carried(a), GroupColumn::Carried(b))
+                | (GroupColumn::Aggregate(a), GroupColumn::Aggregate(b)) => a == b,
                 _ => false,
             });
         let index = found.unwrap_or_else(|| {
-            self.extras.push(extra);
-            self.extras.len() - 1
+            self.group_columns.push(column);
+            self.group_columns.len() - 1
         });
         self.key_shapes.len() + index
     }
@@ -421,7 +421,7 @@ impl Analyzer<'_> {
                 };
                 Ok(Expr {
                     kind: ExprKind::Slot {
-                        index: self.extra_slot(Extra::Aggregate(call)),
+                        index: self.group_column_slot(GroupColumn::Aggregate(call)),
                         sql_type: None,
                     },
                     position: expr.position,
@@ -443,7 +443,7 @@ impl Analyzer<'_> {
                 if self.dependent.iter().any(|range| range.contains(&offset)) {
                     return Ok(Expr {
                         kind: ExprKind::Slot {
-                            index: self.extra_slot(Extra::Carried(offset)),
+                            index: self.group_column_slot(GroupColumn::Carried(offset)),
                             sql_type: self.scope.column_type(offset),
                         },
                         position: expr.position,
@@ -563,7 +563,7 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
             .collect(),
         key_offsets,
         dependent,
-        extras: Vec::new(),
+        group_columns: Vec::new(),
         calls: Vec::new(),
     };
     let mut items = Vec::with_capacity(outputs.len());
@@ -602,7 +602,7 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
         .collect::<SqlResult<_>>()?;
     Ok(Grouping {
         keys,
-        extras: analyzer.extras,
+        group_columns: analyzer.group_columns,
         calls: analyzer.calls,
         items,
         having,
@@ -755,11 +755,11 @@ impl Grouping {
         let mut key_values = Vec::with_capacity(self.keys.len());
         let mut distinct_key = Vec::new();
         let carried: Vec<usize> = self
-            .extras
+            .group_columns
             .iter()
-            .filter_map(|extra| match extra {
-                Extra::Carried(offset) => Some(*offset),
-                Extra::Aggregate(_) => None,
+            .filter_map(|column| match column {
+                GroupColumn::Carried(offset) => Some(*offset),
+                GroupColumn::Aggregate(_) => None,
             })
             .collect();
         let new_group = |keys: Vec<Value>, row: &[Value]| Group {
@@ -825,10 +825,10 @@ impl Grouping {
                 group.accumulators.into_iter().map(Some).collect();
             let mut carried = group.carried.into_iter();
             let mut row = group.keys;
-            for extra in &self.extras {
-                row.push(match extra {
-                    Extra::Carried(_) => carried.next().unwrap_or(Value::Null),
-                    Extra::Aggregate(call) => match accumulators[*call].take() {
+            for column in &self.group_columns {
+                row.push(match column {
+                    GroupColumn::Carried(_) => carried.next().unwrap_or(Value::Null),
+                    GroupColumn::Aggregate(call) => match accumulators[*call].take() {
                         Some(accumulator) => self.calls[*call]
                             .finish(accumulator)
                             .map_err(|error| error.at_if_unplaced(self.calls[*call].position))?,

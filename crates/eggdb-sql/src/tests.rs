@@ -1359,6 +1359,11 @@ fn join_errors_follow_postgresql() {
     for (sql, expected) in cases {
         assert_eq!(state(&mut session, sql), expected, "{sql}");
     }
+    let many = format!(
+        "SELECT count(*) FROM a{}",
+        (0..70).map(|n| format!(", a a{n}")).collect::<String>()
+    );
+    assert_eq!(state(&mut session, &many), "54000");
     let mismatch = fails(
         &mut session,
         "CREATE TABLE c (k text); SELECT * FROM a JOIN c USING (k)",

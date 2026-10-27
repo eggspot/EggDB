@@ -9,6 +9,7 @@ use crate::types::SqlType;
 use std::borrow::Cow;
 
 const MAX_NESTING: usize = 64;
+const MAX_JOINED_TABLES: usize = 64;
 
 const AGGREGATES: &[&str] = &[
     "count",
@@ -1050,6 +1051,13 @@ impl<'t> Parser<'t> {
             };
             if self.is_word("lateral") {
                 return Err(self.not_supported("LATERAL"));
+            }
+            if joins.len() + 1 >= MAX_JOINED_TABLES {
+                return Err(SqlError::new(
+                    SqlState::PROGRAM_LIMIT_EXCEEDED,
+                    format!("a FROM clause can join at most {MAX_JOINED_TABLES} tables"),
+                )
+                .at(self.position()));
             }
             let table = self.table_reference()?;
             let condition = match kind {
