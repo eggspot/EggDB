@@ -550,6 +550,64 @@ impl Shape {
         self.free() >= SLOT + LEAF_CELL_HEADER + suffix_len + value.cell_bytes()
     }
 
+    pub(crate) fn fits_with_high_fence(&self, body: &[u8], high: &[u8]) -> bool {
+        let prefix = common_prefix(self.low_suffix(body), high);
+        let page_size = self.body_len + PAGE_HEADER_SIZE;
+        self.is_leaf()
+            && !self.has_high_fence()
+            && self.used_bytes() + high.len() - prefix <= page_size + prefix * self.count
+    }
+
+    pub(crate) fn take_high_fence(&self, body: &mut [u8], high: &[u8]) -> Result<(), FormatError> {
+        if !self.fits_with_high_fence(body, high) {
+            return Err(self.corrupt("a high fence key does not fit in the page"));
+        }
+        let old = body.to_vec();
+        let low = self.low_suffix(&old);
+        if high <= low {
+            return Err(self.corrupt("a high fence key is not above the low fence key"));
+        }
+        let prefix = common_prefix(low, high);
+        body[..FENCES].fill(0);
+        write_u16(body, COUNT, self.count as u16);
+        write_u16(body, PREFIX_LEN, prefix as u16);
+        write_u16(body, LOW_LEN, low.len() as u16);
+        write_u16(body, HIGH_LEN, high.len() as u16);
+        let mut at = FENCES;
+        for part in [low, &high[prefix..]] {
+            body[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        }
+        let slots = at;
+        let mut cell_start = body.len();
+        for index in 0..self.count {
+            let cell = self.cell_at(&old, index)?;
+            if cell.key.get(..prefix) != Some(&high[..prefix]) || cell.key >= high {
+                return Err(self.corrupt("a key is not below the new high fence key"));
+            }
+            let suffix = &cell.key[prefix..];
+            let value = if cell.overflow {
+                LeafValue::Overflow(
+                    cell.payload
+                        .try_into()
+                        .map_err(|_| self.corrupt("a large value's reference is not 16 bytes"))?,
+                )
+            } else {
+                LeafValue::Inline(cell.payload)
+            };
+            cell_start -= LEAF_CELL_HEADER + suffix.len() + value.cell_bytes();
+            value.write_cell(body, cell_start, suffix);
+            write_u16(
+                body,
+                slots + index * SLOT,
+                (cell_start + PAGE_HEADER_SIZE) as u16,
+            );
+        }
+        body[slots + self.count * SLOT..cell_start].fill(0);
+        write_u32(body, CELL_START, (cell_start + PAGE_HEADER_SIZE) as u32);
+        Ok(())
+    }
+
     pub(crate) fn inner_fits(&self, suffix_len: usize) -> bool {
         self.free() >= SLOT + INNER_CELL_HEADER + suffix_len
     }

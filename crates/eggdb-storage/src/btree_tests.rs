@@ -1,4 +1,4 @@
-use crate::btree::{BTree, TreeReport};
+use crate::btree::{AppendHint, BTree, TreeReport};
 use crate::error::{FormatError, StorageError};
 use crate::format::{Access, FileId, PageHeader, PageSize, PageType};
 use crate::page_cache::{CacheSize, PageCache};
@@ -147,6 +147,103 @@ fn put_if_absent_stores_only_new_keys_and_keeps_existing_values() {
     }
     cache.commit(|_| {}).unwrap();
     assert_matches(&tree, &cache, &model);
+    drop(cache);
+    let cache = open(&fs, Access::ReadOnly, 64);
+    assert_matches(&stored_tree(&cache), &cache, &model);
+}
+
+#[test]
+fn a_rightmost_leaf_takes_a_high_fence_with_the_bytes_a_full_encode_writes() {
+    let page_size = PageSize::DEFAULT.bytes();
+    let prefix = b"\xffSQL\x00\x03\x00\x00\x00\x01".to_vec();
+    let key = |number: u64| [&prefix[..], &number.to_be_bytes()].concat();
+    let mut rng = TestRng::new(5);
+    for low in [Vec::new(), key(100)] {
+        let keys: Vec<Vec<u8>> = (0..40).map(|index| key(1000 + index * 3)).collect();
+        let values: Vec<StoredValue> = keys
+            .iter()
+            .map(|_| StoredValue::Inline(bytes_up_to(&mut rng, 1, 60)))
+            .collect();
+        let open = Node {
+            level: 0,
+            low: low.clone(),
+            high: None,
+            keys: keys.clone(),
+            values: values.clone(),
+            children: Vec::new(),
+        };
+        let header = crate::tree_page::header_for(0, 0);
+        let mut body = vec![0xEE; page_size - 16];
+        open.encode(9, &mut body).unwrap();
+        let shape = Shape::parse(9, header, &body).unwrap();
+        let high = shortest_separator(keys.last().unwrap(), &key(5000));
+        assert!(shape.fits_with_high_fence(&body, &high));
+        shape.take_high_fence(&mut body, &high).unwrap();
+        let closed = Node {
+            high: Some(high.clone()),
+            ..open
+        };
+        let mut expected = vec![0xEE; page_size - 16];
+        closed.encode(9, &mut expected).unwrap();
+        assert_eq!(body, expected);
+        let shape = Shape::parse(9, header, &body).unwrap();
+        shape.validate(&body).unwrap();
+        assert_eq!(Node::decode(&shape, &body).unwrap(), closed);
+        assert!(shape.take_high_fence(&mut body, &high).is_err());
+    }
+}
+
+#[test]
+fn appends_mixed_with_inserts_overflow_values_and_deletes_match_a_model() {
+    let fs = SimFileSystem::new();
+    let mut cache = create(&fs, PageSize::DEFAULT, 4096);
+    let tree = new_tree(&mut cache);
+    let mut model = Model::new();
+    let mut rng = TestRng::new(23);
+    let prefix = b"\xffSQL\x00\x03\x00\x00\x00\x07".to_vec();
+    let mut hint = AppendHint::default();
+    for number in 0..20_000u64 {
+        let appended = number * 4;
+        let key = [&prefix[..], &appended.to_be_bytes()].concat();
+        let value = if number % 997 == 0 {
+            vec![b'o'; 6000]
+        } else {
+            bytes_up_to(&mut rng, 8, 40)
+        };
+        assert!(
+            tree.put_if_absent_hinted(&cache, &key, &value, &mut hint)
+                .unwrap()
+        );
+        assert!(
+            !tree
+                .put_if_absent_hinted(&cache, &key, b"again", &mut hint)
+                .unwrap()
+        );
+        model.insert(key, value);
+        if number % 7 == 0 {
+            let earlier = rng.below(appended as usize + 1) as u64 | 1;
+            let key = [&prefix[..], &earlier.to_be_bytes()].concat();
+            let value = bytes_up_to(&mut rng, 1, 30);
+            tree.put_hinted(&cache, &key, &value, &mut hint).unwrap();
+            model.insert(key, value);
+        }
+        if number % 11 == 0 {
+            hint.forget();
+            let gone = [
+                &prefix[..],
+                &(rng.below(appended as usize + 1) as u64 * 4).to_be_bytes(),
+            ]
+            .concat();
+            assert_eq!(
+                tree.delete(&cache, &gone).unwrap(),
+                model.remove(&gone).is_some()
+            );
+        }
+    }
+    cache.commit(|_| {}).unwrap();
+    assert_matches(&tree, &cache, &model);
+    let report = tree.check(&cache).unwrap();
+    assert!(report.entries / report.leaf_pages > 60, "{report:?}");
     drop(cache);
     let cache = open(&fs, Access::ReadOnly, 64);
     assert_matches(&stored_tree(&cache), &cache, &model);
