@@ -1244,19 +1244,19 @@ fn for_each_matching_row(
     access: &Access,
     visit: &mut RowVisitor<'_>,
 ) -> SqlResult<()> {
-    if let Some(filter) = filter
-        && let Some(key) = point_key(table, scope, filter)
-    {
+    if let Path::Point(key) = &access.path {
         let mut found = None;
-        reader.get_with(&key, &mut |bytes| {
+        reader.get_with(key, &mut |bytes| {
             found = Some(decode_row(bytes, &table.columns)?);
             Ok(())
         })?;
         if let Some(row) = found {
             let filter_is_the_key = table.primary_key.len() == 1
-                && matches!(filter.kind, ExprKind::Binary(BinaryOperator::Equal, ..));
-            if filter_is_the_key || filter_matches(scope, Some(filter), &row)? {
-                visit(&key, row)?;
+                && filter.is_some_and(|filter| {
+                    matches!(filter.kind, ExprKind::Binary(BinaryOperator::Equal, ..))
+                });
+            if filter_is_the_key || filter_matches(scope, filter, &row)? {
+                visit(key, row)?;
             }
         }
         return Ok(());
@@ -1290,13 +1290,28 @@ fn for_each_matching_row(
     )
 }
 
+fn planned_access(
+    table: &TableDefinition,
+    scope: Scope<'_>,
+    filter: Option<&Expr>,
+    order: Option<&OrderRequest>,
+) -> Access {
+    if let Some(key) = filter.and_then(|filter| point_key(table, scope, filter)) {
+        return Access::point(key);
+    }
+    match (filter, order) {
+        (None, None) => Access::scan(),
+        _ => plan::plan(table, scope, filter, order),
+    }
+}
+
 fn matching_rows(
     reader: &dyn KeyValueRead,
     table: &TableDefinition,
     scope: Scope<'_>,
     filter: Option<&Expr>,
 ) -> SqlResult<Vec<(Vec<u8>, Vec<Value>)>> {
-    let access = plan::plan(table, scope, filter, None);
+    let access = planned_access(table, scope, filter, None);
     let mut memory = WorkMemory::new();
     let mut rows = Vec::new();
     for_each_matching_row(reader, table, scope, filter, &access, &mut |key, row| {
@@ -1626,7 +1641,7 @@ fn select_or_explain(
             } else {
                 None
             };
-            let access = plan::plan(table, scope, select.filter.as_ref(), order.as_ref());
+            let access = planned_access(table, scope, select.filter.as_ref(), order.as_ref());
             ordered = access.ordered && order.is_some();
             RowSource::Table(table, access)
         }
@@ -1803,10 +1818,7 @@ impl SourceRows<'_> {
                     Ok(true)
                 }
             }),
-            RowSource::Table(table, access)
-                if access.path == Path::Scan
-                    && filter.is_none_or(|filter| point_key(table, scope, filter).is_none()) =>
-            {
+            RowSource::Table(table, access) if access.path == Path::Scan => {
                 let prefix = rows_prefix(table.id);
                 let mut row = Vec::with_capacity(table.columns.len());
                 reader.scan(

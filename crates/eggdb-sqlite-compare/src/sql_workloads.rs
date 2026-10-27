@@ -9,6 +9,7 @@ use rusqlite::Connection;
 use std::hint::black_box;
 
 pub(crate) const POINT_SELECT: &str = "sqlite_compare.sql_point_select";
+pub(crate) const INDEXED_LOOKUP: &str = "sqlite_compare.sql_indexed_lookup";
 pub(crate) const BULK_INSERT: &str = "sqlite_compare.sql_bulk_insert";
 pub(crate) const JOIN: &str = "sqlite_compare.sql_join";
 pub(crate) const GROUP_BY: &str = "sqlite_compare.sql_group_by";
@@ -130,6 +131,68 @@ pub(crate) fn point_select() -> Result<Vec<Metric>, String> {
         POINT_SELECT,
         measured,
         RatioGate::GatedWithin(KNOWN_GAP_TOLERANCE_PERCENT),
+        ["ns_per_select", "sqlite_ns_per_select"],
+    ))
+}
+
+const NAME_INDEX: &str = "CREATE INDEX people_name ON people (name)";
+
+fn indexed_query(index: u64) -> String {
+    format!(
+        "SELECT id, score FROM people WHERE name = 'person {}'",
+        index.wrapping_mul(7919) % ROWS
+    )
+}
+
+fn eggdb_indexed(session: &mut SqlSession<'_>, first: u64, count: u64) -> Result<usize, String> {
+    let mut found = 0;
+    for index in first..first + count {
+        found += eggdb_run(session, &indexed_query(index))?;
+    }
+    if found as u64 != count {
+        return Err("EggDB missed a row through the index".into());
+    }
+    Ok(found)
+}
+
+fn sqlite_indexed(sqlite: &Connection, first: u64, count: u64) -> Result<i64, String> {
+    let mut folded = 0;
+    for index in first..first + count {
+        let id: i64 = sqlite
+            .query_row(&indexed_query(index), [], |row| row.get(0))
+            .map_err(failed("SQLite indexed select"))?;
+        folded ^= id;
+    }
+    Ok(folded)
+}
+
+pub(crate) fn indexed_lookup() -> Result<Vec<Metric>, String> {
+    let stores = Stores::open("sql-indexed-lookup", Durability::Normal, 0)?;
+    let store = DatabaseStore(&stores.eggdb);
+    let mut session = Session::new(&store);
+    eggdb_run(&mut session, EGGDB_TABLE)?;
+    sqlite_run(&stores.sqlite, SQLITE_TABLE)?;
+    eggdb_insert(&mut session, 0, ROWS)?;
+    sqlite_insert(&stores.sqlite, 0, ROWS)?;
+    eggdb_run(&mut session, NAME_INDEX)?;
+    sqlite_run(&stores.sqlite, NAME_INDEX)?;
+    let (mut eggdb_next, mut sqlite_next) = (0, 0);
+    let measured = measure::paired(
+        &mut |count| {
+            black_box(eggdb_indexed(&mut session, eggdb_next, count)?);
+            eggdb_next += count;
+            Ok(())
+        },
+        &mut |count| {
+            black_box(sqlite_indexed(&stores.sqlite, sqlite_next, count)?);
+            sqlite_next += count;
+            Ok(())
+        },
+    )?;
+    Ok(paired_metrics(
+        INDEXED_LOOKUP,
+        measured,
+        RatioGate::Gated,
         ["ns_per_select", "sqlite_ns_per_select"],
     ))
 }

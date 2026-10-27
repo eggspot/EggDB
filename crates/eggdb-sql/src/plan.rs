@@ -21,6 +21,7 @@ pub(crate) enum KeyChoice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Path {
     Scan,
+    Point(Vec<u8>),
     Ranges {
         key: KeyChoice,
         ranges: Vec<(Vec<u8>, Vec<u8>)>,
@@ -55,9 +56,19 @@ impl Access {
         }
     }
 
+    pub(crate) fn point(key: Vec<u8>) -> Self {
+        Self {
+            path: Path::Point(key),
+            ordered: true,
+            used: Use::Point,
+            conditions: Vec::new(),
+        }
+    }
+
     pub(crate) fn key(&self) -> Option<KeyChoice> {
         match &self.path {
             Path::Scan => None,
+            Path::Point(_) => Some(KeyChoice::Primary),
             Path::Ranges { key, .. } => Some(*key),
         }
     }
