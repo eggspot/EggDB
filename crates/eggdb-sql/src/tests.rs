@@ -932,7 +932,7 @@ fn hostile_input_returns_errors_and_never_panics() {
     fuzz(&mut session, &fragments);
 }
 
-fn fuzz(session: &mut Session<'_, MemoryStore>, fragments: &[&str]) {
+pub(crate) fn fuzz(session: &mut Session<'_, MemoryStore>, fragments: &[&str]) {
     let mut random = Seeded(0xDEAD_BEEF_CAFE_F00D);
     for _ in 0..20_000 {
         let length = 1 + random.below(14);

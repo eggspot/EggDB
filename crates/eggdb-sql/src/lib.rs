@@ -56,6 +56,8 @@ mod index_tests;
 #[cfg(test)]
 mod memory_store;
 #[cfg(test)]
+mod subquery_tests;
+#[cfg(test)]
 mod tests;
 
 pub use dialect::Dialect;
