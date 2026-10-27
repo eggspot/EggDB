@@ -1146,3 +1146,20 @@ ID|ID
 3|NULL
 NULL|4
 SELECT 5
+
+chapter "Data Types": CHAR, RAW and BLOB
+ok
+CREATE TABLE c31 (id NUMBER PRIMARY KEY, c CHAR(5), n NCHAR(3), r RAW(8), b BLOB)
+
+ok
+INSERT INTO c31 (id, c, n) VALUES (1, 'ab', 'x')
+
+rows
+SELECT c, LENGTH(c), n FROM c31 WHERE c = 'ab'
+----
+C|LENGTH(C)|N
+ab   |5|x  
+SELECT 1
+
+error 42601 906
+CREATE TABLE r31 (r RAW)

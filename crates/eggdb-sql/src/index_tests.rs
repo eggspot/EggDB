@@ -904,3 +904,195 @@ fn a_unique_numeric_index_treats_trailing_zeros_as_the_same_value() {
         "42704"
     );
 }
+
+fn random_item_31_rows(random: &mut Seeded, rows: u64) -> Vec<String> {
+    const INTERVALS: [&str; 8] = [
+        "'1 mon'",
+        "'30 days'",
+        "'720 hours'",
+        "'1 day'",
+        "'-1 day 24:00:00'",
+        "'1 year -2 mons'",
+        "'0'",
+        "'25 hours'",
+    ];
+    const CHARACTERS: [&str; 5] = ["'ab'", "'ab  '", "'a'", "''", "'b c'"];
+    (0..rows)
+        .map(|id| {
+            let pick = |random: &mut Seeded, items: &[&str]| -> String {
+                if random.below(7) == 0 {
+                    "NULL".to_owned()
+                } else {
+                    items[random.below(items.len() as u64) as usize].to_owned()
+                }
+            };
+            let i = pick(random, &INTERVALS);
+            let c = pick(random, &CHARACTERS);
+            let b = match random.below(6) {
+                0 => "NULL".to_owned(),
+                _ => format!(
+                    "'\\x{:02x}{}'",
+                    random.below(4),
+                    ["", "00", "ff"][random.below(3) as usize]
+                ),
+            };
+            let u = match random.below(6) {
+                0 => "NULL".to_owned(),
+                _ => format!(
+                    "'{:08X}-0000-4000-8000-00000000000{}'",
+                    random.below(3),
+                    random.below(3)
+                ),
+            };
+            let t = match random.below(6) {
+                0 => "NULL".to_owned(),
+                _ => format!(
+                    "'{:02}:{:02}:00'",
+                    random.below(25).min(23),
+                    random.below(3) * 20
+                ),
+            };
+            let z = match random.below(6) {
+                0 => "NULL".to_owned(),
+                _ => format!("'10:00:00+0{}'", random.below(3)),
+            };
+            format!("({id}, {i}, {c}, {b}, {u}, {t}, {z})")
+        })
+        .collect()
+}
+
+fn random_item_31_condition(random: &mut Seeded) -> String {
+    match random.below(14) {
+        0 => "i = '1 mon'".to_owned(),
+        1 => "i = '30 days'".to_owned(),
+        2 => format!("i < '{} days'", random.below(40)),
+        3 => "i BETWEEN '0' AND '1 day'".to_owned(),
+        4 => "c = 'ab'".to_owned(),
+        5 => "c = 'ab   '".to_owned(),
+        6 => "c > 'a'".to_owned(),
+        7 => format!("b = '\\x{:02x}'", random.below(4)),
+        8 => "b > '\\x01'".to_owned(),
+        9 => format!("u = '{:08x}-0000-4000-8000-000000000001'", random.below(3)),
+        10 => format!("t >= '{:02}:20'", random.below(24)),
+        11 => "z = '09:00:00+00'".to_owned(),
+        12 => format!("z < '10:00:00+0{}'", random.below(3)),
+        _ => "i IN ('1 mon', '1 day', '2 days')".to_owned(),
+    }
+}
+
+#[test]
+fn interval_character_bytea_uuid_and_time_keys_return_the_same_rows_with_and_without_indexes() {
+    let mut random = Seeded(0x5EED_1DE5_0000_0031);
+    for round in 0..4 {
+        let plain_store = MemoryStore::default();
+        let indexed_store = MemoryStore::default();
+        let mut plain = Session::new(&plain_store);
+        let mut indexed = Session::new(&indexed_store);
+        let create = "CREATE TABLE w (id integer PRIMARY KEY, i interval, c char(4), b bytea, u uuid, t time, z timetz)";
+        last(&mut plain, create);
+        last(&mut indexed, create);
+        let rows = random_item_31_rows(&mut random, 40 + round * 30);
+        let insert = format!("INSERT INTO w VALUES {}", rows.join(", "));
+        last(&mut plain, &insert);
+        last(&mut indexed, &insert);
+        for column in ["i", "c", "b", "u", "t", "z"] {
+            last(
+                &mut indexed,
+                &format!("CREATE INDEX w_{column} ON w ({column})"),
+            );
+        }
+        for (query, index) in [
+            ("SELECT * FROM w WHERE i = '1 mon'", "w_i"),
+            ("SELECT * FROM w WHERE c = 'ab'", "w_c"),
+            ("SELECT * FROM w WHERE b = '\\x01'", "w_b"),
+            (
+                "SELECT * FROM w WHERE u = '00000001-0000-4000-8000-000000000001'",
+                "w_u",
+            ),
+            ("SELECT * FROM w WHERE t > '10:00'", "w_t"),
+            ("SELECT * FROM w WHERE z = '10:00:00+01'", "w_z"),
+        ] {
+            let plan = last(&mut indexed, &format!("EXPLAIN {query}"));
+            assert!(
+                plan.contains(&format!("using {index} on w")),
+                "{query}: {plan}"
+            );
+        }
+        for _ in 0..120 {
+            let condition = random_item_31_condition(&mut random);
+            let queries = [
+                format!("SELECT * FROM w WHERE {condition} ORDER BY id"),
+                format!("SELECT id, i FROM w WHERE {condition} ORDER BY i, id"),
+                format!("SELECT id FROM w WHERE {condition} ORDER BY c DESC, b, id LIMIT 5"),
+                format!(
+                    "SELECT count(*), max(c), min(b), max(u), min(t), max(z) FROM w WHERE {condition}"
+                ),
+                format!("SELECT count(DISTINCT i), count(DISTINCT c) FROM w WHERE {condition}"),
+                format!("SELECT c, count(*) FROM w WHERE {condition} GROUP BY c ORDER BY c"),
+            ];
+            for query in &queries {
+                let expected = run(&mut plain, query).map_err(|error| error.to_string());
+                let found = run(&mut indexed, query).map_err(|error| error.to_string());
+                assert_eq!(found, expected, "{query}");
+            }
+            let change = match random.below(3) {
+                0 => format!("UPDATE w SET i = i + '1 day' WHERE {condition}"),
+                1 => format!("DELETE FROM w WHERE {condition} AND id % 4 = 0"),
+                _ => {
+                    let id = 1_000 + random.below(1_000_000);
+                    format!(
+                        "INSERT INTO w VALUES ({id}, '1 mon', 'ab', '\\x01', '00000001-0000-4000-8000-000000000001', '10:20', '11:00+01')"
+                    )
+                }
+            };
+            let expected = run(&mut plain, &change).map_err(|error| error.to_string());
+            let found = run(&mut indexed, &change).map_err(|error| error.to_string());
+            assert_eq!(found, expected, "{change}");
+        }
+        assert!(indexed.check_indexes().is_ok());
+    }
+}
+
+#[test]
+fn unique_indexes_follow_the_equality_of_intervals_and_characters() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE q (id integer PRIMARY KEY, i interval UNIQUE, c char(3) UNIQUE, u uuid UNIQUE)",
+    );
+    last(
+        &mut session,
+        "INSERT INTO q VALUES (1, '1 mon', 'a', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')",
+    );
+    for duplicate in [
+        "INSERT INTO q VALUES (2, '30 days', 'b', NULL)",
+        "INSERT INTO q VALUES (3, NULL, 'a  ', NULL)",
+        "INSERT INTO q VALUES (4, NULL, NULL, '{A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11}')",
+    ] {
+        assert_eq!(
+            fails(&mut session, duplicate).state().code(),
+            "23505",
+            "{duplicate}"
+        );
+    }
+    assert_eq!(
+        last(&mut session, "SELECT id, i FROM q WHERE i = '720 hours'"),
+        "id|i\n1|1 mon\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM q a JOIN q b ON a.c = b.c"
+        ),
+        "count\n1\nSELECT 1"
+    );
+    last(&mut session, "CREATE TABLE p (k interval PRIMARY KEY)");
+    last(&mut session, "INSERT INTO p VALUES ('1 day')");
+    assert_eq!(
+        fails(&mut session, "INSERT INTO p VALUES ('24 hours')")
+            .state()
+            .code(),
+        "23505"
+    );
+}

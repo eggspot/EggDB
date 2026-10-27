@@ -1093,10 +1093,11 @@ impl<'b> Reader<'b> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexDefinition, TableDefinition, decode_key_values, decode_row, encode_key_value,
-        encode_row, prefix_end, skip_key_values,
+        IndexDefinition, MAX_CHARACTER_LENGTH, TableDefinition, decode_key_values, decode_row,
+        encode_key_value, encode_row, prefix_end, skip_key_values,
     };
     use crate::encoding::Column;
+    use crate::interval::{Interval, IntervalFields};
     use crate::types::{NumericModifier, SqlType, Value, compare_values};
 
     struct Seeded(u64);
@@ -1699,6 +1700,296 @@ mod tests {
                 assert_eq!(skip_key_values(&bytes, types), Ok(used));
             }
         }
+    }
+
+    fn item_31_columns() -> Vec<Column> {
+        let column = |name: &str, sql_type| Column {
+            name: name.into(),
+            sql_type,
+            not_null: false,
+            default: None,
+            auto_increment: false,
+        };
+        vec![
+            column("id", SqlType::Integer),
+            column("at", SqlType::Time(Some(2))),
+            column("zoned", SqlType::TimeTz(None)),
+            column(
+                "span",
+                SqlType::Interval {
+                    fields: Some(IntervalFields::DayToSecond),
+                    precision: Some(3),
+                },
+            ),
+            column("raw", SqlType::Bytea),
+            column("tag", SqlType::Uuid),
+            column("code", SqlType::Bpchar(Some(4))),
+            column("price", SqlType::Numeric(None)),
+        ]
+    }
+
+    fn item_31_table() -> TableDefinition {
+        TableDefinition {
+            id: 11,
+            name: "more".into(),
+            columns: item_31_columns(),
+            primary_key: vec![0],
+            indexes: vec![IndexDefinition {
+                id: 1,
+                name: "more_span".into(),
+                unique: false,
+                columns: vec![3, 6],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_table_with_item_31_types_is_version_5_and_round_trips() {
+        let table = item_31_table();
+        let encoded = table.encode();
+        assert_eq!(encoded[0], 5);
+        assert_eq!(TableDefinition::decode("more", &encoded), Ok(table));
+        for cut in 0..encoded.len() {
+            assert!(damaged(&encoded[..cut]), "cut at {cut}");
+        }
+        assert_eq!(typed_table(true).encode()[0], 4);
+        assert_eq!(with_indexes([false, false]).encode()[0], 3);
+    }
+
+    #[test]
+    fn version_5_pins_the_bytes_of_every_item_31_type() {
+        let mut table = item_31_table();
+        table.indexes.clear();
+        let expected: &[u8] = &[
+            5, 11, 0, 0, 0, 8, 2, b'i', b'd', 2, 0, 0, 2, b'a', b't', 15, 2, 0, 0, 5, b'z', b'o',
+            b'n', b'e', b'd', 16, 0xFF, 0, 0, 4, b's', b'p', b'a', b'n', 17, 10, 3, 0, 0, 3, b'r',
+            b'a', b'w', 18, 0, 0, 3, b't', b'a', b'g', 19, 0, 0, 4, b'c', b'o', b'd', b'e', 20, 4,
+            0, 0, 0, 0, 0, 5, b'p', b'r', b'i', b'c', b'e', 9, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+        ];
+        assert_eq!(table.encode(), expected);
+    }
+
+    #[test]
+    fn damaged_item_31_type_tags_and_modifiers_are_errors() {
+        let good = item_31_table().encode();
+        let at_tag = |tag: u8| good.iter().position(|&byte| byte == tag).unwrap();
+        let mut older = good.clone();
+        older[0] = 4;
+        assert!(damaged(&older), "an item 31 type in version 4");
+        let mut unknown = good.clone();
+        unknown[at_tag(20)] = 21;
+        assert!(damaged(&unknown));
+        let mut fraction = good.clone();
+        fraction[at_tag(15) + 1] = 7;
+        assert!(damaged(&fraction));
+        let mut fields = good.clone();
+        fields[at_tag(17) + 1] = 14;
+        assert!(damaged(&fields), "fields code 14");
+        let mut precision_without_seconds = good.clone();
+        precision_without_seconds[at_tag(17) + 1] = 7;
+        assert!(damaged(&precision_without_seconds), "year to month(3)");
+        let mut long = good.clone();
+        let length_at = at_tag(20) + 1;
+        long[length_at..length_at + 4].copy_from_slice(&(MAX_CHARACTER_LENGTH + 1).to_le_bytes());
+        assert!(damaged(&long));
+        let mut plain = typed_table(false).encode();
+        plain[0] = 5;
+        assert!(damaged(&plain), "version 5 without an item 31 type");
+        let mut random = Seeded(0xBAD_F00D_0000_0031);
+        for _ in 0..20_000 {
+            let mut bytes = good.clone();
+            for _ in 0..1 + random.next() % 4 {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            let _ = TableDefinition::decode("more", &bytes);
+        }
+    }
+
+    fn item_31_values() -> Vec<Value> {
+        vec![
+            Value::Integer(1),
+            Value::Time(crate::datetime::MICROS_PER_DAY),
+            Value::TimeTz {
+                micros: 0,
+                offset_seconds: -crate::datetime::MAX_OFFSET,
+            },
+            Value::Interval(Interval {
+                months: i32::MIN,
+                days: i32::MAX,
+                micros: i64::MIN,
+            }),
+            Value::Bytea(vec![0, 0xFF, 0]),
+            Value::Uuid([0xAB; 16]),
+            Value::Bpchar("ab  ".into()),
+            Value::Null,
+        ]
+    }
+
+    #[test]
+    fn rows_of_item_31_types_round_trip_and_hostile_bytes_are_damage() {
+        let columns = item_31_columns();
+        let values = item_31_values();
+        let encoded = encode_row(&values);
+        assert_eq!(decode_row(&encoded, &columns), Ok(values.clone()));
+        for cut in 0..encoded.len() {
+            assert!(decode_row(&encoded[..cut], &columns).is_err());
+        }
+        let mut late = values.clone();
+        late[1] = Value::Time(crate::datetime::MICROS_PER_DAY + 1);
+        assert!(decode_row(&encode_row(&late), &columns).is_err());
+        let mut early = values.clone();
+        early[1] = Value::Time(-1);
+        assert!(decode_row(&encode_row(&early), &columns).is_err());
+        let mut far = values.clone();
+        far[2] = Value::TimeTz {
+            micros: 0,
+            offset_seconds: crate::datetime::MAX_OFFSET + 1,
+        };
+        assert!(decode_row(&encode_row(&far), &columns).is_err());
+        let mut not_utf8 = encode_row(&values);
+        let code_at = not_utf8.len() - 5;
+        assert_eq!(not_utf8[code_at], b'a');
+        not_utf8[code_at] = 0xFF;
+        assert!(decode_row(&not_utf8, &columns).is_err());
+        let mut random = Seeded(0x0DD_C0DE_0000_0031);
+        for _ in 0..20_000 {
+            let mut bytes = encoded.clone();
+            for _ in 0..1 + random.next() % 4 {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            if let Ok(decoded) = decode_row(&bytes, &columns) {
+                assert_eq!(decoded.len(), columns.len());
+            }
+        }
+    }
+
+    #[test]
+    fn keys_of_item_31_types_keep_their_order_and_decode_back() {
+        let mut random = Seeded(0x1D1E_5EED_0000_0031);
+        let types = [
+            SqlType::Time(None),
+            SqlType::TimeTz(None),
+            SqlType::INTERVAL,
+            SqlType::Bytea,
+            SqlType::Uuid,
+            SqlType::Bpchar(None),
+        ];
+        let value = |random: &mut Seeded, kind: usize| -> Value {
+            let bits = random.next();
+            match kind {
+                0 => Value::Time((bits % (crate::datetime::MICROS_PER_DAY as u64 + 1)) as i64),
+                1 => Value::TimeTz {
+                    micros: (bits % 5) as i64 * 3_600_000_000,
+                    offset_seconds: ((bits >> 8) % 5) as i32 * 3600 - 7200,
+                },
+                2 => Value::Interval(match bits % 4 {
+                    0 => Interval {
+                        months: (bits >> 8) as i32,
+                        days: (bits >> 16) as i32,
+                        micros: (bits >> 1) as i64,
+                    },
+                    1 => Interval {
+                        months: i32::MIN,
+                        days: i32::MIN,
+                        micros: i64::MIN,
+                    },
+                    2 => Interval {
+                        months: (bits >> 8) as i32 % 3,
+                        days: (bits >> 16) as i32 % 90,
+                        micros: 0,
+                    },
+                    _ => Interval {
+                        months: i32::MAX,
+                        days: i32::MAX,
+                        micros: i64::MAX,
+                    },
+                }),
+                3 => Value::Bytea(
+                    (0..bits % 5)
+                        .map(|shift| [0u8, 1, 0xFF][((bits >> (shift * 2)) % 3) as usize])
+                        .collect(),
+                ),
+                4 => Value::Uuid([(bits % 3) as u8; 16]),
+                _ => {
+                    Value::Bpchar(["a", "a  ", "a ", "", "b", " "][(bits % 6) as usize].to_owned())
+                }
+            }
+        };
+        for (kind, sql_type) in types.iter().enumerate() {
+            for _ in 0..2_000 {
+                let left = value(&mut random, kind);
+                let right = value(&mut random, kind);
+                assert_eq!(
+                    key_of(&left).cmp(&key_of(&right)),
+                    compare_values(&left, &right),
+                    "{left:?} vs {right:?}"
+                );
+                let key = [key_of(&left), vec![7]].concat();
+                let mut decoded = Vec::new();
+                let used = decode_key_values(&key, [*sql_type], &mut decoded).unwrap();
+                assert_eq!(used, key.len() - 1);
+                assert_eq!(skip_key_values(&key, [*sql_type]), Ok(used));
+                assert_eq!(
+                    compare_values(&decoded[0], &left),
+                    std::cmp::Ordering::Equal
+                );
+                for cut in 0..used {
+                    let mut partial = Vec::new();
+                    assert!(decode_key_values(&key[..cut], [*sql_type], &mut partial).is_err());
+                }
+            }
+        }
+        let mut hostile = Seeded(0xFACE_0000_0031);
+        for _ in 0..20_000 {
+            let length = (hostile.next() % 40) as usize;
+            let bytes: Vec<u8> = (0..length).map(|_| hostile.next() as u8).collect();
+            let mut values = Vec::new();
+            if let Ok(used) = decode_key_values(&bytes, types, &mut values) {
+                assert_eq!(skip_key_values(&bytes, types), Ok(used));
+            }
+        }
+    }
+
+    #[test]
+    fn equal_values_of_item_31_types_share_a_key_and_an_equality_key() {
+        let pairs = [
+            (
+                Value::Interval(Interval {
+                    months: 1,
+                    days: 0,
+                    micros: 0,
+                }),
+                Value::Interval(Interval {
+                    months: 0,
+                    days: 0,
+                    micros: 30 * crate::datetime::MICROS_PER_DAY,
+                }),
+            ),
+            (Value::Bpchar("ab".into()), Value::Bpchar("ab   ".into())),
+            (Value::Bpchar("ab".into()), Value::Text("ab".into())),
+        ];
+        for (left, right) in pairs {
+            assert_eq!(compare_values(&left, &right), std::cmp::Ordering::Equal);
+            if left.sql_type() == right.sql_type() {
+                assert_eq!(key_of(&left), key_of(&right), "{left:?} {right:?}");
+            }
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            crate::types::equality_key(&mut a, &left);
+            crate::types::equality_key(&mut b, &right);
+            assert_eq!(a, b, "{left:?} {right:?}");
+        }
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        crate::types::equality_key(&mut a, &Value::Bpchar("ab".into()));
+        crate::types::equality_key(&mut b, &Value::Text("ab ".into()));
+        assert_ne!(a, b);
+        assert_ne!(
+            compare_values(&Value::Bpchar("ab".into()), &Value::Text("ab ".into())),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]

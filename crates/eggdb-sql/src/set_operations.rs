@@ -33,8 +33,14 @@ pub(crate) fn common_type(left: SqlType, right: SqlType) -> Option<SqlType> {
     if left == right {
         return Some(left);
     }
-    if left.is_string() && right.is_string() {
-        return Some(SqlType::Text);
+    if left.is_character() && right.is_character() {
+        return Some(match (left, right) {
+            (SqlType::Bpchar(_), SqlType::Bpchar(_)) => SqlType::Bpchar(None),
+            _ => SqlType::Text,
+        });
+    }
+    if left.without_modifier() == right.without_modifier() {
+        return Some(left.without_modifier());
     }
     let widest = |rank: fn(SqlType) -> Option<u8>| -> Option<SqlType> {
         let (a, b) = (rank(left)?, rank(right)?);

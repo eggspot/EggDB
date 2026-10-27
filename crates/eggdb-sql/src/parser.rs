@@ -1242,6 +1242,24 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn zoned_typed_literal(&self, word: &str) -> bool {
+        let with_precision = matches!(self.peek_kind_at(1), TokenKind::LeftParen)
+            && matches!(self.peek_kind_at(2), TokenKind::Integer(_))
+            && matches!(self.peek_kind_at(3), TokenKind::RightParen);
+        let zone_at = if with_precision { 4 } else { 1 };
+        let zoned = matches!(word, "time" | "timestamp")
+            && (self.is_word_at(zone_at, "with") || self.is_word_at(zone_at, "without"))
+            && self.is_word_at(zone_at + 1, "time")
+            && self.is_word_at(zone_at + 2, "zone");
+        let string_at = if zoned { zone_at + 3 } else { zone_at };
+        matches!(
+            word,
+            "time" | "timestamp" | "interval" | "timetz" | "timestamptz"
+        ) && self.postgresql()
+            && (with_precision || zoned)
+            && matches!(self.peek_kind_at(string_at), TokenKind::String(_))
+    }
+
     fn interval_fields(&mut self) -> SqlResult<Option<IntervalFields>> {
         const FIELDS: [&str; 6] = ["year", "month", "day", "hour", "minute", "second"];
         let Some(first) = FIELDS.into_iter().find(|field| self.is_word(field)) else {
@@ -2495,7 +2513,8 @@ impl<'t> Parser<'t> {
                         && (matches!(self.peek_kind_at(1), TokenKind::String(_))
                             || (word == "double"
                                 && self.is_word_at(1, "precision")
-                                && matches!(self.peek_kind_at(2), TokenKind::String(_)))) =>
+                                && matches!(self.peek_kind_at(2), TokenKind::String(_)))
+                            || self.zoned_typed_literal(word)) =>
                 {
                     let sql_type = if self.mysql() && word == "timestamp" {
                         self.at += 1;

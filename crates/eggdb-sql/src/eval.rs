@@ -861,7 +861,7 @@ impl Evaluator<'_> {
 
     fn cast(&self, expr: &Expr, target: SqlType) -> SqlResult<Value> {
         match &expr.kind {
-            ExprKind::Literal(Literal::String(text)) if target.is_string() => {
+            ExprKind::Literal(Literal::String(text)) if target.is_character() => {
                 convert(Value::Text(text.clone()), target, Conversion::Explicit)
             }
             ExprKind::Literal(Literal::String(text)) => parse_input(text, target),
@@ -930,13 +930,16 @@ impl Evaluator<'_> {
         }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
-        let arguments_share_a_type =
-            !matches!(name, "encode" | "decode" | "get_byte" | "substring");
-        for argument in arguments {
-            let value = self.eval(argument, hint)?;
-            if arguments_share_a_type {
-                hint = hint.or_else(|| self.type_of(&value, argument));
-            }
+        let declared = crate::bytea::argument_types(name);
+        for (position, argument) in arguments.iter().enumerate() {
+            let value = match declared {
+                Some(types) => self.eval(argument, types.get(position).copied().flatten())?,
+                None => {
+                    let value = self.eval(argument, hint)?;
+                    hint = hint.or_else(|| self.type_of(&value, argument));
+                    value
+                }
+            };
             values.push(value);
         }
         let unknown = || {
@@ -1079,7 +1082,7 @@ fn in_common_type(chosen: &Value, values: &[Value]) -> SqlResult<Value> {
         };
     }
     match common {
-        Some(sql_type) if chosen.sql_type() != Some(sql_type) && !sql_type.is_string() => {
+        Some(sql_type) if chosen.sql_type() != Some(sql_type) && !sql_type.is_character() => {
             convert(chosen.clone(), sql_type, Conversion::Explicit)
         }
         _ => Ok(chosen.clone()),

@@ -899,3 +899,35 @@ SELECT 4
 
 error 42000 1064
 SELECT * FROM sq_dept FULL JOIN sq_emp ON true
+
+chapter "The TIME Type", "The BINARY and VARBINARY Types", "The BLOB and TEXT Types"
+ok
+CREATE TABLE t31 (id INT PRIMARY KEY, t TIME, f TIME(3), b BLOB, v VARBINARY(8))
+
+ok
+INSERT INTO t31 VALUES (1, '10:30:15', '10:30:15.1234', 'abc', 'xy')
+
+rows
+SELECT t, f, LENGTH(b), b = 'abc' FROM t31
+----
+t|f|LENGTH(b)|b = 'abc'
+10:30:15|10:30:15.123|3|1
+SELECT 1
+
+rows
+SELECT TIME '23:59:59'
+----
+TIME '23:59:59'
+23:59:59
+SELECT 1
+
+error 42000 1064
+SELECT gen_random_uuid()
+... differs
+
+rows
+SELECT '838:59:59' = '838:59:59'
+----
+'838:59:59' = '838:59:59'
+1
+SELECT 1

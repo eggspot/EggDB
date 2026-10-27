@@ -353,6 +353,16 @@ fn sliced_bytes(bytes: &[u8], start: i64, count: Option<i64>) -> SqlResult<Value
     Ok(Value::Bytea(bytes[first..end].to_vec()))
 }
 
+pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
+    Some(match name {
+        "encode" => &[Some(SqlType::Bytea), Some(SqlType::Text)],
+        "decode" => &[Some(SqlType::Text), Some(SqlType::Text)],
+        "get_byte" => &[Some(SqlType::Bytea), Some(SqlType::Integer)],
+        "substring" => &[None, Some(SqlType::Integer), Some(SqlType::Integer)],
+        _ => return None,
+    })
+}
+
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     Some(match (name, values) {
         ("length" | "char_length" | "character_length", [Value::Bpchar(text)]) => integer_value(
