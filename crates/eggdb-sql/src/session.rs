@@ -828,13 +828,15 @@ impl KeyValueWrite for TrackedWrite<'_> {
     }
 
     fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
-        self.wrote = true;
-        self.inner.put_if_absent(key, value)
+        let inserted = self.inner.put_if_absent(key, value)?;
+        self.wrote |= inserted;
+        Ok(inserted)
     }
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
-        self.wrote = true;
-        self.inner.delete(key)
+        let deleted = self.inner.delete(key)?;
+        self.wrote |= deleted;
+        Ok(deleted)
     }
 
     fn commit(self) -> SqlResult<()> {
