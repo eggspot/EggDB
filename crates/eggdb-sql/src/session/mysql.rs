@@ -304,6 +304,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Evaluator {
                     scope: Scope::empty(),
                     row: &[],
+                    correlation: None,
                 }
                 .eval(expr, None)?,
             ),

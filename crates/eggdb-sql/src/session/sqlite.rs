@@ -489,13 +489,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 }
             }
             let insert = Insert {
-                table: TableReference {
-                    name: Name {
+                table: TableReference::named(
+                    Name {
                         text: name,
                         position: 0,
                     },
-                    alias: None,
-                },
+                    None,
+                ),
                 columns: None,
                 source: InsertSource::Values(rows),
                 returning: None,

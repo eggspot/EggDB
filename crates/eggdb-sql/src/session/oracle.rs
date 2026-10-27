@@ -342,10 +342,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         )?;
         if !rows.is_empty() {
             let insert = Insert {
-                table: TableReference {
-                    name: name(&view),
-                    alias: None,
-                },
+                table: TableReference::named(name(&view), None),
                 columns: None,
                 source: InsertSource::Values(rows),
                 returning: None,

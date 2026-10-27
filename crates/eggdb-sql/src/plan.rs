@@ -135,6 +135,7 @@ fn constant(expr: &Expr, column: &Column) -> Option<Value> {
     let evaluator = Evaluator {
         scope: Scope::empty(),
         row: &[],
+        correlation: None,
     };
     let original = evaluator.eval(expr, Some(column.sql_type)).ok()?;
     if !same_family(&original, column.sql_type) {

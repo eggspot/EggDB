@@ -39,10 +39,13 @@ mod parser;
 mod plan;
 mod schema;
 mod session;
+mod set_operations;
 mod settings;
 mod sqlite_errors;
 mod sqlite_functions;
 mod store;
+mod subquery;
+mod temp_tables;
 mod types;
 mod typing;
 

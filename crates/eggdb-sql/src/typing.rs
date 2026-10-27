@@ -148,7 +148,10 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             .column(qualifier.as_deref(), name, expr.position)
             .ok()
             .and_then(|offset| scope.column_type(offset)),
-        ExprKind::Slot { sql_type, .. } => *sql_type,
+        ExprKind::Slot { sql_type, .. }
+        | ExprKind::Constant { sql_type, .. }
+        | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
+        ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
         ExprKind::Cast { sql_type, .. } => Some(*sql_type),
         ExprKind::SessionValue { .. } => Some(SqlType::Text),
         ExprKind::Unary(UnaryOperator::Not, _)

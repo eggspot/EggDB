@@ -102,6 +102,8 @@ impl SqlState {
     pub const DUPLICATE_TABLE: Self = Self(*b"42P07");
     /// `42P10` invalid_column_reference.
     pub const INVALID_COLUMN_REFERENCE: Self = Self(*b"42P10");
+    /// `42P19` invalid_recursion.
+    pub const INVALID_RECURSION: Self = Self(*b"42P19");
     /// `42P16` invalid_table_definition.
     pub const INVALID_TABLE_DEFINITION: Self = Self(*b"42P16");
     /// `42P02` undefined_parameter: a `$n` without a value.

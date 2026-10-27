@@ -6,18 +6,79 @@ pub(crate) const WORK_MEMORY_LIMIT: usize = 1 << 30;
 const ROW_OVERHEAD: usize = 24;
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
+thread_local! {
+    static SHARED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) struct SharedStatementMemory {
+    outermost: bool,
+}
+
+impl Drop for SharedStatementMemory {
+    fn drop(&mut self) {
+        if self.outermost {
+            SHARED.with(|shared| shared.set(None));
+        }
+    }
+}
+
+pub(crate) fn share_statement_memory() -> SharedStatementMemory {
+    let outermost = SHARED.with(|shared| {
+        if shared.get().is_some() {
+            false
+        } else {
+            shared.set(Some(0));
+            true
+        }
+    });
+    SharedStatementMemory { outermost }
+}
+
+fn shared_add(bytes: usize) -> Option<usize> {
+    SHARED.with(|shared| {
+        let total = shared.get()?.saturating_add(bytes);
+        shared.set(Some(total));
+        Some(total)
+    })
+}
+
+fn shared_subtract(bytes: usize) {
+    SHARED.with(|shared| {
+        if let Some(total) = shared.get() {
+            shared.set(Some(total.saturating_sub(bytes)));
+        }
+    });
+}
+
 pub(crate) struct WorkMemory {
     used: usize,
     limit: usize,
+    shared: bool,
+}
+
+impl Drop for WorkMemory {
+    fn drop(&mut self) {
+        if self.shared {
+            shared_subtract(self.used);
+        }
+    }
 }
 
 impl WorkMemory {
     pub(crate) fn new() -> Self {
-        Self::with_limit(WORK_MEMORY_LIMIT)
+        Self {
+            used: 0,
+            limit: WORK_MEMORY_LIMIT,
+            shared: SHARED.with(|shared| shared.get().is_some()),
+        }
     }
 
     pub(crate) fn with_limit(limit: usize) -> Self {
-        Self { used: 0, limit }
+        Self {
+            used: 0,
+            limit,
+            shared: false,
+        }
     }
 
     pub(crate) fn used(&self) -> usize {
@@ -26,10 +87,15 @@ impl WorkMemory {
 
     pub(crate) fn charge(&mut self, bytes: usize) -> SqlResult<()> {
         self.used = self.used.saturating_add(bytes);
-        if self.used > self.limit {
+        let total = if self.shared {
+            shared_add(bytes).unwrap_or(self.used)
+        } else {
+            self.used
+        };
+        if total > self.limit {
             return Err(SqlError::new(SqlState::OUT_OF_MEMORY, "out of memory")
                 .with_detail(format!(
-                    "The statement needs more than {} MiB to hold its joined tables, groups, distinct rows, sorted rows and result.",
+                    "The statement needs more than {} MiB to hold its joined tables, groups, distinct rows, sorted rows, subquery results and result.",
                     self.limit >> 20
                 ))
                 .with_hint(
@@ -40,7 +106,11 @@ impl WorkMemory {
     }
 
     pub(crate) fn release(&mut self, bytes: usize) {
-        self.used = self.used.saturating_sub(bytes);
+        let released = bytes.min(self.used);
+        self.used -= released;
+        if self.shared {
+            shared_subtract(released);
+        }
     }
 
     pub(crate) fn row_bytes(row: &[Value]) -> usize {

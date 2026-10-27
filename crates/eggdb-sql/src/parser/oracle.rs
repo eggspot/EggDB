@@ -392,7 +392,7 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.expect_word("table")?;
                 let name = self.table_name()?;
-                Statement::Truncate(TableReference { name, alias: None })
+                Statement::Truncate(TableReference::named(name, None))
             }
             "create" | "drop" | "alter" if self.is_word_at(1, "sequence") => {
                 return Err(self.not_supported("sequences (CREATE SEQUENCE, NEXTVAL, CURRVAL)"));

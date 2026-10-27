@@ -503,6 +503,7 @@ fn build_hash(
             let evaluator = Evaluator {
                 scope: Scope::empty(),
                 row: &row,
+                correlation: None,
             };
             for condition in keep {
                 if evaluator.boolean(condition, "WHERE")? != Some(true) {
@@ -780,6 +781,7 @@ impl<'a> JoinedRows<'a> {
         let evaluator = Evaluator {
             scope: Scope::empty(),
             row,
+            correlation: None,
         };
         for filter in filters {
             if evaluator.boolean(filter, "WHERE")? != Some(true) {
@@ -956,6 +958,7 @@ impl Step<'_> {
         let evaluator = Evaluator {
             scope: self.scope,
             row,
+            correlation: None,
         };
         Ok(evaluator.boolean(on, "JOIN/ON")? == Some(true))
     }

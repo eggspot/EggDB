@@ -168,7 +168,10 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
         ExprKind::Literal(_)
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. } => Vec::new(),
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => Vec::new(),
+        ExprKind::Subquery(subquery) => subquery.test.operand().into_iter().collect(),
         ExprKind::Unary(_, operand)
         | ExprKind::IsNull { expr: operand, .. }
         | ExprKind::IsTruth { expr: operand, .. }
@@ -214,7 +217,10 @@ pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         ExprKind::Literal(_)
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. } => Vec::new(),
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => Vec::new(),
+        ExprKind::Subquery(subquery) => subquery.test.operand_mut().into_iter().collect(),
         ExprKind::Unary(_, operand)
         | ExprKind::IsNull { expr: operand, .. }
         | ExprKind::IsTruth { expr: operand, .. }
@@ -261,7 +267,9 @@ pub(crate) fn first_aggregate(expr: &Expr) -> Option<&Expr> {
         ExprKind::Literal(_)
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
-        | ExprKind::SessionValue { .. } => None,
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => None,
         ExprKind::Unary(_, operand)
         | ExprKind::IsNull { expr: operand, .. }
         | ExprKind::IsTruth { expr: operand, .. }
@@ -346,7 +354,14 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
         ExprKind::Aggregate { argument, .. } => argument
             .as_deref()
             .map_or(Ok(()), |argument| check_columns(argument, scope)),
-        ExprKind::Slot { .. } | ExprKind::SessionValue { .. } => Ok(()),
+        ExprKind::Slot { .. }
+        | ExprKind::SessionValue { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Constant { .. } => Ok(()),
+        ExprKind::Subquery(subquery) => subquery
+            .test
+            .operand()
+            .map_or(Ok(()), |operand| check_columns(operand, scope)),
     }
 }
 
@@ -367,6 +382,13 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
             (_, false) => (sql_type.internal_name().to_owned(), false),
         },
         ExprKind::Case { .. } => ("case".into(), false),
+        ExprKind::Subquery(subquery) => match crate::subquery::output_column(expr) {
+            Some(column) if !matches!(subquery.test, crate::ast::SubqueryTest::Scalar) => {
+                (column.name, false)
+            }
+            Some(column) => (column.name, true),
+            None => ("?column?".into(), false),
+        },
         ExprKind::Literal(Literal::Boolean(_)) => ("bool".into(), false),
         _ => ("?column?".into(), false),
     }
@@ -382,6 +404,7 @@ fn is_unknown_literal(expr: &Expr) -> bool {
 pub(crate) struct Evaluator<'a> {
     pub(crate) scope: Scope<'a>,
     pub(crate) row: &'a [Value],
+    pub(crate) correlation: Option<&'a crate::subquery::Correlation<'a>>,
 }
 
 impl Evaluator<'_> {
@@ -565,6 +588,11 @@ impl Evaluator<'_> {
                 SqlState::GROUPING_ERROR,
                 "aggregate functions are not allowed here",
             )),
+            ExprKind::Subquery(subquery) => crate::subquery::evaluate(self, subquery),
+            ExprKind::Constant { value, .. } => Ok(value.clone()),
+            ExprKind::OuterColumn { .. } => Err(SqlError::not_supported(
+                "a subquery that refers to the outer query here is not supported yet",
+            )),
         }
     }
 
@@ -608,7 +636,10 @@ impl Evaluator<'_> {
                     .ok()?;
                 self.scope.column_type(index)
             }
-            ExprKind::Slot { sql_type, .. } => *sql_type,
+            ExprKind::Slot { sql_type, .. }
+            | ExprKind::Constant { sql_type, .. }
+            | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
+            ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
             ExprKind::Cast { sql_type, .. } => Some(*sql_type),
             ExprKind::SessionValue { .. } => Some(SqlType::Text),
             ExprKind::Unary(UnaryOperator::Minus | UnaryOperator::Plus, operand) => {
@@ -1199,7 +1230,7 @@ pub(crate) fn truth_value(truth: Option<bool>) -> Value {
     truth.map_or(Value::Null, Value::Boolean)
 }
 
-fn and(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+pub(crate) fn and(left: Option<bool>, right: Option<bool>) -> Option<bool> {
     match (left, right) {
         (Some(false), _) | (_, Some(false)) => Some(false),
         (Some(true), Some(true)) => Some(true),
@@ -1207,7 +1238,7 @@ fn and(left: Option<bool>, right: Option<bool>) -> Option<bool> {
     }
 }
 
-fn or(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+pub(crate) fn or(left: Option<bool>, right: Option<bool>) -> Option<bool> {
     match (left, right) {
         (Some(true), _) | (_, Some(true)) => Some(true),
         (Some(false), Some(false)) => Some(false),
