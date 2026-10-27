@@ -239,7 +239,8 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `COMMIT` or `ROLLBACK`; `CREATE TABLE`, `DROP TABLE` and `TRUNCATE TABLE` commit what is open
   before and after them. `eggdb sql` and `eggdb shell` commit an open transaction when they
   end, as SQL*Plus does on exit; the embedded API rolls it back on `close` unless you commit.
-- **Functions**: `NVL`, `NVL2`, `COALESCE`, `NULLIF`, `DECODE` (NULL matches NULL), `CONCAT`,
+- **Functions**: `NVL`, `NVL2`, `COALESCE`, `NULLIF`, `DECODE` (NULL matches NULL, the first argument
+  evaluated once, up to 255 arguments as in Oracle), `CONCAT`,
   `LENGTH`, `SUBSTR` and `INSTR` (negative positions count from the end), `UPPER`, `LOWER`,
   `INITCAP`, `TRIM([LEADING|TRAILING|BOTH] [c FROM] s)`, `LTRIM`, `RTRIM`, `LPAD`, `RPAD`,
   `REPLACE`, `CHR`, `ASCII`, `ABS`, `ROUND`, `TRUNC`, `MOD`, `CEIL`, `FLOOR`, `POWER`, `SQRT`,
@@ -248,7 +249,7 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   fit), `TO_NUMBER`, the aggregates `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `USER`. Other
   dialects' functions are not there (`CHAR_LENGTH` is `ORA-00904`), and Oracle's are not in the
   other dialects.
-- **Length limit**: `LPAD`, `RPAD`, `REPLACE` and `||` refuse a result longer than
+- **Length limit**: `LPAD`, `RPAD`, `REPLACE`, `||`, `UPPER`, `LOWER` and `INITCAP` refuse a result longer than
   1,000,000,000 bytes with `ORA-01489` before they build it.
 - **The data dictionary**: `USER_TABLES` and `ALL_TABLES` (`TABLE_NAME`, `TABLESPACE_NAME`,
   and `OWNER` in `ALL_`), `USER_TAB_COLUMNS` and `ALL_TAB_COLUMNS` (`TABLE_NAME`,

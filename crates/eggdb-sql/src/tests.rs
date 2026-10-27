@@ -2425,6 +2425,9 @@ fn hostile_oracle_input_returns_errors_and_never_panics() {
         "INSTR('abc', 'bc', 9223372036854775807)",
         "ROUND(15.5, -9223372036854775808)",
         "WHERE ROWNUM <= :1",
+        "DECODE(COALESCE(1, 1, 1, 1, 1, 1, 1, 1), 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2)",
+        "DECODE(1, 2",
+        "UPPER(RPAD('ß', 200000000, 'ß'))",
         "LPAD('x', 9223372036854775807, 'ab')",
         "RPAD('x', 1e300)",
         "REPLACE('aaaa', 'a', 'bbbbbbbbbbbbbbbb')",
@@ -2558,4 +2561,67 @@ fn oracle_keeps_a_transaction_open_until_commit_and_ddl_commits_it() {
         .map(|column| column.name)
         .collect();
     assert_eq!(names, ["Id", "ID"]);
+}
+
+#[test]
+fn a_large_oracle_decode_stays_linear_and_obeys_the_argument_limit() {
+    let store = MemoryStore::default();
+    let mut oracle = Session::with_dialect(&store, crate::Dialect::Oracle);
+    let ones = vec!["1"; 2000].join(", ");
+    let pairs = vec!["1, 2"; 126].join(", ");
+    let sql = format!("SELECT DECODE(COALESCE({ones}), {pairs}, 0) d FROM dual");
+    let started = std::time::Instant::now();
+    assert_eq!(last(&mut oracle, &sql), "D\n2\nSELECT 1");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let too_many = format!(
+        "SELECT DECODE(1, {}) FROM dual",
+        vec!["1, 2"; 128].join(", ")
+    );
+    let error = run(&mut oracle, &too_many).expect_err("256 arguments");
+    assert_eq!(
+        error.to_string(),
+        "ORA-00939: too many arguments for function"
+    );
+    assert_eq!(
+        last(
+            &mut oracle,
+            "SELECT DECODE(0, 0, 'zero', 1 / 0) d FROM dual"
+        ),
+        "D\nzero\nSELECT 1"
+    );
+}
+
+#[test]
+fn rows_kept_for_a_rownum_limit_are_charged_to_the_work_memory() {
+    let rows = (0..1000).map(|number| vec![crate::Value::Text(format!("row {number:>40}"))]);
+    let mut memory = crate::memory::WorkMemory::with_limit(10_000);
+    let error = crate::execute::first_rows(
+        |visit| {
+            for row in rows {
+                if !visit(row)? {
+                    break;
+                }
+            }
+            Ok(())
+        },
+        usize::MAX,
+        &mut memory,
+    )
+    .expect_err("past the limit");
+    assert_eq!(error.state().code(), "53200");
+    let mut memory = crate::memory::WorkMemory::with_limit(10_000);
+    let kept = crate::execute::first_rows(
+        |visit| {
+            for number in 0.. {
+                if !visit(vec![crate::Value::BigInt(number)])? {
+                    break;
+                }
+            }
+            Ok(())
+        },
+        3,
+        &mut memory,
+    )
+    .expect("three rows");
+    assert_eq!(kept.len(), 3);
 }

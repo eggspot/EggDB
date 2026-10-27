@@ -12,6 +12,8 @@ use crate::types::SqlType;
 /// The Oracle Database release whose documented behaviour EggDB's Oracle dialect follows.
 pub const ORACLE_COMPATIBLE_VERSION: &str = "23ai";
 
+const MAX_DECODE_ARGUMENTS: usize = 255;
+
 const DICTIONARY_VIEWS: [&str; 6] = [
     "user_tables",
     "all_tables",
@@ -767,7 +769,7 @@ impl<'t> Parser<'t> {
             "nvl2" => ("nvl2", 3, 3),
             "coalesce" => ("coalesce", 2, usize::MAX),
             "nullif" => ("nullif", 2, 2),
-            "decode" => ("decode", 3, usize::MAX),
+            "decode" => ("oracle_decode", 3, MAX_DECODE_ARGUMENTS),
             "concat" => ("oracle_concat", 2, 2),
             "length" => ("oracle_length", 1, 1),
             "substr" => ("oracle_substr", 2, 3),
@@ -837,41 +839,8 @@ impl<'t> Parser<'t> {
                     position,
                 }
             }
-            "decode" => decode(arguments, position),
             _ => oracle_function(internal, arguments, position),
         };
         Ok(Some(expr))
-    }
-}
-
-fn decode(arguments: Vec<Expr>, position: usize) -> Expr {
-    let mut arguments = arguments.into_iter();
-    let Some(subject) = arguments.next() else {
-        return literal(Literal::Null, position);
-    };
-    let rest: Vec<Expr> = arguments.collect();
-    let mut branches = Vec::new();
-    let (pairs, remainder) = rest.as_chunks::<2>();
-    for [compared, result] in pairs {
-        branches.push((
-            Expr {
-                kind: ExprKind::IsDistinctFrom {
-                    left: Box::new(subject.clone()),
-                    right: Box::new(compared.clone()),
-                    negated: true,
-                },
-                position,
-            },
-            result.clone(),
-        ));
-    }
-    let otherwise = remainder.first().cloned().map(Box::new);
-    Expr {
-        kind: ExprKind::Case {
-            operand: None,
-            branches,
-            otherwise,
-        },
-        position,
     }
 }

@@ -5,6 +5,8 @@ use std::cmp::Ordering;
 
 const MAX_UTF8_CHAR_BYTES: usize = 4;
 
+const MAX_CASE_CHANGE_GROWTH: usize = 3;
+
 fn too_long() -> SqlError {
     SqlError::new(
         SqlState::PROGRAM_LIMIT_EXCEEDED,
@@ -737,8 +739,12 @@ fn row_count(value: &Value) -> SqlResult<Value> {
 }
 
 pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
-    let unary_text = |change: fn(&str) -> String| -> Value {
-        text_of(&values[0]).map_or(Value::Null, |text| text_or_null(change(&text)))
+    let unary_text = |change: fn(&str) -> String| -> SqlResult<Value> {
+        let Some(text) = text_of(&values[0]) else {
+            return Ok(Value::Null);
+        };
+        within_limit(text.len().saturating_mul(MAX_CASE_CHANGE_GROWTH))?;
+        Ok(text_or_null(change(&text)))
     };
     match (name, values) {
         ("oracle_concat", _) => concatenated(values),
@@ -751,9 +757,9 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             })),
         ("oracle_substr", _) => substring(values),
         ("oracle_instr", _) => position_of(values),
-        ("oracle_upper", [_]) => Ok(unary_text(str::to_uppercase)),
-        ("oracle_lower", [_]) => Ok(unary_text(str::to_lowercase)),
-        ("oracle_initcap", [_]) => Ok(unary_text(initial_capitals)),
+        ("oracle_upper", [_]) => unary_text(str::to_uppercase),
+        ("oracle_lower", [_]) => unary_text(str::to_lowercase),
+        ("oracle_initcap", [_]) => unary_text(initial_capitals),
         ("oracle_ltrim", _) => trimmed(values, true, false),
         ("oracle_rtrim", _) => trimmed(values, false, true),
         ("oracle_trim_leading", [_, _]) => trim_one(values, true, false),
@@ -841,6 +847,16 @@ mod tests {
         )
         .expect_err("2 GB");
         assert_eq!(error.vendor_code(), Some(1489));
+    }
+
+    #[test]
+    fn case_changes_past_the_length_limit_are_refused_before_they_are_built() {
+        let long = text(&"a".repeat(340_000_000));
+        for name in ["oracle_upper", "oracle_lower", "oracle_initcap"] {
+            let error = call(name, std::slice::from_ref(&long)).expect_err(name);
+            assert_eq!(error.vendor_code(), Some(1489), "{name}");
+        }
+        assert_eq!(call("oracle_initcap", &[text("ab cd")]), Ok(text("Ab Cd")));
     }
 
     #[test]

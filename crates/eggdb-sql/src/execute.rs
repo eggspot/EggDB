@@ -1369,13 +1369,7 @@ pub(crate) fn select(
     };
     if let Some(count) = select.source_row_limit {
         let wanted = usize::try_from(count).unwrap_or(usize::MAX);
-        let mut kept = Vec::new();
-        if wanted > 0 {
-            source.for_each(&mut |row| {
-                kept.push(row);
-                Ok(kept.len() < wanted)
-            })?;
-        }
+        let kept = first_rows(|visit| source.for_each(visit), wanted, &mut memory)?;
         source = SourceRows {
             reader,
             rows: RowSource::Rows(kept),
@@ -1410,6 +1404,22 @@ pub(crate) fn select(
     };
     let tag = format!("SELECT {}", output.len());
     Ok(QueryResult::rows(tag, projection.columns, output))
+}
+
+pub(crate) fn first_rows(
+    for_each: impl FnOnce(&mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()>,
+    wanted: usize,
+    memory: &mut WorkMemory,
+) -> SqlResult<Vec<Vec<Value>>> {
+    let mut kept = Vec::new();
+    if wanted > 0 {
+        for_each(&mut |row| {
+            memory.charge_row(&row)?;
+            kept.push(row);
+            Ok(kept.len() < wanted)
+        })?;
+    }
+    Ok(kept)
 }
 
 #[derive(Clone, Copy)]

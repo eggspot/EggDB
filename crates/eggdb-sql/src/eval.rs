@@ -534,6 +534,9 @@ impl Evaluator<'_> {
                     .collect::<SqlResult<Vec<Value>>>()?;
                 crate::sqlite_functions::call(name, &values)
             }
+            ExprKind::OracleFunction { name, arguments } if *name == "oracle_decode" => {
+                self.decode(arguments, hint)
+            }
             ExprKind::OracleFunction { name, arguments } => {
                 let values = arguments
                     .iter()
@@ -694,6 +697,29 @@ impl Evaluator<'_> {
             ExprKind::Literal(Literal::String(text)) => parse_input(text, target),
             ExprKind::Literal(Literal::Decimal(text)) => decimal_literal(text, target, true),
             _ => convert(self.eval(expr, None)?, target, Conversion::Explicit),
+        }
+    }
+
+    fn decode(&self, arguments: &[Expr], hint: Option<SqlType>) -> SqlResult<Value> {
+        let Some((subject, rest)) = arguments.split_first() else {
+            return Ok(Value::Null);
+        };
+        let subject = self.eval(subject, None)?;
+        let (pairs, otherwise) = rest.as_chunks::<2>();
+        for [search, result] in pairs {
+            let candidate = self.eval(search, subject.sql_type())?;
+            let matched = match (subject.is_null(), candidate.is_null()) {
+                (true, true) => true,
+                (false, false) => compare_truth(&subject, &candidate, "=")? == Some(true),
+                _ => false,
+            };
+            if matched {
+                return self.eval(result, hint);
+            }
+        }
+        match otherwise.first() {
+            Some(otherwise) => self.eval(otherwise, hint),
+            None => Ok(Value::Null),
         }
     }
 
