@@ -138,7 +138,7 @@ jobs:
       - name: Lint the platform layer, the storage engine and the embedded API for each target
         run: |
           for target in $TARGETS; do
-            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb --all-targets --target "$target" -- -D warnings
+            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb --all-targets --target "$target" -- -D warnings
           done
 
   bench:

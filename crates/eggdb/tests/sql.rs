@@ -196,9 +196,12 @@ fn a_killed_process_leaves_the_whole_transaction_or_none_of_it() {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let mut input = child.stdin.take().unwrap();
-        input.write_all(script.as_bytes()).unwrap();
-        drop(input);
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
         std::thread::sleep(Duration::from_millis(delay_ms));
         let _ = child.kill();
         let _ = child.wait();
