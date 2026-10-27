@@ -2,6 +2,7 @@ use super::byte_argument::ByteArgument;
 use super::failure::Failure;
 use super::render;
 use std::ffi::{OsStr, OsString};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 const RESERVED_COMMANDS: [&str; 3] = ["shell", "backup", "compact"];
@@ -21,6 +22,7 @@ pub(crate) enum CommandName {
     Export,
     Import,
     Sql,
+    Serve,
 }
 
 impl CommandName {
@@ -37,6 +39,7 @@ impl CommandName {
             b"export" => Self::Export,
             b"import" => Self::Import,
             b"sql" => Self::Sql,
+            b"serve" => Self::Serve,
             _ => return None,
         })
     }
@@ -54,6 +57,7 @@ impl CommandName {
             Self::Export => "export",
             Self::Import => "import",
             Self::Sql => "sql",
+            Self::Serve => "serve",
         }
     }
 
@@ -62,9 +66,17 @@ impl CommandName {
             OptionName::Cache | OptionName::Help | OptionName::Version => true,
             OptionName::Color => true,
             OptionName::Format => !matches!(self, Self::Ui | Self::Sql),
-            OptionName::Mono | OptionName::Ascii | OptionName::ReadOnly => self == Self::Ui,
+            OptionName::Mono | OptionName::Ascii => self == Self::Ui,
+            OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve),
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
-            OptionName::Create => matches!(self, Self::Put | Self::Import | Self::Sql),
+            OptionName::Create => {
+                matches!(self, Self::Put | Self::Import | Self::Sql | Self::Serve)
+            }
+            OptionName::Listen
+            | OptionName::User
+            | OptionName::PasswordFile
+            | OptionName::Database
+            | OptionName::MaxConnections => self == Self::Serve,
             OptionName::Command => self == Self::Sql,
             OptionName::OnConflict | OptionName::DryRun => self == Self::Import,
             OptionName::Prefix
@@ -146,6 +158,11 @@ enum OptionName {
     OnConflict,
     DryRun,
     Command,
+    Listen,
+    User,
+    PasswordFile,
+    Database,
+    MaxConnections,
 }
 
 impl OptionName {
@@ -170,6 +187,11 @@ impl OptionName {
             b"on-conflict" => Self::OnConflict,
             b"dry-run" => Self::DryRun,
             b"command" => Self::Command,
+            b"listen" => Self::Listen,
+            b"user" => Self::User,
+            b"password-file" => Self::PasswordFile,
+            b"database" => Self::Database,
+            b"max-connections" => Self::MaxConnections,
             _ => return None,
         })
     }
@@ -231,6 +253,16 @@ pub(crate) struct Request {
     pub(crate) on_conflict: ConflictPolicy,
     pub(crate) dry_run: bool,
     pub(crate) sql: Option<SqlSource>,
+    pub(crate) serve: ServeOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ServeOptions {
+    pub(crate) listen: Option<SocketAddr>,
+    pub(crate) user: Option<String>,
+    pub(crate) password_file: Option<ExportFile>,
+    pub(crate) database: Option<String>,
+    pub(crate) max_connections: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,7 +328,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version.",
+            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version.",
             None,
         ));
     };
@@ -423,6 +455,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         on_conflict: ConflictPolicy::Error,
         dry_run: false,
         sql: None,
+        serve: ServeOptions::default(),
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -478,6 +511,29 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     .ok_or_else(|| usage(format!("{} must be UTF-8 text", option.spelled)))?;
                 request.sql = Some(SqlSource::Command(text.to_owned()));
             }
+            OptionName::Listen => {
+                request.serve.listen = Some(parse_listen(value).map_err(usage)?);
+            }
+            OptionName::User => {
+                request.serve.user = Some(parse_name(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::Database => {
+                request.serve.database = Some(parse_name(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::PasswordFile => request.serve.password_file = Some(export_file(value)),
+            OptionName::MaxConnections => {
+                let count = parse_whole_number(value.as_encoded_bytes())
+                    .filter(|&count| count >= 1)
+                    .and_then(|count| usize::try_from(count).ok())
+                    .ok_or_else(|| {
+                        usage(format!(
+                            "{} needs a whole number of at least 1, not '{}'",
+                            option.spelled,
+                            shown(value)
+                        ))
+                    })?;
+                request.serve.max_connections = Some(count);
+            }
             OptionName::Help | OptionName::Version => {}
         }
     }
@@ -492,7 +548,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Scan
         | CommandName::Check
         | CommandName::Stats
-        | CommandName::Ui => (1, 1),
+        | CommandName::Ui
+        | CommandName::Serve => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql => (1, 2),
         CommandName::Get | CommandName::Del => (2, 2),
         CommandName::Put => (2, 3),
@@ -590,7 +647,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version.",
             render::text(name)
         ),
         None,
@@ -612,6 +669,36 @@ fn parse_format(value: &OsStr) -> Result<Format, String> {
         b"raw" => Ok(Format::Raw),
         _ => Err(format!(
             "--format must be text, json, hex or raw, not '{}'",
+            shown(value)
+        )),
+    }
+}
+
+fn parse_listen(value: &OsStr) -> Result<SocketAddr, String> {
+    let refused = || {
+        format!(
+            "--listen needs an address and port such as 127.0.0.1:5432, [::1]:5432 or 5433, not '{}'",
+            shown(value)
+        )
+    };
+    let text = value.to_str().ok_or_else(refused)?;
+    if let Ok(port) = text.parse::<u16>() {
+        return Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+    }
+    if let Some(port) = text.strip_prefix("localhost:") {
+        let port = port.parse::<u16>().map_err(|_| refused())?;
+        return Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+    }
+    text.parse::<SocketAddr>().map_err(|_| refused())
+}
+
+fn parse_name(option: &str, value: &OsStr) -> Result<String, String> {
+    match value.to_str() {
+        Some(name) if !name.is_empty() && !name.chars().any(char::is_control) => {
+            Ok(name.to_owned())
+        }
+        _ => Err(format!(
+            "{option} needs a name without control characters, not '{}'",
             shown(value)
         )),
     }
@@ -799,7 +886,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -842,7 +929,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -855,7 +942,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),

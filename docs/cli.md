@@ -508,7 +508,7 @@ Errors go to stderr as `eggdb: <what happened>: <why>. <what to do>`, never as a
 and add a `try:` line when the fix is a command:
 
 ```
-eggdb: cannot open app.db: no such file. Create it with `eggdb create app.db`, or pass --create to put or sql.
+eggdb: cannot open app.db: no such file. Create it with `eggdb create app.db`, or pass --create to put, sql or serve.
   try: eggdb create app.db
 eggdb: unknown option '--reverse' for eggdb get
   usage: eggdb get <file> <key>

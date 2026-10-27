@@ -107,7 +107,7 @@ fn assert_exit(output: &Output, expected: i32) {
 
 const MAIN_HELP: &str = "\
 eggdb: one database for every kind of data. This release: an embedded key-value store in one file,
-with a first part of SQL.
+with a first part of SQL, served over the PostgreSQL protocol.
 
 Usage: eggdb <command> <file> [arguments] [options]
 
@@ -123,6 +123,7 @@ Commands:
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, from a file or stdin; see --create
   sql    <file> [script]        run SQL (PostgreSQL dialect) from -c, a script or stdin
+  serve  <file>                 serve the file to PostgreSQL clients (psql, drivers); see --listen
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -455,7 +456,7 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);
@@ -498,7 +499,7 @@ fn every_exit_code_and_its_message() {
     assert_exit(&missing_write, 3);
     assert_eq!(
         stderr(&missing_write),
-        "eggdb: cannot open missing.db: no such file. Create it with `eggdb create missing.db`, or pass --create to put or sql.\n  try: eggdb create missing.db\n"
+        "eggdb: cannot open missing.db: no such file. Create it with `eggdb create missing.db`, or pass --create to put, sql or serve.\n  try: eggdb create missing.db\n"
     );
     assert!(
         !dir.path().join("missing.db").exists(),

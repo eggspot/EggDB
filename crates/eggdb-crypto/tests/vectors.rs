@@ -2,7 +2,6 @@
 //! SHA-256, RFC 4231 for HMAC-SHA-256, RFC 7914 and the widely published password/salt vectors
 //! for PBKDF2-HMAC-SHA-256, RFC 4648 for Base64.
 
-
 use eggdb_crypto::{
     Base64Error, HmacSha256, Sha256, base64_decode, base64_encode, constant_time_eq, hmac_sha256,
     pbkdf2_hmac_sha256, sha256,

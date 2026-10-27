@@ -6,6 +6,7 @@ version = 4
 name = "eggdb"
 version = "0.1.0"
 dependencies = [
+ "eggdb-pgwire",
  "eggdb-platform",
  "eggdb-sql",
  "eggdb-storage",

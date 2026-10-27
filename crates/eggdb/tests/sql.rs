@@ -142,7 +142,7 @@ fn usage_mistakes_exit_2() {
     assert_eq!(not_utf8.status.code(), Some(2));
     let no_file = eggdb_sql(file.path(), &["-c", "SELECT 1"], b"");
     assert_eq!(no_file.status.code(), Some(3));
-    assert!(text(&no_file.stderr).contains("pass --create to put or sql"));
+    assert!(text(&no_file.stderr).contains("pass --create to put, sql or serve"));
 }
 
 #[test]

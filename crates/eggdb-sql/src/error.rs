@@ -6,12 +6,36 @@ use std::fmt;
 pub struct SqlState([u8; 5]);
 
 impl SqlState {
+    /// `08006` connection_failure.
+    pub const CONNECTION_FAILURE: Self = Self(*b"08006");
+    /// `08P01` protocol_violation.
+    pub const PROTOCOL_VIOLATION: Self = Self(*b"08P01");
+    /// `26000` invalid_sql_statement_name: no prepared statement by that name.
+    pub const INVALID_SQL_STATEMENT_NAME: Self = Self(*b"26000");
+    /// `28000` invalid_authorization_specification.
+    pub const INVALID_AUTHORIZATION_SPECIFICATION: Self = Self(*b"28000");
+    /// `28P01` invalid_password.
+    pub const INVALID_PASSWORD: Self = Self(*b"28P01");
+    /// `34000` invalid_cursor_name: no portal by that name.
+    pub const INVALID_CURSOR_NAME: Self = Self(*b"34000");
+    /// `3D000` invalid_catalog_name: no database by that name.
+    pub const INVALID_CATALOG_NAME: Self = Self(*b"3D000");
+    /// `42P03` duplicate_cursor: a portal by that name exists.
+    pub const DUPLICATE_CURSOR: Self = Self(*b"42P03");
+    /// `42P05` duplicate_prepared_statement.
+    pub const DUPLICATE_PREPARED_STATEMENT: Self = Self(*b"42P05");
+    /// `53300` too_many_connections.
+    pub const TOO_MANY_CONNECTIONS: Self = Self(*b"53300");
+    /// `57P01` admin_shutdown: the server is stopping.
+    pub const ADMIN_SHUTDOWN: Self = Self(*b"57P01");
     /// `0A000` feature_not_supported: valid SQL that this release does not run yet.
     pub const FEATURE_NOT_SUPPORTED: Self = Self(*b"0A000");
     /// `21000` cardinality_violation.
     pub const CARDINALITY_VIOLATION: Self = Self(*b"21000");
     /// `22001` string_data_right_truncation.
     pub const STRING_DATA_RIGHT_TRUNCATION: Self = Self(*b"22001");
+    /// `22021` character_not_in_repertoire: bytes that are not valid UTF-8.
+    pub const CHARACTER_NOT_IN_REPERTOIRE: Self = Self(*b"22021");
     /// `22003` numeric_value_out_of_range.
     pub const NUMERIC_VALUE_OUT_OF_RANGE: Self = Self(*b"22003");
     /// `22012` division_by_zero.
@@ -26,6 +50,8 @@ impl SqlState {
     pub const INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE: Self = Self(*b"2201X");
     /// `22025` invalid_escape_sequence.
     pub const INVALID_ESCAPE_SEQUENCE: Self = Self(*b"22025");
+    /// `22P03` invalid_binary_representation.
+    pub const INVALID_BINARY_REPRESENTATION: Self = Self(*b"22P03");
     /// `22P02` invalid_text_representation.
     pub const INVALID_TEXT_REPRESENTATION: Self = Self(*b"22P02");
     /// `23502` not_null_violation.
