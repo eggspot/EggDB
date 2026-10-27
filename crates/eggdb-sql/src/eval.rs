@@ -930,7 +930,7 @@ impl Evaluator<'_> {
         }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
-        let declared = crate::bytea::argument_types(name);
+        let declared = declared_argument_types(name);
         for (position, argument) in arguments.iter().enumerate() {
             let value = match declared {
                 Some(types) => self.eval(argument, types.get(position).copied().flatten())?,
@@ -1027,6 +1027,20 @@ impl Evaluator<'_> {
             _ => Err(unknown()),
         }
     }
+}
+
+fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
+    const TIMESTAMP: Option<SqlType> = Some(SqlType::Timestamp(None));
+    const INTERVAL: Option<SqlType> = Some(SqlType::INTERVAL);
+    Some(match name {
+        "encode" => &[Some(SqlType::Bytea), Some(SqlType::Text)],
+        "decode" => &[Some(SqlType::Text), Some(SqlType::Text)],
+        "get_byte" => &[Some(SqlType::Bytea), Some(SqlType::Integer)],
+        "substring" => &[None, Some(SqlType::Integer), Some(SqlType::Integer)],
+        "age" => &[TIMESTAMP, TIMESTAMP],
+        "justify_days" | "justify_hours" | "justify_interval" => &[INTERVAL],
+        _ => return None,
+    })
 }
 
 fn as_text_if_character(value: Value) -> Value {

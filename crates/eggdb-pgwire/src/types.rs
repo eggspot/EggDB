@@ -612,7 +612,11 @@ mod tests {
             "22021"
         );
         assert_eq!(
-            state(decode_parameter(&[0; 8], 1186, Format::Binary, 1)),
+            state(decode_parameter(&[0; 8], INTERVAL_OID, Format::Binary, 1)),
+            "22P03"
+        );
+        assert_eq!(
+            state(decode_parameter(&[0; 8], 790, Format::Binary, 1)),
             "0A000"
         );
         assert_eq!(
@@ -658,6 +662,58 @@ mod tests {
             encode_value(&Value::Integer(3), TEXT_OID, Format::Binary, 0).unwrap(),
             Some(b"3".to_vec())
         );
+    }
+
+    #[test]
+    fn item_31_values_round_trip_through_their_binary_forms() {
+        let values = [
+            (Value::Time(0), TIME_OID),
+            (Value::Time(86_400_000_000), TIME_OID),
+            (
+                Value::TimeTz {
+                    micros: 1,
+                    offset_seconds: -(15 * 3600 + 59 * 60 + 59),
+                },
+                TIMETZ_OID,
+            ),
+            (
+                Value::Interval(Interval {
+                    months: i32::MIN,
+                    days: i32::MAX,
+                    micros: i64::MIN,
+                }),
+                INTERVAL_OID,
+            ),
+            (Value::Bytea(vec![0, 0xFF, b'\\']), BYTEA_OID),
+            (Value::Bytea(Vec::new()), BYTEA_OID),
+            (Value::Uuid([0xA5; 16]), UUID_OID),
+            (Value::Bpchar("ab  ".into()), BPCHAR_OID),
+        ];
+        for (value, oid) in values {
+            let bytes = encode_value(&value, oid, Format::Binary, 0)
+                .unwrap()
+                .unwrap();
+            let text = decode_parameter(&bytes, oid, Format::Binary, 1).unwrap();
+            assert_eq!(Some(text), value.to_text_at(0), "{value:?}");
+            assert_eq!(oid_of(value.sql_type().unwrap()), oid);
+            assert_eq!(
+                sql_type_of(oid).map(SqlType::name),
+                value.sql_type().map(SqlType::name)
+            );
+        }
+        let mut random = 0x0B1A_5EED_0000_0031u64;
+        for _ in 0..20_000 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let length = (random % 20) as usize;
+            let bytes: Vec<u8> = (0..length)
+                .map(|shift| (random >> (shift % 8 * 8)) as u8)
+                .collect();
+            for oid in [TIME_OID, TIMETZ_OID, INTERVAL_OID, BYTEA_OID, UUID_OID] {
+                let _ = decode_parameter(&bytes, oid, Format::Binary, 1);
+            }
+        }
     }
 
     fn numeric(text: &str) -> Value {

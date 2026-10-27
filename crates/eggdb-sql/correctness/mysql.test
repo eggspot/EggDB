@@ -921,13 +921,9 @@ TIME '23:59:59'
 23:59:59
 SELECT 1
 
-error 42000 1064
+error 42000 1305
 SELECT gen_random_uuid()
-... differs
 
-rows
-SELECT '838:59:59' = '838:59:59'
-----
-'838:59:59' = '838:59:59'
-1
-SELECT 1
+ok
+INSERT INTO t31 (id, t) VALUES (2, '838:59:59')
+... differs

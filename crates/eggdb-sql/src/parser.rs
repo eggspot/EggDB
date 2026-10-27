@@ -1242,7 +1242,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn zoned_typed_literal(&self, word: &str) -> bool {
+    fn typed_literal_with_modifiers(&self, word: &str) -> bool {
         let with_precision = matches!(self.peek_kind_at(1), TokenKind::LeftParen)
             && matches!(self.peek_kind_at(2), TokenKind::Integer(_))
             && matches!(self.peek_kind_at(3), TokenKind::RightParen);
@@ -2514,7 +2514,7 @@ impl<'t> Parser<'t> {
                             || (word == "double"
                                 && self.is_word_at(1, "precision")
                                 && matches!(self.peek_kind_at(2), TokenKind::String(_)))
-                            || self.zoned_typed_literal(word)) =>
+                            || self.typed_literal_with_modifiers(word)) =>
                 {
                     let sql_type = if self.mysql() && word == "timestamp" {
                         self.at += 1;

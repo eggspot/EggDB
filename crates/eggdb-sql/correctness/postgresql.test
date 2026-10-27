@@ -1821,10 +1821,10 @@ justify_days|justify_hours|justify_interval
 SELECT 1
 
 rows
-SELECT age(timestamp '2001-04-10', timestamp '1957-06-13')
+SELECT age(timestamp '2001-04-10', timestamp '1957-06-13'), age('2001-04-10', timestamp '1957-06-13'), justify_days('35 days')
 ----
-age
-43 years 9 mons 27 days
+age|age|justify_days
+43 years 9 mons 27 days|43 years 9 mons 27 days|1 mon 5 days
 SELECT 1
 
 rows

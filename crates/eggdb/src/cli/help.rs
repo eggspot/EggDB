@@ -237,8 +237,8 @@ script of - or none at all), in order. This release runs the first parts of the 
 dialect: CREATE TABLE with a PRIMARY KEY, DROP TABLE, INSERT, SELECT with WHERE, inner, left
 and cross joins, GROUP BY with count, sum, avg, min and max, HAVING, DISTINCT, ORDER BY,
 LIMIT and OFFSET, UPDATE, DELETE, BEGIN, COMMIT and ROLLBACK, with the integer,
-floating-point, exact numeric, boolean, text, date, timestamp, timestamptz, json and jsonb
-types and serial and identity columns; with --dialect mysql, MySQL's SQL on the same tables, with MySQL's
+floating-point, exact numeric, boolean, text, char(n), bytea, uuid, date, time, timetz,
+timestamp, timestamptz, interval, json and jsonb types and serial and identity columns; with --dialect mysql, MySQL's SQL on the same tables, with MySQL's
 errors, and with --dialect sqlite, SQLite's SQL (type affinity, INTEGER PRIMARY KEY row ids,
 PRAGMAs, sqlite_schema), with SQLite's errors and result codes, and with --dialect oracle,
 Oracle's SQL (DUAL, ROWNUM, FETCH FIRST, upper-case names, '' as NULL), with ORA- errors.

@@ -164,6 +164,15 @@ the same tables ([sql.md](sql.md)). `db.sql_store()` gives the database as a SQL
 hands each result to a closure. The session's transactions are the database's write
 transactions, so a SQL `BEGIN` holds the one writer until `COMMIT` or `ROLLBACK`.
 
+Result rows are `eggdb::sql::Value`s, one variant per type: `Value::Text`, `Value::Numeric`,
+`Value::Date` (days since 2000-01-01), `Value::Timestamp` and `Value::TimestampTz`
+(microseconds since 2000-01-01), `Value::Time` (microseconds since midnight),
+`Value::TimeTz { micros, offset_seconds }`, `Value::Interval(Interval { months, days, micros })`,
+`Value::Bytea(Vec<u8>)`, `Value::Uuid([u8; 16])`, `Value::Bpchar` (a `character(n)` with its
+padding) and the rest; `value.to_text()` prints any of them as PostgreSQL does and
+`dialect.value_text(&value)` as that dialect's clients do. `gen_random_uuid()` draws from the
+operating system's secure generator, which `db.sql_store()` registers (D113).
+
 ```rust
 use eggdb::Database;
 use eggdb::sql::{Dialect, Parameter, Value};

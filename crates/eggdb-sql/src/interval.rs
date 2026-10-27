@@ -12,6 +12,7 @@ const DAYS_PER_MONTH: i64 = 30;
 const MONTHS_PER_YEAR: i64 = 12;
 const MICROS_PER_MONTH: i128 = DAYS_PER_MONTH as i128 * MICROS_PER_DAY as i128;
 const MAX_INPUT_BYTES: usize = 4096;
+const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
 
 /// An `interval`: a span of months, days and microseconds, kept apart as PostgreSQL keeps them,
 /// because a month's and a day's length depend on the date they are added to.
@@ -258,12 +259,11 @@ impl Totals {
         self.micros += (fraction * MICROS_PER_DAY as f64).round_ties_even() as i128;
     }
 
-    fn finish(self, negate: bool) -> Option<Interval> {
-        let sign = if negate { -1 } else { 1 };
+    fn finish(self) -> Option<Interval> {
         Some(Interval {
-            months: i32::try_from(self.months * sign).ok()?,
-            days: i32::try_from(self.days * sign).ok()?,
-            micros: i64::try_from(self.micros * sign).ok()?,
+            months: i32::try_from(self.months).ok()?,
+            days: i32::try_from(self.days).ok()?,
+            micros: i64::try_from(self.micros).ok()?,
         })
     }
 }
@@ -592,7 +592,7 @@ impl Interval {
             postgres_style(trimmed, fields)
         };
         let interval = match totals {
-            Ok(totals) => totals.finish(false).ok_or_else(|| field_overflow(text))?,
+            Ok(totals) => totals.finish().ok_or_else(|| field_overflow(text))?,
             Err(Failure::Syntax) => return Err(syntax(text)),
             Err(Failure::Range) => return Err(field_overflow(text)),
         };
@@ -713,10 +713,7 @@ impl Interval {
             .ok_or_else(out_of_range)?;
         let micros = (apply(self.micros as f64) + second_remainder * MICROS_PER_SECOND as f64)
             .round_ties_even();
-        if !micros.is_finite()
-            || micros < -9.223_372_036_854_775_808e18
-            || micros >= 9.223_372_036_854_775_808e18
-        {
+        if !micros.is_finite() || micros < -I64_BOUND || micros >= I64_BOUND {
             return Err(out_of_range());
         }
         Ok(Self {
