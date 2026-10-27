@@ -3,7 +3,7 @@ use crate::messages::{
     parse_message, parse_sasl_initial_response, parse_startup,
 };
 use crate::scram::{SCRAM_SHA_256, ScramExchange, ScramFailure, ScramVerifier};
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, Shared, take_slot};
+use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::types::{
     TEXT_OID, UNKNOWN_OID, decode_parameter, describe_columns, encode_value, format_at, oid_of,
     sql_type_of,
@@ -47,8 +47,11 @@ pub(crate) fn printable(text: &str) -> String {
             '\n' => shown.push_str("\\n"),
             '\r' => shown.push_str("\\r"),
             '\t' => shown.push_str("\\t"),
-            control if control.is_control() => {
-                shown.push_str(&format!("\\u{{{:x}}}", u32::from(control)));
+            special
+                if special.is_control()
+                    || matches!(special, '\u{2028}' | '\u{2029}' | '\u{202e}') =>
+            {
+                shown.push_str(&format!("\\u{{{:x}}}", u32::from(special)));
             }
             other => shown.push(other),
         }
@@ -479,6 +482,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
             "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
             wire.peer()
         ));
+        wire.deadline = Some(Instant::now() + REFUSAL_TIMEOUT);
         refuse_too_many(&mut wire);
         return;
     };
@@ -1125,6 +1129,10 @@ mod tests {
         assert_eq!(
             super::printable("a\nb\r\"c\\\u{1b}[31m\u{85}"),
             "a\\nb\\r\\\"c\\\\\\u{1b}[31m\\u{85}"
+        );
+        assert_eq!(
+            super::printable("x\u{2028}y\u{2029}z\u{202e}"),
+            "x\\u{2028}y\\u{2029}z\\u{202e}"
         );
     }
 

@@ -18,7 +18,7 @@ pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// `53300`, so slow or failing logins cannot take every slot.
 pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
 const MAX_REFUSING_THREADS: usize = 8;
-const REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const DELAY_PER_RECENT_FAILURE: Duration = Duration::from_millis(250);
