@@ -23,8 +23,11 @@ pub(crate) fn table_key(name: &str) -> Vec<u8> {
     key
 }
 
+const TYPICAL_KEY_BYTES: usize = 48;
+
 pub(crate) fn rows_prefix(table_id: u32) -> Vec<u8> {
-    let mut key = NAMESPACE.to_vec();
+    let mut key = Vec::with_capacity(TYPICAL_KEY_BYTES);
+    key.extend_from_slice(NAMESPACE);
     key.push(ROW_SPACE);
     key.extend_from_slice(&table_id.to_be_bytes());
     key
@@ -46,7 +49,9 @@ pub(crate) fn corrupt(what: &str) -> SqlError {
         SqlState::DATA_CORRUPTED,
         format!("the SQL {what} stored in the database is damaged"),
     )
-    .with_hint("Run `eggdb check` on the file.")
+    .with_hint(
+        "`eggdb check` checks the file's pages and keys, not SQL rows and definitions, so it can pass: restore the table from a backup or an export.",
+    )
 }
 
 pub(crate) fn encode_meta(next_table_id: u32) -> Vec<u8> {
@@ -257,8 +262,14 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
 }
 
 pub(crate) fn encode_row(values: &[Value]) -> Vec<u8> {
-    let mut out = vec![FORMAT_VERSION];
-    put_varint(&mut out, values.len() as u64);
+    let mut out = Vec::new();
+    encode_row_into(&mut out, values);
+    out
+}
+
+pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
+    out.push(FORMAT_VERSION);
+    put_varint(out, values.len() as u64);
     for value in values {
         match value {
             Value::Null => out.push(0),
@@ -288,11 +299,10 @@ pub(crate) fn encode_row(values: &[Value]) -> Vec<u8> {
             }
             Value::Text(text) => {
                 out.push(7);
-                put_bytes(&mut out, text.as_bytes());
+                put_bytes(out, text.as_bytes());
             }
         }
     }
-    out
 }
 
 pub(crate) fn decode_row(bytes: &[u8], columns: &[Column]) -> SqlResult<Vec<Value>> {

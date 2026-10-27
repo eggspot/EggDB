@@ -43,7 +43,7 @@ enum Level {
 
 pub(crate) struct Parser<'t> {
     text: &'t str,
-    tokens: &'t [Token],
+    tokens: &'t [Token<'t>],
     at: usize,
     depth: usize,
 }
@@ -160,16 +160,16 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn peek(&self) -> &'t Token {
+    fn peek(&self) -> &'t Token<'t> {
         let index = self.at.min(self.tokens.len().saturating_sub(1));
         &self.tokens[index]
     }
 
-    fn peek_kind(&self) -> &'t TokenKind {
+    fn peek_kind(&self) -> &'t TokenKind<'t> {
         &self.peek().kind
     }
 
-    fn peek_kind_at(&self, ahead: usize) -> &'t TokenKind {
+    fn peek_kind_at(&self, ahead: usize) -> &'t TokenKind<'t> {
         let index = (self.at + ahead).min(self.tokens.len().saturating_sub(1));
         &self.tokens[index].kind
     }
@@ -217,7 +217,7 @@ impl<'t> Parser<'t> {
     }
 
     fn is_operator(&self, symbol: &str) -> bool {
-        matches!(self.peek_kind(), TokenKind::Operator(found) if found == symbol)
+        matches!(self.peek_kind(), TokenKind::Operator(found) if *found == symbol)
     }
 
     fn take_operator(&mut self, symbol: &str) -> bool {
@@ -245,7 +245,7 @@ impl<'t> Parser<'t> {
     fn name(&mut self) -> SqlResult<Name> {
         let token = self.peek();
         let text = match &token.kind {
-            TokenKind::Word(word) if !is_reserved(word) => word.clone(),
+            TokenKind::Word(word) if !is_reserved(word) => word.as_ref().to_owned(),
             TokenKind::QuotedIdentifier(name) => name.clone(),
             _ => return Err(self.unexpected()),
         };
@@ -275,7 +275,7 @@ impl<'t> Parser<'t> {
         let TokenKind::Word(word) = self.peek_kind() else {
             return Err(self.unexpected());
         };
-        match word.as_str() {
+        match word.as_ref() {
             "create" => self.create(),
             "drop" => self.drop(),
             "insert" => self.insert(),
@@ -358,7 +358,7 @@ impl<'t> Parser<'t> {
                     return Err(self.unexpected());
                 };
                 if matches!(
-                    word.as_str(),
+                    word.as_ref(),
                     "index"
                         | "unique"
                         | "view"
@@ -490,13 +490,13 @@ impl<'t> Parser<'t> {
 
     pub(crate) fn sql_type(&mut self) -> SqlResult<SqlType> {
         let token = self.peek();
-        let word = match &token.kind {
-            TokenKind::Word(word) => word.clone(),
-            TokenKind::QuotedIdentifier(name) => name.clone(),
+        let word: &str = match &token.kind {
+            TokenKind::Word(word) => word,
+            TokenKind::QuotedIdentifier(name) => name,
             _ => return Err(self.unexpected()),
         };
         self.at += 1;
-        let sql_type = match word.as_str() {
+        let sql_type = match word {
             "smallint" | "int2" => SqlType::SmallInt,
             "integer" | "int" | "int4" => SqlType::Integer,
             "bigint" | "int8" => SqlType::BigInt,
@@ -905,7 +905,7 @@ impl<'t> Parser<'t> {
         if (matches!(self.peek_kind(), TokenKind::Word(word) if !is_reserved(word))
             || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_)))
             && self.peek_kind_at(1) == &TokenKind::Dot
-            && matches!(self.peek_kind_at(2), TokenKind::Operator(op) if op == "*")
+            && matches!(self.peek_kind_at(2), TokenKind::Operator(op) if *op == "*")
         {
             let qualifier = self.name()?.text;
             self.at += 2;
@@ -930,7 +930,7 @@ impl<'t> Parser<'t> {
     fn label(&mut self) -> SqlResult<String> {
         match self.peek_kind() {
             TokenKind::Word(word) => {
-                let word = word.clone();
+                let word = word.as_ref().to_owned();
                 self.at += 1;
                 Ok(word)
             }
@@ -1062,7 +1062,7 @@ impl<'t> Parser<'t> {
 
     fn infix_level(&self) -> Option<Level> {
         match self.peek_kind() {
-            TokenKind::Word(word) => match word.as_str() {
+            TokenKind::Word(word) => match word.as_ref() {
                 "or" => Some(Level::Or),
                 "and" => Some(Level::And),
                 "is" | "isnull" | "notnull" => Some(Level::Is),
@@ -1076,7 +1076,7 @@ impl<'t> Parser<'t> {
                 }
                 _ => None,
             },
-            TokenKind::Operator(symbol) => Some(match symbol.as_str() {
+            TokenKind::Operator(symbol) => Some(match *symbol {
                 "=" | "<>" | "!=" | "<" | "<=" | ">" | ">=" => Level::Comparison,
                 "+" | "-" => Level::Additive,
                 "*" | "/" | "%" => Level::Multiplicative,
@@ -1201,7 +1201,7 @@ impl<'t> Parser<'t> {
         let TokenKind::Operator(symbol) = self.peek_kind() else {
             return None;
         };
-        Some(match symbol.as_str() {
+        Some(match *symbol {
             "=" => BinaryOperator::Equal,
             "<>" | "!=" => BinaryOperator::NotEqual,
             "<" => BinaryOperator::Less,
@@ -1312,16 +1312,16 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 match digits.parse::<i64>() {
                     Ok(value) => literal(Literal::Integer(value)),
-                    Err(_) => literal(Literal::Decimal(digits.clone())),
+                    Err(_) => literal(Literal::Decimal((*digits).to_owned())),
                 }
             }
             TokenKind::Decimal(text) => {
                 self.at += 1;
-                literal(Literal::Decimal(text.clone()))
+                literal(Literal::Decimal((*text).to_owned()))
             }
             TokenKind::String(text) => {
                 self.at += 1;
-                literal(Literal::String(text.clone()))
+                literal(Literal::String(text.as_ref().to_owned()))
             }
             TokenKind::Parameter => {
                 Err(SqlError::not_supported("parameters ($1) are not supported yet").at(position))
@@ -1343,7 +1343,7 @@ impl<'t> Parser<'t> {
                 })
             }
             TokenKind::QuotedIdentifier(_) => self.column_or_function(),
-            TokenKind::Word(word) => match word.as_str() {
+            TokenKind::Word(word) => match word.as_ref() {
                 "null" => {
                     self.at += 1;
                     literal(Literal::Null)
@@ -1393,7 +1393,7 @@ impl<'t> Parser<'t> {
                         return Err(self.unexpected());
                     };
                     let operand = Expr {
-                        kind: ExprKind::Literal(Literal::String(text.clone())),
+                        kind: ExprKind::Literal(Literal::String(text.as_ref().to_owned())),
                         position: self.position(),
                     };
                     self.at += 1;

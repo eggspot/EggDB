@@ -51,6 +51,17 @@ impl KeyValueRead for SqlSnapshot<'_> {
         self.0.get(key).map_err(store_error)
     }
 
+    fn get_with(
+        &self,
+        key: &[u8],
+        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
+    ) -> SqlResult<bool> {
+        match self.0.get_with(key, read).map_err(store_error)? {
+            Some(outcome) => outcome.map(|()| true),
+            None => Ok(false),
+        }
+    }
+
     fn scan(
         &self,
         start: &[u8],
@@ -61,11 +72,26 @@ impl KeyValueRead for SqlSnapshot<'_> {
         let range = (Bound::Included(start), Bound::Excluded(end));
         scan_through(self.0.scan(range), direction, visit)
     }
+
+    fn committed_version(&self) -> Option<u64> {
+        Some(self.0.stamp().bits())
+    }
 }
 
 impl KeyValueRead for SqlWriter<'_> {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
         self.0.get(key).map_err(store_error)
+    }
+
+    fn get_with(
+        &self,
+        key: &[u8],
+        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
+    ) -> SqlResult<bool> {
+        match self.0.get_with(key, read).map_err(store_error)? {
+            Some(outcome) => outcome.map(|()| true),
+            None => Ok(false),
+        }
     }
 
     fn scan(
@@ -83,6 +109,10 @@ impl KeyValueRead for SqlWriter<'_> {
 impl KeyValueWrite for SqlWriter<'_> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
         self.0.put(key, value).map_err(store_error)
+    }
+
+    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        self.0.put_if_absent(key, value).map_err(store_error)
     }
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {

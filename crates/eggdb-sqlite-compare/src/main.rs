@@ -11,7 +11,7 @@
 //! gated against the `ratio_to_sqlite` lines of `benchmarks/baseline.txt`: they fail 50% above
 //! the line after one retry. The SQL workloads run the same SQL text on both, without prepared
 //! statements on either side; their ratios fail 15% above the line, since their gap to SQLite is
-//! known and scheduled (D98) and may only shrink. `eggdb-bench` gates its ratios the same way at 30% (D80), but two
+//! known and scheduled (D99) and may only shrink. `eggdb-bench` gates its ratios the same way at 30% (D80), but two
 //! engines respond differently to each CI runner's processor, so their ratio moves more between
 //! runs. Batched puts in the `Normal` mode and the durable commit, one commit per put waiting for
 //! the disk, depend on the disk more than on either engine and are reported only. `--update`

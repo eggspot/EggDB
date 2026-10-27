@@ -1011,3 +1011,40 @@ fn review_cases_follow_postgresql() {
         "id\nSELECT 0"
     );
 }
+
+#[test]
+fn execute_while_stops_before_the_next_statement_when_told_to() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let mut seen = Vec::new();
+    session
+        .execute_while(
+            "CREATE TABLE t (a integer PRIMARY KEY); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)",
+            &mut |result| {
+                seen.push(result.tag);
+                seen.len() < 2
+            },
+        )
+        .unwrap();
+    assert_eq!(seen, ["CREATE TABLE", "INSERT 0 1"]);
+    assert_eq!(last(&mut session, "SELECT a FROM t"), "a\n1\nSELECT 1");
+}
+
+#[test]
+fn a_cached_definition_follows_a_drop_and_a_new_table_of_the_same_name() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let mut other = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE t (a integer PRIMARY KEY); INSERT INTO t VALUES (1)",
+    );
+    assert_eq!(last(&mut session, "SELECT * FROM t"), "a\n1\nSELECT 1");
+    last(
+        &mut other,
+        "DROP TABLE t; CREATE TABLE t (b text PRIMARY KEY, c integer); INSERT INTO t VALUES ('x', 2)",
+    );
+    assert_eq!(last(&mut session, "SELECT * FROM t"), "b|c\nx|2\nSELECT 1");
+    last(&mut other, "DROP TABLE t");
+    assert_eq!(state(&mut session, "SELECT * FROM t"), "42P01");
+}

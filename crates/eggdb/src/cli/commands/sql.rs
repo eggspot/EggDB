@@ -20,15 +20,14 @@ impl Session<'_> {
         let outcome = {
             let out = &mut self.out;
             let messages = &mut self.messages;
-            session.execute(&text, &mut |result| {
+            session.execute_while(&text, &mut |result| {
                 for notice in &result.notices {
                     messages.text(notice);
                     messages.text("\n");
                 }
                 print_result(out, &result);
-                if printed.is_ok() {
-                    printed = out.line_done();
-                }
+                printed = out.line_done();
+                printed.is_ok()
             })
         };
         let exit = match outcome {

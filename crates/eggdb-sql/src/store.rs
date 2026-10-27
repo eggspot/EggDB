@@ -54,6 +54,19 @@ pub trait KeyValueRead {
     /// The value under `key`, or `None`.
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>>;
 
+    /// Calls `read` with the value under `key` where it lies, when there is one; whether
+    /// there was. The default copies the value out with [`KeyValueRead::get`].
+    fn get_with(
+        &self,
+        key: &[u8],
+        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
+    ) -> SqlResult<bool> {
+        match self.get(key)? {
+            Some(value) => read(&value).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
     /// Calls `visit` with each entry whose key is at least `start` and below `end`, in
     /// `direction`, until it returns `Ok(false)` or an error.
     fn scan(
@@ -63,12 +76,31 @@ pub trait KeyValueRead {
         direction: ScanDirection,
         visit: &mut EntryVisitor<'_>,
     ) -> SqlResult<()>;
+
+    /// The version of the committed state this read sees, when it sees only committed
+    /// state: two reads of a store with the same version see the same entries. `None`, the
+    /// default, when it may also see changes not yet committed, as the writer does, or when
+    /// the store does not tell; SQL then checks what it cached against the store.
+    fn committed_version(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The one write transaction of an ordered byte-string key-value store.
 pub trait KeyValueWrite: KeyValueRead {
     /// Stores `value` under `key`, replacing any value there.
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()>;
+
+    /// Stores `value` under `key` only when `key` is absent; whether it stored it. A key that
+    /// is there keeps its value. The default reads the key and then puts it; a store that can
+    /// do both in one search should.
+    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        if self.get(key)?.is_some() {
+            return Ok(false);
+        }
+        self.put(key, value)?;
+        Ok(true)
+    }
 
     /// Removes `key`; whether it was there.
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool>;

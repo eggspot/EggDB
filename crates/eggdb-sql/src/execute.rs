@@ -4,7 +4,7 @@ use crate::ast::{
 };
 use crate::encoding::{
     Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, encode_key_value, encode_meta,
-    encode_row, meta_key, prefix_end, rows_prefix, table_key,
+    encode_row, encode_row_into, meta_key, prefix_end, rows_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, check_columns, compare_truth, output_name};
@@ -29,9 +29,15 @@ fn undefined_table(name: &Name) -> SqlError {
 
 const CACHED_TABLES: usize = 256;
 
+struct CachedTable {
+    bytes: Vec<u8>,
+    table: Arc<TableDefinition>,
+    checked_at: Option<u64>,
+}
+
 #[derive(Default)]
 pub(crate) struct TableCache {
-    entries: HashMap<String, (Vec<u8>, Arc<TableDefinition>)>,
+    entries: HashMap<String, CachedTable>,
 }
 
 impl TableCache {
@@ -40,20 +46,34 @@ impl TableCache {
         reader: &dyn KeyValueRead,
         name: &str,
     ) -> SqlResult<Option<Arc<TableDefinition>>> {
+        let version = reader.committed_version();
+        if let Some(cached) = self.entries.get(name)
+            && version.is_some()
+            && cached.checked_at == version
+        {
+            return Ok(Some(Arc::clone(&cached.table)));
+        }
         let Some(bytes) = reader.get(&table_key(name))? else {
             return Ok(None);
         };
-        if let Some((cached_bytes, table)) = self.entries.get(name)
-            && *cached_bytes == bytes
+        if let Some(cached) = self.entries.get_mut(name)
+            && cached.bytes == bytes
         {
-            return Ok(Some(Arc::clone(table)));
+            cached.checked_at = version;
+            return Ok(Some(Arc::clone(&cached.table)));
         }
         let table = Arc::new(TableDefinition::decode(name, &bytes)?);
         if self.entries.len() >= CACHED_TABLES {
             self.entries.clear();
         }
-        self.entries
-            .insert(name.to_owned(), (bytes, Arc::clone(&table)));
+        self.entries.insert(
+            name.to_owned(),
+            CachedTable {
+                bytes,
+                table: Arc::clone(&table),
+                checked_at: version,
+            },
+        );
         Ok(Some(table))
     }
 
@@ -269,12 +289,6 @@ fn next_hidden_row_id(reader: &dyn KeyValueRead, table: &TableDefinition) -> Sql
     })
 }
 
-fn hidden_row_key(table: &TableDefinition, id: u64) -> Vec<u8> {
-    let mut key = rows_prefix(table.id);
-    key.extend_from_slice(&id.to_be_bytes());
-    key
-}
-
 fn default_value(column: &Column) -> SqlResult<Value> {
     let Some(text) = &column.default else {
         return Ok(Value::Null);
@@ -445,6 +459,9 @@ pub(crate) fn insert(
     };
     let mut next_row_id = None;
     let mut result_rows = Vec::new();
+    let mut key = rows_prefix(table.id);
+    let prefix_length = key.len();
+    let mut encoded = Vec::new();
     for values in rows {
         let mut row = Vec::with_capacity(table.columns.len());
         for (index, column) in table.columns.iter().enumerate() {
@@ -458,21 +475,25 @@ pub(crate) fn insert(
             });
         }
         check_not_null(&table, &row)?;
-        let key = if table.primary_key.is_empty() {
+        encoded.clear();
+        encode_row_into(&mut encoded, &row);
+        key.truncate(prefix_length);
+        if table.primary_key.is_empty() {
             let id = match next_row_id {
                 Some(id) => id,
                 None => next_hidden_row_id(writer, &table)?,
             };
             next_row_id = Some(id.saturating_add(1));
-            hidden_row_key(&table, id)
+            key.extend_from_slice(&id.to_be_bytes());
+            writer.put(&key, &encoded)?;
         } else {
-            let key = row_key(&table, &row);
-            if writer.get(&key)?.is_some() {
+            for &index in &table.primary_key {
+                encode_key_value(&mut key, &row[index]);
+            }
+            if !writer.put_if_absent(&key, &encoded)? {
                 return Err(duplicate_key(&table, &row));
             }
-            key
-        };
-        writer.put(&key, &encode_row(&row))?;
+        }
         if let Some(projection) = &returning {
             result_rows.push(projection.project(&row)?);
         }
@@ -488,6 +509,7 @@ struct Projection<'a> {
     columns: Vec<OutputColumn>,
     items: Vec<ProjectedItem<'a>>,
     scope: Scope<'a>,
+    each_column_once: bool,
 }
 
 enum ProjectedItem<'a> {
@@ -497,8 +519,8 @@ enum ProjectedItem<'a> {
 
 impl<'a> Projection<'a> {
     fn new(items: &'a [SelectItem], scope: Scope<'a>) -> SqlResult<Self> {
-        let mut columns = Vec::new();
-        let mut projected = Vec::new();
+        let mut columns = Vec::with_capacity(items.len());
+        let mut projected = Vec::with_capacity(items.len());
         for item in items {
             match item {
                 SelectItem::Wildcard {
@@ -530,27 +552,39 @@ impl<'a> Projection<'a> {
                 }
                 SelectItem::Expr { expr, alias } => {
                     check_columns(expr, scope)?;
-                    let sql_type = match &expr.kind {
+                    let column = match &expr.kind {
                         ExprKind::Column { qualifier, name } => scope
                             .column(qualifier.as_deref(), name, expr.position)
                             .ok()
                             .and_then(|index| {
-                                scope.table.map(|table| table.columns[index].sql_type)
+                                scope
+                                    .table
+                                    .map(|table| (index, table.columns[index].sql_type))
                             }),
                         _ => None,
                     };
                     columns.push(OutputColumn {
                         name: alias.clone().unwrap_or_else(|| output_name(expr)),
-                        sql_type,
+                        sql_type: column.map(|(_, sql_type)| sql_type),
                     });
-                    projected.push(ProjectedItem::Expr(expr));
+                    projected.push(match column {
+                        Some((index, _)) => ProjectedItem::Column(index),
+                        None => ProjectedItem::Expr(expr),
+                    });
                 }
             }
         }
+        let each_column_once = projected.iter().enumerate().all(|(at, item)| match item {
+            ProjectedItem::Column(index) => !projected[..at]
+                .iter()
+                .any(|earlier| matches!(earlier, ProjectedItem::Column(other) if other == index)),
+            ProjectedItem::Expr(_) => false,
+        });
         Ok(Self {
             columns,
             items: projected,
             scope,
+            each_column_once,
         })
     }
 
@@ -585,13 +619,22 @@ impl<'a> Projection<'a> {
     fn source_column(&self, index: usize) -> Option<usize> {
         match &self.items[index] {
             ProjectedItem::Column(column) => Some(*column),
-            ProjectedItem::Expr(expr) => match &expr.kind {
-                ExprKind::Column { qualifier, name } => {
-                    self.scope.column(qualifier.as_deref(), name, 0).ok()
-                }
-                _ => None,
-            },
+            ProjectedItem::Expr(_) => None,
         }
+    }
+
+    fn project_owned(&self, mut row: Vec<Value>) -> SqlResult<Vec<Value>> {
+        if !self.each_column_once {
+            return self.project(&row);
+        }
+        Ok(self
+            .items
+            .iter()
+            .map(|item| match item {
+                ProjectedItem::Column(index) => std::mem::replace(&mut row[*index], Value::Null),
+                ProjectedItem::Expr(_) => Value::Null,
+            })
+            .collect())
     }
 
     fn project(&self, row: &[Value]) -> SqlResult<Vec<Value>> {
@@ -617,38 +660,16 @@ fn filter_matches(scope: Scope<'_>, filter: Option<&Expr>, row: &[Value]) -> Sql
     Ok(evaluator.boolean(filter, "WHERE")? == Some(true))
 }
 
-fn conjuncts<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
-    match &expr.kind {
-        ExprKind::And(operands) => {
-            for operand in operands {
-                conjuncts(operand, out);
-            }
-        }
-        _ => out.push(expr),
-    }
-}
-
 fn is_constant(expr: &Expr) -> bool {
     check_columns(expr, Scope::empty()).is_ok()
 }
 
-fn point_key(table: &TableDefinition, scope: Scope<'_>, filter: &Expr) -> Option<Vec<u8>> {
-    if table.primary_key.is_empty() {
-        return None;
-    }
-    let mut parts = Vec::new();
-    conjuncts(filter, &mut parts);
-    let constants = Evaluator {
-        scope: Scope::empty(),
-        row: &[],
-    };
-    let mut key_row = vec![Value::Null; table.columns.len()];
-    for &index in &table.primary_key {
-        let column = &table.columns[index];
-        let found = parts.iter().find_map(|part| {
-            let ExprKind::Binary(BinaryOperator::Equal, left, right) = &part.kind else {
-                return None;
-            };
+fn key_equality<'e>(expr: &'e Expr, scope: Scope<'_>, index: usize) -> Option<&'e Expr> {
+    match &expr.kind {
+        ExprKind::And(operands) => operands
+            .iter()
+            .find_map(|operand| key_equality(operand, scope, index)),
+        ExprKind::Binary(BinaryOperator::Equal, left, right) => {
             let names_column = |expr: &Expr| {
                 matches!(&expr.kind, ExprKind::Column { qualifier, name }
                     if scope.column(qualifier.as_deref(), name, 0).ok() == Some(index))
@@ -660,38 +681,60 @@ fn point_key(table: &TableDefinition, scope: Scope<'_>, filter: &Expr) -> Option
             } else {
                 None
             }
-        })?;
+        }
+        _ => None,
+    }
+}
+
+fn point_key(table: &TableDefinition, scope: Scope<'_>, filter: &Expr) -> Option<Vec<u8>> {
+    if table.primary_key.is_empty() {
+        return None;
+    }
+    let constants = Evaluator {
+        scope: Scope::empty(),
+        row: &[],
+    };
+    let mut key = rows_prefix(table.id);
+    for &index in &table.primary_key {
+        let column = &table.columns[index];
+        let found = key_equality(filter, scope, index)?;
         let original = constants.eval(found, Some(column.sql_type)).ok()?;
         let converted = convert(original.clone(), column.sql_type, Conversion::Assignment).ok()?;
         if converted.is_null() || compare_values(&converted, &original) != Ordering::Equal {
             return None;
         }
-        key_row[index] = converted;
+        encode_key_value(&mut key, &converted);
     }
-    Some(row_key(table, &key_row))
+    Some(key)
 }
 
-fn matching_rows(
+type RowVisitor<'v> = dyn FnMut(&[u8], Vec<Value>) -> SqlResult<bool> + 'v;
+
+fn for_each_matching_row(
     reader: &dyn KeyValueRead,
     table: &TableDefinition,
     scope: Scope<'_>,
     filter: Option<&Expr>,
-    stop_after: Option<usize>,
-) -> SqlResult<Vec<(Vec<u8>, Vec<Value>)>> {
-    let mut rows = Vec::new();
-    if let Some(key) = filter.and_then(|filter| point_key(table, scope, filter)) {
-        if let Some(bytes) = reader.get(&key)? {
-            let row = decode_row(&bytes, &table.columns)?;
-            if filter_matches(scope, filter, &row)? {
-                rows.push((key, row));
+    visit: &mut RowVisitor<'_>,
+) -> SqlResult<()> {
+    if let Some(filter) = filter
+        && let Some(key) = point_key(table, scope, filter)
+    {
+        let mut found = None;
+        reader.get_with(&key, &mut |bytes| {
+            found = Some(decode_row(bytes, &table.columns)?);
+            Ok(())
+        })?;
+        if let Some(row) = found {
+            let filter_is_the_key = table.primary_key.len() == 1
+                && matches!(filter.kind, ExprKind::Binary(BinaryOperator::Equal, ..));
+            if filter_is_the_key || filter_matches(scope, Some(filter), &row)? {
+                visit(&key, row)?;
             }
         }
-        return Ok(rows);
+        return Ok(());
     }
     let prefix = rows_prefix(table.id);
-    if stop_after == Some(0) {
-        return Ok(rows);
-    }
     reader.scan(
         &prefix,
         &prefix_end(&prefix),
@@ -699,11 +742,24 @@ fn matching_rows(
         &mut |key, bytes| {
             let row = decode_row(bytes, &table.columns)?;
             if filter_matches(scope, filter, &row)? {
-                rows.push((key.to_vec(), row));
+                return visit(key, row);
             }
-            Ok(stop_after.is_none_or(|limit| rows.len() < limit))
+            Ok(true)
         },
-    )?;
+    )
+}
+
+fn matching_rows(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+    scope: Scope<'_>,
+    filter: Option<&Expr>,
+) -> SqlResult<Vec<(Vec<u8>, Vec<Value>)>> {
+    let mut rows = Vec::new();
+    for_each_matching_row(reader, table, scope, filter, &mut |key, row| {
+        rows.push((key.to_vec(), row));
+        Ok(true)
+    })?;
     Ok(rows)
 }
 
@@ -798,90 +854,148 @@ pub(crate) fn select(
     }
     let limit = row_count(select.limit.as_ref(), "LIMIT")?;
     let offset = row_count(select.offset.as_ref(), "OFFSET")?.unwrap_or(0);
-    let source_rows = match &table {
-        Some(table) => {
-            let stop_after = if sort_keys.is_empty() {
-                limit.map(|limit| {
-                    usize::try_from(limit.saturating_add(offset)).unwrap_or(usize::MAX)
-                })
-            } else {
-                None
-            };
-            matching_rows(reader, table, scope, select.filter.as_ref(), stop_after)?
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect()
-        }
-        None => {
-            if filter_matches(scope, select.filter.as_ref(), &[])? {
-                vec![Vec::new()]
-            } else {
-                Vec::new()
+    let skip = usize::try_from(offset).unwrap_or(usize::MAX);
+    let take = limit.map_or(usize::MAX, |limit| {
+        usize::try_from(limit).unwrap_or(usize::MAX)
+    });
+    let source = SourceRows {
+        reader,
+        table: table.as_deref(),
+        scope,
+        filter: select.filter.as_ref(),
+    };
+    let output = if sort_keys.is_empty() {
+        unsorted_rows(&source, &projection, skip, take)?
+    } else {
+        sorted_rows(
+            &source,
+            &select.order_by,
+            &projection,
+            &sort_keys,
+            skip,
+            take,
+        )?
+    };
+    let tag = format!("SELECT {}", output.len());
+    Ok(QueryResult::rows(tag, projection.columns, output))
+}
+
+struct SourceRows<'a> {
+    reader: &'a dyn KeyValueRead,
+    table: Option<&'a TableDefinition>,
+    scope: Scope<'a>,
+    filter: Option<&'a Expr>,
+}
+
+impl SourceRows<'_> {
+    fn for_each(&self, visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()> {
+        match self.table {
+            Some(table) => for_each_matching_row(
+                self.reader,
+                table,
+                self.scope,
+                self.filter,
+                &mut |_, row| visit(row),
+            ),
+            None => {
+                if filter_matches(self.scope, self.filter, &[])? {
+                    visit(Vec::new())?;
+                }
+                Ok(())
             }
         }
-    };
-    let mut rows = Vec::with_capacity(source_rows.len());
-    for row in &source_rows {
-        let output = projection.project(row)?;
-        let evaluator = Evaluator { scope, row };
+    }
+}
+
+fn unsorted_rows(
+    source: &SourceRows<'_>,
+    projection: &Projection<'_>,
+    skip: usize,
+    take: usize,
+) -> SqlResult<Vec<Vec<Value>>> {
+    let mut output = Vec::new();
+    if take == 0 && source.table.is_some() {
+        return Ok(output);
+    }
+    let mut skipped = 0;
+    source.for_each(&mut |row| {
+        let projected = projection.project_owned(row)?;
+        if skipped < skip {
+            skipped += 1;
+            return Ok(true);
+        }
+        if output.len() < take {
+            output.push(projected);
+        }
+        Ok(output.len() < take)
+    })?;
+    Ok(output)
+}
+
+fn sorted_rows(
+    source: &SourceRows<'_>,
+    order_by: &[crate::ast::OrderItem],
+    projection: &Projection<'_>,
+    sort_keys: &[SortKey<'_>],
+    skip: usize,
+    take: usize,
+) -> SqlResult<Vec<Vec<Value>>> {
+    let scope = source.scope;
+    let mut rows = Vec::new();
+    source.for_each(&mut |row| {
+        let output = projection.project(&row)?;
+        let evaluator = Evaluator { scope, row: &row };
         let mut keys = Vec::with_capacity(sort_keys.len());
-        for key in &sort_keys {
+        for key in sort_keys {
             keys.push(match key {
                 SortKey::Output(index) => output[*index].clone(),
                 SortKey::Expr(expr) => evaluator.eval(expr, None)?,
             });
         }
         rows.push((keys, output));
-    }
-    if !sort_keys.is_empty() {
-        check_sortable(&select.order_by, &rows)?;
-        rows.sort_by(|(left, _), (right, _)| {
-            for (index, item) in select.order_by.iter().enumerate() {
-                let nulls_first = item.nulls_first.unwrap_or(item.descending);
-                let ordering = match (&left[index], &right[index]) {
-                    (Value::Null, Value::Null) => Ordering::Equal,
-                    (Value::Null, _) => {
-                        if nulls_first {
-                            Ordering::Less
-                        } else {
-                            Ordering::Greater
-                        }
+        Ok(true)
+    })?;
+    check_sortable(order_by, &rows)?;
+    rows.sort_by(|(left, _), (right, _)| {
+        for (index, item) in order_by.iter().enumerate() {
+            let nulls_first = item.nulls_first.unwrap_or(item.descending);
+            let ordering = match (&left[index], &right[index]) {
+                (Value::Null, Value::Null) => Ordering::Equal,
+                (Value::Null, _) => {
+                    if nulls_first {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
                     }
-                    (_, Value::Null) => {
-                        if nulls_first {
-                            Ordering::Greater
-                        } else {
-                            Ordering::Less
-                        }
-                    }
-                    (a, b) => {
-                        let ordering = compare_values(a, b);
-                        if item.descending {
-                            ordering.reverse()
-                        } else {
-                            ordering
-                        }
-                    }
-                };
-                if ordering != Ordering::Equal {
-                    return ordering;
                 }
+                (_, Value::Null) => {
+                    if nulls_first {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (a, b) => {
+                    let ordering = compare_values(a, b);
+                    if item.descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                }
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
             }
-            Ordering::Equal
-        });
-    }
-    let skip = usize::try_from(offset).unwrap_or(usize::MAX);
-    let take = limit.map_or(usize::MAX, |limit| {
-        usize::try_from(limit).unwrap_or(usize::MAX)
+        }
+        Ordering::Equal
     });
-    let output: Vec<Vec<Value>> = rows
+    Ok(rows
         .into_iter()
         .skip(skip)
         .take(take)
         .map(|(_, row)| row)
-        .collect();
-    let tag = format!("SELECT {}", output.len());
-    Ok(QueryResult::rows(tag, projection.columns, output))
+        .collect())
 }
 
 fn check_sortable(
@@ -948,7 +1062,7 @@ pub(crate) fn update(
         Some(items) => Some(Projection::new(items, scope)?),
         None => None,
     };
-    let matched = matching_rows(writer, &table, scope, update.filter.as_ref(), None)?;
+    let matched = matching_rows(writer, &table, scope, update.filter.as_ref())?;
     let mut changes = Vec::with_capacity(matched.len());
     for (old_key, old_row) in matched {
         let evaluator = Evaluator {
@@ -1003,7 +1117,7 @@ pub(crate) fn delete(
         Some(items) => Some(Projection::new(items, scope)?),
         None => None,
     };
-    let matched = matching_rows(writer, &table, scope, delete.filter.as_ref(), None)?;
+    let matched = matching_rows(writer, &table, scope, delete.filter.as_ref())?;
     let mut result_rows = Vec::new();
     for (key, row) in &matched {
         writer.delete(key)?;

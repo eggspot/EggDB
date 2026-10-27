@@ -12,11 +12,13 @@ type Map = BTreeMap<Vec<u8>, Vec<u8>>;
 #[derive(Default)]
 pub(crate) struct MemoryStore {
     committed: RefCell<Rc<Map>>,
+    commits: Cell<u64>,
     writing: Cell<bool>,
 }
 
 pub(crate) struct MemoryRead {
     map: Rc<Map>,
+    version: u64,
 }
 
 pub(crate) struct MemoryWrite<'s> {
@@ -58,6 +60,10 @@ impl KeyValueRead for MemoryRead {
         Ok(self.map.get(key).cloned())
     }
 
+    fn committed_version(&self) -> Option<u64> {
+        Some(self.version)
+    }
+
     fn scan(
         &self,
         start: &[u8],
@@ -97,6 +103,7 @@ impl KeyValueWrite for MemoryWrite<'_> {
 
     fn commit(mut self) -> SqlResult<()> {
         *self.store.committed.borrow_mut() = Rc::new(std::mem::take(&mut self.map));
+        self.store.commits.set(self.store.commits.get() + 1);
         Ok(())
     }
 
@@ -118,6 +125,7 @@ impl KeyValueStore for MemoryStore {
     fn begin_read(&self) -> SqlResult<MemoryRead> {
         Ok(MemoryRead {
             map: Rc::clone(&self.committed.borrow()),
+            version: self.commits.get(),
         })
     }
 

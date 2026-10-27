@@ -103,6 +103,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// error, whose [`position`](SqlError::position) is a byte offset into `text`. Statements
     /// before it keep their effects: committed outside a block, pending inside one.
     pub fn execute(&mut self, text: &str, on_result: &mut dyn FnMut(QueryResult)) -> SqlResult<()> {
+        self.execute_while(text, &mut |result| {
+            on_result(result);
+            true
+        })
+    }
+
+    /// Runs the statements in `text` as [`Session::execute`] does, but stops before the next
+    /// statement once `on_result` returns `false`, for example when the reader of the results
+    /// has gone. The statements not run have no effect; a block they would have closed stays
+    /// open.
+    pub fn execute_while(
+        &mut self,
+        text: &str,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+    ) -> SqlResult<()> {
         let tokens = match tokenize(text) {
             Ok(tokens) => tokens,
             Err(error) => {
@@ -124,9 +139,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     return Err(error);
                 }
             };
-            {
-                let result = self.run(&statement)?;
-                on_result(result)
+            let result = self.run(&statement)?;
+            if !on_result(result) {
+                return Ok(());
             }
         }
     }

@@ -1,16 +1,17 @@
 use crate::error::{SqlError, SqlResult, SqlState};
+use std::borrow::Cow;
 
 pub(crate) const MAX_IDENTIFIER_BYTES: usize = 63;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum TokenKind {
-    Word(String),
+pub(crate) enum TokenKind<'t> {
+    Word(Cow<'t, str>),
     QuotedIdentifier(String),
-    Integer(String),
-    Decimal(String),
-    String(String),
+    Integer(&'t str),
+    Decimal(&'t str),
+    String(Cow<'t, str>),
     Parameter,
-    Operator(String),
+    Operator(&'t str),
     LeftParen,
     RightParen,
     LeftBracket,
@@ -24,19 +25,19 @@ pub(crate) enum TokenKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Token {
-    pub(crate) kind: TokenKind,
+pub(crate) struct Token<'t> {
+    pub(crate) kind: TokenKind<'t>,
     pub(crate) start: usize,
     pub(crate) end: usize,
 }
 
-pub(crate) fn tokenize(text: &str) -> SqlResult<Vec<Token>> {
+pub(crate) fn tokenize(text: &str) -> SqlResult<Vec<Token<'_>>> {
     let mut lexer = Lexer {
         text,
         bytes: text.as_bytes(),
         at: 0,
     };
-    let mut tokens = Vec::new();
+    let mut tokens = Vec::with_capacity(text.len() / 4 + 2);
     loop {
         lexer.skip_space_and_comments()?;
         let start = lexer.at;
@@ -82,7 +83,7 @@ fn truncated_identifier(mut name: String) -> String {
     name
 }
 
-impl Lexer<'_> {
+impl<'t> Lexer<'t> {
     fn peek(&self, ahead: usize) -> Option<u8> {
         self.bytes.get(self.at + ahead).copied()
     }
@@ -132,7 +133,7 @@ impl Lexer<'_> {
         }
     }
 
-    fn next_kind(&mut self) -> SqlResult<TokenKind> {
+    fn next_kind(&mut self) -> SqlResult<TokenKind<'t>> {
         let Some(byte) = self.peek(0) else {
             return Ok(TokenKind::End);
         };
@@ -183,16 +184,20 @@ impl Lexer<'_> {
         }
     }
 
-    fn word(&mut self) -> TokenKind {
+    fn word(&mut self) -> TokenKind<'t> {
         let start = self.at;
         while self.peek(0).is_some_and(is_identifier_part) {
             self.at += 1;
         }
         let text = &self.text[start..self.at];
-        TokenKind::Word(truncated_identifier(text.to_ascii_lowercase()))
+        if text.len() <= MAX_IDENTIFIER_BYTES && !text.bytes().any(|byte| byte.is_ascii_uppercase())
+        {
+            return TokenKind::Word(Cow::Borrowed(text));
+        }
+        TokenKind::Word(Cow::Owned(truncated_identifier(text.to_ascii_lowercase())))
     }
 
-    fn number(&mut self) -> SqlResult<TokenKind> {
+    fn number(&mut self) -> SqlResult<TokenKind<'t>> {
         let start = self.at;
         let mut decimal = false;
         self.digits();
@@ -224,7 +229,7 @@ impl Lexer<'_> {
                 start,
             ));
         }
-        let text = self.text[start..self.at].to_owned();
+        let text = &self.text[start..self.at];
         Ok(if decimal {
             TokenKind::Decimal(text)
         } else {
@@ -238,9 +243,19 @@ impl Lexer<'_> {
         }
     }
 
-    fn string(&mut self, escapes: bool) -> SqlResult<TokenKind> {
+    fn string(&mut self, escapes: bool) -> SqlResult<TokenKind<'t>> {
         let start = self.at;
         self.at += 1;
+        if let Some(length) = self.bytes[self.at..]
+            .iter()
+            .position(|&byte| byte == b'\'' || escapes && byte == b'\\')
+            && self.bytes[self.at + length] == b'\''
+            && self.bytes.get(self.at + length + 1) != Some(&b'\'')
+        {
+            let value = &self.text[self.at..self.at + length];
+            self.at += length + 1;
+            return Ok(TokenKind::String(Cow::Borrowed(value)));
+        }
         let mut value = String::new();
         loop {
             let Some(rest) = self.text.get(self.at..) else {
@@ -256,7 +271,7 @@ impl Lexer<'_> {
                     self.at += 1;
                     value.push('\'');
                 }
-                '\'' => return Ok(TokenKind::String(value)),
+                '\'' => return Ok(TokenKind::String(Cow::Owned(value))),
                 '\\' if escapes => self.escape(&mut value, start)?,
                 _ => value.push(character),
             }
@@ -311,7 +326,7 @@ impl Lexer<'_> {
         Ok(())
     }
 
-    fn quoted_identifier(&mut self) -> SqlResult<TokenKind> {
+    fn quoted_identifier(&mut self) -> SqlResult<TokenKind<'t>> {
         let start = self.at;
         self.at += 1;
         let mut name = String::new();
@@ -344,7 +359,7 @@ impl Lexer<'_> {
         Ok(TokenKind::QuotedIdentifier(truncated_identifier(name)))
     }
 
-    fn dollar(&mut self) -> SqlResult<TokenKind> {
+    fn dollar(&mut self) -> SqlResult<TokenKind<'t>> {
         let start = self.at;
         if self.peek(1).is_some_and(|byte| byte.is_ascii_digit()) {
             self.at += 1;
@@ -367,12 +382,12 @@ impl Lexer<'_> {
         let Some(length) = self.text[body_start..].find(tag) else {
             return Err(unterminated(self.text, start, "dollar-quoted string"));
         };
-        let value = self.text[body_start..body_start + length].to_owned();
+        let value = &self.text[body_start..body_start + length];
         self.at = body_start + length + tag.len();
-        Ok(TokenKind::String(value))
+        Ok(TokenKind::String(Cow::Borrowed(value)))
     }
 
-    fn operator(&mut self) -> TokenKind {
+    fn operator(&mut self) -> TokenKind<'t> {
         let start = self.at;
         let mut end = start;
         while let Some(&byte) = self.bytes.get(end) {
@@ -393,7 +408,7 @@ impl Lexer<'_> {
             text = &text[..text.len() - 1];
         }
         self.at = start + text.len();
-        TokenKind::Operator(text.to_owned())
+        TokenKind::Operator(text)
     }
 }
 
@@ -417,7 +432,7 @@ fn unterminated(text: &str, start: usize, what: &str) -> SqlError {
 mod tests {
     use super::{TokenKind, tokenize};
 
-    fn kinds(text: &str) -> Vec<TokenKind> {
+    fn kinds(text: &str) -> Vec<TokenKind<'_>> {
         tokenize(text)
             .expect("tokenizes")
             .into_iter()
@@ -444,11 +459,11 @@ mod tests {
         assert_eq!(
             kinds("1 1.5 .5 2e3 7."),
             vec![
-                TokenKind::Integer("1".into()),
-                TokenKind::Decimal("1.5".into()),
-                TokenKind::Decimal(".5".into()),
-                TokenKind::Decimal("2e3".into()),
-                TokenKind::Decimal("7.".into()),
+                TokenKind::Integer("1"),
+                TokenKind::Decimal("1.5"),
+                TokenKind::Decimal(".5"),
+                TokenKind::Decimal("2e3"),
+                TokenKind::Decimal("7."),
                 TokenKind::End,
             ]
         );
@@ -474,10 +489,10 @@ mod tests {
             kinds("a /* x /* y */ z */ <>-- note\n=-1 ::"),
             vec![
                 TokenKind::Word("a".into()),
-                TokenKind::Operator("<>".into()),
-                TokenKind::Operator("=".into()),
-                TokenKind::Operator("-".into()),
-                TokenKind::Integer("1".into()),
+                TokenKind::Operator("<>"),
+                TokenKind::Operator("="),
+                TokenKind::Operator("-"),
+                TokenKind::Integer("1"),
                 TokenKind::DoubleColon,
                 TokenKind::End,
             ]
