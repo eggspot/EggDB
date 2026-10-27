@@ -32,6 +32,8 @@ mod types;
 mod typing;
 
 #[cfg(test)]
+mod correctness;
+#[cfg(test)]
 mod memory_store;
 #[cfg(test)]
 mod tests;

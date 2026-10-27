@@ -1,0 +1,1047 @@
+chapter datatype-numeric, "Integer Types"
+rows
+SELECT 32767::smallint, (-32768)::smallint, 2147483647, -2147483648, 9223372036854775807
+----
+int2|int2|?column?|?column?|?column?
+32767|-32768|2147483647|-2147483648|9223372036854775807
+SELECT 1
+
+error 22003
+SELECT 32768::smallint
+
+error 22003
+SELECT 2147483648::integer
+
+error 22003
+SELECT 9223372036854775807 + 1
+
+error 22003
+SELECT 2147483647 + 1
+
+error 22003
+SELECT -2147483648 - 1
+
+error 22003
+SELECT 32767::smallint + 1::smallint
+
+error 22003
+SELECT 2147483647 * 2
+
+rows
+SELECT 2147483647::bigint + 1
+----
+?column?
+2147483648
+SELECT 1
+
+error 22003
+SELECT (-2147483648)::integer / -1
+
+error 22003
+SELECT -((-2147483648)::integer)
+
+error 22003
+SELECT -32768::smallint
+
+rows
+SELECT -(-2147483648)
+----
+?column?
+2147483648
+SELECT 1
+
+chapter functions-math, "Mathematical Operators"
+rows
+SELECT 7 / 2, -7 / 2, 7 / -2, 7 % 3, -7 % 3, 7 % -3
+----
+?column?|?column?|?column?|?column?|?column?|?column?
+3|-3|-3|1|-1|1
+SELECT 1
+
+error 22012
+SELECT 1 / 0
+
+error 22012
+SELECT 1 % 0
+
+error 22012
+SELECT 0 / 0
+
+error 22012
+SELECT 1.0::float8 / 0
+
+error 22012
+SELECT 1::float8 / 0::float8
+
+rows
+SELECT 2 ^ 10, 2 ^ -1, (-2) ^ 3
+----
+?column?|?column?|?column?
+1024|0.5|-8
+SELECT 1
+
+rows
+SELECT abs(-5), abs(5), abs(-2.5::float8)
+----
+abs|abs|abs
+5|5|2.5
+SELECT 1
+
+error 22003
+SELECT abs(-2147483648)
+
+rows
+SELECT 5 + 3 * 2, (5 + 3) * 2, -2 * -3, 10 - 2 - 3
+----
+?column?|?column?|?column?|?column?
+11|16|6|5
+SELECT 1
+
+chapter datatype-numeric, "Floating-Point Types"
+rows
+SELECT 'NaN'::float8, 'Infinity'::float8, '-Infinity'::float8, 'nan'::float8
+----
+float8|float8|float8|float8
+NaN|Infinity|-Infinity|NaN
+SELECT 1
+
+rows
+SELECT 'NaN'::float8 = 'NaN'::float8, 'NaN'::float8 > 'Infinity'::float8, 1::float8 < 'NaN'::float8
+----
+?column?|?column?|?column?
+t|t|t
+SELECT 1
+
+error 22003
+SELECT 1e308::float8 * 10
+
+rows
+SELECT 0.1::float8 + 0.2::float8, 1::float8 / 3
+----
+?column?|?column?
+0.30000000000000004|0.3333333333333333
+SELECT 1
+
+rows
+SELECT 1.5
+----
+?column?
+1.5
+SELECT 1
+... differs
+
+rows
+SELECT 10.0 / 4
+----
+?column?
+2.5000000000000000
+SELECT 1
+... differs
+
+chapter sql-expressions "Type Casts", datatype-boolean, typeconv
+rows
+SELECT '42'::integer + 1, CAST('7' AS bigint), ' 12 '::integer
+----
+?column?|int8|int4
+43|7|12
+SELECT 1
+
+error 22P02
+SELECT 'abc'::integer
+
+error 22P02
+SELECT '1.5'::integer
+
+error 22P02
+SELECT ''::integer
+
+rows
+SELECT 3.7::integer, 3.5::integer, 2.5::integer, -2.5::integer
+----
+int4|int4|int4|?column?
+4|4|3|-3
+SELECT 1
+
+rows
+SELECT 'true'::boolean, 'yes'::boolean, 'on'::boolean, '1'::boolean, 't'::boolean
+----
+bool|bool|bool|bool|bool
+t|t|t|t|t
+SELECT 1
+
+rows
+SELECT 'false'::boolean, 'no'::boolean, 'off'::boolean, '0'::boolean, 'F'::boolean
+----
+bool|bool|bool|bool|bool
+f|f|f|f|f
+SELECT 1
+
+error 22P02
+SELECT 'maybe'::boolean
+
+rows
+SELECT 1::boolean, 0::boolean
+----
+bool|bool
+t|f
+SELECT 1
+
+rows
+SELECT true::integer, false::integer
+----
+int4|int4
+1|0
+SELECT 1
+
+rows
+SELECT 42::text, true::text, 'x'::varchar(3), 'abcdef'::varchar(3)
+----
+text|text|varchar|varchar
+42|true|x|abc
+SELECT 1
+
+rows
+SELECT 1::float8::text, 1.5::float8::integer
+----
+text|int4
+1|2
+SELECT 1
+
+rows
+SELECT 2147483647::bigint::integer
+----
+int4
+2147483647
+SELECT 1
+
+error 22003
+SELECT 2147483648::bigint::integer
+
+error 42883
+SELECT 1 + 'a'::text
+
+error 42804
+SELECT 1 AND true
+
+error 42804
+SELECT CASE WHEN 1 THEN 1 END
+
+rows
+SELECT 1 = 1.0::float8, 1::smallint = 1::bigint
+----
+?column?|?column?
+t|t
+SELECT 1
+
+rows
+SELECT '1' = 1
+----
+?column?
+t
+SELECT 1
+
+chapter functions-logical, functions-comparison, functions-conditional
+rows
+SELECT NULL AND false, NULL AND true, NULL OR true, NULL OR false, NOT NULL::boolean
+----
+?column?|?column?|?column?|?column?|?column?
+f|NULL|t|NULL|NULL
+SELECT 1
+
+rows
+SELECT NULL = NULL, NULL <> 1, NULL IS NULL, 1 IS NOT NULL
+----
+?column?|?column?|?column?|?column?
+NULL|NULL|t|t
+SELECT 1
+
+rows
+SELECT NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM NULL, 1 IS NOT DISTINCT FROM 1
+----
+?column?|?column?|?column?
+f|t|t
+SELECT 1
+
+rows
+SELECT 1 IN (1, NULL), 2 IN (1, NULL), 2 NOT IN (1, NULL), 2 NOT IN (1, 3)
+----
+?column?|?column?|?column?|?column?
+t|NULL|NULL|t
+SELECT 1
+
+rows
+SELECT NULL::integer BETWEEN 1 AND 2, 2 BETWEEN 1 AND 3, 5 NOT BETWEEN 1 AND 3
+----
+?column?|?column?|?column?
+NULL|t|t
+SELECT 1
+
+rows
+SELECT NULL::boolean IS UNKNOWN, true IS TRUE, NULL::boolean IS NOT TRUE, false IS FALSE
+----
+?column?|?column?|?column?|?column?
+t|t|t|t
+SELECT 1
+
+rows
+SELECT coalesce(NULL, 2, 3), coalesce(NULL::integer, NULL), nullif(1, 1), nullif(1, 2)
+----
+coalesce|coalesce|nullif|nullif
+2|NULL|NULL|1
+SELECT 1
+
+rows
+SELECT 1 + NULL, 'a' || NULL, -NULL::integer
+----
+?column?|?column?|?column?
+NULL|NULL|NULL
+SELECT 1
+
+rows
+SELECT CASE WHEN NULL THEN 1 ELSE 2 END, CASE NULL::integer WHEN NULL THEN 'x' ELSE 'y' END
+----
+case|case
+2|y
+SELECT 1
+
+rows
+SELECT CASE 3 WHEN 1 THEN 'a' WHEN 3 THEN 'c' END, CASE 4 WHEN 1 THEN 'a' END
+----
+case|case
+c|NULL
+SELECT 1
+
+chapter functions-comparison
+rows
+SELECT 1 < 2, 2 <= 2, 3 > 4, 'a' < 'b', 'abc' < 'abd', 'Z' < 'a'
+----
+?column?|?column?|?column?|?column?|?column?|?column?
+t|t|f|t|t|t
+SELECT 1
+
+rows
+SELECT 1 <> 2, 1 != 1, true > false
+----
+?column?|?column?|?column?
+t|f|t
+SELECT 1
+
+error 42883
+SELECT 1 < 'a'::text
+
+chapter functions-string
+rows
+SELECT 'a' || 'b' || 1, 1 || 'x', 'x' || true
+----
+?column?|?column?|?column?
+ab1|1x|xt
+SELECT 1
+
+rows
+SELECT length('hello'), length(''), length('héllo')
+----
+length|length|length
+5|0|5
+SELECT 1
+
+rows
+SELECT lower('HeLLo'), upper('héllo')
+----
+lower|upper
+hello|HÉLLO
+SELECT 1
+
+rows
+SELECT substr('alphabet', 3, 2), substr('alphabet', 3)
+----
+substr|substr
+ph|phabet
+SELECT 1
+... differs
+
+rows
+SELECT substring('alphabet' from 3 for 2)
+----
+substring
+ph
+SELECT 1
+... differs
+
+rows
+SELECT trim('  x  '), ltrim('  x'), rtrim('x  '), btrim('xxaxx', 'x')
+----
+btrim|ltrim|rtrim|btrim
+x|x|x|a
+SELECT 1
+... differs
+
+rows
+SELECT replace('abcabc', 'b', 'X'), concat('a', NULL, 'b', 1)
+----
+replace|concat
+aXcaXc|ab1
+SELECT 1
+... differs
+
+rows
+SELECT position('c' in 'abc')
+----
+position
+3
+SELECT 1
+... differs
+
+rows
+SELECT 'abc' LIKE 'a%', 'abc' LIKE '_b_', 'abc' LIKE 'A%', 'abc' ILIKE 'A%', 'abc' NOT LIKE '%d'
+----
+?column?|?column?|?column?|?column?|?column?
+t|t|f|t|t
+SELECT 1
+
+rows
+SELECT 'it''s', '', 'a' = 'a ', char_length('abc')
+----
+?column?|?column?|?column?|char_length
+it's||f|3
+SELECT 1
+
+rows
+SELECT left('abcde', 2), right('abcde', 2), repeat('ab', 3), reverse('abc')
+----
+left|right|repeat|reverse
+ab|de|ababab|cba
+SELECT 1
+... differs
+
+chapter ddl-basics, ddl-constraints, dml-insert
+ok
+CREATE TABLE people (id integer PRIMARY KEY, name text NOT NULL, age smallint, score double precision, active boolean DEFAULT true)
+
+rows
+INSERT INTO people (id, name, age, score) VALUES (3, 'carol', 41, 7.5::float8), (1, 'alice', 30, 9.25::float8), (2, 'bob', NULL, NULL), (4, 'dave', 25, 'NaN'), (5, 'eve', 30, -1::float8)
+----
+INSERT 0 5
+
+rows
+SELECT id, name, active FROM people WHERE id = 2
+----
+id|name|active
+2|bob|t
+SELECT 1
+
+error 23505
+INSERT INTO people (id, name) VALUES (1, 'again')
+
+error 23502
+INSERT INTO people (id, name) VALUES (9, NULL)
+
+error 23502
+INSERT INTO people (id) VALUES (9)
+
+error 23502
+INSERT INTO people (name) VALUES ('nobody')
+
+error 42P07
+CREATE TABLE people (id integer)
+
+ok
+CREATE TABLE IF NOT EXISTS people (id integer)
+
+error 42P01
+SELECT * FROM nowhere
+
+error 42P01
+INSERT INTO nowhere VALUES (1)
+
+error 42P01
+DROP TABLE nowhere
+
+ok
+DROP TABLE IF EXISTS nowhere
+
+error 42703
+SELECT nope FROM people
+
+error 42703
+INSERT INTO people (id, nope) VALUES (10, 1)
+
+error 42703
+UPDATE people SET nope = 1
+
+error 42703
+SELECT * FROM people WHERE nope = 1
+
+error 42702
+SELECT id FROM people a, people b
+
+error 42601
+INSERT INTO people (id, name) VALUES (10)
+
+error 42601
+SELEC 1
+
+error 22P02
+INSERT INTO people (id, name, age) VALUES (10, 'x', 'old')
+
+error 22003
+INSERT INTO people (id, name, age) VALUES (10, 'x', 40000)
+
+error 42804
+INSERT INTO people (id, name, active) VALUES (10, 'x', 5)
+
+error 0A000
+CREATE TABLE things (id integer PRIMARY KEY, price numeric)
+
+rows
+SELECT count(*) FROM people
+----
+count
+5
+SELECT 1
+
+chapter queries-order, queries-limit
+rows
+SELECT name, age FROM people ORDER BY age
+----
+name|age
+dave|25
+alice|30
+eve|30
+carol|41
+bob|NULL
+SELECT 5
+
+rows
+SELECT name, age FROM people ORDER BY age DESC
+----
+name|age
+bob|NULL
+carol|41
+alice|30
+eve|30
+dave|25
+SELECT 5
+
+rows
+SELECT name FROM people ORDER BY age NULLS FIRST, name
+----
+name
+bob
+dave
+alice
+eve
+carol
+SELECT 5
+
+rows
+SELECT name FROM people ORDER BY age DESC NULLS LAST, name DESC
+----
+name
+carol
+eve
+alice
+dave
+bob
+SELECT 5
+
+rows
+SELECT name, score FROM people ORDER BY score
+----
+name|score
+eve|-1
+carol|7.5
+alice|9.25
+dave|NaN
+bob|NULL
+SELECT 5
+
+rows
+SELECT name FROM people ORDER BY 1 LIMIT 2
+----
+name
+alice
+bob
+SELECT 2
+
+rows
+SELECT name FROM people ORDER BY id LIMIT 2 OFFSET 3
+----
+name
+dave
+eve
+SELECT 2
+
+rows
+SELECT name FROM people ORDER BY id OFFSET 10
+----
+name
+SELECT 0
+
+rows
+SELECT name FROM people ORDER BY id LIMIT 0
+----
+name
+SELECT 0
+
+rows
+SELECT name FROM people ORDER BY id LIMIT NULL
+----
+name
+alice
+bob
+carol
+dave
+eve
+SELECT 5
+
+error 2201W
+SELECT name FROM people LIMIT -1
+
+error 2201X
+SELECT name FROM people OFFSET -1
+
+error 42P10
+SELECT name FROM people ORDER BY 3
+
+rows
+SELECT name AS n FROM people ORDER BY n DESC LIMIT 1
+----
+n
+eve
+SELECT 1
+
+rows
+SELECT DISTINCT age FROM people ORDER BY age
+----
+age
+25
+30
+41
+NULL
+SELECT 4
+
+chapter queries-table-expressions
+rows
+SELECT name FROM people WHERE age > 26 AND score > 0 ORDER BY id
+----
+name
+alice
+carol
+SELECT 2
+
+rows
+SELECT name FROM people WHERE age IS NULL OR name = 'eve' ORDER BY id
+----
+name
+bob
+eve
+SELECT 2
+
+rows
+SELECT name FROM people WHERE NOT active ORDER BY id
+----
+name
+SELECT 0
+
+rows
+SELECT name FROM people WHERE age IN (25, 41) ORDER BY id
+----
+name
+carol
+dave
+SELECT 2
+
+rows
+SELECT name FROM people WHERE name LIKE '%a%' ORDER BY id
+----
+name
+alice
+carol
+dave
+SELECT 3
+
+chapter functions-aggregate, queries-table-expressions
+rows
+SELECT count(*), count(age), sum(age), min(age), max(age) FROM people
+----
+count|count|sum|min|max
+5|4|126|25|41
+SELECT 1
+
+rows
+SELECT avg(age) FROM people WHERE age = 30
+----
+avg
+30.0000000000000000
+SELECT 1
+... differs
+
+rows
+SELECT count(*), sum(age), max(name) FROM people WHERE id > 100
+----
+count|sum|max
+0|NULL|NULL
+SELECT 1
+
+rows
+SELECT age, count(*) FROM people GROUP BY age ORDER BY age
+----
+age|count
+25|1
+30|2
+41|1
+NULL|1
+SELECT 4
+
+rows
+SELECT age, count(*) AS n FROM people GROUP BY age HAVING count(*) > 1
+----
+age|n
+30|2
+SELECT 1
+
+rows
+SELECT count(DISTINCT age) FROM people
+----
+count
+3
+SELECT 1
+
+rows
+SELECT active, count(*) FROM people GROUP BY active
+----
+active|count
+t|5
+SELECT 1
+
+rows
+SELECT count(*) FROM people HAVING count(*) > 10
+----
+count
+SELECT 0
+
+error 42803
+SELECT name, count(*) FROM people
+
+error 42803
+SELECT name FROM people GROUP BY age
+
+error 42803
+SELECT age FROM people WHERE count(*) > 1 GROUP BY age
+
+error 42883
+SELECT sum(name) FROM people
+
+rows
+SELECT sum(2147483647) FROM people
+----
+sum
+10737418235
+SELECT 1
+
+chapter queries-table-expressions, "Joined Tables"
+ok
+CREATE TABLE orders (id integer PRIMARY KEY, person_id integer, total integer)
+
+rows
+INSERT INTO orders VALUES (10, 1, 100), (11, 1, 50), (12, 3, 70), (13, 9, 5), (14, NULL, 1)
+----
+INSERT 0 5
+
+rows
+SELECT p.name, o.total FROM people p JOIN orders o ON o.person_id = p.id ORDER BY o.id
+----
+name|total
+alice|100
+alice|50
+carol|70
+SELECT 3
+
+rows
+SELECT p.name, o.id FROM people p LEFT JOIN orders o ON o.person_id = p.id ORDER BY p.id, o.id
+----
+name|id
+alice|10
+alice|11
+bob|NULL
+carol|12
+dave|NULL
+eve|NULL
+SELECT 6
+
+rows
+SELECT p.name, sum(o.total) FROM people p LEFT JOIN orders o ON o.person_id = p.id GROUP BY p.name ORDER BY p.name
+----
+name|sum
+alice|150
+bob|NULL
+carol|70
+dave|NULL
+eve|NULL
+SELECT 5
+
+rows
+SELECT count(*) FROM people CROSS JOIN orders
+----
+count
+25
+SELECT 1
+
+rows
+SELECT count(*) FROM people, orders WHERE people.id = orders.person_id
+----
+count
+3
+SELECT 1
+
+rows
+SELECT o.id FROM orders o JOIN people p ON p.id = o.person_id AND p.age > 35
+----
+id
+12
+SELECT 1
+
+error 42P01
+SELECT people.id FROM people p
+
+error 42712
+SELECT 1 FROM people p JOIN orders p ON true
+
+rows
+SELECT p.name, o.id FROM people p RIGHT JOIN orders o ON o.person_id = p.id ORDER BY o.id
+----
+name|id
+alice|10
+alice|11
+carol|12
+NULL|13
+NULL|14
+SELECT 5
+... differs
+
+rows
+SELECT p.id, o.id FROM people p FULL JOIN orders o ON o.person_id = p.id WHERE p.id IS NULL OR o.id IS NULL ORDER BY 1, 2
+----
+id|id
+2|NULL
+4|NULL
+5|NULL
+NULL|13
+NULL|14
+SELECT 5
+... differs
+
+chapter dml-update, dml-delete
+rows
+UPDATE people SET age = age + 1 WHERE age = 30
+----
+UPDATE 2
+
+rows
+UPDATE people SET age = 1 WHERE id = 100
+----
+UPDATE 0
+
+rows
+UPDATE people SET score = NULL
+----
+UPDATE 5
+
+error 23502
+UPDATE people SET name = NULL WHERE id = 1
+
+error 22003
+UPDATE people SET age = 40000 WHERE id = 1
+
+error 23505
+UPDATE people SET id = 2 WHERE id = 1
+
+rows
+UPDATE people SET id = id + 100 WHERE id = 5 RETURNING id, name
+----
+id|name
+105|eve
+UPDATE 1
+
+rows
+DELETE FROM orders WHERE total < 10
+----
+DELETE 2
+
+rows
+DELETE FROM orders WHERE id = 999
+----
+DELETE 0
+
+rows
+DELETE FROM orders WHERE person_id = 3 RETURNING id
+----
+id
+12
+DELETE 1
+
+rows
+SELECT id, age FROM people ORDER BY id
+----
+id|age
+1|31
+2|NULL
+3|41
+4|25
+105|31
+SELECT 5
+
+rows
+INSERT INTO orders VALUES (20, 2, 1) RETURNING total * 2 AS doubled
+----
+doubled
+2
+INSERT 0 1
+
+chapter tutorial-transactions, sql-begin, sql-rollback, errcodes-appendix
+rows
+BEGIN
+----
+BEGIN
+
+ok
+INSERT INTO orders VALUES (30, 1, 1)
+
+rows
+SELECT count(*) FROM orders WHERE id = 30
+----
+count
+1
+SELECT 1
+
+rows
+ROLLBACK
+----
+ROLLBACK
+
+rows
+SELECT count(*) FROM orders WHERE id = 30
+----
+count
+0
+SELECT 1
+
+ok
+BEGIN; INSERT INTO orders VALUES (31, 1, 1); COMMIT
+
+rows
+SELECT count(*) FROM orders WHERE id = 31
+----
+count
+1
+SELECT 1
+
+ok
+BEGIN
+
+error 22012
+SELECT 1 / 0
+
+error 25P02
+SELECT 1
+
+error 25P02
+INSERT INTO orders VALUES (32, 1, 1)
+
+rows
+COMMIT
+----
+ROLLBACK
+
+rows
+SELECT count(*) FROM orders WHERE id = 32
+----
+count
+0
+SELECT 1
+
+ok
+BEGIN
+
+error 42601
+SELEC 1
+
+rows
+COMMIT; SELECT 1
+----
+?column?
+1
+SELECT 1
+
+rows
+SELECT 2 AS after
+----
+after
+2
+SELECT 1
+
+rows
+COMMIT
+----
+COMMIT
+
+rows
+ROLLBACK
+----
+ROLLBACK
+
+ok
+START TRANSACTION; INSERT INTO orders VALUES (33, 1, 1); END
+
+rows
+SELECT count(*) FROM orders WHERE id = 33
+----
+count
+1
+SELECT 1
+
+ok
+BEGIN; DELETE FROM orders; ABORT
+
+rows
+SELECT count(*) FROM orders
+----
+count
+5
+SELECT 1
+
+ok
+BEGIN; CREATE TABLE temp_t (id integer); ROLLBACK
+
+error 42P01
+SELECT * FROM temp_t
+
+ok
+BEGIN READ ONLY
+
+error 25006
+INSERT INTO orders VALUES (34, 1, 1)
+
+ok
+ROLLBACK
+
+chapter sql-droptable
+rows
+DROP TABLE orders
+----
+DROP TABLE
+
+error 42P01
+SELECT * FROM orders
+
+rows
+CREATE TABLE orders (id integer PRIMARY KEY)
+----
+CREATE TABLE
+
+rows
+SELECT count(*) FROM orders
+----
+count
+0
+SELECT 1
