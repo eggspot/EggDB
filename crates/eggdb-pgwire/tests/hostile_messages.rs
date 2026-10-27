@@ -166,10 +166,13 @@ fn framed(tag: u8, body: &[u8]) -> Vec<u8> {
 
 fn drain(client: &mut Client, limit: Duration) {
     let deadline = Instant::now() + limit;
-    client
+    if client
         .stream
         .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
+        .is_err()
+    {
+        return;
+    }
     let mut buffer = [0u8; 4096];
     while Instant::now() < deadline {
         match std::io::Read::read(&mut client.stream, &mut buffer) {
