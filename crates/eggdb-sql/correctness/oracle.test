@@ -34,6 +34,13 @@ error 42601 923
 SELECT * FORM dual
 
 rows
+SELECT * FROM dual
+----
+DUMMY
+X
+SELECT 1
+
+rows
 SELECT USER FROM dual
 ----
 USER

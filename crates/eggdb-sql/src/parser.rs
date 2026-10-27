@@ -1363,8 +1363,12 @@ impl<'t> Parser<'t> {
         if self.is_word("into") {
             return Err(self.not_supported("SELECT INTO"));
         }
+        let mut items = items;
         let from = if self.take_word("from") {
-            if self.mysql() && self.take_word("dual") || self.oracle() && self.oracle_dual() {
+            if self.oracle() && self.oracle_dual() {
+                items = Self::dual_items(items);
+                None
+            } else if self.mysql() && self.take_word("dual") {
                 None
             } else {
                 Some(self.joined_tables()?)

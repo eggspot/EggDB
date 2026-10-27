@@ -237,7 +237,7 @@ fn position_of(values: &[Value]) -> SqlResult<Value> {
     };
     let count = haystack.len() as i64;
     let width = needle.len() as i64;
-    if start == 0 || width > count {
+    if start == 0 || width > count || start > count {
         return Ok(Value::BigInt(0));
     }
     let matches_at = |at: i64| haystack[at as usize..(at + width) as usize] == needle[..];
@@ -424,6 +424,9 @@ fn scaled(value: &Value, digits: Option<&Value>, rounding: bool) -> SqlResult<Va
         }
         Number::Float(number) => {
             let factor = 10f64.powi(digits as i32);
+            if factor == 0.0 {
+                return Ok(Value::Double(0.0));
+            }
             let shifted = number * factor;
             if !shifted.is_finite() {
                 return Ok(Value::Double(number));
@@ -876,6 +879,17 @@ mod tests {
                 ]
             ),
             Ok(Value::BigInt(14))
+        );
+        assert_eq!(
+            call(
+                "oracle_instr",
+                &[text("abc"), text("bc"), Value::BigInt(i64::MAX)]
+            ),
+            Ok(Value::BigInt(0))
+        );
+        assert_eq!(
+            call("oracle_round", &[Value::Double(15.5), Value::BigInt(-400)]),
+            Ok(Value::Double(0.0))
         );
     }
 }

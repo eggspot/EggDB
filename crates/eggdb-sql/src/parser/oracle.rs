@@ -213,6 +213,8 @@ fn mentions_rownum(expr: &Expr) -> bool {
 fn integer_of(expr: &Expr) -> Option<i64> {
     match &expr.kind {
         ExprKind::Literal(Literal::Integer(number)) => Some(*number),
+        ExprKind::Literal(Literal::String(text)) => text.trim().parse().ok(),
+        ExprKind::Cast { expr, .. } => integer_of(expr),
         ExprKind::Unary(UnaryOperator::Minus, operand) => match &operand.kind {
             ExprKind::Literal(Literal::Integer(number)) => number.checked_neg(),
             _ => None,
@@ -440,6 +442,19 @@ impl<'t> Parser<'t> {
             self.at += 1;
         }
         true
+    }
+
+    pub(super) fn dual_items(items: Vec<SelectItem>) -> Vec<SelectItem> {
+        items
+            .into_iter()
+            .map(|item| match item {
+                SelectItem::Wildcard { position, .. } => SelectItem::Expr {
+                    expr: literal(Literal::String("X".to_owned()), position),
+                    alias: Some("dummy".to_owned()),
+                },
+                other => other,
+            })
+            .collect()
     }
 
     pub(super) fn oracle_from_expected(&self) -> SqlError {
