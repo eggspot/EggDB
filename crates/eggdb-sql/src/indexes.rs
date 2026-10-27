@@ -248,7 +248,17 @@ fn generated_name(
         Dialect::PostgreSql if number == 1 => stem.clone(),
         Dialect::PostgreSql => format!("{stem}{}", number - 1),
     };
-    let mut number = 1;
+    let mut number = match dialect {
+        Dialect::Oracle => {
+            1 + table.indexes.len()
+                + tables
+                    .iter()
+                    .map(|other| other.indexes.len())
+                    .sum::<usize>()
+        }
+        Dialect::Sqlite => 1 + table.indexes.len(),
+        Dialect::MySql | Dialect::PostgreSql => 1,
+    };
     loop {
         let name = candidate(number);
         if !name_taken(tables, table, &name, dialect) {
