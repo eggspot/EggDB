@@ -1,5 +1,8 @@
 mod mysql;
+mod oracle;
 mod sqlite;
+
+pub(crate) use oracle::create_text as oracle_create_text;
 
 pub(crate) use sqlite::create_text as sqlite_create_text;
 
@@ -227,10 +230,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &self.settings.database
     }
 
-    /// Whether statements outside a `BEGIN` block commit on their own: always in PostgreSQL,
-    /// and in MySQL unless `SET autocommit = 0`.
+    /// Whether statements outside a `BEGIN` block commit on their own: always in PostgreSQL
+    /// and SQLite, in MySQL unless `SET autocommit = 0`, and never in Oracle, where the first
+    /// change starts a transaction that lasts until `COMMIT`, `ROLLBACK` or DDL.
     pub fn autocommit(&self) -> bool {
-        self.dialect != Dialect::MySql || self.settings.mysql.autocommit()
+        match self.dialect {
+            Dialect::MySql => self.settings.mysql.autocommit(),
+            Dialect::Oracle => false,
+            Dialect::PostgreSql | Dialect::Sqlite => true,
+        }
     }
 
     fn mysql(&self) -> bool {
@@ -241,9 +249,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.dialect == Dialect::Sqlite
     }
 
+    fn oracle(&self) -> bool {
+        self.dialect == Dialect::Oracle
+    }
+
     fn in_dialect(&mut self, text: &str, error: SqlError) -> SqlError {
         if self.sqlite() {
             return crate::sqlite_errors::translate(error, text);
+        }
+        if self.oracle() {
+            return crate::oracle_errors::translate(error, text, &self.oracle_user());
         }
         if !self.mysql() {
             return error;
@@ -402,6 +417,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 self.select_schema(select, true)
                     .map(|result| result.columns)
             }
+            Statement::Select(select)
+                if self.oracle()
+                    && select
+                        .from
+                        .as_ref()
+                        .is_some_and(|from| crate::parser::is_dictionary_view(&from.first)) =>
+            {
+                self.select_dictionary(select, true)
+                    .map(|result| result.columns)
+            }
             Statement::Select(select) => self
                 .read(|reader, tables| execute::select(reader, tables, select, true))
                 .map(|result| result.columns),
@@ -419,6 +444,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Pragma(pragma) => Ok(self.pragma_columns(pragma)),
             _ => Ok(None),
         };
+        let columns = columns.map(|columns| {
+            if self.oracle() {
+                columns.map(oracle::shown_columns)
+            } else {
+                columns
+            }
+        });
         match columns {
             Ok(columns) => Ok(StatementDescription {
                 parameter_types,
@@ -554,6 +586,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             self.sqlite_after_statement(&mut result);
             return result;
         }
+        if self.oracle() {
+            oracle::after_statement(&mut result);
+            return result;
+        }
         if !self.mysql() {
             return result;
         }
@@ -630,11 +666,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         if matches!(self.block, Block::Failed) {
             return Err(aborted_block());
         }
-        if self.mysql()
-            && matches!(
-                statement,
-                Statement::CreateTable(_) | Statement::DropTable { .. }
-            )
+        if self.commits_implicitly(statement)
             && let Block::Writing(_) = self.block
         {
             self.commit()?;
@@ -651,6 +683,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             {
                 self.select_schema(select, false)
             }
+            Statement::Select(select)
+                if self.oracle()
+                    && select
+                        .from
+                        .as_ref()
+                        .is_some_and(|from| crate::parser::is_dictionary_view(&from.first)) =>
+            {
+                self.select_dictionary(select, false)
+            }
+            Statement::Truncate(table) => self.write("TRUNCATE TABLE", |writer, tables| {
+                execute::truncate(writer, tables, table)
+            }),
             Statement::Select(select) => {
                 self.read(|reader, tables| execute::select(reader, tables, select, false))
             }
@@ -697,16 +741,20 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 writer.rollback()?;
             }
         }
-        if self.mysql()
-            && matches!(
-                statement,
-                Statement::CreateTable(_) | Statement::DropTable { .. }
-            )
+        if self.commits_implicitly(statement)
             && let Block::Writing(_) = self.block
         {
             self.commit()?;
         }
         result
+    }
+
+    fn commits_implicitly(&self, statement: &Statement) -> bool {
+        (self.mysql() || self.oracle())
+            && matches!(
+                statement,
+                Statement::CreateTable(_) | Statement::DropTable { .. } | Statement::Truncate(_)
+            )
     }
 
     fn show(&self, name: Option<&str>) -> SqlResult<QueryResult> {
@@ -792,7 +840,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 let mut writer = self.store.begin_write()?;
                 match body(&mut writer, tables) {
                     Ok(result)
-                        if keep_open && command != "CREATE TABLE" && command != "DROP TABLE" =>
+                        if keep_open
+                            && !matches!(
+                                command,
+                                "CREATE TABLE" | "DROP TABLE" | "TRUNCATE TABLE"
+                            ) =>
                     {
                         self.block = Block::Writing(writer);
                         Ok(result)
@@ -837,7 +889,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             Block::Reading(_) => Ok(QueryResult::command("COMMIT")),
             Block::Failed => Ok(QueryResult::command("ROLLBACK")),
-            Block::None if self.mysql() => Ok(QueryResult::command("COMMIT")),
+            Block::None if self.mysql() || self.oracle() => Ok(QueryResult::command("COMMIT")),
             Block::None => Ok(QueryResult::command("COMMIT")
                 .with_notice("WARNING:  there is no transaction in progress".into())),
         }
@@ -850,7 +902,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Ok(QueryResult::command("ROLLBACK"))
             }
             Block::Reading(_) | Block::Failed => Ok(QueryResult::command("ROLLBACK")),
-            Block::None if self.mysql() => Ok(QueryResult::command("ROLLBACK")),
+            Block::None if self.mysql() || self.oracle() => Ok(QueryResult::command("ROLLBACK")),
             Block::None => Ok(QueryResult::command("ROLLBACK")
                 .with_notice("WARNING:  there is no transaction in progress".into())),
         }

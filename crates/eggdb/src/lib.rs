@@ -47,7 +47,7 @@
 //!   [`write`](Database::write), committed atomically or rolled back.
 //! - [`Scan`]: the entries of a [`KeyRange`] or a prefix, in key order or reversed.
 //! - [`Error`], with an [`ErrorKind`] to match on.
-//! - [`sql`]: SQL on the same file, in PostgreSQL's, MySQL's or SQLite's dialect, from
+//! - [`sql`]: SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, from
 //!   [`Database::sql_store`].
 
 mod database;

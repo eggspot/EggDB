@@ -259,10 +259,11 @@ fn the_mysql_dialect_reads_mysql_and_reports_mysql_errors() {
         b"",
     );
     assert!(text(&postgresql.stdout).contains("egg"));
-    let unknown = eggdb_sql(file.path(), &["--dialect", "oracle", "-c", "SELECT 1"], b"");
+    let unknown = eggdb_sql(file.path(), &["--dialect", "db2", "-c", "SELECT 1"], b"");
     assert_eq!(unknown.status.code(), Some(2));
     assert!(
-        text(&unknown.stderr).contains("--dialect takes postgresql, mysql or sqlite, not 'oracle'")
+        text(&unknown.stderr)
+            .contains("--dialect takes postgresql, mysql, sqlite or oracle, not 'db2'")
     );
 }
 
@@ -310,5 +311,47 @@ fn the_sqlite_dialect_reads_sqlite_and_reports_sqlite_errors() {
         text(&schema.stdout).contains("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)"),
         "{}",
         text(&schema.stdout)
+    );
+}
+
+#[test]
+fn the_oracle_dialect_reads_oracle_and_reports_ora_errors() {
+    let file = TempPath::new("sql-oracle");
+    let created = eggdb_sql(
+        file.path(),
+        &[
+            "--create",
+            "--dialect",
+            "oracle",
+            "-c",
+            "CREATE TABLE items (id NUMBER(9) PRIMARY KEY, name VARCHAR2(10)); INSERT INTO items VALUES (1, 'egg'); INSERT INTO items VALUES (2, ''); SELECT id, NVL(name, '-') AS name FROM items ORDER BY id FETCH FIRST 1 ROWS ONLY",
+        ],
+        b"",
+    );
+    assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
+    assert!(
+        text(&created.stdout).contains(" ID | NAME"),
+        "{}",
+        text(&created.stdout)
+    );
+    let missing = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle", "-c", "SELECT * FROM nowhere"],
+        b"",
+    );
+    assert_eq!(missing.status.code(), Some(3));
+    assert_eq!(
+        text(&missing.stderr),
+        "ORA-00942: table or view does not exist\n"
+    );
+    let committed = eggdb_sql(
+        file.path(),
+        &["-c", "SELECT id FROM items WHERE name IS NULL"],
+        b"",
+    );
+    assert!(
+        text(&committed.stdout).contains("  2\n"),
+        "{}",
+        text(&committed.stdout)
     );
 }

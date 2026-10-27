@@ -595,7 +595,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 let name = value.to_str().unwrap_or_default();
                 request.dialect = eggdb_sql::Dialect::named(name).ok_or_else(|| {
                     usage(format!(
-                        "{} takes postgresql, mysql or sqlite, not '{}'",
+                        "{} takes postgresql, mysql, sqlite or oracle, not '{}'",
                         option.spelled,
                         shown(value)
                     ))

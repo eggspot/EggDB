@@ -132,3 +132,4 @@ its full title with its status.
 - [D105](decisions/D105.md) `eggdb shell` and the query screen reuse the UI's terminal layer and the `sql` command's printers; the correctness suite is a table-driven file per dialect
 - [D106](decisions/D106.md) MySQL protocol: caching_sha2_password fast-auth, native as second; the MySQL dialect in the SQL core, MySQL's errors and transactions, `AUTO_INCREMENT` in table definition version 2
 - [D107](decisions/D107.md) The SQLite dialect: affinity mapped onto the engine's types, `INTEGER PRIMARY KEY` as the row-id column, SQLite's errors with extended result codes, `eggdb::sql` for SQL from the embedded API
+- [D108](decisions/D108.md) The Oracle dialect: names that swap case on the shared catalog, the empty string as NULL, `ROWNUM` as a source-row limit, implicit transactions and `ORA-` errors; no Oracle wire protocol

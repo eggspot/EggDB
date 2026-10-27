@@ -130,7 +130,13 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         };
         let color_err = shell.color_err;
         let file = shell.file.clone();
-        (exit, shell.sql.close(), color_err, file)
+        let committed = super::sql::commit_on_exit(&mut shell.sql);
+        (
+            exit,
+            committed.and_then(|()| shell.sql.close()),
+            color_err,
+            file,
+        )
     };
     let mut exit = exit?;
     match left_open {
@@ -607,7 +613,7 @@ impl<'s> Shell<'s> {
   scan [--prefix p] [--from a] [--to b] [-r] [-n count] [-k]
   check                        read every page and report the file's health
   stats                        size, pages, last commit and log
-SQL: the PostgreSQL dialect, or MySQL's or SQLite's with --dialect, statements ended by ;
+SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
   (docs/sql.md); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
   'delete' starts a DELETE statement here; the key-value command is 'del'.
@@ -863,6 +869,8 @@ fn print_sql_error(
     for (index, line) in error_lines(error, text).iter().enumerate() {
         let prefix = if line.starts_with("Error:") {
             "Error:"
+        } else if line.starts_with("ORA-") {
+            line.get(..10).unwrap_or("ORA-")
         } else {
             "ERROR:"
         };

@@ -1367,6 +1367,16 @@ pub(crate) fn select(
             select.filter.as_ref()
         },
     };
+    if let Some(count) = select.source_row_limit {
+        let wanted = usize::try_from(count).unwrap_or(usize::MAX);
+        let kept = first_rows(|visit| source.for_each(visit), wanted, &mut memory)?;
+        source = SourceRows {
+            reader,
+            rows: RowSource::Rows(kept),
+            scope,
+            filter: None,
+        };
+    }
     if let Some(grouping) = &grouping {
         let groups = grouping.run(
             scope,
@@ -1394,6 +1404,22 @@ pub(crate) fn select(
     };
     let tag = format!("SELECT {}", output.len());
     Ok(QueryResult::rows(tag, projection.columns, output))
+}
+
+pub(crate) fn first_rows(
+    for_each: impl FnOnce(&mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()>,
+    wanted: usize,
+    memory: &mut WorkMemory,
+) -> SqlResult<Vec<Vec<Value>>> {
+    let mut kept = Vec::new();
+    if wanted > 0 {
+        for_each(&mut |row| {
+            memory.charge_row(&row)?;
+            kept.push(row);
+            Ok(kept.len() < wanted)
+        })?;
+    }
+    Ok(kept)
 }
 
 #[derive(Clone, Copy)]
@@ -1714,6 +1740,20 @@ pub(crate) fn update(
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
         None => QueryResult::command(tag),
     })
+}
+
+pub(crate) fn truncate(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &TableReference,
+) -> SqlResult<QueryResult> {
+    let every_row = Delete {
+        table: table.clone(),
+        filter: None,
+        returning: None,
+    };
+    delete(writer, tables, &every_row)?;
+    Ok(QueryResult::command("TRUNCATE TABLE".to_owned()))
 }
 
 pub(crate) fn delete(

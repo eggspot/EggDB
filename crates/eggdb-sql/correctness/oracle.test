@@ -1,0 +1,932 @@
+chapter "SELECT", "DUAL Table"
+rows
+SELECT 1 FROM dual
+----
+1
+1
+SELECT 1
+
+rows
+SELECT 'abc' AS greeting FROM DUAL
+----
+GREETING
+abc
+SELECT 1
+
+rows
+SELECT 2 + 3 * 4 total FROM dual
+----
+TOTAL
+14
+SELECT 1
+
+rows
+SELECT 1+1, 'x' FROM dual
+----
+1+1|'X'
+2|x
+SELECT 1
+
+error 42601 923
+SELECT 1
+
+error 42601 923
+SELECT * FORM dual
+
+rows
+SELECT * FROM dual
+----
+DUMMY
+X
+SELECT 1
+
+rows
+SELECT USER FROM dual
+----
+USER
+EGGDB
+SELECT 1
+
+chapter "Database Object Names and Qualifiers", "CREATE TABLE"
+ok
+CREATE TABLE emp (empno NUMBER(4) PRIMARY KEY, ename VARCHAR2(10) NOT NULL, job VARCHAR2(9), sal NUMBER(7,2), comm NUMBER(7,2), deptno NUMBER(2))
+
+rows
+INSERT INTO emp VALUES (7839, 'KING', 'PRESIDENT', 5000, NULL, 10)
+----
+INSERT 0 1
+
+rows
+INSERT INTO emp (empno, ename, job, sal, comm, deptno) VALUES (7698, 'BLAKE', 'MANAGER', 2850, NULL, 30)
+----
+INSERT 0 1
+
+ok
+INSERT INTO emp VALUES (7782, 'CLARK', 'MANAGER', 2450, NULL, 10)
+
+ok
+INSERT INTO emp VALUES (7499, 'ALLEN', 'SALESMAN', 1600, 300, 30)
+
+ok
+INSERT INTO emp VALUES (7521, 'WARD', 'SALESMAN', 1250, 500, 30)
+
+ok
+INSERT INTO emp VALUES (7900, 'JAMES', 'CLERK', 950, NULL, 30)
+
+ok
+COMMIT
+
+rows
+SELECT empno, ename FROM emp WHERE empno = 7839
+----
+EMPNO|ENAME
+7839|KING
+SELECT 1
+
+rows
+SELECT EMPNO, Ename FROM EMP WHERE ENAME = 'KING'
+----
+EMPNO|ENAME
+7839|KING
+SELECT 1
+
+rows
+SELECT "EMPNO" FROM "EMP" WHERE "EMPNO" = 7839
+----
+EMPNO
+7839
+SELECT 1
+
+error 42P01 942
+SELECT * FROM "emp"
+
+error 42P01 942
+SELECT * FROM nowhere
+
+error 42703 904
+SELECT salary FROM emp
+
+error 42P07 955
+CREATE TABLE emp (x NUMBER)
+
+ok
+CREATE TABLE "Mixed" ("Col" NUMBER)
+
+rows
+SELECT table_name FROM user_tables ORDER BY table_name
+----
+TABLE_NAME
+EMP
+Mixed
+SELECT 2
+
+rows
+SELECT column_name, nullable, column_id FROM user_tab_columns WHERE table_name = 'EMP' ORDER BY column_id
+----
+COLUMN_NAME|NULLABLE|COLUMN_ID
+EMPNO|N|1
+ENAME|N|2
+JOB|Y|3
+SAL|Y|4
+COMM|Y|5
+DEPTNO|Y|6
+SELECT 6
+
+rows
+SELECT column_name, data_type FROM user_tab_columns WHERE table_name = 'EMP' AND column_name IN ('EMPNO', 'ENAME', 'DEPTNO') ORDER BY column_id
+----
+COLUMN_NAME|DATA_TYPE
+EMPNO|NUMBER
+ENAME|VARCHAR2
+DEPTNO|NUMBER
+SELECT 3
+
+rows
+SELECT owner, table_name FROM all_tables WHERE table_name = 'EMP'
+----
+OWNER|TABLE_NAME
+EGGDB|EMP
+SELECT 1
+
+rows
+SELECT data_length FROM user_tab_columns WHERE table_name = 'EMP' AND column_name = 'ENAME'
+----
+DATA_LENGTH
+10
+SELECT 1
+
+rows
+DROP TABLE "Mixed" PURGE
+----
+DROP TABLE
+
+error 42P01 942
+DROP TABLE "Mixed"
+
+chapter "Integrity Constraints", "Data Integrity"
+error 23505 1
+INSERT INTO emp VALUES (7839, 'DUP', NULL, NULL, NULL, NULL)
+
+error 23502 1400
+INSERT INTO emp (empno) VALUES (1)
+
+error 23502 1400
+INSERT INTO emp (empno, ename) VALUES (1, '')
+
+error 23502 1407
+UPDATE emp SET ename = NULL WHERE empno = 7839
+
+error 22001 12899
+INSERT INTO emp (empno, ename) VALUES (2, 'MUCHTOOLONGNAME')
+
+chapter "Nulls", "Nulls in SQL Functions"
+ok
+CREATE TABLE notes (id NUMBER(9) PRIMARY KEY, body VARCHAR2(20))
+
+ok
+INSERT INTO notes VALUES (1, '')
+
+ok
+INSERT INTO notes VALUES (2, 'text')
+
+rows
+SELECT id FROM notes WHERE body IS NULL
+----
+ID
+1
+SELECT 1
+
+rows
+SELECT COUNT(*) FROM notes WHERE body = ''
+----
+COUNT(*)
+0
+SELECT 1
+
+rows
+SELECT NVL(body, 'empty') FROM notes ORDER BY id
+----
+NVL(BODY,'EMPTY')
+empty
+text
+SELECT 2
+
+rows
+SELECT LENGTH('') FROM dual
+----
+LENGTH('')
+NULL
+SELECT 1
+
+rows
+SELECT 'a' || NULL || 'b' FROM dual
+----
+'A'||NULL||'B'
+ab
+SELECT 1
+
+rows
+SELECT NULL || NULL AS both_null FROM dual
+----
+BOTH_NULL
+NULL
+SELECT 1
+
+rows
+SELECT 'n' || 5 || 0.5 FROM dual
+----
+'N'||5||0.5
+n5.5
+SELECT 1
+
+rows
+SELECT CONCAT('ab', 'cd') FROM dual
+----
+CONCAT('AB','CD')
+abcd
+SELECT 1
+
+rows
+SELECT NVL(NULL, 3), NVL(1, 3) FROM dual
+----
+NVL(NULL,3)|NVL(1,3)
+3|1
+SELECT 1
+
+rows
+SELECT NVL2(NULL, 'x', 'y'), NVL2('a', 'x', 'y') FROM dual
+----
+NVL2(NULL,'X','Y')|NVL2('A','X','Y')
+y|x
+SELECT 1
+
+rows
+SELECT COALESCE(NULL, NULL, 7) c FROM dual
+----
+C
+7
+SELECT 1
+
+rows
+SELECT NULLIF(4, 4) a, NULLIF(4, 5) b FROM dual
+----
+A|B
+NULL|4
+SELECT 1
+
+rows
+SELECT DECODE(NULL, NULL, 'null matches', 'no') d FROM dual
+----
+D
+null matches
+SELECT 1
+
+rows
+SELECT ename, DECODE(deptno, 10, 'ACCOUNTING', 20, 'RESEARCH', 'OTHER') dname FROM emp WHERE empno IN (7839, 7698) ORDER BY empno
+----
+ENAME|DNAME
+BLAKE|OTHER
+KING|ACCOUNTING
+SELECT 2
+
+rows
+SELECT DECODE(3, 1, 'one', 2, 'two') d FROM dual
+----
+D
+NULL
+SELECT 1
+
+rows
+SELECT CASE WHEN sal > 3000 THEN 'high' WHEN sal > 1500 THEN 'mid' ELSE 'low' END band FROM emp WHERE empno IN (7839, 7698, 7900) ORDER BY empno
+----
+BAND
+mid
+high
+low
+SELECT 3
+
+rows
+SELECT CASE deptno WHEN 10 THEN 'A' ELSE 'B' END k FROM emp WHERE empno = 7839
+----
+K
+A
+SELECT 1
+
+chapter "ROWNUM Pseudocolumn", "Row Limiting Clause"
+rows
+SELECT ename FROM emp WHERE ROWNUM <= 2
+----
+ENAME
+ALLEN
+WARD
+SELECT 2
+
+rows
+SELECT ename FROM emp WHERE ROWNUM < 2
+----
+ENAME
+ALLEN
+SELECT 1
+
+rows
+SELECT ename FROM emp WHERE ROWNUM = 1
+----
+ENAME
+ALLEN
+SELECT 1
+
+rows
+SELECT ename FROM emp WHERE ROWNUM > 1
+----
+ENAME
+SELECT 0
+
+rows
+SELECT ename FROM emp WHERE ROWNUM = 2
+----
+ENAME
+SELECT 0
+
+rows
+SELECT ename FROM emp WHERE deptno = 30 AND ROWNUM <= 2
+----
+ENAME
+ALLEN
+WARD
+SELECT 2
+
+rows
+SELECT ename FROM emp WHERE ROWNUM <= 3 ORDER BY ename
+----
+ENAME
+ALLEN
+BLAKE
+WARD
+SELECT 3
+
+rows
+SELECT ename FROM emp ORDER BY sal DESC FETCH FIRST 2 ROWS ONLY
+----
+ENAME
+KING
+BLAKE
+SELECT 2
+
+rows
+SELECT ename FROM emp ORDER BY sal DESC OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+----
+ENAME
+BLAKE
+CLARK
+SELECT 2
+
+rows
+SELECT ename FROM emp ORDER BY empno OFFSET 5 ROWS
+----
+ENAME
+JAMES
+SELECT 1
+
+rows
+SELECT ename FROM emp ORDER BY empno FETCH FIRST ROW ONLY
+----
+ENAME
+ALLEN
+SELECT 1
+
+rows
+SELECT ename FROM emp ORDER BY empno FETCH FIRST -1 ROWS ONLY
+----
+ENAME
+SELECT 0
+
+rows
+SELECT ename FROM emp ORDER BY empno OFFSET -3 ROWS FETCH FIRST 1 ROWS ONLY
+----
+ENAME
+ALLEN
+SELECT 1
+
+error 42601 933
+SELECT ename FROM emp LIMIT 1
+
+ok
+SELECT ROWNUM, ename FROM emp
+... differs
+
+ok
+SELECT ename FROM emp ORDER BY sal FETCH FIRST 50 PERCENT ROWS ONLY
+... differs
+
+chapter "Arithmetic Operators", "Numeric Functions"
+rows
+SELECT 7 / 2, 6 / 3, -7 / 2 FROM dual
+----
+7/2|6/3|-7/2
+3.5|2|-3.5
+SELECT 1
+
+error 22012 1476
+SELECT 1 / 0 FROM dual
+
+rows
+SELECT 0.5 + 0.25 FROM dual
+----
+0.5+0.25
+.75
+SELECT 1
+
+rows
+SELECT ABS(-15), ABS(2.5) FROM dual
+----
+ABS(-15)|ABS(2.5)
+15|2.5
+SELECT 1
+
+rows
+SELECT ROUND(15.193, 1), ROUND(15.193, -1), ROUND(2.5), ROUND(-2.5) FROM dual
+----
+ROUND(15.193,1)|ROUND(15.193,-1)|ROUND(2.5)|ROUND(-2.5)
+15.2|20|3|-3
+SELECT 1
+
+rows
+SELECT TRUNC(15.79, 1), TRUNC(15.79, -1), TRUNC(-15.79) FROM dual
+----
+TRUNC(15.79,1)|TRUNC(15.79,-1)|TRUNC(-15.79)
+15.7|10|-15
+SELECT 1
+
+rows
+SELECT ROUND(1234, -2), TRUNC(1299, -2) FROM dual
+----
+ROUND(1234,-2)|TRUNC(1299,-2)
+1200|1200
+SELECT 1
+
+rows
+SELECT MOD(11, 4), MOD(-11, 4), MOD(11, 0) FROM dual
+----
+MOD(11,4)|MOD(-11,4)|MOD(11,0)
+3|-3|11
+SELECT 1
+
+rows
+SELECT CEIL(15.7), FLOOR(15.7), CEIL(-15.7), FLOOR(-15.7) FROM dual
+----
+CEIL(15.7)|FLOOR(15.7)|CEIL(-15.7)|FLOOR(-15.7)
+16|15|-15|-16
+SELECT 1
+
+rows
+SELECT POWER(3, 2), POWER(2, -1), SQRT(16) FROM dual
+----
+POWER(3,2)|POWER(2,-1)|SQRT(16)
+9|.5|4
+SELECT 1
+
+error 22003 1428
+SELECT SQRT(-1) FROM dual
+
+rows
+SELECT SIGN(-15), SIGN(0), SIGN(2.5) FROM dual
+----
+SIGN(-15)|SIGN(0)|SIGN(2.5)
+-1|0|1
+SELECT 1
+
+rows
+SELECT GREATEST(1, 7, 3), LEAST(1, 7, 3), GREATEST(2, NULL) FROM dual
+----
+GREATEST(1,7,3)|LEAST(1,7,3)|GREATEST(2,NULL)
+7|1|NULL
+SELECT 1
+
+rows
+SELECT GREATEST('HARRY', 'HARRIOT', 'HAROLD') g FROM dual
+----
+G
+HARRY
+SELECT 1
+
+rows
+SELECT LEAST('HARRY', 'HARRIOT', 'HAROLD') l FROM dual
+----
+L
+HAROLD
+SELECT 1
+
+chapter "Character Functions"
+rows
+SELECT SUBSTR('ABCDEFG', 3, 4), SUBSTR('ABCDEFG', -5, 4), SUBSTR('ABCDEFG', 0, 2) FROM dual
+----
+SUBSTR('ABCDEFG',3,4)|SUBSTR('ABCDEFG',-5,4)|SUBSTR('ABCDEFG',0,2)
+CDEF|CDEF|AB
+SELECT 1
+
+rows
+SELECT SUBSTR('ABC', 5) s, SUBSTR('ABC', 2, 0) z FROM dual
+----
+S|Z
+NULL|NULL
+SELECT 1
+
+rows
+SELECT INSTR('CORPORATE FLOOR', 'OR', 3, 2) i FROM dual
+----
+I
+14
+SELECT 1
+
+rows
+SELECT INSTR('CORPORATE FLOOR', 'OR', -3, 2) i FROM dual
+----
+I
+2
+SELECT 1
+
+rows
+SELECT INSTR('ABC', 'Z'), INSTR('ABC', 'B') FROM dual
+----
+INSTR('ABC','Z')|INSTR('ABC','B')
+0|2
+SELECT 1
+
+rows
+SELECT LENGTH('CANDIDE'), LENGTH(12345) FROM dual
+----
+LENGTH('CANDIDE')|LENGTH(12345)
+7|5
+SELECT 1
+
+rows
+SELECT UPPER('mr. scott'), LOWER('MR. SCOTT') FROM dual
+----
+UPPER('MR. SCOTT')|LOWER('MR. SCOTT')
+MR. SCOTT|mr. scott
+SELECT 1
+
+rows
+SELECT INITCAP('the soap') i FROM dual
+----
+I
+The Soap
+SELECT 1
+
+rows
+SELECT TRIM('  x  ') a, TRIM(LEADING '0' FROM '0090') b, TRIM(TRAILING 'x' FROM 'axx') c, TRIM(BOTH '*' FROM '**y**') d FROM dual
+----
+A|B|C|D
+x|90|a|y
+SELECT 1
+
+error 22P02 30001
+SELECT TRIM('ab' FROM 'abc') FROM dual
+
+rows
+SELECT TRIM('   ') t FROM dual
+----
+T
+NULL
+SELECT 1
+
+rows
+SELECT LTRIM('<=====>BROWNING<=====>', '<>=') l, RTRIM('BROWNING:./=./=', '/=.') r FROM dual
+----
+L|R
+BROWNING<=====>|BROWNING:
+SELECT 1
+
+rows
+SELECT LPAD('Page 1', 15, '*.') l, RPAD('MORRISON', 12, 'ab') r FROM dual
+----
+L|R
+*.*.*.*.*Page 1|MORRISONabab
+SELECT 1
+
+rows
+SELECT LPAD('abcdef', 3) l, LPAD('x', 0) z, RPAD('x', 3) || '|' r FROM dual
+----
+L|Z|R
+abc|NULL|x  |
+SELECT 1
+
+rows
+SELECT REPLACE('JACK and JUE', 'J', 'BL') r, REPLACE('abcabc', 'b') s FROM dual
+----
+R|S
+BLACK and BLUE|acac
+SELECT 1
+
+rows
+SELECT REPLACE('aaa', 'a') r FROM dual
+----
+R
+NULL
+SELECT 1
+
+rows
+SELECT CHR(67) || CHR(65) || CHR(84) word, ASCII('Q') q FROM dual
+----
+WORD|Q
+CAT|81
+SELECT 1
+
+rows
+SELECT q'[It's]' quoted, 'It''s' doubled FROM dual
+----
+QUOTED|DOUBLED
+It's|It's
+SELECT 1
+
+chapter "Conversion Functions", "Format Models"
+rows
+SELECT TO_CHAR(1234.5, '9,999.99') a, TO_CHAR(7, '000') b FROM dual
+----
+A|B
+ 1,234.50| 007
+SELECT 1
+
+rows
+SELECT TO_CHAR(-12, '999') a, TO_CHAR(12345, '999') b FROM dual
+----
+A|B
+ -12|####
+SELECT 1
+
+rows
+SELECT TO_CHAR(1.5, 'FM9.99') a, TO_CHAR(12, '$99') b, TO_CHAR(12, 'S99') c, TO_CHAR(-12, '99MI') d FROM dual
+----
+A|B|C|D
+1.5| $12|+12|12-
+SELECT 1
+
+rows
+SELECT TO_CHAR(42) a, TO_CHAR(0.5) b FROM dual
+----
+A|B
+42|.5
+SELECT 1
+
+error 22P02 1481
+SELECT TO_CHAR(1, 'X9') FROM dual
+
+rows
+SELECT TO_NUMBER('42') + 1 a, TO_NUMBER(' 2.5 ') b, TO_NUMBER('1,234', '9,999') c FROM dual
+----
+A|B|C
+43|2.5|1234
+SELECT 1
+
+error 22P02 1722
+SELECT TO_NUMBER('abc') FROM dual
+
+chapter "Aggregate Functions", "GROUP BY"
+rows
+SELECT deptno, COUNT(*), SUM(sal), MAX(sal), MIN(ename) FROM emp GROUP BY deptno ORDER BY deptno
+----
+DEPTNO|COUNT(*)|SUM(SAL)|MAX(SAL)|MIN(ENAME)
+10|2|7450|5000|CLARK
+30|4|6650|2850|ALLEN
+SELECT 2
+
+rows
+SELECT deptno, COUNT(comm) FROM emp GROUP BY deptno HAVING COUNT(*) > 2
+----
+DEPTNO|COUNT(COMM)
+30|2
+SELECT 1
+
+rows
+SELECT AVG(sal) a FROM emp WHERE deptno = 10
+----
+A
+3725
+SELECT 1
+
+ok
+SELECT LISTAGG(ename, ',') WITHIN GROUP (ORDER BY ename) FROM emp
+... differs
+
+chapter "Joins"
+ok
+CREATE TABLE dept (deptno NUMBER(2) PRIMARY KEY, dname VARCHAR2(14))
+
+ok
+INSERT INTO dept VALUES (10, 'ACCOUNTING')
+
+ok
+INSERT INTO dept VALUES (30, 'SALES')
+
+ok
+COMMIT
+
+rows
+SELECT e.ename, d.dname FROM emp e JOIN dept d ON e.deptno = d.deptno WHERE e.sal >= 2450 ORDER BY e.ename
+----
+ENAME|DNAME
+BLAKE|SALES
+CLARK|ACCOUNTING
+KING|ACCOUNTING
+SELECT 3
+
+rows
+SELECT e.ename, d.dname FROM emp e, dept d WHERE e.deptno = d.deptno AND e.empno = 7900
+----
+ENAME|DNAME
+JAMES|SALES
+SELECT 1
+
+ok
+SELECT ename FROM emp MINUS SELECT ename FROM emp
+... differs
+
+chapter "Transactions", "COMMIT", "ROLLBACK"
+ok
+INSERT INTO dept VALUES (40, 'OPERATIONS')
+
+rows
+SELECT COUNT(*) FROM dept
+----
+COUNT(*)
+3
+SELECT 1
+
+rows
+ROLLBACK
+----
+ROLLBACK
+
+rows
+SELECT COUNT(*) FROM dept
+----
+COUNT(*)
+2
+SELECT 1
+
+ok
+INSERT INTO dept VALUES (40, 'OPERATIONS')
+
+rows
+COMMIT WORK
+----
+COMMIT
+
+rows
+ROLLBACK
+----
+ROLLBACK
+
+rows
+SELECT dname FROM dept WHERE deptno = 40
+----
+DNAME
+OPERATIONS
+SELECT 1
+
+ok
+INSERT INTO dept VALUES (50, 'TEMP')
+
+ok
+CREATE TABLE ddl_commits (x NUMBER)
+
+rows
+ROLLBACK
+----
+ROLLBACK
+
+rows
+SELECT dname FROM dept WHERE deptno = 50
+----
+DNAME
+TEMP
+SELECT 1
+
+error 0A000 3001
+BEGIN NULL; END;
+
+chapter "UPDATE", "DELETE", "TRUNCATE TABLE"
+rows
+UPDATE emp SET sal = sal + 95 WHERE empno = 7900
+----
+UPDATE 1
+
+rows
+SELECT sal FROM emp WHERE empno = 7900
+----
+SAL
+1045
+SELECT 1
+
+rows
+DELETE dept WHERE deptno = 50
+----
+DELETE 1
+
+rows
+DELETE FROM dept WHERE deptno = 40
+----
+DELETE 1
+
+rows
+TRUNCATE TABLE ddl_commits
+----
+TRUNCATE TABLE
+
+rows
+DROP TABLE ddl_commits CASCADE CONSTRAINTS
+----
+DROP TABLE
+
+ok
+COMMIT
+
+chapter "Identity Columns", "Data Types"
+ok
+CREATE TABLE items (id NUMBER GENERATED BY DEFAULT ON NULL AS IDENTITY PRIMARY KEY, label VARCHAR2(10 CHAR), qty INTEGER, price BINARY_DOUBLE, note CLOB, code CHAR(2))
+
+ok
+INSERT INTO items (label, qty) VALUES ('egg', 12)
+
+ok
+INSERT INTO items (label, qty) VALUES ('jam', 1)
+
+rows
+SELECT id, label, qty FROM items ORDER BY id
+----
+ID|LABEL|QTY
+1|egg|12
+2|jam|1
+SELECT 2
+
+ok
+CREATE TABLE late_identity (name VARCHAR2(10) PRIMARY KEY, id NUMBER(10) GENERATED ALWAYS AS IDENTITY)
+... differs
+
+ok
+CREATE TABLE stamps (d DATE)
+... differs
+
+error 42601 906
+CREATE TABLE no_length (v VARCHAR2)
+
+ok
+CREATE TABLE IF NOT EXISTS items (x NUMBER)
+
+ok
+DROP TABLE IF EXISTS no_such_table
+
+ok
+CREATE SEQUENCE emp_seq
+... differs
+
+ok
+MERGE INTO dept d USING emp e ON (d.deptno = e.deptno) WHEN MATCHED THEN UPDATE SET d.dname = 'X'
+... differs
+
+chapter "Bind Variables", "Lexical Conventions"
+error 42883 904
+SELECT no_such_function(1) FROM dual
+
+error 42883 904
+SELECT char_length('x') FROM dual
+
+error 42601 938
+SELECT NVL(1) FROM dual
+
+error 42601 939
+SELECT LENGTH('a', 'b') FROM dual
+
+rows
+SELECT ename FROM emp WHERE ename LIKE 'B%'
+----
+ENAME
+BLAKE
+SELECT 1
+
+rows
+SELECT ename FROM emp WHERE ename LIKE 'b%'
+----
+ENAME
+SELECT 0
+
+rows
+SELECT COUNT(*) FROM emp WHERE sal != 5000 AND sal ^= 950 AND sal <> 1250
+----
+COUNT(*)
+4
+SELECT 1
+
+rows
+SELECT /* hint-like comment */ COUNT(*) -- trailing comment
+FROM emp
+----
+COUNT(*)
+6
+SELECT 1
+
+error 42601 1756
+SELECT 'unterminated FROM dual
+
+error 42601 1741
+SELECT "" FROM dual

@@ -17,7 +17,8 @@ eggdb sql shop.db -c "SELECT i.name, count(s.id), sum(s.quantity) FROM items i L
 
 These are the first parts of the SQL core (roadmap items 19 and 19b). What comes next is listed
 at the end. The same tables also speak MySQL's SQL: see "The MySQL dialect" and "Connecting with
-mysql" below (roadmap item 22, D106), and SQLite's: see "The SQLite dialect" (item 24, D107).
+mysql" below (roadmap item 22, D106), SQLite's: see "The SQLite dialect" (item 24, D107), and
+Oracle's: see "The Oracle dialect" (item 25, D108).
 
 ## Connecting with psql
 
@@ -190,6 +191,81 @@ What it reads, on top of the statements of "What runs today":
   `eggdb sql` and `eggdb shell` print the message and a `Result code:` line;
   `SqlError::vendor_code` gives the extended result code and `sqlite_result_code_name` its
   name.
+
+## The Oracle dialect
+
+`eggdb sql --dialect oracle`, `eggdb shell --dialect oracle` and the embedded API
+(`eggdb::sql`, [embedded.md](embedded.md#sql)) read Oracle Database's SQL, as Oracle's SQL
+Language Reference documents it (roadmap item 25, D108), on the same tables as the other
+dialects. There is no Oracle wire protocol: Oracle's own clients and drivers (SQL*Plus, JDBC
+thin, OCI) cannot connect, and none is implemented until a lawful public specification of the
+protocol exists (D10). Oracle's SQL runs here, through the CLI and the embedded API.
+
+```sh
+eggdb sql --create hr.db --dialect oracle -c "CREATE TABLE emp (empno NUMBER(4) PRIMARY KEY, ename VARCHAR2(10) NOT NULL, sal NUMBER(7,2))"
+eggdb sql hr.db --dialect oracle -c "INSERT INTO emp VALUES (7839, 'KING', 5000); INSERT INTO emp VALUES (7698, 'BLAKE', 2850)"
+eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00'), '-') pay FROM emp ORDER BY sal DESC FETCH FIRST 1 ROWS ONLY"
+```
+
+- **Names fold to upper case**: `emp`, `EMP` and `"EMP"` are one table, and result columns
+  are named `ENAME`, `PAY`, `NVL(SAL,0)`. Unquoted names in the other dialects fold to lower
+  case, so the catalog keeps a name whose letters are all one case in the other case: a table
+  made as `emp` in Oracle is `emp` in PostgreSQL, and one made as `"Emp"` stays `Emp`
+  everywhere (D108). Oracle's reserved words (`SIZE`, `LEVEL`, `COMMENT`, `USER`, ...) need
+  double quotes as names, as in Oracle.
+- **The empty string is NULL**: `''` is NULL in inserts, updates and expressions (`WHERE x =
+  ''` matches nothing), and a function result that would be empty is NULL (`SUBSTR('abc', 5)`,
+  `TRIM('  ')`, `REPLACE('aa', 'a')`). `||` and `CONCAT` treat NULL as the empty string.
+- **Queries**: `FROM DUAL` (also `SELECT` without `FROM` is `ORA-00923`, as in Oracle),
+  `OFFSET n ROWS` and `FETCH FIRST|NEXT n ROW|ROWS ONLY` (negative counts as 0), `ROWNUM` in
+  `WHERE` with Oracle's meaning (`ROWNUM <= n` keeps the first n rows found, before `GROUP BY`
+  and `ORDER BY`; `ROWNUM = 1`; `ROWNUM > 1` and `ROWNUM = 2` find nothing), `CASE`, joins,
+  `GROUP BY` and `HAVING`, `LIKE` (case-sensitive), `!=`, `^=` and `~=` for `<>`, `q'[...]'`
+  and `N'...'` literals, `:name` and `:1` bind variables, and `/` that divides exactly where
+  it can (`7/2` is `3.5`).
+- **Types**: `VARCHAR2(n [BYTE|CHAR])`, `NVARCHAR2(n)` and `VARCHAR(n)` as `varchar(n)`
+  (the length counts characters), `CHAR(n)`/`NCHAR(n)` as `varchar(n)` (not blank-padded),
+  `NUMBER(p)` and `NUMBER(p,0)` as `smallint` (p up to 4), `integer` (up to 9) or `bigint` (up
+  to 18), `NUMBER(p,s)` with a scale, `NUMBER` without precision, `FLOAT`, `REAL`, `DOUBLE
+  PRECISION` and `BINARY_DOUBLE` as `double precision`, `BINARY_FLOAT` as `real`,
+  `INTEGER`/`INT`/`SMALLINT` (Oracle's `NUMBER(38)`) as `bigint`, `CLOB`, `NCLOB` and `LONG` as
+  `text`, and `BOOLEAN` (23ai). `DATE`, `TIMESTAMP`, `RAW` and `BLOB` wait for their types.
+- **Identity columns**: `GENERATED [ALWAYS | BY DEFAULT [ON NULL]] AS IDENTITY` on the first
+  column of the primary key, numbered as MySQL's `AUTO_INCREMENT` (D106).
+- **Statements**: `CREATE TABLE` (also `IF NOT EXISTS`), `DROP TABLE [IF EXISTS] t [CASCADE
+  CONSTRAINTS] [PURGE]`, `TRUNCATE TABLE`, `INSERT`, `UPDATE`, `DELETE [FROM]`, `COMMIT
+  [WORK]`, `ROLLBACK [WORK]`.
+- **Transactions as Oracle's**: the first change starts a transaction that stays open until
+  `COMMIT` or `ROLLBACK`; `CREATE TABLE`, `DROP TABLE` and `TRUNCATE TABLE` commit what is open
+  before and after them. `eggdb sql` and `eggdb shell` commit an open transaction when they
+  end, as SQL*Plus does on exit; the embedded API rolls it back on `close` unless you commit.
+- **Functions**: `NVL`, `NVL2`, `COALESCE`, `NULLIF`, `DECODE` (NULL matches NULL, the first argument
+  evaluated once, up to 255 arguments as in Oracle), `CONCAT`,
+  `LENGTH`, `SUBSTR` and `INSTR` (negative positions count from the end), `UPPER`, `LOWER`,
+  `INITCAP`, `TRIM([LEADING|TRAILING|BOTH] [c FROM] s)`, `LTRIM`, `RTRIM`, `LPAD`, `RPAD`,
+  `REPLACE`, `CHR`, `ASCII`, `ABS`, `ROUND`, `TRUNC`, `MOD`, `CEIL`, `FLOOR`, `POWER`, `SQRT`,
+  `SIGN`, `GREATEST`, `LEAST` (NULL if any argument is NULL), `TO_CHAR` for numbers (format
+  elements `9`, `0`, `.`, `D`, `,`, `G`, `$`, `S`, `MI`, `FM`; `#`s when the number does not
+  fit), `TO_NUMBER`, the aggregates `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `USER`. Other
+  dialects' functions are not there (`CHAR_LENGTH` is `ORA-00904`), and Oracle's are not in the
+  other dialects.
+- **Length limit**: `LPAD`, `RPAD`, `REPLACE`, `||`, `UPPER`, `LOWER` and `INITCAP` refuse a result longer than
+  1,000,000,000 bytes with `ORA-01489` before they build it.
+- **The data dictionary**: `USER_TABLES` and `ALL_TABLES` (`TABLE_NAME`, `TABLESPACE_NAME`,
+  and `OWNER` in `ALL_`), `USER_TAB_COLUMNS` and `ALL_TAB_COLUMNS` (`TABLE_NAME`,
+  `COLUMN_NAME`, `DATA_TYPE`, `DATA_LENGTH`, `DATA_PRECISION`, `DATA_SCALE`, `NULLABLE`,
+  `COLUMN_ID`), with `WHERE`, `ORDER BY` and the rest of `SELECT` on them. The owner is the
+  session user in upper case (`EGGDB` by default), and `EGGDB.EMP` names the same table as
+  `EMP`.
+- **Errors** with Oracle's numbers and wording: `ORA-00942: table or view does not exist`,
+  `ORA-00904: "X": invalid identifier`, `ORA-00001: unique constraint (EGGDB.EMP_PKEY)
+  violated`, `ORA-01400: cannot insert NULL into ("EGGDB"."EMP"."ENAME")`, `ORA-01407`,
+  `ORA-00955`, `ORA-00923`, `ORA-00933`, `ORA-00936`, `ORA-00900`, `ORA-01722: invalid
+  number`, `ORA-01476: divisor is equal to zero`, `ORA-12899`, `ORA-01426`, `ORA-01428`,
+  `ORA-00938`, `ORA-00939`, `ORA-00906`, `ORA-01741`, `ORA-01756`, `ORA-00972`, and
+  `ORA-03001: unimplemented feature: ...` for what EggDB does not do yet.
+- **Values print as Oracle prints numbers**: no trailing zeros and no zero before the point
+  (`.5`), `TRUE` and `FALSE`.
 
 ## Connecting with mysql
 
@@ -517,6 +593,40 @@ And more, not in the suite yet:
   window functions, `group_concat` and `total`, the JSON and math functions, `GLOB` character
   classes and bare columns in aggregate queries.
 
+## Known differences from Oracle
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 164 cases from Oracle's SQL
+Language Reference, never Oracle's software) marks these as differing until they are fixed:
+- `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`,
+  and `FETCH ... PERCENT` and `WITH TIES`.
+- `LISTAGG`, `MINUS` and the other set operators, and `MERGE`.
+- `DATE` and `TIMESTAMP` columns, `SYSDATE`, `SYSTIMESTAMP` and `CURRENT_DATE`: they wait for
+  the timestamp type (item 19d).
+- Sequences (`CREATE SEQUENCE`, `seq.NEXTVAL`, `seq.CURRVAL`, `DROP SEQUENCE`): they need
+  state kept in the file, a file-format change of their own (D108).
+- An identity column that is not the first column of the primary key.
+
+And more, not in the suite yet:
+- `NUMBER` is exact decimal in Oracle; here `NUMBER` without precision and `NUMBER(p,s)` with a
+  scale are binary floating point (`0.1 + 0.2` is `.30000000000000004`), precision is not
+  enforced beyond the storage type's range (no `ORA-01438`), and integer arithmetic past 64 bits
+  is `ORA-01426` where Oracle has 38 digits. They wait for the `numeric` type.
+- `CHAR(n)` is not blank-padded, `VARCHAR2(n BYTE)` counts characters, and `ORA-12899` gives
+  the maximum but not the column's name or the actual length.
+- A statement that fails after it wrote rows rolls back the whole transaction, where Oracle
+  rolls back only the statement (no statement savepoints yet); a failing single-row `INSERT`,
+  `UPDATE` or `DELETE` that wrote nothing leaves the transaction as it was, as in Oracle.
+  `SAVEPOINT` is not supported yet.
+- `GENERATED ALWAYS` accepts a given value, and an identity column reuses the number of a
+  deleted last row (Oracle's identity is a sequence that never goes back).
+- Result columns of expressions are named after the expression in upper case with spaces
+  removed outside quotes, close to SQL*Plus's headings; `SELECT *` from `USER_TABLES` shows the
+  three columns above, not Oracle's fifty.
+- Not supported yet: subqueries and views, `CONNECT BY`, outer joins with `(+)`, `RIGHT` and
+  `FULL` joins, `ALTER TABLE`, indexes, `UNIQUE`, `CHECK` and foreign keys, PL/SQL (`BEGIN ...
+  END`, procedures, packages), `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms,
+  database links, `ROWID`, the date, regular-expression, analytic and XML functions, `NLS_`
+  settings, and schemas other than the session user's.
+
 ## Next parts (roadmap)
 - Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.
 - The `numeric`, `timestamp` and `json`/`jsonb` types, and `serial`/identity columns.
@@ -525,6 +635,6 @@ And more, not in the suite yet:
 - `RIGHT` and `FULL` joins, subqueries, and the other aggregates.
 - The rest of PostgreSQL's string functions (`substr`, `trim`, `replace`, `concat`, `position`,
   `left`, `right`, ...) and the SQL-standard `substring(... FROM ... FOR ...)` syntax.
-- Then the other dialects (items 23 and 25), each with its own correctness suite; for the PostgreSQL protocol,
+- Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, the `pg_catalog` queries of psql's `\d` and GUI tools, `COPY` and query cancellation
   (M6a).

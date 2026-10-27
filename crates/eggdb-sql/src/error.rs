@@ -239,6 +239,13 @@ impl SqlError {
         self
     }
 
+    /// The same error with an Oracle error number, such as `942` for `ORA-00942`.
+    pub fn with_oracle_code(mut self, code: u16) -> Self {
+        self.report.vendor_code = Some(code);
+        self.report.vendor = Some(crate::Dialect::Oracle);
+        self
+    }
+
     /// The database's own error number, when the dialect has them: MySQL's `1146` for a
     /// missing table, SQLite's extended result code `1` (`SQLITE_ERROR`) for a syntax error,
     /// and so on.
@@ -247,7 +254,7 @@ impl SqlError {
     }
 
     /// The dialect whose numbering [`SqlError::vendor_code`] follows: MySQL's error numbers
-    /// or SQLite's result codes.
+    /// SQLite's result codes or Oracle's `ORA-` numbers.
     pub fn vendor(&self) -> Option<crate::Dialect> {
         self.report.vendor
     }
@@ -283,6 +290,10 @@ impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.report.vendor == Some(crate::Dialect::Sqlite) {
             return write!(f, "Error: {}", self.report.message);
+        }
+        if self.report.vendor == Some(crate::Dialect::Oracle) {
+            let code = self.report.vendor_code.unwrap_or(0);
+            return write!(f, "ORA-{code:05}: {}", self.report.message);
         }
         if let Some(code) = self.report.vendor_code {
             return write!(

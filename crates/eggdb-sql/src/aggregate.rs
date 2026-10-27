@@ -150,6 +150,13 @@ pub(crate) fn rebuild(
                 .map(&mut *child)
                 .collect::<SqlResult<_>>()?,
         },
+        ExprKind::OracleFunction { name, arguments } => ExprKind::OracleFunction {
+            name,
+            arguments: arguments
+                .iter()
+                .map(&mut *child)
+                .collect::<SqlResult<_>>()?,
+        },
         ExprKind::Aggregate {
             function,
             argument,

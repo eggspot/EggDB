@@ -46,7 +46,7 @@ eggdb <command> <file> [arguments] [options]
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below) |
 | `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below) |
-| `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's or SQLite's with `--dialect` (below, and [sql.md](sql.md)) |
+| `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
@@ -464,8 +464,12 @@ same tables, and reports errors as MySQL does (`ERROR 1146 (42S02): Table 'eggdb
 exist`) and warnings as `Warning 1062: ...` on stderr; `--dialect sqlite` (or `sqlite3`) reads
 SQLite's SQL (type affinity, `INTEGER PRIMARY KEY` row ids, upserts, PRAGMAs, `sqlite_schema`)
 and reports errors as SQLite does, with the extended result code on a second line (`Error:
-near "FORM": syntax error`, `Result code: SQLITE_ERROR (1)`); `--dialect postgresql` is the
-default.
+near "FORM": syntax error`, `Result code: SQLITE_ERROR (1)`); `--dialect oracle` reads Oracle's
+SQL (`DUAL`, `ROWNUM`, `FETCH FIRST`, upper-case names, `''` as NULL, Oracle's types and
+functions), reports errors as Oracle does (`ORA-00942: table or view does not exist`), keeps
+the transaction that the first change starts open until `COMMIT`, `ROLLBACK` or DDL, and
+commits it when the run ends, as SQL*Plus does on exit (there is no Oracle wire protocol,
+D10); `--dialect postgresql` is the default.
 [sql.md](sql.md) lists exactly what runs and what comes next.
 
 ```sh
@@ -515,13 +519,14 @@ SQLSTATE:  42P01
 ## `eggdb shell`
 
 ```
-eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite] [--read-only] [--create]
+eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle] [--read-only] [--create]
 ```
 
 One prompt for everything this page and [sql.md](sql.md) do with a file: the key-value
 commands without their `eggdb <command> <file>` prefix, SQL in the PostgreSQL dialect (or
-MySQL's or SQLite's with `--dialect mysql` or `--dialect sqlite`; `.schema` then prints SQLite's
-`CREATE TABLE`), and a
+MySQL's, SQLite's or Oracle's with `--dialect mysql`, `sqlite` or `oracle`; `.schema` then prints
+that dialect's `CREATE TABLE`, and in Oracle's the open transaction is committed when the shell
+ends, as SQL*Plus does), and a
 few `.` commands. The file stays open for writing while the shell runs (`--read-only`: open
 read-only), so other writers get the busy message meanwhile. The design is
 [ux/cli.md](ux/cli.md), section 15.

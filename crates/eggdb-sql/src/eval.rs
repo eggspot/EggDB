@@ -199,9 +199,9 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
             all.extend(otherwise.iter().map(AsRef::as_ref));
             all
         }
-        ExprKind::Function { arguments, .. } | ExprKind::SqliteFunction { arguments, .. } => {
-            arguments.iter().collect()
-        }
+        ExprKind::Function { arguments, .. }
+        | ExprKind::SqliteFunction { arguments, .. }
+        | ExprKind::OracleFunction { arguments, .. } => arguments.iter().collect(),
         ExprKind::Aggregate { argument, .. } => argument.iter().map(AsRef::as_ref).collect(),
     }
 }
@@ -245,9 +245,9 @@ pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
             all.extend(otherwise.iter_mut().map(AsMut::as_mut));
             all
         }
-        ExprKind::Function { arguments, .. } | ExprKind::SqliteFunction { arguments, .. } => {
-            arguments.iter_mut().collect()
-        }
+        ExprKind::Function { arguments, .. }
+        | ExprKind::SqliteFunction { arguments, .. }
+        | ExprKind::OracleFunction { arguments, .. } => arguments.iter_mut().collect(),
         ExprKind::Aggregate { argument, .. } => argument.iter_mut().map(AsMut::as_mut).collect(),
     }
 }
@@ -335,11 +335,11 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
                 .as_deref()
                 .map_or(Ok(()), |otherwise| check_columns(otherwise, scope))
         }
-        ExprKind::Function { arguments, .. } | ExprKind::SqliteFunction { arguments, .. } => {
-            arguments
-                .iter()
-                .try_for_each(|argument| check_columns(argument, scope))
-        }
+        ExprKind::Function { arguments, .. }
+        | ExprKind::SqliteFunction { arguments, .. }
+        | ExprKind::OracleFunction { arguments, .. } => arguments
+            .iter()
+            .try_for_each(|argument| check_columns(argument, scope)),
         ExprKind::Aggregate { argument, .. } => argument
             .as_deref()
             .map_or(Ok(()), |argument| check_columns(argument, scope)),
@@ -355,9 +355,9 @@ pub(crate) fn output_name(expr: &Expr) -> String {
 fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
     match &expr.kind {
         ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
-        ExprKind::SessionValue { name, .. } | ExprKind::SqliteFunction { name, .. } => {
-            ((*name).to_owned(), true)
-        }
+        ExprKind::SessionValue { name, .. }
+        | ExprKind::SqliteFunction { name, .. }
+        | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
         ExprKind::Aggregate { function, .. } => (function.name().to_owned(), true),
         ExprKind::Cast { expr, sql_type } => match name_and_whether_it_names_a_value(expr) {
             (name, true) => (name, true),
@@ -534,6 +534,16 @@ impl Evaluator<'_> {
                     .collect::<SqlResult<Vec<Value>>>()?;
                 crate::sqlite_functions::call(name, &values)
             }
+            ExprKind::OracleFunction { name, arguments } if *name == "oracle_decode" => {
+                self.decode(arguments, hint)
+            }
+            ExprKind::OracleFunction { name, arguments } => {
+                let values = arguments
+                    .iter()
+                    .map(|argument| self.eval(argument, None))
+                    .collect::<SqlResult<Vec<Value>>>()?;
+                crate::oracle_functions::call(name, &values)
+            }
             ExprKind::Slot { index, .. } => {
                 Ok(self.row.get(*index).cloned().unwrap_or(Value::Null))
             }
@@ -687,6 +697,29 @@ impl Evaluator<'_> {
             ExprKind::Literal(Literal::String(text)) => parse_input(text, target),
             ExprKind::Literal(Literal::Decimal(text)) => decimal_literal(text, target, true),
             _ => convert(self.eval(expr, None)?, target, Conversion::Explicit),
+        }
+    }
+
+    fn decode(&self, arguments: &[Expr], hint: Option<SqlType>) -> SqlResult<Value> {
+        let Some((subject, rest)) = arguments.split_first() else {
+            return Ok(Value::Null);
+        };
+        let subject = self.eval(subject, None)?;
+        let (pairs, otherwise) = rest.as_chunks::<2>();
+        for [search, result] in pairs {
+            let candidate = self.eval(search, subject.sql_type())?;
+            let matched = match (subject.is_null(), candidate.is_null()) {
+                (true, true) => true,
+                (false, false) => compare_truth(&subject, &candidate, "=")? == Some(true),
+                _ => false,
+            };
+            if matched {
+                return self.eval(result, hint);
+            }
+        }
+        match otherwise.first() {
+            Some(otherwise) => self.eval(otherwise, hint),
+            None => Ok(Value::Null),
         }
     }
 

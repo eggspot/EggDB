@@ -1,4 +1,7 @@
+mod oracle;
 mod sqlite;
+
+pub(crate) use oracle::swap_uniform_case;
 
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -116,7 +119,7 @@ impl<'t> Lexer<'t> {
     }
 
     fn skip_space_and_comments(&mut self) -> SqlResult<()> {
-        if self.dialect == Dialect::Sqlite {
+        if matches!(self.dialect, Dialect::Sqlite | Dialect::Oracle) {
             self.skip_sqlite_space_and_comments();
             return Ok(());
         }
@@ -214,6 +217,9 @@ impl<'t> Lexer<'t> {
         }
         if self.dialect == Dialect::Sqlite {
             return self.next_sqlite_kind(byte);
+        }
+        if self.dialect == Dialect::Oracle {
+            return self.next_oracle_kind(byte);
         }
 
         match byte {
