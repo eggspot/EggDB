@@ -391,18 +391,24 @@ the fast path always applies, since the server checks every password itself).
 ## What runs today
 
 **Statements**
-- `CREATE TABLE [IF NOT EXISTS] name (column type [NOT NULL | NULL | PRIMARY KEY | UNIQUE | DEFAULT expr] ..., [PRIMARY KEY (columns)], [UNIQUE (columns)] ...)`.
+- `CREATE TABLE [IF NOT EXISTS] name (column type [NOT NULL | NULL | PRIMARY KEY | UNIQUE | DEFAULT expr | CHECK (expr) | REFERENCES parent [(columns)] [actions]] ..., [PRIMARY KEY (columns)], [UNIQUE (columns)], [CHECK (expr)], [FOREIGN KEY (columns) REFERENCES parent [(columns)] [actions]] ...)`.
   A table without a primary key keeps its rows in insertion order under a hidden row number.
-  `CONSTRAINT name` names a `UNIQUE` constraint's index (otherwise `table_column_key`). At
-  most 1,600 columns, as in PostgreSQL.
+  `CONSTRAINT name` names a constraint (otherwise PostgreSQL's names: `table_pkey`,
+  `table_column_key`, `table_column_check`, `table_column_fkey`). At most 1,600 columns, as in
+  PostgreSQL. Constraints are described under
+  [Sequences, constraints and ALTER TABLE](#sequences-constraints-and-alter-table).
+- `ALTER TABLE [IF EXISTS] [ONLY] name action [, ...]`, `CREATE SEQUENCE`, `ALTER SEQUENCE`
+  and `DROP SEQUENCE [IF EXISTS] name [, ...] [CASCADE | RESTRICT]`: described under
+  [Sequences, constraints and ALTER TABLE](#sequences-constraints-and-alter-table).
 - `CREATE [UNIQUE] INDEX [IF NOT EXISTS] [name] ON table [USING btree | hash] (column [ASC | DESC] [NULLS FIRST | LAST], ...)`
   and `DROP INDEX [IF EXISTS] name [, ...] [RESTRICT]`: secondary indexes, described under
   [Indexes](#indexes). An unnamed index is `table_columns_idx`.
 - `EXPLAIN statement` for `SELECT`, `UPDATE` and `DELETE`: the plan as PostgreSQL prints it
   without costs (`Seq Scan on t`, `Index Scan using t_b on t`, `Index Scan Backward ...`,
   `Sort`, `Limit`, `Nested Loop`, `Hash Join`).
-- `DROP TABLE [IF EXISTS] name [, ...] [RESTRICT]`: removes the definition and every row, in
-  one transaction.
+- `DROP TABLE [IF EXISTS] name [, ...] [CASCADE | RESTRICT]`: removes the definition and every
+  row, in one transaction, and the sequences its columns own. A table another table's foreign
+  key references is `2BP01` unless `CASCADE`, which drops those foreign keys (not the tables).
 - `INSERT INTO name [(columns)] VALUES (...), (...) | DEFAULT VALUES [RETURNING items]`, with
   `DEFAULT` in a values list.
 - `SELECT [ALL | DISTINCT] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY expr, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
@@ -697,6 +703,86 @@ row has exactly its entries, no entry lacks a row, every entry decodes and no un
 a value twice; a disagreement is `XX001` naming the index, repaired by dropping and creating it
 again. `eggdb check` checks the file's pages and keys and does not run it.
 
+## Sequences, constraints and ALTER TABLE
+
+**Sequences** (D114) are catalog objects beside the tables, sharing their names:
+`CREATE SEQUENCE [IF NOT EXISTS] name [AS smallint | integer | bigint] [INCREMENT [BY] n]
+[MINVALUE n | NO MINVALUE] [MAXVALUE n | NO MAXVALUE] [START [WITH] n] [CACHE n] [[NO] CYCLE]
+[OWNED BY table.column | NONE]`, `ALTER SEQUENCE [IF EXISTS] name` with the same options and
+`RESTART [[WITH] n]`, `OWNER TO` (accepted) or `RENAME TO`, and `DROP SEQUENCE`. The defaults and
+checks are PostgreSQL's: `bigint`, increment 1, an ascending sequence from 1 to the type's
+maximum, a descending one from -1 down to the type's minimum, `INCREMENT must not be zero`,
+`MINVALUE (x) must be less than MAXVALUE (y)`, `START value (x) cannot be less than MINVALUE
+(y)`. The functions are PostgreSQL's: `nextval('name')`, `currval('name')` (`55000` before this
+session's first `nextval`), `lastval()`, `setval('name', n [, is_called])`, with the name
+resolved as PostgreSQL resolves a `regclass` (lower case unless quoted, `public.` accepted) and
+`'name'::regclass` printing the name; `pg_catalog.nextval(...)` and the other `pg_catalog.`
+spellings work. Past its limit a sequence fails with `2200H` (`nextval: reached maximum value of
+sequence "s" (9223372036854775807)`) or, with `CYCLE`, starts again; arithmetic never wraps.
+`nextval` is not undone by a rollback, as in PostgreSQL, and is durable with the commit of any
+transaction that used the value. Oracle's sequences are the same objects: `CREATE SEQUENCE s
+START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE` (with `NOMAXVALUE`, `NOMINVALUE`, `ORDER` and the
+rest accepted), `s.NEXTVAL` and `s.CURRVAL`, with ORA-02289, ORA-08002 and ORA-08004. MySQL and
+SQLite have no sequences, and `nextval` there is an unknown function. A column `DEFAULT
+nextval('s')` numbers rows, as `pg_dump` writes `serial` columns; EggDB's own `serial` and
+identity columns still use the auto-increment column (D111).
+
+**Constraints.** `NOT NULL`, `UNIQUE` and `PRIMARY KEY` are as before. `CHECK (expr)` refuses a
+row for which `expr` is false (NULL passes) with `23514 new row for relation "t" violates check
+constraint "c"`; it may name only its table's columns and holds no subquery or aggregate.
+`FOREIGN KEY (columns) REFERENCES parent [(columns)]` (or `REFERENCES` on a column) needs the
+parent's primary key or a unique constraint on exactly those columns (`42830` otherwise) and
+types that compare (`42804`). A child row with a NULL in any key column is not checked (`MATCH
+SIMPLE`); otherwise its key must be in the parent (`23503 insert or update on table "c" violates
+foreign key constraint "f"`, `Key (a)=(5) is not present in table "p".`). Deleting or changing
+a parent key runs `ON DELETE` / `ON UPDATE`: `NO ACTION` (the default) and `RESTRICT` refuse
+while children remain, `CASCADE` deletes or updates them, `SET NULL` and `SET DEFAULT` change
+their keys (a default must itself be in the parent). Cascades go any depth, self-references
+included, through a queue charged to the statement's 1 GiB work memory. Foreign keys are
+checked when the statement ends, so a multi-row `INSERT` may insert a child before its parent;
+`DEFERRABLE` and `INITIALLY DEFERRED` are accepted and behave as `IMMEDIATE`. A child is found
+through an index on its key columns when there is one: create one on large children, as in
+PostgreSQL. `TRUNCATE` of a referenced table is `0A000`. At most 1,024 checks and 1,024 foreign
+keys a table, a foreign key of at most 32 columns. In SQLite foreign keys are enforced only after
+`PRAGMA foreign_keys = ON` (off by default, as in SQLite), with `FOREIGN KEY constraint failed`
+and `CHECK constraint failed: name` (an unnamed check is named by its text); MySQL answers 1452,
+1451 and 3819 with its constraint text, Oracle ORA-02291, ORA-02292 and ORA-02290.
+
+**ALTER TABLE** takes several actions separated by commas, all in one transaction:
+- `ADD [COLUMN] [IF NOT EXISTS] column type [constraints]`: existing rows read the new column's
+  default, each row its own (`DEFAULT nextval('s')` numbers them); `NOT NULL` without a default
+  on a table with rows is `23502`. Adding a primary key, `serial` or identity column this way
+  is `0A000`.
+- `DROP [COLUMN] [IF EXISTS] column [CASCADE | RESTRICT]`: drops the indexes and checks on the
+  column, the foreign keys that use it, and the sequences it owns; another table's foreign key
+  that references it is `2BP01` unless `CASCADE`.
+- `RENAME [COLUMN] a TO b`, `RENAME TO name`: foreign keys, owned sequences and check
+  expressions follow.
+- `ALTER [COLUMN] c SET DEFAULT expr | DROP DEFAULT | SET NOT NULL | DROP NOT NULL |
+  [SET DATA] TYPE type`: `SET NOT NULL` checks every row; `TYPE` converts every row as an
+  assignment would (`42804 column "c" cannot be cast automatically to type t` otherwise;
+  `USING` is not supported yet).
+- `ADD [CONSTRAINT name] PRIMARY KEY (columns) | UNIQUE (columns) | CHECK (expr) | FOREIGN KEY
+  ...`: existing rows are checked first (`could not create unique index "t_pkey"`, `check
+  constraint "c" of relation "t" is violated by some row`). `DROP CONSTRAINT [IF EXISTS] name
+  [CASCADE | RESTRICT]` drops a check, foreign key, unique constraint or the primary key.
+- `OWNER TO role` is accepted and does nothing, as `pg_dump` writes it.
+
+MySQL's spellings: `ADD [COLUMN]`, `DROP [COLUMN]`, `MODIFY [COLUMN] definition` and `CHANGE
+[COLUMN] old definition` (the whole definition is replaced, as in MySQL), `ALTER [COLUMN] c SET
+DEFAULT | DROP DEFAULT`, `RENAME [TO | AS] name`, `RENAME COLUMN`, `ADD [CONSTRAINT [name]]
+PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK`, `DROP PRIMARY KEY`, `DROP FOREIGN KEY name`, `DROP
+CHECK name`, `DROP INDEX name` and `AUTO_INCREMENT = n` (accepted; the next value stays the
+highest one plus one). SQLite's limited `ALTER TABLE`: `ADD [COLUMN]`, `RENAME TO`, `RENAME
+[COLUMN] a TO b` and `DROP [COLUMN]` only. Oracle's: `ADD (column definitions)` or `ADD
+column`, `MODIFY (column [type] [DEFAULT expr] [NOT NULL | NULL], ...)`, `DROP COLUMN c`, `DROP
+(columns)`, `RENAME COLUMN a TO b`, `RENAME TO name`, `ADD CONSTRAINT ...`, `DROP CONSTRAINT
+name` and `DROP PRIMARY KEY`.
+
+`DROP COLUMN`, `TYPE` and adding or dropping a primary key rebuild the table's rows and indexes a
+thousand rows at a time within the statement's transaction; `ADD COLUMN` with a default rewrites
+the rows in place; the other actions change only the definition (D114).
+
 ## How SQL is stored
 
 SQL lives in the database's one ordered key space, under keys that begin with the five bytes
@@ -708,6 +794,8 @@ SQL lives in the database's one ordered key space, under keys that begin with th
 | prefix, `0x02`, table name | the table's definition: its number, columns, types, `NOT NULL`, defaults and primary key |
 | prefix, `0x03`, table number (4 bytes, big-endian), primary key | the row |
 | prefix, `0x04`, table number, index number (4 bytes each, big-endian), indexed values, primary key | empty: one entry of a secondary index |
+| prefix, `0x05`, sequence name | the sequence: its type, start, increment, bounds, cache, last value, whether it was called, cycle and owner (D114) |
+| prefix, `0x06`, parent table name (length-prefixed), child table name | empty: the child has a foreign key to the parent (D114) |
 
 A table definition is written in format version 1, or version 2 when it has an
 `AUTO_INCREMENT` column, and in version 3 only when it has secondary indexes: version 3 adds
@@ -724,7 +812,14 @@ types item 31 added is written in version 5 (D113): the version 4 layout with th
 (`time`) and 16 (`timetz`, each then one byte of fractional digits), 17 (`interval`, then its
 fields as one byte, 0 without, and its fractional digits), 18 (`bytea`), 19 (`uuid`) and 20
 (`character`, then its length as a 32-bit little-endian number, 0 without). Tables without them
-keep their version and bytes; an older release refuses a version 5 table by name.
+keep their version and bytes; an older release refuses a version 5 table by name. A table with
+`CHECK` or `FOREIGN KEY` constraints, or a primary key named other than `table_pkey`, is written
+in version 6 (D114): the version 5 layout followed by the primary key's name (a flag byte, then
+the name), the checks (count; each its name, the dialect it was written in as one byte and its
+expression text) and the foreign keys (count; each its name, its column numbers, the parent's
+name, the parent's column names, the `ON DELETE` and `ON UPDATE` actions as one byte each and a
+`DEFERRABLE` flag). Other tables keep their version and bytes; an older release refuses a
+version 6 table by name.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
@@ -883,7 +978,7 @@ until they are fixed:
   must reach 1.0 before v0.3.0 (item 19e, D100).
 
 ## Known differences from MySQL
-The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 183 cases from the MySQL 8.0
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 205 cases from the MySQL 8.0
 Reference Manual's documented behaviour) marks these as differing until they are fixed:
 - `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`, and decimal constants
   outside a `DECIMAL` column are doubles (`0.1 + 0.2` is `0.30000000000000004`); stored into a
@@ -895,6 +990,17 @@ Reference Manual's documented behaviour) marks these as differing until they are
   past a day (up to `838:59:59`, D113) fail with an error.
 
 And more, not in the suite yet:
+- Constraints are checked when each statement ends: `INITIALLY DEFERRED` waits for nothing, and
+  `RESTRICT` behaves as `NO ACTION` (an `UPDATE` that moves a referenced key away and back in one
+  statement passes both). `NOT VALID`, `RENAME CONSTRAINT`, `ALTER COLUMN ... TYPE ... USING` and
+  `ADD COLUMN` of a `serial` or identity column answer `0A000`.
+- A sequence's `CACHE` is remembered, not used: every value is saved. A value handed out by a
+  transaction that rolled back can be handed out once more if another connection's writer starts
+  between the rollback and the re-saving of the sequence (D114); a committed value never is.
+  `serial` and identity columns have no visible sequence (`pg_get_serial_sequence` waits for
+  item 37); `nextval` takes a name, not an OID.
+- `\d`, `SHOW CREATE TABLE`, `sqlite_schema` and `.schema` do not show `CHECK` and `FOREIGN KEY`
+  constraints yet.
 - Comparisons and `IS` tests are booleans, shown as `1` and `0`, but arithmetic on them (`TRUE +
   1`) and `IF(1, ...)` with an integer condition are type errors where MySQL treats booleans as
   integers. Strings are not converted to numbers implicitly (`'5' + 1` with a typed string).
@@ -929,10 +1035,12 @@ And more, not in the suite yet:
 - Indexes: a key on a column prefix (`KEY k (name(10))`) indexes the whole value, and a
   `UNIQUE` one answers 1235; `FULLTEXT` and `SPATIAL` keys answer 1235. `SHOW INDEX` gives
   `Cardinality` and `Sub_part` as `NULL`, and `EXPLAIN` gives `key_len`, `ref` and `rows` as
-  `NULL`. `ALTER TABLE ... ADD INDEX` waits for `ALTER TABLE`.
+  `NULL`. `ALTER TABLE ... ADD INDEX` answers 1235 (use `CREATE INDEX`), and `FIRST`/`AFTER`
+  in `ALTER TABLE` too. Foreign keys are checked when the statement ends, not row by row, and
+  creating one makes no index on the child's columns (InnoDB makes one).
 
 ## Known differences from SQLite
-The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 198 cases from sqlite.org's
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 217 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
@@ -975,18 +1083,19 @@ And more, not in the suite yet:
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 219 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 236 cases from Oracle's SQL
 Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
   primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
 - `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`,
   and `FETCH ... PERCENT` and `WITH TIES`.
 - `LISTAGG` and `MERGE`.
-- Sequences (`CREATE SEQUENCE`, `seq.NEXTVAL`, `seq.CURRVAL`, `DROP SEQUENCE`): they need
-  state kept in the file, a file-format change of their own (D108).
 - An identity column that is not the first column of the primary key.
 
 And more, not in the suite yet:
+- Sequences hold 64-bit values: `NOMAXVALUE` is 9223372036854775807 (Oracle's is 10^28 - 1) and
+  a larger `MAXVALUE` counts as `NOMAXVALUE`. Two `NEXTVAL` references in one row give two values
+  (Oracle gives the row one), and the column of `s.NEXTVAL` is headed `S.NEXTVAL`.
 - `NUMBER(p)` with `p` up to 18 is enforced by its storage type's range, not by `p` (no
   `ORA-01438` for 1000 in a `NUMBER(3)`); decimal constants, `/` and the numeric functions
   compute in double precision (`1/3` has 15 significant digits where Oracle has 38); `NUMBER`

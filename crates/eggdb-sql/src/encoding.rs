@@ -2457,7 +2457,10 @@ mod tests {
     #[test]
     fn sequences_are_read_back_and_damaged_ones_refused() {
         let bytes = sequence().encode();
-        assert_eq!(super::SequenceDefinition::decode(&bytes).unwrap(), sequence());
+        assert_eq!(
+            super::SequenceDefinition::decode(&bytes).unwrap(),
+            sequence()
+        );
         let mut unowned = sequence();
         unowned.owned_by = None;
         unowned.is_called = false;
@@ -2488,7 +2491,9 @@ mod tests {
         assert!(invalid(|sequence| sequence.start = 51));
         assert!(invalid(|sequence| sequence.max = i64::from(i32::MAX) + 1));
         assert!(invalid(|sequence| sequence.sql_type = SqlType::Text));
-        assert!(invalid(|sequence| sequence.owned_by = Some((String::new(), "id".into()))));
+        assert!(invalid(
+            |sequence| sequence.owned_by = Some((String::new(), "id".into()))
+        ));
         let flags_at = 1 + 1 + 6 * 8;
         let mut flags = bytes.clone();
         flags[flags_at] = 4;

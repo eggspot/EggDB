@@ -632,7 +632,10 @@ fn prepared_sequence_calls_describe_without_running() {
         description.columns.unwrap()[0].sql_type,
         Some(crate::SqlType::BigInt)
     );
-    assert_eq!(last(&mut session, "SELECT nextval('s')"), "nextval\n1\nSELECT 1");
+    assert_eq!(
+        last(&mut session, "SELECT nextval('s')"),
+        "nextval\n1\nSELECT 1"
+    );
 }
 
 struct Seeded(u64);
@@ -647,7 +650,7 @@ impl Seeded {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Action {
+enum Referential {
     Cascade,
     SetNull,
     SetDefault,
@@ -655,7 +658,7 @@ enum Action {
     NoAction,
 }
 
-impl Action {
+impl Referential {
     fn sql(self) -> &'static str {
         match self {
             Self::Cascade => "CASCADE",
@@ -682,14 +685,14 @@ impl Model {
             .collect()
     }
 
-    fn remove_or_move(&mut self, old: i64, new: Option<i64>, action: Action) -> bool {
+    fn remove_or_move(&mut self, old: i64, new: Option<i64>, action: Referential) -> bool {
         let children = self.referencing(old);
         if children.is_empty() {
             return true;
         }
         match action {
-            Action::Restrict | Action::NoAction => false,
-            Action::Cascade => {
+            Referential::Restrict | Referential::NoAction => false,
+            Referential::Cascade => {
                 for child in children {
                     match new {
                         Some(new) => {
@@ -702,13 +705,13 @@ impl Model {
                 }
                 true
             }
-            Action::SetNull => {
+            Referential::SetNull => {
                 for child in children {
                     self.children.insert(child, None);
                 }
                 true
             }
-            Action::SetDefault => {
+            Referential::SetDefault => {
                 if !self.parents.contains(&0) {
                     return false;
                 }
@@ -720,7 +723,7 @@ impl Model {
         }
     }
 
-    fn apply(&mut self, operation: &Operation, action: Action) -> bool {
+    fn apply(&mut self, operation: &Operation, action: Referential) -> bool {
         let mut next = self.clone();
         let ok = match *operation {
             Operation::InsertParent(id) => next.parents.insert(id),
@@ -734,9 +737,7 @@ impl Model {
                     || !self.parents.contains(&id)
             }
             Operation::UpdateParent(old, new) => {
-                if !next.parents.contains(&old) {
-                    true
-                } else if old == new {
+                if !next.parents.contains(&old) || old == new {
                     true
                 } else if next.parents.contains(&new) {
                     false
@@ -809,11 +810,11 @@ fn table_state(session: &mut Session<'_, MemoryStore>) -> Model {
 #[test]
 fn referential_actions_agree_with_a_model_with_and_without_an_index() {
     for action in [
-        Action::Cascade,
-        Action::SetNull,
-        Action::SetDefault,
-        Action::Restrict,
-        Action::NoAction,
+        Referential::Cascade,
+        Referential::SetNull,
+        Referential::SetDefault,
+        Referential::Restrict,
+        Referential::NoAction,
     ] {
         for indexed in [false, true] {
             let store = MemoryStore::default();
@@ -877,7 +878,10 @@ fn constraint_bounds_hold() {
         script.push_str(&format!(", ({id}, {})", id - 1));
     }
     last(&mut session, &script);
-    assert_eq!(last(&mut session, "DELETE FROM chain WHERE id = 0"), "DELETE 1");
+    assert_eq!(
+        last(&mut session, "DELETE FROM chain WHERE id = 0"),
+        "DELETE 1"
+    );
     assert_eq!(
         last(&mut session, "SELECT count(*) FROM chain"),
         "count\n0\nSELECT 1"
@@ -911,8 +915,40 @@ fn constraint_bounds_hold() {
     let error = fails(&mut session, "INSERT INTO named VALUES (0)");
     assert_eq!(error.state().code(), "23514");
     assert!(error.message().contains(&"n".repeat(63)), "{error}");
-    let nested = format!("CREATE TABLE deep (a int CHECK ({}a > 0{}))", "(".repeat(5_000), ")".repeat(5_000));
+    let nested = format!(
+        "CREATE TABLE deep (a int CHECK ({}a > 0{}))",
+        "(".repeat(5_000),
+        ")".repeat(5_000)
+    );
     assert_eq!(fails(&mut session, &nested).state().code(), "54001");
     let explained = last(&mut session, "EXPLAIN SELECT * FROM chain WHERE id = 1");
     assert!(explained.contains("chain"), "{explained}");
+}
+
+#[test]
+fn foreign_keys_refuse_definitions_their_encoding_cannot_hold() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE p (a int, b int, PRIMARY KEY (a, b))",
+    );
+    assert_eq!(
+        fails(
+            &mut session,
+            "CREATE TABLE c (x int, y int, FOREIGN KEY (x, y) REFERENCES p (a, a))"
+        )
+        .state()
+        .code(),
+        "42830"
+    );
+    let columns: Vec<String> = (0..33).map(|n| format!("c{n} int")).collect();
+    let names: Vec<String> = (0..33).map(|n| format!("c{n}")).collect();
+    let sql = format!(
+        "CREATE TABLE wide ({}, FOREIGN KEY ({}) REFERENCES p)",
+        columns.join(", "),
+        names.join(", ")
+    );
+    assert_eq!(fails(&mut session, &sql).state().code(), "54011");
+    session.tables().unwrap();
 }

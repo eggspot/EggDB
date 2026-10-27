@@ -273,7 +273,10 @@ ALTER TABLE ONLY public.kids
         refused[0].field(b'D').as_deref(),
         Some("Key (parent_id)=(9) is not present in table \"parents\".")
     );
-    assert_eq!(client.query("INSERT INTO kids VALUES (2, 1, -1)")[0].code(), "23514");
+    assert_eq!(
+        client.query("INSERT INTO kids VALUES (2, 1, -1)")[0].code(),
+        "23514"
+    );
     client.query("DELETE FROM parents WHERE id = 1");
     assert_eq!(
         rows(&client.query("SELECT count(*) FROM kids")),

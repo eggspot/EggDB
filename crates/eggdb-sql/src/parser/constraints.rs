@@ -453,13 +453,11 @@ impl Parser<'_> {
         if self.take_word("drop") {
             return self.drop_action(actions, position);
         }
-        if self.postgresql() || self.mysql() {
-            if self.take_word("alter") {
-                self.take_word("column");
-                let column = self.name()?;
-                actions.push(self.alter_column_action(column)?);
-                return Ok(());
-            }
+        if (self.postgresql() || self.mysql()) && self.take_word("alter") {
+            self.take_word("column");
+            let column = self.name()?;
+            actions.push(self.alter_column_action(column)?);
+            return Ok(());
         }
         if self.postgresql() && self.take_word("owner") {
             self.expect_word("to")?;

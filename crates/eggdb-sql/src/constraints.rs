@@ -812,6 +812,16 @@ pub(crate) fn define_foreign_key(
             }
         }
     };
+    if key.columns.len() > crate::encoding::MAX_INDEX_COLUMNS {
+        return Err(SqlError::new(
+            SqlState::TOO_MANY_COLUMNS,
+            format!(
+                "cannot have more than {} keys in a foreign key",
+                crate::encoding::MAX_INDEX_COLUMNS
+            ),
+        )
+        .at(spec.position));
+    }
     let mut columns = Vec::with_capacity(key.columns.len());
     for name in &key.columns {
         let index = table.column_index(&name.text).ok_or_else(|| {
@@ -827,7 +837,7 @@ pub(crate) fn define_foreign_key(
         if columns.contains(&index) {
             return Err(SqlError::new(
                 SqlState::DUPLICATE_COLUMN,
-                format!("foreign key referenced-columns list must not contain duplicates"),
+                "foreign key referenced-columns list must not contain duplicates".to_owned(),
             )
             .at(name.position));
         }
@@ -847,6 +857,13 @@ pub(crate) fn define_foreign_key(
                     )
                     .at(name.position)
                 })?;
+                if found.contains(&index) {
+                    return Err(invalid_key(
+                        "foreign key referenced-columns list must not contain duplicates"
+                            .to_owned(),
+                    )
+                    .at(name.position));
+                }
                 found.push(index);
             }
             found

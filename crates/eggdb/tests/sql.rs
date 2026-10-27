@@ -358,7 +358,10 @@ fn a_killed_process_never_rewinds_a_sequence_or_breaks_a_foreign_key() {
         drop(session);
         assert_eq!(db.check().unwrap().leaked_pages, 0);
     }
-    assert!(highest_seen > 0, "no run committed a row before it was killed");
+    assert!(
+        highest_seen > 0,
+        "no run committed a row before it was killed"
+    );
 }
 
 #[test]

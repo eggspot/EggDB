@@ -403,11 +403,13 @@ fn add_column(
     Ok(None)
 }
 
+type ReferencingKey = (Arc<TableDefinition>, String, Vec<String>);
+
 fn referencing_keys(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     table: &TableDefinition,
-) -> SqlResult<Vec<(Arc<TableDefinition>, String, Vec<String>)>> {
+) -> SqlResult<Vec<ReferencingKey>> {
     let mut found = Vec::new();
     for child in constraints::referencing_tables(writer, &table.name)? {
         if child == table.name {
