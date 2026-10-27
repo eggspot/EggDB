@@ -4263,8 +4263,12 @@ is not met on Linux for this line. As with D99 and D94 (issue #52), the pull req
 a schedule, not a waiver. It improves the Linux ratio about 2.7 times and makes no existing line
 worse. The line is gated at today's value (15% ceiling, may only shrink), and D99's condition
 applies unchanged: at most 1.0 on macOS and Linux before v0.3.0, or a D7 research recorded here.
-The next steps are profiles on Linux x86-64 (`perf`) before any change: allocations in the hash
-build (`values`, `next` and the map grow without a reserve, and glibc's allocator costs more
+Allocation count is not the cause: a test in the compare crate counts the allocations of one
+statement on its own thread and finds 152 for the join over 10,000 rows (189 before its hash
+table was sized from the row count seen at the same commit) and 717 for the `GROUP BY`, a
+statement's worth rather than one per row, and it fails if they pass 300 and 1,000. With that
+sizing the Linux join measured 1.36. The next steps are profiles on Linux x86-64 (`perf`)
+before any change: the hash build (`values`, `next` and the map grow without a reserve, and glibc's allocator costs more
 than Apple's for small vectors), `Value` clones and drops per probe, and the probe loop's branch
 misses against SQLite's rowid seeks on the same machine. They are item 19e.
 
@@ -4286,5 +4290,5 @@ unexplained loosening would not be. The macOS line stays at 1.226, and D99's con
 **Binary size (D6).** The stripped release `eggdb` grows from 1,198,032 to {M:,} bytes on
 aarch64 macOS (+{M-1198032:,}, +{(M-1198032)/1198032*100:.1f}%) for the join planner and executor, the hash join, column pruning,
 the grouping rewrite and the aggregate states; start time and peak memory stay within their lines (1,671,168 and 2,359,296
-bytes peak). On x86-64 Linux it grows from 1,461,576 to 1,591,632 bytes (+130,056, +8.9%) with the
+bytes peak). On x86-64 Linux it grows from 1,461,576 to 1,595,088 bytes (+133,512, +9.1%) with the
 hash join and column pruning; peak memory stays within its lines.

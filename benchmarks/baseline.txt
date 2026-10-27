@@ -51,7 +51,7 @@ linux btree.scan_reverse ratio_to_std_btreemap 5.586
 linux database.open ratio_to_store_open 1.002
 linux database.read ratio_to_store_read 1.006
 linux database.write ratio_to_store_commit 0.997
-linux footprint.binary stripped_release_bytes 1591632
+linux footprint.binary stripped_release_bytes 1595088
 linux footprint.open_and_get peak_resident_bytes 5670912
 linux footprint.open_and_get ratio_to_a_program_that_exits_at_once 1.421
 linux footprint.start peak_resident_bytes 3043328
