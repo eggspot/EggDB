@@ -17,7 +17,7 @@ eggdb sql shop.db -c "SELECT i.name, count(s.id), sum(s.quantity) FROM items i L
 
 These are the first parts of the SQL core (roadmap items 19 and 19b). What comes next is listed
 at the end. The same tables also speak MySQL's SQL: see "The MySQL dialect" and "Connecting with
-mysql" below (roadmap item 22, D106).
+mysql" below (roadmap item 22, D106), and SQLite's: see "The SQLite dialect" (item 24, D107).
 
 ## Connecting with psql
 
@@ -122,6 +122,69 @@ What it reads, on top of the statements of "What runs today":
   end the transaction when the failing statement had not written yet; `SET autocommit = 0`
   keeps a transaction open from the first write to `COMMIT` or `ROLLBACK`; `CREATE TABLE`,
   `DROP TABLE` and `START TRANSACTION` commit an open transaction first.
+
+## The SQLite dialect
+
+`eggdb sql --dialect sqlite`, `eggdb shell --dialect sqlite` and the embedded API
+(`eggdb::sql`, [embedded.md](embedded.md#sql)) read SQLite's SQL, as sqlite.org documents it
+(roadmap item 24, D107). It works on the same tables as the other dialects. Reading and writing
+SQLite's own file format is a later item: EggDB keeps its own file, and SQLite's SQL runs on it.
+
+```sh
+eggdb sql --create --dialect sqlite notes.db -c "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL, stars INT DEFAULT 0)"
+eggdb sql --dialect sqlite notes.db -c "INSERT INTO notes (body) VALUES ('first'), ('second'); SELECT last_insert_rowid()"
+eggdb sql --dialect sqlite notes.db -c "INSERT INTO notes VALUES (1, 'again', 5) ON CONFLICT (id) DO UPDATE SET stars = stars + excluded.stars"
+eggdb sql --dialect sqlite notes.db -c "PRAGMA table_info(notes); SELECT name, sql FROM sqlite_schema"
+```
+
+What it reads, on top of the statements of "What runs today":
+- **Lexical rules**: `"..."`, `` `...` `` and `[...]` identifiers (all case-insensitive, like
+  unquoted names), `'...'` strings without backslash escapes, `--` and `/* */` comments (an
+  unterminated `/*` ends at the end of the text), the parameters `?`, `?NNN` (1 to 32766),
+  `:name`, `@name` and `$name` numbered as SQLite numbers them; a parameter without a value is
+  NULL.
+- **Type affinity** from the declared type name, by datatype3.html's rules in order: a name
+  containing `INT` is an integer (`bigint`, 64 bits), `CHAR`, `CLOB` or `TEXT` text (lengths
+  such as `VARCHAR(10)` are not enforced, as in SQLite), `REAL`, `FLOA` or `DOUB` a real
+  (`double precision`), no type at all text; the rest (`NUMERIC` affinity) is a real, except
+  `BOOLEAN` (an integer) and names containing `DATE` or `TIME` (text, as SQLite's date
+  functions keep them). `BLOB` columns wait for the blob type.
+- **Row ids**: a column declared exactly `INTEGER PRIMARY KEY` (on the column or as the table's
+  one-column key) is the row id: a NULL or missing value takes one more than the largest in
+  the table; `AUTOINCREMENT` is accepted on it (and refused elsewhere, as in SQLite);
+  `last_insert_rowid()`, `changes()` and `total_changes()` report as SQLite does.
+- **Statements**: `CREATE TABLE [IF NOT EXISTS]` with `WITHOUT ROWID` and `STRICT` accepted,
+  `REFERENCES` and `FOREIGN KEY` accepted and not enforced (SQLite's default, `PRAGMA
+  foreign_keys` off), `ON CONFLICT ABORT|FAIL` in constraints; `INSERT OR
+  REPLACE|IGNORE|ABORT|FAIL|ROLLBACK`, `REPLACE INTO`, upserts (`ON CONFLICT [(cols)] DO
+  NOTHING` and `DO UPDATE SET ... excluded.col`), `RETURNING`; `LIMIT n OFFSET m`, `LIMIT m, n`
+  and a negative `LIMIT` for no limit; `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION]`,
+  `COMMIT`, `END`, `ROLLBACK`, with SQLite's errors for a `BEGIN` inside a transaction and a
+  `COMMIT` or `ROLLBACK` outside one; a failing statement inside a transaction leaves it open,
+  and `INSERT OR ROLLBACK` rolls it back.
+- **The schema table**: `sqlite_schema` and `sqlite_master` (with `type`, `name`, `tbl_name`,
+  `rootpage` and `sql`) list the tables; `sqlite_temp_schema`/`sqlite_temp_master` are empty.
+- **PRAGMAs**: `table_info(t)`, `table_list[(t)]`, `foreign_keys`, `user_version`,
+  `journal_mode`, `synchronous` and `encoding`; unknown PRAGMAs do nothing, as in SQLite.
+- **Expressions**: `||`, `==`, `IS`/`IS NOT` between any two values, `LIKE` ignoring ASCII
+  case, `GLOB` with `*` and `?`, integers as conditions (`WHERE active`, `NOT 0`), `TRUE` and
+  `FALSE` as 1 and 0, comparisons giving 1 and 0, division and remainder by zero giving NULL,
+  and result columns named by their text (`SELECT count(*)` gives a column `count(*)`).
+- **Functions**: `ifnull`, `nullif`, `coalesce`, `iif`, `typeof`, `length`, `substr` and
+  `substring`, `upper`, `lower` (ASCII only, as SQLite's), `trim`, `ltrim`, `rtrim`, `replace`,
+  `instr`, `abs`, `round`, scalar `min` and `max`, `random`, `hex`, `quote`, `printf` and
+  `format`, `like`, `glob`, `sqlite_version()` (`3.46.0`), `last_insert_rowid`, `changes`,
+  `total_changes`, and the aggregates `count`, `sum`, `avg`, `min` and `max`.
+- **Values print as SQLite prints them**: reals with up to 15 significant digits and a decimal
+  point (`2.0`, `0.333333333333333`, `1.0e+20`).
+- **Errors** with SQLite's wording and result codes: `Error: near "FORM": syntax error`, `no
+  such table: t`, `table t already exists`, `no such column: x`, `UNIQUE constraint failed:
+  t.id` (`SQLITE_CONSTRAINT_PRIMARYKEY`, 1555), `NOT NULL constraint failed: t.c`
+  (`SQLITE_CONSTRAINT_NOTNULL`, 1299), `no such function: f`, `wrong number of arguments to
+  function f()`, `datatype mismatch` (`SQLITE_MISMATCH`, 20) and the rest as `SQLITE_ERROR` (1).
+  `eggdb sql` and `eggdb shell` print the message and a `Result code:` line;
+  `SqlError::vendor_code` gives the extended result code and `sqlite_result_code_name` its
+  name.
 
 ## Connecting with mysql
 
@@ -413,6 +476,42 @@ And more, not in the suite yet:
   `transaction_isolation`: every transaction is serializable); `SET GLOBAL` is refused.
 - `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`, `double` for `DECIMAL`).
 
+## Known differences from SQLite
+The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 149 cases from sqlite.org's
+documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
+fixed:
+- A column has one type: the affinity's. SQLite's columns may hold any storage class, so a
+  `NUMERIC` column given `7` keeps the integer `7` where EggDB keeps the real `7.0`, and an
+  `INTEGER` column given `'abc'` keeps the text where EggDB answers `datatype mismatch`.
+- Dates and times: `date()`, `time()`, `datetime()`, `julianday()`, `strftime()`,
+  `unixepoch()` and `CURRENT_TIMESTAMP` wait for the timestamp type (item 19d).
+
+And more, not in the suite yet:
+- Columns without a declared type are text, so `typeof()` says `text` for numbers stored
+  there; `BLOB` columns and `x'...'` literals wait for the blob type. A real given to an
+  `INTEGER` column is rounded where SQLite keeps it as a real, and `CAST('abc' AS INTEGER)` is
+  an error where SQLite gives 0.
+- Names fold to lower case: result columns and `PRAGMA table_info` show `id` for a column
+  declared `Id`. `PRAGMA table_info` and `sqlite_schema.sql` show the affinity's type name
+  (`INTEGER`, `TEXT`, `REAL`) and a `CREATE TABLE` regenerated from the catalog, not the text
+  as written.
+- An `INTEGER PRIMARY KEY` given `0` takes the next row id where SQLite stores 0, and
+  `AUTOINCREMENT` reuses the row id of a deleted last row (SQLite's never does).
+  `last_insert_rowid()` is not changed by inserts into tables whose key is not an `INTEGER
+  PRIMARY KEY`.
+- `changes()` counts 2 for a row that `REPLACE` or an upsert replaced, as MySQL does, where
+  SQLite counts 1.
+- A statement that fails after it wrote rows inside a transaction rolls the whole transaction
+  back, where SQLite rolls back the statement (no statement savepoints yet); `INSERT OR FAIL`
+  behaves as `ABORT`, and the `OR` forms cover the primary key only (there are no `UNIQUE`
+  constraints yet).
+- `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
+  kept in the file; foreign keys are never enforced.
+- Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
+  generated columns, views, triggers, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `WITH`, subqueries,
+  window functions, `group_concat` and `total`, the JSON and math functions, `GLOB` character
+  classes and bare columns in aggregate queries.
+
 ## Next parts (roadmap)
 - Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.
 - The `numeric`, `timestamp` and `json`/`jsonb` types, and `serial`/identity columns.
@@ -421,6 +520,6 @@ And more, not in the suite yet:
 - `RIGHT` and `FULL` joins, subqueries, and the other aggregates.
 - The rest of PostgreSQL's string functions (`substr`, `trim`, `replace`, `concat`, `position`,
   `left`, `right`, ...) and the SQL-standard `substring(... FROM ... FOR ...)` syntax.
-- Then the other dialects (items 22 to 25), each with its own correctness suite; for the PostgreSQL protocol,
+- Then the other dialects (items 23 and 25), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, the `pg_catalog` queries of psql's `\d` and GUI tools, `COPY` and query cancellation
   (M6a).
