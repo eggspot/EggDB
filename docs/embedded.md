@@ -158,7 +158,7 @@ fn main() -> eggdb::Result<()> {
   nothing changes under it.
 
 ## SQL
-`eggdb::sql` runs SQL on the same file, in PostgreSQL's, MySQL's or SQLite's dialect, all on
+`eggdb::sql` runs SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, all on
 the same tables ([sql.md](sql.md)). `db.sql_store()` gives the database as a SQL store, and
 `store.session(dialect)` a session on it; `execute` runs statements separated by semicolons and
 hands each result to a closure. The session's transactions are the database's write
@@ -204,7 +204,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `execute_prepared` binds parameter values as text, read as a constant of the type their place
 calls for; in SQLite's dialect a parameter left without a value is NULL, as in SQLite. Errors
 are `eggdb::sql::SqlError`s in the session's dialect: SQLite's message and extended result code
-here, MySQL's numbers in MySQL's, SQLSTATEs in all three.
+here, MySQL's numbers in MySQL's, `ORA-` numbers in Oracle's, SQLSTATEs in all four.
+
+In Oracle's dialect (`Dialect::Oracle`) the first change starts a transaction, as in Oracle:
+it holds the database's one writer until `COMMIT`, `ROLLBACK` or DDL, and `close` rolls it back,
+so commit what you want to keep. Bind variables are `:name` or `:1`, numbered in order of first
+appearance, and names fold to upper case in result columns.
+
+```rust
+use eggdb::Database;
+use eggdb::sql::{Dialect, Parameter, Value};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    # let path = std::env::temp_dir().join(format!("eggdb-guide-oracle-{}.db", std::process::id()));
+    let db = Database::open(&path)?;
+    let store = db.sql_store();
+    let mut sql = store.session(Dialect::Oracle);
+    sql.execute(
+        "CREATE TABLE emp (empno NUMBER(4) PRIMARY KEY, ename VARCHAR2(10), comm NUMBER(7,2));
+         INSERT INTO emp VALUES (7839, 'KING', NULL);
+         INSERT INTO emp VALUES (7499, 'ALLEN', 300);
+         COMMIT",
+        &mut |_| {},
+    )?;
+    let allen = [Parameter { declared_type: None, value: Some("7499".into()) }];
+    let mut rows = Vec::new();
+    sql.execute_prepared("SELECT ename, NVL(comm, 0) AS comm FROM emp WHERE empno = :id", &allen, &mut |result| {
+        let names: Vec<String> = result.columns.iter().flatten().map(|column| column.name.clone()).collect();
+        assert_eq!(names, ["ENAME", "COMM"]);
+        rows.extend(result.rows);
+        true
+    })?;
+    assert_eq!(rows, vec![vec![Value::Text("ALLEN".into()), Value::Double(300.0)]]);
+    if let Err(error) = sql.execute("SELECT * FROM missing", &mut |_| {}) {
+        assert_eq!(error.to_string(), "ORA-00942: table or view does not exist");
+    }
+    sql.close()?;
+    db.close()?;
+    # std::fs::remove_file(&path)?;
+    Ok(())
+}
+```
 
 ## Durability
 | Mode | A commit returns after | A power loss can |
