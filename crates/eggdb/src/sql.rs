@@ -29,9 +29,9 @@
 use crate::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
 use eggdb_sql::StoreFailure;
 pub use eggdb_sql::{
-    ColumnSchema, Dialect, IndexCheck, IndexSchema, Numeric, NumericModifier, OutputColumn,
-    Parameter, QueryResult, RESERVED_KEY_PREFIX, Session, SqlError, SqlResult, SqlState, SqlType,
-    TableSchema, TransactionStatus, Value, sqlite_result_code_name,
+    ColumnSchema, Dialect, IndexCheck, IndexSchema, Interval, IntervalFields, Numeric,
+    NumericModifier, OutputColumn, Parameter, QueryResult, RESERVED_KEY_PREFIX, Session, SqlError,
+    SqlResult, SqlState, SqlType, TableSchema, TransactionStatus, Value, sqlite_result_code_name,
 };
 use eggdb_sql::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use std::ops::Bound;
@@ -43,6 +43,7 @@ pub struct Store<'db>(pub &'db Database);
 impl<'db> Store<'db> {
     /// A SQL session on this database that reads `dialect`, outside any transaction block.
     pub fn session(&self, dialect: Dialect) -> Session<'_, Store<'db>> {
+        eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
         Session::with_dialect(self, dialect)
     }
 }
@@ -50,6 +51,7 @@ impl<'db> Store<'db> {
 impl Database {
     /// This database as a store for SQL: [`Store::session`] runs SQL on it in any dialect.
     pub fn sql_store(&self) -> Store<'_> {
+        eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
         Store(self)
     }
 }

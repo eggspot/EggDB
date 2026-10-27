@@ -363,7 +363,6 @@ SELECT substring('alphabet' from 3 for 2)
 substring
 ph
 SELECT 1
-... differs
 
 rows
 SELECT trim('  x  '), ltrim('  x'), rtrim('x  '), btrim('xxaxx', 'x')
@@ -1269,8 +1268,12 @@ SELECT 1
 error 0A000
 SELECT extract(hour FROM DATE '2024-02-29')
 
-error 0A000
+rows
 SELECT TIMESTAMP '2024-01-02' - TIMESTAMP '2024-01-01'
+----
+?column?
+1 day
+SELECT 1
 
 ok
 CREATE TABLE events (id integer PRIMARY KEY, day date, at timestamp, zoned timestamptz)

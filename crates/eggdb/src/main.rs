@@ -8,6 +8,7 @@ use eggdb_platform::terminal::{StandardStream, is_terminal, wants_color};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let terminal = cli::Terminal {
         stdin: is_terminal(StandardStream::Input),

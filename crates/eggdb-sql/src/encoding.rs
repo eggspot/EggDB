@@ -1,5 +1,6 @@
 use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
 use crate::types::{NumericModifier, SqlType, Value};
 
@@ -12,6 +13,7 @@ const FORMAT_VERSION: u8 = 1;
 const AUTO_INCREMENT_FORMAT_VERSION: u8 = 2;
 const INDEXES_FORMAT_VERSION: u8 = 3;
 const TYPES_FORMAT_VERSION: u8 = 4;
+const MORE_TYPES_FORMAT_VERSION: u8 = 5;
 const NO_PRECISION: u8 = 0xFF;
 const DEFAULT_ABSENT: u8 = 0;
 const DEFAULT_EXPRESSION: u8 = 1;
@@ -21,6 +23,7 @@ pub(crate) const NULL_IN_KEY: u8 = 0x02;
 pub(crate) const MAX_COLUMNS: usize = 1600;
 pub(crate) const MAX_INDEX_COLUMNS: usize = 32;
 pub(crate) const MAX_INDEXES: usize = 1024;
+pub(crate) const MAX_CHARACTER_LENGTH: u32 = 10_485_760;
 
 pub(crate) fn meta_key() -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
@@ -110,11 +113,21 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::TimestampTz(_) => 12,
         SqlType::Json => 13,
         SqlType::Jsonb => 14,
+        SqlType::Time(_) => 15,
+        SqlType::TimeTz(_) => 16,
+        SqlType::Interval { .. } => 17,
+        SqlType::Bytea => 18,
+        SqlType::Uuid => 19,
+        SqlType::Bpchar(_) => 20,
     }
 }
 
 fn is_version_4_type(sql_type: SqlType) -> bool {
     type_tag(sql_type) >= type_tag(SqlType::Numeric(None))
+}
+
+fn is_version_5_type(sql_type: SqlType) -> bool {
+    type_tag(sql_type) >= type_tag(SqlType::Time(None))
 }
 
 fn put_type(out: &mut Vec<u8>, sql_type: SqlType) {
@@ -127,9 +140,17 @@ fn put_type(out: &mut Vec<u8>, sql_type: SqlType) {
             out.extend_from_slice(&precision.to_le_bytes());
             out.extend_from_slice(&scale.to_le_bytes());
         }
-        SqlType::Timestamp(precision) | SqlType::TimestampTz(precision) => {
+        SqlType::Timestamp(precision)
+        | SqlType::TimestampTz(precision)
+        | SqlType::Time(precision)
+        | SqlType::TimeTz(precision) => {
             out.push(precision.unwrap_or(NO_PRECISION));
         }
+        SqlType::Interval { fields, precision } => {
+            out.push(fields.map_or(0, IntervalFields::code));
+            out.push(precision.unwrap_or(NO_PRECISION));
+        }
+        SqlType::Bpchar(length) => out.extend_from_slice(&length.unwrap_or(0).to_le_bytes()),
         _ => {}
     }
 }
@@ -175,6 +196,12 @@ impl TableDefinition {
 
     pub(crate) fn encode(&self) -> Vec<u8> {
         let version = if self
+            .columns
+            .iter()
+            .any(|column| is_version_5_type(column.sql_type))
+        {
+            MORE_TYPES_FORMAT_VERSION
+        } else if self
             .columns
             .iter()
             .any(|column| is_version_4_type(column.sql_type))
@@ -224,9 +251,10 @@ impl TableDefinition {
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "table definition");
-        let version = reader.version_up_to(TYPES_FORMAT_VERSION)?;
+        let version = reader.version_up_to(MORE_TYPES_FORMAT_VERSION)?;
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
+        let more_types_allowed = version >= MORE_TYPES_FORMAT_VERSION;
         let id = reader.u32()?;
         let count = reader.count()?;
         if count > MAX_COLUMNS {
@@ -253,6 +281,16 @@ impl TableDefinition {
                 12 if new_types_allowed => SqlType::TimestampTz(reader.precision()?),
                 13 if new_types_allowed => SqlType::Json,
                 14 if new_types_allowed => SqlType::Jsonb,
+                15 if more_types_allowed => SqlType::Time(reader.precision()?),
+                16 if more_types_allowed => SqlType::TimeTz(reader.precision()?),
+                17 if more_types_allowed => reader.interval_type()?,
+                18 if more_types_allowed => SqlType::Bytea,
+                19 if more_types_allowed => SqlType::Uuid,
+                20 if more_types_allowed => match reader.u32()? {
+                    0 => SqlType::Bpchar(None),
+                    length if length <= MAX_CHARACTER_LENGTH => SqlType::Bpchar(Some(length)),
+                    _ => return Err(reader.damaged()),
+                },
                 _ => return Err(reader.damaged()),
             };
             let not_null = match reader.byte()? {
@@ -288,14 +326,21 @@ impl TableDefinition {
         }
         let indexes = match version {
             INDEXES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), false)?,
-            TYPES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            TYPES_FORMAT_VERSION | MORE_TYPES_FORMAT_VERSION => {
+                decode_indexes(&mut reader, columns.len(), true)?
+            }
             _ => Vec::new(),
         };
         reader.finish()?;
+        let newest_type_needed = if more_types_allowed {
+            is_version_5_type
+        } else {
+            is_version_4_type
+        };
         if new_types_allowed
             && !columns
                 .iter()
-                .any(|column| is_version_4_type(column.sql_type))
+                .any(|column| newest_type_needed(column.sql_type))
         {
             return Err(reader.damaged());
         }
@@ -456,13 +501,37 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
         }
         Value::Text(text) | Value::Json(text) => {
             out.push(PRESENT);
-            for &byte in text.as_bytes() {
-                out.push(byte);
-                if byte == 0 {
-                    out.push(0xFF);
-                }
-            }
-            out.extend_from_slice(&[0x00, 0x01]);
+            push_escaped_text(out, text.as_bytes());
+        }
+        Value::Bpchar(text) => {
+            out.push(PRESENT);
+            push_escaped_text(out, crate::types::without_trailing_spaces(text).as_bytes());
+        }
+        Value::Bytea(bytes) => {
+            out.push(PRESENT);
+            push_escaped_text(out, bytes);
+        }
+        Value::Uuid(bytes) => {
+            out.push(PRESENT);
+            out.extend_from_slice(bytes);
+        }
+        Value::Time(micros) => {
+            out.push(PRESENT);
+            out.extend_from_slice(&((*micros as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
+        }
+        Value::TimeTz {
+            micros,
+            offset_seconds,
+        } => {
+            out.push(PRESENT);
+            let utc = datetime::time_tz_utc(*micros, *offset_seconds);
+            out.extend_from_slice(&((utc as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
+            let west = offset_seconds.wrapping_neg();
+            out.extend_from_slice(&((west as u32) ^ 0x8000_0000).to_be_bytes());
+        }
+        Value::Interval(interval) => {
+            out.push(PRESENT);
+            out.extend_from_slice(&((interval.span() as u128) ^ (1 << 127)).to_be_bytes());
         }
         Value::Numeric(number) => {
             out.push(PRESENT);
@@ -553,6 +622,36 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
                 out.push(14);
                 put_bytes(out, text.as_bytes());
             }
+            Value::Time(micros) => {
+                out.push(15);
+                out.extend_from_slice(&micros.to_le_bytes());
+            }
+            Value::TimeTz {
+                micros,
+                offset_seconds,
+            } => {
+                out.push(16);
+                out.extend_from_slice(&micros.to_le_bytes());
+                out.extend_from_slice(&offset_seconds.to_le_bytes());
+            }
+            Value::Interval(interval) => {
+                out.push(17);
+                out.extend_from_slice(&interval.months.to_le_bytes());
+                out.extend_from_slice(&interval.days.to_le_bytes());
+                out.extend_from_slice(&interval.micros.to_le_bytes());
+            }
+            Value::Bytea(bytes) => {
+                out.push(18);
+                put_bytes(out, bytes);
+            }
+            Value::Uuid(bytes) => {
+                out.push(19);
+                out.extend_from_slice(bytes);
+            }
+            Value::Bpchar(text) => {
+                out.push(20);
+                put_bytes(out, text.as_bytes());
+            }
         }
     }
 }
@@ -596,11 +695,40 @@ pub(crate) fn decode_row_into(
             7 if wanted => Value::Text(reader.text()?),
             13 if wanted => Value::Json(reader.json(false)?),
             14 if wanted => Value::Jsonb(reader.json(true)?),
-            7 | 13 | 14 => {
+            18 if wanted => {
+                let length = reader.count()?;
+                Value::Bytea(reader.take(length)?.to_vec())
+            }
+            20 if wanted => Value::Bpchar(reader.text()?),
+            7 | 13 | 14 | 18 | 20 => {
                 reader.skip_text()?;
                 Value::Null
             }
             9 => Value::Numeric(reader.numeric()?),
+            15 => {
+                let micros = i64::from_le_bytes(reader.array()?);
+                if !datetime::valid_time(micros) {
+                    return Err(reader.damaged());
+                }
+                Value::Time(micros)
+            }
+            16 => {
+                let micros = i64::from_le_bytes(reader.array()?);
+                let offset_seconds = i32::from_le_bytes(reader.array()?);
+                if !datetime::valid_time(micros) || !datetime::valid_offset(offset_seconds) {
+                    return Err(reader.damaged());
+                }
+                Value::TimeTz {
+                    micros,
+                    offset_seconds,
+                }
+            }
+            17 => Value::Interval(Interval {
+                months: i32::from_le_bytes(reader.array()?),
+                days: i32::from_le_bytes(reader.array()?),
+                micros: i64::from_le_bytes(reader.array()?),
+            }),
+            19 => Value::Uuid(reader.array()?),
             10 => {
                 let days = i32::from_le_bytes(reader.array()?);
                 if !datetime::valid_date(days) {
@@ -747,6 +875,18 @@ impl<'b> Reader<'b> {
         Ok(SqlType::Numeric(Some(NumericModifier { precision, scale })))
     }
 
+    fn interval_type(&mut self) -> SqlResult<SqlType> {
+        let fields = match self.byte()? {
+            0 => None,
+            code => Some(IntervalFields::from_code(code).ok_or_else(|| self.damaged())?),
+        };
+        let precision = self.precision()?;
+        if precision.is_some() && fields.is_some_and(|fields| !fields.ends_in_seconds()) {
+            return Err(self.damaged());
+        }
+        Ok(SqlType::Interval { fields, precision })
+    }
+
     fn precision(&mut self) -> SqlResult<Option<u8>> {
         match self.byte()? {
             NO_PRECISION => Ok(None),
@@ -791,14 +931,23 @@ impl<'b> Reader<'b> {
             SqlType::Boolean => 1,
             SqlType::SmallInt => 2,
             SqlType::Integer | SqlType::Real | SqlType::Date => 4,
-            SqlType::BigInt | SqlType::Double | SqlType::Timestamp(_) | SqlType::TimestampTz(_) => {
-                8
-            }
+            SqlType::BigInt
+            | SqlType::Double
+            | SqlType::Timestamp(_)
+            | SqlType::TimestampTz(_)
+            | SqlType::Time(_) => 8,
+            SqlType::TimeTz(_) => 12,
+            SqlType::Interval { .. } | SqlType::Uuid => 16,
             SqlType::Numeric(_) => {
                 let rest = self.bytes.get(self.at..).unwrap_or(&[]);
                 Numeric::key_length(rest).ok_or_else(|| self.damaged())?
             }
-            SqlType::Text | SqlType::Varchar(_) | SqlType::Json | SqlType::Jsonb => {
+            SqlType::Text
+            | SqlType::Varchar(_)
+            | SqlType::Json
+            | SqlType::Jsonb
+            | SqlType::Bytea
+            | SqlType::Bpchar(_) => {
                 let rest = self.bytes.get(self.at..).unwrap_or(&[]);
                 let mut at = 0;
                 loop {
@@ -873,7 +1022,40 @@ impl<'b> Reader<'b> {
                     Value::TimestampTz(micros)
                 }
             }
-            SqlType::Text | SqlType::Varchar(_) | SqlType::Json | SqlType::Jsonb => {
+            SqlType::Time(_) => {
+                let micros = (u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64;
+                if !datetime::valid_time(micros) {
+                    return Err(self.damaged());
+                }
+                Value::Time(micros)
+            }
+            SqlType::TimeTz(_) => {
+                let utc = (u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64;
+                let west = (u32::from_be_bytes(self.array()?) ^ 0x8000_0000) as i32;
+                let offset_seconds = west.wrapping_neg();
+                if !datetime::valid_offset(offset_seconds) {
+                    return Err(self.damaged());
+                }
+                let micros = utc
+                    .checked_add(i64::from(offset_seconds) * datetime::MICROS_PER_SECOND)
+                    .filter(|&micros| datetime::valid_time(micros))
+                    .ok_or_else(|| self.damaged())?;
+                Value::TimeTz {
+                    micros,
+                    offset_seconds,
+                }
+            }
+            SqlType::Interval { .. } => {
+                let span = (u128::from_be_bytes(self.array()?) ^ (1 << 127)) as i128;
+                Value::Interval(Interval::from_span(span).ok_or_else(|| self.damaged())?)
+            }
+            SqlType::Uuid => Value::Uuid(self.array()?),
+            SqlType::Text
+            | SqlType::Varchar(_)
+            | SqlType::Json
+            | SqlType::Jsonb
+            | SqlType::Bytea
+            | SqlType::Bpchar(_) => {
                 let mut bytes = Vec::new();
                 loop {
                     match self.byte()? {
@@ -885,8 +1067,12 @@ impl<'b> Reader<'b> {
                         byte => bytes.push(byte),
                     }
                 }
+                if sql_type == SqlType::Bytea {
+                    return Ok(Value::Bytea(bytes));
+                }
                 let text = String::from_utf8(bytes).map_err(|_| self.damaged())?;
                 match sql_type {
+                    SqlType::Bpchar(_) => Value::Bpchar(text),
                     SqlType::Json => Value::Json(text),
                     SqlType::Jsonb => Value::Jsonb(text),
                     _ => Value::Text(text),
@@ -1142,10 +1328,10 @@ mod tests {
     #[test]
     fn a_newer_table_definition_version_is_refused_by_name() {
         let mut newer = with_indexes([true, false]).encode();
-        newer[0] = 5;
+        newer[0] = 6;
         let error = TableDefinition::decode("t", &newer).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
-        assert!(error.message().contains("format version 5"), "{error}");
+        assert!(error.message().contains("format version 6"), "{error}");
     }
 
     fn with_indexes(auto: [bool; 2]) -> TableDefinition {

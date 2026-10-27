@@ -95,6 +95,8 @@ pub const TYPE_DATETIME: u8 = 12;
 pub const TYPE_YEAR: u8 = 13;
 /// `MYSQL_TYPE_JSON`.
 pub const TYPE_JSON: u8 = 245;
+/// `MYSQL_TYPE_BLOB`.
+pub const TYPE_BLOB: u8 = 252;
 /// `MYSQL_TYPE_NEWDECIMAL`.
 pub const TYPE_NEWDECIMAL: u8 = 246;
 /// `MYSQL_TYPE_VAR_STRING`.

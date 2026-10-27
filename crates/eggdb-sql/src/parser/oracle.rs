@@ -512,8 +512,14 @@ impl<'t> Parser<'t> {
                 if word == "character" && self.take_word("varying") {
                     return Ok(SqlType::Varchar(self.oracle_length(true)?));
                 }
-                SqlType::Varchar(Some(self.oracle_length(false)?.unwrap_or(1)))
+                SqlType::Bpchar(Some(self.oracle_length(false)?.unwrap_or(1)))
             }
+            "raw" => {
+                self.oracle_length(true)?;
+                SqlType::Bytea
+            }
+            "long" if self.take_word("raw") => SqlType::Bytea,
+            "blob" => SqlType::Bytea,
             "number" | "numeric" | "decimal" | "dec" => self.oracle_number()?,
             "integer" | "int" | "smallint" => SqlType::BigInt,
             "float" => {
@@ -536,8 +542,8 @@ impl<'t> Parser<'t> {
             "date" => SqlType::Timestamp(Some(0)),
             "timestamp" => self.oracle_timestamp(start)?,
             "json" => SqlType::Jsonb,
-            "interval" | "raw" | "long" | "blob" | "bfile" | "rowid" | "urowid" | "xmltype"
-            | "vector" | "sdo_geometry" => {
+            "interval" | "long" | "bfile" | "rowid" | "urowid" | "xmltype" | "vector"
+            | "sdo_geometry" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()

@@ -11,13 +11,15 @@
 //! with `WHERE`, inner, left, right, full and cross joins, subqueries, `WITH` queries and set
 //! operations, `GROUP BY` with `count`, `sum`, `avg`, `min` and
 //! `max`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE`,
-//! transaction blocks, and the integer, floating-point, exact `numeric`, boolean, text, `date`,
-//! `timestamp`, `timestamptz`, `json` and `jsonb` types. Everything
+//! transaction blocks, and the integer, floating-point, exact `numeric`, boolean, text,
+//! `character(n)`, `bytea`, `uuid`, `date`, `time`, `timetz`, `timestamp`, `timestamptz`,
+//! `interval`, `json` and `jsonb` types. Everything
 //! else answers SQLSTATE `0A000` (feature not supported). The guide is `docs/sql.md` in the
 //! repository.
 
 mod aggregate;
 mod ast;
+mod bytea;
 mod datetime;
 mod dialect;
 mod encoding;
@@ -27,6 +29,7 @@ mod execute;
 mod explain;
 mod hash_index;
 mod indexes;
+mod interval;
 mod join;
 mod json;
 mod lexer;
@@ -38,6 +41,7 @@ mod oracle_errors;
 mod oracle_functions;
 mod parser;
 mod plan;
+mod random;
 mod schema;
 mod session;
 mod set_operations;
@@ -47,6 +51,7 @@ mod sqlite_functions;
 mod store;
 mod subquery;
 mod temp_tables;
+mod temporal;
 mod types;
 mod typing;
 
@@ -64,10 +69,12 @@ mod tests;
 pub use dialect::Dialect;
 pub use error::{SqlError, SqlResult, SqlState};
 pub use indexes::IndexCheck;
+pub use interval::{Interval, IntervalFields};
 pub use mysql_errors::Warning;
 pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
 pub use numeric::Numeric;
 pub use parser::{ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION};
+pub use random::{RandomSource, set_random_source};
 pub use schema::{ColumnSchema, IndexSchema, TableSchema, quoted};
 pub use session::{
     OutputColumn, Parameter, PreparedStatement, QueryResult, Session, StatementDescription,

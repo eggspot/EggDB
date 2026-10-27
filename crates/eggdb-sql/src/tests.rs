@@ -593,8 +593,8 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "WITH x AS (DELETE FROM people RETURNING id) SELECT * FROM x",
         "INSERT INTO people SELECT * FROM people",
         "ALTER TABLE people ADD COLUMN x int",
-        "CREATE TABLE ts (t time)",
-        "CREATE TABLE js (j interval)",
+        "CREATE TABLE ts (t money)",
+        "CREATE TABLE js (j inet)",
         "SAVEPOINT a",
     ] {
         let error = fails(&mut session, sql);

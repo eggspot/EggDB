@@ -32,6 +32,11 @@ enum Family {
     Local,
     Zoned,
     Jsonb,
+    Time,
+    TimeTz,
+    Interval,
+    Bytea,
+    Uuid,
 }
 
 fn family(value: &Value) -> Option<Family> {
@@ -40,7 +45,12 @@ fn family(value: &Value) -> Option<Family> {
             Family::Exact
         }
         Value::Real(_) | Value::Double(_) => Family::Float,
-        Value::Text(_) => Family::Text,
+        Value::Text(_) | Value::Bpchar(_) => Family::Text,
+        Value::Time(_) => Family::Time,
+        Value::TimeTz { .. } => Family::TimeTz,
+        Value::Interval(_) => Family::Interval,
+        Value::Bytea(_) => Family::Bytea,
+        Value::Uuid(_) => Family::Uuid,
         Value::Boolean(_) => Family::Boolean,
         Value::Date(_) | Value::Timestamp(_) => Family::Local,
         Value::TimestampTz(_) => Family::Zoned,

@@ -485,8 +485,17 @@ impl<'t> Parser<'t> {
                 }
             }
             "text" | "tinytext" | "mediumtext" | "longtext" => SqlType::Text,
-            "time" | "year" | "blob" | "tinyblob" | "mediumblob" | "longblob" | "binary"
-            | "varbinary" | "bit" | "enum" | "set" | "geometry" | "point" => {
+            "time" => SqlType::Time(Some(self.fractional_digits(width, token.start)?)),
+            "blob" | "tinyblob" | "mediumblob" | "longblob" => SqlType::Bytea,
+            "binary" => {
+                width.map_or(Ok(1), |length| self.length(length, token.start))?;
+                SqlType::Bytea
+            }
+            "varbinary" => {
+                self.required_length(width, token.start)?;
+                SqlType::Bytea
+            }
+            "year" | "bit" | "enum" | "set" | "geometry" | "point" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()

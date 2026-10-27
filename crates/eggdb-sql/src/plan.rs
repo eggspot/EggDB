@@ -120,6 +120,12 @@ fn column_of(expr: &Expr, scope: Scope<'_>) -> Option<usize> {
 fn same_family(value: &Value, sql_type: SqlType) -> bool {
     match value {
         Value::Text(_) => sql_type.is_string(),
+        Value::Bpchar(_) => matches!(sql_type, SqlType::Bpchar(_)),
+        Value::Bytea(_) => sql_type == SqlType::Bytea,
+        Value::Uuid(_) => sql_type == SqlType::Uuid,
+        Value::Time(_) => matches!(sql_type, SqlType::Time(_)),
+        Value::TimeTz { .. } => matches!(sql_type, SqlType::TimeTz(_)),
+        Value::Interval(_) => matches!(sql_type, SqlType::Interval { .. }),
         Value::Boolean(_) => sql_type == SqlType::Boolean,
         Value::Null | Value::Json(_) => false,
         Value::Jsonb(_) => sql_type == SqlType::Jsonb,

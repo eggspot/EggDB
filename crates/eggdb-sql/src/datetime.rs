@@ -448,6 +448,165 @@ pub(crate) fn parse_timestamp(text: &str, with_zone: bool) -> SqlResult<i64> {
     checked_timestamp(micros).map_err(|_| out_of_range_input(kind, text))
 }
 
+pub(crate) const MAX_OFFSET: i32 = MAX_OFFSET_SECONDS as i32;
+
+fn time_input_error(with_zone: bool, text: &str, failure: Failure) -> SqlError {
+    let name = if with_zone {
+        "time with time zone"
+    } else {
+        "time without time zone"
+    };
+    match failure {
+        Failure::Syntax => SqlError::new(
+            SqlState::INVALID_DATETIME_FORMAT,
+            format!("invalid input syntax for type {name}: \"{text}\""),
+        ),
+        Failure::Field => SqlError::new(
+            SqlState::DATETIME_FIELD_OVERFLOW,
+            format!("date/time field value out of range: \"{text}\""),
+        ),
+    }
+}
+
+fn clock_parts(text: &str) -> Result<(i64, Option<i64>), Failure> {
+    let trimmed = text.trim();
+    let year_digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if year_digits >= 4 && trimmed.as_bytes().get(year_digits) == Some(&b'-') {
+        let parsed = parse_parts(trimmed)?;
+        return Ok((parsed.micros, parsed.offset_seconds));
+    }
+    let mut scan = Scanner {
+        bytes: trimmed.as_bytes(),
+        at: 0,
+    };
+    let mut micros = parse_time(&mut scan)?;
+    scan.spaces();
+    let hour = micros / (3600 * MICROS_PER_SECOND);
+    let half_day = 12 * 3600 * MICROS_PER_SECOND;
+    if scan.word("am") || scan.word("a.m.") {
+        if hour > 12 {
+            return Err(Failure::Field);
+        }
+        if hour == 12 {
+            micros -= half_day;
+        }
+    } else if scan.word("pm") || scan.word("p.m.") {
+        if hour > 12 {
+            return Err(Failure::Field);
+        }
+        if hour != 12 {
+            micros += half_day;
+        }
+    }
+    scan.spaces();
+    let offset = parse_zone(&mut scan)?;
+    scan.spaces();
+    if !scan.done() {
+        return Err(Failure::Syntax);
+    }
+    Ok((micros, offset))
+}
+
+pub(crate) fn valid_time(micros: i64) -> bool {
+    (0..=MICROS_PER_DAY).contains(&micros)
+}
+
+pub(crate) fn valid_offset(offset: i32) -> bool {
+    (-MAX_OFFSET..=MAX_OFFSET).contains(&offset)
+}
+
+pub(crate) fn parse_time_of_day(text: &str, with_zone: bool) -> SqlResult<(i64, i32)> {
+    let (micros, offset) =
+        clock_parts(text).map_err(|failure| time_input_error(with_zone, text, failure))?;
+    if !valid_time(micros) {
+        return Err(time_input_error(with_zone, text, Failure::Field));
+    }
+    let offset = offset.map_or_else(session_offset, |offset| offset as i32);
+    Ok((micros, offset))
+}
+
+pub(crate) fn round_time(micros: i64, precision: u8) -> i64 {
+    if precision >= 6 {
+        return micros;
+    }
+    let unit = 10i64.pow(u32::from(6 - precision));
+    (micros + unit / 2) / unit * unit
+}
+
+pub(crate) fn format_time(micros: i64) -> String {
+    let seconds = micros / MICROS_PER_SECOND;
+    let fraction = micros % MICROS_PER_SECOND;
+    let mut out = format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    );
+    if fraction != 0 {
+        let digits = format!("{fraction:06}");
+        out.push('.');
+        out.push_str(digits.trim_end_matches('0'));
+    }
+    out
+}
+
+pub(crate) fn format_time_tz(micros: i64, offset: i32) -> String {
+    format!("{}{}", format_time(micros), format_offset(offset))
+}
+
+pub(crate) fn time_tz_utc(micros: i64, offset: i32) -> i64 {
+    micros - i64::from(offset) * MICROS_PER_SECOND
+}
+
+pub(crate) fn time_of_timestamp(micros: i64) -> i64 {
+    micros.rem_euclid(MICROS_PER_DAY)
+}
+
+pub(crate) fn wrap_time(micros: i128) -> i64 {
+    micros.rem_euclid(i128::from(MICROS_PER_DAY)) as i64
+}
+
+pub(crate) fn extract_time(name: &str, micros: i64, offset: Option<i32>) -> SqlResult<Numeric> {
+    let kind_name = if offset.is_some() {
+        "time with time zone"
+    } else {
+        "time without time zone"
+    };
+    let field = Field::named(name).ok_or_else(|| {
+        SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!("unit \"{name}\" not recognized for type {kind_name}"),
+        )
+    })?;
+    let units = i128::from(micros);
+    let within_minute = units % i128::from(60 * MICROS_PER_SECOND);
+    Ok(match (field, offset) {
+        (Field::Microseconds, _) => Numeric::from_scaled(within_minute, 0),
+        (Field::Milliseconds, _) => Numeric::from_scaled(within_minute, 3),
+        (Field::Second, _) => Numeric::from_scaled(within_minute, 6),
+        (Field::Minute, _) => {
+            Numeric::from_scaled(units / i128::from(60 * MICROS_PER_SECOND) % 60, 0)
+        }
+        (Field::Hour, _) => Numeric::from_scaled(units / i128::from(3600 * MICROS_PER_SECOND), 0),
+        (Field::Epoch, None) => Numeric::from_scaled(units, 6),
+        (Field::Epoch, Some(offset)) => Numeric::from_scaled(
+            units - i128::from(offset) * i128::from(MICROS_PER_SECOND),
+            6,
+        ),
+        (Field::Timezone, Some(offset)) => Numeric::from_scaled(i128::from(offset), 0),
+        (Field::TimezoneHour, Some(offset)) => Numeric::from_scaled(i128::from(offset / 3600), 0),
+        (Field::TimezoneMinute, Some(offset)) => {
+            Numeric::from_scaled(i128::from(offset / 60 % 60), 0)
+        }
+        _ => {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                format!("unit \"{name}\" not supported for type {kind_name}"),
+            ));
+        }
+    })
+}
+
 fn year_text(year: i64) -> (String, bool) {
     if year <= 0 {
         (format!("{:04}", 1 - year), true)

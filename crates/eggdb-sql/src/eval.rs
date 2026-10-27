@@ -518,8 +518,8 @@ impl Evaluator<'_> {
                 negated,
                 case_insensitive,
             } => {
-                let value = self.eval(expr, Some(SqlType::Text))?;
-                let pattern = self.eval(pattern, Some(SqlType::Text))?;
+                let value = as_text_if_character(self.eval(expr, Some(SqlType::Text))?);
+                let pattern = as_text_if_character(self.eval(pattern, Some(SqlType::Text))?);
                 let operator = if *case_insensitive { "~~*" } else { "~~" };
                 match (&value, &pattern) {
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
@@ -697,6 +697,7 @@ impl Evaluator<'_> {
             Value::Real(number) => Ok(Value::Real(-number)),
             Value::Double(number) => Ok(Value::Double(-number)),
             Value::Numeric(number) => Ok(Value::Numeric(number.negated())),
+            Value::Interval(interval) => interval.negated().map(Value::Interval),
             other => Err(no_prefix_operator(symbol, &other)),
         }
     }
@@ -704,8 +705,10 @@ impl Evaluator<'_> {
     fn binary(&self, operator: BinaryOperator, left: &Expr, right: &Expr) -> SqlResult<Value> {
         match operator {
             BinaryOperator::Concat => {
-                let left = self.eval(left, Some(SqlType::Text))?;
-                let right = self.eval(right, Some(SqlType::Text))?;
+                let (left, right) = self.concatenated(left, right)?;
+                if let Some(joined) = bytes_concatenated(&left, &right) {
+                    return joined;
+                }
                 let either_text = matches!(left, Value::Text(_)) || matches!(right, Value::Text(_));
                 let either_null = left.is_null() || right.is_null();
                 if !either_text && !either_null {
@@ -767,6 +770,25 @@ impl Evaluator<'_> {
                 json_select(operator, &document, &selector)
             }
         }
+    }
+
+    fn concatenated(&self, left: &Expr, right: &Expr) -> SqlResult<(Value, Value)> {
+        let bytes_hint = |value: &Value| {
+            if matches!(value, Value::Bytea(_)) {
+                Some(SqlType::Bytea)
+            } else {
+                Some(SqlType::Text)
+            }
+        };
+        let (left, right) = if is_unknown_literal(left) && !is_unknown_literal(right) {
+            let right = self.eval(right, Some(SqlType::Text))?;
+            (self.eval(left, bytes_hint(&right))?, right)
+        } else {
+            let left = self.eval(left, Some(SqlType::Text))?;
+            let right = self.eval(right, bytes_hint(&left))?;
+            (left, right)
+        };
+        Ok((as_text_if_character(left), as_text_if_character(right)))
     }
 
     fn datetime_function(&self, name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
@@ -908,9 +930,13 @@ impl Evaluator<'_> {
         }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
+        let arguments_share_a_type =
+            !matches!(name, "encode" | "decode" | "get_byte" | "substring");
         for argument in arguments {
             let value = self.eval(argument, hint)?;
-            hint = hint.or_else(|| self.type_of(&value, argument));
+            if arguments_share_a_type {
+                hint = hint.or_else(|| self.type_of(&value, argument));
+            }
             values.push(value);
         }
         let unknown = || {
@@ -930,6 +956,12 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = json_function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::temporal::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::bytea::function(name, &values) {
             return result;
         }
         match (name, values.as_slice()) {
@@ -992,6 +1024,31 @@ impl Evaluator<'_> {
             _ => Err(unknown()),
         }
     }
+}
+
+fn as_text_if_character(value: Value) -> Value {
+    match value {
+        Value::Bpchar(mut text) => {
+            text.truncate(crate::types::without_trailing_spaces(&text).len());
+            Value::Text(text)
+        }
+        other => other,
+    }
+}
+
+fn bytes_concatenated(left: &Value, right: &Value) -> Option<SqlResult<Value>> {
+    let joined = |a: &[u8], b: &[u8]| -> SqlResult<Value> {
+        crate::bytea::check_size(a.len().saturating_add(b.len()))?;
+        let mut out = Vec::with_capacity(a.len() + b.len());
+        out.extend_from_slice(a);
+        out.extend_from_slice(b);
+        Ok(Value::Bytea(out))
+    };
+    Some(match (left, right) {
+        (Value::Bytea(a), Value::Bytea(b)) => joined(a, b),
+        (Value::Bytea(_), Value::Null) | (Value::Null, Value::Bytea(_)) => Ok(Value::Null),
+        _ => return None,
+    })
 }
 
 fn extreme(name: &str, values: &[Value]) -> SqlResult<Value> {
@@ -1226,14 +1283,6 @@ fn json_select(operator: BinaryOperator, document: &Value, selector: &Value) -> 
 }
 
 fn datetime_arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResult<Value> {
-    let interval = || {
-        SqlError::not_supported(format!(
-            "{} {} {} returns type interval, which is not supported yet",
-            left.type_name(),
-            operator.symbol(),
-            right.type_name()
-        ))
-    };
     let shifted = |days: i32, by: i64| -> SqlResult<Value> {
         let moved = i64::from(days)
             .checked_add(by)
@@ -1259,14 +1308,6 @@ fn datetime_arithmetic(operator: BinaryOperator, left: &Value, right: &Value) ->
         }
         (BinaryOperator::Subtract, Value::Date(a), Value::Date(b)) => {
             integer_value(i64::from(*a) - i64::from(*b), SqlType::Integer)
-        }
-        (
-            BinaryOperator::Subtract,
-            Value::Timestamp(_) | Value::TimestampTz(_),
-            Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_),
-        )
-        | (BinaryOperator::Subtract, Value::Date(_), Value::Timestamp(_) | Value::TimestampTz(_)) => {
-            Err(interval())
         }
         _ => Err(no_operator(operator.symbol(), left, right)),
     }
@@ -1367,12 +1408,21 @@ fn arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResul
         let other = if left.is_null() { right } else { left };
         if let Some(sql_type) = other.sql_type()
             && !sql_type.is_numeric()
+            && !crate::temporal::is_time_or_interval(sql_type)
         {
             return Err(no_operator(symbol, left, right));
         }
         return Ok(Value::Null);
     };
-    if left_type.is_datetime() || right_type.is_datetime() {
+    let temporal =
+        |sql_type| crate::temporal::is_time_or_interval(sql_type) || SqlType::is_datetime(sql_type);
+    if temporal(left_type) || temporal(right_type) {
+        if let Some(result) = crate::temporal::arithmetic(operator, left, right) {
+            return result;
+        }
+        if !left_type.is_datetime() && !right_type.is_datetime() {
+            return Err(no_operator(symbol, left, right));
+        }
         return datetime_arithmetic(operator, left, right);
     }
     if !left_type.is_numeric() || !right_type.is_numeric() {

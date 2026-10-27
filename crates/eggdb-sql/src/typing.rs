@@ -46,6 +46,15 @@ fn arithmetic_type(
         }
         _ => (static_type(left, scope)?, static_type(right, scope)?),
     };
+    if crate::temporal::is_time_or_interval(left_type)
+        || crate::temporal::is_time_or_interval(right_type)
+        || (operator == BinaryOperator::Subtract
+            && left_type.is_datetime()
+            && right_type.is_datetime()
+            && (left_type, right_type) != (SqlType::Date, SqlType::Date))
+    {
+        return crate::temporal::arithmetic_type(operator, left_type, right_type);
+    }
     if left_type.is_datetime() || right_type.is_datetime() {
         return match (operator, left_type, right_type) {
             (BinaryOperator::Add, SqlType::Date, other)
@@ -107,6 +116,20 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
             _ => None,
         },
         ("json_typeof" | "jsonb_typeof", [_]) => Some(SqlType::Text),
+        ("justify_days" | "justify_hours" | "justify_interval" | "age", _) => {
+            Some(SqlType::INTERVAL)
+        }
+        ("current_time", []) => Some(SqlType::TimeTz(None)),
+        ("localtime", []) => Some(SqlType::Time(None)),
+        ("gen_random_uuid", []) => Some(SqlType::Uuid),
+        ("encode", [_, _]) => Some(SqlType::Text),
+        ("decode", [_, _]) => Some(SqlType::Bytea),
+        ("get_byte", [_, _]) | ("octet_length", [_]) => Some(SqlType::Integer),
+        ("substring", [argument, ..]) => match static_type(argument, scope)? {
+            SqlType::Bytea => Some(SqlType::Bytea),
+            sql_type if sql_type.is_character() => Some(SqlType::Text),
+            _ => None,
+        },
         ("json_array_length" | "jsonb_array_length", [_]) => Some(SqlType::Integer),
         ("round" | "trunc" | "ceil" | "ceiling" | "floor", [argument, ..]) => {
             match static_type(argument, scope)? {
@@ -133,6 +156,12 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         }
         _ => None,
     }
+}
+
+fn bytes_concatenation(left: &Expr, right: &Expr, scope: Scope<'_>) -> bool {
+    let bytes = |expr: &Expr| static_type(expr, scope) == Some(SqlType::Bytea);
+    (bytes(left) && (bytes(right) || is_untyped_literal(right)))
+        || (bytes(right) && is_untyped_literal(left))
 }
 
 /// The type an expression's values have, when it is known before any row is read: what a
@@ -169,7 +198,9 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
         | ExprKind::InList { .. }
         | ExprKind::Like { .. } => Some(SqlType::Boolean),
         ExprKind::Unary(UnaryOperator::Minus | UnaryOperator::Plus, operand) => {
-            static_type(operand, scope).filter(|sql_type| sql_type.is_numeric())
+            static_type(operand, scope).filter(|sql_type| {
+                sql_type.is_numeric() || matches!(sql_type, SqlType::Interval { .. })
+            })
         }
         ExprKind::Binary(operator, left, right) => match operator {
             BinaryOperator::Equal
@@ -178,6 +209,9 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::LessOrEqual
             | BinaryOperator::Greater
             | BinaryOperator::GreaterOrEqual => Some(SqlType::Boolean),
+            BinaryOperator::Concat if bytes_concatenation(left, right, scope) => {
+                Some(SqlType::Bytea)
+            }
             BinaryOperator::Concat
             | BinaryOperator::JsonFieldText
             | BinaryOperator::JsonPathText => Some(SqlType::Text),

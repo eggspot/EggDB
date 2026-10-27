@@ -140,12 +140,21 @@ fn number_of(value: &Value) -> SqlResult<Option<Number>> {
         Value::BigInt(number) => Number::Integer(*number),
         Value::Real(number) => Number::Float(f64::from(*number)),
         Value::Double(number) => Number::Float(*number),
-        Value::Text(text) | Value::Json(text) | Value::Jsonb(text) => parse_number(text)?,
+        Value::Text(text) | Value::Json(text) | Value::Jsonb(text) | Value::Bpchar(text) => {
+            parse_number(text)?
+        }
         Value::Numeric(number) => match number.integral_value().map(i64::try_from) {
             Some(Ok(whole)) => Number::Integer(whole),
             _ => Number::Float(number.to_f64()),
         },
-        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
+        Value::Date(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_)
+        | Value::Time(_)
+        | Value::TimeTz { .. }
+        | Value::Interval(_)
+        | Value::Bytea(_)
+        | Value::Uuid(_) => {
             return Err(invalid_number());
         }
     }))
