@@ -1,7 +1,7 @@
 use crate::ast::{
-    BinaryOperator, ColumnDefinition, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource,
-    InsertValue, Literal, Name, OrderItem, Select, SelectItem, Statement, TableReference,
-    TruthTest, UnaryOperator, Update,
+    AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, Expr, ExprKind,
+    FromClause, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind, Literal, Name,
+    OrderItem, Select, SelectItem, Statement, TableReference, TruthTest, UnaryOperator, Update,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind};
@@ -420,7 +420,9 @@ impl<'t> Parser<'t> {
             "create" => self.create(),
             "drop" => self.drop(),
             "insert" => self.insert(),
-            "select" => self.select().map(Statement::Select),
+            "select" => self
+                .select()
+                .map(|select| Statement::Select(Box::new(select))),
             "update" => self.update(),
             "delete" => self.delete(),
             "begin" | "start" => self.begin(),
@@ -901,10 +903,13 @@ impl<'t> Parser<'t> {
 
     fn select(&mut self) -> SqlResult<Select> {
         self.at += 1;
-        if self.is_word("distinct") {
-            return Err(self.not_supported("DISTINCT"));
+        let distinct = self.take_word("distinct");
+        if distinct && self.is_word("on") {
+            return Err(self.not_supported("DISTINCT ON"));
         }
-        self.take_word("all");
+        if !distinct {
+            self.take_word("all");
+        }
         let items = if self.is_clause_end() {
             Vec::new()
         } else {
@@ -914,22 +919,22 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("SELECT INTO"));
         }
         let from = if self.take_word("from") {
-            let table = self.table_reference()?;
-            if self.peek_kind() == &TokenKind::Comma
-                || ["join", "inner", "left", "right", "full", "cross", "natural"]
-                    .iter()
-                    .any(|word| self.is_word(word))
-            {
-                return Err(self.not_supported("joins"));
-            }
-            Some(table)
+            Some(self.joined_tables()?)
         } else {
             None
         };
         let filter = self.filter()?;
-        if self.is_word("group") || self.is_word("having") {
-            return Err(self.not_supported("GROUP BY and HAVING"));
-        }
+        let group_by = if self.take_word("group") {
+            self.expect_word("by")?;
+            self.group_by()?
+        } else {
+            Vec::new()
+        };
+        let having = if self.take_word("having") {
+            Some(self.expression()?)
+        } else {
+            None
+        };
         if self.is_word("window") {
             return Err(self.not_supported("WINDOW"));
         }
@@ -1008,13 +1013,91 @@ impl<'t> Parser<'t> {
             }
         }
         Ok(Select {
+            distinct,
             items,
             from,
             filter,
+            group_by,
+            having,
             order_by,
             limit,
             offset,
         })
+    }
+
+    fn joined_tables(&mut self) -> SqlResult<FromClause> {
+        let first = self.table_reference()?;
+        let mut joins = Vec::new();
+        loop {
+            let kind = if self.take(&TokenKind::Comma) {
+                JoinKind::Comma
+            } else if self.take_word("cross") {
+                self.expect_word("join")?;
+                JoinKind::Cross
+            } else if self.take_word("join") {
+                JoinKind::Inner
+            } else if self.take_word("inner") {
+                self.expect_word("join")?;
+                JoinKind::Inner
+            } else if self.take_word("left") {
+                self.take_word("outer");
+                self.expect_word("join")?;
+                JoinKind::Left
+            } else if self.is_word("right") || self.is_word("full") {
+                return Err(self.not_supported("RIGHT and FULL joins"));
+            } else if self.is_word("natural") {
+                return Err(self.not_supported("NATURAL joins"));
+            } else {
+                break;
+            };
+            if self.is_word("lateral") {
+                return Err(self.not_supported("LATERAL"));
+            }
+            let table = self.table_reference()?;
+            let condition = match kind {
+                JoinKind::Comma | JoinKind::Cross => JoinCondition::Always,
+                JoinKind::Inner | JoinKind::Left => {
+                    if self.take_word("on") {
+                        JoinCondition::On(self.expression()?)
+                    } else if self.take_word("using") {
+                        let names = self.name_list()?;
+                        if self.is_word("as") {
+                            return Err(self.not_supported("an alias for USING"));
+                        }
+                        JoinCondition::Using(names)
+                    } else {
+                        return Err(self.unexpected());
+                    }
+                }
+            };
+            joins.push(Join {
+                kind,
+                table,
+                condition,
+            });
+        }
+        Ok(FromClause { first, joins })
+    }
+
+    fn group_by(&mut self) -> SqlResult<Vec<Expr>> {
+        if self.is_word("all") || self.is_word("distinct") {
+            return Err(self.not_supported("GROUP BY ALL and GROUP BY DISTINCT"));
+        }
+        let mut keys = Vec::new();
+        loop {
+            let grouping_set = (["rollup", "cube"].iter().any(|word| self.is_word(word))
+                && self.peek_kind_at(1) == &TokenKind::LeftParen)
+                || (self.is_word("grouping") && self.is_word_at(1, "sets"))
+                || (self.peek_kind() == &TokenKind::LeftParen
+                    && self.peek_kind_at(1) == &TokenKind::RightParen);
+            if grouping_set {
+                return Err(self.not_supported("ROLLUP, CUBE and GROUPING SETS"));
+            }
+            keys.push(self.expression()?);
+            if !self.take(&TokenKind::Comma) {
+                return Ok(keys);
+            }
+        }
     }
 
     fn is_clause_end(&self) -> bool {
@@ -1584,6 +1667,9 @@ impl<'t> Parser<'t> {
     }
 
     fn function(&mut self, name: Name) -> SqlResult<Expr> {
+        if let Some(function) = AggregateFunction::named(&name.text) {
+            return self.aggregate(name, function);
+        }
         if AGGREGATES.contains(&name.text.as_str()) {
             return Err(SqlError::not_supported(format!(
                 "aggregate functions such as {}() are not supported yet",
@@ -1612,6 +1698,69 @@ impl<'t> Parser<'t> {
             kind: ExprKind::Function {
                 name: name.text,
                 arguments,
+            },
+            position: name.position,
+        })
+    }
+
+    fn aggregate(&mut self, name: Name, function: AggregateFunction) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let (argument, distinct) = if self.is_operator("*") {
+            self.at += 1;
+            if function != AggregateFunction::Count {
+                return Err(SqlError::new(
+                    SqlState::WRONG_OBJECT_TYPE,
+                    format!(
+                        "{}(*) specified, but {} is not a parameterless aggregate function",
+                        name.text, name.text
+                    ),
+                )
+                .at(name.position));
+            }
+            (None, false)
+        } else if self.peek_kind() == &TokenKind::RightParen {
+            return Err(SqlError::new(
+                SqlState::WRONG_OBJECT_TYPE,
+                format!(
+                    "{}(*) must be used to call a parameterless aggregate function",
+                    name.text
+                ),
+            )
+            .at(name.position));
+        } else {
+            let distinct = self.take_word("distinct");
+            if !distinct {
+                self.take_word("all");
+            }
+            let first = self.expression()?;
+            if self.peek_kind() == &TokenKind::Comma {
+                let mut arguments = vec![first];
+                while self.take(&TokenKind::Comma) {
+                    arguments.push(self.expression()?);
+                }
+                self.expect(&TokenKind::RightParen)?;
+                return Ok(Expr {
+                    kind: ExprKind::Function {
+                        name: name.text,
+                        arguments,
+                    },
+                    position: name.position,
+                });
+            }
+            (Some(Box::new(first)), distinct)
+        };
+        if self.is_word("order") {
+            return Err(self.not_supported("ORDER BY inside an aggregate's arguments"));
+        }
+        self.expect(&TokenKind::RightParen)?;
+        if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
+            return Err(self.not_supported("window and aggregate clauses"));
+        }
+        Ok(Expr {
+            kind: ExprKind::Aggregate {
+                function,
+                argument,
+                distinct,
             },
             position: name.position,
         })

@@ -5,7 +5,7 @@ pub(crate) enum Statement {
     CreateTable(CreateTable),
     DropTable { names: Vec<Name>, if_exists: bool },
     Insert(Insert),
-    Select(Select),
+    Select(Box<Select>),
     Update(Update),
     Delete(Delete),
     Begin { read_only: bool },
@@ -96,11 +96,42 @@ pub(crate) struct OrderItem {
     pub(crate) nulls_first: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JoinKind {
+    Inner,
+    Left,
+    Cross,
+    Comma,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum JoinCondition {
+    Always,
+    On(Expr),
+    Using(Vec<Name>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Join {
+    pub(crate) kind: JoinKind,
+    pub(crate) table: TableReference,
+    pub(crate) condition: JoinCondition,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FromClause {
+    pub(crate) first: TableReference,
+    pub(crate) joins: Vec<Join>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Select {
+    pub(crate) distinct: bool,
     pub(crate) items: Vec<SelectItem>,
-    pub(crate) from: Option<TableReference>,
+    pub(crate) from: Option<FromClause>,
     pub(crate) filter: Option<Expr>,
+    pub(crate) group_by: Vec<Expr>,
+    pub(crate) having: Option<Expr>,
     pub(crate) order_by: Vec<OrderItem>,
     pub(crate) limit: Option<Expr>,
     pub(crate) offset: Option<Expr>,
@@ -139,6 +170,38 @@ impl BinaryOperator {
             Self::LessOrEqual => "<=",
             Self::Greater => ">",
             Self::GreaterOrEqual => ">=",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AggregateFunction {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl AggregateFunction {
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        Some(match name {
+            "count" => Self::Count,
+            "sum" => Self::Sum,
+            "avg" => Self::Avg,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Count => "count",
+            Self::Sum => "sum",
+            Self::Avg => "avg",
+            Self::Min => "min",
+            Self::Max => "max",
         }
     }
 }
@@ -226,5 +289,14 @@ pub(crate) enum ExprKind {
     Function {
         name: String,
         arguments: Vec<Expr>,
+    },
+    Aggregate {
+        function: AggregateFunction,
+        argument: Option<Box<Expr>>,
+        distinct: bool,
+    },
+    Slot {
+        index: usize,
+        sql_type: Option<SqlType>,
     },
 }

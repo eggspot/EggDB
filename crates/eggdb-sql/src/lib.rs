@@ -11,12 +11,15 @@
 //! integer, floating-point, boolean and text types. Everything else answers SQLSTATE `0A000`
 //! (feature not supported). The guide is `docs/sql.md` in the repository.
 
+mod aggregate;
 mod ast;
 mod encoding;
 mod error;
 mod eval;
 mod execute;
+mod join;
 mod lexer;
+mod memory;
 mod parser;
 mod session;
 mod store;
