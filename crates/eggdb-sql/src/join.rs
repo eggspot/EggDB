@@ -1,4 +1,4 @@
-use crate::aggregate::bind;
+use crate::aggregate::{bind, rebuild};
 use crate::ast::{
     BinaryOperator, Expr, ExprKind, FromClause, JoinCondition, JoinKind, Select, SelectItem,
 };
@@ -311,6 +311,32 @@ fn scan_table(
     )
 }
 
+fn touches_only(expr: &Expr, own: &std::ops::Range<usize>) -> bool {
+    let mut inside = true;
+    let mut any = false;
+    visit_exprs(expr, &mut |node| {
+        if let ExprKind::Slot { index, .. } = node.kind {
+            any = true;
+            inside &= own.contains(&index);
+        }
+    });
+    any && inside
+}
+
+fn shift_slots(expr: &Expr, offset: usize) -> Expr {
+    match &expr.kind {
+        ExprKind::Slot { index, sql_type } => Expr {
+            kind: ExprKind::Slot {
+                index: index - offset,
+                sql_type: *sql_type,
+            },
+            position: expr.position,
+        },
+        _ => rebuild(expr, &mut |child| Ok(shift_slots(child, offset)))
+            .unwrap_or_else(|_| expr.clone()),
+    }
+}
+
 const LOOKUP_HASH_LIMIT: usize = 64 << 20;
 
 fn build_hash(
@@ -318,6 +344,7 @@ fn build_hash(
     shape: &StepShape<'_>,
     pairs: &[(usize, usize)],
     needed: &[bool],
+    keep: &[Expr],
     limit: Option<usize>,
     memory: &mut WorkMemory,
 ) -> SqlResult<Option<HashIndex>> {
@@ -343,6 +370,15 @@ fn build_hash(
         &mut |_, bytes| {
             row.clear();
             decode_row_into(bytes, &table.columns, Some(needed), &mut row)?;
+            let evaluator = Evaluator {
+                scope: Scope::empty(),
+                row: &row,
+            };
+            for condition in keep {
+                if evaluator.boolean(condition, "WHERE")? != Some(true) {
+                    return Ok(true);
+                }
+            }
             match &mut bounded {
                 Some(local) => {
                     if index.insert(&mut row, &build, local).is_err() {
@@ -400,7 +436,7 @@ impl<'a> JoinedRows<'a> {
         joined: &'a JoinedFrom<'a>,
         first_key: Option<Vec<u8>>,
         mut needed: Vec<Vec<bool>>,
-        filters: Vec<Vec<Expr>>,
+        mut filters: Vec<Vec<Expr>>,
         memory: &mut WorkMemory,
     ) -> SqlResult<Self> {
         let outer_is_scanned = first_key.is_none();
@@ -411,6 +447,16 @@ impl<'a> JoinedRows<'a> {
             let step_needed = std::mem::take(&mut needed[index + 1]);
             let scope = Scope::Many(&shape.visible);
             let pairs = equality_pairs(shape);
+            let own = offset..offset + table.columns.len();
+            let keep: Vec<Expr> = if shape.kind == JoinKind::Inner {
+                filters[index + 1]
+                    .iter()
+                    .filter(|filter| touches_only(filter, &own))
+                    .map(|filter| shift_slots(filter, offset))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let lookup: Option<Vec<usize>> = if table.primary_key.is_empty() {
                 None
             } else {
@@ -463,12 +509,16 @@ impl<'a> JoinedRows<'a> {
                         shape,
                         &probe_build,
                         &step_needed,
+                        &keep,
                         Some(LOOKUP_HASH_LIMIT),
                         memory,
                     )?
                 } else {
                     None
                 };
+                if bounded.is_some() && !keep.is_empty() {
+                    filters[index + 1].retain(|filter| !touches_only(filter, &own));
+                }
                 match bounded {
                     Some(index) => Access::Hash {
                         probe: lefts,
@@ -477,8 +527,12 @@ impl<'a> JoinedRows<'a> {
                     None => Access::Lookup(lefts),
                 }
             } else if !pairs.is_empty() {
-                let index = build_hash(reader, shape, &pairs, &step_needed, None, memory)?
+                let built = build_hash(reader, shape, &pairs, &step_needed, &keep, None, memory)?
                     .unwrap_or_else(|| HashIndex::new(false, table.columns.len()));
+                if !keep.is_empty() {
+                    filters[index + 1].retain(|filter| !touches_only(filter, &own));
+                }
+                let index = built;
                 Access::Hash {
                     probe: pairs.iter().map(|&(outer, _)| outer).collect(),
                     index,

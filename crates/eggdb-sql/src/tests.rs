@@ -1236,6 +1236,22 @@ fn inner_and_left_joins_follow_postgresql() {
             "x|y\na1|NULL\na2|b2\nan|NULL\nSELECT 3",
         ),
         (
+            "SELECT a.x, b.y FROM a JOIN b ON a.k = b.k WHERE b.y <> 'b2'",
+            "x|y\nSELECT 0",
+        ),
+        (
+            "SELECT a.x, b.y FROM a LEFT JOIN b ON a.k = b.k WHERE b.y IS NULL ORDER BY 1",
+            "x|y\na1|NULL\nan|NULL\nSELECT 2",
+        ),
+        (
+            "SELECT p.name FROM orders o JOIN people p ON p.id = o.person_id WHERE p.age > 35 ORDER BY 1",
+            "name\ncarol\nSELECT 1",
+        ),
+        (
+            "SELECT o.id, p.name FROM orders o LEFT JOIN people p ON p.id = o.person_id WHERE p.name IS NULL ORDER BY 1",
+            "id|name\n13|NULL\n14|NULL\nSELECT 2",
+        ),
+        (
             "SELECT a.x, b.y FROM a JOIN b ON a.k + 0 = b.k",
             "x|y\na2|b2\nSELECT 1",
         ),
@@ -1467,6 +1483,14 @@ fn group_by_and_aggregates_follow_postgresql() {
         (
             "SELECT max(score), min(score) FROM people",
             "max|min\nNaN|7.5\nSELECT 1",
+        ),
+        (
+            "SELECT p.age + 1, count(*) FROM people p GROUP BY age + 1 ORDER BY 1",
+            "?column?|count\n26|1\n31|1\n42|1\nNULL|1\nSELECT 4",
+        ),
+        (
+            "SELECT a.x || '!', count(*) FROM a JOIN b ON a.k = b.k GROUP BY x || '!'",
+            "?column?|count\na2!|1\nSELECT 1",
         ),
         (
             "SELECT * FROM people GROUP BY id ORDER BY id LIMIT 1",

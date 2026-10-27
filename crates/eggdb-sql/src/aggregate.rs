@@ -371,7 +371,12 @@ impl Analyzer<'_> {
 
     fn rewrite(&mut self, expr: &Expr, exact_bigint_allowed: bool) -> SqlResult<Expr> {
         let shape = shape_of(expr);
-        if let Some(index) = self.key_shapes.iter().position(|key| *key == shape) {
+        let bound_shape = bind(expr, self.scope).ok().map(|bound| shape_of(&bound));
+        if let Some(index) = self
+            .key_shapes
+            .iter()
+            .position(|key| Some(key) == bound_shape.as_ref())
+        {
             return Ok(Expr {
                 kind: ExprKind::Slot {
                     index,
@@ -556,7 +561,10 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
         .collect();
     let mut analyzer = Analyzer {
         scope,
-        key_shapes: keys.iter().map(shape_of).collect(),
+        key_shapes: keys
+            .iter()
+            .map(|key| bind(key, scope).map(|bound| shape_of(&bound)))
+            .collect::<SqlResult<_>>()?,
         key_types: key_offsets
             .iter()
             .map(|offset| offset.and_then(|offset| scope.column_type(offset)))
