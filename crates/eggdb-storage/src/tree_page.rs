@@ -792,7 +792,7 @@ impl Node {
         Ok(())
     }
 
-    pub(crate) fn split(&self, page_size: usize, inserted: usize) -> Option<Split> {
+    pub(crate) fn split(self, page_size: usize, inserted: usize) -> Option<Split> {
         let count = self.keys.len();
         if count < 2 {
             return None;
@@ -812,24 +812,19 @@ impl Node {
         if self.level != 0 {
             candidates.push(0);
         }
-        candidates
+        let (at, separator) = candidates
             .into_iter()
-            .find_map(|at| self.split_at(at, page_size))
+            .find_map(|at| self.separator_fitting(at, page_size).map(|sep| (at, sep)))?;
+        Some(self.split_at(at, separator))
     }
 
     fn middle(&self) -> usize {
-        let sizes: Vec<usize> = self
-            .keys
-            .iter()
-            .enumerate()
-            .map(|(index, key)| {
-                key.len() + self.values.get(index).map_or(8, StoredValue::cell_bytes)
-            })
-            .collect();
-        let total: usize = sizes.iter().sum();
+        let total: usize = (0..self.keys.len())
+            .map(|index| self.entry_bytes(index))
+            .sum();
         let mut running = 0;
-        for (index, size) in sizes.iter().enumerate() {
-            running += size;
+        for index in 0..self.keys.len() {
+            running += self.entry_bytes(index);
             if running * 2 >= total {
                 return index + 1;
             }
@@ -837,58 +832,70 @@ impl Node {
         self.keys.len() / 2
     }
 
-    fn split_at(&self, at: usize, page_size: usize) -> Option<Split> {
-        let (left, separator, right) = if self.level == 0 {
-            let separator = shortest_separator(&self.keys[at - 1], &self.keys[at]);
-            let left = self.part(self.low.clone(), Some(separator.clone()), 0..at, Vec::new());
-            let right = self.part(
-                separator.clone(),
-                self.high.clone(),
-                at..self.keys.len(),
-                Vec::new(),
-            );
-            (left, separator, right)
-        } else {
-            let separator = self.keys[at].clone();
-            let left = self.part(
-                self.low.clone(),
-                Some(separator.clone()),
-                0..at,
-                self.children[..=at].to_vec(),
-            );
-            let right = self.part(
-                separator.clone(),
-                self.high.clone(),
-                at + 1..self.keys.len(),
-                self.children[at + 1..].to_vec(),
-            );
-            (left, separator, right)
-        };
-        (left.size() <= page_size && right.size() <= page_size).then_some(Split {
-            left,
-            separator,
-            right,
-        })
+    fn entry_bytes(&self, index: usize) -> usize {
+        self.keys[index].len() + self.values.get(index).map_or(8, StoredValue::cell_bytes)
     }
 
-    fn part(
-        &self,
-        low: Vec<u8>,
-        high: Option<Vec<u8>>,
-        range: std::ops::Range<usize>,
-        children: Vec<u64>,
-    ) -> Self {
-        Self {
-            level: self.level,
-            low,
-            high,
-            keys: self.keys[range.clone()].to_vec(),
-            values: if self.level == 0 {
-                self.values[range].to_vec()
+    fn separator_fitting(&self, at: usize, page_size: usize) -> Option<Vec<u8>> {
+        let (separator, right_keys) = if self.level == 0 {
+            (
+                shortest_separator(&self.keys[at - 1], &self.keys[at]),
+                at..self.keys.len(),
+            )
+        } else {
+            (self.keys[at].clone(), at + 1..self.keys.len())
+        };
+        let values = |range: std::ops::Range<usize>| {
+            if self.level == 0 {
+                &self.values[range]
             } else {
-                Vec::new()
-            },
-            children,
+                &[]
+            }
+        };
+        let left_size = size_of(
+            self.level,
+            &self.low,
+            Some(&separator),
+            &self.keys[..at],
+            values(0..at),
+        );
+        let right_size = size_of(
+            self.level,
+            &separator,
+            self.high.as_deref(),
+            &self.keys[right_keys.clone()],
+            values(right_keys),
+        );
+        (left_size <= page_size && right_size <= page_size).then_some(separator)
+    }
+
+    fn split_at(mut self, at: usize, separator: Vec<u8>) -> Split {
+        let right_from = if self.level == 0 { at } else { at + 1 };
+        let right_keys = self.keys.split_off(right_from);
+        let right_values = if self.level == 0 {
+            self.values.split_off(at)
+        } else {
+            Vec::new()
+        };
+        let right_children = if self.level == 0 {
+            Vec::new()
+        } else {
+            self.keys.truncate(at);
+            self.children.split_off(at + 1)
+        };
+        let right = Self {
+            level: self.level,
+            low: separator.clone(),
+            high: self.high.take(),
+            keys: right_keys,
+            values: right_values,
+            children: right_children,
+        };
+        self.high = Some(separator.clone());
+        Split {
+            left: self,
+            separator,
+            right,
         }
     }
 }

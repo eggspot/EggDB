@@ -450,6 +450,18 @@ impl<F: File> WriteTransaction<'_, F> {
         self.change(|cache| tree.put(cache, key, value))
     }
 
+    /// Stores `value` under `key` in `tree` only when `key` is absent, and returns whether it
+    /// stored it (see [`BTree::put_if_absent`]). Errors are those of
+    /// [`WriteTransaction::put`].
+    pub fn put_if_absent(
+        &mut self,
+        tree: &BTree,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, StorageError> {
+        self.change(|cache| tree.put_if_absent(cache, key, value))
+    }
+
     /// Removes `key` from `tree` and returns whether it was there (see [`BTree::delete`]). An
     /// error rolls the transaction back.
     pub fn delete(&mut self, tree: &BTree, key: &[u8]) -> Result<bool, StorageError> {

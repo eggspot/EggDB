@@ -30,6 +30,47 @@ fn a_commit_is_seen_by_later_transactions_and_returns_a_rising_stamp() {
 }
 
 #[test]
+fn get_with_reads_a_value_in_place_in_both_kinds_of_transaction() {
+    let file = TempPath::new("get-with");
+    let db = Database::open(file.path()).unwrap();
+    let read = db.begin_read().unwrap();
+    assert_eq!(read.get_with("a", <[u8]>::len).unwrap(), None);
+    drop(read);
+    db.put("a", "123").unwrap();
+    let mut tx = db.begin_write().unwrap();
+    tx.put("b", "45").unwrap();
+    assert_eq!(tx.get_with("a", <[u8]>::len).unwrap(), Some(3));
+    assert_eq!(
+        tx.get_with("b", <[u8]>::to_vec).unwrap(),
+        Some(b"45".to_vec())
+    );
+    assert_eq!(tx.get_with("c", <[u8]>::len).unwrap(), None);
+    tx.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    assert_eq!(
+        read.get_with("b", <[u8]>::to_vec).unwrap(),
+        Some(b"45".to_vec())
+    );
+}
+
+#[test]
+fn put_if_absent_stores_a_new_key_once_and_a_rollback_forgets_it() {
+    let file = TempPath::new("put-if-absent");
+    let db = Database::open(file.path()).unwrap();
+    let mut tx = db.begin_write().unwrap();
+    assert!(tx.put_if_absent("a", "1").unwrap());
+    assert!(!tx.put_if_absent("a", "2").unwrap());
+    tx.commit().unwrap();
+    let mut tx = db.begin_write().unwrap();
+    assert!(!tx.put_if_absent("a", "3").unwrap());
+    assert!(tx.put_if_absent("b", "4").unwrap());
+    tx.rollback().unwrap();
+    assert_eq!(db.get("a").unwrap(), Some(b"1".to_vec()));
+    assert_eq!(db.get("b").unwrap(), None);
+    assert_eq!(db.check().unwrap().entries, 1);
+}
+
+#[test]
 fn a_rollback_or_a_drop_forgets_every_change() {
     let file = TempPath::new("rollback");
     let db = Database::open(file.path()).unwrap();

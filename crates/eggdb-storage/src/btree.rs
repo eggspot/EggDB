@@ -60,6 +60,12 @@ pub struct TreeReport {
     pub overflow_pages: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Existing {
+    Replace,
+    Keep,
+}
+
 pub(crate) enum FoundValue<'a> {
     Borrowed(&'a [u8]),
     Assembled(Vec<u8>),
@@ -238,6 +244,29 @@ impl BTree {
         key: &[u8],
         value: &[u8],
     ) -> Result<(), StorageError> {
+        self.store_entry(cache, key, value, Existing::Replace)
+            .map(|_| ())
+    }
+
+    /// Stores `value` under `key` only when `key` is absent, in the same single descent as
+    /// [`BTree::put`], and returns whether it stored it. A key that is there keeps its value.
+    /// Errors are those of [`BTree::put`].
+    pub fn put_if_absent<F: File>(
+        &self,
+        cache: &PageCache<F>,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, StorageError> {
+        self.store_entry(cache, key, value, Existing::Keep)
+    }
+
+    fn store_entry<F: File>(
+        &self,
+        cache: &PageCache<F>,
+        key: &[u8],
+        value: &[u8],
+        existing: Existing,
+    ) -> Result<bool, StorageError> {
         Self::check_fits(cache, key, value)?;
         let inline = fits_inline(cache.page_size(), key, value);
         let mut path = [NO_PAGE; MAX_HEIGHT as usize];
@@ -261,12 +290,13 @@ impl BTree {
         let mut shape = shape_of_mut(&page)?;
         let suffix = shape.key_suffix(&page, key)?;
         let index = match shape.search(&page, suffix)? {
+            Ok(_) if existing == Existing::Keep => return Ok(false),
             Ok(index) => {
                 let cell = shape.cell_at(&page, index)?;
                 let replaced = shape.overflow_reference(&cell)?;
                 if inline && replaced.is_none() && cell.payload.len() == value.len() {
                     shape.overwrite_value(&mut page, index, value)?;
-                    return Ok(());
+                    return Ok(true);
                 }
                 if let Some(reference) = replaced {
                     overflow::free_value(cache, &reference, key)?;
@@ -300,7 +330,7 @@ impl BTree {
             );
             store(cache, &path[..=depth], page, node, index)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Removes `key` and its value, and returns whether the key was there. A key that is not
@@ -656,6 +686,7 @@ fn store<F: File>(
         node.encode(page_id, &mut page)?;
         return Ok(());
     }
+    let level = node.level;
     let split = node
         .split(page_size, inserted)
         .ok_or(FormatError::CorruptTree {
@@ -664,7 +695,7 @@ fn store<F: File>(
         })?;
     let parents = &path[..path.len().saturating_sub(1)];
     let Some(&parent_id) = parents.last() else {
-        return split_root(cache, page, node.level, split);
+        return split_root(cache, page, level, split);
     };
     let right_id = new_page(cache, &split.right)?;
     split.left.encode(page_id, &mut page)?;

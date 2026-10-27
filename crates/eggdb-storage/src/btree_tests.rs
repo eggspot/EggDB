@@ -127,6 +127,32 @@ fn random_puts_with_64_kib_pages_match_a_model() {
 }
 
 #[test]
+fn put_if_absent_stores_only_new_keys_and_keeps_existing_values() {
+    let fs = SimFileSystem::new();
+    let mut cache = create(&fs, PageSize::DEFAULT, 4096);
+    let tree = new_tree(&mut cache);
+    let mut model = Model::new();
+    let mut rng = TestRng::new(11);
+    let large = vec![b'v'; 9000];
+    for round in 0..6000u32 {
+        let key = format!("key-{:05}", rng.below(3000)).into_bytes();
+        let value = if round % 500 == 0 {
+            large.clone()
+        } else {
+            round.to_le_bytes().to_vec()
+        };
+        let stored = tree.put_if_absent(&cache, &key, &value).unwrap();
+        assert_eq!(stored, !model.contains_key(&key), "{key:?}");
+        model.entry(key).or_insert(value);
+    }
+    cache.commit(|_| {}).unwrap();
+    assert_matches(&tree, &cache, &model);
+    drop(cache);
+    let cache = open(&fs, Access::ReadOnly, 64);
+    assert_matches(&stored_tree(&cache), &cache, &model);
+}
+
+#[test]
 fn sequential_and_reverse_inserts_split_up_to_three_levels_and_fill_pages() {
     for reverse in [false, true] {
         let fs = SimFileSystem::new();
