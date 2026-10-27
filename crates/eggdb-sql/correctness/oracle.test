@@ -930,3 +930,66 @@ SELECT 'unterminated FROM dual
 
 error 42601 1741
 SELECT "" FROM dual
+
+chapter "CREATE INDEX", "DROP INDEX", "Constraints: UNIQUE", "USER_INDEXES", "USER_IND_COLUMNS"
+ok
+CREATE TABLE staff (id NUMBER(9) PRIMARY KEY, badge VARCHAR2(20) CONSTRAINT staff_badge_uk UNIQUE, dept NUMBER(4))
+
+ok
+CREATE INDEX staff_dept_ix ON staff (dept) TABLESPACE users
+
+rows
+INSERT INTO staff VALUES (1, 'b1', 10)
+----
+INSERT 0 1
+
+rows
+INSERT INTO staff VALUES (2, NULL, 10)
+----
+INSERT 0 1
+
+rows
+INSERT INTO staff VALUES (3, NULL, 20)
+----
+INSERT 0 1
+
+error 23505 1
+INSERT INTO staff VALUES (4, 'b1', 20)
+
+error 23505 1452
+CREATE UNIQUE INDEX staff_dept_uk ON staff (dept)
+
+error 42P07 955
+CREATE INDEX staff_dept_ix ON staff (badge)
+
+rows
+SELECT id FROM staff WHERE dept = 10 ORDER BY id
+----
+ID
+1
+2
+SELECT 2
+
+rows
+SELECT index_name, uniqueness FROM user_indexes WHERE table_name = 'STAFF' ORDER BY index_name
+----
+INDEX_NAME|UNIQUENESS
+STAFF_BADGE_UK|UNIQUE
+STAFF_DEPT_IX|NONUNIQUE
+SELECT 2
+
+rows
+SELECT column_name, column_position FROM user_ind_columns WHERE index_name = 'STAFF_DEPT_IX'
+----
+COLUMN_NAME|COLUMN_POSITION
+DEPT|1
+SELECT 1
+
+error 42704 1418
+DROP INDEX no_such_index
+
+ok
+DROP INDEX staff_dept_ix
+
+ok
+DROP TABLE staff

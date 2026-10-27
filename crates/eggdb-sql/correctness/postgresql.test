@@ -1046,3 +1046,83 @@ SELECT count(*) FROM orders
 count
 0
 SELECT 1
+
+chapter sql-createindex, indexes-unique, ddl-constraints "Unique Constraints"
+ok
+CREATE TABLE accounts (id integer PRIMARY KEY, email text UNIQUE, region text, score integer)
+
+ok
+CREATE INDEX accounts_region_score ON accounts (region, score DESC NULLS LAST)
+
+rows
+INSERT INTO accounts VALUES (1, 'a@x', 'eu', 10), (2, NULL, 'eu', 20), (3, NULL, 'us', 5)
+----
+INSERT 0 3
+
+error 23505
+INSERT INTO accounts VALUES (4, 'a@x', 'us', 1)
+
+error 23505
+INSERT INTO accounts VALUES (4, 'b@x', 'us', 1), (5, 'b@x', 'us', 2)
+
+rows
+SELECT id FROM accounts WHERE region = 'eu' AND score >= 15
+----
+id
+2
+SELECT 1
+
+rows
+SELECT id, score FROM accounts WHERE region = 'eu' ORDER BY score DESC
+----
+id|score
+2|20
+1|10
+SELECT 2
+
+error 42P07
+CREATE INDEX accounts_region_score ON accounts (score)
+
+ok
+CREATE INDEX IF NOT EXISTS accounts_region_score ON accounts (score)
+
+error 23505
+CREATE UNIQUE INDEX accounts_region ON accounts (region)
+
+ok
+CREATE UNIQUE INDEX ON accounts (score)
+
+rows
+EXPLAIN SELECT * FROM accounts WHERE score = 5
+----
+QUERY PLAN
+Index Scan using accounts_score_idx on accounts
+EXPLAIN
+
+error 42704
+DROP INDEX no_such_index
+
+ok
+DROP INDEX IF EXISTS no_such_index
+
+ok
+DROP INDEX accounts_score_idx, accounts_region_score
+
+rows
+EXPLAIN SELECT * FROM accounts WHERE score = 5
+----
+QUERY PLAN
+Seq Scan on accounts
+EXPLAIN
+
+error 42703
+CREATE INDEX ON accounts (nope)
+
+error 0A000
+CREATE INDEX ON accounts (score) WHERE score > 0
+
+error 0A000
+CREATE INDEX CONCURRENTLY ON accounts (score)
+
+ok
+DROP TABLE accounts
