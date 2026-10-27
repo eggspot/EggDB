@@ -17,4 +17,4 @@
   user:19                                                 43
   user:2                                                  41
 
- ↑↓ move  Enter open  / filter  e edit  ? help  q quit
+ ↑↓ move  / filter  e edit  a add  d delete  ? help  q quit

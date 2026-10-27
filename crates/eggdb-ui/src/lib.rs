@@ -18,6 +18,7 @@ mod editor;
 mod fake;
 mod frame;
 mod json;
+mod line;
 mod os_terminal;
 mod render;
 mod source;
@@ -31,11 +32,12 @@ pub use app::{Ui, UiOptions};
 pub use decoder::InputDecoder;
 pub use fake::FakeTerminal;
 pub use frame::{Cell, CellText, Color, Frame, Style};
+pub use line::{Completion, InlineTerminal, LineEnd, LineReader, LineTerminal};
 pub use os_terminal::{Fallbacks, OsTerminal, detect_capabilities};
 pub use render::Renderer;
 pub use source::{
-    Change, CheckSummary, CountStep, ErrorKind, KeyRow, Source, SourceError, Start, Summary,
-    WriterBusy,
+    Change, CheckSummary, CountStep, ErrorKind, KeyRow, Source, SourceError, SqlFailure, SqlRun,
+    SqlTable, Start, Summary, WriterBusy,
 };
 pub use terminal::{Capabilities, Colors, Event, KeyCode, KeyEvent, Modifiers, Size, Terminal};
 

@@ -55,10 +55,11 @@ Parsing rules, in order:
 `export`, `import`, `shell`, `backup`, `compact`, `ui`. In v0.2.0, before each ships, typing one
 prints `eggdb <name> is not in this release yet; see docs/roadmap.md` and exits 2. How they fit
 the grammar when they come: `export <file> [<out>|-]` and `import <file> [<in>|-]` (JSON lines,
-same byte rules as section 4; shipped as designed, D93); `shell <file>` runs the commands of this document without the
-`eggdb <command> <file>` prefix, one per line; `backup <file> <copy>` copies a consistent
-snapshot while others write; `compact <file>` rewrites the file without free or leaked pages;
-`ui <file>` opens the terminal UI (its own design document).
+same byte rules as section 4; shipped as designed, D93); `shell <file>` runs the commands of this
+document without the `eggdb <command> <file>` prefix, one per line, and SQL (shipped, section
+15); `backup <file> <copy>` copies a consistent snapshot while others write; `compact <file>`
+rewrites the file without free or leaked pages; `ui <file>` opens the terminal UI (its own
+design document).
 
 ### Creating a file: explicit, never by accident
 `put` and `del` **do not create** a database. A typo in the path (`app.bd`) must not leave a
@@ -418,8 +419,8 @@ eggdb stats app.db
 9. Colour only on a terminal with `NO_COLOR` unset and `TERM` not `dumb`; 16-colour SGR; data
    is never coloured.
 10. `stats` omits the page-cache counters; `check` with leaked pages is still `ok` (exit 0).
-11. Reserved: `shell`, `backup`, `compact`; they answer with the roadmap until they ship
-    (`ui`, `export` and `import` have shipped).
+11. Reserved: `backup`, `compact`; they answer with the roadmap until they ship (`ui`,
+    `export`, `import`, `sql`, `serve` and `shell` have shipped).
 
 ## 13. As built in v0.2.0 (D90)
 
@@ -511,3 +512,284 @@ Fable. The choices:
    stop; a second Ctrl-C ends the process at once (exit 130).
 8. **The file is open for writing the whole time**, so every other `eggdb` command gets the
    busy message and exit 5 meanwhile; `--read-only` serves beside readers instead.
+
+## 15. `eggdb shell`: the interactive prompt (item 20)
+
+`eggdb shell <file>` is one prompt for everything this document and [sql.md](../sql.md) can
+do with a file: the key-value commands without their `eggdb <command> <file>` prefix, SQL in
+the PostgreSQL dialect, and a few `.meta` commands. It is psql for an EggDB file, built on the
+terminal layer of `eggdb-ui` (raw mode, the escape-sequence decoder, the single-line editor)
+and on the `sql` command's result and error printers, which it reuses unchanged. Designed by
+Claude Fable (D15).
+
+```
+eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--read-only] [--create]
+```
+`--read-only`, `--create` and `--cache` mean what they mean for `sql` and `serve`. The file is
+open for writing for the whole session (read-only with `--read-only`), so other writers get the
+busy message meanwhile, as with `serve`.
+
+### Interactive or batch
+The shell is **interactive** when stdin and stdout are both terminals and no `-c` is given.
+Otherwise it is a **batch**: it runs each `-c` text in order, or, without `-c`, everything on
+stdin, with no banner, no prompt, no colour, no completion and no history, in `table` mode
+whatever the width, so its output is stable for scripts. A batch stops at the first failure
+(exit code below) unless `--keep-going`, which runs on and exits with the first failure's code.
+`eggdb sql` remains the command for scripts of pure SQL; the batch form exists so that what
+was typed at the prompt can be pasted into a script unchanged.
+
+### Banner, prompt, exit
+The banner is two lines; the second names the three things a newcomer needs:
+```
+EggDB 0.2.0: app.db, open read-write (12 tables, 1,204 keys)
+Type .help for help. SQL ends with ; and .quit or Ctrl-D quits.
+```
+(`open read-only` with `--read-only`; the counts come from the catalog and the key count of
+`stats`, left out while a file has no SQL tables: `(1,204 keys)`.)
+
+The prompt is the file's stem, as `serve` names the database (`app.db` is `app`), followed by
+psql's markers, which a psql user reads without learning:
+
+| Prompt | When |
+|--------|------|
+| `app=> ` | a new statement or command |
+| `app-> ` | a SQL statement continues on this line (no `;` yet) |
+| `app=*> ` / `app-*> ` | inside an open transaction block |
+| `app=!> ` / `app-!> ` | inside a failed block (every statement answers `25P02` until `ROLLBACK`) |
+| `app'> ` / `app"> ` | inside an unfinished `'…'` or `"…"` of a statement |
+
+A stem longer than 24 characters is cut to 23 plus `…`. The prompt is bold.
+
+`.quit`, `.exit` and `Ctrl-D` on an empty line end the shell with exit 0; an open transaction
+block is rolled back first, with `WARNING:  the shell ended inside a transaction block (BEGIN
+without COMMIT); it was rolled back` on stderr, the `sql` command's words. `Ctrl-D` on a
+non-empty line does nothing.
+
+### Reading a line
+Raw mode is on only while a line is read, and off again before anything runs, so output scrolls
+as every command's does and a `Ctrl-C` during a long statement ends the process the way it ends
+every `eggdb` command (section 7: exit 130, the engine rolls the write back; a statement cannot
+be cancelled in this release). The line is one row that scrolls horizontally, the UI's
+single-line editor, with its keys plus the readline keys people's fingers know:
+
+| Key | Does |
+|-----|------|
+| `←` `→`, `Home` `End`, `Ctrl-A` `Ctrl-E` | move by one character, to the line's start or end |
+| `Alt-B` `Alt-F`, `Ctrl-←` `Ctrl-→` | move by one word (a word is a run of letters, digits and `_`) |
+| `Backspace` `Delete` | delete the character before or under the cursor |
+| `Ctrl-W` | delete the word before the cursor (and the spaces after it) |
+| `Ctrl-U` `Ctrl-K` | delete to the line's start or end |
+| `Ctrl-Z` `Ctrl-Y` | undo and redo within the line (the editor's own) |
+| `Tab` | complete (below) |
+| `↑` `↓` | the previous or next history entry; the line being typed is kept at the newest end |
+| `Ctrl-R` | reverse search in the history (below) |
+| `Ctrl-C` | clears the line and drops an unfinished statement: prints `^C`, back to `app=> ` (an open transaction block is kept) |
+| `Ctrl-D` | on an empty line, exit |
+| `Ctrl-L` | clears the screen and redraws the prompt with the line as it was |
+| `Enter` | sends the line |
+
+A paste (bracketed) is inserted as text; its line breaks send the lines one after another, as
+if typed, so a pasted script runs line by line and, being interactive, goes on past an error.
+`Esc` alone does nothing. A resize redraws the line at the new width.
+
+### What a line is
+The first word of a line decides, in this order:
+1. **A meta-command**: the line starts with `.`. One line, never continued.
+2. **A key-value command**: the first word is exactly `put`, `get`, `del`, `scan`, `check` or
+   `stats`, in lower case, and the line is the command's arguments as the CLI takes them
+   (section 3's byte arguments, section 5's `scan` options, `--format`), split like a shell:
+   words separated by spaces, a word in `"…"` or `'…'` may hold spaces, `\"` and `\\` inside
+   double quotes. One line, never continued. `@-` is a usage error here (`@- reads stdin, which
+   is the shell's own; use @file`), and so is `put` without a value. `delete` is **not** a
+   key-value command at the prompt, so `delete from t` in lower case is the SQL it looks like;
+   `.help` says so. No SQL statement begins with any of the six words, in any dialect EggDB
+   speaks, which is what keeps the rule free of a prefix character.
+3. **SQL** otherwise: the line, and every line after it, until a `;` outside quotes, comments
+   and `$$` bodies ends the statement (several statements on one line run in order). An empty
+   line at `app=> ` does nothing; at `app-> ` it is part of the statement.
+
+### Meta-commands and their exact help
+```
+app=> .help
+Key-value commands, as on the command line without 'eggdb <command> app.db':
+  put <key> <value>            store a value (text, 0x.. hex, @file, =text)
+  get <key>                    print a value
+  del <key>                    remove a key
+  scan [--prefix p] [--from a] [--to b] [-r] [-n count] [-k]
+  check                        read every page and report the file's health
+  stats                        size, pages, last commit and log
+SQL: PostgreSQL dialect, statements ended by ; (docs/sql.md); BEGIN spans prompts:
+  app=*> is inside a transaction block, app=!> a failed one (ROLLBACK ends it).
+  'delete' starts a DELETE statement here; the key-value command is 'del'.
+Shell commands:
+  .tables                      list the tables
+  .schema [table]              CREATE TABLE statements, all or one
+  .mode [table|expanded|csv]   how results print; no argument shows the current mode
+  .timer [on|off]              print each command's time
+  .help                        this text
+  .quit  .exit                 leave (so does Ctrl-D on an empty line)
+Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L the screen.
+History: ~/.local/state/eggdb/history (EGGDB_HISTORY=<path> moves it; set empty, turns it off)
+```
+The history line shows the path actually in use. `.tables` prints one name per line, sorted,
+or `no tables` dimmed. `.schema` prints `CREATE TABLE name (col type NOT NULL, …, PRIMARY KEY
+(…));` as the catalog defines it, one statement per table; an unknown table is `eggdb: no table
+named orders` (exit 1 in batch). `.mode` alone answers `mode: table`; `.timer` alone `timer:
+off`. Unknown: `eggdb: unknown command '.foo'. Type .help for the list.`
+
+### Results and errors
+A SQL result prints exactly as `eggdb sql` prints it (aligned header and rule, numbers
+right-aligned, NULL as an empty cell, `(3 rows)` then an empty line; command tags such as
+`INSERT 0 1`, `UPDATE 2`, `CREATE TABLE`, `BEGIN`, `ROLLBACK`). The modes:
+- `table` (default): psql's aligned format. On a terminal, a result wider than the terminal is
+  printed `expanded` instead, for that result only (psql's `\x auto`), so nothing is cut and
+  nothing wraps mid-cell. In batch there is no width and `table` is always `table`.
+- `expanded`: one record per block, psql's vertical format, `-[ RECORD 1 ]-+-------` headers.
+- `csv`: RFC 4180 with a header row, `"` doubled, NULL empty, no row count, for pasting into a
+  spreadsheet. Command tags still print.
+
+Key-value commands print what the CLI prints in `text` (section 4) with `scan`'s count on
+stderr; `--format json|hex|raw` on the line switches that line. `check` and `stats` print their
+reports. `.timer on` adds `Time: 1.234 ms` (dim, stderr, three decimals; `s` above 1,000 ms)
+after every SQL statement, key-value command and `.schema`.
+
+A SQL error is `eggdb sql`'s, to the character, with `ERROR:` red:
+```
+app=> select name from users where id = 1;
+ERROR:  relation "users" does not exist
+LINE 1: select name from users where id = 1;
+                         ^
+SQLSTATE:  42P01
+```
+`LINE n` counts from the statement's first line, so a continued statement says `LINE 3`. A
+key-value failure is the CLI's `eggdb: …` line (`eggdb: key not found: user:9`, `eggdb: cannot
+store user:1 in app.db: …`, `try:` lines included), red prefix on a terminal. Colour follows
+section 8: a terminal, `NO_COLOR` unset, `TERM` not `dumb`, `--color` to override; the prompt
+and column headers are bold, `ERROR:` and `eggdb:` red, `WARNING:` yellow, `(3 rows)`, `Time:`
+and `^C` dim. Data is never coloured.
+
+### Tab completion
+Completion is computed from the catalog and the keys, never from a word list the user cannot
+see, and it is case-honest: a keyword completes in upper case unless the letters typed are all
+lower case. What completes where:
+
+| Cursor is | Candidates |
+|-----------|------------|
+| in the first word of a line | the six key-value commands, the meta-commands with their `.`, and the statement keywords (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP`, `BEGIN`, `COMMIT`, `ROLLBACK`, `SET`, `SHOW`, `RESET`, `START`, `END`, `ABORT`) |
+| after `FROM`, `JOIN`, `INTO`, `UPDATE`, `TABLE`, `.schema` | table names |
+| elsewhere in SQL | the columns of every table the statement names so far, then SQL keywords and function names from sql.md (`WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, `count`, `coalesce`, …) |
+| after `get`, `del`, `scan --prefix`, `scan --from`, `scan --to` | keys that start with the word, from a prefix scan, at most 50 |
+| after `.mode`, `.timer` | their arguments |
+
+One candidate completes the word and adds a space (a table name after `.schema` too; a key
+adds none). Several complete the longest common prefix; a second `Tab` on the same word lists
+the candidates below the line in columns the width of the longest plus two, at most 200 (then
+`… and 312 more`), and redraws the prompt and line under them. No candidate: nothing happens,
+no bell. Names are completed as the catalog spells them; a name that needs quoting is listed as
+`"Mixed Case"` and inserted with its quotes.
+
+### History
+Every statement and command sent is one entry, appended to the history file as it is sent
+(a crash loses nothing), a multi-line statement as one entry with its line breaks written
+`\n` and a backslash `\\`, read back the same way. Not stored: an empty line, a line that starts
+with a space (the shell convention for "keep this out"), `.quit`/`.exit`, and an entry equal
+to the previous one. The file keeps the newest 1,000 entries (trimmed on exit), is created
+with mode 0600 in a directory of mode 0700, and lives at:
+
+| OS | Path |
+|----|------|
+| Linux, the BSDs, macOS | `$XDG_STATE_HOME/eggdb/history`, else `~/.local/state/eggdb/history` |
+| Windows | `%LOCALAPPDATA%\EggDB\history` |
+
+`EGGDB_HISTORY=<path>` moves it; `EGGDB_HISTORY=` (set and empty) turns it off for the session,
+and so does a file that cannot be created (one dim notice at start: `history off: cannot create
+/home/ada/.local/state/eggdb/history: permission denied`). `↑` recalls the newest entry; a
+multi-line entry is recalled as one line with its line breaks turned into spaces (the one place
+the shell alters text, stated here because a string literal spanning lines changes by it).
+`Ctrl-R` opens `(reverse-i-search)'': ` in the prompt's place; each typed character narrows to
+the newest entry containing the text, `Ctrl-R` again goes to the next older match, `Enter`
+sends the match, `→`/`←`/`End`/`Home` keep it on the line for editing, `Esc` or `Ctrl-C`
+restores the line as it was. A failing search shows `(failed reverse-i-search)'xyz': `.
+
+### Transactions
+`BEGIN` at the prompt opens the file's one write transaction, held across lines and prompts
+until `COMMIT` or `ROLLBACK`, exactly as a `psql` session on `eggdb serve`; the prompt shows
+`=*>`. A failed statement inside the block makes it `=!>` and every statement answers `25P02`
+until `ROLLBACK`. Key-value commands inside a block run inside it (so a `put` is committed by
+the `COMMIT`, or rolled back), which is the one place the two worlds meet. `.quit`, `Ctrl-D`
+and the end of a batch roll an open block back with the `WARNING:` above.
+
+### Exit codes
+Interactive: 0, or 130 from a `Ctrl-C` during a statement. Batch, from section 7's table: 0 when
+every statement and command succeeded; 1 when the first failure was a `get`/`del` of a missing
+key; 2 usage (an unknown `.command`, a bad key-value line, SQL that is not UTF-8); 3 a SQL
+error (any SQLSTATE but the two below) or a database error; 4 damaged (`XX001`, `Corrupt`); 5
+busy (`55P03`, `Locked`). Writing to a closed pipe exits 0 quietly.
+
+### Examples
+```
+$ eggdb shell app.db
+EggDB 0.2.0: app.db, open read-write (2 tables, 1,204 keys)
+Type .help for help. SQL ends with ; and .quit or Ctrl-D quits.
+app=> .tables
+items
+sales
+app=> select i.name, sum(s.quantity) as sold
+app-> from items i join sales s on s.item_id = i.id
+app-> group by i.name order by 2 desc;
+ name  | sold
+-------+------
+ egg   |    7
+ bread |    1
+(2 rows)
+
+app=> begin;
+BEGIN
+app=*> put user:21 Linus
+app=*> insert into items values (3, 'milk', 1.2);
+INSERT 0 1
+app=*> insert into items values (3, 'milk', 1.2);
+ERROR:  duplicate key value violates unique constraint "items_pkey"
+DETAIL:  Key (id)=(3) already exists.
+SQLSTATE:  23505
+app=!> commit;
+ROLLBACK
+app=> get user:21
+eggdb: key not found: user:21
+app=> scan --prefix user:2 -n 2
+user:2    Grace
+user:20   Mira
+2 entries
+app=> .timer on
+timer: on
+app=> select count(*) from items;
+ count
+-------
+     2
+(1 row)
+
+Time: 0.412 ms
+app=> .quit
+$ eggdb shell app.db -c "scan -k -n 1" -c "select 1 as one;"
+user:1
+ one
+-----
+   1
+(1 row)
+
+$ echo $?
+0
+```
+
+### Decided by this design
+1. The prompt is psql's, on the file's stem, so `serve`'s database name and the shell's prompt
+   agree, and `=*>`/`=!>` need no explaining to a psql user.
+2. The six key-value words are recognised in lower case only and `delete` is always SQL: no
+   prefix character, and no SQL statement can be mistaken for a command.
+3. Raw mode only while a line is read; `Ctrl-C` during a statement keeps section 7's meaning.
+4. A wide result goes `expanded` for that result (psql's `\x auto`) rather than cut: nothing
+   printed is ever less than the data.
+5. History is one entry per line, 0600, under XDG state (or `%LOCALAPPDATA%`), moved or turned
+   off by `EGGDB_HISTORY`; a multi-line entry is recalled on one line with spaces.
+6. `BEGIN` holds the write transaction across prompts, and key-value commands join it.
+7. Batch mode prints like `eggdb sql` and stops at the first failure unless `--keep-going`.

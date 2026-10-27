@@ -21,4 +21,4 @@
   user:4                      41│
   user:5                      41│
  Committed doc:json (93 B) at 09:14:04Z
- ↑↓ move  Enter open  / filter  e edit  a add  d delete  c check  ? help  q quit
+ ↑↓ move  / filter  e edit  a add  d delete  s sql  c check  ? help  q quit

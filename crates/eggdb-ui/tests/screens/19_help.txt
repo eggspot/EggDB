@@ -1,4 +1,4 @@
- EggDB ui help                                                          1–22/22
+ EggDB ui help                                                          1–22/26
 
  Move        ↑↓ or j/k   PgUp/PgDn   Home/End or g/G   ←→ scroll
  Panes       Tab or Shift-Tab switch   Enter open the value   Esc back to keys
@@ -17,8 +17,8 @@
  Every change is one transaction, written to disk before the screen redraws.
  Nothing is changed until you confirm. There is no undo after a commit.
 
+ Query       s  SQL screen   F5 or Ctrl-R run   Tab editor/grid   Esc back
+             Ctrl-P/Ctrl-N previous/next query   Enter is a line break
+             A run holds nothing after it: BEGIN and COMMIT in one run, or roll…
+
  Terminal    at least 40x10; two panes from 80 columns
-             NO_COLOR, --mono and --ascii change colours and box characters
- Database    app.db   page size 4.0 KiB   keys up to 512 B   values up to 1.0 G…
-             the editor holds 4.0 MiB of text   page cache 16.0 MiB
- Version     EggDB X.Y.Z   docs github.com/eggspot/EggDB/blob/main/docs/ux/ui.md

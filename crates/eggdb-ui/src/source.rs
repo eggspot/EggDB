@@ -44,6 +44,55 @@ pub trait Source {
     /// Closes the database and opens it again, which recovers its last durable state after
     /// [`ErrorKind::NeedsReopen`].
     fn reopen(&mut self) -> Result<(), SourceError>;
+
+    /// Runs `text` as a SQL script, statement by statement, as `eggdb sql` does, and rolls
+    /// back a transaction block the script leaves open. A source without SQL answers with an
+    /// error.
+    fn run_sql(&mut self, text: &str) -> SqlRun {
+        let _ = text;
+        SqlRun {
+            failure: Some(SqlFailure {
+                lines: vec!["ERROR:  this database has no SQL".to_owned()],
+                position: None,
+            }),
+            ..SqlRun::default()
+        }
+    }
+}
+
+/// What a [`Source::run_sql`] run did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SqlRun {
+    /// Every statement's command tag that ran, in order (`CREATE TABLE`, `INSERT 0 3`).
+    pub tags: Vec<String>,
+    /// Notices and warnings the session gave, one per entry.
+    pub notices: Vec<String>,
+    /// The last result that had columns.
+    pub table: Option<SqlTable>,
+    /// The error that stopped the run.
+    pub failure: Option<SqlFailure>,
+    /// How long the run took.
+    pub elapsed: Duration,
+}
+
+/// A result with columns, as text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SqlTable {
+    /// The column names.
+    pub columns: Vec<String>,
+    /// Whether each column holds numbers, which are aligned right.
+    pub numeric: Vec<bool>,
+    /// The rows, each cell as text; NULL is `None`.
+    pub rows: Vec<Vec<Option<String>>>,
+}
+
+/// A SQL error, printed as `eggdb sql` prints it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SqlFailure {
+    /// The lines: `ERROR:  …`, `LINE n: …` and its caret, `DETAIL:`, `HINT:`, `SQLSTATE:`.
+    pub lines: Vec<String>,
+    /// The byte offset in the script the error points at.
+    pub position: Option<usize>,
 }
 
 /// Where a [`Source::keys`] scan starts.

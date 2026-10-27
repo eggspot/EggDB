@@ -216,7 +216,7 @@ differs from them. The main screen, with a JSON value selected:
   user:4                      41│
   user:5                      41│
 
- ↑↓ move  Enter open  / filter  e edit  a add  d delete  c check  ? help  q quit
+ ↑↓ move  / filter  e edit  a add  d delete  s sql  c check  ? help  q quit
 ```
 
 | Keys | In the key list | In the value viewer |

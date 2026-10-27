@@ -7,4 +7,4 @@
   user:1                              41
   user:10                             43
  Opened app.db read-write
- ↑↓ move  Enter open  ? help  q quit
+ ↑↓ move  / filter  ? help  q quit
