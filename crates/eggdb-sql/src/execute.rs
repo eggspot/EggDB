@@ -574,10 +574,9 @@ impl<'a> Projection<'a> {
                 }
             }
         }
-        let each_column_once = projected.iter().enumerate().all(|(at, item)| match item {
-            ProjectedItem::Column(index) => !projected[..at]
-                .iter()
-                .any(|earlier| matches!(earlier, ProjectedItem::Column(other) if other == index)),
+        let mut taken = vec![false; scope.table.map_or(0, |table| table.columns.len())];
+        let each_column_once = projected.iter().all(|item| match item {
+            ProjectedItem::Column(index) => !std::mem::replace(&mut taken[*index], true),
             ProjectedItem::Expr(_) => false,
         });
         Ok(Self {
