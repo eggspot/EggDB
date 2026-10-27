@@ -153,16 +153,16 @@ exports into a new file, or into a file without SQL tables.
   adjacent string literals on separate lines, `U&'...'` strings, octal and Unicode escapes in
   `E'...'` strings, `CASE` branches of different types; `lower` and `upper` change case by
   Unicode rules, where PostgreSQL's `C` collation changes only ASCII letters.
-- Speed: a point `SELECT` by primary key takes about 1.2 times SQLite's time and multi-row
-  `INSERT`s about 1.7 times on an Apple-silicon Mac (0.85 and 1.67 times on CI's Linux runners), measured with the same SQL text on both and
-  gated so they can only improve; closing the rest of the gap is roadmap item 19e (D99).
+- Speed: a point `SELECT` by primary key takes about 1.2 times SQLite's time on an
+  Apple-silicon Mac (0.85 on CI's Linux runners), and multi-row `INSERT`s of constants about 0.9
+  times (0.83 on Linux), measured with the same SQL text on both and gated so they can only improve; the rest of
+  the point-select gap is roadmap item 19e (D99).
 
 ## Next parts (roadmap)
 - Joins: inner and left joins (`JOIN ... ON`, `USING`, comma joins).
 - `GROUP BY` with `count`, `sum`, `avg`, `min`, `max`, `HAVING`, and `DISTINCT`.
 - Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.
 - The `numeric`, `timestamp` and `json`/`jsonb` types, and `serial`/identity columns.
-- SQL as fast as SQLite for point `SELECT`s and bulk `INSERT`s: leaf splits without decoding the
-  leaf, an AST that borrows the SQL text, a direct path for `INSERT ... VALUES`, and a plan
+- Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache.
 - Then `eggdb shell`, the PostgreSQL wire protocol, and the other dialects (items 20 to 25).

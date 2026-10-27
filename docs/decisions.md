@@ -4158,3 +4158,34 @@ outputs are new code beside the old; on x86-64 Linux the binary grows by 24,576 
 to 1,444,696, +1.7%), while its peak memory stays within its lines (3,010,560 bytes for
 `--version`, 5,638,144 for a `get`, both slightly below them). That is the stated price of the
 speed above; both footprint size lines are updated.
+
+**Closing the gap, second round (2026-10-27).** The coordinator's review would not accept bulk
+inserts gated at 1.7 times SQLite's time, since the research above found the rest avoidable, so
+this part goes on with that research's fixes in order until `sql_bulk_insert` is at most 1.0:
+- *An append split that does not decode the leaf.* A key appended past the last key of the
+  rightmost leaf, when it does not fit, now starts a new right leaf holding only that key; the
+  old leaf keeps its cells and takes the separator as its high fence, rewritten in one pass with
+  the prefix that fence gives it (`Shape::take_high_fence`). This is the split point the general
+  split already chose for that case, so the pages are byte for byte what it wrote (a test
+  compares the rewrite with a full encode of the same node), the leaves of a sequential load
+  stay full, and the file format is unchanged.
+- *Appends without a descent.* A write transaction remembers the path to the rightmost leaf
+  after a put that appended there; the next put of a larger key goes straight to that leaf. Any
+  other put, any delete and every split forget it, so the path is only reused while nothing can
+  have moved it. A model test mixes appends, inserts in the middle, overflow values and deletes.
+- *`INSERT ... VALUES` without an AST.* When every value is a plain constant (a number, with an
+  optional minus, a string, `NULL`, `TRUE` or `FALSE`), there is no column list, `RETURNING` or
+  `ON CONFLICT`, and all rows have the same length, the session checks the statement's tokens
+  once and stores each row straight from them, evaluating each constant exactly as the parser's
+  literal would be. Anything else takes the general path. A differential test runs 3,000
+  random statements both ways (the general one forced by a column list) and compares every
+  result, error, position and the final table.
+
+`sql_bulk_insert` went from 1.74 to **0.89** on the Apple-silicon Mac (0.31 against 0.34 µs per
+row), and on CI's Linux runner from 1.67 to **0.83**; both lines are lowered to these values. The AST that borrows the SQL text and the plan cache were not
+needed for the insert target and remain for point selects, which stay at 1.23 on macOS and 0.85
+to 0.94 on Linux. The binary grows by another 16,528 bytes on macOS (1,181,504 to 1,198,032,
++1.4%) and 16,880 on x86-64 Linux (1,444,696 to 1,461,576, +1.2%) for the append path and the
+direct `INSERT` path, the stated price of the speed; Linux peak memory moves within its lines
+(3,053,568 bytes for `--version`, 5,687,296 for a `get`, about 10 KB above them, from the larger
+binary the loader maps), which stay as they are.
