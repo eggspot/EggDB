@@ -1688,6 +1688,9 @@ fn order_request(
     scope: Scope<'_>,
     table: &TableDefinition,
 ) -> Option<OrderRequest> {
+    if sort_keys.is_empty() {
+        return None;
+    }
     let mut columns = Vec::with_capacity(sort_keys.len());
     for (item, key) in select.order_by.iter().zip(sort_keys) {
         let column = match key {
