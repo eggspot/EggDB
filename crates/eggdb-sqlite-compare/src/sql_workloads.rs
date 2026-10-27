@@ -388,9 +388,9 @@ mod tests {
         eggdb_run(&mut session, &orders_script()).unwrap();
         for (sql, most) in [(JOIN_QUERY, 300), (super::GROUP_BY_QUERY, 1000)] {
             eggdb_run(&mut session, sql).unwrap();
-            let before = crate::ALLOCATOR.count();
+            let before = crate::thread_allocations::made_on_this_thread();
             eggdb_run(&mut session, sql).unwrap();
-            let made = crate::ALLOCATOR.count() - before;
+            let made = crate::thread_allocations::made_on_this_thread() - before;
             println!("ALLOCATIONS {made} for {sql}");
             assert!(made <= most, "{made} allocations for {sql}");
         }

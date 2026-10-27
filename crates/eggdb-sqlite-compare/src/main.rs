@@ -17,9 +17,6 @@
 //! the disk, depend on the disk more than on either engine and are reported only. `--update`
 //! rewrites this system's lines of these benchmarks and `--baseline <path>` reads another file.
 
-#[cfg(test)]
-#[path = "../../eggdb-bench/src/allocations.rs"]
-mod allocations;
 #[path = "../../eggdb-bench/src/baseline.rs"]
 #[allow(dead_code)]
 mod baseline;
@@ -41,8 +38,59 @@ mod workloads;
 use crate::harness::Benchmark;
 
 #[cfg(test)]
+mod thread_allocations {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static MADE: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) struct ThreadCountingAllocator;
+
+    pub(crate) fn made_on_this_thread() -> u64 {
+        MADE.with(Cell::get)
+    }
+
+    fn record() {
+        MADE.with(|made| made.set(made.get() + 1));
+    }
+
+    // SAFETY: every call goes unchanged to the system allocator, which meets `GlobalAlloc`'s
+    // contract; counting the calls in a thread-local cell allocates nothing.
+    unsafe impl GlobalAlloc for ThreadCountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record();
+            // SAFETY: the caller meets `alloc`'s contract, which `System.alloc` shares.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record();
+            // SAFETY: the caller meets `alloc_zeroed`'s contract, which `System.alloc_zeroed`
+            // shares.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record();
+            // SAFETY: the caller meets `realloc`'s contract, and `ptr` came from the system
+            // allocator underneath this one.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: the caller meets `dealloc`'s contract, and `ptr` came from the system
+            // allocator underneath this one.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+}
+
+#[cfg(test)]
 #[global_allocator]
-static ALLOCATOR: allocations::CountingAllocator = allocations::CountingAllocator::new();
+static ALLOCATOR: thread_allocations::ThreadCountingAllocator =
+    thread_allocations::ThreadCountingAllocator;
 use std::process::ExitCode;
 
 type Workload = fn() -> Result<Vec<crate::baseline::Metric>, String>;
