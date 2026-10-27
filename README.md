@@ -79,7 +79,7 @@ PGPASSWORD=choose-one psql -h 127.0.0.1 -U eggdb shop -c "SELECT * FROM items"
 
 Or work in one session, with history and tab completion:
 
-```
+```text
 $ eggdb shell shop.db
 EggDB 0.2.0: shop.db, open read-write (1 table)
 Type .help for help. SQL ends with ; and .quit or Ctrl-D quits.

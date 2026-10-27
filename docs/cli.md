@@ -681,7 +681,7 @@ eggdb: unknown option '--reverse' for eggdb get
   try: eggdb help get
 ```
 
-The commands that are coming (`shell`, `backup`, `compact`) answer
+The commands that are coming (`backup`, `compact`) answer
 `eggdb <name> is not in this release yet; see docs/roadmap.md` and exit 2, so no script is built
 on a name that later changes meaning.
 

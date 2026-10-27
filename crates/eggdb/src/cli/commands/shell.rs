@@ -1030,6 +1030,10 @@ fn scan_sql(text: &str) -> Pending {
             }
             b'\'' | b'"' => {
                 let quote = bytes[index];
+                let escapes = quote == b'\''
+                    && index > 0
+                    && matches!(bytes[index - 1], b'E' | b'e')
+                    && (index < 2 || !is_identifier_byte(bytes[index - 2]));
                 index += 1;
                 open = if quote == b'\'' {
                     Open::Single
@@ -1037,6 +1041,10 @@ fn scan_sql(text: &str) -> Pending {
                     Open::Double
                 };
                 while index < bytes.len() {
+                    if escapes && bytes[index] == b'\\' {
+                        index += 2;
+                        continue;
+                    }
                     if bytes[index] == quote {
                         if bytes.get(index + 1) == Some(&quote) {
                             index += 2;
@@ -1094,6 +1102,10 @@ fn scan_sql(text: &str) -> Pending {
     Pending { complete_to, open }
 }
 
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
 fn dollar_tag(bytes: &[u8]) -> Option<&[u8]> {
     let rest = bytes.get(1..)?;
     let end = rest.iter().position(|&b| b == b'$')?;
@@ -1127,6 +1139,9 @@ mod tests {
         assert_eq!(scan_sql("select $$;$$;").complete_to, 13);
         assert_eq!(scan_sql("select $a$ ; $a$").complete_to, 0);
         assert_eq!(scan_sql("select \"a;\";").complete_to, 12);
+        assert_eq!(scan_sql("select E'it\\'s;';").complete_to, 17);
+        assert_eq!(scan_sql("select e'\\\\';").complete_to, 13);
+        assert_eq!(scan_sql("select 'a\\';").complete_to, 12);
         assert_eq!(scan_sql("select 'open").open, Open::Single);
         assert_eq!(scan_sql("select \"open").open, Open::Double);
         assert_eq!(scan_sql("select 'closed'").open, Open::None);
