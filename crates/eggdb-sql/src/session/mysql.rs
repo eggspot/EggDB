@@ -34,7 +34,6 @@ fn rows_result(columns: Vec<OutputColumn>, rows: Vec<Vec<Value>>) -> QueryResult
     QueryResult::rows(format!("SELECT {}", rows.len()), columns, rows)
 }
 
-/// The type `sql_type` is shown as by MySQL's `SHOW COLUMNS` and `SHOW CREATE TABLE`.
 pub(crate) fn mysql_type_name(sql_type: SqlType) -> String {
     match sql_type {
         SqlType::SmallInt => "smallint".into(),
@@ -306,7 +305,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                             format!("Variable '{name}' is a read only variable"),
                         )
                         .with_vendor_code(1238),
-                        SetRefused::WrongValue(_) => SqlError::new(
+                        SetRefused::WrongValue => SqlError::new(
                             SqlState::MYSQL_SYNTAX_OR_ACCESS,
                             format!("Variable '{name}' can't be set to the value of '{shown}'"),
                         )

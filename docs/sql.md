@@ -16,7 +16,8 @@ eggdb sql shop.db -c "SELECT i.name, count(s.id), sum(s.quantity) FROM items i L
 ```
 
 These are the first parts of the SQL core (roadmap items 19 and 19b). What comes next is listed
-at the end.
+at the end. The same tables also speak MySQL's SQL: see "The MySQL dialect" and "Connecting with
+mysql" below (roadmap item 22, D106).
 
 ## Connecting with psql
 
@@ -75,6 +76,101 @@ catalog queries of GUI tools (`pg_catalog`), `COPY`, `LISTEN`/`NOTIFY`, cancelli
 query, the implicit transaction around a multi-statement `Query` or an extended-protocol
 pipeline (each statement commits on its own outside `BEGIN`), stored users and roles, and
 non-ASCII passwords.
+
+## The MySQL dialect
+
+`eggdb sql --dialect mysql` and `eggdb shell --dialect mysql` read MySQL's SQL, and every
+connection through `eggdb serve --mysql-listen` does (D106). Both dialects work on the same
+tables, so a table made through psql is queried with `mysql` and the other way round.
+
+```sh
+eggdb sql --create --dialect mysql shop.db -c "CREATE TABLE \`items\` (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(40) NOT NULL) ENGINE=InnoDB"
+eggdb sql --dialect mysql shop.db -c "INSERT INTO items (name) VALUES ('egg'), ('bread'); SELECT LAST_INSERT_ID()"
+eggdb sql --dialect mysql shop.db -c "INSERT INTO items VALUES (1, 'eggs') ON DUPLICATE KEY UPDATE name = VALUES(name)"
+eggdb sql --dialect mysql shop.db -c "SELECT * FROM items LIMIT 0, 10; SHOW TABLES; DESCRIBE items"
+```
+
+What it reads, on top of the statements of "What runs today":
+- **Lexical rules**: backtick identifiers (folded to lower case like unquoted names, so
+  `lower_case_table_names` is 1), `"..."` strings, backslash escapes in strings, `#` and `-- `
+  comments, `/*! ... */` run as SQL, `?` placeholders.
+- **Statements**: `LIMIT offset, count`, `AUTO_INCREMENT`, `INSERT IGNORE`, `REPLACE`,
+  `INSERT ... ON DUPLICATE KEY UPDATE` with `VALUES(col)`, `SHOW TABLES`, `SHOW DATABASES`,
+  `DESCRIBE`/`SHOW COLUMNS`, `SHOW CREATE TABLE`, `SHOW VARIABLES [LIKE ...]`, `SHOW WARNINGS`,
+  `SHOW COUNT(*) WARNINGS`, `USE`, `SET` of session and user variables (`SET NAMES`, `SET
+  autocommit`, `SET @x = ...`), `START TRANSACTION`, `LOCK TABLES`/`UNLOCK TABLES` (accepted),
+  table options such as `ENGINE=` and `DEFAULT CHARSET=` and non-unique `KEY`/`INDEX` entries
+  (accepted and ignored).
+- **Types** as the engine's: `TINYINT(1)` and `BOOLEAN` are booleans (shown as `1` and `0`),
+  `TINYINT` and `SMALLINT` are `smallint`, `MEDIUMINT` and `INT` are `integer`, `BIGINT` is
+  `bigint`, `UNSIGNED` takes the next wider type, `FLOAT` is `real`, `DOUBLE`, `REAL`,
+  `DECIMAL` and `NUMERIC` are `double precision` until the `numeric` type exists, `CHAR(n)` and
+  `VARCHAR(n)` are `varchar(n)`, the `TEXT` family is `text`; `DATE`, `DATETIME`, `TIMESTAMP`,
+  `JSON`, `BLOB` and `ENUM` answer error 1235 until item 19d.
+- **Functions and operators**: `IFNULL`, `IF`, `CONCAT`, `LENGTH` (bytes), `CHAR_LENGTH`,
+  `UPPER`/`UCASE`, `LOWER`/`LCASE`, `COALESCE`, `NULLIF`, `ABS`, `DATABASE()`, `SCHEMA()`,
+  `VERSION()`, `USER()`, `CURRENT_USER()`, `CONNECTION_ID()`, `LAST_INSERT_ID()`, `@@var`
+  (`@@version`, `@@sql_mode`, `@@max_allowed_packet`, ...), `@var`, `DIV`, `MOD`, `/` in
+  floating point, `<=>`, `||` and `&&` as `OR` and `AND`, `!`. A result column without an alias
+  is named by its text (`SELECT 1+1` gives a column `1+1`).
+- **Errors** with MySQL's numbers, SQLSTATEs and wording: `ERROR 1146 (42S02): Table
+  'eggdb.missing' doesn't exist` (`eggdb` is the database name in `eggdb sql` and `eggdb shell`;
+  through the server it is `--database`'s), 1064 for syntax errors (`... near '...' at line 1`), 1054,
+  1062, 1048, 1050, 1051, 1049, 1193 and the rest. `SHOW WARNINGS` lists the last statement's
+  warnings and notes, or its error.
+- **Transactions as MySQL has them**: an error inside `START TRANSACTION` ... `COMMIT` does not
+  end the transaction when the failing statement had not written yet; `SET autocommit = 0`
+  keeps a transaction open from the first write to `COMMIT` or `ROLLBACK`; `CREATE TABLE`,
+  `DROP TABLE` and `START TRANSACTION` commit an open transaction first.
+
+## Connecting with mysql
+
+`eggdb serve --mysql-listen <address>` also serves the file over MySQL's client/server protocol
+(roadmap item 22, D106), beside the PostgreSQL listener, to the same user and password:
+
+```sh
+export EGGDB_PASSWORD='choose-one'
+eggdb serve --create shop.db --mysql-listen 127.0.0.1:3306
+```
+
+and in another terminal:
+
+```sh
+MYSQL_PWD='choose-one' mysql -h 127.0.0.1 -P 3306 -u eggdb shop
+mysql> CREATE TABLE items (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(40) NOT NULL);
+mysql> INSERT INTO items (name) VALUES ('egg'), ('bread');
+mysql> SELECT * FROM items;
+mysql> SHOW TABLES;
+```
+
+A driver connects the same way (PyMySQL, mysql-connector, Connector/J, mysql2, ...) with
+`127.0.0.1`, port 3306, user `eggdb`, the password and database `shop`, and runs
+parameterized queries, client-side or as server prepared statements.
+
+What the server does:
+- **Authentication is always required**: `caching_sha2_password` (MySQL 8's default; its fast
+  path) or `mysql_native_password` (MariaDB's clients use it), one user per server, and error
+  1045 `Access denied for user ...` for a wrong password, answered more slowly after repeated
+  failures. Passwords must be ASCII, as for the PostgreSQL listener.
+- **Loopback only, without TLS (D102)**: the handshake does not offer TLS, so `mysql` and
+  drivers with TLS preferred (the default) connect without it on loopback, and those requiring
+  it fail. `--mysql-listen` refuses addresses that are not loopback.
+- **`COM_QUERY`** with text result sets, several statements per query for clients that ask for
+  it (the `mysql` client does), OK packets with affected rows, the `AUTO_INCREMENT` value and
+  the warning count, and status flags for open transactions and `autocommit`.
+- **Prepared statements**: `COM_STMT_PREPARE`, `COM_STMT_EXECUTE` with binary parameters and
+  binary rows, `COM_STMT_SEND_LONG_DATA`, `COM_STMT_RESET`, `COM_STMT_CLOSE`.
+- **What clients ask at connect**: `select @@version_comment limit 1`, `SET NAMES`, `SET
+  autocommit`, `@@max_allowed_packet`, Connector/J's list of session variables, `SHOW
+  VARIABLES`, `SHOW WARNINGS`; `COM_INIT_DB`, `COM_PING`, `COM_RESET_CONNECTION`,
+  `COM_FIELD_LIST`, `COM_SET_OPTION`. The server reports itself as `8.0.36-EggDB`.
+- **Several connections**, up to `--max-connections` (64) for this listener, at most 16 of them
+  still logging in; the next gets error 1040. A stop ends idle connections with error 1053.
+
+Not yet: TLS, compression, `LOAD DATA LOCAL INFILE`, `CLIENT_DEPRECATE_EOF`, query attributes,
+`information_schema` and the catalog queries of GUI tools (MySQL Workbench, DBeaver), dates and
+times, stored users, and `caching_sha2_password`'s full authentication (which needs TLS or RSA;
+the fast path always applies, since the server checks every password itself).
 
 ## What runs today
 
@@ -292,6 +388,30 @@ until they are fixed:
   rows takes about 0.94 times SQLite's time on the Mac and 0.86 on Linux, and a 10,000-row join
   by primary key about 0.99 times on the Mac and 1.4 on Linux, gated the same way; the Linux join
   must reach 1.0 before v0.3.0 (item 19e, D100).
+
+## Known differences from MySQL
+The MySQL suite (`crates/eggdb-sql/correctness/mysql.test`, 112 cases from the MySQL 8.0
+Reference Manual's documented behaviour) marks these as differing until they are fixed:
+- `7 / 2` is `3.5` (a `double`) where MySQL gives the `DECIMAL` `3.5000`: decimals come with the
+  `numeric` type (item 19d).
+- `1 / 0` is error 1365 where MySQL's `SELECT` gives `NULL` with a warning.
+- Text compares byte by byte (`'a' = 'A'` is false) where `utf8mb4_0900_ai_ci` ignores case and
+  accents; collations come with D30.
+
+And more, not in the suite yet:
+- Comparisons and `IS` tests are booleans, shown as `1` and `0`, but arithmetic on them (`TRUE +
+  1`) and `IF(1, ...)` with an integer condition are type errors where MySQL treats booleans as
+  integers. Strings are not converted to numbers implicitly (`'5' + 1` with a typed string).
+- A statement that fails after it wrote rows inside a transaction rolls the whole transaction
+  back, where MySQL rolls back only the statement (no statement savepoints yet).
+- `AUTO_INCREMENT` continues from the largest value in the table, so the value of a deleted last
+  row is given again, which MySQL 8 does not do; `AUTO_INCREMENT=n` table options are ignored.
+- `INSERT IGNORE` skips duplicate keys only; other errors still fail the statement.
+- `UPDATE` reports rows matched, as with `CLIENT_FOUND_ROWS`, not rows changed.
+- `BIGINT UNSIGNED` is refused; `UNSIGNED` columns accept negative values.
+- `SET` remembers session variables without applying them (`sql_mode`, `time_zone`,
+  `transaction_isolation`: every transaction is serializable); `SET GLOBAL` is refused.
+- `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`, `double` for `DECIMAL`).
 
 ## Next parts (roadmap)
 - Secondary indexes (`CREATE INDEX`, `UNIQUE`), used by `WHERE` and `ORDER BY`.

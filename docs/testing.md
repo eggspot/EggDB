@@ -204,7 +204,9 @@ through the `eggdb` command; the smoke test reads the samples with each release 
 the expected output after `----`, or `error <SQLSTATE>`), its SQL, and the PostgreSQL manual's
 chapter it comes from on a `chapter` line. They run in order in one session over the in-memory
 store, so later cases see the tables earlier ones made. The runner (`src/correctness.rs`) takes
-the dialect's name; each later dialect adds its own file. A case marked `... differs` is a known
+the dialect's name; each later dialect adds its own file. `mysql.test` (112 cases from the MySQL
+8.0 Reference Manual, D106) may name MySQL's error number after the SQLSTATE (`error 42S02
+1146`), and the runner then checks both. A case marked `... differs` is a known
 difference, listed in sql.md: the runner checks that it still differs, so fixing the engine
 fails the suite until the mark and the doc line go. At most one case in ten may be marked.
 

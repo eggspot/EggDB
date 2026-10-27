@@ -20,6 +20,7 @@ pub const MAX_AUTHENTICATION_PACKET_BYTES: usize = 16 * 1024;
 /// The largest packet accepted from an authenticated client: `@@max_allowed_packet`, 64 MiB.
 pub const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PREPARED_STATEMENTS: usize = 4096;
+const MAX_HELD_BYTES: usize = MAX_PACKET_BYTES;
 
 pub(crate) fn printable(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
@@ -83,7 +84,6 @@ fn send_sql_error(wire: &mut Wire<'_>, error: &SqlError) {
     wire.send(&err_packet(code, &state, error.message()));
 }
 
-/// Answers a connection over the limit with MySQL's error 1040 in place of the handshake.
 pub(crate) fn refuse_too_many(wire: &mut Wire<'_>) {
     wire.sequence = 0;
     send_error(wire, 1040, "08004", "Too many connections");
@@ -207,6 +207,7 @@ struct Prepared {
     types: Vec<ParameterType>,
     long_data: Vec<Option<Vec<u8>>>,
     long_data_bytes: usize,
+    long_data_overflowed: bool,
 }
 
 struct Connection<'a, 's, S: KeyValueStore + 's> {
@@ -234,8 +235,6 @@ fn new_session<'s, S: KeyValueStore + 's>(
     session
 }
 
-/// Runs one connection: the handshake, authentication, then commands until the client
-/// leaves or the server stops.
 pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     mut wire: Wire<'a>,
     shared: &'a Shared<'a>,
@@ -587,6 +586,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                     Some(prepared) => {
                         prepared.long_data.iter_mut().for_each(|data| *data = None);
                         prepared.long_data_bytes = 0;
+                        prepared.long_data_overflowed = false;
                         self.ok(0, 0, 0)
                     }
                     None => self.unknown_statement(statement, "mysqld_stmt_reset"),
@@ -758,7 +758,9 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
     }
 
     fn prepare(&mut self, text: String) -> bool {
-        if self.statements.len() >= MAX_PREPARED_STATEMENTS {
+        if self.statements.len() >= MAX_PREPARED_STATEMENTS
+            || self.held_bytes().saturating_add(text.len()) > MAX_HELD_BYTES
+        {
             return self.error(
                 1461,
                 "42000",
@@ -810,21 +812,32 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 types: Vec::new(),
                 long_data: vec![None; count],
                 long_data_bytes: 0,
+                long_data_overflowed: false,
             },
         );
         self.wire.flush().is_ok()
     }
 
+    fn held_bytes(&self) -> usize {
+        self.statements
+            .values()
+            .map(|prepared| prepared.text.len().saturating_add(prepared.long_data_bytes))
+            .fold(0, usize::saturating_add)
+    }
+
     fn long_data(&mut self, statement: u32, parameter: u16, data: &[u8]) {
+        let fits = self.held_bytes().saturating_add(data.len()) <= MAX_HELD_BYTES;
         let Some(prepared) = self.statements.get_mut(&statement) else {
             return;
         };
         let Some(slot) = prepared.long_data.get_mut(usize::from(parameter)) else {
             return;
         };
-        prepared.long_data_bytes = prepared.long_data_bytes.saturating_add(data.len());
-        if prepared.long_data_bytes <= MAX_PACKET_BYTES {
+        if fits {
+            prepared.long_data_bytes += data.len();
             slot.get_or_insert_with(Vec::new).extend_from_slice(data);
+        } else {
+            prepared.long_data_overflowed = true;
         }
     }
 
@@ -834,7 +847,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         };
         let sent_long: Vec<bool> = prepared.long_data.iter().map(Option::is_some).collect();
         let parsed = parse_execute(body, prepared.parameter_count, &prepared.types, &sent_long);
-        let too_long = prepared.long_data_bytes > MAX_PACKET_BYTES;
+        let too_long = std::mem::take(&mut prepared.long_data_overflowed);
         let long_data: Vec<Option<Vec<u8>>> =
             prepared.long_data.iter_mut().map(Option::take).collect();
         prepared.long_data_bytes = 0;

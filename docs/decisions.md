@@ -130,3 +130,4 @@ its full title with its status.
 - [D103](decisions/D103.md) The PostgreSQL server: an `eggdb-pgwire` crate, a thread per connection, SCRAM-SHA-256 with our own `eggdb-crypto`, one user whose verifier is derived at startup
 - [D104](decisions/D104.md) SQL takes `$n` parameters as text bound at parse time, describes statements without running them, and keeps PostgreSQL's run-time parameters
 - [D105](decisions/D105.md) `eggdb shell` and the query screen reuse the UI's terminal layer and the `sql` command's printers; the correctness suite is a table-driven file per dialect
+- [D106](decisions/D106.md) MySQL protocol: caching_sha2_password fast-auth, native as second; the MySQL dialect in the SQL core, MySQL's errors and transactions, `AUTO_INCREMENT` in table definition version 2

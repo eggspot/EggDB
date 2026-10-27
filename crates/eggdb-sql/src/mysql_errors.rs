@@ -60,8 +60,6 @@ fn keep_position(error: SqlError, position: Option<usize>) -> SqlError {
     }
 }
 
-/// `error`, raised while running `text`, as MySQL reports the same failure: its error number,
-/// SQLSTATE and message, such as `1146 (42S02): Table 'shop.items' doesn't exist`.
 pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError {
     if error.vendor_code().is_some() {
         return error;
@@ -231,8 +229,6 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
     keep_position(result, position)
 }
 
-/// A PostgreSQL-style notice (`NOTICE:  relation "t" already exists, skipping`) as the MySQL
-/// note the same statement gives.
 pub(crate) fn note_for(notice: &str, database: &str) -> Option<Warning> {
     let name = first_quoted(notice);
     if notice.contains("already exists, skipping") {

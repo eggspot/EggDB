@@ -151,13 +151,16 @@ enum Block<'s, S: KeyValueStore + 's> {
     Failed,
 }
 
-/// A SQL session over a [`KeyValueStore`]: it runs statements of the PostgreSQL dialect one
-/// after another, each in its own transaction unless a `BEGIN` opened a block.
+/// A SQL session over a [`KeyValueStore`]: it runs statements of its [`Dialect`] (PostgreSQL's
+/// unless [`Session::with_dialect`] chose MySQL's) one after another, each in its own
+/// transaction unless a `BEGIN` opened a block.
 ///
 /// A block holds the store's one write transaction from `BEGIN` to `COMMIT` or `ROLLBACK`.
-/// A failed statement inside a block rolls the block back at once and leaves the session in
-/// PostgreSQL's aborted state: every statement fails with SQLSTATE `25P02` until `ROLLBACK`
-/// (or `COMMIT`, which then reports `ROLLBACK`).
+/// In PostgreSQL's dialect a failed statement inside a block rolls the block back at once and
+/// leaves the session in the aborted state: every statement fails with SQLSTATE `25P02` until
+/// `ROLLBACK` (or `COMMIT`, which then reports `ROLLBACK`). In MySQL's, a statement that fails
+/// before writing leaves the block open, one that fails after writing rolls it back and ends
+/// it, and errors carry MySQL's numbers and wording.
 pub struct Session<'s, S: KeyValueStore + 's> {
     store: &'s S,
     block: Block<'s, S>,

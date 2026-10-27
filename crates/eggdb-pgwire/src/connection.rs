@@ -271,8 +271,6 @@ fn read_startup(wire: &mut Wire<'_>) -> Option<Startup> {
     None
 }
 
-/// Answers a connection over the limit, after reading its startup packet as PostgreSQL does,
-/// with `53300 too_many_connections`.
 pub(crate) fn refuse_too_many(wire: &mut Wire<'_>) {
     if read_startup(wire).is_some() {
         fatal(
@@ -457,7 +455,6 @@ fn tag_with_count(tag: &str, count: usize) -> String {
     }
 }
 
-/// One client connection, from its startup packet to its end.
 pub(crate) struct Connection<'a, 's, S: KeyValueStore + 's> {
     wire: Wire<'a>,
     shared: &'a Shared<'a>,
@@ -468,8 +465,6 @@ pub(crate) struct Connection<'a, 's, S: KeyValueStore + 's> {
     skipping_to_sync: bool,
 }
 
-/// Runs one connection: startup, authentication, then messages until the client leaves or the
-/// server stops.
 pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     mut wire: Wire<'a>,
     shared: &'a Shared<'a>,

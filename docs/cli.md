@@ -459,8 +459,10 @@ stdin (a script of `-`, or none at all when stdin is not a terminal). This relea
 first parts of the PostgreSQL dialect: tables with a primary key, `INSERT`, `SELECT` with
 `WHERE`, inner, left and cross joins, `GROUP BY` with aggregates, `HAVING`, `DISTINCT`,
 `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE` and transaction blocks, with the integer,
-floating-point, boolean and text types. [sql.md](sql.md) lists exactly what runs and
-what comes next.
+floating-point, boolean and text types. `--dialect mysql` reads MySQL's SQL instead, on the
+same tables, and reports errors as MySQL does (`ERROR 1146 (42S02): Table 'eggdb.t' doesn't
+exist`) and warnings as `Warning 1062: ...` on stderr; `--dialect postgresql` is the default.
+[sql.md](sql.md) lists exactly what runs and what comes next.
 
 ```sh
 eggdb sql --create shop.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL, price double precision)"
@@ -509,11 +511,12 @@ SQLSTATE:  42P01
 ## `eggdb shell`
 
 ```
-eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--read-only] [--create]
+eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql] [--read-only] [--create]
 ```
 
 One prompt for everything this page and [sql.md](sql.md) do with a file: the key-value
-commands without their `eggdb <command> <file>` prefix, SQL in the PostgreSQL dialect, and a
+commands without their `eggdb <command> <file>` prefix, SQL in the PostgreSQL dialect (or
+MySQL's with `--dialect mysql`), and a
 few `.` commands. The file stays open for writing while the shell runs (`--read-only`: open
 read-only), so other writers get the busy message meanwhile. The design is
 [ux/cli.md](ux/cli.md), section 15.
@@ -605,12 +608,14 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file> [--listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]
+eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
 PostgreSQL driver connect to it unchanged and run the SQL of `eggdb sql` ([sql.md](sql.md),
-"Connecting with psql"). The design is [ux/cli.md](ux/cli.md), section 14.
+"Connecting with psql"). With `--mysql-listen` it also serves MySQL's client/server protocol,
+so the `mysql` client and MySQL drivers connect and run MySQL's SQL on the same tables
+([sql.md](sql.md), "Connecting with mysql", D106). The design is [ux/cli.md](ux/cli.md), section 14.
 
 ```sh
 export EGGDB_PASSWORD='choose-one'
@@ -625,7 +630,8 @@ eggdb serve --create app.db
 | Option | Meaning |
 |--------|---------|
 | `--listen <address>` | `host:port`, `[::1]:port`, `localhost:port` or a port alone (on `127.0.0.1`); port 0 takes any free port. Default `127.0.0.1:5432`. **Loopback addresses only** (below) |
-| `--user <name>` | the one user clients log in as, with SCRAM-SHA-256. Default `eggdb` |
+| `--mysql-listen <address>` | also serve MySQL's protocol there, the same forms as `--listen` (MySQL's port is 3306); same user, password and database, `caching_sha2_password` or `mysql_native_password`, and its own `--max-connections`. **Loopback addresses only**, like `--listen` |
+| `--user <name>` | the one user clients log in as, with SCRAM-SHA-256 (and MySQL's methods on `--mysql-listen`). Default `eggdb` |
 | `--password-file <file>` | the password is the file's first line; `-` reads it from stdin. Without it, `EGGDB_PASSWORD`. Never on the command line. ASCII only in this release (SASLprep is not implemented). Prefer the file: `EGGDB_PASSWORD` stays in the server's environment for as long as it runs, where the same user (and on some systems an administrator) can read it, for example through `/proc/<pid>/environ` on Linux |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
 | `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, so slow or failing logins cannot take every slot; a 17th gets `53300` too |
@@ -641,7 +647,8 @@ is removed when TLS lands.
 
 **Output.** On a terminal, the report above; in a pipe, one JSON line,
 `{"listening":"127.0.0.1:5432","host":"127.0.0.1","port":5432,"file":"app.db","database":"app","user":"eggdb","max_connections":64,"read_only":false}`,
-so a script reads the port with `jq .port`. While it runs, stderr is a log of failures, one per
+so a script reads the port with `jq .port`; with `--mysql-listen` the line also has
+`"mysql_listening"` and `"mysql_port"`, and the report a `mysql` line. While it runs, stderr is a log of failures, one per
 line: `2026-10-27 09:14:07 UTC  127.0.0.1:53422  password authentication failed for user "bob"`.
 Ctrl-C or `SIGTERM` finishes the running statements, ends idle connections with `57P01`, rolls
 back open transactions, prints `stopped` (`{"stopped":true,"connections_closed":N}` in JSON) and

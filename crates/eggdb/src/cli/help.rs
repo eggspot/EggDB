@@ -17,8 +17,8 @@ Commands:
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, from a file or stdin; see --create
-  sql    <file> [script]        run SQL (PostgreSQL dialect) from -c, a script or stdin
-  serve  <file>                 serve the file to PostgreSQL clients (psql, drivers); see --listen
+  sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
+  serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   help   [command]              this text, or one command's help
   version                       print the version
@@ -53,12 +53,14 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Import => {
             "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run]"
         }
-        CommandName::Sql => "eggdb sql <file> [-c <sql> | <script> | -] [--create]",
+        CommandName::Sql => {
+            "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql] [--create]"
+        }
         CommandName::Shell => {
-            "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--read-only] [--create]"
+            "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql] [--read-only] [--create]"
         }
         CommandName::Serve => {
-            "eggdb serve <file> [--listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
+            "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
         }
     }
 }
@@ -235,12 +237,14 @@ script of - or none at all), in order. This release runs the first parts of the 
 dialect: CREATE TABLE with a PRIMARY KEY, DROP TABLE, INSERT, SELECT with WHERE, inner, left
 and cross joins, GROUP BY with count, sum, avg, min and max, HAVING, DISTINCT, ORDER BY,
 LIMIT and OFFSET, UPDATE, DELETE, BEGIN, COMMIT and ROLLBACK, with the integer, floating-point,
-boolean and text types. Results print as aligned tables, like psql. Each statement outside
+boolean and text types. With --dialect mysql it reads MySQL's SQL and reports MySQL's errors. Results print as aligned
+tables, like psql. Each statement outside
 BEGIN ... COMMIT is its own transaction. The first failing statement stops the run with exit 3
 and a PostgreSQL-style error on stderr; statements before it stay committed, and a block left
 open is rolled back. Indexes, more types and the rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
+      --dialect <name>  postgresql (default) or mysql
       --create          create the database file if it is missing
 
 Examples:
@@ -263,6 +267,7 @@ batch: plain output, no prompt, and it stops at the first failure unless --keep-
   -c, --command <text>   a line to run, repeatable; runs in order, then exits
       --keep-going       run on after a failure, exiting with the first failure's code
       --mode <mode>      table (default), expanded or csv
+      --dialect <name>   SQL in postgresql (default) or mysql
       --read-only        open the file read-only
       --create           create the database file if it is missing
 
@@ -283,6 +288,8 @@ the running statements, rolls back open transactions and stops with exit 0.
 
       --listen <address>          host:port, [::1]:port, or a port alone on 127.0.0.1; port 0
                                   takes any free port (default 127.0.0.1:5432)
+      --mysql-listen <address>    also serve MySQL's protocol there, to the mysql client and
+                                  MySQL drivers (MySQL's SQL; port 3306 is MySQL's)
       --user <name>               the user clients log in as (default eggdb)
       --password-file <file>      the password is the file's first line; - reads stdin
       --database <name>           the name clients connect to (default: the file name
@@ -296,4 +303,5 @@ Examples:
   EGGDB_PASSWORD=secret eggdb serve app.db --listen 127.0.0.1:5433
   eggdb serve --create new.db --password-file - < password.txt
   psql postgresql://eggdb@127.0.0.1:5432/app
+  eggdb serve app.db --password-file pw.txt --mysql-listen 127.0.0.1:3306
 ";

@@ -92,16 +92,12 @@ const READ_ONLY_VARIABLES: &[&str] = &[
     "version_compile_os",
 ];
 
-/// Why a system variable was not set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SetRefused {
     ReadOnly,
-    WrongValue(String),
+    WrongValue,
 }
 
-/// A MySQL session's variables: the system variables clients read with `@@name` and `SHOW
-/// VARIABLES` and set with `SET`, the user variables of `SET @name`, and what
-/// `LAST_INSERT_ID()` and `CONNECTION_ID()` return.
 #[derive(Debug, Clone)]
 pub(crate) struct MySqlVariables {
     system: BTreeMap<String, Value>,
@@ -170,8 +166,7 @@ impl MySqlVariables {
             (None, Some((_, default))) => default_value(default),
             (None, None) => Value::Null,
             (Some(value), _) if BOOLEAN_VARIABLES.contains(&name.as_str()) => {
-                let shown = value.to_text().unwrap_or_else(|| "NULL".to_owned());
-                Value::BigInt(switch(&value).ok_or(SetRefused::WrongValue(shown))?)
+                Value::BigInt(switch(&value).ok_or(SetRefused::WrongValue)?)
             }
             (Some(value), _) => value,
         };
