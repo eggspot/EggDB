@@ -514,6 +514,27 @@ fn correlated_subqueries_run_once_per_distinct_outer_value() {
         ),
         "count\n10\nSELECT 1"
     );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM big o WHERE EXISTS (SELECT 1 FROM big i WHERE i.k = o.id AND i.id > 4990)"
+        ),
+        "count\n9\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM big o WHERE o.id < 100 AND NOT EXISTS (SELECT 1 FROM big i WHERE o.id::float8 / 2 = i.k)"
+        ),
+        "count\n90\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM big o WHERE EXISTS (SELECT 1 FROM big i WHERE i.k = o.id::numeric / 2)"
+        ),
+        "count\n10\nSELECT 1"
+    );
 }
 
 #[test]

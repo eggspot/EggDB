@@ -262,6 +262,180 @@ pub(crate) struct Template {
     prepared: Prepared,
     outer: Vec<usize>,
     test: SubqueryTest,
+    lookup: Option<KeyLookup>,
+}
+
+struct KeyLookup {
+    outer: Vec<usize>,
+    families: Vec<Option<Family>>,
+    keys: HashSet<Vec<u8>>,
+    found: Arc<SubqueryRows>,
+    missing: Arc<SubqueryRows>,
+    _held: crate::memory::HeldMemory,
+}
+
+impl KeyLookup {
+    fn probe(&self, row: &[Value]) -> Option<Arc<SubqueryRows>> {
+        let mut key = Vec::new();
+        for (&index, family_of_keys) in self.outer.iter().zip(&self.families) {
+            let value = row.get(index)?;
+            if value.is_null() {
+                return Some(Arc::clone(&self.missing));
+            }
+            match family_of_keys {
+                None => return Some(Arc::clone(&self.missing)),
+                Some(known) if family(value) != Some(*known) => return None,
+                Some(_) => equality_key(&mut key, value),
+            }
+        }
+        Some(Arc::clone(if self.keys.contains(&key) {
+            &self.found
+        } else {
+            &self.missing
+        }))
+    }
+}
+
+fn existence(rows: usize) -> SqlResult<Arc<SubqueryRows>> {
+    Ok(Arc::new(SubqueryRows {
+        sql_type: None,
+        values: Vec::new(),
+        rows,
+        hashed: std::sync::OnceLock::new(),
+        _held: crate::memory::HeldMemory::holding(0)?,
+    }))
+}
+
+fn split_and(expr: Expr) -> Vec<Expr> {
+    match expr.kind {
+        ExprKind::And(parts) => parts,
+        kind => vec![Expr {
+            kind,
+            position: expr.position,
+        }],
+    }
+}
+
+fn mentions_outer(expr: &Expr) -> bool {
+    let mut found = Vec::new();
+    collect_outer(expr, &mut found);
+    !found.is_empty()
+}
+
+fn key_query(query: &Query) -> Option<(Query, Vec<usize>)> {
+    let SetExpr::Select(select) = &query.body else {
+        return None;
+    };
+    if !query.with.is_empty()
+        || !query.order_by.is_empty()
+        || query.offset.is_some()
+        || select.offset.is_some()
+        || select.source_row_limit.is_some()
+        || !select.group_by.is_empty()
+        || select.having.is_some()
+        || crate::aggregate::is_aggregate_query(select)
+    {
+        return None;
+    }
+    if let Some(from) = &select.from
+        && from
+            .joins
+            .iter()
+            .any(|join| matches!(&join.condition, JoinCondition::On(on) if mentions_outer(on)))
+    {
+        return None;
+    }
+    let mut outer = Vec::new();
+    let mut items = Vec::new();
+    let mut kept = Vec::new();
+    for conjunct in split_and(select.filter.clone()?) {
+        if !mentions_outer(&conjunct) {
+            kept.push(conjunct);
+            continue;
+        }
+        let ExprKind::Binary(BinaryOperator::Equal, left, right) = &conjunct.kind else {
+            return None;
+        };
+        let (inner, index) = match (&left.kind, &right.kind) {
+            (_, ExprKind::OuterColumn { index, .. }) if !mentions_outer(left) => (left, *index),
+            (ExprKind::OuterColumn { index, .. }, _) if !mentions_outer(right) => (right, *index),
+            _ => return None,
+        };
+        outer.push(index);
+        items.push(SelectItem::Expr {
+            expr: (**inner).clone(),
+            alias: None,
+        });
+    }
+    if outer.is_empty() {
+        return None;
+    }
+    let position = select.filter.as_ref().map_or(0, |filter| filter.position);
+    let filter = match kept.len() {
+        0 => None,
+        1 => kept.pop(),
+        _ => Some(Expr {
+            kind: ExprKind::And(kept),
+            position,
+        }),
+    };
+    let keys = Select {
+        distinct: true,
+        items,
+        from: select.from.clone(),
+        filter,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        source_row_limit: None,
+    };
+    Some((Query::of_select(keys, query.position), outer))
+}
+
+fn build_lookup(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    query: &Query,
+    prepared: &Prepared,
+) -> SqlResult<Option<KeyLookup>> {
+    let Some((keys_query, outer)) = key_query(query) else {
+        return Ok(None);
+    };
+    let result = execute_query(env, tables, &keys_query, prepared)?;
+    let mut families: Vec<Option<Family>> = vec![None; outer.len()];
+    let mut mixed = false;
+    let mut keys = HashSet::with_capacity(result.rows.len());
+    let mut bytes = 0usize;
+    for row in &result.rows {
+        if row.iter().any(Value::is_null) {
+            continue;
+        }
+        let mut key = Vec::new();
+        for (value, known) in row.iter().zip(families.iter_mut()) {
+            let found = family(value);
+            match known {
+                None => *known = found,
+                Some(existing) if Some(*existing) != found => mixed = true,
+                Some(_) => {}
+            }
+            equality_key(&mut key, value);
+        }
+        bytes = bytes.saturating_add(key.len() + 48);
+        keys.insert(key);
+    }
+    if mixed || families.iter().any(Option::is_none) && !keys.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(KeyLookup {
+        outer,
+        families,
+        keys,
+        found: existence(1)?,
+        missing: existence(0)?,
+        _held: crate::memory::HeldMemory::holding(bytes)?,
+    }))
 }
 
 pub(crate) struct Prepared {
@@ -350,6 +524,11 @@ impl<'a> Correlation<'a> {
             .map(|&index| row.get(index).cloned().unwrap_or(Value::Null))
             .collect();
         let key = (template, encode_row(&outer));
+        if let Some(lookup) = &found.lookup
+            && let Some(rows) = lookup.probe(row)
+        {
+            return Ok(rows);
+        }
         if let Some(rows) = self
             .memo
             .try_borrow()
@@ -1269,11 +1448,22 @@ fn prepare_subquery(
             }
         });
         let sql_type = rows.sql_type;
+        let lookup = if matches!(subquery.test, SubqueryTest::Exists) && !env.columns_only {
+            let keys_env = Env {
+                reader: &overlay,
+                names: env.names,
+                columns_only: false,
+            };
+            build_lookup(&keys_env, tables, &query, &inner)?
+        } else {
+            None
+        };
         templates.push(Template {
             query,
             prepared: inner,
             outer,
             test: subquery.test.clone(),
+            lookup,
         });
         subquery.state = SubqueryState::Correlated {
             template: templates.len() - 1,

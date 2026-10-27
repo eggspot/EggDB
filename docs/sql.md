@@ -423,7 +423,8 @@ the fast path always applies, since the server checks every password itself).
   select list, `WHERE`, `HAVING` and `JOIN ... ON`, and stand in that query's select list,
   `WHERE` or `ORDER BY` (in a grouped query, in `WHERE` only); it then runs once for each
   distinct set of the outer values it names, read by key or index where its conditions allow,
-  and the others run once per statement. `INSERT ... VALUES`, `UPDATE` and `DELETE` take subqueries
+  and the others run once per statement; an `EXISTS` whose outer references are only
+  `inner = outer` conditions in `WHERE` runs once, into a hash set the outer rows look up. `INSERT ... VALUES`, `UPDATE` and `DELETE` take subqueries
   that do not name the changed table's columns.
 - **`WITH` queries**: `WITH name [(columns)] AS [[NOT] MATERIALIZED] (query), ...` before a
   query or a subquery, each name visible to the ones after it and to the query; every `WITH`
