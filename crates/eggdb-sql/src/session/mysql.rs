@@ -389,7 +389,7 @@ fn index_columns() -> Vec<OutputColumn> {
 }
 
 fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
-    let primary = (!table.primary_key.is_empty()).then(|| ("PRIMARY", true, &table.primary_key));
+    let primary = (!table.primary_key.is_empty()).then_some(("PRIMARY", true, &table.primary_key));
     let keys = primary.into_iter().chain(
         table
             .indexes

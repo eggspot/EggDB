@@ -1044,7 +1044,7 @@ mod tests {
             let mut values = Vec::new();
             let mut key = Vec::new();
             for (kind, _) in types.iter().enumerate() {
-                let value = if random.next() % 5 == 0 {
+                let value = if random.next().is_multiple_of(5) {
                     Value::Null
                 } else {
                     random_value(&mut random, kind as u64)
@@ -1080,7 +1080,7 @@ mod tests {
                 let at = (random.next() as usize) % bytes.len();
                 bytes[at] = random.next() as u8;
             }
-            if random.next() % 3 == 0 {
+            if random.next().is_multiple_of(3) {
                 let keep = (random.next() as usize) % bytes.len();
                 bytes.truncate(keep);
             }

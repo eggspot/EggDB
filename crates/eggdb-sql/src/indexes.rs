@@ -563,7 +563,7 @@ pub(crate) fn drop_index(
     Ok(result)
 }
 
-/// What [`check_indexes`] found: every table and index it read.
+/// What [`Session::check_indexes`](crate::Session::check_indexes) found: every table and index it read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexCheck {
     /// The SQL tables read.
