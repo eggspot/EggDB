@@ -1,5 +1,5 @@
 use super::{Access, Session};
-use crate::cli::args::{CommandName, SqlSource};
+use crate::cli::args::{CommandName, ResultMode, SqlSource};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use crate::cli::sql_store::DatabaseStore;
@@ -82,7 +82,7 @@ impl Session<'_> {
     }
 }
 
-fn exit_for(error: &SqlError) -> Exit {
+pub(super) fn exit_for(error: &SqlError) -> Exit {
     match error.state() {
         SqlState::DATA_CORRUPTED => Exit::Damaged,
         SqlState::LOCK_NOT_AVAILABLE => Exit::Busy,
@@ -90,25 +90,36 @@ fn exit_for(error: &SqlError) -> Exit {
     }
 }
 
-fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &str) {
-    messages.styled(Style::Red, "ERROR:");
-    messages.text(&format!("  {}\n", error.message()));
+pub(super) fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &str) {
+    let lines = error_lines(error, text);
+    for (index, line) in lines.iter().enumerate() {
+        match line.strip_prefix("ERROR:") {
+            Some(rest) if index == 0 => {
+                messages.styled(Style::Red, "ERROR:");
+                messages.text(rest);
+            }
+            _ => messages.text(line),
+        }
+        messages.text("\n");
+    }
+}
+
+pub(crate) fn error_lines(error: &SqlError, text: &str) -> Vec<String> {
+    let mut lines = vec![format!("ERROR:  {}", error.message())];
     if let Some(position) = error.position().filter(|&position| position <= text.len()) {
         let (number, line, column) = line_of(text, position);
         let prefix = format!("LINE {number}: ");
-        messages.text(&format!("{prefix}{line}\n"));
-        messages.text(&format!(
-            "{}^\n",
-            " ".repeat(prefix.chars().count() + column)
-        ));
+        lines.push(format!("{prefix}{line}"));
+        lines.push(format!("{}^", " ".repeat(prefix.chars().count() + column)));
     }
     if let Some(detail) = error.detail() {
-        messages.text(&format!("DETAIL:  {detail}\n"));
+        lines.push(format!("DETAIL:  {detail}"));
     }
     if let Some(hint) = error.hint() {
-        messages.text(&format!("HINT:  {hint}\n"));
+        lines.push(format!("HINT:  {hint}"));
     }
-    messages.text(&format!("SQLSTATE:  {}\n", error.state()));
+    lines.push(format!("SQLSTATE:  {}", error.state()));
+    lines
 }
 
 fn line_of(text: &str, position: usize) -> (usize, &str, usize) {
@@ -128,83 +139,187 @@ fn line_of(text: &str, position: usize) -> (usize, &str, usize) {
 }
 
 fn print_result(out: &mut Output<'_>, result: &QueryResult) {
-    if let Some(columns) = &result.columns {
-        let cells: Vec<Vec<String>> = result
+    out.text(&result_text(result, ResultMode::Table, None));
+}
+
+pub(crate) struct ResultCells {
+    pub(crate) columns: Vec<String>,
+    pub(crate) numeric: Vec<bool>,
+    pub(crate) rows: Vec<Vec<Option<String>>>,
+}
+
+pub(crate) fn result_cells(result: &QueryResult) -> Option<ResultCells> {
+    let columns = result.columns.as_ref()?;
+    let numeric = (0..columns.len())
+        .map(|index| {
+            columns[index]
+                .sql_type
+                .map(|sql_type| {
+                    !matches!(
+                        sql_type,
+                        eggdb_sql::SqlType::Text
+                            | eggdb_sql::SqlType::Varchar(_)
+                            | eggdb_sql::SqlType::Boolean
+                    )
+                })
+                .or_else(|| {
+                    result
+                        .rows
+                        .iter()
+                        .find_map(|row| row.get(index).filter(|value| !value.is_null()))
+                        .map(is_number)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    Some(ResultCells {
+        columns: columns.iter().map(|column| column.name.clone()).collect(),
+        numeric,
+        rows: result
             .rows
             .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|value| value.to_text().unwrap_or_default())
-                    .collect()
-            })
-            .collect();
-        let mut widths: Vec<usize> = columns
-            .iter()
-            .map(|column| column.name.chars().count())
-            .collect();
-        for row in &cells {
-            for (width, cell) in widths.iter_mut().zip(row) {
-                *width = (*width).max(cell.chars().count());
+            .map(|row| row.iter().map(Value::to_text).collect())
+            .collect(),
+    })
+}
+
+pub(super) fn result_text(result: &QueryResult, mode: ResultMode, width: Option<usize>) -> String {
+    let Some(cells) = result_cells(result) else {
+        return format!("{}\n", result.tag);
+    };
+    let mut text = match mode {
+        ResultMode::Csv => csv_text(&cells),
+        ResultMode::Expanded => expanded_text(&cells),
+        ResultMode::Table => {
+            let table = table_text(&cells);
+            let widest = table.lines().map(|line| line.chars().count()).max();
+            match (width, widest) {
+                (Some(width), Some(widest)) if widest > width => expanded_text(&cells),
+                _ => table,
             }
         }
-        let numeric: Vec<bool> = (0..columns.len())
-            .map(|index| {
-                columns[index]
-                    .sql_type
-                    .map(|sql_type| {
-                        !matches!(
-                            sql_type,
-                            eggdb_sql::SqlType::Text
-                                | eggdb_sql::SqlType::Varchar(_)
-                                | eggdb_sql::SqlType::Boolean
-                        )
-                    })
-                    .or_else(|| {
-                        result
-                            .rows
-                            .iter()
-                            .find_map(|row| row.get(index).filter(|value| !value.is_null()))
-                            .map(is_number)
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-        let header: Vec<String> = columns
+    };
+    if !result.tag.starts_with("SELECT") {
+        text.push_str(&format!("{}\n", result.tag));
+    }
+    text
+}
+
+fn rows_line(count: usize) -> String {
+    format!("({count} {})\n\n", if count == 1 { "row" } else { "rows" })
+}
+
+fn table_text(cells: &ResultCells) -> String {
+    let mut widths: Vec<usize> = cells
+        .columns
+        .iter()
+        .map(|name| name.chars().count())
+        .collect();
+    for row in &cells.rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.as_deref().map_or(0, |cell| cell.chars().count()));
+        }
+    }
+    let mut text = String::new();
+    let header: Vec<String> = cells
+        .columns
+        .iter()
+        .zip(&widths)
+        .map(|(name, &width)| centered(name, width))
+        .collect();
+    text.push_str(&table_line(&header));
+    let rule: Vec<String> = widths.iter().map(|&width| "-".repeat(width + 2)).collect();
+    text.push_str(&rule.join("+"));
+    text.push('\n');
+    for row in &cells.rows {
+        let padded: Vec<String> = row
             .iter()
             .zip(&widths)
-            .map(|(column, &width)| centered(&column.name, width))
+            .zip(&cells.numeric)
+            .map(|((cell, &width), &right)| {
+                let cell = cell.as_deref().unwrap_or_default();
+                let fill = " ".repeat(width - cell.chars().count());
+                if right {
+                    format!("{fill}{cell}")
+                } else {
+                    format!("{cell}{fill}")
+                }
+            })
             .collect();
-        out.text(&table_line(&header));
-        let rule: Vec<String> = widths.iter().map(|&width| "-".repeat(width + 2)).collect();
-        out.text(&rule.join("+"));
-        out.text("\n");
-        for row in &cells {
-            let padded: Vec<String> = row
-                .iter()
-                .zip(&widths)
-                .zip(&numeric)
-                .map(|((cell, &width), &right)| {
-                    let fill = width - cell.chars().count();
-                    if right {
-                        format!("{}{cell}", " ".repeat(fill))
-                    } else {
-                        format!("{cell}{}", " ".repeat(fill))
-                    }
-                })
-                .collect();
-            out.text(&table_line(&padded));
-        }
-        let count = result.rows.len();
-        out.text(&format!(
-            "({count} {})\n\n",
-            if count == 1 { "row" } else { "rows" }
-        ));
-        if !result.tag.starts_with("SELECT") {
-            out.text(&format!("{}\n", result.tag));
-        }
-    } else {
-        out.text(&format!("{}\n", result.tag));
+        text.push_str(&table_line(&padded));
     }
+    text.push_str(&rows_line(cells.rows.len()));
+    text
+}
+
+fn expanded_text(cells: &ResultCells) -> String {
+    if cells.rows.is_empty() {
+        return rows_line(0);
+    }
+    let name_width = cells
+        .columns
+        .iter()
+        .map(|name| name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let value_width = cells
+        .rows
+        .iter()
+        .flatten()
+        .map(|cell| cell.as_deref().map_or(0, |cell| cell.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let mut text = String::new();
+    for (number, row) in cells.rows.iter().enumerate() {
+        let label = format!("-[ RECORD {} ]", number + 1);
+        let left = name_width + 1;
+        let label_width = label.chars().count();
+        let rule = if label_width < left {
+            format!(
+                "{label}{}+{}",
+                "-".repeat(left - label_width),
+                "-".repeat(value_width + 1)
+            )
+        } else {
+            format!(
+                "{label}{}",
+                "-".repeat((left + 2 + value_width).saturating_sub(label_width).max(1))
+            )
+        };
+        text.push_str(&rule);
+        text.push('\n');
+        for (name, cell) in cells.columns.iter().zip(row) {
+            let fill = " ".repeat(name_width - name.chars().count());
+            let line = format!("{name}{fill} | {}", cell.as_deref().unwrap_or_default());
+            text.push_str(line.trim_end());
+            text.push('\n');
+        }
+    }
+    text.push('\n');
+    text
+}
+
+fn csv_text(cells: &ResultCells) -> String {
+    let field = |text: &str| {
+        if text.contains([',', '"', '\n', '\r']) || text.starts_with(' ') || text.ends_with(' ') {
+            format!("\"{}\"", text.replace('"', "\"\""))
+        } else {
+            text.to_owned()
+        }
+    };
+    let mut text = String::new();
+    let header: Vec<String> = cells.columns.iter().map(|name| field(name)).collect();
+    text.push_str(&header.join(","));
+    text.push('\n');
+    for row in &cells.rows {
+        let fields: Vec<String> = row
+            .iter()
+            .map(|cell| cell.as_deref().map_or_else(String::new, field))
+            .collect();
+        text.push_str(&fields.join(","));
+        text.push('\n');
+    }
+    text
 }
 
 fn is_number(value: &Value) -> bool {

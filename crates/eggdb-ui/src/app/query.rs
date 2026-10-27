@@ -66,7 +66,10 @@ fn widths(table: &SqlTable) -> Vec<usize> {
             *width = (*width).max(cell.as_deref().map_or(0, text_width));
         }
     }
-    widths.iter().map(|width| (*width).min(WIDEST_CELL)).collect()
+    widths
+        .iter()
+        .map(|width| (*width).min(WIDEST_CELL))
+        .collect()
 }
 
 fn fitted(cell: &str, width: usize, right: bool, ellipsis: &str) -> String {
@@ -164,7 +167,7 @@ impl<S: Source> Ui<S> {
     }
 
     fn grid_key(&mut self, key: KeyEvent) {
-        let page = self.grid_rows().saturating_sub(3).max(1);
+        let page = self.grid_rows().saturating_sub(2).max(1);
         let Some(query) = self.query.as_mut() else {
             return;
         };
@@ -283,7 +286,7 @@ impl<S: Source> Ui<S> {
             QueryFocus::Grid => vec![
                 Hint::new(up_down, "scroll"),
                 Hint::new(left_right, "columns"),
-                Hint::new("Home/End", ""),
+                Hint::new("Home/End", "ends"),
                 Hint::new("Tab", "editor"),
                 Hint::new("F5", "run"),
                 Hint::new("Esc", "editor"),
@@ -333,7 +336,10 @@ impl<S: Source> Ui<S> {
             );
         }
         if editor_focused {
-            let row = query.editor.cursor_line().saturating_sub(query.editor.top());
+            let row = query
+                .editor
+                .cursor_line()
+                .saturating_sub(query.editor.top());
             let col = query
                 .editor
                 .cursor_cells()
@@ -465,7 +471,14 @@ impl<S: Source> Ui<S> {
             Role::Plain
         };
         let row = self.size.rows.saturating_sub(2);
-        self.put(frame, 1, row, &status, role, self.size.cols.saturating_sub(2));
+        self.put(
+            frame,
+            1,
+            row,
+            &status,
+            role,
+            self.size.cols.saturating_sub(2),
+        );
     }
 }
 
@@ -481,10 +494,16 @@ fn recall(query: &mut Query, by: isize) {
     if query.recalled == query.history.len() {
         query.draft = query.editor.text().to_owned();
     }
-    let target = query
+    let mut target = query
         .recalled
         .saturating_add_signed(by)
         .min(query.history.len());
+    if by < 0
+        && query.recalled == query.history.len()
+        && query.history.get(target).map(String::as_str) == Some(query.editor.text())
+    {
+        target = target.saturating_sub(1);
+    }
     if target == query.recalled {
         return;
     }

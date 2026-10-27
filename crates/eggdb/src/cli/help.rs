@@ -19,6 +19,7 @@ Commands:
   import <file> [in]            load an export, from a file or stdin; see --create
   sql    <file> [script]        run SQL (PostgreSQL dialect) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL clients (psql, drivers); see --listen
+  shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -53,6 +54,9 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
             "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run]"
         }
         CommandName::Sql => "eggdb sql <file> [-c <sql> | <script> | -] [--create]",
+        CommandName::Shell => {
+            "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--read-only] [--create]"
+        }
         CommandName::Serve => {
             "eggdb serve <file> [--listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
         }
@@ -81,6 +85,7 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Import => IMPORT,
         CommandName::Sql => SQL,
         CommandName::Serve => SERVE,
+        CommandName::Shell => SHELL,
     }
 }
 
@@ -244,6 +249,27 @@ Examples:
   eggdb sql app.db -c \"SELECT name FROM users WHERE id = 2\"
   eggdb sql app.db schema.sql
   cat queries.sql | eggdb sql app.db
+";
+
+const SHELL: &str = "\
+An interactive prompt on one database file: the key-value commands without their
+'eggdb <command> <file>' prefix (put, get, del, scan, check, stats), SQL in the PostgreSQL
+dialect until a semicolon, and .help, .tables, .schema, .mode, .timer, .quit. Tab completes,
+Up/Down and Ctrl-R recall the history, which is kept in $XDG_STATE_HOME/eggdb/history
+(EGGDB_HISTORY=<path> moves it; set empty, turns it off). BEGIN holds a transaction across
+prompts until COMMIT or ROLLBACK. With -c, or with stdin not a terminal, it runs the text as a
+batch: plain output, no prompt, and it stops at the first failure unless --keep-going.
+
+  -c, --command <text>   a line to run, repeatable; runs in order, then exits
+      --keep-going       run on after a failure, exiting with the first failure's code
+      --mode <mode>      table (default), expanded or csv
+      --read-only        open the file read-only
+      --create           create the database file if it is missing
+
+Examples:
+  eggdb shell app.db
+  eggdb shell app.db -c \"put user:1 Ada\" -c \"select count(*) from users;\"
+  eggdb shell app.db < session.txt
 ";
 
 const SERVE: &str = "\

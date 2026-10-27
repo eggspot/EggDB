@@ -119,6 +119,7 @@ mod topology_sysfs;
 #[cfg(any(test, windows))]
 mod topology_windows;
 mod uncached;
+pub mod user_files;
 
 pub use aligned::AlignedBuffer;
 pub use cache::{CACHE_LINE_PADDING, CachePadded};

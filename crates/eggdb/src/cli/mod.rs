@@ -62,7 +62,11 @@ fn print(stdout: &mut dyn Write, text: &str) -> Exit {
     }
 }
 
-fn report(failure: &Failure, console: &mut Console<'_>, color: args::ColorChoice) -> Exit {
+pub(crate) fn report(
+    failure: &Failure,
+    console: &mut Console<'_>,
+    color: args::ColorChoice,
+) -> Exit {
     let color = commands::uses_color(color, console.terminal.stderr_color);
     let mut messages = Output::new(&mut *console.stderr, color);
     let try_line = match failure {
@@ -116,6 +120,8 @@ fn usage_line(messages: &mut Output<'_>, command: CommandName) {
     messages.text("\n");
 }
 
+#[cfg(test)]
+mod shell_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

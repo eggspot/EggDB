@@ -12,7 +12,8 @@ use std::io::Read;
 use std::ops::Bound;
 
 mod serve;
-mod sql;
+mod shell;
+pub(super) mod sql;
 mod transfer;
 
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
@@ -25,7 +26,24 @@ enum Access {
     Write { create: bool },
 }
 
+enum Opened<'a> {
+    Owned(Box<Database>),
+    Shared(&'a Database),
+}
+
+impl std::ops::Deref for Opened<'_> {
+    type Target = Database;
+
+    fn deref(&self) -> &Database {
+        match self {
+            Self::Owned(db) => db,
+            Self::Shared(db) => db,
+        }
+    }
+}
+
 struct Session<'a> {
+    shared: Option<&'a Database>,
     request: Request,
     file: String,
     file_display: String,
@@ -55,20 +73,26 @@ pub(crate) fn uses_color(choice: ColorChoice, terminal_wants_color: bool) -> boo
 }
 
 pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exit, Failure> {
-    let terminal = console.terminal;
-    if request.command == CommandName::Ui && !(terminal.stdin && terminal.stdout) {
-        return Err(Failure::usage(
-            "eggdb ui needs a terminal; use eggdb get/scan instead",
-            Some(CommandName::Ui),
-        ));
+    if request.command == CommandName::Shell {
+        return shell::run(request, console);
     }
+    execute_on(request, console, None)
+}
+
+fn session_for<'a>(
+    request: Request,
+    console: &'a mut Console<'_>,
+    shared: Option<&'a Database>,
+) -> Session<'a> {
+    let terminal = console.terminal;
     let format = request
         .format
         .unwrap_or_else(|| default_format(request.command, terminal.stdout));
     let stdout_color = format == Format::Text && uses_color(request.color, terminal.stdout_color);
     let stderr_color = uses_color(request.color, terminal.stderr_color);
     let file_display = request.file.display().to_string();
-    let mut session = Session {
+    Session {
+        shared,
         file: render::text(file_display.as_bytes()),
         file_display,
         request,
@@ -79,7 +103,22 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
         stdin_is_terminal: terminal.stdin,
         stdin_taken: false,
         stderr_is_terminal: terminal.stderr,
-    };
+    }
+}
+
+fn execute_on(
+    request: Request,
+    console: &mut Console<'_>,
+    shared: Option<&Database>,
+) -> Result<Exit, Failure> {
+    let terminal = console.terminal;
+    if request.command == CommandName::Ui && !(terminal.stdin && terminal.stdout) {
+        return Err(Failure::usage(
+            "eggdb ui needs a terminal; use eggdb get/scan instead",
+            Some(CommandName::Ui),
+        ));
+    }
+    let mut session = session_for(request, console, shared);
     let result = match session.request.command {
         CommandName::Create => session.create(),
         CommandName::Put => session.put(),
@@ -93,6 +132,10 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
         CommandName::Import => session.import(),
         CommandName::Sql => session.sql(),
         CommandName::Serve => session.serve(),
+        CommandName::Shell => Err(Failure::usage(
+            "eggdb shell does not run inside itself",
+            Some(CommandName::Shell),
+        )),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -101,7 +144,7 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
     Ok(exit)
 }
 
-impl Session<'_> {
+impl<'a> Session<'a> {
     fn create(&mut self) -> Result<Exit, Failure> {
         if std::fs::symlink_metadata(&self.request.file).is_ok() {
             return Err(Failure::database(
@@ -365,7 +408,7 @@ impl Session<'_> {
     }
 
     fn check(&mut self) -> Result<Exit, Failure> {
-        let db = match self.open_database(Access::ReadOnly, None) {
+        let db = match self.open_shared_or(Access::ReadOnly) {
             Ok(db) => db,
             Err(error) if error.kind() == ErrorKind::Corrupt => {
                 return Ok(self.damaged(None, &error));
@@ -482,7 +525,7 @@ impl Session<'_> {
             Failure::database(format!("the terminal failed: {error}"), Exit::DatabaseError)
         })?;
         if let Some(db) = screen.into_source().into_database() {
-            self.close(db)?;
+            self.close_database(db)?;
         }
         Ok(Exit::Done)
     }
@@ -500,9 +543,27 @@ impl Session<'_> {
         }
     }
 
-    fn open(&self, access: Access, cache_for_command: Option<usize>) -> Result<Database, Failure> {
-        self.open_database(access, cache_for_command)
-            .map_err(|error| self.open_failure(&error, access))
+    fn open(
+        &self,
+        access: Access,
+        cache_for_command: Option<usize>,
+    ) -> Result<Opened<'a>, Failure> {
+        match self.shared {
+            Some(db) => Ok(Opened::Shared(db)),
+            None => self
+                .open_database(access, cache_for_command)
+                .map(|db| Opened::Owned(Box::new(db)))
+                .map_err(|error| self.open_failure(&error, access)),
+        }
+    }
+
+    fn open_shared_or(&self, access: Access) -> Result<Opened<'a>, Error> {
+        match self.shared {
+            Some(db) => Ok(Opened::Shared(db)),
+            None => self
+                .open_database(access, None)
+                .map(|db| Opened::Owned(Box::new(db))),
+        }
     }
 
     fn open_database(
@@ -533,7 +594,14 @@ impl Session<'_> {
         options
     }
 
-    fn close(&self, db: Database) -> Result<(), Failure> {
+    fn close(&self, db: Opened<'_>) -> Result<(), Failure> {
+        match db {
+            Opened::Owned(db) => self.close_database(*db),
+            Opened::Shared(_) => Ok(()),
+        }
+    }
+
+    fn close_database(&self, db: Database) -> Result<(), Failure> {
         db.close()
             .map_err(|error| operation_failure(&error, &format!("cannot close {}", self.file)))
     }

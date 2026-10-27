@@ -242,7 +242,11 @@ impl LineReader {
                     return Ok(LineEnd::Line(line));
                 }
                 KeyCode::Char('c') if ctrl => {
-                    let mark = if self.styled { "\x1b[2m^C\x1b[0m" } else { "^C" };
+                    let mark = if self.styled {
+                        "\x1b[2m^C\x1b[0m"
+                    } else {
+                        "^C"
+                    };
                     terminal.write(format!("{mark}\r\n").as_bytes())?;
                     return Ok(LineEnd::Cleared);
                 }
@@ -328,7 +332,11 @@ impl LineReader {
     ) -> io::Result<()> {
         let cursor = editor.cursor();
         let start = completion.start.min(cursor);
-        let typed = editor.text().get(start..cursor).unwrap_or_default().to_owned();
+        let typed = editor
+            .text()
+            .get(start..cursor)
+            .unwrap_or_default()
+            .to_owned();
         match completion.candidates.as_slice() {
             [] => {}
             [only] => {
@@ -704,7 +712,10 @@ mod tests {
         let end = reader.read_line(&mut script, "> ", &mut complete);
         assert_eq!(end.ok(), Some(line("from user")));
         let written = String::from_utf8_lossy(&script.written).into_owned();
-        assert!(written.contains("\r\nusers       user_roles\r\n"), "{written}");
+        assert!(
+            written.contains("\r\nusers       user_roles\r\n"),
+            "{written}"
+        );
     }
 
     #[test]

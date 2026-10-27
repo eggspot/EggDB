@@ -1,8 +1,10 @@
+use super::commands::sql::{error_lines, result_cells};
 use super::render::{self, TimeStyle};
+use super::sql_store::DatabaseStore;
 use eggdb::{CheckReport, CommitStamp, Database, Options, Scan};
 use eggdb_ui::{
-    Change, CheckSummary, CountStep, ErrorKind, KeyRow, Source, SourceError, Start, Summary,
-    WriterBusy,
+    Change, CheckSummary, CountStep, ErrorKind, KeyRow, Source, SourceError, SqlFailure, SqlRun,
+    SqlTable, Start, Summary, WriterBusy,
 };
 use std::ops::Bound;
 use std::path::PathBuf;
@@ -321,6 +323,56 @@ impl Source for DatabaseSource {
             .map_err(|error| source_error(&error))?;
         self.db = Some(Arc::new(db));
         Ok(())
+    }
+
+    fn run_sql(&mut self, text: &str) -> SqlRun {
+        let started = Instant::now();
+        let mut run = SqlRun::default();
+        let db = match self.db() {
+            Ok(db) => db,
+            Err(error) => {
+                run.failure = Some(SqlFailure {
+                    lines: vec![format!("ERROR:  {}", error.message)],
+                    position: None,
+                });
+                return run;
+            }
+        };
+        let store = DatabaseStore(db);
+        let mut session = eggdb_sql::Session::new(&store);
+        let outcome = session.execute(text, &mut |result| {
+            run.tags.push(result.tag.clone());
+            run.notices.extend(result.notices.iter().cloned());
+            if let Some(cells) = result_cells(&result) {
+                run.table = Some(SqlTable {
+                    columns: cells.columns,
+                    numeric: cells.numeric,
+                    rows: cells.rows,
+                });
+            }
+        });
+        if let Err(error) = outcome {
+            run.failure = Some(SqlFailure {
+                lines: error_lines(&error, text),
+                position: error.position().filter(|&position| position <= text.len()),
+            });
+        }
+        match session.close() {
+            Ok(true) => run.notices.push(
+                "WARNING:  the run ended inside a transaction block (BEGIN without COMMIT); it was rolled back"
+                    .to_owned(),
+            ),
+            Ok(false) => {}
+            Err(error) if run.failure.is_none() => {
+                run.failure = Some(SqlFailure {
+                    lines: error_lines(&error, text),
+                    position: None,
+                });
+            }
+            Err(_) => {}
+        }
+        run.elapsed = started.elapsed();
+        run
     }
 }
 
@@ -708,5 +760,94 @@ mod tests {
             .read(|tx| tx.scan(..).collect())
             .unwrap_or_else(|error| panic!("scan: {error}"));
         assert!(scanned == model, "the file differs from the model");
+    }
+
+    #[test]
+    fn the_query_screen_runs_sql_and_shows_the_result_grid() {
+        let (file, db) = database("query");
+        let mut screen = Screen::new(DatabaseSource::new(db, "t.db".to_owned(), Options::new()));
+        let opened = screen.keys(&["s"]);
+        assert!(opened.contains(" SQL  ln 1 col 1"), "{opened}");
+        assert!(opened.contains(" Result"), "{opened}");
+        screen.typed("CREATE TABLE items (id integer PRIMARY KEY, name text);");
+        screen.keys(&["Enter"]);
+        screen.typed("INSERT INTO items VALUES (1, 'egg'), (2, NULL);");
+        let written = screen.keys(&["F5"]);
+        assert!(written.contains("Result  no rows to show"), "{written}");
+        assert!(written.contains("CREATE TABLE · INSERT 0 2"), "{written}");
+        screen.keys(&["Ctrl-A", "Ctrl-K", "Up", "Ctrl-A", "Ctrl-K"]);
+        screen.typed("SELECT id, name FROM items ORDER BY id;");
+        let shown = screen.keys(&["Ctrl-R"]);
+        assert!(shown.contains("Result  2 rows · "), "{shown}");
+        assert!(shown.contains("rows 1–2/2 · cols 1–2/2"), "{shown}");
+        assert!(shown.contains(" id | name"), "{shown}");
+        assert!(shown.contains("  1 | egg"), "{shown}");
+        assert!(shown.contains("(2 rows)"), "{shown}");
+        let failed = {
+            screen.keys(&["Ctrl-A", "Ctrl-K"]);
+            screen.typed("SELECT nope FROM items;");
+            screen.keys(&["F5"])
+        };
+        assert!(failed.contains("Result  ERROR"), "{failed}");
+        assert!(
+            failed.contains("ERROR:  column \"nope\" does not exist"),
+            "{failed}"
+        );
+        assert!(failed.contains("SQLSTATE:  42703"), "{failed}");
+        let recalled = screen.keys(&["Ctrl-P"]);
+        assert!(
+            recalled.contains("SELECT id, name FROM items ORDER BY id;"),
+            "{recalled}"
+        );
+        let left_open = {
+            screen.keys(&["Ctrl-A", "Ctrl-K"]);
+            screen.typed("BEGIN; INSERT INTO items VALUES (3, 'milk');");
+            screen.keys(&["F5"])
+        };
+        assert!(
+            left_open.contains("BEGIN · INSERT 0 1 · WARNING:"),
+            "{left_open}"
+        );
+        let back = screen.keys(&["Esc"]);
+        assert!(back.contains("s sql"), "{back}");
+        let again = screen.keys(&["s"]);
+        assert!(again.contains("BEGIN; INSERT INTO items"), "{again}");
+        screen.close();
+        let db = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));
+        let store = super::DatabaseStore(&db);
+        let mut session = eggdb_sql::Session::new(&store);
+        let mut rows = 0;
+        session
+            .execute("SELECT * FROM items", &mut |result| {
+                rows = result.rows.len()
+            })
+            .unwrap_or_else(|error| panic!("select: {error}"));
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn the_query_grid_scrolls_rows_and_columns() {
+        let (_file, db) = database("grid");
+        let mut screen = Screen::new(DatabaseSource::new(db, "t.db".to_owned(), Options::new()));
+        screen.keys(&["s"]);
+        screen.typed("CREATE TABLE wide (a integer PRIMARY KEY, b text, c text, d text, e text);");
+        screen.keys(&["F5", "Ctrl-A", "Ctrl-K"]);
+        let long = "x".repeat(40);
+        let values: Vec<String> = (1..=40)
+            .map(|n| format!("({n}, '{long}', '{long}', '{long}', 'end')"))
+            .collect();
+        screen.typed(&format!("INSERT INTO wide VALUES {};", values.join(", ")));
+        screen.keys(&["F5", "Ctrl-A", "Ctrl-K"]);
+        screen.typed("SELECT * FROM wide ORDER BY a;");
+        let first = screen.keys(&["F5"]);
+        assert!(first.contains("rows 1–13/40 · cols 1–2/5"), "{first}");
+        let moved = screen.keys(&["Tab", "Down", "PgDn", "Right", "Right"]);
+        assert!(moved.contains("rows 15–27/40 · cols 3–3/5"), "{moved}");
+        let end = screen.keys(&["End", "Ctrl-End"]);
+        assert!(end.contains("rows 28–40/40 · cols 5–5/5"), "{end}");
+        assert!(end.contains("\n end\n"), "{end}");
+        let top = screen.keys(&["Home", "Ctrl-Home"]);
+        assert!(top.contains("rows 1–13/40 · cols 1–2/5"), "{top}");
+        screen.close();
     }
 }
