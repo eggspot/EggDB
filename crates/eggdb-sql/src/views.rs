@@ -242,7 +242,7 @@ fn view_columns(
         if columns.iter().any(|known| known.name == name) {
             return Err(match dialect {
                 Dialect::MySql => SqlError::new(
-                    SqlState::MYSQL_SYNTAX_OR_ACCESS,
+                    SqlState::MYSQL_COLUMN_EXISTS,
                     format!("Duplicate column name '{name}'"),
                 )
                 .with_vendor_code(1060),

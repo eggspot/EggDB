@@ -1,6 +1,6 @@
 use crate::ast::{
     AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
-    FromClause, Insert, InsertSource, InsertValue, JoinCondition, Literal, Name, OnDuplicate,
+    FromClause, Insert, InsertSource, InsertValue, JoinCondition, Name, OnDuplicate,
     Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
 };
 use crate::dialect::Dialect;
@@ -284,10 +284,7 @@ impl<'a> Resolver<'a> {
                 self.walk_query(&mut subquery.query, ctes)
             }
             ExprKind::SessionValue { name, value } if *name == "current_schema" => {
-                match schemas::current_schema(self.reader)? {
-                    Some(schema) => *value = schema,
-                    None => expr.kind = ExprKind::Literal(Literal::Null),
-                }
+                *value = schemas::current_schema(self.reader)?.unwrap_or_default();
                 Ok(())
             }
             ExprKind::SessionValue { name, value } if *name == "current_schemas" => {

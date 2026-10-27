@@ -2176,3 +2176,351 @@ SELECT 'never32'::regclass
 regclass
 never32
 SELECT 1
+
+chapter ddl-schemas, "Schemas"
+ok
+CREATE SCHEMA myschema33
+
+error 42P06
+CREATE SCHEMA myschema33
+
+ok
+CREATE SCHEMA IF NOT EXISTS myschema33
+
+error 42939
+CREATE SCHEMA pg_mine33
+
+error 42939
+CREATE SCHEMA information_schema
+
+ok
+CREATE TABLE myschema33.mytable (id integer PRIMARY KEY, name text)
+
+ok
+CREATE TABLE mytable (id integer PRIMARY KEY, name text)
+
+ok
+INSERT INTO myschema33.mytable VALUES (1, 'in myschema33')
+
+ok
+INSERT INTO public.mytable VALUES (1, 'in public')
+
+rows
+SELECT name FROM mytable
+----
+name
+in public
+SELECT 1
+
+rows
+SELECT m.name FROM myschema33.mytable m
+----
+name
+in myschema33
+SELECT 1
+
+rows
+SHOW search_path
+----
+search_path
+"$user", public
+SHOW
+
+ok
+SET search_path TO myschema33, public
+
+rows
+SELECT name FROM mytable
+----
+name
+in myschema33
+SELECT 1
+
+rows
+SELECT current_schema()
+----
+current_schema
+myschema33
+SELECT 1
+
+rows
+SELECT current_schemas(true)
+----
+current_schemas
+{pg_catalog,myschema33,public}
+SELECT 1
+
+ok
+CREATE TABLE made33 (a integer)
+
+rows
+SELECT count(*) FROM myschema33.made33
+----
+count
+0
+SELECT 1
+
+error 42P01
+SELECT * FROM public.made33
+
+ok
+SELECT set_config('search_path', '', false)
+
+error 42P01
+SELECT * FROM mytable
+
+error 3F000
+CREATE TABLE nowhere33 (a integer)
+
+rows
+SELECT current_schema()
+----
+current_schema
+NULL
+SELECT 1
+
+ok
+RESET search_path
+
+error 3F000
+CREATE TABLE missing33.t (a integer)
+
+error 42P01
+SELECT * FROM missing33.t
+
+ok
+CREATE TABLE child33 (id integer PRIMARY KEY, parent_id integer REFERENCES myschema33.mytable (id))
+
+error 23503
+INSERT INTO child33 VALUES (1, 9)
+
+ok
+INSERT INTO child33 VALUES (1, 1)
+
+ok
+CREATE INDEX mytable_name33 ON myschema33.mytable (name)
+
+ok
+CREATE INDEX mytable_name33 ON mytable (name)
+
+ok
+DROP INDEX myschema33.mytable_name33
+
+ok
+ALTER SCHEMA myschema33 RENAME TO renamed33
+
+rows
+SELECT name FROM renamed33.mytable
+----
+name
+in myschema33
+SELECT 1
+
+error 2BP01
+DROP SCHEMA renamed33
+
+ok
+DROP SCHEMA renamed33 CASCADE
+
+rows
+SELECT count(*) FROM child33
+----
+count
+1
+SELECT 1
+
+error 3F000
+DROP SCHEMA renamed33
+
+ok
+DROP SCHEMA IF EXISTS renamed33
+
+ok
+CREATE SCHEMA moved33
+
+ok
+ALTER TABLE child33 SET SCHEMA moved33
+
+rows
+SELECT id FROM moved33.child33
+----
+id
+1
+SELECT 1
+
+ok
+DROP SCHEMA moved33 CASCADE
+
+chapter sql-createview, "CREATE VIEW"
+ok
+CREATE TABLE films33 (code integer PRIMARY KEY, title text, kind text, classification text)
+
+ok
+INSERT INTO films33 VALUES (1, 'Airplane', 'Comedy', 'PG'), (2, 'Alien', 'Horror', 'R'), (3, 'Annie', 'Comedy', 'G')
+
+ok
+CREATE VIEW comedies33 AS SELECT * FROM films33 WHERE kind = 'Comedy'
+
+ok
+CREATE VIEW pg_comedies33 AS SELECT * FROM comedies33 WHERE classification = 'PG'
+
+rows
+SELECT title FROM pg_comedies33
+----
+title
+Airplane
+SELECT 1
+
+ok
+ALTER TABLE films33 ADD COLUMN length integer
+
+rows
+SELECT * FROM comedies33 ORDER BY code
+----
+code|title|kind|classification
+1|Airplane|Comedy|PG
+3|Annie|Comedy|G
+SELECT 2
+
+ok
+CREATE VIEW kinds33 (kind, films) AS SELECT kind, count(*) FROM films33 GROUP BY kind
+
+rows
+SELECT * FROM kinds33 ORDER BY kind
+----
+kind|films
+Comedy|2
+Horror|1
+SELECT 2
+
+rows
+SELECT k.films FROM kinds33 k JOIN films33 f ON f.kind = k.kind WHERE f.code = 2
+----
+films
+1
+SELECT 1
+
+ok
+CREATE VIEW titles33 AS SELECT title FROM films33 WHERE kind = 'Comedy' UNION SELECT title FROM films33 WHERE code = 2
+
+rows
+SELECT title FROM titles33 ORDER BY title
+----
+title
+Airplane
+Alien
+Annie
+SELECT 3
+
+error 42P07
+CREATE VIEW kinds33 AS SELECT 1
+
+error 42P16
+CREATE OR REPLACE VIEW kinds33 AS SELECT kind FROM films33
+
+error 42P16
+CREATE OR REPLACE VIEW kinds33 (kind, total) AS SELECT kind, count(*) FROM films33 GROUP BY kind
+
+ok
+CREATE OR REPLACE VIEW kinds33 (kind, films, longest) AS SELECT kind, count(*), max(length) FROM films33 GROUP BY kind
+
+error 42601
+CREATE VIEW too_many33 (a, b) AS SELECT 1
+
+error 42701
+CREATE VIEW twice33 AS SELECT code, code FROM films33
+
+error 0A000
+CREATE VIEW checked33 AS SELECT * FROM films33 WITH CHECK OPTION
+
+error 0A000
+CREATE MATERIALIZED VIEW m33 AS SELECT 1
+
+error 0A000
+INSERT INTO comedies33 (code) VALUES (9)
+
+error 42P17
+CREATE OR REPLACE VIEW comedies33 AS SELECT * FROM pg_comedies33
+
+error 2BP01
+DROP TABLE films33
+
+error 2BP01
+ALTER TABLE films33 DROP COLUMN kind
+
+error 2BP01
+ALTER TABLE films33 DROP COLUMN length
+
+ok
+ALTER TABLE films33 ADD COLUMN spare integer
+
+ok
+ALTER TABLE films33 DROP COLUMN spare
+
+error 2BP01
+DROP VIEW comedies33
+
+error 42809
+DROP VIEW films33
+
+error 42809
+DROP TABLE comedies33
+
+ok
+ALTER VIEW titles33 RENAME TO film_titles33
+
+rows
+SELECT count(*) FROM film_titles33
+----
+count
+3
+SELECT 1
+
+error 42P01
+DROP VIEW titles33
+
+ok
+DROP VIEW IF EXISTS titles33
+
+ok
+DROP TABLE films33 CASCADE
+
+error 42P01
+SELECT * FROM pg_comedies33
+
+chapter sql-comment, "COMMENT"
+ok
+CREATE TABLE mytable33 (id integer CONSTRAINT id_positive33 CHECK (id > 0), name text)
+
+ok
+COMMENT ON TABLE mytable33 IS 'This is my table.'
+
+ok
+COMMENT ON TABLE mytable33 IS NULL
+
+ok
+COMMENT ON COLUMN mytable33.name IS 'Employee name'
+
+ok
+COMMENT ON CONSTRAINT id_positive33 ON mytable33 IS 'Keeps ids positive'
+
+ok
+COMMENT ON SCHEMA public IS 'standard public schema'
+
+error 42703
+COMMENT ON COLUMN mytable33.nope IS 'x'
+
+error 42704
+COMMENT ON CONSTRAINT nope ON mytable33 IS 'x'
+
+error 42P01
+COMMENT ON TABLE nope33 IS 'x'
+
+error 3F000
+COMMENT ON SCHEMA nope33 IS 'x'
+
+error 0A000
+COMMENT ON FUNCTION nope33() IS 'x'
+
+ok
+DROP TABLE mytable33

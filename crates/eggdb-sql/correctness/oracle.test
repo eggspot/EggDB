@@ -1235,3 +1235,78 @@ DROP SEQUENCE customers_seq
 
 error 42P01 2289
 SELECT customers_seq.NEXTVAL FROM dual
+
+chapter CREATE-VIEW, "CREATE VIEW"
+ok
+CREATE TABLE emp33 (empno NUMBER(4) PRIMARY KEY, ename VARCHAR2(10), deptno NUMBER(2))
+
+ok
+INSERT INTO emp33 VALUES (7369, 'SMITH', 20)
+
+ok
+INSERT INTO emp33 VALUES (7499, 'ALLEN', 30)
+
+ok
+CREATE VIEW emp_view33 AS SELECT empno, ename FROM emp33 WHERE deptno = 20
+
+rows
+SELECT ename FROM emp_view33
+----
+ENAME
+SMITH
+SELECT 1
+
+ok
+CREATE OR REPLACE FORCE VIEW emp_view33 AS SELECT empno, ename, deptno FROM emp33 WITH READ ONLY
+
+rows
+SELECT COUNT(*) FROM emp_view33
+----
+COUNT(*)
+2
+SELECT 1
+
+error 42P07 955
+CREATE VIEW emp_view33 AS SELECT 1 FROM dual
+
+error 42P01 942
+SELECT * FROM scott.emp33
+
+ok
+COMMENT ON TABLE emp33 IS 'Employees'
+
+ok
+COMMENT ON COLUMN emp33.ename IS 'Employee name'
+
+rows
+SELECT comments FROM user_tab_comments WHERE table_name = 'EMP33'
+----
+COMMENTS
+Employees
+SELECT 1
+
+rows
+SELECT column_name, comments FROM user_col_comments WHERE table_name = 'EMP33' AND comments IS NOT NULL
+----
+COLUMN_NAME|COMMENTS
+ENAME|Employee name
+SELECT 1
+
+rows
+SELECT view_name FROM user_views
+----
+VIEW_NAME
+EMP_VIEW33
+SELECT 1
+
+error 0A000
+CREATE VIEW checked33 AS SELECT * FROM emp33 WITH CHECK OPTION
+
+ok
+DROP VIEW emp_view33
+
+error 42P01 942
+SELECT * FROM emp_view33
+
+ok
+DROP TABLE emp33

@@ -1024,3 +1024,77 @@ ALTER TABLE child32 RENAME TO child32b
 
 error 42000 1305
 SELECT nextval('s')
+
+chapter create-view, "CREATE VIEW Statement"
+ok
+CREATE TABLE t33 (qty INT, price INT, note VARCHAR(20) COMMENT 'free text') COMMENT='stock'
+
+ok
+INSERT INTO t33 VALUES (3, 50, 'a'), (5, 60, 'b')
+
+ok
+CREATE VIEW v33 AS SELECT qty, price, qty*price AS value FROM t33
+
+rows
+SELECT * FROM v33 ORDER BY qty
+----
+qty|price|value
+3|50|150
+5|60|300
+SELECT 2
+
+ok
+CREATE OR REPLACE ALGORITHM=TEMPTABLE SQL SECURITY INVOKER VIEW v33 AS SELECT qty, price, qty*price AS value, note FROM t33
+
+rows
+SELECT note FROM v33 WHERE qty = 5
+----
+note
+b
+SELECT 1
+
+ok
+CREATE DEFINER=CURRENT_USER VIEW w33 (total) AS SELECT SUM(value) FROM v33
+
+rows
+SELECT total FROM w33
+----
+total
+450
+SELECT 1
+
+error 42S01 1050
+CREATE VIEW v33 AS SELECT 1
+
+error 42S01 1050
+CREATE TABLE v33 (a INT)
+
+error 42S21 1060
+CREATE VIEW dup33 AS SELECT qty, qty FROM t33
+
+rows
+SHOW FULL TABLES LIKE '%33'
+----
+Tables_in_eggdb|Table_type
+t33|BASE TABLE
+v33|VIEW
+w33|VIEW
+SELECT 3
+
+error 42000 1235
+INSERT INTO v33 (qty) VALUES (1)
+
+ok
+DROP VIEW v33, w33
+
+error 42S02 1051
+DROP VIEW v33
+
+ok
+DROP VIEW IF EXISTS v33
+
+error 42S02 1146
+SELECT * FROM w33
+
+ok
+DROP TABLE t33
