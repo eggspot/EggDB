@@ -1662,10 +1662,14 @@ fn days_added(operator: BinaryOperator, left: &Value, right: &Value) -> Option<S
     };
     let shift = days.as_float().unwrap_or(f64::NAN) * sign * datetime::MICROS_PER_DAY as f64;
     if !shift.is_finite() || shift.abs() > 4e17 {
-        return Some(Err(datetime::timestamp_out_of_range()));
+        return Some(Err(crate::sqlserver_functions::date_add_overflow(
+            "datetime",
+        )));
     }
-    let shifted =
-        |micros: i64| datetime::checked_timestamp(i128::from(micros) + shift.round() as i128);
+    let shifted = |micros: i64| {
+        datetime::checked_timestamp(i128::from(micros) + shift.round() as i128)
+            .map_err(|_| crate::sqlserver_functions::date_add_overflow("datetime"))
+    };
     Some(match stamp {
         Value::Timestamp(micros) => shifted(*micros).map(Value::Timestamp),
         Value::TimestampTz(micros) => shifted(*micros).map(Value::TimestampTz),
@@ -1695,7 +1699,13 @@ fn sqlserver_arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -
             {
                 return joined;
             }
-            engine_arithmetic(operator, &left, &right).map_err(|_| incompatible())
+            engine_arithmetic(operator, &left, &right).map_err(|error| {
+                if error.state() == SqlState::UNDEFINED_FUNCTION {
+                    incompatible()
+                } else {
+                    error
+                }
+            })
         }
         None => Err(incompatible()),
     }

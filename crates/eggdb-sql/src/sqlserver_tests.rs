@@ -450,3 +450,29 @@ fn a_table_made_in_transact_sql_reads_back_in_postgresql() {
         ]]
     );
 }
+
+#[test]
+fn errors_after_a_conversion_keep_their_own_numbers() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE e (id INT PRIMARY KEY, digits VARCHAR(5), at DATETIME) INSERT INTO e VALUES (1, '5', '2020-01-01 10:00')",
+    );
+    for (text, code) in [
+        ("SELECT digits / 0 FROM e", 8134),
+        ("SELECT digits - digits FROM e", 402),
+        ("SELECT at + 1e10 FROM e", 517),
+        ("SELECT CONVERT(date, '2020-01-01', 999)", 281),
+    ] {
+        let error = session.execute(text, &mut |_| {}).expect_err(text);
+        assert_eq!(error.vendor_code(), Some(code), "{text}: {error}");
+    }
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT DATEDIFF(day, at - 1, at + 1.5) FROM e"
+        ),
+        vec![vec![Value::Integer(2)]]
+    );
+}

@@ -189,7 +189,7 @@ pub(crate) fn within_limit(bytes: usize) -> SqlResult<()> {
     }
 }
 
-fn date_add_overflow(target: &str) -> SqlError {
+pub(crate) fn date_add_overflow(target: &str) -> SqlError {
     SqlError::new(
         SqlState::DATETIME_FIELD_OVERFLOW,
         format!("Adding a value to a '{target}' column caused an overflow."),
