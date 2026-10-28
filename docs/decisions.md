@@ -37,7 +37,7 @@ its full title with its status.
 - [D10](decisions/D010.md) Every query language and concept, each SQL dialect as itself
 - [D11](decisions/D011.md) AI-native, with a built-in MCP server
 - [D12](decisions/D012.md) Works with every tool people already use
-- [D13](decisions/D013.md) Migrating from another database is restoring its backup
+- [D13](decisions/D013.md) Migrating from another database is restoring its backup (for `pg_dump`, applied by D118)
 - [D14](decisions/D014.md) One second to download, one second to install
 - [D15](decisions/D015.md) The EggDB client: our own design by Claude Fable, plus familiar layouts
 - [D16](decisions/D016.md) Official connectors for every language, working with existing ORMs
@@ -142,3 +142,4 @@ its full title with its status.
 - [D115](decisions/D115.md) The binary's growth past twice its first baseline is the price of the all-in-one SQL features: the `footprint.binary` lines move to the measured size and the weekly pass of 2026-10-31 shrinks it
 - [D116](decisions/D116.md) Schemas as name prefixes (`public` keeps today's bytes) with tables in other schemas in format version 7, `search_path` resolved per statement, views as format version 8 records in the table key space expanded at use with depth, size and cycle limits, view dependencies and comments in key spaces of their own
 - [D117](decisions/D117.md) `COPY` streams through a client channel into the `INSERT` path in one transaction, scripts carry their data inline, lines up to 1 GiB, and no server files or programs
+- [D118](decisions/D118.md) `eggdb restore` reads a `pg_dump` plain dump as a stream, one transaction per statement, a new file built aside, and a report of what was skipped

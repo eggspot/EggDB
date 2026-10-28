@@ -310,6 +310,23 @@ one more than twice its line fails ([benchmarks.md](benchmarks.md)).
   threads; snapshots that expire when their memory runs out; commit stamps that never go back,
   across a wall clock set back and a reopen (`store_tests.rs`, `hybrid_clock.rs`).
 
+## Restoring pg_dump output (D118)
+`crates/eggdb/tests/data/pg_dump` holds dumps that PostgreSQL wrote of
+`scripts/pg-restore/fixture.sql` (twelve tables in two schemas with every type EggDB has,
+sequences, identity columns, foreign keys with actions, check and unique constraints, views over
+joins, indexes, comments, and awkward values: tabs, newlines, backslashes, `\.`, quotes, `NULL`
+and empty strings, Unicode, large text and every byte value), with `expected.txt`, each table's
+sorted `COPY` output from PostgreSQL itself. They were made with 300 rows by
+`scripts/pg-restore/check.sh target/debug/eggdb <work> --rows 300 --fixtures
+crates/eggdb/tests/data/pg_dump pg16` against PostgreSQL 16.13 and with `pg18` against 18 (`PG_BIN`
+naming each one's tools); `pg18.sql` carries `\restrict`, and `pg18-custom.sql` is a custom
+archive turned into SQL by `pg_restore -f`. `crates/eggdb/tests/restore.rs` restores each and
+compares every table byte for byte. CI's `pg-restore` job runs the same script against the
+official `postgres:16` and `postgres:17` containers with about 50,000 rows, restoring every form
+with `eggdb restore` and the plain one with `psql -f` against `eggdb serve`.
+`crates/eggdb/tests/data/pg_dump-sample.sql`, a small dump that PostgreSQL 18 wrote of a bakery
+schema, is the smoke test's sample, restored both ways.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.
