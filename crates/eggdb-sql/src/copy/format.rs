@@ -514,12 +514,13 @@ impl Fields {
             }
             let raw = &record[start..at];
             let value = &self.decoded[decoded_start..];
-            let unquoted_null = !quoted
-                && raw == layout.null.as_slice()
-                && !force_not_null.get(column).copied().unwrap_or(false);
-            let forced_null =
-                force_null.get(column).copied().unwrap_or(false) && value == layout.null.as_slice();
-            let kind = if unquoted_null || forced_null {
+            let null_text = layout.null.as_slice();
+            let is_null = if !quoted && raw == null_text {
+                !force_not_null.get(column).copied().unwrap_or(false)
+            } else {
+                quoted && force_null.get(column).copied().unwrap_or(false) && value == null_text
+            };
+            let kind = if is_null {
                 FieldKind::Null
             } else if !quoted && layout.default.as_deref() == Some(raw) {
                 FieldKind::Default

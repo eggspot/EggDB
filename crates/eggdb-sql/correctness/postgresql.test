@@ -2786,6 +2786,20 @@ f||t
 SELECT 1
 
 rows
+COPY copy_csv FROM STDIN (FORMAT csv, FORCE_NOT_NULL (a, b), FORCE_NULL (a, b));
+7,,""
+\.
+----
+COPY 1
+
+rows
+SELECT a IS NULL, a, b IS NULL FROM copy_csv WHERE id = 7
+----
+?column?|a|?column?
+f||t
+SELECT 1
+
+rows
 COPY copy_csv FROM STDIN (FORMAT csv, HEADER match);
 id,a,b
 5,five,

@@ -765,6 +765,19 @@ fn force_null_and_force_not_null_change_what_csv_reads_as_null() {
         ),
         "id|?column?|a|?column?|b\n1|f||t|NULL\n2|f||f|x\nSELECT 2"
     );
+    copy_in(
+        &mut session,
+        "COPY f FROM STDIN (FORMAT csv, FORCE_NOT_NULL (a, b), FORCE_NULL (a, b))",
+        "3,,\"\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT a IS NULL, a, b IS NULL FROM f WHERE id = 3"
+        ),
+        "?column?|a|?column?\nf||t\nSELECT 1"
+    );
 }
 
 #[test]
