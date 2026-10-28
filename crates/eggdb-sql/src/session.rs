@@ -276,6 +276,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     search_path_cache: crate::schemas::PathCache,
     search_path_at_begin: Option<String>,
     max_value_bytes: usize,
+    max_row_bytes: usize,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -308,6 +309,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             search_path_cache: crate::schemas::PathCache::default(),
             search_path_at_begin: None,
             max_value_bytes: usize::MAX,
+            max_row_bytes: usize::MAX,
         }
     }
 
@@ -317,6 +319,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// limits apply; a server that runs untrusted statements sets it low.
     pub fn set_max_value_bytes(&mut self, bytes: usize) {
         self.max_value_bytes = bytes;
+    }
+
+    /// Sets the largest row a statement of this session may build from its select list and
+    /// sort keys, counted value by value as the row is built, so a select list that copies one
+    /// large value into many columns stops before it allocates them all; a larger row fails
+    /// with SQLSTATE `54000`. Unlimited by default; a server that runs untrusted statements
+    /// sets it low.
+    pub fn set_max_row_bytes(&mut self, bytes: usize) {
+        self.max_row_bytes = bytes;
     }
 
     /// The dialect this session reads.
@@ -887,6 +898,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _bytes = crate::bytea::enter_dialect(self.dialect);
             let _values = crate::memory::enter_value_limit(self.max_value_bytes);
+            let _rows = crate::memory::enter_row_limit(self.max_row_bytes);
             let _path = self.enter_search_path(&settings);
             let mut parser = Parser::new(text, tokens)
                 .with_context(parameters, &settings)

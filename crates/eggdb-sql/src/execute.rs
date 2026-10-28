@@ -1655,13 +1655,24 @@ impl<'a> Projection<'a> {
             row,
             correlation: self.correlation,
         };
-        self.items
-            .iter()
-            .map(|item| match item {
-                ProjectedItem::Column(index) => Ok(row.get(*index).cloned().unwrap_or(Value::Null)),
-                ProjectedItem::Expr(expr) => evaluator.eval(expr, None),
-            })
-            .collect()
+        let mut bytes = crate::memory::RowBytes::default();
+        let mut output = Vec::with_capacity(self.items.len());
+        for item in &self.items {
+            let value = match item {
+                ProjectedItem::Column(index) => {
+                    let value = row.get(*index).unwrap_or(&Value::Null);
+                    bytes.add(value)?;
+                    value.clone()
+                }
+                ProjectedItem::Expr(expr) => {
+                    let value = evaluator.eval(expr, None)?;
+                    bytes.add(&value)?;
+                    value
+                }
+            };
+            output.push(value);
+        }
+        Ok(output)
     }
 }
 
@@ -2646,11 +2657,17 @@ fn sorted_rows(
             correlation,
         };
         let mut keys = Vec::with_capacity(sort_keys.len());
+        let mut bytes = crate::memory::RowBytes::default();
+        for value in &output {
+            bytes.add(value)?;
+        }
         for key in sort_keys {
-            keys.push(match key {
+            let value = match key {
                 SortKey::Output(index) => output[*index].clone(),
                 SortKey::Expr(expr) => evaluator.eval(expr, None)?,
-            });
+            };
+            bytes.add(&value)?;
+            keys.push(value);
         }
         memory.charge_row(&output)?;
         memory.charge_row(&keys)?;
