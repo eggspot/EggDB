@@ -629,3 +629,164 @@ fn every_way_of_holding_many_large_values_at_once_stops_at_the_row_limit() {
     let (status, _) = mcp.finish();
     assert!(status.success());
 }
+
+impl Mcp {
+    fn initialize_with(&mut self, capabilities: &str) {
+        let answer = self.request(
+            "initialize",
+            &format!(
+                r#"{{"protocolVersion":"2025-11-25","capabilities":{capabilities},"clientInfo":{{"name":"acceptance-test","version":"1.0"}}}}"#
+            ),
+        );
+        assert_eq!(
+            text_at(&answer, &["result", "protocolVersion"]),
+            "2025-11-25"
+        );
+        self.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    }
+
+    fn send_call(&mut self, tool: &str, arguments: &str) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{arguments}}}}}"#
+        ));
+        id
+    }
+
+    fn server_request(&mut self) -> Node {
+        let line = self.lines.recv_timeout(ANSWER_WAIT).expect("a request");
+        assert!(line.is_ascii(), "{line}");
+        let node = parse_document(&line).unwrap_or_else(|error| panic!("{line}: {error:?}"));
+        assert_eq!(text_at(&node, &["jsonrpc"]), "2.0", "{line}");
+        assert_eq!(text_at(&node, &["method"]), "elicitation/create", "{line}");
+        node
+    }
+}
+
+fn user_count(path: &str) -> String {
+    let counted = eggdb(&["sql", path, "-c", "SELECT count(*) FROM users"]);
+    assert!(counted.status.success(), "{}", stderr(&counted));
+    stdout(&counted)
+}
+
+#[test]
+fn an_agent_writes_with_allow_write_and_destructive_statements_wait_for_the_user() {
+    let (file, _audit) = sample("mcp-writes", 0);
+    let path = file.path().to_str().unwrap();
+    let mut reader = Mcp::start(file.path(), &[]);
+    reader.initialize();
+    let refused = reader.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO users VALUES (9, 'Eve', NULL)"}"#,
+    );
+    assert_eq!(error_code(&refused), "read_only");
+    assert!(text_at(result(&refused), &["error", "fix"]).contains("--allow-write"));
+    let (status, _) = reader.finish();
+    assert!(status.success());
+
+    let mut mcp = Mcp::start(file.path(), &["--allow-write"]);
+    mcp.initialize();
+    let listed = mcp.request("tools/list", "{}");
+    let Json::Array(tools) = &get(&listed, &["result", "tools"]).value else {
+        panic!("{listed:?}");
+    };
+    let write = tools
+        .iter()
+        .find(|tool| text_at(tool, &["name"]) == "write_sql")
+        .expect("write_sql is listed");
+    assert_eq!(text_at(write, &["annotations", "readOnlyHint"]), "false");
+    assert_eq!(text_at(write, &["annotations", "destructiveHint"]), "true");
+    let through_run_sql = mcp.call(
+        "run_sql",
+        r#"{"sql":"INSERT INTO users VALUES (4, 'Eve', NULL)"}"#,
+    );
+    assert_eq!(error_code(&through_run_sql), "read_only");
+    let granted = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO users VALUES (4, 'Eve', NULL)"}"#,
+    );
+    assert_eq!(text_at(ok(&granted), &["committed"]), "true");
+    let oracle = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO users VALUES (5, 'Hedy', NULL)","dialect":"oracle"}"#,
+    );
+    assert_eq!(text_at(ok(&oracle), &["committed"]), "true");
+    assert!(user_count(path).contains('5'), "{}", user_count(path));
+    let writer = eggdb(&[
+        "sql",
+        path,
+        "-c",
+        "INSERT INTO users VALUES (6, 'Katherine', NULL)",
+    ]);
+    assert!(writer.status.success(), "{}", stderr(&writer));
+    let created = mcp.call(
+        "write_sql",
+        r#"{"sql":"CREATE TABLE scratch (id integer PRIMARY KEY)"}"#,
+    );
+    ok(&created);
+    let unconfirmed = mcp.call("write_sql", r#"{"sql":"DELETE FROM users"}"#);
+    assert_eq!(error_code(&unconfirmed), "needs_confirmation");
+    assert!(user_count(path).contains('6'), "{}", user_count(path));
+    let filtered = mcp.call("write_sql", r#"{"sql":"DELETE FROM users WHERE id = 6"}"#);
+    assert_eq!(text_at(ok(&filtered), &["rows_changed"]), "1");
+    let confirmed = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE users SET email = NULL","confirm":true}"#,
+    );
+    assert_eq!(text_at(ok(&confirmed), &["rows_changed"]), "5");
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(messages.contains("read-write"), "{messages}");
+
+    let mut asking = Mcp::start(file.path(), &["--allow-write"]);
+    asking.initialize_with(r#"{"elicitation":{}}"#);
+    let dropping = asking.send_call("write_sql", r#"{"sql":"DROP TABLE scratch"}"#);
+    let question = asking.server_request();
+    assert_eq!(text_at(&question, &["id"]), "eggdb-confirm-1");
+    assert!(text_at(&question, &["params", "message"]).contains("DROP TABLE on "));
+    let between = eggdb(&["put", path, "asked", "while waiting"]);
+    assert!(between.status.success(), "{}", stderr(&between));
+    asking.send(r#"{"jsonrpc":"2.0","id":"eggdb-confirm-1","result":{"action":"accept","content":{"run":true}}}"#);
+    let dropped = asking.answer();
+    assert_eq!(text_at(&dropped, &["id"]), dropping.to_string());
+    assert_eq!(text_at(ok(&dropped), &["committed"]), "true");
+    let declining = asking.send_call(
+        "write_sql",
+        r#"{"sql":"TRUNCATE TABLE users","dialect":"oracle"}"#,
+    );
+    let question = asking.server_request();
+    assert_eq!(text_at(&question, &["id"]), "eggdb-confirm-2");
+    asking.send(r#"{"jsonrpc":"2.0","id":"eggdb-confirm-2","result":{"action":"decline"}}"#);
+    let declined = asking.answer();
+    assert_eq!(text_at(&declined, &["id"]), declining.to_string());
+    assert_eq!(error_code(&declined), "declined_by_user");
+    assert!(user_count(path).contains('5'), "{}", user_count(path));
+    let (status, messages) = asking.finish();
+    assert!(status.success(), "{messages}");
+
+    let listing = eggdb(&["audit", path, "--format", "text", "--color", "never"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let text = stdout(&listing);
+    let calls: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.contains("server started"))
+        .collect();
+    assert_eq!(calls.len(), 10, "{text}");
+    assert!(text.contains("writes allowed"), "{text}");
+    assert!(text.contains("ok, agent confirmed"), "{text}");
+    assert!(text.contains("ok, user confirmed"), "{text}");
+    assert!(text.contains("needs_confirmation"), "{text}");
+    assert!(text.contains("declined_by_user"), "{text}");
+    assert!(!text.contains("unknown"), "{text}");
+    let json = eggdb(&["audit", path, "--format", "json"]);
+    let records: Vec<Node> = stdout(&json)
+        .lines()
+        .map(|line| parse_document(line).unwrap())
+        .collect();
+    let started = records
+        .iter()
+        .filter(|record| text_at(record, &["event"]) == "call_started")
+        .count();
+    assert_eq!(started, 6, "{}", stdout(&json));
+}

@@ -12,37 +12,52 @@ use std::time::Duration;
 
 const DEFAULT_TIME_LIMIT_SECONDS: u64 = 5;
 
-struct ReadOnlyOpener {
+struct FileOpener {
     path: PathBuf,
     file_display: String,
     cache_bytes: usize,
 }
 
-impl ReadOnlyOpener {
-    fn open(&self) -> eggdb::Result<Database> {
+impl FileOpener {
+    fn open(&self, read_only: bool) -> eggdb::Result<Database> {
         Database::open_with(
             &self.path,
             Options::new()
-                .read_only(true)
+                .read_only(read_only)
                 .create_if_missing(false)
                 .cache_bytes(self.cache_bytes),
         )
     }
+
+    fn refusal(&self, error: &eggdb::Error) -> OpenRefusal {
+        let message = without_open_prefix(&error.to_string(), &self.file_display);
+        match error.kind() {
+            ErrorKind::Locked => OpenRefusal::Busy,
+            ErrorKind::NotFound => OpenRefusal::Missing,
+            ErrorKind::Corrupt => OpenRefusal::Damaged(message),
+            _ => OpenRefusal::Failed(message),
+        }
+    }
 }
 
-impl DatabaseOpener for ReadOnlyOpener {
+impl DatabaseOpener for FileOpener {
     type Store = OwnedStore;
 
     fn open_read_only(&self) -> Result<OwnedStore, OpenRefusal> {
-        self.open().map(OwnedStore).map_err(|error| {
-            let message = without_open_prefix(&error.to_string(), &self.file_display);
-            match error.kind() {
-                ErrorKind::Locked => OpenRefusal::Busy,
-                ErrorKind::NotFound => OpenRefusal::Missing,
-                ErrorKind::Corrupt => OpenRefusal::Damaged(message),
-                _ => OpenRefusal::Failed(message),
-            }
-        })
+        self.open(true)
+            .map(OwnedStore)
+            .map_err(|error| self.refusal(&error))
+    }
+
+    fn open_read_write(&self) -> Result<OwnedStore, OpenRefusal> {
+        self.open(false)
+            .map(OwnedStore)
+            .map_err(|error| match error.kind() {
+                ErrorKind::PermissionDenied | ErrorKind::ReadOnly => {
+                    OpenRefusal::NotWritable("permission denied".to_owned())
+                }
+                _ => self.refusal(&error),
+            })
     }
 
     fn close(&self, store: OwnedStore) -> Result<(), OpenRefusal> {
@@ -55,12 +70,12 @@ impl DatabaseOpener for ReadOnlyOpener {
 pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, Failure> {
     let file_display = request.file.display().to_string();
     let file = render::text(file_display.as_bytes());
-    let opener = ReadOnlyOpener {
+    let opener = FileOpener {
         path: request.file.clone(),
         file_display: file_display.clone(),
         cache_bytes: request.cache_bytes.unwrap_or(DEFAULT_CACHE_BYTES),
     };
-    let busy_at_start = match opener.open() {
+    let busy_at_start = match opener.open(true) {
         Ok(db) => {
             let _ = db.close();
             false
@@ -87,6 +102,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         server_version: eggdb::VERSION.to_owned(),
         time_limit: Duration::from_secs(time_limit_seconds),
         audit: AuditLog::new(audit_path),
+        allow_write: request.allow_write,
         exit_process: Some(std::process::exit),
     };
     let mut server = Server::new(&opener, config).map_err(|failure| match failure {
@@ -110,15 +126,21 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
             Exit::DatabaseError,
         ),
     })?;
-    let mut banner = if console.terminal.stderr {
-        format!(
+    let mut banner = match (console.terminal.stderr, request.allow_write) {
+        (true, false) => format!(
             "eggdb mcp {file}: a read-only MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.\n  audit        {audit_shown} (eggdb audit {file} shows it)\n  time limit   {time_limit_seconds} s per call\n  add it       claude mcp add mydb -- eggdb mcp {file}\n  stop         Ctrl-C, or close stdin\n"
-        )
-    } else {
-        format!(
+        ),
+        (true, true) => format!(
+            "eggdb mcp {file}: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.\n  writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction\n  confirm      DROP, TRUNCATE, a DELETE or UPDATE of a whole table, dropping or retyping a column: only after you say yes\n  audit        {audit_shown} (eggdb audit {file} shows it)\n  time limit   {time_limit_seconds} s per call\n  add it       claude mcp add mydb -- eggdb mcp {file} --allow-write\n  stop         Ctrl-C, or close stdin\n"
+        ),
+        (false, false) => format!(
             "eggdb {} mcp: serving {file} read-only; audit {audit_shown}; time limit {time_limit_seconds} s\n",
             eggdb::VERSION
-        )
+        ),
+        (false, true) => format!(
+            "eggdb {} mcp: serving {file} read-write (destructive statements need the user's confirmation); audit {audit_shown}; time limit {time_limit_seconds} s\n",
+            eggdb::VERSION
+        ),
     };
     if busy_at_start {
         banner.push_str(&format!(

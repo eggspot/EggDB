@@ -1,15 +1,22 @@
-//! EggDB's built-in MCP server (D11, D45, D119): AI agents read a database over the Model
-//! Context Protocol, JSON-RPC 2.0 messages one per line on stdin and stdout, written from the
-//! public specification at modelcontextprotocol.io with no SDK (D1).
+//! EggDB's built-in MCP server (D11, D45, D119, D121): AI agents read, and when the user allows
+//! it change, a database over the Model Context Protocol, JSON-RPC 2.0 messages one per line on
+//! stdin and stdout, written from the public specification at modelcontextprotocol.io with no
+//! SDK (D1).
 //!
 //! - [`Server`] speaks the protocol versions that start with `initialize`
 //!   ([`PROTOCOL_VERSIONS`]) and offers the tools `list_tables`, `describe_table`, `run_sql`,
 //!   `explain_query`, `sample_rows`, `kv_get` and `kv_scan`, and the resource `eggdb://schema`.
-//! - It is read-only: each call opens the database read-only through a [`DatabaseOpener`] and
-//!   closes it after, and the store the call runs on has no writer at all.
+//! - Those are read-only: each call opens the database read-only through a
+//!   [`DatabaseOpener`] and closes it after, and the store the call runs on has no writer.
+//! - With [`ServerConfig::allow_write`] it also offers `write_sql`, which opens the database
+//!   read-write for its one statement. A destructive statement runs only once the user
+//!   confirmed it, through the client (`elicitation/create`) when the client can ask, and
+//!   otherwise through the agent's `confirm: true`.
 //! - Every call has limits: one SQL statement, at most a number of rows and 1 MiB of result,
-//!   and a time limit, past which reads fail and, a second later, a watchdog ends the process.
-//! - Every call is recorded in an [`audit`] file before its result is sent.
+//!   256 MiB of change, and a time limit, past which reads fail and, a second later, a watchdog
+//!   ends the process, never once a commit has started.
+//! - Every call is recorded in an [`audit`] file before its result is sent, and a write also
+//!   before it runs.
 //! - Results are structured data marked as data, never instructions, and every message out is
 //!   one line of ASCII, so stored text cannot change the protocol.
 //!
@@ -17,6 +24,7 @@
 
 pub mod audit;
 mod call_store;
+mod confirmation;
 mod json_out;
 mod jsonrpc;
 mod results;

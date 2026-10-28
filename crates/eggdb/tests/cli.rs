@@ -126,7 +126,7 @@ Commands:
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump (pg_dump's plain SQL) into the file
-  mcp    <file>                 serve the file read-only to an AI agent over MCP on stdin/stdout
+  mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help
   version                       print the version

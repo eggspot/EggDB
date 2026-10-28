@@ -101,8 +101,14 @@ pub(crate) enum Message {
         method: String,
         params: Option<Node>,
     },
-    Notification,
-    Response,
+    Notification {
+        method: String,
+        params: Option<Node>,
+    },
+    Response {
+        id: Option<String>,
+        result: Option<Node>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -209,13 +215,18 @@ fn request_of(document: Node) -> Result<Message, Refusal> {
     let mut method = None;
     let mut params = None;
     let mut is_response = false;
+    let mut result = None;
     for (name, value) in members {
         match name.as_str() {
             "jsonrpc" => version = Some(value),
             "id" => id = Some(value),
             "method" => method = Some(value),
             "params" => params = Some(value),
-            "result" | "error" => is_response = true,
+            "result" => {
+                is_response = true;
+                result = Some(value);
+            }
+            "error" => is_response = true,
             _ => {}
         }
     }
@@ -245,7 +256,7 @@ fn request_of(document: Node) -> Result<Message, Refusal> {
                 "a method name is a string",
             ));
         }
-        None if is_response => return Ok(Message::Response),
+        None if is_response => return Ok(Message::Response { id, result }),
         None => {
             return Err(Refusal::new(
                 id,
@@ -255,7 +266,7 @@ fn request_of(document: Node) -> Result<Message, Refusal> {
         }
     };
     let Some(id) = id else {
-        return Ok(Message::Notification);
+        return Ok(Message::Notification { method, params });
     };
     if let Some(node) = &params
         && !matches!(node.value, Json::Object(_))
@@ -269,7 +280,7 @@ fn request_of(document: Node) -> Result<Message, Refusal> {
     Ok(Message::Request { id, method, params })
 }
 
-fn request_id(node: &Node) -> Option<String> {
+pub(crate) fn request_id(node: &Node) -> Option<String> {
     match &node.value {
         Json::String(text) => Some(encoded_string(text)),
         Json::Number(text)
@@ -394,11 +405,16 @@ mod tests {
         assert!(matches!(named, Message::Request { ref id, .. } if id == "\"a\\u0001\""));
         assert!(matches!(
             parse_message(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).unwrap(),
-            Message::Notification
+            Message::Notification { ref method, .. } if method == "notifications/initialized"
         ));
         assert!(matches!(
             parse_message(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#).unwrap(),
-            Message::Response
+            Message::Response { id: Some(ref id), result: Some(_) } if id == "1"
+        ));
+        assert!(matches!(
+            parse_message(br#"{"jsonrpc":"2.0","id":"c-1","error":{"code":-1,"message":"no"}}"#)
+                .unwrap(),
+            Message::Response { id: Some(ref id), result: None } if id == "\"c-1\""
         ));
     }
 

@@ -189,7 +189,7 @@ fn every_kind_of_write_is_refused_and_nothing_changes() {
             "read_only",
             "{dialect} {sql}: {answer:?}"
         );
-        assert!(text_at(structured(&answer), &["error", "fix"]).contains("later EggDB release"));
+        assert!(text_at(structured(&answer), &["error", "fix"]).contains("--allow-write"));
     }
     assert_eq!(opener.store.snapshot(), before);
 }

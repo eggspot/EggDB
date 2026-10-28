@@ -20,6 +20,7 @@ pub const AUDIT_FILE_SUFFIX: &str = ".mcp-audit.jsonl";
 pub const MAX_AUDIT_BYTES: u64 = 1 << 30;
 
 const LOCK_WAIT: Duration = Duration::from_secs(5);
+const PROMPT_LOCK_WAIT: Duration = Duration::from_millis(250);
 const LOCK_POLL: Duration = Duration::from_millis(10);
 
 /// The audit file of the database at `database`: its path with [`AUDIT_FILE_SUFFIX`] added.
@@ -62,14 +63,23 @@ impl AuditLog {
         &self.path
     }
 
-    /// Appends `record`, one JSON object without a line break, and syncs it to the disk.
+    /// Appends `record`, one JSON object without a line break, and syncs it to the disk,
+    /// waiting up to five seconds for another server's lock on the file.
     pub fn append(&self, record: &str) -> Result<(), AuditFailure> {
+        self.append_waiting(record, LOCK_WAIT)
+    }
+
+    pub(crate) fn append_promptly(&self, record: &str) -> Result<(), AuditFailure> {
+        self.append_waiting(record, PROMPT_LOCK_WAIT)
+    }
+
+    fn append_waiting(&self, record: &str, wait: Duration) -> Result<(), AuditFailure> {
         let failure = |error: io::Error| AuditFailure {
             reason: describe(&error),
         };
         let mut file = eggdb_platform::user_files::open_private_append_no_follow(&self.path)
             .map_err(failure)?;
-        lock(&file).map_err(failure)?;
+        lock(&file, wait).map_err(failure)?;
         let size = file.metadata().map_err(failure)?.len();
         if size.saturating_add(record.len() as u64 + 1) > MAX_AUDIT_BYTES {
             return Err(AuditFailure {
@@ -84,8 +94,8 @@ impl AuditLog {
     }
 }
 
-fn lock(file: &File) -> io::Result<()> {
-    let give_up = Instant::now() + LOCK_WAIT;
+fn lock(file: &File, wait: Duration) -> io::Result<()> {
+    let give_up = Instant::now() + wait;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(()),
@@ -95,7 +105,7 @@ fn lock(file: &File) -> io::Result<()> {
             Err(std::fs::TryLockError::WouldBlock) => {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
-                    "another eggdb mcp held the audit file's lock for over five seconds",
+                    "another eggdb mcp held the audit file's lock too long",
                 ));
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error),
@@ -151,6 +161,7 @@ pub(crate) struct ServerStarted<'a> {
     pub(crate) version: &'a str,
     pub(crate) database: &'a str,
     pub(crate) time_limit: Duration,
+    pub(crate) allow_write: bool,
 }
 
 pub(crate) fn server_started_record(started: &ServerStarted<'_>) -> String {
@@ -167,7 +178,9 @@ pub(crate) fn server_started_record(started: &ServerStarted<'_>) -> String {
         .key("database")
         .string(started.database)
         .key("read_only")
-        .boolean(true)
+        .boolean(!started.allow_write)
+        .key("allow_write")
+        .boolean(started.allow_write)
         .key("time_limit_ms")
         .unsigned(duration_ms(started.time_limit))
         .end_object();
@@ -197,50 +210,76 @@ pub(crate) fn duration_ms(duration: Duration) -> u64 {
 
 pub(crate) const MAX_ARGUMENT_BYTES: usize = 8 * 1024;
 
-pub(crate) struct CallRecord<'a> {
+pub(crate) struct CallRequest<'a> {
+    pub(crate) call_id: &'a str,
     pub(crate) started: &'a str,
     pub(crate) client_name: Option<&'a str>,
     pub(crate) client_version: Option<&'a str>,
     pub(crate) protocol: Option<&'a str>,
     pub(crate) tool: &'a str,
     pub(crate) arguments: &'a str,
+}
+
+pub(crate) struct CallRecord<'a> {
+    pub(crate) request: CallRequest<'a>,
     pub(crate) error_code: Option<&'a str>,
     pub(crate) sqlstate: Option<&'a str>,
     pub(crate) result_bytes: u64,
     pub(crate) rows: Option<u64>,
     pub(crate) truncated: bool,
     pub(crate) duration: Duration,
+    pub(crate) write: Option<WriteFacts<'a>>,
+}
+
+pub(crate) struct WriteFacts<'a> {
+    pub(crate) confirmation: Option<&'a str>,
+    pub(crate) committed: bool,
+    pub(crate) warning: Option<&'a str>,
+}
+
+fn request_fields(out: &mut JsonOut, event: &str, request: &CallRequest<'_>) {
+    out.begin_object()
+        .key("event")
+        .string(event)
+        .key("time")
+        .string(request.started)
+        .key("call_id")
+        .string(request.call_id);
+    if request.client_name.is_some() || request.client_version.is_some() {
+        out.key("client")
+            .begin_object()
+            .optional_string("name", request.client_name)
+            .optional_string("version", request.client_version)
+            .end_object();
+    }
+    out.optional_string("protocol", request.protocol)
+        .key("tool")
+        .string(request.tool);
+    let arguments = request.arguments;
+    if arguments.len() <= MAX_ARGUMENT_BYTES {
+        out.key("arguments").encoded(arguments);
+    } else {
+        let mut cut = MAX_ARGUMENT_BYTES;
+        while !arguments.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.key("arguments_cut")
+            .string(&arguments[..cut])
+            .key("arguments_bytes")
+            .unsigned(arguments.len() as u64);
+    }
+}
+
+pub(crate) fn call_started_record(request: &CallRequest<'_>) -> String {
+    let mut out = JsonOut::new();
+    request_fields(&mut out, "call_started", request);
+    out.end_object();
+    out.finish()
 }
 
 pub(crate) fn call_record(call: &CallRecord<'_>) -> String {
     let mut out = JsonOut::new();
-    out.begin_object()
-        .key("event")
-        .string("call")
-        .key("time")
-        .string(call.started);
-    if call.client_name.is_some() || call.client_version.is_some() {
-        out.key("client")
-            .begin_object()
-            .optional_string("name", call.client_name)
-            .optional_string("version", call.client_version)
-            .end_object();
-    }
-    out.optional_string("protocol", call.protocol)
-        .key("tool")
-        .string(call.tool);
-    if call.arguments.len() <= MAX_ARGUMENT_BYTES {
-        out.key("arguments").encoded(call.arguments);
-    } else {
-        let mut cut = MAX_ARGUMENT_BYTES;
-        while !call.arguments.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.key("arguments_cut")
-            .string(&call.arguments[..cut])
-            .key("arguments_bytes")
-            .unsigned(call.arguments.len() as u64);
-    }
+    request_fields(&mut out, "call", &call.request);
     out.key("outcome")
         .string(if call.error_code.is_some() {
             "error"
@@ -254,9 +293,14 @@ pub(crate) fn call_record(call: &CallRecord<'_>) -> String {
     if let Some(rows) = call.rows {
         out.key("rows").unsigned(rows);
     }
-    out.key("truncated")
-        .boolean(call.truncated)
-        .key("duration_ms")
+    out.key("truncated").boolean(call.truncated);
+    if let Some(write) = &call.write {
+        out.optional_string("confirmation", write.confirmation)
+            .key("committed")
+            .boolean(write.committed)
+            .optional_string("warning", write.warning);
+    }
+    out.key("duration_ms")
         .unsigned(duration_ms(call.duration))
         .end_object();
     out.finish()
@@ -269,6 +313,9 @@ pub enum AuditEvent {
     ServerStarted,
     /// An agent's call.
     Call,
+    /// A write call about to change the database; the [`AuditEvent::Call`] with the same
+    /// call id follows unless the server stopped during the write.
+    CallStarted,
     /// A call ran past its time limit and the server exited.
     TimeLimitExceeded,
 }
@@ -303,6 +350,20 @@ pub struct AuditEntry {
     pub pid: Option<u64>,
     /// The time limit per call.
     pub time_limit_ms: Option<u64>,
+    /// The call's id, `<pid>-<number>`, which pairs a call with its call-started record.
+    pub call_id: Option<String>,
+    /// How a destructive statement was confirmed: `elicitation` (the user, through the
+    /// client) or `confirm_argument` (the agent's `confirm: true`).
+    pub confirmation: Option<String>,
+    /// Whether a write call committed a change.
+    pub committed: Option<bool>,
+    /// A warning given with a call's result, such as a close that failed after a commit.
+    pub warning: Option<String>,
+    /// Whether the server let agents write (`--allow-write`), for a server start.
+    pub allow_write: bool,
+    /// For a call-started record: no call with its id follows, so the server stopped during
+    /// the call and its outcome is unknown.
+    pub outcome_unknown: bool,
 }
 
 /// One line of the audit file as [`read_audit`] found it.
@@ -333,6 +394,8 @@ pub struct AuditTotals {
     pub errors: u64,
     /// Every line that is not a record.
     pub unreadable: u64,
+    /// Every call-started record with no call after it: the server stopped during the call.
+    pub outcomes_unknown: u64,
     /// The client names, in the order they first appear.
     pub clients: Vec<String>,
 }
@@ -370,22 +433,38 @@ impl Read for PatientFile {
 }
 
 /// Reads the audit file at `path` line by line and hands `visit` every line, or only the last
-/// `limit` lines when a limit is given; `visit` returns whether to go on. It returns the
-/// totals of the whole file, or `None` when there is no audit file. It holds one line at a
-/// time (the last `limit` with a limit), and a line over 1 MiB, which no record is, is skipped
-/// unread as unreadable. On Windows, where a server's lock blocks reading for the moment it
-/// writes, each read waits up to five seconds.
+/// `limit` lines when a limit is given; `visit` returns whether to go on. A call-started record
+/// whose call follows in the file is handed over only when `every_record` is set, and one with
+/// no call after it is marked [`AuditEntry::outcome_unknown`]. It returns the totals of the
+/// whole file, or `None` when there is no audit file. It reads the file twice, the first time
+/// for the call ids that have a call record, and holds one line at a time (the last `limit`
+/// with a limit); a line over 1 MiB, which no record is, is skipped unread as unreadable. On
+/// Windows, where a server's lock blocks reading for the moment it writes, each read waits up
+/// to five seconds.
 pub fn read_audit(
     path: &Path,
     limit: Option<usize>,
+    every_record: bool,
     visit: &mut dyn FnMut(AuditLine) -> bool,
 ) -> io::Result<Option<AuditTotals>> {
-    let file = match patiently(|| File::open(path)) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+    let Some(mut reader) = open_audit(path)? else {
+        return Ok(None);
     };
-    let mut reader = BufReader::new(PatientFile(file));
+    let mut answered = std::collections::HashSet::new();
+    while let Some(bytes) = next_line(&mut reader)? {
+        if let Some((_, entry)) = bytes
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(record_of)
+            && entry.event == AuditEvent::Call
+            && let Some(call_id) = entry.call_id
+        {
+            answered.insert(call_id);
+        }
+    }
+    let Some(mut reader) = open_audit(path)? else {
+        return Ok(None);
+    };
     let mut totals = AuditTotals::default();
     let mut kept = VecDeque::new();
     let mut going = true;
@@ -397,17 +476,31 @@ pub fn read_audit(
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(record_of)
         {
-            Some((raw, entry)) => {
-                if entry.event == AuditEvent::Call {
-                    totals.calls += 1;
-                    if entry.error_code.is_some() {
-                        totals.errors += 1;
+            Some((raw, mut entry)) => {
+                match entry.event {
+                    AuditEvent::Call => {
+                        totals.calls += 1;
+                        if entry.error_code.is_some() {
+                            totals.errors += 1;
+                        }
+                        if let Some(client) = &entry.client
+                            && !totals.clients.contains(client)
+                        {
+                            totals.clients.push(client.clone());
+                        }
                     }
-                    if let Some(client) = &entry.client
-                        && !totals.clients.contains(client)
-                    {
-                        totals.clients.push(client.clone());
+                    AuditEvent::CallStarted => {
+                        entry.outcome_unknown = entry
+                            .call_id
+                            .as_ref()
+                            .is_none_or(|call_id| !answered.contains(call_id));
+                        if entry.outcome_unknown {
+                            totals.outcomes_unknown += 1;
+                        } else if !every_record {
+                            continue;
+                        }
                     }
+                    AuditEvent::ServerStarted | AuditEvent::TimeLimitExceeded => {}
                 }
                 AuditLine::Record {
                     number,
@@ -437,6 +530,14 @@ pub fn read_audit(
         }
     }
     Ok(Some(totals))
+}
+
+fn open_audit(path: &Path) -> io::Result<Option<BufReader<PatientFile>>> {
+    match patiently(|| File::open(path)) {
+        Ok(file) => Ok(Some(BufReader::new(PatientFile(file)))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn next_line(reader: &mut impl BufRead) -> io::Result<Option<Option<Vec<u8>>>> {
@@ -508,6 +609,7 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
     let event = match text_of(&members, "event")?.as_str() {
         "server_started" => AuditEvent::ServerStarted,
         "call" => AuditEvent::Call,
+        "call_started" => AuditEvent::CallStarted,
         "time_limit_exceeded" => AuditEvent::TimeLimitExceeded,
         _ => return None,
     };
@@ -539,6 +641,15 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
         version: text_of(&members, "version"),
         pid: number_of(&members, "pid"),
         time_limit_ms: number_of(&members, "time_limit_ms"),
+        call_id: text_of(&members, "call_id"),
+        confirmation: text_of(&members, "confirmation"),
+        committed: match member(&members, "committed") {
+            Some(Json::Boolean(committed)) => Some(*committed),
+            _ => None,
+        },
+        warning: text_of(&members, "warning"),
+        allow_write: matches!(member(&members, "allow_write"), Some(Json::Boolean(true))),
+        outcome_unknown: false,
     };
     Some((ascii.finish(), entry))
 }
@@ -553,7 +664,7 @@ fn arguments_shown(members: &[(String, Node)], tool: Option<&str>) -> Option<Str
         .map(|(_, node)| node)?;
     if let Json::Object(fields) = &arguments.value {
         let shown_field = match tool {
-            Some("run_sql" | "explain_query") => Some("sql"),
+            Some("run_sql" | "write_sql" | "explain_query") => Some("sql"),
             Some("resources/read") => Some("uri"),
             _ => None,
         };
@@ -569,8 +680,8 @@ fn arguments_shown(members: &[(String, Node)], tool: Option<&str>) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditEvent, AuditLine, AuditLog, AuditTotals, CallRecord, audit_path_for, call_record,
-        read_audit, rfc3339,
+        AuditEvent, AuditLine, AuditLog, AuditTotals, CallRecord, CallRequest, WriteFacts,
+        audit_path_for, call_record, call_started_record, read_audit, rfc3339,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -586,19 +697,27 @@ mod tests {
 
     fn call(tool: &str, arguments: &str, error_code: Option<&str>) -> String {
         call_record(&CallRecord {
-            started: "2026-10-28T09:14:07.123456Z",
-            client_name: Some("claude-code"),
-            client_version: Some("2.1.0"),
-            protocol: Some("2025-11-25"),
-            tool,
-            arguments,
+            request: request(tool, arguments, "1-1"),
             error_code,
             sqlstate: None,
             result_bytes: 10,
             rows: Some(2),
             truncated: false,
             duration: Duration::from_millis(12),
+            write: None,
         })
+    }
+
+    fn request<'a>(tool: &'a str, arguments: &'a str, call_id: &'a str) -> CallRequest<'a> {
+        CallRequest {
+            call_id,
+            started: "2026-10-28T09:14:07.123456Z",
+            client_name: Some("claude-code"),
+            client_version: Some("2.1.0"),
+            protocol: Some("2025-11-25"),
+            tool,
+            arguments,
+        }
     }
 
     #[test]
@@ -620,7 +739,7 @@ mod tests {
 
     fn read_all(path: &Path, limit: Option<usize>) -> Option<(Vec<AuditLine>, AuditTotals)> {
         let mut lines = Vec::new();
-        let totals = read_audit(path, limit, &mut |line| {
+        let totals = read_audit(path, limit, false, &mut |line| {
             lines.push(line);
             true
         })
@@ -662,7 +781,7 @@ mod tests {
         assert_eq!(last.len(), 1);
         assert_eq!(totals.calls, 3);
         let mut seen = 0;
-        read_audit(&path, None, &mut |_| {
+        read_audit(&path, None, false, &mut |_| {
             seen += 1;
             false
         })
@@ -732,5 +851,82 @@ mod tests {
         assert_eq!(read_all(&archived, None).unwrap().1.calls, 1);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&archived);
+    }
+
+    #[test]
+    fn a_call_started_record_pairs_with_its_call_and_one_without_is_an_unknown_outcome() {
+        let path = temporary("started");
+        let log = AuditLog::new(path.clone());
+        let insert = r#"{"sql":"INSERT INTO t VALUES (1)"}"#;
+        log.append(&call_started_record(&request("write_sql", insert, "7-1")))
+            .unwrap();
+        log.append(&call_record(&CallRecord {
+            request: request("write_sql", insert, "7-1"),
+            error_code: None,
+            sqlstate: None,
+            result_bytes: 10,
+            rows: Some(1),
+            truncated: false,
+            duration: Duration::from_millis(3),
+            write: Some(WriteFacts {
+                confirmation: Some("elicitation"),
+                committed: true,
+                warning: Some("committed; closing the database file failed"),
+            }),
+        }))
+        .unwrap();
+        let drop = r#"{"sql":"DROP TABLE t"}"#;
+        log.append(&call_started_record(&request("write_sql", drop, "7-2")))
+            .unwrap();
+        let (shown, totals) = read_all(&path, None).unwrap();
+        assert_eq!((totals.calls, totals.outcomes_unknown), (1, 1));
+        assert_eq!(shown.len(), 2);
+        let AuditLine::Record { entry, .. } = &shown[0] else {
+            panic!("{:?}", shown[0]);
+        };
+        assert_eq!(entry.event, AuditEvent::Call);
+        assert_eq!(entry.call_id.as_deref(), Some("7-1"));
+        assert_eq!(entry.confirmation.as_deref(), Some("elicitation"));
+        assert_eq!(entry.committed, Some(true));
+        assert!(entry.warning.is_some());
+        let AuditLine::Record { entry, .. } = &shown[1] else {
+            panic!("{:?}", shown[1]);
+        };
+        assert_eq!(entry.event, AuditEvent::CallStarted);
+        assert!(entry.outcome_unknown);
+        assert_eq!(entry.arguments.as_deref(), Some("DROP TABLE t"));
+        let mut every = 0;
+        read_audit(&path, None, true, &mut |_| {
+            every += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(every, 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_prompt_append_gives_up_on_a_held_lock_long_before_a_normal_one() {
+        let path = temporary("prompt");
+        let log = AuditLog::new(path.clone());
+        log.append(&call("list_tables", "{}", None)).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        holder.lock().unwrap();
+        let started = std::time::Instant::now();
+        assert!(
+            log.append_promptly(&call("list_tables", "{}", None))
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+        holder.unlock().unwrap();
+        drop(holder);
+        log.append_promptly(&call("list_tables", "{}", None))
+            .unwrap();
+        assert_eq!(read_all(&path, None).unwrap().1.calls, 2);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -362,6 +362,20 @@ expect_exit 0 "$eggdb" audit shell.db --format json
 grep -q '"tool":"run_sql"' last.out || fail "eggdb audit listed $(cat last.out)"
 pass "mcp: initialize, tools/list and a query over stdio, recorded in the audit file"
 
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write_sql","arguments":{"sql":"insert into t values (9, '"'"'z'"'"')"}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"write_sql","arguments":{"sql":"delete from t"}}}' > mcp-write.in
+expect_exit 0 "$eggdb" mcp shell.db --allow-write < mcp-write.in
+[ "$(wc -l < last.out | tr -d ' ')" = 4 ] || fail "eggdb mcp --allow-write answered $(cat last.out)"
+grep -q '"name":"write_sql"' last.out || fail "eggdb mcp --allow-write's tools/list answered $(sed -n 2p last.out)"
+grep -q 'committed' last.out || fail "eggdb mcp --allow-write's write_sql answered $(sed -n 3p last.out)"
+grep -q 'needs_confirmation' last.out || fail "eggdb mcp --allow-write's delete answered $(sed -n 4p last.out)"
+expect_exit 0 "$eggdb" sql shell.db -c 'select count(*) from t'
+grep -q '3' last.out || fail "after write_sql, t holds $(cat last.out)"
+pass "mcp --allow-write: write_sql commits, and a destructive statement waits for confirmation"
+
 expect_exit 0 "$eggdb" ui --help
 grep -q '^Usage: eggdb ui <file>' last.out || fail "eggdb ui --help printed $(cat last.out)"
 expect_exit 2 "$eggdb" ui app.db < /dev/null
