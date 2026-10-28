@@ -304,12 +304,21 @@ fn deobfuscated(bytes: &[u8]) -> Option<Password> {
     let mut units = utf16_units(&clear);
     clear.fill(0);
     std::hint::black_box(&clear);
-    let text: Option<String> = char::decode_utf16(units.iter().copied())
-        .collect::<Result<String, _>>()
-        .ok();
+    let mut text = String::with_capacity(units.len() * 3);
+    let mut valid = true;
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => text.push(character),
+            Err(_) => {
+                valid = false;
+                break;
+            }
+        }
+    }
     units.fill(0);
     std::hint::black_box(&units);
-    text.map(|text| Password(text.into_bytes()))
+    let password = Password(text.into_bytes());
+    valid.then_some(password)
 }
 
 /// Reads a LOGIN7 message's body ([MS-TDS] 2.2.6.4): its fixed part, the offset and length of

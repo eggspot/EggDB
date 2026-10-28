@@ -47,7 +47,14 @@ pub(crate) fn printable(text: &str) -> String {
             '\t' => shown.push_str("\\t"),
             special
                 if special.is_control()
-                    || matches!(special, '\u{2028}' | '\u{2029}' | '\u{202e}') =>
+                    || matches!(
+                        special,
+                        '\u{200e}'
+                            | '\u{200f}'
+                            | '\u{061c}'
+                            | '\u{2028}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}'
+                    ) =>
             {
                 shown.push_str(&format!("\\u{{{:x}}}", u32::from(special)));
             }
@@ -78,10 +85,31 @@ fn sleep_unless_stopped(duration: Duration, stop: &(dyn Fn() -> bool + Sync)) {
     }
 }
 
-fn line_of(text: &str, offset: usize) -> u32 {
-    let end = offset.min(text.len());
-    let before = text.get(..end).unwrap_or(text);
-    u32::try_from(before.matches('\n').count() + 1).unwrap_or(u32::MAX)
+fn newlines(text: &str, from: usize, to: usize) -> usize {
+    text.as_bytes()
+        .get(from..to)
+        .map_or(0, |part| part.iter().filter(|&&byte| byte == b'\n').count())
+}
+
+struct LineCursor {
+    offset: usize,
+    line: usize,
+}
+
+impl LineCursor {
+    fn new() -> Self {
+        Self { offset: 0, line: 1 }
+    }
+
+    fn line_at(&mut self, text: &str, offset: usize) -> u32 {
+        let offset = offset.min(text.len());
+        if offset < self.offset {
+            *self = Self::new();
+        }
+        self.line += newlines(text, self.offset, offset);
+        self.offset = offset;
+        u32::try_from(self.line).unwrap_or(u32::MAX)
+    }
 }
 
 fn send_errors(wire: &mut Wire<'_>, errors: &[(u32, u8, &str)]) {
@@ -219,6 +247,7 @@ fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Login {
     };
     if message.kind != LOGIN7 {
         message.body.fill(0);
+        std::hint::black_box(&message.body);
         (shared.log)(&format!(
             "{}  protocol error: the message after PRELOGIN is not LOGIN7",
             wire.peer()
@@ -513,6 +542,7 @@ impl Connection<'_> {
         let mut writer = StepWriter {
             connection: self,
             text: &text,
+            lines: LineCursor::new(),
             database,
             pending: &mut pending,
             failed_write: &mut failed_write,
@@ -534,7 +564,12 @@ impl Connection<'_> {
             command: 0,
             rows: 0,
         });
-        let status = last.status & !DONE_MORE;
+        let status = (last.status & !DONE_MORE)
+            | if in_transaction {
+                DONE_IN_TRANSACTION
+            } else {
+                0
+            };
         if self
             .wire
             .write(&tokens::done(DONE, status, last.command, last.rows))
@@ -549,6 +584,7 @@ impl Connection<'_> {
 struct StepWriter<'w, 'a> {
     connection: &'w mut Connection<'a>,
     text: &'w str,
+    lines: LineCursor,
     database: String,
     pending: &'w mut Option<PendingDone>,
     failed_write: &'w mut bool,
@@ -593,7 +629,9 @@ impl StepWriter<'_, '_> {
     }
 
     fn error(&mut self, error: &SqlError, statement_start: usize) {
-        let line = line_of(self.text, error.position().unwrap_or(statement_start));
+        let line = self
+            .lines
+            .line_at(self.text, error.position().unwrap_or(statement_start));
         let number = error.vendor_code().map_or(50_000, u32::from);
         let severity = error.severity().unwrap_or(16);
         let token = tokens::error(&ServerMessage {
@@ -616,14 +654,14 @@ impl StepWriter<'_, '_> {
             return false;
         }
         let committed = matches!(&step.outcome, Ok(result) if result.tag == "COMMIT");
-        if !self.transaction_change(step.in_transaction, committed) {
-            return false;
-        }
         let written = match step.outcome {
-            Ok(result) => self.result(&result, step.no_count),
+            Ok(result) => {
+                self.transaction_change(step.in_transaction, committed)
+                    && self.result(&result, step.no_count)
+            }
             Err(error) => {
                 self.error(&error, step.statement_start);
-                !*self.failed_write
+                !*self.failed_write && self.transaction_change(step.in_transaction, committed)
             }
         };
         if step.in_transaction
@@ -729,7 +767,7 @@ impl StepWriter<'_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_of, printable, version_bytes};
+    use super::{LineCursor, printable, version_bytes};
 
     #[test]
     fn the_version_is_sql_server_2022_build_1000() {
@@ -738,8 +776,14 @@ mod tests {
 
     #[test]
     fn lines_count_from_one_and_log_names_escape_line_breaks() {
-        assert_eq!(line_of("SELECT 1\nSELECT x", 9), 2);
-        assert_eq!(line_of("SELECT 1", 100), 1);
+        let text = "SELECT 1\nSELECT x\n\nSELECT y";
+        let mut lines = LineCursor::new();
+        assert_eq!(lines.line_at(text, 0), 1);
+        assert_eq!(lines.line_at(text, 9), 2);
+        assert_eq!(lines.line_at(text, 19), 4);
+        assert_eq!(lines.line_at(text, 9), 2);
+        assert_eq!(LineCursor::new().line_at("SELECT 1", 100), 1);
+        assert_eq!(printable("\u{2066}\u{200f}"), "\\u{2066}\\u{200f}");
         assert_eq!(printable("a\nb\u{202e}"), "a\\nb\\u{202e}");
     }
 }

@@ -111,6 +111,15 @@ impl<'a> Wire<'a> {
 
     pub(crate) fn read_message(&mut self, limit: usize) -> Result<Message, WireError> {
         let mut body = Vec::new();
+        let read = self.read_message_into(&mut body, limit);
+        if read.is_err() {
+            body.fill(0);
+            std::hint::black_box(&body);
+        }
+        read.map(|kind| Message { kind, body })
+    }
+
+    fn read_message_into(&mut self, body: &mut Vec<u8>, limit: usize) -> Result<u8, WireError> {
         let mut kind = None;
         loop {
             let mut header = [0u8; HEADER_BYTES];
@@ -145,10 +154,7 @@ impl<'a> Wire<'a> {
                 read += chunk;
             }
             if header[1] & END_OF_MESSAGE != 0 {
-                return Ok(Message {
-                    kind: kind.unwrap_or(0),
-                    body,
-                });
+                return Ok(kind.unwrap_or(0));
             }
         }
     }
