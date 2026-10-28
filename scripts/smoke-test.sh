@@ -165,12 +165,14 @@ expect_exit 2 env -u EGGDB_PASSWORD "$eggdb" serve shop.db
 grep -q 'serve needs a password' last.err || fail "eggdb serve without a password said $(cat last.err)"
 expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 0.0.0.0:5432
 grep -q 'not a loopback address' last.err || fail "eggdb serve on 0.0.0.0 said $(cat last.err)"
+expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --tds-listen 0.0.0.0:1433
+grep -q 'not a loopback address' last.err || fail "eggdb serve --tds-listen on 0.0.0.0 said $(cat last.err)"
 if [ "${OS:-}" = Windows_NT ]; then
   echo "skip serve with clients: stopping a server gracefully needs SIGTERM, which Windows lacks"
 else
   printf 'pg-secret\n' > password.txt
   "$eggdb" sql --create pg.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL)" > /dev/null
-  "$eggdb" serve pg.db --listen 127.0.0.1:0 --mysql-listen 127.0.0.1:0 --password-file password.txt --cache 1g > serve.out 2> serve.err &
+  "$eggdb" serve pg.db --listen 127.0.0.1:0 --mysql-listen 127.0.0.1:0 --tds-listen 127.0.0.1:0 --log-batches --password-file password.txt --cache 1g > serve.out 2> serve.err &
   server_pid=$!
   for _ in $(seq 1 50); do
     [ -s serve.out ] && break
@@ -313,6 +315,31 @@ PYTHON
     pass "serve: the PyMySQL driver runs parameterized queries and round-trips DECIMAL, DATE, DATETIME, JSON, TIME and BLOB values"
   else
     echo "skip driver: PyMySQL is not installed (CI's Linux job installs it)"
+  fi
+  tds_port=$(sed -n 's/.*"tds_port":\([0-9]*\).*/\1/p' serve.out | head -n 1)
+  [ -n "$tds_port" ] || fail "eggdb serve printed no TDS port: $(cat serve.out)"
+  sqlcmd_tool="${EGGDB_SMOKE_SQLCMD:-}"
+  if [ -n "$sqlcmd_tool" ] && [ -x "$sqlcmd_tool" ]; then
+    run_sqlcmd() {
+      SQLCMDPASSWORD="$1" "$sqlcmd_tool" -S "127.0.0.1,$tds_port" -U eggdb -d pg -l 10 "${@:2}"
+    }
+    run_sqlcmd pg-secret -b -h -1 -W -Q "CREATE TABLE [dbo].[Bakes] ([id] INT IDENTITY(1,1) NOT NULL, [name] NVARCHAR(40) NOT NULL, CONSTRAINT [PK_Bakes] PRIMARY KEY ([id]))
+INSERT INTO bakes (name) VALUES (N'bread'), (N'egg')
+SELECT TOP 1 [name] FROM dbo.bakes ORDER BY id DESC
+SELECT @@VERSION" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
+    grep -qx 'egg' sqlcmd.out || fail "sqlcmd printed $(cat sqlcmd.out) server: $(cat serve.err)"
+    grep -q 'compatible with Microsoft SQL Server 2022' sqlcmd.out || fail "sqlcmd's @@VERSION printed $(cat sqlcmd.out)"
+    printf 'SELECT count(*) AS n FROM bakes\nGO\nINSERT INTO bakes (name) VALUES (N%sjam%s)\nGO\nSELECT count(*) AS n FROM bakes\nGO\n' "'" "'" > script.sql
+    run_sqlcmd pg-secret -b -h -1 -W -N disable -i script.sql > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd -i failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
+    grep -qx '3' sqlcmd.out || fail "sqlcmd -i printed $(cat sqlcmd.out)"
+    run_sqlcmd pg-secret -Q "SELECT * FROM missing" > sqlcmd.out 2>&1 || true
+    grep -q "Msg 208, Level 16, State 1" sqlcmd.out || fail "sqlcmd's missing table said $(cat sqlcmd.out)"
+    grep -q "Invalid object name 'missing'" sqlcmd.out || fail "sqlcmd's missing table said $(cat sqlcmd.out)"
+    run_sqlcmd wrong -b -Q "SELECT 1" > sqlcmd.out 2>&1 && fail "sqlcmd connected with a wrong password"
+    grep -q "Login failed for user 'eggdb'" sqlcmd.out || fail "a wrong sqlcmd password said $(cat sqlcmd.out)"
+    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches and an -i script with GO; errors and a wrong password are refused"
+  else
+    echo "skip sqlcmd: EGGDB_SMOKE_SQLCMD names no go-sqlcmd binary (CI's Linux job downloads one; a sqlcmd on PATH is never used)"
   fi
   kill -TERM "$server_pid"
   status=0

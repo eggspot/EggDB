@@ -58,6 +58,17 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/pg-driver"
           "$RUNNER_TEMP/pg-driver/bin/pip" install --quiet pg8000==1.31.2 PyMySQL==1.1.1
           echo "EGGDB_SMOKE_PYTHON=$RUNNER_TEMP/pg-driver/bin/python" >> "$GITHUB_ENV"
+      - name: Download go-sqlcmd v1.10.0 (MIT) for the smoke test, checked against its SHA-256 (test tooling, never shipped)
+        run: |
+          mkdir -p "$RUNNER_TEMP/go-sqlcmd"
+          cd "$RUNNER_TEMP/go-sqlcmd"
+          curl --retry 3 -fsSL -o sqlcmd-linux-amd64.tar.bz2 https://github.com/microsoft/go-sqlcmd/releases/download/v1.10.0/sqlcmd-linux-amd64.tar.bz2
+          echo "92516d98c63d99b0994de5b61350c91f6915f9b76f139a59039fbcb225c2e987  sqlcmd-linux-amd64.tar.bz2" | sha256sum -c -
+          tar -xjf sqlcmd-linux-amd64.tar.bz2
+          tool=$(find "$PWD" -maxdepth 2 -type f -name sqlcmd | head -n 1)
+          [ -n "$tool" ] || { echo "::error::no sqlcmd in the go-sqlcmd archive"; exit 1; }
+          "$tool" --version
+          echo "EGGDB_SMOKE_SQLCMD=$tool" >> "$GITHUB_ENV"
       - name: Smoke test the eggdb command
         run: cargo build -p eggdb && scripts/smoke-test.sh target/debug/eggdb
       - name: Docs
@@ -142,10 +153,10 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-cross-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL and MCP servers and the embedded API for each target
+      - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL, SQL Server and MCP servers and the embedded API for each target
         run: |
           for target in $TARGETS; do
-            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-mcp -p eggdb --all-targets --target "$target" -- -D warnings
+            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-mcp -p eggdb-tdswire -p eggdb --all-targets --target "$target" -- -D warnings
           done
 
   bench:

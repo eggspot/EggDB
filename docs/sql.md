@@ -344,6 +344,53 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
 - **Values print as Oracle prints numbers**: no trailing zeros and no zero before the point
   (`.5`), `TRUE` and `FALSE`.
 
+## The SQL Server dialect
+
+`eggdb sql --dialect sqlserver` (also `mssql` and `tsql`), `eggdb shell --dialect sqlserver`,
+MCP's `dialect: "sqlserver"` and every connection over SQL Server's protocol (`eggdb serve
+--tds-listen`) read Microsoft SQL Server's Transact-SQL, as Microsoft's Transact-SQL reference
+documents it (roadmap item 23a, D122), on the same tables as the other dialects:
+
+```sql
+CREATE TABLE [dbo].[Bakes] ([id] INT IDENTITY(1,1) NOT NULL, [name] NVARCHAR(40) NOT NULL,
+  CONSTRAINT [PK_Bakes] PRIMARY KEY ([id]))
+INSERT INTO bakes (name) VALUES (N'bread'), (N'egg')
+SELECT TOP 1 [name], GETDATE() AS at FROM dbo.bakes ORDER BY id DESC
+SELECT @@VERSION
+```
+
+- **Names**: `[brackets]` (with `]]` for a `]`) and `"double quotes"` delimit names, and every
+  name and alias folds to lower case, so `[Bakes]`, `bakes` and `"BAKES"` are one table, as in
+  SQL Server's default case-insensitive collations; results show names in lower case. Schema
+  `dbo` is PostgreSQL's `public`, so a table made in Transact-SQL is `public.bakes` to psql.
+- **Statements need no semicolons**: a statement ends where the next one's first word (`SELECT`,
+  `INSERT`, `BEGIN`, `SET`, ...) begins. `GO` separates batches in `sqlcmd`, which removes it
+  before sending; EggDB reads it as a syntax error, as SQL Server does (scripts with `GO` for
+  `eggdb restore` come with item 40).
+- `SELECT TOP n` and `TOP (expression)`; `N'...'` strings; `--` and nested `/* */` comments;
+  the operators `+ - * / % = <> != < > <= >= !< !>`.
+- **Types**: `int`, `bigint`, `smallint`, `decimal`/`numeric(p,s)` (18,0 without a precision,
+  at most 38 digits), `float(n)`, `real`, `char`/`nchar`/`varchar`/`nvarchar(n | max)`
+  (1 when no length is given), `text`, `ntext`, `date` and `datetime2(n)`.
+- **`IDENTITY` and `IDENTITY(1,1)`** number an integer column that is the first column of the
+  primary key, inline or as a table-level `CONSTRAINT ... PRIMARY KEY`. An `INSERT` without a
+  column list leaves it out, and an explicit value is error 544, as with `IDENTITY_INSERT OFF`.
+- `GETDATE()` and `CURRENT_TIMESTAMP` (milliseconds), `SYSDATETIME()`, `GETUTCDATE()`,
+  `SYSUTCDATETIME()` (the session's time zone is UTC), `UPPER`, `LOWER`, `ABS`, `COALESCE`,
+  `NULLIF`, `CAST` and the aggregates. `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`,
+  `@@LANGUAGE`. Another function is error 195, another `@@` name or `@variable` error 137.
+- **Transactions**: each statement commits on its own unless `BEGIN TRAN[SACTION]` opened a
+  transaction; `BEGIN TRAN` nests (`@@TRANCOUNT`), the outermost `COMMIT [TRAN | WORK]`
+  commits, `ROLLBACK [TRAN | WORK]` rolls everything back, and without a transaction they are
+  errors 3902 and 3903. DDL is transactional.
+- `USE` the served database (another is error 911), and `SET NOCOUNT`, `ANSI_NULLS`,
+  `QUOTED_IDENTIFIER`, `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`
+  and `ANSI_NULL_DFLT_ON` `ON`, `IMPLICIT_TRANSACTIONS OFF`, `TEXTSIZE`, `LANGUAGE us_english`,
+  `DATEFORMAT mdy`, `LOCK_TIMEOUT` and `TRANSACTION ISOLATION LEVEL` (all run serializable).
+- **Errors** carry SQL Server's numbers, severities and wording: `Msg 208, Level 16, State 1:
+  Invalid object name 'missing'.` in `eggdb sql`, and the same fields in TDS's ERROR token.
+  Features EggDB lacks are 40517 (`... is not supported in this version of EggDB.`).
+
 ## Connecting with mysql
 
 `eggdb serve --mysql-listen <address>` also serves the file over MySQL's client/server protocol
@@ -392,6 +439,45 @@ Not yet: TLS, compression, `LOAD DATA LOCAL INFILE`, `CLIENT_DEPRECATE_EOF`, que
 `information_schema` and the catalog queries of GUI tools (MySQL Workbench, DBeaver), dates and
 times, stored users, and `caching_sha2_password`'s full authentication (which needs TLS or RSA;
 the fast path always applies, since the server checks every password itself).
+
+## Connecting with sqlcmd
+
+`eggdb serve --tds-listen <address>` also serves the file over SQL Server's TDS protocol, version
+7.4 from Microsoft's [MS-TDS] specification (roadmap item 23a, D122), beside the PostgreSQL
+listener, to the same user and password as a SQL login:
+
+```sh
+export EGGDB_PASSWORD='choose-one'
+eggdb serve --create shop.db --tds-listen 127.0.0.1:1433
+```
+
+and in another terminal, with Microsoft's `sqlcmd` (go-sqlcmd, MIT-licensed):
+
+```sh
+export SQLCMDPASSWORD='choose-one'
+sqlcmd -S 127.0.0.1,1433 -U eggdb -d shop -Q "SELECT @@VERSION"
+sqlcmd -S 127.0.0.1,1433 -U eggdb -d shop -i schema.sql
+```
+
+What the server does:
+- **No encryption**: the server answers that encryption is not available. go-sqlcmd's default
+  (`-N` not given) and `-N disable` connect without it; `-N true`, `mandatory` and `strict`
+  (TDS 8) fail, as do drivers set to `Encrypt=true`. The login sends its password only
+  obfuscated, so in effect in the clear, which is why the listener is loopback only (D102).
+- **SQL logins only**, one per server, TDS 7.4 only: a wrong password, an unknown user, Windows
+  (SSPI) or Azure AD logins are error 18456 `Login failed for user '...'`, answered more slowly
+  after repeated failures; another database than the served one is error 4060.
+- **SQL batches** run with SQL Server's rules: the whole batch is parsed first, so a syntax error
+  runs nothing; a duplicate key or other constraint violation ends only its statement; any other
+  error ends the batch. Results come back with their columns' types, `(n rows affected)` counts
+  unless `SET NOCOUNT ON`, and transaction changes.
+- **Several connections**, up to `--max-connections` (64) for this listener, at most 16 of them
+  still logging in; the next gets error 17809. `--log-batches` logs the first 200 characters of
+  each batch, to see what a client sends.
+
+Not yet: TLS, Microsoft.Data.SqlClient and mssql-jdbc (they send parameterized queries as RPC
+requests, item 23b), bulk load (`bcp`, item 46), MARS, cancelling a running batch (attention is
+answered when the batch ends), and SSMS's and Azure Data Studio's catalog queries (item 41).
 
 ## What runs today
 
@@ -1340,6 +1426,28 @@ And more, not in the suite yet:
   END`, procedures, packages), `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms,
   database links, `ROWID`, the regular-expression, analytic and XML functions, `NLS_`
   settings, and schemas other than the session user's.
+
+## Known differences from SQL Server
+The SQL Server suite (`crates/eggdb-sql/correctness/sqlserver.test`, from Microsoft's
+Transact-SQL reference, never SQL Server's software) and D122 list these:
+- Names and aliases come back in lower case; a mixed-case table made in PostgreSQL with quotes
+  (`"Users"`) cannot be named from Transact-SQL.
+- Comparisons are binary (the collation reported is Latin1_General_100_BIN2): `'a' = 'A'` is
+  false, and trailing spaces count.
+- `+` with a string operand is not supported yet (40517), and nor are the types `bit`,
+  `tinyint`, `money`, `datetime`, `datetimeoffset`, `uniqueidentifier`, `varbinary` and `time`
+  (item 39), `alias = expression`, `ISNULL`, `CONVERT`, `OFFSET ... FETCH`, `TOP ... PERCENT`
+  and `WITH TIES`, `OUTPUT`, `SELECT ... INTO` and `#temporary` tables.
+- An `IDENTITY` seed or increment other than (1,1), and an identity column that is not the
+  first column of the primary key; the next number is one more than the largest in the table,
+  so a deleted largest value is used again.
+- A statement that fails after it wrote rows rolls back the whole transaction (no statement
+  savepoints yet) and ends the batch; one that wrote nothing leaves the transaction open, as in
+  SQL Server. An unknown column of an existing table is found when the statement runs, after
+  the statements before it in the batch ran (SQL Server finds it when the batch compiles).
+- `DECLARE`, `IF`, `WHILE`, `BEGIN ... END`, `TRY ... CATCH`, `PRINT`, `EXEC`, stored procedures
+  and triggers; `SAVE TRANSACTION`; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF`, `ANSI_PADDING OFF`
+  and `IMPLICIT_TRANSACTIONS ON`; three-part names and other databases.
 
 ## Next parts (roadmap)
 - The rest of the JSON functions (item 36).
