@@ -455,9 +455,7 @@ fn load(
             .map_err(|error| with_context(error, context))?;
         count += 1;
         if !deferred_parents && children.len() >= FOREIGN_KEY_BATCH_ROWS {
-            children
-                .check_and_forget(writer, tables)
-                .map_err(|error| with_context(error, context))?;
+            children.check_and_forget(writer, tables)?;
         }
     }
     children.check(writer, tables)?;
