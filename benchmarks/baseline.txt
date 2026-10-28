@@ -85,6 +85,7 @@ macos footprint.start ratio_to_a_program_that_exits_at_once 0.968
 macos large_value.get ratio_to_copying_the_value 2.367
 macos large_value.put ratio_to_writing_the_value_twice 9.798
 macos log.recovery ratio_to_crc32c_of_the_replayed_log 1.827
+macos mcp.tools_call ratio_to_open_and_select 44.488
 macos page_cache.hit ratio_to_reference 0.375
 macos sql_copy.from_stdin ratio_to_insert_values 1.059
 macos sql_copy.to_stdout ratio_to_select 1.396

@@ -11,8 +11,10 @@ use eggdb_storage::{BTree, PageSize, StorageError};
 use std::io::Read;
 use std::ops::Bound;
 
+mod audit;
 mod copy_io;
 mod csv_import;
+mod mcp;
 mod restore;
 mod serve;
 mod shell;
@@ -80,6 +82,9 @@ pub(crate) fn execute(request: Request, console: &mut Console<'_>) -> Result<Exi
     if request.command == CommandName::Shell {
         return shell::run(request, console);
     }
+    if request.command == CommandName::Mcp {
+        return mcp::run(request, console);
+    }
     execute_on(request, console, None)
 }
 
@@ -141,6 +146,11 @@ fn execute_on(
             "eggdb shell does not run inside itself",
             Some(CommandName::Shell),
         )),
+        CommandName::Mcp => Err(Failure::usage(
+            "eggdb mcp runs on its own, with the agent's client on stdin and stdout",
+            Some(CommandName::Mcp),
+        )),
+        CommandName::Audit => session.audit(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -540,7 +550,8 @@ impl<'a> Session<'a> {
         match (error.kind(), access) {
             (ErrorKind::Locked, Access::Write { .. }) => Failure::database(
                 format!(
-                    "cannot open {file}: another program has it open. Close it before editing, or browse it with `eggdb ui --read-only {file}`, which works beside other readers."
+                    "cannot open {file}: another program has it open. Close it before editing, or browse it with `eggdb ui --read-only {file}`, which works beside other readers.\n{}",
+                    mcp_may_hold(file)
                 ),
                 Exit::Busy,
             ),
@@ -643,7 +654,8 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
             ),
             Access::Write { .. } => Failure::database(
                 format!(
-                    "cannot open {file}: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers."
+                    "cannot open {file}: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers.\n{}",
+                    mcp_may_hold(file)
                 ),
                 Exit::Busy,
             ),
@@ -669,6 +681,12 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
             Exit::for_error(kind),
         ),
     }
+}
+
+fn mcp_may_hold(file: &str) -> String {
+    format!(
+        "  it may be an AI agent's call through eggdb mcp, which holds the file for up to its time limit; run the command again, or see `eggdb audit {file}`."
+    )
 }
 
 fn cache_for_value(value_bytes: usize) -> usize {

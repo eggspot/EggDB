@@ -54,6 +54,48 @@ impl IndexSchema {
     }
 }
 
+/// A view as the catalog defines it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewSchema {
+    /// The view's name, prefixed by its schema and a dot when that is not `public`.
+    pub name: String,
+    /// The schema the view is in: `public` unless it was created in another one.
+    pub schema: String,
+    /// The view's comment, from `COMMENT ON VIEW`.
+    pub comment: Option<String>,
+    /// Its columns, in order.
+    pub columns: Vec<ViewColumnSchema>,
+}
+
+/// One column of a [`ViewSchema`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewColumnSchema {
+    /// The column's name.
+    pub name: String,
+    /// Its type, when the view's query fixes it.
+    pub sql_type: Option<SqlType>,
+}
+
+pub(crate) fn read_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ViewSchema>> {
+    let mut views = Vec::new();
+    for view in crate::views::every_view(reader)? {
+        views.push(ViewSchema {
+            name: crate::schemas::display(&view.name),
+            schema: crate::schemas::schema_of(&view.name).to_owned(),
+            comment: crate::comments::relation_comment(reader, &view.name)?,
+            columns: view
+                .columns
+                .into_iter()
+                .map(|column| ViewColumnSchema {
+                    name: column.name,
+                    sql_type: column.sql_type,
+                })
+                .collect(),
+        });
+    }
+    Ok(views)
+}
+
 /// One column of a [`TableSchema`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnSchema {

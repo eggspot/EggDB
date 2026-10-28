@@ -635,6 +635,16 @@ struct Group {
     carried: Vec<Value>,
     accumulators: Vec<Accumulator>,
     seen: Vec<HashSet<Vec<u8>>>,
+    held: crate::memory::RowBytes,
+}
+
+impl Accumulator {
+    fn held_bytes(&self) -> usize {
+        match self {
+            Self::Extreme(value) => crate::memory::held_bytes(value),
+            _ => 0,
+        }
+    }
 }
 
 fn add_float(total: f64, value: f64) -> SqlResult<f64> {
@@ -837,6 +847,7 @@ impl Grouping {
                 .collect(),
             accumulators: self.calls.iter().map(Call::start).collect(),
             seen: self.calls.iter().map(|_| HashSet::new()).collect(),
+            held: crate::memory::RowBytes::default(),
         };
         feed(&mut |row| {
             let evaluator = Evaluator {
@@ -847,17 +858,23 @@ impl Grouping {
             key.clear();
             key_values.clear();
             let mut integer_key = None;
+            let mut key_bytes = crate::memory::RowBytes::default();
             if let [expr] = self.keys.as_slice() {
                 let value = evaluator.eval(expr, None)?;
+                key_bytes.add(&value)?;
                 integer_key = integer_group_key(&value);
                 if integer_key.is_none() {
                     equality_key(&mut key, &value);
+                    key_bytes.add_bytes(key.len())?;
                 }
                 key_values.push(value);
             } else {
                 for expr in &self.keys {
                     let value = evaluator.eval(expr, None)?;
+                    key_bytes.add(&value)?;
+                    let before = key.len();
                     equality_key(&mut key, &value);
+                    key_bytes.add_bytes(key.len() - before)?;
                     key_values.push(value);
                 }
             }
@@ -873,7 +890,13 @@ impl Grouping {
                 None => {
                     memory.charge_row(&key_values)?;
                     memory.charge(key.len() + self.calls.len() * 64)?;
-                    groups.push(new_group(key_values.clone(), row));
+                    let mut group = new_group(std::mem::take(&mut key_values), row);
+                    for value in &group.carried {
+                        key_bytes.add(value)?;
+                    }
+                    memory.charge_row(&group.carried)?;
+                    group.held = key_bytes;
+                    groups.push(group);
                     match integer_key {
                         Some(integer_key) => integer_index.insert(integer_key, groups.len() - 1),
                         None => index.insert(key.clone(), groups.len() - 1),
@@ -902,8 +925,16 @@ impl Grouping {
                     memory.charge(distinct_key.len() + 32)?;
                     group.seen[number].insert(distinct_key.clone());
                 }
+                let before = group.accumulators[number].held_bytes();
                 call.add(&mut group.accumulators[number], value)
                     .map_err(|error| error.at_if_unplaced(call.position))?;
+                let grown = group.accumulators[number]
+                    .held_bytes()
+                    .saturating_sub(before);
+                if grown > 0 {
+                    group.held.add_bytes(grown)?;
+                    memory.charge(grown)?;
+                }
             }
             Ok(true)
         })?;

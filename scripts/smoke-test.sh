@@ -348,6 +348,20 @@ expect_exit 1 "$eggdb" shell shell.db --keep-going -c 'get nobody' -c 'select co
 grep -q '     2' last.out || fail "eggdb shell --keep-going printed $(cat last.out)"
 pass "shell: piped lines and -c, key-value commands, SQL and meta-commands, stopping at the first failure"
 
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"select name from t order by id"}}}' > mcp.in
+expect_exit 0 "$eggdb" mcp shell.db < mcp.in
+[ "$(wc -l < last.out | tr -d ' ')" = 3 ] || fail "eggdb mcp answered $(cat last.out)"
+grep -q '"protocolVersion":"2025-11-25"' last.out || fail "eggdb mcp's initialize answered $(head -1 last.out)"
+grep -q '"name":"run_sql"' last.out || fail "eggdb mcp's tools/list answered $(sed -n 2p last.out)"
+grep -q '"rows":\[\["x"\],\["y"\]\]' last.out || fail "eggdb mcp's run_sql answered $(sed -n 3p last.out)"
+expect_exit 0 "$eggdb" audit shell.db --format json
+grep -q '"tool":"run_sql"' last.out || fail "eggdb audit listed $(cat last.out)"
+pass "mcp: initialize, tools/list and a query over stdio, recorded in the audit file"
+
 expect_exit 0 "$eggdb" ui --help
 grep -q '^Usage: eggdb ui <file>' last.out || fail "eggdb ui --help printed $(cat last.out)"
 expect_exit 2 "$eggdb" ui app.db < /dev/null

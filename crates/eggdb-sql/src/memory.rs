@@ -15,6 +15,88 @@ struct Shared {
 thread_local! {
     static SHARED: std::cell::Cell<Option<Shared>> = const { std::cell::Cell::new(None) };
     static STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static VALUE_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    static ROW_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+pub(crate) fn held_bytes(value: &Value) -> usize {
+    match value {
+        Value::Text(text) | Value::Json(text) | Value::Jsonb(text) => text.len(),
+        Value::Bytea(bytes) => bytes.len(),
+        _ => 0,
+    }
+}
+
+pub(crate) struct EnteredRowLimit {
+    previous: usize,
+}
+
+impl Drop for EnteredRowLimit {
+    fn drop(&mut self) {
+        ROW_LIMIT.with(|limit| limit.set(self.previous));
+    }
+}
+
+pub(crate) fn enter_row_limit(bytes: usize) -> EnteredRowLimit {
+    EnteredRowLimit {
+        previous: ROW_LIMIT.with(|limit| limit.replace(bytes)),
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RowBytes {
+    total: usize,
+}
+
+impl RowBytes {
+    pub(crate) fn add(&mut self, value: &Value) -> SqlResult<()> {
+        self.add_bytes(VALUE_SIZE.saturating_add(held_bytes(value)))
+    }
+
+    pub(crate) fn add_bytes(&mut self, bytes: usize) -> SqlResult<()> {
+        self.total = self.total.saturating_add(bytes);
+        let limit = ROW_LIMIT.with(std::cell::Cell::get);
+        if self.total <= limit {
+            return Ok(());
+        }
+        Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            format!(
+                "a row of more than {limit} bytes is larger than this session's limit on one row"
+            ),
+        )
+        .with_hint("Select fewer or smaller columns: the session that runs this statement limits the size of one row."))
+    }
+}
+
+pub(crate) struct EnteredValueLimit {
+    previous: usize,
+}
+
+impl Drop for EnteredValueLimit {
+    fn drop(&mut self) {
+        VALUE_LIMIT.with(|limit| limit.set(self.previous));
+    }
+}
+
+pub(crate) fn enter_value_limit(bytes: usize) -> EnteredValueLimit {
+    EnteredValueLimit {
+        previous: VALUE_LIMIT.with(|limit| limit.replace(bytes)),
+    }
+}
+
+pub(crate) fn check_value_bytes(bytes: usize) -> SqlResult<()> {
+    let limit = VALUE_LIMIT.with(std::cell::Cell::get);
+    if bytes <= limit {
+        return Ok(());
+    }
+    Err(SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        format!("a value of {bytes} bytes is larger than this session's limit of {limit} bytes"),
+    )
+    .with_hint(
+        "Build smaller values: the session that runs this statement limits the size of one value.",
+    ))
 }
 
 pub(crate) struct SharedStatementMemory {
@@ -153,14 +235,8 @@ impl WorkMemory {
     }
 
     pub(crate) fn row_bytes(row: &[Value]) -> usize {
-        let text: usize = row
-            .iter()
-            .map(|value| match value {
-                Value::Text(text) => text.len(),
-                _ => 0,
-            })
-            .sum();
-        ROW_OVERHEAD + row.len() * VALUE_SIZE + text
+        let held: usize = row.iter().map(held_bytes).sum();
+        ROW_OVERHEAD + row.len() * VALUE_SIZE + held
     }
 
     pub(crate) fn charge_row(&mut self, row: &[Value]) -> SqlResult<()> {
@@ -202,5 +278,34 @@ mod tests {
         assert_eq!(error.state().code(), "53200");
         assert!(error.hint().is_some());
         assert!(memory.charge(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn the_value_limit_holds_while_entered_and_is_restored_after() {
+        use super::{check_value_bytes, enter_value_limit};
+        assert!(check_value_bytes(1 << 40).is_ok());
+        {
+            let _outer = enter_value_limit(100);
+            assert!(check_value_bytes(100).is_ok());
+            assert_eq!(check_value_bytes(101).unwrap_err().state().code(), "54000");
+            {
+                let _inner = enter_value_limit(10);
+                assert!(check_value_bytes(11).is_err());
+            }
+            assert!(check_value_bytes(100).is_ok());
+        }
+        assert!(check_value_bytes(1 << 40).is_ok());
+    }
+
+    #[test]
+    fn a_row_stops_growing_at_the_row_limit_and_binary_values_count() {
+        use super::{RowBytes, WorkMemory, enter_row_limit};
+        let big = Value::Bytea(vec![0; 1000]);
+        assert!(WorkMemory::row_bytes(std::slice::from_ref(&big)) > 1000);
+        let _limit = enter_row_limit(2500);
+        let mut row = RowBytes::default();
+        assert!(row.add(&big).is_ok());
+        assert!(row.add(&big).is_ok());
+        assert_eq!(row.add(&big).unwrap_err().state().code(), "54000");
     }
 }

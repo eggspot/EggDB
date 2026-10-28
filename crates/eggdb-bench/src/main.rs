@@ -35,6 +35,7 @@ mod footprint;
 mod harness;
 mod large_value;
 mod log;
+mod mcp;
 mod measure;
 mod page_cache;
 mod transaction;
@@ -50,7 +51,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 22] = [
+const COUNTED: [(&str, Counted); 23] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -73,6 +74,7 @@ const COUNTED: [(&str, Counted); 22] = [
     (large_value::GET, large_value::get),
     (copy::FROM, copy::from_stdin),
     (copy::TO, copy::to_stdout),
+    (mcp::TOOLS_CALL, mcp::tools_call),
 ];
 
 const FOOTPRINT: [(&str, Uncounted); 3] = [

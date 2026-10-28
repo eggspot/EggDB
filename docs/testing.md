@@ -156,6 +156,19 @@ example and malformed variants) and the cryptography's published vectors have un
 their own, and `crates/eggdb-pgwire/tests/protocol.rs` drives every protocol flow with a client
 written in the test.
 
+## Hostile MCP messages (D119)
+`eggdb mcp` reads whatever an agent's client sends, so its JSON-RPC reader and dispatch have a
+seeded fuzzer in `crates/eggdb-mcp/tests/hostile_messages.rs`: it mutates valid MCP messages
+(byte flips, cuts, inserted JSON fragments such as `\u0000`, lone surrogates and huge numbers,
+nesting past the 256-level limit, a parameter of every wrong type, a key given twice, batches and
+random bytes) and requires every line that is a request to get exactly one answer that is one
+line of valid JSON, no answer to notifications and responses, no panic, and the database
+unchanged (25,000 cases in CI); a second run sends 2,000 of them through `serve` and counts the
+answers in order. Messages over 4 MiB are refused without being buffered, and so are messages holding more than 100,000 JSON values, before they are parsed. `EGGDB_FUZZ_CASES` and
+`EGGDB_FUZZ_SEED` run longer campaigns. `crates/eggdb-mcp/tests/server.rs` drives every tool and
+rule over an in-memory store, and `crates/eggdb/tests/mcp.rs` drives the built binary as a child
+process, checking that every line on its stdout is a JSON-RPC message.
+
 ## Files from released versions (D96)
 `crates/eggdb/tests/data` holds files written by released versions, which every later version
 must keep reading (D20). From their release's tag on they are never regenerated or edited, and a

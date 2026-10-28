@@ -969,3 +969,124 @@ During a long `COPY` the row count moves and the line number is the `COPY` state
    `consequences` and `errors` are never cut.
 4. Archives are refused with the exact `pg_restore -f` command before the file is touched.
 5. `--report` keeps the verdict on stdout, so a script's log still shows the outcome.
+
+## 17. `eggdb mcp` and `eggdb audit`: AI agents over MCP (item 49a)
+
+`eggdb mcp <file>` keeps the grammar of section 1 and serves one file to an AI agent over the
+Model Context Protocol on stdin and stdout; `eggdb audit <file>` shows what the agents did.
+Designed by Claude Fable (D15). The agent's client starts `eggdb mcp` itself (`claude mcp add
+mydb -- eggdb mcp app.db`), so a person rarely types it; `eggdb audit` is the command people
+type. Both are read-only in this release.
+
+```
+eggdb mcp <file> [--time-limit <seconds>]
+eggdb audit <file> [-n <count>] [--format text|json]
+```
+
+### Help
+Two lines in the command list of section 9, after `restore`:
+```
+  mcp    <file>                 serve the file read-only to an AI agent over MCP on stdin/stdout
+  audit  <file>                 list the calls AI agents made through eggdb mcp
+```
+`eggdb help mcp` says what the server is for, that there is nothing to type, what the agent
+gets, that the release is read-only, how calls share the file with other programs, where the
+audit file is and that the server does not start without it, the time-limit exit, and that
+stdout carries the protocol only; then `--time-limit <seconds>` (1 to 300, default 5) and three
+examples. `eggdb help audit` says what is listed, in which order, that the database is never
+opened, and what `--format json` adds; then `-n, --limit <count>` and three examples. The exact
+text is in `crates/eggdb/src/cli/help.rs`.
+
+### `eggdb mcp` on stderr
+**stderr is a terminal** (someone typed it by hand):
+```
+eggdb mcp app.db: a read-only MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
+  audit        app.db.mcp-audit.jsonl (eggdb audit app.db shows it)
+  time limit   5 s per call
+  add it       claude mcp add mydb -- eggdb mcp app.db
+  stop         Ctrl-C, or close stdin
+```
+**stderr is not a terminal** (the client's log), one line: `eggdb 0.2.0 mcp: serving app.db
+read-only; audit app.db.mcp-audit.jsonl; time limit 5 s`. A file open for writing elsewhere at
+start is not an error: one more line says calls will report it until it is closed. EOF on stdin
+prints nothing and exits 0.
+
+Startup errors, section 7's shape, before anything is read from stdin:
+| When | Exit | Message |
+|------|------|---------|
+| missing file | 3 | `cannot open app.db: no such file. eggdb mcp never creates a database: check the path, or create it with` `` `eggdb create app.db` `` + `  try: eggdb create app.db` |
+| not a database, damaged, newer | 3, 4, 3 | section 10's read-only open messages |
+| audit unwritable | 3 | `cannot write app.db.mcp-audit.jsonl: permission denied. Every MCP call is recorded there, so eggdb mcp does not start without it. Make the database's directory writable, or copy the database somewhere that is.` |
+| bad `--time-limit` | 2 | `--time-limit must be a whole number of seconds from 1 to 300, not '0'` + the usage and `try:` lines |
+| time limit exceeded | 3 | the process exits after appending a `time_limit_exceeded` record |
+
+### `eggdb audit`: the text view
+Like `scan`: one line per record, no header row, columns aligned, the summary on stderr. Oldest
+first, as the file is; `-n 20` is the file's last 20 lines. Columns: time (UTC, milliseconds;
+the JSON keeps microseconds), duration right-aligned in ms, tool (bold), outcome (`ok` or the
+error code in red, `sql_error` with its SQLSTATE), rows (`-` for an error, `200+` when the result
+was cut), arguments: the SQL text for `run_sql` and `explain_query`, the URI for
+`resources/read`, compact JSON otherwise. Newline, tab and carriage return become one space;
+any other control character, U+2028, U+2029 and bidirectional controls are shown as `\u001b`,
+so logged SQL can never drive the terminal. `server_started` and `time_limit_exceeded` are dim
+sentences in the same time column.
+```
+$ eggdb audit app.db
+2026-10-28 09:14:02.004  server started: eggdb 0.2.0, pid 48213, read-only, time limit 5 s
+2026-10-28 09:14:07.123      12 ms  list_tables     ok                   14  {}
+2026-10-28 09:14:09.880      3 ms  describe_table  ok                    -  {"table":"users"}
+2026-10-28 09:14:15.402    418 ms  run_sql         ok                 200+  SELECT id, name, email FROM users WHERE created_at > '2026-10-01' ORDER BY cr...
+2026-10-28 09:14:21.007      1 ms  run_sql         read_only             -  UPDATE users SET name = 'Ada L.' WHERE id = 7
+2026-10-28 09:14:24.310      2 ms  run_sql         sql_error 42P01       -  SELECT * FROM user
+7 calls, 3 errors, by claude-code 2.1.0 (the name the client gave)
+```
+The summary: `{n} calls, {e} errors, by {clients}`; `no errors`; `1 call`; with `-n` that cut,
+`last {k} of {n} calls, …`; `{u} unreadable lines` only when there are any; the client names in
+order of first appearance, followed by `(the names the clients gave)` since they are unverified.
+An unreadable line is shown in place as `line 412   unreadable: not a JSON object; skipped`; in
+`--format json` it is left out of stdout and reported on stderr as `eggdb:
+app.db.mcp-audit.jsonl line 412 is not a record; skipped`, exit still 0.
+
+**Empty and missing:** no audit file while the database exists: stdout empty, stderr `no MCP
+calls yet (app.db.mcp-audit.jsonl does not exist)`, exit 0; an empty file prints `no MCP calls
+yet`; neither file: exit 3, `cannot open app.db: no such file. Check the path.` `--format hex` or
+`raw` follows section 13.4.
+
+### The busy message, one more line
+The write busy line of section 10 and `ui`'s own busy line get a second line, indented like
+`try:`; the read-command busy line is unchanged:
+```
+eggdb: cannot open app.db: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers.
+  it may be an AI agent's call through eggdb mcp, which holds the file for up to its time limit; run the command again, or see `eggdb audit app.db`.
+```
+
+### Decided by this design
+1. Oldest first, `-n` is the newest: the text view is the file in its own order, like `scan`
+   and `tail`.
+2. SQL in the text view is shown as the agent sent it, never masked: the audit exists to show
+   exactly what an agent did, the JSON holds it anyway, and the file is readable by its owner
+   only. The docs say to protect the audit file like the database.
+3. On a terminal `eggdb mcp` prints a report whose first line says nothing is to be typed; in a
+   pipe one line, so the client's log shows the server, file and version.
+4. `audit` never opens the database, so it works while `mcp` or `serve` holds it; a missing
+   audit file is "no calls yet" (exit 0) when the database exists, a path error (exit 3) when it
+   does not.
+5. A file busy at startup is not a startup error for `mcp`; the first call reports it.
+6. The busy note goes only on the write-side message, since MCP calls hold a shared lock.
+7. A time-limit exit is exit 3, after the audit record is written.
+8. No header row and no client column: the client's name goes in the summary; the protocol
+   version, SQLSTATE message and result bytes stay in `--format json`.
+9. Unreadable audit lines are reported in place and counted, never stop the listing, and keep
+   exit 0.
+
+### As built in v0.2.0 (D119, D120)
+- Lines are cut at 120 columns with `...` whether or not stdout is a terminal: reading the
+  terminal's width needs the raw-terminal layer, which `audit` does not otherwise use.
+- The time-limit exit writes its audit record but no stderr line: the main thread holds stderr
+  for the protocol's lifetime, and the record says why the server stopped.
+- `--format json` prints each record re-encoded as ASCII JSON, not the stored bytes, so raw
+  control or bidirectional characters written into the file are escaped; the text view escapes
+  every control, bidirectional and invisible formatting character (U+200B to U+200F, U+2060 to
+  U+2069, U+FEFF, the tag characters) in every field.
+- The busy note says the holder *may* be an `eggdb mcp` call, which holds the file for up to its
+  time limit (`--time-limit` goes to 300 s).

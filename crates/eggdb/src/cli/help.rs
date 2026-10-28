@@ -21,6 +21,8 @@ Commands:
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump (pg_dump's plain SQL) into the file
+  mcp    <file>                 serve the file read-only to an AI agent over MCP on stdin/stdout
+  audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -66,6 +68,8 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Restore => {
             "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql]"
         }
+        CommandName::Mcp => "eggdb mcp <file> [--time-limit <seconds>]",
+        CommandName::Audit => "eggdb audit <file> [-n <count>] [--format text|json]",
     }
 }
 
@@ -93,6 +97,8 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Serve => SERVE,
         CommandName::Shell => SHELL,
         CommandName::Restore => RESTORE,
+        CommandName::Mcp => MCP,
+        CommandName::Audit => AUDIT,
     }
 }
 
@@ -360,4 +366,42 @@ Examples:
   pg_dump app | eggdb restore --create app.db
   pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
   eggdb restore app.db dump.sql --keep-going --report restore.json --format json
+";
+
+const MCP: &str = "\
+Serves the file to an AI agent over the Model Context Protocol (MCP) on stdin and stdout. The
+agent's client (Claude Code, for one) starts eggdb mcp itself and talks JSON-RPC to it, so there
+is nothing to type here. The agent gets tools to list and describe tables, run and explain SQL,
+sample rows and read keys. This release is read-only: a write is refused with an error the agent
+can read. Each call opens the file read-only for at most the time limit and closes it again, so
+other readers run beside it; while a call runs, a program that wants to write the file is
+refused, and while another program has the file open for writing a call fails and the agent is
+told to try again. Every call is appended to <file>.mcp-audit.jsonl next to the file (readable by
+its owner only), which eggdb audit shows; if that file cannot be written the server does not
+start. A statement still running a second past its time limit cannot be stopped, so the server
+records it and exits for the client to restart it. Closing stdin stops the server with exit 0.
+stdout carries the protocol only; every message goes to stderr.
+
+      --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
+
+Examples:
+  claude mcp add mydb -- eggdb mcp app.db
+  claude mcp add mydb -- eggdb mcp app.db --time-limit 30
+  eggdb audit app.db
+";
+
+const AUDIT: &str = "\
+Lists what AI agents did through eggdb mcp: every call in <file>.mcp-audit.jsonl, oldest first,
+one line each with its time (UTC), duration, tool, outcome, rows and arguments (SQL as the agent
+sent it, on one line, cut at 120 columns). Server starts and time-limit exits are lines too. The
+database itself is never opened, so audit works while eggdb mcp or any other command has it.
+--format json prints the records re-encoded as ASCII JSON, one per line, with the client's name and
+version, the protocol version, the SQLSTATE and the result's size.
+
+  -n, --limit <count>   only the newest lines (the file's last ones)
+
+Examples:
+  eggdb audit app.db
+  eggdb audit app.db -n 20
+  eggdb audit app.db --format json
 ";

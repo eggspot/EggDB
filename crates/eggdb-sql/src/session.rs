@@ -78,6 +78,31 @@ pub enum TransactionStatus {
     Failed,
 }
 
+/// Why [`Session::run_one_statement`] did not run its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OneStatementError {
+    /// The text was refused before anything ran.
+    Refused(OneStatementRefusal),
+    /// The statement failed, or the text did not parse: the error in the session's dialect.
+    Failed(SqlError),
+}
+
+/// What [`Session::run_one_statement`] refuses before running anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneStatementRefusal {
+    /// The text holds no statement, only spaces, comments or semicolons.
+    Empty,
+    /// Another statement follows the first; `position` is the byte offset where it starts.
+    MoreThanOne {
+        /// The byte offset in the text where the second statement starts.
+        position: usize,
+    },
+    /// The statement starts, commits or rolls back a transaction.
+    TransactionControl,
+    /// The statement is a `COPY`.
+    Copy,
+}
+
 /// What a prepared statement takes and gives back, before it runs: PostgreSQL's
 /// `ParameterDescription` and `RowDescription`.
 #[derive(Debug, Clone, PartialEq)]
@@ -250,6 +275,8 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     statement_walks_expressions: bool,
     search_path_cache: crate::schemas::PathCache,
     search_path_at_begin: Option<String>,
+    max_value_bytes: usize,
+    max_row_bytes: usize,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -281,7 +308,26 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             statement_walks_expressions: true,
             search_path_cache: crate::schemas::PathCache::default(),
             search_path_at_begin: None,
+            max_value_bytes: usize::MAX,
+            max_row_bytes: usize::MAX,
         }
+    }
+
+    /// Sets the largest text or binary value a statement of this session may build, such as
+    /// the result of `||`, `CONCAT`, `LPAD` or `REPLACE`, checked before the value is built;
+    /// a larger one fails with SQLSTATE `54000`. Unlimited by default, so only the engine's own
+    /// limits apply; a server that runs untrusted statements sets it low.
+    pub fn set_max_value_bytes(&mut self, bytes: usize) {
+        self.max_value_bytes = bytes;
+    }
+
+    /// Sets the largest row a statement of this session may build from its select list and
+    /// sort keys, counted value by value as the row is built, so a select list that copies one
+    /// large value into many columns stops before it allocates them all; a larger row fails
+    /// with SQLSTATE `54000`. Unlimited by default; a server that runs untrusted statements
+    /// sets it low.
+    pub fn set_max_row_bytes(&mut self, bytes: usize) {
+        self.max_row_bytes = bytes;
     }
 
     /// The dialect this session reads.
@@ -616,6 +662,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.read(|reader, _| crate::schema::read_tables(reader))
     }
 
+    /// Every view in the catalog, sorted by name, as this session sees them.
+    pub fn views(&mut self) -> SqlResult<Vec<crate::schema::ViewSchema>> {
+        self.read(|reader, _| crate::schema::read_views(reader))
+    }
+
     /// Checks every table's secondary indexes against its rows, as this session sees them:
     /// each row has exactly its entries, no entry is left without a row, every entry decodes,
     /// and a unique index holds no value twice. A disagreement fails with SQLSTATE `XX001`
@@ -690,6 +741,92 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             .map_err(|error| self.in_dialect(text, error))
     }
 
+    /// Runs `text` when it holds exactly one statement, as one call of an AI agent does. The
+    /// text is parsed once, and refused before anything runs when it holds no statement, when
+    /// another statement follows the first (empty statements aside), when the statement
+    /// controls a transaction (`BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`), or
+    /// when it is a `COPY`, which needs a client to stream through. Otherwise the statement
+    /// runs as [`Session::execute_while`] runs it, its result handed to `on_result`.
+    pub fn run_one_statement(
+        &mut self,
+        text: &str,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+    ) -> Result<(), OneStatementError> {
+        let tokens = match tokenize_in(text, self.dialect) {
+            Ok(tokens) => tokens,
+            Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
+        };
+        match self.one_statement_in(text, &tokens) {
+            Ok(None) => {}
+            Ok(Some(refusal)) => return Err(OneStatementError::Refused(refusal)),
+            Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
+        }
+        let mut client = Client {
+            channel: &mut NoCopyChannel,
+            script: false,
+        };
+        match self.run_tokens(
+            text,
+            &tokens,
+            Parameters::Absent,
+            on_result,
+            &mut client,
+            None,
+        ) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(OneStatementError::Failed(self.in_dialect(text, error))),
+        }
+    }
+
+    fn one_statement_in(
+        &self,
+        text: &str,
+        tokens: &[Token<'_>],
+    ) -> SqlResult<Option<OneStatementRefusal>> {
+        let settings = Arc::clone(&self.settings);
+        let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
+        let _bytes = crate::bytea::enter_dialect(self.dialect);
+        let _path = self.enter_search_path(&settings);
+        let mut parser = Parser::new(text, tokens)
+            .with_context(Parameters::Absent, &settings)
+            .in_dialect(self.dialect);
+        parser.skip_empty_statements();
+        if parser.at_end() {
+            return Ok(Some(OneStatementRefusal::Empty));
+        }
+        let _constraints = crate::constraints::enter(
+            self.dialect,
+            !self.sqlite() || self.settings.sqlite.foreign_keys,
+            if self.mysql() {
+                self.settings.database.clone()
+            } else {
+                String::new()
+            },
+            if self.oracle() {
+                self.oracle_user()
+            } else {
+                String::new()
+            },
+        );
+        if parser.literal_rows().is_none() {
+            match parser.statement()? {
+                Statement::Begin { .. } | Statement::Commit | Statement::Rollback => {
+                    return Ok(Some(OneStatementRefusal::TransactionControl));
+                }
+                Statement::Copy(_) => return Ok(Some(OneStatementRefusal::Copy)),
+                _ => {}
+            }
+        }
+        parser.skip_empty_statements();
+        if parser.at_end() {
+            Ok(None)
+        } else {
+            Ok(Some(OneStatementRefusal::MoreThanOne {
+                position: parser.position(),
+            }))
+        }
+    }
+
     fn run_text(
         &mut self,
         text: &str,
@@ -760,6 +897,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let settings = Arc::clone(&self.settings);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _bytes = crate::bytea::enter_dialect(self.dialect);
+            let _values = crate::memory::enter_value_limit(self.max_value_bytes);
+            let _rows = crate::memory::enter_row_limit(self.max_row_bytes);
             let _path = self.enter_search_path(&settings);
             let mut parser = Parser::new(text, tokens)
                 .with_context(parameters, &settings)

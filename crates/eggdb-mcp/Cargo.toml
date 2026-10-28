@@ -1,0 +1,14 @@
+[package]
+name = "eggdb-mcp"
+description = "EggDB's built-in MCP server: AI agents read a database over the Model Context Protocol on stdio, read-only, within per-call limits, every call recorded in an audit file (D11, D45)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-platform = { path = "../eggdb-platform" }
+eggdb-sql = { path = "../eggdb-sql" }

@@ -16,7 +16,7 @@ fn within_limit(bytes: usize) -> SqlResult<()> {
     if bytes > MAX_TEXT_BYTES {
         Err(too_big())
     } else {
-        Ok(())
+        crate::memory::check_value_bytes(bytes)
     }
 }
 

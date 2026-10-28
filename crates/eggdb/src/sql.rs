@@ -30,9 +30,9 @@ use crate::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
 use eggdb_sql::StoreFailure;
 pub use eggdb_sql::{
     ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck, IndexSchema, Interval,
-    IntervalFields, Numeric, NumericModifier, OutputColumn, Parameter, QueryResult,
-    RESERVED_KEY_PREFIX, Session, SqlError, SqlResult, SqlState, SqlType, TableSchema,
-    TransactionStatus, Value, sqlite_result_code_name,
+    IntervalFields, Numeric, NumericModifier, OneStatementError, OneStatementRefusal, OutputColumn,
+    Parameter, QueryResult, RESERVED_KEY_PREFIX, Session, SqlError, SqlResult, SqlState, SqlType,
+    TableSchema, TransactionStatus, Value, ViewColumnSchema, ViewSchema, sqlite_result_code_name,
 };
 use eggdb_sql::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use std::ops::Bound;
@@ -188,6 +188,38 @@ impl KeyValueWrite for SqlWriter<'_> {
 }
 
 impl KeyValueStore for Store<'_> {
+    type Read<'s>
+        = SqlSnapshot<'s>
+    where
+        Self: 's;
+    type Write<'s>
+        = SqlWriter<'s>
+    where
+        Self: 's;
+
+    fn begin_read(&self) -> SqlResult<SqlSnapshot<'_>> {
+        self.0.begin_read().map(SqlSnapshot).map_err(store_error)
+    }
+
+    fn begin_write(&self) -> SqlResult<SqlWriter<'_>> {
+        self.0.begin_write().map(SqlWriter).map_err(store_error)
+    }
+}
+
+/// A [`Database`] owned as the store SQL sessions run on, for a program that opens the
+/// database for one piece of work and closes it after, such as one call of `eggdb mcp`.
+/// [`OwnedStore::close`] gives the database back closed; [`Store`] borrows one instead.
+#[derive(Debug)]
+pub struct OwnedStore(pub Database);
+
+impl OwnedStore {
+    /// Closes the database, as [`Database::close`] does.
+    pub fn close(self) -> crate::Result<()> {
+        self.0.close()
+    }
+}
+
+impl KeyValueStore for OwnedStore {
     type Read<'s>
         = SqlSnapshot<'s>
     where

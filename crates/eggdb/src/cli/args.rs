@@ -8,6 +8,7 @@ use std::path::PathBuf;
 const RESERVED_COMMANDS: [&str; 2] = ["backup", "compact"];
 const SMALLEST_PAGE_SIZE: usize = 4096;
 const LARGEST_PAGE_SIZE: usize = 65536;
+const MOST_TIME_LIMIT_SECONDS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandName {
@@ -25,6 +26,8 @@ pub(crate) enum CommandName {
     Serve,
     Shell,
     Restore,
+    Mcp,
+    Audit,
 }
 
 impl CommandName {
@@ -44,6 +47,8 @@ impl CommandName {
             b"serve" => Self::Serve,
             b"shell" => Self::Shell,
             b"restore" => Self::Restore,
+            b"mcp" => Self::Mcp,
+            b"audit" => Self::Audit,
             _ => return None,
         })
     }
@@ -64,6 +69,8 @@ impl CommandName {
             Self::Serve => "serve",
             Self::Shell => "shell",
             Self::Restore => "restore",
+            Self::Mcp => "mcp",
+            Self::Audit => "audit",
         }
     }
 
@@ -71,7 +78,7 @@ impl CommandName {
         match option {
             OptionName::Cache | OptionName::Help | OptionName::Version => true,
             OptionName::Color => true,
-            OptionName::Format => !matches!(self, Self::Ui | Self::Sql | Self::Shell),
+            OptionName::Format => !matches!(self, Self::Ui | Self::Sql | Self::Shell | Self::Mcp),
             OptionName::Mono | OptionName::Ascii => self == Self::Ui,
             OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve | Self::Shell),
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
@@ -104,11 +111,12 @@ impl CommandName {
             | OptionName::Header
             | OptionName::Delimiter
             | OptionName::Null => self == Self::Import,
+            OptionName::Limit => matches!(self, Self::Scan | Self::Audit),
+            OptionName::TimeLimit => self == Self::Mcp,
             OptionName::Prefix
             | OptionName::From
             | OptionName::To
             | OptionName::Reverse
-            | OptionName::Limit
             | OptionName::KeysOnly => self == Self::Scan,
         }
     }
@@ -198,6 +206,7 @@ enum OptionName {
     Delimiter,
     Null,
     Report,
+    TimeLimit,
 }
 
 impl OptionName {
@@ -237,6 +246,7 @@ impl OptionName {
             b"delimiter" => Self::Delimiter,
             b"null" => Self::Null,
             b"report" => Self::Report,
+            b"time-limit" => Self::TimeLimit,
             _ => return None,
         })
     }
@@ -305,6 +315,7 @@ pub(crate) struct Request {
     pub(crate) shell: ShellOptions,
     pub(crate) csv: CsvOptions,
     pub(crate) restore: RestoreOptions,
+    pub(crate) time_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -429,7 +440,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version.",
+            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version.",
             None,
         ));
     };
@@ -561,6 +572,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         shell: ShellOptions::default(),
         csv: CsvOptions::default(),
         restore: RestoreOptions::default(),
+        time_limit: None,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -691,6 +703,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     _ => request.csv.null = Some(text),
                 }
             }
+            OptionName::TimeLimit => {
+                request.time_limit = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|seconds| (1..=MOST_TIME_LIMIT_SECONDS).contains(seconds))
+                        .ok_or_else(|| {
+                            usage(format!(
+                                "{} must be a whole number of seconds from 1 to {MOST_TIME_LIMIT_SECONDS}, not '{}'",
+                                option.spelled,
+                                shown(value)
+                            ))
+                        })?,
+                );
+            }
             OptionName::Help | OptionName::Version => {}
         }
     }
@@ -707,7 +732,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Stats
         | CommandName::Ui
         | CommandName::Serve
-        | CommandName::Shell => (1, 1),
+        | CommandName::Shell
+        | CommandName::Mcp
+        | CommandName::Audit => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -868,7 +895,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version.",
             render::text(name)
         ),
         None,
@@ -1146,7 +1173,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -1189,7 +1216,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -1202,7 +1229,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),

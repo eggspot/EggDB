@@ -37,7 +37,7 @@ fn a_busy_file_exits_5_and_says_which_side_waits() {
     assert_eq!(write.status.code(), Some(5), "{}", stderr(&write));
     assert_eq!(
         stderr(&write),
-        "eggdb: cannot open app.db: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers.\n"
+        "eggdb: cannot open app.db: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers.\n  it may be an AI agent's call through eggdb mcp, which holds the file for up to its time limit; run the command again, or see `eggdb audit app.db`.\n"
     );
     let alongside = eggdb(&directory, &["get", "app.db", "k"]);
     assert_eq!(alongside.status.code(), Some(0), "{}", stderr(&alongside));
