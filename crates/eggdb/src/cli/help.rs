@@ -16,7 +16,7 @@ Commands:
   stats  <file>                 size, pages, last commit and log, without reading pages
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
-  import <file> [in]            load an export, from a file or stdin; see --create
+  import <file> [in]            load an export, or a CSV file into a table with --csv
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
@@ -51,7 +51,7 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Ui => "eggdb ui <file> [--read-only] [--mono] [--ascii] [--cache <bytes>]",
         CommandName::Export => "eggdb export <file> [<out> | -]",
         CommandName::Import => {
-            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run]"
+            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>]"
         }
         CommandName::Sql => {
             "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle] [--create]"
@@ -224,11 +224,23 @@ succeeded.
                                  skip keeps the value already there
       --dry-run                  check the export and report, without writing anything
 
+With --csv, it loads a CSV file (or stdin, with -) into an existing SQL table instead, as
+COPY <table> FROM STDIN (FORMAT csv) does: every row or none, in one transaction, through
+the same path as INSERT (constraints, defaults, serial columns and indexes apply). The page
+cache grows with the file, since the whole load must fit in it; --cache sets it.
+
+      --csv <file>               the CSV file to load, or - for stdin
+      --table <name>             the table, as SQL writes it (users, app.\"Users\", t (a, b))
+      --header                   the first line names the columns and is skipped
+      --delimiter <c>            the field separator, a comma by default
+      --null <text>              the text that stands for NULL, unquoted; empty by default
+
 Examples:
   eggdb import --create copy.db backup.jsonl
   gunzip -c backup.jsonl.gz | eggdb import --create copy.db
   eggdb import app.db fixes.jsonl --on-conflict overwrite
   eggdb import app.db backup.jsonl --dry-run
+  eggdb import app.db --csv people.csv --table people --header
 ";
 
 const SQL: &str = "\
@@ -248,7 +260,10 @@ or DDL ends, and the run commits it at the end, as SQL*Plus does. The first fail
 stops the run with exit 3 and the dialect's error on stderr; statements before it stay
 committed, and a block left open is rolled back. CREATE INDEX and UNIQUE speed up WHERE and
 ORDER BY in every dialect. Views (CREATE VIEW) work in every dialect, schemas with
-search_path in PostgreSQL's and COMMENT ON in PostgreSQL's and Oracle's; more types and the rest come next (docs/sql.md).
+search_path in PostgreSQL's and COMMENT ON in PostgreSQL's and Oracle's. COPY ... FROM STDIN and
+COPY ... TO STDOUT (text and CSV) load and unload tables in PostgreSQL's dialect: in a script the
+data follows the COPY line up to a line \\., as pg_dump writes it; with -c it comes from stdin;
+COPY ... TO STDOUT prints the rows. More types and the rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
       --dialect <name>  postgresql (default), mysql, sqlite or oracle
@@ -260,18 +275,20 @@ Examples:
   eggdb sql app.db -c \"SELECT name FROM users WHERE id = 2\"
   eggdb sql app.db schema.sql
   cat queries.sql | eggdb sql app.db
+  eggdb sql app.db -c \"COPY users FROM STDIN (FORMAT csv)\" < users.csv
 ";
 
 const SHELL: &str = "\
 An interactive prompt on one database file: the key-value commands without their 'eggdb
 <command> <file>' prefix (put, get, del, scan, check, stats), SQL in the PostgreSQL dialect
 (or MySQL's, SQLite's or Oracle's, with --dialect mysql, sqlite or oracle) until a semicolon,
-and .help,
-.tables, .schema, .mode, .timer, .quit. Tab completes, Up/Down and Ctrl-R recall the history,
-which is kept in $XDG_STATE_HOME/eggdb/history (EGGDB_HISTORY=<path> moves it; set empty,
-turns it off). BEGIN holds a transaction across prompts until COMMIT or ROLLBACK. With -c, or
-with stdin not a terminal, it runs the text as a batch: plain output, no prompt, and it stops
-at the first failure unless --keep-going.
+.help, .tables, .schema, .mode, .timer, .quit, and psql's \\copy, which reads and writes files
+on this machine. COPY ... FROM STDIN reads the lines after it up to a line \\. as its data.
+Tab completes, Up/Down and Ctrl-R recall the history, which is kept in
+$XDG_STATE_HOME/eggdb/history (EGGDB_HISTORY=<path> moves it; set empty, turns it off).
+BEGIN holds a transaction across prompts until COMMIT or ROLLBACK. With -c, or with stdin not
+a terminal, it runs the text as a batch: plain output, no prompt, and it stops at the first
+failure unless --keep-going.
 
   -c, --command <text>   a line to run, repeatable; runs in order, then exits
       --keep-going       run on after a failure, exiting with the first failure's code

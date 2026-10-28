@@ -149,6 +149,9 @@ impl Session<'_> {
     }
 
     pub(super) fn import(&mut self) -> Result<Exit, Failure> {
+        if let Some(source) = self.request.csv.source.clone() {
+            return self.import_csv(source);
+        }
         let usage = |message: String| Failure::usage(message, Some(CommandName::Import));
         let source = match &self.request.export_file {
             Some(ExportFile::Path(path)) => Some(path.clone()),

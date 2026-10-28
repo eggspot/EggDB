@@ -86,7 +86,13 @@ impl CommandName {
             | OptionName::MaxConnections => self == Self::Serve,
             OptionName::Command | OptionName::Dialect => matches!(self, Self::Sql | Self::Shell),
             OptionName::KeepGoing | OptionName::Mode => self == Self::Shell,
-            OptionName::OnConflict | OptionName::DryRun => self == Self::Import,
+            OptionName::OnConflict
+            | OptionName::DryRun
+            | OptionName::Csv
+            | OptionName::Table
+            | OptionName::Header
+            | OptionName::Delimiter
+            | OptionName::Null => self == Self::Import,
             OptionName::Prefix
             | OptionName::From
             | OptionName::To
@@ -175,6 +181,11 @@ enum OptionName {
     MaxConnections,
     KeepGoing,
     Mode,
+    Csv,
+    Table,
+    Header,
+    Delimiter,
+    Null,
 }
 
 impl OptionName {
@@ -208,6 +219,11 @@ impl OptionName {
             b"max-connections" => Self::MaxConnections,
             b"keep-going" => Self::KeepGoing,
             b"mode" => Self::Mode,
+            b"csv" => Self::Csv,
+            b"table" => Self::Table,
+            b"header" => Self::Header,
+            b"delimiter" => Self::Delimiter,
+            b"null" => Self::Null,
             _ => return None,
         })
     }
@@ -239,6 +255,7 @@ impl OptionName {
                 | Self::ReadOnly
                 | Self::DryRun
                 | Self::KeepGoing
+                | Self::Header
         )
     }
 }
@@ -273,6 +290,16 @@ pub(crate) struct Request {
     pub(crate) dialect: eggdb_sql::Dialect,
     pub(crate) serve: ServeOptions,
     pub(crate) shell: ShellOptions,
+    pub(crate) csv: CsvOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CsvOptions {
+    pub(crate) source: Option<ExportFile>,
+    pub(crate) table: Option<String>,
+    pub(crate) header: bool,
+    pub(crate) delimiter: Option<String>,
+    pub(crate) null: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -511,6 +538,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         dialect: eggdb_sql::Dialect::PostgreSql,
         serve: ServeOptions::default(),
         shell: ShellOptions::default(),
+        csv: CsvOptions::default(),
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -621,6 +649,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     })?;
                 request.serve.max_connections = Some(count);
             }
+            OptionName::Csv => request.csv.source = Some(export_file(value)),
+            OptionName::Header => request.csv.header = true,
+            OptionName::Table | OptionName::Delimiter | OptionName::Null => {
+                let text = value
+                    .to_str()
+                    .ok_or_else(|| usage(format!("{} must be UTF-8 text", option.spelled)))?
+                    .to_owned();
+                match option.name {
+                    OptionName::Table => request.csv.table = Some(text),
+                    OptionName::Delimiter => request.csv.delimiter = Some(text),
+                    _ => request.csv.null = Some(text),
+                }
+            }
             OptionName::Help | OptionName::Version => {}
         }
     }
@@ -669,6 +710,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     }
     if matches!(command, CommandName::Export | CommandName::Import) {
         request.export_file = arguments.get(1).map(|argument| export_file(argument));
+        check_csv_options(&request).map_err(usage)?;
         return Ok(request);
     }
     let byte_argument = |argument: &&OsStr| {
@@ -677,6 +719,38 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     request.key = arguments.get(1).map(byte_argument).transpose()?;
     request.value = arguments.get(2).map(byte_argument).transpose()?;
     Ok(request)
+}
+
+fn check_csv_options(request: &Request) -> Result<(), String> {
+    let csv = &request.csv;
+    if csv.source.is_none() {
+        let given = [
+            (csv.table.is_some(), "--table"),
+            (csv.header, "--header"),
+            (csv.delimiter.is_some(), "--delimiter"),
+            (csv.null.is_some(), "--null"),
+        ];
+        return match given.iter().find(|(given, _)| *given) {
+            Some((_, option)) => Err(format!("{option} goes with --csv <file>")),
+            None => Ok(()),
+        };
+    }
+    if request.export_file.is_some() {
+        return Err("give the CSV with --csv <file>, not as a second argument".to_owned());
+    }
+    if csv.table.is_none() {
+        return Err("--csv needs --table <name>, the table to load the rows into".to_owned());
+    }
+    if request.dry_run
+        || request.on_conflict != ConflictPolicy::Error
+        || request.page_size.is_some()
+    {
+        return Err(
+            "--dry-run, --on-conflict and --page-size are for eggdb-jsonl imports, not --csv"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn export_file(argument: &OsStr) -> ExportFile {
@@ -864,7 +938,8 @@ fn parse_whole_number(digits: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ByteArgument, ColorChoice, CommandName, Format, Invocation, Request, ScanOptions, parse,
+        ByteArgument, ColorChoice, CommandName, CsvOptions, ExportFile, Format, Invocation,
+        Request, ScanOptions, parse,
     };
     use crate::cli::failure::Failure;
     use std::ffi::OsString;
@@ -891,6 +966,42 @@ mod tests {
 
     fn bytes(text: &str) -> Option<ByteArgument> {
         Some(ByteArgument::Bytes(text.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn import_csv_takes_a_table_and_the_csv_options() {
+        let csv =
+            request("import app.db --csv data.csv --table users --header --delimiter ; --null NA");
+        assert_eq!(
+            csv.csv,
+            CsvOptions {
+                source: Some(ExportFile::Path(PathBuf::from("data.csv"))),
+                table: Some("users".into()),
+                header: true,
+                delimiter: Some(";".into()),
+                null: Some("NA".into()),
+            }
+        );
+        assert_eq!(
+            request("import app.db --csv - --table t").csv.source,
+            Some(ExportFile::Standard)
+        );
+        assert_eq!(
+            usage_message("import app.db --csv data.csv"),
+            "--csv needs --table <name>, the table to load the rows into"
+        );
+        assert_eq!(
+            usage_message("import app.db --table t"),
+            "--table goes with --csv <file>"
+        );
+        assert_eq!(
+            usage_message("import app.db in.csv --csv data.csv --table t"),
+            "give the CSV with --csv <file>, not as a second argument"
+        );
+        assert!(
+            usage_message("import app.db --csv d.csv --table t --dry-run").contains("--dry-run")
+        );
+        assert!(usage_message("sql app.db --csv d.csv").contains("--csv"));
     }
 
     #[test]

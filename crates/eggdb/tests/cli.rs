@@ -121,7 +121,7 @@ Commands:
   stats  <file>                 size, pages, last commit and log, without reading pages
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
-  import <file> [in]            load an export, from a file or stdin; see --create
+  import <file> [in]            load an export, or a CSV file into a table with --csv
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
