@@ -143,3 +143,5 @@ its full title with its status.
 - [D116](decisions/D116.md) Schemas as name prefixes (`public` keeps today's bytes) with tables in other schemas in format version 7, `search_path` resolved per statement, views as format version 8 records in the table key space expanded at use with depth, size and cycle limits, view dependencies and comments in key spaces of their own
 - [D117](decisions/D117.md) `COPY` streams through a client channel into the `INSERT` path in one transaction, scripts carry their data inline, lines up to 1 GiB, and no server files or programs
 - [D118](decisions/D118.md) `eggdb restore` reads a `pg_dump` plain dump as a stream, one transaction per statement, a new file built aside, and a report of what was skipped
+- [D119](decisions/D119.md) The built-in MCP server, part 1: `eggdb mcp` over stdio, read-only by opening the file read-only for each call, one statement per call, a time, row and byte limit per call, results marked as data
+- [D120](decisions/D120.md) The MCP audit log: a sidecar `<file>.mcp-audit.jsonl`, one JSON line per call written and synced before the result is sent, opened anew for each record, not tamper-evident

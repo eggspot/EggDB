@@ -50,6 +50,8 @@ eggdb <command> <file> [arguments] [options]
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s) into the file, with a report (below, and [migrate.md](migrate.md)) |
+| `mcp <file>` | read-only, for each call | serves the file to an AI agent over MCP on stdin and stdout, read-only (below, and [mcp.md](mcp.md)) |
+| `audit <file>` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
@@ -63,7 +65,8 @@ reads as "empty".
 **Read-only commands share the file.** `get`, `scan`, `check`, `stats` and `export` can run
 together, and next to an application that has the file open read-only. A program that has it
 open for writing keeps them out, and `put`, `del`, `import` and `sql` wait for nobody: they exit 5 at
-once when the file is open anywhere (see "Exit codes").
+once when the file is open anywhere (see "Exit codes"). That includes an AI agent's call through
+`eggdb mcp`, which holds the file read-only for a few seconds at most; the busy message says so.
 
 **Large values.** `put` sizes its page cache to the value, so any value up to 1 GiB works
 without an option. `--cache <bytes>` sets the cache for any command (`--cache 64m`).
@@ -784,6 +787,53 @@ rows per table
 …
 ok: every table and row of the dump is in app.db; 3 objects skipped and 1 consequence, listed above.
 ```
+
+## `eggdb mcp`
+
+`eggdb mcp <file>` serves the file to an AI agent over the Model Context Protocol on stdin and
+stdout (D11, D119); [mcp.md](mcp.md) is the guide. The agent's client starts it:
+
+```sh
+claude mcp add mydb -- eggdb mcp /path/to/app.db
+claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
+```
+
+- **Read-only.** Each call opens the file read-only and closes it after, so the storage refuses
+  any write; between calls the file is free for your own writers. While a call runs (at most
+  `--time-limit` seconds, 5 by default, 1 to 300), a program that wants to write the file is
+  refused.
+- **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,
+  `sqlite` or `oracle`), `explain_query`, `sample_rows`, `kv_get`, `kv_scan`, and the resource
+  `eggdb://schema`.
+- **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
+  cannot be written, `eggdb mcp` does not start.
+- stdout carries only protocol messages; one line on stderr says what is served (a short
+  report when stderr is a terminal). Closing stdin stops it with exit 0. It exits 3 at start for
+  a missing file (it never creates one) or an unwritable audit file, and 3 when a statement it
+  cannot stop runs a second past the time limit, after recording it.
+
+## `eggdb audit`
+
+`eggdb audit <file>` lists the calls AI agents made through `eggdb mcp`, from
+`<file>.mcp-audit.jsonl`, oldest first, without opening the database:
+
+```
+$ eggdb audit app.db -n 3
+2026-10-28 09:14:07.123      12 ms  list_tables     ok                    2  {}
+2026-10-28 09:14:15.402     18 ms  run_sql         ok                 100+  SELECT id, name FROM users ORDER BY id
+2026-10-28 09:14:21.007      1 ms  run_sql         read_only             -  UPDATE users SET name = 'Ada L.' WHERE id = 7
+last 3 of 41 calls, 2 errors, by claude-code 2.1.0 (the name the client gave)
+```
+
+- One line per record: the time (UTC), the duration, the tool, `ok` or the error code (with the
+  SQLSTATE for `sql_error`), the rows returned (`100+` when cut, `-` for an error) and the
+  arguments (the SQL as sent, on one line). Lines are cut at 120 columns; control characters in
+  logged text are shown escaped (`\u001b`). Server starts and time-limit exits are lines too.
+- `-n <count>` (`--limit`) shows the newest lines; the summary on stderr counts every call.
+- `--format json` prints the records as stored, one JSON object per line, with the client's
+  name and version, the protocol version, the SQLSTATE and the result's size.
+- No audit file: `no MCP calls yet` on stderr, exit 0. A line that is not a record is reported
+  and skipped.
 
 ## Exit codes and errors
 
