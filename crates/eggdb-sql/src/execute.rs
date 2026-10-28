@@ -864,9 +864,29 @@ pub(crate) fn insert(
     }
     let checks = PreparedChecks::of(&table)?;
     let scope = scope_of(&table, &insert.table);
+    let sqlserver = crate::constraints::current_dialect() == crate::dialect::Dialect::SqlServer;
+    let identity = sqlserver.then(|| table.auto_increment_column()).flatten();
     let targets = match &insert.columns {
-        Some(names) => target_columns(&table, names)?,
-        None => (0..table.columns.len()).collect(),
+        Some(names) => {
+            let targets = target_columns(&table, names)?;
+            if let Some(identity) = identity
+                && targets.contains(&identity)
+            {
+                return Err(SqlError::new(
+                    SqlState::INVALID_COLUMN_REFERENCE,
+                    format!(
+                        "Cannot insert explicit value for identity column in table '{}' when IDENTITY_INSERT is set to OFF.",
+                        crate::schemas::display(&insert.table.name.text)
+                    ),
+                )
+                .with_sqlserver_code(544)
+                .at(insert.table.name.position));
+            }
+            targets
+        }
+        None => (0..table.columns.len())
+            .filter(|&index| Some(index) != identity)
+            .collect(),
     };
     let returning = returning(&insert.returning, scope)?;
     let empty_row: Vec<Vec<InsertValue>> = vec![Vec::new()];
@@ -887,7 +907,8 @@ pub(crate) fn insert(
                 insert.table.name.position,
             ));
         }
-        if insert.columns.is_some() && first.len() < targets.len() {
+        let listed_values = matches!(insert.source, InsertSource::Values(_));
+        if (insert.columns.is_some() || sqlserver && listed_values) && first.len() < targets.len() {
             return Err(SqlError::syntax(
                 "INSERT has more target columns than expressions",
                 insert.table.name.position,

@@ -1,5 +1,5 @@
-//! EggDB's SQL core: the PostgreSQL, MySQL, SQLite and Oracle dialects on any ordered key-value
-//! store.
+//! EggDB's SQL core: the PostgreSQL, MySQL, SQLite, Oracle and SQL Server (Transact-SQL)
+//! dialects on any ordered key-value store.
 //!
 //! [`Session`] runs SQL text, statement by statement, over a [`KeyValueStore`]: one writer
 //! and snapshot readers over byte-string keys in order, which `eggdb::Database` provides. The
@@ -58,6 +58,7 @@ mod set_operations;
 mod settings;
 mod sqlite_errors;
 mod sqlite_functions;
+mod sqlserver_errors;
 mod store;
 mod subquery;
 mod temp_tables;
@@ -83,6 +84,8 @@ mod one_statement_tests;
 #[cfg(test)]
 mod schema_tests;
 #[cfg(test)]
+mod sqlserver_tests;
+#[cfg(test)]
 mod subquery_tests;
 #[cfg(test)]
 mod tests;
@@ -98,7 +101,9 @@ pub use interval::{Interval, IntervalFields};
 pub use mysql_errors::Warning;
 pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
 pub use numeric::Numeric;
-pub use parser::{ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION};
+pub use parser::{
+    ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION, SQLSERVER_COMPATIBLE_VERSION,
+};
 pub use random::{RandomSource, set_random_source};
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, MAX_LISTED, RestoreError, RestoreOptions,
@@ -106,7 +111,7 @@ pub use restore::{
 };
 pub use schema::{ColumnSchema, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted};
 pub use session::{
-    OneStatementError, OneStatementRefusal, OutputColumn, Parameter, PreparedStatement,
+    BatchStep, OneStatementError, OneStatementRefusal, OutputColumn, Parameter, PreparedStatement,
     QueryResult, Session, StatementDescription, TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;

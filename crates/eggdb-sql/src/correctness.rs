@@ -5,11 +5,12 @@ use crate::memory_store::MemoryStore;
 use crate::session::{QueryResult, Session};
 use crate::tests::render;
 
-const SUITES: [(&str, &str); 4] = [
+const SUITES: [(&str, &str); 5] = [
     ("postgresql", include_str!("../correctness/postgresql.test")),
     ("mysql", include_str!("../correctness/mysql.test")),
     ("sqlite", include_str!("../correctness/sqlite.test")),
     ("oracle", include_str!("../correctness/oracle.test")),
+    ("sqlserver", include_str!("../correctness/sqlserver.test")),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,4 +294,19 @@ fn the_suite_runner_takes_only_dialects_it_knows() {
         Err("line 1: a rows case needs ---- and its output".to_owned())
     );
     assert!(parse("maybe\nSELECT 1").is_err());
+}
+
+#[test]
+fn the_sqlserver_dialect_behaves_as_the_transact_sql_reference_documents() {
+    match run_suite("sqlserver") {
+        Ok((cases, differences)) => {
+            assert!(cases >= 60, "only {cases} cases");
+            assert!(differences * 10 < cases, "{differences} known differences");
+        }
+        Err(problems) => panic!(
+            "{} cases disagree:\n{}",
+            problems.len(),
+            problems.join("\n")
+        ),
+    }
 }

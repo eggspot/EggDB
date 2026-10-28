@@ -57,13 +57,13 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
             "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>]"
         }
         CommandName::Sql => {
-            "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle] [--create]"
+            "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--create]"
         }
         CommandName::Shell => {
-            "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle] [--read-only] [--create]"
+            "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--read-only] [--create]"
         }
         CommandName::Serve => {
-            "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
+            "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
         }
         CommandName::Restore => {
             "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql]"
@@ -264,7 +264,9 @@ floating-point, exact numeric, boolean, text, char(n), bytea, uuid, date, time, 
 timestamp, timestamptz, interval, json and jsonb types and serial and identity columns; with --dialect mysql, MySQL's SQL on the same tables, with MySQL's
 errors, and with --dialect sqlite, SQLite's SQL (type affinity, INTEGER PRIMARY KEY row ids,
 PRAGMAs, sqlite_schema), with SQLite's errors and result codes, and with --dialect oracle,
-Oracle's SQL (DUAL, ROWNUM, FETCH FIRST, upper-case names, '' as NULL), with ORA- errors.
+Oracle's SQL (DUAL, ROWNUM, FETCH FIRST, upper-case names, '' as NULL), with ORA- errors,
+and with --dialect sqlserver, SQL Server's Transact-SQL ([brackets], TOP, IDENTITY,
+GETDATE()), with SQL Server's error numbers.
 Results print as aligned tables, like psql. Each statement outside BEGIN ... COMMIT is its own
 transaction; in Oracle's dialect the first change starts a transaction that COMMIT, ROLLBACK
 or DDL ends, and the run commits it at the end, as SQL*Plus does. The first failing statement
@@ -277,7 +279,7 @@ data follows the COPY line up to a line \\., as pg_dump writes it; with -c it co
 COPY ... TO STDOUT prints the rows. More types and the rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
-      --dialect <name>  postgresql (default), mysql, sqlite or oracle
+      --dialect <name>  postgresql (default), mysql, sqlite, oracle or sqlserver
       --create          create the database file if it is missing
 
 Examples:
@@ -292,7 +294,8 @@ Examples:
 const SHELL: &str = "\
 An interactive prompt on one database file: the key-value commands without their 'eggdb
 <command> <file>' prefix (put, get, del, scan, check, stats), SQL in the PostgreSQL dialect
-(or MySQL's, SQLite's or Oracle's, with --dialect mysql, sqlite or oracle) until a semicolon,
+(or MySQL's, SQLite's, Oracle's or SQL Server's, with --dialect mysql, sqlite, oracle or
+sqlserver) until a semicolon,
 .help, .tables, .schema, .mode, .timer, .quit, and psql's \\copy, which reads and writes files
 on this machine. COPY ... FROM STDIN reads the lines after it up to a line \\. as its data.
 Tab completes, Up/Down and Ctrl-R recall the history, which is kept in
@@ -304,7 +307,7 @@ failure unless --keep-going.
   -c, --command <text>   a line to run, repeatable; runs in order, then exits
       --keep-going       run on after a failure, exiting with the first failure's code
       --mode <mode>      table (default), expanded or csv
-      --dialect <name>   SQL in postgresql (default), mysql, sqlite or oracle
+      --dialect <name>   SQL in postgresql (default), mysql, sqlite, oracle or sqlserver
       --read-only        open the file read-only
       --create           create the database file if it is missing
 
@@ -327,6 +330,11 @@ the running statements, rolls back open transactions and stops with exit 0.
                                   takes any free port (default 127.0.0.1:5432)
       --mysql-listen <address>    also serve MySQL's protocol there, to the mysql client and
                                   MySQL drivers (MySQL's SQL; port 3306 is MySQL's)
+      --tds-listen <address>      also serve SQL Server's TDS protocol there, to sqlcmd
+                                  (go-sqlcmd), without encryption: connect with its default
+                                  or -N disable (Transact-SQL; port 1433 is SQL Server's)
+      --log-batches               log the first 200 characters of each TDS batch, to see what
+                                  a client sends (never the login or its password)
       --user <name>               the user clients log in as (default eggdb)
       --password-file <file>      the password is the file's first line; - reads stdin
       --database <name>           the name clients connect to (default: the file name
@@ -341,6 +349,8 @@ Examples:
   eggdb serve --create new.db --password-file - < password.txt
   psql postgresql://eggdb@127.0.0.1:5432/app
   eggdb serve app.db --password-file pw.txt --mysql-listen 127.0.0.1:3306
+  eggdb serve app.db --password-file pw.txt --tds-listen 127.0.0.1:1433
+  SQLCMDPASSWORD=secret sqlcmd -S 127.0.0.1,1433 -U eggdb -d app -Q \"SELECT @@VERSION\"
 ";
 
 const RESTORE: &str = "\

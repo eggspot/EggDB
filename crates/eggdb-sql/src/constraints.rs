@@ -66,6 +66,10 @@ fn context() -> Context {
     })
 }
 
+pub(crate) fn current_dialect() -> Dialect {
+    context().dialect
+}
+
 fn foreign_keys_enforced() -> bool {
     context().foreign_keys
 }
@@ -155,7 +159,7 @@ fn missing_parent(child: &TableDefinition, key: &ForeignKey, row: &[Value]) -> S
             ),
         )
         .with_oracle_code(2291),
-        Dialect::PostgreSql => error
+        Dialect::PostgreSql | Dialect::SqlServer => error
             .with_detail(format!(
                 "Key ({})=({}) is not present in table \"{}\".",
                 column_names(child, &key.columns).join(", "),
@@ -197,7 +201,7 @@ fn still_referenced(
             ),
         )
         .with_oracle_code(2292),
-        Dialect::PostgreSql => SqlError::new(
+        Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
             SqlState::FOREIGN_KEY_VIOLATION,
             format!(
                 "update or delete on table \"{}\" violates foreign key constraint \"{}\" on table \"{}\"",
@@ -233,7 +237,7 @@ fn check_failed(table: &TableDefinition, check: &CheckConstraint, row: &[Value])
             format!("check constraint ({}) violated", oracle_name(&check.name)),
         )
         .with_oracle_code(2290),
-        Dialect::PostgreSql => SqlError::new(
+        Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
             SqlState::CHECK_VIOLATION,
             format!(
                 "new row for relation \"{}\" violates check constraint \"{}\"",
@@ -789,6 +793,12 @@ pub(crate) fn define_check(
     text: &str,
     dialect: Dialect,
 ) -> SqlResult<usize> {
+    if dialect == Dialect::SqlServer {
+        return Err(SqlError::not_supported(
+            "CHECK constraints in the SQL Server dialect are not supported in this version of EggDB.",
+        )
+        .at(expr.position));
+    }
     if let Some(name) = &spec.name {
         check_identifier(name)?;
     }

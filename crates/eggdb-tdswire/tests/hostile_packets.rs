@@ -1,0 +1,138 @@
+//! Hostile input for the TDS server (D9, D35): a seeded fuzzer that mutates valid PRELOGIN,
+//! LOGIN7 and SQL batch messages and feeds them to every parser, which must answer with an
+//! error or a value and never panic; and the same mutations sent over real sockets before and
+//! after login, with oversized lengths, packets shorter than their header and stalled clients,
+//! after which the server must still serve a well-behaved client.
+//! `EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run longer campaigns.
+
+mod common;
+
+use common::{
+    Client, LoginOptions, TestServer, batch_body, errors, login7_body, prelogin_body, rows,
+};
+use eggdb_tdswire::messages::{parse_login7, parse_prelogin, parse_sql_batch};
+use std::time::Duration;
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next() % bound.max(1) as u64) as usize
+    }
+}
+
+fn setting(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn mutate(rng: &mut Rng, seed: &[u8]) -> Vec<u8> {
+    let mut bytes = seed.to_vec();
+    for _ in 0..1 + rng.below(6) {
+        match rng.below(6) {
+            0 if !bytes.is_empty() => {
+                let at = rng.below(bytes.len());
+                bytes[at] = rng.next() as u8;
+            }
+            1 if !bytes.is_empty() => {
+                let at = rng.below(bytes.len());
+                bytes[at] = [0, 0xFF, 0x7F, 0x80][rng.below(4)];
+            }
+            2 => {
+                let at = rng.below(bytes.len() + 1);
+                bytes.truncate(at);
+            }
+            3 => {
+                let at = rng.below(bytes.len() + 1);
+                bytes.insert(at, rng.next() as u8);
+            }
+            4 if bytes.len() >= 2 => {
+                let at = rng.below(bytes.len() - 1);
+                bytes[at..at + 2].copy_from_slice(&[0xFF, 0xFF]);
+            }
+            _ => bytes.extend(std::iter::repeat_n(rng.next() as u8, rng.below(64))),
+        }
+    }
+    bytes
+}
+
+fn seeds() -> Vec<Vec<u8>> {
+    vec![
+        prelogin_body(0x00),
+        login7_body(&LoginOptions::default()),
+        batch_body("SELECT TOP (2) [a] FROM dbo.t WHERE b = N'x' -- c\nSELECT @@VERSION"),
+        batch_body("BEGIN TRAN INSERT INTO t VALUES (1) COMMIT SET NOCOUNT ON USE shop"),
+        batch_body("CREATE TABLE [t] ([id] INT IDENTITY(1,1) PRIMARY KEY, n NVARCHAR(max))"),
+    ]
+}
+
+#[test]
+fn mutated_messages_never_panic_a_parser() {
+    let cases = setting("EGGDB_FUZZ_CASES", 20_000);
+    let mut rng = Rng(setting("EGGDB_FUZZ_SEED", 0x05EE_D7D5));
+    let seeds = seeds();
+    for _ in 0..cases {
+        let seed = &seeds[rng.below(seeds.len())];
+        let bytes = mutate(&mut rng, seed);
+        let _ = parse_prelogin(&bytes);
+        if let Ok(login) = parse_login7(&bytes) {
+            let _ = login
+                .password
+                .as_ref()
+                .map(|password| password.bytes().len());
+        }
+        let _ = parse_sql_batch(&bytes);
+    }
+}
+
+#[test]
+fn mutated_messages_over_sockets_leave_the_server_serving() {
+    let server = TestServer::start_with(64, Duration::from_secs(2));
+    let mut rng = Rng(setting("EGGDB_FUZZ_SEED", 0x0BAD_07D5));
+    let cases = setting("EGGDB_FUZZ_CASES", 20_000).min(200);
+    for case in 0..cases {
+        let bytes = mutate(&mut rng, &seeds()[case as usize % 5]);
+        let mut client = Client::connect(server.address);
+        match case % 4 {
+            0 => client.send(0x12, &bytes),
+            1 => {
+                client.prelogin(0x02);
+                client.send(0x10, &bytes);
+            }
+            2 => {
+                let (mut logged_in, _) =
+                    Client::login_with(server.address, &LoginOptions::default());
+                logged_in.send(0x01, &bytes);
+                let _ = logged_in.read_message();
+                continue;
+            }
+            _ => {
+                client.send_raw(&bytes);
+                continue;
+            }
+        }
+        let _ = client.read_message();
+    }
+    let mut short = Client::connect(server.address);
+    short.send_raw(&[0x12, 0x01, 0x00, 0x04, 0, 0, 1, 0]);
+    assert!(short.is_closed());
+    let mut stalled = Client::connect(server.address);
+    stalled.send_raw(&[0x12, 0x01, 0x00]);
+    assert!(stalled.is_closed());
+    let mut client = Client::login(server.address);
+    assert_eq!(
+        rows(&client.batch("SELECT 1")),
+        vec![vec![Some("1".to_owned())]]
+    );
+    assert!(errors(&client.batch("SELECT 2")).is_empty());
+}

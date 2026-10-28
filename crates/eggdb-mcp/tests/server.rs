@@ -239,7 +239,7 @@ fn arguments_are_checked_before_anything_runs() {
     for (tool, arguments) in [
         ("run_sql", r#"{}"#),
         ("run_sql", r#"{"sql":1}"#),
-        ("run_sql", r#"{"sql":"SELECT 1","dialect":"sqlserver"}"#),
+        ("run_sql", r#"{"sql":"SELECT 1","dialect":"db2"}"#),
         ("run_sql", r#"{"sql":"SELECT 1","max_rows":0}"#),
         ("run_sql", r#"{"sql":"SELECT 1","max_rows":10001}"#),
         ("run_sql", r#"{"sql":"SELECT 1","max_rows":1.5}"#),

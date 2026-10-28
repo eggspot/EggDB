@@ -6,9 +6,12 @@ mod oracle;
 mod query;
 mod schemas;
 mod sqlite;
+mod sqlserver;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved};
+pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
+pub(crate) use sqlserver::is_reserved as is_sqlserver_reserved;
 
 pub(crate) use schemas::Nesting;
 pub use sqlite::SQLITE_COMPATIBLE_VERSION;
@@ -189,6 +192,7 @@ pub(crate) struct Parser<'t> {
     query_depth: usize,
     queries: usize,
     setting_changes: Vec<(String, String)>,
+    pending_top: Option<Expr>,
 }
 
 #[derive(Clone, Copy)]
@@ -298,6 +302,7 @@ impl<'t> Parser<'t> {
             query_depth: 0,
             queries: 0,
             setting_changes: Vec::new(),
+            pending_top: None,
         }
     }
 
@@ -322,12 +327,17 @@ impl<'t> Parser<'t> {
         self.dialect == Dialect::Oracle
     }
 
+    fn sqlserver(&self) -> bool {
+        self.dialect == Dialect::SqlServer
+    }
+
     fn reserved(&self, word: &str) -> bool {
         match self.dialect {
             Dialect::PostgreSql => is_reserved(word),
             Dialect::MySql => mysql::is_reserved(word),
             Dialect::Sqlite => sqlite::is_reserved(word),
             Dialect::Oracle => oracle::is_reserved(word),
+            Dialect::SqlServer => sqlserver::is_reserved(word),
         }
     }
 
@@ -373,7 +383,11 @@ impl<'t> Parser<'t> {
     }
 
     pub(crate) fn literal_rows(&mut self) -> Option<LiteralRows<'t>> {
-        if self.oracle() || !self.is_word("insert") || !self.is_word_at(1, "into") {
+        if self.oracle()
+            || self.sqlserver()
+            || !self.is_word("insert")
+            || !self.is_word_at(1, "into")
+        {
             return None;
         }
         let start = self.at;
@@ -465,6 +479,9 @@ impl<'t> Parser<'t> {
                 Ok(statement)
             }
             TokenKind::End => Ok(statement),
+            TokenKind::Word(word) if self.sqlserver() && sqlserver::starts_statement(word) => {
+                Ok(statement)
+            }
             _ => Err(self.unexpected()),
         }
     }
@@ -611,6 +628,10 @@ impl<'t> Parser<'t> {
             }
             return Ok(table);
         }
+        if self.sqlserver() && self.peek_kind() == &TokenKind::Dot {
+            self.at += 1;
+            return self.sqlserver_qualified_name(name);
+        }
         if self.peek_kind() == &TokenKind::Dot {
             self.at += 1;
             return self.qualified_part(&name);
@@ -631,6 +652,11 @@ impl<'t> Parser<'t> {
         }
         if self.oracle()
             && let Some(statement) = self.oracle_statement()?
+        {
+            return Ok(statement);
+        }
+        if self.sqlserver()
+            && let Some(statement) = self.sqlserver_statement()?
         {
             return Ok(statement);
         }
@@ -1297,10 +1323,19 @@ impl<'t> Parser<'t> {
                 let start = self.position();
                 let expr = self.binary_operand()?;
                 let end = self.tokens[self.at.saturating_sub(1)].end;
-                let source = self.text.get(start..end).unwrap_or("").to_owned();
+                let source = if self.sqlserver() {
+                    sqlserver::default_source(&expr).ok_or_else(|| {
+                        sqlserver::not_supported("A DEFAULT other than a constant or GETDATE()")
+                            .at(start)
+                    })?
+                } else {
+                    self.text.get(start..end).unwrap_or("").to_owned()
+                };
                 column.default = Some((expr, source));
             } else if self.oracle() && self.is_word("generated") {
                 self.oracle_identity(&mut column)?;
+            } else if self.sqlserver() && self.is_word("identity") {
+                self.sqlserver_identity(&mut column)?;
             } else if self.postgresql() && self.is_word("generated") {
                 self.postgresql_identity(&mut column)?;
             } else if ["generated", "collate"]
@@ -1317,7 +1352,7 @@ impl<'t> Parser<'t> {
     }
 
     fn postgresql(&self) -> bool {
-        !self.mysql() && !self.sqlite() && !self.oracle()
+        self.dialect == Dialect::PostgreSql
     }
 
     fn typed_literal_allowed(&self, word: &str) -> bool {
@@ -1325,7 +1360,7 @@ impl<'t> Parser<'t> {
             "numeric" | "decimal" | "timestamptz" | "json" | "jsonb" | "timetz" | "interval"
             | "bytea" | "uuid" | "bpchar" | "char" | "character" => self.postgresql(),
             "time" => self.postgresql() || self.mysql(),
-            "date" | "timestamp" => !self.sqlite(),
+            "date" | "timestamp" => !self.sqlite() && !self.sqlserver(),
             _ => true,
         }
     }
@@ -1533,6 +1568,9 @@ impl<'t> Parser<'t> {
         }
         if self.oracle() {
             return self.oracle_type();
+        }
+        if self.sqlserver() {
+            return self.sqlserver_type();
         }
         let sql_type = self.element_type()?;
         if self.peek_kind() == &TokenKind::LeftBracket || self.is_word("array") {
@@ -1821,7 +1859,7 @@ impl<'t> Parser<'t> {
     }
 
     fn returning(&mut self) -> SqlResult<Option<Vec<SelectItem>>> {
-        if self.take_word("returning") {
+        if !self.sqlserver() && self.take_word("returning") {
             Ok(Some(self.select_items()?))
         } else {
             Ok(None)
@@ -1903,10 +1941,15 @@ impl<'t> Parser<'t> {
         if !distinct {
             self.take_word("all");
         }
+        let top = if self.sqlserver() && self.is_word("top") {
+            Some(self.sqlserver_top()?)
+        } else {
+            None
+        };
         let called = matches!(self.peek_kind(), TokenKind::Word(_))
             && self.peek_kind_at(1) == &TokenKind::LeftParen;
         let items = if self.is_clause_end() && !(self.sqlite() && called) {
-            if self.sqlite() || self.oracle() {
+            if self.sqlite() || self.oracle() || self.sqlserver() {
                 return Err(self.unexpected());
             }
             Vec::new()
@@ -1956,6 +1999,9 @@ impl<'t> Parser<'t> {
         }
         if self.oracle() {
             oracle::reject_rownum_outside_where(&items, &group_by, having.as_ref(), &[])?;
+        }
+        if top.is_some() {
+            self.pending_top = top;
         }
         Ok(Select {
             distinct,
@@ -2147,6 +2193,8 @@ impl<'t> Parser<'t> {
             Some(text.clone())
         } else if self.oracle() && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(oracle::label(&self.source_text(first_token)))
+        } else if self.sqlserver() && !matches!(expr.kind, ExprKind::Column { .. }) {
+            Some(String::new())
         } else if (self.mysql() || self.sqlite()) && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(self.source_text(first_token))
         } else {
@@ -2402,6 +2450,7 @@ impl<'t> Parser<'t> {
                 Ok(Self::binary(left, BinaryOperator::Concat, right))
             }
             Level::Additive => {
+                let operator_position = self.position();
                 let operator = if self.take_operator("+") {
                     BinaryOperator::Add
                 } else {
@@ -2409,6 +2458,13 @@ impl<'t> Parser<'t> {
                     BinaryOperator::Subtract
                 };
                 let right = self.expression_above(Level::Multiplicative)?;
+                if self.sqlserver()
+                    && operator == BinaryOperator::Add
+                    && (sqlserver::is_string_literal(&left) || sqlserver::is_string_literal(&right))
+                {
+                    return Err(sqlserver::not_supported("String concatenation with +")
+                        .at(operator_position));
+                }
                 Ok(Self::binary(left, operator, right))
             }
             Level::Multiplicative => {
@@ -2440,7 +2496,7 @@ impl<'t> Parser<'t> {
 
     fn is_test(&mut self, expr: Expr) -> SqlResult<Expr> {
         let position = expr.position;
-        if self.is_word("isnull") || self.is_word("notnull") {
+        if !self.sqlserver() && (self.is_word("isnull") || self.is_word("notnull")) {
             let negated = self.is_word("notnull");
             self.at += 1;
             return Ok(Expr {
@@ -2458,6 +2514,8 @@ impl<'t> Parser<'t> {
                 expr: Box::new(expr),
                 negated,
             }
+        } else if self.sqlserver() {
+            return Err(self.unexpected());
         } else if self.take_word("true") {
             truth(expr, TruthTest::True, negated)
         } else if self.take_word("false") {
@@ -2552,7 +2610,7 @@ impl<'t> Parser<'t> {
             self.at += 1;
             let pattern = self.expression_above(Level::Other)?;
             return sqlite::glob(expr, pattern, negated);
-        } else if self.is_word("like") || self.is_word("ilike") {
+        } else if self.is_word("like") || (self.is_word("ilike") && !self.sqlserver()) {
             let case_insensitive = self.is_word("ilike") || self.sqlite();
             self.at += 1;
             let pattern = self.expression_above(Level::Other)?;
@@ -2641,6 +2699,11 @@ impl<'t> Parser<'t> {
         }
         if self.oracle()
             && let Some(expr) = self.oracle_primary(&token.kind, position)?
+        {
+            return Ok(expr);
+        }
+        if self.sqlserver()
+            && let Some(expr) = self.sqlserver_primary(&token.kind, position)?
         {
             return Ok(expr);
         }
@@ -2971,6 +3034,11 @@ impl<'t> Parser<'t> {
         }
         if self.oracle()
             && let Some(expr) = self.oracle_function(&name)?
+        {
+            return Ok(expr);
+        }
+        if self.sqlserver()
+            && let Some(expr) = self.sqlserver_function(&name)?
         {
             return Ok(expr);
         }

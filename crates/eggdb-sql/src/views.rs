@@ -55,7 +55,7 @@ fn duplicate_relation(name: &Name, internal: &str, dialect: Dialect) -> SqlError
             format!("view {shown} already exists"),
         )
         .with_sqlite_code(1),
-        Dialect::PostgreSql => SqlError::new(
+        Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
             SqlState::DUPLICATE_TABLE,
             format!("relation \"{shown}\" already exists"),
         ),
@@ -77,7 +77,7 @@ fn missing_view(name: &Name, dialect: Dialect) -> SqlError {
             format!("no such view: {}", display(&name.text)),
         )
         .with_sqlite_code(1),
-        Dialect::PostgreSql => SqlError::new(
+        Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
             SqlState::UNDEFINED_TABLE,
             format!("view \"{}\" does not exist", display(&name.text)),
         ),
@@ -134,6 +134,11 @@ pub(crate) fn create_view(
     context: &ViewContext<'_>,
 ) -> SqlResult<QueryResult> {
     let dialect = context.dialect;
+    if dialect == Dialect::SqlServer {
+        return Err(SqlError::not_supported(
+            "Views in the SQL Server dialect are not supported in this version of EggDB.",
+        ));
+    }
     let result = QueryResult::command("CREATE VIEW");
     if create.text.len() > crate::encoding::MAX_VIEW_TEXT {
         return Err(SqlError::new(

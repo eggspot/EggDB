@@ -1,0 +1,361 @@
+chapter "SELECT", "TOP"
+ok
+CREATE TABLE [dbo].[Products] ([ProductID] INT IDENTITY(1,1) NOT NULL, [Name] NVARCHAR(50) NOT NULL, [Price] DECIMAL(10,2) NOT NULL, CONSTRAINT [PK_Products] PRIMARY KEY ([ProductID]))
+
+ok
+INSERT INTO Products (Name, Price) VALUES (N'Bread', 2.50), (N'Eggs', 3.20), (N'Jam', 4.75), (N'Tea', 1.99)
+
+rows
+SELECT TOP 2 Name, Price FROM Products ORDER BY Price DESC
+----
+name|price
+Jam|4.75
+Eggs|3.20
+SELECT 2
+
+rows
+SELECT TOP (1) [Name] AS [Cheapest] FROM [dbo].[Products] ORDER BY [Price]
+----
+cheapest
+Tea
+SELECT 1
+
+rows
+SELECT TOP 10 ProductID AS id FROM Products ORDER BY ProductID
+----
+id
+1
+2
+3
+4
+SELECT 4
+
+error 0A000 40517
+SELECT TOP 50 PERCENT Name FROM Products
+
+error 0A000 40517
+SELECT TOP 1 WITH TIES Name FROM Products ORDER BY Price
+
+error 42601 102
+SELECT Name FROM Products LIMIT 1
+
+error 0A000 40517
+SELECT TOP 1 Name FROM Products UNION SELECT Name FROM Products
+
+rows
+SELECT TOP 1 Name AS name FROM Products WHERE ProductID IN (SELECT TOP 3 ProductID FROM Products ORDER BY ProductID) ORDER BY (SELECT 1), Price DESC
+----
+name
+Jam
+SELECT 1
+
+chapter "IDENTITY (Property)"
+rows
+SELECT ProductID AS id, Name AS name FROM Products WHERE Name = N'Tea'
+----
+id|name
+4|Tea
+SELECT 1
+
+ok
+INSERT INTO Products VALUES (N'Milk', 0.99)
+
+rows
+SELECT max(ProductID) AS last_id FROM Products
+----
+last_id
+5
+SELECT 1
+
+error 42P10 544
+INSERT INTO Products (ProductID, Name, Price) VALUES (9, N'Salt', 0.50)
+
+error 0A000 40517
+CREATE TABLE Seeded (id INT IDENTITY(100, 5) PRIMARY KEY)
+
+error 42P16 40517
+CREATE TABLE NoKey (id INT IDENTITY, name NVARCHAR(10))
+
+error 42601 213
+INSERT INTO Products VALUES (N'Salt')
+
+ok
+CREATE TABLE Visits ([VisitID] INT IDENTITY(1,1) PRIMARY KEY, [Note] NVARCHAR(20) DEFAULT N'none', [At] DATETIME2(3) DEFAULT GETDATE())
+
+ok
+INSERT INTO Visits DEFAULT VALUES
+
+ok
+INSERT INTO Visits DEFAULT VALUES
+
+rows
+SELECT VisitID AS id, Note AS note, count(At) AS stamped FROM Visits GROUP BY VisitID, Note ORDER BY VisitID
+----
+id|note|stamped
+1|none|1
+2|none|1
+SELECT 2
+
+ok
+DROP TABLE Visits
+
+chapter "Database Identifiers"
+ok
+CREATE TABLE [Order Details] ([Order ID] INT PRIMARY KEY, [Qty]]x] INT)
+
+ok
+INSERT INTO [order details] VALUES (1, 5)
+
+rows
+SELECT [Order ID] AS [o], "qty]x" AS q FROM [ORDER DETAILS]
+----
+o|q
+1|5
+SELECT 1
+
+rows
+SELECT [order id] AS a FROM [dbo].[Order Details]
+----
+a
+1
+SELECT 1
+
+error 42P01 208
+SELECT * FROM [Missing Table]
+
+chapter "Constants", "Operators"
+rows
+SELECT N'café' AS a, 'it''s' AS b
+----
+a|b
+café|it's
+SELECT 1
+
+error 0A000 40517
+SELECT 'a' + 'b' AS c
+
+error 0A000 40517
+SELECT N'1' + 2 AS c
+
+rows
+SELECT 1 + 2 * 3 AS n, 7 / 2 AS q, 7 % 3 AS r
+----
+n|q|r
+7|3|1
+SELECT 1
+
+rows
+SELECT Name AS name FROM Products WHERE Price !< 4 ORDER BY Name
+----
+name
+Jam
+SELECT 1
+
+rows
+SELECT Name AS name FROM Products WHERE Price != 2.50 AND Price !> 2 ORDER BY Name
+----
+name
+Milk
+Tea
+SELECT 2
+
+error 42601 102
+SELECT 2 ^ 3 AS x
+
+error 42601 102
+SELECT 'a' || 'b' AS x
+
+error 42601 102
+SELECT 1::int AS x
+
+error 42883 40517
+SELECT Name + 1 AS x FROM Products
+
+error 42883 40517
+SELECT Name + Name AS x FROM Products
+
+error 42883 8117
+SELECT sum(Name) AS x FROM Products
+
+error 2201W 1060
+SELECT TOP (-1) Name FROM Products
+
+chapter "Date and Time Functions"
+rows
+SELECT count(*) AS n FROM Products WHERE GETDATE() > CAST('2020-01-01' AS datetime2)
+----
+n
+5
+SELECT 1
+
+rows
+SELECT count(*) AS n FROM Products WHERE SYSDATETIME() >= GETUTCDATE() OR SYSDATETIME() < SYSUTCDATETIME() OR CURRENT_TIMESTAMP IS NOT NULL
+----
+n
+5
+SELECT 1
+
+error 42704 2715
+CREATE TABLE Bits (id INT PRIMARY KEY, flag BIT)
+
+error 42704 2715
+CREATE TABLE Money (id INT PRIMARY KEY, amount MONEY)
+
+chapter "@@ Functions", "Built-in Functions"
+rows
+SELECT @@SERVERNAME AS server, @@LANGUAGE AS language, @@TRANCOUNT AS trancount
+----
+server|language|trancount
+EggDB|us_english|0
+SELECT 1
+
+error 42P02 137
+SELECT @@NOT_A_VARIABLE AS x
+
+error 42P02 137
+SELECT @total AS x
+
+error 42883 195
+SELECT version() AS v
+
+error 42883 195
+SELECT now() AS v
+
+rows
+SELECT upper(Name) AS u, coalesce(NULL, Name) AS c, nullif(Name, N'x') AS d FROM Products WHERE ProductID = 1
+----
+u|c|d
+BREAD|Bread|Bread
+SELECT 1
+
+chapter "Transactions"
+ok
+BEGIN TRAN
+
+ok
+BEGIN TRANSACTION inner_one
+
+rows
+SELECT @@TRANCOUNT AS n
+----
+n
+2
+SELECT 1
+
+ok
+COMMIT TRAN
+
+ok
+DELETE FROM Products WHERE Name = N'Milk'
+
+rows
+SELECT @@TRANCOUNT AS n
+----
+n
+1
+SELECT 1
+
+ok
+ROLLBACK
+
+rows
+SELECT count(*) AS n FROM Products
+----
+n
+5
+SELECT 1
+
+error 25P01 3902
+COMMIT
+
+error 25P01 3903
+ROLLBACK TRANSACTION
+
+error 0A000 40517
+SAVE TRANSACTION point
+
+error 0A000 40517
+BEGIN DELETE FROM Products END
+
+ok
+BEGIN TRAN; COMMIT WORK
+
+chapter "SET Statements"
+ok
+SET ANSI_NULLS ON
+
+ok
+SET QUOTED_IDENTIFIER ON
+
+ok
+SET ANSI_NULLS, ANSI_WARNINGS ON
+
+ok
+SET NOCOUNT ON
+
+ok
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+
+ok
+SET DATEFORMAT mdy
+
+error 0A000 40517
+SET ANSI_PADDING OFF
+
+error 0A000 40517
+SET XACT_ABORT ON
+
+error 42601 195
+SET NOT_AN_OPTION ON
+
+ok
+SET NOCOUNT OFF
+
+chapter "USE"
+ok
+USE eggdb
+
+error 3D000 911
+USE master
+
+chapter "Database Engine Errors"
+error 42601 102
+SELECT * FORM Products
+
+error 42601 156
+SELECT FROM Products
+
+error 42P01 3701
+DROP TABLE NotThere
+
+error 42P07 2714
+CREATE TABLE Products (id INT PRIMARY KEY)
+
+error 23505 2627
+INSERT INTO [Order Details] VALUES (1, 6)
+
+error 23502 515
+INSERT INTO Products (Name, Price) VALUES (NULL, 1)
+
+error 22012 8134
+SELECT 1 / 0 AS x
+
+error 42703 207
+SELECT NoSuchColumn FROM Products
+
+error 22P02 245
+SELECT CAST(N'abc' AS INT) AS x
+
+chapter "Batches"
+rows
+SELECT 1 AS a SELECT 2 AS b
+----
+b
+2
+SELECT 1
+
+error 42601 102
+SELECT 1 AS a GO
+
+ok
+DROP TABLE [Order Details]

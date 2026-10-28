@@ -1,0 +1,789 @@
+use crate::messages::{
+    ATTENTION, BULK_LOAD, LOGIN7, Login7, PRELOGIN, PreLogin, RPC, SQL_BATCH, TABULAR_RESULT,
+    TDS_7_4, TRANSACTION_MANAGER, parse_login7, parse_prelogin, parse_sql_batch, prelogin_response,
+};
+use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
+use crate::tokens::{
+    self, DONE, DONE_ATTENTION, DONE_COUNT, DONE_ERROR, DONE_IN_TRANSACTION, DONE_MORE,
+    ENV_COMMIT_TRANSACTION, ENV_DATABASE, ENV_LANGUAGE, ENV_PACKET_SIZE, ENV_ROLLBACK_TRANSACTION,
+    ServerMessage,
+};
+use crate::types::{push_value, wire_columns};
+use crate::wire::{DEFAULT_PACKET_SIZE, POLL_INTERVAL, Wire, WireError};
+use eggdb_sql::{
+    BatchStep, Dialect, KeyValueStore, QueryResult, SQLSERVER_COMPATIBLE_VERSION, Session, SqlError,
+};
+use std::time::{Duration, Instant};
+
+/// The largest PRELOGIN or LOGIN7 message accepted before a client has logged in.
+pub const MAX_LOGIN_BYTES: usize = 64 * 1024;
+/// The largest SQL batch accepted from a logged-in client, as MySQL's server allows per packet
+/// (D106, D122).
+pub const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
+const SMALLEST_PACKET_SIZE: u32 = 512;
+const LARGEST_PACKET_SIZE: u32 = 32_767;
+const SELECT_COMMAND: u16 = 0xC1;
+const INSERT_COMMAND: u16 = 0xC3;
+const DELETE_COMMAND: u16 = 0xC4;
+const UPDATE_COMMAND: u16 = 0xC5;
+const LOGIN_FAILED: u32 = 18_456;
+const CANNOT_OPEN_DATABASE: u32 = 4060;
+const TOO_MANY_CONNECTIONS: u32 = 17_809;
+const NOT_SUPPORTED: u32 = 40_517;
+const PROTOCOL_ERROR: u32 = 4002;
+const LOGGED_BATCH_CHARACTERS: usize = 200;
+const MAX_RESULT_COLUMNS: usize = 4096;
+const TOO_MANY_RESULT_COLUMNS: u32 = 1056;
+
+pub(crate) fn printable(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\\' => shown.push_str("\\\\"),
+            '"' => shown.push_str("\\\""),
+            '\n' => shown.push_str("\\n"),
+            '\r' => shown.push_str("\\r"),
+            '\t' => shown.push_str("\\t"),
+            special
+                if special.is_control()
+                    || matches!(
+                        special,
+                        '\u{200e}'
+                            | '\u{200f}'
+                            | '\u{061c}'
+                            | '\u{2028}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}'
+                    ) =>
+            {
+                shown.push_str(&format!("\\u{{{:x}}}", u32::from(special)));
+            }
+            other => shown.push(other),
+        }
+    }
+    shown
+}
+
+fn version_bytes() -> [u8; 4] {
+    let mut parts = SQLSERVER_COMPATIBLE_VERSION
+        .split('.')
+        .map(|part| part.parse::<u16>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0) as u8;
+    let minor = parts.next().unwrap_or(0) as u8;
+    let build = parts.next().unwrap_or(0).to_be_bytes();
+    [major, minor, build[0], build[1]]
+}
+
+fn sleep_unless_stopped(duration: Duration, stop: &(dyn Fn() -> bool + Sync)) {
+    let until = Instant::now() + duration;
+    while !stop() {
+        let now = Instant::now();
+        if now >= until {
+            return;
+        }
+        std::thread::sleep((until - now).min(POLL_INTERVAL));
+    }
+}
+
+fn newlines(text: &str, from: usize, to: usize) -> usize {
+    text.as_bytes()
+        .get(from..to)
+        .map_or(0, |part| part.iter().filter(|&&byte| byte == b'\n').count())
+}
+
+struct LineCursor {
+    offset: usize,
+    line: usize,
+}
+
+impl LineCursor {
+    fn new() -> Self {
+        Self { offset: 0, line: 1 }
+    }
+
+    fn line_at(&mut self, text: &str, offset: usize) -> u32 {
+        let offset = offset.min(text.len());
+        if offset < self.offset {
+            *self = Self::new();
+        }
+        self.line += newlines(text, self.offset, offset);
+        self.offset = offset;
+        u32::try_from(self.line).unwrap_or(u32::MAX)
+    }
+}
+
+fn send_errors(wire: &mut Wire<'_>, errors: &[(u32, u8, &str)]) {
+    let mut body = Vec::new();
+    for (number, severity, text) in errors {
+        body.extend(tokens::error(&ServerMessage {
+            number: *number,
+            severity: *severity,
+            text,
+            line: 1,
+        }));
+    }
+    body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
+    let _ = wire.send_message(TABULAR_RESULT, &body);
+}
+
+fn refuse(wire: &mut Wire<'_>, errors: &[(u32, u8, &str)]) {
+    send_errors(wire, errors);
+    wire.close_after_refusal();
+}
+
+fn login_failed(user: &str) -> String {
+    format!("Login failed for user '{user}'.")
+}
+
+fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error: &WireError) {
+    match error {
+        WireError::Tls => (shared.log)(&format!(
+            "{}  client requires TLS (TDS 8 / encrypt=strict); EggDB has no TLS yet",
+            wire.peer()
+        )),
+        WireError::Malformed(reason) => {
+            (shared.log)(&format!("{}  protocol error: {reason}", wire.peer()));
+            refuse(
+                wire,
+                &[(
+                    PROTOCOL_ERROR,
+                    16,
+                    "The incoming tabular data stream (TDS) protocol stream is incorrect.",
+                )],
+            );
+        }
+        WireError::TooLarge => {
+            (shared.log)(&format!("{}  message too large", wire.peer()));
+            refuse(
+                wire,
+                &[(
+                    PROTOCOL_ERROR,
+                    16,
+                    "The incoming tabular data stream (TDS) message is larger than EggDB accepts.",
+                )],
+            );
+        }
+        WireError::TimedOut => {
+            (shared.log)(&format!("{}  login timed out", wire.peer()));
+        }
+        WireError::Closed | WireError::Stopping | WireError::Io => {}
+    }
+}
+
+fn read_prelogin(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Option<PreLogin> {
+    let message = match wire.read_message(MAX_LOGIN_BYTES) {
+        Ok(message) => message,
+        Err(error) => {
+            report_wire_error(shared, wire, &error);
+            return None;
+        }
+    };
+    if message.kind != PRELOGIN {
+        (shared.log)(&format!(
+            "{}  protocol error: the first message is not PRELOGIN",
+            wire.peer()
+        ));
+        return None;
+    }
+    let prelogin = match parse_prelogin(&message.body) {
+        Ok(prelogin) => prelogin,
+        Err(error) => {
+            (shared.log)(&format!("{}  protocol error: {error}", wire.peer()));
+            return None;
+        }
+    };
+    let answer = prelogin_response(&prelogin, version_bytes());
+    if wire.send_message(TABULAR_RESULT, &answer).is_err() {
+        return None;
+    }
+    if prelogin.wants_encryption() {
+        (shared.log)(&format!(
+            "{}  client requires encryption; EggDB has no TLS yet (connect with encrypt=false or sqlcmd -N disable)",
+            wire.peer()
+        ));
+        wire.close_after_refusal();
+        return None;
+    }
+    Some(prelogin)
+}
+
+pub(crate) fn refuse_too_many(shared: &Shared<'_>, wire: &mut Wire<'_>) {
+    if read_prelogin(shared, wire).is_none() {
+        return;
+    }
+    let Ok(mut message) = wire.read_message(MAX_LOGIN_BYTES) else {
+        return;
+    };
+    message.body.fill(0);
+    std::hint::black_box(&message.body);
+    let text = format!(
+        "Could not connect because the maximum number of '{}' user connections has already been reached. The connection has been closed.",
+        shared.config.max_connections
+    );
+    refuse(wire, &[(TOO_MANY_CONNECTIONS, 20, &text)]);
+}
+
+enum Login {
+    Accepted { user: String, packet_size: usize },
+    Refused,
+}
+
+fn login_refusal(shared: &Shared<'_>, wire: &mut Wire<'_>, user: &str, reason: &str) {
+    (shared.log)(&format!(
+        "{}  login refused for user \"{}\": {reason}",
+        wire.peer(),
+        printable(user)
+    ));
+    refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(user))]);
+}
+
+fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Login {
+    let mut message = match wire.read_message(MAX_LOGIN_BYTES) {
+        Ok(message) => message,
+        Err(error) => {
+            report_wire_error(shared, wire, &error);
+            return Login::Refused;
+        }
+    };
+    if message.kind != LOGIN7 {
+        message.body.fill(0);
+        std::hint::black_box(&message.body);
+        (shared.log)(&format!(
+            "{}  protocol error: the message after PRELOGIN is not LOGIN7",
+            wire.peer()
+        ));
+        refuse(
+            wire,
+            &[(
+                PROTOCOL_ERROR,
+                16,
+                "The incoming tabular data stream (TDS) protocol stream is incorrect.",
+            )],
+        );
+        return Login::Refused;
+    }
+    let parsed = parse_login7(&message.body);
+    message.body.fill(0);
+    std::hint::black_box(&message.body);
+    let login = match parsed {
+        Ok(login) => login,
+        Err(error) => {
+            (shared.log)(&format!("{}  protocol error: {error}", wire.peer()));
+            refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(""))]);
+            return Login::Refused;
+        }
+    };
+    check_login(shared, wire, login)
+}
+
+fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login {
+    let user = login.user_name.clone();
+    if login.tds_version < TDS_7_4 {
+        let reason = format!(
+            "the client speaks TDS {:#010x}; EggDB needs TDS 7.4",
+            login.tds_version
+        );
+        login_refusal(shared, wire, &user, &reason);
+        return Login::Refused;
+    }
+    if login.integrated_security || login.sspi_bytes > 0 {
+        login_refusal(
+            shared,
+            wire,
+            &user,
+            "integrated (SSPI) authentication is not supported; use a SQL login",
+        );
+        return Login::Refused;
+    }
+    if login.federated_authentication {
+        login_refusal(
+            shared,
+            wire,
+            &user,
+            "federated authentication is not supported; use a SQL login",
+        );
+        return Login::Refused;
+    }
+    if login.change_password {
+        login_refusal(
+            shared,
+            wire,
+            &user,
+            "changing the password at login is not supported",
+        );
+        return Login::Refused;
+    }
+    let config = shared.config;
+    let credentials = if user == config.user {
+        &config.credentials
+    } else {
+        &shared.unknown_user
+    };
+    let accepted = match &login.password {
+        Some(password) => credentials.verify(password.bytes()),
+        None => {
+            let _ = credentials.verify(&[]);
+            false
+        }
+    };
+    if !accepted || user != config.user {
+        (shared.log)(&format!(
+            "{}  password authentication failed for user \"{}\"",
+            wire.peer(),
+            printable(&user)
+        ));
+        sleep_unless_stopped(shared.throttle.delay_after_failure(), shared.stop);
+        refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(&user))]);
+        return Login::Refused;
+    }
+    if !login.database.is_empty() && !login.database.eq_ignore_ascii_case(&config.database) {
+        (shared.log)(&format!(
+            "{}  unknown database \"{}\"",
+            wire.peer(),
+            printable(&login.database)
+        ));
+        let cannot_open = format!(
+            "Cannot open database \"{}\" requested by the login. The login failed.",
+            login.database
+        );
+        refuse(
+            wire,
+            &[
+                (CANNOT_OPEN_DATABASE, 11, &cannot_open),
+                (LOGIN_FAILED, 14, &login_failed(&user)),
+            ],
+        );
+        return Login::Refused;
+    }
+    let packet_size = match login.packet_size {
+        0 => DEFAULT_PACKET_SIZE as u32,
+        size => size.clamp(SMALLEST_PACKET_SIZE, LARGEST_PACKET_SIZE),
+    };
+    Login::Accepted {
+        user,
+        packet_size: packet_size as usize,
+    }
+}
+
+fn login_response(database: &str, packet_size: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend(tokens::env_change_text(ENV_DATABASE, database, "master"));
+    body.extend(tokens::info(&ServerMessage {
+        number: 5701,
+        severity: 0,
+        text: &format!("Changed database context to '{database}'."),
+        line: 0,
+    }));
+    body.extend(tokens::env_change_text(ENV_LANGUAGE, "us_english", ""));
+    body.extend(tokens::info(&ServerMessage {
+        number: 5703,
+        severity: 0,
+        text: "Changed language setting to us_english.",
+        line: 0,
+    }));
+    body.extend(tokens::env_change_collation());
+    body.extend(tokens::env_change_text(
+        ENV_PACKET_SIZE,
+        &packet_size.to_string(),
+        &DEFAULT_PACKET_SIZE.to_string(),
+    ));
+    body.extend(tokens::login_ack(TDS_7_4, "EggDB", version_bytes()));
+    body.extend(tokens::done(DONE, 0, 0, 0));
+    body
+}
+
+pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
+    mut wire: Wire<'a>,
+    shared: &'a Shared<'a>,
+    store: &'s S,
+    connection_id: u32,
+) {
+    let Some(login_slot) = take_slot(&shared.unauthenticated, MAX_UNAUTHENTICATED_CONNECTIONS)
+    else {
+        (shared.log)(&format!(
+            "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
+            wire.peer()
+        ));
+        wire.deadline = Some(Instant::now() + REFUSAL_TIMEOUT);
+        refuse_too_many(shared, &mut wire);
+        return;
+    };
+    if read_prelogin(shared, &mut wire).is_none() {
+        return;
+    }
+    let Login::Accepted { user, packet_size } = log_in(shared, &mut wire) else {
+        return;
+    };
+    drop(login_slot);
+    wire.deadline = None;
+    wire.spid = connection_id as u16;
+    let config = shared.config;
+    if wire
+        .send_message(
+            TABULAR_RESULT,
+            &login_response(&config.database, packet_size),
+        )
+        .is_err()
+    {
+        return;
+    }
+    wire.packet_size = packet_size;
+    let mut session = Session::with_dialect(store, Dialect::SqlServer);
+    session.identify(&user, &config.database);
+    session.set_connection_id(connection_id);
+    let mut connection = Connection {
+        wire,
+        shared,
+        next_transaction: 1,
+        transaction: None,
+    };
+    connection.run(&mut session);
+    let _ = session.close();
+}
+
+struct Connection<'a> {
+    wire: Wire<'a>,
+    shared: &'a Shared<'a>,
+    next_transaction: u64,
+    transaction: Option<u64>,
+}
+
+struct PendingDone {
+    status: u16,
+    command: u16,
+    rows: u64,
+}
+
+impl Connection<'_> {
+    fn run<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>) {
+        loop {
+            let message = match self.wire.read_message(MAX_BATCH_BYTES) {
+                Ok(message) => message,
+                Err(WireError::Stopping) => {
+                    self.shared
+                        .ended_by_stop
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    return;
+                }
+                Err(error) => {
+                    report_wire_error(self.shared, &mut self.wire, &error);
+                    return;
+                }
+            };
+            let keep_going = match message.kind {
+                SQL_BATCH => self.batch(session, &message.body),
+                ATTENTION => self.send_done(DONE_ATTENTION),
+                RPC | TRANSACTION_MANAGER | BULK_LOAD => {
+                    let what = match message.kind {
+                        RPC => "Remote procedure calls (RPC requests, such as sp_executesql)",
+                        TRANSACTION_MANAGER => "Transaction manager requests",
+                        _ => "Bulk load",
+                    };
+                    self.send_not_supported(what)
+                }
+                _ => {
+                    report_wire_error(
+                        self.shared,
+                        &mut self.wire,
+                        &WireError::Malformed("an unknown packet type"),
+                    );
+                    false
+                }
+            };
+            if !keep_going {
+                return;
+            }
+        }
+    }
+
+    fn send_done(&mut self, status: u16) -> bool {
+        self.wire
+            .send_message(TABULAR_RESULT, &tokens::done(DONE, status, 0, 0))
+            .is_ok()
+    }
+
+    fn send_not_supported(&mut self, what: &str) -> bool {
+        let text = format!("{what} are not supported in this version of EggDB.");
+        let mut body = tokens::error(&ServerMessage {
+            number: NOT_SUPPORTED,
+            severity: 16,
+            text: &text,
+            line: 1,
+        });
+        body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
+        self.wire.send_message(TABULAR_RESULT, &body).is_ok()
+    }
+
+    fn batch<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, body: &[u8]) -> bool {
+        let batch = match parse_sql_batch(body) {
+            Ok(batch) => batch,
+            Err(error) => {
+                report_wire_error(
+                    self.shared,
+                    &mut self.wire,
+                    &WireError::Malformed(error.reason),
+                );
+                return false;
+            }
+        };
+        if self.shared.config.log_batches {
+            let shown: String = batch.text.chars().take(LOGGED_BATCH_CHARACTERS).collect();
+            (self.shared.log)(&format!(
+                "{}  batch: {}",
+                self.wire.peer(),
+                printable(&shown)
+            ));
+        }
+        let text = batch.text;
+        self.wire.begin_message(TABULAR_RESULT);
+        let mut pending: Option<PendingDone> = None;
+        let mut failed_write = false;
+        let database = session.database().to_owned();
+        let mut writer = StepWriter {
+            connection: self,
+            text: &text,
+            lines: LineCursor::new(),
+            database,
+            pending: &mut pending,
+            failed_write: &mut failed_write,
+        };
+        let outcome = session.execute_batch(&text, &mut |step| writer.step(step));
+        if let Err(error) = outcome {
+            writer.error(&error, 0);
+        }
+        let in_transaction = session.transaction_status() != eggdb_sql::TransactionStatus::Idle;
+        if failed_write {
+            return false;
+        }
+        let last = pending.take().unwrap_or(PendingDone {
+            status: if in_transaction {
+                DONE_IN_TRANSACTION
+            } else {
+                0
+            },
+            command: 0,
+            rows: 0,
+        });
+        let status = (last.status & !DONE_MORE)
+            | if in_transaction {
+                DONE_IN_TRANSACTION
+            } else {
+                0
+            };
+        if self
+            .wire
+            .write(&tokens::done(DONE, status, last.command, last.rows))
+            .is_err()
+        {
+            return false;
+        }
+        self.wire.end_message().is_ok()
+    }
+}
+
+struct StepWriter<'w, 'a> {
+    connection: &'w mut Connection<'a>,
+    text: &'w str,
+    lines: LineCursor,
+    database: String,
+    pending: &'w mut Option<PendingDone>,
+    failed_write: &'w mut bool,
+}
+
+impl StepWriter<'_, '_> {
+    fn write(&mut self, bytes: &[u8]) -> bool {
+        if self.connection.wire.write(bytes).is_err() {
+            *self.failed_write = true;
+            return false;
+        }
+        true
+    }
+
+    fn flush_pending(&mut self) -> bool {
+        let Some(pending) = self.pending.take() else {
+            return true;
+        };
+        let status = pending.status | DONE_MORE;
+        self.write(&tokens::done(DONE, status, pending.command, pending.rows))
+    }
+
+    fn transaction_change(&mut self, in_transaction: bool, committed: bool) -> bool {
+        match (self.connection.transaction, in_transaction) {
+            (None, true) => {
+                let descriptor = self.connection.next_transaction;
+                self.connection.next_transaction += 1;
+                self.connection.transaction = Some(descriptor);
+                self.write(&tokens::env_change_begin(descriptor))
+            }
+            (Some(descriptor), false) => {
+                self.connection.transaction = None;
+                let kind = if committed {
+                    ENV_COMMIT_TRANSACTION
+                } else {
+                    ENV_ROLLBACK_TRANSACTION
+                };
+                self.write(&tokens::env_change_end(kind, descriptor))
+            }
+            _ => true,
+        }
+    }
+
+    fn error(&mut self, error: &SqlError, statement_start: usize) {
+        let line = self
+            .lines
+            .line_at(self.text, error.position().unwrap_or(statement_start));
+        let number = error.vendor_code().map_or(50_000, u32::from);
+        let severity = error.severity().unwrap_or(16);
+        let token = tokens::error(&ServerMessage {
+            number,
+            severity,
+            text: error.message(),
+            line,
+        });
+        if self.write(&token) {
+            *self.pending = Some(PendingDone {
+                status: DONE_ERROR,
+                command: 0,
+                rows: 0,
+            });
+        }
+    }
+
+    fn step(&mut self, step: BatchStep) -> bool {
+        if !self.flush_pending() {
+            return false;
+        }
+        let committed = matches!(&step.outcome, Ok(result) if result.tag == "COMMIT");
+        let written = match step.outcome {
+            Ok(result) => {
+                self.transaction_change(step.in_transaction, committed)
+                    && self.result(&result, step.no_count)
+            }
+            Err(error) => {
+                self.error(&error, step.statement_start);
+                !*self.failed_write && self.transaction_change(step.in_transaction, committed)
+            }
+        };
+        if step.in_transaction
+            && let Some(pending) = self.pending.as_mut()
+        {
+            pending.status |= DONE_IN_TRANSACTION;
+        }
+        written
+    }
+
+    fn result(&mut self, result: &QueryResult, no_count: bool) -> bool {
+        let count = if no_count { 0 } else { DONE_COUNT };
+        if let Some(database) = result.tag.strip_prefix("USE ") {
+            let old = std::mem::replace(&mut self.database, database.to_owned());
+            let mut body = tokens::env_change_text(ENV_DATABASE, database, &old);
+            body.extend(tokens::info(&ServerMessage {
+                number: 5701,
+                severity: 0,
+                text: &format!("Changed database context to '{database}'."),
+                line: 1,
+            }));
+            if !self.write(&body) {
+                return false;
+            }
+            *self.pending = Some(PendingDone {
+                status: 0,
+                command: 0,
+                rows: 0,
+            });
+            return true;
+        }
+        if let Some(columns) = &result.columns {
+            if columns.len() > MAX_RESULT_COLUMNS {
+                let token = tokens::error(&ServerMessage {
+                    number: TOO_MANY_RESULT_COLUMNS,
+                    severity: 15,
+                    text: "The number of elements in the select list exceeds the maximum allowed number of 4096 elements.",
+                    line: 1,
+                });
+                if !self.write(&token) {
+                    return false;
+                }
+                *self.pending = Some(PendingDone {
+                    status: DONE_ERROR,
+                    command: 0,
+                    rows: 0,
+                });
+                return true;
+            }
+            let wire_columns = wire_columns(columns, &result.rows);
+            if !self.write(&tokens::column_metadata(&wire_columns)) {
+                return false;
+            }
+            let mut row_bytes = Vec::new();
+            for row in &result.rows {
+                row_bytes.clear();
+                row_bytes.push(tokens::row_start());
+                for (column, value) in wire_columns.iter().zip(row) {
+                    push_value(&mut row_bytes, column, value);
+                }
+                if !self.write(&row_bytes) {
+                    return false;
+                }
+            }
+            *self.pending = Some(PendingDone {
+                status: count,
+                command: SELECT_COMMAND,
+                rows: result.rows.len() as u64,
+            });
+            return true;
+        }
+        let mut words = result.tag.split_whitespace();
+        let command = match words.next() {
+            Some("INSERT") => INSERT_COMMAND,
+            Some("UPDATE") => UPDATE_COMMAND,
+            Some("DELETE") => DELETE_COMMAND,
+            _ => 0,
+        };
+        let rows = if command == 0 {
+            None
+        } else {
+            result
+                .tag
+                .rsplit(' ')
+                .next()
+                .and_then(|count| count.parse::<u64>().ok())
+        };
+        *self.pending = Some(match rows {
+            Some(rows) => PendingDone {
+                status: count,
+                command,
+                rows,
+            },
+            None => PendingDone {
+                status: 0,
+                command,
+                rows: 0,
+            },
+        });
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LineCursor, printable, version_bytes};
+
+    #[test]
+    fn the_version_is_sql_server_2022_build_1000() {
+        assert_eq!(version_bytes(), [16, 0, 0x03, 0xE8]);
+    }
+
+    #[test]
+    fn lines_count_from_one_and_log_names_escape_line_breaks() {
+        let text = "SELECT 1\nSELECT x\n\nSELECT y";
+        let mut lines = LineCursor::new();
+        assert_eq!(lines.line_at(text, 0), 1);
+        assert_eq!(lines.line_at(text, 9), 2);
+        assert_eq!(lines.line_at(text, 19), 4);
+        assert_eq!(lines.line_at(text, 9), 2);
+        assert_eq!(LineCursor::new().line_at("SELECT 1", 100), 1);
+        assert_eq!(printable("\u{2066}\u{200f}"), "\\u{2066}\\u{200f}");
+        assert_eq!(printable("a\nb\u{202e}"), "a\\nb\\u{202e}");
+    }
+}

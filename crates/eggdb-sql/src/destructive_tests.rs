@@ -317,3 +317,54 @@ fn only_the_confirmed_destructive_statement_runs() {
         .unwrap();
     assert!(tables(&store).is_empty());
 }
+
+#[test]
+fn transact_sql_brackets_and_transactions_are_classified_as_in_the_other_dialects() {
+    for (text, expected) in [
+        (
+            "DELETE FROM [t]",
+            Some(DestructiveKind::DeleteWithoutFilter),
+        ),
+        ("TRUNCATE TABLE [dbo].[t]", Some(DestructiveKind::Truncate)),
+        ("DROP TABLE [dbo].[t]", Some(DestructiveKind::DropTable)),
+        ("DELETE FROM [t] WHERE [id] = 1", None),
+        ("SELECT TOP 1 [id] FROM [dbo].[t]", None),
+    ] {
+        assert_eq!(kind(Dialect::SqlServer, text), expected, "{text}");
+    }
+    assert_eq!(
+        statement(Dialect::SqlServer, "TRUNCATE TABLE [dbo].[T]").parts[0].objects,
+        ["t"]
+    );
+    for text in [
+        "BEGIN TRAN",
+        "BEGIN TRANSACTION loading",
+        "COMMIT TRAN",
+        "COMMIT",
+        "ROLLBACK TRANSACTION",
+        "ROLLBACK WORK",
+    ] {
+        assert_eq!(
+            destructive_statement(text, Dialect::SqlServer),
+            Err(OneStatementError::Refused(
+                OneStatementRefusal::TransactionControl
+            )),
+            "{text}"
+        );
+    }
+    for text in ["SAVE TRAN point", "BEGIN DELETE FROM t END"] {
+        assert!(
+            matches!(
+                destructive_statement(text, Dialect::SqlServer),
+                Err(OneStatementError::Failed(_))
+            ),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        destructive_statement("DELETE FROM t DELETE FROM u", Dialect::SqlServer),
+        Err(OneStatementError::Refused(
+            OneStatementRefusal::MoreThanOne { position: 14 }
+        ))
+    );
+}

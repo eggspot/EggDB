@@ -324,6 +324,25 @@ impl SqlError {
         self
     }
 
+    /// The same error with a SQL Server error number, such as `208` for `Invalid object
+    /// name`; [`SqlError::severity`] gives its severity.
+    pub fn with_sqlserver_code(mut self, code: u16) -> Self {
+        self.report.vendor_code = Some(code);
+        self.report.vendor = Some(crate::Dialect::SqlServer);
+        self
+    }
+
+    /// The severity SQL Server reports with an error of its numbering (`Level 16` in
+    /// `Msg 208, Level 16, State 1`), or `None` for an error numbered by another dialect.
+    pub fn severity(&self) -> Option<u8> {
+        if self.report.vendor != Some(crate::Dialect::SqlServer) {
+            return None;
+        }
+        self.report
+            .vendor_code
+            .map(crate::sqlserver_errors::severity_of)
+    }
+
     /// The database's own error number, when the dialect has them: MySQL's `1146` for a
     /// missing table, SQLite's extended result code `1` (`SQLITE_ERROR`) for a syntax error,
     /// and so on.
@@ -377,6 +396,15 @@ impl fmt::Display for SqlError {
         if self.report.vendor == Some(crate::Dialect::Oracle) {
             let code = self.report.vendor_code.unwrap_or(0);
             return write!(f, "ORA-{code:05}: {}", self.report.message);
+        }
+        if self.report.vendor == Some(crate::Dialect::SqlServer) {
+            let code = self.report.vendor_code.unwrap_or(0);
+            let severity = crate::sqlserver_errors::severity_of(code);
+            return write!(
+                f,
+                "Msg {code}, Level {severity}, State 1: {}",
+                self.report.message
+            );
         }
         if let Some(code) = self.report.vendor_code {
             return write!(

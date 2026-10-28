@@ -674,14 +674,16 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]
+eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
 PostgreSQL driver connect to it unchanged and run the SQL of `eggdb sql` ([sql.md](sql.md),
 "Connecting with psql"). With `--mysql-listen` it also serves MySQL's client/server protocol,
 so the `mysql` client and MySQL drivers connect and run MySQL's SQL on the same tables
-([sql.md](sql.md), "Connecting with mysql", D106). The design is [ux/cli.md](ux/cli.md), section 14.
+([sql.md](sql.md), "Connecting with mysql", D106). With `--tds-listen` it also serves SQL
+Server's TDS protocol, so Microsoft's `sqlcmd` (go-sqlcmd) connects and runs Transact-SQL
+batches on the same tables ([sql.md](sql.md), "Connecting with sqlcmd", D122). The design is [ux/cli.md](ux/cli.md), section 14.
 
 ```sh
 export EGGDB_PASSWORD='choose-one'
@@ -697,6 +699,8 @@ eggdb serve --create app.db
 |--------|---------|
 | `--listen <address>` | `host:port`, `[::1]:port`, `localhost:port` or a port alone (on `127.0.0.1`); port 0 takes any free port. Default `127.0.0.1:5432`. **Loopback addresses only** (below) |
 | `--mysql-listen <address>` | also serve MySQL's protocol there, the same forms as `--listen` (MySQL's port is 3306); same user, password and database, `caching_sha2_password` or `mysql_native_password`, and its own `--max-connections`. **Loopback addresses only**, like `--listen` |
+| `--tds-listen <address>` | also serve SQL Server's TDS 7.4 protocol there, the same forms as `--listen` (SQL Server's port is 1433); same user, password and database as a SQL login, **no encryption** (connect with go-sqlcmd's default or `-N disable`), and its own `--max-connections`. **Loopback addresses only**, like `--listen` |
+| `--log-batches` | log the first 200 characters of each TDS batch to stderr, to see what a client sends; never the login or its password. Off by default |
 | `--user <name>` | the one user clients log in as, with SCRAM-SHA-256 (and MySQL's methods on `--mysql-listen`). Default `eggdb` |
 | `--password-file <file>` | the password is the file's first line; `-` reads it from stdin. Without it, `EGGDB_PASSWORD`. Never on the command line. ASCII only in this release (SASLprep is not implemented). Prefer the file: `EGGDB_PASSWORD` stays in the server's environment for as long as it runs, where the same user (and on some systems an administrator) can read it, for example through `/proc/<pid>/environ` on Linux |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
@@ -714,7 +718,8 @@ is removed when TLS lands.
 **Output.** On a terminal, the report above; in a pipe, one JSON line,
 `{"listening":"127.0.0.1:5432","host":"127.0.0.1","port":5432,"file":"app.db","database":"app","user":"eggdb","max_connections":64,"read_only":false}`,
 so a script reads the port with `jq .port`; with `--mysql-listen` the line also has
-`"mysql_listening"` and `"mysql_port"`, and the report a `mysql` line. While it runs, stderr is a log of failures, one per
+`"mysql_listening"` and `"mysql_port"`, and the report a `mysql` line; with `--tds-listen`,
+`"tds_listening"` and `"tds_port"`, and an `sqlcmd` line. While it runs, stderr is a log of failures, one per
 line: `2026-10-27 09:14:07 UTC  127.0.0.1:53422  password authentication failed for user "bob"`.
 Ctrl-C or `SIGTERM` finishes the running statements, ends idle connections with `57P01`, rolls
 back open transactions, prints `stopped` (`{"stopped":true,"connections_closed":N}` in JSON) and

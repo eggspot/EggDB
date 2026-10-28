@@ -20,4 +20,5 @@ eggdb-pgwire = { path = "../eggdb-pgwire" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-sql = { path = "../eggdb-sql" }
 eggdb-storage = { path = "../eggdb-storage" }
+eggdb-tdswire = { path = "../eggdb-tdswire" }
 eggdb-ui = { path = "../eggdb-ui" }

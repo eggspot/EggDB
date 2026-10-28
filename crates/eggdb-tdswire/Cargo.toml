@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-tdswire"
+description = "EggDB's server for SQL Server's TDS protocol (7.4, from Microsoft's public [MS-TDS] specification): pre-login without encryption, SQL logins, Transact-SQL batches, on loopback listeners only for now (D102, D122)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-platform = { path = "../eggdb-platform" }
+eggdb-sql = { path = "../eggdb-sql" }

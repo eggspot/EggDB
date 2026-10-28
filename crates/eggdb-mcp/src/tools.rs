@@ -1022,12 +1022,13 @@ fn explain_query<O: DatabaseOpener>(
     arguments.allow(&["sql", "dialect"])?;
     let sql = sql_argument(arguments)?;
     let dialect = arguments.dialect()?;
-    if dialect == Dialect::Oracle {
-        return Err(ToolError::new(
-            "not_supported",
-            "Oracle's EXPLAIN PLAN is not in EggDB yet.",
-        )
-        .with_fix(
+    if dialect == Dialect::Oracle || dialect == Dialect::SqlServer {
+        let what = if dialect == Dialect::Oracle {
+            "Oracle's EXPLAIN PLAN is not in EggDB yet."
+        } else {
+            "SQL Server's showplan is not in EggDB yet."
+        };
+        return Err(ToolError::new("not_supported", what).with_fix(
             "Explain the query with dialect postgresql: every dialect sees the same tables.",
         ));
     }

@@ -100,7 +100,17 @@ impl Parser<'_> {
             return Err(self.not_supported("WITH before INSERT, UPDATE or DELETE"));
         }
         let body = self.set_expression()?;
-        let tail = self.query_tail()?;
+        let top = self.pending_top.take();
+        let mut tail = self.query_tail()?;
+        if let Some(top) = top {
+            if !matches!(body, SetExpr::Select(_)) {
+                return Err(
+                    super::sqlserver::not_supported("TOP with UNION, INTERSECT or EXCEPT")
+                        .at(top.position),
+                );
+            }
+            tail.limit = Some(top);
+        }
         let (body, tail) = match body {
             SetExpr::Select(mut select)
                 if select.order_by.is_empty()
@@ -263,6 +273,12 @@ impl Parser<'_> {
     }
 
     fn set_operand(&mut self) -> SqlResult<SetExpr> {
+        if let Some(top) = &self.pending_top {
+            return Err(
+                super::sqlserver::not_supported("TOP with UNION, INTERSECT or EXCEPT")
+                    .at(top.position),
+            );
+        }
         self.count_query()?;
         if self.peek_kind() == &TokenKind::LeftParen {
             if self.sqlite() {
@@ -334,6 +350,13 @@ impl Parser<'_> {
         let mut limit = None;
         let mut offset = None;
         loop {
+            if self.sqlserver()
+                && ["limit", "offset", "fetch", "for"]
+                    .iter()
+                    .any(|word| self.is_word(word))
+            {
+                break;
+            }
             if self.oracle() && self.is_word("limit") {
                 return Err(SqlError::syntax(
                     "SQL command not properly ended",

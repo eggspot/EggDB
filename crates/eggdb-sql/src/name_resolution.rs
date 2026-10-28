@@ -495,7 +495,7 @@ impl Resolver<'_> {
         position: usize,
     ) -> SqlResult<DerivedTable> {
         match view.dialect {
-            Dialect::PostgreSql => Ok(DerivedTable {
+            Dialect::PostgreSql | Dialect::SqlServer => Ok(DerivedTable {
                 query: Query::of_select(
                     narrowed(query, column_names, label, view.dialect, position),
                     position,

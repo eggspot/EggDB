@@ -1,6 +1,9 @@
 mod mysql;
 mod oracle;
 mod sqlite;
+mod sqlserver;
+
+pub use sqlserver::BatchStep;
 
 pub(crate) use oracle::create_text as oracle_create_text;
 
@@ -287,6 +290,8 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     search_path_at_begin: Option<String>,
     max_value_bytes: usize,
     max_row_bytes: usize,
+    batch_resume: Option<(usize, usize)>,
+    statement_start: usize,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -320,6 +325,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             search_path_at_begin: None,
             max_value_bytes: usize::MAX,
             max_row_bytes: usize::MAX,
+            batch_resume: None,
+            statement_start: 0,
         }
     }
 
@@ -345,9 +352,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.dialect
     }
 
-    /// Sets the number MySQL's `CONNECTION_ID()` returns.
+    /// Sets the number MySQL's `CONNECTION_ID()` and SQL Server's `@@SPID` return.
     pub fn set_connection_id(&mut self, id: u32) {
-        Arc::make_mut(&mut self.settings).mysql.connection_id = id;
+        let settings = Arc::make_mut(&mut self.settings);
+        settings.mysql.connection_id = id;
+        settings.sqlserver.connection_id = id;
     }
 
     /// The warnings and notes of the last statement, as MySQL's `SHOW WARNINGS` lists them.
@@ -361,14 +370,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &self.settings.database
     }
 
-    /// Whether statements outside a `BEGIN` block commit on their own: always in PostgreSQL
-    /// and SQLite, in MySQL unless `SET autocommit = 0`, and never in Oracle, where the first
-    /// change starts a transaction that lasts until `COMMIT`, `ROLLBACK` or DDL.
+    /// Whether statements outside a `BEGIN` block commit on their own: always in PostgreSQL,
+    /// SQLite and SQL Server, in MySQL unless `SET autocommit = 0`, and never in Oracle, where
+    /// the first change starts a transaction that lasts until `COMMIT`, `ROLLBACK` or DDL.
     pub fn autocommit(&self) -> bool {
         match self.dialect {
             Dialect::MySql => self.settings.mysql.autocommit(),
             Dialect::Oracle => false,
-            Dialect::PostgreSql | Dialect::Sqlite => true,
+            Dialect::PostgreSql | Dialect::Sqlite | Dialect::SqlServer => true,
         }
     }
 
@@ -384,8 +393,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.dialect == Dialect::Oracle
     }
 
+    fn sqlserver(&self) -> bool {
+        self.dialect == Dialect::SqlServer
+    }
+
     fn in_dialect(&mut self, text: &str, error: SqlError) -> SqlError {
         let error = error.with_names_displayed();
+        if self.sqlserver() {
+            let statement = text.get(self.statement_start..).unwrap_or(text);
+            return crate::sqlserver_errors::translate(
+                error,
+                text,
+                statement,
+                &self.settings.database,
+            );
+        }
         if self.sqlite() {
             return crate::sqlite_errors::translate(error, text);
         }
@@ -892,6 +914,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
+        self.statement_start = 0;
         if !client.script {
             let tokens = match tokenize_in(text, self.dialect) {
                 Ok(tokens) => tokens,
@@ -950,8 +973,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     ) -> SqlResult<Flow> {
         let inline = data_start.and_then(|start| text.as_bytes().get(start..));
         let mut inline_end = None;
-        let mut resume = (0, 0);
+        let mut resume = self.batch_resume.unwrap_or((0, 0));
         loop {
+            if self.sqlserver() {
+                self.sync_transaction_count();
+            }
             let settings = Arc::clone(&self.settings);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _bytes = crate::bytea::enter_dialect(self.dialect);
@@ -966,6 +992,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             if parser.at_end() {
                 return Ok(Flow::Finished { inline_end });
             }
+            self.statement_start = parser.position();
             let _constraints = crate::constraints::enter(
                 self.dialect,
                 !self.sqlite() || self.settings.sqlite.foreign_keys,
@@ -982,6 +1009,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             );
             if let Some(mut rows) = parser.literal_rows() {
                 resume = parser.resume_point();
+                if self.batch_resume.is_some() {
+                    self.batch_resume = Some(resume);
+                }
                 self.enter_sequences(false);
                 let result = self.insert_literal_rows(&mut rows);
                 self.leave_sequences();
@@ -997,6 +1027,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let parsed = parser.statement();
             let setting_changes = parser.take_setting_changes();
             resume = parser.resume_point();
+            if self.batch_resume.is_some() {
+                self.batch_resume = Some(resume);
+            }
             let statement_tokens = tokens.get(first_token..resume.0.min(tokens.len()));
             let uses_sequences = statement_tokens.is_some_and(mentions_sequence_functions);
             self.statement_walks_expressions = statement_tokens.is_none_or(walks_expressions);
@@ -1232,6 +1265,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 _ => {}
             }
         }
+        if self.sqlserver() {
+            match statement {
+                Statement::Begin { .. } => return self.sqlserver_begin(),
+                Statement::Commit => return self.sqlserver_commit(),
+                Statement::Rollback => return self.sqlserver_rollback(),
+                Statement::SqlServer(statement) => return self.run_sqlserver(statement),
+                _ => {}
+            }
+        }
         match statement {
             Statement::Begin { read_only } => return self.begin(*read_only),
             Statement::Commit => return self.commit(),
@@ -1423,7 +1465,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 binding.delete(writer, tables, delete)?;
                 execute::delete(writer, tables, delete)
             }),
-            Statement::Begin { .. } | Statement::Commit | Statement::Rollback => {
+            Statement::Begin { .. }
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::SqlServer(_) => {
                 return Err(SqlError::new(
                     SqlState::INTERNAL_ERROR,
                     "unreachable statement",

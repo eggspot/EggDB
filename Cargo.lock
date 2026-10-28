@@ -12,6 +12,7 @@ dependencies = [
  "eggdb-platform",
  "eggdb-sql",
  "eggdb-storage",
+ "eggdb-tdswire",
  "eggdb-ui",
 ]
 
@@ -68,6 +69,15 @@ name = "eggdb-storage"
 version = "0.1.0"
 dependencies = [
  "eggdb-platform",
+]
+
+[[package]]
+name = "eggdb-tdswire"
+version = "0.1.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-platform",
+ "eggdb-sql",
 ]
 
 [[package]]

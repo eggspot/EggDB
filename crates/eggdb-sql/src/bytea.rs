@@ -26,7 +26,7 @@ impl Drop for TextFormGuard {
 
 pub(crate) fn enter_dialect(dialect: crate::Dialect) -> TextFormGuard {
     let form = match dialect {
-        crate::Dialect::PostgreSql => TextForm::PostgresqlInput,
+        crate::Dialect::PostgreSql | crate::Dialect::SqlServer => TextForm::PostgresqlInput,
         crate::Dialect::MySql | crate::Dialect::Sqlite => TextForm::AsIs,
         crate::Dialect::Oracle => TextForm::Hexadecimal,
     };

@@ -96,6 +96,23 @@ fn serve_refuses_every_address_but_loopback() {
     assert!(
         stderr(&bad).contains("--mysql-listen needs an address and port such as 127.0.0.1:3306")
     );
+    let tds = eggdb(
+        &[
+            "serve",
+            path,
+            "--create",
+            "--listen",
+            "127.0.0.1:0",
+            "--tds-listen",
+            "0.0.0.0:1433",
+        ],
+        Some("secret"),
+    );
+    assert_eq!(tds.status.code(), Some(2), "{}", stderr(&tds));
+    assert!(stderr(&tds).contains("it is not a loopback address"));
+    assert!(stderr(&tds).contains("--tds-listen 127.0.0.1:1433"));
+    let bad = eggdb(&["serve", path, "--tds-listen", "x"], Some("secret"));
+    assert!(stderr(&bad).contains("--tds-listen needs an address and port such as 127.0.0.1:1433"));
     assert!(!file.path().exists());
 }
 

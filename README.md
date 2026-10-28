@@ -37,8 +37,9 @@ Everything above is the goal; the first release people can use is smaller. v0.2.
 embedded, crash-safe, transactional key-value store: one file, a Rust API, the `eggdb` command
 and `eggdb ui`, a full-screen terminal UI, and `eggdb sql` runs the first parts of the PostgreSQL
 dialect on the same file: tables, joins, `GROUP BY` with aggregates ([docs/sql.md](docs/sql.md)).
-`eggdb serve` serves the file to psql and PostgreSQL drivers, and with `--mysql-listen` to the
-`mysql` client and MySQL drivers in MySQL's SQL, on loopback only until EggDB has TLS, with one
+`eggdb serve` serves the file to psql and PostgreSQL drivers, with `--mysql-listen` to the
+`mysql` client and MySQL drivers in MySQL's SQL, and with `--tds-listen` to Microsoft's
+`sqlcmd` in Transact-SQL, on loopback only until EggDB has TLS, with one
 writer at a time. `eggdb sql --dialect sqlite` and the embedded API run SQLite's SQL on the same
 file, and `--dialect oracle` Oracle's (no Oracle wire protocol). `eggdb mcp` lets AI agents
 such as Claude Code read the file over MCP, read-only, every call in an audit log
@@ -77,9 +78,10 @@ eggdb check app.db                           # "ok: every page passed its checks
 eggdb export app.db backup.jsonl             # every entry as JSON lines; import loads it
 eggdb ui app.db                              # browse and edit it full screen; q quits
 eggdb sql shop.db --create -c "CREATE TABLE items (id integer PRIMARY KEY, name text)"
-EGGDB_PASSWORD=choose-one eggdb serve shop.db --mysql-listen 3306  # PostgreSQL on 127.0.0.1:5432, MySQL on :3306
+EGGDB_PASSWORD=choose-one eggdb serve shop.db --mysql-listen 3306 --tds-listen 1433  # PostgreSQL on :5432, MySQL on :3306, SQL Server on :1433
 PGPASSWORD=choose-one psql -h 127.0.0.1 -U eggdb shop -c "SELECT * FROM items"
 MYSQL_PWD=choose-one mysql -h 127.0.0.1 -P 3306 -u eggdb shop -e "SHOW TABLES"
+SQLCMDPASSWORD=choose-one sqlcmd -S 127.0.0.1,1433 -U eggdb -d shop -Q "SELECT TOP 1 * FROM items"
 ```
 
 Or work in one session, with history and tab completion:
