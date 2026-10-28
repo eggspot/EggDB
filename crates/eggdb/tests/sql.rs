@@ -577,7 +577,11 @@ fn the_sqlserver_dialect_reads_transact_sql_and_reports_sql_server_errors() {
         b"",
     );
     assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
-    assert!(text(&created.stdout).contains("jam"), "{}", text(&created.stdout));
+    assert!(
+        text(&created.stdout).contains("jam"),
+        "{}",
+        text(&created.stdout)
+    );
     let missing = eggdb_sql(
         file.path(),
         &["--dialect", "sqlserver", "-c", "SELECT * FROM [Missing]"],
