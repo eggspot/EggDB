@@ -913,3 +913,16 @@ fn progress_reports_lines_tables_and_rows_during_a_long_copy() {
     );
     assert_eq!(seen.last().map(|progress| progress.rows), Some(30_000));
 }
+
+#[test]
+fn a_line_of_a_million_empty_statements_is_read_in_one_pass() {
+    let mut line = ";".repeat(1_000_000);
+    line.push_str(" SELECT 1; SELECT 2;\n");
+    let started = std::time::Instant::now();
+    let found = statements_of(&line);
+    assert_eq!(
+        found,
+        [("SELECT 1;".to_owned(), 1), ("SELECT 2;".to_owned(), 1)]
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}

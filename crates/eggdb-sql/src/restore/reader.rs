@@ -97,7 +97,7 @@ pub(crate) struct DumpReader<'r> {
     input: &'r mut dyn BufRead,
     line: Vec<u8>,
     line_number: u64,
-    pending: Option<(Vec<u8>, u64)>,
+    pending: Option<(String, u64, usize)>,
     statement: String,
     statement_line: u64,
     started: bool,
@@ -163,68 +163,94 @@ impl<'r> DumpReader<'r> {
         }
         self.copy = Copy::None;
         loop {
-            let (mut line, number) = match self.pending.take() {
+            let (line, number, start) = match self.pending.take() {
                 Some(pending) => pending,
-                None => {
-                    let mut line = std::mem::take(&mut self.line);
-                    let read = match self.read_line_into(&mut line) {
-                        Ok(read) => read,
-                        Err(error) => {
-                            self.line = line;
-                            return Err(error);
-                        }
-                    };
-                    if !read {
-                        self.line = line;
-                        return self.at_end();
-                    }
-                    self.line_number += 1;
-                    if self.first_line {
-                        self.first_line = false;
-                        if line.starts_with(BYTE_ORDER_MARK) {
-                            line.drain(..BYTE_ORDER_MARK.len());
-                        }
-                    }
-                    (line, self.line_number)
-                }
+                None => match self.read_text_line()? {
+                    Some(line) => (line, self.line_number, 0),
+                    None => return self.at_end(),
+                },
             };
-            let outcome = self.line_item(&line, number);
-            line.clear();
-            if line.capacity() <= REUSED_LINE_BYTES && self.line.capacity() < line.capacity() {
-                self.line = line;
-            }
-            if let Some(item) = outcome? {
-                return Ok(item);
+            let outcome = self.line_item(&line[start..], number);
+            match outcome {
+                Ok((item, Some(rest))) => {
+                    self.pending = Some((line, number, start + rest));
+                    if let Some(item) = item {
+                        return Ok(item);
+                    }
+                }
+                Ok((item, None)) => {
+                    self.recycle(line);
+                    if let Some(item) = item {
+                        return Ok(item);
+                    }
+                }
+                Err(error) => {
+                    self.recycle(line);
+                    return Err(error);
+                }
             }
         }
     }
 
-    fn line_item(&mut self, line: &[u8], number: u64) -> SqlResult<Option<Item>> {
-        if self.lex == Lex::Normal
-            && line
-                .iter()
-                .find(|byte| !matches!(byte, b' ' | b'\t'))
-                .is_some_and(|&byte| byte == b'\\')
-        {
-            return Ok(Some(Item::Meta(meta_command(line, number)?)));
+    fn recycle(&mut self, line: String) {
+        let mut bytes = line.into_bytes();
+        bytes.clear();
+        if bytes.capacity() <= REUSED_LINE_BYTES && self.line.capacity() < bytes.capacity() {
+            self.line = bytes;
         }
-        let text = std::str::from_utf8(line).map_err(|error| {
+    }
+
+    fn read_text_line(&mut self) -> SqlResult<Option<String>> {
+        let mut line = std::mem::take(&mut self.line);
+        line.clear();
+        let read = match self.read_line_into(&mut line) {
+            Ok(read) => read,
+            Err(error) => {
+                self.line = line;
+                return Err(error);
+            }
+        };
+        if !read {
+            self.line = line;
+            return Ok(None);
+        }
+        self.line_number += 1;
+        if self.first_line {
+            self.first_line = false;
+            if line.starts_with(BYTE_ORDER_MARK) {
+                line.drain(..BYTE_ORDER_MARK.len());
+            }
+        }
+        let number = self.line_number;
+        String::from_utf8(line).map(Some).map_err(|error| {
             SqlError::new(
                 SqlState::CHARACTER_NOT_IN_REPERTOIRE,
                 format!(
                     "line {number} of the dump is not UTF-8 text (invalid byte at column {})",
-                    error.valid_up_to() + 1
+                    error.utf8_error().valid_up_to() + 1
                 ),
             )
-        })?;
+        })
+    }
+
+    fn line_item(&mut self, line: &str, number: u64) -> SqlResult<(Option<Item>, Option<usize>)> {
+        let bytes = line.as_bytes();
+        if self.lex == Lex::Normal
+            && bytes
+                .iter()
+                .find(|byte| !matches!(byte, b' ' | b'\t'))
+                .is_some_and(|&byte| byte == b'\\')
+        {
+            return Ok((Some(Item::Meta(meta_command(line, number))), None));
+        }
         let was_started = self.started;
-        let (end, started_at) = self.scan(line, number);
+        let (end, started_at) = self.scan(bytes, number);
         let from = if was_started {
             0
         } else {
-            started_at.unwrap_or(line.len())
+            started_at.unwrap_or(bytes.len())
         };
-        let to = end.map_or(line.len(), |end| end + 1);
+        let to = end.map_or(bytes.len(), |end| end + 1);
         if from < to {
             if self.statement.len() + (to - from) > self.max_statement {
                 return Err(SqlError::new(
@@ -235,16 +261,13 @@ impl<'r> DumpReader<'r> {
                     ),
                 ));
             }
-            self.statement.push_str(&text[from..to]);
+            self.statement.push_str(&line[from..to]);
         }
         let Some(end) = end else {
-            return Ok(None);
+            return Ok((None, None));
         };
-        let rest = &line[end + 1..];
-        if rest.iter().any(|byte| !byte.is_ascii_whitespace()) {
-            self.pending = Some((rest.to_vec(), number));
-        }
-        Ok(self.finish_statement(number))
+        let rest = (end + 1 < bytes.len()).then_some(end + 1);
+        Ok((self.finish_statement(number), rest))
     }
 
     fn finish_statement(&mut self, end_line: u64) -> Option<Item> {
@@ -567,14 +590,8 @@ fn dollar_tag_length(text: &[u8]) -> Option<usize> {
     }
 }
 
-fn meta_command(line: &[u8], number: u64) -> SqlResult<MetaCommand> {
-    let text = std::str::from_utf8(line).map_err(|_| {
-        SqlError::new(
-            SqlState::CHARACTER_NOT_IN_REPERTOIRE,
-            format!("line {number} of the dump is not UTF-8 text"),
-        )
-    })?;
-    let body = text
+fn meta_command(line: &str, number: u64) -> MetaCommand {
+    let body = line
         .trim_start_matches([' ', '\t'])
         .trim_start_matches('\\')
         .trim_end_matches(['\n', '\r']);
@@ -585,11 +602,11 @@ fn meta_command(line: &[u8], number: u64) -> SqlResult<MetaCommand> {
         Some(first) => first.len_utf8(),
         None => 0,
     };
-    Ok(MetaCommand {
+    MetaCommand {
         name: body[..name_length].to_owned(),
         argument: body[name_length..].trim().to_owned(),
         line: number,
-    })
+    }
 }
 
 fn is_copy_from_stdin(text: &str) -> bool {

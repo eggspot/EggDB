@@ -9,7 +9,7 @@ use crate::session::{QueryResult, Session};
 use crate::store::KeyValueStore;
 use classify::{Action, Effect, Ignored, Skip};
 use reader::{DumpReader, DumpStatement, Item, MetaCommand};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use words::{Token, Words};
 
@@ -236,6 +236,7 @@ pub fn restore_dump<S: KeyValueStore>(
         skipped_names: HashMap::new(),
         skipped_tables: HashMap::new(),
         table_rows: HashMap::new(),
+        set_names: HashSet::new(),
     };
     restore.run();
     restore.report
@@ -260,6 +261,7 @@ struct Restore<'a, 's, S: KeyValueStore> {
     skipped_names: HashMap<String, String>,
     skipped_tables: HashMap<String, SkippedTable>,
     table_rows: HashMap<String, usize>,
+    set_names: HashSet<String>,
 }
 
 impl<S: KeyValueStore> Restore<'_, '_, S> {
@@ -381,7 +383,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             Ignored::Revoke => ignored.revoke += 1,
             Ignored::Set(name) => {
                 ignored.set_statements += 1;
-                if !ignored.set.contains(&name) && ignored.set.len() < MAX_LISTED {
+                if ignored.set.len() < MAX_LISTED && self.set_names.insert(name.clone()) {
                     ignored.set.push(name);
                 }
             }
