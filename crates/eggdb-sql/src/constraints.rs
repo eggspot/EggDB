@@ -793,12 +793,6 @@ pub(crate) fn define_check(
     text: &str,
     dialect: Dialect,
 ) -> SqlResult<usize> {
-    if dialect == Dialect::SqlServer {
-        return Err(SqlError::not_supported(
-            "CHECK constraints in the SQL Server dialect are not supported in this version of EggDB.",
-        )
-        .at(expr.position));
-    }
     if let Some(name) = &spec.name {
         check_identifier(name)?;
     }
@@ -836,11 +830,12 @@ pub(crate) fn define_check(
                 .as_ref()
                 .map(|column| column.text.clone())
                 .or_else(|| first_column_named(expr, table));
-            let base = match column {
-                Some(column) => {
-                    format!("{}_{column}_check", crate::schemas::base_name(&table.name))
-                }
-                None => format!("{}_check", crate::schemas::base_name(&table.name)),
+            let table_name = crate::schemas::base_name(&table.name);
+            let base = match (column, dialect) {
+                (Some(column), Dialect::SqlServer) => format!("ck__{table_name}__{column}"),
+                (None, Dialect::SqlServer) => format!("ck__{table_name}"),
+                (Some(column), _) => format!("{table_name}_{column}_check"),
+                (None, _) => format!("{table_name}_check"),
             };
             generated_name(table, base)
         }
@@ -1198,6 +1193,7 @@ pub(crate) fn renamed_in_text(text: &str, dialect: Dialect, from: &str, to: &str
 fn quoted_in(name: &str, dialect: Dialect) -> String {
     match dialect {
         Dialect::MySql => format!("`{}`", name.replace('`', "``")),
+        Dialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
         Dialect::Oracle => {
             let shown = swap_uniform_case(name);
             format!("\"{}\"", shown.replace('"', "\"\""))

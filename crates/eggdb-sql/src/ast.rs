@@ -103,6 +103,7 @@ pub(crate) enum CopyDirection {
 pub(crate) struct CreateView {
     pub(crate) name: Name,
     pub(crate) or_replace: bool,
+    pub(crate) existing_only: bool,
     pub(crate) if_not_exists: bool,
     pub(crate) columns: Vec<Name>,
     pub(crate) query: Query,

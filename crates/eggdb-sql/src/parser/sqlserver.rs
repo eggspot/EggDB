@@ -1,6 +1,7 @@
 use super::Parser;
 use crate::ast::{
-    ColumnDefinition, Expr, ExprKind, Literal, Name, SqlServerStatement, Statement, TableReference,
+    ColumnDefinition, Expr, ExprKind, Literal, Name, Query, SetExpr, SqlServerStatement, Statement,
+    TableReference,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope};
@@ -505,7 +506,7 @@ impl<'t> Parser<'t> {
                 if self.is_word_at(1, "view")
                     || (self.is_word_at(1, "or") && self.is_word_at(3, "view")) =>
             {
-                return Err(not_supported("Views in the SQL Server dialect").at(position));
+                self.sqlserver_view()?
             }
             "use" => {
                 self.at += 1;
@@ -658,6 +659,59 @@ impl<'t> Parser<'t> {
                 Err(not_supported(&format!("SET {shown}")).at(position))
             }
             _ => Err(unknown_option(&shown, position)),
+        }
+    }
+
+    fn sqlserver_view(&mut self) -> SqlResult<Statement> {
+        let position = self.position();
+        let first_in_batch = self
+            .tokens
+            .get(..self.at)
+            .unwrap_or_default()
+            .iter()
+            .all(|token| token.kind == TokenKind::Semicolon);
+        let existing_only = self.is_word("alter");
+        self.at += 1;
+        let or_alter = !existing_only && self.take_word("or");
+        if or_alter {
+            self.expect_word("alter")?;
+        }
+        let shown = if existing_only {
+            "ALTER VIEW"
+        } else {
+            "CREATE VIEW"
+        };
+        let mut statement = self.create_view(or_alter || existing_only)?;
+        if let Statement::CreateView(view) = &mut statement {
+            view.existing_only = existing_only;
+            self.skip_empty_statements();
+            if !first_in_batch || !self.at_end() {
+                return Err(SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    format!("'{shown}' must be the first statement in a query batch."),
+                )
+                .with_sqlserver_code(111)
+                .at(position));
+            }
+            if orders_without_a_limit(&view.query) {
+                return Err(order_by_in_view(view.query.position));
+            }
+        }
+        Ok(statement)
+    }
+
+    pub(super) fn sqlserver_view_attributes(&mut self) -> SqlResult<()> {
+        loop {
+            let position = self.position();
+            if self.take_word("encryption") {
+                return Err(not_supported("WITH ENCRYPTION on a view").at(position));
+            }
+            if !(self.take_word("schemabinding") || self.take_word("view_metadata")) {
+                return Err(self.unexpected());
+            }
+            if !self.take(&TokenKind::Comma) {
+                return Ok(());
+            }
         }
     }
 
@@ -1044,6 +1098,25 @@ fn accepted_set() -> Statement {
         tag: "SET",
         notice: None,
     }
+}
+
+fn orders_without_a_limit(query: &Query) -> bool {
+    let (order_by, limit, offset) = match &query.body {
+        SetExpr::Select(select) if query.order_by.is_empty() => {
+            (&select.order_by, &select.limit, &select.offset)
+        }
+        _ => (&query.order_by, &query.limit, &query.offset),
+    };
+    !order_by.is_empty() && limit.is_none() && offset.is_none()
+}
+
+fn order_by_in_view(position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        "The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified.",
+    )
+    .with_sqlserver_code(1033)
+    .at(position)
 }
 
 fn unknown_option(shown: &str, position: usize) -> SqlError {

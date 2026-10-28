@@ -134,12 +134,11 @@ pub(crate) fn create_view(
     context: &ViewContext<'_>,
 ) -> SqlResult<QueryResult> {
     let dialect = context.dialect;
-    if dialect == Dialect::SqlServer {
-        return Err(SqlError::not_supported(
-            "Views in the SQL Server dialect are not supported in this version of EggDB.",
-        ));
-    }
-    let result = QueryResult::command("CREATE VIEW");
+    let result = QueryResult::command(if create.existing_only {
+        "ALTER VIEW"
+    } else {
+        "CREATE VIEW"
+    });
     if create.text.len() > crate::encoding::MAX_VIEW_TEXT {
         return Err(SqlError::new(
             SqlState::PROGRAM_LIMIT_EXCEEDED,
@@ -157,6 +156,9 @@ pub(crate) fn create_view(
     })?;
     let existing = match tables.relation(writer, &internal)? {
         Some(Relation::View(view)) => Some(view),
+        Some(Relation::Table(_)) if create.existing_only => {
+            return Err(not_a_view(&internal).at(create.name.position));
+        }
         Some(Relation::Table(_)) => {
             if create.if_not_exists {
                 return Ok(result.with_notice(format!(
@@ -166,6 +168,7 @@ pub(crate) fn create_view(
             }
             return Err(duplicate_relation(&create.name, &internal, dialect));
         }
+        None if create.existing_only => return Err(missing_view(&create.name, dialect)),
         None => {
             if crate::sequences::read(writer, &internal)?.is_some() {
                 return Err(duplicate_relation(&create.name, &internal, dialect));
@@ -217,7 +220,9 @@ pub(crate) fn create_view(
     }
     let columns = view_columns(&create.columns, &output, dialect)?;
     if let Some(existing) = &existing {
-        check_replacement(existing, &columns)?;
+        if dialect != Dialect::SqlServer {
+            check_replacement(existing, &columns)?;
+        }
         forget_dependencies(writer, existing)?;
     } else {
         crate::store::delete_prefix(writer, &comments_prefix(&internal))?;
@@ -246,6 +251,19 @@ pub(crate) fn create_view(
     Ok(result)
 }
 
+#[cold]
+#[inline(never)]
+fn unnamed_view_column(index: usize) -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_OBJECT_DEFINITION,
+        format!(
+            "Create View or Function failed because no column name was specified for column {}.",
+            index + 1
+        ),
+    )
+    .with_sqlserver_code(4511)
+}
+
 fn view_columns(
     names: &[Name],
     output: &[OutputColumn],
@@ -264,6 +282,9 @@ fn view_columns(
             Some(name) => {
                 crate::constraints::check_identifier(name)?;
                 name.text.clone()
+            }
+            None if column.name.is_empty() && dialect == Dialect::SqlServer => {
+                return Err(unnamed_view_column(index));
             }
             None => column.name.clone(),
         };
@@ -290,10 +311,15 @@ fn view_columns(
                 format!("invalid view column name \"{}\"", name.escape_default()),
             ));
         }
+        let source = if column.name.is_empty() {
+            name.clone()
+        } else {
+            column.name.clone()
+        };
         columns.push(ViewColumn {
             name,
             sql_type: column.sql_type,
-            source: column.name.clone(),
+            source,
         });
     }
     if columns.is_empty() {

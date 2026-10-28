@@ -194,6 +194,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("with") {
             return Err(self.not_supported("CREATE VIEW ... WITH (options)"));
         }
+        if self.sqlserver() && self.take_word("with") {
+            self.sqlserver_view_attributes()?;
+        }
         self.expect_word("as")?;
         let start = self.at;
         if !self.starts_query() && self.peek_kind() != &TokenKind::LeftParen {
@@ -211,6 +214,10 @@ impl<'t> Parser<'t> {
             self.at += 1;
             if self.oracle() && self.take_word("read") {
                 self.expect_word("only")?;
+            } else if self.sqlserver() {
+                self.expect_word("check")?;
+                self.expect_word("option")?;
+                return Err(super::sqlserver::not_supported("WITH CHECK OPTION").at(position));
             } else {
                 let _ = self.take_word("cascaded") || self.take_word("local");
                 self.expect_word("check")?;
@@ -224,6 +231,7 @@ impl<'t> Parser<'t> {
         Ok(Statement::CreateView(Box::new(CreateView {
             name,
             or_replace,
+            existing_only: false,
             if_not_exists,
             columns,
             query,

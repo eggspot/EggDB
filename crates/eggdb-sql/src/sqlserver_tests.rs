@@ -113,6 +113,11 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
         "CREATE TABLE t (id INT PRIMARY KEY, name NVARCHAR(3) NOT NULL, made DATETIME2(3) DEFAULT GETDATE(), n INT DEFAULT ((0)))",
     );
     values(&mut session, "INSERT INTO t (id, name) VALUES (1, N'a')");
+    values(
+        &mut session,
+        "CREATE TABLE c (id INT PRIMARY KEY CHECK (id > 0))",
+    );
+    values(&mut session, "INSERT INTO c VALUES (1)");
     let rows = values(&mut session, "SELECT n, made AS m FROM t");
     assert_eq!(rows[0][0], Value::Integer(0));
     assert!(matches!(rows[0][1], Value::Timestamp(_)));
@@ -131,7 +136,8 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
         "SELECT nope FROM t",
         "INSERT INTO t (id, name) VALUES (1, N'b')",
         "INSERT INTO t (id, name) VALUES (2, NULL)",
-        "CREATE TABLE c (id INT PRIMARY KEY CHECK (id > 0))",
+        "INSERT INTO c VALUES (0)",
+        "ALTER TABLE c ADD CONSTRAINT c_small CHECK (id > 5)",
         "CREATE TABLE d (id INT PRIMARY KEY, at DATETIME2 DEFAULT SYSDATETIME() + 1)",
         "INSERT INTO t (id, name) VALUES (3, N'long')",
         "SELECT 1 / 0 AS x",
@@ -144,7 +150,9 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
         "SELECT @@whatever AS v",
         "DROP TABLE nowhere",
         "CREATE TABLE t (id INT PRIMARY KEY)",
-        "CREATE VIEW v AS SELECT 1 AS one",
+        "CREATE VIEW v AS SELECT 1 AS one ORDER BY one",
+        "ALTER VIEW nowhere AS SELECT 1 AS one",
+        "SELECT 1 AS one; CREATE VIEW v AS SELECT 1 AS one",
         "SELECT id FROM t GROUP BY name",
         "SET XACT_ABORT ON",
         "COMMIT",
@@ -475,4 +483,364 @@ fn errors_after_a_conversion_keep_their_own_numbers() {
         ),
         vec![vec![Value::Integer(2)]]
     );
+}
+
+fn stored(store: &MemoryStore, relation: &str) -> Vec<u8> {
+    use crate::store::{KeyValueRead, KeyValueStore};
+    store
+        .begin_read()
+        .unwrap()
+        .get(&crate::encoding::table_key(relation))
+        .unwrap()
+        .unwrap()
+}
+
+fn error_of(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
+    session.execute(text, &mut |_| {}).expect_err(text)
+}
+
+#[test]
+fn views_and_checks_written_in_transact_sql_are_stored_with_its_dialect_code() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE [dbo].[Orders] ([OrderID] INT NOT NULL PRIMARY KEY, [Qty] INT NOT NULL, CONSTRAINT [CK_Orders_Qty] CHECK ([Qty] > 0))",
+    );
+    values(
+        &mut session,
+        "CREATE VIEW [dbo].[vOrders] AS SELECT [OrderID], [Qty] FROM [dbo].[Orders]",
+    );
+    let table =
+        crate::encoding::TableDefinition::decode("orders", &stored(&store, "orders")).unwrap();
+    assert_eq!(table.checks.len(), 1);
+    assert_eq!(table.checks[0].name, "ck_orders_qty");
+    assert_eq!(table.checks[0].dialect, Dialect::SqlServer);
+    assert_eq!(table.checks[0].expression, "[Qty] > 0");
+    let view = stored(&store, "vorders");
+    assert_eq!(view[..2], [8, 4]);
+    let decoded = crate::encoding::ViewDefinition::decode("vorders", &view).unwrap();
+    assert_eq!(decoded.dialect, Dialect::SqlServer);
+    assert_eq!(decoded.query, "SELECT [OrderID], [Qty] FROM [dbo].[Orders]");
+}
+
+#[test]
+fn transact_sql_checks_and_views_work_from_every_dialect_and_back() {
+    let store = MemoryStore::default();
+    let mut tsql = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut tsql,
+        "CREATE TABLE [dbo].[Stock] ([ID] INT NOT NULL PRIMARY KEY, [Qty] INT NOT NULL CHECK ([Qty] >= 0), [Name] NVARCHAR(20) NULL)",
+    );
+    values(
+        &mut tsql,
+        "CREATE VIEW [dbo].[vStock] AS SELECT [ID], ISNULL([Name], N'none') AS [Shown] FROM [dbo].[Stock]",
+    );
+    let mut postgresql = Session::new(&store);
+    values(&mut postgresql, "INSERT INTO stock VALUES (1, 5, NULL)");
+    let error = error_of(&mut postgresql, "INSERT INTO stock VALUES (2, -1, 'x')");
+    assert_eq!(error.state().code(), "23514");
+    assert_eq!(error.vendor(), None);
+    assert!(
+        error.message().contains("violates check constraint"),
+        "{error}"
+    );
+    assert_eq!(
+        values(&mut postgresql, "SELECT shown FROM vstock"),
+        vec![vec![Value::Text("none".into())]]
+    );
+    values(
+        &mut postgresql,
+        "CREATE TABLE pg_made (id integer PRIMARY KEY, n integer CHECK (n < 10))",
+    );
+    let error = error_of(&mut tsql, "INSERT INTO pg_made VALUES (1, 10)");
+    assert_eq!(error.vendor_code(), Some(547));
+    let error = error_of(&mut tsql, "INSERT INTO Stock VALUES (3, -2, NULL)");
+    assert_eq!(error.vendor_code(), Some(547));
+    assert!(error.message().contains("CHECK constraint"), "{error}");
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    assert!(
+        mysql
+            .execute("INSERT INTO stock VALUES (4, -3, NULL)", &mut |_| {})
+            .is_err()
+    );
+    assert_eq!(
+        values(&mut mysql, "SELECT shown FROM vstock"),
+        vec![vec![Value::Text("none".into())]]
+    );
+}
+
+#[test]
+fn a_renamed_column_is_written_back_into_transact_sql_checks_in_brackets() {
+    let store = MemoryStore::default();
+    let mut tsql = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut tsql,
+        "CREATE TABLE t (id INT PRIMARY KEY, qty INT NOT NULL, CONSTRAINT ck_qty CHECK (qty > 0 AND [qty] < 100))",
+    );
+    let mut postgresql = Session::new(&store);
+    values(
+        &mut postgresql,
+        "ALTER TABLE t RENAME COLUMN qty TO \"a]b c\"",
+    );
+    let table = crate::encoding::TableDefinition::decode("t", &stored(&store, "t")).unwrap();
+    assert_eq!(
+        table.checks[0].expression,
+        "[a]]b c] > 0 AND [a]]b c] < 100"
+    );
+    assert_eq!(
+        error_of(&mut tsql, "INSERT INTO t VALUES (1, 0)").vendor_code(),
+        Some(547)
+    );
+    values(&mut tsql, "INSERT INTO t VALUES (1, 5)");
+    let error = error_of(
+        &mut postgresql,
+        "ALTER TABLE t RENAME COLUMN \"a]b c\" TO \"MixedCase\"",
+    );
+    assert_eq!(error.state().code(), "0A000");
+    assert!(error.message().contains("ck_qty"), "{error}");
+    let table = crate::encoding::TableDefinition::decode("t", &stored(&store, "t")).unwrap();
+    assert_eq!(table.columns[1].name, "a]b c");
+    values(
+        &mut postgresql,
+        "ALTER TABLE t RENAME COLUMN \"a]b c\" TO amount",
+    );
+    assert_eq!(
+        error_of(&mut tsql, "INSERT INTO t VALUES (2, 100)").vendor_code(),
+        Some(547)
+    );
+    values(&mut postgresql, "ALTER TABLE t RENAME COLUMN id TO \"Id\"");
+}
+
+#[test]
+fn unnamed_transact_sql_checks_get_names_that_transact_sql_can_drop() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE [Items] ([ID] INT PRIMARY KEY, [Price] INT CHECK ([Price] >= 0), CHECK ([ID] > 0), CHECK ([Price] < 1000))",
+    );
+    let table =
+        crate::encoding::TableDefinition::decode("items", &stored(&store, "items")).unwrap();
+    let names: Vec<&str> = table
+        .checks
+        .iter()
+        .map(|check| check.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["ck__items__price", "ck__items__id", "ck__items__price1"]
+    );
+    values(
+        &mut session,
+        "ALTER TABLE Items DROP CONSTRAINT CK__Items__Price",
+    );
+    values(&mut session, "INSERT INTO Items VALUES (1, -5)");
+}
+
+#[test]
+fn create_view_must_be_alone_in_its_batch() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    for text in [
+        "SELECT 1 AS a\nCREATE VIEW v AS SELECT 1 AS one",
+        "CREATE VIEW v AS SELECT 1 AS one\nSELECT 2 AS two",
+        "CREATE TABLE t (id INT PRIMARY KEY);\nALTER VIEW v AS SELECT 1 AS one",
+    ] {
+        let error = batch(&mut session, text).expect_err(text);
+        assert_eq!(error.vendor_code(), Some(111), "{text}");
+        assert_eq!(error.severity(), Some(15), "{text}");
+    }
+    let steps = batch(&mut session, ";\nCREATE VIEW v AS SELECT 1 AS one;").unwrap();
+    assert_eq!(codes(&steps), vec![None]);
+    let mut postgresql = Session::new(&store);
+    assert!(postgresql.execute("SELECT * FROM t", &mut |_| {}).is_err());
+    assert_eq!(
+        values(&mut postgresql, "SELECT one FROM v"),
+        vec![vec![Value::Integer(1)]]
+    );
+}
+
+#[test]
+fn view_options_and_replacement_follow_sql_servers_rules() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY, n INT)");
+    values(&mut session, "INSERT INTO t VALUES (1, 10), (2, 20)");
+    values(
+        &mut session,
+        "CREATE VIEW v WITH SCHEMABINDING, VIEW_METADATA AS SELECT id FROM dbo.t",
+    );
+    for (text, code) in [
+        ("CREATE VIEW w WITH ENCRYPTION AS SELECT id FROM t", 40517),
+        ("CREATE VIEW w AS SELECT id FROM t WITH CHECK OPTION", 40517),
+        ("CREATE OR REPLACE VIEW w AS SELECT id FROM t", 102),
+        ("CREATE VIEW v AS SELECT id FROM t", 2714),
+        ("ALTER VIEW t AS SELECT id FROM t", 50000),
+        ("CREATE VIEW w AS SELECT id, n + 1 FROM t", 4511),
+    ] {
+        assert_eq!(
+            error_of(&mut session, text).vendor_code(),
+            Some(code),
+            "{text}"
+        );
+    }
+    values(&mut session, "ALTER VIEW v AS SELECT n FROM t WHERE id = 2");
+    assert_eq!(
+        values(&mut session, "SELECT n FROM v"),
+        vec![vec![Value::Integer(20)]]
+    );
+    values(
+        &mut session,
+        "CREATE OR ALTER VIEW v AS SELECT TOP 1 n FROM t ORDER BY n",
+    );
+    assert_eq!(
+        values(&mut session, "SELECT n FROM v"),
+        vec![vec![Value::Integer(10)]]
+    );
+    values(&mut session, "CREATE OR ALTER VIEW w AS SELECT * FROM t");
+    values(&mut session, "DROP TABLE t");
+    assert_eq!(
+        error_of(&mut session, "SELECT * FROM w").vendor_code(),
+        Some(208)
+    );
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY, n INT)");
+    values(&mut session, "INSERT INTO t VALUES (3, 30)");
+    assert_eq!(
+        values(&mut session, "SELECT * FROM w"),
+        vec![vec![Value::Integer(3), Value::Integer(30)]]
+    );
+    values(&mut session, "DROP TABLE t");
+    values(&mut session, "CREATE TABLE t (n INT)");
+    assert_eq!(
+        error_of(&mut session, "SELECT * FROM w").vendor_code(),
+        Some(4413)
+    );
+}
+
+#[test]
+fn stored_transact_sql_texts_keep_their_meaning() {
+    const CHECKS: [(&str, &[(&str, bool)]); 4] = [
+        (
+            "[Qty] BETWEEN 1 AND 99",
+            &[
+                ("1, 1, N'a', '2024-01-01'", true),
+                ("2, 100, N'a', '2024-01-01'", false),
+            ],
+        ),
+        (
+            "ISNULL([Code], N'x') <> N''",
+            &[
+                ("1, 1, NULL, '2024-01-01'", true),
+                ("2, 1, N'', '2024-01-01'", false),
+            ],
+        ),
+        (
+            "[Day] >= CONVERT(date, '20240101', 112) AND DATEDIFF(day, '20240101', [Day]) < 31",
+            &[
+                ("1, 1, N'a', '2024-01-31'", true),
+                ("2, 1, N'a', '2024-02-01'", false),
+            ],
+        ),
+        (
+            "LEN([Code]) <= 3 OR [Code] IS NULL",
+            &[
+                ("1, 1, N'abc', '2024-01-01'", true),
+                ("2, 1, N'abcd', '2024-01-01'", false),
+            ],
+        ),
+    ];
+    const VIEWS: [(&str, &[&[i64]]); 3] = [
+        (
+            "SELECT [ID], [Qty] FROM [dbo].[Base] WHERE [Qty] > 1",
+            &[&[2, 5], &[3, 9]],
+        ),
+        (
+            "SELECT TOP (2) [ID] FROM [dbo].[Base] ORDER BY [Qty] DESC",
+            &[&[3], &[2]],
+        ),
+        (
+            "SELECT COUNT(*) AS [N], SUM([Qty]) AS [Total] FROM [dbo].[Base] WHERE [Code] + N'!' = N'b!'",
+            &[&[2, 14]],
+        ),
+    ];
+    for (index, (check, rows)) in CHECKS.iter().enumerate() {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+        values(
+            &mut session,
+            &format!(
+                "CREATE TABLE [dbo].[Corpus] ([ID] INT PRIMARY KEY, [Qty] INT NOT NULL, [Code] NVARCHAR(10) NULL, [Day] DATE NOT NULL, CONSTRAINT [CK_Corpus_{index}] CHECK ({check}))"
+            ),
+        );
+        let table =
+            crate::encoding::TableDefinition::decode("corpus", &stored(&store, "corpus")).unwrap();
+        assert_eq!(table.checks[0].expression, *check);
+        for (row, accepted) in *rows {
+            let outcome =
+                session.execute(&format!("INSERT INTO Corpus VALUES ({row})"), &mut |_| {});
+            assert_eq!(
+                outcome.is_ok(),
+                *accepted,
+                "{check} with {row}: {outcome:?}"
+            );
+        }
+    }
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE [dbo].[Base] ([ID] INT PRIMARY KEY, [Qty] INT NOT NULL, [Code] NVARCHAR(10) NULL)",
+    );
+    values(
+        &mut session,
+        "INSERT INTO Base VALUES (1, 1, N'a'), (2, 5, N'b'), (3, 9, N'b')",
+    );
+    for (index, (query, expected)) in VIEWS.iter().enumerate() {
+        values(
+            &mut session,
+            &format!("CREATE VIEW [dbo].[vCorpus{index}] AS {query}"),
+        );
+        let view = crate::encoding::ViewDefinition::decode(
+            &format!("vcorpus{index}"),
+            &stored(&store, &format!("vcorpus{index}")),
+        )
+        .unwrap();
+        assert_eq!(view.query, *query);
+        let found = values(&mut session, &format!("SELECT * FROM vCorpus{index}"));
+        let found: Vec<Vec<i64>> = found
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|value| value.as_integer().unwrap())
+                    .collect()
+            })
+            .collect();
+        let expected: Vec<Vec<i64>> = expected.iter().map(|row| row.to_vec()).collect();
+        assert_eq!(found, expected, "{query}");
+    }
+}
+
+#[test]
+fn hostile_views_and_checks_in_transact_sql_return_errors_and_never_panic() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY, n INT)");
+    let deep = format!("{}1{}", "(".repeat(20_000), ")".repeat(20_000));
+    let long = format!("SELECT id FROM t WHERE n <> {}", "1+".repeat(600_000));
+    for text in [
+        format!("CREATE VIEW v1 AS SELECT {deep} AS x"),
+        format!("CREATE TABLE c1 (id INT CHECK (id > {deep}))"),
+        format!("ALTER TABLE t ADD CONSTRAINT c2 CHECK (n > {deep})"),
+        format!("CREATE VIEW v2 AS {long}1"),
+        "CREATE VIEW v3 AS SELECT (SELECT COUNT(*) FROM t) AS x ORDER BY x".to_owned(),
+        "CREATE VIEW v4 AS".to_owned(),
+        "CREATE VIEW [v5 AS SELECT 1 AS one".to_owned(),
+        "ALTER TABLE t ADD CONSTRAINT c3 CHECK ((SELECT 1) = 1)".to_owned(),
+        "ALTER TABLE t ADD CONSTRAINT c4 CHECK (COUNT(*) > 0)".to_owned(),
+        "CREATE VIEW v6 WITH AS SELECT 1 AS one".to_owned(),
+    ] {
+        let error = session.execute(&text, &mut |_| {}).expect_err("refused");
+        assert!(error.vendor_code().is_some(), "{error}");
+    }
 }

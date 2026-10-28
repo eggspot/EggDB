@@ -495,7 +495,7 @@ impl Resolver<'_> {
         position: usize,
     ) -> SqlResult<DerivedTable> {
         match view.dialect {
-            Dialect::PostgreSql | Dialect::SqlServer => Ok(DerivedTable {
+            Dialect::PostgreSql => Ok(DerivedTable {
                 query: Query::of_select(
                     narrowed(query, column_names, label, view.dialect, position),
                     position,
@@ -527,7 +527,7 @@ impl Resolver<'_> {
                 column_names: Vec::new(),
                 dialect: view.dialect,
             }),
-            Dialect::MySql | Dialect::Oracle => {
+            Dialect::MySql | Dialect::Oracle | Dialect::SqlServer => {
                 let present = self.output_columns(&query)?;
                 let sources = source_positions(view, &present)
                     .ok_or_else(|| invalid_view(view, self.settings))?;
@@ -596,6 +596,14 @@ fn invalid_view(view: &ViewDefinition, settings: Option<&Settings>) -> SqlError 
             ),
         )
         .with_vendor_code(1356),
+        Dialect::SqlServer => SqlError::new(
+            SqlState::INVALID_OBJECT_DEFINITION,
+            format!(
+                "Could not use view or function '{}' because of binding errors.",
+                crate::schemas::display(&view.name)
+            ),
+        )
+        .with_sqlserver_code(4413),
         _ => SqlError::new(
             SqlState::INVALID_OBJECT_DEFINITION,
             format!(
