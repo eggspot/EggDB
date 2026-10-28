@@ -45,7 +45,7 @@ eggdb <command> <file> [arguments] [options]
 | `stats <file>` | read-only | the page size, pages, file size, last commit and log, without reading a page |
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below) |
-| `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below) |
+| `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below); with `--csv <file> --table <name>`, a CSV file into a SQL table |
 | `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
@@ -372,6 +372,7 @@ grid in psql's style and puts the cursor on the character it points at:
 ```
 eggdb export <file> [<out> | -]
 eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run]
+eggdb import <file> --csv <csv file | -> --table <name> [--header] [--delimiter <c>] [--null <text>]
 ```
 
 `export` writes every entry, from one snapshot, to `<out>`, or to stdout without it or with `-`.
@@ -420,6 +421,35 @@ entry above about 30 MiB), as `put` does.
 
 **Progress.** On a terminal, both show `imported 1,204,000 entries…` on stderr, redrawn once a
 second, and erase it when they end.
+
+### Loading a CSV file into a table: `import --csv`
+
+```
+eggdb import <file> --csv <csv file | -> --table <name> [--header] [--delimiter <c>] [--null <text>]
+```
+
+With `--csv`, `import` loads a CSV file (or stdin, with `-`) into an existing SQL table instead,
+as `COPY <name> FROM STDIN (FORMAT csv)` does ([sql.md](sql.md#copy), D117): every row goes
+through the path of `INSERT`, so constraints, defaults, `serial` columns and indexes apply, and
+the whole file loads in one transaction, all rows or none. `--table` is the table as SQL writes
+it (`people`, `app."People"`, or `people (name, id)` for the columns the file holds, in its
+order); `--header` skips a first line of column names; `--delimiter` and `--null` change the
+separator (a comma) and the unquoted text that means NULL (empty). It prints `imported 2 rows
+from people.csv into people in app.db`, or in a pipe one JSON line with `file`, `from`, `table`
+and `rows`; a bad row prints the error with its line and column, `Nothing was imported`, and
+exits 3. The page cache grows with the file (four times its size plus 16 MiB, between 256 MiB
+and 1 GiB) since the load must fit in it; `--cache` sets it for larger files. `--dry-run`,
+`--on-conflict` and `--page-size` are for eggdb-jsonl imports, and `--create` is refused: a new
+file has no table to load into, so create the file and the table with `eggdb sql --create`.
+
+```sh
+eggdb sql app.db -c "CREATE TABLE people (id integer PRIMARY KEY, name text, born date)"
+eggdb import app.db --csv people.csv --table people --header
+gunzip -c more.csv.gz | eggdb import app.db --csv - --table "people (name, id)"
+```
+
+To unload a table as CSV, run `COPY ... TO STDOUT` with `eggdb sql`:
+`eggdb sql app.db -c "COPY people TO STDOUT (FORMAT csv, HEADER)" > people.csv`.
 
 ### The export format, eggdb-jsonl version 1
 
@@ -514,6 +544,14 @@ SQLSTATE:  42P01
   `0xff 'S' 'Q' 'L' 0x00` (D98). `eggdb scan`, `export`, `import` and `check` see and carry
   them like any other key; writing keys with that prefix through `put` or the embedded API
   changes the tables underneath SQL.
+- `COPY ... FROM STDIN` and `COPY ... TO STDOUT` ([sql.md](sql.md#copy)) work as with psql: in
+  a script (a file, or stdin), the data follows the statement's line up to a line `\.`, as
+  `pg_dump` writes it; with `-c`, the data is read from stdin
+  (`eggdb sql app.db -c "COPY people FROM STDIN (FORMAT csv)" < people.csv`). `COPY ... TO
+  STDOUT` prints the rows themselves, with no table around them and no `COPY n` line, so its
+  output can be saved as it is. An error in the data adds a `CONTEXT:` line naming the line
+  and the column. When the SQL contains `COPY`, the page cache grows with the script (as for
+  `import --csv`) so a large load fits in its one transaction.
 - `-c` takes UTF-8 text, given once (put several statements in it, separated by semicolons);
   `-c` and a script together, a script that cannot be read, or SQL that is not UTF-8 are usage
   errors (exit 2).
@@ -584,6 +622,8 @@ block fail with the busy error (exit 5): the block holds the one write transacti
 | `.timer [on\|off]` | `Time: 1.234 ms` on stderr after every statement and command |
 | `.help` | the commands, keys and the history file |
 | `.quit`, `.exit` | leave (so does `Ctrl-D` on an empty line) |
+| `\copy t from 'file' [options]` | psql's `\copy`: load a file on this machine into a table, as `COPY t FROM STDIN [options]` (`from stdin` reads the lines that follow, up to `\.`) |
+| `\copy {t \| (query)} to 'file' [options]` | unload into a file on this machine (replacing it), or `to stdout` |
 
 | Key | Does |
 |-----|------|
@@ -602,6 +642,15 @@ block fail with the busy error (exit 5): the block holds the one write transacti
 the newest 1,000, mode 0600 in a 0700 directory. Empty lines, lines starting with a space,
 repeats of the previous entry and `.quit` are not kept. `EGGDB_HISTORY=<path>` moves the file and
 `EGGDB_HISTORY=` (set and empty) turns it off.
+
+**COPY.** `COPY t FROM STDIN;` reads its data from the lines that follow, up to a line `\.`
+(at the prompt it says so and prompts with `>>`; `Ctrl-D` also ends the data and `Ctrl-C` fails
+the copy), and `COPY ... TO STDOUT` prints the rows. When a `COPY` fails in a batch while it
+reads its data, the rest of the data, up to `\.`, is skipped, so it never runs as SQL; a `COPY`
+refused before its data starts (a missing table, say) leaves the lines to run as SQL, as psql
+does. `\copy` reads and writes files with
+the shell's own permissions; a file name may be quoted (`'my file.csv'`) and `program` is
+refused.
 
 **Batch use.** With `-c` (repeatable, run in order) or with stdin not a terminal, the shell runs
 the text as if typed, without banner, prompt, colour or history, and prints results in `table`

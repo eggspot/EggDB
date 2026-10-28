@@ -19,13 +19,16 @@
 //! it measured, keeping the others (such as `eggdb-sqlite-compare`'s), `--baseline <path>`
 //! reads another file, `--results <path>` writes one line per metric (`<os> <benchmark>
 //! <metric> <value> <baseline> <change> <verdict>`) for CI to keep per pull request, and the
-//! table is added to `$GITHUB_STEP_SUMMARY` when it is set.
+//! table is added to `$GITHUB_STEP_SUMMARY` when it is set. `--only <family>` runs only the
+//! benchmarks whose names start with `<family>.`, such as `sql_copy`, so `--update` can add one
+//! family's lines without measuring the rest again.
 
 mod allocations;
 mod baseline;
 mod bench_file;
 mod btree;
 mod checkpoint;
+mod copy;
 mod database;
 mod entries;
 mod footprint;
@@ -47,7 +50,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 20] = [
+const COUNTED: [(&str, Counted); 22] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -68,6 +71,8 @@ const COUNTED: [(&str, Counted); 20] = [
     (database::WRITE, database::write),
     (large_value::PUT, large_value::put),
     (large_value::GET, large_value::get),
+    (copy::FROM, copy::from_stdin),
+    (copy::TO, copy::to_stdout),
 ];
 
 const FOOTPRINT: [(&str, Uncounted); 3] = [

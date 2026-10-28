@@ -10,9 +10,10 @@ use crate::types::{
 };
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_sql::{
-    KeyValueStore, OutputColumn, Parameter, QueryResult, Session, SqlError, SqlState, SqlType,
-    TransactionStatus,
+    CopyChannel, CopyStart, KeyValueStore, OutputColumn, Parameter, QueryResult, Session, SqlError,
+    SqlResult, SqlState, SqlType, TransactionStatus,
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -97,6 +98,9 @@ fn report_error(wire: &mut Wire<'_>, severity: Severity, error: &SqlError, text:
     if let Some(position) = &position {
         fields.push((ReportField::Position, position));
     }
+    if let Some(context) = error.context() {
+        fields.push((ReportField::Where, context));
+    }
     wire.outbox.report(false, &fields);
 }
 
@@ -145,6 +149,113 @@ fn aborted() -> SqlError {
 
 fn protocol_violation(message: impl Into<String>) -> SqlError {
     SqlError::new(SqlState::PROTOCOL_VIOLATION, message)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lost {
+    Closed,
+    Stopping,
+    TooLarge(usize),
+}
+
+struct WireCopy<'r, 'w, 'a> {
+    wire: &'r RefCell<&'w mut Wire<'a>>,
+    lost: Option<Lost>,
+}
+
+impl WireCopy<'_, '_, '_> {
+    fn lose(&mut self, lost: Lost) -> SqlError {
+        self.lost = Some(lost);
+        match lost {
+            Lost::Stopping => SqlError::new(
+                SqlState::ADMIN_SHUTDOWN,
+                "terminating connection due to administrator command",
+            ),
+            Lost::TooLarge(length) => {
+                protocol_violation(format!("invalid message length {length}"))
+            }
+            Lost::Closed => SqlError::new(
+                SqlState::CONNECTION_FAILURE,
+                "unexpected EOF on client connection with an open transaction",
+            ),
+        }
+    }
+
+    fn sent(&mut self, written: std::io::Result<()>) -> SqlResult<()> {
+        written.map_err(|_| self.lose(Lost::Closed))
+    }
+}
+
+impl CopyChannel for WireCopy<'_, '_, '_> {
+    fn start_copy_in(&mut self, start: &CopyStart) -> SqlResult<()> {
+        let flushed = {
+            let mut wire = self.wire.borrow_mut();
+            wire.outbox
+                .copy_in_response(start.columns)
+                .map_err(too_large)?;
+            wire.flush()
+        };
+        self.sent(flushed)
+    }
+
+    fn read_copy_data(&mut self, data: &mut Vec<u8>) -> SqlResult<bool> {
+        loop {
+            let read = self.wire.borrow_mut().read_message(MAX_MESSAGE_BYTES);
+            let (tag, body) = match read {
+                Ok(message) => message,
+                Err(WireError::Stopping) => return Err(self.lose(Lost::Stopping)),
+                Err(WireError::TooLarge(length)) => return Err(self.lose(Lost::TooLarge(length))),
+                Err(WireError::Closed | WireError::TimedOut | WireError::Io) => {
+                    return Err(self.lose(Lost::Closed));
+                }
+            };
+            match tag {
+                b'd' => {
+                    data.extend_from_slice(&body);
+                    return Ok(true);
+                }
+                b'c' => return Ok(false),
+                b'f' => {
+                    let reason = match parse_message(tag, &body) {
+                        Ok(FrontendMessage::CopyFail(reason)) => reason,
+                        _ => String::new(),
+                    };
+                    return Err(SqlError::new(
+                        SqlState::QUERY_CANCELED,
+                        format!("COPY from stdin failed: {reason}"),
+                    ));
+                }
+                b'H' | b'S' => {}
+                other => {
+                    return Err(protocol_violation(format!(
+                        "unexpected message type 0x{other:02X} during COPY from stdin"
+                    )));
+                }
+            }
+        }
+    }
+
+    fn start_copy_out(&mut self, start: &CopyStart) -> SqlResult<()> {
+        self.wire
+            .borrow_mut()
+            .outbox
+            .copy_out_response(start.columns)
+            .map_err(too_large)
+    }
+
+    fn write_copy_data(&mut self, data: &[u8]) -> SqlResult<()> {
+        let flushed = {
+            let mut wire = self.wire.borrow_mut();
+            wire.outbox.copy_data(data).map_err(too_large)?;
+            wire.flush_if_large()
+        };
+        self.sent(flushed)
+    }
+
+    fn finish_copy_out(&mut self) -> SqlResult<()> {
+        self.wire.borrow_mut().outbox.copy_done();
+        Ok(())
+    }
 }
 
 pub(crate) struct Startup {
@@ -464,6 +575,7 @@ pub(crate) struct Connection<'a, 's, S: KeyValueStore + 's> {
     statements: HashMap<String, PreparedEntry>,
     portals: HashMap<String, Portal>,
     skipping_to_sync: bool,
+    lost: Option<Lost>,
 }
 
 pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
@@ -554,6 +666,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         statements: HashMap::new(),
         portals: HashMap::new(),
         skipping_to_sync: false,
+        lost: None,
     };
     connection.ready_for_query();
     if connection.wire.flush().is_ok() {
@@ -653,7 +766,9 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 }
                 FrontendMessage::Flush => self.wire.flush().is_ok(),
                 FrontendMessage::Terminate => false,
-                FrontendMessage::Other(b'd' | b'c' | b'f') => true,
+                FrontendMessage::CopyData
+                | FrontendMessage::CopyDone
+                | FrontendMessage::CopyFail(_) => true,
                 FrontendMessage::Other(b'F') => {
                     report_error(
                         &mut self.wire,
@@ -679,8 +794,34 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                     false
                 }
             };
-            if !keep_going {
+            if !keep_going || !self.still_connected() {
                 return;
+            }
+        }
+    }
+
+    fn still_connected(&mut self) -> bool {
+        match self.lost.take() {
+            None => true,
+            Some(Lost::Closed) => false,
+            Some(Lost::Stopping) => {
+                self.shared
+                    .ended_by_stop
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                fatal(
+                    &mut self.wire,
+                    SqlState::ADMIN_SHUTDOWN,
+                    "terminating connection due to administrator command",
+                );
+                false
+            }
+            Some(Lost::TooLarge(length)) => {
+                fatal(
+                    &mut self.wire,
+                    SqlState::PROTOCOL_VIOLATION,
+                    &format!("invalid message length {length}"),
+                );
+                false
             }
         }
     }
@@ -690,7 +831,9 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         step: impl FnOnce(&mut Self) -> Result<(), (SqlError, Option<String>)>,
     ) -> bool {
         if let Err((error, text)) = step(self) {
-            report_error(&mut self.wire, Severity::Error, &error, text.as_deref());
+            if self.lost.is_none() {
+                report_error(&mut self.wire, Severity::Error, &error, text.as_deref());
+            }
             self.skipping_to_sync = true;
         }
         self.wire.flush_if_large().is_ok()
@@ -715,12 +858,18 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         let mut results = 0usize;
         let mut sent = true;
         let mut unsendable = None;
-        let outcome = {
-            let wire = &mut self.wire;
-            self.session.execute_while(text, &mut |result| {
+        let wire = RefCell::new(&mut self.wire);
+        let mut copy = WireCopy {
+            wire: &wire,
+            lost: None,
+        };
+        let outcome = self.session.execute_with_copy(
+            text,
+            &mut |result| {
                 results += 1;
+                let mut wire = wire.borrow_mut();
                 for notice in &result.notices {
-                    send_notice(wire, notice);
+                    send_notice(&mut wire, notice);
                 }
                 if let Some(columns) = &result.columns {
                     let description = describe_columns(columns, &result.rows, &[]);
@@ -746,9 +895,11 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 wire.outbox.command_complete(&result.tag);
                 sent = wire.flush_if_large().is_ok();
                 sent
-            })
-        };
-        if !sent {
+            },
+            &mut copy,
+        );
+        self.lost = copy.lost;
+        if !sent || self.lost == Some(Lost::Closed) {
             return false;
         }
         let outcome = match unsendable {
@@ -758,6 +909,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         match outcome {
             Ok(()) if results == 0 => self.wire.outbox.empty_query_response(),
             Ok(()) => {}
+            Err(_) if self.lost.is_some() => return true,
             Err(error) => report_error(&mut self.wire, Severity::Error, &error, Some(text)),
         }
         self.report_changed_parameters();
@@ -1035,12 +1187,22 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 .map(|columns| describe_columns(&columns, &[], &formats)),
         };
         let mut results: Vec<QueryResult> = Vec::new();
-        self.session
-            .execute_prepared(&text, &parameters, &mut |result| {
+        let wire = RefCell::new(&mut self.wire);
+        let mut copy = WireCopy {
+            wire: &wire,
+            lost: None,
+        };
+        let outcome = self.session.execute_prepared_with_copy(
+            &text,
+            &parameters,
+            &mut |result| {
                 results.push(result);
                 true
-            })
-            .map_err(|error| (error, Some(text.clone())))?;
+            },
+            &mut copy,
+        );
+        self.lost = copy.lost;
+        outcome.map_err(|error| (error, Some(text.clone())))?;
         self.report_changed_parameters();
         let Some(result) = results.pop() else {
             if let Some(portal) = self.portals.get_mut(name) {

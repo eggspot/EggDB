@@ -71,6 +71,103 @@ pub(crate) fn tokenize_in(text: &str, dialect: Dialect) -> SqlResult<Vec<Token<'
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CopyStop {
+    pub(crate) range: usize,
+    pub(crate) at: usize,
+}
+
+pub(crate) struct ScriptTokens<'t> {
+    pub(crate) tokens: Vec<Token<'t>>,
+    pub(crate) copy_stop: Option<CopyStop>,
+}
+
+fn copies_from_client(tokens: &[Token<'_>]) -> bool {
+    if !matches!(tokens.first().map(|token| &token.kind), Some(TokenKind::Word(word)) if word == "copy")
+    {
+        return false;
+    }
+    let mut depth = 0usize;
+    for pair in tokens.windows(2) {
+        match &pair[0].kind {
+            TokenKind::LeftParen => depth += 1,
+            TokenKind::RightParen => depth = depth.saturating_sub(1),
+            TokenKind::Word(word) if depth == 0 && word == "from" => {
+                return matches!(&pair[1].kind, TokenKind::Word(target)
+                    if target == "stdin" || target == "stdout");
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+pub(crate) fn tokenize_script<'t>(
+    text: &'t str,
+    dialect: Dialect,
+    ranges: &[std::ops::Range<usize>],
+) -> SqlResult<ScriptTokens<'t>> {
+    let detects = dialect == Dialect::PostgreSql;
+    let mut tokens = Vec::new();
+    let mut statement_start = 0;
+    let mut end = 0;
+    for (index, range) in ranges.iter().enumerate() {
+        let Some(part) = text.get(..range.end) else {
+            continue;
+        };
+        end = range.end;
+        let mut lexer = Lexer {
+            text: part,
+            bytes: part.as_bytes(),
+            at: range.start.min(range.end),
+            dialect,
+            open_executable_comments: 0,
+            named_parameters: Vec::new(),
+            highest_parameter: 0,
+        };
+        loop {
+            lexer.skip_space_and_comments()?;
+            let start = lexer.at;
+            let kind = lexer.next_kind()?;
+            if kind == TokenKind::End {
+                break;
+            }
+            let semicolon = kind == TokenKind::Semicolon;
+            tokens.push(Token {
+                kind,
+                start,
+                end: lexer.at,
+            });
+            if !semicolon {
+                continue;
+            }
+            if detects && copies_from_client(&tokens[statement_start..]) {
+                let at = lexer.at;
+                tokens.push(Token {
+                    kind: TokenKind::End,
+                    start: at,
+                    end: at,
+                });
+                return Ok(ScriptTokens {
+                    tokens,
+                    copy_stop: Some(CopyStop { range: index, at }),
+                });
+            }
+            statement_start = tokens.len();
+        }
+    }
+    let copy_stop = (detects && copies_from_client(&tokens[statement_start..])).then(|| CopyStop {
+        range: ranges.len().saturating_sub(1),
+        at: end,
+    });
+    tokens.push(Token {
+        kind: TokenKind::End,
+        start: end,
+        end,
+    });
+    Ok(ScriptTokens { tokens, copy_stop })
+}
+
 struct Lexer<'t> {
     text: &'t str,
     bytes: &'t [u8],

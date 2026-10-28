@@ -1,4 +1,5 @@
 mod constraints;
+mod copy;
 mod indexes;
 mod mysql;
 mod oracle;
@@ -691,6 +692,7 @@ impl<'t> Parser<'t> {
             "grant" if self.postgresql() => self.grant_or_revoke("GRANT"),
             "revoke" if self.postgresql() => self.grant_or_revoke("REVOKE"),
             "comment" if self.postgresql() || self.oracle() => self.comment(),
+            "copy" if self.postgresql() => self.copy(),
             "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
             | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
             | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),

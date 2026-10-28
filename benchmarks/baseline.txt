@@ -86,6 +86,8 @@ macos large_value.get ratio_to_copying_the_value 2.367
 macos large_value.put ratio_to_writing_the_value_twice 9.798
 macos log.recovery ratio_to_crc32c_of_the_replayed_log 1.827
 macos page_cache.hit ratio_to_reference 0.375
+macos sql_copy.from_stdin ratio_to_insert_values 1.059
+macos sql_copy.to_stdout ratio_to_select 1.396
 macos sqlite_compare.batch_put ratio_to_sqlite 0.693
 macos sqlite_compare.get ratio_to_sqlite 0.752
 macos sqlite_compare.scan ratio_to_sqlite 0.584

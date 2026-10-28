@@ -6,11 +6,12 @@ pub(crate) use oracle::create_text as oracle_create_text;
 
 pub(crate) use sqlite::create_text as sqlite_create_text;
 
-use crate::ast::{MySqlStatement, Statement};
+use crate::ast::{CopyDirection, CopySource, CopyStatement, MySqlStatement, Statement};
+use crate::copy::{CopyChannel, CopyIo, NoCopyChannel};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
-use crate::lexer::{Token, TokenKind, tokenize_in};
+use crate::lexer::{CopyStop, Token, TokenKind, tokenize_in, tokenize_script};
 use crate::mysql_errors::{self, Warning};
 use crate::name_resolution::Binding;
 use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
@@ -181,6 +182,35 @@ impl QueryResult {
         self.notices.push(notice);
         self
     }
+}
+
+struct Client<'c> {
+    channel: &'c mut dyn CopyChannel,
+    script: bool,
+}
+
+enum Flow {
+    Stopped,
+    Finished { inline_end: Option<usize> },
+}
+
+fn line_end_within(text: &str, from: usize, end: usize) -> usize {
+    text.get(from..end)
+        .and_then(|part| part.find('\n'))
+        .map_or(end, |offset| from + offset + 1)
+}
+
+fn inline_data_start(text: &str, ranges: &[std::ops::Range<usize>], stop: CopyStop) -> usize {
+    let Some(range) = ranges.get(stop.range) else {
+        return text.len();
+    };
+    let line_end = line_end_within(text, stop.at, range.end);
+    if line_end < range.end {
+        return line_end;
+    }
+    ranges
+        .get(stop.range + 1)
+        .map_or(range.end, |next| next.start)
 }
 
 fn aborted_block() -> SqlError {
@@ -545,7 +575,23 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         parameters: &[Parameter],
         on_result: &mut dyn FnMut(QueryResult) -> bool,
     ) -> SqlResult<()> {
-        self.run_text(text, Parameters::Values(parameters), on_result)
+        self.execute_prepared_with_copy(text, parameters, on_result, &mut NoCopyChannel)
+    }
+
+    /// Runs a prepared statement as [`Session::execute_prepared`] does, with `copy` as the
+    /// client end of a `COPY ... FROM STDIN` or `COPY ... TO STDOUT`.
+    pub fn execute_prepared_with_copy(
+        &mut self,
+        text: &str,
+        parameters: &[Parameter],
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+        copy: &mut dyn CopyChannel,
+    ) -> SqlResult<()> {
+        let mut client = Client {
+            channel: copy,
+            script: false,
+        };
+        self.run_text(text, Parameters::Values(parameters), on_result, &mut client)
             .map_err(|error| self.in_dialect(text, error))
     }
 
@@ -597,13 +643,50 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// Runs the statements in `text` as [`Session::execute`] does, but stops before the next
     /// statement once `on_result` returns `false`, for example when the reader of the results
     /// has gone. The statements not run have no effect; a block they would have closed stays
-    /// open.
+    /// open. A `COPY ... FROM STDIN` or `TO STDOUT` fails, since there is no client to take
+    /// part: [`Session::execute_with_copy`] gives it one.
     pub fn execute_while(
         &mut self,
         text: &str,
         on_result: &mut dyn FnMut(QueryResult) -> bool,
     ) -> SqlResult<()> {
-        self.run_text(text, Parameters::Absent, on_result)
+        self.execute_with_copy(text, on_result, &mut NoCopyChannel)
+    }
+
+    /// Runs the statements in `text` as [`Session::execute_while`] does, with `copy` as the
+    /// client end of every `COPY ... FROM STDIN` (whose data `copy` reads) and `COPY ... TO
+    /// STDOUT` (whose rows it receives), as a PostgreSQL connection does. A `COPY` loads all
+    /// its rows or none: any error rolls the whole statement back.
+    pub fn execute_with_copy(
+        &mut self,
+        text: &str,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+        copy: &mut dyn CopyChannel,
+    ) -> SqlResult<()> {
+        let mut client = Client {
+            channel: copy,
+            script: false,
+        };
+        self.run_text(text, Parameters::Absent, on_result, &mut client)
+            .map_err(|error| self.in_dialect(text, error))
+    }
+
+    /// Runs `text` as a script, as `psql -f` runs a file: like
+    /// [`Session::execute_with_copy`], except that the data of a `COPY ... FROM STDIN` is the
+    /// script's own lines after the statement's line, up to a line `\.` or the script's end,
+    /// as `pg_dump` writes it. Statements on the rest of the `COPY`'s line run after its data.
+    /// `copy` receives the rows of every `COPY ... TO STDOUT`.
+    pub fn execute_script(
+        &mut self,
+        text: &str,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+        copy: &mut dyn CopyChannel,
+    ) -> SqlResult<()> {
+        let mut client = Client {
+            channel: copy,
+            script: true,
+        };
+        self.run_text(text, Parameters::Absent, on_result, &mut client)
             .map_err(|error| self.in_dialect(text, error))
     }
 
@@ -612,27 +695,79 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         text: &str,
         parameters: Parameters<'_>,
         on_result: &mut dyn FnMut(QueryResult) -> bool,
+        client: &mut Client<'_>,
     ) -> SqlResult<()> {
-        let tokens = match tokenize_in(text, self.dialect) {
-            Ok(tokens) => tokens,
-            Err(error) => {
-                self.fail_block_in_postgresql();
-                return Err(error);
-            }
-        };
+        if !client.script {
+            let tokens = match tokenize_in(text, self.dialect) {
+                Ok(tokens) => tokens,
+                Err(error) => {
+                    self.fail_block_in_postgresql();
+                    return Err(error);
+                }
+            };
+            return self
+                .run_tokens(text, &tokens, parameters, on_result, client, None)
+                .map(|_| ());
+        }
+        let mut ranges: Vec<std::ops::Range<usize>> = std::iter::once(0..text.len()).collect();
+        loop {
+            let script = match tokenize_script(text, self.dialect, &ranges) {
+                Ok(script) => script,
+                Err(error) => {
+                    self.fail_block_in_postgresql();
+                    return Err(error);
+                }
+            };
+            let data_start = script
+                .copy_stop
+                .map(|stop| inline_data_start(text, &ranges, stop));
+            let flow = self.run_tokens(
+                text,
+                &script.tokens,
+                parameters,
+                on_result,
+                client,
+                data_start,
+            )?;
+            let (Some(stop), Some(data_start), Flow::Finished { inline_end }) =
+                (script.copy_stop, data_start, flow)
+            else {
+                return Ok(());
+            };
+            let line_end = ranges.get(stop.range).map_or(text.len(), |range| {
+                line_end_within(text, stop.at, range.end)
+            });
+            let data_end = inline_end
+                .unwrap_or(data_start)
+                .clamp(data_start, text.len());
+            ranges = vec![stop.at..line_end, data_end..text.len()];
+        }
+    }
+
+    fn run_tokens(
+        &mut self,
+        text: &str,
+        tokens: &[Token<'_>],
+        parameters: Parameters<'_>,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+        client: &mut Client<'_>,
+        data_start: Option<usize>,
+    ) -> SqlResult<Flow> {
+        let inline = data_start.and_then(|start| text.as_bytes().get(start..));
+        let mut inline_end = None;
         let mut resume = (0, 0);
         loop {
             let settings = Arc::clone(&self.settings);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _bytes = crate::bytea::enter_dialect(self.dialect);
             let _path = self.enter_search_path(&settings);
-            let mut parser = Parser::new(text, &tokens)
+            let mut parser = Parser::new(text, tokens)
                 .with_context(parameters, &settings)
                 .in_dialect(self.dialect)
                 .resuming_at(resume);
             parser.skip_empty_statements();
             if parser.at_end() {
-                return Ok(());
+                return Ok(Flow::Finished { inline_end });
             }
             let _constraints = crate::constraints::enter(
                 self.dialect,
@@ -657,7 +792,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 let result = self.after_statement(result?, false);
                 settled?;
                 if !on_result(result) {
-                    return Ok(());
+                    return Ok(Flow::Stopped);
                 }
                 continue;
             }
@@ -681,8 +816,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     MySqlStatement::ShowWarnings { .. } | MySqlStatement::ShowCount { .. }
                 )
             );
+            let mut io = CopyIo {
+                channel: &mut *client.channel,
+                inline,
+                consumed: None,
+            };
             self.enter_sequences(uses_sequences);
-            let result = self.run(&mut statement);
+            let result = self.run(&mut statement, &mut io);
+            if let (Some(start), Some(consumed)) = (data_start, io.consumed) {
+                inline_end = Some(start + consumed);
+            }
             _path.remember(&mut self.search_path_cache);
             self.leave_sequences();
             let settled = self.settle_sequences();
@@ -691,7 +834,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let result = self.after_statement(result?, diagnostic);
             settled?;
             if !on_result(result) {
-                return Ok(());
+                return Ok(Flow::Stopped);
             }
         }
     }
@@ -817,7 +960,58 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
-    fn run(&mut self, statement: &mut Statement) -> SqlResult<QueryResult> {
+    fn run_copy(
+        &mut self,
+        copy: &mut CopyStatement,
+        io: &mut CopyIo<'_, '_>,
+        binding: &Binding<'_>,
+    ) -> SqlResult<QueryResult> {
+        match copy.direction {
+            CopyDirection::FromClient => self.write("COPY FROM", |writer, tables| {
+                if let CopySource::Table { name, .. } = &mut copy.source {
+                    binding.names(writer, tables, std::slice::from_mut(name))?;
+                }
+                crate::copy::copy_from_client(writer, tables, copy, io)
+            }),
+            CopyDirection::ToClient => {
+                let channel = &mut *io.channel;
+                if matches!(copy.source, CopySource::Table { .. }) {
+                    return self.read(|reader, tables| {
+                        if let CopySource::Table { name, .. } = &mut copy.source {
+                            binding.names(reader, tables, std::slice::from_mut(name))?;
+                        }
+                        crate::copy::copy_table_to_client(reader, tables, copy, channel)
+                    });
+                }
+                let run_query = |reader: &dyn KeyValueRead,
+                                 tables: &mut TableCache,
+                                 copy: &mut CopyStatement| {
+                    let CopySource::Query(query) = &mut copy.source else {
+                        return Err(SqlError::new(
+                            SqlState::INTERNAL_ERROR,
+                            "COPY of a table reached the query path",
+                        ));
+                    };
+                    binding.query(reader, tables, query)?;
+                    execute::query(reader, tables, query, false)
+                };
+                let result = if self.statement_uses_sequences {
+                    self.write("nextval()", |writer, tables| {
+                        run_query(writer, tables, copy)
+                    })
+                } else {
+                    self.read(|reader, tables| run_query(reader, tables, copy))
+                }?;
+                crate::copy::copy_rows_to_client(result, copy, channel)
+            }
+        }
+    }
+
+    fn run(
+        &mut self,
+        statement: &mut Statement,
+        io: &mut CopyIo<'_, '_>,
+    ) -> SqlResult<QueryResult> {
         if self.sqlite() {
             match statement {
                 Statement::Begin { .. } if self.in_block() => {
@@ -973,6 +1167,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 binding.comment(writer, tables, comment)?;
                 crate::comments::comment_on(writer, tables, comment, dialect)
             }),
+            Statement::Copy(copy) => self.run_copy(copy, io, binding),
             Statement::Ignored { tag, notice } => {
                 let result = QueryResult::command(*tag);
                 Ok(match notice {

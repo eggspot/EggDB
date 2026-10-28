@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 const DELETE_BATCH: usize = 1024;
 
-fn undefined_table(name: &Name) -> SqlError {
+pub(crate) fn undefined_table(name: &Name) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_TABLE,
         format!("relation \"{}\" does not exist", name.text),
@@ -604,9 +604,9 @@ fn row_identifiers_used(table: &TableDefinition) -> SqlError {
     )
 }
 
-fn default_value(column: &Column) -> SqlResult<Value> {
+fn default_expression(column: &Column) -> SqlResult<Option<Expr>> {
     let Some(text) = &column.default else {
-        return Ok(Value::Null);
+        return Ok(None);
     };
     let tokens = tokenize(text)?;
     let mut parser = Parser::new(text, &tokens);
@@ -614,15 +614,46 @@ fn default_value(column: &Column) -> SqlResult<Value> {
     if !parser.at_end() {
         return Err(crate::encoding::corrupt("column default"));
     }
+    Ok(Some(expr))
+}
+
+fn evaluated_default(expr: Option<&Expr>, column: &Column) -> SqlResult<Value> {
+    let Some(expr) = expr else {
+        return Ok(Value::Null);
+    };
     let evaluator = Evaluator {
         scope: Scope::empty(),
         row: &[],
         correlation: None,
     };
     let value = evaluator
-        .eval(&expr, Some(column.sql_type))
+        .eval(expr, Some(column.sql_type))
         .map_err(|error| SqlError::new(error.state(), error.message().to_owned()))?;
     assign(value, column)
+}
+
+fn default_value(column: &Column) -> SqlResult<Value> {
+    evaluated_default(default_expression(column)?.as_ref(), column)
+}
+
+pub(crate) struct ColumnDefaults {
+    expressions: Vec<Option<Expr>>,
+}
+
+impl ColumnDefaults {
+    pub(crate) fn of(table: &TableDefinition) -> SqlResult<Self> {
+        Ok(Self {
+            expressions: table
+                .columns
+                .iter()
+                .map(default_expression)
+                .collect::<SqlResult<_>>()?,
+        })
+    }
+
+    pub(crate) fn value(&self, index: usize, column: &Column) -> SqlResult<Value> {
+        evaluated_default(self.expressions.get(index).and_then(Option::as_ref), column)
+    }
 }
 
 fn assign(value: Value, column: &Column) -> SqlResult<Value> {
@@ -705,7 +736,7 @@ fn duplicate_key(table: &TableDefinition, row: &[Value]) -> SqlError {
     .with_table(&table.name)
 }
 
-fn target_columns(table: &TableDefinition, names: &[Name]) -> SqlResult<Vec<usize>> {
+pub(crate) fn target_columns(table: &TableDefinition, names: &[Name]) -> SqlResult<Vec<usize>> {
     let mut indexes = Vec::with_capacity(names.len());
     for name in names {
         let index = table.column_index(&name.text).ok_or_else(|| {
@@ -962,14 +993,14 @@ pub(crate) fn insert(
     Ok(result)
 }
 
-struct ChildRows<'t> {
+pub(crate) struct ChildRows<'t> {
     table: &'t TableDefinition,
     rows: Vec<Vec<Value>>,
     memory: WorkMemory,
 }
 
 impl<'t> ChildRows<'t> {
-    fn new(table: &'t TableDefinition) -> Self {
+    pub(crate) fn new(table: &'t TableDefinition) -> Self {
         Self {
             table,
             rows: Vec::new(),
@@ -977,7 +1008,7 @@ impl<'t> ChildRows<'t> {
         }
     }
 
-    fn push(&mut self, row: &[Value]) -> SqlResult<()> {
+    pub(crate) fn push(&mut self, row: &[Value]) -> SqlResult<()> {
         if self.table.foreign_keys.is_empty() {
             return Ok(());
         }
@@ -986,10 +1017,30 @@ impl<'t> ChildRows<'t> {
         Ok(())
     }
 
-    fn check(&self, reader: &dyn KeyValueRead, tables: &mut TableCache) -> SqlResult<()> {
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn check(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+    ) -> SqlResult<()> {
         for row in &self.rows {
             constraints::check_parents(reader, tables, self.table, row, None)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn check_and_forget(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+    ) -> SqlResult<()> {
+        self.check(reader, tables)?;
+        self.rows.clear();
+        let used = self.memory.used();
+        self.memory.release(used);
         Ok(())
     }
 }
@@ -1105,6 +1156,12 @@ enum NextRowId {
 }
 
 impl<'a> StoredRows<'a> {
+    pub(crate) fn checked(table: &'a TableDefinition, checks: &'a PreparedChecks) -> Self {
+        let mut stored = Self::new(table);
+        stored.checks = Some(checks);
+        stored
+    }
+
     pub(crate) fn new(table: &'a TableDefinition) -> Self {
         let key = rows_prefix(table.id);
         Self {

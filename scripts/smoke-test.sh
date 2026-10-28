@@ -123,6 +123,15 @@ expect_exit 2 "$eggdb" sql shop.db -c "SELECT 1" extra.sql
 expect_exit 0 "$eggdb" check shop.db
 pass "sql: create, script, stdin, a join with GROUP BY, errors, a rolled-back block, usage"
 
+printf 'CREATE TABLE loaded (id integer PRIMARY KEY, name text);\nCOPY loaded FROM stdin;\n1\tegg\n2\t\\N\n\\.\nCOPY loaded TO STDOUT (FORMAT csv);\n' > copy.sql
+expect_output "$(printf 'CREATE TABLE\nCOPY 2\n1,egg\n2,')" "$eggdb" sql shop.db copy.sql
+printf 'id,name\n3,jam\n4,"tea, green"\n' > more.csv
+expect_exit 0 "$eggdb" import shop.db --csv more.csv --table loaded --header
+expect_output "$(printf '3\tjam\n4\ttea, green')" "$eggdb" sql shop.db -c "COPY (SELECT id, name FROM loaded WHERE id > 2 ORDER BY id) TO STDOUT"
+expect_exit 3 "$eggdb" sql shop.db -c "COPY loaded FROM STDIN (FORMAT csv)" < more.csv
+grep -q 'CONTEXT:  COPY loaded, line 1, column id: "id"' last.err || fail "a bad COPY said $(cat last.err)"
+pass "copy: a script with inline data, COPY TO STDOUT, import --csv and an error's context"
+
 expect_exit 0 "$eggdb" sql --dialect sqlite shop.db -c "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('a'), ('b'); INSERT OR REPLACE INTO notes VALUES (1, 'c')"
 expect_output '2|b' sh -c "\"$eggdb\" sql --dialect sqlite shop.db -c 'SELECT id, body FROM notes WHERE NOT id - 2' | sed -n 3p | tr -d ' '"
 expect_exit 3 "$eggdb" sql --dialect sqlite shop.db -c "SELECT * FROM nowhere"
@@ -144,7 +153,7 @@ if [ "${OS:-}" = Windows_NT ]; then
 else
   printf 'pg-secret\n' > password.txt
   "$eggdb" sql --create pg.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL)" > /dev/null
-  "$eggdb" serve pg.db --listen 127.0.0.1:0 --mysql-listen 127.0.0.1:0 --password-file password.txt > serve.out 2> serve.err &
+  "$eggdb" serve pg.db --listen 127.0.0.1:0 --mysql-listen 127.0.0.1:0 --password-file password.txt --cache 1g > serve.out 2> serve.err &
   server_pid=$!
   for _ in $(seq 1 50); do
     [ -s serve.out ] && break
@@ -167,6 +176,14 @@ else
     PGPASSWORD=wrong psql "$connection" -At -c 'SELECT 1' > psql.out 2> psql.err && fail "psql connected with a wrong password"
     grep -q 'password authentication failed' psql.err || fail "a wrong password said $(cat psql.err)"
     pass "serve: psql creates, inserts and joins; errors and a wrong password are refused"
+    awk 'BEGIN { for (id = 1; id <= 1000000; id++) printf "%d\tname %d\t%d.%02d\n", id, id, id % 1000, id % 100 }' > million.tsv
+    psql "$connection" -v ON_ERROR_STOP=1 -q \
+      -c "CREATE TABLE million (id integer PRIMARY KEY, name text, score numeric)" \
+      -c "\\copy million from 'million.tsv'" \
+      -c "\\copy million to 'million.out'" \
+      > psql.out 2> psql.err || fail "psql \\copy failed: $(cat psql.err)"
+    cmp -s million.tsv million.out || fail "the million rows psql copied out differ from those it copied in"
+    pass "serve: psql's \\copy loads a million rows and unloads them byte for byte"
   else
     echo "skip psql: psql is not on PATH (CI's Linux job installs postgresql-client)"
   fi

@@ -16,6 +16,7 @@ struct Options {
     update: bool,
     baseline: PathBuf,
     results: Option<PathBuf>,
+    only: Option<String>,
 }
 
 pub(crate) fn exit_code(program: &str, outcome: Result<bool, String>) -> ExitCode {
@@ -37,6 +38,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             "/../../benchmarks/baseline.txt"
         )),
         results: None,
+        only: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -46,6 +48,9 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             }
             "--results" => {
                 options.results = Some(args.next().ok_or("--results needs a path")?.into());
+            }
+            "--only" => {
+                options.only = Some(args.next().ok_or("--only needs a benchmark family")?);
             }
             other => return Err(format!("unknown argument `{other}`")),
         }
@@ -68,7 +73,13 @@ pub(crate) fn run(
         Err(error) => return Err(format!("{}: {error}", options.baseline.display())),
     };
     let mut results = Vec::new();
-    for (name, mut benchmark) in benchmarks {
+    let chosen = |name: &str| {
+        options
+            .only
+            .as_deref()
+            .is_none_or(|family| name.split('.').next() == Some(family))
+    };
+    for (name, mut benchmark) in benchmarks.into_iter().filter(|(name, _)| chosen(name)) {
         let mut metrics = benchmark()?;
         if !options.update && blocking_ceiling(&metrics, &baseline) {
             println!(

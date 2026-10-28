@@ -1,3 +1,6 @@
+use super::shell_copy::{
+    CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
+};
 use super::sql::{error_lines, exit_for, result_text};
 use super::{Access, execute_on, session_for, uses_color};
 use crate::cli::args::{self, CommandName, Invocation, Request, ResultMode};
@@ -9,8 +12,11 @@ use eggdb::sql::Store as DatabaseStore;
 use eggdb_platform::user_files;
 use eggdb_sql::{QueryResult, TableSchema, TransactionStatus};
 use eggdb_ui::{Completion, InlineTerminal, LineEnd, LineReader, LineTerminal};
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -141,7 +147,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
     let mut exit = exit?;
     match left_open {
         Ok(true) => print_notice(
-            console,
+            &mut *console.stderr,
             color_err,
             "WARNING:  the shell ended inside a transaction block (BEGIN without COMMIT); it was rolled back",
         ),
@@ -176,6 +182,14 @@ struct Shell<'s> {
     read_only: bool,
     history_path: Option<PathBuf>,
     history_notice: Option<String>,
+    pending: VecDeque<String>,
+    line_reader: Option<LineReader>,
+}
+
+struct CopyFiles {
+    file_in: Option<File>,
+    file_out: Option<BufWriter<File>>,
+    show_copy_tag: bool,
 }
 
 impl<'s> Shell<'s> {
@@ -210,6 +224,8 @@ impl<'s> Shell<'s> {
             width: None,
             history_path,
             history_notice,
+            pending: VecDeque::new(),
+            line_reader: None,
         }
     }
 
@@ -240,12 +256,14 @@ impl<'s> Shell<'s> {
         for text in texts {
             let lines: Vec<&str> = text.split('\n').collect();
             let count = lines.len();
-            for (index, line) in lines.into_iter().enumerate() {
-                if index + 1 == count && line.is_empty() {
-                    continue;
-                }
-                let line = line.strip_suffix('\r').unwrap_or(line);
-                match self.line(console, line) {
+            self.pending = lines
+                .into_iter()
+                .enumerate()
+                .filter(|(index, line)| index + 1 != count || !line.is_empty())
+                .map(|(_, line)| line.strip_suffix('\r').unwrap_or(line).to_owned())
+                .collect();
+            while let Some(line) = self.pending.pop_front() {
+                match self.line(console, &line) {
                     Step::Quit => return Ok(first_failure.unwrap_or(Exit::Done)),
                     Step::Continue(Exit::Done) => {}
                     Step::Continue(exit) => {
@@ -308,7 +326,12 @@ impl<'s> Shell<'s> {
                         self.entry.push('\n');
                     }
                     self.entry.push_str(&line);
+                    self.line_reader = Some(reader);
                     let step = self.line(console, &line);
+                    reader = match self.line_reader.take() {
+                        Some(reader) => reader,
+                        None => LineReader::new(Vec::new(), self.color_out),
+                    };
                     if self.buffer.is_empty() {
                         let entry = std::mem::take(&mut self.entry);
                         let quits = matches!(entry.trim(), ".quit" | ".exit");
@@ -376,6 +399,9 @@ impl<'s> Shell<'s> {
             if trimmed.starts_with('.') {
                 return self.meta(console, trimmed.trim_end());
             }
+            if let Some(arguments) = backslash_copy_arguments(trimmed) {
+                return self.backslash_copy(console, arguments);
+            }
             let first = trimmed.split_whitespace().next().unwrap_or_default();
             if KEY_VALUE_COMMANDS.contains(&first) {
                 return self.key_value(console, trimmed);
@@ -407,21 +433,61 @@ impl<'s> Shell<'s> {
     }
 
     fn run_sql(&mut self, console: &mut Console<'_>, text: &str) -> Step {
+        let files = CopyFiles {
+            file_in: None,
+            file_out: None,
+            show_copy_tag: false,
+        };
+        self.run_with_copy(console, text, files)
+    }
+
+    fn run_with_copy(&mut self, console: &mut Console<'_>, text: &str, files: CopyFiles) -> Step {
         let started = Instant::now();
-        let mut printed = Vec::new();
-        let outcome = self.sql.execute(text, &mut |result: QueryResult| {
-            printed.push(result);
-        });
-        let width = self.width;
-        let mode = self.mode;
-        for result in &printed {
-            for notice in &result.notices {
-                self.print_notice(console, notice);
-            }
-            let text = result_text(result, mode, width, self.sql.dialect());
-            if !self.print(console, &text) {
-                return Step::Quit;
-            }
+        let (width, mode, color_err) = (self.width, self.mode, self.color_err);
+        let dialect = self.sql.dialect();
+        let Self {
+            sql,
+            pending,
+            line_reader,
+            ..
+        } = self;
+        let lines = match line_reader.as_mut() {
+            Some(reader) => CopyLines::Terminal(reader),
+            None => CopyLines::Batch(pending),
+        };
+        let stdout = RefCell::new(Output::new(&mut *console.stdout, false));
+        let stderr = &mut *console.stderr;
+        let copied_out = Cell::new(false);
+        let mut closed = false;
+        let mut copy = ShellCopy {
+            lines,
+            file_in: files.file_in,
+            file_out: files.file_out,
+            stdout: &stdout,
+            copied_out: &copied_out,
+        };
+        let outcome = sql.execute_with_copy(
+            text,
+            &mut |result: QueryResult| {
+                for notice in &result.notices {
+                    print_notice(&mut *stderr, color_err, notice);
+                }
+                if copied_out.replace(false)
+                    && result.tag.starts_with("COPY ")
+                    && !files.show_copy_tag
+                {
+                    return true;
+                }
+                let mut out = stdout.borrow_mut();
+                out.text(&result_text(&result, mode, width, dialect));
+                closed = out.line_done().is_err();
+                !closed
+            },
+            &mut copy,
+        );
+        drop(copy);
+        if stdout.into_inner().finish().is_err() || closed {
+            return Step::Quit;
         }
         let exit = match outcome {
             Ok(()) => Exit::Done,
@@ -432,6 +498,35 @@ impl<'s> Shell<'s> {
         };
         self.time(console, started.elapsed());
         Step::Continue(exit)
+    }
+
+    fn backslash_copy(&mut self, console: &mut Console<'_>, arguments: &str) -> Step {
+        let copy = match parse_backslash_copy(arguments) {
+            Ok(copy) => copy,
+            Err(message) => return self.fail(console, &message, Exit::Usage),
+        };
+        let mut files = CopyFiles {
+            file_in: None,
+            file_out: None,
+            show_copy_tag: true,
+        };
+        if let CopyEnd::File(path) = &copy.end {
+            let opened = if copy.from {
+                File::open(path).map(|file| files.file_in = Some(file))
+            } else {
+                File::create(path).map(|file| files.file_out = Some(BufWriter::new(file)))
+            };
+            if let Err(error) = opened {
+                return self.fail(
+                    console,
+                    &format!("{}: {error}", path.display()),
+                    Exit::DatabaseError,
+                );
+            }
+        } else if !copy.from {
+            files.show_copy_tag = false;
+        }
+        self.run_with_copy(console, &copy.sql, files)
     }
 
     fn time(&self, console: &mut Console<'_>, elapsed: Duration) {
@@ -448,10 +543,6 @@ impl<'s> Shell<'s> {
 
     fn print_sql_error(&self, console: &mut Console<'_>, error: &eggdb_sql::SqlError, text: &str) {
         print_sql_error(console, self.color_err, error, text);
-    }
-
-    fn print_notice(&self, console: &mut Console<'_>, notice: &str) {
-        print_notice(console, self.color_err, notice);
     }
 
     fn print(&self, console: &mut Console<'_>, text: &str) -> bool {
@@ -630,6 +721,8 @@ Shell commands:
   .schema [table]              CREATE TABLE statements, all or one
   .mode [table|expanded|csv]   how results print; no argument shows the current mode
   .timer [on|off]              print each command's time
+  \\copy t from 'file' [options]  load a file into a table, read here (also: from stdin)
+  \\copy t to 'file' [options]    unload a table or a (query) into a file here (or: to stdout)
   .help                        this text
   .quit  .exit                 leave (so does Ctrl-D on an empty line)
 Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L the screen.
@@ -894,8 +987,8 @@ fn print_sql_error(
     let _ = messages.finish();
 }
 
-fn print_notice(console: &mut Console<'_>, color: bool, notice: &str) {
-    let mut messages = Output::new(&mut *console.stderr, color);
+fn print_notice(stderr: &mut dyn Write, color: bool, notice: &str) {
+    let mut messages = Output::new(stderr, color);
     match notice.strip_prefix("WARNING:") {
         Some(rest) => {
             messages.styled(Style::Yellow, "WARNING:");

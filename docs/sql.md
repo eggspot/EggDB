@@ -71,12 +71,17 @@ What the server does:
   and `server_encoding` (`UTF8`), `DateStyle`, `TimeZone`, `integer_datetimes`,
   `standard_conforming_strings` and the other reported parameters; `SET`, `SHOW`, `RESET`,
   `version()`, `current_user`, `current_database()` and `current_setting()`.
+- **`COPY`** (D117): `COPY ... FROM STDIN` takes `CopyData` messages in pieces of any size,
+  ending with `CopyDone`; `CopyFail` fails it with `57014`, and `Flush` and `Sync` are ignored
+  until it ends, as libpq expects. `COPY ... TO STDOUT` sends one `CopyData` per row, then
+  `CopyDone`. Both work from the simple and the extended protocol, so psql's `\copy` and
+  drivers' copy calls work; see [COPY](#copy).
 - **Several connections**, one thread and one session each, up to `--max-connections` (64),
   at most 16 of them still logging in; readers run side by side, writers one at a time (a
   second waits 5 s, then `55P03`: retry once the other session's transaction ends).
 
 Not yet (each fails readably or is ignored harmlessly): TLS, psql's `\d` commands and the
-catalog queries of GUI tools (`pg_catalog`), `COPY`, `LISTEN`/`NOTIFY`, cancelling a running
+catalog queries of GUI tools (`pg_catalog`), `COPY` in the binary format, `LISTEN`/`NOTIFY`, cancelling a running
 query, the implicit transaction around a multi-statement `Query` or an extended-protocol
 pipeline (each statement commits on its own outside `BEGIN`), stored users and roles, and
 non-ASCII passwords.
@@ -851,6 +856,75 @@ parameters of its scripts are accepted, and view text with parenthesized joins (
 b ON ...) JOIN c ON ...)`) runs. `CREATE MATERIALIZED VIEW`, `CREATE TYPE`, `CREATE DOMAIN` and
 `WITH CHECK OPTION` are `0A000` with a message naming them.
 
+## COPY
+
+`COPY` loads a table from the client and unloads a table or a query to it, in PostgreSQL's
+text and CSV formats (D117, PostgreSQL dialect only; the other dialects refuse it with their own
+syntax error):
+
+```sql
+COPY table [(column, ...)] FROM STDIN [[WITH] (option, ...)]
+COPY {table [(column, ...)] | (query)} TO STDOUT [[WITH] (option, ...)]
+```
+
+The older forms that `pg_dump` and psql write work too (`WITH CSV HEADER`, `DELIMITER [AS]
+'x'`, `NULL [AS] 'x'`, `QUOTE`, `ESCAPE`, `FORCE QUOTE`, `FORCE NOT NULL`, `BINARY`), and
+`STDIN` and `STDOUT` may be written either way round, as in PostgreSQL. Options:
+
+| Option | Meaning |
+|--------|---------|
+| `FORMAT text \| csv` | text (the default) or CSV; `binary` is `0A000` for now |
+| `DELIMITER 'c'` | one one-byte character between columns: tab in text, comma in CSV |
+| `NULL 's'` | the text for NULL: `\N` in text, an unquoted empty field in CSV |
+| `DEFAULT 's'` | `COPY FROM` only: the text that stands for the column's default |
+| `HEADER [true \| false \| match]` | a first line of column names: written by `TO`, skipped by `FROM`, or with `match` checked against the columns (`22P04` on a mismatch) |
+| `QUOTE 'c'`, `ESCAPE 'c'` | CSV only: the quote (`"`) and the character that escapes it inside quotes (the quote itself) |
+| `FORCE_QUOTE (cols) \| *` | CSV `TO` only: quote these columns' non-NULL values |
+| `FORCE_NOT_NULL (cols) \| *`, `FORCE_NULL (cols) \| *` | CSV `FROM` only: an unquoted null string is an empty string, or a quoted one is NULL |
+| `ENCODING 'UTF8'` | UTF-8 only; another encoding is `0A000` |
+| `FREEZE`, `ON_ERROR stop` | accepted; `ON_ERROR ignore` is `0A000` |
+
+The text format is the manual's: one row per line ending in `\n` (`\r\n` and `\r` are read
+too, but one file uses one), columns separated by the delimiter, `\N` for NULL (matched before
+backslashes are removed, so `\\N` is the text `\N`), and the escapes `\b \f \n \r \t \v`,
+`\` and one to three octal digits, `\x` and one or two hex digits, and a backslash before any
+other character for that character (so `\\`, and the delimiter, and a newline). A line of just
+`\.` ends the data. `COPY TO` writes the same escapes. CSV follows the manual's rules: fields
+with the delimiter, the quote, a carriage return or a newline are quoted, a quote inside is
+doubled, an unquoted empty field is NULL and a quoted one an empty string, quoted fields may
+span lines, and a value `\.` alone on a line is quoted on output. Every value goes through its
+type's text input and output, the same as a quoted constant and a result in psql: numeric,
+dates and time stamps (`timestamptz` in the session's `TimeZone`), `bytea` (`\x` hex),
+`uuid`, `json` and `jsonb`, intervals.
+
+A `COPY FROM` is one statement: its rows go through the path of `INSERT ... VALUES`, so
+constraints (`NOT NULL`, `CHECK`, `UNIQUE`, primary and foreign keys), defaults, `serial` and
+identity columns, sequences and indexes behave as they do there, and any error rolls back every
+row of it (in a `BEGIN` block, the block fails as after any failed statement). Errors carry
+PostgreSQL's SQLSTATEs (`22P04` for data that breaks the format, `22P02`, `22003`, `22021` for
+bytes that are not UTF-8, `23505`, `23502`, `23503`, `23514`, ...) and a context line naming
+where: `COPY t, line 3, column b: "x"` (psql and `eggdb sql` print it as `CONTEXT:`). Rows are
+read and stored one at a time, so a load holds one line of the data and one piece of input (a
+protocol message, or 64 KiB of a file) in memory at a time, plus the rows of a foreign key to
+its own table until the end; a line is at most 1 GiB (`54000`).
+The whole load is one transaction, so its pages must fit in the page cache: `eggdb serve
+--cache 1g` for large loads (`eggdb sql` and `eggdb import --csv` size the cache from the data
+they are given). `COPY TO` of a table streams its rows in primary-key order; `COPY (query) TO`
+runs the query first, with the memory bound of any query.
+
+`COPY` never touches files or programs on the server: `COPY t FROM 'file'` and `... PROGRAM
+'cmd'` are refused with `42501`, as PostgreSQL refuses them to a role that is not allowed to
+read server files. Copy client-side instead: psql's `\copy`, `eggdb shell`'s `\copy`, or
+`eggdb import --csv` ([cli.md](cli.md)). Where the data comes from:
+- **psql and drivers** send it over the protocol ([Connecting with psql](#connecting-with-psql)).
+- **A script** run by `eggdb sql file.sql`, `eggdb sql < file.sql` or `psql -f` carries it after
+  the statement, from the next line up to a line `\.`, as `pg_dump` writes its data sections;
+  statements after the `;` on the `COPY`'s own line run after the data, as in psql.
+- **`eggdb sql -c "COPY ... FROM STDIN"`** reads it from standard input; `COPY ... TO STDOUT`
+  prints the rows without a table or a tag.
+- **The embedded API**: `Session::execute_with_copy` and `Session::execute_script` take a
+  `CopyChannel` that supplies and receives the data.
+
 ## How SQL is stored
 
 SQL lives in the database's one ordered key space, under keys that begin with the five bytes
@@ -953,6 +1027,13 @@ with the search path it was created with when it is used, where PostgreSQL binds
 column `DEFAULT nextval('s')` finds an unqualified `s` through the search path when it runs, and
 messages name objects outside `public` as `schema.name`. There are no roles, so `GRANT`,
 `REVOKE` and owners are accepted and ignored; `current_schemas` returns text, not `name[]`.
+
+`COPY` (D117): the binary format and `ON_ERROR ignore` are `0A000`; `ENCODING` takes only
+UTF-8; `FREEZE` is accepted and changes nothing (PostgreSQL refuses it unless the table was
+created or truncated in the same transaction); `COPY ... WHERE` is `0A000`; files and programs
+on the server are always `42501`; a `\.` inside a text-format field reads as `.` where
+PostgreSQL may refuse it; `COPY TO` of a table writes rows in primary-key order (PostgreSQL in
+storage order); and some option errors carry other SQLSTATEs or wording than PostgreSQL's.
 
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
 checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
@@ -1239,5 +1320,5 @@ And more, not in the suite yet:
 - The rest of PostgreSQL's string functions (`substr`, `trim`, `replace`, `concat`, `position`,
   `left`, `right`, ...).
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
-  TLS, the `pg_catalog` queries of psql's `\d` and GUI tools, `COPY` and query cancellation
-  (M6a).
+  TLS, the `pg_catalog` queries of psql's `\d` and GUI tools, binary `COPY` and query
+  cancellation (M6a).

@@ -1,27 +1,38 @@
+use super::copy_io::{StreamCopy, script_cache};
 use super::{Access, Session};
 use crate::cli::args::{CommandName, ResultMode, SqlSource};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_sql::{Dialect, QueryResult, SqlError, SqlState, TransactionStatus, Value};
+use std::cell::{Cell, RefCell};
+use std::io::Read;
 
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
         let text = self.sql_text()?;
+        let script = !matches!(self.request.sql, Some(SqlSource::Command(_)));
         let db = self.open(
             Access::Write {
                 create: self.request.create,
             },
-            None,
+            Some(script_cache(&text)),
         )?;
         let store = DatabaseStore(&db);
         let dialect = self.request.dialect;
         let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
         let mut printed = Ok(());
+        let copied_out = Cell::new(false);
         let outcome = {
-            let out = &mut self.out;
+            let out = RefCell::new(&mut self.out);
             let messages = &mut self.messages;
-            session.execute_while(&text, &mut |result| {
+            let input: Option<&mut dyn Read> = if script { None } else { Some(&mut *self.stdin) };
+            let mut copy = StreamCopy {
+                input,
+                output: Some(&out),
+                copied_out: &copied_out,
+            };
+            let mut on_result = |result: QueryResult| {
                 for notice in &result.notices {
                     messages.text(notice);
                     messages.text("\n");
@@ -32,10 +43,18 @@ impl Session<'_> {
                         warning.level, warning.code, warning.message
                     ));
                 }
-                print_result(out, &result, dialect);
+                let mut out = out.borrow_mut();
+                if !(copied_out.replace(false) && result.tag.starts_with("COPY ")) {
+                    print_result(&mut out, &result, dialect);
+                }
                 printed = out.line_done();
                 printed.is_ok()
-            })
+            };
+            if script {
+                session.execute_script(&text, &mut on_result, &mut copy)
+            } else {
+                session.execute_with_copy(&text, &mut on_result, &mut copy)
+            }
         };
         let exit = match outcome {
             Ok(()) => Exit::Done,
@@ -163,6 +182,9 @@ pub(crate) fn error_lines(error: &SqlError, text: &str) -> Vec<String> {
     }
     if let Some(hint) = error.hint() {
         lines.push(format!("HINT:  {hint}"));
+    }
+    if let Some(context) = error.context() {
+        lines.push(format!("CONTEXT:  {context}"));
     }
     lines.push(format!("SQLSTATE:  {}", error.state()));
     lines

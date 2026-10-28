@@ -66,10 +66,30 @@ pub(crate) enum Statement {
     },
     AlterView(AlterView),
     Comment(Comment),
+    Copy(Box<CopyStatement>),
     Ignored {
         tag: &'static str,
         notice: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CopyStatement {
+    pub(crate) source: CopySource,
+    pub(crate) direction: CopyDirection,
+    pub(crate) options: crate::copy::CopyOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CopySource {
+    Table { name: Name, columns: Vec<Name> },
+    Query(Box<Query>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyDirection {
+    FromClient,
+    ToClient,
 }
 
 #[derive(Debug, Clone, PartialEq)]

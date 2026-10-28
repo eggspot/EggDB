@@ -11,8 +11,11 @@ use eggdb_storage::{BTree, PageSize, StorageError};
 use std::io::Read;
 use std::ops::Bound;
 
+mod copy_io;
+mod csv_import;
 mod serve;
 mod shell;
+mod shell_copy;
 pub(super) mod sql;
 mod transfer;
 
