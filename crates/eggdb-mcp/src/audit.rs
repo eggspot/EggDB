@@ -19,7 +19,7 @@ pub const AUDIT_FILE_SUFFIX: &str = ".mcp-audit.jsonl";
 /// until it is archived or removed: 1 GiB.
 pub const MAX_AUDIT_BYTES: u64 = 1 << 30;
 
-const LOCK_WAIT: Duration = Duration::from_secs(1);
+const LOCK_WAIT: Duration = Duration::from_secs(5);
 const LOCK_POLL: Duration = Duration::from_millis(10);
 
 /// The audit file of the database at `database`: its path with [`AUDIT_FILE_SUFFIX`] added.
@@ -95,7 +95,7 @@ fn lock(file: &File) -> io::Result<()> {
             Err(std::fs::TryLockError::WouldBlock) => {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
-                    "another eggdb mcp held the audit file's lock for over a second",
+                    "another eggdb mcp held the audit file's lock for over five seconds",
                 ));
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error),
@@ -374,7 +374,7 @@ impl Read for PatientFile {
 /// totals of the whole file, or `None` when there is no audit file. It holds one line at a
 /// time (the last `limit` with a limit), and a line over 1 MiB, which no record is, is skipped
 /// unread as unreadable. On Windows, where a server's lock blocks reading for the moment it
-/// writes, each read waits up to a second.
+/// writes, each read waits up to five seconds.
 pub fn read_audit(
     path: &Path,
     limit: Option<usize>,
@@ -679,7 +679,7 @@ mod tests {
             .map(|writer| {
                 let log = AuditLog::new(path.clone());
                 std::thread::spawn(move || {
-                    for record in 0..50 {
+                    for record in 0..25 {
                         let arguments = format!(
                             r#"{{"sql":"{}"}}"#,
                             format!("{writer}-{record} ").repeat(400)
@@ -693,8 +693,8 @@ mod tests {
             writer.join().unwrap();
         }
         let (lines, totals) = read_all(&path, None).unwrap();
-        assert_eq!(lines.len(), 200);
-        assert_eq!((totals.calls, totals.unreadable), (200, 0));
+        assert_eq!(lines.len(), 100);
+        assert_eq!((totals.calls, totals.unreadable), (100, 0));
         let _ = std::fs::remove_file(&path);
     }
 

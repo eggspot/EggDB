@@ -60,7 +60,17 @@ fn sample(name: &str, rows: usize) -> (TempPath, Audit) {
             ));
         }
     }
-    let created = eggdb(&["sql", &path, "--create", "-c", &sql]);
+    let mut creating = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+        .args(["sql", &path, "--create"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut input) = creating.stdin.take() {
+        input.write_all(sql.as_bytes()).unwrap();
+    }
+    let created = creating.wait_with_output().unwrap();
     assert!(created.status.success(), "{}", stderr(&created));
     let put = eggdb(&["put", &path, "greeting", "hello"]);
     assert!(put.status.success(), "{}", stderr(&put));
