@@ -195,7 +195,7 @@ pub(crate) fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-pub(crate) const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_ARGUMENT_BYTES: usize = 8 * 1024;
 
 pub(crate) struct CallRecord<'a> {
     pub(crate) started: &'a str,
@@ -395,9 +395,9 @@ pub fn read_audit(
         let line = match bytes
             .as_deref()
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .and_then(|text| entry_of(text).map(|entry| (text, entry)))
+            .and_then(record_of)
         {
-            Some((text, entry)) => {
+            Some((raw, entry)) => {
                 if entry.event == AuditEvent::Call {
                     totals.calls += 1;
                     if entry.error_code.is_some() {
@@ -411,7 +411,7 @@ pub fn read_audit(
                 }
                 AuditLine::Record {
                     number,
-                    raw: text.to_owned(),
+                    raw,
                     entry: Box::new(entry),
                 }
             }
@@ -498,8 +498,11 @@ fn number_of(members: &[(String, Node)], name: &str) -> Option<u64> {
     }
 }
 
-fn entry_of(line: &str) -> Option<AuditEntry> {
-    let Json::Object(members) = parse_document(line).ok()?.value else {
+fn record_of(line: &str) -> Option<(String, AuditEntry)> {
+    let document = parse_document(line).ok()?;
+    let mut ascii = JsonOut::new();
+    ascii.node(&document);
+    let Json::Object(members) = document.value else {
         return None;
     };
     let event = match text_of(&members, "event")?.as_str() {
@@ -522,7 +525,7 @@ fn entry_of(line: &str) -> Option<AuditEntry> {
         _ => None,
     };
     let tool = text_of(&members, "tool");
-    Some(AuditEntry {
+    let entry = AuditEntry {
         event,
         time: text_of(&members, "time")?,
         client,
@@ -536,7 +539,8 @@ fn entry_of(line: &str) -> Option<AuditEntry> {
         version: text_of(&members, "version"),
         pid: number_of(&members, "pid"),
         time_limit_ms: number_of(&members, "time_limit_ms"),
-    })
+    };
+    Some((ascii.finish(), entry))
 }
 
 fn arguments_shown(members: &[(String, Node)], tool: Option<&str>) -> Option<String> {

@@ -11,6 +11,7 @@ use eggdb_sql::{
 use std::time::{Duration, Instant};
 
 const MAX_SQL_BYTES: usize = 1 << 20;
+const MAX_VALUE_BYTES: usize = 16 << 20;
 const DEFAULT_MAX_ROWS: u64 = 100;
 const LARGEST_MAX_ROWS: u64 = 10_000;
 const DEFAULT_SAMPLE_ROWS: u64 = 10;
@@ -88,7 +89,7 @@ impl Tool {
                 "Shows the plan EggDB would use for one SELECT, UPDATE or DELETE, without running it, in the dialect's own EXPLAIN form (postgresql, mysql or sqlite; oracle has no EXPLAIN yet)."
             }
             Self::SampleRows => {
-                "Returns the first rows of a table or view in primary-key order (not a random sample), to see what its data looks like."
+                "Returns the first rows of a table or view as they are stored, to see what its data looks like: a table's in primary-key order, a view's in the order its query gives them. Not a random sample."
             }
             Self::KvGet => {
                 "Reads the value stored under one key of the database's key-value store (the keys outside SQL's tables). Give the key as text (key) or as hexadecimal bytes (key_hex)."
@@ -353,6 +354,8 @@ impl ToolError {
     pub(crate) fn structured(&self) -> String {
         let mut out = JsonOut::new();
         out.begin_object()
+            .key("notice")
+            .string(NOTICE)
             .key("error")
             .begin_object()
             .key("code")
@@ -627,6 +630,7 @@ fn one_statement<S: KeyValueStore, O: DatabaseOpener>(
     sql: &str,
 ) -> Result<Option<QueryResult>, ToolError> {
     let mut session = Session::with_dialect(store, dialect);
+    session.set_max_value_bytes(MAX_VALUE_BYTES);
     let mut result = None;
     let ran = session.run_one_statement(sql, &mut |returned| {
         result = Some(returned);
@@ -709,9 +713,12 @@ fn explain_query<O: DatabaseOpener>(
         .trim_start()
         .get(..7)
         .is_some_and(|word| word.eq_ignore_ascii_case("explain"));
-    let explained = if starts_with_explain {
-        sql.to_owned()
-    } else if dialect == Dialect::Sqlite {
+    if starts_with_explain {
+        return Err(ToolError::invalid(
+            "give the statement to explain, without EXPLAIN: explain_query adds it",
+        ));
+    }
+    let explained = if dialect == Dialect::Sqlite {
         format!("EXPLAIN QUERY PLAN {sql}")
     } else {
         format!("EXPLAIN {sql}")
@@ -1176,7 +1183,7 @@ fn kv_scan<O: DatabaseOpener>(
                 let mut one = JsonOut::new();
                 entry(&mut one, key, (!keys_only).then_some(value));
                 let one = one.finish();
-                if out.len() + one.len() > results::MAX_RESULT_BYTES {
+                if listed > 0 && out.len() + one.len() > results::MAX_RESULT_BYTES {
                     next_start = Some(key.to_vec());
                     return Ok(false);
                 }

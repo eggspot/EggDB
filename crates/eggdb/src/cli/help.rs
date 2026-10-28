@@ -395,7 +395,7 @@ Lists what AI agents did through eggdb mcp: every call in <file>.mcp-audit.jsonl
 one line each with its time (UTC), duration, tool, outcome, rows and arguments (SQL as the agent
 sent it, on one line, cut at 120 columns). Server starts and time-limit exits are lines too. The
 database itself is never opened, so audit works while eggdb mcp or any other command has it.
---format json prints the records as stored, one JSON object per line, with the client's name and
+--format json prints the records re-encoded as ASCII JSON, one per line, with the client's name and
 version, the protocol version, the SQLSTATE and the result's size.
 
   -n, --limit <count>   only the newest lines (the file's last ones)

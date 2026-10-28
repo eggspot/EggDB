@@ -365,10 +365,21 @@ fn a_call_past_its_time_limit_is_stopped_and_a_stuck_one_ends_the_server() {
     let (file, audit) = sample("mcp-time-limit", 5000);
     let mut mcp = Mcp::start(file.path(), &["--time-limit", "1"]);
     mcp.initialize();
-    let reads = mcp.call(
-        "run_sql",
-        r#"{"sql":"SELECT count(*) FROM numbers a WHERE (SELECT count(*) FROM numbers b WHERE b.n <= a.n) > 0"}"#,
+    mcp.send(r#"{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"SELECT count(*) FROM numbers a WHERE (SELECT count(*) FROM numbers b WHERE b.n <= a.n) > 0"}}}"#);
+    std::thread::sleep(Duration::from_millis(300));
+    let refused_writer = eggdb(&["put", file.path().to_str().unwrap(), "during", "call"]);
+    assert_eq!(
+        refused_writer.status.code(),
+        Some(5),
+        "{}",
+        stderr(&refused_writer)
     );
+    assert!(
+        stderr(&refused_writer).contains("eggdb mcp"),
+        "{}",
+        stderr(&refused_writer)
+    );
+    let reads = mcp.answer();
     assert_eq!(error_code(&reads), "time_limit");
     mcp.send(r#"{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"WITH k AS (SELECT n FROM numbers) SELECT count(*) FROM k x CROSS JOIN k y CROSS JOIN k z WHERE x.n + y.n + z.n < 0"}}}"#);
     let (status, _) = mcp.finish();
@@ -450,4 +461,58 @@ fn startup_refuses_a_missing_file_an_unwritable_audit_file_and_a_bad_time_limit(
     assert_eq!(hex.status.code(), Some(2));
     let nowhere = eggdb(&["audit", path]);
     assert_eq!(nowhere.status.code(), Some(3));
+}
+
+#[test]
+fn eggdb_audit_never_prints_raw_control_characters_from_the_file() {
+    let (file, audit) = sample("mcp-hostile-audit", 0);
+    let hostile = "\\u001b[2J\\u001b]0;pwned\\u0007\\u009b31m\\u202e\\u200b\\u2066\\udb40\\udc41";
+    let lines = [
+        format!(r#"{{"event":"server_started","time":"{hostile}XXXXXXXXXXXXXXX","version":"{hostile}","pid":1,"read_only":true,"time_limit_ms":5000}}"#),
+        format!(r#"{{"event":"call","time":"2026-10-28T09:14:07.123456Z{hostile}","client":{{"name":"{hostile}","version":"{hostile}"}},"protocol":"{hostile}","tool":"{hostile}","arguments":{{"sql":"{hostile}"}},"outcome":"error","error_code":"{hostile}","sqlstate":"{hostile}","result_bytes":1,"truncated":false,"duration_ms":1}}"#),
+        format!(r#"{{"event":"time_limit_exceeded","time":"{hostile}","tool":"{hostile}","time_limit_ms":1,"pid":1}}"#),
+        "{\"event\":\"call\",\"time\":\"2026-10-28T09:14:07.123456Z\",\"tool\":\"run_sql\",\"arguments\":{\"sql\":\"raw \u{9b}\u{202e}\u{1b}x\"},\"outcome\":\"ok\",\"result_bytes\":1,\"truncated\":false,\"duration_ms\":1}".to_owned(),
+    ];
+    std::fs::write(&audit.0, lines.join("\n") + "\n").unwrap();
+    let path = file.path().to_str().unwrap();
+    for format in ["text", "json"] {
+        let listed = eggdb(&["audit", path, "--format", format, "--color", "never"]);
+        assert!(listed.status.success(), "{}", stderr(&listed));
+        let text = stdout(&listed) + &stderr(&listed);
+        assert!(text.contains("pwned"), "{format}: {text}");
+        for raw in [
+            '\u{1b}',
+            '\u{7}',
+            '\u{9b}',
+            '\u{202e}',
+            '\u{200b}',
+            '\u{2066}',
+            '\u{e0041}',
+        ] {
+            assert!(!text.contains(raw), "{format} printed {raw:?}: {text:?}");
+        }
+    }
+}
+
+#[test]
+fn values_too_large_for_a_call_fail_fast_instead_of_taking_gigabytes() {
+    let (file, _audit) = sample("mcp-big-values", 0);
+    let mut mcp = Mcp::start(file.path(), &["--time-limit", "60"]);
+    mcp.initialize();
+    for sql in [
+        "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 32) SELECT n, length(s) FROM r ORDER BY n DESC LIMIT 1",
+        "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 28) SELECT length(s||s||s||s||s||s||s||s||s||s||s||s||s||s||s||s) FROM r WHERE n = 28",
+    ] {
+        let start = std::time::Instant::now();
+        let answer = mcp.call("run_sql", &format!(r#"{{"sql":"{sql}"}}"#));
+        assert_eq!(error_code(&answer), "sql_error", "{answer:?}");
+        assert_eq!(text_at(result(&answer), &["error", "sqlstate"]), "54000");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+    let (status, _) = mcp.finish();
+    assert!(status.success());
 }

@@ -98,7 +98,7 @@ impl Session<'_> {
             AuditEvent::ServerStarted => {
                 let sentence = format!(
                     "{time}  server started: eggdb {}, pid {}, read-only, time limit {} s",
-                    entry.version.as_deref().unwrap_or("?"),
+                    printable(entry.version.as_deref().unwrap_or("?")),
                     entry.pid.unwrap_or(0),
                     entry.time_limit_ms.unwrap_or(0) / 1000
                 );
@@ -152,10 +152,26 @@ impl Session<'_> {
 }
 
 fn shown_time(time: &str) -> String {
-    match (time.get(..10), time.get(11..23)) {
+    let shown = match (time.get(..10), time.get(11..23)) {
         (Some(date), Some(clock)) => format!("{date} {clock}"),
-        _ => printable(time),
-    }
+        _ => time.to_owned(),
+    };
+    printable(&shown)
+}
+
+fn is_hidden_or_control(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{e0000}'..='\u{e007f}'
+        )
 }
 
 fn printable(text: &str) -> String {
@@ -163,15 +179,9 @@ fn printable(text: &str) -> String {
     for character in text.chars() {
         match character {
             '\n' | '\r' | '\t' => shown.push(' '),
-            '\u{0}'..='\u{1f}'
-            | '\u{7f}'..='\u{9f}'
-            | '\u{200e}'
-            | '\u{200f}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{061c}' => shown.push_str(&format!("\\u{:04x}", u32::from(character))),
+            hidden if is_hidden_or_control(hidden) => {
+                shown.push_str(&format!("\\u{:04x}", u32::from(hidden)));
+            }
             other => shown.push(other),
         }
     }
@@ -244,6 +254,34 @@ fn summary(totals: &AuditTotals, shown_calls: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{cut_to, printable, shown_time};
+
+    #[test]
+    fn hidden_and_control_characters_are_shown_escaped() {
+        for hidden in [
+            '\u{7}',
+            '\u{1b}',
+            '\u{85}',
+            '\u{9b}',
+            '\u{200b}',
+            '\u{200d}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{feff}',
+            '\u{e0041}',
+            '\u{e007f}',
+            '\u{202e}',
+            '\u{2066}',
+        ] {
+            let shown = printable(&format!("a{hidden}b"));
+            assert!(!shown.contains(hidden), "{hidden:?}");
+            assert!(shown.is_ascii(), "{shown}");
+        }
+        let time = shown_time("\u{1b}[2J\u{1b}]0;pwned\u{7}XXXXXXXXXX");
+        assert!(
+            time.is_ascii() && !time.contains('\u{1b}') && time.contains("\\u001b"),
+            "{time}"
+        );
+    }
 
     #[test]
     fn logged_text_cannot_drive_the_terminal() {

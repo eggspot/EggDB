@@ -145,7 +145,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 Incoming::TooLong => Some(error_line(
                     None,
                     INVALID_REQUEST,
-                    "the message is larger than 8 MiB",
+                    "the message is larger than 4 MiB",
                     None,
                 )),
                 Incoming::Line(line) => self.handle(&line),
@@ -169,12 +169,16 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             return None;
         }
         match parse_message(line) {
-            Err(refusal) => Some(error_line(
-                refusal.id.as_deref(),
-                refusal.code,
-                refusal.message,
-                None,
-            )),
+            Err(refusal) => {
+                let id = refusal.id.as_deref();
+                if let Some(method) = refusal.method.as_deref()
+                    && is_call(method)
+                    && let Err(failure) = self.refused_call(method, "{}", "invalid_request")
+                {
+                    return Some(self.unrecorded(id, &failure));
+                }
+                Some(error_line(id, refusal.code, refusal.message, None))
+            }
             Ok(Message::Request { id, method, params }) => {
                 Some(self.request(&id, &method, params.as_ref()))
             }
@@ -192,6 +196,11 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 | "resources/templates/list"
         );
         if needs_initialize && !self.client.initialized {
+            if is_call(method)
+                && let Err(failure) = self.refused_call(method, "{}", "not_initialized")
+            {
+                return self.unrecorded(Some(id), &failure);
+            }
             return error_line(
                 Some(id),
                 INVALID_REQUEST,
@@ -336,6 +345,26 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         }))
     }
 
+    fn refused_call(
+        &self,
+        name: &str,
+        arguments: &str,
+        code: &'static str,
+    ) -> Result<(), AuditFailure> {
+        let refusal: Result<ToolSuccess, ToolError> = Err(ToolError::new(code, ""));
+        self.audited(&now_rfc3339(), name, arguments, &refusal, Duration::ZERO)
+    }
+
+    fn unrecorded(&self, id: Option<&str>, failure: &AuditFailure) -> String {
+        let error = self.audit_unavailable(failure);
+        error_line(
+            id,
+            INTERNAL_ERROR,
+            &error.message,
+            Some(&error.structured()),
+        )
+    }
+
     fn audit_unavailable(&self, failure: &AuditFailure) -> ToolError {
         ToolError::new(
             "audit_unavailable",
@@ -379,14 +408,9 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 (Some(_), Some(_)) => ("tools/call's arguments is an object", "invalid_request"),
             };
             let shown_name = cut(name.unwrap_or("?"), 128);
-            let refusal: Result<ToolSuccess, ToolError> = Err(ToolError::new(code, message));
-            let _ = self.audited(
-                &now_rfc3339(),
-                &shown_name,
-                &arguments_text,
-                &refusal,
-                Duration::ZERO,
-            );
+            if let Err(failure) = self.refused_call(&shown_name, &arguments_text, code) {
+                return self.unrecorded(Some(id), &failure);
+            }
             let mut data = JsonOut::new();
             data.begin_object()
                 .key("name")
@@ -508,4 +532,8 @@ fn text(members: &[(String, Node)], name: &str) -> Option<String> {
 
 fn cut(text: &str, characters: usize) -> String {
     text.chars().take(characters).collect()
+}
+
+fn is_call(method: &str) -> bool {
+    matches!(method, "tools/call" | "resources/read")
 }

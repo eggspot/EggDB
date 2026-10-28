@@ -685,7 +685,7 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
 
 fn mcp_may_hold(file: &str) -> String {
     format!(
-        "  an AI agent's call through eggdb mcp holds the file for a few seconds at most; run the command again, or see `eggdb audit {file}`."
+        "  it may be an AI agent's call through eggdb mcp, which holds the file for up to its time limit; run the command again, or see `eggdb audit {file}`."
     )
 }
 

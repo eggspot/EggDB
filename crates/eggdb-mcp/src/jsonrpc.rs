@@ -2,8 +2,8 @@ use crate::json_out::{JsonOut, encoded_string};
 use eggdb_sql::json::{Json, Node, parse_document};
 use std::io::{self, Read};
 
-/// The largest message the server reads: 8 MiB. A longer line is refused and skipped.
-pub const MAX_MESSAGE_BYTES: usize = 8 << 20;
+/// The largest message the server reads: 4 MiB. A longer line is refused and skipped.
+pub const MAX_MESSAGE_BYTES: usize = 4 << 20;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 pub(crate) const PARSE_ERROR: i64 = -32700;
@@ -110,19 +110,76 @@ pub(crate) struct Refusal {
     pub(crate) id: Option<String>,
     pub(crate) code: i64,
     pub(crate) message: &'static str,
+    pub(crate) method: Option<String>,
 }
 
 impl Refusal {
     fn new(id: Option<String>, code: i64, message: &'static str) -> Self {
-        Self { id, code, message }
+        Self {
+            id,
+            code,
+            message,
+            method: None,
+        }
     }
 }
 
 pub(crate) fn parse_message(bytes: &[u8]) -> Result<Message, Refusal> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| Refusal::new(None, PARSE_ERROR, "the message is not UTF-8 text"))?;
+    if too_many_values(text) {
+        return Err(Refusal::new(
+            None,
+            INVALID_REQUEST,
+            "the message holds more than 100,000 JSON values",
+        ));
+    }
     let document = parse_document(text)
         .map_err(|_| Refusal::new(None, PARSE_ERROR, "the message is not valid JSON"))?;
+    let method = match &document.value {
+        Json::Object(members) => members.iter().find_map(|(name, node)| match &node.value {
+            Json::String(method) if name == "method" => Some(method.clone()),
+            _ => None,
+        }),
+        _ => None,
+    };
+    request_of(document).map_err(|mut refusal| {
+        refusal.method = method;
+        refusal
+    })
+}
+
+const MOST_VALUES: usize = 100_000;
+
+fn too_many_values(text: &str) -> bool {
+    let mut values = 1usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in text.bytes() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b',' | b'[' | b'{' | b':' => {
+                values += 1;
+                if values > MOST_VALUES {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn request_of(document: Node) -> Result<Message, Refusal> {
     if has_duplicate_keys(&document) {
         return Err(Refusal::new(
             None,

@@ -78,7 +78,8 @@ pub(crate) fn statement(
     dialect: Dialect,
     max_rows: usize,
 ) -> Returned {
-    out.key("tag").string(&result.tag);
+    out.key("tag");
+    text(out, &result.tag);
     let mut returned = Returned {
         rows: 0,
         cut_by: None,
@@ -86,7 +87,8 @@ pub(crate) fn statement(
     if let Some(columns) = &result.columns {
         out.key("columns").begin_array();
         for column in columns {
-            out.begin_object().key("name").string(&column.name);
+            out.begin_object().key("name");
+            text(out, &column.name);
             match column.sql_type {
                 Some(sql_type) => out.key("type").string(&sql_type.name()),
                 None => out.key("type").null(),
@@ -95,6 +97,10 @@ pub(crate) fn statement(
         }
         out.end_array().key("rows").begin_array();
         for row in &result.rows {
+            if out.len() > MAX_RESULT_BYTES {
+                returned.cut_by = Some(CutBy::Bytes);
+                break;
+            }
             if returned.rows as usize >= max_rows {
                 returned.cut_by = Some(CutBy::MaxRows);
                 break;
@@ -119,27 +125,33 @@ pub(crate) fn statement(
             .key("returned_rows")
             .unsigned(returned.rows);
     }
+    let messages = result.notices.iter().cloned().chain(
+        result
+            .warnings
+            .iter()
+            .map(|warning| format!("{} {}: {}", warning.level, warning.code, warning.message)),
+    );
+    let mut notices = JsonOut::new();
+    notices.begin_array();
+    let mut any = false;
+    for message in messages {
+        let mut one = JsonOut::new();
+        text(&mut one, &message);
+        let one = one.finish();
+        if out.len() + notices.len() + one.len() > MAX_RESULT_BYTES {
+            returned.cut_by.get_or_insert(CutBy::Bytes);
+            break;
+        }
+        notices.encoded(&one);
+        any = true;
+    }
+    notices.end_array();
+    if any {
+        out.key("notices").encoded(&notices.finish());
+    }
     out.key("truncated").boolean(returned.cut_by.is_some());
     if let Some(cut_by) = returned.cut_by {
         out.key("truncated_by").string(cut_by.name());
-    }
-    let messages: Vec<String> = result
-        .notices
-        .iter()
-        .cloned()
-        .chain(
-            result
-                .warnings
-                .iter()
-                .map(|warning| format!("{} {}: {}", warning.level, warning.code, warning.message)),
-        )
-        .collect();
-    if !messages.is_empty() {
-        out.key("notices").begin_array();
-        for message in &messages {
-            text(out, message);
-        }
-        out.end_array();
     }
     returned
 }
@@ -200,7 +212,7 @@ mod tests {
         assert_eq!(returned.rows, 2);
         assert_eq!(
             out.finish(),
-            "{\"tag\":\"SELECT 3\",\"columns\":[{\"name\":\"id\",\"type\":\"integer\"}],\"rows\":[[1],[2]],\"row_count\":3,\"returned_rows\":2,\"truncated\":true,\"truncated_by\":\"max_rows\",\"notices\":[\"a notice\"]}"
+            "{\"tag\":\"SELECT 3\",\"columns\":[{\"name\":\"id\",\"type\":\"integer\"}],\"rows\":[[1],[2]],\"row_count\":3,\"returned_rows\":2,\"notices\":[\"a notice\"],\"truncated\":true,\"truncated_by\":\"max_rows\"}"
         );
     }
 }
