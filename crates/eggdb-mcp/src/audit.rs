@@ -121,6 +121,10 @@ fn describe(error: &io::Error) -> String {
     }
 }
 
+pub(crate) fn now_unix_ms() -> u64 {
+    eggdb_platform::SystemClock::new().unix_time_nanos() / 1_000_000
+}
+
 pub(crate) fn now_rfc3339() -> String {
     let nanos = eggdb_platform::SystemClock::new().unix_time_nanos();
     rfc3339(nanos / 1000)
@@ -350,7 +354,8 @@ pub struct AuditEntry {
     pub pid: Option<u64>,
     /// The time limit per call.
     pub time_limit_ms: Option<u64>,
-    /// The call's id, `<pid>-<number>`, which pairs a call with its call-started record.
+    /// The call's id, `<pid>-<server start in ms since 1970>-<number>`, which pairs a call
+    /// with its call-started record.
     pub call_id: Option<String>,
     /// How a destructive statement was confirmed: `elicitation` (the user, through the
     /// client) or `confirm_argument` (the agent's `confirm: true`).

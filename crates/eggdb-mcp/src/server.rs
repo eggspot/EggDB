@@ -1,6 +1,7 @@
 use crate::audit::{
     AuditFailure, AuditLog, CallRecord, CallRequest, ServerStarted, WriteFacts, call_record,
-    call_started_record, now_rfc3339, server_started_record, time_limit_exceeded_record,
+    call_started_record, now_rfc3339, now_unix_ms, server_started_record,
+    time_limit_exceeded_record,
 };
 use crate::confirmation::elicitation_params;
 use crate::json_out::{JsonOut, encoded_string};
@@ -105,13 +106,13 @@ struct Queued {
     line: Vec<u8>,
 }
 
-struct Link<'l, 'r> {
+struct Connection<'l, 'r> {
     reader: &'l mut MessageReader<'r>,
     output: &'l mut dyn Write,
     queued: &'l mut VecDeque<Queued>,
 }
 
-impl Link<'_, '_> {
+impl Connection<'_, '_> {
     fn send(&mut self, line: &str) -> io::Result<()> {
         send_line(self.output, line)
     }
@@ -125,7 +126,7 @@ struct PendingWrite<'a> {
     begun: Instant,
 }
 
-enum Answer {
+enum UserAnswer {
     Run,
     Declined,
     Failed,
@@ -146,6 +147,7 @@ pub struct Server<'o, O: DatabaseOpener> {
     config: ServerConfig,
     client: Client,
     watchdog: Option<Watchdog>,
+    started_ms: u64,
     calls: u64,
     confirmations: u64,
     stopped: bool,
@@ -192,6 +194,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             config,
             client: Client::default(),
             watchdog,
+            started_ms: now_unix_ms(),
             calls: 0,
             confirmations: 0,
             stopped: false,
@@ -214,7 +217,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 Incoming::End => return Ok(()),
                 Incoming::TooLong => Some(too_long()),
                 Incoming::Line(line) => {
-                    let mut link = Link {
+                    let mut link = Connection {
                         reader: &mut reader,
                         output: &mut *output,
                         queued: &mut queued,
@@ -240,7 +243,11 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         self.handle_linked(line, None)
     }
 
-    fn handle_linked(&mut self, line: &[u8], link: Option<&mut Link<'_, '_>>) -> Option<String> {
+    fn handle_linked(
+        &mut self,
+        line: &[u8],
+        link: Option<&mut Connection<'_, '_>>,
+    ) -> Option<String> {
         if line.iter().all(u8::is_ascii_whitespace) {
             return None;
         }
@@ -267,7 +274,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         id: &str,
         method: &str,
         params: Option<&Node>,
-        link: Option<&mut Link<'_, '_>>,
+        link: Option<&mut Connection<'_, '_>>,
     ) -> Option<String> {
         let needs_initialize = matches!(
             method,
@@ -391,7 +398,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
 
     fn next_call_id(&mut self) -> String {
         self.calls += 1;
-        format!("{}-{}", std::process::id(), self.calls)
+        format!("{}-{}-{}", std::process::id(), self.started_ms, self.calls)
     }
 
     fn request_of<'a>(
@@ -504,7 +511,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         &mut self,
         id: &str,
         params: Option<&Node>,
-        link: Option<&mut Link<'_, '_>>,
+        link: Option<&mut Connection<'_, '_>>,
     ) -> Option<String> {
         let members = match params.map(|node| &node.value) {
             Some(Json::Object(members)) => members.as_slice(),
@@ -570,7 +577,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         id: &str,
         arguments: &Arguments<'_>,
         arguments_text: &str,
-        link: Option<&mut Link<'_, '_>>,
+        link: Option<&mut Connection<'_, '_>>,
     ) -> Option<String> {
         let pending = PendingWrite {
             id,
@@ -594,22 +601,22 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             match link {
                 Some(link) if self.client.can_ask_user => {
                     match self.ask_user(link, id, statement, request.sql) {
-                        Answer::Run => confirmation = Some("elicitation"),
-                        Answer::Declined => {
+                        UserAnswer::Run => confirmation = Some("elicitation"),
+                        UserAnswer::Declined => {
                             return Some(self.finish_write(
                                 &pending,
                                 unwritten(Err(tools::declined_by_user(statement))),
                                 Some("elicitation"),
                             ));
                         }
-                        Answer::Failed => {
+                        UserAnswer::Failed => {
                             return Some(self.finish_write(
                                 &pending,
                                 unwritten(Err(tools::confirmation_failed())),
                                 Some("elicitation"),
                             ));
                         }
-                        Answer::Cancelled => {
+                        UserAnswer::Cancelled => {
                             let cancelled = unwritten(Err(ToolError::new(
                                 "cancelled",
                                 "The call was cancelled while the user was asked. Nothing was run.",
@@ -695,11 +702,11 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
 
     fn ask_user(
         &mut self,
-        link: &mut Link<'_, '_>,
+        link: &mut Connection<'_, '_>,
         call: &str,
         statement: &DestructiveStatement,
         sql: &str,
-    ) -> Answer {
+    ) -> UserAnswer {
         self.confirmations += 1;
         let asked = format!("eggdb-confirm-{}", self.confirmations);
         let asked_id = encoded_string(&asked);
@@ -718,7 +725,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             .end_object();
         if link.send(&out.finish()).is_err() {
             self.stopped = true;
-            return Answer::Cancelled;
+            return UserAnswer::Cancelled;
         }
         loop {
             let incoming = match link.reader.next_message() {
@@ -729,7 +736,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 Incoming::End => {
                     self.stopped = true;
                     let _ = link.send(&cancelled_notification(&asked_id));
-                    return Answer::Cancelled;
+                    return UserAnswer::Cancelled;
                 }
                 Incoming::TooLong => {
                     let _ = link.send(&too_long());
@@ -755,7 +762,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                     };
                     if target == call {
                         let _ = link.send(&cancelled_notification(&asked_id));
-                        return Answer::Cancelled;
+                        return UserAnswer::Cancelled;
                     }
                     link.queued
                         .retain(|waiting| waiting.id.as_deref() != Some(target.as_str()));
@@ -915,9 +922,9 @@ fn tool_result_line(id: &str, outcome: &Result<ToolSuccess, ToolError>) -> Strin
     result_line(id, &out.finish())
 }
 
-fn answer_of(result: Option<&Node>) -> Answer {
+fn answer_of(result: Option<&Node>) -> UserAnswer {
     let Some(Json::Object(members)) = result.map(|node| &node.value) else {
-        return Answer::Failed;
+        return UserAnswer::Failed;
     };
     let accepted =
         matches!(member(members, "action"), Some(Json::String(action)) if action == "accept");
@@ -926,9 +933,9 @@ fn answer_of(result: Option<&Node>) -> Answer {
         _ => false,
     };
     if accepted && run {
-        Answer::Run
+        UserAnswer::Run
     } else {
-        Answer::Declined
+        UserAnswer::Declined
     }
 }
 

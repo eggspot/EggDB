@@ -180,7 +180,7 @@ appended to `<file>.mcp-audit.jsonl` next to the database (`app.db.mcp-audit.jso
 line each, **before** its result goes to the agent: the time, the client's name and version as
 the client stated them in `initialize`, the protocol version, the tool, its arguments, and the
 result's size, row count and truncation, or the error code and SQLSTATE, and the duration. The
-result's content is never recorded. Every call has a `call_id`. A `write_sql` also writes a
+result's content is never recorded. Every call has a `call_id` (`<pid>-<server start in ms>-<n>`). A `write_sql` also writes a
 `call_started` record before it opens the file, and its `call` record says how a destructive
 statement was confirmed (`confirmation`: `elicitation` or `confirm_argument`), whether it
 `committed`, and any `warning`; a `call_started` with no `call` after it means the server stopped
