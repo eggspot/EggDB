@@ -44,7 +44,9 @@ pub fn open_private_append(path: &Path) -> io::Result<File> {
 /// so a link swapped in while opening is refused too), and a file that is not a regular file
 /// (a FIFO, a device, a directory) or that has another name (a hard link) is refused before
 /// anything is written to it or its mode is changed. A FIFO never makes it wait. So nothing
-/// planted at the path can send the writes to another file.
+/// planted at the path can send the writes to another file. The file can be locked with
+/// [`File::try_lock`] on every system: on Windows, where locking needs read or write access
+/// and appending alone gives neither, it is also opened for reading.
 pub fn open_private_append_no_follow(path: &Path) -> io::Result<File> {
     let file = match open_append_no_follow(path) {
         Ok(file) => file,
@@ -199,6 +201,7 @@ fn open_append_no_follow(path: &Path) -> io::Result<File> {
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     let mut options = private_options();
     options
+        .read(true)
         .append(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     options.open(path)
@@ -336,6 +339,30 @@ mod tests {
                 let _ = std::fs::remove_file(path);
             }
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_no_follow_append_can_be_locked_and_reopened_while_a_reader_holds_the_file() {
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-no-follow-lock-{}", std::process::id()));
+        create_private_directory(&directory).unwrap();
+        let path = directory.join("audit.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut first = open_private_append_no_follow(&path).unwrap();
+        first.try_lock().unwrap();
+        first.write_all(b"one\n").unwrap();
+        first.sync_data().unwrap();
+        drop(first);
+        let reader = std::fs::File::open(&path).unwrap();
+        let mut second = open_private_append_no_follow(&path).unwrap();
+        second.try_lock().unwrap();
+        assert!(second.metadata().unwrap().len() > 0);
+        second.write_all(b"two\n").unwrap();
+        second.sync_data().unwrap();
+        drop(second);
+        drop(reader);
+        assert_eq!(std::fs::read(&path).unwrap(), b"one\ntwo\n");
         let _ = std::fs::remove_file(&path);
     }
 }
