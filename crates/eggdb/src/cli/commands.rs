@@ -13,6 +13,7 @@ use std::ops::Bound;
 
 mod copy_io;
 mod csv_import;
+mod restore;
 mod serve;
 mod shell;
 mod shell_copy;
@@ -135,6 +136,7 @@ fn execute_on(
         CommandName::Import => session.import(),
         CommandName::Sql => session.sql(),
         CommandName::Serve => session.serve(),
+        CommandName::Restore => session.restore(),
         CommandName::Shell => Err(Failure::usage(
             "eggdb shell does not run inside itself",
             Some(CommandName::Shell),

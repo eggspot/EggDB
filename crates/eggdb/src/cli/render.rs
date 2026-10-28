@@ -198,6 +198,20 @@ impl JsonObject {
         }
     }
 
+    pub(crate) fn raw(mut self, name: &str, json: &str) -> Self {
+        self.name(name);
+        self.out.push_str(json);
+        self
+    }
+
+    pub(crate) fn object(mut self) -> String {
+        if self.out.is_empty() {
+            self.out.push('{');
+        }
+        self.out.push('}');
+        self.out
+    }
+
     pub(crate) fn line(mut self) -> String {
         if self.out.is_empty() {
             self.out.push('{');
@@ -205,6 +219,12 @@ impl JsonObject {
         self.out.push_str("}\n");
         self.out
     }
+}
+
+pub(crate) fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    push_json_string(&mut out, text);
+    out
 }
 
 fn push_json_string(out: &mut String, text: &str) {

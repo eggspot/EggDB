@@ -20,6 +20,7 @@ Commands:
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
+  restore <file> [dump]         restore a PostgreSQL dump (pg_dump's plain SQL) into the file
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -62,6 +63,9 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Serve => {
             "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
         }
+        CommandName::Restore => {
+            "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql]"
+        }
     }
 }
 
@@ -88,6 +92,7 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Sql => SQL,
         CommandName::Serve => SERVE,
         CommandName::Shell => SHELL,
+        CommandName::Restore => RESTORE,
     }
 }
 
@@ -330,4 +335,29 @@ Examples:
   eggdb serve --create new.db --password-file - < password.txt
   psql postgresql://eggdb@127.0.0.1:5432/app
   eggdb serve app.db --password-file pw.txt --mysql-listen 127.0.0.1:3306
+";
+
+const RESTORE: &str = "\
+Restores a PostgreSQL dump in plain SQL form (pg_dump, or pg_restore -f dump.sql <archive>)
+into the file, statement by statement, each in its own transaction (a table's COPY data in one).
+Objects EggDB does not have yet (functions, triggers, types, policies, partitioned tables,
+extensions other than plpgsql, ...) are skipped and listed in the report with their line in the
+dump; GRANT, REVOKE and OWNER TO are ignored (no roles yet); a statement that fails only because
+it uses a skipped object is a consequence, not an error. An error in a supported statement (a
+COPY row breaking a constraint, bad syntax, a failed INSERT) stops the restore at that line, and
+the statements before it stay committed. Custom, directory and tar archives are not read:
+convert them first with pg_restore -f dump.sql <archive>. The report counts what was created,
+lists everything skipped, ignored and failed, and is one JSON object in a pipe.
+
+      --create            create the file if it is missing (built as <file>.restoring, renamed
+                          when the restore succeeded, so a failed restore leaves no file)
+      --keep-going        report an error and go on; exit 3 at the end if there was one
+      --report <path>     write the report to this file instead of stdout
+      --dialect <name>    the dump's dialect: postgresql (sqlserver and oracle come later)
+
+Examples:
+  eggdb restore --create app.db app.sql
+  pg_dump app | eggdb restore --create app.db
+  pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
+  eggdb restore app.db dump.sql --keep-going --report restore.json --format json
 ";

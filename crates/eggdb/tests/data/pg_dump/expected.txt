@@ -1,0 +1,353 @@
+== COPY (SELECT * FROM public.customers ORDER BY id) TO STDOUT
+1	customer 1	c1@example.com	US	t	2024-01-01 03:07:11.25+00	
+2	customer 2	c2@example.com	DE	t	2024-01-01 06:14:22.5+00	O'Brien said "hi"
+3	customer 3	c3@example.com	JP	f	2024-01-01 09:21:33.75+00	Ngọc Ánh – 東京 🎉
+4	customer 4	c4@example.com	BR	t	2024-01-01 12:28:45+00	\N
+5	customer 5	c5@example.com	VN	t	2024-01-01 15:35:56.25+00	
+6	customer 6	c6@example.com	US	f	2024-01-01 18:43:07.5+00	O'Brien said "hi"
+7	customer 7	c7@example.com	DE	t	2024-01-01 21:50:18.75+00	Ngọc Ánh – 東京 🎉
+8	customer 8	c8@example.com	JP	t	2024-01-02 00:57:30+00	\N
+9	customer 9	c9@example.com	BR	f	2024-01-02 04:04:41.25+00	
+10	customer 10	c10@example.com	VN	t	2024-01-02 07:11:52.5+00	O'Brien said "hi"
+11	customer 11	c11@example.com	US	t	2024-01-02 10:19:03.75+00	Ngọc Ánh – 東京 🎉
+12	customer 12	c12@example.com	DE	f	2024-01-02 13:26:15+00	\N
+13	customer 13	c13@example.com	JP	t	2024-01-02 16:33:26.25+00	
+14	customer 14	c14@example.com	BR	t	2024-01-02 19:40:37.5+00	O'Brien said "hi"
+15	customer 15	c15@example.com	VN	f	2024-01-02 22:47:48.75+00	Ngọc Ánh – 東京 🎉
+== COPY (SELECT * FROM public.products ORDER BY id) TO STDOUT
+1	8402e99c-5b52-5201-6079-4615a8161683	product 1	0.37	0.125	3.25	{"new": false, "note": "line\\ntwo", "sizes": [1, 1], "colour": "green"}	{"id": 1,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
+2	815b505d-9619-dfa9-a7c1-73acd8897fce	product 2	0.74	0.25	6.5	{"new": true, "note": "line\\ntwo", "sizes": [2, 2], "colour": "blue"}	{"id": 2,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
+3	8a203a0d-515d-eb1c-42a1-d176e7da3b92	product 3	1.11	0.375	9.75	{"new": false, "note": "line\\ntwo", "sizes": [3, 3], "colour": "red"}	{"id": 3,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
+4	90d6d188-6f4f-ba57-a67f-f5c326fdecee	product 4	1.48	0.5	13	{"new": true, "note": "line\\ntwo", "sizes": [4, 4], "colour": "green"}	{"id": 4,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
+5	cd606c61-d9fb-1c37-599f-1f483621e929	product 5	1.85	0.625	16.25	{"new": false, "note": "line\\ntwo", "sizes": [0, 5], "colour": "blue"}	{"id": 5,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
+6	ef329fbc-031f-8a6e-ecc7-1f2ba8f99f58	product 6	2.22	0.75	19.5	{"new": true, "note": "line\\ntwo", "sizes": [1, 6], "colour": "red"}	{"id": 6,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
+== COPY (SELECT * FROM public.orders ORDER BY id) TO STDOUT
+1	2	2024-01-02	2024-01-01 08:41:03.5	paid	7.9190000000000000
+2	3	2024-01-03	2024-01-01 09:22:07	shipped	15.8380000000000000
+3	4	2024-01-04	2024-01-01 10:03:10.5	cancelled	23.7570000000000000
+4	5	2024-01-05	2024-01-01 10:44:14	new	31.6760000000000000
+5	6	2024-01-06	2024-01-01 11:25:17.5	paid	39.5950000000000000
+6	7	2024-01-07	2024-01-01 12:06:21	shipped	47.5140000000000000
+7	8	2024-01-08	2024-01-01 12:47:24.5	cancelled	55.4330000000000000
+8	9	2024-01-09	2024-01-01 13:28:28	new	63.3520000000000000
+9	10	2024-01-10	2024-01-01 14:09:31.5	paid	71.2710000000000000
+10	11	2024-01-11	2024-01-01 14:50:35	shipped	79.1900000000000000
+11	12	2024-01-12	2024-01-01 15:31:38.5	cancelled	87.1090000000000000
+12	13	2024-01-13	2024-01-01 16:12:42	new	95.0280000000000000
+13	14	2024-01-14	2024-01-01 16:53:45.5	paid	\N
+14	15	2024-01-15	2024-01-01 17:34:49	shipped	110.8660000000000000
+15	1	2024-01-16	2024-01-01 18:15:52.5	cancelled	118.7850000000000000
+16	2	2024-01-17	2024-01-01 18:56:56	new	126.7040000000000000
+17	3	2024-01-18	2024-01-01 19:37:59.5	paid	134.6230000000000000
+18	4	2024-01-19	2024-01-01 20:19:03	shipped	142.5420000000000000
+19	5	2024-01-20	2024-01-01 21:00:06.5	cancelled	150.4610000000000000
+20	6	2024-01-21	2024-01-01 21:41:10	new	158.3800000000000000
+21	7	2024-01-22	2024-01-01 22:22:13.5	paid	166.2990000000000000
+22	8	2024-01-23	2024-01-01 23:03:17	shipped	174.2180000000000000
+23	9	2024-01-24	2024-01-01 23:44:20.5	cancelled	182.1370000000000000
+24	10	2024-01-25	2024-01-02 00:25:24	new	190.0560000000000000
+25	11	2024-01-26	2024-01-02 01:06:27.5	paid	197.9750000000000000
+26	12	2024-01-27	2024-01-02 01:47:31	shipped	\N
+27	13	2024-01-28	2024-01-02 02:28:34.5	cancelled	213.8130000000000000
+28	14	2024-01-29	2024-01-02 03:09:38	new	221.7320000000000000
+29	15	2024-01-30	2024-01-02 03:50:41.5	paid	229.6510000000000000
+30	1	2024-01-31	2024-01-02 04:31:45	shipped	237.5700000000000000
+== COPY (SELECT * FROM public.order_items ORDER BY order_id, line) TO STDOUT
+1	1	2	2	1.13
+1	2	3	3	2.26
+1	3	4	4	3.39
+1	4	5	5	4.52
+1	5	6	6	5.65
+2	1	1	7	6.78
+2	2	2	8	7.91
+2	3	3	9	9.04
+2	4	4	1	10.17
+2	5	5	2	11.30
+3	1	6	3	12.43
+3	2	1	4	13.56
+3	3	2	5	14.69
+3	4	3	6	15.82
+3	5	4	7	16.95
+4	1	5	8	18.08
+4	2	6	9	19.21
+4	3	1	1	20.34
+4	4	2	2	21.47
+4	5	3	3	22.60
+5	1	4	4	23.73
+5	2	5	5	24.86
+5	3	6	6	25.99
+5	4	1	7	27.12
+5	5	2	8	28.25
+6	1	3	9	29.38
+6	2	4	1	30.51
+6	3	5	2	31.64
+6	4	6	3	32.77
+6	5	1	4	33.90
+7	1	2	5	35.03
+7	2	3	6	36.16
+7	3	4	7	37.29
+7	4	5	8	38.42
+7	5	6	9	39.55
+8	1	1	1	40.68
+8	2	2	2	41.81
+8	3	3	3	42.94
+8	4	4	4	44.07
+8	5	5	5	45.20
+9	1	6	6	46.33
+9	2	1	7	47.46
+9	3	2	8	48.59
+9	4	3	9	49.72
+9	5	4	1	50.85
+10	1	5	2	51.98
+10	2	6	3	53.11
+10	3	1	4	54.24
+10	4	2	5	55.37
+10	5	3	6	56.50
+11	1	4	7	57.63
+11	2	5	8	58.76
+11	3	6	9	59.89
+11	4	1	1	61.02
+11	5	2	2	62.15
+12	1	3	3	63.28
+12	2	4	4	64.41
+12	3	5	5	65.54
+12	4	6	6	66.67
+12	5	1	7	67.80
+13	1	2	8	68.93
+13	2	3	9	70.06
+13	3	4	1	71.19
+13	4	5	2	72.32
+13	5	6	3	73.45
+14	1	1	4	74.58
+14	2	2	5	75.71
+14	3	3	6	76.84
+14	4	4	7	77.97
+14	5	5	8	79.10
+15	1	6	9	80.23
+15	2	1	1	81.36
+15	3	2	2	82.49
+15	4	3	3	83.62
+15	5	4	4	84.75
+== COPY (SELECT * FROM shop.warehouses ORDER BY code) TO STDOUT
+BER1	Berlin	06:00:00	22:00:00+01
+HAN1	Hà Nội	07:30:00	18:00:00+07
+LON1	London	00:00:00	23:59:59.999999+00
+NYC1	New York	\N	17:45:30-05
+SAO1	São Paulo	10:15:00	\N
+SGN1	Sài Gòn	08:00:00.5	20:30:00+07
+SYD1	Sydney	05:05:05	15:15:00+10:30
+TYO1	Tokyo	09:00:00	19:00:00+09
+== COPY (SELECT * FROM shop.stock ORDER BY warehouse, product_id) TO STDOUT
+BER1	1	21	2025-06-01 12:01:00+00
+BER1	2	38	2025-06-01 12:02:00+00
+BER1	3	55	2025-06-01 12:03:00+00
+BER1	4	72	2025-06-01 12:04:00+00
+BER1	5	89	2025-06-01 12:05:00+00
+BER1	6	106	2025-06-01 12:06:00+00
+HAN1	1	21	2025-06-01 12:01:00+00
+HAN1	2	38	2025-06-01 12:02:00+00
+HAN1	3	55	2025-06-01 12:03:00+00
+HAN1	4	72	2025-06-01 12:04:00+00
+HAN1	5	89	2025-06-01 12:05:00+00
+HAN1	6	106	2025-06-01 12:06:00+00
+LON1	1	21	2025-06-01 12:01:00+00
+LON1	2	38	2025-06-01 12:02:00+00
+LON1	3	55	2025-06-01 12:03:00+00
+LON1	4	72	2025-06-01 12:04:00+00
+LON1	5	89	2025-06-01 12:05:00+00
+LON1	6	106	2025-06-01 12:06:00+00
+NYC1	1	21	2025-06-01 12:01:00+00
+NYC1	2	38	2025-06-01 12:02:00+00
+NYC1	3	55	2025-06-01 12:03:00+00
+NYC1	4	72	2025-06-01 12:04:00+00
+NYC1	5	89	2025-06-01 12:05:00+00
+NYC1	6	106	2025-06-01 12:06:00+00
+== COPY (SELECT * FROM public.blobs ORDER BY id) TO STDOUT
+0	\N	\\xcfcd208495d565ef66e7dff9f98764da
+1	\\x	\\xc4ca4238a0b923820dcc509a6f75849b
+2	\\x02030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff0001	\\xc81e728d9d4c2f636f067f89cc14862c
+3	\\x030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102	\\xeccbc87e4b5ce2fe28308fd9f2a7baf3
+4	\\x0405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff00010203	\\xa87ff679a2f3e71d9181a67b7542122c
+5	\\x05060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff0001020304	\\xe4da3b7fbbce2345d7772b0674a318d5
+6	\\x060708090a0b0c0d0e0f101112131415161718191a1b	\\x1679091c5a880faf6fb5e6087eb1b2dc
+7	\\x0708090a0b0c0d0e0f101112131415161718191a1b1c1d	\\x8f14e45fceea167a5a36dedd4bea2543
+8	\\x08090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f	\\xc9f0f895fb98ab9159f51fd0297e236d
+== COPY (SELECT * FROM public.texts ORDER BY id) TO STDOUT
+1		label 1
+2	tab\tseparated\tvalue	label 2
+3	line one\nline two\r\nline three	label 3
+4	back\\slash \\N \\. \\\\ end\\	label 4
+5	it's "quoted" 'twice'	\N
+6	Tiếng Việt, Ελληνικά, Русский, עברית, 中文, 😀👍	label 6
+7	large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 large text 7 	label 7
+8	\\.	label 8
+9	   leading and trailing spaces   	label 9
+10	NULL	\N
+11	semicolon; -- not a comment /* nor this */ $$dollar$$	label 11
+12	\N	label 12
+13		label 13
+14	tab\tseparated\tvalue	label 14
+15	line one\nline two\r\nline three	\N
+16	back\\slash \\N \\. \\\\ end\\	label 16
+17	it's "quoted" 'twice'	label 17
+18	Tiếng Việt, Ελληνικά, Русский, עברית, 中文, 😀👍	label 18
+19	large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 large text 19 	label 19
+20	\\.	\N
+21	   leading and trailing spaces   	label 21
+22	NULL	label 22
+23	semicolon; -- not a comment /* nor this */ $$dollar$$	label 23
+24	\N	label 24
+== COPY (SELECT * FROM public.events ORDER BY id) TO STDOUT
+1	2023-03-26 00:47:01.000001+00	00:00:01	{"n": 1, "ok": false, "nested": {"a": "x", "z": 1.50}}	alert
+2	2023-03-26 01:04:02.000002+00	2 days 02:00:00	{"n": 2, "ok": true, "nested": {"a": "x", "z": 1.50}}	\N
+3	2023-03-26 01:21:03.000003+00	3 mons	{"n": 3, "ok": false, "nested": {"a": "x", "z": 1.50}}	audit
+4	2023-03-26 01:38:04.000004+00	1 year -00:04:00	\N	deploy
+5	2023-03-26 01:55:05.000005+00	-1 days +02:03:04.5	{"n": 5, "ok": false, "nested": {"a": "x", "z": 1.50}}	alert
+6	2023-03-26 02:12:06.000006+00	\N	{"n": 6, "ok": true, "nested": {"a": "x", "z": 1.50}}	\N
+7	2023-03-26 02:29:07.000007+00	00:00:07	{"n": 7, "ok": false, "nested": {"a": "x", "z": 1.50}}	audit
+8	2023-03-26 02:46:08.000008+00	8 days 08:00:00	\N	deploy
+9	2023-03-26 03:03:09.000009+00	9 mons	{"n": 9, "ok": false, "nested": {"a": "x", "z": 1.50}}	alert
+10	2023-03-26 03:20:10.00001+00	1 year -00:10:00	{"n": 10, "ok": true, "nested": {"a": "x", "z": 1.50}}	\N
+11	2023-03-26 03:37:11.000011+00	-1 days +02:03:04.5	{"n": 11, "ok": false, "nested": {"a": "x", "z": 1.50}}	audit
+12	2023-03-26 03:54:12.000012+00	\N	\N	deploy
+13	2023-03-26 04:11:13.000013+00	00:00:13	{"n": 13, "ok": false, "nested": {"a": "x", "z": 1.50}}	alert
+14	2023-03-26 04:28:14.000014+00	14 days 14:00:00	{"n": 14, "ok": true, "nested": {"a": "x", "z": 1.50}}	\N
+15	2023-03-26 04:45:15.000015+00	1 mon	{"n": 15, "ok": false, "nested": {"a": "x", "z": 1.50}}	audit
+16	2023-03-26 05:02:16.000016+00	1 year -00:16:00	\N	deploy
+17	2023-03-26 05:19:17.000017+00	-1 days +02:03:04.5	{"n": 17, "ok": false, "nested": {"a": "x", "z": 1.50}}	alert
+18	2023-03-26 05:36:18.000018+00	\N	{"n": 18, "ok": true, "nested": {"a": "x", "z": 1.50}}	\N
+19	2023-03-26 05:53:19.000019+00	00:00:19	{"n": 19, "ok": false, "nested": {"a": "x", "z": 1.50}}	audit
+20	2023-03-26 06:10:20.00002+00	20 days 20:00:00	\N	deploy
+21	2023-03-26 06:27:21.000021+00	7 mons	{"n": 21, "ok": false, "nested": {"a": "x", "z": 1.50}}	alert
+22	2023-03-26 06:44:22.000022+00	1 year -00:22:00	{"n": 22, "ok": true, "nested": {"a": "x", "z": 1.50}}	\N
+23	2023-03-26 07:01:23.000023+00	-1 days +02:03:04.5	{"n": 23, "ok": false, "nested": {"a": "x", "z": 1.50}}	audit
+24	2023-03-26 07:18:24.000024+00	\N	\N	deploy
+25	2023-03-26 07:35:25.000025+00	00:00:25	{"n": 25, "ok": false, "nested": {"a": "x", "z": 1.50}}	alert
+26	2023-03-26 07:52:26.000026+00	26 days 02:00:00	{"n": 26, "ok": true, "nested": {"a": "x", "z": 1.50}}	\N
+27	2023-03-26 08:09:27.000027+00	1 year 1 mon	{"n": 27, "ok": false, "nested": {"a": "x", "z": 1.50}}	audit
+28	2023-03-26 08:26:28.000028+00	1 year -00:28:00	\N	deploy
+29	2023-03-26 08:43:29.000029+00	-1 days +02:03:04.5	{"n": 29, "ok": false, "nested": {"a": "x", "z": 1.50}}	alert
+30	2023-03-26 09:00:30.00003+00	\N	{"n": 30, "ok": true, "nested": {"a": "x", "z": 1.50}}	\N
+== COPY (SELECT * FROM public.measurements ORDER BY sensor, taken) TO STDOUT
+0	2025-01-01 00:01:30	-616.25	t
+0	2025-01-01 00:03:00	-607.5	t
+0	2025-01-01 00:04:30	-598.75	t
+1	2025-01-01 00:00:00	-624.5625	f
+1	2025-01-01 00:01:30	-615.8125	\N
+1	2025-01-01 00:03:00	-607.0625	f
+2	2025-01-01 00:00:00	-624.125	t
+2	2025-01-01 00:01:30	-615.375	t
+2	2025-01-01 00:03:00	-606.625	\N
+3	2025-01-01 00:00:00	-623.6875	f
+3	2025-01-01 00:01:30	\N	f
+3	2025-01-01 00:03:00	-606.1875	f
+4	2025-01-01 00:00:00	-623.25	t
+4	2025-01-01 00:01:30	-614.5	t
+4	2025-01-01 00:03:00	-605.75	t
+5	2025-01-01 00:00:00	-622.8125	f
+5	2025-01-01 00:01:30	-614.0625	f
+5	2025-01-01 00:03:00	-605.3125	f
+6	2025-01-01 00:00:00	-622.375	t
+6	2025-01-01 00:01:30	-613.625	t
+6	2025-01-01 00:03:00	\N	t
+7	2025-01-01 00:00:00	-621.9375	\N
+7	2025-01-01 00:01:30	-613.1875	f
+7	2025-01-01 00:03:00	-604.4375	f
+8	2025-01-01 00:00:00	-621.5	t
+8	2025-01-01 00:01:30	-612.75	\N
+8	2025-01-01 00:03:00	-604	t
+9	2025-01-01 00:00:00	-621.0625	f
+9	2025-01-01 00:01:30	-612.3125	f
+9	2025-01-01 00:03:00	-603.5625	\N
+10	2025-01-01 00:00:00	-620.625	t
+10	2025-01-01 00:01:30	-611.875	t
+10	2025-01-01 00:03:00	-603.125	t
+11	2025-01-01 00:00:00	-620.1875	f
+11	2025-01-01 00:01:30	-611.4375	f
+11	2025-01-01 00:03:00	-602.6875	f
+12	2025-01-01 00:00:00	-619.75	t
+12	2025-01-01 00:01:30	-611	t
+12	2025-01-01 00:03:00	-602.25	t
+13	2025-01-01 00:00:00	-619.3125	f
+13	2025-01-01 00:01:30	-610.5625	f
+13	2025-01-01 00:03:00	-601.8125	f
+14	2025-01-01 00:00:00	-618.875	\N
+14	2025-01-01 00:01:30	-610.125	t
+14	2025-01-01 00:03:00	-601.375	t
+15	2025-01-01 00:00:00	-618.4375	f
+15	2025-01-01 00:01:30	-609.6875	\N
+15	2025-01-01 00:03:00	-600.9375	f
+16	2025-01-01 00:00:00	-618	t
+16	2025-01-01 00:01:30	-609.25	t
+16	2025-01-01 00:03:00	-600.5	\N
+17	2025-01-01 00:00:00	-617.5625	f
+17	2025-01-01 00:01:30	-608.8125	f
+17	2025-01-01 00:03:00	-600.0625	f
+18	2025-01-01 00:00:00	-617.125	t
+18	2025-01-01 00:01:30	-608.375	t
+18	2025-01-01 00:03:00	-599.625	t
+19	2025-01-01 00:00:00	-616.6875	f
+19	2025-01-01 00:01:30	-607.9375	f
+19	2025-01-01 00:03:00	-599.1875	f
+== COPY (SELECT * FROM public.log_lines ORDER BY logged_at, level, message) TO STDOUT
+2025-02-01 00:00:00+00	info	request 1 ok
+2025-02-01 00:00:00+00	warn	request 2 ok
+2025-02-01 00:00:01+00	debug	request 4 ok
+2025-02-01 00:00:01+00	error	request 3 ok
+2025-02-01 00:00:01+00	info	request 5 ok
+2025-02-01 00:00:02+00	debug	request 8 ok
+2025-02-01 00:00:02+00	error	request 7 ok
+2025-02-01 00:00:02+00	warn	request 6 ok
+2025-02-01 00:00:03+00	error	request 11 ok
+2025-02-01 00:00:03+00	info	request 9 ok
+2025-02-01 00:00:03+00	warn	request 10 failed:\ttimeout
+2025-02-01 00:00:04+00	debug	request 12 ok
+2025-02-01 00:00:04+00	info	request 13 ok
+2025-02-01 00:00:04+00	warn	request 14 ok
+2025-02-01 00:00:05+00	debug	request 16 ok
+2025-02-01 00:00:05+00	error	request 15 ok
+2025-02-01 00:00:05+00	info	request 17 ok
+2025-02-01 00:00:06+00	debug	request 20 failed:\ttimeout
+2025-02-01 00:00:06+00	error	request 19 ok
+2025-02-01 00:00:06+00	warn	request 18 ok
+2025-02-01 00:00:07+00	error	request 23 ok
+2025-02-01 00:00:07+00	info	request 21 ok
+2025-02-01 00:00:07+00	warn	request 22 ok
+2025-02-01 00:00:08+00	debug	request 24 ok
+2025-02-01 00:00:08+00	info	request 25 ok
+2025-02-01 00:00:08+00	warn	request 26 ok
+2025-02-01 00:00:09+00	debug	request 28 ok
+2025-02-01 00:00:09+00	error	request 27 ok
+2025-02-01 00:00:09+00	info	request 29 ok
+2025-02-01 00:00:10+00	warn	request 30 failed:\ttimeout
+== COPY (SELECT * FROM public.ledger ORDER BY id) TO STDOUT
+1	1000000000001	-9.895271	1000	entry #1	2020-03-01
+2	1000000000002	-9.790542	1007	entry #2	2020-03-02
+3	1000000000003	-9.685813	1014	entry #3	2020-03-03
+4	1000000000004	-9.581084	1021	entry #4	2020-03-04
+5	1000000000005	-9.476355	1028	entry #5	2020-03-05
+6	1000000000006	-9.371626	1035	entry #6	2020-03-06
+7	1000000000007	-9.266897	1042	entry #7	2020-03-07
+8	1000000000008	-9.162168	1049	\N	2020-03-08
+9	1000000000009	-9.057439	1056	entry #9	2020-03-09
+10	1000000000010	-8.952710	1063	entry #10	2020-03-10
+11	1000000000011	-8.847981	1070	entry #11	2020-03-11
+12	1000000000012	-8.743252	1077	entry #12	2020-03-12
+13	1000000000013	-8.638523	1084	entry #13	2020-03-13
+14	1000000000014	-8.533794	1091	entry #14	2020-03-14
+15	1000000000015	-8.429065	1098	entry #15	2020-03-15
+16	1000000000016	-8.324336	1105	\N	2020-03-16
+17	1000000000017	-8.219607	1112	entry #17	2020-03-17
+18	1000000000018	-8.114878	1119	entry #18	2020-03-18
+19	1000000000019	-8.010149	1126	entry #19	2020-03-19
+20	1000000000020	-7.905420	1133	entry #20	2020-03-20
+21	1000000000021	-7.800691	1140	entry #21	2020-03-21
+22	1000000000022	-7.695962	1147	entry #22	2020-03-22
+23	1000000000023	-7.591233	1154	entry #23	2020-03-23
+24	1000000000024	-7.486504	1161	\N	2020-03-24
+25	1000000000025	-7.381775	1168	entry #25	2020-03-25
+26	1000000000026	-7.277046	1175	entry #26	2020-03-26
+27	1000000000027	-7.172317	1182	entry #27	2020-03-27
+28	1000000000028	-7.067588	1189	entry #28	2020-03-28
+29	1000000000029	-6.962859	1196	entry #29	2020-03-29
+30	1000000000030	-6.858130	1203	entry #30	2020-03-30
