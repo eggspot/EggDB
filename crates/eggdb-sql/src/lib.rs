@@ -48,6 +48,7 @@ mod oracle_functions;
 mod parser;
 mod plan;
 mod random;
+mod restore;
 mod schema;
 mod schemas;
 mod sequences;
@@ -91,6 +92,10 @@ pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
 pub use numeric::Numeric;
 pub use parser::{ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION};
 pub use random::{RandomSource, set_random_source};
+pub use restore::{
+    Consequence, IgnoredMetaCommand, IgnoredStatements, MAX_LISTED, RestoreError, RestoreOptions,
+    RestoreProgress, RestoreReport, SkippedObject, TableRows, restore_dump,
+};
 pub use schema::{ColumnSchema, IndexSchema, TableSchema, quoted};
 pub use session::{
     OutputColumn, Parameter, PreparedStatement, QueryResult, Session, StatementDescription,

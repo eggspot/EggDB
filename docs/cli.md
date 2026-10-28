@@ -49,13 +49,14 @@ eggdb <command> <file> [arguments] [options]
 | `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
+| `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s) into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
 The command comes first and the file second; options may go anywhere after the command, and
 `--` ends them, so `eggdb get app.db -- -k` reads the key `-k`.
 
-**Only `create`, `put --create`, `import --create`, `sql --create`, `serve --create` and `shell --create` make a database file.** A wrong path such
+**Only `create`, `put --create`, `import --create`, `sql --create`, `serve --create`, `shell --create` and `restore --create` make a database file.** A wrong path such
 as `app.bd` is an error that says how to create the file, never a new empty database that later
 reads as "empty".
 
@@ -719,6 +720,70 @@ exits 0; a second Ctrl-C ends it at once.
 pass --password-file …`. A port in use: exit 3 with a `try:` line naming the next port. The file
 busy (another program has it open for writing): exit 5. While `serve` runs, the file is open for
 writing, so `eggdb put`, `sql` and the read-only commands exit 5 meanwhile.
+
+## `eggdb restore`
+
+`eggdb restore` brings a PostgreSQL database over by restoring the dump PostgreSQL already makes
+(D13, D118): `pg_dump`'s plain SQL, or the plain SQL that `pg_restore -f dump.sql <archive>`
+writes from a custom, directory or tar archive. [migrate.md](migrate.md) is the guide.
+
+```sh
+pg_dump app > app.sql
+eggdb restore --create app.db app.sql
+pg_dump app | eggdb restore --create app.db
+pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
+eggdb restore app.db app.sql --keep-going --report restore.json
+```
+
+- The dump is read line by line, never whole, and its statements run one at a time, each in its
+  own transaction as `psql -f` runs them; a table's `COPY` data loads in one transaction, so it
+  must fit in the page cache, which grows with the dump (as for `import --csv`; `--cache` sets
+  it).
+- `--create` makes a missing file: the restore builds it as `<file>.restoring` and renames it into
+  place only when it succeeded, so a failed or interrupted restore leaves no `<file>` (a
+  `<file>.restoring` left by a crash is refused; remove it and restore again). Without
+  `--create` the file must exist and the restore goes into it; an error then leaves the statements
+  before it committed.
+- psql's meta-commands in the dump are handled as psql would for what `pg_dump` writes:
+  `\connect` is noted (one database per file), `\restrict` and `\unrestrict` must carry the same
+  key (`pg_dump` 17.6 and later); every other meta-command is listed and never run.
+- Objects EggDB does not have yet (functions, procedures, triggers, rules, policies, types,
+  domains, materialized views, partitioned and inherited tables, extensions other than
+  `plpgsql`, ...) are skipped and listed with their line in the dump and why; `GRANT`, `REVOKE`
+  and `OWNER TO` are ignored (no roles yet), as are `SET` parameters EggDB does not have and
+  storage settings such as `REPLICA IDENTITY`. A statement that fails only because it uses a
+  skipped object is a consequence, listed too. None of these change the exit code.
+- An error in a supported statement (a `COPY` row breaking a constraint, bad syntax, an
+  `INSERT` that fails) stops the restore: stderr gets the error with its detail and the dump's
+  line, and the exit code is 3. `--keep-going` lists every error and runs on, then exits 3.
+- The report comes at the end in every outcome: counts of what was created and loaded (rows per
+  table), and every skipped object, consequence, ignored kind and error. It is text on a
+  terminal and one JSON object in a pipe or with `--format json`; `--report <path>` writes it to
+  a file (JSON for a `.json` path) and leaves only the verdict line on stdout.
+- A custom-format archive (it starts with `PGDMP`), a directory or tar archive, or a dump
+  compressed with gzip, zstd or lz4 is not read: the command exits 2 before any file is touched
+  and prints the exact `pg_restore -f dump.sql <archive>` or decompress command to run first.
+- `--dialect postgresql` is the only dialect for now; SQL Server's and Oracle's scripts come in
+  later releases (roadmap items 40 and 43).
+
+```
+restored app.sql into app.db (1,204 statements, 2.3 s)
+  schemas         2
+  tables          14, 1,204,311 rows
+  views           3
+  sequences       9
+  indexes         21
+  constraints     17
+  comments        4
+  skipped         3 (function 1, trigger 1, materialized view 1)
+  consequences    1
+  ignored         61 (OWNER TO 38, GRANT 20, SET 3)
+rows per table
+  public.orders  1,180,002
+  public.users      12,480
+…
+ok: every table and row of the dump is in app.db; 3 objects skipped and 1 consequence, listed above.
+```
 
 ## Exit codes and errors
 

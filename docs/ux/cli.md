@@ -804,3 +804,168 @@ $ echo $?
    continuation line (`app->`) every line is SQL.
 4. **The expanded header** follows psql's narrow form when the label is wider than the names
    and values (`-[ RECORD 1 ]-`).
+
+## 16. `eggdb restore`: restoring a pg_dump (item 35)
+
+`eggdb restore` keeps the grammar of section 1 (command, file, options) and reuses `--create`,
+`--keep-going`, `--format`, `--cache` and `--dialect` as `import`, `shell` and `sql` define them.
+Designed by Claude Fable (D15). It reads a PostgreSQL dump in plain SQL form (`pg_dump`, or
+`pg_restore -f dump.sql <archive>`) into one EggDB file, statement by statement, each in its own
+transaction (a table's `COPY` data in one), and ends with a report.
+
+```
+eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql]
+```
+`-` or no second argument reads stdin; when stdin is a terminal that is a usage error. The file
+must exist unless `--create`, which builds it as `<file>.restoring` and renames it into place
+only when the whole restore succeeded, so a failed restore leaves no file (import's rule, D93).
+
+### Help: `eggdb help restore`
+```
+Usage: eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql]
+
+Restores a PostgreSQL dump in plain SQL form (pg_dump, or pg_restore -f dump.sql <archive>)
+into the file, statement by statement, each in its own transaction (a table's COPY data in one).
+Objects EggDB does not have yet (functions, triggers, types, policies, partitioned tables,
+extensions other than plpgsql, ...) are skipped and listed in the report with their line in the
+dump; GRANT, REVOKE and OWNER TO are ignored (no roles yet); a statement that fails only because
+it uses a skipped object is a consequence, not an error. An error in a supported statement (a
+COPY row breaking a constraint, bad syntax, a failed INSERT) stops the restore at that line, and
+the statements before it stay committed. Custom, directory and tar archives are not read:
+convert them first with pg_restore -f dump.sql <archive>. The report counts what was created,
+lists everything skipped, ignored and failed, and is one JSON object in a pipe.
+
+      --create            create the file if it is missing (built as <file>.restoring, renamed
+                          when the restore succeeded, so a failed restore leaves no file)
+      --keep-going        report an error and go on; exit 3 at the end if there was one
+      --report <path>     write the report to this file instead of stdout
+      --dialect <name>    the dump's dialect: postgresql (sqlserver and oracle come later)
+
+Examples:
+  eggdb restore --create app.db app.sql
+  pg_dump app | eggdb restore --create app.db
+  pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
+  eggdb restore app.db dump.sql --keep-going --report restore.json --format json
+```
+
+### The text report
+Section 6's shape: a fixed first line, labelled facts (the same labels as the JSON fields),
+lists one item per line, and a verdict line. Every list item carries its dump line, so `sed -n
+'23p' dump.sql` shows the statement. The report prints in every outcome, failure included,
+because it says what the file holds and what to fix in the dump.
+```
+restored app.sql into app.db (1,204 statements, 2.3 s)
+  schemas         2
+  tables          14, 1,204,311 rows
+  views           3
+  sequences       9
+  indexes         21
+  constraints     17
+  comments        4
+  skipped         7 (functions 3, triggers 2, types 1, extensions 1)
+  consequences    2
+  ignored         61 (OWNER TO 38, GRANT 20, SET 3)
+rows per table
+  public.orders          1,180,002
+  public.users              12,480
+  public.items               1,329
+skipped (not in EggDB yet; docs/roadmap.md)
+  line 23     function public.set_updated_at()            plpgsql functions come later
+  line 310    trigger users_updated on public.users       triggers come later
+  line 2,114  table public.events (partitioned), 40,120 rows   partitioned tables come later
+consequences (fail only because of a skipped object)
+  line 412    ALTER TABLE public.orders ADD CONSTRAINT …  uses function public.set_updated_at()
+ignored
+  OWNER TO    38 statements (EggDB has no roles yet)
+  GRANT       20 statements
+  SET         3 statements: default_table_access_method, default_toast_compression, xmloption
+  \connect    line 5 (one database per file)
+  \!          line 9, never run
+ok: every table and row of the dump is in app.db; 7 objects skipped and 2 consequences, listed above.
+```
+Rules: `rows per table` is sorted by rows, largest first, at most 20 lines, then `  … and 34
+more tables (12,002 rows); --format json lists every table`. `skipped`, `consequences` and
+`errors` are never cut: they are the work left to do. `ignored` is counts, one line per kind
+(`OWNER TO`, `GRANT`, `REVOKE`, `SET` with its parameter names, then each meta-command with its
+lines), never one line per statement; `\restrict`/`\unrestrict`, `\.` and `\connect` to the
+file's own database are not listed at all. A statement in a list is cut after 48 characters
+with `…`; the line number is padded to the widest. A section with nothing is left out, and its
+summary line reads `skipped         0`. The verdict (green `ok:`, red `failed:` or `errors
+ignored:`) is one of:
+- `ok: every table and row of the dump is in app.db.`
+- `ok: every table and row of the dump is in app.db; {n} objects skipped and {m} consequences, listed above.`
+- `ok: {t} of {T} tables and {r} of {R} rows are in app.db; {n} objects skipped and {m} consequences, listed above.` (a partitioned or inherited table's rows are not restored)
+- `failed: line 412: duplicate key value violates unique constraint "orders_pkey". The 1,203 statements before it are in app.db; nothing after it ran.` (without `--create`)
+- `failed: line 412: {error}. Nothing was created; app.db does not exist.` (with `--create`)
+- `errors ignored: 3 statements failed and were skipped (--keep-going), listed above; app.db holds everything else.`
+
+With `--keep-going` the list `errors (ignored with --keep-going)` comes before `ignored`, one
+line each: `  line 512    INSERT INTO public.audit VALUES (…)   duplicate key value violates
+unique constraint "audit_pkey"`. Without it the failing statement appears the same way under
+`error`, one line. Counts of one read `1 table, 1 row`; `(1 statement, 0.4 s)`.
+
+With `--report <path>` stdout gets only the verdict line and the report goes to the file, in
+`--format`'s format, which defaults to `json` for a path ending in `.json` and `text` otherwise.
+
+### The JSON report
+One object, stable fields, every number a plain integer (section 4), the same names as the
+text labels. `ok` is true exactly when the exit code is 0.
+```
+{"ok":true,"file":"app.db","dump":"app.sql","created":true,"dialect":"postgresql",
+ "statements":1204,"elapsed_ms":2301,
+ "schemas":2,"tables":14,"rows":1204311,"views":3,"sequences":9,"indexes":21,"constraints":17,
+ "comments":4,"tables_skipped":1,"rows_skipped":40120,
+ "rows_per_table":[{"table":"public.orders","rows":1180002},{"table":"public.users","rows":12480}],
+ "skipped":[{"line":23,"kind":"function","name":"public.set_updated_at()","reason":"plpgsql functions come later"},
+            {"line":2114,"kind":"table","name":"public.events","detail":"partitioned","rows":40120,"reason":"partitioned tables come later"}],
+ "consequences":[{"line":412,"statement":"ALTER TABLE public.orders ADD CONSTRAINT …","uses":"function public.set_updated_at()","error":"function public.set_updated_at() does not exist","sqlstate":"42883"}],
+ "ignored":{"owner_to":38,"grant":20,"revoke":0,"set":["default_table_access_method","default_toast_compression","xmloption"],
+            "meta_commands":[{"line":5,"command":"\\connect","reason":"one database per file"},{"line":9,"command":"\\!","reason":"never run"}]},
+ "errors":[],"error":null,"verdict":"every table and row of the dump is in app.db; 7 objects skipped and 2 consequences, listed above."}
+```
+`dump` is `"-"` for stdin. `rows_per_table` holds every table, in the text order. `kind` is
+pg_dump's lower-case object kind (`function`, `procedure`, `aggregate`, `trigger`, `rule`,
+`policy`, `type`, `domain`, `materialized view`, `table`, `publication`, `subscription`,
+`extension`, `event trigger`, `statement` for DDL refused as not supported yet); `detail` is
+present for `partitioned`, `inherited` and `not supported yet`. A stop puts the failing statement
+in `error` as `{"line":412,"statement":"…","error":"…","sqlstate":"23505","committed_statements":1203}`
+with `ok:false`; `--keep-going` fills `errors` with such objects (no `committed_statements`)
+and sets `ok:false`. `statement` and `uses` are cut like the text. `verdict` is the verdict line
+without its label.
+
+### Messages (stderr, section 7's shape)
+| When | Message |
+|------|---------|
+| custom archive | `cannot restore app.dump: it is a pg_dump custom-format archive (it starts with PGDMP), which eggdb restore does not read. Convert it to SQL first (docs/migrate.md).` + `  try: pg_restore -f dump.sql app.dump` |
+| directory archive | `cannot restore backup/: it is a pg_dump directory-format archive (it holds toc.dat), which eggdb restore does not read. Convert it to SQL first (docs/migrate.md).` + `  try: pg_restore -f dump.sql backup/` |
+| tar archive | `cannot restore app.tar: it is a pg_dump tar-format archive (its first entry is toc.dat), which eggdb restore does not read. Convert it to SQL first (docs/migrate.md).` + `  try: pg_restore -f dump.sql app.tar` |
+| archive on stdin | the same with `stdin` as the name and `  try: pg_restore -f dump.sql <archive>` |
+| stdin is a terminal | `restore needs a dump: give the file as the second argument, or pipe it to stdin` |
+| leftover staging file | `cannot create app.db: app.db.restoring exists, left by a restore that did not finish or one still running. Remove it and restore again.` |
+| file missing, no `--create` | `cannot open app.db: no such file. Pass --create to restore into a new file.` + `  try: eggdb restore --create app.db dump.sql` |
+| genuine error, no `--create` | `cannot restore dump.sql into app.db: line 412: duplicate key value violates unique constraint "orders_pkey". The 1,203 statements before it are in app.db; nothing after it ran. Restore a fixed dump into a new file with --create, or add --keep-going to run on and list every error.` |
+| genuine error, `--create` | `cannot restore dump.sql into app.db: line 412: {error}. Nothing was created; app.db does not exist. Fix the dump, or add --keep-going to run on and list every error.` |
+| `--keep-going` end | `restored dump.sql into app.db with 3 errors ignored (--keep-going); the report lists them.` |
+| `\restrict` key mismatch | `cannot restore dump.sql: line 1,340: \unrestrict key does not match the \restrict key of line 2. The dump was altered; take it again.` (a genuine error) |
+| `--dialect sqlserver` / `oracle` | `--dialect sqlserver comes in a later release (docs/roadmap.md, item 40); eggdb restore reads PostgreSQL dumps now.` (`oracle`: item 43) |
+| other `--dialect` | `--dialect must be postgresql (sqlserver and oracle come in a later release), not 'mysql'` |
+| `--report` unwritable | `cannot write the report to restore.json: permission denied. The restore itself finished; see the exit code.` |
+
+Archives, the terminal-stdin case and the dialect messages exit 2 before the database is
+opened or created; the restore errors exit 3; the others follow section 7. Each error line
+of a report cites PostgreSQL's own message, as `eggdb sql` prints it, without `ERROR:`.
+
+### Progress (stderr, terminal only)
+As `import`: one line redrawn once a second and erased when the command ends, never in a pipe:
+`restoring dump.sql: line 41,220, 14 tables, 1,180,002 rows…` (`restoring stdin: …` for `-`).
+During a long `COPY` the row count moves and the line number is the `COPY` statement's.
+
+### Decided by this design
+1. A report in every outcome, with the dump line on every item: a failed restore still tells
+   what got in and what to fix.
+2. Three outcomes, three verdict labels: `ok:` (skips and consequences do not change it),
+   `failed:` (stopped, exit 3), `errors ignored:` (`--keep-going`, exit 3).
+3. The `ignored` section is counts per kind, never a line per `OWNER TO`; `skipped`,
+   `consequences` and `errors` are never cut.
+4. Archives are refused with the exact `pg_restore -f` command before the file is touched.
+5. `--report` keeps the verdict on stdout, so a script's log still shows the outcome.

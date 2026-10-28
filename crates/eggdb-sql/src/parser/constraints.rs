@@ -800,7 +800,44 @@ impl Parser<'_> {
         if self.postgresql() && self.take_word("type") {
             return self.set_type_action(column);
         }
+        if self.postgresql() && self.is_word("add") && self.is_word_at(1, "generated") {
+            self.at += 2;
+            return self.add_identity_action(column);
+        }
         Err(self.unexpected())
+    }
+
+    fn add_identity_action(&mut self, column: Name) -> SqlResult<AlterAction> {
+        if !self.take_word("always") {
+            self.expect_word("by")?;
+            self.expect_word("default")?;
+        }
+        self.expect_word("as")?;
+        if self.peek_kind() == &TokenKind::LeftParen {
+            return Err(self.not_supported("generated columns"));
+        }
+        self.expect_word("identity")?;
+        let mut sequence = None;
+        let mut options = SequenceOptions::default();
+        if self.take(&TokenKind::LeftParen) {
+            while !self.take(&TokenKind::RightParen) {
+                if sequence.is_none() && self.is_word("sequence") && self.is_word_at(1, "name") {
+                    self.at += 2;
+                    sequence = Some(self.table_name()?);
+                    continue;
+                }
+                let more = self.sequence_options(false)?;
+                if more == SequenceOptions::default() || more.owned_by.is_some() {
+                    return Err(self.unexpected());
+                }
+                options = merged_options(options, more);
+            }
+        }
+        Ok(AlterAction::AddIdentity {
+            column,
+            sequence,
+            options,
+        })
     }
 
     fn set_type_action(&mut self, column: Name) -> SqlResult<AlterAction> {
@@ -809,5 +846,19 @@ impl Parser<'_> {
             return Err(self.not_supported("ALTER COLUMN TYPE with USING or COLLATE"));
         }
         Ok(AlterAction::SetType { column, sql_type })
+    }
+}
+
+fn merged_options(earlier: SequenceOptions, later: SequenceOptions) -> SequenceOptions {
+    SequenceOptions {
+        sql_type: later.sql_type.or(earlier.sql_type),
+        increment: later.increment.or(earlier.increment),
+        min: later.min.or(earlier.min),
+        max: later.max.or(earlier.max),
+        start: later.start.or(earlier.start),
+        restart: later.restart.or(earlier.restart),
+        cache: later.cache.or(earlier.cache),
+        cycle: later.cycle.or(earlier.cycle),
+        owned_by: later.owned_by.or(earlier.owned_by),
     }
 }

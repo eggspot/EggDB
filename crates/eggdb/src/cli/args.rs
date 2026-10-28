@@ -24,6 +24,7 @@ pub(crate) enum CommandName {
     Sql,
     Serve,
     Shell,
+    Restore,
 }
 
 impl CommandName {
@@ -42,6 +43,7 @@ impl CommandName {
             b"sql" => Self::Sql,
             b"serve" => Self::Serve,
             b"shell" => Self::Shell,
+            b"restore" => Self::Restore,
             _ => return None,
         })
     }
@@ -61,6 +63,7 @@ impl CommandName {
             Self::Sql => "sql",
             Self::Serve => "serve",
             Self::Shell => "shell",
+            Self::Restore => "restore",
         }
     }
 
@@ -75,7 +78,12 @@ impl CommandName {
             OptionName::Create => {
                 matches!(
                     self,
-                    Self::Put | Self::Import | Self::Sql | Self::Serve | Self::Shell
+                    Self::Put
+                        | Self::Import
+                        | Self::Sql
+                        | Self::Serve
+                        | Self::Shell
+                        | Self::Restore
                 )
             }
             OptionName::Listen
@@ -84,8 +92,11 @@ impl CommandName {
             | OptionName::PasswordFile
             | OptionName::Database
             | OptionName::MaxConnections => self == Self::Serve,
-            OptionName::Command | OptionName::Dialect => matches!(self, Self::Sql | Self::Shell),
-            OptionName::KeepGoing | OptionName::Mode => self == Self::Shell,
+            OptionName::Command => matches!(self, Self::Sql | Self::Shell),
+            OptionName::Dialect => matches!(self, Self::Sql | Self::Shell | Self::Restore),
+            OptionName::KeepGoing => matches!(self, Self::Shell | Self::Restore),
+            OptionName::Report => self == Self::Restore,
+            OptionName::Mode => self == Self::Shell,
             OptionName::OnConflict
             | OptionName::DryRun
             | OptionName::Csv
@@ -186,6 +197,7 @@ enum OptionName {
     Header,
     Delimiter,
     Null,
+    Report,
 }
 
 impl OptionName {
@@ -224,6 +236,7 @@ impl OptionName {
             b"header" => Self::Header,
             b"delimiter" => Self::Delimiter,
             b"null" => Self::Null,
+            b"report" => Self::Report,
             _ => return None,
         })
     }
@@ -291,6 +304,14 @@ pub(crate) struct Request {
     pub(crate) serve: ServeOptions,
     pub(crate) shell: ShellOptions,
     pub(crate) csv: CsvOptions,
+    pub(crate) restore: RestoreOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RestoreOptions {
+    pub(crate) dump: Option<ExportFile>,
+    pub(crate) report: Option<PathBuf>,
+    pub(crate) keep_going: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -408,7 +429,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version.",
+            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version.",
             None,
         ));
     };
@@ -539,6 +560,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         serve: ServeOptions::default(),
         shell: ShellOptions::default(),
         csv: CsvOptions::default(),
+        restore: RestoreOptions::default(),
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -588,7 +610,14 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     .ok_or_else(|| usage(format!("{} must be UTF-8 text", option.spelled)))?;
                 request.shell.commands.push(text.to_owned());
             }
+            OptionName::KeepGoing if command == CommandName::Restore => {
+                request.restore.keep_going = true;
+            }
             OptionName::KeepGoing => request.shell.keep_going = true,
+            OptionName::Report => request.restore.report = Some(PathBuf::from(value)),
+            OptionName::Dialect if command == CommandName::Restore => {
+                check_restore_dialect(value).map_err(usage)?;
+            }
             OptionName::Mode => {
                 let name = value.to_str().unwrap_or_default();
                 request.shell.mode = Some(ResultMode::parse(name).ok_or_else(|| {
@@ -679,7 +708,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Ui
         | CommandName::Serve
         | CommandName::Shell => (1, 1),
-        CommandName::Export | CommandName::Import | CommandName::Sql => (1, 2),
+        CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
+            (1, 2)
+        }
         CommandName::Get | CommandName::Del => (2, 2),
         CommandName::Put => (2, 3),
     };
@@ -706,6 +737,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             (None, Some(_)) => {}
             (None, None) => request.sql = Some(SqlSource::Stdin),
         }
+        return Ok(request);
+    }
+    if command == CommandName::Restore {
+        request.restore.dump = arguments.get(1).map(|argument| export_file(argument));
         return Ok(request);
     }
     if matches!(command, CommandName::Export | CommandName::Import) {
@@ -757,6 +792,24 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn check_restore_dialect(value: &OsStr) -> Result<(), String> {
+    match value.to_str().unwrap_or_default() {
+        "postgresql" => Ok(()),
+        "sqlserver" => Err(
+            "--dialect sqlserver comes in a later release (docs/roadmap.md, item 40); eggdb restore reads PostgreSQL dumps now."
+                .to_owned(),
+        ),
+        "oracle" => Err(
+            "--dialect oracle comes in a later release (docs/roadmap.md, item 43); eggdb restore reads PostgreSQL dumps now."
+                .to_owned(),
+        ),
+        _ => Err(format!(
+            "--dialect must be postgresql (sqlserver and oracle come in a later release), not '{}'",
+            shown(value)
+        )),
+    }
 }
 
 fn export_file(argument: &OsStr) -> ExportFile {
@@ -815,7 +868,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version.",
             render::text(name)
         ),
         None,
@@ -1093,7 +1146,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -1136,7 +1189,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -1149,7 +1202,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),

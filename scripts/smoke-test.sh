@@ -132,6 +132,23 @@ expect_exit 3 "$eggdb" sql shop.db -c "COPY loaded FROM STDIN (FORMAT csv)" < mo
 grep -q 'CONTEXT:  COPY loaded, line 1, column id: "id"' last.err || fail "a bad COPY said $(cat last.err)"
 pass "copy: a script with inline data, COPY TO STDOUT, import --csv and an error's context"
 
+expect_exit 0 "$eggdb" restore --create bakery.db "$samples/pg_dump-sample.sql" --format text
+grep -q '^ok: every table and row of the dump is in bakery.db; ' last.out || fail "restore said $(cat last.out)"
+grep -q 'function bakery.touch_order()' last.out || fail "restore did not list the skipped function: $(cat last.out)"
+expect_output "$(printf 'rye\t2\t7\nsourdough\t2\t3')" "$eggdb" sql bakery.db -c "COPY (SELECT b.name, count(*), sum(o.quantity) FROM bakery.breads b JOIN bakery.orders o ON o.bread_id = b.id GROUP BY b.name ORDER BY b.name) TO STDOUT"
+expect_output "$(printf 'rye\t7')" "$eggdb" sql bakery.db -c "COPY (SELECT * FROM bakery.best_sellers ORDER BY 1 LIMIT 1) TO STDOUT"
+expect_exit 3 "$eggdb" restore bakery.db "$samples/pg_dump-sample.sql" --format text
+grep -q 'failed: line ' last.out || fail "a second restore into the same file said $(cat last.out)"
+printf 'PGDMP\001\016\000\004\010' > bakery.dump
+expect_exit 2 "$eggdb" restore --create archive.db bakery.dump
+grep -q 'try: pg_restore -f dump.sql bakery.dump' last.err || fail "a custom-format archive said $(cat last.err)"
+[ ! -e archive.db ] || fail "restoring an archive created a file"
+printf 'CREATE TABLE t (id integer PRIMARY KEY);\nCOPY t (id) FROM stdin;\n1\n1\n\\.\n' > broken.sql
+expect_exit 3 "$eggdb" restore --create broken.db broken.sql
+grep -q 'line 4: duplicate key value' last.err || fail "a broken restore said $(cat last.err)"
+[ ! -e broken.db ] && [ ! -e broken.db.restoring ] || fail "a failed restore with --create left a file"
+pass "restore: a pg_dump sample with its report, a second restore stopped, an archive refused, a failed --create leaves no file"
+
 expect_exit 0 "$eggdb" sql --dialect sqlite shop.db -c "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('a'), ('b'); INSERT OR REPLACE INTO notes VALUES (1, 'c')"
 expect_output '2|b' sh -c "\"$eggdb\" sql --dialect sqlite shop.db -c 'SELECT id, body FROM notes WHERE NOT id - 2' | sed -n 3p | tr -d ' '"
 expect_exit 3 "$eggdb" sql --dialect sqlite shop.db -c "SELECT * FROM nowhere"
@@ -184,6 +201,10 @@ else
       > psql.out 2> psql.err || fail "psql \\copy failed: $(cat psql.err)"
     cmp -s million.tsv million.out || fail "the million rows psql copied out differ from those it copied in"
     pass "serve: psql's \\copy loads a million rows and unloads them byte for byte"
+    psql "$connection" -q -f "$samples/pg_dump-sample.sql" > psql.out 2> psql.err || true
+    [ "$(psql "$connection" -At -c 'SELECT count(*), sum(quantity) FROM bakery.orders' 2> psql.err)" = "4|10" ] ||
+      fail "psql -f of the pg_dump sample left $(psql "$connection" -At -c 'SELECT count(*) FROM bakery.orders' 2>&1)"
+    pass "serve: psql -f restores the pg_dump sample"
   else
     echo "skip psql: psql is not on PATH (CI's Linux job installs postgresql-client)"
   fi

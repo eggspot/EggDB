@@ -125,6 +125,7 @@ Commands:
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
+  restore <file> [dump]         restore a PostgreSQL dump (pg_dump's plain SQL) into the file
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -457,7 +458,7 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);
