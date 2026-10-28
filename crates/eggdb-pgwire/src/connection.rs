@@ -218,8 +218,7 @@ impl CopyChannel for WireCopy<'_, '_, '_> {
                 b'f' => {
                     let reason = match parse_message(tag, &body) {
                         Ok(FrontendMessage::CopyFail(reason)) => reason,
-                        _ => String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body))
-                            .into_owned(),
+                        _ => String::new(),
                     };
                     return Err(SqlError::new(
                         SqlState::QUERY_CANCELED,

@@ -854,6 +854,22 @@ fn a_script_carries_its_copy_data_inline_up_to_backslash_period() {
     );
     let error = script(&mut session, "SELECT 1;\nSELECT * FROM nope;").unwrap_err();
     assert_eq!(error.position(), Some(24));
+    let two = "COPY b FROM stdin; COPY a (id) FROM stdin; SELECT count(*) FROM b;\n\
+               20\n\
+               \\.\n\
+               21\n\
+               \\.\n\
+               SELECT * FROM nope;";
+    let error = script(&mut session, two).unwrap_err();
+    assert_eq!(error.position(), Some(two.len() - 5));
+    assert_eq!(
+        rows(&mut session, "SELECT count(*) FROM b WHERE id = 20"),
+        "count\n1\nSELECT 1"
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT s IS NULL FROM a WHERE id = 21"),
+        "?column?\nt\nSELECT 1"
+    );
 }
 
 #[test]

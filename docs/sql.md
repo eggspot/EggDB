@@ -904,8 +904,9 @@ row of it (in a `BEGIN` block, the block fails as after any failed statement). E
 PostgreSQL's SQLSTATEs (`22P04` for data that breaks the format, `22P02`, `22003`, `22021` for
 bytes that are not UTF-8, `23505`, `23502`, `23503`, `23514`, ...) and a context line naming
 where: `COPY t, line 3, column b: "x"` (psql and `eggdb sql` print it as `CONTEXT:`). Rows are
-read and stored one at a time, so a load holds one line of the data in memory at a time, plus
-the rows of a foreign key to its own table until the end; a line is at most 1 GiB (`54000`).
+read and stored one at a time, so a load holds one line of the data and one piece of input (a
+protocol message, or 64 KiB of a file) in memory at a time, plus the rows of a foreign key to
+its own table until the end; a line is at most 1 GiB (`54000`).
 The whole load is one transaction, so its pages must fit in the page cache: `eggdb serve
 --cache 1g` for large loads (`eggdb sql` and `eggdb import --csv` size the cache from the data
 they are given). `COPY TO` of a table streams its rows in primary-key order; `COPY (query) TO`

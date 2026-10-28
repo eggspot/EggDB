@@ -741,6 +741,12 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     if csv.table.is_none() {
         return Err("--csv needs --table <name>, the table to load the rows into".to_owned());
     }
+    if request.create {
+        return Err(
+            "--csv loads into a table that exists; a new file has none, so create it first with eggdb sql --create"
+                .to_owned(),
+        );
+    }
     if request.dry_run
         || request.on_conflict != ConflictPolicy::Error
         || request.page_size.is_some()
@@ -1001,6 +1007,7 @@ mod tests {
         assert!(
             usage_message("import app.db --csv d.csv --table t --dry-run").contains("--dry-run")
         );
+        assert!(usage_message("import app.db --csv d.csv --table t --create").contains("--create"));
         assert!(usage_message("sql app.db --csv d.csv").contains("--csv"));
     }
 

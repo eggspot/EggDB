@@ -262,9 +262,11 @@ pub enum FrontendMessage {
     AuthenticationResponse(Vec<u8>),
     /// `d`: a piece of `COPY` data; outside a copy it is ignored, so its bytes are not kept.
     CopyData,
-    /// `c`: the end of a `COPY`'s data.
+    /// `c`: the end of a `COPY`'s data; any body is ignored, as the message is dropped outside
+    /// a copy.
     CopyDone,
-    /// `f`: the client fails a `COPY ... FROM STDIN`, with its reason.
+    /// `f`: the client fails a `COPY ... FROM STDIN`, with its reason (read leniently, since
+    /// the message is dropped outside a copy).
     CopyFail(String),
     /// A message type this server does not handle, such as a function call.
     Other(u8),
@@ -347,8 +349,13 @@ pub fn parse_message(tag: u8, body: &[u8]) -> Result<FrontendMessage, MalformedM
         b'X' => FrontendMessage::Terminate,
         b'p' => return Ok(FrontendMessage::AuthenticationResponse(body.to_vec())),
         b'd' => return Ok(FrontendMessage::CopyData),
-        b'c' => FrontendMessage::CopyDone,
-        b'f' => FrontendMessage::CopyFail(fields.string()?.to_owned()),
+        b'c' => return Ok(FrontendMessage::CopyDone),
+        b'f' => {
+            let reason = body.strip_suffix(&[0]).unwrap_or(body);
+            return Ok(FrontendMessage::CopyFail(
+                String::from_utf8_lossy(reason).into_owned(),
+            ));
+        }
         other => return Ok(FrontendMessage::Other(other)),
     };
     fields.finish()?;
@@ -862,8 +869,11 @@ mod tests {
             parse_message(b'f', b"gave up\0"),
             Ok(FrontendMessage::CopyFail("gave up".into()))
         );
-        assert!(parse_message(b'c', b"x").is_err());
-        assert!(parse_message(b'f', b"no end").is_err());
+        assert_eq!(parse_message(b'c', b"x"), Ok(FrontendMessage::CopyDone));
+        assert_eq!(
+            parse_message(b'f', b"no end \xff"),
+            Ok(FrontendMessage::CopyFail("no end \u{fffd}".into()))
+        );
         let mut sasl = b"SCRAM-SHA-256\0".to_vec();
         sasl.extend_from_slice(&3i32.to_be_bytes());
         sasl.extend_from_slice(b"n,,");

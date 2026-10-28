@@ -439,7 +439,8 @@ from people.csv into people in app.db`, or in a pipe one JSON line with `file`, 
 and `rows`; a bad row prints the error with its line and column, `Nothing was imported`, and
 exits 3. The page cache grows with the file (four times its size plus 16 MiB, between 256 MiB
 and 1 GiB) since the load must fit in it; `--cache` sets it for larger files. `--dry-run`,
-`--on-conflict` and `--page-size` are for eggdb-jsonl imports.
+`--on-conflict` and `--page-size` are for eggdb-jsonl imports, and `--create` is refused: a new
+file has no table to load into, so create the file and the table with `eggdb sql --create`.
 
 ```sh
 eggdb sql app.db -c "CREATE TABLE people (id integer PRIMARY KEY, name text, born date)"
@@ -644,8 +645,10 @@ repeats of the previous entry and `.quit` are not kept. `EGGDB_HISTORY=<path>` m
 
 **COPY.** `COPY t FROM STDIN;` reads its data from the lines that follow, up to a line `\.`
 (at the prompt it says so and prompts with `>>`; `Ctrl-D` also ends the data and `Ctrl-C` fails
-the copy), and `COPY ... TO STDOUT` prints the rows. When a `COPY` fails in a batch, the rest of
-its data, up to `\.`, is skipped, so it never runs as SQL. `\copy` reads and writes files with
+the copy), and `COPY ... TO STDOUT` prints the rows. When a `COPY` fails in a batch while it
+reads its data, the rest of the data, up to `\.`, is skipped, so it never runs as SQL; a `COPY`
+refused before its data starts (a missing table, say) leaves the lines to run as SQL, as psql
+does. `\copy` reads and writes files with
 the shell's own permissions; a file name may be quoted (`'my file.csv'`) and `program` is
 refused.
 
