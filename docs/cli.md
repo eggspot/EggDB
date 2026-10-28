@@ -66,7 +66,8 @@ reads as "empty".
 together, and next to an application that has the file open read-only. A program that has it
 open for writing keeps them out, and `put`, `del`, `import` and `sql` wait for nobody: they exit 5 at
 once when the file is open anywhere (see "Exit codes"). That includes an AI agent's call through
-`eggdb mcp`, which holds the file read-only for a few seconds at most; the busy message says so.
+`eggdb mcp`, which holds the file read-only for up to its time limit; the busy message says it
+may be one.
 
 **Large values.** `put` sizes its page cache to the value, so any value up to 1 GiB works
 without an option. `--cache <bytes>` sets the cache for any command (`--cache 64m`).
@@ -830,7 +831,7 @@ last 3 of 41 calls, 2 errors, by claude-code 2.1.0 (the name the client gave)
   arguments (the SQL as sent, on one line). Lines are cut at 120 columns; control characters in
   logged text are shown escaped (`\u001b`). Server starts and time-limit exits are lines too.
 - `-n <count>` (`--limit`) shows the newest lines; the summary on stderr counts every call.
-- `--format json` prints the records as stored, one JSON object per line, with the client's
+- `--format json` prints the records, re-encoded as ASCII JSON, one object per line, with the client's
   name and version, the protocol version, the SQLSTATE and the result's size.
 - No audit file: `no MCP calls yet` on stderr, exit 0. A line that is not a record is reported
   and skipped.

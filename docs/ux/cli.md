@@ -1057,7 +1057,7 @@ The write busy line of section 10 and `ui`'s own busy line get a second line, in
 `try:`; the read-command busy line is unchanged:
 ```
 eggdb: cannot open app.db: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers.
-  an AI agent's call through eggdb mcp holds the file for a few seconds at most; run the command again, or see `eggdb audit app.db`.
+  it may be an AI agent's call through eggdb mcp, which holds the file for up to its time limit; run the command again, or see `eggdb audit app.db`.
 ```
 
 ### Decided by this design
@@ -1084,3 +1084,9 @@ eggdb: cannot open app.db: another program has it open. Close it before writing,
   terminal's width needs the raw-terminal layer, which `audit` does not otherwise use.
 - The time-limit exit writes its audit record but no stderr line: the main thread holds stderr
   for the protocol's lifetime, and the record says why the server stopped.
+- `--format json` prints each record re-encoded as ASCII JSON, not the stored bytes, so raw
+  control or bidirectional characters written into the file are escaped; the text view escapes
+  every control, bidirectional and invisible formatting character (U+200B to U+200F, U+2060 to
+  U+2069, U+FEFF, the tag characters) in every field.
+- The busy note says the holder *may* be an `eggdb mcp` call, which holds the file for up to its
+  time limit (`--time-limit` goes to 300 s).
