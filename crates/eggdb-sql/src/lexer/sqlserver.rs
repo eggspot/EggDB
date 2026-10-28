@@ -222,7 +222,10 @@ mod tests {
         ] {
             let error = tokenize_in(text, Dialect::SqlServer).expect_err(text);
             assert_eq!(error.state().code(), "42601", "{text}");
-            assert!(error.message().starts_with("Incorrect syntax near"), "{text}");
+            assert!(
+                error.message().starts_with("Incorrect syntax near"),
+                "{text}"
+            );
         }
     }
 

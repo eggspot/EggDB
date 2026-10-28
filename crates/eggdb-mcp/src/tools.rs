@@ -1028,8 +1028,7 @@ fn explain_query<O: DatabaseOpener>(
         } else {
             "SQL Server's showplan is not in EggDB yet."
         };
-        return Err(ToolError::new("not_supported", what)
-        .with_fix(
+        return Err(ToolError::new("not_supported", what).with_fix(
             "Explain the query with dialect postgresql: every dialect sees the same tables.",
         ));
     }

@@ -112,9 +112,7 @@ fn serve_refuses_every_address_but_loopback() {
     assert!(stderr(&tds).contains("it is not a loopback address"));
     assert!(stderr(&tds).contains("--tds-listen 127.0.0.1:1433"));
     let bad = eggdb(&["serve", path, "--tds-listen", "x"], Some("secret"));
-    assert!(
-        stderr(&bad).contains("--tds-listen needs an address and port such as 127.0.0.1:1433")
-    );
+    assert!(stderr(&bad).contains("--tds-listen needs an address and port such as 127.0.0.1:1433"));
     assert!(!file.path().exists());
 }
 

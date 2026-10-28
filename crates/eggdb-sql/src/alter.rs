@@ -956,7 +956,7 @@ fn rename_table(
                 ),
             )
             .with_sqlite_code(1),
-            Dialect::PostgreSql => SqlError::new(
+            Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
                 SqlState::DUPLICATE_TABLE,
                 format!("relation \"{}\" already exists", to.text),
             ),

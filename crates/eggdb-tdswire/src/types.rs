@@ -155,11 +155,9 @@ fn datetime2_parts(value: &Value) -> Option<(i64, i64)> {
 fn fits(kind: WireType, value: &Value) -> bool {
     match (kind, value) {
         (_, Value::Null) => true,
-        (WireType::Int(width), Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_)) => {
-            value
-                .as_integer()
-                .is_some_and(|number| integer_width(number) <= width)
-        }
+        (WireType::Int(width), Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_)) => value
+            .as_integer()
+            .is_some_and(|number| integer_width(number) <= width),
         (WireType::Float(4), Value::Real(_)) => true,
         (WireType::Float(8), Value::Real(_) | Value::Double(_)) => true,
         (WireType::Bit, Value::Boolean(_)) => true,
@@ -423,7 +421,10 @@ mod tests {
             encoded(Some(SqlType::BigInt), Value::Null),
             (WireType::Int(8), false, vec![0])
         );
-        assert_eq!(encoded(None, Value::Null), (WireType::Int(4), false, vec![0]));
+        assert_eq!(
+            encoded(None, Value::Null),
+            (WireType::Int(4), false, vec![0])
+        );
         assert_eq!(
             encoded(Some(SqlType::Double), Value::Double(1.5)).2,
             [&[8u8][..], &1.5f64.to_le_bytes()].concat()
@@ -481,7 +482,10 @@ mod tests {
             Value::Numeric(eggdb_sql::Numeric::parse("1.5").unwrap()),
         );
         assert!(unconstrained.1);
-        let early = encoded(Some(SqlType::Timestamp(Some(3))), Value::Timestamp(i64::MIN / 2));
+        let early = encoded(
+            Some(SqlType::Timestamp(Some(3))),
+            Value::Timestamp(i64::MIN / 2),
+        );
         assert!(early.1);
         let rows = vec![vec![Value::Integer(1)], vec![Value::Text("x".into())]];
         let mixed = wire_columns(&column(None), &rows);
@@ -490,7 +494,8 @@ mod tests {
 
     #[test]
     fn datetime2_counts_days_from_year_one_and_units_of_its_scale() {
-        let (kind, text, bytes) = encoded(Some(SqlType::Timestamp(Some(3))), Value::Timestamp(1_500));
+        let (kind, text, bytes) =
+            encoded(Some(SqlType::Timestamp(Some(3))), Value::Timestamp(1_500));
         assert_eq!(kind, WireType::DateTime2 { scale: 3 });
         assert!(!text);
         assert_eq!(bytes[0], 7);

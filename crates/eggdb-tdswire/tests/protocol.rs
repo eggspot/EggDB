@@ -1,3 +1,7 @@
+//! The TDS server over a real loopback socket, driven by a client written in the tests: the
+//! pre-login, logins, batches, transactions, errors and limits as [MS-TDS] and SQL Server do
+//! them (D122).
+
 mod common;
 
 use common::{Client, DATABASE, LoginOptions, TestServer, Token, batch_body, dones, errors, rows};
@@ -35,7 +39,12 @@ fn prelogin_answers_that_encryption_is_not_available_and_closes_on_clients_that_
     let mut tls = Client::connect(server.address);
     tls.send_raw(&[0x16, 0x03, 0x01, 0x00, 0x05, 1, 2, 3, 4, 5]);
     assert!(tls.is_closed());
-    assert!(server.log().iter().any(|line| line.contains("requires TLS")));
+    assert!(
+        server
+            .log()
+            .iter()
+            .any(|line| line.contains("requires TLS"))
+    );
 }
 
 #[test]
@@ -113,7 +122,10 @@ fn wrong_passwords_unknown_users_and_other_databases_are_refused_with_sql_server
     );
     assert!(any_case.is_empty());
     let log = server.log();
-    assert!(log.iter().any(|line| line.contains("password authentication failed for user \"ada\"")));
+    assert!(
+        log.iter()
+            .any(|line| line.contains("password authentication failed for user \"ada\""))
+    );
     assert!(log.iter().any(|line| line.contains("\"mallory\"")));
     assert!(!log.iter().any(|line| line.contains("wrong")));
 }
@@ -140,7 +152,10 @@ fn older_tds_versions_integrated_logins_and_password_changes_are_refused() {
     let log = server.log();
     assert!(log.iter().any(|line| line.contains("EggDB needs TDS 7.4")));
     assert!(log.iter().any(|line| line.contains("SSPI")));
-    assert!(log.iter().any(|line| line.contains("changing the password")));
+    assert!(
+        log.iter()
+            .any(|line| line.contains("changing the password"))
+    );
 }
 
 #[test]
@@ -154,14 +169,13 @@ fn a_batch_without_semicolons_creates_inserts_and_selects_with_top_identity_and_
          SELECT @@VERSION",
     );
     assert!(errors(&tokens).is_empty(), "{tokens:?}");
-    assert_eq!(
-        rows(&tokens)[0],
-        vec![Some("egg".to_owned())],
-        "{tokens:?}"
+    assert_eq!(rows(&tokens)[0], vec![Some("egg".to_owned())], "{tokens:?}");
+    assert!(
+        rows(&tokens)[1][0]
+            .as_deref()
+            .is_some_and(|version| version.starts_with("EggDB ")
+                && version.contains("compatible with Microsoft SQL Server 2022"))
     );
-    assert!(rows(&tokens)[1][0]
-        .as_deref()
-        .is_some_and(|version| version.starts_with("EggDB ") && version.contains("compatible with Microsoft SQL Server 2022")));
     let done = dones(&tokens);
     assert_eq!(done[1], (DONE_MORE | DONE_COUNT, 2));
     assert_eq!(done.last().unwrap().0 & DONE_MORE, 0);
@@ -169,16 +183,14 @@ fn a_batch_without_semicolons_creates_inserts_and_selects_with_top_identity_and_
         .iter()
         .filter(|token| matches!(token, Token::Columns(_)))
         .collect();
-    assert_eq!(
-        columns[0],
-        &Token::Columns(vec![("name".into(), 0xE7)])
-    );
-    assert_eq!(
-        columns[1],
-        &Token::Columns(vec![(String::new(), 0xE7)])
-    );
+    assert_eq!(columns[0], &Token::Columns(vec![("name".into(), 0xE7)]));
+    assert_eq!(columns[1], &Token::Columns(vec![(String::new(), 0xE7)]));
     let typed = client.batch("SELECT id, GETDATE() AS at FROM bakes WHERE id = 1");
-    let Token::Columns(described) = typed.iter().find(|token| matches!(token, Token::Columns(_))).unwrap() else {
+    let Token::Columns(described) = typed
+        .iter()
+        .find(|token| matches!(token, Token::Columns(_)))
+        .unwrap()
+    else {
         unreachable!()
     };
     assert_eq!(described, &vec![("id".into(), 0x26), ("at".into(), 0x2A)]);
@@ -194,14 +206,28 @@ fn a_syntax_error_runs_nothing_and_errors_carry_their_number_severity_and_line()
     let server = TestServer::start(8);
     let mut client = Client::login(server.address);
     let tokens = client.batch("CREATE TABLE t (id INT PRIMARY KEY)\nSELECT * FORM t");
-    assert_eq!(errors(&tokens), vec![(102, 15, "Incorrect syntax near 'FORM'.".into())]);
-    assert!(tokens.iter().any(|token| matches!(token, Token::Error { line: 2, .. })));
+    assert_eq!(
+        errors(&tokens),
+        vec![(102, 15, "Incorrect syntax near 'FORM'.".into())]
+    );
+    assert!(
+        tokens
+            .iter()
+            .any(|token| matches!(token, Token::Error { line: 2, .. }))
+    );
     assert_eq!(dones(&tokens).last().unwrap().0 & DONE_ERROR, DONE_ERROR);
     let missing = client.batch("SELECT * FROM t");
     assert_eq!(errors(&missing)[0].0, 208);
     let tokens = client.batch("SELECT 1\nSELECT * FROM missing\nSELECT 2");
-    assert_eq!(errors(&tokens), vec![(208, 16, "Invalid object name 'missing'.".into())]);
-    assert!(tokens.iter().any(|token| matches!(token, Token::Error { line: 2, .. })));
+    assert_eq!(
+        errors(&tokens),
+        vec![(208, 16, "Invalid object name 'missing'.".into())]
+    );
+    assert!(
+        tokens
+            .iter()
+            .any(|token| matches!(token, Token::Error { line: 2, .. }))
+    );
     assert_eq!(rows(&tokens), vec![vec![Some("1".to_owned())]]);
 }
 
@@ -223,38 +249,51 @@ fn transactions_nest_report_their_changes_and_an_error_that_rolls_one_back_ends_
     let server = TestServer::start(8);
     let mut client = Client::login(server.address);
     client.batch("CREATE TABLE t (id INT PRIMARY KEY)");
-    let tokens = client.batch("BEGIN TRAN\nBEGIN TRANSACTION\nINSERT INTO t VALUES (1)\nSELECT @@TRANCOUNT");
+    let tokens =
+        client.batch("BEGIN TRAN\nBEGIN TRANSACTION\nINSERT INTO t VALUES (1)\nSELECT @@TRANCOUNT");
     let begins = tokens
         .iter()
         .filter(|token| matches!(token, Token::EnvChange { kind: 8, .. }))
         .count();
     assert_eq!(begins, 1, "{tokens:?}");
     assert_eq!(rows(&tokens), vec![vec![Some("2".to_owned())]]);
-    assert!(dones(&tokens)
-        .iter()
-        .all(|(status, _)| status & DONE_IN_TRANSACTION != 0));
+    assert!(
+        dones(&tokens)
+            .iter()
+            .all(|(status, _)| status & DONE_IN_TRANSACTION != 0)
+    );
     let nested = client.batch("COMMIT");
-    assert!(!nested.iter().any(|token| matches!(token, Token::EnvChange { .. })));
+    assert!(
+        !nested
+            .iter()
+            .any(|token| matches!(token, Token::EnvChange { .. }))
+    );
     let committed = client.batch("COMMIT TRAN");
-    assert!(committed
-        .iter()
-        .any(|token| matches!(token, Token::EnvChange { kind: 9, .. })));
+    assert!(
+        committed
+            .iter()
+            .any(|token| matches!(token, Token::EnvChange { kind: 9, .. }))
+    );
     assert_eq!(errors(&client.batch("COMMIT"))[0].0, 3902);
     assert_eq!(errors(&client.batch("ROLLBACK"))[0].0, 3903);
     let kept_open = client.batch(
         "BEGIN TRAN\nINSERT INTO t VALUES (2)\nINSERT INTO t VALUES (1)\nINSERT INTO t VALUES (3)\nCOMMIT",
     );
     assert_eq!(errors(&kept_open)[0].0, 2627);
-    assert!(kept_open
-        .iter()
-        .any(|token| matches!(token, Token::EnvChange { kind: 9, .. })));
+    assert!(
+        kept_open
+            .iter()
+            .any(|token| matches!(token, Token::EnvChange { kind: 9, .. }))
+    );
     let rolled_back = client.batch(
         "BEGIN TRAN\nINSERT INTO t VALUES (4)\nINSERT INTO t VALUES (5), (1)\nINSERT INTO t VALUES (6)\nCOMMIT",
     );
     assert_eq!(errors(&rolled_back)[0].0, 2627);
-    assert!(rolled_back
-        .iter()
-        .any(|token| matches!(token, Token::EnvChange { kind: 10, .. })));
+    assert!(
+        rolled_back
+            .iter()
+            .any(|token| matches!(token, Token::EnvChange { kind: 10, .. }))
+    );
     assert_eq!(errors(&rolled_back).len(), 1, "{rolled_back:?}");
     let count = client.batch("SELECT count(*) FROM t");
     assert_eq!(rows(&count), vec![vec![Some("3".to_owned())]]);
@@ -266,14 +305,22 @@ fn use_set_nocount_and_unsupported_requests_answer_as_sql_server_does() {
     let server = TestServer::start(8);
     let mut client = Client::login(server.address);
     let used = client.batch("USE [Shop]");
-    assert!(used
-        .iter()
-        .any(|token| matches!(token, Token::EnvChange { kind: 1, .. })));
+    assert!(
+        used.iter()
+            .any(|token| matches!(token, Token::EnvChange { kind: 1, .. }))
+    );
     assert_eq!(errors(&client.batch("USE master"))[0].0, 911);
     client.batch("CREATE TABLE t (id INT PRIMARY KEY)");
     let quiet = client.batch("SET NOCOUNT ON\nINSERT INTO t VALUES (1)");
-    assert!(dones(&quiet).iter().all(|(status, _)| status & DONE_COUNT == 0));
-    assert_eq!(errors(&client.batch("SET ANSI_NULLS ON\nSET QUOTED_IDENTIFIER ON")).len(), 0);
+    assert!(
+        dones(&quiet)
+            .iter()
+            .all(|(status, _)| status & DONE_COUNT == 0)
+    );
+    assert_eq!(
+        errors(&client.batch("SET ANSI_NULLS ON\nSET QUOTED_IDENTIFIER ON")).len(),
+        0
+    );
     assert_eq!(errors(&client.batch("SET XACT_ABORT ON"))[0].0, 40517);
     assert_eq!(errors(&client.batch("SET FOO ON"))[0].0, 195);
     assert_eq!(errors(&client.batch("SELECT 'a' + 'b'"))[0].0, 40517);
@@ -288,7 +335,10 @@ fn use_set_nocount_and_unsupported_requests_answer_as_sql_server_does() {
         dones(&common::parse_tokens(&body)),
         vec![(DONE_ATTENTION, 0)]
     );
-    assert_eq!(rows(&client.batch("SELECT 1")), vec![vec![Some("1".to_owned())]]);
+    assert_eq!(
+        rows(&client.batch("SELECT 1")),
+        vec![vec![Some("1".to_owned())]]
+    );
 }
 
 #[test]
@@ -328,10 +378,12 @@ fn the_65th_connection_is_refused_after_its_login_without_a_password_check() {
         },
     );
     assert_eq!(errors(&tokens)[0].0, 17809);
-    assert!(!server
-        .log()
-        .iter()
-        .any(|line| line.contains("password authentication failed")));
+    assert!(
+        !server
+            .log()
+            .iter()
+            .any(|line| line.contains("password authentication failed"))
+    );
 }
 
 #[test]

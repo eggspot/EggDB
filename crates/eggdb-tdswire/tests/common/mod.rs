@@ -288,13 +288,32 @@ pub fn batch_body(text: &str) -> Vec<u8> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    EnvChange { kind: u8, new: Vec<u8>, old: Vec<u8> },
-    Info { number: u32, message: String },
-    Error { number: u32, severity: u8, message: String, line: u32 },
-    LoginAck { version: [u8; 4], program: String },
+    EnvChange {
+        kind: u8,
+        new: Vec<u8>,
+        old: Vec<u8>,
+    },
+    Info {
+        number: u32,
+        message: String,
+    },
+    Error {
+        number: u32,
+        severity: u8,
+        message: String,
+        line: u32,
+    },
+    LoginAck {
+        version: [u8; 4],
+        program: String,
+    },
     Columns(Vec<(String, u8)>),
     Row(Vec<Option<String>>),
-    Done { status: u16, command: u16, rows: u64 },
+    Done {
+        status: u16,
+        command: u16,
+        rows: u64,
+    },
 }
 
 pub struct Client {
@@ -312,8 +331,10 @@ fn read_b_varchar(body: &[u8], at: &mut usize) -> String {
 
 fn from_utf16(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     String::from_utf16(&units).unwrap()
 }
@@ -344,28 +365,48 @@ fn read_type(body: &[u8], at: &mut usize) -> ColumnType {
         0x26 | 0x6D | 0x68 => {
             let length = usize::from(body[*at]);
             *at += 1;
-            ColumnType { kind, length, scale: 0 }
+            ColumnType {
+                kind,
+                length,
+                scale: 0,
+            }
         }
         0x6A => {
             let length = usize::from(body[*at]);
             let scale = body[*at + 2];
             *at += 3;
-            ColumnType { kind, length, scale }
+            ColumnType {
+                kind,
+                length,
+                scale,
+            }
         }
         0x2A => {
             let scale = body[*at];
             *at += 1;
-            ColumnType { kind, length: 0, scale }
+            ColumnType {
+                kind,
+                length: 0,
+                scale,
+            }
         }
         0xE7 => {
             let length = usize::from(u16_at(body, *at));
             *at += 7;
-            ColumnType { kind, length, scale: 0 }
+            ColumnType {
+                kind,
+                length,
+                scale: 0,
+            }
         }
         0xA5 => {
             let length = usize::from(u16_at(body, *at));
             *at += 2;
-            ColumnType { kind, length, scale: 0 }
+            ColumnType {
+                kind,
+                length,
+                scale: 0,
+            }
         }
         other => panic!("unexpected type 0x{other:02x}"),
     }
@@ -471,8 +512,9 @@ fn read_value(body: &[u8], at: &mut usize, column: ColumnType) -> Option<String>
             *at += usize::from(length);
             Some(text)
         }
-        0xA5 if column.length == 0xFFFF => read_plp(body, at)
-            .map(|data| data.iter().map(|byte| format!("{byte:02x}")).collect()),
+        0xA5 if column.length == 0xFFFF => {
+            read_plp(body, at).map(|data| data.iter().map(|byte| format!("{byte:02x}")).collect())
+        }
         0xA5 => {
             let length = u16_at(body, *at);
             *at += 2;
@@ -527,7 +569,12 @@ pub fn parse_tokens(body: &[u8]) -> Vec<Token> {
                 read_b_varchar(body, &mut cursor);
                 let line = u32_at(body, cursor);
                 tokens.push(if token == 0xAA {
-                    Token::Error { number, severity, message, line }
+                    Token::Error {
+                        number,
+                        severity,
+                        message,
+                        line,
+                    }
                 } else {
                     Token::Info { number, message }
                 });
@@ -565,7 +612,7 @@ pub fn parse_tokens(body: &[u8]) -> Vec<Token> {
                     .collect();
                 tokens.push(Token::Row(row));
             }
-            0xFD | 0xFE | 0xFF => {
+            0xFD..=0xFF => {
                 tokens.push(Token::Done {
                     status: u16_at(body, at),
                     command: u16_at(body, at + 2),
@@ -627,8 +674,22 @@ impl Client {
     }
 
     pub fn is_closed(&mut self) -> bool {
-        let mut byte = [0u8; 1];
-        matches!(self.stream.read(&mut byte), Ok(0) | Err(_))
+        let mut buffer = [0u8; 4096];
+        loop {
+            match self.stream.read(&mut buffer) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return false;
+                }
+                Err(_) => return true,
+            }
+        }
     }
 
     pub fn prelogin(&mut self, encryption: u8) -> Option<Vec<u8>> {
@@ -656,7 +717,9 @@ impl Client {
     pub fn login(address: SocketAddr) -> Self {
         let (client, tokens) = Self::login_with(address, &LoginOptions::default());
         assert!(
-            tokens.iter().any(|token| matches!(token, Token::LoginAck { .. })),
+            tokens
+                .iter()
+                .any(|token| matches!(token, Token::LoginAck { .. })),
             "{tokens:?}"
         );
         client
@@ -683,9 +746,12 @@ pub fn errors(tokens: &[Token]) -> Vec<(u32, u8, String)> {
     tokens
         .iter()
         .filter_map(|token| match token {
-            Token::Error { number, severity, message, .. } => {
-                Some((*number, *severity, message.clone()))
-            }
+            Token::Error {
+                number,
+                severity,
+                message,
+                ..
+            } => Some((*number, *severity, message.clone())),
             _ => None,
         })
         .collect()

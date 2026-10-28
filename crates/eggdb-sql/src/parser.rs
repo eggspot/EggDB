@@ -9,11 +9,9 @@ mod sqlite;
 mod sqlserver;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
-pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
-pub(crate) use sqlserver::{
-    is_reserved as is_sqlserver_reserved, starts_statement as starts_sqlserver_statement,
-};
 pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved};
+pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
+pub(crate) use sqlserver::is_reserved as is_sqlserver_reserved;
 
 pub(crate) use schemas::Nesting;
 pub use sqlite::SQLITE_COMPATIBLE_VERSION;
@@ -385,7 +383,10 @@ impl<'t> Parser<'t> {
     }
 
     pub(crate) fn literal_rows(&mut self) -> Option<LiteralRows<'t>> {
-        if self.oracle() || self.sqlserver() || !self.is_word("insert") || !self.is_word_at(1, "into")
+        if self.oracle()
+            || self.sqlserver()
+            || !self.is_word("insert")
+            || !self.is_word_at(1, "into")
         {
             return None;
         }

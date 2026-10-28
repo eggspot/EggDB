@@ -55,7 +55,7 @@ fn duplicate_relation(name: &Name, internal: &str, dialect: Dialect) -> SqlError
             format!("view {shown} already exists"),
         )
         .with_sqlite_code(1),
-        Dialect::PostgreSql => SqlError::new(
+        Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
             SqlState::DUPLICATE_TABLE,
             format!("relation \"{shown}\" already exists"),
         ),
@@ -77,7 +77,7 @@ fn missing_view(name: &Name, dialect: Dialect) -> SqlError {
             format!("no such view: {}", display(&name.text)),
         )
         .with_sqlite_code(1),
-        Dialect::PostgreSql => SqlError::new(
+        Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
             SqlState::UNDEFINED_TABLE,
             format!("view \"{}\" does not exist", display(&name.text)),
         ),

@@ -79,14 +79,17 @@ fn seeds() -> Vec<Vec<u8>> {
 #[test]
 fn mutated_messages_never_panic_a_parser() {
     let cases = setting("EGGDB_FUZZ_CASES", 20_000);
-    let mut rng = Rng(setting("EGGDB_FUZZ_SEED", 0x5EED_7D5));
+    let mut rng = Rng(setting("EGGDB_FUZZ_SEED", 0x05EE_D7D5));
     let seeds = seeds();
     for _ in 0..cases {
         let seed = &seeds[rng.below(seeds.len())];
         let bytes = mutate(&mut rng, seed);
         let _ = parse_prelogin(&bytes);
         if let Ok(login) = parse_login7(&bytes) {
-            let _ = login.password.as_ref().map(|password| password.bytes().len());
+            let _ = login
+                .password
+                .as_ref()
+                .map(|password| password.bytes().len());
         }
         let _ = parse_sql_batch(&bytes);
     }
@@ -95,7 +98,7 @@ fn mutated_messages_never_panic_a_parser() {
 #[test]
 fn mutated_messages_over_sockets_leave_the_server_serving() {
     let server = TestServer::start_with(64, Duration::from_secs(2));
-    let mut rng = Rng(setting("EGGDB_FUZZ_SEED", 0xBAD_7D5));
+    let mut rng = Rng(setting("EGGDB_FUZZ_SEED", 0x0BAD_07D5));
     let cases = setting("EGGDB_FUZZ_CASES", 20_000).min(200);
     for case in 0..cases {
         let bytes = mutate(&mut rng, &seeds()[case as usize % 5]);
@@ -107,7 +110,8 @@ fn mutated_messages_over_sockets_leave_the_server_serving() {
                 client.send(0x10, &bytes);
             }
             2 => {
-                let (mut logged_in, _) = Client::login_with(server.address, &LoginOptions::default());
+                let (mut logged_in, _) =
+                    Client::login_with(server.address, &LoginOptions::default());
                 logged_in.send(0x01, &bytes);
                 let _ = logged_in.read_message();
                 continue;
@@ -126,6 +130,9 @@ fn mutated_messages_over_sockets_leave_the_server_serving() {
     stalled.send_raw(&[0x12, 0x01, 0x00]);
     assert!(stalled.is_closed());
     let mut client = Client::login(server.address);
-    assert_eq!(rows(&client.batch("SELECT 1")), vec![vec![Some("1".to_owned())]]);
+    assert_eq!(
+        rows(&client.batch("SELECT 1")),
+        vec![vec![Some("1".to_owned())]]
+    );
     assert!(errors(&client.batch("SELECT 2")).is_empty());
 }

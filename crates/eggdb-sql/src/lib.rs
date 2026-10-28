@@ -84,6 +84,8 @@ mod one_statement_tests;
 #[cfg(test)]
 mod schema_tests;
 #[cfg(test)]
+mod sqlserver_tests;
+#[cfg(test)]
 mod subquery_tests;
 #[cfg(test)]
 mod tests;
@@ -109,8 +111,8 @@ pub use restore::{
 };
 pub use schema::{ColumnSchema, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted};
 pub use session::{
-    BatchStep, OneStatementError, OneStatementRefusal, OutputColumn, Parameter,
-    PreparedStatement, QueryResult, Session, StatementDescription, TransactionStatus,
+    BatchStep, OneStatementError, OneStatementRefusal, OutputColumn, Parameter, PreparedStatement,
+    QueryResult, Session, StatementDescription, TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;

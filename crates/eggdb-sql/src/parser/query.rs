@@ -103,10 +103,10 @@ impl Parser<'_> {
         let mut tail = self.query_tail()?;
         if let Some(top) = self.pending_top.take() {
             if !matches!(body, SetExpr::Select(_)) {
-                return Err(super::sqlserver::not_supported(
-                    "TOP with UNION, INTERSECT or EXCEPT",
-                )
-                .at(top.position));
+                return Err(
+                    super::sqlserver::not_supported("TOP with UNION, INTERSECT or EXCEPT")
+                        .at(top.position),
+                );
             }
             tail.limit = Some(top);
         }

@@ -117,8 +117,10 @@ impl PreLogin {
     /// certificate-based authentication. Such a client ends the connection when told
     /// encryption is not available ([MS-TDS] 2.2.6.5).
     pub fn wants_encryption(&self) -> bool {
-        self.encryption
-            .is_some_and(|value| value & ENCRYPT_CLIENT_CERT != 0 || value & 0x7F != ENCRYPT_OFF && value & 0x7F != ENCRYPT_NOT_SUP)
+        self.encryption.is_some_and(|value| {
+            value & ENCRYPT_CLIENT_CERT != 0
+                || value & 0x7F != ENCRYPT_OFF && value & 0x7F != ENCRYPT_NOT_SUP
+        })
     }
 
     /// Whether the client named an instance other than the default one.
@@ -182,7 +184,10 @@ pub fn parse_prelogin(body: &[u8]) -> Result<PreLogin, MalformedMessage> {
 /// FEDAUTHREQUIRED 0 when the client sent that option.
 pub fn prelogin_response(request: &PreLogin, version: [u8; 4]) -> Vec<u8> {
     let mut options: Vec<(u8, Vec<u8>)> = vec![
-        (OPTION_VERSION, vec![version[0], version[1], version[2], version[3], 0, 0]),
+        (
+            OPTION_VERSION,
+            vec![version[0], version[1], version[2], version[3], 0, 0],
+        ),
         (OPTION_ENCRYPTION, vec![ENCRYPT_NOT_SUP]),
         (
             OPTION_INSTANCE,
@@ -267,8 +272,10 @@ pub struct Login7 {
 
 fn utf16_units(bytes: &[u8]) -> Vec<u16> {
     bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect()
 }
 
@@ -311,7 +318,9 @@ fn deobfuscated(bytes: &[u8]) -> Option<Password> {
 /// extensions walked only to find a request for federated authentication.
 pub fn parse_login7(body: &[u8]) -> Result<Login7, MalformedMessage> {
     if body.len() < LOGIN7_FIXED_BYTES {
-        return Err(malformed("the LOGIN7 message is shorter than its fixed part"));
+        return Err(malformed(
+            "the LOGIN7 message is shorter than its fixed part",
+        ));
     }
     let length = u32_le(body, 0)? as usize;
     if length < LOGIN7_FIXED_BYTES || length > body.len() {
@@ -320,7 +329,11 @@ pub fn parse_login7(body: &[u8]) -> Result<Login7, MalformedMessage> {
     let body = &body[..length];
     let option_flags2 = body[25];
     let option_flags3 = body[27];
-    let password_bytes = field(body, 44, "the LOGIN7 password is longer than 128 characters")?;
+    let password_bytes = field(
+        body,
+        44,
+        "the LOGIN7 password is longer than 128 characters",
+    )?;
     let password = deobfuscated(password_bytes);
     let sspi_bytes = usize::from(u16_le(body, 80)?);
     let federated_authentication = if option_flags3 & EXTENSION != 0 {
@@ -331,13 +344,37 @@ pub fn parse_login7(body: &[u8]) -> Result<Login7, MalformedMessage> {
     Ok(Login7 {
         tds_version: u32_le(body, 4)?,
         packet_size: u32_le(body, 8)?,
-        host_name: text_field(body, 36, "the LOGIN7 host name is longer than 128 characters")?,
-        user_name: text_field(body, 40, "the LOGIN7 user name is longer than 128 characters")?,
+        host_name: text_field(
+            body,
+            36,
+            "the LOGIN7 host name is longer than 128 characters",
+        )?,
+        user_name: text_field(
+            body,
+            40,
+            "the LOGIN7 user name is longer than 128 characters",
+        )?,
         password,
-        app_name: text_field(body, 48, "the LOGIN7 application name is longer than 128 characters")?,
-        server_name: text_field(body, 52, "the LOGIN7 server name is longer than 128 characters")?,
-        language: text_field(body, 64, "the LOGIN7 language is longer than 128 characters")?,
-        database: text_field(body, 68, "the LOGIN7 database is longer than 128 characters")?,
+        app_name: text_field(
+            body,
+            48,
+            "the LOGIN7 application name is longer than 128 characters",
+        )?,
+        server_name: text_field(
+            body,
+            52,
+            "the LOGIN7 server name is longer than 128 characters",
+        )?,
+        language: text_field(
+            body,
+            64,
+            "the LOGIN7 language is longer than 128 characters",
+        )?,
+        database: text_field(
+            body,
+            68,
+            "the LOGIN7 database is longer than 128 characters",
+        )?,
         integrated_security: option_flags2 & INTEGRATED_SECURITY != 0,
         sspi_bytes,
         change_password: option_flags3 & CHANGE_PASSWORD != 0,
@@ -350,12 +387,16 @@ fn asks_federated_authentication(body: &[u8]) -> Result<bool, MalformedMessage> 
     let pointer = usize::from(u16_le(body, 56)?);
     let pointer_length = usize::from(u16_le(body, 58)?);
     if pointer_length < 4 {
-        return Err(malformed("the LOGIN7 feature extension pointer is too short"));
+        return Err(malformed(
+            "the LOGIN7 feature extension pointer is too short",
+        ));
     }
     let mut at = u32_le(body, pointer)? as usize;
     loop {
         let Some(&feature) = body.get(at) else {
-            return Err(malformed("the LOGIN7 feature extensions have no terminator"));
+            return Err(malformed(
+                "the LOGIN7 feature extensions have no terminator",
+            ));
         };
         if feature == FEATURE_TERMINATOR {
             return Ok(false);
@@ -368,7 +409,9 @@ fn asks_federated_authentication(body: &[u8]) -> Result<bool, MalformedMessage> 
             .checked_add(5)
             .and_then(|start| start.checked_add(length))
             .filter(|&end| end <= body.len())
-            .ok_or(malformed("a LOGIN7 feature extension lies outside the message"))?;
+            .ok_or(malformed(
+                "a LOGIN7 feature extension lies outside the message",
+            ))?;
     }
 }
 
@@ -387,7 +430,9 @@ pub struct SqlBatch {
 pub fn parse_sql_batch(body: &[u8]) -> Result<SqlBatch, MalformedMessage> {
     let total = u32_le(body, 0)? as usize;
     if total < 4 || total > body.len() {
-        return Err(malformed("the ALL_HEADERS length does not match the message"));
+        return Err(malformed(
+            "the ALL_HEADERS length does not match the message",
+        ));
     }
     let mut at = 4;
     let mut seen = [false; 4];
@@ -411,7 +456,9 @@ pub fn parse_sql_batch(body: &[u8]) -> Result<SqlBatch, MalformedMessage> {
         seen[slot] = true;
         if kind == HEADER_TRANSACTION_DESCRIPTOR {
             if length != 18 {
-                return Err(malformed("the transaction descriptor header is not 18 bytes"));
+                return Err(malformed(
+                    "the transaction descriptor header is not 18 bytes",
+                ));
             }
             let mut descriptor = [0u8; 8];
             descriptor.copy_from_slice(&body[at + 6..at + 14]);
@@ -423,7 +470,7 @@ pub fn parse_sql_batch(body: &[u8]) -> Result<SqlBatch, MalformedMessage> {
         return Err(malformed("ALL_HEADERS holds no transaction descriptor"));
     };
     let text_bytes = &body[total..];
-    if text_bytes.len() % 2 != 0 {
+    if !text_bytes.len().is_multiple_of(2) {
         return Err(malformed("the batch text has an odd number of bytes"));
     }
     let text = char::decode_utf16(utf16_units(text_bytes))
@@ -493,8 +540,36 @@ mod tests {
     #[test]
     fn prelogin_reads_the_options_and_answers_encryption_not_available() {
         let request = parse_prelogin(&[
-            0, 0, 21, 0, 6, 1, 0, 27, 0, 1, 2, 0, 28, 0, 1, 4, 0, 29, 0, 1, 0xFF, 16, 0, 3, 0xE8,
-            0, 0, ENCRYPT_OFF, 0, 1,
+            0,
+            0,
+            21,
+            0,
+            6,
+            1,
+            0,
+            27,
+            0,
+            1,
+            2,
+            0,
+            28,
+            0,
+            1,
+            4,
+            0,
+            29,
+            0,
+            1,
+            0xFF,
+            16,
+            0,
+            3,
+            0xE8,
+            0,
+            0,
+            ENCRYPT_OFF,
+            0,
+            1,
         ])
         .unwrap();
         assert_eq!(request.encryption, Some(ENCRYPT_OFF));

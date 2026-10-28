@@ -117,12 +117,10 @@ impl Dialect {
             (
                 Self::MySql | Self::Sqlite | Self::Oracle | Self::SqlServer,
                 crate::Value::TimestampTz(micros),
-            ) => {
-                Some(match crate::datetime::utc_to_local(*micros) {
-                    Ok(local) => crate::datetime::format_timestamp(local),
-                    Err(_) => crate::datetime::format_timestamp(*micros),
-                })
-            }
+            ) => Some(match crate::datetime::utc_to_local(*micros) {
+                Ok(local) => crate::datetime::format_timestamp(local),
+                Err(_) => crate::datetime::format_timestamp(*micros),
+            }),
             _ => value.to_text(),
         }
     }

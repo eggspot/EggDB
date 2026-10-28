@@ -134,7 +134,9 @@ fn operator_name(symbol: &str) -> Option<&'static str> {
 fn incompatible_operands(message: &str) -> Option<String> {
     let rest = message.strip_prefix("operator does not exist: ")?;
     let words: Vec<&str> = rest.split(' ').collect();
-    let at = words.iter().position(|word| operator_name(word).is_some())?;
+    let at = words
+        .iter()
+        .position(|word| operator_name(word).is_some())?;
     let operator = operator_name(words[at])?;
     let left = words[..at].join(" ");
     let right = words[at + 1..].join(" ");
@@ -167,9 +169,12 @@ fn near(text: &str, error: &SqlError) -> String {
 
 fn syntax(error: &SqlError, text: &str) -> (u16, String) {
     let message = error.message();
-    if message.starts_with("Incorrect syntax near") || message.starts_with("An object or column")
-    {
-        let code = if message.starts_with("An object") { 1038 } else { 102 };
+    if message.starts_with("Incorrect syntax near") || message.starts_with("An object or column") {
+        let code = if message.starts_with("An object") {
+            1038
+        } else {
+            102
+        };
         return (code, message.to_owned());
     }
     if message.starts_with("INSERT has more") {
@@ -193,12 +198,13 @@ fn syntax(error: &SqlError, text: &str) -> (u16, String) {
         );
     }
     if message.starts_with("unterminated") {
-        return (102, "Incorrect syntax: the text ends inside a quoted name or a comment.".to_owned());
+        return (
+            102,
+            "Incorrect syntax: the text ends inside a quoted name or a comment.".to_owned(),
+        );
     }
     let found = near(text, error);
-    if crate::parser::starts_sqlserver_statement(&found.to_ascii_lowercase())
-        || crate::parser::is_sqlserver_reserved(&found.to_ascii_lowercase())
-    {
+    if crate::parser::is_sqlserver_reserved(&found.to_ascii_lowercase()) {
         return (
             156,
             format!(
@@ -217,7 +223,9 @@ fn duplicate_key(error: &SqlError) -> (u16, String) {
         .detail()
         .and_then(|detail| detail.split_once(")=("))
         .and_then(|(_, rest)| rest.split_once(") already exists"))
-        .map_or(String::new(), |(value, _)| format!(" The duplicate key value is ({value})."));
+        .map_or(String::new(), |(value, _)| {
+            format!(" The duplicate key value is ({value}).")
+        });
     let object = error.table().map(object_name).unwrap_or_default();
     let kind = if constraint.ends_with("_pkey") || constraint.starts_with("pk_") {
         "PRIMARY KEY"
@@ -235,7 +243,10 @@ fn duplicate_key(error: &SqlError) -> (u16, String) {
 fn not_null(error: &SqlError, text: &str, database: &str) -> (u16, String) {
     let names = quoted_names(error.message());
     let column = names.first().cloned().unwrap_or_default();
-    let table = names.get(1).map(|table| object_name(table)).unwrap_or_default();
+    let table = names
+        .get(1)
+        .map(|table| object_name(table))
+        .unwrap_or_default();
     let statement = if first_word(text) == "UPDATE" {
         "UPDATE"
     } else {
@@ -264,13 +275,18 @@ fn conflict(error: &SqlError, text: &str, kind: &str) -> (u16, String) {
     };
     (
         547,
-        format!("The {statement} statement conflicted with the {kind} constraint \"{constraint}\"."),
+        format!(
+            "The {statement} statement conflicted with the {kind} constraint \"{constraint}\"."
+        ),
     )
 }
 
 fn conversion(message: &str) -> (u16, String) {
     let Some(rest) = message.strip_prefix("invalid input syntax for type ") else {
-        return (245, "Conversion failed when converting a value to another data type.".to_owned());
+        return (
+            245,
+            "Conversion failed when converting a value to another data type.".to_owned(),
+        );
     };
     let (target, value) = match rest.split_once(": \"") {
         Some((target, value)) => (target, value.trim_end_matches('"')),
@@ -300,10 +316,7 @@ fn not_supported(message: &str) -> String {
 fn generic(error: &SqlError) -> String {
     let names = quoted_names(error.message());
     if names.is_empty() {
-        format!(
-            "The statement failed with SQLSTATE {}.",
-            error.state()
-        )
+        format!("The statement failed with SQLSTATE {}.", error.state())
     } else {
         format!(
             "The statement failed with SQLSTATE {} on '{}'.",
@@ -437,7 +450,10 @@ mod tests {
     fn errors_take_sql_server_numbers_severities_and_wording() {
         assert_eq!(
             shown(
-                SqlError::new(SqlState::UNDEFINED_TABLE, "relation \"missing\" does not exist"),
+                SqlError::new(
+                    SqlState::UNDEFINED_TABLE,
+                    "relation \"missing\" does not exist"
+                ),
                 "SELECT * FROM missing"
             ),
             "Msg 208, Level 16, State 1: Invalid object name 'missing'."
@@ -510,7 +526,10 @@ mod tests {
             "shop",
         );
         assert_eq!(keyword.vendor_code(), Some(156));
-        assert_eq!(keyword.message(), "Incorrect syntax near the keyword 'FROM'.");
+        assert_eq!(
+            keyword.message(),
+            "Incorrect syntax near the keyword 'FROM'."
+        );
         assert_eq!(severity_of(102), 15);
         assert_eq!(severity_of(18456), 14);
     }
@@ -518,8 +537,11 @@ mod tests {
     #[test]
     fn errors_without_a_counterpart_carry_no_postgresql_wording() {
         let error = translate(
-            SqlError::new(SqlState::INTERNAL_ERROR, "could not open relation with OID 5")
-                .with_hint("PostgreSQL hint"),
+            SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "could not open relation with OID 5",
+            )
+            .with_hint("PostgreSQL hint"),
             "SELECT 1",
             "shop",
         );

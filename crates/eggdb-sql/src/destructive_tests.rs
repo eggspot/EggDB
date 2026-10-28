@@ -321,7 +321,10 @@ fn only_the_confirmed_destructive_statement_runs() {
 #[test]
 fn transact_sql_brackets_and_transactions_are_classified_as_in_the_other_dialects() {
     for (text, expected) in [
-        ("DELETE FROM [t]", Some(DestructiveKind::DeleteWithoutFilter)),
+        (
+            "DELETE FROM [t]",
+            Some(DestructiveKind::DeleteWithoutFilter),
+        ),
         ("TRUNCATE TABLE [dbo].[t]", Some(DestructiveKind::Truncate)),
         ("DROP TABLE [dbo].[t]", Some(DestructiveKind::DropTable)),
         ("DELETE FROM [t] WHERE [id] = 1", None),
@@ -335,7 +338,7 @@ fn transact_sql_brackets_and_transactions_are_classified_as_in_the_other_dialect
     );
     for text in [
         "BEGIN TRAN",
-        "BEGIN TRANSACTION load",
+        "BEGIN TRANSACTION loading",
         "COMMIT TRAN",
         "COMMIT",
         "ROLLBACK TRANSACTION",

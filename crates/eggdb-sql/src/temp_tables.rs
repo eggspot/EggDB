@@ -113,7 +113,7 @@ fn unique_names(names: Vec<String>, dialect: Dialect, position: usize) -> SqlRes
                 .at(position));
             }
             Dialect::Oracle => return Err(ambiguous(&name, position)),
-            Dialect::PostgreSql | Dialect::Sqlite => {
+            Dialect::PostgreSql | Dialect::Sqlite | Dialect::SqlServer => {
                 unique.push(format!("{name}{TEMP_TABLE_MARKER}{index}"));
             }
         }

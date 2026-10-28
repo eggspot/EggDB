@@ -263,7 +263,7 @@ fn generated_name(
             crate::schemas::base_name(&table.name)
         ),
         Dialect::Oracle => "sys_c".to_owned(),
-        Dialect::PostgreSql => format!(
+        Dialect::PostgreSql | Dialect::SqlServer => format!(
             "{}_{}_{}",
             crate::schemas::base_name(&table.name),
             columns.join("_"),
@@ -276,7 +276,7 @@ fn generated_name(
         Dialect::Sqlite => format!("{stem}_{number}"),
         Dialect::Oracle => format!("{stem}{number:07}"),
         Dialect::PostgreSql if number == 1 => stem.clone(),
-        Dialect::PostgreSql => format!("{stem}{}", number - 1),
+        Dialect::PostgreSql | Dialect::SqlServer => format!("{stem}{}", number - 1),
     };
     let mut number = match dialect {
         Dialect::Oracle => {
@@ -287,7 +287,7 @@ fn generated_name(
                     .sum::<usize>()
         }
         Dialect::Sqlite => 1 + table.indexes.len(),
-        Dialect::MySql | Dialect::PostgreSql => 1,
+        Dialect::MySql | Dialect::PostgreSql | Dialect::SqlServer => 1,
     };
     loop {
         let name = candidate(number);
@@ -310,7 +310,7 @@ fn duplicate_name(name: &str, dialect: Dialect) -> SqlError {
             format!("index {name} already exists"),
         )
         .with_sqlite_code(1),
-        Dialect::PostgreSql | Dialect::Oracle => SqlError::new(
+        Dialect::PostgreSql | Dialect::Oracle | Dialect::SqlServer => SqlError::new(
             SqlState::DUPLICATE_TABLE,
             format!("relation \"{name}\" already exists"),
         ),
@@ -524,7 +524,7 @@ fn index_missing(name: &Name, dialect: Dialect) -> SqlError {
             "specified index does not exist".to_owned(),
         )
         .with_oracle_code(1418),
-        Dialect::PostgreSql => SqlError::new(
+        Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
             SqlState::UNDEFINED_OBJECT,
             format!("index \"{}\" does not exist", name.text),
         ),

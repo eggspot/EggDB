@@ -1,17 +1,18 @@
 use crate::messages::{
     ATTENTION, BULK_LOAD, LOGIN7, Login7, PRELOGIN, PreLogin, RPC, SQL_BATCH, TABULAR_RESULT,
-    TDS_7_4, TRANSACTION_MANAGER, parse_login7, parse_prelogin, parse_sql_batch,
-    prelogin_response,
+    TDS_7_4, TRANSACTION_MANAGER, parse_login7, parse_prelogin, parse_sql_batch, prelogin_response,
 };
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::tokens::{
     self, DONE, DONE_ATTENTION, DONE_COUNT, DONE_ERROR, DONE_IN_TRANSACTION, DONE_MORE,
-    ENV_COMMIT_TRANSACTION, ENV_DATABASE, ENV_LANGUAGE, ENV_PACKET_SIZE,
-    ENV_ROLLBACK_TRANSACTION, Message,
+    ENV_COMMIT_TRANSACTION, ENV_DATABASE, ENV_LANGUAGE, ENV_PACKET_SIZE, ENV_ROLLBACK_TRANSACTION,
+    Message,
 };
 use crate::types::{push_value, wire_columns};
 use crate::wire::{DEFAULT_PACKET_SIZE, POLL_INTERVAL, Wire, WireError};
-use eggdb_sql::{BatchStep, Dialect, KeyValueStore, QueryResult, SQLSERVER_COMPATIBLE_VERSION, Session, SqlError};
+use eggdb_sql::{
+    BatchStep, Dialect, KeyValueStore, QueryResult, SQLSERVER_COMPATIBLE_VERSION, Session, SqlError,
+};
 use std::time::{Duration, Instant};
 
 /// The largest PRELOGIN or LOGIN7 message accepted before a client has logged in.
@@ -273,7 +274,12 @@ fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login
         return Login::Refused;
     }
     if login.change_password {
-        login_refusal(shared, wire, &user, "changing the password at login is not supported");
+        login_refusal(
+            shared,
+            wire,
+            &user,
+            "changing the password at login is not supported",
+        );
         return Login::Refused;
     }
     let config = shared.config;
@@ -382,7 +388,10 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     wire.spid = connection_id as u16;
     let config = shared.config;
     if wire
-        .send_message(TABULAR_RESULT, &login_response(&config.database, packet_size))
+        .send_message(
+            TABULAR_RESULT,
+            &login_response(&config.database, packet_size),
+        )
         .is_err()
     {
         return;
@@ -478,13 +487,21 @@ impl Connection<'_> {
         let batch = match parse_sql_batch(body) {
             Ok(batch) => batch,
             Err(error) => {
-                report_wire_error(self.shared, &mut self.wire, &WireError::Malformed(error.reason));
+                report_wire_error(
+                    self.shared,
+                    &mut self.wire,
+                    &WireError::Malformed(error.reason),
+                );
                 return false;
             }
         };
         if self.shared.config.log_batches {
             let shown: String = batch.text.chars().take(LOGGED_BATCH_CHARACTERS).collect();
-            (self.shared.log)(&format!("{}  batch: {}", self.wire.peer(), printable(&shown)));
+            (self.shared.log)(&format!(
+                "{}  batch: {}",
+                self.wire.peer(),
+                printable(&shown)
+            ));
         }
         let text = batch.text;
         self.wire.begin_message(TABULAR_RESULT);
@@ -507,7 +524,11 @@ impl Connection<'_> {
             return false;
         }
         let last = pending.take().unwrap_or(Pending {
-            status: if in_transaction { DONE_IN_TRANSACTION } else { 0 },
+            status: if in_transaction {
+                DONE_IN_TRANSACTION
+            } else {
+                0
+            },
             command: 0,
             rows: 0,
         });

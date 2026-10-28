@@ -1,7 +1,6 @@
 use super::Parser;
 use crate::ast::{
-    ColumnDefinition, Expr, ExprKind, Literal, Name, SqlServerStatement, Statement,
-    TableReference,
+    ColumnDefinition, Expr, ExprKind, Literal, Name, SqlServerStatement, Statement, TableReference,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -426,7 +425,8 @@ impl<'t> Parser<'t> {
             "commit" | "rollback" => {
                 let commit = word == "commit";
                 self.at += 1;
-                if !self.take_word("work") && (self.take_word("tran") || self.take_word("transaction"))
+                if !self.take_word("work")
+                    && (self.take_word("tran") || self.take_word("transaction"))
                 {
                     self.optional_transaction_name();
                 }
@@ -437,6 +437,12 @@ impl<'t> Parser<'t> {
                 }
             }
             "save" => return Err(not_supported("SAVE TRANSACTION").at(position)),
+            "create" | "alter"
+                if self.is_word_at(1, "view")
+                    || (self.is_word_at(1, "or") && self.is_word_at(3, "view")) =>
+            {
+                return Err(not_supported("Views in the SQL Server dialect").at(position));
+            }
             "use" => {
                 self.at += 1;
                 let name = self.name()?;
@@ -543,9 +549,8 @@ impl<'t> Parser<'t> {
             "language" => {
                 let language = match self.peek_kind() {
                     TokenKind::Word(word) => word.as_ref().to_owned(),
-                    TokenKind::String(text) | TokenKind::QuotedIdentifier(text) => {
-                        text.to_ascii_lowercase()
-                    }
+                    TokenKind::String(text) => text.to_ascii_lowercase(),
+                    TokenKind::QuotedIdentifier(text) => text.to_ascii_lowercase(),
                     _ => return Err(self.unexpected()),
                 };
                 self.at += 1;
@@ -579,7 +584,9 @@ impl<'t> Parser<'t> {
                     self.at += 1;
                 }
                 if !self.on_or_off()? {
-                    return Err(not_supported(&format!("SET {} OFF", names.join(", "))).at(position));
+                    return Err(
+                        not_supported(&format!("SET {} OFF", names.join(", "))).at(position)
+                    );
                 }
                 Ok(accepted_set())
             }
@@ -674,8 +681,11 @@ impl<'t> Parser<'t> {
             return Err(self.unexpected());
         };
         let value = digits.parse::<i64>().map_err(|_| {
-            SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "The type argument is too large.")
-                .at(position)
+            SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                "The type argument is too large.",
+            )
+            .at(position)
         })?;
         self.at += 1;
         self.expect(&TokenKind::RightParen)?;
@@ -735,7 +745,9 @@ impl<'t> Parser<'t> {
         if scale > precision {
             return Err(SqlError::new(
                 SqlState::INVALID_PARAMETER_VALUE,
-                format!("The scale ({scale}) must be less than or equal to the precision ({precision})."),
+                format!(
+                    "The scale ({scale}) must be less than or equal to the precision ({precision})."
+                ),
             )
             .with_sqlserver_code(192)
             .at(position));
@@ -755,16 +767,19 @@ impl<'t> Parser<'t> {
             let increment = self.signed_type_argument()?;
             self.expect(&TokenKind::RightParen)?;
             if seed != 1 || increment != 1 {
-                return Err(not_supported("an IDENTITY seed or increment other than (1, 1)")
-                    .at(position));
+                return Err(
+                    not_supported("an IDENTITY seed or increment other than (1, 1)").at(position),
+                );
             }
         }
         if !matches!(
             column.sql_type,
             SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
         ) {
-            return Err(not_supported("IDENTITY on a column that is not int, bigint or smallint")
-                .at(position));
+            return Err(
+                not_supported("IDENTITY on a column that is not int, bigint or smallint")
+                    .at(position),
+            );
         }
         column.auto_increment = true;
         column.not_null = true;
@@ -912,7 +927,10 @@ mod tests {
     fn the_reserved_words_are_sorted_and_hold_every_word_that_starts_a_statement() {
         assert!(RESERVED.windows(2).all(|pair| pair[0] < pair[1]));
         for word in STATEMENT_WORDS {
-            assert!(is_reserved(word) || ["go", "throw"].contains(&word), "{word}");
+            assert!(
+                is_reserved(word) || ["go", "throw"].contains(&word),
+                "{word}"
+            );
         }
     }
 }

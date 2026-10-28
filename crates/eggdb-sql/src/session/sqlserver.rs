@@ -44,7 +44,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         text: &str,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
-        let tokens = tokenize_in(text, self.dialect).map_err(|error| self.in_dialect(text, error))?;
+        let tokens =
+            tokenize_in(text, self.dialect).map_err(|error| self.in_dialect(text, error))?;
         self.check_batch_syntax(text, &tokens)
             .map_err(|error| self.in_dialect(text, error))?;
         self.batch_resume = Some((0, 0));
@@ -62,10 +63,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             self.sync_transaction_count();
         }
         let settings = Arc::clone(&self.settings);
-        let mut parser = Parser::new(text, tokens)
-            .with_context(Parameters::Absent, &settings)
-            .in_dialect(self.dialect);
+        let mut resume = (0, 0);
         loop {
+            let mut parser = Parser::new(text, tokens)
+                .with_context(Parameters::Absent, &settings)
+                .in_dialect(self.dialect)
+                .resuming_at(resume);
             parser.skip_empty_statements();
             if parser.at_end() {
                 return Ok(());
@@ -73,6 +76,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             if parser.literal_rows().is_none() {
                 parser.statement()?;
             }
+            resume = parser.resume_point();
         }
     }
 
