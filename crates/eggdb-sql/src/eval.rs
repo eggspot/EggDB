@@ -216,7 +216,8 @@ pub(crate) fn children(expr: &Expr) -> Vec<&Expr> {
         }
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. } => arguments.iter().collect(),
+        | ExprKind::OracleFunction { arguments, .. }
+        | ExprKind::SqlServerFunction { arguments, .. } => arguments.iter().collect(),
         ExprKind::Aggregate { argument, .. } => argument.iter().map(AsRef::as_ref).collect(),
     }
 }
@@ -265,7 +266,8 @@ pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         }
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. } => arguments.iter_mut().collect(),
+        | ExprKind::OracleFunction { arguments, .. }
+        | ExprKind::SqlServerFunction { arguments, .. } => arguments.iter_mut().collect(),
         ExprKind::Aggregate { argument, .. } => argument.iter_mut().map(AsMut::as_mut).collect(),
     }
 }
@@ -357,7 +359,8 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
         }
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. } => arguments
+        | ExprKind::OracleFunction { arguments, .. }
+        | ExprKind::SqlServerFunction { arguments, .. } => arguments
             .iter()
             .try_for_each(|argument| check_columns(argument, scope)),
         ExprKind::Aggregate { argument, .. } => argument
@@ -391,6 +394,14 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
         | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
+        ExprKind::SqlServerFunction {
+            function: crate::sqlserver_functions::Function::Convert { .. },
+            arguments,
+        } => match arguments.first().map(name_and_whether_it_names_a_value) {
+            Some((name, true)) => (name, true),
+            _ => ("convert".to_owned(), false),
+        },
+        ExprKind::SqlServerFunction { function, .. } => (function.name().to_owned(), true),
         ExprKind::Aggregate { function, .. } => (function.name().to_owned(), true),
         ExprKind::Cast { expr, sql_type } => match name_and_whether_it_names_a_value(expr) {
             (name, true) => (name, true),
@@ -595,6 +606,10 @@ impl Evaluator<'_> {
                 let values = self.arguments(arguments)?;
                 crate::oracle_functions::call(name, &values)
             }
+            ExprKind::SqlServerFunction {
+                function,
+                arguments,
+            } => self.sqlserver_function(*function, arguments, hint),
             ExprKind::Slot { index, .. } => {
                 Ok(self.row.get(*index).cloned().unwrap_or(Value::Null))
             }
@@ -655,6 +670,10 @@ impl Evaluator<'_> {
             | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
             ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
             ExprKind::Cast { sql_type, .. } => Some(*sql_type),
+            ExprKind::SqlServerFunction {
+                function: crate::sqlserver_functions::Function::Convert { target, .. },
+                ..
+            } => Some(target.engine_type()),
             ExprKind::SessionValue { .. } => Some(SqlType::Text),
             ExprKind::Unary(UnaryOperator::Minus | UnaryOperator::Plus, operand) => {
                 self.declared_type(operand)
@@ -880,6 +899,45 @@ impl Evaluator<'_> {
             ExprKind::Literal(Literal::String(text)) => parse_input(text, target),
             ExprKind::Literal(Literal::Decimal(text)) => decimal_literal(text, target, true),
             _ => convert(self.eval(expr, None)?, target, Conversion::Explicit),
+        }
+    }
+
+    fn declared_scale(&self, expr: &Expr) -> Option<u8> {
+        match crate::typing::static_type(expr, self.scope)? {
+            SqlType::Timestamp(scale) | SqlType::TimestampTz(scale) | SqlType::Time(scale) => scale,
+            _ => None,
+        }
+    }
+
+    fn sqlserver_function(
+        &self,
+        function: crate::sqlserver_functions::Function,
+        arguments: &[Expr],
+        hint: Option<SqlType>,
+    ) -> SqlResult<Value> {
+        use crate::sqlserver_functions::Function;
+        match (function, arguments) {
+            (Function::Convert { target, style }, [argument]) => {
+                let value = self.eval(argument, None)?;
+                let scale = self.declared_scale(argument);
+                crate::sqlserver_conversion::convert(value, target, style, scale)
+            }
+            (Function::IsNull, [first, second]) => {
+                let declared = crate::typing::static_type(first, self.scope);
+                let value = self.eval(first, hint)?;
+                if !value.is_null() {
+                    return Ok(value);
+                }
+                let fallback = self.eval(second, declared.or(hint))?;
+                match declared {
+                    Some(sql_type) => isnull_fallback(fallback, sql_type),
+                    None => Ok(fallback),
+                }
+            }
+            _ => {
+                let values = self.arguments(arguments)?;
+                crate::sqlserver_functions::call(function, &values)
+            }
         }
     }
 
@@ -1183,7 +1241,25 @@ pub(crate) fn literal_value(literal: &Literal, hint: Option<SqlType>) -> SqlResu
     }
 }
 
+fn read_by_sqlserver(sql_type: SqlType) -> bool {
+    matches!(
+        sql_type,
+        SqlType::Date
+            | SqlType::Time(_)
+            | SqlType::Timestamp(_)
+            | SqlType::TimestampTz(_)
+            | SqlType::Boolean
+            | SqlType::Uuid
+    ) && crate::constraints::current_dialect() == crate::Dialect::SqlServer
+}
+
 pub(crate) fn string_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Value> {
+    if let Some(sql_type) = hint
+        && read_by_sqlserver(sql_type)
+        && let Some(value) = crate::sqlserver_conversion::literal_of(text, sql_type)
+    {
+        return value;
+    }
     match hint {
         Some(sql_type) if !sql_type.is_string() => parse_input(text, sql_type.without_modifier()),
         _ => Ok(Value::Text(text.to_owned())),
@@ -1450,6 +1526,26 @@ fn compare_checked(left: &Value, right: &Value, symbol: &str) -> SqlResult<Order
 }
 
 pub(crate) fn compare_truth(left: &Value, right: &Value, symbol: &str) -> SqlResult<Option<bool>> {
+    engine_compare_truth(left, right, symbol).or_else(|error| {
+        if error.state() != SqlState::UNDEFINED_FUNCTION
+            || crate::constraints::current_dialect() != crate::Dialect::SqlServer
+        {
+            return Err(error);
+        }
+        if left.is_null() || right.is_null() {
+            return Ok(None);
+        }
+        match crate::sqlserver_conversion::by_precedence(left, right) {
+            Some(converted) => {
+                let (left, right) = converted?;
+                engine_compare_truth(&left, &right, symbol)
+            }
+            None => Err(error),
+        }
+    })
+}
+
+fn engine_compare_truth(left: &Value, right: &Value, symbol: &str) -> SqlResult<Option<bool>> {
     if left.is_null() || right.is_null() {
         if let (Some(a), Some(b)) = (left.sql_type(), right.sql_type())
             && !comparable(a, b)
@@ -1487,6 +1583,125 @@ fn division_by_zero() -> SqlError {
 }
 
 fn arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResult<Value> {
+    engine_arithmetic(operator, left, right).or_else(|error| {
+        if error.state() == SqlState::UNDEFINED_FUNCTION
+            && crate::constraints::current_dialect() == crate::Dialect::SqlServer
+        {
+            sqlserver_arithmetic(operator, left, right)
+        } else {
+            Err(error)
+        }
+    })
+}
+
+fn isnull_fallback(fallback: Value, sql_type: SqlType) -> SqlResult<Value> {
+    let converted = crate::sqlserver_conversion::implicit(fallback, sql_type)?;
+    let (Value::Text(text), SqlType::Varchar(Some(length)) | SqlType::Bpchar(Some(length))) =
+        (&converted, sql_type)
+    else {
+        return Ok(converted);
+    };
+    Ok(match text.char_indices().nth(length as usize) {
+        Some((cut, _)) => Value::Text(text[..cut].to_owned()),
+        None => converted,
+    })
+}
+
+fn operator_name(operator: BinaryOperator) -> &'static str {
+    match operator {
+        BinaryOperator::Add => "add",
+        BinaryOperator::Subtract => "subtract",
+        BinaryOperator::Multiply => "multiply",
+        BinaryOperator::Divide => "divide",
+        BinaryOperator::Modulo => "modulo",
+        _ => operator.symbol(),
+    }
+}
+
+fn sqlserver_concatenated(left: &Value, right: &Value) -> Option<SqlResult<Value>> {
+    match (left, right) {
+        (Value::Text(left) | Value::Bpchar(left), Value::Text(right) | Value::Bpchar(right)) => {
+            let joined = (|| {
+                crate::sqlserver_functions::within_limit(left.len().saturating_add(right.len()))?;
+                let mut joined = String::with_capacity(left.len() + right.len());
+                joined.push_str(left);
+                joined.push_str(right);
+                Ok(Value::Text(joined))
+            })();
+            Some(joined)
+        }
+        (Value::Bytea(left), Value::Bytea(right)) => Some((|| {
+            crate::sqlserver_functions::within_limit(left.len().saturating_add(right.len()))?;
+            let mut joined = Vec::with_capacity(left.len() + right.len());
+            joined.extend_from_slice(left);
+            joined.extend_from_slice(right);
+            Ok(Value::Bytea(joined))
+        })()),
+        _ => None,
+    }
+}
+
+fn days_added(operator: BinaryOperator, left: &Value, right: &Value) -> Option<SqlResult<Value>> {
+    let (stamp, days, sign) = match (operator, left, right) {
+        (BinaryOperator::Add, Value::Timestamp(_) | Value::TimestampTz(_), number)
+            if number.sql_type().is_some_and(SqlType::is_numeric) =>
+        {
+            (left, number, 1.0)
+        }
+        (BinaryOperator::Subtract, Value::Timestamp(_) | Value::TimestampTz(_), number)
+            if number.sql_type().is_some_and(SqlType::is_numeric) =>
+        {
+            (left, number, -1.0)
+        }
+        (BinaryOperator::Add, number, Value::Timestamp(_) | Value::TimestampTz(_))
+            if number.sql_type().is_some_and(SqlType::is_numeric) =>
+        {
+            (right, number, 1.0)
+        }
+        _ => return None,
+    };
+    let shift = days.as_float().unwrap_or(f64::NAN) * sign * datetime::MICROS_PER_DAY as f64;
+    if !shift.is_finite() || shift.abs() > 4e17 {
+        return Some(Err(datetime::timestamp_out_of_range()));
+    }
+    let shifted =
+        |micros: i64| datetime::checked_timestamp(i128::from(micros) + shift.round() as i128);
+    Some(match stamp {
+        Value::Timestamp(micros) => shifted(*micros).map(Value::Timestamp),
+        Value::TimestampTz(micros) => shifted(*micros).map(Value::TimestampTz),
+        _ => return None,
+    })
+}
+
+fn sqlserver_arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResult<Value> {
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null);
+    }
+    if operator == BinaryOperator::Add
+        && let Some(joined) = sqlserver_concatenated(left, right)
+    {
+        return joined;
+    }
+    if let Some(shifted) = days_added(operator, left, right) {
+        return shifted;
+    }
+    let incompatible =
+        || crate::sqlserver_types::incompatible_in_operator(left, right, operator_name(operator));
+    match crate::sqlserver_conversion::by_precedence(left, right) {
+        Some(converted) => {
+            let (left, right) = converted?;
+            if operator == BinaryOperator::Add
+                && let Some(joined) = sqlserver_concatenated(&left, &right)
+            {
+                return joined;
+            }
+            engine_arithmetic(operator, &left, &right).map_err(|_| incompatible())
+        }
+        None => Err(incompatible()),
+    }
+}
+
+fn engine_arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResult<Value> {
     let symbol = operator.symbol();
     let (Some(left_type), Some(right_type)) = (left.sql_type(), right.sql_type()) else {
         let other = if left.is_null() { right } else { left };

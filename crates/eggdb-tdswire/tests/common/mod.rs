@@ -381,13 +381,27 @@ fn read_type(body: &[u8], at: &mut usize) -> ColumnType {
                 scale,
             }
         }
-        0x2A => {
+        0x2A | 0x29 | 0x2B => {
             let scale = body[*at];
             *at += 1;
             ColumnType {
                 kind,
                 length: 0,
                 scale,
+            }
+        }
+        0x28 => ColumnType {
+            kind,
+            length: 0,
+            scale: 0,
+        },
+        0x24 => {
+            let length = usize::from(body[*at]);
+            *at += 1;
+            ColumnType {
+                kind,
+                length,
+                scale: 0,
             }
         }
         0xE7 => {
@@ -500,6 +514,51 @@ fn read_value(body: &[u8], at: &mut usize, column: ColumnType) -> Option<String>
                 u32::from_le_bytes(days),
                 u64::from_le_bytes(time)
             ))
+        }
+        0x28 => {
+            let length = usize::from(body[*at]);
+            *at += 1;
+            let mut days = [0u8; 4];
+            days[..length].copy_from_slice(&body[*at..*at + length]);
+            *at += length;
+            (length != 0).then(|| format!("days={}", u32::from_le_bytes(days)))
+        }
+        0x29 => {
+            let length = usize::from(body[*at]);
+            *at += 1;
+            let mut time = [0u8; 8];
+            time[..length].copy_from_slice(&body[*at..*at + length]);
+            *at += length;
+            (length != 0).then(|| format!("units={}", u64::from_le_bytes(time)))
+        }
+        0x2B => {
+            let length = usize::from(body[*at]);
+            *at += 1;
+            if length == 0 {
+                return None;
+            }
+            let time_length = length - 5;
+            let mut time = [0u8; 8];
+            time[..time_length].copy_from_slice(&body[*at..*at + time_length]);
+            let mut days = [0u8; 4];
+            days[..3].copy_from_slice(&body[*at + time_length..*at + time_length + 3]);
+            let offset = i16::from_le_bytes([body[*at + length - 2], body[*at + length - 1]]);
+            *at += length;
+            Some(format!(
+                "days={} units={} offset={offset}",
+                u32::from_le_bytes(days),
+                u64::from_le_bytes(time)
+            ))
+        }
+        0x24 => {
+            let length = usize::from(body[*at]);
+            *at += 1;
+            let hex = body[*at..*at + length]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            *at += length;
+            (length != 0).then_some(hex)
         }
         0xE7 if column.length == 0xFFFF => read_plp(body, at).map(|data| from_utf16(&data)),
         0xE7 => {

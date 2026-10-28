@@ -7,6 +7,7 @@ mod query;
 mod schemas;
 mod sqlite;
 mod sqlserver;
+mod sqlserver_functions;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved};
@@ -346,6 +347,7 @@ impl<'t> Parser<'t> {
             || self.mysql() && mysql::is_clause_word(word)
             || self.sqlite() && sqlite::is_clause_word(word)
             || self.oracle() && oracle::is_clause_word(word)
+            || self.sqlserver() && word == "output"
     }
 
     pub(crate) fn with_context(
@@ -1324,7 +1326,7 @@ impl<'t> Parser<'t> {
                 let expr = self.binary_operand()?;
                 let end = self.tokens[self.at.saturating_sub(1)].end;
                 let source = if self.sqlserver() {
-                    sqlserver::default_source(&expr).ok_or_else(|| {
+                    sqlserver::default_source(&expr, column.sql_type).ok_or_else(|| {
                         sqlserver::not_supported("A DEFAULT other than a constant or GETDATE()")
                             .at(start)
                     })?
@@ -1791,6 +1793,11 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
+        let output = if self.sqlserver() {
+            self.sqlserver_output(sqlserver_functions::OutputRows::Inserted)?
+        } else {
+            None
+        };
         if self.is_word("overriding") {
             if !self.postgresql() {
                 return Err(self.not_supported("OVERRIDING"));
@@ -1837,6 +1844,8 @@ impl<'t> Parser<'t> {
         }
         let returning = if self.mysql() {
             None
+        } else if output.is_some() {
+            output
         } else {
             self.returning()?
         };
@@ -1887,11 +1896,19 @@ impl<'t> Parser<'t> {
                 break;
             }
         }
+        let output = if self.sqlserver() {
+            self.sqlserver_output(sqlserver_functions::OutputRows::Updated)?
+        } else {
+            None
+        };
         if self.is_word("from") {
             return Err(self.not_supported("UPDATE ... FROM"));
         }
         let filter = self.filter()?;
-        let returning = self.returning()?;
+        let returning = match output {
+            Some(output) => Some(output),
+            None => self.returning()?,
+        };
         Ok(Statement::Update(Update {
             table,
             assignments,
@@ -1911,8 +1928,16 @@ impl<'t> Parser<'t> {
         if self.is_word("using") {
             return Err(self.not_supported("DELETE ... USING"));
         }
+        let output = if self.sqlserver() {
+            self.sqlserver_output(sqlserver_functions::OutputRows::Deleted)?
+        } else {
+            None
+        };
         let filter = self.filter()?;
-        let returning = self.returning()?;
+        let returning = match output {
+            Some(output) => Some(output),
+            None => self.returning()?,
+        };
         Ok(Statement::Delete(Delete {
             table,
             filter,
@@ -2177,6 +2202,15 @@ impl<'t> Parser<'t> {
             return Ok(SelectItem::Wildcard {
                 qualifier: Some(qualifier),
                 position,
+            });
+        }
+        if self.sqlserver()
+            && let Some(alias) = self.sqlserver_assigned_alias()?
+        {
+            let expr = self.expression()?;
+            return Ok(SelectItem::Expr {
+                expr,
+                alias: Some(alias),
             });
         }
         let first_token = self.at;
@@ -2450,7 +2484,6 @@ impl<'t> Parser<'t> {
                 Ok(Self::binary(left, BinaryOperator::Concat, right))
             }
             Level::Additive => {
-                let operator_position = self.position();
                 let operator = if self.take_operator("+") {
                     BinaryOperator::Add
                 } else {
@@ -2458,13 +2491,6 @@ impl<'t> Parser<'t> {
                     BinaryOperator::Subtract
                 };
                 let right = self.expression_above(Level::Multiplicative)?;
-                if self.sqlserver()
-                    && operator == BinaryOperator::Add
-                    && (sqlserver::is_string_literal(&left) || sqlserver::is_string_literal(&right))
-                {
-                    return Err(sqlserver::not_supported("String concatenation with +")
-                        .at(operator_position));
-                }
                 Ok(Self::binary(left, operator, right))
             }
             Level::Multiplicative => {

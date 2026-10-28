@@ -16,6 +16,7 @@ pub(crate) enum TokenKind<'t> {
     QuotedIdentifier(String),
     Integer(&'t str),
     Decimal(&'t str),
+    Binary(&'t str),
     String(Cow<'t, str>),
     Parameter(&'t str),
     Placeholder,

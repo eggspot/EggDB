@@ -876,6 +876,10 @@ pub(crate) enum ExprKind {
         name: &'static str,
         arguments: Vec<Expr>,
     },
+    SqlServerFunction {
+        function: crate::sqlserver_functions::Function,
+        arguments: Vec<Expr>,
+    },
     Aggregate {
         function: AggregateFunction,
         argument: Option<Box<Expr>>,

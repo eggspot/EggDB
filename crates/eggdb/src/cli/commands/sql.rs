@@ -241,7 +241,12 @@ pub(crate) fn result_cells(result: &QueryResult, dialect: Dialect) -> Option<Res
         rows: result
             .rows
             .iter()
-            .map(|row| row.iter().map(|value| dialect.value_text(value)).collect())
+            .map(|row| {
+                row.iter()
+                    .zip(columns)
+                    .map(|(value, column)| dialect.value_text_typed(value, column.sql_type))
+                    .collect()
+            })
             .collect(),
     })
 }

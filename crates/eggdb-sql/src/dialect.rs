@@ -74,11 +74,37 @@ impl Dialect {
         NAMED.iter().map(|&(name, _)| name)
     }
 
+    /// `value`, of a column whose type is `sql_type`, as this dialect's clients print it: as
+    /// [`Dialect::value_text`], except that SQL Server's dates and times show the fractional
+    /// digits of their type's scale (`2020-01-01 10:00:00.000` for a `datetime`).
+    pub fn value_text_typed(
+        self,
+        value: &crate::Value,
+        sql_type: Option<crate::SqlType>,
+    ) -> Option<String> {
+        let scale = match sql_type {
+            Some(
+                crate::SqlType::Timestamp(scale)
+                | crate::SqlType::TimestampTz(scale)
+                | crate::SqlType::Time(scale),
+            ) => scale,
+            _ => None,
+        };
+        match (self, value) {
+            (
+                Self::SqlServer,
+                crate::Value::Timestamp(_) | crate::Value::TimestampTz(_) | crate::Value::Time(_),
+            ) if scale.is_some() => crate::sqlserver_conversion::display_text(value, scale),
+            _ => self.value_text(value),
+        }
+    }
+
     /// `value` as this dialect's clients print it in text form: PostgreSQL's `t` and `f` for
     /// booleans, MySQL's, SQLite's and SQL Server's `1` and `0`, SQLite's floating point with 15 significant
     /// digits and a decimal point (`2.0`), Oracle's `TRUE` and `FALSE` and its numbers without a
-    /// leading zero (`.5`), a `bytea` as MySQL's client shows it (`0x6162`), as Oracle's
-    /// (`6162`) or as SQLite's (its bytes as text), and `None` for NULL.
+    /// leading zero (`.5`), a `bytea` as MySQL's and SQL Server's clients show it (`0x6162`), as
+    /// Oracle's (`6162`) or as SQLite's (its bytes as text), SQL Server's `uniqueidentifier` in
+    /// upper case and its `datetimeoffset` with its offset, and `None` for NULL.
     pub fn value_text(self, value: &crate::Value) -> Option<String> {
         match (self, value) {
             (Self::MySql | Self::Sqlite | Self::SqlServer, crate::Value::Boolean(flag)) => {
@@ -104,6 +130,10 @@ impl Dialect {
                 Some(whole) => whole.to_string(),
                 None => crate::sqlite_functions::real_text(number.to_f64())?,
             }),
+            (
+                Self::SqlServer,
+                crate::Value::Bytea(_) | crate::Value::Uuid(_) | crate::Value::TimestampTz(_),
+            ) => crate::sqlserver_conversion::display_text(value, None),
             (Self::MySql, crate::Value::Bytea(bytes)) => Some(format!(
                 "0x{}",
                 crate::bytea::format_hex(bytes)[2..].to_ascii_uppercase()
@@ -114,13 +144,12 @@ impl Dialect {
             (Self::Sqlite, crate::Value::Bytea(bytes)) => {
                 Some(String::from_utf8_lossy(bytes).into_owned())
             }
-            (
-                Self::MySql | Self::Sqlite | Self::Oracle | Self::SqlServer,
-                crate::Value::TimestampTz(micros),
-            ) => Some(match crate::datetime::utc_to_local(*micros) {
-                Ok(local) => crate::datetime::format_timestamp(local),
-                Err(_) => crate::datetime::format_timestamp(*micros),
-            }),
+            (Self::MySql | Self::Sqlite | Self::Oracle, crate::Value::TimestampTz(micros)) => {
+                Some(match crate::datetime::utc_to_local(*micros) {
+                    Ok(local) => crate::datetime::format_timestamp(local),
+                    Err(_) => crate::datetime::format_timestamp(*micros),
+                })
+            }
             _ => value.to_text(),
         }
     }

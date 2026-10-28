@@ -25,6 +25,22 @@ pub struct BatchStep {
     pub no_count: bool,
 }
 
+fn rows_counted(result: &QueryResult) -> i64 {
+    let mut words = result.tag.split_whitespace();
+    let counted = match words.next() {
+        Some("INSERT" | "UPDATE" | "DELETE" | "MERGE") => true,
+        Some("SELECT") => return result.rows.len() as i64,
+        _ => false,
+    };
+    if !counted {
+        return 0;
+    }
+    words
+        .last()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
+
 fn no_transaction(code: u16, message: &str) -> SqlError {
     SqlError::new(SqlState::NO_ACTIVE_SQL_TRANSACTION, message).with_sqlserver_code(code)
 }
@@ -145,6 +161,24 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     }
                 }
             }
+        }
+    }
+
+    pub(super) fn enter_sqlserver_status(
+        &mut self,
+    ) -> Option<crate::sqlserver_functions::StatusGuard> {
+        if !self.sqlserver() {
+            return None;
+        }
+        let guard = crate::sqlserver_functions::enter_status(self.sqlserver_status);
+        self.sqlserver_status.row_count = 0;
+        Some(guard)
+    }
+
+    pub(super) fn sqlserver_after_statement(&mut self, result: &QueryResult) {
+        self.sqlserver_status.row_count = rows_counted(result);
+        if let Some(identity) = result.last_identity_value {
+            self.sqlserver_status.identity = Some(identity);
         }
     }
 

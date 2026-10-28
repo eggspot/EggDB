@@ -244,6 +244,16 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
         }
         ExprKind::Function { name, arguments } => function_type(name, arguments, scope),
         ExprKind::SqliteFunction { .. } | ExprKind::OracleFunction { .. } => None,
+        ExprKind::SqlServerFunction {
+            function,
+            arguments,
+        } => {
+            let first = match function {
+                crate::sqlserver_functions::Function::DateAdd(_) => arguments.get(1),
+                _ => arguments.first(),
+            };
+            function.result_type(first.and_then(|first| static_type(first, scope)))
+        }
         ExprKind::Aggregate { .. } => None,
     }
 }

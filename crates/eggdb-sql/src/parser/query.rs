@@ -109,6 +109,14 @@ impl Parser<'_> {
                         .at(top.position),
                 );
             }
+            if tail.offset.is_some() || tail.limit.is_some() {
+                return Err(SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    "A TOP can not be used in the same query or sub-query as a OFFSET.",
+                )
+                .with_sqlserver_code(10741)
+                .at(top.position));
+            }
             tail.limit = Some(top);
         }
         let (body, tail) = match body {
@@ -349,6 +357,9 @@ impl Parser<'_> {
         }
         let mut limit = None;
         let mut offset = None;
+        if self.sqlserver() {
+            (offset, limit) = self.sqlserver_offset_fetch(!order_by.is_empty())?;
+        }
         loop {
             if self.sqlserver()
                 && ["limit", "offset", "fetch", "for"]

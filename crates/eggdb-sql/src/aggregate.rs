@@ -166,6 +166,16 @@ pub(crate) fn rebuild(
                 .map(&mut *child)
                 .collect::<SqlResult<_>>()?,
         },
+        ExprKind::SqlServerFunction {
+            function,
+            arguments,
+        } => ExprKind::SqlServerFunction {
+            function: *function,
+            arguments: arguments
+                .iter()
+                .map(&mut *child)
+                .collect::<SqlResult<_>>()?,
+        },
         ExprKind::Aggregate {
             function,
             argument,
@@ -218,6 +228,10 @@ fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             .ok()
             .and_then(|offset| scope.column_type(offset)),
         ExprKind::Cast { sql_type, .. } => Some(*sql_type),
+        ExprKind::SqlServerFunction {
+            function: crate::sqlserver_functions::Function::Convert { target, .. },
+            ..
+        } => Some(target.engine_type()),
         _ => None,
     }
 }

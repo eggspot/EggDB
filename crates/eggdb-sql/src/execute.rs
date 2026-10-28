@@ -676,16 +676,27 @@ fn assign(value: Value, column: &Column) -> SqlResult<Value> {
     })
 }
 
+type Assignment = fn(Value, &Column) -> SqlResult<Value>;
+
+fn assignment_rule(sqlserver: bool) -> Assignment {
+    if sqlserver {
+        crate::sqlserver_conversion::assign
+    } else {
+        assign
+    }
+}
+
 fn assigned_value(
     evaluator: &Evaluator<'_>,
     value: &InsertValue,
     column: &Column,
+    rule: Assignment,
 ) -> SqlResult<Value> {
     match value {
         InsertValue::Default => default_value(column),
         InsertValue::Expr(expr) => {
             let evaluated = evaluator.eval(expr, Some(column.sql_type))?;
-            assign(evaluated, column).map_err(|error| error.at_if_unplaced(expr.position))
+            rule(evaluated, column).map_err(|error| error.at_if_unplaced(expr.position))
         }
     }
 }
@@ -866,6 +877,7 @@ pub(crate) fn insert(
     let scope = scope_of(&table, &insert.table);
     let sqlserver = crate::constraints::current_dialect() == crate::dialect::Dialect::SqlServer;
     let identity = sqlserver.then(|| table.auto_increment_column()).flatten();
+    let rule = assignment_rule(sqlserver);
     let targets = match &insert.columns {
         Some(names) => {
             let targets = target_columns(&table, names)?;
@@ -947,7 +959,7 @@ pub(crate) fn insert(
                 .position(|&target| target == index)
                 .and_then(|slot| values.get(slot));
             row.push(match given {
-                Some(value) => assigned_value(&constants, value, column)?,
+                Some(value) => assigned_value(&constants, value, column, rule)?,
                 None => default_value(column)?,
             });
         }
@@ -995,6 +1007,7 @@ pub(crate) fn insert(
     let changes = std::mem::take(&mut stored.changes);
     let first_generated = stored.first_generated;
     let last_rowid = stored.last_rowid;
+    let last_identity = table.auto_increment_column().and(last_rowid);
     drop(stored);
     for change in &changes {
         if let Some(new) = &change.new {
@@ -1011,6 +1024,7 @@ pub(crate) fn insert(
     result.warnings = warnings;
     result.last_insert_id = first_generated;
     result.last_insert_rowid = last_rowid;
+    result.last_identity_value = last_identity;
     Ok(result)
 }
 
@@ -2790,6 +2804,7 @@ pub(crate) fn update(
         crate::sequences::load_all(writer)?;
     }
     let checks = PreparedChecks::of(&table)?;
+    let rule = assignment_rule(constraints::current_dialect() == Dialect::SqlServer);
     let referenced = constraints::is_referenced(&table);
     let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
     let scope = scope_of(&table, &update.table);
@@ -2838,7 +2853,7 @@ pub(crate) fn update(
         };
         let mut new_row = old_row.clone();
         for ((_, value), &index) in update.assignments.iter().zip(&targets) {
-            new_row[index] = assigned_value(&evaluator, value, &table.columns[index])?;
+            new_row[index] = assigned_value(&evaluator, value, &table.columns[index], rule)?;
         }
         check_not_null(&table, &new_row)?;
         if !checks.is_empty() {

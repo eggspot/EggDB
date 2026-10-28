@@ -726,7 +726,8 @@ pub(crate) fn mentions_subquery(expr: &Expr) -> bool {
         }
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
-        | ExprKind::OracleFunction { arguments, .. } => any(arguments),
+        | ExprKind::OracleFunction { arguments, .. }
+        | ExprKind::SqlServerFunction { arguments, .. } => any(arguments),
         ExprKind::Aggregate { argument, .. } => argument.as_deref().is_some_and(mentions_subquery),
     }
 }

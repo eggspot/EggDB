@@ -3,9 +3,15 @@ use crate::ast::{
     ColumnDefinition, Expr, ExprKind, Literal, Name, SqlServerStatement, Statement, TableReference,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::eval::{Evaluator, Scope};
 use crate::lexer::TokenKind;
 use crate::settings::Settings;
-use crate::types::{NumericModifier, SqlType};
+use crate::sqlserver_functions::Function;
+use crate::sqlserver_types::{
+    Length, MAX_DECIMAL_PRECISION, MAX_TIME_SCALE, SqlServerType, UNSPECIFIED_CAST_LENGTH,
+};
+use crate::types::SqlType;
+use crate::types::Value;
 
 /// The SQL Server version EggDB's Transact-SQL dialect and TDS server present themselves as
 /// compatible with: SQL Server 2022's major and minor version and a build number, as clients
@@ -388,21 +394,69 @@ fn integer(value: i64, position: usize) -> Expr {
     }
 }
 
-pub(super) fn is_string_literal(expr: &Expr) -> bool {
-    matches!(&expr.kind, ExprKind::Literal(Literal::String(_)))
+fn calls(expr: &Expr, function: &str) -> bool {
+    matches!(&expr.kind, ExprKind::Function { name, arguments }
+        if name == function && arguments.is_empty())
 }
 
-pub(super) fn default_source(expr: &Expr) -> Option<String> {
+fn is_constant(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Literal(_) | ExprKind::Constant { .. } => true,
+        ExprKind::Unary(_, operand) => is_constant(operand),
+        ExprKind::SqlServerFunction {
+            function: Function::Convert { .. },
+            arguments,
+        } => arguments.iter().all(is_constant),
+        _ => false,
+    }
+}
+
+fn postgresql_literal(value: &Value) -> Option<String> {
+    Some(match value {
+        Value::Null => "NULL".to_owned(),
+        Value::Boolean(flag) => flag.to_string(),
+        Value::SmallInt(_)
+        | Value::Integer(_)
+        | Value::BigInt(_)
+        | Value::Real(_)
+        | Value::Double(_)
+        | Value::Numeric(_) => value.to_text()?,
+        Value::Bytea(bytes) => format!("'{}'", crate::bytea::format_hex(bytes)),
+        other => format!("'{}'", other.to_text()?.replace('\'', "''")),
+    })
+}
+
+fn folded_default(expr: &Expr, column_type: SqlType) -> Option<String> {
+    let evaluator = Evaluator {
+        scope: Scope::empty(),
+        row: &[],
+        correlation: None,
+    };
+    let value = evaluator.eval(expr, Some(column_type)).ok()?;
+    let value = crate::sqlserver_conversion::implicit(value, column_type).ok()?;
+    postgresql_literal(&value)
+}
+
+pub(super) fn default_source(expr: &Expr, column_type: SqlType) -> Option<String> {
     match &expr.kind {
         ExprKind::Cast {
             expr: clock,
             sql_type: SqlType::Timestamp(Some(precision)),
-        } if matches!(&clock.kind, ExprKind::Function { name, arguments }
-                if name == "localtimestamp" && arguments.is_empty()) =>
-        {
+        } if calls(clock, "localtimestamp") => {
             Some(format!("CAST(localtimestamp AS timestamp({precision}))"))
         }
-        _ => super::mysql::postgresql_source(expr),
+        ExprKind::Cast {
+            expr: clock,
+            sql_type: SqlType::TimestampTz(Some(precision)),
+        } if calls(clock, "now") => Some(format!(
+            "CAST(now() AS timestamp({precision}) with time zone)"
+        )),
+        ExprKind::SqlServerFunction {
+            function: Function::NewId,
+            ..
+        } => Some("gen_random_uuid()".to_owned()),
+        _ if is_constant(expr) => folded_default(expr, column_type),
+        _ => None,
     }
 }
 
@@ -618,23 +672,29 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn sqlserver_type(&mut self) -> SqlResult<SqlType> {
+        Ok(self.sqlserver_declared_type(false)?.engine_type())
+    }
+
+    pub(super) fn sqlserver_declared_type(&mut self, in_cast: bool) -> SqlResult<SqlServerType> {
         let token = self.peek();
         let word = match &token.kind {
             TokenKind::Word(word) => word.as_ref().to_owned(),
-            TokenKind::QuotedIdentifier(name) => name.clone(),
+            TokenKind::QuotedIdentifier(name) => name.to_ascii_lowercase(),
             _ => return Err(self.unexpected()),
         };
         self.at += 1;
         let position = token.start;
+        let unspecified = if in_cast { UNSPECIFIED_CAST_LENGTH } else { 1 };
         Ok(match word.as_str() {
-            "int" | "integer" => SqlType::Integer,
-            "bigint" => SqlType::BigInt,
-            "smallint" => SqlType::SmallInt,
-            "real" => SqlType::Real,
+            "int" | "integer" => SqlServerType::Int,
+            "bigint" => SqlServerType::BigInt,
+            "smallint" => SqlServerType::SmallInt,
+            "tinyint" => SqlServerType::TinyInt,
+            "bit" => SqlServerType::Bit,
+            "real" => SqlServerType::Real,
             "float" => match self.sqlserver_type_argument(position)? {
-                None => SqlType::Double,
-                Some(1..=24) => SqlType::Real,
-                Some(25..=53) => SqlType::Double,
+                None | Some(25..=53) => SqlServerType::Float,
+                Some(1..=24) => SqlServerType::Real,
                 Some(bits) => {
                     return Err(SqlError::new(
                         SqlState::INVALID_PARAMETER_VALUE,
@@ -647,40 +707,72 @@ impl<'t> Parser<'t> {
                 }
             },
             "decimal" | "numeric" | "dec" => self.sqlserver_decimal(position)?,
-            "char" | "nchar" | "character" => {
-                let length = self.sqlserver_length(&word, position)?;
-                SqlType::Bpchar(Some(length.unwrap_or(1)))
+            "money" => SqlServerType::Money,
+            "smallmoney" => SqlServerType::SmallMoney,
+            "char" | "character" => {
+                SqlServerType::Char(self.sqlserver_length(&word, position, unspecified, false)?)
             }
-            "varchar" | "nvarchar" => {
-                if self.is_word_at(1, "max")
-                    && self.peek_kind() == &TokenKind::LeftParen
-                    && self.peek_kind_at(2) == &TokenKind::RightParen
-                {
-                    self.at += 3;
-                    SqlType::Text
-                } else {
-                    let length = self.sqlserver_length(&word, position)?;
-                    SqlType::Varchar(Some(length.unwrap_or(1)))
-                }
+            "nchar" => {
+                SqlServerType::NChar(self.sqlserver_length(&word, position, unspecified, false)?)
             }
-            "text" | "ntext" => SqlType::Text,
-            "date" => SqlType::Date,
-            "datetime2" => {
-                let digits = self.sqlserver_type_argument(position)?.unwrap_or(7);
-                if !(0..=7).contains(&digits) {
-                    return Err(SqlError::new(
-                        SqlState::INVALID_PARAMETER_VALUE,
-                        format!(
-                            "Specified scale {digits} is invalid. 'datetime2' datatype must have scale between 0 and 7."
-                        ),
-                    )
-                    .with_sqlserver_code(1002)
-                    .at(position));
-                }
-                SqlType::Timestamp(Some(digits.min(6) as u8))
+            "varchar" => {
+                SqlServerType::VarChar(self.sqlserver_length(&word, position, unspecified, true)?)
+            }
+            "nvarchar" => SqlServerType::NVarChar(self.sqlserver_length(
+                &word,
+                position,
+                unspecified,
+                true,
+            )?),
+            "sysname" => SqlServerType::NVarChar(Length::Given(128)),
+            "text" => SqlServerType::Text,
+            "ntext" => SqlServerType::NText,
+            "binary" => {
+                SqlServerType::Binary(self.sqlserver_length(&word, position, unspecified, false)?)
+            }
+            "varbinary" => SqlServerType::VarBinary(self.sqlserver_length(
+                &word,
+                position,
+                unspecified,
+                true,
+            )?),
+            "image" => SqlServerType::Image,
+            "uniqueidentifier" => SqlServerType::UniqueIdentifier,
+            "date" => SqlServerType::Date,
+            "datetime" => SqlServerType::DateTime,
+            "smalldatetime" => SqlServerType::SmallDateTime,
+            "time" => SqlServerType::Time {
+                scale: self.sqlserver_time_scale(&word, position)?,
+            },
+            "datetime2" => SqlServerType::DateTime2 {
+                scale: self.sqlserver_time_scale(&word, position)?,
+            },
+            "datetimeoffset" => SqlServerType::DateTimeOffset {
+                scale: self.sqlserver_time_scale(&word, position)?,
+            },
+            "rowversion" | "timestamp" | "sql_variant" | "xml" | "hierarchyid" | "geography"
+            | "geometry" => {
+                return Err(not_supported(&format!("The data type {word}")).at(position));
             }
             _ => return Err(unknown_type(&word, position)),
         })
+    }
+
+    fn sqlserver_time_scale(&mut self, word: &str, position: usize) -> SqlResult<u8> {
+        let digits = self
+            .sqlserver_type_argument(position)?
+            .unwrap_or(i64::from(MAX_TIME_SCALE));
+        if !(0..=i64::from(MAX_TIME_SCALE)).contains(&digits) {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!(
+                    "Specified scale {digits} is invalid. '{word}' datatype must have scale between 0 and 7."
+                ),
+            )
+            .with_sqlserver_code(1002)
+            .at(position));
+        }
+        Ok(digits as u8)
     }
 
     fn sqlserver_type_argument(&mut self, position: usize) -> SqlResult<Option<i64>> {
@@ -702,9 +794,23 @@ impl<'t> Parser<'t> {
         Ok(Some(value))
     }
 
-    fn sqlserver_length(&mut self, word: &str, position: usize) -> SqlResult<Option<u32>> {
+    fn sqlserver_length(
+        &mut self,
+        word: &str,
+        position: usize,
+        unspecified: u32,
+        max_allowed: bool,
+    ) -> SqlResult<Length> {
+        if max_allowed
+            && self.peek_kind() == &TokenKind::LeftParen
+            && self.is_word_at(1, "max")
+            && self.peek_kind_at(2) == &TokenKind::RightParen
+        {
+            self.at += 3;
+            return Ok(Length::Max);
+        }
         let Some(length) = self.sqlserver_type_argument(position)? else {
-            return Ok(None);
+            return Ok(Length::Given(unspecified));
         };
         let maximum = if word.starts_with('n') { 4000 } else { 8000 };
         if !(1..=maximum).contains(&length) {
@@ -717,10 +823,10 @@ impl<'t> Parser<'t> {
             .with_sqlserver_code(131)
             .at(position));
         }
-        Ok(Some(length as u32))
+        Ok(Length::Given(length as u32))
     }
 
-    fn sqlserver_decimal(&mut self, position: usize) -> SqlResult<SqlType> {
+    fn sqlserver_decimal(&mut self, position: usize) -> SqlResult<SqlServerType> {
         let (precision, scale) = if self.take(&TokenKind::LeftParen) {
             let TokenKind::Integer(digits) = self.peek_kind() else {
                 return Err(self.unexpected());
@@ -742,7 +848,7 @@ impl<'t> Parser<'t> {
         } else {
             (18, 0)
         };
-        if !(1..=38).contains(&precision) {
+        if !(1..=i64::from(MAX_DECIMAL_PRECISION)).contains(&precision) {
             return Err(SqlError::new(
                 SqlState::INVALID_PARAMETER_VALUE,
                 format!(
@@ -762,10 +868,10 @@ impl<'t> Parser<'t> {
             .with_sqlserver_code(192)
             .at(position));
         }
-        Ok(SqlType::Numeric(Some(NumericModifier {
-            precision: precision as u16,
-            scale: scale as i16,
-        })))
+        Ok(SqlServerType::Decimal {
+            precision: precision as u8,
+            scale: scale as u8,
+        })
     }
 
     pub(super) fn sqlserver_identity(&mut self, column: &mut ColumnDefinition) -> SqlResult<()> {
@@ -838,7 +944,17 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.system_variable(name, position)?
             }
+            TokenKind::Binary(digits) => {
+                self.at += 1;
+                super::sqlserver_functions::binary_literal(digits, position)?
+            }
             TokenKind::Word(word) => match word.as_ref() {
+                "cast" if self.peek_kind_at(1) == &TokenKind::LeftParen => {
+                    self.sqlserver_cast(position)?
+                }
+                "convert" if self.peek_kind_at(1) == &TokenKind::LeftParen => {
+                    self.sqlserver_convert(position)?
+                }
                 "current_timestamp" => {
                     self.at += 1;
                     clock(3, position)
@@ -884,6 +1000,13 @@ impl<'t> Parser<'t> {
             "@@servername" => session_text("EggDB".to_owned(), position),
             "@@trancount" => integer(i64::from(state.transaction_count), position),
             "@@language" => session_text("us_english".to_owned(), position),
+            "@@rowcount" => Expr {
+                kind: ExprKind::SqlServerFunction {
+                    function: crate::sqlserver_functions::Function::RowCount,
+                    arguments: Vec::new(),
+                },
+                position,
+            },
             _ => return Err(undeclared_variable(name, position)),
         })
     }
@@ -898,6 +1021,9 @@ impl<'t> Parser<'t> {
             self.expect(&TokenKind::LeftParen)?;
             self.expect(&TokenKind::RightParen)?;
             return Ok(Some(clock(precision, name.position)));
+        }
+        if let Some(expr) = self.sqlserver_call(name)? {
+            return Ok(Some(expr));
         }
         if ENGINE_FUNCTIONS.contains(&name.text.as_str()) {
             return Ok(None);

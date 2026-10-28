@@ -112,7 +112,12 @@ fn rendered(result: &QueryResult, dialect: Dialect) -> String {
         for row in &result.rows {
             let cells: Vec<String> = row
                 .iter()
-                .map(|value| dialect.value_text(value).unwrap_or_else(|| "NULL".into()))
+                .zip(columns)
+                .map(|(value, column)| {
+                    dialect
+                        .value_text_typed(value, column.sql_type)
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect();
             out.push_str(&cells.join("|"));
             out.push('\n');

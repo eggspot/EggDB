@@ -2,7 +2,7 @@ use crate::error::SqlError;
 
 const GENERIC_ERROR: u16 = 50000;
 
-const SEVERITIES: [(u16, u8); 46] = [
+const SEVERITIES: [(u16, u8); 62] = [
     (102, 15),
     (103, 15),
     (105, 15),
@@ -48,6 +48,22 @@ const SEVERITIES: [(u16, u8); 46] = [
     (17809, 20),
     (18456, 14),
     (40517, 16),
+    (155, 15),
+    (174, 15),
+    (206, 16),
+    (220, 16),
+    (242, 16),
+    (281, 16),
+    (517, 16),
+    (529, 16),
+    (535, 16),
+    (7119, 16),
+    (8114, 16),
+    (8116, 16),
+    (8169, 16),
+    (9809, 16),
+    (9810, 16),
+    (10741, 15),
     (GENERIC_ERROR, 16),
 ];
 
@@ -129,23 +145,6 @@ fn operator_name(symbol: &str) -> Option<&'static str> {
         ">=" => "greater than or equal to",
         _ => return None,
     })
-}
-
-fn is_text_type(name: &str) -> bool {
-    matches!(
-        name,
-        "text" | "character varying" | "character" | "bpchar" | "unknown" | "varchar"
-    )
-}
-
-fn concatenates_text(message: &str) -> bool {
-    let Some(rest) = message.strip_prefix("operator does not exist: ") else {
-        return false;
-    };
-    match rest.split_once(" + ") {
-        Some((left, right)) => is_text_type(left) || is_text_type(right),
-        None => rest.strip_prefix("+ ").is_some_and(is_text_type),
-    }
 }
 
 fn incompatible_operands(message: &str) -> Option<String> {
@@ -404,10 +403,6 @@ pub(crate) fn translate(error: SqlError, text: &str, statement: &str, database: 
                 )
             }
         }
-        "42883" if concatenates_text(&message) => (
-            40517,
-            "String concatenation with + is not supported in this version of EggDB.".to_owned(),
-        ),
         "42883" => match incompatible_operands(&message) {
             Some(wording) => (402, wording),
             None => (402, "The data types are incompatible in this operator.".to_owned()),
@@ -459,6 +454,10 @@ pub(crate) fn translate(error: SqlError, text: &str, statement: &str, database: 
         ),
         "0A000" => (40517, not_supported(&message)),
         "55P03" => (1222, "Lock request time out period exceeded.".to_owned()),
+        "54000" => (
+            7119,
+            format!("Attempting to grow LOB beyond maximum allowed size: {message}"),
+        ),
         "25006" => (
             3906,
             format!("Failed to update database \"{database}\" because the database is read-only."),
