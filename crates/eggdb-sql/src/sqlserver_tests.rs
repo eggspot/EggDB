@@ -678,6 +678,7 @@ fn view_options_and_replacement_follow_sql_servers_rules() {
         ("CREATE VIEW v AS SELECT id FROM t", 2714),
         ("ALTER VIEW t AS SELECT id FROM t", 50000),
         ("CREATE VIEW w AS SELECT id, n + 1 FROM t", 4511),
+        ("CREATE VIEW w (a, b, c) AS SELECT *, n + 1 FROM t", 4511),
     ] {
         assert_eq!(
             error_of(&mut session, text).vendor_code(),
@@ -685,6 +686,14 @@ fn view_options_and_replacement_follow_sql_servers_rules() {
             "{text}"
         );
     }
+    values(
+        &mut session,
+        "CREATE VIEW named (a, b) AS SELECT id, n + 1 FROM t WHERE id = 1",
+    );
+    assert_eq!(
+        values(&mut session, "SELECT b FROM named"),
+        vec![vec![Value::Integer(11)]]
+    );
     values(&mut session, "ALTER VIEW v AS SELECT n FROM t WHERE id = 2");
     assert_eq!(
         values(&mut session, "SELECT n FROM v"),

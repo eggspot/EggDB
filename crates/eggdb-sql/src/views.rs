@@ -218,7 +218,12 @@ pub(crate) fn create_view(
         )
         .at(create.name.position));
     }
-    let columns = view_columns(&create.columns, &output, dialect)?;
+    let columns = view_columns(
+        &create.columns,
+        &output,
+        selects_wildcard(&create.query),
+        dialect,
+    )?;
     if let Some(existing) = &existing {
         if dialect != Dialect::SqlServer {
             check_replacement(existing, &columns)?;
@@ -253,20 +258,25 @@ pub(crate) fn create_view(
 
 #[cold]
 #[inline(never)]
-fn unnamed_view_column(index: usize) -> SqlError {
-    SqlError::new(
+fn unnamed_view_column(index: usize, dialect: Dialect) -> SqlError {
+    let error = SqlError::new(
         SqlState::INVALID_OBJECT_DEFINITION,
         format!(
             "Create View or Function failed because no column name was specified for column {}.",
             index + 1
         ),
-    )
-    .with_sqlserver_code(4511)
+    );
+    if dialect == Dialect::SqlServer {
+        error.with_sqlserver_code(4511)
+    } else {
+        error
+    }
 }
 
 fn view_columns(
     names: &[Name],
     output: &[OutputColumn],
+    expands_wildcard: bool,
     dialect: Dialect,
 ) -> SqlResult<Vec<ViewColumn>> {
     if names.len() > output.len() {
@@ -283,11 +293,11 @@ fn view_columns(
                 crate::constraints::check_identifier(name)?;
                 name.text.clone()
             }
-            None if column.name.is_empty() && dialect == Dialect::SqlServer => {
-                return Err(unnamed_view_column(index));
-            }
             None => column.name.clone(),
         };
+        if column.name.is_empty() && (names.get(index).is_none() || expands_wildcard) {
+            return Err(unnamed_view_column(index, dialect));
+        }
         if columns.iter().any(|known| known.name == name) {
             return Err(match dialect {
                 Dialect::MySql => SqlError::new(
