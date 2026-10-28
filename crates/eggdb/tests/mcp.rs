@@ -160,7 +160,7 @@ impl Mcp {
     }
 
     fn finish(mut self) -> (ExitStatus, String) {
-        drop(self.stdin.take());
+        self.stdin = None;
         let status = self.child.wait().unwrap();
         while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(5)) {
             let node = parse_document(&line).unwrap_or_else(|error| panic!("{line}: {error:?}"));
