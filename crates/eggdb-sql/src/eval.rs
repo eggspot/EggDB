@@ -725,8 +725,12 @@ impl Evaluator<'_> {
                 if !either_text && !either_null {
                     return Err(no_operator("||", &left, &right));
                 }
+                if let (Value::Text(left), Value::Text(right)) = (&left, &right) {
+                    crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
+                }
                 match (left.to_text(), right.to_text()) {
                     (Some(mut left), Some(right)) => {
+                        crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
                         left.push_str(&right);
                         Ok(Value::Text(left))
                     }
@@ -1032,7 +1036,12 @@ impl Evaluator<'_> {
                 let mut joined = String::new();
                 for value in &values {
                     match crate::dialect::Dialect::MySql.value_text(value) {
-                        Some(text) => joined.push_str(&text),
+                        Some(text) => {
+                            crate::memory::check_value_bytes(
+                                joined.len().saturating_add(text.len()),
+                            )?;
+                            joined.push_str(&text);
+                        }
                         None => return Ok(Value::Null),
                     }
                 }

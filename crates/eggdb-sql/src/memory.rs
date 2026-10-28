@@ -15,6 +15,37 @@ struct Shared {
 thread_local! {
     static SHARED: std::cell::Cell<Option<Shared>> = const { std::cell::Cell::new(None) };
     static STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static VALUE_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+pub(crate) struct EnteredValueLimit {
+    previous: usize,
+}
+
+impl Drop for EnteredValueLimit {
+    fn drop(&mut self) {
+        VALUE_LIMIT.with(|limit| limit.set(self.previous));
+    }
+}
+
+pub(crate) fn enter_value_limit(bytes: usize) -> EnteredValueLimit {
+    EnteredValueLimit {
+        previous: VALUE_LIMIT.with(|limit| limit.replace(bytes)),
+    }
+}
+
+pub(crate) fn check_value_bytes(bytes: usize) -> SqlResult<()> {
+    let limit = VALUE_LIMIT.with(std::cell::Cell::get);
+    if bytes <= limit {
+        return Ok(());
+    }
+    Err(SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        format!("a value of {bytes} bytes is larger than this session's limit of {limit} bytes"),
+    )
+    .with_hint(
+        "Build smaller values: the session that runs this statement limits the size of one value.",
+    ))
 }
 
 pub(crate) struct SharedStatementMemory {
@@ -202,5 +233,22 @@ mod tests {
         assert_eq!(error.state().code(), "53200");
         assert!(error.hint().is_some());
         assert!(memory.charge(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn the_value_limit_holds_while_entered_and_is_restored_after() {
+        use super::{check_value_bytes, enter_value_limit};
+        assert!(check_value_bytes(1 << 40).is_ok());
+        {
+            let _outer = enter_value_limit(100);
+            assert!(check_value_bytes(100).is_ok());
+            assert_eq!(check_value_bytes(101).unwrap_err().state().code(), "54000");
+            {
+                let _inner = enter_value_limit(10);
+                assert!(check_value_bytes(11).is_err());
+            }
+            assert!(check_value_bytes(100).is_ok());
+        }
+        assert!(check_value_bytes(1 << 40).is_ok());
     }
 }

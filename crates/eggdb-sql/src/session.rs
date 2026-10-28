@@ -275,6 +275,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     statement_walks_expressions: bool,
     search_path_cache: crate::schemas::PathCache,
     search_path_at_begin: Option<String>,
+    max_value_bytes: usize,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -306,7 +307,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             statement_walks_expressions: true,
             search_path_cache: crate::schemas::PathCache::default(),
             search_path_at_begin: None,
+            max_value_bytes: usize::MAX,
         }
+    }
+
+    /// Sets the largest text or binary value a statement of this session may build, such as
+    /// the result of `||`, `CONCAT`, `LPAD` or `REPLACE`, checked before the value is built;
+    /// a larger one fails with SQLSTATE `54000`. Unlimited by default, so only the engine's own
+    /// limits apply; a server that runs untrusted statements sets it low.
+    pub fn set_max_value_bytes(&mut self, bytes: usize) {
+        self.max_value_bytes = bytes;
     }
 
     /// The dialect this session reads.
@@ -876,6 +886,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let settings = Arc::clone(&self.settings);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _bytes = crate::bytea::enter_dialect(self.dialect);
+            let _values = crate::memory::enter_value_limit(self.max_value_bytes);
             let _path = self.enter_search_path(&settings);
             let mut parser = Parser::new(text, tokens)
                 .with_context(parameters, &settings)

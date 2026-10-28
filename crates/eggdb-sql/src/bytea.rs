@@ -101,7 +101,7 @@ pub(crate) fn check_size(length: usize) -> SqlResult<()> {
     if length > MAX_BYTES {
         Err(too_large())
     } else {
-        Ok(())
+        crate::memory::check_value_bytes(length)
     }
 }
 
