@@ -361,7 +361,7 @@ fn date_add(part: DatePart, number: &Value, date: &Value) -> SqlResult<Value> {
         DatePart::Year => add_months(start, count.checked_mul(12).ok_or_else(overflow)?),
         DatePart::Quarter => add_months(start, count.checked_mul(3).ok_or_else(overflow)?),
         DatePart::Month => add_months(start, count),
-        DatePart::Nanosecond => Some(start + (i128::from(count) / NANOS_PER_MICRO) as i64),
+        DatePart::Nanosecond => start.checked_add((i128::from(count) / NANOS_PER_MICRO) as i64),
         part => {
             let units = units_of(part).unwrap_or(1);
             let moved = i128::from(start) + i128::from(count) * units;

@@ -606,7 +606,22 @@ mod tests {
             Some(SqlType::Numeric(None)),
             Value::Numeric(eggdb_sql::Numeric::parse("1.5").unwrap()),
         );
-        assert!(unconstrained.1);
+        assert_eq!(
+            unconstrained,
+            (
+                WireType::Decimal {
+                    precision: 2,
+                    scale: 1
+                },
+                false,
+                vec![5, 1, 15, 0, 0, 0]
+            )
+        );
+        let not_a_number = encoded(
+            Some(SqlType::Numeric(None)),
+            Value::Numeric(eggdb_sql::Numeric::parse("NaN").unwrap()),
+        );
+        assert!(not_a_number.1);
         let early = encoded(
             Some(SqlType::Timestamp(Some(3))),
             Value::Timestamp(i64::MIN / 2),
@@ -615,6 +630,42 @@ mod tests {
         let rows = vec![vec![Value::Integer(1)], vec![Value::Text("x".into())]];
         let mixed = wire_columns(&column(None), &rows);
         assert!(mixed[0].as_text);
+    }
+
+    #[test]
+    fn dates_times_offsets_and_guids_take_their_tds_layouts() {
+        let (kind, _, bytes) = encoded(Some(SqlType::Date), Value::Date(0));
+        assert_eq!(kind, WireType::Date);
+        assert_eq!(bytes, [3, 0x07, 0x24, 0x0B]);
+        for (scale, length) in [(0, 3), (2, 3), (3, 4), (4, 4), (5, 5), (6, 5)] {
+            let (kind, _, bytes) =
+                encoded(Some(SqlType::Time(Some(scale))), Value::Time(1_000_000));
+            assert_eq!(kind, WireType::Time { scale });
+            assert_eq!(bytes[0], length, "time({scale})");
+            let (kind, _, bytes) = encoded(
+                Some(SqlType::TimestampTz(Some(scale))),
+                Value::TimestampTz(0),
+            );
+            assert_eq!(kind, WireType::DateTimeOffset { scale });
+            assert_eq!(bytes[0], length + 5, "datetimeoffset({scale})");
+        }
+        let (kind, _, bytes) = encoded(
+            Some(SqlType::Uuid),
+            Value::Uuid([
+                0x6F, 0x96, 0x19, 0xFF, 0x8B, 0x86, 0xD0, 0x11, 0xB4, 0x2D, 0x00, 0xC0, 0x4F, 0xC9,
+                0x64, 0xFF,
+            ]),
+        );
+        assert_eq!(kind, WireType::Guid);
+        assert_eq!(
+            bytes,
+            [
+                16, 0xFF, 0x19, 0x96, 0x6F, 0x86, 0x8B, 0x11, 0xD0, 0xB4, 0x2D, 0x00, 0xC0, 0x4F,
+                0xC9, 0x64, 0xFF
+            ]
+        );
+        let midnight = encoded(Some(SqlType::Time(Some(6))), Value::Time(86_400_000_000));
+        assert!(midnight.1);
     }
 
     #[test]

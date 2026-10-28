@@ -323,7 +323,10 @@ fn use_set_nocount_and_unsupported_requests_answer_as_sql_server_does() {
     );
     assert_eq!(errors(&client.batch("SET XACT_ABORT ON"))[0].0, 40517);
     assert_eq!(errors(&client.batch("SET FOO ON"))[0].0, 195);
-    assert_eq!(errors(&client.batch("SELECT 'a' + 'b'"))[0].0, 40517);
+    assert_eq!(
+        rows(&client.batch("SELECT 'a' + 'b'")),
+        vec![vec![Some("ab".to_owned())]]
+    );
     assert_eq!(errors(&client.batch("SELECT version()"))[0].0, 195);
     assert_eq!(errors(&client.batch("SELECT @x"))[0].0, 137);
     client.send(0x03, &[1, 2, 3]);

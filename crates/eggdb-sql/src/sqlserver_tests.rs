@@ -51,7 +51,7 @@ fn constraint_violations_end_their_statement_and_other_errors_end_the_batch() {
     assert_eq!(codes(&steps), vec![None, None, Some(2627), None, Some(208)]);
     assert_eq!(
         values(&mut session, "SELECT count(*) AS n FROM t"),
-        vec![vec![Value::BigInt(2)]]
+        vec![vec![Value::Integer(2)]]
     );
     assert!(steps.iter().all(|step| !step.in_transaction));
     assert!(steps[1].statement_start > steps[0].statement_start);
@@ -76,7 +76,7 @@ fn an_error_that_rolls_back_the_transaction_ends_the_batch_without_committing_la
     assert!(!steps[2].in_transaction);
     assert_eq!(
         values(&mut session, "SELECT count(*) AS n FROM t"),
-        vec![vec![Value::BigInt(1)]]
+        vec![vec![Value::Integer(1)]]
     );
 }
 

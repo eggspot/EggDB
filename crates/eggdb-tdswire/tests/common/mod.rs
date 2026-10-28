@@ -381,7 +381,7 @@ fn read_type(body: &[u8], at: &mut usize) -> ColumnType {
                 scale,
             }
         }
-        0x2A | 0x29 | 0x2B => {
+        0x29..=0x2B => {
             let scale = body[*at];
             *at += 1;
             ColumnType {

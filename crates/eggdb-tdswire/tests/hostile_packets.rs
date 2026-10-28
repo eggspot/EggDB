@@ -136,3 +136,34 @@ fn mutated_messages_over_sockets_leave_the_server_serving() {
     );
     assert!(errors(&client.batch("SELECT 2")).is_empty());
 }
+
+#[test]
+fn hostile_arguments_to_sql_servers_functions_get_errors_and_the_server_keeps_serving() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    let long_date = format!("SELECT CAST('{}' AS datetime2) AS d", "2".repeat(10_000));
+    let wide_binary = format!("SELECT 0x{} AS b", "AB".repeat(500_000));
+    let batches = [
+        "SELECT DATEADD(year, 2147483647, '20060731') AS d".to_owned(),
+        "SELECT DATEADD(nanosecond, 9223372036854775807, SYSDATETIME()) AS d".to_owned(),
+        "SELECT DATEADD(microsecond, -9223372036854775807, SYSDATETIME()) AS d".to_owned(),
+        "SELECT DATEDIFF(nanosecond, '0001-01-01', '9999-12-31') AS d".to_owned(),
+        "SELECT CONVERT(varchar(30), GETDATE(), 65535) AS d".to_owned(),
+        "SELECT CONVERT(varchar(30), GETDATE(), 99999) AS d".to_owned(),
+        "SELECT CAST('99999999999999999999999999999999999999999' AS money) AS m".to_owned(),
+        "SELECT CAST(N'\u{1F600}\u{1F600}\u{1F600}' AS uniqueidentifier) AS g".to_owned(),
+        "SELECT CHARINDEX(N'b', N'a\u{1F600}b', -5) AS i".to_owned(),
+        "SELECT CAST(1e308 AS real) AS r".to_owned(),
+        "SELECT CAST('12/31/9999 23:59:59.997' AS datetime) + 1 AS d".to_owned(),
+        long_date,
+        wide_binary,
+    ];
+    for text in &batches {
+        let tokens = client.batch(text);
+        assert!(!tokens.is_empty(), "{}", &text[..text.len().min(80)]);
+    }
+    assert_eq!(
+        rows(&client.batch("SELECT 1")),
+        vec![vec![Some("1".to_owned())]]
+    );
+}

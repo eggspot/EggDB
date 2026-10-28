@@ -146,5 +146,5 @@ its full title with its status.
 - [D119](decisions/D119.md) The built-in MCP server, part 1: `eggdb mcp` over stdio, read-only by opening the file read-only for each call, one statement per call, a time, row and byte limit per call, results marked as data
 - [D120](decisions/D120.md) The MCP audit log: a sidecar `<file>.mcp-audit.jsonl`, one JSON line per call written and synced before the result is sent, opened anew for each record, not tamper-evident
 - [D121](decisions/D121.md) The built-in MCP server, part 2: `write_sql` under `--allow-write`, destructive statements confirmed by the user through elicitation or `confirm: true`, the watchdog never ending a write that began to commit
-- [D122](decisions/D122.md) SQL Server's TDS protocol and a first Transact-SQL dialect: TDS 7.4 without encryption, SQL logins, names folded to lower case with `dbo` as `public`, SQL Server's batch rules and error numbers
+- [D122](decisions/D122.md) SQL Server's TDS protocol and a first Transact-SQL dialect: TDS 7.4 without encryption, SQL logins, names folded to lower case with `dbo` as `public`, SQL Server's batch rules and error numbers (superseded in part by D123)
 - [D123](decisions/D123.md) SQL Server's types, conversions and functions in the Transact-SQL dialect: types mapped onto the engine's, SQL Server's conversion rules and styles, no file-format change

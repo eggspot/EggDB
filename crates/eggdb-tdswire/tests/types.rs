@@ -1,3 +1,6 @@
+//! SQL Server's date, time, GUID and decimal types on the wire, in the byte layouts of
+//! [MS-TDS] 2.2.5.4.2 and 2.2.5.5.1 (D123).
+
 mod common;
 
 use common::{Client, TestServer, Token, errors, rows};

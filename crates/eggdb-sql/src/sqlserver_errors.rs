@@ -558,7 +558,7 @@ mod tests {
                 "SELECT a + b FROM t",
                 "shop",
             );
-            assert_eq!(error.vendor_code(), Some(40517), "{message}");
+            assert_eq!(error.vendor_code(), Some(402), "{message}");
         }
         assert_eq!(
             shown(
