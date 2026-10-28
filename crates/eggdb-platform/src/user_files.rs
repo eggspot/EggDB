@@ -39,48 +39,176 @@ pub fn open_private_append(path: &Path) -> io::Result<File> {
     owner_only(private_options().append(true).open(path)?)
 }
 
-/// Opens `path` for appending as [`open_private_append`] does, but refuses a path that is a
-/// symbolic link, or one replaced by another file while it was being opened, so a link planted
-/// at the path cannot send the writes to another file. The file's identity is checked before
-/// its mode is changed.
+/// Opens `path` for appending as [`open_private_append`] does, but only when it is a plain
+/// file of its own: a symbolic link at the path is never followed (the open itself refuses it,
+/// so a link swapped in while opening is refused too), and a file that is not a regular file
+/// (a FIFO, a device, a directory) or that has another name (a hard link) is refused before
+/// anything is written to it or its mode is changed. A FIFO never makes it wait. So nothing
+/// planted at the path can send the writes to another file.
 pub fn open_private_append_no_follow(path: &Path) -> io::Result<File> {
-    if is_symbolic_link(path)? {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "it is a symbolic link",
-        ));
-    }
-    let file = private_options().append(true).open(path)?;
-    if !is_the_file_at(&file, path)? {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "another file took its place while it was being opened",
-        ));
-    }
+    let file = match open_append_no_follow(path) {
+        Ok(file) => file,
+        Err(error) => return Err(explained(path, error)),
+    };
+    refuse_unless_plain(&file)?;
     owner_only(file)
 }
 
-fn is_symbolic_link(path: &Path) -> io::Result<bool> {
+fn refused(reason: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, reason.to_owned())
+}
+
+fn explained(path: &Path, error: io::Error) -> io::Error {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(metadata.file_type().is_symlink()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
+        Ok(metadata) if metadata.file_type().is_symlink() => refused("it is a symbolic link"),
+        Ok(metadata) if !metadata.is_file() => refused("it is not a regular file"),
+        _ => error,
     }
 }
 
-#[cfg(unix)]
-fn is_the_file_at(file: &File, path: &Path) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let opened = file.metadata()?;
-    let at_path = std::fs::symlink_metadata(path)?;
-    Ok(!at_path.file_type().is_symlink()
-        && opened.dev() == at_path.dev()
-        && opened.ino() == at_path.ino())
+fn refuse_unless_plain(file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_symlink() {
+        return Err(refused("it is a symbolic link"));
+    }
+    if !metadata.is_file() {
+        return Err(refused("it is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(refused("it has another name (a hard link)"));
+        }
+    }
+    Ok(())
 }
 
-#[cfg(not(unix))]
-fn is_the_file_at(_file: &File, path: &Path) -> io::Result<bool> {
-    Ok(!std::fs::symlink_metadata(path)?.file_type().is_symlink())
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod open_flags {
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "loongarch64"
+    ))]
+    pub(super) const NO_FOLLOW: Option<i32> = Some(0o400000);
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))]
+    pub(super) const NO_FOLLOW: Option<i32> = Some(0o100000);
+    #[cfg(any(target_arch = "mips", target_arch = "mips64"))]
+    pub(super) const NO_FOLLOW: Option<i32> = Some(0x20000);
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "loongarch64",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "mips",
+        target_arch = "mips64"
+    )))]
+    pub(super) const NO_FOLLOW: Option<i32> = None;
+    #[cfg(any(target_arch = "mips", target_arch = "mips64"))]
+    pub(super) const NON_BLOCK: i32 = 0x80;
+    #[cfg(any(target_arch = "sparc", target_arch = "sparc64"))]
+    pub(super) const NON_BLOCK: i32 = 0x4000;
+    #[cfg(not(any(
+        target_arch = "mips",
+        target_arch = "mips64",
+        target_arch = "sparc",
+        target_arch = "sparc64"
+    )))]
+    pub(super) const NON_BLOCK: i32 = 0o4000;
+}
+
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+mod open_flags {
+    pub(super) const NO_FOLLOW: Option<i32> = Some(0x100);
+    pub(super) const NON_BLOCK: i32 = 0x4;
+}
+
+#[cfg(any(target_os = "illumos", target_os = "solaris"))]
+mod open_flags {
+    pub(super) const NO_FOLLOW: Option<i32> = Some(0x20000);
+    pub(super) const NON_BLOCK: i32 = 0x80;
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "illumos",
+        target_os = "solaris"
+    ))
+))]
+mod open_flags {
+    pub(super) const NO_FOLLOW: Option<i32> = None;
+    pub(super) const NON_BLOCK: i32 = 0;
+}
+
+#[cfg(unix)]
+fn open_append_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut options = private_options();
+    options.append(true);
+    if let Some(no_follow) = open_flags::NO_FOLLOW {
+        options.custom_flags(no_follow | open_flags::NON_BLOCK);
+        return options.open(path);
+    }
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(refused("it is not a regular file"));
+    }
+    let file = options.open(path)?;
+    let opened = file.metadata()?;
+    let at_path = std::fs::symlink_metadata(path)?;
+    if at_path.file_type().is_symlink()
+        || opened.dev() != at_path.dev()
+        || opened.ino() != at_path.ino()
+    {
+        return Err(refused(
+            "another file took its place while it was being opened",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_append_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut options = private_options();
+    options
+        .append(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_append_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = private_options();
+    options.append(true);
+    options.open(path)
 }
 
 /// Opens `path` for writing from the start, emptying it, creating it when it is missing; on
@@ -170,14 +298,43 @@ mod tests {
         {
             let target = directory.join("elsewhere");
             std::fs::write(&target, b"kept\n").unwrap();
+            let refused = |planted: &std::path::Path| {
+                let error = open_private_append_no_follow(planted).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{error}");
+                assert_eq!(std::fs::read(&target).unwrap(), b"kept\n");
+            };
             let link = directory.join("planted");
             let _ = std::fs::remove_file(&link);
             std::os::unix::fs::symlink(&target, &link).unwrap();
-            let error = open_private_append_no_follow(&link).unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-            assert_eq!(std::fs::read(&target).unwrap(), b"kept\n");
-            let _ = std::fs::remove_file(&link);
-            let _ = std::fs::remove_file(&target);
+            refused(&link);
+            let dangling = directory.join("dangling");
+            let _ = std::fs::remove_file(&dangling);
+            std::os::unix::fs::symlink(directory.join("nowhere"), &dangling).unwrap();
+            refused(&dangling);
+            assert!(!directory.join("nowhere").exists());
+            let hard = directory.join("hard");
+            let _ = std::fs::remove_file(&hard);
+            std::fs::hard_link(&target, &hard).unwrap();
+            refused(&hard);
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+                refused(&hard);
+                let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o644);
+            }
+            let fifo = directory.join("fifo");
+            let _ = std::fs::remove_file(&fifo);
+            let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+            if made.is_ok_and(|status| status.success()) {
+                let start = std::time::Instant::now();
+                assert!(open_private_append_no_follow(&fifo).is_err());
+                assert!(start.elapsed() < std::time::Duration::from_secs(5));
+                let _ = std::fs::remove_file(&fifo);
+            }
+            for path in [&link, &dangling, &hard, &target] {
+                let _ = std::fs::remove_file(path);
+            }
         }
         let _ = std::fs::remove_file(&path);
     }
