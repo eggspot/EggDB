@@ -9,13 +9,47 @@ use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, Sca
 /// agent only after its user confirmed it: what it does, and to what.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestructiveStatement {
-    /// What the statement does.
+    /// What the statement does, one part per kind in the order the statement first does it:
+    /// an `ALTER TABLE` that changes a column's type and drops another has two parts.
+    pub parts: Vec<DestructivePart>,
+    /// Whether it also drops what depends on them (`CASCADE`).
+    pub cascade: bool,
+}
+
+/// One kind of destruction a [`DestructiveStatement`] does, and to what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestructivePart {
+    /// What it does.
     pub kind: DestructiveKind,
     /// What it does it to, as the statement names them: tables, views, indexes, sequences or
     /// schemas, or `table.column` and `table.constraint`.
     pub objects: Vec<String>,
-    /// Whether it also drops what depends on them (`CASCADE`).
-    pub cascade: bool,
+}
+
+impl DestructiveStatement {
+    fn new(kind: DestructiveKind, objects: Vec<String>, cascade: bool) -> Self {
+        Self {
+            parts: vec![DestructivePart { kind, objects }],
+            cascade,
+        }
+    }
+
+    /// Every object the statement acts on, part by part.
+    pub fn objects(&self) -> impl Iterator<Item = &str> {
+        self.parts
+            .iter()
+            .flat_map(|part| part.objects.iter().map(String::as_str))
+    }
+
+    fn add(&mut self, kind: DestructiveKind, object: String) {
+        match self.parts.iter_mut().find(|part| part.kind == kind) {
+            Some(part) => part.objects.push(object),
+            None => self.parts.push(DestructivePart {
+                kind,
+                objects: vec![object],
+            }),
+        }
+    }
 }
 
 /// What a [`DestructiveStatement`] does.
@@ -57,7 +91,7 @@ impl DestructiveKind {
             Self::DropSequence => "DROP SEQUENCE",
             Self::DropSchema => "DROP SCHEMA",
             Self::DropColumn => "ALTER TABLE ... DROP COLUMN",
-            Self::DropConstraint => "ALTER TABLE ... DROP CONSTRAINT",
+            Self::DropConstraint => "ALTER TABLE ... DROP of a constraint, key or index",
             Self::DropPrimaryKey => "ALTER TABLE ... DROP PRIMARY KEY",
             Self::ChangeColumnType => "a change of a column's type",
             Self::Truncate => "TRUNCATE",
@@ -93,23 +127,27 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
             dropped(DestructiveKind::DropSchema, names, *cascade)
         }
         Statement::DropIndex(drop) => dropped(DestructiveKind::DropIndex, &drop.names, false),
-        Statement::Truncate(table) => Some(DestructiveStatement {
-            kind: DestructiveKind::Truncate,
-            objects: vec![shown(&table.name)],
-            cascade: false,
-        }),
+        Statement::Truncate(table) => Some(DestructiveStatement::new(
+            DestructiveKind::Truncate,
+            vec![shown(&table.name)],
+            false,
+        )),
         Statement::Delete(delete) => {
-            (!filters_rows(delete.filter.as_ref(), &delete.table)).then(|| DestructiveStatement {
-                kind: DestructiveKind::DeleteWithoutFilter,
-                objects: vec![shown(&delete.table.name)],
-                cascade: false,
+            (!filters_rows(delete.filter.as_ref(), &delete.table)).then(|| {
+                DestructiveStatement::new(
+                    DestructiveKind::DeleteWithoutFilter,
+                    vec![shown(&delete.table.name)],
+                    false,
+                )
             })
         }
         Statement::Update(update) => {
-            (!filters_rows(update.filter.as_ref(), &update.table)).then(|| DestructiveStatement {
-                kind: DestructiveKind::UpdateWithoutFilter,
-                objects: vec![shown(&update.table.name)],
-                cascade: false,
+            (!filters_rows(update.filter.as_ref(), &update.table)).then(|| {
+                DestructiveStatement::new(
+                    DestructiveKind::UpdateWithoutFilter,
+                    vec![shown(&update.table.name)],
+                    false,
+                )
             })
         }
         Statement::AlterTable(alter) => altered(&alter.name, &alter.actions),
@@ -140,11 +178,11 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
 }
 
 fn dropped(kind: DestructiveKind, names: &[Name], cascade: bool) -> Option<DestructiveStatement> {
-    Some(DestructiveStatement {
+    Some(DestructiveStatement::new(
         kind,
-        objects: names.iter().map(shown).collect(),
+        names.iter().map(shown).collect(),
         cascade,
-    })
+    ))
 }
 
 fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement> {
@@ -187,16 +225,10 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
         };
         match &mut found {
             Some(statement) => {
-                statement.objects.push(object);
+                statement.add(kind, object);
                 statement.cascade |= cascade;
             }
-            None => {
-                found = Some(DestructiveStatement {
-                    kind,
-                    objects: vec![object],
-                    cascade,
-                });
-            }
+            None => found = Some(DestructiveStatement::new(kind, vec![object], cascade)),
         }
     }
     found

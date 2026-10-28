@@ -334,6 +334,14 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 None,
             );
         };
+        if self.client.initialized {
+            return error_line(
+                Some(id),
+                INVALID_REQUEST,
+                "this connection is already initialized; start a new one to initialize again",
+                None,
+            );
+        }
         let version = PROTOCOL_VERSIONS
             .into_iter()
             .find(|known| known == requested)
@@ -685,7 +693,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         };
         let result = match self.audited(request, &outcome.result, duration, Some(facts)) {
             Ok(()) => outcome.result,
-            Err(failure) if outcome.committed => Err(ToolError::new(
+            Err(failure) if outcome.committed && outcome.result.is_ok() => Err(ToolError::new(
                 "audit_unavailable",
                 format!(
                     "The change WAS committed, but the call could not be recorded in the audit log ({failure}), so its result is withheld."

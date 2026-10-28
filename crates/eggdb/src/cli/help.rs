@@ -382,7 +382,8 @@ must pass confirm: true, so set that client to ask you before write_sql runs. Ea
 opens the file read-only for at most the time limit and closes it again, so other readers run
 beside it; while a call runs, a program that wants to write the file is refused, and while
 another program has the file open for writing a call fails and the agent is told to try again.
-A write_sql call holds the file alone, for at most the time limit, never while you are asked.
+A write_sql call holds the file alone while its statement runs (the time limit bounds it),
+commits and closes the file, and never while you are asked.
 Every call is appended to <file>.mcp-audit.jsonl next to the file (readable by its owner only),
 which eggdb audit shows; if that file cannot be written the server does not start. A statement
 still running a second past its time limit cannot be stopped, so the server records it and exits

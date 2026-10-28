@@ -96,9 +96,11 @@ With `--allow-write` the agent gets `write_sql`: one statement per call, in the 
 run in a transaction of its own that commits when the statement succeeds and changes nothing
 when it fails (on Oracle the server commits the statement's block itself). The result says
 `committed` and, for an `INSERT`, `UPDATE` or `DELETE`, `rows_changed`. Each call may change at
-most 256 MiB; a larger change is rolled back with `write_too_large`. Only `write_sql` opens the
-file read-write: while it runs, other programs cannot open the file at all, for at most the
-time limit.
+most 256 MiB (the bytes it puts and the keys it deletes); a larger change is rolled back with
+`write_too_large`. A failed statement changes nothing but the sequence values it drew, which
+stay drawn, as in the database itself. Only `write_sql` opens the file read-write: while its
+statement runs (the time limit bounds it), commits and closes the file, other programs cannot
+open the file at all.
 
 **Destructive statements need your confirmation**: `DROP` of anything, `TRUNCATE`, `ALTER TABLE
 ... DROP COLUMN`, `DROP CONSTRAINT` or `DROP PRIMARY KEY`, a column's type change, and a `DELETE`
@@ -117,6 +119,11 @@ renames, `ADD COLUMN` and the like run without asking.
   `needs_confirmation` and runs nothing. `confirm: true` is the agent's word, not yours: the
   tool's description tells the agent to ask you first, and you should set such a client to ask
   before every `write_sql` (its annotations say it is destructive).
+
+The question names every table, column or index the statement acts on, each with what is done
+to it, even when the SQL shown is cut. Names are as the statement gives them: an earlier rename
+(which needs no confirmation) can make a familiar name stand for another table, so read the
+question with the agent's recent calls in mind.
 
 The confirmation guards against accidents. It is not a security boundary: a `DELETE` with an
 always-true condition that names a column (`WHERE id IS NOT NULL`) runs without asking, and a
@@ -168,7 +175,8 @@ calls `eggdb mcp` holds nothing. So:
 - other read-only programs (`eggdb get`, `scan`, `ui --read-only`, `serve --read-only`) run beside
   the agent's calls;
 - a `write_sql` call opens the file read-write, so while it runs every other program, reader or
-  writer, is refused, for at most the time limit and never while you are asked to confirm.
+  writer, is refused: for its statement, which the time limit bounds, then its commit and the
+  close, and never while you are asked to confirm.
 
 A file a crashed writer left with an unfinished log is read correctly: the log is replayed in
 memory for each call, and the file is not changed.
@@ -184,7 +192,8 @@ result's content is never recorded. Every call has a `call_id` (`<pid>-<server s
 `call_started` record before it opens the file, and its `call` record says how a destructive
 statement was confirmed (`confirmation`: `elicitation` or `confirm_argument`), whether it
 `committed`, and any `warning`; a `call_started` with no `call` after it means the server stopped
-during the write, and `eggdb audit` shows its outcome as `unknown`. A request for a tool that does not exist is recorded too,
+during the write (or that the write is still running), and `eggdb audit` shows its outcome as
+`unknown`. `--format json` prints the records as stored: pair them by `call_id` yourself. A request for a tool that does not exist is recorded too,
 with the error code `unknown_tool`, and so is a `tools/call` or `resources/read` refused before
 it runs (sent before `initialize`, with malformed params, or with a key given twice). The server's start and a time-limit exit are records too.
 

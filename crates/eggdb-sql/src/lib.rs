@@ -88,7 +88,9 @@ mod subquery_tests;
 mod tests;
 
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
-pub use destructive::{DestructiveKind, DestructiveStatement, destructive_statement};
+pub use destructive::{
+    DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,
+};
 pub use dialect::Dialect;
 pub use error::{SqlError, SqlResult, SqlState};
 pub use indexes::IndexCheck;

@@ -324,7 +324,7 @@ fn a_client_that_can_ask_gets_an_elicitation_and_its_answer_decides() {
         assert_eq!(text_at(asked, &["params", "mode"]), "form");
         let message = text_at(asked, &["params", "message"]);
         assert!(
-            message.contains("DROP TABLE on app.db: scratch"),
+            message.contains("on app.db. DROP TABLE: scratch."),
             "{message}"
         );
         assert!(
@@ -641,4 +641,59 @@ fn a_write_that_committed_is_never_ended_by_the_watchdog() {
             .iter()
             .all(|record| text_at(record, &["event"]) != "time_limit_exceeded")
     );
+}
+
+#[test]
+fn a_second_initialize_is_refused_and_cannot_switch_off_the_question() {
+    let audit = TempAudit::new("initialize-twice");
+    let opener = MapOpener::new(scratch_store());
+    let mut server = Server::new(&opener, writing_config(&audit)).unwrap();
+    let answers = served(
+        &mut server,
+        &script(&[
+            initialize_line("2025-11-25", ELICITING),
+            initialize_line("2025-11-25", "{}").replace("\"id\":0", "\"id\":1"),
+            call_line(2, "write_sql", r#"{"sql":"DROP TABLE scratch"}"#),
+            answer_line(1, r#"{"action":"decline"}"#),
+        ]),
+    );
+    assert_eq!(
+        text_at(with_id(&answers, "1").unwrap(), &["error", "code"]),
+        "-32600"
+    );
+    assert_eq!(methods(&answers), ["elicitation/create"]);
+    assert_eq!(
+        error_code(with_id(&answers, "2").unwrap()),
+        "declined_by_user"
+    );
+}
+
+#[test]
+fn a_failed_write_that_drew_sequence_values_says_they_stay_drawn() {
+    let audit = TempAudit::new("sequence-kept");
+    let store = scratch_store();
+    store.sql(
+        Dialect::PostgreSql,
+        "CREATE SEQUENCE s; CREATE TABLE q (id integer PRIMARY KEY); INSERT INTO q VALUES (1)",
+    );
+    let opener = MapOpener::new(store);
+    let mut server = writing_server(&opener, &audit, "{}");
+    let failed = call(
+        &mut server,
+        1,
+        "write_sql",
+        r#"{"sql":"INSERT INTO q VALUES (nextval('s'))"}"#,
+    );
+    assert_eq!(error_code(&failed), "sql_error");
+    let message = text_at(structured(&failed), &["error", "message"]);
+    let record = audit_records(&audit);
+    let committed = text_at(record.last().unwrap(), &["committed"]) == "true";
+    assert_eq!(message.contains("Sequence values"), committed, "{message}");
+    let next = call(
+        &mut server,
+        2,
+        "write_sql",
+        r#"{"sql":"INSERT INTO q VALUES (nextval('s'))"}"#,
+    );
+    assert_eq!(!is_error(&next), committed, "{next:?}");
 }

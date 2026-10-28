@@ -693,6 +693,21 @@ impl<O: DatabaseOpener> Call<'_, O> {
     }
 }
 
+fn with_sequences_kept(mut error: ToolError) -> ToolError {
+    const KEPT: &str =
+        "Sequence values the statement drew stay drawn, as they do in the database itself.";
+    match error.message.strip_suffix("Nothing was changed.") {
+        Some(before) => {
+            error.message = format!("{before}Nothing else was changed. {KEPT}");
+        }
+        None => {
+            error.message.push(' ');
+            error.message.push_str(KEPT);
+        }
+    }
+    error
+}
+
 fn writes_not_allowed() -> ToolError {
     ToolError::new(
         "read_only",
@@ -867,16 +882,21 @@ pub(crate) fn destructive_part(
 }
 
 pub(crate) fn destructive_summary(statement: &DestructiveStatement) -> String {
-    let mut summary = format!("{}: {}", statement.kind.label(), listed(&statement.objects));
+    let parts: Vec<String> = statement
+        .parts
+        .iter()
+        .map(|part| format!("{}: {}", part.kind.label(), listed(&part.objects)))
+        .collect();
+    let mut summary = parts.join("; ");
     if statement.cascade {
         summary.push_str(", with CASCADE");
     }
     summary
 }
 
-pub(crate) const MOST_LISTED_OBJECTS: usize = 10;
+const MOST_LISTED_OBJECTS: usize = 10;
 
-pub(crate) fn listed(objects: &[String]) -> String {
+fn listed(objects: &[String]) -> String {
     let shown: Vec<&str> = objects
         .iter()
         .take(MOST_LISTED_OBJECTS)
@@ -949,6 +969,10 @@ pub(crate) fn write_sql<O: DatabaseOpener>(
             Err(OneStatementError::Failed(error)) => Err(call.sql_failure(limits, error)),
         }
     });
+    let result = match result {
+        Err(error) if committed => Err(with_sequences_kept(error)),
+        other => other,
+    };
     let result = result.map(|returned| {
         statement_success_with(
             returned.as_ref(),

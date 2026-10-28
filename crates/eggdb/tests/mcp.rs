@@ -664,10 +664,17 @@ impl Mcp {
     }
 }
 
-fn user_count(path: &str) -> String {
+fn user_count(path: &str) -> u64 {
     let counted = eggdb(&["sql", path, "-c", "SELECT count(*) FROM users"]);
     assert!(counted.status.success(), "{}", stderr(&counted));
-    stdout(&counted)
+    let text = stdout(&counted);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.first().map(|line| line.trim()),
+        Some("count"),
+        "{text}"
+    );
+    lines[2].trim().parse().unwrap_or_else(|_| panic!("{text}"))
 }
 
 #[test]
@@ -712,7 +719,7 @@ fn an_agent_writes_with_allow_write_and_destructive_statements_wait_for_the_user
         r#"{"sql":"INSERT INTO users VALUES (5, 'Hedy', NULL)","dialect":"oracle"}"#,
     );
     assert_eq!(text_at(ok(&oracle), &["committed"]), "true");
-    assert!(user_count(path).contains('5'), "{}", user_count(path));
+    assert_eq!(user_count(path), 5);
     let writer = eggdb(&[
         "sql",
         path,
@@ -727,7 +734,7 @@ fn an_agent_writes_with_allow_write_and_destructive_statements_wait_for_the_user
     ok(&created);
     let unconfirmed = mcp.call("write_sql", r#"{"sql":"DELETE FROM users"}"#);
     assert_eq!(error_code(&unconfirmed), "needs_confirmation");
-    assert!(user_count(path).contains('6'), "{}", user_count(path));
+    assert_eq!(user_count(path), 6);
     let filtered = mcp.call("write_sql", r#"{"sql":"DELETE FROM users WHERE id = 6"}"#);
     assert_eq!(text_at(ok(&filtered), &["rows_changed"]), "1");
     let confirmed = mcp.call(
@@ -744,7 +751,7 @@ fn an_agent_writes_with_allow_write_and_destructive_statements_wait_for_the_user
     let dropping = asking.send_call("write_sql", r#"{"sql":"DROP TABLE scratch"}"#);
     let question = asking.server_request();
     assert_eq!(text_at(&question, &["id"]), "eggdb-confirm-1");
-    assert!(text_at(&question, &["params", "message"]).contains("DROP TABLE on "));
+    assert!(text_at(&question, &["params", "message"]).contains("DROP TABLE: scratch."));
     let between = eggdb(&["put", path, "asked", "while waiting"]);
     assert!(between.status.success(), "{}", stderr(&between));
     asking.send(r#"{"jsonrpc":"2.0","id":"eggdb-confirm-1","result":{"action":"accept","content":{"run":true}}}"#);
@@ -761,7 +768,7 @@ fn an_agent_writes_with_allow_write_and_destructive_statements_wait_for_the_user
     let declined = asking.answer();
     assert_eq!(text_at(&declined, &["id"]), declining.to_string());
     assert_eq!(error_code(&declined), "declined_by_user");
-    assert!(user_count(path).contains('5'), "{}", user_count(path));
+    assert_eq!(user_count(path), 5);
     let (status, messages) = asking.finish();
     assert!(status.success(), "{messages}");
 

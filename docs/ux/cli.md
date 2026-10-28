@@ -1204,6 +1204,17 @@ are any; `--format json` prints `call_started` and `call` records as stored.
     at once that the agent can change the file and what still needs a yes.
 
 ### As built in v0.2.0 (D121)
-- Hidden characters in the dialog are shown as `\u{202e}`-style escapes, escaped before the SQL
-  is cut, and names also have Markdown characters escaped with a backslash.
+- The heading names each kind of destruction with its own objects, since one `ALTER TABLE` can
+  change a column's type and drop another: `The AI agent asks to run a destructive statement on
+  app.db. a change of a column's type: m.b; ALTER TABLE ... DROP COLUMN: m.a.`
+- Every object is named, not ten (up to 16 KiB of names, then a count and the advice to
+  decline): the shown SQL can be cut before a name by padding, so the heading must carry them
+  all. A run of more than 16 blanks in the shown SQL is shown as `<3,000 blank characters>`.
+- The closing line adds: "Names are as the statement gives them: an earlier rename can make a
+  familiar name stand for another table."
+- Hidden characters in the dialog (controls, bidirectional and invisible formatting characters
+  such as soft hyphens and variation selectors) are shown as `\u{202e}`-style escapes, escaped
+  before the SQL is cut; line breaks and tabs in the SQL stay, since the fence is longer than any
+  run of backticks in it. Names also have Markdown characters escaped with a backslash (not `_`,
+  so `order_items` reads as written); the `run` field's title is plain text.
 - The warning line under a call is indented to the tool column.

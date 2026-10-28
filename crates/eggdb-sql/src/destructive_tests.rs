@@ -6,7 +6,7 @@ use crate::{
 
 fn kind(dialect: Dialect, text: &str) -> Option<DestructiveKind> {
     match destructive_statement(text, dialect) {
-        Ok(found) => found.map(|statement| statement.kind),
+        Ok(found) => found.map(|statement| statement.parts[0].kind),
         Err(error) => panic!("{dialect:?} {text:?}: {error:?}"),
     }
 }
@@ -58,7 +58,7 @@ fn drops_truncates_and_unfiltered_deletes_and_updates_are_destructive_in_every_d
     }
     for dialect in Dialect::ALL {
         match destructive_statement("TRUNCATE TABLE t", dialect) {
-            Ok(Some(found)) => assert_eq!(found.kind, DestructiveKind::Truncate),
+            Ok(Some(found)) => assert_eq!(found.parts[0].kind, DestructiveKind::Truncate),
             Err(OneStatementError::Failed(_)) => assert_ne!(dialect, Dialect::Oracle),
             other => panic!("{dialect:?}: {other:?}"),
         }
@@ -107,18 +107,56 @@ fn drops_truncates_and_unfiltered_deletes_and_updates_are_destructive_in_every_d
 #[test]
 fn the_objects_are_named_and_cascade_is_kept() {
     let dropped = statement(Dialect::PostgreSql, "DROP TABLE a, app.b CASCADE");
-    assert_eq!(dropped.kind, DestructiveKind::DropTable);
-    assert_eq!(dropped.objects, ["a", "app.b"]);
+    assert_eq!(dropped.parts[0].kind, DestructiveKind::DropTable);
+    assert_eq!(dropped.parts[0].objects, ["a", "app.b"]);
     assert!(dropped.cascade);
     let column = statement(
         Dialect::PostgreSql,
         "ALTER TABLE t DROP COLUMN name CASCADE",
     );
-    assert_eq!(column.objects, ["t.name"]);
+    assert_eq!(column.parts[0].objects, ["t.name"]);
     assert!(column.cascade);
     let two = statement(Dialect::MySql, "ALTER TABLE t DROP COLUMN a, DROP COLUMN b");
-    assert_eq!(two.objects, ["t.a", "t.b"]);
-    assert_eq!(statement(Dialect::Sqlite, "DELETE FROM t").objects, ["t"]);
+    assert_eq!(two.parts.len(), 1);
+    assert_eq!(two.parts[0].objects, ["t.a", "t.b"]);
+    assert_eq!(
+        statement(Dialect::Sqlite, "DELETE FROM t")
+            .objects()
+            .collect::<Vec<_>>(),
+        ["t"]
+    );
+}
+
+#[test]
+fn an_alter_table_doing_several_kinds_of_destruction_names_each_with_its_own_kind() {
+    let mixed = statement(
+        Dialect::PostgreSql,
+        "ALTER TABLE m ALTER COLUMN b TYPE bigint, DROP COLUMN a",
+    );
+    assert_eq!(mixed.parts.len(), 2);
+    assert_eq!(mixed.parts[0].kind, DestructiveKind::ChangeColumnType);
+    assert_eq!(mixed.parts[0].objects, ["m.b"]);
+    assert_eq!(mixed.parts[1].kind, DestructiveKind::DropColumn);
+    assert_eq!(mixed.parts[1].objects, ["m.a"]);
+    let mysql = statement(
+        Dialect::MySql,
+        "ALTER TABLE m MODIFY b bigint, DROP COLUMN a, DROP PRIMARY KEY, DROP COLUMN c",
+    );
+    let kinds: Vec<DestructiveKind> = mysql.parts.iter().map(|part| part.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            DestructiveKind::ChangeColumnType,
+            DestructiveKind::DropColumn,
+            DestructiveKind::DropPrimaryKey
+        ]
+    );
+    assert_eq!(mysql.parts[1].objects, ["m.a", "m.c"]);
+    assert_eq!(mysql.parts[2].objects, ["m"]);
+    assert_eq!(
+        mysql.objects().collect::<Vec<_>>(),
+        ["m.b", "m.a", "m.c", "m"]
+    );
 }
 
 #[test]

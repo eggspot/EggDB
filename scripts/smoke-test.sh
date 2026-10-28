@@ -373,7 +373,7 @@ grep -q '"name":"write_sql"' last.out || fail "eggdb mcp --allow-write's tools/l
 grep -q 'committed' last.out || fail "eggdb mcp --allow-write's write_sql answered $(sed -n 3p last.out)"
 grep -q 'needs_confirmation' last.out || fail "eggdb mcp --allow-write's delete answered $(sed -n 4p last.out)"
 expect_exit 0 "$eggdb" sql shell.db -c 'select count(*) from t'
-grep -q '3' last.out || fail "after write_sql, t holds $(cat last.out)"
+tr -d '\r' < last.out | grep -qx ' *3' || fail "after write_sql, t holds $(cat last.out)"
 pass "mcp --allow-write: write_sql commits, and a destructive statement waits for confirmation"
 
 expect_exit 0 "$eggdb" ui --help

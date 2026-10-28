@@ -442,10 +442,11 @@ impl Read for PatientFile {
 /// whose call follows in the file is handed over only when `every_record` is set, and one with
 /// no call after it is marked [`AuditEntry::outcome_unknown`]. It returns the totals of the
 /// whole file, or `None` when there is no audit file. It reads the file twice, the first time
-/// for the call ids that have a call record, and holds one line at a time (the last `limit`
-/// with a limit); a line over 1 MiB, which no record is, is skipped unread as unreadable. On
-/// Windows, where a server's lock blocks reading for the moment it writes, each read waits up
-/// to five seconds.
+/// to pair call-started records with their calls, keeping the ids of write calls only, and
+/// otherwise holds one line at a time (the last `limit` with a limit); a line over 1 MiB,
+/// which no record is, is skipped unread as unreadable. On Windows, where a server's lock
+/// blocks reading for the moment it writes, each read waits up to five seconds. A write still
+/// running when the file is read has no call yet, so it shows as an unknown outcome too.
 pub fn read_audit(
     path: &Path,
     limit: Option<usize>,
@@ -455,16 +456,24 @@ pub fn read_audit(
     let Some(mut reader) = open_audit(path)? else {
         return Ok(None);
     };
+    let mut started = std::collections::HashSet::new();
     let mut answered = std::collections::HashSet::new();
     while let Some(bytes) = next_line(&mut reader)? {
-        if let Some((_, entry)) = bytes
+        let Some((_, entry)) = bytes
             .as_deref()
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(record_of)
-            && entry.event == AuditEvent::Call
-            && let Some(call_id) = entry.call_id
-        {
-            answered.insert(call_id);
+        else {
+            continue;
+        };
+        match (entry.event, entry.call_id) {
+            (AuditEvent::CallStarted, Some(call_id)) => {
+                started.insert(call_id);
+            }
+            (AuditEvent::Call, Some(call_id)) if started.remove(&call_id) => {
+                answered.insert(call_id);
+            }
+            _ => {}
         }
     }
     let Some(mut reader) = open_audit(path)? else {
