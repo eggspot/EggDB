@@ -386,7 +386,7 @@ pub(crate) fn translate(error: SqlError, text: &str, statement: &str, database: 
                 .strip_prefix("function ")
                 .and_then(|rest| rest.split_once('('))
                 .map_or((String::new(), String::new()), |(function, rest)| {
-                    let arguments = rest.split_once(')').map_or(rest, |(inside, _)| inside);
+                    let arguments = rest.rsplit_once(')').map_or(rest, |(inside, _)| inside);
                     (function.to_owned(), arguments.to_owned())
                 });
             if ["sum", "avg"].contains(&function.as_str()) && !arguments.is_empty() {
@@ -394,7 +394,7 @@ pub(crate) fn translate(error: SqlError, text: &str, statement: &str, database: 
                     8117,
                     format!(
                         "Operand data type {} is invalid for {function} operator.",
-                        type_name(&arguments)
+                        type_name(arguments.split('(').next().unwrap_or_default().trim())
                     ),
                 )
             } else {
@@ -566,6 +566,16 @@ mod tests {
                 SqlError::new(
                     SqlState::UNDEFINED_FUNCTION,
                     "function sum(character varying) does not exist"
+                ),
+                "SELECT sum(name) FROM t"
+            ),
+            "Msg 8117, Level 16, State 1: Operand data type nvarchar is invalid for sum operator."
+        );
+        assert_eq!(
+            shown(
+                SqlError::new(
+                    SqlState::UNDEFINED_FUNCTION,
+                    "function sum(character varying(20)) does not exist"
                 ),
                 "SELECT sum(name) FROM t"
             ),
