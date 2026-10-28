@@ -26,6 +26,10 @@ impl SqlState {
     pub const DUPLICATE_PREPARED_STATEMENT: Self = Self(*b"42P05");
     /// `53300` too_many_connections.
     pub const TOO_MANY_CONNECTIONS: Self = Self(*b"53300");
+    /// `57014` query_canceled, such as a `COPY` the client failed with `CopyFail`.
+    pub const QUERY_CANCELED: Self = Self(*b"57014");
+    /// `42501` insufficient_privilege, such as `COPY` to or from a server file.
+    pub const INSUFFICIENT_PRIVILEGE: Self = Self(*b"42501");
     /// `57P01` admin_shutdown: the server is stopping.
     pub const ADMIN_SHUTDOWN: Self = Self(*b"57P01");
     /// `0A000` feature_not_supported: valid SQL that this release does not run yet.
@@ -66,6 +70,8 @@ impl SqlState {
     pub const INVALID_BINARY_REPRESENTATION: Self = Self(*b"22P03");
     /// `22P02` invalid_text_representation.
     pub const INVALID_TEXT_REPRESENTATION: Self = Self(*b"22P02");
+    /// `22P04` bad_copy_file_format: `COPY` data that does not follow its format.
+    pub const BAD_COPY_FILE_FORMAT: Self = Self(*b"22P04");
     /// `23502` not_null_violation.
     pub const NOT_NULL_VIOLATION: Self = Self(*b"23502");
     /// `23505` unique_violation.
@@ -206,6 +212,7 @@ struct Report {
     vendor_code: Option<u16>,
     vendor: Option<crate::Dialect>,
     table: Option<String>,
+    context: Option<String>,
 }
 
 /// The result of SQL operations.
@@ -224,6 +231,7 @@ impl SqlError {
                 vendor_code: None,
                 vendor: None,
                 table: None,
+                context: None,
             }),
         }
     }
@@ -247,6 +255,13 @@ impl SqlError {
     /// The same error with a hint line.
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.report.hint = Some(hint.into());
+        self
+    }
+
+    /// The same error with a context line, such as `COPY t, line 3, column b: "x"`, which
+    /// PostgreSQL reports in the `CONTEXT` field.
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.report.context = Some(context.into());
         self
     }
 
@@ -278,6 +293,7 @@ impl SqlError {
             .chain(report.detail.as_mut())
             .chain(report.hint.as_mut())
             .chain(report.table.as_mut())
+            .chain(report.context.as_mut())
         {
             if text.contains(crate::schemas::QUALIFIER) {
                 *text = crate::schemas::display(text);
@@ -339,6 +355,11 @@ impl SqlError {
     /// The hint line, when there is one.
     pub fn hint(&self) -> Option<&str> {
         self.report.hint.as_deref()
+    }
+
+    /// The context line, when there is one: where in a `COPY`'s data the error was found.
+    pub fn context(&self) -> Option<&str> {
+        self.report.context.as_deref()
     }
 
     /// The byte offset in the text given to [`Session::execute`](crate::Session::execute) that

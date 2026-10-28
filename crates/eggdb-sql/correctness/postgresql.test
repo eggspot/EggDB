@@ -2524,3 +2524,356 @@ COMMENT ON FUNCTION nope33() IS 'x'
 
 ok
 DROP TABLE mytable33
+
+chapter sql-copy, "COPY": Examples
+ok
+CREATE TABLE country (country_code char(2) PRIMARY KEY, country_name text)
+
+rows
+COPY country FROM STDIN;
+AF	AFGHANISTAN
+AL	ALBANIA
+DZ	ALGERIA
+ZM	ZAMBIA
+ZW	ZIMBABWE
+\.
+----
+COPY 5
+
+rows
+COPY country TO STDOUT (DELIMITER '|')
+----
+AF|AFGHANISTAN
+AL|ALBANIA
+DZ|ALGERIA
+ZM|ZAMBIA
+ZW|ZIMBABWE
+COPY 5
+
+rows
+COPY (SELECT * FROM country WHERE country_name LIKE 'A%') TO STDOUT
+----
+AF	AFGHANISTAN
+AL	ALBANIA
+DZ	ALGERIA
+COPY 3
+
+rows
+COPY country TO STDOUT WITH CSV HEADER
+----
+country_code,country_name
+AF,AFGHANISTAN
+AL,ALBANIA
+DZ,ALGERIA
+ZM,ZAMBIA
+ZW,ZIMBABWE
+COPY 5
+
+error 42501
+COPY country FROM '/usr1/proj/bray/sql/country_data'
+
+error 42501
+COPY (SELECT * FROM country WHERE country_name LIKE 'A%') TO '/usr1/proj/bray/sql/a_list_countries.copy'
+
+error 42501
+COPY country TO PROGRAM 'gzip > /usr1/proj/bray/sql/country_data.gz'
+
+rows
+COPY country (country_name) TO STDOUT WITH (FORMAT csv, FORCE_QUOTE *)
+----
+"AFGHANISTAN"
+"ALBANIA"
+"ALGERIA"
+"ZAMBIA"
+"ZIMBABWE"
+COPY 5
+
+error 22P04
+COPY country FROM STDIN;
+FR	FRANCE	EUROPE
+\.
+
+error 22P04
+COPY country FROM STDIN;
+FR
+\.
+
+error 23505
+COPY country FROM STDIN;
+FR	FRANCE
+AF	AFGHANISTAN AGAIN
+\.
+
+rows
+SELECT count(*) FROM country
+----
+count
+5
+SELECT 1
+
+error 22001
+COPY country FROM STDIN;
+FRA	FRANCE
+\.
+
+error 42809
+CREATE VIEW country_names AS SELECT country_name FROM country;
+COPY country_names TO STDOUT
+
+ok
+COPY country TO STDOUT (FORMAT binary)
+... differs
+
+ok
+COPY country TO STDOUT (ENCODING 'LATIN1')
+... differs
+
+chapter sql-copy, "COPY": Text Format
+ok
+CREATE TABLE copy_text (id integer PRIMARY KEY, t text)
+
+rows
+COPY copy_text FROM STDIN;
+1	tab\there
+2	line\nbreak\rreturn
+3	back\\slash
+4	\N
+5	\\N
+6	\101\x42\103
+7	\b\f\v
+8	\q
+9	
+\.
+----
+COPY 9
+
+rows
+SELECT id, t IS NULL AS null, length(t), t = E'tab\there' AS tab FROM copy_text ORDER BY id
+----
+id|null|length|tab
+1|f|8|t
+2|f|17|f
+3|f|10|f
+4|t|NULL|NULL
+5|f|2|f
+6|f|3|f
+7|f|3|f
+8|f|1|f
+9|f|0|f
+SELECT 9
+
+rows
+SELECT t FROM copy_text WHERE id IN (3, 5, 6, 8) ORDER BY id
+----
+t
+back\slash
+\N
+ABC
+q
+SELECT 4
+
+rows
+COPY copy_text TO STDOUT
+----
+1	tab\there
+2	line\nbreak\rreturn
+3	back\\slash
+4	\N
+5	\\N
+6	ABC
+7	\b\f\v
+8	q
+9	
+COPY 9
+
+rows
+COPY copy_text (t, id) TO STDOUT WITH (DELIMITER ',', NULL 'nothing')
+----
+tab\there,1
+line\nbreak\rreturn,2
+back\\slash,3
+nothing,4
+\\N,5
+ABC,6
+\b\f\v,7
+q,8
+,9
+COPY 9
+
+rows
+COPY copy_text FROM STDIN (DELIMITER '|', NULL '');
+10|a\|b
+11|
+\.
+----
+COPY 2
+
+rows
+SELECT id, t IS NULL AS null, t FROM copy_text WHERE id > 9 ORDER BY id
+----
+id|null|t
+10|f|a|b
+11|t|NULL
+SELECT 2
+
+error 22023
+COPY copy_text FROM STDIN (DELIMITER 'a')
+
+error 0A000
+COPY copy_text FROM STDIN (DELIMITER '::')
+
+error 0A000
+COPY copy_text FROM STDIN (QUOTE '"')
+
+error 42601
+COPY copy_text FROM STDIN (FORMAT text, FORMAT csv)
+
+chapter sql-copy, "COPY": CSV Format
+ok
+CREATE TABLE copy_csv (id integer PRIMARY KEY, a text, b text)
+
+rows
+COPY copy_csv FROM STDIN (FORMAT csv);
+1,"x,y",""
+2,,"q""uote"
+3,"two
+lines",plain
+\.
+----
+COPY 3
+
+rows
+SELECT id, a IS NULL AS a_null, a, b IS NULL AS b_null, length(b) FROM copy_csv ORDER BY id
+----
+id|a_null|a|b_null|length
+1|f|x,y|f|0
+2|t|NULL|f|6
+3|f|two
+lines|f|5
+SELECT 3
+
+rows
+COPY copy_csv TO STDOUT (FORMAT csv)
+----
+1,"x,y",""
+2,,"q""uote"
+3,"two
+lines",plain
+COPY 3
+
+rows
+COPY copy_csv TO STDOUT (FORMAT csv, HEADER, QUOTE '''', DELIMITER ';', FORCE_QUOTE (b))
+----
+id;a;b
+1;x,y;''
+2;;'q"uote'
+3;'two
+lines';'plain'
+COPY 3
+
+rows
+COPY copy_csv FROM STDIN (FORMAT csv, FORCE_NOT_NULL (a), FORCE_NULL (b));
+4,,""
+\.
+----
+COPY 1
+
+rows
+SELECT a IS NULL, a, b IS NULL FROM copy_csv WHERE id = 4
+----
+?column?|a|?column?
+f||t
+SELECT 1
+
+rows
+COPY copy_csv FROM STDIN (FORMAT csv, HEADER match);
+id,a,b
+5,five,
+\.
+----
+COPY 1
+
+error 22P04
+COPY copy_csv FROM STDIN (FORMAT csv, HEADER match);
+id,b,a
+\.
+
+error 22P04
+COPY copy_csv FROM STDIN (FORMAT csv);
+6,"open
+\.
+
+ok
+CREATE TABLE copy_one (v text)
+
+rows
+COPY copy_one FROM STDIN (FORMAT csv);
+"\."
+\.
+----
+COPY 1
+
+rows
+COPY copy_one TO STDOUT (FORMAT csv)
+----
+"\."
+COPY 1
+
+error 0A000
+COPY copy_csv TO STDOUT (FORMAT csv, FORCE_NOT_NULL (a))
+
+error 0A000
+COPY copy_csv FROM STDIN (FORMAT csv, FORCE_QUOTE (a))
+
+error 22023
+COPY copy_csv FROM STDIN (FORMAT csv, QUOTE ',')
+
+error 42P10
+COPY copy_csv (id) FROM STDIN (FORMAT csv, FORCE_NOT_NULL (a))
+
+chapter sql-copy, "COPY": DEFAULT and column lists
+ok
+CREATE TABLE copy_defaults (id serial PRIMARY KEY, label text DEFAULT 'unnamed', amount integer NOT NULL)
+
+rows
+COPY copy_defaults (amount) FROM STDIN;
+10
+20
+\.
+----
+COPY 2
+
+rows
+COPY copy_defaults (label, amount) FROM STDIN (DEFAULT '\D');
+\D	30
+named	40
+\.
+----
+COPY 2
+
+rows
+SELECT * FROM copy_defaults ORDER BY id
+----
+id|label|amount
+1|unnamed|10
+2|unnamed|20
+3|unnamed|30
+4|named|40
+SELECT 4
+
+error 23502
+COPY copy_defaults (label) FROM STDIN;
+x
+\.
+
+error 22023
+COPY copy_defaults FROM STDIN (NULL 'x', DEFAULT 'x')
+
+error 0A000
+COPY copy_defaults TO STDOUT (DEFAULT 'x')
+
+error 42703
+COPY copy_defaults (nope) FROM STDIN
+
+error 42701
+COPY copy_defaults (amount, amount) FROM STDIN

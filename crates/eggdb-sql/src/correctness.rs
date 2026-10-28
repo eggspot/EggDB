@@ -1,4 +1,6 @@
+use crate::copy::{CopyChannel, CopyStart};
 use crate::dialect::Dialect;
+use crate::error::SqlResult;
 use crate::memory_store::MemoryStore;
 use crate::session::{QueryResult, Session};
 use crate::tests::render;
@@ -119,11 +121,50 @@ fn rendered(result: &QueryResult, dialect: Dialect) -> String {
     out
 }
 
+#[derive(Default)]
+struct CopiedOut(Vec<u8>);
+
+impl CopyChannel for CopiedOut {
+    fn start_copy_in(&mut self, _start: &CopyStart) -> SqlResult<()> {
+        Ok(())
+    }
+
+    fn read_copy_data(&mut self, _data: &mut Vec<u8>) -> SqlResult<bool> {
+        Ok(false)
+    }
+
+    fn start_copy_out(&mut self, _start: &CopyStart) -> SqlResult<()> {
+        Ok(())
+    }
+
+    fn write_copy_data(&mut self, data: &[u8]) -> SqlResult<()> {
+        self.0.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn finish_copy_out(&mut self) -> SqlResult<()> {
+        Ok(())
+    }
+}
+
 fn outcome(session: &mut Session<'_, MemoryStore>, sql: &str) -> Expected {
     let mut last = None;
     let dialect = session.dialect();
-    match session.execute(sql, &mut |result| last = Some(rendered(&result, dialect))) {
-        Ok(()) => Expected::Output(last.unwrap_or_default()),
+    let mut copied = CopiedOut::default();
+    let ran = session.execute_script(
+        sql,
+        &mut |result| {
+            last = Some(rendered(&result, dialect));
+            true
+        },
+        &mut copied,
+    );
+    match ran {
+        Ok(()) => Expected::Output(format!(
+            "{}{}",
+            String::from_utf8_lossy(&copied.0),
+            last.unwrap_or_default()
+        )),
         Err(error) => Expected::Failure(match error.vendor_code() {
             Some(code) => format!("{} {code}", error.state().code()),
             None => error.state().code().to_owned(),

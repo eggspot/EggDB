@@ -11,7 +11,8 @@
 //! with `WHERE`, inner, left, right, full and cross joins, subqueries, `WITH` queries and set
 //! operations, `GROUP BY` with `count`, `sum`, `avg`, `min` and
 //! `max`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE`,
-//! transaction blocks, and the integer, floating-point, exact `numeric`, boolean, text,
+//! transaction blocks, `COPY ... FROM STDIN` and `COPY ... TO STDOUT` in the text and CSV
+//! formats, and the integer, floating-point, exact `numeric`, boolean, text,
 //! `character(n)`, `bytea`, `uuid`, `date`, `time`, `timetz`, `timestamp`, `timestamptz`,
 //! `interval`, `json` and `jsonb` types. Everything
 //! else answers SQLSTATE `0A000` (feature not supported). The guide is `docs/sql.md` in the
@@ -23,6 +24,7 @@ mod ast;
 mod bytea;
 mod comments;
 mod constraints;
+mod copy;
 mod datetime;
 mod dialect;
 mod encoding;
@@ -65,6 +67,8 @@ mod views;
 #[cfg(test)]
 mod constraint_tests;
 #[cfg(test)]
+mod copy_tests;
+#[cfg(test)]
 mod correctness;
 #[cfg(test)]
 mod index_tests;
@@ -77,6 +81,7 @@ mod subquery_tests;
 #[cfg(test)]
 mod tests;
 
+pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use dialect::Dialect;
 pub use error::{SqlError, SqlResult, SqlState};
 pub use indexes::IndexCheck;
