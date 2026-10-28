@@ -172,6 +172,19 @@ fn syntax(error: &SqlError, text: &str) -> (u16, String) {
         let code = if message.starts_with("An object") { 1038 } else { 102 };
         return (code, message.to_owned());
     }
+    if message.starts_with("INSERT has more") {
+        return (
+            213,
+            "Column name or number of supplied values does not match table definition.".to_owned(),
+        );
+    }
+    if message == "VALUES lists must all be the same length" {
+        return (
+            10709,
+            "The number of columns for each row in a table value constructor must be the same."
+                .to_owned(),
+        );
+    }
     if let Some(rest) = message.strip_prefix("unterminated quoted string at or near \"") {
         let string = rest.trim_end_matches('"').trim_start_matches(['\'', 'N']);
         return (

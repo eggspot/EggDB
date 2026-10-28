@@ -20,6 +20,9 @@ pub struct BatchStep {
     pub statement_start: usize,
     /// Whether a transaction is open after the statement.
     pub in_transaction: bool,
+    /// Whether `SET NOCOUNT ON` is in effect after the statement, so a server leaves the
+    /// count of rows out of its completion.
+    pub no_count: bool,
 }
 
 fn no_transaction(code: u16, message: &str) -> SqlError {
@@ -112,6 +115,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                             outcome: Ok(result),
                             statement_start,
                             in_transaction,
+                            no_count: self.settings.sqlserver.no_count,
                         };
                         if !on_step(step) {
                             return Ok(());
@@ -129,6 +133,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         outcome: Err(error),
                         statement_start,
                         in_transaction,
+                        no_count: self.settings.sqlserver.no_count,
                     };
                     if !on_step(step) || ends_batch {
                         return Ok(());
