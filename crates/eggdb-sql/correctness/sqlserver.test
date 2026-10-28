@@ -42,6 +42,13 @@ SELECT Name FROM Products LIMIT 1
 error 0A000 40517
 SELECT TOP 1 Name FROM Products UNION SELECT Name FROM Products
 
+rows
+SELECT TOP 1 Name AS name FROM Products WHERE ProductID IN (SELECT TOP 3 ProductID FROM Products ORDER BY ProductID) ORDER BY (SELECT 1), Price DESC
+----
+name
+Jam
+SELECT 1
+
 chapter "IDENTITY (Property)"
 rows
 SELECT ProductID AS id, Name AS name FROM Products WHERE Name = N'Tea'

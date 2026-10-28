@@ -379,12 +379,6 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
-    /// Whether SQL Server's `SET NOCOUNT ON` is in effect, so a server leaves the count of
-    /// rows out of each statement's completion.
-    pub fn sqlserver_no_count(&self) -> bool {
-        self.settings.sqlserver.no_count
-    }
-
     fn mysql(&self) -> bool {
         self.dialect == Dialect::MySql
     }

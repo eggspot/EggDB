@@ -100,8 +100,9 @@ impl Parser<'_> {
             return Err(self.not_supported("WITH before INSERT, UPDATE or DELETE"));
         }
         let body = self.set_expression()?;
+        let top = self.pending_top.take();
         let mut tail = self.query_tail()?;
-        if let Some(top) = self.pending_top.take() {
+        if let Some(top) = top {
             if !matches!(body, SetExpr::Select(_)) {
                 return Err(
                     super::sqlserver::not_supported("TOP with UNION, INTERSECT or EXCEPT")
