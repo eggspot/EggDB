@@ -365,8 +365,9 @@ SELECT @@VERSION
   `dbo` is PostgreSQL's `public`, so a table made in Transact-SQL is `public.bakes` to psql.
 - **Statements need no semicolons**: a statement ends where the next one's first word (`SELECT`,
   `INSERT`, `BEGIN`, `SET`, ...) begins. `GO` separates batches in `sqlcmd`, which removes it
-  before sending; EggDB reads it as a syntax error, as SQL Server does (scripts with `GO` for
-  `eggdb restore` come with item 40).
+  before sending; the server reads `GO` as SQL Server does, as an ordinary word (`SELECT 1 GO`
+  names its column `go`; `GO` alone is a syntax error). Scripts with `GO` for `eggdb restore`
+  come with item 40.
 - `SELECT TOP n` and `TOP (expression)`; `N'...'` strings; `--` and nested `/* */` comments;
   the operators `+ - * / % = <> != < > <= >= !< !>`.
 - **Types**: `int`, `bigint`, `smallint`, `decimal`/`numeric(p,s)` (18,0 without a precision,
@@ -1449,6 +1450,10 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   file, and a fifth dialect there is a file-format change of its own (D114, D116, D35); views
   and constraints made in another dialect work from Transact-SQL. A `DEFAULT` is a constant or
   `GETDATE()` and its kin.
+- Accepted where SQL Server refuses or differs: `SELECT name IS NULL FROM t` (a boolean result),
+  an `UPDATE` of an identity column (SQL Server's 8102), and `ROLLBACK TRAN <name>` ignores the
+  name. Divide by zero and arithmetic overflow end the batch, where SQL Server ends only the
+  statement.
 - `DECLARE`, `IF`, `WHILE`, `BEGIN ... END`, `TRY ... CATCH`, `PRINT`, `EXEC`, stored procedures
   and triggers; `SAVE TRANSACTION`; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF`, `ANSI_PADDING OFF`
   and `IMPLICIT_TRANSACTIONS ON`; three-part names and other databases.
