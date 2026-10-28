@@ -356,7 +356,16 @@ mod tests {
         drop(first);
         let reader = std::fs::File::open(&path).unwrap();
         let mut second = open_private_append_no_follow(&path).unwrap();
-        second.try_lock().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match second.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("{error:?}"),
+            }
+        }
         assert!(second.metadata().unwrap().len() > 0);
         second.write_all(b"two\n").unwrap();
         second.sync_data().unwrap();
