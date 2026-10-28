@@ -107,7 +107,7 @@ that can run other statements (an Oracle anonymous block, `CALL`, `EXECUTE IMMED
 counts as destructive too; EggDB does not run any of them yet. `INSERT` in every form, `CREATE`,
 renames, `ADD COLUMN` and the like run without asking.
 
-- **Clients that can ask you** (they declare MCP form elicitation; Claude Code and others do)
+- **Clients that can ask you** (they declare MCP form elicitation in `initialize`)
   get a question from `eggdb mcp` itself before anything is opened: what the statement does, to
   what, whether `CASCADE` takes more with it, and the SQL, with a yes-or-no field that defaults
   to no. Yes runs it; no, closing the question or cancelling the call runs nothing, and the agent

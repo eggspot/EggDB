@@ -867,13 +867,9 @@ pub(crate) fn destructive_part(
 }
 
 pub(crate) fn destructive_summary(statement: &DestructiveStatement) -> String {
-    let mut summary = format!(
-        "{} of {}",
-        statement.kind.label(),
-        listed(&statement.objects)
-    );
+    let mut summary = format!("{}: {}", statement.kind.label(), listed(&statement.objects));
     if statement.cascade {
-        summary.push_str(" with CASCADE");
+        summary.push_str(", with CASCADE");
     }
     summary
 }
@@ -900,7 +896,7 @@ pub(crate) fn needs_confirmation(statement: &DestructiveStatement) -> ToolError 
     ToolError::new(
         "needs_confirmation",
         format!(
-            "{} is destructive and this client cannot ask its user, so the call needs confirm: true. Nothing was run.",
+            "The statement is destructive ({}), and this client cannot ask its user, so the call needs confirm: true. Nothing was run.",
             destructive_summary(statement)
         ),
     )
@@ -911,7 +907,7 @@ pub(crate) fn declined_by_user(statement: &DestructiveStatement) -> ToolError {
     ToolError::new(
         "declined_by_user",
         format!(
-            "The user declined {}. Nothing was run.",
+            "The user declined the destructive statement ({}). Nothing was run.",
             destructive_summary(statement)
         ),
     )
