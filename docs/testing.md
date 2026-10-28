@@ -165,9 +165,14 @@ random bytes) and requires every line that is a request to get exactly one answe
 line of valid JSON, no answer to notifications and responses, no panic, and the database
 unchanged (25,000 cases in CI); a second run sends 2,000 of them through `serve` and counts the
 answers in order. Messages over 4 MiB are refused without being buffered, and so are messages holding more than 100,000 JSON values, before they are parsed. `EGGDB_FUZZ_CASES` and
-`EGGDB_FUZZ_SEED` run longer campaigns. `crates/eggdb-mcp/tests/server.rs` drives every tool and
-rule over an in-memory store, and `crates/eggdb/tests/mcp.rs` drives the built binary as a child
-process, checking that every line on its stdout is a JSON-RPC message.
+`EGGDB_FUZZ_SEED` run longer campaigns. A third run (D121) starts a server with `--allow-write`
+and a client that can be asked, sends 400 destructive `write_sql` calls and answers each
+question with mutated, cut, stray or garbled answers, cancels and pings: every line out must be
+JSON and the statement must never run. `crates/eggdb-mcp/tests/server.rs` drives every tool and
+rule over an in-memory store, `crates/eggdb-mcp/tests/writes.rs` the writes, both confirmation
+paths, the wait for an answer and the commits that must never be reported failed, and
+`crates/eggdb/tests/mcp.rs` drives the built binary as a child process, checking that every line
+on its stdout is a JSON-RPC message.
 
 ## Files from released versions (D96)
 `crates/eggdb/tests/data` holds files written by released versions, which every later version

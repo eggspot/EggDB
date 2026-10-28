@@ -50,7 +50,7 @@ eggdb <command> <file> [arguments] [options]
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s) into the file, with a report (below, and [migrate.md](migrate.md)) |
-| `mcp <file>` | read-only, for each call | serves the file to an AI agent over MCP on stdin and stdout, read-only (below, and [mcp.md](mcp.md)) |
+| `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
 | `audit <file>` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
@@ -792,17 +792,24 @@ ok: every table and row of the dump is in app.db; 3 objects skipped and 1 conseq
 ## `eggdb mcp`
 
 `eggdb mcp <file>` serves the file to an AI agent over the Model Context Protocol on stdin and
-stdout (D11, D119); [mcp.md](mcp.md) is the guide. The agent's client starts it:
+stdout (D11, D119, D121); [mcp.md](mcp.md) is the guide. The agent's client starts it:
 
 ```sh
 claude mcp add mydb -- eggdb mcp /path/to/app.db
+claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
 ```
 
-- **Read-only.** Each call opens the file read-only and closes it after, so the storage refuses
-  any write; between calls the file is free for your own writers. While a call runs (at most
-  `--time-limit` seconds, 5 by default, 1 to 300), a program that wants to write the file is
-  refused.
+- **Read-only unless `--allow-write`.** Each call opens the file read-only and closes it after,
+  so the storage refuses any write; between calls the file is free for your own writers. While a
+  call runs (at most `--time-limit` seconds, 5 by default, 1 to 300), a program that wants to
+  write the file is refused.
+- **`--allow-write`** adds `write_sql`: one statement per call that may change the file, in a
+  transaction of its own, the file opened read-write for that call only. Destructive statements
+  (`DROP`, `TRUNCATE`, dropping a column, constraint or primary key, a column's type change, a
+  `DELETE` or `UPDATE` whose `WHERE` names no column of its table) run only after the user
+  confirms them: through the client's question when it can ask, otherwise through the agent's
+  `confirm: true`. `run_sql` stays read-only.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,
   `sqlite` or `oracle`), `explain_query`, `sample_rows`, `kv_get`, `kv_scan`, and the resource
   `eggdb://schema`.
@@ -829,7 +836,10 @@ last 3 of 41 calls, 2 errors, by claude-code 2.1.0 (the name the client gave)
 - One line per record: the time (UTC), the duration, the tool, `ok` or the error code (with the
   SQLSTATE for `sql_error`), the rows returned (`100+` when cut, `-` for an error) and the
   arguments (the SQL as sent, on one line). Lines are cut at 120 columns; control characters in
-  logged text are shown escaped (`\u001b`). Server starts and time-limit exits are lines too.
+  logged text are shown escaped (`\u001b`). Server starts and time-limit exits are lines too. A
+  confirmed write shows `ok, user confirmed` or `ok, agent confirmed`; a write whose server
+  stopped before it finished shows `unknown`, and the summary counts it; a warning is a line of
+  its own under its call.
 - `-n <count>` (`--limit`) shows the newest lines; the summary on stderr counts every call.
 - `--format json` prints the records, re-encoded as ASCII JSON, one object per line, with the client's
   name and version, the protocol version, the SQLSTATE and the result's size.

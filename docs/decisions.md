@@ -145,3 +145,4 @@ its full title with its status.
 - [D118](decisions/D118.md) `eggdb restore` reads a `pg_dump` plain dump as a stream, one transaction per statement, a new file built aside, and a report of what was skipped
 - [D119](decisions/D119.md) The built-in MCP server, part 1: `eggdb mcp` over stdio, read-only by opening the file read-only for each call, one statement per call, a time, row and byte limit per call, results marked as data
 - [D120](decisions/D120.md) The MCP audit log: a sidecar `<file>.mcp-audit.jsonl`, one JSON line per call written and synced before the result is sent, opened anew for each record, not tamper-evident
+- [D121](decisions/D121.md) The built-in MCP server, part 2: `write_sql` under `--allow-write`, destructive statements confirmed by the user through elicitation or `confirm: true`, the watchdog never ending a write that began to commit
