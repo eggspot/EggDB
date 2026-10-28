@@ -68,8 +68,11 @@ dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..
   at most 16 MiB in a call (SQLSTATE `54000`), so a call cannot take gigabytes of memory by
   doubling a string; stored values of any size are still read. EggDB's own limit for other
   sessions stays 1 GiB per statement (D100); an engine-wide value limit like PostgreSQL's 1 GB
-  is on the roadmap. Likewise one row a statement builds may be at most 64 MiB, so a select list
-  copying a large value into many columns stops early.
+  is on the roadmap. Likewise one row a statement builds may be at most 64 MiB, and so may the
+  values it holds at once for `GROUP BY` keys, aggregates or a function's arguments, so a
+  statement copying a large value many times stops early. One consequence: a single stored value
+  over 64 MiB cannot be read through `eggdb mcp`, since the row that holds it is over the limit;
+  read it with `eggdb get` or `eggdb sql`.
 - **Run longer than the time limit.** A statement past the limit is stopped and the call
   answers `time_limit`. A statement that cannot be stopped (a long computation that reads
   nothing) is still running a second after the limit: the server records it in the audit file

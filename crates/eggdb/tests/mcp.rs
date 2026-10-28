@@ -541,3 +541,80 @@ fn values_too_large_for_a_call_fail_fast_instead_of_taking_gigabytes() {
     let (status, _) = mcp.finish();
     assert!(status.success());
 }
+
+#[test]
+fn every_way_of_holding_many_large_values_at_once_stops_at_the_row_limit() {
+    let (file, _audit) = sample("mcp-wide-families", 0);
+    let mut mcp = Mcp::start(file.path(), &["--time-limit", "60"]);
+    mcp.initialize();
+    let doubled = "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 24)";
+    let copies = |prefix: &str| {
+        (0..20)
+            .map(|copy| format!("{prefix}s || '{copy}')"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let plain = |separator: &str| {
+        (0..20)
+            .map(|copy| format!("s || '{copy}'"))
+            .collect::<Vec<_>>()
+            .join(separator)
+    };
+    for (family, sql) in [
+        (
+            "GROUP BY keys",
+            format!(
+                "{doubled} SELECT count(*) FROM (SELECT n FROM r WHERE n = 24 GROUP BY n, {}) AS q",
+                plain(", ")
+            ),
+        ),
+        (
+            "aggregate states",
+            format!(
+                "{doubled} SELECT count(*) FROM (SELECT {} FROM r WHERE n = 24) AS q",
+                copies("max(")
+            ),
+        ),
+        (
+            "function arguments",
+            format!(
+                "{doubled} SELECT length(greatest({})) FROM r WHERE n = 24",
+                plain(", ")
+            ),
+        ),
+        (
+            "ORDER BY keys",
+            format!(
+                "{doubled} SELECT n FROM r WHERE n = 24 ORDER BY {}",
+                plain(", ")
+            ),
+        ),
+        (
+            "DISTINCT rows",
+            format!(
+                "{doubled} SELECT count(*) FROM (SELECT DISTINCT {} FROM r WHERE n = 24) AS q",
+                plain(", ")
+            ),
+        ),
+        (
+            "set operations",
+            format!(
+                "{doubled} SELECT count(*) FROM (SELECT {0} FROM r WHERE n = 24 UNION SELECT {0} FROM r WHERE n = 23) AS q",
+                plain(", ")
+            ),
+        ),
+    ] {
+        let start = std::time::Instant::now();
+        let answer = mcp.call("run_sql", &format!(r#"{{"sql":"{sql}"}}"#));
+        assert_eq!(error_code(&answer), "sql_error", "{family}: {answer:?}");
+        let state = text_at(result(&answer), &["error", "sqlstate"]);
+        assert!(state == "54000" || state == "53200", "{family}: {state}");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "{family}: {:?}",
+            start.elapsed()
+        );
+    }
+    let (status, _) = mcp.finish();
+    assert!(status.success());
+}
