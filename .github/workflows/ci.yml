@@ -216,8 +216,45 @@ jobs:
           overwrite: true
           if-no-files-found: warn
 
+  pg-restore:
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['16', '17']
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-pg-restore-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Start the official postgres:${{ matrix.postgres }} container (test oracle only, never shipped)
+        run: |
+          docker run -d --name pg --network host -e POSTGRES_HOST_AUTH_METHOD=trust "postgres:${{ matrix.postgres }}"
+          for _ in $(seq 1 60); do
+            docker exec pg pg_isready -h 127.0.0.1 -U postgres -q && break
+            sleep 1
+          done
+          docker exec pg pg_isready -h 127.0.0.1 -U postgres
+      - name: Dump the fixture plain, with inserts and as an archive, restore each into EggDB and compare every table
+        env:
+          PG_CONTAINER: pg
+          PGHOST: 127.0.0.1
+          PGUSER: postgres
+        run: scripts/pg-restore/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-restore" --rows 50000
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare]
+    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
