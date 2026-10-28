@@ -1072,6 +1072,10 @@ fn add_identity(
         ),
     };
     let position = sequence.map_or(column.position, |given| given.position);
+    let sequence_schema = crate::schemas::schema_of(&sequence_name);
+    if !crate::schemas::schema_exists(writer, sequence_schema)? {
+        return Err(crate::schemas::missing_schema(sequence_schema, dialect).at(position));
+    }
     let owner = if crate::schemas::is_qualified(name) {
         name.to_owned()
     } else {
