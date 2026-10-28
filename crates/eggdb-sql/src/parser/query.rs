@@ -498,6 +498,9 @@ impl Parser<'_> {
         let all = self.is_word("all");
         self.at += 1;
         if !(self.is_word_at(1, "select") || self.is_word_at(1, "with")) {
+            if self.postgresql() {
+                return self.quantified_array(left, operator, all);
+            }
             return Err(self.not_supported("ANY, SOME and ALL over a list or an array"));
         }
         let position = left.position;
@@ -511,9 +514,130 @@ impl Parser<'_> {
         )
     }
 
+    fn quantified_array(
+        &mut self,
+        left: Expr,
+        operator: BinaryOperator,
+        all: bool,
+    ) -> SqlResult<Expr> {
+        let position = left.position;
+        self.expect(&TokenKind::LeftParen)?;
+        let entry_depth = self.depth;
+        let elements = self.array_operand();
+        self.depth = entry_depth;
+        let elements = elements?;
+        self.expect(&TokenKind::RightParen)?;
+        let membership = match (operator, all) {
+            (BinaryOperator::Equal, false) => Some(false),
+            (BinaryOperator::NotEqual, true) => Some(true),
+            _ => None,
+        };
+        if elements.is_empty() {
+            let constant = || Expr {
+                kind: ExprKind::Literal(Literal::Boolean(all)),
+                position,
+            };
+            return Ok(Expr {
+                kind: if all {
+                    ExprKind::And(vec![constant(), constant()])
+                } else {
+                    ExprKind::Or(vec![constant(), constant()])
+                },
+                position,
+            });
+        }
+        if let Some(negated) = membership {
+            return Ok(Expr {
+                kind: ExprKind::InList {
+                    expr: Box::new(left),
+                    list: elements,
+                    negated,
+                },
+                position,
+            });
+        }
+        if !is_cheap_to_repeat(&left) {
+            return Err(SqlError::not_supported(
+                "ANY and ALL over an array with this operator on anything but a column or a constant",
+            )
+            .at(position));
+        }
+        let mut comparisons: Vec<Expr> = elements
+            .into_iter()
+            .map(|element| Self::binary(left.clone(), operator, element))
+            .collect();
+        if comparisons.len() == 1 {
+            return Ok(comparisons.remove(0));
+        }
+        Ok(Expr {
+            kind: if all {
+                ExprKind::And(comparisons)
+            } else {
+                ExprKind::Or(comparisons)
+            },
+            position,
+        })
+    }
+
+    fn array_operand(&mut self) -> SqlResult<Vec<Expr>> {
+        self.depth += 1;
+        if self.depth > super::MAX_NESTING {
+            return Err(super::too_deep(self.position()));
+        }
+        let mut elements = if self.take(&TokenKind::LeftParen) {
+            let elements = self.array_operand()?;
+            self.expect(&TokenKind::RightParen)?;
+            elements
+        } else if self.is_word("array") && self.peek_kind_at(1) == &TokenKind::LeftBracket {
+            self.at += 2;
+            let mut elements = Vec::new();
+            if !self.take(&TokenKind::RightBracket) {
+                loop {
+                    elements.push(self.expression()?);
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RightBracket)?;
+            }
+            elements
+        } else {
+            return Err(
+                self.not_supported("ANY, SOME and ALL over anything but an ARRAY[...] list")
+            );
+        };
+        while self.take(&TokenKind::DoubleColon) {
+            let sql_type = self.element_type()?;
+            self.expect(&TokenKind::LeftBracket)?;
+            self.expect(&TokenKind::RightBracket)?;
+            elements = elements
+                .into_iter()
+                .map(|element| {
+                    let position = element.position;
+                    Expr {
+                        kind: ExprKind::Cast {
+                            expr: Box::new(element),
+                            sql_type,
+                        },
+                        position,
+                    }
+                })
+                .collect();
+        }
+        Ok(elements)
+    }
+
     pub(super) fn select_core(&mut self) -> SqlResult<Select> {
         let mut select = self.select_clauses()?;
         select.order_by = Vec::new();
         Ok(select)
+    }
+}
+
+fn is_cheap_to_repeat(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Column { .. } | ExprKind::Literal(_) => true,
+        ExprKind::Cast { expr, .. } => is_cheap_to_repeat(expr),
+        _ => false,
     }
 }

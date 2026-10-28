@@ -1,6 +1,6 @@
 use crate::ast::{
     AlterAction, AlterTable, ColumnDefinition, ConstraintKind, ConstraintSpec, CreateIndex,
-    IndexSpec, Name,
+    CreateSequence, IndexSpec, Name, SequenceOptions,
 };
 use crate::constraints::{self, PreparedChecks};
 use crate::dialect::Dialect;
@@ -188,6 +188,20 @@ fn apply(
         AlterAction::SetNotNull { column, not_null } => {
             set_not_null(writer, tables, name, column, *not_null, dialect).map(|()| None)
         }
+        AlterAction::AddIdentity {
+            column,
+            sequence,
+            options,
+        } => add_identity(
+            writer,
+            tables,
+            name,
+            column,
+            sequence.as_ref(),
+            options,
+            dialect,
+        )
+        .map(|()| None),
         AlterAction::SetType { column, sql_type } => {
             set_type(writer, tables, name, column, *sql_type, dialect).map(|()| None)
         }
@@ -999,6 +1013,100 @@ fn set_default(
     }
     let target = &mut table.columns[index];
     target.default = default.map(|(_, text)| text.clone());
+    target.auto_increment = false;
+    save(writer, &table)
+}
+
+fn add_identity(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &Name,
+    sequence: Option<&Name>,
+    options: &SequenceOptions,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let table = current(writer, tables, name)?;
+    let index = column_index(&table, column, dialect)?;
+    let target = &table.columns[index];
+    if !matches!(
+        target.sql_type,
+        SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
+    ) {
+        return Err(SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!(
+                "identity column type must be smallint, integer, or bigint, not {}",
+                target.sql_type.name()
+            ),
+        )
+        .at(column.position));
+    }
+    if target.auto_increment || target.default.is_some() {
+        let shown = crate::schemas::display(name);
+        return Err(SqlError::new(
+            SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+            if target.auto_increment {
+                format!(
+                    "column \"{}\" of relation \"{shown}\" is already an identity column",
+                    column.text
+                )
+            } else {
+                format!(
+                    "column \"{}\" of relation \"{shown}\" already has a default value",
+                    column.text
+                )
+            },
+        )
+        .at(column.position));
+    }
+    let schema = crate::schemas::schema_of(name);
+    let sequence_name = match sequence {
+        Some(given) if crate::schemas::is_qualified(&given.text) => {
+            crate::schemas::normalized(&given.text).to_owned()
+        }
+        Some(given) => crate::schemas::qualified(schema, &given.text),
+        None => crate::schemas::qualified(
+            schema,
+            &format!("{}_{}_seq", crate::schemas::base_name(name), column.text),
+        ),
+    };
+    let position = sequence.map_or(column.position, |given| given.position);
+    let owner = if crate::schemas::is_qualified(name) {
+        name.to_owned()
+    } else {
+        crate::schemas::written_qualified(crate::schemas::DEFAULT_SCHEMA, name)
+    };
+    let mut options = options.clone();
+    if options.sql_type.is_none() {
+        options.sql_type = Some((target.sql_type, column.position));
+    }
+    options.owned_by = Some(Some((
+        Name {
+            text: owner,
+            position: column.position,
+        },
+        column.clone(),
+    )));
+    let create = CreateSequence {
+        name: Name {
+            text: sequence_name.clone(),
+            position,
+        },
+        if_not_exists: false,
+        options,
+    };
+    crate::sequences::create_sequence(writer, tables, &create, dialect)?;
+    set_not_null(writer, tables, name, column, true, dialect)?;
+    let regclass = format!(
+        "{}.{}",
+        crate::schema::quoted(crate::schemas::schema_of(&sequence_name)),
+        crate::schema::quoted(crate::schemas::base_name(&sequence_name))
+    );
+    let default = format!("nextval('{}'::regclass)", regclass.replace('\'', "''"));
+    let mut table = current(writer, tables, name)?;
+    let target = &mut table.columns[index];
+    target.default = Some(default);
     target.auto_increment = false;
     save(writer, &table)
 }

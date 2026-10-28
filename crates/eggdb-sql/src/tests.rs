@@ -589,7 +589,7 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "SELECT age FROM people GROUP BY ROLLUP (age)",
         "SELECT DISTINCT ON (age) age FROM people",
         "SELECT * FROM people, LATERAL (SELECT 1) x",
-        "SELECT 1 = ANY (ARRAY[1])",
+        "SELECT 1 = ANY ('{1}'::int[])",
         "WITH x AS (DELETE FROM people RETURNING id) SELECT * FROM x",
         "INSERT INTO people SELECT * FROM people",
         "ALTER TABLE people RENAME CONSTRAINT a TO b",

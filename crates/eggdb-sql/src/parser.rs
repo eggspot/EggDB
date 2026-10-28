@@ -1072,6 +1072,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("sequence") {
             return self.create_sequence();
         }
+        if self.postgresql() && self.is_word("unlogged") && self.is_word_at(1, "table") {
+            self.at += 1;
+        }
         if self.is_word("temp") || self.is_word("temporary") || self.is_word("unlogged") {
             return Err(self.not_supported("CREATE TEMPORARY or UNLOGGED TABLE"));
         }
@@ -1531,6 +1534,14 @@ impl<'t> Parser<'t> {
         if self.oracle() {
             return self.oracle_type();
         }
+        let sql_type = self.element_type()?;
+        if self.peek_kind() == &TokenKind::LeftBracket || self.is_word("array") {
+            return Err(self.not_supported("array types"));
+        }
+        Ok(sql_type)
+    }
+
+    fn element_type(&mut self) -> SqlResult<SqlType> {
         let token = self.peek();
         let word: &str = match &token.kind {
             TokenKind::Word(word) => word,
@@ -1593,9 +1604,6 @@ impl<'t> Parser<'t> {
                 .at(token.start));
             }
         };
-        if self.peek_kind() == &TokenKind::LeftBracket || self.is_word("array") {
-            return Err(self.not_supported("array types"));
-        }
         Ok(sql_type)
     }
 
@@ -1727,7 +1735,16 @@ impl<'t> Parser<'t> {
         } else {
             self.expect_word("into")?;
         }
-        let table = self.table_reference()?;
+        let start = self.at;
+        let table = match self.table_name() {
+            Ok(name) if self.postgresql() && self.is_word("overriding") => {
+                TableReference::named(name, None)
+            }
+            _ => {
+                self.at = start;
+                self.table_reference()?
+            }
+        };
         let columns = if self.peek_kind() == &TokenKind::LeftParen
             && !self.is_word_at(1, "select")
             && !self.is_word_at(1, "values")
@@ -1737,7 +1754,13 @@ impl<'t> Parser<'t> {
             None
         };
         if self.is_word("overriding") {
-            return Err(self.not_supported("OVERRIDING"));
+            if !self.postgresql() {
+                return Err(self.not_supported("OVERRIDING"));
+            }
+            if !(self.is_word_at(1, "system") && self.is_word_at(2, "value")) {
+                return Err(self.not_supported("OVERRIDING USER VALUE"));
+            }
+            self.at += 3;
         }
         let source = if self.take_word("default") {
             self.expect_word("values")?;

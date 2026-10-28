@@ -778,6 +778,10 @@ pub(crate) fn move_sequence(writer: &mut dyn KeyValueWrite, from: &str, to: &str
 }
 
 pub(crate) fn regclass_name(text: &str) -> SqlResult<String> {
+    regclass_target(text).map(|(name, _)| name)
+}
+
+fn regclass_target(text: &str) -> SqlResult<(String, bool)> {
     let invalid = || {
         SqlError::new(
             SqlState::INVALID_TEXT_REPRESENTATION,
@@ -845,9 +849,9 @@ pub(crate) fn regclass_name(text: &str) -> SqlResult<String> {
         return Err(invalid());
     }
     match parts.as_slice() {
-        [name] => Ok(name.clone()),
-        [schema, name] if schema == "public" || schema == "pg_catalog" => Ok(name.clone()),
-        [schema, name] => Ok(crate::schemas::qualified(schema, name)),
+        [name] => Ok((name.clone(), false)),
+        [schema, name] if schema == "public" || schema == "pg_catalog" => Ok((name.clone(), true)),
+        [schema, name] => Ok((crate::schemas::qualified(schema, name), true)),
         _ => Err(SqlError::not_supported(
             "cross-database references are not implemented",
         )),
@@ -896,7 +900,13 @@ fn sequence_on_path(reader: &dyn KeyValueRead, name: String) -> SqlResult<String
 
 fn argument_name(value: &Value) -> SqlResult<String> {
     match value {
-        Value::Text(text) => regclass_name(text).map(on_path),
+        Value::Text(text) => {
+            regclass_target(text).map(
+                |(name, schema_given)| {
+                    if schema_given { name } else { on_path(name) }
+                },
+            )
+        }
         Value::BigInt(_) | Value::Integer(_) | Value::SmallInt(_) => Err(SqlError::not_supported(
             "sequence object identifiers (OIDs) are not supported yet",
         )),

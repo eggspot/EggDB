@@ -274,6 +274,11 @@ pub(crate) enum AlterAction {
     },
     DropPrimaryKey(usize),
     SetSchema(Name),
+    AddIdentity {
+        column: Name,
+        sequence: Option<Name>,
+        options: SequenceOptions,
+    },
     Accepted,
 }
 
