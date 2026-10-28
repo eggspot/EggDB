@@ -189,6 +189,9 @@ pub struct QueryResult {
     /// its `INTEGER PRIMARY KEY` (given or assigned), or the hidden row id of a table without
     /// a primary key. SQLite's `last_insert_rowid()` returns it afterwards.
     pub last_insert_rowid: Option<i64>,
+    /// The last value this statement gave a SQL Server `IDENTITY` (auto-increment) column,
+    /// given or generated, which SQL Server's `SCOPE_IDENTITY()` returns afterwards.
+    pub last_identity_value: Option<i64>,
 }
 
 impl QueryResult {
@@ -201,6 +204,7 @@ impl QueryResult {
             warnings: Vec::new(),
             last_insert_id: None,
             last_insert_rowid: None,
+            last_identity_value: None,
         }
     }
 
@@ -213,6 +217,7 @@ impl QueryResult {
             warnings: Vec::new(),
             last_insert_id: None,
             last_insert_rowid: None,
+            last_identity_value: None,
         }
     }
 
@@ -291,6 +296,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     max_value_bytes: usize,
     max_row_bytes: usize,
     batch_resume: Option<(usize, usize)>,
+    sqlserver_status: crate::sqlserver_functions::SessionStatus,
     statement_start: usize,
 }
 
@@ -326,6 +332,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             max_value_bytes: usize::MAX,
             max_row_bytes: usize::MAX,
             batch_resume: None,
+            sqlserver_status: crate::sqlserver_functions::SessionStatus::default(),
             statement_start: 0,
         }
     }
@@ -993,6 +1000,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 return Ok(Flow::Finished { inline_end });
             }
             self.statement_start = parser.position();
+            let _status = self.enter_sqlserver_status();
             let _constraints = crate::constraints::enter(
                 self.dialect,
                 !self.sqlite() || self.settings.sqlite.foreign_keys,
@@ -1144,6 +1152,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
         if self.oracle() {
             oracle::after_statement(&mut result);
+            return result;
+        }
+        if self.sqlserver() {
+            self.sqlserver_after_statement(&result);
             return result;
         }
         if !self.mysql() {

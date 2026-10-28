@@ -335,9 +335,13 @@ SELECT @@VERSION" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd failed: $(cat sqlcm
     run_sqlcmd pg-secret -Q "SELECT * FROM missing" > sqlcmd.out 2>&1 || true
     grep -q "Msg 208, Level 16, State 1" sqlcmd.out || fail "sqlcmd's missing table said $(cat sqlcmd.out)"
     grep -q "Invalid object name 'missing'" sqlcmd.out || fail "sqlcmd's missing table said $(cat sqlcmd.out)"
+    run_sqlcmd pg-secret -b -h -1 -W -Q "CREATE TABLE [dbo].[Typed] ([id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [flag] [bit] NOT NULL, [price] [money] NULL, [at] [datetime2](7) NULL, [guid] [uniqueidentifier] NULL, [bytes] [varbinary](max) NULL)
+INSERT INTO [dbo].[Typed] ([flag], [price], [at], [guid], [bytes]) VALUES (1, 32.3800, CAST(N'2020-07-04T13:05:09.1234567' AS DateTime2), N'6f9619ff-8b86-d011-b42d-00c04fc964ff', 0x0102FF), (0, NULL, NULL, NULL, NULL)
+SELECT CONVERT(varchar(10), [at], 103) + '|' + CONVERT(varchar(36), [guid]) + '|' + CAST(CAST([price] AS decimal(10,2)) AS varchar(20)) FROM [dbo].[Typed] ORDER BY [id] OFFSET 0 ROWS FETCH NEXT 1 ROW ONLY" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd's typed batch failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
+    grep -qx '04/07/2020|6F9619FF-8B86-D011-B42D-00C04FC964FF|32.38' sqlcmd.out || fail "sqlcmd's typed batch printed $(cat sqlcmd.out) server: $(cat serve.err)"
     run_sqlcmd wrong -b -Q "SELECT 1" > sqlcmd.out 2>&1 && fail "sqlcmd connected with a wrong password"
     grep -q "Login failed for user 'eggdb'" sqlcmd.out || fail "a wrong sqlcmd password said $(cat sqlcmd.out)"
-    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches and an -i script with GO; errors and a wrong password are refused"
+    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches, SQL Server types and an -i script with GO; errors and a wrong password are refused"
   else
     echo "skip sqlcmd: EGGDB_SMOKE_SQLCMD names no go-sqlcmd binary (CI's Linux job downloads one; a sqlcmd on PATH is never used)"
   fi

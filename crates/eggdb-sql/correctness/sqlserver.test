@@ -131,11 +131,19 @@ a|b
 café|it's
 SELECT 1
 
-error 0A000 40517
+rows
 SELECT 'a' + 'b' AS c
+----
+c
+ab
+SELECT 1
 
-error 0A000 40517
+rows
 SELECT N'1' + 2 AS c
+----
+c
+3
+SELECT 1
 
 rows
 SELECT 1 + 2 * 3 AS n, 7 / 2 AS q, 7 % 3 AS r
@@ -168,11 +176,15 @@ SELECT 'a' || 'b' AS x
 error 42601 102
 SELECT 1::int AS x
 
-error 42883 40517
+error 22P02 245
 SELECT Name + 1 AS x FROM Products
 
-error 42883 40517
-SELECT Name + Name AS x FROM Products
+rows
+SELECT Name + Name AS x FROM Products WHERE ProductID = 1
+----
+x
+BreadBread
+SELECT 1
 
 error 42883 8117
 SELECT sum(Name) AS x FROM Products
@@ -195,11 +207,11 @@ n
 5
 SELECT 1
 
-error 42704 2715
-CREATE TABLE Bits (id INT PRIMARY KEY, flag BIT)
+error 0A000 40517
+CREATE TABLE Versions (id INT PRIMARY KEY, version ROWVERSION)
 
 error 42704 2715
-CREATE TABLE Money (id INT PRIMARY KEY, amount MONEY)
+CREATE TABLE Odd (id INT PRIMARY KEY, amount NOTATYPE)
 
 chapter "@@ Functions", "Built-in Functions"
 rows
@@ -359,3 +371,345 @@ SELECT 1 AS a GO
 
 ok
 DROP TABLE [Order Details]
+
+chapter "Data type conversion (Database Engine)", "Data type precedence (Transact-SQL)"
+rows
+SELECT 1 + '1' AS n
+----
+n
+2
+SELECT 1
+
+error 22P02 245
+SELECT 1 + ' is not a string.' AS n
+
+rows
+SELECT CAST('abc' AS char(5)) + '#' AS padded, CAST('abcdef' AS varchar(3)) AS cut, CAST(1234567 AS varchar) AS plain
+----
+padded|cut|plain
+abc  #|abc|1234567
+SELECT 1
+
+chapter "CAST and CONVERT (Transact-SQL)"
+rows
+SELECT CAST(10.3496847 AS money) AS m
+----
+m
+10.3497
+SELECT 1
+
+rows
+SELECT CAST(10.6496 AS int) AS trunc1, CAST(-10.6496 AS int) AS trunc2
+----
+trunc1|trunc2
+10|-10
+SELECT 1
+
+rows
+SELECT CONVERT(varchar(10), CAST('2020-07-04' AS date), 101) AS us, CONVERT(varchar(10), CAST('2020-07-04' AS date), 103) AS uk, CONVERT(varchar(8), CAST('2020-07-04' AS date), 112) AS iso, CONVERT(varchar(10), CAST('2020-07-04' AS date), 23) AS odbc
+----
+us|uk|iso|odbc
+07/04/2020|04/07/2020|20200704|2020-07-04
+SELECT 1
+
+rows
+SELECT CONVERT(varchar(19), CAST('2020-07-04 13:05:09' AS datetime), 120) AS odbc, CONVERT(varchar(23), CAST('2020-07-04 13:05:09.12' AS datetime), 121) AS canonical, CONVERT(varchar(30), CAST('2020-07-04 13:05:09' AS datetime), 126) AS iso8601
+----
+odbc|canonical|iso8601
+2020-07-04 13:05:09|2020-07-04 13:05:09.120|2020-07-04T13:05:09
+SELECT 1
+
+rows
+SELECT CONVERT(date, '04/07/2020', 103) AS uk, CONVERT(date, '04/07/2020', 101) AS us
+----
+uk|us
+2020-07-04|2020-04-07
+SELECT 1
+
+error 22023 281
+SELECT CONVERT(varchar(30), CAST('2020-07-04' AS date), 999) AS d
+
+error 42846 529
+SELECT CAST(CAST('2020-01-01' AS date) AS int) AS n
+
+rows
+SELECT CAST('6F9619FF-8B86-D011-B42D-00C04FC964FF' AS uniqueidentifier) AS g, CONVERT(uniqueidentifier, N'0E984725-C51C-4BF4-9960-E1C80E27ABA0wrong') AS truncated
+----
+g|truncated
+6F9619FF-8B86-D011-B42D-00C04FC964FF|0E984725-C51C-4BF4-9960-E1C80E27ABA0
+SELECT 1
+
+chapter "bit (Transact-SQL)", "tinyint (Transact-SQL)", "money and smallmoney (Transact-SQL)"
+rows
+SELECT CAST('TRUE' AS bit) AS t, CAST('false' AS bit) AS f, CAST(2 AS bit) AS two
+----
+t|f|two
+1|0|1
+SELECT 1
+
+error 22003 220
+SELECT CAST(256 AS tinyint) AS n
+
+error 22003 8115
+SELECT CAST(214748.3648 AS smallmoney) AS n
+
+rows
+SELECT CAST(214748.3647 AS smallmoney) AS n
+----
+n
+214748.3647
+SELECT 1
+
+chapter "datetime (Transact-SQL)", "smalldatetime (Transact-SQL)"
+rows
+SELECT CAST('01/01/98 23:59:59.999' AS datetime) AS a, CAST('01/01/98 23:59:59.996' AS datetime) AS b, CAST('01/01/98 23:59:59.992' AS datetime) AS c, CAST('01/01/98 23:59:59.991' AS datetime) AS d
+----
+a|b|c|d
+1998-01-02 00:00:00.000|1998-01-01 23:59:59.997|1998-01-01 23:59:59.993|1998-01-01 23:59:59.990
+SELECT 1
+
+error 22007 241
+SELECT CAST('2020-01-01 10:00:00.1234' AS datetime) AS d
+
+rows
+SELECT CAST('2000-05-08 12:35:29.998' AS smalldatetime) AS down, CAST('2000-05-08 12:35:29.999' AS smalldatetime) AS up
+----
+down|up
+2000-05-08 12:35:00|2000-05-08 12:36:00
+SELECT 1
+
+rows
+SELECT CAST('01/01/60' AS date) AS sixty, CAST('01/01/49' AS date) AS fortynine
+----
+sixty|fortynine
+1960-01-01|2049-01-01
+SELECT 1
+
+chapter "Date and time data types and functions (Transact-SQL)"
+rows
+SELECT CAST('2007-05-08 12:35:29.1234567 +12:15' AS date) AS d, CAST('2007-05-08 12:35:29.123' AS smalldatetime) AS s, CAST('2007-05-08 12:35:29.123' AS datetime) AS dt
+----
+d|s|dt
+2007-05-08|2007-05-08 12:35:00|2007-05-08 12:35:29.123
+SELECT 1
+
+rows
+SELECT CAST('2007-05-08 12:35:29.1234567 +12:15' AS datetime2(7)) AS d
+----
+d
+2007-05-08 12:35:29.1234567
+SELECT 1
+... differs
+
+rows
+SELECT CAST('2007-05-08 12:35:29.1234567 +12:15' AS time(7)) AS t
+----
+t
+12:35:29.1234567
+SELECT 1
+... differs
+
+rows
+SELECT CAST('2007-05-08 12:35:29.1234567 +12:15' AS datetimeoffset(7)) AS o
+----
+o
+2007-05-08 12:35:29.1234567 +12:15
+SELECT 1
+... differs
+
+chapter "DATEADD (Transact-SQL)"
+rows
+SELECT DATEADD(month, 1, '20060830') AS a, DATEADD(month, 1, '20060831') AS b
+----
+a|b
+2006-09-30 00:00:00.000|2006-09-30 00:00:00.000
+SELECT 1
+
+error 22008 517
+SELECT DATEADD(year, 2147483647, '20060731') AS d
+
+error 22023 9810
+SELECT DATEADD(hour, 1, CAST('2020-01-01' AS date)) AS d
+
+error 22023 155
+SELECT DATEADD(fortnight, 1, '20060731') AS d
+
+chapter "DATEDIFF (Transact-SQL)"
+rows
+SELECT DATEDIFF(year, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS y, DATEDIFF(quarter, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS q, DATEDIFF(month, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS m, DATEDIFF(dayofyear, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS dy, DATEDIFF(day, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS d, DATEDIFF(week, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS wk, DATEDIFF(hour, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS hh, DATEDIFF(minute, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS mi, DATEDIFF(second, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS ss, DATEDIFF(millisecond, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS ms, DATEDIFF(microsecond, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS mcs
+----
+y|q|m|dy|d|wk|hh|mi|ss|ms|mcs
+1|1|1|1|1|1|1|1|1|1|1
+SELECT 1
+
+rows
+SELECT DATEDIFF(nanosecond, '2005-12-31 23:59:59.9999999', '2006-01-01 00:00:00.0000000') AS ns
+----
+ns
+100
+SELECT 1
+... differs
+
+rows
+SELECT DATEDIFF(week, '2020-01-04', '2020-01-05') AS sunday, DATEDIFF(day, '2020-01-05', '2020-01-04') AS back
+----
+sunday|back
+1|-1
+SELECT 1
+
+error 22003 535
+SELECT DATEDIFF(millisecond, '0001-01-01', '9999-12-31') AS ms
+
+chapter "ISNULL (Transact-SQL)", "CHARINDEX (Transact-SQL)", "LEN (Transact-SQL)", "NEWID (Transact-SQL)"
+ok
+CREATE TABLE T39 (id INT IDENTITY(1,1) NOT NULL PRIMARY KEY, qty INT NOT NULL, short VARCHAR(3) NULL)
+
+ok
+INSERT INTO T39 (qty, short) VALUES (5, NULL), (6, 'ab'), (7, NULL)
+
+rows
+SELECT id, ISNULL(short, 'abcdef') AS s, ISNULL(NULL, 50) AS n FROM T39 ORDER BY id
+----
+id|s|n
+1|abc|50
+2|ab|50
+3|abc|50
+SELECT 3
+
+rows
+SELECT CHARINDEX('bicycle', 'Reflectors are vital safety components of your bicycle.') AS a, CHARINDEX('vital', 'Reflectors are vital safety components of your bicycle.', 5) AS b, CHARINDEX('bike', 'Reflectors are vital safety components of your bicycle.') AS c
+----
+a|b|c
+48|16|0
+SELECT 1
+
+rows
+SELECT LEN('abc  ') AS trailing, LEN('  abc') AS leading, LEN(CAST(NEWID() AS char(36))) AS guid
+----
+trailing|leading|guid
+3|5|36
+SELECT 1
+
+chapter "SCOPE_IDENTITY (Transact-SQL)", "@@ROWCOUNT (Transact-SQL)"
+rows
+SELECT SCOPE_IDENTITY() AS id
+----
+id
+3
+SELECT 1
+
+ok
+UPDATE T39 SET qty = qty + 1 WHERE id <= 2
+
+rows
+SELECT @@ROWCOUNT AS n
+----
+n
+2
+SELECT 1
+
+ok
+SET NOCOUNT OFF
+
+rows
+SELECT @@ROWCOUNT AS n
+----
+n
+0
+SELECT 1
+
+chapter "SELECT - ORDER BY Clause (Transact-SQL)"
+rows
+SELECT id FROM T39 ORDER BY id OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+----
+id
+2
+3
+SELECT 2
+
+rows
+SELECT id FROM T39 ORDER BY id DESC OFFSET 0 ROWS FETCH FIRST 1 ROW ONLY
+----
+id
+3
+SELECT 1
+
+rows
+SELECT id FROM T39 ORDER BY id OFFSET 2 ROWS
+----
+id
+3
+SELECT 1
+
+error 42601 102
+SELECT id FROM T39 OFFSET 1 ROWS
+
+error 42601 10741
+SELECT TOP 1 id FROM T39 ORDER BY id OFFSET 1 ROWS
+
+chapter "OUTPUT Clause (Transact-SQL)"
+rows
+INSERT INTO T39 (qty) OUTPUT INSERTED.id, inserted.qty VALUES (8)
+----
+id|qty
+4|8
+INSERT 0 1
+
+rows
+UPDATE T39 SET qty = 9 OUTPUT inserted.qty WHERE id = 4
+----
+qty
+9
+UPDATE 1
+
+rows
+DELETE FROM T39 OUTPUT deleted.id WHERE id = 4
+----
+id
+4
+DELETE 1
+
+error 0A000 40517
+UPDATE T39 SET qty = 1 OUTPUT deleted.qty WHERE id = 1
+
+chapter "SELECT - SELECT Clause (Transact-SQL)", "COUNT (Transact-SQL)"
+rows
+SELECT total = qty * 2, 'label' = short FROM T39 WHERE id = 2
+----
+total|label
+14|ab
+SELECT 1
+
+rows
+SELECT COUNT(*) AS n FROM T39
+----
+n
+3
+SELECT 1
+
+chapter "Constants (Transact-SQL)", "binary and varbinary (Transact-SQL)", "sysname"
+rows
+SELECT 0x0102FF AS b, 0x AS e, 0x123 AS odd
+----
+b|e|odd
+0x0102FF|0x|0x0123
+SELECT 1
+
+ok
+CREATE TABLE Names39 (name sysname NOT NULL PRIMARY KEY, data VARBINARY(MAX) NULL)
+
+ok
+INSERT INTO Names39 VALUES (N'one', 0xCAFE)
+
+rows
+SELECT name, data + 0x00 AS data FROM Names39
+----
+name|data
+one|0xCAFE00
+SELECT 1
+
+ok
+DROP TABLE Names39
+
+ok
+DROP TABLE T39

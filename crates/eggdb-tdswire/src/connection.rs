@@ -64,6 +64,17 @@ pub(crate) fn printable(text: &str) -> String {
     shown
 }
 
+fn changed_rows(tag: &str) -> Option<(u16, u64)> {
+    let mut words = tag.split_whitespace();
+    let command = match words.next()? {
+        "INSERT" => INSERT_COMMAND,
+        "UPDATE" => UPDATE_COMMAND,
+        "DELETE" => DELETE_COMMAND,
+        _ => return None,
+    };
+    Some((command, words.last()?.parse().ok()?))
+}
+
 fn version_bytes() -> [u8; 4] {
     let mut parts = SQLSERVER_COMPATIBLE_VERSION
         .split('.')
@@ -726,10 +737,14 @@ impl StepWriter<'_, '_> {
                     return false;
                 }
             }
+            let (command, rows) = match changed_rows(&result.tag) {
+                Some(changed) => changed,
+                None => (SELECT_COMMAND, result.rows.len() as u64),
+            };
             *self.pending = Some(PendingDone {
                 status: count,
-                command: SELECT_COMMAND,
-                rows: result.rows.len() as u64,
+                command,
+                rows,
             });
             return true;
         }

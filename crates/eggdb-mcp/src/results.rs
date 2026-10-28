@@ -204,6 +204,7 @@ mod tests {
             warnings: Vec::new(),
             last_insert_id: None,
             last_insert_rowid: None,
+            last_identity_value: None,
         };
         let mut out = JsonOut::new();
         out.begin_object();

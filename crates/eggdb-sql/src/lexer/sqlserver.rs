@@ -50,10 +50,7 @@ impl<'t> Lexer<'t> {
                 self.at += 1;
                 Ok(TokenKind::Dot)
             }
-            b'0' if matches!(self.peek(1), Some(b'x' | b'X')) => Err(SqlError::not_supported(
-                "binary literals (0x...) are not supported in this version of EggDB",
-            )
-            .at(self.at)),
+            b'0' if matches!(self.peek(1), Some(b'x' | b'X')) => self.binary_literal(),
             b'0'..=b'9' => self.number(),
             b'\'' => self.string(false),
             b'n' | b'N' if self.peek(1) == Some(b'\'') => {
@@ -85,6 +82,21 @@ impl<'t> Lexer<'t> {
                 Err(incorrect_syntax(&character.to_string(), self.at))
             }
         }
+    }
+
+    fn binary_literal(&mut self) -> SqlResult<TokenKind<'t>> {
+        let start = self.at;
+        self.at += 2;
+        let digits_start = self.at;
+        while self.peek(0).is_some_and(|byte| byte.is_ascii_hexdigit()) {
+            self.at += 1;
+        }
+        if self.peek(0).is_some_and(is_sqlserver_identifier_part) {
+            let rest = &self.text[start..];
+            let near: String = rest.chars().take(self.at - start + 1).collect();
+            return Err(incorrect_syntax(&near, start));
+        }
+        Ok(TokenKind::Binary(&self.text[digits_start..self.at]))
     }
 
     fn sqlserver_word(&mut self) -> SqlResult<TokenKind<'t>> {
@@ -230,11 +242,19 @@ mod tests {
     }
 
     #[test]
-    fn temporary_tables_binary_literals_and_long_names_are_refused() {
-        for text in ["SELECT * FROM #t", "SELECT 0x0102"] {
-            let error = tokenize_in(text, Dialect::SqlServer).expect_err(text);
-            assert_eq!(error.state().code(), "0A000", "{text}");
+    fn binary_literals_are_hexadecimal_digits_after_0x() {
+        for (text, digits) in [("0x0102FF", "0102FF"), ("0x", ""), ("0X123", "123")] {
+            let tokens = tokenize_in(text, Dialect::SqlServer).expect(text);
+            assert_eq!(tokens[0].kind, TokenKind::Binary(digits), "{text}");
         }
+        let error = tokenize_in("SELECT 0xZ1", Dialect::SqlServer).expect_err("0xZ1");
+        assert_eq!(error.state().code(), "42601");
+    }
+
+    #[test]
+    fn temporary_tables_and_long_names_are_refused() {
+        let error = tokenize_in("SELECT * FROM #t", Dialect::SqlServer).expect_err("#t");
+        assert_eq!(error.state().code(), "0A000");
         let long = format!("SELECT [{}]", "x".repeat(64));
         let error = tokenize_in(&long, Dialect::SqlServer).expect_err("long");
         assert_eq!(error.state().code(), "42622");

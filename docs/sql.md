@@ -370,16 +370,46 @@ SELECT @@VERSION
   come with item 40.
 - `SELECT TOP n` and `TOP (expression)`; `N'...'` strings; `--` and nested `/* */` comments;
   the operators `+ - * / % = <> != < > <= >= !< !>`.
-- **Types**: `int`, `bigint`, `smallint`, `decimal`/`numeric(p,s)` (18,0 without a precision,
-  at most 38 digits), `float(n)`, `real`, `char`/`nchar`/`varchar`/`nvarchar(n | max)`
-  (1 when no length is given), `text`, `ntext`, `date` and `datetime2(n)`.
+- **Types** (item 39, D123), written bare or bracketed in any case (`[decimal](18, 2)`, `AS
+  DateTime2`), each kept as one of the engine's types, so PostgreSQL SQL reads the same columns:
+
+  | SQL Server | Kept as | Notes |
+  | --- | --- | --- |
+  | `int`, `bigint`, `smallint`, `tinyint` | `integer`, `bigint`, `smallint`, `smallint` | `CAST` to `tinyint` checks 0-255 (error 220) |
+  | `bit` | `boolean` | 1, 0 and NULL; `'TRUE'`/`'FALSE'` and any non-zero number convert; printed `1`/`0` |
+  | `decimal`/`numeric(p,s)`, `money`, `smallmoney` | `numeric(p,s)`, `numeric(19,4)`, `numeric(10,4)` | 18,0 without a precision, at most 38 digits; money rounds to 4 places |
+  | `float(n)`, `real` | `double precision`, `real` | `float(1..24)` is `real` |
+  | `date`, `time(n)` | `date`, `time(n)` | |
+  | `datetime`, `smalldatetime`, `datetime2(n)` | `timestamp(3)`, `timestamp(0)`, `timestamp(n)` | `CAST` rounds `datetime` to 1/300 s and `smalldatetime` to the minute |
+  | `datetimeoffset(n)` | `timestamptz(n)` | the same instant, shown in UTC (`+00:00`) |
+  | `uniqueidentifier` | `uuid` | printed in upper case |
+  | `char`/`nchar`/`varchar`/`nvarchar(n \| max)`, `text`, `ntext`, `sysname` | `character(n)`, `varchar(n)`, `text`, `varchar(128)` | 1 when no length is given (30 in `CAST`) |
+  | `binary(n)`, `varbinary(n \| max)`, `image` | `bytea` | `0x0102FF` constants; printed as `0x...` |
+
+  `rowversion`/`timestamp`, `sql_variant`, `xml`, `hierarchyid` and the spatial types are error
+  40517. Seven fractional digits are read and the seventh is dropped (`.9999999` stays in its
+  second).
+- **Conversions follow SQL Server's rules** for `CAST`, `CONVERT`, assignment to a column, `+`
+  and comparisons: the operand of lower data type precedence converts to the other's type
+  (`1 + '1'` is 2, `'a' + 1` is error 245, `'1' + '1'` is `11`), a fraction stored into an
+  integer is truncated (`10.6` stores 10), dates are read as SQL Server reads them (ISO 8601,
+  `yyyymmdd`, `mm/dd/yyyy`, month names, two-digit years 00-49 as 20xx), and conversions SQL
+  Server's chart forbids are errors 529 (explicit) and 206 (implicit). `CONVERT` takes the
+  styles 0, 23, 101, 103, 112, 120, 121 and 126.
 - **`IDENTITY` and `IDENTITY(1,1)`** number an integer column that is the first column of the
   primary key, inline or as a table-level `CONSTRAINT ... PRIMARY KEY`. An `INSERT` without a
   column list leaves it out, and an explicit value is error 544, as with `IDENTITY_INSERT OFF`.
 - `GETDATE()` and `CURRENT_TIMESTAMP` (milliseconds), `SYSDATETIME()`, `GETUTCDATE()`,
-  `SYSUTCDATETIME()` (the session's time zone is UTC), `UPPER`, `LOWER`, `ABS`, `COALESCE`,
-  `NULLIF`, `CAST` and the aggregates. `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`,
-  `@@LANGUAGE`. Another function is error 195, another `@@` name or `@variable` error 137.
+  `SYSUTCDATETIME()`, `SYSDATETIMEOFFSET()` (the session's time zone is UTC), `CAST`,
+  `CONVERT`, `ISNULL`, `DATEADD`, `DATEDIFF` (counting boundaries crossed), `CHARINDEX`,
+  `LEN`, `NEWID()`, `SCOPE_IDENTITY()`, `UPPER`, `LOWER`, `ABS`, `COALESCE`, `NULLIF` and the
+  aggregates, `COUNT` returning `int`. `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`,
+  `@@LANGUAGE`, `@@ROWCOUNT`. Another function is error 195, another `@@` name or `@variable`
+  error 137.
+- `ORDER BY ... OFFSET n ROWS [FETCH {FIRST | NEXT} m ROWS ONLY]`, `OUTPUT inserted.*` on
+  `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE`, and `SELECT total = qty * price`.
+- **Defaults** are constants (folded to the column's type: `DEFAULT ((0))` on a `bit` column
+  is false), `GETDATE()` and its kin, `NEWID()` and `NEWSEQUENTIALID()`.
 - **Transactions**: each statement commits on its own unless `BEGIN TRAN[SACTION]` opened a
   transaction; `BEGIN TRAN` nests (`@@TRANCOUNT`), the outermost `COMMIT [TRAN | WORK]`
   commits, `ROLLBACK [TRAN | WORK]` rolls everything back, and without a transaction they are
@@ -1434,11 +1464,30 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - Names and aliases come back in lower case; a mixed-case table made in PostgreSQL with quotes
   (`"Users"`) cannot be named from Transact-SQL.
 - Comparisons are binary (the collation reported is Latin1_General_100_BIN2): `'a' = 'A'` is
-  false, and trailing spaces count.
-- `+` with a string operand is not supported yet (40517), and nor are the types `bit`,
-  `tinyint`, `money`, `datetime`, `datetimeoffset`, `uniqueidentifier`, `varbinary` and `time`
-  (item 39), `alias = expression`, `ISNULL`, `CONVERT`, `OFFSET ... FETCH`, `TOP ... PERCENT`
-  and `WITH TIES`, `OUTPUT`, `SELECT ... INTO` and `#temporary` tables.
+  false, ordering is by code point, and trailing spaces count in `varchar` and `nvarchar`
+  (`'a' = 'a '` is false; `char(n)` ignores them), so a script's expected output must not
+  depend on case-insensitive comparison or ordering.
+- A column keeps the engine type its SQL Server type maps to, not the SQL Server type (D123):
+  a `tinyint` column accepts -32,768 to 32,767, a `datetime` or `smalldatetime` column keeps
+  what it is given without rounding to 1/300 s or the minute and without the 1753 limit,
+  `money` has `numeric(19,4)`'s slightly wider range, follows decimal arithmetic and prints 4
+  places (SQL Server prints 2), and `binary(n)` and `varbinary(n)` columns neither check their
+  length nor pad. `CAST` and `CONVERT` apply each type's own rules exactly.
+- A `datetimeoffset` keeps its instant but not its offset: values come back in UTC with
+  `+00:00`. `datetime2(7)`, `time(7)` and `datetimeoffset(7)` keep six fractional digits.
+- A `uniqueidentifier` sorts by its bytes in order, not in SQL Server's group order;
+  `NEWSEQUENTIALID()` gives random values, not increasing ones.
+- TDS sends `money` as `decimal(19,4)`, `datetime` as `datetime2(3)` and `tinyint` as
+  `smallint`.
+- `DATEDIFF(nanosecond, ...)` counts microseconds times 1,000; `CONVERT` to `varbinary` of a
+  string takes its UTF-8 bytes.
+- Not yet (item 39b and later): `SUBSTRING`, `LEFT`, `RIGHT`, `REPLACE`, `STUFF`,
+  `REPLICATE`, `SPACE`, `REVERSE`, `TRIM`, `LTRIM`, `RTRIM`, `CONCAT`, `DATALENGTH`, `IIF`,
+  `CHOOSE`, `DATEPART`, `DATENAME`, `YEAR`, `MONTH`, `DAY`, `EOMONTH`, `TRY_CAST`,
+  `TRY_CONVERT`, `DATEDIFF_BIG`, `ROUND`, `CEILING`, `FLOOR`, `COUNT_BIG`, `@@ERROR`,
+  `@@IDENTITY`, the other `CONVERT` styles, `SUM` and `AVG` with SQL Server's result types and
+  decimal division's scale; `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.`
+  in `UPDATE`, `SELECT ... INTO` and `#temporary` tables.
 - An `IDENTITY` seed or increment other than (1,1), and an identity column that is not the
   first column of the primary key; the next number is one more than the largest in the table,
   so a deleted largest value is used again.

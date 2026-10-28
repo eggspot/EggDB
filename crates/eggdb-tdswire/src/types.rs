@@ -18,6 +18,10 @@ pub(crate) enum WireType {
     Bit,
     Decimal { precision: u8, scale: u8 },
     DateTime2 { scale: u8 },
+    Date,
+    Time { scale: u8 },
+    DateTimeOffset { scale: u8 },
+    Guid,
     NVarChar { units: u16 },
     NVarCharMax,
     VarBinary { bytes: u16 },
@@ -68,6 +72,10 @@ impl WireType {
                 out.extend_from_slice(&[0x6A, decimal_bytes(precision), precision, scale]);
             }
             Self::DateTime2 { scale } => out.extend_from_slice(&[0x2A, scale]),
+            Self::Date => out.push(0x28),
+            Self::Time { scale } => out.extend_from_slice(&[0x29, scale]),
+            Self::DateTimeOffset { scale } => out.extend_from_slice(&[0x2B, scale]),
+            Self::Guid => out.extend_from_slice(&[0x24, 16]),
             Self::NVarChar { units } => {
                 out.push(0xE7);
                 out.extend_from_slice(&units.saturating_mul(2).to_le_bytes());
@@ -152,6 +160,80 @@ fn datetime2_parts(value: &Value) -> Option<(i64, i64)> {
         .then_some((days, micros.rem_euclid(MICROS_PER_DAY)))
 }
 
+fn date_from_year_one(value: &Value) -> Option<i64> {
+    let Value::Date(days) = value else {
+        return None;
+    };
+    let days = i64::from(*days) + DAYS_FROM_YEAR_ONE_TO_2000;
+    (0..=LAST_DAY_FROM_YEAR_ONE).contains(&days).then_some(days)
+}
+
+fn utc_parts(value: &Value) -> Option<(i64, i64)> {
+    let Value::TimestampTz(micros) = value else {
+        return None;
+    };
+    datetime2_parts(&Value::Timestamp(*micros))
+}
+
+fn time_of_day(value: &Value) -> Option<i64> {
+    match value {
+        Value::Time(micros) if (0..MICROS_PER_DAY).contains(micros) => Some(*micros),
+        _ => None,
+    }
+}
+
+fn time_units(micros: i64, scale: u8) -> i64 {
+    if scale >= 7 {
+        micros * 10
+    } else {
+        micros / 10i64.pow(6 - u32::from(scale))
+    }
+}
+
+fn push_time(out: &mut Vec<u8>, micros: i64, scale: u8) {
+    let length = usize::from(time_bytes(scale));
+    out.extend_from_slice(&time_units(micros, scale).to_le_bytes()[..length]);
+}
+
+fn guid_bytes(uuid: &[u8; 16]) -> [u8; 16] {
+    let mut out = *uuid;
+    out[..4].reverse();
+    out[4..6].reverse();
+    out[6..8].reverse();
+    out
+}
+
+fn decimal_shape(value: &Value) -> Option<(usize, usize)> {
+    let Value::Numeric(number) = value else {
+        return None;
+    };
+    if number.is_nan() {
+        return None;
+    }
+    let text = number.to_string();
+    let digits = text.trim_start_matches('-');
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    Some((whole.trim_start_matches('0').len(), fraction.len()))
+}
+
+fn unconstrained_decimal(values: &[&Value]) -> Option<WireType> {
+    let mut whole = 0;
+    let mut scale = 0;
+    for value in values {
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        let (digits, places) = decimal_shape(value)?;
+        whole = whole.max(digits);
+        scale = scale.max(places);
+    }
+    let precision = (whole + scale).max(1);
+    (precision <= usize::from(MAX_DECIMAL_PRECISION)).then_some(WireType::Decimal {
+        precision: precision as u8,
+        scale: scale as u8,
+    })
+}
+
 fn fits(kind: WireType, value: &Value) -> bool {
     match (kind, value) {
         (_, Value::Null) => true,
@@ -165,6 +247,10 @@ fn fits(kind: WireType, value: &Value) -> bool {
             scaled_decimal(value, precision, scale).is_some()
         }
         (WireType::DateTime2 { .. }, _) => datetime2_parts(value).is_some(),
+        (WireType::Date, _) => date_from_year_one(value).is_some(),
+        (WireType::Time { .. }, _) => time_of_day(value).is_some(),
+        (WireType::DateTimeOffset { .. }, _) => utc_parts(value).is_some(),
+        (WireType::Guid, Value::Uuid(_)) => true,
         (WireType::NVarChar { units }, _) => {
             character_text(value).is_some_and(|text| utf16_units(text) <= usize::from(units))
         }
@@ -207,6 +293,15 @@ fn candidate(sql_type: SqlType, values: &[&Value]) -> Option<WireType> {
         SqlType::Timestamp(precision) => WireType::DateTime2 {
             scale: precision.unwrap_or(6).min(6),
         },
+        SqlType::Date => WireType::Date,
+        SqlType::Time(precision) => WireType::Time {
+            scale: precision.unwrap_or(6).min(6),
+        },
+        SqlType::TimestampTz(precision) => WireType::DateTimeOffset {
+            scale: precision.unwrap_or(6).min(6),
+        },
+        SqlType::Uuid => WireType::Guid,
+        SqlType::Numeric(None) => return unconstrained_decimal(values),
         SqlType::Text | SqlType::Varchar(_) | SqlType::Bpchar(_) => {
             let declared = match sql_type {
                 SqlType::Varchar(Some(length)) | SqlType::Bpchar(Some(length)) => length as usize,
@@ -374,6 +469,36 @@ pub(crate) fn push_value(out: &mut Vec<u8>, column: &WireColumn, value: &Value) 
             }
             None => out.push(0),
         },
+        WireType::Date => match date_from_year_one(value) {
+            Some(days) => {
+                out.push(3);
+                out.extend_from_slice(&days.to_le_bytes()[..3]);
+            }
+            None => out.push(0),
+        },
+        WireType::Time { scale } => match time_of_day(value) {
+            Some(micros) => {
+                out.push(time_bytes(scale));
+                push_time(out, micros, scale);
+            }
+            None => out.push(0),
+        },
+        WireType::DateTimeOffset { scale } => match utc_parts(value) {
+            Some((days, micros)) => {
+                out.push(time_bytes(scale) + 5);
+                push_time(out, micros, scale);
+                out.extend_from_slice(&days.to_le_bytes()[..3]);
+                out.extend_from_slice(&0i16.to_le_bytes());
+            }
+            None => out.push(0),
+        },
+        WireType::Guid => match value {
+            Value::Uuid(uuid) => {
+                out.push(16);
+                out.extend_from_slice(&guid_bytes(uuid));
+            }
+            _ => out.push(0),
+        },
         WireType::NVarChar { .. } | WireType::NVarCharMax => {
             push_text(out, column.kind, character_text(value));
         }
@@ -481,7 +606,22 @@ mod tests {
             Some(SqlType::Numeric(None)),
             Value::Numeric(eggdb_sql::Numeric::parse("1.5").unwrap()),
         );
-        assert!(unconstrained.1);
+        assert_eq!(
+            unconstrained,
+            (
+                WireType::Decimal {
+                    precision: 2,
+                    scale: 1
+                },
+                false,
+                vec![5, 1, 15, 0, 0, 0]
+            )
+        );
+        let not_a_number = encoded(
+            Some(SqlType::Numeric(None)),
+            Value::Numeric(eggdb_sql::Numeric::parse("NaN").unwrap()),
+        );
+        assert!(not_a_number.1);
         let early = encoded(
             Some(SqlType::Timestamp(Some(3))),
             Value::Timestamp(i64::MIN / 2),
@@ -490,6 +630,42 @@ mod tests {
         let rows = vec![vec![Value::Integer(1)], vec![Value::Text("x".into())]];
         let mixed = wire_columns(&column(None), &rows);
         assert!(mixed[0].as_text);
+    }
+
+    #[test]
+    fn dates_times_offsets_and_guids_take_their_tds_layouts() {
+        let (kind, _, bytes) = encoded(Some(SqlType::Date), Value::Date(0));
+        assert_eq!(kind, WireType::Date);
+        assert_eq!(bytes, [3, 0x07, 0x24, 0x0B]);
+        for (scale, length) in [(0, 3), (2, 3), (3, 4), (4, 4), (5, 5), (6, 5)] {
+            let (kind, _, bytes) =
+                encoded(Some(SqlType::Time(Some(scale))), Value::Time(1_000_000));
+            assert_eq!(kind, WireType::Time { scale });
+            assert_eq!(bytes[0], length, "time({scale})");
+            let (kind, _, bytes) = encoded(
+                Some(SqlType::TimestampTz(Some(scale))),
+                Value::TimestampTz(0),
+            );
+            assert_eq!(kind, WireType::DateTimeOffset { scale });
+            assert_eq!(bytes[0], length + 5, "datetimeoffset({scale})");
+        }
+        let (kind, _, bytes) = encoded(
+            Some(SqlType::Uuid),
+            Value::Uuid([
+                0x6F, 0x96, 0x19, 0xFF, 0x8B, 0x86, 0xD0, 0x11, 0xB4, 0x2D, 0x00, 0xC0, 0x4F, 0xC9,
+                0x64, 0xFF,
+            ]),
+        );
+        assert_eq!(kind, WireType::Guid);
+        assert_eq!(
+            bytes,
+            [
+                16, 0xFF, 0x19, 0x96, 0x6F, 0x86, 0x8B, 0x11, 0xD0, 0xB4, 0x2D, 0x00, 0xC0, 0x4F,
+                0xC9, 0x64, 0xFF
+            ]
+        );
+        let midnight = encoded(Some(SqlType::Time(Some(6))), Value::Time(86_400_000_000));
+        assert!(midnight.1);
     }
 
     #[test]
