@@ -276,3 +276,62 @@ fn every_hostile_line_through_serve_gets_its_answers_in_order() {
         parsed(line);
     }
 }
+
+const ANSWERS: [&str; 8] = [
+    r#"{"jsonrpc":"2.0","id":"eggdb-confirm-N","result":{"action":"decline"}}"#,
+    r#"{"jsonrpc":"2.0","id":"eggdb-confirm-N","result":{"action":"accept","content":{"run":false}}}"#,
+    r#"{"jsonrpc":"2.0","id":"eggdb-confirm-N","result":{"action":"cancel"}}"#,
+    r#"{"jsonrpc":"2.0","id":"eggdb-confirm-N","error":{"code":-1,"message":"no"}}"#,
+    r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"eggdb-confirm-N"}}"#,
+    r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":77}}"#,
+    r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#,
+    r#"{"jsonrpc":"2.0","id":"eggdb-confirm-N","result":"accept"}"#,
+];
+
+#[test]
+fn hostile_answers_to_a_pending_confirmation_never_panic_or_run_the_statement() {
+    let mut seeded = Seeded(setting("EGGDB_FUZZ_SEED", 0xD0_C0FF) | 1);
+    let audit = TempAudit::new("fuzz-confirm");
+    let opener = MapOpener::new(sample_store());
+    opener.store.sql(
+        eggdb_sql::Dialect::PostgreSql,
+        "CREATE TABLE scratch (id integer PRIMARY KEY)",
+    );
+    let before = opener.store.snapshot();
+    let mut server = eggdb_mcp::Server::new(&opener, common::writing_config(&audit)).unwrap();
+    let mut input = br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"elicitation":{}},"clientInfo":{"name":"fuzz","version":"1"}}}"#.to_vec();
+    input.push(b'\n');
+    for round in 1..=400u32 {
+        input.extend_from_slice(
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{round},"method":"tools/call","params":{{"name":"write_sql","arguments":{{"sql":"DROP TABLE scratch"}}}}}}"#
+            )
+            .as_bytes(),
+        );
+        input.push(b'\n');
+        for _ in 0..seeded.below(4) + 1 {
+            let template = seeded.pick(&ANSWERS);
+            let asked = seeded.below(round as usize + 2);
+            let mut line = template.replace('N', &asked.to_string()).into_bytes();
+            match seeded.below(4) {
+                0 => {
+                    let at = seeded.below(line.len());
+                    line[at] = (seeded.next() & 0x7f) as u8;
+                }
+                1 => line.truncate(seeded.below(line.len())),
+                2 => line.extend_from_slice(mutated(&mut seeded).as_slice()),
+                _ => {}
+            }
+            line.retain(|&byte| byte != b'\n');
+            input.extend_from_slice(&line);
+            input.push(b'\n');
+        }
+    }
+    let mut output = Vec::new();
+    server.serve(&mut input.as_slice(), &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    for line in output.lines() {
+        parsed(line);
+    }
+    assert_eq!(opener.store.snapshot(), before);
+}

@@ -1,3 +1,4 @@
+use crate::watchdog::Watchdog;
 use eggdb_sql::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, SqlError, SqlResult,
     SqlState, StoreFailure,
@@ -7,12 +8,18 @@ use std::time::Instant;
 
 const READS_BETWEEN_CLOCK_CHECKS: u64 = 256;
 
+pub(crate) const MAX_WRITTEN_BYTES: u64 = 256 << 20;
+
 #[derive(Debug)]
 pub(crate) struct CallLimits {
     deadline: Instant,
     reads: Cell<u64>,
     deadline_passed: Cell<bool>,
     write_refused: Cell<bool>,
+    written_bytes: Cell<u64>,
+    write_too_large: Cell<bool>,
+    committed: Cell<bool>,
+    commit_stopped: Cell<bool>,
 }
 
 impl CallLimits {
@@ -22,15 +29,40 @@ impl CallLimits {
             reads: Cell::new(0),
             deadline_passed: Cell::new(false),
             write_refused: Cell::new(false),
+            written_bytes: Cell::new(0),
+            write_too_large: Cell::new(false),
+            committed: Cell::new(false),
+            commit_stopped: Cell::new(false),
         }
     }
 
     pub(crate) fn deadline_passed(&self) -> bool {
-        self.deadline_passed.get()
+        self.deadline_passed.get() || self.commit_stopped.get()
     }
 
     pub(crate) fn write_refused(&self) -> bool {
         self.write_refused.get()
+    }
+
+    pub(crate) fn write_too_large(&self) -> bool {
+        self.write_too_large.get()
+    }
+
+    pub(crate) fn committed(&self) -> bool {
+        self.committed.get()
+    }
+
+    fn count_written(&self, bytes: usize) -> SqlResult<()> {
+        let written = self.written_bytes.get().saturating_add(bytes as u64);
+        self.written_bytes.set(written);
+        if written > MAX_WRITTEN_BYTES {
+            self.write_too_large.set(true);
+            return Err(SqlError::store(
+                StoreFailure::TooLarge,
+                "the call's change is larger than 256 MiB",
+            ));
+        }
+        Ok(())
     }
 
     fn check(&self) -> SqlResult<()> {
@@ -168,6 +200,132 @@ impl<'c, S: KeyValueStore> KeyValueStore for CallStore<'c, S> {
     }
 }
 
+pub(crate) struct WritingCallStore<'c, S: KeyValueStore> {
+    inner: &'c S,
+    limits: &'c CallLimits,
+    watchdog: Option<&'c Watchdog>,
+}
+
+impl<'c, S: KeyValueStore> WritingCallStore<'c, S> {
+    pub(crate) fn new(
+        inner: &'c S,
+        limits: &'c CallLimits,
+        watchdog: Option<&'c Watchdog>,
+    ) -> Self {
+        Self {
+            inner,
+            limits,
+            watchdog,
+        }
+    }
+}
+
+pub(crate) struct LimitedWrite<'c, W> {
+    inner: W,
+    limits: &'c CallLimits,
+    watchdog: Option<&'c Watchdog>,
+}
+
+impl<W: KeyValueWrite> KeyValueRead for LimitedWrite<'_, W> {
+    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.limits.check()?;
+        self.inner.get(key)
+    }
+
+    fn get_with(
+        &self,
+        key: &[u8],
+        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
+    ) -> SqlResult<bool> {
+        self.limits.check()?;
+        self.inner.get_with(key, read)
+    }
+
+    fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        self.limits.check()?;
+        let limits = self.limits;
+        self.inner.scan(start, end, direction, &mut |key, value| {
+            limits.check()?;
+            visit(key, value)
+        })
+    }
+
+    fn committed_version(&self) -> Option<u64> {
+        self.inner.committed_version()
+    }
+}
+
+impl<W: KeyValueWrite> KeyValueWrite for LimitedWrite<'_, W> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        self.limits.check()?;
+        self.limits.count_written(key.len() + value.len())?;
+        self.inner.put(key, value)
+    }
+
+    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        self.limits.check()?;
+        self.limits.count_written(key.len() + value.len())?;
+        self.inner.put_if_absent(key, value)
+    }
+
+    fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.limits.check()?;
+        self.limits.count_written(key.len())?;
+        self.inner.delete(key)
+    }
+
+    fn commit(self) -> SqlResult<()> {
+        if let Some(watchdog) = self.watchdog
+            && watchdog.disarm_for_commit().is_err()
+        {
+            self.limits.commit_stopped.set(true);
+            let _ = self.inner.rollback();
+            return Err(time_limit_error());
+        }
+        self.inner.commit()?;
+        self.limits.committed.set(true);
+        Ok(())
+    }
+
+    fn rollback(self) -> SqlResult<()> {
+        self.inner.rollback()
+    }
+}
+
+impl<'c, S: KeyValueStore> KeyValueStore for WritingCallStore<'c, S> {
+    type Read<'s>
+        = LimitedRead<'c, S::Read<'s>>
+    where
+        Self: 's;
+    type Write<'s>
+        = LimitedWrite<'c, S::Write<'s>>
+    where
+        Self: 's;
+
+    fn begin_read(&self) -> SqlResult<Self::Read<'_>> {
+        self.limits.check()?;
+        Ok(LimitedRead {
+            inner: self.inner.begin_read()?,
+            limits: self.limits,
+        })
+    }
+
+    fn begin_write(&self) -> SqlResult<Self::Write<'_>> {
+        self.limits.check()?;
+        Ok(LimitedWrite {
+            inner: self.inner.begin_write()?,
+            limits: self.limits,
+            watchdog: self.watchdog,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CallLimits, CallStore};
@@ -253,5 +411,106 @@ mod tests {
         let error = store.begin_read().err().unwrap();
         assert_eq!(error.state().code(), "57014");
         assert!(passed.deadline_passed());
+    }
+
+    #[derive(Default)]
+    struct Counted {
+        committed: std::cell::Cell<u32>,
+    }
+
+    struct CountedWrite<'s>(&'s Counted);
+
+    impl KeyValueRead for CountedWrite<'_> {
+        fn get(&self, _key: &[u8]) -> eggdb_sql::SqlResult<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn scan(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+            _direction: ScanDirection,
+            _visit: &mut eggdb_sql::EntryVisitor<'_>,
+        ) -> eggdb_sql::SqlResult<()> {
+            Ok(())
+        }
+    }
+
+    impl eggdb_sql::KeyValueWrite for CountedWrite<'_> {
+        fn put(&mut self, _key: &[u8], _value: &[u8]) -> eggdb_sql::SqlResult<()> {
+            Ok(())
+        }
+
+        fn delete(&mut self, _key: &[u8]) -> eggdb_sql::SqlResult<bool> {
+            Ok(true)
+        }
+
+        fn commit(self) -> eggdb_sql::SqlResult<()> {
+            self.0.committed.set(self.0.committed.get() + 1);
+            Ok(())
+        }
+
+        fn rollback(self) -> eggdb_sql::SqlResult<()> {
+            Ok(())
+        }
+    }
+
+    impl KeyValueStore for Counted {
+        type Read<'s> = CountedWrite<'s>;
+        type Write<'s> = CountedWrite<'s>;
+
+        fn begin_read(&self) -> eggdb_sql::SqlResult<CountedWrite<'_>> {
+            Ok(CountedWrite(self))
+        }
+
+        fn begin_write(&self) -> eggdb_sql::SqlResult<CountedWrite<'_>> {
+            Ok(CountedWrite(self))
+        }
+    }
+
+    #[test]
+    fn a_write_past_256_mib_is_refused_and_a_commit_is_remembered() {
+        use eggdb_sql::KeyValueWrite;
+        let counted = Counted::default();
+        let limits = CallLimits::new(Instant::now() + Duration::from_secs(600));
+        let store = super::WritingCallStore::new(&counted, &limits, None);
+        let mut writer = store.begin_write().unwrap();
+        let value = vec![0u8; 1 << 20];
+        for _ in 0..255 {
+            writer.put(b"k", &value).unwrap();
+        }
+        let error = writer.put(b"k", &value).unwrap_err();
+        assert_eq!(error.state().code(), "54000");
+        assert!(limits.write_too_large());
+        writer.rollback().unwrap();
+        assert!(!limits.committed());
+        let writer = store.begin_write().unwrap();
+        writer.commit().unwrap();
+        assert!(limits.committed());
+        assert_eq!(counted.committed.get(), 1);
+    }
+
+    #[test]
+    fn a_commit_is_refused_once_the_watchdog_fires() {
+        use eggdb_sql::KeyValueWrite;
+        let (fired, received) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = std::sync::Mutex::new(held);
+        let watchdog = crate::watchdog::Watchdog::start(Box::new(move |_| {
+            let _ = fired.send(());
+            let _ = held.lock().unwrap().recv();
+        }))
+        .unwrap();
+        watchdog.arm(Instant::now(), "write_sql");
+        received.recv_timeout(Duration::from_secs(30)).unwrap();
+        let counted = Counted::default();
+        let limits = CallLimits::new(Instant::now() + Duration::from_secs(600));
+        let store = super::WritingCallStore::new(&counted, &limits, Some(&watchdog));
+        let writer = store.begin_write().unwrap();
+        assert_eq!(writer.commit().unwrap_err().state().code(), "57014");
+        assert_eq!(counted.committed.get(), 0);
+        assert!(!limits.committed());
+        assert!(limits.deadline_passed());
+        release.send(()).unwrap();
     }
 }

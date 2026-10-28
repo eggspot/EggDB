@@ -143,6 +143,11 @@ pub struct MapOpener {
     pub store: MapStore,
     pub busy: Cell<bool>,
     pub opens: Cell<u32>,
+    pub write_opens: Cell<u32>,
+    pub not_writable: Cell<bool>,
+    pub close_fails: Cell<bool>,
+    pub close_delay: Cell<Duration>,
+    pub after_close: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 impl MapOpener {
@@ -151,6 +156,11 @@ impl MapOpener {
             store,
             busy: Cell::new(false),
             opens: Cell::new(0),
+            write_opens: Cell::new(0),
+            not_writable: Cell::new(false),
+            close_fails: Cell::new(false),
+            close_delay: Cell::new(Duration::ZERO),
+            after_close: RefCell::new(None),
         }
     }
 }
@@ -166,7 +176,25 @@ impl DatabaseOpener for MapOpener {
         Ok(self.store.clone())
     }
 
+    fn open_read_write(&self) -> Result<MapStore, OpenRefusal> {
+        if self.busy.get() {
+            return Err(OpenRefusal::Busy);
+        }
+        if self.not_writable.get() {
+            return Err(OpenRefusal::NotWritable("permission denied".to_owned()));
+        }
+        self.write_opens.set(self.write_opens.get() + 1);
+        Ok(self.store.clone())
+    }
+
     fn close(&self, _store: MapStore) -> Result<(), OpenRefusal> {
+        std::thread::sleep(self.close_delay.get());
+        if let Some(after) = self.after_close.borrow().as_ref() {
+            after();
+        }
+        if self.close_fails.get() {
+            return Err(OpenRefusal::Failed("the disk is full".to_owned()));
+        }
         Ok(())
     }
 }
@@ -209,6 +237,7 @@ pub fn config(audit: &TempAudit) -> ServerConfig {
         server_version: "0.0.0-test".to_owned(),
         time_limit: Duration::from_secs(5),
         audit: AuditLog::new(audit.path.clone()),
+        allow_write: false,
         exit_process: None,
     }
 }
@@ -314,5 +343,63 @@ pub fn canonical(node: &Node) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+    }
+}
+
+pub fn writing_config(audit: &TempAudit) -> ServerConfig {
+    ServerConfig {
+        allow_write: true,
+        ..config(audit)
+    }
+}
+
+pub fn writing_server<'o>(
+    opener: &'o MapOpener,
+    audit: &TempAudit,
+    capabilities: &str,
+) -> Server<'o, MapOpener> {
+    let mut server = Server::new(opener, writing_config(audit)).unwrap();
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{capabilities},"clientInfo":{{"name":"test-client","version":"1.0"}}}}}}"#
+    );
+    let answer = server.handle(request.as_bytes()).unwrap();
+    assert!(answer.contains("write_sql"), "{answer}");
+    server
+}
+
+pub fn served(server: &mut Server<'_, MapOpener>, input: &str) -> Vec<Node> {
+    let mut input = input.as_bytes();
+    let mut output = Vec::new();
+    server.serve(&mut input, &mut output).unwrap();
+    String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(parsed)
+        .collect()
+}
+
+pub fn count(store: &MapStore, dialect: Dialect, query: &str) -> i64 {
+    let mut session = Session::with_dialect(store, dialect);
+    let mut found = None;
+    session
+        .execute(query, &mut |result| {
+            if let Some(eggdb_sql::Value::BigInt(value)) =
+                result.rows.first().and_then(|row| row.first())
+            {
+                found = Some(*value);
+            }
+        })
+        .unwrap_or_else(|error| panic!("{query}: {error}"));
+    session.close().unwrap();
+    found.unwrap_or_else(|| panic!("{query} gave no count"))
+}
+
+pub fn member<'n>(node: &'n Node, name: &str) -> Option<&'n Node> {
+    match &node.value {
+        Json::Object(members) => members
+            .iter()
+            .find(|(member, _)| member == name)
+            .map(|(_, value)| value),
+        _ => None,
     }
 }

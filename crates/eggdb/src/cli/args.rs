@@ -112,7 +112,7 @@ impl CommandName {
             | OptionName::Delimiter
             | OptionName::Null => self == Self::Import,
             OptionName::Limit => matches!(self, Self::Scan | Self::Audit),
-            OptionName::TimeLimit => self == Self::Mcp,
+            OptionName::TimeLimit | OptionName::AllowWrite => self == Self::Mcp,
             OptionName::Prefix
             | OptionName::From
             | OptionName::To
@@ -207,6 +207,7 @@ enum OptionName {
     Null,
     Report,
     TimeLimit,
+    AllowWrite,
 }
 
 impl OptionName {
@@ -247,6 +248,7 @@ impl OptionName {
             b"null" => Self::Null,
             b"report" => Self::Report,
             b"time-limit" => Self::TimeLimit,
+            b"allow-write" => Self::AllowWrite,
             _ => return None,
         })
     }
@@ -279,6 +281,7 @@ impl OptionName {
                 | Self::DryRun
                 | Self::KeepGoing
                 | Self::Header
+                | Self::AllowWrite
         )
     }
 }
@@ -316,6 +319,7 @@ pub(crate) struct Request {
     pub(crate) csv: CsvOptions,
     pub(crate) restore: RestoreOptions,
     pub(crate) time_limit: Option<u64>,
+    pub(crate) allow_write: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -573,6 +577,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         csv: CsvOptions::default(),
         restore: RestoreOptions::default(),
         time_limit: None,
+        allow_write: false,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -612,6 +617,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Mono => request.mono = true,
             OptionName::Ascii => request.ascii = true,
             OptionName::ReadOnly => request.read_only = true,
+            OptionName::AllowWrite => request.allow_write = true,
             OptionName::OnConflict => {
                 request.on_conflict = parse_on_conflict(value).map_err(usage)?
             }

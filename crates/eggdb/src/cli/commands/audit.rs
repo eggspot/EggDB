@@ -10,7 +10,7 @@ use eggdb_mcp::audit::{
 const LINE_COLUMNS: usize = 120;
 const TIME_COLUMNS: usize = 23;
 const TOOL_COLUMNS: usize = 14;
-const OUTCOME_COLUMNS: usize = 17;
+const OUTCOME_COLUMNS: usize = 19;
 const ROWS_COLUMNS: usize = 5;
 
 impl Session<'_> {
@@ -26,7 +26,7 @@ impl Session<'_> {
         let mut shown_calls = 0u64;
         let mut shown_lines = 0u64;
         let mut printed = Ok(());
-        let read = read_audit(&path, limit, &mut |line| {
+        let read = read_audit(&path, limit, json, &mut |line| {
             shown_lines += 1;
             match (&line, json) {
                 (AuditLine::Record { raw, .. }, true) => {
@@ -37,7 +37,7 @@ impl Session<'_> {
                     "eggdb: {shown} line {number} is not a record; skipped\n"
                 )),
                 (_, false) => {
-                    if matches!(&line, AuditLine::Record { entry, .. } if entry.event == AuditEvent::Call)
+                    if matches!(&line, AuditLine::Record { entry, .. } if matches!(entry.event, AuditEvent::Call | AuditEvent::CallStarted))
                     {
                         shown_calls += 1;
                     }
@@ -72,7 +72,11 @@ impl Session<'_> {
         if json {
             return Ok(Exit::Done);
         }
-        if shown_lines == 0 && totals.calls == 0 && totals.unreadable == 0 {
+        if shown_lines == 0
+            && totals.calls == 0
+            && totals.unreadable == 0
+            && totals.outcomes_unknown == 0
+        {
             self.messages.text("no MCP calls yet\n");
             return Ok(Exit::Done);
         }
@@ -97,9 +101,14 @@ impl Session<'_> {
         match entry.event {
             AuditEvent::ServerStarted => {
                 let sentence = format!(
-                    "{time}  server started: eggdb {}, pid {}, read-only, time limit {} s",
+                    "{time}  server started: eggdb {}, pid {}, {}, time limit {} s",
                     printable(entry.version.as_deref().unwrap_or("?")),
                     entry.pid.unwrap_or(0),
+                    if entry.allow_write {
+                        "writes allowed"
+                    } else {
+                        "read-only"
+                    },
                     entry.time_limit_ms.unwrap_or(0) / 1000
                 );
                 self.out.styled(Style::Dim, &cut(&sentence));
@@ -113,19 +122,32 @@ impl Session<'_> {
                 self.out.styled(Style::Dim, &cut(&sentence));
                 self.out.text("\n");
             }
-            AuditEvent::Call => self.call_line(&time, entry),
+            AuditEvent::Call | AuditEvent::CallStarted => self.call_line(&time, entry),
         }
     }
 
     fn call_line(&mut self, time: &str, entry: &AuditEntry) {
-        let duration = format!("{:>6} ms", entry.duration_ms.unwrap_or(0));
+        let unknown = entry.event == AuditEvent::CallStarted;
+        let duration = if unknown {
+            format!("{:>9}", "-")
+        } else {
+            format!("{:>6} ms", entry.duration_ms.unwrap_or(0))
+        };
         let tool = printable(entry.tool.as_deref().unwrap_or("?"));
         let outcome = match (&entry.error_code, &entry.sqlstate) {
-            (None, _) => "ok".to_owned(),
+            _ if unknown => "unknown".to_owned(),
+            (None, _) => match (entry.confirmation.as_deref(), entry.committed) {
+                (_, Some(false)) => "ok, not committed".to_owned(),
+                (Some("elicitation"), _) => "ok, user confirmed".to_owned(),
+                (Some("confirm_argument"), _) => "ok, agent confirmed".to_owned(),
+                _ => "ok".to_owned(),
+            },
             (Some(code), Some(state)) => format!("{} {}", printable(code), printable(state)),
             (Some(code), None) => printable(code),
         };
+        let failed = unknown || entry.error_code.is_some();
         let rows = match (&entry.error_code, entry.rows) {
+            _ if unknown => "-".to_owned(),
             (Some(_), _) | (None, None) => "-".to_owned(),
             (None, Some(rows)) if entry.truncated => format!("{rows}+"),
             (None, Some(rows)) => rows.to_string(),
@@ -141,13 +163,19 @@ impl Session<'_> {
         self.out.text(&head);
         self.out.styled(Style::Bold, &tool_cell);
         self.out.text("  ");
-        if entry.error_code.is_some() {
+        if failed {
             self.out.styled(Style::Red, &outcome_cell);
         } else {
             self.out.text(&outcome_cell);
         }
         self.out.text(&cut_to(&tail, room));
         self.out.text("\n");
+        if let Some(warning) = &entry.warning {
+            let indent = " ".repeat(head.chars().count());
+            let line = format!("{indent}warning: {}", printable(warning));
+            self.out.styled(Style::Dim, &cut(&line));
+            self.out.text("\n");
+        }
     }
 }
 
@@ -211,18 +239,26 @@ fn plural(count: u64, one: &str, many: &str) -> String {
 
 fn summary(totals: &AuditTotals, shown_calls: u64) -> String {
     let mut parts = Vec::new();
-    if shown_calls < totals.calls {
+    let calls = totals.calls + totals.outcomes_unknown;
+    if shown_calls < calls {
         parts.push(format!(
             "last {shown_calls} of {}",
-            plural(totals.calls, "call", "calls")
+            plural(calls, "call", "calls")
         ));
     } else {
-        parts.push(plural(totals.calls, "call", "calls"));
+        parts.push(plural(calls, "call", "calls"));
     }
     parts.push(match totals.errors {
         0 => "no errors".to_owned(),
         errors => plural(errors, "error", "errors"),
     });
+    if totals.outcomes_unknown > 0 {
+        parts.push(plural(
+            totals.outcomes_unknown,
+            "outcome unknown",
+            "outcomes unknown",
+        ));
+    }
     if totals.unreadable > 0 {
         parts.push(plural(
             totals.unreadable,

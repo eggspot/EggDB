@@ -1090,3 +1090,131 @@ eggdb: cannot open app.db: another program has it open. Close it before writing,
   U+2069, U+FEFF, the tag characters) in every field.
 - The busy note says the holder *may* be an `eggdb mcp` call, which holds the file for up to its
   time limit (`--time-limit` goes to 300 s).
+
+## 18. `eggdb mcp --allow-write`: writes and confirmation (item 49b-1)
+
+`eggdb mcp <file> --allow-write` adds one tool, `write_sql`, which runs one SQL statement that
+may change the file; the file is opened read-write for that call only and closed again. A
+statement that destroys data runs only after the person says yes: a dialog in the agent's client
+when it can show one (MCP form elicitation), otherwise the agent must pass `confirm: true` and
+the client is expected to ask before the call. Everything of section 17 stays as it is; without
+the flag the server is the read-only one of section 17. Designed by Claude Fable (D15).
+
+```
+eggdb mcp <file> [--allow-write] [--time-limit <seconds>]
+```
+
+### Help
+The command list line of section 9 loses "read-only":
+```
+  mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
+```
+`eggdb help mcp` replaces "This release is read-only: a write is refused with an error the agent
+can read." with: "Without --allow-write every call is read-only and a write is refused with an
+error the agent can read. With it the agent also gets write_sql, one statement per call that may
+change the file, run in its own transaction; the file is opened read-write for that call only.
+A statement that destroys data (DROP, TRUNCATE, a DELETE or UPDATE whose WHERE names no column
+of the table, dropping a column, constraint or primary key, changing a column's type) runs only
+after you confirm it: in a client that can ask you, a dialog; in one that cannot, the agent must
+pass confirm: true, so set that client to ask you before write_sql runs." The option line, before
+`--time-limit`:
+```
+      --allow-write            add write_sql: one statement per call that may change the file
+```
+One more example, between the two `claude mcp add` lines: `claude mcp add mydb -- eggdb mcp app.db --allow-write`.
+
+### `eggdb mcp` on stderr with `--allow-write`
+**stderr is a terminal**: the first line says read-write instead of read-only, and two lines come
+before `audit`:
+```
+eggdb mcp app.db: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
+  writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction
+  confirm      DROP, TRUNCATE, a DELETE or UPDATE of a whole table, dropping or retyping a column: only after you say yes
+  audit        app.db.mcp-audit.jsonl (eggdb audit app.db shows it)
+  time limit   5 s per call
+  add it       claude mcp add mydb -- eggdb mcp app.db --allow-write
+  stop         Ctrl-C, or close stdin
+```
+**stderr is not a terminal**, one line: `eggdb 0.2.0 mcp: serving app.db read-write (destructive
+statements need the user's confirmation); audit app.db.mcp-audit.jsonl; time limit 5 s`. The
+busy-at-start line of section 17 is unchanged.
+
+### The confirmation dialog
+The `message` of `elicitation/create` is plain text that reads the same when a client renders it
+as Markdown; the SQL is in a code fence (escaped and cut by the server). It names what is about
+to happen before it shows the SQL, since the SQL may be long, and it ends with the one thing to
+decide. Objects: up to 10 names, then `and N more`; `with CASCADE (what depends on them goes
+too)` only when CASCADE is given; the alphabet line only when a name mixes alphabets.
+````
+The AI agent asks to run DROP TABLE on app.db: users, sessions, orders, and 9 more, with CASCADE (what depends on them goes too).
+Some of these names mix alphabets: two names that look the same may be different tables.
+
+```sql
+DROP TABLE users, sessions, orders, items, carts, ... CASCADE
+(1,204 more characters not shown)
+```
+
+It runs now, in its own transaction, and cannot be undone through the agent; only a backup brings the data back. Run it?
+````
+The one field, `run`, a boolean, default false: title `Run it on app.db`; description `Yes runs
+the statement now. No, or closing this, runs nothing, and the agent is told you declined.`
+
+### `eggdb audit`: the text view
+The server line says `writes allowed` in place of `read-only`:
+`server started: eggdb 0.2.0, pid 51277, writes allowed, time limit 5 s`. A `call_started`
+record is not shown when the `call` with its `call_id` follows: the call line tells the whole
+story. One without a matching call (the server died during the write: a crash, a kill, a
+time-limit exit) is shown as a call line with `-` for the duration and rows and the outcome
+`unknown` in red, and the summary counts it. The outcome column widens from 17 to 19 columns,
+which `needs_confirmation` and `confirmation_failed` need. A confirmed write shows how it was
+confirmed in the outcome column: `ok, user confirmed` (elicitation) or `ok, agent confirmed`
+(`confirm: true`). A `write_sql` that changed nothing shows `ok, not committed`. The rows column
+of `write_sql` is the rows changed. A `warning` is a dim line of its own under the call. The
+duration of a confirmed or declined call includes the time the person took.
+```
+$ eggdb audit app.db
+2026-10-28 10:02:11.004  server started: eggdb 0.2.0, pid 51277, writes allowed, time limit 5 s
+2026-10-28 10:02:14.310      9 ms  write_sql       ok                        1  INSERT INTO users (name) VALUES ('Ada')
+2026-10-28 10:02:20.118      2 ms  write_sql       needs_confirmation        -  DELETE FROM sessions
+2026-10-28 10:02:41.902  21784 ms  write_sql       ok, user confirmed     3118  DELETE FROM sessions
+2026-10-28 10:03:05.455   6410 ms  write_sql       declined_by_user          -  DROP TABLE users CASCADE
+2026-10-28 10:03:30.007      1 ms  run_sql         read_only                 -  UPDATE users SET name = 'Ada L.' WHERE id = 7
+2026-10-28 10:04:02.600          -  write_sql       unknown                   -  ALTER TABLE orders DROP COLUMN total
+6 calls, 3 errors, 1 outcome unknown, by claude-code 2.1.0 (the name the client gave)
+```
+The summary gains `, {k} outcome unknown` (`outcomes unknown` for more than one) only when there
+are any; `--format json` prints `call_started` and `call` records as stored.
+
+### Decided by this design
+1. The dialog's wording is EggDB's: the agent can put nothing in it but the SQL and the names,
+   which are fenced and escaped, so an agent cannot talk the person into a yes through the dialog.
+2. The dialog names what the statement does (kind, objects, CASCADE) before the SQL, says it
+   cannot be undone through the agent, and says what a no does: the agent is told.
+3. The `run` field defaults to false, so a hasty submit runs nothing.
+4. The two confirmation paths are told apart in the audit (`user confirmed`, `agent confirmed`),
+   since a `confirm: true` is the agent's own word.
+5. `run_sql` stays read-only with `--allow-write`; its `read_only` fix says to use `write_sql`.
+6. `needs_confirmation` counts as an error in the summary: it is a refused call, like `read_only`.
+7. A `call_started` is hidden when its `call` follows and shown as `unknown` when it does not, so
+   a server that died mid-write leaves a red line and a summary count, never silence.
+8. The outcome column widens to 19 for the new codes; arguments lose two columns.
+9. The wait for the person's answer is not charged against the time limit; the duration column
+   includes it so the audit shows how long the decision took.
+10. On a terminal the banner has `writes` and `confirm` lines, so whoever starts it by hand sees
+    at once that the agent can change the file and what still needs a yes.
+
+### As built in v0.2.0 (D121)
+- The heading names each kind of destruction with its own objects, since one `ALTER TABLE` can
+  change a column's type and drop another: `The AI agent asks to run a destructive statement on
+  app.db. a change of a column's type: m.b; ALTER TABLE ... DROP COLUMN: m.a.`
+- Every object is named, not ten (up to 16 KiB of names, then a count and the advice to
+  decline): the shown SQL can be cut before a name by padding, so the heading must carry them
+  all. A run of more than 16 blanks in the shown SQL is shown as `<3,000 blank characters>`.
+- The closing line adds: "Names are as the statement gives them: an earlier rename can make a
+  familiar name stand for another table."
+- Hidden characters in the dialog (controls, bidirectional and invisible formatting characters
+  such as soft hyphens and variation selectors) are shown as `\u{202e}`-style escapes, escaped
+  before the SQL is cut; line breaks and tabs in the SQL stay, since the fence is longer than any
+  run of backticks in it. Names also have Markdown characters escaped with a backslash (not `_`,
+  so `order_items` reads as written); the `run` field's title is plain text.
+- The warning line under a call is indented to the tool column.

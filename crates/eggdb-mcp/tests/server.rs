@@ -47,7 +47,8 @@ fn initialize_answers_the_client_s_version_or_the_newest_and_comes_first() {
         let request = format!(
             r#"{{"jsonrpc":"2.0","id":3,"method":"initialize","params":{{"protocolVersion":"{asked}","capabilities":{{}},"clientInfo":{{"name":"c","version":"1"}}}}}}"#
         );
-        let answer = parsed(&server.handle(request.as_bytes()).unwrap());
+        let mut fresh = common::server(&opener, &audit);
+        let answer = parsed(&fresh.handle(request.as_bytes()).unwrap());
         assert_eq!(text_at(&answer, &["result", "protocolVersion"]), answered);
         assert_eq!(text_at(&answer, &["result", "serverInfo", "name"]), "eggdb");
         assert!(matches!(
@@ -55,6 +56,14 @@ fn initialize_answers_the_client_s_version_or_the_newest_and_comes_first() {
             Json::Object(_)
         ));
     }
+    let first = br#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"#;
+    let answer = parsed(&server.handle(first).unwrap());
+    assert_eq!(
+        text_at(&answer, &["result", "protocolVersion"]),
+        "2025-11-25"
+    );
+    let again = parsed(&server.handle(first).unwrap());
+    assert_eq!(text_at(&again, &["error", "code"]), "-32600");
     assert!(
         server
             .handle(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
@@ -189,7 +198,7 @@ fn every_kind_of_write_is_refused_and_nothing_changes() {
             "read_only",
             "{dialect} {sql}: {answer:?}"
         );
-        assert!(text_at(structured(&answer), &["error", "fix"]).contains("later EggDB release"));
+        assert!(text_at(structured(&answer), &["error", "fix"]).contains("--allow-write"));
     }
     assert_eq!(opener.store.snapshot(), before);
 }

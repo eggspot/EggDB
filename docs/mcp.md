@@ -3,7 +3,8 @@
 `eggdb mcp <file>` lets an AI agent read an EggDB database through the Model Context Protocol
 (MCP), the protocol Claude Code, Claude Desktop, Cursor, VS Code and other agent clients use to
 reach tools. It is built into the `eggdb` binary: nothing else to install, no SDK, no network
-port (D11, D119). In this release the agent can **read**; writes come in a later release.
+port (D11, D119). The agent can **read**, and with `--allow-write` it can also **change** the
+database, one statement per call, with your confirmation for anything destructive (D121).
 
 ## Set it up
 
@@ -31,6 +32,12 @@ Clients configured with JSON (Claude Desktop, Cursor and others) take the same c
 }
 ```
 
+To let the agent change the database:
+
+```sh
+claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
+```
+
 `eggdb mcp` never creates a database: create it first (`eggdb create`, `eggdb sql --create`,
 `eggdb restore --create`).
 
@@ -40,14 +47,16 @@ Clients configured with JSON (Claude Desktop, Cursor and others) take the same c
 |------|------|
 | `list_tables` | the schemas, tables and views, with their column counts and comments |
 | `describe_table` | one table's or view's columns (types, `NOT NULL`, defaults, comments), primary key, indexes, comment, and its row count (exact up to 10,000) |
-| `run_sql` | runs **one** SQL statement in a dialect: `postgresql` (the default), `mysql`, `sqlite` or `oracle`, all on the same tables; returns at most `max_rows` rows (100 by default, at most 10,000) and 1 MiB |
+| `write_sql` | only with `--allow-write`: runs **one** statement that may change the database, in its own transaction (below) |
+| `run_sql` | runs **one** SQL statement that reads, in a dialect: `postgresql` (the default), `mysql`, `sqlite` or `oracle`, all on the same tables; returns at most `max_rows` rows (100 by default, at most 10,000) and 1 MiB |
 | `explain_query` | the plan for one `SELECT`, `UPDATE` or `DELETE`, without running it; give the statement without `EXPLAIN` (Oracle has no `EXPLAIN` yet) |
 | `sample_rows` | the first rows of a table or view as stored: a table's in primary-key order, a view's in its query's order; not a random sample (10 by default, at most 1,000) |
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key |
 | `kv_scan` | keys and values in key order, by prefix or range, a page at a time |
 
-The resource `eggdb://schema` is the whole catalog as one JSON document. Every tool is marked
-`readOnlyHint`, so a client can let it run without asking each time.
+The resource `eggdb://schema` is the whole catalog as one JSON document. Every tool but
+`write_sql` is marked `readOnlyHint`, so a client can let it run without asking each time;
+`write_sql` is marked `destructiveHint` and not idempotent, so a client asks before it runs.
 
 Results come back as structured JSON (`structuredContent`, with the same JSON as text): column
 names and types, rows, how many rows there were and whether the result was cut (`truncated`,
@@ -56,10 +65,10 @@ dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..
 
 ## What the agent can't do (yet)
 
-- **Write.** Every call opens the file read-only, so the storage refuses any change. An
-  `INSERT`, `UPDATE`, `DELETE`, any DDL, `nextval` or anything else that writes fails with the
-  error `read_only`. Writes, with the user's confirmation for destructive statements, come in a
-  later release.
+- **Write, unless you allow it.** Without `--allow-write` every call opens the file read-only,
+  so the storage refuses any change: an `INSERT`, `UPDATE`, `DELETE`, any DDL, `nextval` or
+  anything else that writes fails with the error `read_only`, which names `--allow-write`. Even
+  with it, `run_sql` only reads: writes go through `write_sql`.
 - **Run several statements in one call, or a transaction.** `run_sql` takes one statement;
   `BEGIN`, `START TRANSACTION`, `COMMIT` and `ROLLBACK` are refused, since each call is a
   transaction of its own, so `COMMIT; DROP TABLE t` runs nothing. `COPY` is refused too: use
@@ -81,6 +90,46 @@ dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..
   release; today an agent that can use `eggdb mcp` reads every table and key.
 - **Reach it over the network.** MCP inside `eggdb serve` waits for EggDB's own TLS (D102).
 
+## Letting the agent write
+
+With `--allow-write` the agent gets `write_sql`: one statement per call, in the dialect it names,
+run in a transaction of its own that commits when the statement succeeds and changes nothing
+when it fails (on Oracle the server commits the statement's block itself). The result says
+`committed` and, for an `INSERT`, `UPDATE` or `DELETE`, `rows_changed`. Each call may change at
+most 256 MiB (the bytes it puts and the keys it deletes); a larger change is rolled back with
+`write_too_large`. A failed statement changes nothing but the sequence values it drew, which
+stay drawn, as in the database itself. Only `write_sql` opens the file read-write: while its
+statement runs (the time limit bounds it), commits and closes the file, other programs cannot
+open the file at all.
+
+**Destructive statements need your confirmation**: `DROP` of anything, `TRUNCATE`, `ALTER TABLE
+... DROP COLUMN`, `DROP CONSTRAINT` or `DROP PRIMARY KEY`, a column's type change, and a `DELETE`
+or `UPDATE` whose `WHERE` names no column of its table (or that has no `WHERE`). A statement
+that can run other statements (an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`)
+counts as destructive too; EggDB does not run any of them yet. `INSERT` in every form, `CREATE`,
+renames, `ADD COLUMN` and the like run without asking.
+
+- **Clients that can ask you** (they declare MCP form elicitation in `initialize`)
+  get a question from `eggdb mcp` itself before anything is opened: what the statement does, to
+  what, whether `CASCADE` takes more with it, and the SQL, with a yes-or-no field that defaults
+  to no. Yes runs it; no, closing the question or cancelling the call runs nothing, and the agent
+  is told you declined. While you think, the database is not open, no lock is held and the time
+  limit has not started.
+- **Clients that cannot ask** make the agent send `confirm: true`; without it the call answers
+  `needs_confirmation` and runs nothing. `confirm: true` is the agent's word, not yours: the
+  tool's description tells the agent to ask you first, and you should set such a client to ask
+  before every `write_sql` (its annotations say it is destructive).
+
+The question names every table, column or index the statement acts on, each with what is done
+to it, even when the SQL shown is cut. Names are as the statement gives them: an earlier rename
+(which needs no confirmation) can make a familiar name stand for another table, so read the
+question with the agent's recent calls in mind.
+
+The confirmation guards against accidents. It is not a security boundary: a `DELETE` with an
+always-true condition that names a column (`WHERE id IS NOT NULL`) runs without asking, and a
+client may be set to accept for you. Give `--allow-write` only to agents you would let change the
+data, and keep a backup.
+
 ## Errors
 
 A refused or failed call is a tool result with `isError: true` and
@@ -89,7 +138,12 @@ the `sqlstate`, `detail`, `hint` and `position` in the statement. The codes:
 
 | Code | When | Fix |
 |------|------|-----|
-| `read_only` | the statement needs to write | read with `SELECT` |
+| `read_only` | the statement needs to write: the server has no `--allow-write`, or it went to `run_sql` | read with `run_sql`, or ask for `--allow-write`; send writes with `write_sql` |
+| `needs_confirmation` | a destructive `write_sql` without `confirm: true` on a client that cannot ask | ask the user, then send `confirm: true` |
+| `declined_by_user` | the user said no to a destructive statement | |
+| `confirmation_failed` | the client answered the question with an error | |
+| `not_writable` | the file or its directory cannot be opened for writing by this user | |
+| `write_too_large` | the call changed more than 256 MiB | split the change |
 | `one_statement_per_call` | the text holds a second statement | one statement per call |
 | `transaction_control_refused` | `BEGIN`, `COMMIT`, `ROLLBACK` | send the statement alone |
 | `copy_not_available` | `COPY` | use `SELECT` |
@@ -119,7 +173,10 @@ calls `eggdb mcp` holds nothing. So:
 - a call made while a program has the file open for writing answers `database_busy` after a
   second of retrying, and the agent is told to try again;
 - other read-only programs (`eggdb get`, `scan`, `ui --read-only`, `serve --read-only`) run beside
-  the agent's calls.
+  the agent's calls;
+- a `write_sql` call opens the file read-write, so while it runs every other program, reader or
+  writer, is refused: for its statement, which the time limit bounds, then its commit and the
+  close, and never while you are asked to confirm.
 
 A file a crashed writer left with an unfinished log is read correctly: the log is replayed in
 memory for each call, and the file is not changed.
@@ -131,7 +188,12 @@ appended to `<file>.mcp-audit.jsonl` next to the database (`app.db.mcp-audit.jso
 line each, **before** its result goes to the agent: the time, the client's name and version as
 the client stated them in `initialize`, the protocol version, the tool, its arguments, and the
 result's size, row count and truncation, or the error code and SQLSTATE, and the duration. The
-result's content is never recorded. A request for a tool that does not exist is recorded too,
+result's content is never recorded. Every call has a `call_id` (`<pid>-<server start in ms>-<n>`). A `write_sql` also writes a
+`call_started` record before it opens the file, and its `call` record says how a destructive
+statement was confirmed (`confirmation`: `elicitation` or `confirm_argument`), whether it
+`committed`, and any `warning`; a `call_started` with no `call` after it means the server stopped
+during the write (or that the write is still running), and `eggdb audit` shows its outcome as
+`unknown`. `--format json` prints the records as stored: pair them by `call_id` yourself. A request for a tool that does not exist is recorded too,
 with the error code `unknown_tool`, and so is a `tools/call` or `resources/read` refused before
 it runs (sent before `initialize`, with malformed params, or with a key given twice). The server's start and a time-limit exit are records too.
 
@@ -185,6 +247,13 @@ Things to know about the audit file:
   nested deeper than 256 levels, a key given twice in an object, batches and requests with the
   wrong types are answered with JSON-RPC errors; a seeded fuzzer checks it (testing.md).
 - `clientInfo` is what the client says it is: it is recorded and shown, never trusted.
+- **The confirmation question is EggDB's own text.** The agent can put nothing in it but the SQL
+  and the names it uses, which are shown in a code fence with hidden and direction-changing
+  characters made visible, so the question cannot be made to say something else. What runs is
+  exactly the statement you saw.
+- **A stopped call never half-writes.** A call still running a second past its time limit ends
+  the server, but never once its commit began: the time-limit record always means nothing was
+  committed. A change that was committed is never reported as failed.
 
 ## Protocol
 

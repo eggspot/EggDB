@@ -26,6 +26,7 @@ mod comments;
 mod constraints;
 mod copy;
 mod datetime;
+mod destructive;
 mod dialect;
 mod encoding;
 mod error;
@@ -72,6 +73,8 @@ mod copy_tests;
 #[cfg(test)]
 mod correctness;
 #[cfg(test)]
+mod destructive_tests;
+#[cfg(test)]
 mod index_tests;
 #[cfg(test)]
 mod memory_store;
@@ -85,6 +88,9 @@ mod subquery_tests;
 mod tests;
 
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
+pub use destructive::{
+    DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,
+};
 pub use dialect::Dialect;
 pub use error::{SqlError, SqlResult, SqlState};
 pub use indexes::IndexCheck;
