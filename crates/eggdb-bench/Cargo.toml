@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 eggdb = { path = "../eggdb" }
+eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-storage = { path = "../eggdb-storage" }
 
