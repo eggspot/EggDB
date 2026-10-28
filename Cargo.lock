@@ -6,6 +6,7 @@ version = 4
 name = "eggdb"
 version = "0.1.0"
 dependencies = [
+ "eggdb-mcp",
  "eggdb-mysqlwire",
  "eggdb-pgwire",
  "eggdb-platform",
@@ -19,6 +20,7 @@ name = "eggdb-bench"
 version = "0.1.0"
 dependencies = [
  "eggdb",
+ "eggdb-mcp",
  "eggdb-platform",
  "eggdb-storage",
 ]
@@ -26,6 +28,14 @@ dependencies = [
 [[package]]
 name = "eggdb-crypto"
 version = "0.1.0"
+
+[[package]]
+name = "eggdb-mcp"
+version = "0.1.0"
+dependencies = [
+ "eggdb-platform",
+ "eggdb-sql",
+]
 
 [[package]]
 name = "eggdb-mysqlwire"
