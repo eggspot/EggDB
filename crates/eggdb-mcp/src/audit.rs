@@ -669,6 +669,32 @@ mod tests {
     }
 
     #[test]
+    fn appenders_sharing_the_file_never_interleave_their_lines() {
+        let path = temporary("shared");
+        let writers: Vec<_> = (0..4)
+            .map(|writer| {
+                let log = AuditLog::new(path.clone());
+                std::thread::spawn(move || {
+                    for record in 0..50 {
+                        let arguments = format!(
+                            r#"{{"sql":"{}"}}"#,
+                            format!("{writer}-{record} ").repeat(400)
+                        );
+                        log.append(&call("run_sql", &arguments, None)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let (lines, totals) = read_all(&path, None).unwrap();
+        assert_eq!(lines.len(), 200);
+        assert_eq!((totals.calls, totals.unreadable), (200, 0));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn long_arguments_are_cut_and_their_size_kept() {
         let long = format!("{{\"sql\":\"{}\"}}", "x".repeat(70_000));
         let record = call("run_sql", &long, None);

@@ -117,7 +117,8 @@ appended to `<file>.mcp-audit.jsonl` next to the database (`app.db.mcp-audit.jso
 line each, **before** its result goes to the agent: the time, the client's name and version as
 the client stated them in `initialize`, the protocol version, the tool, its arguments, and the
 result's size, row count and truncation, or the error code and SQLSTATE, and the duration. The
-result's content is never recorded. The server's start and a time-limit exit are records too.
+result's content is never recorded. A request for a tool that does not exist is recorded too,
+with the error code `unknown_tool`. The server's start and a time-limit exit are records too.
 
 ```sh
 eggdb audit app.db            # one line per call, oldest first, a summary on stderr
