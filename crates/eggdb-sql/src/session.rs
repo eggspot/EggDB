@@ -8,6 +8,7 @@ pub(crate) use sqlite::create_text as sqlite_create_text;
 
 use crate::ast::{CopyDirection, CopySource, CopyStatement, MySqlStatement, Statement};
 use crate::copy::{CopyChannel, CopyIo, NoCopyChannel};
+use crate::destructive::DestructiveStatement;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
@@ -101,6 +102,15 @@ pub enum OneStatementRefusal {
     TransactionControl,
     /// The statement is a `COPY`.
     Copy,
+    /// The statement is destructive and is not the one confirmed
+    /// ([`Session::run_one_statement_if_confirmed`]).
+    Unconfirmed,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DestructiveRule<'c> {
+    Allowed,
+    OnlyConfirmed(Option<&'c DestructiveStatement>),
 }
 
 /// What a prepared statement takes and gives back, before it runs: PostgreSQL's
@@ -752,13 +762,59 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         text: &str,
         on_result: &mut dyn FnMut(QueryResult) -> bool,
     ) -> Result<(), OneStatementError> {
+        self.run_checked_statement(text, DestructiveRule::Allowed, on_result)
+    }
+
+    /// Runs `text` as [`Session::run_one_statement`] does, but refuses it, before anything
+    /// runs, with [`OneStatementRefusal::Unconfirmed`] when its statement is destructive
+    /// ([`crate::destructive_statement`]) and is not exactly `confirmed`: an AI agent's write
+    /// runs only the destructive statement its user confirmed.
+    pub fn run_one_statement_if_confirmed(
+        &mut self,
+        text: &str,
+        confirmed: Option<&DestructiveStatement>,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+    ) -> Result<(), OneStatementError> {
+        self.run_checked_statement(text, DestructiveRule::OnlyConfirmed(confirmed), on_result)
+    }
+
+    /// Parses `text` as [`Session::run_one_statement`] does and says whether its one
+    /// statement is destructive, without running it.
+    pub fn destructive_statement(
+        &mut self,
+        text: &str,
+    ) -> Result<Option<DestructiveStatement>, OneStatementError> {
         let tokens = match tokenize_in(text, self.dialect) {
             Ok(tokens) => tokens,
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         };
         match self.one_statement_in(text, &tokens) {
-            Ok(None) => {}
-            Ok(Some(refusal)) => return Err(OneStatementError::Refused(refusal)),
+            Ok(Ok(destructive)) => Ok(destructive),
+            Ok(Err(refusal)) => Err(OneStatementError::Refused(refusal)),
+            Err(error) => Err(OneStatementError::Failed(self.in_dialect(text, error))),
+        }
+    }
+
+    fn run_checked_statement(
+        &mut self,
+        text: &str,
+        rule: DestructiveRule<'_>,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+    ) -> Result<(), OneStatementError> {
+        let tokens = match tokenize_in(text, self.dialect) {
+            Ok(tokens) => tokens,
+            Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
+        };
+        match self.one_statement_in(text, &tokens) {
+            Ok(Ok(destructive)) => {
+                if let DestructiveRule::OnlyConfirmed(confirmed) = rule
+                    && destructive.is_some()
+                    && destructive.as_ref() != confirmed
+                {
+                    return Err(OneStatementError::Refused(OneStatementRefusal::Unconfirmed));
+                }
+            }
+            Ok(Err(refusal)) => return Err(OneStatementError::Refused(refusal)),
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         }
         let mut client = Client {
@@ -782,7 +838,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &self,
         text: &str,
         tokens: &[Token<'_>],
-    ) -> SqlResult<Option<OneStatementRefusal>> {
+    ) -> SqlResult<Result<Option<DestructiveStatement>, OneStatementRefusal>> {
         let settings = Arc::clone(&self.settings);
         let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
         let _bytes = crate::bytea::enter_dialect(self.dialect);
@@ -792,7 +848,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             .in_dialect(self.dialect);
         parser.skip_empty_statements();
         if parser.at_end() {
-            return Ok(Some(OneStatementRefusal::Empty));
+            return Ok(Err(OneStatementRefusal::Empty));
         }
         let _constraints = crate::constraints::enter(
             self.dialect,
@@ -808,20 +864,22 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 String::new()
             },
         );
-        if parser.literal_rows().is_none() {
+        let destructive = if parser.literal_rows().is_none() {
             match parser.statement()? {
                 Statement::Begin { .. } | Statement::Commit | Statement::Rollback => {
-                    return Ok(Some(OneStatementRefusal::TransactionControl));
+                    return Ok(Err(OneStatementRefusal::TransactionControl));
                 }
-                Statement::Copy(_) => return Ok(Some(OneStatementRefusal::Copy)),
-                _ => {}
+                Statement::Copy(_) => return Ok(Err(OneStatementRefusal::Copy)),
+                statement => crate::destructive::classify(&statement),
             }
-        }
+        } else {
+            None
+        };
         parser.skip_empty_statements();
         if parser.at_end() {
-            Ok(None)
+            Ok(Ok(destructive))
         } else {
-            Ok(Some(OneStatementRefusal::MoreThanOne {
+            Ok(Err(OneStatementRefusal::MoreThanOne {
                 position: parser.position(),
             }))
         }
