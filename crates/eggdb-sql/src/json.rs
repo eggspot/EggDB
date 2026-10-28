@@ -1,24 +1,72 @@
+//! JSON text: [`parse_document`] reads a JSON document into a tree of [`Node`]s, which the SQL
+//! `json` and `jsonb` types and EggDB's JSON-RPC servers build on.
+
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::numeric::Numeric;
 use std::cmp::Ordering;
 
 pub(crate) const MAX_DEPTH: usize = 256;
 
+/// A JSON value as [`parse_document`] reads it.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Json {
+pub enum Json {
+    /// `null`.
     Null,
+    /// `true` or `false`.
     Boolean(bool),
+    /// A number, as its text in the document, so no precision is lost.
     Number(String),
+    /// A string, with its escapes decoded.
     String(String),
+    /// An array's elements, in order.
     Array(Vec<Node>),
+    /// An object's members, in order, keeping any key that appears twice.
     Object(Vec<(String, Node)>),
 }
 
+/// A JSON value and where it lies in the document: the byte range of its text.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Node {
-    pub(crate) value: Json,
-    pub(crate) start: usize,
-    pub(crate) end: usize,
+pub struct Node {
+    /// The value.
+    pub value: Json,
+    /// The byte offset where its text starts.
+    pub start: usize,
+    /// The byte offset just past its text.
+    pub end: usize,
+}
+
+/// Why [`parse_document`] refused a document: where and what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonSyntaxError {
+    /// The byte offset in the document where reading stopped.
+    pub position: usize,
+    /// What is wrong, such as `Expected ":", but found something else.`.
+    pub message: String,
+}
+
+/// Reads `text` as one JSON document (RFC 8259): a value with optional white space around it.
+/// Strings may hold any character, `\u0000` included; nesting deeper than 256 arrays and
+/// objects is refused, so hostile input cannot exhaust the stack.
+pub fn parse_document(text: &str) -> Result<Node, JsonSyntaxError> {
+    let mut parser = Parser {
+        text,
+        bytes: text.as_bytes(),
+        at: 0,
+        type_name: "JSON",
+        allows_nul: true,
+    };
+    let parsed = parser.value(0).and_then(|node| {
+        parser.spaces();
+        if parser.at == text.len() {
+            Ok(node)
+        } else {
+            Err(parser.error("Expected end of input, but found something else."))
+        }
+    });
+    parsed.map_err(|error| JsonSyntaxError {
+        position: parser.at,
+        message: error.detail().unwrap_or(error.message()).to_owned(),
+    })
 }
 
 fn invalid(type_name: &str, detail: &str) -> SqlError {
@@ -34,6 +82,7 @@ struct Parser<'t> {
     bytes: &'t [u8],
     at: usize,
     type_name: &'static str,
+    allows_nul: bool,
 }
 
 impl Parser<'_> {
@@ -230,7 +279,7 @@ impl Parser<'_> {
                 } else {
                     first
                 };
-                if code == 0 {
+                if code == 0 && !self.allows_nul {
                     return Err(SqlError::new(
                         SqlState::INVALID_TEXT_REPRESENTATION,
                         "unsupported Unicode escape sequence",
@@ -300,6 +349,7 @@ pub(crate) fn parse(text: &str, binary: bool) -> SqlResult<Node> {
         bytes: text.as_bytes(),
         at: 0,
         type_name: if binary { "jsonb" } else { "json" },
+        allows_nul: false,
     };
     let node = parser.value(0)?;
     parser.spaces();
@@ -717,5 +767,55 @@ mod tests {
             }
             let _ = parse_path(&text);
         }
+    }
+
+    #[test]
+    fn a_document_reads_rfc_8259_values_and_keeps_nul_and_duplicate_keys() {
+        let node = parse_document(
+            " {\"a\": [1, -2.5e3, true, null], \"b\": \"x\\u0000y\\ud83d\\ude00\\n\", \"a\": {}} ",
+        )
+        .unwrap();
+        let Json::Object(members) = &node.value else {
+            panic!("not an object: {node:?}");
+        };
+        assert_eq!(members.len(), 3);
+        assert_eq!(members[0].0, "a");
+        assert_eq!(members[2].0, "a");
+        let Json::Array(items) = &members[0].1.value else {
+            panic!("not an array");
+        };
+        assert_eq!(items[1].value, Json::Number("-2.5e3".into()));
+        assert_eq!(
+            members[1].1.value,
+            Json::String("x\u{0}y\u{1F600}\n".into())
+        );
+        assert_eq!((node.start, node.end), (1, 71));
+        for scalar in ["0", "\"\"", "false", "1E+2", "[]", "{}"] {
+            assert!(parse_document(scalar).is_ok(), "{scalar}");
+        }
+    }
+
+    #[test]
+    fn a_document_refuses_what_rfc_8259_refuses_with_a_position_and_no_sql_type_name() {
+        for (text, position) in [
+            ("", 0),
+            ("{", 1),
+            ("[1,]", 3),
+            ("01", 2),
+            ("1.", 2),
+            ("\"\\x\"", 3),
+            ("\"\\udc00\"", 7),
+            ("\"a\nb\"", 2),
+            ("nul", 0),
+            ("{} {}", 3),
+            ("{\"a\" 1}", 5),
+        ] {
+            let error = parse_document(text).unwrap_err();
+            assert_eq!(error.position, position, "{text:?}: {error:?}");
+            assert!(!error.message.contains("json"), "{text:?}: {error:?}");
+        }
+        let deep = "[".repeat(MAX_DEPTH + 2);
+        assert!(parse_document(&deep).unwrap_err().message.contains("256"));
+        assert!(parse(r#""\u0000""#, false).is_err());
     }
 }

@@ -36,7 +36,7 @@ mod hash_index;
 mod indexes;
 mod interval;
 mod join;
-mod json;
+pub mod json;
 mod lexer;
 mod memory;
 mod mysql_errors;
@@ -76,6 +76,8 @@ mod index_tests;
 #[cfg(test)]
 mod memory_store;
 #[cfg(test)]
+mod one_statement_tests;
+#[cfg(test)]
 mod schema_tests;
 #[cfg(test)]
 mod subquery_tests;
@@ -96,10 +98,10 @@ pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, MAX_LISTED, RestoreError, RestoreOptions,
     RestoreProgress, RestoreReport, SkippedObject, TableRows, restore_dump,
 };
-pub use schema::{ColumnSchema, IndexSchema, TableSchema, quoted};
+pub use schema::{ColumnSchema, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted};
 pub use session::{
-    OutputColumn, Parameter, PreparedStatement, QueryResult, Session, StatementDescription,
-    TransactionStatus,
+    OneStatementError, OneStatementRefusal, OutputColumn, Parameter, PreparedStatement,
+    QueryResult, Session, StatementDescription, TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;

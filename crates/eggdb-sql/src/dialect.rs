@@ -18,6 +18,17 @@ pub enum Dialect {
     Oracle,
 }
 
+const NAMED: [(&str, Dialect); 8] = [
+    ("postgresql", Dialect::PostgreSql),
+    ("mysql", Dialect::MySql),
+    ("sqlite", Dialect::Sqlite),
+    ("oracle", Dialect::Oracle),
+    ("postgres", Dialect::PostgreSql),
+    ("pg", Dialect::PostgreSql),
+    ("mariadb", Dialect::MySql),
+    ("sqlite3", Dialect::Sqlite),
+];
+
 impl Dialect {
     /// Every dialect, in the order the roadmap brought them.
     pub const ALL: [Self; 4] = [Self::PostgreSql, Self::MySql, Self::Sqlite, Self::Oracle];
@@ -35,13 +46,16 @@ impl Dialect {
     /// The dialect named `name` (case-insensitive), accepting `postgres`, `pg`, `mariadb` and
     /// `sqlite3` as other names.
     pub fn named(name: &str) -> Option<Self> {
-        match name.to_ascii_lowercase().as_str() {
-            "postgresql" | "postgres" | "pg" => Some(Self::PostgreSql),
-            "mysql" | "mariadb" => Some(Self::MySql),
-            "sqlite" | "sqlite3" => Some(Self::Sqlite),
-            "oracle" => Some(Self::Oracle),
-            _ => None,
-        }
+        NAMED
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(name))
+            .map(|&(_, dialect)| dialect)
+    }
+
+    /// Every name [`Dialect::named`] accepts, in lower case: the four dialects' own names
+    /// first, then `postgres`, `pg`, `mariadb` and `sqlite3`.
+    pub fn accepted_names() -> impl Iterator<Item = &'static str> {
+        NAMED.iter().map(|&(name, _)| name)
     }
 
     /// `value` as this dialect's clients print it in text form: PostgreSQL's `t` and `f` for
@@ -108,4 +122,25 @@ fn oracle_numeric_text(number: &crate::Numeric) -> String {
         return format!("-.{rest}");
     }
     trimmed.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Dialect;
+
+    #[test]
+    fn every_accepted_name_names_a_dialect_in_any_case_and_each_dialect_leads_with_its_own_name() {
+        let names: Vec<&str> = Dialect::accepted_names().collect();
+        assert_eq!(names.len(), 8);
+        for name in &names {
+            let dialect = Dialect::named(name).unwrap();
+            assert_eq!(Dialect::named(&name.to_ascii_uppercase()), Some(dialect));
+        }
+        for (dialect, name) in Dialect::ALL.iter().zip(&names) {
+            assert_eq!(dialect.name(), *name);
+        }
+        assert_eq!(Dialect::named("PostGres"), Some(Dialect::PostgreSql));
+        assert_eq!(Dialect::named("sqlserver"), None);
+        assert_eq!(Dialect::named(""), None);
+    }
 }
