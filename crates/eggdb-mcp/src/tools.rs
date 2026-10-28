@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const MAX_SQL_BYTES: usize = 1 << 20;
 const MAX_VALUE_BYTES: usize = 16 << 20;
+const MAX_ROW_BYTES: usize = 64 << 20;
 const DEFAULT_MAX_ROWS: u64 = 100;
 const LARGEST_MAX_ROWS: u64 = 10_000;
 const DEFAULT_SAMPLE_ROWS: u64 = 10;
@@ -631,6 +632,7 @@ fn one_statement<S: KeyValueStore, O: DatabaseOpener>(
 ) -> Result<Option<QueryResult>, ToolError> {
     let mut session = Session::with_dialect(store, dialect);
     session.set_max_value_bytes(MAX_VALUE_BYTES);
+    session.set_max_row_bytes(MAX_ROW_BYTES);
     let mut result = None;
     let ran = session.run_one_statement(sql, &mut |returned| {
         result = Some(returned);

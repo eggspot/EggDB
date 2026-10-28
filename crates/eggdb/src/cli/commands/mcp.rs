@@ -90,12 +90,21 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         exit_process: Some(std::process::exit),
     };
     let mut server = Server::new(&opener, config).map_err(|failure| match failure {
-        StartFailure::Audit(failure) => Failure::database(
-            format!(
-                "cannot write {audit_shown}: {failure}. Every MCP call is recorded there, so eggdb mcp does not start without it. Make the database's directory writable, or copy the database somewhere that is."
-            ),
-            Exit::DatabaseError,
-        ),
+        StartFailure::Audit(failure) => {
+            let advice = if failure.reason.starts_with("it ")
+                || failure.reason.starts_with("another file")
+            {
+                "Move it away: eggdb mcp writes its audit only to a plain file of its own, which it creates."
+            } else {
+                "Make the database's directory writable, or copy the database somewhere that is."
+            };
+            Failure::database(
+                format!(
+                    "cannot write {audit_shown}: {failure}. Every MCP call is recorded there, so eggdb mcp does not start without it. {advice}"
+                ),
+                Exit::DatabaseError,
+            )
+        }
         StartFailure::Watchdog(error) => Failure::database(
             format!("cannot start eggdb mcp's watchdog thread: {error}"),
             Exit::DatabaseError,

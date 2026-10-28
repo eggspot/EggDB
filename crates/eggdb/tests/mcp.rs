@@ -450,6 +450,26 @@ fn startup_refuses_a_missing_file_an_unwritable_audit_file_and_a_bad_time_limit(
         stderr(&blocked)
     );
     std::fs::remove_dir(&audit.0).unwrap();
+    #[cfg(unix)]
+    {
+        let elsewhere = TempPath::new("mcp-audit-elsewhere");
+        std::fs::write(elsewhere.path(), b"kept\n").unwrap();
+        std::fs::hard_link(elsewhere.path(), &audit.0).unwrap();
+        let linked = eggdb(&["mcp", file.path().to_str().unwrap()]);
+        assert_eq!(linked.status.code(), Some(3));
+        assert!(
+            stderr(&linked).contains("it has another name (a hard link)"),
+            "{}",
+            stderr(&linked)
+        );
+        assert!(
+            stderr(&linked).contains("Move it away"),
+            "{}",
+            stderr(&linked)
+        );
+        assert_eq!(std::fs::read(elsewhere.path()).unwrap(), b"kept\n");
+        std::fs::remove_file(&audit.0).unwrap();
+    }
     for value in ["0", "301", "five"] {
         let bad = eggdb(&["mcp", file.path().to_str().unwrap(), "--time-limit", value]);
         assert_eq!(bad.status.code(), Some(2));
@@ -499,9 +519,14 @@ fn values_too_large_for_a_call_fail_fast_instead_of_taking_gigabytes() {
     let (file, _audit) = sample("mcp-big-values", 0);
     let mut mcp = Mcp::start(file.path(), &["--time-limit", "60"]);
     mcp.initialize();
+    let wide = format!(
+        "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 25) SELECT count(*) FROM (SELECT {} FROM r WHERE n = 25) AS q",
+        vec!["s"; 200].join(", ")
+    );
     for sql in [
         "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 32) SELECT n, length(s) FROM r ORDER BY n DESC LIMIT 1",
         "WITH RECURSIVE r(n, s) AS (SELECT 1, 'x' UNION ALL SELECT n + 1, s || s FROM r WHERE n < 28) SELECT length(s||s||s||s||s||s||s||s||s||s||s||s||s||s||s||s) FROM r WHERE n = 28",
+        &wide,
     ] {
         let start = std::time::Instant::now();
         let answer = mcp.call("run_sql", &format!(r#"{{"sql":"{sql}"}}"#));
