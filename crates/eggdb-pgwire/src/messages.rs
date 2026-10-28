@@ -260,7 +260,13 @@ pub enum FrontendMessage {
     Terminate,
     /// `p`: a SASL message during authentication.
     AuthenticationResponse(Vec<u8>),
-    /// A message type this server does not handle, such as COPY data or a function call.
+    /// `d`: a piece of `COPY` data; outside a copy it is ignored, so its bytes are not kept.
+    CopyData,
+    /// `c`: the end of a `COPY`'s data.
+    CopyDone,
+    /// `f`: the client fails a `COPY ... FROM STDIN`, with its reason.
+    CopyFail(String),
+    /// A message type this server does not handle, such as a function call.
     Other(u8),
 }
 
@@ -340,6 +346,9 @@ pub fn parse_message(tag: u8, body: &[u8]) -> Result<FrontendMessage, MalformedM
         b'H' => FrontendMessage::Flush,
         b'X' => FrontendMessage::Terminate,
         b'p' => return Ok(FrontendMessage::AuthenticationResponse(body.to_vec())),
+        b'd' => return Ok(FrontendMessage::CopyData),
+        b'c' => FrontendMessage::CopyDone,
+        b'f' => FrontendMessage::CopyFail(fields.string()?.to_owned()),
         other => return Ok(FrontendMessage::Other(other)),
     };
     fields.finish()?;
@@ -428,6 +437,8 @@ pub enum ReportField {
     Hint,
     /// `P`: the 1-based character position in the query text.
     Position,
+    /// `W`: the context, such as the line of `COPY` data an error was found on.
+    Where,
 }
 
 impl ReportField {
@@ -440,6 +451,7 @@ impl ReportField {
             Self::Detail => b'D',
             Self::Hint => b'H',
             Self::Position => b'P',
+            Self::Where => b'W',
         }
     }
 }
@@ -605,6 +617,44 @@ impl Outbox {
             }
         });
         Ok(())
+    }
+
+    fn copy_response(&mut self, tag: u8, columns: usize) -> Result<(), TooLarge> {
+        let count = count_field(columns, TooLarge::Columns)?;
+        self.message(tag, |body| {
+            body.push(0);
+            body.extend_from_slice(&count);
+            for _ in 0..columns {
+                body.extend_from_slice(&0i16.to_be_bytes());
+            }
+        });
+        Ok(())
+    }
+
+    /// `CopyInResponse` for text data (format 0) with `columns` columns; refused for more
+    /// than 32,767 columns.
+    pub fn copy_in_response(&mut self, columns: usize) -> Result<(), TooLarge> {
+        self.copy_response(b'G', columns)
+    }
+
+    /// `CopyOutResponse` for text data (format 0) with `columns` columns; refused for more
+    /// than 32,767 columns.
+    pub fn copy_out_response(&mut self, columns: usize) -> Result<(), TooLarge> {
+        self.copy_response(b'H', columns)
+    }
+
+    /// `CopyData` with one row of a `COPY ... TO STDOUT`; refused over 2 GiB.
+    pub fn copy_data(&mut self, data: &[u8]) -> Result<(), TooLarge> {
+        if data.len() > i32::MAX as usize - 4 {
+            return Err(TooLarge::ValueBytes(data.len()));
+        }
+        self.message(b'd', |body| body.extend_from_slice(data));
+        Ok(())
+    }
+
+    /// `CopyDone`: the rows of a `COPY ... TO STDOUT` have all been sent.
+    pub fn copy_done(&mut self) {
+        self.message(b'c', |_| {});
     }
 
     /// `CommandComplete` with its tag, such as `INSERT 0 1`.
@@ -806,10 +856,14 @@ mod tests {
         assert_eq!(parse_message(b'S', b""), Ok(FrontendMessage::Sync));
         assert_eq!(parse_message(b'H', b""), Ok(FrontendMessage::Flush));
         assert_eq!(parse_message(b'X', b""), Ok(FrontendMessage::Terminate));
+        assert_eq!(parse_message(b'd', b"xyz"), Ok(FrontendMessage::CopyData));
+        assert_eq!(parse_message(b'c', b""), Ok(FrontendMessage::CopyDone));
         assert_eq!(
-            parse_message(b'd', b"xyz"),
-            Ok(FrontendMessage::Other(b'd'))
+            parse_message(b'f', b"gave up\0"),
+            Ok(FrontendMessage::CopyFail("gave up".into()))
         );
+        assert!(parse_message(b'c', b"x").is_err());
+        assert!(parse_message(b'f', b"no end").is_err());
         let mut sasl = b"SCRAM-SHA-256\0".to_vec();
         sasl.extend_from_slice(&3i32.to_be_bytes());
         sasl.extend_from_slice(b"n,,");
@@ -891,5 +945,15 @@ mod tests {
             &[(ReportField::Code, "42P01"), (ReportField::Message, "a\0b")],
         );
         assert_eq!(outbox.bytes(), b"E\0\0\0\x10C42P01\0Mab\0\0");
+        outbox.clear();
+        outbox.copy_in_response(2).unwrap();
+        outbox.copy_out_response(1).unwrap();
+        outbox.copy_data(b"1\tx\n").unwrap();
+        outbox.copy_done();
+        assert_eq!(
+            outbox.bytes(),
+            b"G\0\0\0\x0b\0\0\x02\0\0\0\0H\0\0\0\x09\0\0\x01\0\0d\0\0\0\x081\tx\nc\0\0\0\x04"
+        );
+        assert!(outbox.copy_in_response(40_000).is_err());
     }
 }

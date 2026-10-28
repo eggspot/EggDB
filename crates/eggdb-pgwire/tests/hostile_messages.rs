@@ -66,6 +66,15 @@ fn seeds() -> Vec<(u8, Vec<u8>)> {
         (b'S', Vec::new()),
         (b'H', Vec::new()),
         (b'p', sasl),
+        (
+            b'Q',
+            cstring("CREATE TABLE IF NOT EXISTS h (a integer, b text)"),
+        ),
+        (b'Q', cstring("COPY h FROM STDIN")),
+        (b'Q', cstring("COPY h TO STDOUT (FORMAT csv, HEADER)")),
+        (b'd', b"1\tx\n2\t\\N\n".to_vec()),
+        (b'c', Vec::new()),
+        (b'f', cstring("gave up")),
     ]
 }
 
@@ -227,6 +236,61 @@ fn hostile_clients_over_sockets_leave_the_server_serving() {
     }
     let (mut client, _) = Client::login(server.address);
     assert_eq!(tags(&client.query("SELECT 1")), "TDCZ");
+}
+
+#[test]
+fn hostile_messages_inside_a_copy_leave_the_server_serving() {
+    let cases = (setting("EGGDB_FUZZ_CASES", 20_000) / 500).max(20);
+    let seed = setting("EGGDB_FUZZ_SEED", 0x5eed_2026);
+    let server = TestServer::start_with(16, Duration::from_millis(400));
+    let (mut setup, _) = Client::login(server.address);
+    assert_eq!(
+        tags(&setup.query("CREATE TABLE h (a integer PRIMARY KEY, b text)")),
+        "CZ"
+    );
+    let mut rng = Rng(seed ^ 0xc0b1);
+    let starts = [
+        "COPY h FROM STDIN",
+        "COPY h FROM STDIN (FORMAT csv, HEADER match)",
+        "COPY h (b, a) FROM STDIN (DELIMITER ',', NULL '')",
+    ];
+    let rows = [
+        &b"1\tx\n"[..],
+        b"2\t\\N\n3\ty",
+        b"4,\"q\"\"\"\n",
+        b"\\.\n",
+        b"a,b\n",
+    ];
+    for _ in 0..cases {
+        let (mut client, _) = Client::login(server.address);
+        let mut stream = framed(b'Q', &cstring(starts[rng.below(starts.len())]));
+        for _ in 0..=rng.below(6) {
+            let (tag, mut body) = match rng.below(6) {
+                0 | 1 => (b'd', rows[rng.below(rows.len())].to_vec()),
+                2 => (b'c', Vec::new()),
+                3 => (b'f', cstring("stop")),
+                4 => (b"HSQXP"[rng.below(5)], Vec::new()),
+                _ => (rng.next() as u8, Vec::new()),
+            };
+            if rng.below(3) == 0 {
+                mutate(&mut rng, &mut body);
+            }
+            stream.extend(framed(tag, &body));
+        }
+        if rng.below(4) == 0 {
+            mutate(&mut rng, &mut stream);
+        }
+        client.send_raw(&stream);
+        client.send_raw(&framed(b'c', &[]));
+        client.send_raw(&framed(b'S', &[]));
+        client.send_raw(&framed(b'X', &[]));
+        drain(&mut client, Duration::from_secs(2));
+    }
+    let (mut client, _) = Client::login(server.address);
+    assert_eq!(tags(&client.query("SELECT 1")), "TDCZ");
+    let copied = client.query("COPY h TO STDOUT");
+    assert_eq!(copied.last().map(|message| message.tag), Some(b'Z'));
+    assert_eq!(copied[0].tag, b'H');
 }
 
 #[test]

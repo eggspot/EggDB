@@ -14,6 +14,9 @@
 //! - The simple query protocol and the extended one (`Parse`, `Bind`, `Describe`, `Execute`,
 //!   `Close`, `Sync`, `Flush`) with `$n` parameters in text or binary form and results in
 //!   either.
+//! - The copy sub-protocol: `COPY ... FROM STDIN` (`CopyInResponse`, then the client's
+//!   `CopyData`, `CopyDone` or `CopyFail`) and `COPY ... TO STDOUT` (`CopyOutResponse`, one
+//!   `CopyData` per row, `CopyDone`), in the text and CSV formats, which psql's `\copy` uses.
 //!
 //! The guide is "Connecting with psql" in `docs/sql.md` in the repository.
 
