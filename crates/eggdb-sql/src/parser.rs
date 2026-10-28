@@ -1323,7 +1323,14 @@ impl<'t> Parser<'t> {
                 let start = self.position();
                 let expr = self.binary_operand()?;
                 let end = self.tokens[self.at.saturating_sub(1)].end;
-                let source = self.text.get(start..end).unwrap_or("").to_owned();
+                let source = if self.sqlserver() {
+                    sqlserver::default_source(&expr).ok_or_else(|| {
+                        sqlserver::not_supported("A DEFAULT other than a constant or GETDATE()")
+                            .at(start)
+                    })?
+                } else {
+                    self.text.get(start..end).unwrap_or("").to_owned()
+                };
                 column.default = Some((expr, source));
             } else if self.oracle() && self.is_word("generated") {
                 self.oracle_identity(&mut column)?;

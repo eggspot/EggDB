@@ -96,14 +96,14 @@ pub(crate) fn env_change_end(kind: u8, descriptor: u64) -> Vec<u8> {
     with_length(ENVCHANGE, body)
 }
 
-pub(crate) struct Message<'m> {
+pub(crate) struct ServerMessage<'m> {
     pub(crate) number: u32,
     pub(crate) severity: u8,
     pub(crate) text: &'m str,
     pub(crate) line: u32,
 }
 
-fn message_token(token: u8, message: &Message<'_>) -> Vec<u8> {
+fn message_token(token: u8, message: &ServerMessage<'_>) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&message.number.to_le_bytes());
     body.push(1);
@@ -115,11 +115,11 @@ fn message_token(token: u8, message: &Message<'_>) -> Vec<u8> {
     with_length(token, body)
 }
 
-pub(crate) fn error(message: &Message<'_>) -> Vec<u8> {
+pub(crate) fn error(message: &ServerMessage<'_>) -> Vec<u8> {
     message_token(ERROR, message)
 }
 
-pub(crate) fn info(message: &Message<'_>) -> Vec<u8> {
+pub(crate) fn info(message: &ServerMessage<'_>) -> Vec<u8> {
     message_token(INFO, message)
 }
 
@@ -159,7 +159,7 @@ pub(crate) fn row_start() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        COLLATION, DONE, DONE_COUNT, DONE_MORE, ENV_COMMIT_TRANSACTION, Message, done,
+        COLLATION, DONE, DONE_COUNT, DONE_MORE, ENV_COMMIT_TRANSACTION, ServerMessage, done,
         env_change_begin, env_change_end, env_change_text, error, login_ack,
     };
 
@@ -196,7 +196,7 @@ mod tests {
             env_change_end(ENV_COMMIT_TRANSACTION, 1),
             [0xE3, 11, 0, 9, 0, 8, 1, 0, 0, 0, 0, 0, 0, 0]
         );
-        let token = error(&Message {
+        let token = error(&ServerMessage {
             number: 208,
             severity: 16,
             text: "x",

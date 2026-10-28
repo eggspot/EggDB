@@ -793,6 +793,12 @@ pub(crate) fn define_check(
     text: &str,
     dialect: Dialect,
 ) -> SqlResult<usize> {
+    if dialect == Dialect::SqlServer {
+        return Err(SqlError::not_supported(
+            "CHECK constraints in the SQL Server dialect are not supported in this version of EggDB.",
+        )
+        .at(expr.position));
+    }
     if let Some(name) = &spec.name {
         check_identifier(name)?;
     }

@@ -134,6 +134,11 @@ pub(crate) fn create_view(
     context: &ViewContext<'_>,
 ) -> SqlResult<QueryResult> {
     let dialect = context.dialect;
+    if dialect == Dialect::SqlServer {
+        return Err(SqlError::not_supported(
+            "Views in the SQL Server dialect are not supported in this version of EggDB.",
+        ));
+    }
     let result = QueryResult::command("CREATE VIEW");
     if create.text.len() > crate::encoding::MAX_VIEW_TEXT {
         return Err(SqlError::new(

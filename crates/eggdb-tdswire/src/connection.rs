@@ -6,7 +6,7 @@ use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, ta
 use crate::tokens::{
     self, DONE, DONE_ATTENTION, DONE_COUNT, DONE_ERROR, DONE_IN_TRANSACTION, DONE_MORE,
     ENV_COMMIT_TRANSACTION, ENV_DATABASE, ENV_LANGUAGE, ENV_PACKET_SIZE, ENV_ROLLBACK_TRANSACTION,
-    Message,
+    ServerMessage,
 };
 use crate::types::{push_value, wire_columns};
 use crate::wire::{DEFAULT_PACKET_SIZE, POLL_INTERVAL, Wire, WireError};
@@ -33,6 +33,8 @@ const TOO_MANY_CONNECTIONS: u32 = 17_809;
 const NOT_SUPPORTED: u32 = 40_517;
 const PROTOCOL_ERROR: u32 = 4002;
 const LOGGED_BATCH_CHARACTERS: usize = 200;
+const MAX_RESULT_COLUMNS: usize = 4096;
+const TOO_MANY_RESULT_COLUMNS: u32 = 1056;
 
 pub(crate) fn printable(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
@@ -85,7 +87,7 @@ fn line_of(text: &str, offset: usize) -> u32 {
 fn send_errors(wire: &mut Wire<'_>, errors: &[(u32, u8, &str)]) {
     let mut body = Vec::new();
     for (number, severity, text) in errors {
-        body.extend(tokens::error(&Message {
+        body.extend(tokens::error(&ServerMessage {
             number: *number,
             severity: *severity,
             text,
@@ -337,14 +339,14 @@ fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login
 fn login_response(database: &str, packet_size: usize) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend(tokens::env_change_text(ENV_DATABASE, database, "master"));
-    body.extend(tokens::info(&Message {
+    body.extend(tokens::info(&ServerMessage {
         number: 5701,
         severity: 0,
         text: &format!("Changed database context to '{database}'."),
         line: 0,
     }));
     body.extend(tokens::env_change_text(ENV_LANGUAGE, "us_english", ""));
-    body.extend(tokens::info(&Message {
+    body.extend(tokens::info(&ServerMessage {
         number: 5703,
         severity: 0,
         text: "Changed language setting to us_english.",
@@ -417,7 +419,7 @@ struct Connection<'a> {
     transaction: Option<u64>,
 }
 
-struct Pending {
+struct PendingDone {
     status: u16,
     command: u16,
     rows: u64,
@@ -473,7 +475,7 @@ impl Connection<'_> {
 
     fn send_not_supported(&mut self, what: &str) -> bool {
         let text = format!("{what} are not supported in this version of EggDB.");
-        let mut body = tokens::error(&Message {
+        let mut body = tokens::error(&ServerMessage {
             number: NOT_SUPPORTED,
             severity: 16,
             text: &text,
@@ -505,7 +507,7 @@ impl Connection<'_> {
         }
         let text = batch.text;
         self.wire.begin_message(TABULAR_RESULT);
-        let mut pending: Option<Pending> = None;
+        let mut pending: Option<PendingDone> = None;
         let mut failed_write = false;
         let database = session.database().to_owned();
         let mut writer = StepWriter {
@@ -523,7 +525,7 @@ impl Connection<'_> {
         if failed_write {
             return false;
         }
-        let last = pending.take().unwrap_or(Pending {
+        let last = pending.take().unwrap_or(PendingDone {
             status: if in_transaction {
                 DONE_IN_TRANSACTION
             } else {
@@ -548,7 +550,7 @@ struct StepWriter<'w, 'a> {
     connection: &'w mut Connection<'a>,
     text: &'w str,
     database: String,
-    pending: &'w mut Option<Pending>,
+    pending: &'w mut Option<PendingDone>,
     failed_write: &'w mut bool,
 }
 
@@ -594,14 +596,14 @@ impl StepWriter<'_, '_> {
         let line = line_of(self.text, error.position().unwrap_or(statement_start));
         let number = error.vendor_code().map_or(50_000, u32::from);
         let severity = error.severity().unwrap_or(16);
-        let token = tokens::error(&Message {
+        let token = tokens::error(&ServerMessage {
             number,
             severity,
             text: error.message(),
             line,
         });
         if self.write(&token) {
-            *self.pending = Some(Pending {
+            *self.pending = Some(PendingDone {
                 status: DONE_ERROR,
                 command: 0,
                 rows: 0,
@@ -637,7 +639,7 @@ impl StepWriter<'_, '_> {
         if let Some(database) = result.tag.strip_prefix("USE ") {
             let old = std::mem::replace(&mut self.database, database.to_owned());
             let mut body = tokens::env_change_text(ENV_DATABASE, database, &old);
-            body.extend(tokens::info(&Message {
+            body.extend(tokens::info(&ServerMessage {
                 number: 5701,
                 severity: 0,
                 text: &format!("Changed database context to '{database}'."),
@@ -646,7 +648,7 @@ impl StepWriter<'_, '_> {
             if !self.write(&body) {
                 return false;
             }
-            *self.pending = Some(Pending {
+            *self.pending = Some(PendingDone {
                 status: 0,
                 command: 0,
                 rows: 0,
@@ -654,6 +656,23 @@ impl StepWriter<'_, '_> {
             return true;
         }
         if let Some(columns) = &result.columns {
+            if columns.len() > MAX_RESULT_COLUMNS {
+                let token = tokens::error(&ServerMessage {
+                    number: TOO_MANY_RESULT_COLUMNS,
+                    severity: 15,
+                    text: "The number of elements in the select list exceeds the maximum allowed number of 4096 elements.",
+                    line: 1,
+                });
+                if !self.write(&token) {
+                    return false;
+                }
+                *self.pending = Some(PendingDone {
+                    status: DONE_ERROR,
+                    command: 0,
+                    rows: 0,
+                });
+                return true;
+            }
             let wire_columns = wire_columns(columns, &result.rows);
             if !self.write(&tokens::column_metadata(&wire_columns)) {
                 return false;
@@ -669,7 +688,7 @@ impl StepWriter<'_, '_> {
                     return false;
                 }
             }
-            *self.pending = Some(Pending {
+            *self.pending = Some(PendingDone {
                 status: count,
                 command: SELECT_COMMAND,
                 rows: result.rows.len() as u64,
@@ -693,12 +712,12 @@ impl StepWriter<'_, '_> {
                 .and_then(|count| count.parse::<u64>().ok())
         };
         *self.pending = Some(match rows {
-            Some(rows) => Pending {
+            Some(rows) => PendingDone {
                 status: count,
                 command,
                 rows,
             },
-            None => Pending {
+            None => PendingDone {
                 status: 0,
                 command,
                 rows: 0,

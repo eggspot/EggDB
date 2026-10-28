@@ -1445,6 +1445,10 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   savepoints yet) and ends the batch; one that wrote nothing leaves the transaction open, as in
   SQL Server. An unknown column of an existing table is found when the statement runs, after
   the statements before it in the batch ran (SQL Server finds it when the batch compiles).
+- Views (`CREATE VIEW` and `ALTER VIEW`) and `CHECK` constraints: each keeps its dialect in the
+  file, and a fifth dialect there is a file-format change of its own (D114, D116, D35); views
+  and constraints made in another dialect work from Transact-SQL. A `DEFAULT` is a constant or
+  `GETDATE()` and its kin.
 - `DECLARE`, `IF`, `WHILE`, `BEGIN ... END`, `TRY ... CATCH`, `PRINT`, `EXEC`, stored procedures
   and triggers; `SAVE TRANSACTION`; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF`, `ANSI_PADDING OFF`
   and `IMPLICIT_TRANSACTIONS ON`; three-part names and other databases.

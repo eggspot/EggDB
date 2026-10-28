@@ -110,9 +110,12 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
     values(
         &mut session,
-        "CREATE TABLE t (id INT PRIMARY KEY, name NVARCHAR(3) NOT NULL, CONSTRAINT positive CHECK (id > 0))",
+        "CREATE TABLE t (id INT PRIMARY KEY, name NVARCHAR(3) NOT NULL, made DATETIME2(3) DEFAULT GETDATE(), n INT DEFAULT ((0)))",
     );
-    values(&mut session, "INSERT INTO t VALUES (1, N'a')");
+    values(&mut session, "INSERT INTO t (id, name) VALUES (1, N'a')");
+    let rows = values(&mut session, "SELECT n, made AS m FROM t");
+    assert_eq!(rows[0][0], Value::Integer(0));
+    assert!(matches!(rows[0][1], Value::Timestamp(_)));
     let postgresql_words = [
         "relation \"",
         "duplicate key value violates",
@@ -126,10 +129,11 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
     for text in [
         "SELECT * FROM nowhere",
         "SELECT nope FROM t",
-        "INSERT INTO t VALUES (1, N'b')",
-        "INSERT INTO t VALUES (2, NULL)",
-        "INSERT INTO t VALUES (-1, N'c')",
-        "INSERT INTO t VALUES (3, N'long')",
+        "INSERT INTO t (id, name) VALUES (1, N'b')",
+        "INSERT INTO t (id, name) VALUES (2, NULL)",
+        "CREATE TABLE c (id INT PRIMARY KEY CHECK (id > 0))",
+        "CREATE TABLE d (id INT PRIMARY KEY, at DATETIME2 DEFAULT SYSDATETIME() + 1)",
+        "INSERT INTO t (id, name) VALUES (3, N'long')",
         "SELECT 1 / 0 AS x",
         "SELECT CAST(N'x' AS INT) AS x",
         "SELECT name + 1 AS x FROM t",

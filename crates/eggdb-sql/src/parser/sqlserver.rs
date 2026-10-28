@@ -389,10 +389,20 @@ fn integer(value: i64, position: usize) -> Expr {
 }
 
 pub(super) fn is_string_literal(expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::Literal(Literal::String(_)))
+}
+
+pub(super) fn default_source(expr: &Expr) -> Option<String> {
     match &expr.kind {
-        ExprKind::Literal(Literal::String(_)) => true,
-        ExprKind::Literal(Literal::Null) => false,
-        _ => false,
+        ExprKind::Cast {
+            expr: clock,
+            sql_type: SqlType::Timestamp(Some(precision)),
+        } if matches!(&clock.kind, ExprKind::Function { name, arguments }
+                if name == "localtimestamp" && arguments.is_empty()) =>
+        {
+            Some(format!("CAST(localtimestamp AS timestamp({precision}))"))
+        }
+        _ => super::mysql::postgresql_source(expr),
     }
 }
 
