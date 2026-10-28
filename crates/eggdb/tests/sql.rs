@@ -469,7 +469,7 @@ fn the_mysql_dialect_reads_mysql_and_reports_mysql_errors() {
     assert_eq!(unknown.status.code(), Some(2));
     assert!(
         text(&unknown.stderr)
-            .contains("--dialect takes postgresql, mysql, sqlite or oracle, not 'db2'")
+            .contains("--dialect takes postgresql, mysql, sqlite, oracle or sqlserver, not 'db2'")
     );
 }
 
@@ -559,5 +559,33 @@ fn the_oracle_dialect_reads_oracle_and_reports_ora_errors() {
         text(&committed.stdout).contains("  2\n"),
         "{}",
         text(&committed.stdout)
+    );
+}
+
+#[test]
+fn the_sqlserver_dialect_reads_transact_sql_and_reports_sql_server_errors() {
+    let file = TempPath::new("sql-sqlserver");
+    let created = eggdb_sql(
+        file.path(),
+        &[
+            "--create",
+            "--dialect",
+            "sqlserver",
+            "-c",
+            "CREATE TABLE [dbo].[Items] ([ID] INT IDENTITY(1,1) PRIMARY KEY, [Name] NVARCHAR(20)) INSERT INTO items (name) VALUES (N'egg'), (N'jam') SELECT TOP 1 [Name] AS [Last] FROM items ORDER BY id DESC",
+        ],
+        b"",
+    );
+    assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
+    assert!(text(&created.stdout).contains("jam"), "{}", text(&created.stdout));
+    let missing = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlserver", "-c", "SELECT * FROM [Missing]"],
+        b"",
+    );
+    assert_eq!(missing.status.code(), Some(3));
+    assert_eq!(
+        text(&missing.stderr),
+        "Msg 208, Level 16, State 1: Invalid object name 'missing'.\n"
     );
 }

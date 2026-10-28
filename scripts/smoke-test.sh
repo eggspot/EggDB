@@ -165,7 +165,7 @@ expect_exit 2 env -u EGGDB_PASSWORD "$eggdb" serve shop.db
 grep -q 'serve needs a password' last.err || fail "eggdb serve without a password said $(cat last.err)"
 expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 0.0.0.0:5432
 grep -q 'not a loopback address' last.err || fail "eggdb serve on 0.0.0.0 said $(cat last.err)"
-expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --tds-listen 0.0.0.0:1433
+expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 127.0.0.1:0 --tds-listen 0.0.0.0:1433
 grep -q 'not a loopback address' last.err || fail "eggdb serve --tds-listen on 0.0.0.0 said $(cat last.err)"
 if [ "${OS:-}" = Windows_NT ]; then
   echo "skip serve with clients: stopping a server gracefully needs SIGTERM, which Windows lacks"
