@@ -71,6 +71,13 @@ pub(crate) enum Statement {
         tag: &'static str,
         notice: Option<String>,
     },
+    SqlServer(SqlServerStatement),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SqlServerStatement {
+    Use(Name),
+    NoCount(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]

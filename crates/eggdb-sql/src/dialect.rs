@@ -16,35 +16,51 @@ pub enum Dialect {
     /// identifiers, implicit transactions and `ORA-` errors. EggDB does not speak Oracle's wire
     /// protocol.
     Oracle,
+    /// Microsoft SQL Server's Transact-SQL, as Microsoft's Transact-SQL reference documents it:
+    /// `[bracketed]` names, `TOP`, `IDENTITY`, `GETDATE()`, `@@VERSION`, batches without
+    /// semicolons and SQL Server's error numbers (`Msg 208, Level 16`). Clients reach it over
+    /// SQL Server's TDS protocol (`eggdb serve --tds-listen`).
+    SqlServer,
 }
 
-const NAMED: [(&str, Dialect); 8] = [
+const NAMED: [(&str, Dialect); 11] = [
     ("postgresql", Dialect::PostgreSql),
     ("mysql", Dialect::MySql),
     ("sqlite", Dialect::Sqlite),
     ("oracle", Dialect::Oracle),
+    ("sqlserver", Dialect::SqlServer),
     ("postgres", Dialect::PostgreSql),
     ("pg", Dialect::PostgreSql),
     ("mariadb", Dialect::MySql),
     ("sqlite3", Dialect::Sqlite),
+    ("mssql", Dialect::SqlServer),
+    ("tsql", Dialect::SqlServer),
 ];
 
 impl Dialect {
     /// Every dialect, in the order the roadmap brought them.
-    pub const ALL: [Self; 4] = [Self::PostgreSql, Self::MySql, Self::Sqlite, Self::Oracle];
+    pub const ALL: [Self; 5] = [
+        Self::PostgreSql,
+        Self::MySql,
+        Self::Sqlite,
+        Self::Oracle,
+        Self::SqlServer,
+    ];
 
-    /// The dialect's name as `--dialect` takes it: `postgresql`, `mysql`, `sqlite` or `oracle`.
+    /// The dialect's name as `--dialect` takes it: `postgresql`, `mysql`, `sqlite`, `oracle` or
+    /// `sqlserver`.
     pub fn name(self) -> &'static str {
         match self {
             Self::PostgreSql => "postgresql",
             Self::MySql => "mysql",
             Self::Sqlite => "sqlite",
             Self::Oracle => "oracle",
+            Self::SqlServer => "sqlserver",
         }
     }
 
-    /// The dialect named `name` (case-insensitive), accepting `postgres`, `pg`, `mariadb` and
-    /// `sqlite3` as other names.
+    /// The dialect named `name` (case-insensitive), accepting `postgres`, `pg`, `mariadb`,
+    /// `sqlite3`, `mssql` and `tsql` as other names.
     pub fn named(name: &str) -> Option<Self> {
         NAMED
             .iter()
@@ -52,20 +68,20 @@ impl Dialect {
             .map(|&(_, dialect)| dialect)
     }
 
-    /// Every name [`Dialect::named`] accepts, in lower case: the four dialects' own names
-    /// first, then `postgres`, `pg`, `mariadb` and `sqlite3`.
+    /// Every name [`Dialect::named`] accepts, in lower case: the five dialects' own names
+    /// first, then `postgres`, `pg`, `mariadb`, `sqlite3`, `mssql` and `tsql`.
     pub fn accepted_names() -> impl Iterator<Item = &'static str> {
         NAMED.iter().map(|&(name, _)| name)
     }
 
     /// `value` as this dialect's clients print it in text form: PostgreSQL's `t` and `f` for
-    /// booleans, MySQL's and SQLite's `1` and `0`, SQLite's floating point with 15 significant
+    /// booleans, MySQL's, SQLite's and SQL Server's `1` and `0`, SQLite's floating point with 15 significant
     /// digits and a decimal point (`2.0`), Oracle's `TRUE` and `FALSE` and its numbers without a
     /// leading zero (`.5`), a `bytea` as MySQL's client shows it (`0x6162`), as Oracle's
     /// (`6162`) or as SQLite's (its bytes as text), and `None` for NULL.
     pub fn value_text(self, value: &crate::Value) -> Option<String> {
         match (self, value) {
-            (Self::MySql | Self::Sqlite, crate::Value::Boolean(flag)) => {
+            (Self::MySql | Self::Sqlite | Self::SqlServer, crate::Value::Boolean(flag)) => {
                 Some(if *flag { "1" } else { "0" }.into())
             }
             (Self::Sqlite, crate::Value::Real(number)) => {
@@ -98,7 +114,10 @@ impl Dialect {
             (Self::Sqlite, crate::Value::Bytea(bytes)) => {
                 Some(String::from_utf8_lossy(bytes).into_owned())
             }
-            (Self::MySql | Self::Sqlite | Self::Oracle, crate::Value::TimestampTz(micros)) => {
+            (
+                Self::MySql | Self::Sqlite | Self::Oracle | Self::SqlServer,
+                crate::Value::TimestampTz(micros),
+            ) => {
                 Some(match crate::datetime::utc_to_local(*micros) {
                     Ok(local) => crate::datetime::format_timestamp(local),
                     Err(_) => crate::datetime::format_timestamp(*micros),
@@ -131,7 +150,7 @@ mod tests {
     #[test]
     fn every_accepted_name_names_a_dialect_in_any_case_and_each_dialect_leads_with_its_own_name() {
         let names: Vec<&str> = Dialect::accepted_names().collect();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 11);
         for name in &names {
             let dialect = Dialect::named(name).unwrap();
             assert_eq!(Dialect::named(&name.to_ascii_uppercase()), Some(dialect));
@@ -140,7 +159,9 @@ mod tests {
             assert_eq!(dialect.name(), *name);
         }
         assert_eq!(Dialect::named("PostGres"), Some(Dialect::PostgreSql));
-        assert_eq!(Dialect::named("sqlserver"), None);
+        assert_eq!(Dialect::named("SQLServer"), Some(Dialect::SqlServer));
+        assert_eq!(Dialect::named("mssql"), Some(Dialect::SqlServer));
+        assert_eq!(Dialect::named("sql server"), None);
         assert_eq!(Dialect::named(""), None);
     }
 }

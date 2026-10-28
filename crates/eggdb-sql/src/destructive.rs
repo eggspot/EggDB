@@ -173,7 +173,8 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::AlterView(_)
         | Statement::Comment(_)
         | Statement::Copy(_)
-        | Statement::Ignored { .. } => None,
+        | Statement::Ignored { .. }
+        | Statement::SqlServer(_) => None,
     }
 }
 

@@ -66,6 +66,10 @@ fn context() -> Context {
     })
 }
 
+pub(crate) fn current_dialect() -> Dialect {
+    context().dialect
+}
+
 fn foreign_keys_enforced() -> bool {
     context().foreign_keys
 }

@@ -1,5 +1,6 @@
 mod oracle;
 mod sqlite;
+mod sqlserver;
 
 pub(crate) use oracle::swap_uniform_case;
 
@@ -296,6 +297,9 @@ impl<'t> Lexer<'t> {
         if self.dialect == Dialect::Sqlite && byte == b'[' {
             return self.bracket_identifier();
         }
+        if self.dialect == Dialect::SqlServer && byte == b'[' {
+            return self.next_sqlserver_kind(byte);
+        }
         let single = match byte {
             b'(' => Some(TokenKind::LeftParen),
             b')' => Some(TokenKind::RightParen),
@@ -317,6 +321,9 @@ impl<'t> Lexer<'t> {
         }
         if self.dialect == Dialect::Oracle {
             return self.next_oracle_kind(byte);
+        }
+        if self.dialect == Dialect::SqlServer {
+            return self.next_sqlserver_kind(byte);
         }
 
         match byte {

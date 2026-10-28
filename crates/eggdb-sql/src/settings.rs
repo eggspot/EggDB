@@ -302,6 +302,14 @@ pub(crate) struct Settings {
     pub(crate) time_zone_offset: i32,
     pub(crate) mysql: crate::mysql_variables::MySqlVariables,
     pub(crate) sqlite: SqliteState,
+    pub(crate) sqlserver: SqlServerState,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SqlServerState {
+    pub(crate) connection_id: u32,
+    pub(crate) transaction_count: u32,
+    pub(crate) no_count: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +349,7 @@ impl Default for Settings {
             time_zone_offset: 0,
             mysql: crate::mysql_variables::MySqlVariables::default(),
             sqlite: SqliteState::default(),
+            sqlserver: SqlServerState::default(),
         }
     }
 }
