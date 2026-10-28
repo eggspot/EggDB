@@ -244,6 +244,7 @@ fn ok(answer: &Node) -> &Node {
 
 #[test]
 fn an_agent_reads_but_never_writes_and_every_call_is_audited() {
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let (file, audit) = sample("mcp-acceptance", 0);
     let path = file.path().to_str().unwrap();
     let none_yet = eggdb(&["audit", path]);
