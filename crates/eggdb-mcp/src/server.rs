@@ -354,39 +354,10 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             Some(Json::Object(members)) => members.as_slice(),
             _ => &[],
         };
-        let Some(Json::String(name)) = member(members, "name") else {
-            return error_line(
-                Some(id),
-                INVALID_PARAMS,
-                "tools/call needs params.name",
-                None,
-            );
-        };
-        let Some(tool) = Tool::named(name) else {
-            let mut data = JsonOut::new();
-            data.begin_object()
-                .key("name")
-                .string(&cut(name, 128))
-                .end_object();
-            return error_line(
-                Some(id),
-                INVALID_PARAMS,
-                "unknown tool",
-                Some(&data.finish()),
-            );
-        };
         let arguments_node = members
             .iter()
             .find(|(member, _)| member == "arguments")
             .map(|(_, node)| node);
-        let Some(arguments) = Arguments::of(arguments_node) else {
-            return error_line(
-                Some(id),
-                INVALID_PARAMS,
-                "tools/call's arguments is an object",
-                None,
-            );
-        };
         let arguments_text = match arguments_node {
             Some(node) => {
                 let mut out = JsonOut::new();
@@ -394,6 +365,34 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 out.finish()
             }
             None => "{}".to_owned(),
+        };
+        let name = match member(members, "name") {
+            Some(Json::String(name)) => Some(name.as_str()),
+            _ => None,
+        };
+        let tool = name.and_then(Tool::named);
+        let arguments = Arguments::of(arguments_node);
+        let (Some(tool), Some(arguments)) = (tool, arguments) else {
+            let (message, code) = match (name, tool) {
+                (None, _) => ("tools/call needs params.name", "invalid_request"),
+                (Some(_), None) => ("unknown tool", "unknown_tool"),
+                (Some(_), Some(_)) => ("tools/call's arguments is an object", "invalid_request"),
+            };
+            let shown_name = cut(name.unwrap_or("?"), 128);
+            let refusal: Result<ToolSuccess, ToolError> = Err(ToolError::new(code, message));
+            let _ = self.audited(
+                &now_rfc3339(),
+                &shown_name,
+                &arguments_text,
+                &refusal,
+                Duration::ZERO,
+            );
+            let mut data = JsonOut::new();
+            data.begin_object()
+                .key("name")
+                .string(&shown_name)
+                .end_object();
+            return error_line(Some(id), INVALID_PARAMS, message, Some(&data.finish()));
         };
         let started = now_rfc3339();
         let (outcome, duration) =

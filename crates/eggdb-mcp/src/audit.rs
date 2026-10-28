@@ -8,7 +8,7 @@ use eggdb_sql::json::{Json, Node, parse_document};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -324,11 +324,9 @@ pub enum AuditLine {
     },
 }
 
-/// The audit file as [`read_audit`] read it.
+/// What [`read_audit`] counted in the whole audit file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AuditListing {
-    /// The lines kept: all of them, or the last ones when a limit was given.
-    pub lines: Vec<AuditLine>,
+pub struct AuditTotals {
     /// Every call in the file.
     pub calls: u64,
     /// Every call that failed.
@@ -341,76 +339,142 @@ pub struct AuditListing {
 
 const SHARING_VIOLATION: i32 = 32;
 const LOCK_VIOLATION: i32 = 33;
+const LONGEST_RECORD_BYTES: usize = 1 << 20;
 
-/// Reads the audit file at `path`, keeping only its last `limit` lines when a limit is
-/// given; `None` when there is no audit file. On Windows, where a server's lock blocks reading
-/// for the moment it writes, it retries for up to a second.
-pub fn read_audit(path: &Path, limit: Option<usize>) -> io::Result<Option<AuditListing>> {
+fn is_locked_for_now(error: &io::Error) -> bool {
+    cfg!(windows)
+        && matches!(
+            error.raw_os_error(),
+            Some(SHARING_VIOLATION | LOCK_VIOLATION)
+        )
+}
+
+fn patiently<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let give_up = Instant::now() + LOCK_WAIT;
     loop {
-        match read_audit_once(path, limit) {
-            Err(error)
-                if cfg!(windows)
-                    && matches!(
-                        error.raw_os_error(),
-                        Some(SHARING_VIOLATION | LOCK_VIOLATION)
-                    )
-                    && Instant::now() < give_up =>
-            {
+        match attempt() {
+            Err(error) if is_locked_for_now(&error) && Instant::now() < give_up => {
                 std::thread::sleep(LOCK_POLL);
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            other => return other.map(Some),
+            other => return other,
         }
     }
 }
 
-fn read_audit_once(path: &Path, limit: Option<usize>) -> io::Result<AuditListing> {
-    let mut reader = BufReader::new(File::open(path)?);
-    let mut listing = AuditListing::default();
+struct PatientFile(File);
+
+impl Read for PatientFile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        patiently(|| self.0.read(buffer))
+    }
+}
+
+/// Reads the audit file at `path` line by line and hands `visit` every line, or only the last
+/// `limit` lines when a limit is given; `visit` returns whether to go on. It returns the
+/// totals of the whole file, or `None` when there is no audit file. It holds one line at a
+/// time (the last `limit` with a limit), and a line over 1 MiB, which no record is, is skipped
+/// unread as unreadable. On Windows, where a server's lock blocks reading for the moment it
+/// writes, each read waits up to a second.
+pub fn read_audit(
+    path: &Path,
+    limit: Option<usize>,
+    visit: &mut dyn FnMut(AuditLine) -> bool,
+) -> io::Result<Option<AuditTotals>> {
+    let file = match patiently(|| File::open(path)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut reader = BufReader::new(PatientFile(file));
+    let mut totals = AuditTotals::default();
     let mut kept = VecDeque::new();
-    let mut bytes = Vec::new();
+    let mut going = true;
     let mut number = 0;
-    loop {
-        bytes.clear();
-        if reader.read_until(b'\n', &mut bytes)? == 0 {
-            break;
-        }
+    while let Some(bytes) = next_line(&mut reader)? {
         number += 1;
-        while matches!(bytes.last(), Some(b'\n' | b'\r')) {
-            bytes.pop();
-        }
-        let line = match std::str::from_utf8(&bytes).ok().and_then(entry_of) {
-            Some(entry) => {
+        let line = match bytes
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|text| entry_of(text).map(|entry| (text, entry)))
+        {
+            Some((text, entry)) => {
                 if entry.event == AuditEvent::Call {
-                    listing.calls += 1;
+                    totals.calls += 1;
                     if entry.error_code.is_some() {
-                        listing.errors += 1;
+                        totals.errors += 1;
                     }
                     if let Some(client) = &entry.client
-                        && !listing.clients.contains(client)
+                        && !totals.clients.contains(client)
                     {
-                        listing.clients.push(client.clone());
+                        totals.clients.push(client.clone());
                     }
                 }
                 AuditLine::Record {
                     number,
-                    raw: String::from_utf8_lossy(&bytes).into_owned(),
+                    raw: text.to_owned(),
                     entry: Box::new(entry),
                 }
             }
             None => {
-                listing.unreadable += 1;
+                totals.unreadable += 1;
                 AuditLine::Unreadable { number }
             }
         };
-        kept.push_back(line);
-        if limit.is_some_and(|limit| kept.len() > limit) {
-            kept.pop_front();
+        match limit {
+            None if going => going = visit(line),
+            None => {}
+            Some(limit) => {
+                kept.push_back(line);
+                if kept.len() > limit {
+                    kept.pop_front();
+                }
+            }
         }
     }
-    listing.lines = kept.into();
-    Ok(listing)
+    for line in kept {
+        if !visit(line) {
+            break;
+        }
+    }
+    Ok(Some(totals))
+}
+
+fn next_line(reader: &mut impl BufRead) -> io::Result<Option<Option<Vec<u8>>>> {
+    let mut line = Vec::new();
+    let mut too_long = false;
+    let mut read_any = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        read_any = true;
+        let (taken, ends) = match available.iter().position(|&byte| byte == b'\n') {
+            Some(at) => (at + 1, true),
+            None => (available.len(), false),
+        };
+        if !too_long {
+            line.extend_from_slice(&available[..taken]);
+            if line.len() > LONGEST_RECORD_BYTES {
+                too_long = true;
+                line = Vec::new();
+            }
+        }
+        reader.consume(taken);
+        if ends {
+            break;
+        }
+    }
+    if !read_any {
+        return Ok(None);
+    }
+    if too_long {
+        return Ok(Some(None));
+    }
+    while matches!(line.last(), Some(b'\n' | b'\r')) {
+        line.pop();
+    }
+    Ok(Some(Some(line)))
 }
 
 fn member<'n>(members: &'n [(String, Node)], name: &str) -> Option<&'n Json> {
@@ -501,8 +565,8 @@ fn arguments_shown(members: &[(String, Node)], tool: Option<&str>) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditEvent, AuditLine, AuditLog, CallRecord, audit_path_for, call_record, read_audit,
-        rfc3339,
+        AuditEvent, AuditLine, AuditLog, AuditTotals, CallRecord, audit_path_for, call_record,
+        read_audit, rfc3339,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -550,6 +614,16 @@ mod tests {
         );
     }
 
+    fn read_all(path: &Path, limit: Option<usize>) -> Option<(Vec<AuditLine>, AuditTotals)> {
+        let mut lines = Vec::new();
+        let totals = read_audit(path, limit, &mut |line| {
+            lines.push(line);
+            true
+        })
+        .unwrap()?;
+        Some((lines, totals))
+    }
+
     #[test]
     fn records_append_as_whole_lines_and_read_back_with_counts_and_a_limit() {
         let path = temporary("append");
@@ -561,30 +635,36 @@ mod tests {
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, b"not json\n"))
+            .and_then(|mut file| {
+                std::io::Write::write_all(&mut file, b"not json\n")?;
+                std::io::Write::write_all(&mut file, &vec![b'x'; (1 << 20) + 10])?;
+                std::io::Write::write_all(&mut file, b"\n")
+            })
             .unwrap();
         log.append(&call("kv_get", r#"{"key":"a"}"#, None)).unwrap();
-        let listing = read_audit(&path, None).unwrap().unwrap();
-        assert_eq!(
-            (listing.calls, listing.errors, listing.unreadable),
-            (3, 1, 1)
-        );
-        assert_eq!(listing.clients, ["claude-code 2.1.0"]);
-        let AuditLine::Record { entry, .. } = &listing.lines[0] else {
-            panic!("{:?}", listing.lines[0]);
+        let (lines, totals) = read_all(&path, None).unwrap();
+        assert_eq!((totals.calls, totals.errors, totals.unreadable), (3, 1, 2));
+        assert_eq!(totals.clients, ["claude-code 2.1.0"]);
+        let AuditLine::Record { entry, .. } = &lines[0] else {
+            panic!("{:?}", lines[0]);
         };
         assert_eq!(entry.event, AuditEvent::Call);
         assert_eq!(entry.arguments.as_deref(), Some("SELECT 1\nFROM t"));
         assert_eq!(entry.rows, Some(2));
-        assert_eq!(listing.lines[2], AuditLine::Unreadable { number: 3 });
-        let last = read_audit(&path, Some(1)).unwrap().unwrap();
-        assert_eq!(last.lines.len(), 1);
-        assert_eq!(last.calls, 3);
-        assert!(
-            read_audit(&path.with_extension("missing"), None)
-                .unwrap()
-                .is_none()
-        );
+        assert_eq!(lines[2], AuditLine::Unreadable { number: 3 });
+        assert_eq!(lines[3], AuditLine::Unreadable { number: 4 });
+        assert_eq!(lines.len(), 5);
+        let (last, totals) = read_all(&path, Some(1)).unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(totals.calls, 3);
+        let mut seen = 0;
+        read_audit(&path, None, &mut |_| {
+            seen += 1;
+            false
+        })
+        .unwrap();
+        assert_eq!(seen, 1);
+        assert!(read_all(&path.with_extension("missing"), None).is_none());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -618,8 +698,8 @@ mod tests {
         let archived = path.with_file_name("archived.jsonl");
         std::fs::rename(&path, &archived).unwrap();
         log.append(&call("list_tables", "{}", None)).unwrap();
-        assert_eq!(read_audit(&path, None).unwrap().unwrap().calls, 1);
-        assert_eq!(read_audit(&archived, None).unwrap().unwrap().calls, 1);
+        assert_eq!(read_all(&path, None).unwrap().1.calls, 1);
+        assert_eq!(read_all(&archived, None).unwrap().1.calls, 1);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&archived);
     }

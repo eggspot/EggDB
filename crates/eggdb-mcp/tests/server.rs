@@ -500,8 +500,15 @@ fn every_call_is_audited_with_the_client_s_name_and_no_result_content() {
     server
         .handle(br#"{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"eggdb://schema"}}"#)
         .unwrap();
+    server
+        .handle(br#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"drop_everything","arguments":{"why":"because"}}}"#)
+        .unwrap();
     let lines = audit.lines();
-    assert_eq!(lines.len(), 5, "{lines:#?}");
+    assert_eq!(lines.len(), 6, "{lines:#?}");
+    let unknown = parsed(&lines[5]);
+    assert_eq!(text_at(&unknown, &["tool"]), "drop_everything");
+    assert_eq!(text_at(&unknown, &["error_code"]), "unknown_tool");
+    assert_eq!(text_at(&unknown, &["arguments", "why"]), "because");
     let started = parsed(&lines[0]);
     assert_eq!(text_at(&started, &["event"]), "server_started");
     assert_eq!(text_at(&started, &["read_only"]), "true");

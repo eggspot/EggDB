@@ -335,6 +335,15 @@ fn an_agent_reads_but_never_writes_and_every_call_is_audited() {
         summary.contains("10 calls, 3 errors, by acceptance-test 1.0 (the name the client gave)"),
         "{summary}"
     );
+    let none_shown = eggdb(&[
+        "audit", path, "-n", "0", "--format", "text", "--color", "never",
+    ]);
+    assert!(stdout(&none_shown).is_empty());
+    assert!(
+        stderr(&none_shown).starts_with("last 0 of 10 calls, 3 errors"),
+        "{}",
+        stderr(&none_shown)
+    );
     let json = eggdb(&["audit", path, "--format", "json", "-n", "3"]);
     let records: Vec<Node> = stdout(&json)
         .lines()

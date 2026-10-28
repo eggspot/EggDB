@@ -4,7 +4,7 @@ use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::Style;
 use crate::cli::render;
 use eggdb_mcp::audit::{
-    AuditEntry, AuditEvent, AuditLine, AuditListing, audit_path_for, read_audit,
+    AuditEntry, AuditEvent, AuditLine, AuditTotals, audit_path_for, read_audit,
 };
 
 const LINE_COLUMNS: usize = 120;
@@ -22,7 +22,33 @@ impl Session<'_> {
             .scan
             .limit
             .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX));
-        let listing = read_audit(&path, limit).map_err(|error| {
+        let json = self.format == Format::Json;
+        let mut shown_calls = 0u64;
+        let mut shown_lines = 0u64;
+        let mut printed = Ok(());
+        let read = read_audit(&path, limit, &mut |line| {
+            shown_lines += 1;
+            match (&line, json) {
+                (AuditLine::Record { raw, .. }, true) => {
+                    self.out.text(raw);
+                    self.out.text("\n");
+                }
+                (AuditLine::Unreadable { number }, true) => self.messages.text(&format!(
+                    "eggdb: {shown} line {number} is not a record; skipped\n"
+                )),
+                (_, false) => {
+                    if matches!(&line, AuditLine::Record { entry, .. } if entry.event == AuditEvent::Call)
+                    {
+                        shown_calls += 1;
+                    }
+                    self.audit_line(&line);
+                }
+            }
+            printed = self.out.line_done();
+            printed.is_ok()
+        });
+        printed?;
+        let totals = read.map_err(|error| {
             let reason = match error.kind() {
                 std::io::ErrorKind::PermissionDenied => "permission denied".to_owned(),
                 _ => error.to_string(),
@@ -32,7 +58,7 @@ impl Session<'_> {
                 Exit::DatabaseError,
             )
         })?;
-        let Some(listing) = listing else {
+        let Some(totals) = totals else {
             if std::fs::symlink_metadata(&self.request.file).is_err() {
                 return Err(Failure::database(
                     format!("cannot open {}: no such file. Check the path.", self.file),
@@ -43,30 +69,15 @@ impl Session<'_> {
                 .text(&format!("no MCP calls yet ({shown} does not exist)\n"));
             return Ok(Exit::Done);
         };
-        if self.format == Format::Json {
-            for line in &listing.lines {
-                match line {
-                    AuditLine::Record { raw, .. } => {
-                        self.out.text(raw);
-                        self.out.text("\n");
-                        self.out.line_done()?;
-                    }
-                    AuditLine::Unreadable { number } => self.messages.text(&format!(
-                        "eggdb: {shown} line {number} is not a record; skipped\n"
-                    )),
-                }
-            }
+        if json {
             return Ok(Exit::Done);
         }
-        if listing.lines.is_empty() {
+        if shown_lines == 0 && totals.calls == 0 && totals.unreadable == 0 {
             self.messages.text("no MCP calls yet\n");
             return Ok(Exit::Done);
         }
-        for line in &listing.lines {
-            self.audit_line(line);
-            self.out.line_done()?;
-        }
-        self.messages.styled(Style::Dim, &summary(&listing));
+        self.messages
+            .styled(Style::Dim, &summary(&totals, shown_calls));
         self.messages.text("\n");
         Ok(Exit::Done)
     }
@@ -188,37 +199,30 @@ fn plural(count: u64, one: &str, many: &str) -> String {
     }
 }
 
-fn summary(listing: &AuditListing) -> String {
-    let shown_calls = listing
-        .lines
-        .iter()
-        .filter(|line| {
-            matches!(line, AuditLine::Record { entry, .. } if entry.event == AuditEvent::Call)
-        })
-        .count() as u64;
+fn summary(totals: &AuditTotals, shown_calls: u64) -> String {
     let mut parts = Vec::new();
-    if shown_calls < listing.calls {
+    if shown_calls < totals.calls {
         parts.push(format!(
             "last {shown_calls} of {}",
-            plural(listing.calls, "call", "calls")
+            plural(totals.calls, "call", "calls")
         ));
     } else {
-        parts.push(plural(listing.calls, "call", "calls"));
+        parts.push(plural(totals.calls, "call", "calls"));
     }
-    parts.push(match listing.errors {
+    parts.push(match totals.errors {
         0 => "no errors".to_owned(),
         errors => plural(errors, "error", "errors"),
     });
-    if listing.unreadable > 0 {
+    if totals.unreadable > 0 {
         parts.push(plural(
-            listing.unreadable,
+            totals.unreadable,
             "unreadable line",
             "unreadable lines",
         ));
     }
     let mut summary = parts.join(", ");
-    if !listing.clients.is_empty() {
-        let clients: Vec<String> = listing
+    if !totals.clients.is_empty() {
+        let clients: Vec<String> = totals
             .clients
             .iter()
             .map(|client| printable(client))
