@@ -121,7 +121,7 @@ impl SqlServerType {
         }
     }
 
-    pub(crate) fn kind(self) -> Kind {
+    pub(crate) fn kind(self) -> TypeFamily {
         match self {
             Self::TinyInt
             | Self::SmallInt
@@ -131,28 +131,28 @@ impl SqlServerType {
             | Self::Money
             | Self::SmallMoney
             | Self::Float
-            | Self::Real => Kind::Number,
-            Self::Bit => Kind::Bit,
-            Self::Date => Kind::Date,
-            Self::Time { .. } => Kind::Time,
+            | Self::Real => TypeFamily::Number,
+            Self::Bit => TypeFamily::Bit,
+            Self::Date => TypeFamily::Date,
+            Self::Time { .. } => TypeFamily::Time,
             Self::DateTime
             | Self::SmallDateTime
             | Self::DateTime2 { .. }
-            | Self::DateTimeOffset { .. } => Kind::DateTime,
+            | Self::DateTimeOffset { .. } => TypeFamily::DateTime,
             Self::Char(_)
             | Self::VarChar(_)
             | Self::NChar(_)
             | Self::NVarChar(_)
             | Self::Text
-            | Self::NText => Kind::Character,
-            Self::Binary(_) | Self::VarBinary(_) | Self::Image => Kind::Binary,
-            Self::UniqueIdentifier => Kind::Guid,
+            | Self::NText => TypeFamily::Character,
+            Self::Binary(_) | Self::VarBinary(_) | Self::Image => TypeFamily::Binary,
+            Self::UniqueIdentifier => TypeFamily::Guid,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub(crate) enum TypeFamily {
     Number,
     Bit,
     Date,
@@ -164,7 +164,7 @@ pub(crate) enum Kind {
     Other,
 }
 
-impl Kind {
+impl TypeFamily {
     pub(crate) fn of(value: &Value) -> Self {
         match value {
             Value::SmallInt(_)
@@ -184,7 +184,7 @@ impl Kind {
         }
     }
 
-    fn of_type(sql_type: SqlType) -> Self {
+    pub(crate) fn of_engine(sql_type: SqlType) -> Self {
         match sql_type {
             SqlType::SmallInt
             | SqlType::Integer
@@ -222,10 +222,6 @@ impl Kind {
             (Self::Binary, target) if target.is_temporal() => false,
             _ => true,
         }
-    }
-
-    pub(crate) fn of_engine(sql_type: SqlType) -> Self {
-        Self::of_type(sql_type)
     }
 }
 
@@ -322,7 +318,7 @@ pub(crate) fn incompatible_in_operator(left: &Value, right: &Value, operator: &s
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Length, SqlServerType, precedence};
+    use super::{Length, SqlServerType, TypeFamily, precedence};
     use crate::types::{SqlType, Value};
 
     #[test]
@@ -368,12 +364,12 @@ mod tests {
 
     #[test]
     fn the_conversion_chart_refuses_dates_with_numbers_and_guids_with_numbers() {
-        assert!(!Kind::Date.allows(Kind::Number));
-        assert!(!Kind::Number.allows(Kind::DateTime));
-        assert!(!Kind::Guid.allows(Kind::Number));
-        assert!(!Kind::Date.allows(Kind::Time));
-        assert!(Kind::Character.allows(Kind::Guid));
-        assert!(Kind::Character.allows(Kind::Date));
-        assert!(Kind::Bit.allows(Kind::Number));
+        assert!(!TypeFamily::Date.allows(TypeFamily::Number));
+        assert!(!TypeFamily::Number.allows(TypeFamily::DateTime));
+        assert!(!TypeFamily::Guid.allows(TypeFamily::Number));
+        assert!(!TypeFamily::Date.allows(TypeFamily::Time));
+        assert!(TypeFamily::Character.allows(TypeFamily::Guid));
+        assert!(TypeFamily::Character.allows(TypeFamily::Date));
+        assert!(TypeFamily::Bit.allows(TypeFamily::Number));
     }
 }

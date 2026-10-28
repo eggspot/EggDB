@@ -1794,7 +1794,7 @@ impl<'t> Parser<'t> {
             None
         };
         let output = if self.sqlserver() {
-            self.sqlserver_output(sqlserver_functions::OutputRows::Inserted)?
+            self.sqlserver_output(sqlserver_functions::OutputStatement::Insert)?
         } else {
             None
         };
@@ -1897,7 +1897,7 @@ impl<'t> Parser<'t> {
             }
         }
         let output = if self.sqlserver() {
-            self.sqlserver_output(sqlserver_functions::OutputRows::Updated)?
+            self.sqlserver_output(sqlserver_functions::OutputStatement::Update)?
         } else {
             None
         };
@@ -1929,7 +1929,7 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("DELETE ... USING"));
         }
         let output = if self.sqlserver() {
-            self.sqlserver_output(sqlserver_functions::OutputRows::Deleted)?
+            self.sqlserver_output(sqlserver_functions::OutputStatement::Delete)?
         } else {
             None
         };

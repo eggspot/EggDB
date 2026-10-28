@@ -4,8 +4,8 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::numeric::Numeric;
 use crate::sqlserver_functions::within_limit;
 use crate::sqlserver_types::{
-    Kind, Length, SqlServerType, engine_type_name, explicit_conversion_refused, operand_clash,
-    precedence, value_type_name,
+    Length, SqlServerType, TypeFamily, engine_type_name, explicit_conversion_refused,
+    operand_clash, precedence, value_type_name,
 };
 use crate::types::{SqlType, Value, numeric_value};
 
@@ -31,7 +31,7 @@ const MONTHS: [&str; 12] = [
     "december",
 ];
 
-const IMPLEMENTED_STYLES: [u16; 8] = [0, 23, 100, 101, 103, 112, 120, 121];
+const IMPLEMENTED_STYLES: [u16; 8] = [0, 23, 101, 103, 112, 120, 121, 126];
 
 const KNOWN_DATE_STYLES: [u16; 44] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 20, 21, 22, 23, 24, 25, 100, 101, 102, 103,
@@ -169,7 +169,7 @@ fn style_not_supported(style: u16) -> SqlError {
 fn check_date_style(style: Option<u16>, source: &str) -> SqlResult<()> {
     match style {
         None => Ok(()),
-        Some(style) if IMPLEMENTED_STYLES.contains(&style) || style == 126 => Ok(()),
+        Some(style) if IMPLEMENTED_STYLES.contains(&style) => Ok(()),
         Some(style) if KNOWN_DATE_STYLES.contains(&style) => Err(style_not_supported(style)),
         Some(style) => Err(invalid_style(style, source)),
     }
@@ -605,6 +605,9 @@ fn local_micros(value: &Value) -> SqlResult<Option<i64>> {
 
 fn to_temporal(value: &Value, target: Temporal, scale: u8, style: Option<u16>) -> SqlResult<Value> {
     if let Some(text) = character_text(value) {
+        if let Some(style) = style.filter(|style| !KNOWN_DATE_STYLES.contains(style)) {
+            return Err(invalid_style(style, value_type_name(value)));
+        }
         return parse_datetime(text, target, scale, order_of(style));
     }
     let source = value_type_name(value);
@@ -1032,7 +1035,7 @@ pub(crate) fn convert(
     if value.is_null() {
         return Ok(Value::Null);
     }
-    let source = Kind::of(&value);
+    let source = TypeFamily::of(&value);
     if !source.allows(target.kind()) {
         return Err(explicit_conversion_refused(
             value_type_name(&value),
@@ -1081,8 +1084,8 @@ pub(crate) fn implicit(value: Value, target: SqlType) -> SqlResult<Value> {
     if value.is_null() {
         return Ok(value);
     }
-    let source = Kind::of(&value);
-    let wanted = Kind::of_engine(target);
+    let source = TypeFamily::of(&value);
+    let wanted = TypeFamily::of_engine(target);
     if !source.allows(wanted) {
         return Err(operand_clash(
             value_type_name(&value),
@@ -1106,7 +1109,7 @@ pub(crate) fn implicit(value: Value, target: SqlType) -> SqlResult<Value> {
         },
         SqlType::Date | SqlType::Time(_) | SqlType::Timestamp(_) | SqlType::TimestampTz(_) => {
             let (temporal, scale) = temporal_of_engine(target).unwrap_or((Temporal::DateTime2, 6));
-            if Kind::of(&value) == Kind::of_engine(target)
+            if TypeFamily::of(&value) == TypeFamily::of_engine(target)
                 && !matches!(
                     (&value, target),
                     (Value::Timestamp(_), SqlType::TimestampTz(_))

@@ -7,10 +7,10 @@ use crate::sqlserver_functions::{DatePart, Function};
 use crate::types::{SqlType, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OutputRows {
-    Inserted,
-    Updated,
-    Deleted,
+pub(super) enum OutputStatement {
+    Insert,
+    Update,
+    Delete,
 }
 
 fn call(function: Function, arguments: Vec<Expr>, position: usize) -> Expr {
@@ -93,11 +93,11 @@ pub(super) fn now_with_offset(position: usize) -> Expr {
     }
 }
 
-fn unqualified(expr: &mut Expr, rows: OutputRows) -> SqlResult<()> {
+fn unqualified(expr: &mut Expr, statement: OutputStatement) -> SqlResult<()> {
     if let ExprKind::Column { qualifier, name } = &mut expr.kind {
         match qualifier.as_deref() {
-            Some("inserted") if rows != OutputRows::Deleted => *qualifier = None,
-            Some("deleted") if rows == OutputRows::Deleted => *qualifier = None,
+            Some("inserted") if statement != OutputStatement::Delete => *qualifier = None,
+            Some("deleted") if statement == OutputStatement::Delete => *qualifier = None,
             Some("deleted") => {
                 return Err(not_supported("OUTPUT deleted. in UPDATE").at(expr.position));
             }
@@ -107,7 +107,7 @@ fn unqualified(expr: &mut Expr, rows: OutputRows) -> SqlResult<()> {
         return Ok(());
     }
     for child in crate::eval::children_mut(expr) {
-        unqualified(child, rows)?;
+        unqualified(child, statement)?;
     }
     Ok(())
 }
@@ -193,7 +193,6 @@ impl Parser<'_> {
         let word = match self.peek_kind() {
             TokenKind::Word(word) => word.as_ref().to_owned(),
             TokenKind::QuotedIdentifier(word) => word.to_ascii_lowercase(),
-            TokenKind::String(text) => text.to_ascii_lowercase(),
             _ => return Err(self.unexpected()),
         };
         let part =
@@ -265,7 +264,7 @@ impl Parser<'_> {
 
     pub(super) fn sqlserver_output(
         &mut self,
-        rows: OutputRows,
+        statement: OutputStatement,
     ) -> SqlResult<Option<Vec<SelectItem>>> {
         if !self.take_word("output") {
             return Ok(None);
@@ -280,15 +279,15 @@ impl Parser<'_> {
                     qualifier,
                     position,
                 } => match qualifier.as_deref() {
-                    Some("inserted") if rows != OutputRows::Deleted => *qualifier = None,
-                    Some("deleted") if rows == OutputRows::Deleted => *qualifier = None,
+                    Some("inserted") if statement != OutputStatement::Delete => *qualifier = None,
+                    Some("deleted") if statement == OutputStatement::Delete => *qualifier = None,
                     Some("deleted") => {
                         return Err(not_supported("OUTPUT deleted. in UPDATE").at(*position));
                     }
                     Some(other) => return Err(not_bound(other, "*", *position)),
                     None => {}
                 },
-                SelectItem::Expr { expr, .. } => unqualified(expr, rows)?,
+                SelectItem::Expr { expr, .. } => unqualified(expr, statement)?,
             }
         }
         Ok(Some(items))

@@ -247,23 +247,27 @@ fn end_moment() -> i64 {
     civil_micros(10000, 1, 1)
 }
 
-enum Moment {
+enum DateArgument {
     Date(i64),
     Time(i64),
     Local(i64),
     Utc(i64),
 }
 
-fn moment_of(value: &Value, argument: usize, function: &str) -> SqlResult<Option<Moment>> {
+fn date_argument(
+    value: &Value,
+    argument: usize,
+    function: &str,
+) -> SqlResult<Option<DateArgument>> {
     Ok(Some(match value {
         Value::Null => return Ok(None),
-        Value::Date(days) => Moment::Date(i64::from(*days) * MICROS_PER_DAY),
-        Value::Time(micros) => Moment::Time(*micros),
-        Value::Timestamp(micros) => Moment::Local(*micros),
-        Value::TimestampTz(micros) => Moment::Utc(*micros),
+        Value::Date(days) => DateArgument::Date(i64::from(*days) * MICROS_PER_DAY),
+        Value::Time(micros) => DateArgument::Time(*micros),
+        Value::Timestamp(micros) => DateArgument::Local(*micros),
+        Value::TimestampTz(micros) => DateArgument::Utc(*micros),
         Value::Text(text) | Value::Bpchar(text) => {
             match parse_datetime(text, Temporal::DateTime2, 7, DateOrder::MonthDayYear)? {
-                Value::Timestamp(micros) => Moment::Local(micros),
+                Value::Timestamp(micros) => DateArgument::Local(micros),
                 _ => return Ok(None),
             }
         }
@@ -271,7 +275,7 @@ fn moment_of(value: &Value, argument: usize, function: &str) -> SqlResult<Option
     }))
 }
 
-impl Moment {
+impl DateArgument {
     fn micros(&self) -> i64 {
         match self {
             Self::Date(micros) | Self::Local(micros) | Self::Utc(micros) => *micros,
@@ -345,18 +349,18 @@ fn date_add(part: DatePart, number: &Value, date: &Value) -> SqlResult<Value> {
             }
         },
     };
-    let Some(moment) = moment_of(date, 3, "dateadd")? else {
+    let Some(argument_date) = date_argument(date, 3, "dateadd")? else {
         return Ok(Value::Null);
     };
-    let type_name = moment.type_name();
-    if matches!(moment, Moment::Date(_)) && part.is_time_of_day() {
+    let type_name = argument_date.type_name();
+    if matches!(argument_date, DateArgument::Date(_)) && part.is_time_of_day() {
         return Err(part_not_supported(part, "dateadd", "date"));
     }
-    if matches!(moment, Moment::Time(_)) && !part.is_time_of_day() {
+    if matches!(argument_date, DateArgument::Time(_)) && !part.is_time_of_day() {
         return Err(part_not_supported(part, "dateadd", "time"));
     }
     let overflow = || date_add_overflow(type_name);
-    let start = moment.micros();
+    let start = argument_date.micros();
     let shifted = match part {
         DatePart::Year => add_months(start, count.checked_mul(12).ok_or_else(overflow)?),
         DatePart::Quarter => add_months(start, count.checked_mul(3).ok_or_else(overflow)?),
@@ -369,12 +373,12 @@ fn date_add(part: DatePart, number: &Value, date: &Value) -> SqlResult<Value> {
         }
     }
     .ok_or_else(overflow)?;
-    Ok(match moment {
-        Moment::Time(_) => Value::Time(shifted.rem_euclid(MICROS_PER_DAY)),
+    Ok(match argument_date {
+        DateArgument::Time(_) => Value::Time(shifted.rem_euclid(MICROS_PER_DAY)),
         _ if shifted < first_moment() || shifted >= end_moment() => return Err(overflow()),
-        Moment::Date(_) => Value::Date(shifted.div_euclid(MICROS_PER_DAY) as i32),
-        Moment::Local(_) => Value::Timestamp(shifted),
-        Moment::Utc(_) => Value::TimestampTz(shifted),
+        DateArgument::Date(_) => Value::Date(shifted.div_euclid(MICROS_PER_DAY) as i32),
+        DateArgument::Local(_) => Value::Timestamp(shifted),
+        DateArgument::Utc(_) => Value::TimestampTz(shifted),
     })
 }
 
@@ -394,8 +398,8 @@ fn boundaries(part: DatePart, micros: i64) -> i128 {
 
 fn date_diff(part: DatePart, start: &Value, end: &Value) -> SqlResult<Value> {
     let (Some(start), Some(end)) = (
-        moment_of(start, 2, "datediff")?,
-        moment_of(end, 3, "datediff")?,
+        date_argument(start, 2, "datediff")?,
+        date_argument(end, 3, "datediff")?,
     ) else {
         return Ok(Value::Null);
     };
