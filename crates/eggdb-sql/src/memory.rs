@@ -43,17 +43,18 @@ pub(crate) fn enter_row_limit(bytes: usize) -> EnteredRowLimit {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct RowBytes {
     total: usize,
 }
 
 impl RowBytes {
     pub(crate) fn add(&mut self, value: &Value) -> SqlResult<()> {
-        self.total = self
-            .total
-            .saturating_add(VALUE_SIZE)
-            .saturating_add(held_bytes(value));
+        self.add_bytes(VALUE_SIZE.saturating_add(held_bytes(value)))
+    }
+
+    pub(crate) fn add_bytes(&mut self, bytes: usize) -> SqlResult<()> {
+        self.total = self.total.saturating_add(bytes);
         let limit = ROW_LIMIT.with(std::cell::Cell::get);
         if self.total <= limit {
             return Ok(());

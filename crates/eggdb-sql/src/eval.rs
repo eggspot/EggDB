@@ -585,20 +585,14 @@ impl Evaluator<'_> {
             }
             ExprKind::Function { name, arguments } => self.function(name, arguments),
             ExprKind::SqliteFunction { name, arguments } => {
-                let values = arguments
-                    .iter()
-                    .map(|argument| self.eval(argument, None))
-                    .collect::<SqlResult<Vec<Value>>>()?;
+                let values = self.arguments(arguments)?;
                 crate::sqlite_functions::call(name, &values)
             }
             ExprKind::OracleFunction { name, arguments } if *name == "oracle_decode" => {
                 self.decode(arguments, hint)
             }
             ExprKind::OracleFunction { name, arguments } => {
-                let values = arguments
-                    .iter()
-                    .map(|argument| self.eval(argument, None))
-                    .collect::<SqlResult<Vec<Value>>>()?;
+                let values = self.arguments(arguments)?;
                 crate::oracle_functions::call(name, &values)
             }
             ExprKind::Slot { index, .. } => {
@@ -943,6 +937,17 @@ impl Evaluator<'_> {
             .ok_or_else(invalid_extract_field)
     }
 
+    fn arguments(&self, arguments: &[Expr]) -> SqlResult<Vec<Value>> {
+        let mut held = crate::memory::RowBytes::default();
+        let mut values = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let value = self.eval(argument, None)?;
+            held.add(&value)?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+
     fn function(&self, name: &str, arguments: &[Expr]) -> SqlResult<Value> {
         if name == "oracle_extract" {
             return self.oracle_extract(arguments);
@@ -950,6 +955,7 @@ impl Evaluator<'_> {
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
         let declared = declared_argument_types(name);
+        let mut held = crate::memory::RowBytes::default();
         for (position, argument) in arguments.iter().enumerate() {
             let value = match declared {
                 Some(types) => self.eval(argument, types.get(position).copied().flatten())?,
@@ -959,6 +965,7 @@ impl Evaluator<'_> {
                     value
                 }
             };
+            held.add(&value)?;
             values.push(value);
         }
         let unknown = || {
