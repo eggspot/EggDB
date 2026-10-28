@@ -68,7 +68,8 @@ dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..
   at most 16 MiB in a call (SQLSTATE `54000`), so a call cannot take gigabytes of memory by
   doubling a string; stored values of any size are still read. EggDB's own limit for other
   sessions stays 1 GiB per statement (D100); an engine-wide value limit like PostgreSQL's 1 GB
-  is on the roadmap.
+  is on the roadmap. Likewise one row a statement builds may be at most 64 MiB, so a select list
+  copying a large value into many columns stops early.
 - **Run longer than the time limit.** A statement past the limit is stopped and the call
   answers `time_limit`. A statement that cannot be stopped (a long computation that reads
   nothing) is still running a second after the limit: the server records it in the audit file
@@ -151,6 +152,10 @@ Things to know about the audit file:
   with their size kept), so literals in it, such as an email address, a token or a password
   hash, land in the file. Protect it like the database; it is created readable and writable by
   its owner only (mode 0600 on Unix; on Windows it has the directory's permissions).
+- **Nothing planted at its path is written to.** A symbolic link, a FIFO, a device, a directory
+  or a file with another name (a hard link) at `app.db.mcp-audit.jsonl` is refused, and
+  `eggdb mcp` does not start until it is moved away. On Windows a hard link is not detected (a
+  platform limit).
 - **It is not tamper-evident.** Anyone who can write the file can change or remove records;
   the agent's tools cannot reach it, but an agent that also has a shell can. A tamper-evident log
   needs keys EggDB doesn't manage yet (D26, D23).
