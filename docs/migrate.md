@@ -68,7 +68,10 @@ psql "host=127.0.0.1 user=eggdb dbname=app" -f app.sql
 
 psql runs the statements one by one and prints an error for each object EggDB cannot create yet,
 then goes on, as it does against PostgreSQL; `eggdb restore` lists the same objects in its report
-instead.
+instead. When a table cannot be created (a column of an enum type, a partitioned table), psql
+reads its `COPY` data as SQL and may lose the statements after it, as it would against
+PostgreSQL: restore such a dump with `eggdb restore`, which skips that data, or take it with
+`pg_dump --inserts` for `psql -f`.
 
 ### 3. Read the report
 
@@ -120,6 +123,10 @@ ok: every table and row of the dump is in app.db; 3 objects skipped and 1 conseq
   `ALTER DEFAULT PRIVILEGES`, `SET` of parameters EggDB does not have, storage settings with no
   meaning in EggDB (`REPLICA IDENTITY`, `SET STATISTICS`, `CLUSTER ON`), and psql meta-commands:
   `\connect` (one database per file) and anything else, which is never run.
+- **Transaction control** in the dump (`BEGIN`, `COMMIT`, and also `ROLLBACK` and `ABORT`) is
+  ignored: each statement commits on its own. Use `--create` for all or nothing.
+- **A cut dump** is an error, never a success: one that ends inside a `COPY`'s data before its
+  `\.` line, inside a quoted string or comment, or after a `\restrict` with no `\unrestrict`.
 - **Errors** stop the restore: a `COPY` row that breaks a constraint, bad syntax in a statement
   EggDB supports, a failed `INSERT`. The message names the dump's line, the data line for a
   `COPY`, with PostgreSQL's wording, detail and SQLSTATE; the exit code is 3. `--keep-going` runs

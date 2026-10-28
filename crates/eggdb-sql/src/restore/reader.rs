@@ -108,6 +108,7 @@ pub(crate) struct DumpReader<'r> {
     atomic: Atomic,
     copy: Copy,
     copy_lines: u64,
+    copy_line: u64,
     first_line: bool,
     max_line: usize,
     max_statement: usize,
@@ -143,6 +144,7 @@ impl<'r> DumpReader<'r> {
             atomic: Atomic::default(),
             copy: Copy::None,
             copy_lines: 0,
+            copy_line: 0,
             first_line: true,
             max_line: MAX_LINE_BYTES,
             max_statement: MAX_STATEMENT_BYTES,
@@ -283,6 +285,7 @@ impl<'r> DumpReader<'r> {
         if copy_from_stdin {
             self.copy = Copy::Data;
             self.copy_lines = 0;
+            self.copy_line = self.statement_line;
         }
         Some(Item::Statement(DumpStatement {
             text,
@@ -461,6 +464,17 @@ impl<'r> DumpReader<'r> {
         (None, started_at)
     }
 
+    fn cut_inside_copy(&self) -> SqlError {
+        SqlError::new(
+            SqlState::BAD_COPY_FILE_FORMAT,
+            format!(
+                "the dump ends inside the data of the COPY at line {}, with no line \\. after it",
+                self.copy_line
+            ),
+        )
+        .with_hint("The dump is cut short; take it again, or copy all of it.")
+    }
+
     pub(crate) fn copy_data(&mut self, out: &mut Vec<u8>) -> SqlResult<bool> {
         if self.copy != Copy::Data {
             return Ok(false);
@@ -470,7 +484,7 @@ impl<'r> DumpReader<'r> {
             let line_start = out.len();
             if !self.read_line_into(out)? {
                 self.copy = Copy::Ended;
-                break;
+                return Err(self.cut_inside_copy());
             }
             self.line_number += 1;
             if is_end_of_copy(&out[line_start..]) {
@@ -487,7 +501,10 @@ impl<'r> DumpReader<'r> {
         let mut skipped = 0;
         while self.copy == Copy::Data {
             match self.skip_line()? {
-                None => self.copy = Copy::Ended,
+                None => {
+                    self.copy = Copy::Ended;
+                    return Err(self.cut_inside_copy());
+                }
                 Some(true) => {
                     self.line_number += 1;
                     self.copy = Copy::Ended;

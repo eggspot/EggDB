@@ -29,14 +29,21 @@ pub(crate) enum Ignored {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Effect {
     Schema(String),
-    Table { name: String, constraints: u64 },
+    Table {
+        name: String,
+        constraints: u64,
+    },
     View(String),
     Sequence(String),
     Index(String),
-    AlterTable { constraints: u64, identities: u64 },
+    AlterTable {
+        constraints: u64,
+        identity_sequences: Vec<String>,
+    },
     Comment,
     Copy(String),
     Insert(String),
+    SequenceCall(String),
     Setting,
     Data,
     OtherDdl,
@@ -103,9 +110,11 @@ pub(crate) fn classify(text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Ac
             data_statement(words, Effect::Insert)
         }
         "drop" | "refresh" | "cluster" | "reindex" => Action::Run(Effect::OtherDdl),
-        "select" | "update" | "delete" | "truncate" | "with" | "values" => {
-            Action::Run(Effect::Data)
-        }
+        "select" => match sequence_call(text) {
+            Some(sequence) => Action::Run(Effect::SequenceCall(sequence)),
+            None => Action::Run(Effect::Data),
+        },
+        "update" | "delete" | "truncate" | "with" | "values" => Action::Run(Effect::Data),
         _ => Action::Run(Effect::Other),
     }
 }
@@ -496,19 +505,6 @@ fn create_table(tokens: &[Token], mut at: usize) -> Action {
     Action::Run(Effect::Table { name, constraints })
 }
 
-const STORAGE_SETTINGS: &[&[&str]] = &[
-    &["replica", "identity"],
-    &["cluster", "on"],
-    &["set", "without"],
-    &["set", "statistics"],
-    &["set", "storage"],
-    &["set", "compression"],
-    &["set", "tablespace"],
-    &["set", "access"],
-    &["set", "logged"],
-    &["set", "unlogged"],
-];
-
 fn alter(tokens: &[Token]) -> Action {
     let mut words = tokens.len();
     while words > 0 && tokens[words - 1].is_symbol(b';') {
@@ -534,103 +530,210 @@ fn alter(tokens: &[Token]) -> Action {
     }
 }
 
-fn alter_table(tokens: &[Token]) -> Action {
-    let mut depth = 0u32;
-    let mut constraints = 0u64;
-    let mut identities = 0u64;
-    let mut table = None;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlterKind {
+    Storage,
+    Trigger,
+    RowSecurity,
+    Partition,
+    Inheritance,
+    Change,
+}
+
+fn starts_with_words(tokens: &[Token], words: &[&str]) -> bool {
+    words.len() <= tokens.len()
+        && words
+            .iter()
+            .zip(tokens)
+            .all(|(word, token)| token.is_word(word))
+}
+
+fn after_column(action: &[Token]) -> &[Token] {
     let mut at = 1;
-    skip_words(tokens, &mut at, &["view", "table", "if", "exists", "only"]);
-    if tokens.first().is_some_and(|token| token.is_word("table")) {
-        table = qualified_name(tokens, &mut at);
+    if action.get(at).is_some_and(|token| token.is_word("column")) {
+        at += 1;
     }
-    for (index, token) in tokens.iter().enumerate().skip(at) {
+    action.get(at + 1..).unwrap_or_default()
+}
+
+fn action_kind(action: &[Token]) -> AlterKind {
+    let set_options = |rest: &[Token]| {
+        (rest
+            .first()
+            .is_some_and(|token| token.is_word("set") || token.is_word("reset")))
+            && rest.get(1).is_some_and(|token| token.is_symbol(b'('))
+    };
+    if starts_with_words(action, &["replica", "identity"])
+        || starts_with_words(action, &["cluster", "on"])
+        || starts_with_words(action, &["set", "without"])
+        || starts_with_words(action, &["set", "tablespace"])
+        || starts_with_words(action, &["set", "access", "method"])
+        || starts_with_words(action, &["set", "logged"])
+        || starts_with_words(action, &["set", "unlogged"])
+        || set_options(action)
+    {
+        return AlterKind::Storage;
+    }
+    if action.first().is_some_and(|token| token.is_word("alter")) {
+        let rest = after_column(action);
+        if ["statistics", "storage", "compression"]
+            .iter()
+            .any(|word| starts_with_words(rest, &["set", word]))
+            || set_options(rest)
+        {
+            return AlterKind::Storage;
+        }
+        return AlterKind::Change;
+    }
+    let toggles = ["enable", "disable"]
+        .iter()
+        .any(|word| action.first().is_some_and(|token| token.is_word(word)));
+    let switched = if toggles { &action[1..] } else { action };
+    if toggles
+        && (starts_with_words(switched, &["trigger"])
+            || starts_with_words(switched, &["always", "trigger"])
+            || starts_with_words(switched, &["replica", "trigger"])
+            || starts_with_words(switched, &["rule"])
+            || starts_with_words(switched, &["always", "rule"])
+            || starts_with_words(switched, &["replica", "rule"]))
+    {
+        return AlterKind::Trigger;
+    }
+    let forced = if starts_with_words(action, &["no", "force"]) {
+        &action[2..]
+    } else if starts_with_words(action, &["force"]) {
+        &action[1..]
+    } else {
+        switched
+    };
+    if starts_with_words(forced, &["row", "level", "security"]) {
+        return AlterKind::RowSecurity;
+    }
+    if starts_with_words(action, &["attach", "partition"])
+        || starts_with_words(action, &["detach", "partition"])
+    {
+        return AlterKind::Partition;
+    }
+    if starts_with_words(action, &["inherit"]) || starts_with_words(action, &["no", "inherit"]) {
+        return AlterKind::Inheritance;
+    }
+    AlterKind::Change
+}
+
+fn identity_sequence(action: &[Token]) -> Option<String> {
+    let rest = after_column(action);
+    if !starts_with_words(rest, &["add", "generated"]) {
+        return None;
+    }
+    let at = rest
+        .windows(2)
+        .position(|pair| pair[0].is_word("sequence") && pair[1].is_word("name"))?;
+    let mut name_at = at + 2;
+    qualified_name(rest, &mut name_at)
+}
+
+fn alter_table(tokens: &[Token]) -> Action {
+    let is_table = tokens.first().is_some_and(|token| token.is_word("table"));
+    let mut at = 1;
+    skip_words(tokens, &mut at, &["view", "table"]);
+    if starts_with_words(&tokens[at.min(tokens.len())..], &["if", "exists"]) {
+        at += 2;
+    }
+    skip_words(tokens, &mut at, &["only"]);
+    let table = qualified_name(tokens, &mut at).unwrap_or_default();
+    let mut actions: Vec<&[Token]> = Vec::new();
+    let mut depth = 0u32;
+    let mut start = at;
+    let body = tokens.get(at..).unwrap_or_default();
+    for (offset, token) in body.iter().enumerate() {
+        let index = at + offset;
         if token.is_symbol(b'(') {
             depth += 1;
-            continue;
-        }
-        if token.is_symbol(b')') {
+        } else if token.is_symbol(b')') {
             depth = depth.saturating_sub(1);
-            continue;
-        }
-        if depth != 0 {
-            continue;
-        }
-        let following = |offset: usize| tokens.get(index + offset);
-        if (token.is_word("set") || token.is_word("reset"))
-            && following(1).is_some_and(|next| next.is_symbol(b'('))
-        {
-            return Action::Ignore(Ignored::Other("storage settings"));
-        }
-        if STORAGE_SETTINGS.iter().any(|setting| {
-            setting
-                .iter()
-                .enumerate()
-                .all(|(offset, word)| following(offset).is_some_and(|next| next.is_word(word)))
-        }) {
-            return Action::Ignore(Ignored::Other("storage settings"));
-        }
-        if (token.is_word("enable") || token.is_word("disable"))
-            && tokens[index + 1..]
-                .iter()
-                .take(2)
-                .any(|next| next.is_word("trigger") || next.is_word("rule"))
-        {
-            return Action::Ignore(Ignored::Other("ENABLE and DISABLE TRIGGER"));
-        }
-        if token.is_word("row")
-            && following(1).is_some_and(|next| next.is_word("level"))
-            && following(2).is_some_and(|next| next.is_word("security"))
-        {
-            return skip_change(
-                "row-level security",
-                table.unwrap_or_default(),
-                "row-level security policies come later",
-            );
-        }
-        if token.is_word("attach") && following(1).is_some_and(|next| next.is_word("partition")) {
-            return skip_change(
-                "partition",
-                table.unwrap_or_default(),
-                "partitioned tables come later",
-            );
-        }
-        if token.is_word("inherit") {
-            return skip_change(
-                "inheritance",
-                table.unwrap_or_default(),
-                "table inheritance comes later",
-            );
-        }
-        if token.is_word("add") {
-            match following(1) {
-                Some(next)
-                    if [
-                        "constraint",
-                        "primary",
-                        "unique",
-                        "foreign",
-                        "check",
-                        "exclude",
-                    ]
-                    .iter()
-                    .any(|word| next.is_word(word)) =>
-                {
-                    constraints += 1;
-                }
-                Some(next) if next.is_word("generated") => identities += 1,
-                _ => {}
-            }
+        } else if depth == 0 && (token.is_symbol(b',') || token.is_symbol(b';')) {
+            actions.push(&tokens[start..index]);
+            start = index + 1;
         }
     }
-    if tokens.first().is_some_and(|token| token.is_word("table")) {
-        Action::Run(Effect::AlterTable {
-            constraints,
-            identities,
-        })
-    } else {
-        Action::Run(Effect::OtherDdl)
+    if start < tokens.len() {
+        actions.push(&tokens[start..]);
     }
+    actions.retain(|action| !action.is_empty());
+    let kinds: Vec<AlterKind> = actions.iter().map(|action| action_kind(action)).collect();
+    if kinds.contains(&AlterKind::RowSecurity) {
+        return skip_change(
+            "row-level security",
+            table,
+            "row-level security policies come later",
+        );
+    }
+    if kinds.contains(&AlterKind::Partition) {
+        return skip_change("partition", table, "partitioned tables come later");
+    }
+    if kinds.contains(&AlterKind::Inheritance) {
+        return skip_change("inheritance", table, "table inheritance comes later");
+    }
+    if !kinds.is_empty() && kinds.iter().all(|kind| *kind == AlterKind::Storage) {
+        return Action::Ignore(Ignored::Other("storage settings"));
+    }
+    if !kinds.is_empty() && kinds.iter().all(|kind| *kind == AlterKind::Trigger) {
+        return Action::Ignore(Ignored::Other("ENABLE and DISABLE TRIGGER"));
+    }
+    if !is_table {
+        return Action::Run(Effect::OtherDdl);
+    }
+    let mut constraints = 0u64;
+    let mut sequences = Vec::new();
+    for action in &actions {
+        if action.first().is_some_and(|token| token.is_word("add"))
+            && action.get(1).is_some_and(|next| {
+                [
+                    "constraint",
+                    "primary",
+                    "unique",
+                    "foreign",
+                    "check",
+                    "exclude",
+                ]
+                .iter()
+                .any(|word| next.is_word(word))
+            })
+        {
+            constraints += 1;
+        }
+        if let Some(sequence) = identity_sequence(action) {
+            sequences.push(sequence);
+        }
+    }
+    Action::Run(Effect::AlterTable {
+        constraints,
+        identity_sequences: sequences,
+    })
+}
+
+pub(crate) fn sequence_call(text: &str) -> Option<String> {
+    let tokens: Vec<Token> = Words::new(text).take(8).collect();
+    let mut at = 1;
+    if !tokens.first().is_some_and(|token| token.is_word("select")) {
+        return None;
+    }
+    if starts_with_words(&tokens[1..], &["pg_catalog"])
+        && tokens.get(2).is_some_and(|token| token.is_symbol(b'.'))
+    {
+        at = 3;
+    }
+    let function = tokens.get(at)?;
+    if !["setval", "nextval", "currval"]
+        .iter()
+        .any(|name| function.is_word(name))
+        || !tokens.get(at + 1)?.is_symbol(b'(')
+    {
+        return None;
+    }
+    let mut words = Words::new(text);
+    words.find(|token| token.is_symbol(b'('))?;
+    words.literal_text()
 }
 
 pub(crate) fn insert_rows(text: &str) -> u64 {

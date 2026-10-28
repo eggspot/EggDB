@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict BNdFaaNDaMifxoRoBbHTj1d78vkp8tsz6MJgLFf5MGsPsfvF5fgXfjdYUvBdiGW
+\restrict k88Ec4Dul07fnv4L2Y9TYVcZhgqRFX3awLZtBIl1GRoTzcuHP1VVNN2RMZstNE6
 
 -- Dumped from database version 18.6 (Homebrew)
 -- Dumped by pg_dump version 18.6 (Homebrew)
@@ -382,6 +382,33 @@ ALTER TABLE public.products OWNER TO postgres;
 
 ALTER TABLE public.products ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME public.products_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: tasks; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.tasks (
+    id bigint NOT NULL,
+    feeling public.mood NOT NULL,
+    title text
+);
+
+
+ALTER TABLE public.tasks OWNER TO postgres;
+
+--
+-- Name: tasks_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+ALTER TABLE public.tasks ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.tasks_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -833,6 +860,17 @@ COPY public.products (id, sku, title, price, weight, rating, attrs, raw) FROM st
 
 
 --
+-- Data for Name: tasks; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.tasks (id, feeling, title) FROM stdin;
+1	busy	task 1
+2	calm	task 2
+3	busy	task 3
+\.
+
+
+--
 -- Data for Name: texts; Type: TABLE DATA; Schema: public; Owner: postgres
 --
 
@@ -955,6 +993,13 @@ SELECT pg_catalog.setval('public.products_id_seq', 6, true);
 
 
 --
+-- Name: tasks_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.tasks_id_seq', 3, true);
+
+
+--
 -- Name: blobs blobs_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1032,6 +1077,14 @@ ALTER TABLE ONLY public.products
 
 ALTER TABLE ONLY public.products
     ADD CONSTRAINT products_sku_key UNIQUE (sku);
+
+
+--
+-- Name: tasks tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_pkey PRIMARY KEY (id);
 
 
 --
@@ -1166,5 +1219,5 @@ REFRESH MATERIALIZED VIEW public.daily_orders;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict BNdFaaNDaMifxoRoBbHTj1d78vkp8tsz6MJgLFf5MGsPsfvF5fgXfjdYUvBdiGW
+\unrestrict k88Ec4Dul07fnv4L2Y9TYVcZhgqRFX3awLZtBIl1GRoTzcuHP1VVNN2RMZstNE6
 

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict eapFGu8kgyImDir6wqzaWwKjZvZ13axVA5ezAhDrNdF09U2wV4XNNl9riBXLt5z
+\restrict 1F1Q1I7Jl9eK2cNHlTwWuZItK3IMglqW6IeefPpsVdL2TsVewOPbtIPi2DftdW6
 
 -- Dumped from database version 16.13 (Homebrew)
 -- Dumped by pg_dump version 16.13 (Homebrew)
@@ -381,6 +381,33 @@ ALTER TABLE public.products OWNER TO postgres;
 
 ALTER TABLE public.products ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME public.products_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: tasks; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.tasks (
+    id bigint NOT NULL,
+    feeling public.mood NOT NULL,
+    title text
+);
+
+
+ALTER TABLE public.tasks OWNER TO postgres;
+
+--
+-- Name: tasks_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+ALTER TABLE public.tasks ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.tasks_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -814,6 +841,15 @@ INSERT INTO public.products (id, sku, title, price, weight, rating, attrs, raw) 
 
 
 --
+-- Data for Name: tasks; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+INSERT INTO public.tasks (id, feeling, title) OVERRIDING SYSTEM VALUE VALUES (1, 'busy', 'task 1');
+INSERT INTO public.tasks (id, feeling, title) OVERRIDING SYSTEM VALUE VALUES (2, 'calm', 'task 2');
+INSERT INTO public.tasks (id, feeling, title) OVERRIDING SYSTEM VALUE VALUES (3, 'busy', 'task 3');
+
+
+--
 -- Data for Name: texts; Type: TABLE DATA; Schema: public; Owner: postgres
 --
 
@@ -934,6 +970,13 @@ SELECT pg_catalog.setval('public.products_id_seq', 6, true);
 
 
 --
+-- Name: tasks_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.tasks_id_seq', 3, true);
+
+
+--
 -- Name: blobs blobs_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1011,6 +1054,14 @@ ALTER TABLE ONLY public.products
 
 ALTER TABLE ONLY public.products
     ADD CONSTRAINT products_sku_key UNIQUE (sku);
+
+
+--
+-- Name: tasks tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_pkey PRIMARY KEY (id);
 
 
 --
@@ -1145,5 +1196,5 @@ REFRESH MATERIALIZED VIEW public.daily_orders;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict eapFGu8kgyImDir6wqzaWwKjZvZ13axVA5ezAhDrNdF09U2wV4XNNl9riBXLt5z
+\unrestrict 1F1Q1I7Jl9eK2cNHlTwWuZItK3IMglqW6IeefPpsVdL2TsVewOPbtIPi2DftdW6
 

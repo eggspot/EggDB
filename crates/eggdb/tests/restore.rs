@@ -128,7 +128,11 @@ fn copied_out(db: &Database, query: &str) -> Vec<u8> {
 #[test]
 fn every_committed_pg_dump_fixture_restores_and_matches_postgresql_table_for_table() {
     let expected = expected_tables();
-    assert_eq!(expected.len(), 12, "the fixture has twelve tables");
+    assert_eq!(
+        expected.len(),
+        18,
+        "the fixture has twelve tables EggDB restores and six sequences"
+    );
     let directory = TempDirectory::new("fixtures");
     for name in FIXTURES {
         let target = directory.join(&format!("{name}.db"));
@@ -162,7 +166,11 @@ fn every_committed_pg_dump_fixture_restores_and_matches_postgresql_table_for_tab
         }
         assert!(report.contains("\"tables\":12,"), "{name}: {report}");
         assert!(report.contains("\"views\":3,"), "{name}: {report}");
-        assert!(report.contains("\"tables_skipped\":0,"), "{name}: {report}");
+        assert!(report.contains("\"tables_skipped\":1,"), "{name}: {report}");
+        assert!(
+            report.contains("\"uses\":\"sequence public.tasks_id_seq\""),
+            "{name}: {report}"
+        );
         let db = Database::open(&target).unwrap();
         for (query, rows) in &expected {
             let found = copied_out(&db, query);

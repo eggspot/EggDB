@@ -101,6 +101,20 @@ impl<'t> Words<'t> {
         content
     }
 
+    pub(crate) fn literal_text(&mut self) -> Option<String> {
+        self.skip_space_and_comments();
+        if self.peek(0) != Some(b'\'') {
+            return None;
+        }
+        let content = self.quoted(b'\'', false);
+        let text = String::from_utf8_lossy(&content).into_owned();
+        Some(if text.contains('"') {
+            text
+        } else {
+            text.to_ascii_lowercase()
+        })
+    }
+
     fn dollar_tag_length(&self) -> Option<usize> {
         let mut length = 1;
         loop {

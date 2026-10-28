@@ -5,8 +5,10 @@ usage="usage: scripts/pg-restore/check.sh <eggdb binary> <work directory> [--row
 
 Fills a database of a running PostgreSQL server with scripts/pg-restore/fixture.sql, dumps it
 plain, with --inserts, with --column-inserts and as a custom-format archive converted by
-pg_restore -f, restores every dump with eggdb restore and the plain one with psql -f against
-eggdb serve, and compares every table's sorted COPY output with PostgreSQL's.
+pg_restore -f, restores every dump with eggdb restore and the --inserts one with psql -f against
+eggdb serve, and compares every table's sorted COPY output and every sequence's next value with
+PostgreSQL's. psql -f reads the --inserts dump: with a plain dump, psql reads the COPY data of a
+table that could not be created as SQL, against EggDB as against PostgreSQL.
 
 PostgreSQL's tools run inside the docker container named by PG_CONTAINER, or from PG_BIN (a
 directory), or from PATH; PGHOST, PGPORT, PGUSER and PGPASSWORD reach the server."
@@ -45,24 +47,33 @@ fail() {
   exit 1
 }
 
-tables=(
-  "public.customers|id"
-  "public.products|id"
-  "public.orders|id"
-  "public.order_items|order_id, line"
-  "shop.warehouses|code"
-  "shop.stock|warehouse, product_id"
-  "public.blobs|id"
-  "public.texts|id"
-  "public.events|id"
-  "public.measurements|sensor, taken"
-  "public.log_lines|logged_at, level, message"
-  "public.ledger|id"
-)
+unsupported_column="EXISTS (SELECT 1 FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid
+  WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND ty.typtype IN ('e', 'd', 'c'))"
+user_tables="FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'"
+tables_query="SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '|' || coalesce(
+  (SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY k.ord)
+     FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+    WHERE i.indrelid = c.oid AND i.indisprimary),
+  (SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) FROM pg_attribute a
+    WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.atttypid <> 'json'::regtype))
+  $user_tables AND NOT $unsupported_column ORDER BY 1"
+skipped_query="SELECT count(*) $user_tables AND $unsupported_column"
+sequences_query="SELECT quote_ident(n.nspname) || '.' || quote_ident(s.relname)
+  FROM pg_class s JOIN pg_namespace n ON n.oid = s.relnamespace
+  WHERE s.relkind = 'S' AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_class c ON c.oid = d.refobjid
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = s.oid AND d.refclassid = 'pg_class'::regclass
+      AND d.deptype IN ('a', 'i') AND $unsupported_column)
+  ORDER BY 1"
 
-query_of() {
+table_query() {
   local table=${1%%|*} order=${1#*|}
   echo "COPY (SELECT * FROM $table ORDER BY $order) TO STDOUT"
+}
+
+sequence_query() {
+  echo "COPY (SELECT nextval('$1')) TO STDOUT"
 }
 
 database=eggdb_fixture
@@ -73,12 +84,17 @@ pg psql -v ON_ERROR_STOP=1 -q -v rows="$rows" -f - < "$here/fixture.sql" > /dev/
 version=$(pg psql -At -c 'SHOW server_version')
 echo "PostgreSQL $version, $rows rows"
 
-: > "$work/expected.txt"
-for spec in "${tables[@]}"; do
-  query=$(query_of "$spec")
-  echo "== $query" >> "$work/expected.txt"
-  pg psql -v ON_ERROR_STOP=1 -q -c "$query" >> "$work/expected.txt"
-done
+tables=()
+while IFS= read -r spec; do
+  tables+=("$spec")
+done < <(pg psql -v ON_ERROR_STOP=1 -At -c "$tables_query")
+sequences=()
+while IFS= read -r sequence; do
+  sequences+=("$sequence")
+done < <(pg psql -v ON_ERROR_STOP=1 -At -c "$sequences_query")
+expected_skipped=$(pg psql -v ON_ERROR_STOP=1 -At -c "$skipped_query")
+[ "${#tables[@]}" -gt 0 ] || fail "the fixture database has no tables"
+echo "${#tables[@]} tables and ${#sequences[@]} sequences to compare; tables expected to be skipped: $expected_skipped"
 
 pg pg_dump > "$work/plain.sql"
 pg pg_dump --inserts > "$work/inserts.sql"
@@ -86,20 +102,38 @@ pg pg_dump --column-inserts > "$work/column-inserts.sql"
 pg pg_dump -Fc > "$work/archive.dump"
 pg pg_restore -f - < "$work/archive.dump" > "$work/custom.sql"
 
+: > "$work/expected.txt"
+for spec in "${tables[@]}"; do
+  query=$(table_query "$spec")
+  echo "== $query" >> "$work/expected.txt"
+  pg psql -v ON_ERROR_STOP=1 -q -c "$query" >> "$work/expected.txt"
+done
+for sequence in "${sequences[@]}"; do
+  query=$(sequence_query "$sequence")
+  echo "== $query" >> "$work/expected.txt"
+  pg psql -v ON_ERROR_STOP=1 -q -c "$query" >> "$work/expected.txt"
+done
+
 compare() {
   local form=$1 db=$2
   : > "$work/$form.found"
   for spec in "${tables[@]}"; do
-    query=$(query_of "$spec")
+    query=$(table_query "$spec")
     echo "== $query" >> "$work/$form.found"
     "$eggdb" sql "$db" -c "$query" >> "$work/$form.found" ||
       fail "$form: eggdb could not read ${spec%%|*}"
+  done
+  for sequence in "${sequences[@]}"; do
+    query=$(sequence_query "$sequence")
+    echo "== $query" >> "$work/$form.found"
+    "$eggdb" sql "$db" -c "$query" >> "$work/$form.found" ||
+      fail "$form: eggdb could not read the sequence $sequence"
   done
   if ! cmp -s "$work/expected.txt" "$work/$form.found"; then
     diff "$work/expected.txt" "$work/$form.found" | head -n 40 >&2 || true
     fail "$form: the restored tables differ from PostgreSQL's"
   fi
-  echo "ok   $form: every table matches PostgreSQL's"
+  echo "ok   $form: every table and sequence matches PostgreSQL's"
 }
 
 status=0
@@ -113,7 +147,8 @@ for form in plain inserts column-inserts custom; do
   rm -f "$work/$form.db"
   "$eggdb" restore --create "$work/$form.db" "$work/$form.sql" --report "$work/$form.report.json" > "$work/$form.out" ||
     fail "$form: eggdb restore failed: $(cat "$work/$form.out") $(cat "$work/$form.report.json" 2> /dev/null)"
-  grep -q '"tables_skipped":0,' "$work/$form.report.json" || fail "$form: a table was skipped: $(cat "$work/$form.report.json")"
+  grep -q "\"tables_skipped\":$expected_skipped," "$work/$form.report.json" ||
+    fail "$form: expected $expected_skipped skipped tables: $(cat "$work/$form.report.json")"
   compare "$form" "$work/$form.db"
 done
 
@@ -129,7 +164,7 @@ if [ "${OS:-}" != Windows_NT ]; then
   done
   port=$(sed -n 's/.*"port":\([0-9]*\).*/\1/p' "$work/serve.out" | head -n 1)
   [ -n "$port" ] || fail "eggdb serve printed no port: $(cat "$work/serve.out") $(cat "$work/serve.err")"
-  PGPASSWORD=restore-secret pg psql "host=127.0.0.1 port=$port user=eggdb dbname=served" -q -f - < "$work/plain.sql" > "$work/psql.out" 2> "$work/psql.err" || true
+  PGPASSWORD=restore-secret pg psql "host=127.0.0.1 port=$port user=eggdb dbname=served" -q -f - < "$work/inserts.sql" > "$work/psql.out" 2> "$work/psql.err" || true
   kill -TERM "$server"
   wait "$server" || fail "eggdb serve exited badly: $(cat "$work/serve.err")"
   trap - EXIT

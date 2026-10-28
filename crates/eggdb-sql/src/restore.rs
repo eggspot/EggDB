@@ -237,6 +237,7 @@ pub fn restore_dump<S: KeyValueStore>(
         skipped_tables: HashMap::new(),
         table_rows: HashMap::new(),
         set_names: HashSet::new(),
+        skipped_sequences: HashSet::new(),
     };
     restore.run();
     restore.report
@@ -262,6 +263,7 @@ struct Restore<'a, 's, S: KeyValueStore> {
     skipped_tables: HashMap<String, SkippedTable>,
     table_rows: HashMap<String, usize>,
     set_names: HashSet<String>,
+    skipped_sequences: HashSet<String>,
 }
 
 impl<S: KeyValueStore> Restore<'_, '_, S> {
@@ -280,7 +282,24 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                 }
             };
             let flow = match item {
-                Item::End => return,
+                Item::End => {
+                    if let Some((_, line)) = self.restricted.take() {
+                        let error = SqlError::new(
+                            SqlState::SYNTAX_ERROR,
+                            format!(
+                                "the dump ends without the \\unrestrict that closes the \\restrict of line {line}"
+                            ),
+                        )
+                        .with_hint("The dump is cut short; take it again, or copy all of it.");
+                        self.genuine_error(RestoreError {
+                            line: self.reader.line_number(),
+                            statement: String::new(),
+                            error,
+                            statements_before: self.report.statements,
+                        });
+                    }
+                    return;
+                }
                 Item::Meta(meta) => self.meta_command(meta),
                 Item::Statement(statement) => {
                     self.report.statements += 1;
@@ -359,16 +378,12 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                 self.ignore(kind);
                 Flow::Continue
             }
-            Action::Skip(skip) => {
-                self.skip(&statement, skip);
-                Flow::Continue
-            }
+            Action::Skip(skip) => self.skip(&statement, skip),
             Action::Run(effect) => {
                 if let Some(table) = effect.data_target()
                     && let Some(key) = self.skipped_table_key(table)
                 {
-                    self.data_of_skipped_table(&statement, &key);
-                    return Flow::Continue;
+                    return self.data_of_skipped_table(&statement, &key);
                 }
                 self.execute(statement, &effect)
             }
@@ -395,9 +410,12 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         }
     }
 
-    fn skip(&mut self, statement: &DumpStatement, skip: Skip) {
+    fn skip(&mut self, statement: &DumpStatement, skip: Skip) -> Flow {
         let rows = if statement.copy_from_stdin {
-            self.reader.skip_copy_data().ok()
+            match self.reader.skip_copy_data() {
+                Ok(rows) => Some(rows),
+                Err(error) => return self.unreadable(error),
+            }
         } else {
             None
         };
@@ -416,6 +434,17 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             self.report.tables_skipped += 1;
             self.remember_skipped_table(&skip.name, listed);
         }
+        Flow::Continue
+    }
+
+    fn unreadable(&mut self, error: SqlError) -> Flow {
+        self.report.error = Some(RestoreError {
+            line: self.reader.line_number(),
+            statement: String::new(),
+            error,
+            statements_before: self.report.statements,
+        });
+        Flow::Stop
     }
 
     fn list_skipped(&mut self, object: SkippedObject) -> Option<usize> {
@@ -429,15 +458,30 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
     }
 
     fn remember_skipped(&mut self, kind: &str, name: &str) {
-        let shown = format!("{kind} {name}");
-        let base = name.split(['(', ' ']).next().unwrap_or(name);
-        for key in [base, base.rsplit('.').next().unwrap_or(base)] {
-            if key.is_empty() || self.skipped_names.len() >= MAX_REMEMBERED_NAMES {
-                continue;
+        let key = name.split(['(', ' ']).next().unwrap_or(name);
+        if key.is_empty() || self.skipped_names.len() >= MAX_REMEMBERED_NAMES {
+            return;
+        }
+        self.skipped_names
+            .entry(key.to_owned())
+            .or_insert_with(|| format!("{kind} {name}"));
+    }
+
+    fn remember_skipped_sequence(&mut self, name: &str) {
+        self.remember_skipped("sequence", name);
+        if self.skipped_sequences.len() < MAX_REMEMBERED_NAMES {
+            self.skipped_sequences.insert(table_key(name));
+        }
+    }
+
+    fn remember_identity_sequences(&mut self, effect: &Effect) {
+        if let Effect::AlterTable {
+            identity_sequences, ..
+        } = effect
+        {
+            for sequence in identity_sequences {
+                self.remember_skipped_sequence(sequence);
             }
-            self.skipped_names
-                .entry(key.to_owned())
-                .or_insert_with(|| shown.clone());
         }
     }
 
@@ -453,9 +497,12 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         self.skipped_tables.contains_key(&key).then_some(key)
     }
 
-    fn data_of_skipped_table(&mut self, statement: &DumpStatement, key: &str) {
+    fn data_of_skipped_table(&mut self, statement: &DumpStatement, key: &str) -> Flow {
         let rows = if statement.copy_from_stdin {
-            self.reader.skip_copy_data().unwrap_or_default()
+            match self.reader.skip_copy_data() {
+                Ok(rows) => rows,
+                Err(error) => return self.unreadable(error),
+            }
         } else {
             classify::insert_rows(&statement.text)
         };
@@ -467,6 +514,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         {
             *object.rows.get_or_insert(0) += rows;
         }
+        Flow::Continue
     }
 
     fn execute(&mut self, statement: DumpStatement, effect: &Effect) -> Flow {
@@ -488,13 +536,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         if statement.copy_from_stdin
             && let Err(error) = self.reader.skip_copy_data()
         {
-            self.report.error = Some(RestoreError {
-                line: self.reader.line_number(),
-                statement: String::new(),
-                error,
-                statements_before: self.report.statements,
-            });
-            return Flow::Stop;
+            return self.unreadable(error);
         }
         match outcome {
             Ok(()) => {
@@ -519,17 +561,21 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             Effect::Index(_) => report.indexes += 1,
             Effect::AlterTable {
                 constraints,
-                identities,
+                identity_sequences,
             } => {
                 report.constraints += constraints;
-                report.sequences += identities;
+                report.sequences += identity_sequences.len() as u64;
             }
             Effect::Comment => report.comments += 1,
             Effect::Copy(table) | Effect::Insert(table) => {
                 report.rows += loaded;
                 self.add_rows(table, loaded);
             }
-            Effect::Setting | Effect::Data | Effect::OtherDdl | Effect::Other => {}
+            Effect::SequenceCall(_)
+            | Effect::Setting
+            | Effect::Data
+            | Effect::OtherDdl
+            | Effect::Other => {}
         }
     }
 
@@ -555,10 +601,20 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         let state = error.state();
         let code = state.code();
         let missing_object = matches!(code, "42704" | "42883" | "42P01" | "3F000");
-        let refused_definition = effect.is_ddl() && matches!(code, "0A000" | "42601" | "42809");
-        if (missing_object || refused_definition)
-            && let Some(uses) = self.uses_skipped(&statement.text)
-        {
+        let refused_definition = matches!(code, "0A000" | "42601" | "42809");
+        let uses = match effect {
+            Effect::SequenceCall(sequence)
+                if missing_object && self.skipped_sequences.contains(&table_key(sequence)) =>
+            {
+                Some(format!("sequence {sequence}"))
+            }
+            effect if effect.is_ddl() && (missing_object || refused_definition) => {
+                self.uses_skipped(&statement.text)
+            }
+            _ => None,
+        };
+        if let Some(uses) = uses {
+            self.remember_identity_sequences(effect);
             if let Some((kind, name)) = effect.created() {
                 self.remember_skipped(kind, name);
                 if kind == "table" {
@@ -579,6 +635,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             return Flow::Continue;
         }
         if error.state() == SqlState::FEATURE_NOT_SUPPORTED && effect.is_ddl() {
+            self.remember_identity_sequences(effect);
             let (kind, name) = effect
                 .created()
                 .map_or(("statement", shortened(&statement.text)), |(kind, name)| {
@@ -626,28 +683,26 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         if self.skipped_names.is_empty() {
             return None;
         }
-        let mut name = String::new();
+        let mut chain = String::new();
         let mut after_dot = false;
         for token in Words::new(text) {
             match token.name_part() {
                 Some(part) => {
-                    if after_dot {
-                        name.push('.');
-                        name.push_str(&part);
+                    if !after_dot {
+                        chain.clear();
                     } else {
-                        name = part.clone();
+                        chain.push('.');
                     }
+                    chain.push_str(&part);
                     after_dot = false;
-                    for key in [name.as_str(), part.as_str()] {
-                        if let Some(shown) = self.skipped_names.get(key) {
-                            return Some(shown.clone());
-                        }
+                    if let Some(shown) = self.skipped_names.get(&chain) {
+                        return Some(shown.clone());
                     }
                 }
                 None => {
-                    after_dot = token == Token::Symbol(b'.') && !name.is_empty();
+                    after_dot = token == Token::Symbol(b'.') && !chain.is_empty() && !after_dot;
                     if !after_dot {
-                        name.clear();
+                        chain.clear();
                     }
                 }
             }

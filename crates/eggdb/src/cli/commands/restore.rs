@@ -503,12 +503,23 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
         );
     }
     if report.error_count() > 0 {
+        let count = report.error_count();
+        let not_restored = if report.rows_skipped > 0 || report.tables_skipped > 0 {
+            format!(
+                " but the {} and {} of skipped tables",
+                counted(report.tables_skipped, "table", "tables"),
+                counted(report.rows_skipped, "row", "rows")
+            )
+        } else {
+            String::new()
+        };
         return (
             "errors ignored:",
             Style::Red,
             format!(
-                "{} failed and were skipped (--keep-going), listed above; {file} holds everything else.",
-                statements(report.error_count())
+                "{} failed and {} skipped (--keep-going), listed above; {file} holds everything else{not_restored}.",
+                statements(count),
+                if count == 1 { "was" } else { "were" }
             ),
         );
     }

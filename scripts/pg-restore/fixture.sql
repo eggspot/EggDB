@@ -110,6 +110,12 @@ CREATE TABLE public.ledger (
     posted date
 );
 
+CREATE TABLE public.tasks (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    feeling public.mood NOT NULL,
+    title text
+);
+
 INSERT INTO public.customers (name, email, country, active, created_at, note)
 SELECT 'customer ' || i,
        CASE WHEN i % 17 = 0 THEN NULL ELSE 'c' || i || '@example.com' END,
@@ -217,6 +223,10 @@ SELECT 1000000000000 + i % 50,
        CASE WHEN i % 8 = 0 THEN NULL ELSE 'entry #' || i END,
        date '2020-02-29' + i
 FROM generate_series(1, :rows / 10) AS i;
+
+INSERT INTO public.tasks (feeling, title)
+SELECT (ARRAY['calm', 'busy']::public.mood[])[1 + i % 2], 'task ' || i
+FROM generate_series(1, greatest(3, :rows / 100)) AS i;
 
 CREATE INDEX orders_customer_idx ON public.orders (customer_id);
 CREATE INDEX orders_placed_idx ON public.orders (ordered_on DESC, status);
