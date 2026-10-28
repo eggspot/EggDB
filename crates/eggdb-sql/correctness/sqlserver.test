@@ -79,6 +79,26 @@ CREATE TABLE NoKey (id INT IDENTITY, name NVARCHAR(10))
 error 42601 213
 INSERT INTO Products VALUES (N'Salt')
 
+ok
+CREATE TABLE Visits ([VisitID] INT IDENTITY(1,1) PRIMARY KEY, [Note] NVARCHAR(20) DEFAULT N'none', [At] DATETIME2(3) DEFAULT GETDATE())
+
+ok
+INSERT INTO Visits DEFAULT VALUES
+
+ok
+INSERT INTO Visits DEFAULT VALUES
+
+rows
+SELECT VisitID AS id, Note AS note, count(At) AS stamped FROM Visits GROUP BY VisitID, Note ORDER BY VisitID
+----
+id|note|stamped
+1|none|1
+2|none|1
+SELECT 2
+
+ok
+DROP TABLE Visits
+
 chapter "Database Identifiers"
 ok
 CREATE TABLE [Order Details] ([Order ID] INT PRIMARY KEY, [Qty]]x] INT)
@@ -148,8 +168,17 @@ SELECT 'a' || 'b' AS x
 error 42601 102
 SELECT 1::int AS x
 
-error 42883 402
+error 42883 40517
 SELECT Name + 1 AS x FROM Products
+
+error 42883 40517
+SELECT Name + Name AS x FROM Products
+
+error 42883 8117
+SELECT sum(Name) AS x FROM Products
+
+error 2201W 1060
+SELECT TOP (-1) Name FROM Products
 
 chapter "Date and Time Functions"
 rows

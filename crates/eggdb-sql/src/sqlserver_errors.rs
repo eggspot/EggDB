@@ -131,6 +131,23 @@ fn operator_name(symbol: &str) -> Option<&'static str> {
     })
 }
 
+fn is_text_type(name: &str) -> bool {
+    matches!(
+        name,
+        "text" | "character varying" | "character" | "bpchar" | "unknown" | "varchar"
+    )
+}
+
+fn concatenates_text(message: &str) -> bool {
+    let Some(rest) = message.strip_prefix("operator does not exist: ") else {
+        return false;
+    };
+    match rest.split_once(" + ") {
+        Some((left, right)) => is_text_type(left) || is_text_type(right),
+        None => rest.strip_prefix("+ ").is_some_and(is_text_type),
+    }
+}
+
 fn incompatible_operands(message: &str) -> Option<String> {
     let rest = message.strip_prefix("operator does not exist: ")?;
     let words: Vec<&str> = rest.split(' ').collect();
@@ -305,11 +322,11 @@ fn not_supported(message: &str) -> String {
     if message.ends_with("in this version of EggDB.") {
         return message.to_owned();
     }
-    let what = message
-        .trim_end_matches('.')
-        .trim_end_matches(" yet")
-        .trim_end_matches(" is not supported")
-        .trim_end_matches(" are not supported");
+    let trimmed = message.trim_end_matches('.').trim_end_matches(" yet");
+    if let Some(what) = trimmed.strip_suffix(" are not supported") {
+        return format!("{what} are not supported in this version of EggDB.");
+    }
+    let what = trimmed.trim_end_matches(" is not supported");
     format!("{what} is not supported in this version of EggDB.")
 }
 
@@ -326,13 +343,14 @@ fn generic(error: &SqlError) -> String {
     }
 }
 
-/// `error`, raised by the engine in PostgreSQL's terms while running `text`, with SQL Server's
+/// `error`, raised by the engine in PostgreSQL's terms while running `text` (at `statement`, the
+/// failing statement and the text after it), with SQL Server's
 /// number and wording, as Microsoft's "Database engine events and errors" lists them, in the
 /// database named `database`. An error without a SQL Server counterpart becomes `Msg 50000`
 /// (the number SQL Server gives user messages of `RAISERROR`), with a neutral message rebuilt
 /// from its SQLSTATE and the names it carries, so no PostgreSQL wording reaches a SQL Server
 /// client.
-pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError {
+pub(crate) fn translate(error: SqlError, text: &str, statement: &str, database: &str) -> SqlError {
     if error.vendor() == Some(crate::Dialect::SqlServer) {
         return error;
     }
@@ -346,7 +364,7 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             103,
             format!("The identifier that starts with '{first}' is too long."),
         ),
-        "42P01" if first_word(text) == "DROP" => (
+        "42P01" if first_word(statement) == "DROP" => (
             3701,
             format!(
                 "Cannot drop the table '{first}', because it does not exist or you do not have permission."
@@ -364,19 +382,40 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             format!("Column names in each table must be unique. Column name '{first}' is specified more than once."),
         ),
         "42883" if message.starts_with("function ") => {
-            let function = message
+            let (function, arguments) = message
                 .strip_prefix("function ")
                 .and_then(|rest| rest.split_once('('))
-                .map_or(String::new(), |(function, _)| function.to_owned());
-            (
-                195,
-                format!("'{function}' is not a recognized built-in function name."),
-            )
+                .map_or((String::new(), String::new()), |(function, rest)| {
+                    let arguments = rest.split_once(')').map_or(rest, |(inside, _)| inside);
+                    (function.to_owned(), arguments.to_owned())
+                });
+            if ["sum", "avg"].contains(&function.as_str()) && !arguments.is_empty() {
+                (
+                    8117,
+                    format!(
+                        "Operand data type {} is invalid for {function} operator.",
+                        type_name(&arguments)
+                    ),
+                )
+            } else {
+                (
+                    195,
+                    format!("'{function}' is not a recognized built-in function name."),
+                )
+            }
         }
+        "42883" if concatenates_text(&message) => (
+            40517,
+            "String concatenation with + is not supported in this version of EggDB.".to_owned(),
+        ),
         "42883" => match incompatible_operands(&message) {
             Some(wording) => (402, wording),
             None => (402, "The data types are incompatible in this operator.".to_owned()),
         },
+        "2201W" | "2201X" => (
+            1060,
+            "The number of rows provided for a TOP or FETCH clauses row count parameter must be an integer.".to_owned(),
+        ),
         "42804" | "42846" => (
             402,
             "The data types of the operands are incompatible.".to_owned(),
@@ -399,9 +438,9 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             "Cannot add multiple PRIMARY KEY constraints to the table.".to_owned(),
         ),
         "23505" => duplicate_key(&error),
-        "23502" => not_null(&error, text, database),
-        "23503" => conflict(&error, text, "FOREIGN KEY"),
-        "23514" => conflict(&error, text, "CHECK"),
+        "23502" => not_null(&error, statement, database),
+        "23503" => conflict(&error, statement, "FOREIGN KEY"),
+        "23514" => conflict(&error, statement, "CHECK"),
         "22001" => (8152, "String or binary data would be truncated.".to_owned()),
         "22012" => (8134, "Divide by zero error encountered.".to_owned()),
         "22003" => (
@@ -443,7 +482,7 @@ mod tests {
     use crate::error::{SqlError, SqlState};
 
     fn shown(error: SqlError, text: &str) -> String {
-        translate(error, text, "shop").to_string()
+        translate(error, text, text, "shop").to_string()
     }
 
     #[test]
@@ -503,11 +542,34 @@ mod tests {
             shown(
                 SqlError::new(
                     SqlState::UNDEFINED_FUNCTION,
-                    "operator does not exist: text + integer"
+                    "operator does not exist: integer - text"
                 ),
-                "SELECT name + 1 FROM t"
+                "SELECT 1 - name FROM t"
             ),
-            "Msg 402, Level 16, State 1: The data types nvarchar and int are incompatible in the add operator."
+            "Msg 402, Level 16, State 1: The data types int and nvarchar are incompatible in the subtract operator."
+        );
+        for message in [
+            "operator does not exist: text + text",
+            "operator does not exist: character varying + integer",
+            "operator does not exist: integer + character varying",
+        ] {
+            let error = translate(
+                SqlError::new(SqlState::UNDEFINED_FUNCTION, message),
+                "SELECT a + b FROM t",
+                "SELECT a + b FROM t",
+                "shop",
+            );
+            assert_eq!(error.vendor_code(), Some(40517), "{message}");
+        }
+        assert_eq!(
+            shown(
+                SqlError::new(
+                    SqlState::UNDEFINED_FUNCTION,
+                    "function sum(character varying) does not exist"
+                ),
+                "SELECT sum(name) FROM t"
+            ),
+            "Msg 8117, Level 16, State 1: Operand data type nvarchar is invalid for sum operator."
         );
     }
 
@@ -516,12 +578,14 @@ mod tests {
         let error = translate(
             SqlError::syntax("syntax error at or near \"FORM\"", 9),
             "SELECT * FORM t",
+            "SELECT * FORM t",
             "shop",
         );
         assert_eq!(error.vendor_code(), Some(102));
         assert_eq!(error.message(), "Incorrect syntax near 'FORM'.");
         let keyword = translate(
             SqlError::syntax("syntax error at or near \"from\"", 7),
+            "SELECT from t",
             "SELECT from t",
             "shop",
         );
@@ -543,6 +607,7 @@ mod tests {
             )
             .with_hint("PostgreSQL hint"),
             "SELECT 1",
+            "SELECT 1",
             "shop",
         );
         assert_eq!(error.vendor_code(), Some(50000));
@@ -550,6 +615,7 @@ mod tests {
         assert_eq!(error.hint(), None);
         let unsupported = translate(
             SqlError::not_supported("SELECT INTO is not supported yet"),
+            "SELECT * INTO u FROM t",
             "SELECT * INTO u FROM t",
             "shop",
         );

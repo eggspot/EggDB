@@ -162,3 +162,58 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
         assert!(error.severity().is_some(), "{text}");
     }
 }
+
+#[test]
+fn errors_are_worded_from_the_failing_statement_not_the_first_of_the_batch() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let steps = batch(&mut session, "SELECT 1 AS a\nDROP TABLE nowhere").unwrap();
+    assert_eq!(codes(&steps), vec![None, Some(3701)]);
+    let error = session
+        .execute("SELECT 1 AS a; DROP TABLE nowhere", &mut |_| {})
+        .expect_err("a missing table");
+    assert_eq!(error.vendor_code(), Some(3701));
+    values(
+        &mut session,
+        "CREATE TABLE nn (id INT PRIMARY KEY, v INT NOT NULL) INSERT INTO nn VALUES (1, 1)",
+    );
+    let steps = batch(
+        &mut session,
+        "SET NOCOUNT ON\nUPDATE nn SET v = NULL WHERE id = 1\nINSERT INTO nn VALUES (2, NULL)",
+    )
+    .unwrap();
+    let messages: Vec<String> = steps
+        .iter()
+        .filter_map(|step| {
+            step.outcome
+                .as_ref()
+                .err()
+                .map(|error| error.message().to_owned())
+        })
+        .collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].ends_with("UPDATE fails."), "{messages:?}");
+    assert!(messages[1].ends_with("INSERT fails."), "{messages:?}");
+}
+
+#[test]
+fn string_columns_joined_with_plus_are_refused_as_not_supported() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE s (id INT PRIMARY KEY, name NVARCHAR(10), n INT) INSERT INTO s VALUES (1, N'a', 2)",
+    );
+    for text in [
+        "SELECT name + name AS x FROM s",
+        "SELECT name + n AS x FROM s",
+        "SELECT n + name AS x FROM s",
+    ] {
+        let error = session.execute(text, &mut |_| {}).expect_err(text);
+        assert_eq!(error.vendor_code(), Some(40517), "{text}: {error}");
+    }
+    assert_eq!(
+        values(&mut session, "SELECT n + n AS x FROM s"),
+        vec![vec![Value::Integer(4)]]
+    );
+}

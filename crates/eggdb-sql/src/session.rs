@@ -291,6 +291,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     max_value_bytes: usize,
     max_row_bytes: usize,
     batch_resume: Option<(usize, usize)>,
+    statement_start: usize,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -325,6 +326,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             max_value_bytes: usize::MAX,
             max_row_bytes: usize::MAX,
             batch_resume: None,
+            statement_start: 0,
         }
     }
 
@@ -398,7 +400,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     fn in_dialect(&mut self, text: &str, error: SqlError) -> SqlError {
         let error = error.with_names_displayed();
         if self.sqlserver() {
-            return crate::sqlserver_errors::translate(error, text, &self.settings.database);
+            let statement = text.get(self.statement_start..).unwrap_or(text);
+            return crate::sqlserver_errors::translate(
+                error,
+                text,
+                statement,
+                &self.settings.database,
+            );
         }
         if self.sqlite() {
             return crate::sqlite_errors::translate(error, text);
@@ -906,6 +914,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
+        self.statement_start = 0;
         if !client.script {
             let tokens = match tokenize_in(text, self.dialect) {
                 Ok(tokens) => tokens,
@@ -983,6 +992,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             if parser.at_end() {
                 return Ok(Flow::Finished { inline_end });
             }
+            self.statement_start = parser.position();
             let _constraints = crate::constraints::enter(
                 self.dialect,
                 !self.sqlite() || self.settings.sqlite.foreign_keys,

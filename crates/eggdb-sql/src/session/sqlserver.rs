@@ -44,6 +44,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         text: &str,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
+        self.statement_start = 0;
         let tokens =
             tokenize_in(text, self.dialect).map_err(|error| self.in_dialect(text, error))?;
         self.check_batch_syntax(text, &tokens)

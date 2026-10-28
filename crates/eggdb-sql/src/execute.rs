@@ -907,7 +907,8 @@ pub(crate) fn insert(
                 insert.table.name.position,
             ));
         }
-        if (insert.columns.is_some() || sqlserver) && first.len() < targets.len() {
+        let listed_values = matches!(insert.source, InsertSource::Values(_));
+        if (insert.columns.is_some() || sqlserver && listed_values) && first.len() < targets.len() {
             return Err(SqlError::syntax(
                 "INSERT has more target columns than expressions",
                 insert.table.name.position,
