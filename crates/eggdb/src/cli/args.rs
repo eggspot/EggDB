@@ -95,6 +95,8 @@ impl CommandName {
             }
             OptionName::Listen
             | OptionName::MysqlListen
+            | OptionName::TdsListen
+            | OptionName::LogBatches
             | OptionName::User
             | OptionName::PasswordFile
             | OptionName::Database
@@ -193,6 +195,8 @@ enum OptionName {
     Command,
     Listen,
     MysqlListen,
+    TdsListen,
+    LogBatches,
     Dialect,
     User,
     PasswordFile,
@@ -234,6 +238,8 @@ impl OptionName {
             b"command" => Self::Command,
             b"listen" => Self::Listen,
             b"mysql-listen" => Self::MysqlListen,
+            b"tds-listen" => Self::TdsListen,
+            b"log-batches" => Self::LogBatches,
             b"dialect" => Self::Dialect,
             b"user" => Self::User,
             b"password-file" => Self::PasswordFile,
@@ -282,6 +288,7 @@ impl OptionName {
                 | Self::KeepGoing
                 | Self::Header
                 | Self::AllowWrite
+                | Self::LogBatches
         )
     }
 }
@@ -375,6 +382,8 @@ impl ResultMode {
 pub(crate) struct ServeOptions {
     pub(crate) listen: Option<SocketAddr>,
     pub(crate) mysql_listen: Option<SocketAddr>,
+    pub(crate) tds_listen: Option<SocketAddr>,
+    pub(crate) log_batches: bool,
     pub(crate) user: Option<String>,
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
@@ -618,6 +627,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Ascii => request.ascii = true,
             OptionName::ReadOnly => request.read_only = true,
             OptionName::AllowWrite => request.allow_write = true,
+            OptionName::LogBatches => request.serve.log_batches = true,
             OptionName::OnConflict => {
                 request.on_conflict = parse_on_conflict(value).map_err(usage)?
             }
@@ -666,11 +676,15 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.mysql_listen =
                     Some(parse_listen(&option.spelled, value, 3306).map_err(usage)?);
             }
+            OptionName::TdsListen => {
+                request.serve.tds_listen =
+                    Some(parse_listen(&option.spelled, value, 1433).map_err(usage)?);
+            }
             OptionName::Dialect => {
                 let name = value.to_str().unwrap_or_default();
                 request.dialect = eggdb_sql::Dialect::named(name).ok_or_else(|| {
                     usage(format!(
-                        "{} takes postgresql, mysql, sqlite or oracle, not '{}'",
+                        "{} takes postgresql, mysql, sqlite, oracle or sqlserver, not '{}'",
                         option.spelled,
                         shown(value)
                     ))

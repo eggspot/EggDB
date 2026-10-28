@@ -137,6 +137,8 @@ pub(super) fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &st
             "Error:"
         } else if line.starts_with("ORA-") {
             line.get(..10).unwrap_or("ORA-")
+        } else if line.starts_with("Msg ") {
+            line.split_once(':').map_or("Msg", |(prefix, _)| prefix)
         } else {
             "ERROR:"
         };
@@ -160,7 +162,7 @@ pub(crate) fn error_lines(error: &SqlError, text: &str) -> Vec<String> {
             format!("Result code: {name} ({code})"),
         ];
     }
-    if error.vendor() == Some(Dialect::Oracle) {
+    if error.vendor() == Some(Dialect::Oracle) || error.vendor() == Some(Dialect::SqlServer) {
         return vec![error.to_string()];
     }
     if let Some(code) = error.vendor_code() {

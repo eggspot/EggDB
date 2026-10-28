@@ -66,6 +66,18 @@ impl Session<'_> {
                 ListenError::Io(error) => Some(error),
             }),
         )?;
+        let tds_listener = match options.tds_listen {
+            Some(address) => Some(self.listener(
+                "--tds-listen",
+                "SQL Server",
+                address,
+                eggdb_tdswire::listen_on_loopback(address).map_err(|error| match error {
+                    eggdb_tdswire::ListenError::NotLoopback(_) => None,
+                    eggdb_tdswire::ListenError::Io(error) => Some(error),
+                }),
+            )?),
+            None => None,
+        };
         let mysql_listener = match options.mysql_listen {
             Some(address) => Some(self.listener(
                 "--mysql-listen",
@@ -87,6 +99,12 @@ impl Session<'_> {
             })?),
             None => None,
         };
+        let tds_bound = match &tds_listener {
+            Some(listener) => Some(listener.local_addr().map_err(|error| {
+                Failure::database(format!("cannot listen: {error}"), Exit::DatabaseError)
+            })?),
+            None => None,
+        };
         let mut salt = [0u8; SCRAM_SALT_BYTES];
         secure_random::fill(&mut salt).map_err(|error| {
             Failure::database(
@@ -98,6 +116,21 @@ impl Session<'_> {
         let mysql_credentials = mysql_listener
             .as_ref()
             .map(|_| eggdb_mysqlwire::MySqlCredentials::derive(password.as_bytes()));
+        let tds_credentials = match &tds_listener {
+            Some(_) => Some(
+                eggdb_tdswire::TdsCredentials::derive(
+                    password.as_bytes(),
+                    eggdb_tdswire::DEFAULT_ITERATIONS,
+                )
+                .map_err(|error| {
+                    Failure::database(
+                        format!("cannot get random bytes from the operating system: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?,
+            ),
+            None => None,
+        };
         drop(password);
         let read_only = self.request.read_only;
         let access = if read_only {
@@ -124,12 +157,21 @@ impl Session<'_> {
             max_connections: config.max_connections,
             authentication_timeout: eggdb_mysqlwire::DEFAULT_AUTHENTICATION_TIMEOUT,
         });
-        self.print_listening(bound, mysql_bound, &config, read_only);
+        let tds_config = tds_credentials.map(|credentials| eggdb_tdswire::ServerConfig {
+            user: config.user.clone(),
+            credentials,
+            database: config.database.clone(),
+            max_connections: config.max_connections,
+            authentication_timeout: eggdb_tdswire::DEFAULT_AUTHENTICATION_TIMEOUT,
+            log_batches: options.log_batches,
+        });
+        self.print_listening(bound, mysql_bound, tds_bound, &config, read_only);
         self.out.finish()?;
         let _ = stop_signals::watch();
         let store = DatabaseStore(&db);
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
+        let tds_events = events.clone();
         let served = std::thread::scope(|scope| {
             let server = scope.spawn(|| {
                 let log = move |line: &str| {
@@ -149,6 +191,18 @@ impl Session<'_> {
                     Ok(0)
                 }
             });
+            let tds_server = scope.spawn(|| match (&tds_listener, &tds_config) {
+                (Some(listener), Some(config)) => {
+                    let log = move |line: &str| {
+                        let _ = tds_events.send(stamped(&format!("tds {line}")));
+                    };
+                    eggdb_tdswire::serve(&store, listener, config, &stop_signals::requested, &log)
+                }
+                _ => {
+                    drop(tds_events);
+                    Ok(0)
+                }
+            });
             for line in received {
                 self.messages.text(&line);
                 let _ = self.messages.finish();
@@ -160,10 +214,14 @@ impl Session<'_> {
             };
             let postgresql = server.join().unwrap_or_else(|_| unexpected());
             let mysql = mysql_server.join().unwrap_or_else(|_| unexpected());
-            postgresql.and_then(|open| mysql.map(|mysql_open| open + mysql_open))
+            let tds = tds_server.join().unwrap_or_else(|_| unexpected());
+            postgresql
+                .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
+                .and_then(|open| tds.map(|tds_open| open + tds_open))
         });
         drop(listener);
         drop(mysql_listener);
+        drop(tds_listener);
         let open = served.map_err(|error| {
             Failure::database(format!("the server failed: {error}"), Exit::DatabaseError)
         })?;
@@ -235,6 +293,7 @@ impl Session<'_> {
         &mut self,
         bound: SocketAddr,
         mysql_bound: Option<SocketAddr>,
+        tds_bound: Option<SocketAddr>,
         config: &ServerConfig,
         read_only: bool,
     ) {
@@ -252,6 +311,15 @@ impl Session<'_> {
                 config.database
             )
         });
+        let tds_line = tds_bound.map_or_else(String::new, |tds| {
+            format!(
+                "  sqlcmd       listening on {tds} (SQL Server's TDS protocol, no encryption): sqlcmd -S {},{} -U {} -d {} (password in SQLCMDPASSWORD or -P; go-sqlcmd's default encryption or -N disable)\n",
+                tds.ip(),
+                tds.port(),
+                config.user,
+                config.database
+            )
+        });
         match self.format {
             Format::Json => {
                 let mut object = JsonObject::new()
@@ -262,6 +330,11 @@ impl Session<'_> {
                     object = object
                         .string("mysql_listening", &mysql.to_string())
                         .number("mysql_port", u64::from(mysql.port()));
+                }
+                if let Some(tds) = tds_bound {
+                    object = object
+                        .string("tds_listening", &tds.to_string())
+                        .number("tds_port", u64::from(tds.port()));
                 }
                 self.out.text(
                     &object
@@ -274,7 +347,7 @@ impl Session<'_> {
                 );
             }
             _ => self.out.text(&format!(
-                "listening on {bound} (PostgreSQL protocol; loopback only until EggDB has TLS)\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n  connect      psql postgresql://{}@{url_host}:{}/{}\n{mysql_line}  stop         Ctrl-C\n",
+                "listening on {bound} (PostgreSQL protocol; loopback only until EggDB has TLS)\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n  connect      psql postgresql://{}@{url_host}:{}/{}\n{mysql_line}{tds_line}  stop         Ctrl-C\n",
                 config.database,
                 self.file,
                 if read_only { "read-only" } else { "for writing" },
