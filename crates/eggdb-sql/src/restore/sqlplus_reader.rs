@@ -606,7 +606,7 @@ impl<'r> SqlPlusReader<'r> {
                 mode: StatementMode::Undecided,
                 ended_by_semicolon: false,
             });
-            return self.continue_statement(content, number);
+            return self.continue_statement(content.trim_start(), number);
         }
         self.command(trimmed, number)
     }

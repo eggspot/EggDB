@@ -543,7 +543,7 @@ fn oracle_session_with(store: &MemoryStore, sql: &str) {
 
 #[test]
 fn constraint_clauses_are_built_from_the_catalog() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     oracle_session_with(
         &store,
         "CREATE TABLE p (id NUMBER PRIMARY KEY, code NUMBER UNIQUE); \
@@ -603,7 +603,7 @@ fn restore(store: &MemoryStore, script: &str, keep_going: bool) -> RestoreReport
 
 #[test]
 fn a_trigger_setting_after_a_skipped_trigger_is_a_plsql_setting_not_a_consequence() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let report = restore(
         &store,
         "CREATE TABLE t (a NUMBER);\nCREATE OR REPLACE TRIGGER x BEFORE INSERT ON t\nBEGIN\n  NULL;\nEND;\n/\nALTER TRIGGER x DISABLE;\n",
@@ -620,7 +620,7 @@ fn a_trigger_setting_after_a_skipped_trigger_is_a_plsql_setting_not_a_consequenc
 
 #[test]
 fn a_drop_of_a_missing_object_has_nothing_to_drop_and_unknown_session_parameters_are_named() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let report = restore(
         &store,
         "DROP TABLE nothing CASCADE CONSTRAINTS;\nDROP SEQUENCE nothing_seq;\nALTER SESSION SET EVENTS '10150 TRACE NAME CONTEXT FOREVER, LEVEL 1';\nALTER SESSION SET NLS_LANGUAGE=American;\nCREATE TABLE t (a NUMBER);\n",
@@ -637,7 +637,7 @@ fn a_drop_of_a_missing_object_has_nothing_to_drop_and_unknown_session_parameters
 
 #[test]
 fn a_block_into_a_skipped_table_counts_its_rows_and_runs_the_others() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let report = restore(
         &store,
         "CREATE TABLE docs (id NUMBER, body VARCHAR2(10)) ORGANIZATION EXTERNAL (TYPE oracle_loader DEFAULT DIRECTORY d LOCATION ('docs.csv'));\nCREATE TABLE notes (id NUMBER);\nBEGIN\n  INSERT INTO docs VALUES (1, NULL);\n  INSERT INTO notes VALUES (1);\nEND;\n/\n",
@@ -650,7 +650,7 @@ fn a_block_into_a_skipped_table_counts_its_rows_and_runs_the_others() {
 
 #[test]
 fn errors_and_reports_never_show_a_password() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let report = restore(
         &store,
         "CONNECT scott/tiger\nDEFINE pw = hunter2\nCREATE TABLE t (a NUMBER IDENTIFIED BY hunter2);\n",

@@ -2057,6 +2057,9 @@ CREATE TABLE iot_t (code CHAR(2) CONSTRAINT iot_code_nn NOT NULL ENABLE, name VA
 ok
 INSERT INTO iot_t VALUES ('IT', 'Italy')
 
+ok
+COMMIT
+
 error 23505 1
 INSERT INTO iot_t VALUES ('IT', 'Again')
 
@@ -2106,6 +2109,9 @@ INSERT INTO hr_jobs VALUES ('AD_PRES')
 ok
 INSERT INTO hr_employees VALUES (100, 'AD_PRES', NULL, NULL)
 
+ok
+COMMIT
+
 error 23503 2291
 INSERT INTO hr_employees VALUES (101, 'AD_PRES', 999, NULL)
 
@@ -2141,6 +2147,9 @@ ALTER TABLE ui_t ADD CONSTRAINT ui_t_pk PRIMARY KEY (a) USING INDEX ui_t_pk ENAB
 
 ok
 INSERT INTO ui_t VALUES (1)
+
+ok
+COMMIT
 
 error 23505 1
 INSERT INTO ui_t VALUES (1)

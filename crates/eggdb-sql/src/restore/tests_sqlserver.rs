@@ -52,7 +52,7 @@ fn statements_of(bytes: &[u8]) -> Result<Vec<(String, u64)>, crate::SqlError> {
         match script.next_item()? {
             ScriptItem::End => return Ok(statements),
             ScriptItem::Statement(statement) => statements.push((statement.text, statement.line)),
-            ScriptItem::ClientCommand(_) => {}
+            ScriptItem::ClientCommand(_) | ScriptItem::Failed(_) => {}
         }
     }
 }
