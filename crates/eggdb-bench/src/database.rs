@@ -11,6 +11,7 @@ use eggdb_storage::{
 use std::hint::black_box;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const READ_ENTRIES: u64 = 100_000;
 const COUNTED_READS: u64 = 100_000;
@@ -286,5 +287,66 @@ pub(crate) fn increment(_allocator: &CountingAllocator) -> Result<Vec<Metric>, S
         Metric::ratio(INCREMENT, "ratio_to_put_commit", measured.ratio),
         Metric::reported(INCREMENT, "ns_per_increment", measured.subject_ns),
         Metric::reported(INCREMENT, "reference_ns_per_commit", measured.reference_ns),
+    ])
+}
+
+pub(crate) const BACKUP: &str = "database.backup";
+const BACKUP_ENTRIES: u64 = 10_000;
+
+fn per_entry<'a>(
+    round: &'a mut dyn FnMut() -> Result<Duration, String>,
+) -> impl FnMut(u64) -> Result<Duration, String> + 'a {
+    move |entries| {
+        let rounds = entries.div_ceil(BACKUP_ENTRIES).max(1);
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..rounds {
+            elapsed += round()?;
+        }
+        Ok(elapsed.mul_f64(entries as f64 / (rounds * BACKUP_ENTRIES) as f64))
+    }
+}
+
+fn backup_once(db: &Database, copy: &Path) -> Result<Duration, String> {
+    let start = Instant::now();
+    db.backup_to(copy).map_err(failed("backup"))?;
+    let elapsed = start.elapsed();
+    std::fs::remove_file(copy).map_err(failed("remove the backup"))?;
+    Ok(elapsed)
+}
+
+fn fill_once(path: &Path) -> Result<Duration, String> {
+    let start = Instant::now();
+    let options = Options::new()
+        .cache_bytes(CACHE_BYTES)
+        .durability(Durability::Normal);
+    let db = Database::open_with(path, options).map_err(failed("open"))?;
+    db.write(|tx| {
+        for index in 0..BACKUP_ENTRIES {
+            tx.put(key(index), value(index))?;
+        }
+        Ok(())
+    })
+    .map_err(failed("fill"))?;
+    db.close().map_err(failed("close"))?;
+    let elapsed = start.elapsed();
+    std::fs::remove_file(path).map_err(failed("remove the filled file"))?;
+    Ok(elapsed)
+}
+
+pub(crate) fn backup(_allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
+    let source_file = BenchFile::new("database-backup")?;
+    let copy_file = BenchFile::new("database-backup-copy")?;
+    let reference_file = BenchFile::new("database-backup-reference")?;
+    let source = database_with(&source_file.path, BACKUP_ENTRIES, Durability::Off)?;
+    let mut backup_round = || backup_once(&source, &copy_file.path);
+    let mut fill_round = || fill_once(&reference_file.path);
+    let measured = measure::paired_timed(
+        &mut per_entry(&mut backup_round),
+        &mut per_entry(&mut fill_round),
+    )?;
+    Ok(vec![
+        Metric::ratio(BACKUP, "ratio_to_fill", measured.ratio),
+        Metric::reported(BACKUP, "ns_per_entry", measured.subject_ns),
+        Metric::reported(BACKUP, "reference_ns_per_entry", measured.reference_ns),
     ])
 }

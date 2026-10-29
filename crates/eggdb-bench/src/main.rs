@@ -51,7 +51,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 26] = [
+const COUNTED: [(&str, Counted); 27] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -72,6 +72,7 @@ const COUNTED: [(&str, Counted); 26] = [
     (database::WRITE, database::write),
     (database::READ_EXPIRING, database::read_expiring),
     (database::INCREMENT, database::increment),
+    (database::BACKUP, database::backup),
     (large_value::PUT, large_value::put),
     (large_value::GET, large_value::get),
     (copy::FROM, copy::from_stdin),
