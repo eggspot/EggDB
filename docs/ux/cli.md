@@ -2147,3 +2147,491 @@ The implementation follows this section, except:
    values are compared in.
 6. `-Fjson` is not a spelling the parser knows (it takes `-F json`), and `help` ignores
    `--format hex|raw` as it did, printing the text help.
+
+## 24. The Egg command model: `table`, `explain`, `sql --read-only` and the whole registry (command model slice 2)
+
+Slice 2 of the shared Egg command model (D143; the approved design's table "New CLI twins for
+EggDB's tools"). Every tool now has a CLI twin: `table list`, `table show` and `table sample` are
+the twins of `list_tables`, `describe_table` and `sample_rows`; `explain` is the twin of
+`explain_query`; `sql --read-only` is the twin of `run_sql`. Every command enters the registry.
+Everything that shipped stays byte for byte: every text output, every text error, every JSON line,
+exit codes 0 to 5, and every MCP tool's name, arguments, result fields and annotations. The one
+shipped command whose help changes is `sql`, which gains the `--read-only` option; the main help
+gains two commands (24.9).
+
+The rules of section 23 apply unchanged to the new commands: text on a terminal, JSON records in
+a pipe, "JSON was asked for" means `--json`/`--format json`, text errors as `eggdb: <message>`
+with `  usage:` and `  try:` lines, the JSON error form of 23.3 only when JSON was asked for.
+All of `table list`, `table show`, `table sample` and `explain` open the file read-only (section
+2's shared lock), so they run beside other readers; a writer makes them busy with section 7's
+first busy message, exit 5. A missing, damaged, foreign or unreadable file is the existing error
+(exit 3 or 4), word for word.
+
+### 24.1 `eggdb table list <file> [--schema <name>]`
+
+Twin of `list_tables`. **Text** (a terminal): one line per table and view, tables first, then
+views, each group in the catalog's order (schema, then name), which is the tool's order. The
+columns are `schema.name`, the kind (`table` or `view`), the column count (`1 column`,
+`4 columns`) and the comment when there is one; each column is padded to its widest value, two
+spaces separate columns, a line ends after its last present column with no trailing spaces. The
+count goes to **stderr**, dim, as `scan`'s count does: `<n> tables, <m> views` with `1 table`
+and `1 view` singular.
+
+```
+$ eggdb table list app.db
+public.orders  table  5 columns
+public.users   table  4 columns  the people who sign in
+sales.totals   view   2 columns
+2 tables, 1 view
+```
+
+An empty database (or a `--schema` with nothing in it) prints nothing on stdout, `0 tables, 0
+views` on stderr, exit 0: an empty list is a result, as an empty `scan` is. `--schema <name>`
+keeps only that schema's tables and views, matched exactly as the tool matches it (no
+lower-casing). Names are shown as SQL stores them; a name that needs quoting in SQL is shown
+unquoted here, as the tool shows it.
+
+**JSON** (a pipe, or `--json`): JSON lines, one record per table and view, in the same order:
+
+```
+{"schema":"public","name":"orders","kind":"table","columns":5}
+{"schema":"public","name":"users","kind":"table","columns":4,"comment":"the people who sign in"}
+{"schema":"sales","name":"totals","kind":"view","columns":2}
+```
+
+**Parity with `list_tables`.** The tool's result is
+`{notice, schemas:[...], tables:[{schema,name,columns,comment?}], views:[same]}`. The CLI's
+records are every element of `tables` with `"kind":"table"`, then every element of `views` with
+`"kind":"view"`; `kind` sits after `name`; `comment` is present exactly when the tool has it;
+`schemas` is the distinct `schema` values in order of first appearance, so it is not repeated;
+`notice` is envelope. Empty database: no lines (the tool gives `"tables":[],"views":[]`).
+
+Exit codes: 0 always when the file opened (an empty list is 0). Errors are the file errors only.
+
+### 24.2 `eggdb table show <file> <table>`
+
+Twin of `describe_table`. `<table>` is `name` or `schema.name` (split at the first `.`; the
+schema is `public` when none is given), matched exactly first, then lower-cased, exactly as the
+tool does (`eggdb_sql::find_relation`). A name that is not UTF-8 matches nothing.
+
+**Text**, a table. Section 6's report style: one fact per line, a fixed label per fact, the
+labels start at column 3 and the values at column 19 as in `stats`; the column and index lines
+are indented four spaces:
+
+```
+$ eggdb table show app.db users
+public.users
+  kind            table
+  rows            1,204
+  columns         4
+    id          integer    not null, auto increment
+    name        text       not null
+    email       text       default 'unknown'         where mail goes
+    created_at  timestamp
+  primary key     id
+  indexes         2
+    users_email_key    unique (email)
+    users_created_idx  (created_at)
+  comment         the people who sign in
+```
+
+- `rows`: the count with thousands separators; `more than 10,000` when the tool's `exact` is
+  `false` (it counts up to 10,001).
+- A column line: name, type, attributes, comment; each padded to its widest value in the table,
+  two spaces between, no trailing spaces, a line ends after its last present cell. Attributes
+  are joined with `, ` in the order `not null`, `auto increment`, `default <text>` where `<text>`
+  is the tool's `default` as it gives it.
+- `primary key`: the columns joined with `, `, or `none`.
+- `indexes`: the count, or `none`; each index line is its name, then `unique (a, b)` or `(a, b)`.
+- `comment` only when the table has one (the tool omits the key too).
+
+A view:
+
+```
+$ eggdb table show app.db sales.totals
+sales.totals
+  kind            view
+  rows            12
+  columns         2
+    region      text
+    total       numeric
+```
+
+A view has no `primary key` or `indexes` lines (the tool has no such keys for a view); a column
+whose type the tool gives as `null` shows its name alone.
+
+**JSON**: one object on one line, the tool's result without `notice`, with the tool's field
+order kept:
+
+```
+{"schema":"public","name":"users","kind":"table","columns":[{"name":"id","type":"integer","not_null":true,"auto_increment":true},{"name":"name","type":"text","not_null":true},{"name":"email","type":"text","not_null":false,"default":"'unknown'","comment":"where mail goes"},{"name":"created_at","type":"timestamp","not_null":false}],"primary_key":["id"],"indexes":[{"name":"users_email_key","unique":true,"columns":["email"]},{"name":"users_created_idx","unique":false,"columns":["created_at"]}],"comment":"the people who sign in","rows":{"count":1204,"exact":true}}
+```
+
+A view's object: `schema`, `name`, `"kind":"view"`, `columns` of `{name,type}` (`type` may be
+`null`), `comment?`, `rows`.
+
+**No such table: exit 1.** A table the user named and EggDB does not have is a *not found*
+result in the sense of section 7 ("1 not found"), the exit `collection_not_found` already uses
+when `-C <name>` names no collection: the database was opened and read fine, the thing named in
+it is not there. Exit 3 is for the database itself being unreachable (missing file, foreign
+file, I/O), and a script that tells "not there" from "could not look"
+(`eggdb table show app.db users || eggdb sql app.db -c "CREATE TABLE users ..."`) needs the two
+apart. Unlike `get`, it is an error with a message, not silence: a missing key is routine, a
+missing table is almost always a typo, and the message names the fix. The code is
+`table_not_found` (category `not_found`, exit 1), a code of its own because the CLI's `not_found`
+is the missing file at exit 3 and one code has one exit; the MCP tool keeps its `not_found`, as
+the hard rule requires, and an agent branches on the shared `category`, which is the same.
+
+```
+$ eggdb table show app.db order
+eggdb: cannot show "order" in app.db: there is no table or view with that name. List the names with `eggdb table list app.db`.
+  try: eggdb table list app.db
+```
+```
+{"error":{"code":"table_not_found","category":"not_found","message":"cannot show \"order\" in app.db: there is no table or view with that name. List the names with `eggdb table list app.db`.","fix_command":"eggdb table list app.db"}}
+```
+
+The name is shown as typed, in double quotes, cut after 64 characters as the tool cuts it,
+rendered as the CLI renders any argument (section 4's text rules).
+
+### 24.3 `eggdb table sample <file> <table> [-n, --limit <count>]`
+
+Twin of `sample_rows`. `<table>` is matched as in 24.2. `-n, --limit <count>`: how many rows,
+1 to 1000, default 10, the tool's bounds; more rows is what `eggdb sql` is for. EggDB runs
+`SELECT * FROM <schema>.<name> LIMIT <count>+1` in PostgreSQL's dialect, as the tool does, and
+prints at most `<count>` rows; the extra row only tells that more exist. Values are printed as
+PostgreSQL's dialect prints them (there is no `--dialect`).
+
+**Text**: exactly what `eggdb sql app.db -c "SELECT * FROM public.users LIMIT 10"` prints: the
+psql-style table and its `(n rows)` line, then a blank line. When more rows exist, one more line
+goes to **stderr**, dim: `more rows follow: -n shows up to 1,000, eggdb sql shows them all`.
+
+```
+$ eggdb table sample app.db users -n 2
+ id | name
+----+-------
+  1 | Ada
+  2 | Grace
+(2 rows)
+
+more rows follow: -n shows up to 1,000, eggdb sql shows them all
+```
+
+An empty table prints its header, rule and `(0 rows)`, exit 0.
+
+**JSON**: one line, the `sql --json` statement line of 23.2 plus `truncated`:
+
+```
+{"tag":"SELECT 2","columns":[{"name":"id","type":"integer"},{"name":"name","type":"text"}],"rows":[[1,"Ada"],[2,"Grace"]],"row_count":2,"truncated":true}
+```
+
+- `tag` is `SELECT <rows shown>`; `rows` holds the rows shown; `row_count` is their number, the
+  shipped `sql --json` meaning (the tool's `row_count` is the `LIMIT n+1` count and its
+  `returned_rows` the rows shown: the CLI prints only the rows it shows, so one count).
+- `truncated` is always present, `true` when the table has more rows than shown. It keeps the
+  tool's name for the same fact. `truncated_by` would always be `"max_rows"`, so it is left out;
+  `notice`, `dialect` and `returned_rows` are envelope.
+- `notices` as in 23.2, when any.
+
+`-n 0`, `-n 5000`, `-n x`: usage, exit 2:
+`-n needs a whole number from 1 to 1000, not '5000'; for more rows use eggdb sql` (the option
+as typed, `-n` or `--limit`, as the shipped `-n needs a whole number, not 'x'` does).
+
+No such table: as 24.2, with `cannot sample "order" in app.db: ...`, code `table_not_found`,
+exit 1, the same `try:`.
+
+### 24.4 `eggdb explain <file> -c <sql> [--dialect postgresql|mysql|sqlite|oracle|sqlserver]`
+
+Twin of `explain_query`. The statement comes from `-c` only. EggDB puts `EXPLAIN` (or `EXPLAIN
+QUERY PLAN` for sqlite) in front and runs it read-only, never the statement itself.
+
+**Text**: the result as `sql` prints a SELECT (the psql-style table, the `(n rows)` line, a blank
+line), and no tag line: `sql -c "EXPLAIN ..."` prints `EXPLAIN` after the table as the
+statement's tag; `explain` does not, since the command is the tag.
+
+```
+$ eggdb explain app.db -c "SELECT * FROM users WHERE id = 2"
+              QUERY PLAN
+--------------------------------------
+ Index Scan using users_pkey on users
+(1 row)
+
+```
+
+The columns are the dialect's own: `QUERY PLAN` for postgresql, MySQL's twelve (`id`,
+`select_type`, `table`, `partitions`, `type`, `possible_keys`, `key`, `key_len`, `ref`, `rows`,
+`filtered`, `Extra`) for mysql, `id`, `parent`, `notused`, `detail` for sqlite.
+
+**JSON**: one `sql --json` statement line, 23.2's shape, `"tag":"EXPLAIN"`:
+
+```
+{"tag":"EXPLAIN","columns":[{"name":"QUERY PLAN","type":"text"}],"rows":[["Index Scan using users_pkey on users"]],"row_count":1}
+```
+
+Refusals, each with its code, category and exit; the text form shows the `  usage:` and `  try:
+eggdb help explain` lines for the usage ones, as every usage error does:
+
+| Case | Text message | Code, category, exit |
+|------|--------------|----------------------|
+| no `-c`, or `-c ""` | `eggdb explain needs a statement: give it with -c` | `invalid_arguments`, usage, 2 |
+| the text starts with `EXPLAIN` (any case, after spaces) | `cannot explain the statement: it starts with EXPLAIN, which eggdb explain adds itself. Give the statement without it.` | `invalid_arguments`, usage, 2 |
+| a second statement | `cannot explain more than one statement: another one starts at byte 23. Give eggdb explain one statement.` | `one_statement_per_call`, usage, 2 |
+| `--dialect oracle` | `cannot explain in Oracle's dialect: Oracle's EXPLAIN PLAN is not in EggDB yet. Explain the query with --dialect postgresql; every dialect sees the same tables.` | `not_supported`, refused, 3 |
+| `--dialect sqlserver` | `cannot explain in SQL Server's dialect: SQL Server's showplan is not in EggDB yet. Explain the query with --dialect postgresql; every dialect sees the same tables.` | `not_supported`, refused, 3 |
+| the statement fails (syntax, a missing table, a statement EXPLAIN does not take) | the dialect's error lines exactly as `eggdb sql` prints them | `sql_error`, failed, 3 (4 or 5 by SQLSTATE) |
+
+`not_supported` exits 3, not 2: the command line is well formed and EggDB refuses the work, as
+every `refused` code does (`not_a_database`, `incompatible`, `permission_denied`); the dialects
+are checked before the file is opened, so a missing file is not reported first. The
+`not_supported` errors print no `try:` line and carry no `fix_command`: the fix repeats the
+statement, and a command built around a user's quoted SQL is 23.4's half-right command. A bad
+`--dialect` value is `sql`'s existing message.
+
+```
+$ eggdb explain app.db -c "SELECT 1" --dialect oracle --json
+{"error":{"code":"not_supported","category":"refused","message":"cannot explain in Oracle's dialect: Oracle's EXPLAIN PLAN is not in EggDB yet. Explain the query with --dialect postgresql; every dialect sees the same tables."}}
+```
+
+`eggdb help explain`:
+
+```
+Usage: eggdb explain <file> -c <sql> [--dialect postgresql|mysql|sqlite|oracle|sqlserver]
+
+Shows the plan EggDB would use for one SELECT, UPDATE or DELETE, without running it. EggDB puts
+EXPLAIN in front of the statement (EXPLAIN QUERY PLAN with --dialect sqlite) and prints the
+result as eggdb sql prints a SELECT, in the dialect's own EXPLAIN form: postgresql's QUERY PLAN
+lines, mysql's EXPLAIN columns, sqlite's query plan rows. Oracle's EXPLAIN PLAN and SQL Server's
+showplan are not in EggDB yet; every dialect sees the same tables, so explain with postgresql.
+The file is opened read-only, so it works beside other readers. One statement per call.
+
+  -c, --command <sql>   the statement to explain, without EXPLAIN
+      --dialect <name>  postgresql (default), mysql, sqlite, oracle or sqlserver
+
+Examples:
+  eggdb explain app.db -c "SELECT * FROM users WHERE id = 2"
+  eggdb explain app.db -c "SELECT * FROM orders ORDER BY placed_at DESC LIMIT 10" --json
+  eggdb explain app.db --dialect sqlite -c "SELECT name FROM users WHERE id = 2"
+```
+
+### 24.5 `eggdb sql --read-only`
+
+Twin of `run_sql`. `--read-only` opens the file read-only: a shared lock, so it runs beside
+every other reader and never waits for or blocks on `eggdb ui`, `eggdb mcp` or an application
+reading the file; a writer makes it busy with section 7's first busy message, exit 5 (without the
+option, `sql` opens for writing and gets the second). The statements run as they do today, and
+the first statement that writes fails with SQLSTATE `25006` in the dialect's own form, exactly as
+`sql` prints that SQLSTATE today; the run stops there, exit 3.
+
+```
+$ eggdb sql app.db --read-only -c "INSERT INTO users VALUES (3, 'Linus')"
+ERROR:  cannot execute INSERT in a read-only transaction
+SQLSTATE:  25006
+$ eggdb sql app.db --read-only --dialect mysql -c "INSERT INTO users VALUES (3, 'Linus')"
+ERROR 1792 (25006): Cannot execute statement in a READ ONLY transaction.
+```
+
+The PostgreSQL message is PostgreSQL's own, with the statement's command word (`INSERT`,
+`UPDATE`, `CREATE TABLE`); the other dialects print their mapping of 25006 as `sql` already has
+it. **JSON**: code `read_only`, category `read_only`, exit 3, with `sqlstate`:
+
+```
+{"error":{"code":"read_only","category":"read_only","message":"cannot execute INSERT in a read-only transaction","sqlstate":"25006"}}
+```
+
+As 23.4's rule 7 picks `damaged` and `database_busy` by SQLSTATE, SQLSTATE `25006` picks
+`read_only`, so code, category and exit agree (3 is `sql_error`'s exit; a refused write is a
+failed statement, not a usage error, and the run before it stays committed as today). The exit
+stays 3 whatever made the session read-only, so `SET TRANSACTION READ ONLY` followed by a write
+gets the same code. The `read_only` row of the error table gains exit 3.
+
+`--read-only` with `--create`: usage, exit 2, in the shape of the shipped `--prefix cannot be
+combined with --from or --to`:
+`--read-only cannot be combined with --create: a read-only open never creates a file`.
+
+`eggdb help sql` changes in exactly three places. The usage line becomes
+`eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--read-only | --create]`.
+The options gain a line between `--dialect` and `--create`:
+
+```
+      --read-only       open the file read-only, beside other readers; a statement that writes fails
+```
+
+The examples gain, after `cat queries.sql | eggdb sql app.db`:
+
+```
+  eggdb sql app.db --read-only -c "SELECT count(*) FROM users"
+```
+
+The help body, the main help's `sql` line and every `sql` output stay as they are. `shell` and
+`serve` keep their own `--read-only` as shipped.
+
+### 24.6 `eggdb version --json`
+
+`eggdb version --json`, `eggdb version --format json`, `eggdb --version --json` and `eggdb -V
+--json` print one object on one line, exit 0:
+
+```
+{"version":"0.1.0"}
+```
+
+`version` is the crate version at build time, the same string the text form prints after `eggdb `
+and `help --json` carries as `version`. `--format text` prints the text form; `--format hex|raw`
+is ignored and prints text, as `help` does (23's as-built item 6). In a pipe, `version` keeps
+text: `v=$(eggdb version)` has shipped, so `version` joins `sql` as a documented exception to the
+pipe rule, and `help` with it (its pipe default was text already). No other field: what the binary
+is built from (target, commit) is not in the text form and would be new data; it can join when
+the text form gets it.
+
+### 24.7 Help for nouns, and `help --json` with every command
+
+`eggdb help table` prints one page for the three verbs, as `eggdb help collection` does, with a
+three-line `Usage:`:
+
+```
+Usage: eggdb table list <file> [--schema <name>]
+       eggdb table show <file> <table>
+       eggdb table sample <file> <table> [-n <count>]
+
+The tables and views in the database file, as SQL sees them in every dialect. <table> is a name,
+or schema.name for a schema other than public, matched as typed and then lower-cased, as SQL
+matches an unquoted name. Each verb opens the file read-only, so it works beside other readers.
+Exit 1 when the table named is not there; eggdb table list shows the names.
+
+  list     one line per table and view: schema.name, kind, columns and comment; tables first
+  show     one table or view: kind, row count, columns, primary key, indexes and comment
+  sample   the first rows of a table or view, printed as eggdb sql prints a SELECT
+
+      --schema <name>     list: only this schema's tables and views
+  -n, --limit <count>     sample: how many rows, 1 to 1000 (default 10); more is eggdb sql's job
+
+Examples:
+  eggdb table list app.db
+  eggdb table show app.db users
+  eggdb table show app.db sales.totals --json
+  eggdb table sample app.db users -n 50
+  eggdb table list app.db | jq -r .name
+```
+
+Accepted spellings, all printing that page, exit 0: `eggdb help table`, `eggdb help table
+list|show|sample`, `eggdb table --help`, `eggdb table list --help` (and the other verbs). The same
+for `collection`: `eggdb help collection list|add|delete` now prints the collection page (today it
+is `too many arguments for eggdb`, exit 2; an error becoming the help asked for is the one shipped
+behavior this slice turns into a success). A verb the noun does not have is the noun's own usage
+error, with its three-line `usage:` and `try: eggdb help table`, exit 2: `eggdb help table frob`
+and `eggdb table frob app.db` both say `table needs list, show or sample`, as `collection needs
+list, add or delete` does today. Missing operands mirror `collection`'s wording: `eggdb table list
+needs a file`, `eggdb table show needs a file and a table name`, `eggdb table show needs a table
+name`, the same for `sample`. An option of another verb is the existing `unknown option '--limit'
+for eggdb table list`.
+
+**`help --json` for a noun.** `eggdb help table --json` (and `eggdb table --help --json`) prints
+the registry objects of the noun's commands, one per line, in the `Usage:` order: three lines for
+`table`, three for `collection`. `eggdb help table list --json` prints that one verb's object, one
+line. The rule stays "`help <words> --json` prints the object of every command the words name";
+`jq -s` collects a noun's lines, and a script that wants one object names the verb. In a command
+object `words` is `["table","list"]`; `aliases` holds the other spellings of the last word
+(`collection delete` has `["del"]`).
+
+**Every command is in the registry**, so `help --json`'s `commands` lists them all in the main
+help's order: `create`, `put`, `get`, `del`, `scan`, `ttl`, `expire`, `persist`, `incr`, `decr`,
+`cas`, `check`, `stats`, `backup`, `compact`, `ui`, `export`, `import`, `sql`, `explain`,
+`table list`, `table show`, `table sample`, `serve`, `shell`, `restore`, `collection list`,
+`collection add`, `collection delete`, `mcp`, `audit`, `help`, `version`. Outputs of the new ones:
+`table list` is `records` in json with fields `schema` text, `name` text, `kind` text, `columns`
+integer, `comment` text, and `table` in text; `table show` is `object` in json with `schema`,
+`name`, `kind` text, `columns` array, `primary_key` array, `indexes` array, `comment` text,
+`rows` object, and `table` in text; `table sample` and `explain` are `table` in both formats like
+`sql`; `version` is `content` in text and `object` in json with `version` text; `help` is
+`content` in text and `object` in json. `ui`, `shell` and `mcp` take no `--format`: their
+`outputs` is `[]` and their `default_format` is `null`, since the computed terminal/pipe pair would
+claim a JSON form they do not have. Each new command's `errors` lists its codes from this section,
+and `max_effect` is `read` for all four new commands. The tools' `command` fields fill in:
+`list_tables` `["table","list"]`, `describe_table` `["table","show"]`, `sample_rows`
+`["table","sample"]`, `explain_query` `["explain"]`, `run_sql` `["sql"]` with
+`"fixed":{"format":"json","read-only":true}` (a flag's fixed value is `true`), `write_sql` `["sql"]`
+with `{"format":"json"}`. Arguments map: `schema` to `option:schema`, `table` to `operand:table`,
+`sample_rows`'s `max_rows` to `option:limit`, `sql` to `option:command`, `dialect` to
+`option:dialect`; `run_sql`'s `max_rows` keeps its slice 1 value.
+
+**`other_commands` stays**, as `[]`. Removing a key is a change scripts written against slice 1
+would feel (`.other_commands | length` must keep answering `0`, not `null`), and an empty array
+says "none" where a missing key would say "unknown". It is documented as empty from this release
+on.
+
+### 24.8 `ui`, `shell`, `mcp`: no `--format`, no `--json`
+
+Confirmed as slice 1 decided: `--json` on these three stays the text error `unknown option
+'--json' for eggdb ui`, exit 2. Their stdout is not data: `ui` draws a screen, `shell`'s output
+is governed by its own `--mode table|expanded|csv`, and `mcp`'s stdout carries the protocol. "Every
+command gets the shared errors" is met in the registry: their `errors` list their codes and
+categories, which `help --json` shows, and their usage errors stay text because no token on their
+command line can ask for JSON. A JSON mode for `shell` would be a feature of the shell (a `--mode
+json` beside `csv`), not of the error form, and is not in this slice.
+
+### 24.9 The main help and the command lists
+
+The main help (section 9, as shipped in `help.rs`) changes in exactly these lines. After the
+`sql` line, three new lines, in the shipped alignment (name column of 6 at column 3, synopsis at
+column 10, summary at column 33; `explain` overruns its column by one as `persist`, `compact` and
+`restore` do; `table` takes the two-line form `collection` uses):
+
+```
+  explain <file>                show the plan for one statement given with -c, without running it
+  table  list|show|sample <file> [table]
+                                tables and views: list them, show one, sample rows; see eggdb help table
+```
+
+Every other line of the main help is unchanged: the first paragraph, the `sql`, `help` and
+`version` lines, the keys-and-values paragraph, the options block and the two footer lines.
+
+The two command lists in usage errors (`no command given. Commands: ...` and `unknown command
+'<name>'. Commands: ...`) gain `explain, table` after `sql`:
+`... export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help,
+version.`
+
+**Tables in `command-model.md`**: the registry table gains `table list` (read; text, json;
+records as 24.1; twin of `list_tables`), `table show` (read; text, json; one object as 24.2;
+`describe_table`), `table sample` (read; text, json; one `sql --json` line plus `truncated`;
+`sample_rows`), `explain` (read; text, json; one `sql --json` line; `explain_query`), and `sql`'s
+twin cell reads `run_sql` (with `--read-only`), `write_sql`. The tools table's CLI twin cells lose
+their `slice 2:` prefixes; `sample_rows`'s envelope becomes `notice`, `dialect`, `returned_rows`,
+`truncated_by`. The error table gains `table_not_found` (`not_found`, 1: `table show` or `table
+sample` named no table or view; `fix_command` is `eggdb table list <file>`), and fills exits for
+`one_statement_per_call` (2), `not_supported` (3) and `read_only` (3).
+
+### Decided by this design
+1. `table list` prints one record per table and view with `kind` after `name`, tables first then
+   views in the tool's order; `schemas` and `notice` are not printed; an empty database is an
+   empty result, exit 0, with `0 tables, 0 views` on stderr in text.
+2. `table show` text is a section 6 report (labels at column 3, values at column 19, column and
+   index lines indented four), `rows` shows `more than 10,000` for an inexact count, and
+   `primary key`/`indexes` say `none` while `comment` is omitted when absent; its JSON is the
+   tool's object minus `notice`, field order kept.
+3. A table the user named and EggDB does not have exits 1 with an error and a `try: eggdb table
+   list <file>` line, code `table_not_found`, category `not_found`: exit 1 is "not found" and the
+   `collection_not_found` precedent; 3 stays for the database being unreachable; the MCP tool
+   keeps `not_found`.
+4. `table sample` is `-n, --limit` 1 to 1000, default 10, PostgreSQL's value text, text identical
+   to `sql`'s SELECT plus a dim stderr line `more rows follow: ...` when more exist; its JSON is
+   the `sql --json` line plus `truncated` (always present), `row_count` counts the rows in the
+   line, `truncated_by` is dropped as constant.
+5. `explain` takes `-c` only, prints the EXPLAIN result as `sql` prints a SELECT without the
+   `EXPLAIN` tag line, and its JSON is one `sql --json` line with `"tag":"EXPLAIN"`.
+6. `explain`'s refusals: a leading `EXPLAIN` and a second statement are usage (2, codes
+   `invalid_arguments` and `one_statement_per_call`); oracle and sqlserver are `not_supported`,
+   `refused`, exit 3, with no `try:` line because the fix would quote the user's SQL.
+7. `sql --read-only` opens with the shared lock; the first writing statement fails with SQLSTATE
+   25006 in the dialect's own form, exit 3; in JSON SQLSTATE 25006 selects code `read_only`,
+   category `read_only`, as 23.4's rule 7 selects `damaged` and `database_busy`; `--read-only
+   --create` is a usage error, exit 2; `sql`'s usage line reads `[--read-only | --create]`.
+8. `version --json` is `{"version":"<crate version>"}`; `version` and `help` keep text in a pipe
+   as `sql` does, and ignore `--format hex|raw` as `help` does.
+9. `help <noun>` is one page with a three-line `Usage:`; `help <noun> <verb>` and `<noun> <verb>
+   --help` print that page; a wrong verb is the noun's usage error; `help <noun> --json` prints
+   one command object per verb, one line each, and `help <noun> <verb> --json` one line.
+10. `other_commands` stays in `help --json` as an empty array.
+11. `ui`, `shell` and `mcp` have `"outputs":[]` and `"default_format":null` in the registry, and
+    `--json` stays an unknown option on them.
+12. The main help gains exactly the `explain` line and the two-line `table` entry after `sql`;
+    the usage errors' command lists gain `explain, table` after `sql`; nothing else in the main
+    help moves.
