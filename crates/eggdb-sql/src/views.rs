@@ -258,19 +258,15 @@ pub(crate) fn create_view(
 
 #[cold]
 #[inline(never)]
-fn unnamed_view_column(index: usize, dialect: Dialect) -> SqlError {
-    let error = SqlError::new(
+fn unnamed_transact_sql_view_column(index: usize) -> SqlError {
+    SqlError::new(
         SqlState::INVALID_OBJECT_DEFINITION,
         format!(
             "Create View or Function failed because no column name was specified for column {}.",
             index + 1
         ),
-    );
-    if dialect == Dialect::SqlServer {
-        error.with_sqlserver_code(4511)
-    } else {
-        error
-    }
+    )
+    .with_sqlserver_code(4511)
 }
 
 fn view_columns(
@@ -295,8 +291,11 @@ fn view_columns(
             }
             None => column.name.clone(),
         };
-        if column.name.is_empty() && (names.get(index).is_none() || expands_wildcard) {
-            return Err(unnamed_view_column(index, dialect));
+        if dialect == Dialect::SqlServer
+            && column.name.is_empty()
+            && (names.get(index).is_none() || expands_wildcard)
+        {
+            return Err(unnamed_transact_sql_view_column(index));
         }
         if columns.iter().any(|known| known.name == name) {
             return Err(match dialect {

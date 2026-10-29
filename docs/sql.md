@@ -416,7 +416,7 @@ SELECT @@VERSION
   `TOP` or `OFFSET` (error 1033). A table can be dropped under a view, which then fails with
   error 208 until the table is back, as SQL Server's views without `SCHEMABINDING` do. `CHECK`
   constraints inline, at table level and through `ALTER TABLE ... ADD CONSTRAINT`, violated with
-  error 547; an unnamed one is called `ck__<table>__<column>`. Both keep their Transact-SQL text
+  error 547 (a subquery in one is error 1046, an aggregate error 175); an unnamed one is called `ck__<table>__<column>`. Both keep their Transact-SQL text
   in the file and work from every dialect.
 - **Transactions**: each statement commits on its own unless `BEGIN TRAN[SACTION]` opened a
   transaction; `BEGIN TRAN` nests (`@@TRANCOUNT`), the outermost `COMMIT [TRAN | WORK]`
@@ -1115,8 +1115,9 @@ keep their version and bytes; an older release refuses a version 5 table by name
 `CHECK` or `FOREIGN KEY` constraints, or a primary key named other than `table_pkey`, is written
 in version 6 (D114): the version 5 layout followed by the primary key's name (a flag byte, then
 the name), the checks (count; each its name, the dialect it was written in as one byte, `0`
-PostgreSQL, `1` MySQL, `2` SQLite, `3` Oracle or `4` SQL Server (D124), and its expression text) and the foreign keys (count; each its name, its column numbers, the parent's
-name, the parent's column names, the `ON DELETE` and `ON UPDATE` actions as one byte each and a
+PostgreSQL, `1` MySQL, `2` SQLite, `3` Oracle or `4` SQL Server (D124), and its expression
+text) and the foreign keys (count; each its name, its column numbers, the parent's name, the
+parent's column names, the `ON DELETE` and `ON UPDATE` actions as one byte each and a
 `DEFERRABLE` flag). A table that another table's foreign key references, or
 that owns a sequence (`OWNED BY`), is written in version 6 too, with a flags byte after the
 primary key's name saying so, so that an older release refuses it by name instead of deleting a
@@ -1125,8 +1126,8 @@ bytes; an older release refuses a version 6 table by name. A table in a schema o
 `public` is stored under its schema's name, a zero byte and its name, and written in version 7
 (D116): the version 6 layout with the constraints part always present; `public` tables keep
 their names, versions and bytes, and an older release refuses a version 7 table by name. A view
-is stored under its name in the same key space as version 8: its dialect, a flag for `*` in its
-select list, its query text, its columns with their types, the schemas of the search path when
+is stored under its name in the same key space as version 8: its dialect (the same codes as a
+check's), a flag for `*` in its select list, its query text, its columns with their types, the schemas of the search path when
 it was created and the relations it names; an older release refuses it by name.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte

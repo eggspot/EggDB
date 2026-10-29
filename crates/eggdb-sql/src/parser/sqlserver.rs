@@ -676,6 +676,9 @@ impl<'t> Parser<'t> {
         if or_alter {
             self.expect_word("alter")?;
         }
+        if !self.is_word("view") {
+            return Err(self.unexpected());
+        }
         let shown = if existing_only {
             "ALTER VIEW"
         } else {

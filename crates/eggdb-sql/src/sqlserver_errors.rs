@@ -2,7 +2,7 @@ use crate::error::SqlError;
 
 const GENERIC_ERROR: u16 = 50000;
 
-const SEVERITIES: [(u16, u8); 65] = [
+const SEVERITIES: [(u16, u8); 67] = [
     (102, 15),
     (103, 15),
     (105, 15),
@@ -12,6 +12,8 @@ const SEVERITIES: [(u16, u8); 65] = [
     (1038, 15),
     (111, 15),
     (1033, 15),
+    (175, 15),
+    (1046, 15),
     (131, 16),
     (192, 16),
     (207, 16),

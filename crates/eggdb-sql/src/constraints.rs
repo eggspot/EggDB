@@ -800,20 +800,34 @@ pub(crate) fn define_check(
         return Err(too_many_constraints(table));
     }
     reject_aggregates(expr, "check constraints").map_err(|error| {
-        if error.state() == SqlState::GROUPING_ERROR {
+        if error.state() != SqlState::GROUPING_ERROR {
+            error
+        } else if dialect == Dialect::SqlServer {
+            SqlError::new(
+                SqlState::GROUPING_ERROR,
+                "An aggregate may not appear in a computed column expression or check constraint.",
+            )
+            .with_sqlserver_code(175)
+            .at(expr.position)
+        } else {
             SqlError::new(
                 SqlState::GROUPING_ERROR,
                 "aggregate functions are not allowed in check constraints",
             )
             .at(expr.position)
-        } else {
-            error
         }
     })?;
     if crate::subquery::mentions_subquery(expr) {
-        return Err(
-            SqlError::not_supported("cannot use subquery in check constraint").at(expr.position),
-        );
+        return Err(if dialect == Dialect::SqlServer {
+            SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "Subqueries are not allowed in this context. Only scalar expressions are allowed.",
+            )
+            .with_sqlserver_code(1046)
+        } else {
+            SqlError::not_supported("cannot use subquery in check constraint")
+        }
+        .at(expr.position));
     }
     check_columns(expr, table_scope(table))?;
     let name = match &spec.name {

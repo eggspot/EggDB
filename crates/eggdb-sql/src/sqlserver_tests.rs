@@ -639,6 +639,40 @@ fn unnamed_transact_sql_checks_get_names_that_transact_sql_can_drop() {
 }
 
 #[test]
+fn subqueries_and_aggregates_in_a_transact_sql_check_get_sql_servers_errors() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY, n INT)");
+    for (text, code) in [
+        ("CREATE TABLE s (a INT, CHECK (a IN (SELECT 1)))", 1046),
+        (
+            "ALTER TABLE t ADD CONSTRAINT c1 CHECK ((SELECT 1) = n)",
+            1046,
+        ),
+        ("CREATE TABLE g (a INT CHECK (COUNT(*) > 0))", 175),
+        ("ALTER TABLE t ADD CONSTRAINT c2 CHECK (SUM(n) > 0)", 175),
+    ] {
+        let error = error_of(&mut session, text);
+        assert_eq!(error.vendor_code(), Some(code), "{text}");
+        assert_eq!(error.severity(), Some(15), "{text}");
+    }
+}
+
+#[test]
+fn an_unnamed_view_column_keeps_each_other_dialects_own_error() {
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    let error = mysql
+        .execute("CREATE VIEW v AS SELECT 1 AS ''", &mut |_| {})
+        .expect_err("an empty column name");
+    assert_ne!(error.vendor_code(), Some(4511));
+    assert!(
+        error.message().contains("invalid view column name"),
+        "{error}"
+    );
+}
+
+#[test]
 fn create_view_must_be_alone_in_its_batch() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
@@ -675,6 +709,7 @@ fn view_options_and_replacement_follow_sql_servers_rules() {
         ("CREATE VIEW w WITH ENCRYPTION AS SELECT id FROM t", 40517),
         ("CREATE VIEW w AS SELECT id FROM t WITH CHECK OPTION", 40517),
         ("CREATE OR REPLACE VIEW w AS SELECT id FROM t", 102),
+        ("ALTER OR ALTER VIEW v AS SELECT id FROM t", 156),
         ("CREATE VIEW v AS SELECT id FROM t", 2714),
         ("ALTER VIEW t AS SELECT id FROM t", 50000),
         ("CREATE VIEW w AS SELECT id, n + 1 FROM t", 4511),
