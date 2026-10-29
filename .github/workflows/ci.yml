@@ -378,8 +378,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.nuget/packages
             target
-          key: cargo-pg-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-pg-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck/NpgsqlAppCheck.csproj') }}
       - name: Start the official postgres:17 container (test oracle only, never shipped)
         run: |
           docker run -d --name pg --network host -e POSTGRES_USER=eggdb -e POSTGRES_PASSWORD=apps-oracle \
@@ -400,7 +401,7 @@ jobs:
             sleep 1
           done
           docker exec pg pg_isready -h 127.0.0.1 -U eggdb
-      - name: Run pgjdbc, psycopg 3 and SQLAlchemy Core on PostgreSQL 17 and on EggDB and compare the bytes
+      - name: Run pgjdbc, psycopg 3, SQLAlchemy Core and Npgsql (PostgreSQL License; restored from NuGet, never shipped) on PostgreSQL 17 and on EggDB and compare the bytes
         env:
           PG_CONTAINER: pg
           PGHOST: 127.0.0.1
@@ -420,6 +421,7 @@ jobs:
             ${{ runner.temp }}/pg-apps/*.out
             ${{ runner.temp }}/pg-apps/serve.err
             ${{ runner.temp }}/pg-apps/output.diff
+            ${{ runner.temp }}/pg-apps/dotnet-build.log
           retention-days: 7
           if-no-files-found: ignore
 
