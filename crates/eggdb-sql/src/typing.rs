@@ -167,9 +167,6 @@ fn bytes_concatenation(left: &Expr, right: &Expr, scope: Scope<'_>) -> bool {
         || (bytes(right) && is_untyped_literal(left))
 }
 
-/// The type an expression's values have, when it is known before any row is read: what a
-/// client is told in a result's column description. `None` when the type depends on the
-/// values, as for a NULL or a string constant of unknown type.
 fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
     match name {
         "oracle_to_date" | "oracle_date_literal" | "oracle_add_months" | "oracle_last_day" => {
@@ -188,6 +185,9 @@ fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
     }
 }
 
+/// The type an expression's values have, when it is known before any row is read: what a
+/// client is told in a result's column description. `None` when the type depends on the
+/// values, as for a NULL or a string constant of unknown type.
 pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
     match &expr.kind {
         ExprKind::Literal(Literal::Integer(number)) => Some(if i32::try_from(*number).is_ok() {

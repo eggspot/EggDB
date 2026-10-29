@@ -636,7 +636,16 @@ impl<'t> Parser<'t> {
                 .with_oracle_code(942)
                 .at(name.position));
             }
-            return Ok(table);
+            if oracle::is_dictionary_name(&table.text) {
+                return Ok(table);
+            }
+            return Ok(Name {
+                text: crate::schemas::written_qualified(
+                    crate::schemas::DEFAULT_SCHEMA,
+                    &table.text,
+                ),
+                position: table.position,
+            });
         }
         if self.sqlserver() && self.peek_kind() == &TokenKind::Dot {
             self.at += 1;

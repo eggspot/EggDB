@@ -1082,7 +1082,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     fn alter_session(&mut self, settings: &[(String, String)]) -> SqlResult<QueryResult> {
         for (name, value) in settings {
             if name == "current_schema" {
-                let schema = value.trim_matches('\'').to_owned();
+                if value.starts_with('\'') {
+                    return Err(
+                        SqlError::new(SqlState::SYNTAX_ERROR, "missing or invalid option")
+                            .with_oracle_code(922),
+                    );
+                }
+                let schema = value.clone();
                 let exists =
                     self.read(|reader, _| crate::schemas::schema_exists(reader, &schema))?;
                 if !exists {
@@ -1092,7 +1098,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     )
                     .with_oracle_code(1435));
                 }
-                Arc::make_mut(&mut self.settings).set("search_path", Some(&schema))?;
+                let entry = if schema.chars().all(|character| {
+                    character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+                }) {
+                    schema
+                } else {
+                    format!("\"{}\"", schema.replace('"', "\"\""))
+                };
+                Arc::make_mut(&mut self.settings).set("search_path", Some(&entry))?;
                 continue;
             }
             self.oracle_nls = Arc::new(self.oracle_nls.with(name, value)?);

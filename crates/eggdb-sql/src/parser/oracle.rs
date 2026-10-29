@@ -151,6 +151,10 @@ pub(super) fn is_clause_word(word: &str) -> bool {
     matches!(word, "minus" | "connect" | "start" | "model" | "pivot")
 }
 
+pub(super) fn is_dictionary_name(name: &str) -> bool {
+    DICTIONARY_VIEWS.contains(&name)
+}
+
 pub(crate) fn is_dictionary_view(table: &TableReference) -> bool {
     table.derived.is_none() && DICTIONARY_VIEWS.contains(&table.name.text.as_str())
 }

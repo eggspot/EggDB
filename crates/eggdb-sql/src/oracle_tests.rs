@@ -159,7 +159,7 @@ fn to_char_is_refused_before_it_builds_past_the_value_limit() {
 }
 
 #[test]
-fn merge_is_destructive_only_when_it_deletes_without_restricting_on() {
+fn merge_is_destructive_when_on_does_not_restrict_the_rows_it_updates_or_deletes() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
     let classify = |session: &mut Session<'_, MemoryStore>, text: &str| {
@@ -179,6 +179,14 @@ fn merge_is_destructive_only_when_it_deletes_without_restricting_on() {
     assert!(classify(
         &mut session,
         "MERGE INTO t USING s ON (1 = 1) WHEN MATCHED THEN UPDATE SET t.v = s.v DELETE WHERE s.v > 1"
+    ));
+    assert!(classify(
+        &mut session,
+        "MERGE INTO accounts a USING dual ON (1 = 1) WHEN MATCHED THEN UPDATE SET a.balance = 0"
+    ));
+    assert!(!classify(
+        &mut session,
+        "MERGE INTO t USING s ON (1 = 1) WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)"
     ));
 }
 
@@ -225,5 +233,50 @@ fn merge_resolves_names_against_both_tables() {
     assert_eq!(
         values(&mut session, "SELECT id, v FROM t"),
         vec![vec![number(1), number(100)]]
+    );
+}
+
+#[test]
+fn the_session_users_own_tables_stay_its_own_after_current_schema() {
+    let store = MemoryStore::default();
+    let mut setup = Session::new(&store);
+    for statement in [
+        "CREATE SCHEMA hr",
+        "CREATE TABLE hr.t (a integer)",
+        "INSERT INTO hr.t VALUES (2)",
+        "CREATE TABLE t (a integer)",
+        "INSERT INTO t VALUES (1)",
+        "CREATE SCHEMA \"Mixed\"",
+        "CREATE TABLE \"Mixed\".m (a integer)",
+        "INSERT INTO \"Mixed\".m VALUES (3)",
+    ] {
+        values(&mut setup, statement);
+    }
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(&mut session, "ALTER SESSION SET CURRENT_SCHEMA = hr");
+    assert_eq!(
+        values(&mut session, "SELECT a FROM t"),
+        vec![vec![Value::Integer(2)]]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT a FROM eggdb.t"),
+        vec![vec![Value::Integer(1)]]
+    );
+    values(&mut session, "UPDATE eggdb.t SET a = 10");
+    values(&mut session, "DELETE FROM eggdb.t WHERE a = 10");
+    values(&mut session, "COMMIT");
+    assert_eq!(
+        values(&mut setup, "SELECT a FROM hr.t"),
+        vec![vec![Value::Integer(2)]]
+    );
+    assert!(values(&mut setup, "SELECT a FROM public.t").is_empty());
+    values(&mut session, "ALTER SESSION SET CURRENT_SCHEMA = \"Mixed\"");
+    assert_eq!(
+        values(&mut session, "SELECT a FROM m"),
+        vec![vec![Value::Integer(3)]]
+    );
+    assert_eq!(
+        failure(&mut session, "ALTER SESSION SET CURRENT_SCHEMA = 'hr'").vendor_code(),
+        Some(922)
     );
 }

@@ -311,7 +311,9 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
 - **Session settings** (D126): `ALTER SESSION SET` `NLS_DATE_FORMAT`, `NLS_TIMESTAMP_FORMAT`,
   `NLS_TIMESTAMP_TZ_FORMAT`, `NLS_LANGUAGE`/`NLS_DATE_LANGUAGE` (American),
   `NLS_TERRITORY` (America, which resets the formats it implies), `NLS_NUMERIC_CHARACTERS='.,'`,
-  `NLS_SORT=BINARY`, `NLS_COMP=BINARY` and `CURRENT_SCHEMA` (as `search_path`). Defaults are
+  `NLS_SORT=BINARY`, `NLS_COMP=BINARY` and `CURRENT_SCHEMA` (as `search_path`; the Oracle
+  dialect has no `CREATE SCHEMA` or `CREATE USER`, so it reaches schemas made in another dialect
+  or by a restore, and `EGGDB.T`, the session user's own table, keeps naming it). Defaults are
   `DD-MON-RR` and `DD-MON-RR HH.MI.SSXFF AM`.
 - **Implicit conversions** (D126): text compared with or assigned to a `DATE` or `TIMESTAMP`,
   and `CAST(text AS DATE)`, is read by the NLS format, then as strict ISO 8601; text meets a
@@ -1510,7 +1512,10 @@ And more, not in the suite yet:
 - Not supported yet: `CONNECT BY`, outer joins with `(+)`, PL/SQL (`BEGIN ... END`,
   procedures, packages), `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms, database
   links, `ROWID`, the regular-expression, analytic and XML functions, and views `WITH CHECK
-  OPTION` (refused).
+  OPTION` (refused). A name qualified with another owner (`HR.T`) is `ORA-00942`; unqualified
+  names reach another schema through `ALTER SESSION SET CURRENT_SCHEMA`.
+- `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where
+  Oracle raises `ORA-01426`, and a magnitude below `1e-130` does not underflow to 0.
 
 ## Known differences from SQL Server
 The SQL Server suite (`crates/eggdb-sql/correctness/sqlserver.test`, from Microsoft's

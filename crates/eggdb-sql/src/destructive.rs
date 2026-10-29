@@ -179,15 +179,14 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         Statement::Merge(merge) => merge
             .update
             .as_ref()
-            .filter(|update| {
-                update.delete_condition.is_some() && !filters_rows(Some(&merge.on), &merge.target)
-            })
-            .map(|_| {
-                DestructiveStatement::new(
-                    DestructiveKind::DeleteWithoutFilter,
-                    vec![shown(&merge.target.name)],
-                    false,
-                )
+            .filter(|_| !filters_rows(Some(&merge.on), &merge.target))
+            .map(|update| {
+                let kind = if update.delete_condition.is_some() {
+                    DestructiveKind::DeleteWithoutFilter
+                } else {
+                    DestructiveKind::UpdateWithoutFilter
+                };
+                DestructiveStatement::new(kind, vec![shown(&merge.target.name)], false)
             }),
     }
 }
