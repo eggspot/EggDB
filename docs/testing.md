@@ -386,6 +386,23 @@ tests in `crates/eggdb-sql/src/restore/tests_oracle.rs`, with a seeded fuzz of 2
 scripts (`EGGDB_FUZZ_CASES`, `EGGDB_FUZZ_SEED`) through `MemoryIncludes`, so it never touches the
 disk. `crates/eggdb/tests/data/oracle-sample.sql` is the smoke test's sample.
 
+## Unchanged Java and Python apps (D131)
+`crates/eggdb/tests/clients/java/AppCheck.java` is a pgjdbc program: CRUD through prepared
+statements (run past the driver's threshold, so it switches to named server statements),
+`INSERT ... RETURNING`, a rollback and a commit, a query over the fixture, and
+`DatabaseMetaData`'s `getSchemas`, `getTables`, `getColumns`, `getPrimaryKeys` and
+`getImportedKeys`. `crates/eggdb/tests/clients/python/app_check.py` does CRUD through psycopg 3
+and reflects both schemas with SQLAlchemy Core (`MetaData.reflect()`, the inspector and a Core
+query). `scripts/pg-apps/check.sh <eggdb> <work>` loads `scripts/pg-catalog/fixture.sql` into a
+PostgreSQL server, restores its `pg_dump` into EggDB, runs both programs against both servers and
+fails unless each prints the same bytes on both. CI's `pg-apps` job runs it against the official
+`postgres:17` container with pgjdbc 42.7.4, psycopg 3.2.3 and SQLAlchemy 2.0.36, downloaded as test
+tools and never shipped, and keeps both outputs and the difference. `information_schema`, the
+catalog functions, aggregate `ORDER BY`, lock-step set-returning functions and the ranking window
+functions have unit tests in `crates/eggdb-sql/src/information_schema/tests.rs`,
+`pg_catalog/tests.rs`, `set_returning_tests.rs` and `window.rs`, and cases in
+`correctness/postgresql.test`.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.

@@ -682,9 +682,14 @@ answered when the batch ends), and SSMS's and Azure Data Studio's catalog querie
   order; use `ORDER BY`.
 - **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`,
   `string_agg(text, delimiter)` (also over `bytea`; a NULL delimiter joins with nothing),
-  `json_agg`, `jsonb_agg`, `json_object_agg(key, value)` and `jsonb_object_agg(key, value)`, each
-  with `DISTINCT` or `ALL`. They skip NULLs, except the JSON aggregates, which keep them as JSON
-  `null` (a NULL key is `22004`); `count` of nothing is 0, the others are NULL. Result types are
+  `json_agg`, `jsonb_agg`, `json_object_agg(key, value)`, `jsonb_object_agg(key, value)`,
+  `array_agg` and, in the PostgreSQL dialect, `bool_and`, `bool_or` and `every` (D131), each
+  with `DISTINCT` or `ALL` and an `ORDER BY` inside the call (`array_agg(x ORDER BY y DESC
+  NULLS LAST)`, `string_agg(s, ',' ORDER BY s)`) that orders the values it combines. They skip
+  NULLs, except the JSON aggregates, which keep them as JSON `null` (a NULL key is `22004`), and
+  `array_agg`, which keeps them as NULL elements; `count` of nothing is 0, the others are NULL.
+  `array_agg` makes an array of its argument's type (`integer[]`, `text[]`, ...) for the
+  element types arrays take; `bool_and`, `bool_or` and `every` take `boolean` only (`42883`). Result types are
   PostgreSQL's: `count` is `bigint`; `sum` of `smallint` or `integer` is `bigint`, of `bigint`
   or `numeric` is an exact `numeric`, of `real` is `real`, of `double precision` is `double
   precision`; `avg` of an integer or `numeric` is an exact `numeric` (divided at PostgreSQL's
@@ -697,11 +702,17 @@ answered when the batch ends), and SSMS's and Azure Data Studio's catalog querie
   visits rows).
 - `DELETE FROM name [[AS] alias] [WHERE expr] [RETURNING items]`.
 - `BEGIN [WORK | TRANSACTION] [READ ONLY | READ WRITE] [ISOLATION LEVEL ...]`,
-  `START TRANSACTION`, `COMMIT`/`END`, `ROLLBACK`/`ABORT`.
+  `START TRANSACTION`, `COMMIT`/`END`, `ROLLBACK`/`ABORT`. `SET SESSION CHARACTERISTICS AS
+  TRANSACTION ...` and `SET TRANSACTION ...` take every isolation level, `[NOT] DEFERRABLE` and
+  `READ WRITE` (D131): every transaction runs serializable, so the level changes nothing, as
+  `SHOW transaction_isolation` says; `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` sets
+  `default_transaction_read_only`. `SET TRANSACTION READ ONLY` and `SET TRANSACTION SNAPSHOT`
+  are `0A000`.
 - `SET [SESSION] name {TO | =} value | DEFAULT`, `SET TIME ZONE`, `SET NAMES`, `RESET name | ALL`,
   `SHOW name | ALL`: PostgreSQL's run-time parameters (D104). `client_encoding` takes `UTF8`
   (and `SQL_ASCII`, which passes bytes through) only; settings EggDB does not apply yet, such as `statement_timeout` and `search_path`, are
-  remembered and shown; `SET LOCAL` and `SET TRANSACTION` are not supported yet.
+  remembered and shown; `SET LOCAL` is not supported yet. `max_identifier_length`,
+  `max_index_keys` and `max_function_args` are fixed, as PostgreSQL's server limits.
 - `$1`, `$2`, …: parameters, given through the PostgreSQL protocol's extended query messages
   (D104); outside it, `$1` is `42P02` (there is no parameter `$1`).
 - `version()`, `current_user`, `session_user`, `user`, `current_database()`, `current_schema`
@@ -1269,10 +1280,12 @@ same fixture, and requires the same bytes; `scripts/pg-catalog/check.sh` does th
 relation X (`pg_catalog` is searched first unless `search_path` lists it after another schema):
 `pg_class`, `pg_attribute`, `pg_type`, `pg_namespace`, `pg_index`, `pg_constraint`,
 `pg_attrdef`, `pg_description`, `pg_database`, `pg_roles`, `pg_am`, `pg_collation`,
-`pg_sequence`, `pg_depend` and `pg_tablespace`, and the empty `pg_inherits`, `pg_policy`,
-`pg_statistic_ext`, `pg_publication`, `pg_publication_rel`, `pg_publication_namespace`,
-`pg_trigger`, `pg_rewrite` and `pg_auth_members`, each with PostgreSQL 16's columns and column
-types. A statement that names them builds their rows from the stored tables, views, sequences,
+`pg_sequence`, `pg_depend`, `pg_tablespace` and `pg_settings` (the session's settings, one row
+each), and the empty `pg_inherits`, `pg_policy`, `pg_statistic_ext`, `pg_publication`,
+`pg_publication_rel`, `pg_publication_namespace`, `pg_trigger`, `pg_rewrite`,
+`pg_auth_members`, `pg_opclass` and `pg_enum`, each with PostgreSQL 16's columns and column
+types. `information_schema`'s views are catalog relations too: see
+[Java and Python apps](#java-and-python-apps-and-information_schema). A statement that names them builds their rows from the stored tables, views, sequences,
 schemas and comments once, however often it reads them (correlated subqueries included); a
 statement that names none costs nothing; a stored default, `CHECK` constraint or view that uses
 a catalog function or a `reg*` cast reads the catalog when a statement uses it. Equalities in
@@ -1317,15 +1330,18 @@ only the catalog's `pg_node_tree` columns, as PostgreSQL does. The functions:
 `format_type`, `pg_get_userbyid`, `pg_table_is_visible`, `pg_type_is_visible`, `pg_get_expr`,
 `pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef` (the view's stored text),
 `pg_relation_is_publishable`, `pg_partition_ancestors` (no rows: there are no partitions),
-`pg_encoding_to_char`, `obj_description`, `col_description`, and `pg_get_triggerdef`,
+`pg_encoding_to_char`, `obj_description`, `col_description`, `pg_get_serial_sequence` (the
+sequence a `serial` column owns, schema-qualified, or NULL), `to_regclass` and `to_regtype`
+(NULL for a name that does not exist), `generate_subscripts`, and `pg_get_triggerdef`,
 `pg_get_ruledef`, `pg_get_statisticsobjdef_columns` and `shobj_description`, which return NULL.
+`regproc` takes and shows the name of the built-in function EggDB names: `array_in`, the
+`typinput` of every array type in `pg_type`; another name is `42883`.
 
 **Not yet:** `\d+` and `\dt+ \dv+ \ds+ \di+ \dn+` (sizes, storage, a table's access
 method, `public`'s access privileges and description; `pg_table_size` and the rest are
 missing), `\df`, `\dT`, `\dp`, `\dx`, `\dd`, `\db` and `\dC` (they read `pg_proc`,
-`pg_extension`, `pg_opclass`, `pg_tablespace_location` and `pg_cast`, which are not there yet,
-and fail readably), the composite row type of each table, `information_schema` (item 38), a
-view column of a catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` is `0A000`;
+`pg_extension`, `pg_tablespace_location` and `pg_cast`, which are not there yet, and fail
+readably), the composite row type of each table, a view column of a catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` is `0A000`;
 `relname::text` works), and four things the table definition does not store yet (roadmap
 37c): an index's method other than `btree` and a descending order, whether a unique index was
 made by `CREATE UNIQUE INDEX` rather than a constraint, and `GENERATED ALWAYS` identities.
@@ -1337,6 +1353,47 @@ without PostgreSQL's extra parentheses around nested casts. A `reg*` cast Postgr
 while planning (`'t'::regclass::regtype`) fails here when the cast runs, so not on zero rows or
 a NULL; `numeric` with a negative scale and `interval year(3)` are not taken by `regtype`, and
 `timestamp(7)` gives no warning.
+
+## Java and Python apps and information_schema
+
+Java apps through pgjdbc, and Python apps through psycopg 3 and SQLAlchemy Core, run against
+`eggdb serve` unchanged (roadmap item 38, D131): their connection setup, CRUD with prepared
+statements, transactions, `DatabaseMetaData` (`getSchemas`, `getTables`, `getColumns`,
+`getImportedKeys`) and SQLAlchemy's `MetaData.reflect()` and inspector answer as on PostgreSQL.
+CI's `pg-apps` job restores the catalog fixture's `pg_dump`, runs the same pgjdbc program and the
+same psycopg 3 and SQLAlchemy program against EggDB and against PostgreSQL 17 holding the same
+fixture, and requires the same bytes; `scripts/pg-apps/check.sh` does the same locally.
+pgjdbc's `getPrimaryKeys` and `getIndexInfo` call `information_schema._pg_expandarray`, which
+returns a composite value: it comes with user-defined types (roadmap 3.08) and is `0A000` until
+then.
+
+**`information_schema`.** `information_schema.schemata`, `tables`, `columns`, `views`,
+`sequences`, `table_constraints`, `key_column_usage`, `referential_constraints`,
+`constraint_column_usage`, `check_constraints`, `routines` and `parameters` answer with
+PostgreSQL 17's columns and rows, built from the stored definitions once per statement that names
+them, like the catalog relations above. A name without a schema reaches them only when
+`information_schema` is on `search_path` (after any table of that name in an earlier schema);
+they are read-only (`42501`). What the rows say:
+
+- `tables` and `columns` list your tables and views and the catalog's own relations (the
+  `pg_catalog` relations as `BASE TABLE`, `pg_roles`, `pg_settings` and `information_schema`'s
+  relations as `VIEW`); views are not insertable or updatable (`NO`), as EggDB's views are
+  read-only.
+- `columns` gives each column's `data_type` as `format_type` names it (`character varying`,
+  `timestamp with time zone`, `ARRAY` for arrays), `character_maximum_length`,
+  `character_octet_length` (four bytes a character, 1073741824 without a limit),
+  `numeric_precision`, `numeric_precision_radix`, `numeric_scale`, `datetime_precision`,
+  `interval_type`, `udt_name` (`int4`, `varchar`, ...), the default as `pg_get_expr` shows it,
+  and `is_identity`/`identity_*` for EggDB's identity columns (`BY DEFAULT`, from 1 by 1).
+- `table_constraints`, `key_column_usage` (with `position_in_unique_constraint` for foreign
+  keys), `referential_constraints` (`match_option` `NONE`, PostgreSQL's rule names),
+  `constraint_column_usage` (a foreign key's referenced columns; a check constraint's columns
+  are the ones its text names) and `check_constraints` (the clause as `pg_get_constraintdef`
+  shows it). As in PostgreSQL 17, every `NOT NULL` column is also a `CHECK` constraint named
+  `<schema oid>_<table oid>_<column number>_not_null` whose clause is `<column> IS NOT NULL`.
+- `views` gives the stored text of each view and `check_option` `NONE`; `sequences` each
+  sequence's type, bounds, increment and cycle; `schemata` each schema with its owner.
+- `routines` and `parameters` are empty: EggDB has no stored functions yet.
 
 ## How SQL is stored
 
@@ -1442,6 +1499,14 @@ column `DEFAULT nextval('s')` finds an unqualified `s` through the search path w
 messages name objects outside `public` as `schema.name`. There are no roles, so `GRANT`,
 `REVOKE` and owners are accepted and ignored; `current_schemas` returns text, not `name[]`.
 
+`information_schema` (D131): its columns have the base types of PostgreSQL's domains (`name` for
+`sql_identifier`, `integer` for `cardinal_number`, `character varying` for `character_data`,
+`character varying(3)` for `yes_or_no`, `timestamptz(2)` for `time_stamp`), so a client that
+asks for a column's type name sees the base type; `routines` and `parameters` are empty; a check
+constraint's columns in `constraint_column_usage` are the column names its text uses (PostgreSQL
+records them as dependencies); `pg_settings` shows `vartype` `string` and no `category`, unit or
+bounds.
+
 `COPY` (D117): the binary format and `ON_ERROR ignore` are `0A000`; `ENCODING` takes only
 UTF-8; `FREEZE` is accepted and changes nothing (PostgreSQL refuses it unless the table was
 created or truncated in the same transaction); `COPY ... WHERE` is `0A000`; files and programs
@@ -1510,8 +1575,7 @@ checks the PostgreSQL manual's documented behaviour; the two cases it marks as d
   hierarchical longest/shortest rule to every part; the whole match is the same. A pattern with
   back references explores every way it can match, bounded by the step budget, so a hostile one
   ends with `54000`.
-- The JSON aggregates and `string_agg` take no `ORDER BY` inside the call (`0A000`);
-  `to_json`, `to_jsonb` and `json_build_*` take a whole row only as a `FROM` item's name;
+- `to_json`, `to_jsonb` and `json_build_*` take a whole row only as a `FROM` item's name;
   `jsonb_path_query` and the rest of SQL/JSON path, `json_populate_record`, `json_to_record`,
   `json_object(text[])` and `JSON_TABLE` are missing.
 - `interval` (D113): only the `postgres` `IntervalStyle` is printed; PostgreSQL 17's
@@ -1566,16 +1630,19 @@ checks the PostgreSQL manual's documented behaviour; the two cases it marks as d
   to 32 MiB of results by outer value. An `IN` list of constants is compared item by item (a list of
   more than 256 items is not used to choose a key range either), so a very long list against
   many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
-- `NATURAL` joins, `DISTINCT ON`,
-  `GROUPING SETS`, `ROLLUP` and `CUBE`, window functions, `FILTER`, ordered aggregates
-  (`string_agg(s, ',' ORDER BY s)`) and the other aggregates (`bool_and`, `array_agg`, ...) fail
-  with `0A000`.
+- `NATURAL` joins, `DISTINCT ON`, `GROUPING SETS`, `ROLLUP` and `CUBE`, `FILTER`, ordered-set
+  aggregates (`WITHIN GROUP`) and the other aggregates fail with `0A000`. Window functions run
+  as select-list items only, and only `row_number()`, `rank()` and `dense_rank()` with
+  `OVER ([PARTITION BY ...] [ORDER BY ...])` (D131); window frames, named windows (`OVER w`),
+  aggregates and other functions over windows, a window call inside an expression or outside the
+  select list, and a window call beside a set-returning function are `0A000`.
 - Arrays and set-returning functions (D128): arrays cannot be stored in a table or a view, have
   one dimension, and take the element types above; `x[1:2]`, `'[1:2]={1,2}'`, `ARRAY[[1, 2]]`
-  and array parameters answer `0A000`. Only `generate_series` (over integers) and `unnest` run in
-  `FROM`, one per select list, and a function in `FROM` cannot name another item of the same
-  `FROM` (PostgreSQL's implicit `LATERAL`). `COLLATE` takes only the `C`-like collations. The aggregate `string_agg`
-  takes no `ORDER BY` inside its call; its rows are joined in the order they are read.
+  and array parameters answer `0A000`. Set-returning functions run in `FROM` and as select-list
+  items; several of them in one select list run in lock-step, each input row giving as many rows
+  as the longest one, the others padded with NULL, as in PostgreSQL 10 and later (D131); one
+  inside an expression is `0A000`, and a function in `FROM` cannot name another item of the same
+  `FROM` (PostgreSQL's implicit `LATERAL`). `COLLATE` takes only the `C`-like collations.
   When the output stops being read (`eggdb sql ... | head`), the command stops before the next
   statement.
 - `UPDATE` and `DELETE` collect the rows they change before changing them, in memory.
