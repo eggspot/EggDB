@@ -170,6 +170,11 @@ expect_exit 3 "$eggdb" sql --dialect oracle shop.db -c "SELECT * FROM nowhere"
 grep -q 'ORA-00942: table or view does not exist' last.err || fail "eggdb sql --dialect oracle error said $(cat last.err)"
 pass "sql --dialect oracle: '' as NULL, upper-case names, commit at exit, ORA- errors"
 
+expect_exit 0 "$eggdb" sql --dialect oracle shop.db -c "ALTER SESSION SET NLS_TERRITORY = America; CREATE TABLE hires (id NUMBER(6) PRIMARY KEY, hired DATE); INSERT INTO hires VALUES (1, TO_DATE('17-06-2013', 'dd-MM-yyyy')); MERGE INTO hires h USING (SELECT 1 id FROM dual UNION ALL SELECT 2 FROM dual) s ON (h.id = s.id) WHEN NOT MATCHED THEN INSERT VALUES (s.id, DATE '2024-02-29')"
+expect_output '1|17-JUN-2013' sh -c "\"$eggdb\" sql --dialect oracle shop.db -c \"SELECT id, TO_CHAR(hired, 'DD-MON-YYYY') d FROM hires ORDER BY id\" | sed -n 3p | tr -d ' '"
+expect_output '2|29-FEB-2024' sh -c "\"$eggdb\" sql --dialect oracle shop.db -c \"SELECT id, TO_CHAR(hired, 'DD-MON-YYYY') d FROM hires ORDER BY id\" | sed -n 4p | tr -d ' '"
+pass "sql --dialect oracle: ALTER SESSION, TO_DATE with a format model, MERGE and TO_CHAR of a date"
+
 expect_exit 2 env -u EGGDB_PASSWORD "$eggdb" serve shop.db
 grep -q 'serve needs a password' last.err || fail "eggdb serve without a password said $(cat last.err)"
 expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 0.0.0.0:5432

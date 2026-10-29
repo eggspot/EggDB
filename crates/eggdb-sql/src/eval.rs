@@ -604,7 +604,20 @@ impl Evaluator<'_> {
             }
             ExprKind::OracleFunction { name, arguments } => {
                 let values = self.arguments(arguments)?;
-                crate::oracle_functions::call(name, &values)
+                let declared: Vec<Option<SqlType>> =
+                    if matches!(*name, "oracle_concat" | "oracle_to_char")
+                        && values
+                            .iter()
+                            .any(|value| value.sql_type().is_some_and(SqlType::is_datetime))
+                    {
+                        arguments
+                            .iter()
+                            .map(|argument| self.oracle_declared_type(argument))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                crate::oracle_functions::call(name, &values, &declared)
             }
             ExprKind::SqlServerFunction {
                 function,
@@ -679,6 +692,19 @@ impl Evaluator<'_> {
                 self.declared_type(operand)
             }
             _ => None,
+        }
+    }
+
+    fn oracle_declared_type(&self, expr: &Expr) -> Option<SqlType> {
+        match &expr.kind {
+            ExprKind::Function { name, .. } => match name.as_str() {
+                "mysql_now" => Some(SqlType::Timestamp(Some(0))),
+                "localtimestamp" => Some(SqlType::Timestamp(Some(6))),
+                "now" => Some(SqlType::TimestampTz(Some(6))),
+                _ => None,
+            },
+            ExprKind::OracleFunction { .. } => crate::typing::static_type(expr, self.scope),
+            _ => self.declared_type(expr),
         }
     }
 
@@ -896,9 +922,20 @@ impl Evaluator<'_> {
             ExprKind::Literal(Literal::String(text)) if target.is_character() => {
                 convert(Value::Text(text.clone()), target, Conversion::Explicit)
             }
-            ExprKind::Literal(Literal::String(text)) => parse_input(text, target),
+            ExprKind::Literal(Literal::String(text)) => match oracle_datetime_of(text, target) {
+                Some(value) => value,
+                None => parse_input(text, target),
+            },
             ExprKind::Literal(Literal::Decimal(text)) => decimal_literal(text, target, true),
-            _ => convert(self.eval(expr, None)?, target, Conversion::Explicit),
+            _ => {
+                let value = self.eval(expr, None)?;
+                if let Value::Text(text) = &value
+                    && let Some(converted) = oracle_datetime_of(text, target)
+                {
+                    return converted;
+                }
+                convert(value, target, Conversion::Explicit)
+            }
         }
     }
 
@@ -972,7 +1009,7 @@ impl Evaluator<'_> {
             return Err(invalid_extract_field());
         };
         let declared_date = matches!(
-            self.declared_type(source),
+            self.oracle_declared_type(source),
             Some(SqlType::Timestamp(Some(0)))
         ) || matches!(&source.kind, ExprKind::Function { name, .. } if name == "mysql_now");
         let value = self.eval(source, None)?;
@@ -1241,8 +1278,8 @@ pub(crate) fn literal_value(literal: &Literal, hint: Option<SqlType>) -> SqlResu
     }
 }
 
-fn read_by_sqlserver(sql_type: SqlType) -> bool {
-    matches!(
+fn read_by_dialect(sql_type: SqlType) -> Option<crate::Dialect> {
+    if !matches!(
         sql_type,
         SqlType::Date
             | SqlType::Time(_)
@@ -1250,18 +1287,47 @@ fn read_by_sqlserver(sql_type: SqlType) -> bool {
             | SqlType::TimestampTz(_)
             | SqlType::Boolean
             | SqlType::Uuid
-    ) && crate::constraints::current_dialect() == crate::Dialect::SqlServer
+    ) {
+        return None;
+    }
+    match crate::constraints::current_dialect() {
+        crate::Dialect::SqlServer => Some(crate::Dialect::SqlServer),
+        crate::Dialect::Oracle if sql_type.is_datetime() => Some(crate::Dialect::Oracle),
+        _ => None,
+    }
+}
+
+fn oracle_datetime_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
+    if !target.is_datetime() || crate::constraints::current_dialect() != crate::Dialect::Oracle {
+        return None;
+    }
+    crate::oracle_conversion::datetime_of(text, target)
 }
 
 pub(crate) fn string_constant(text: &str, hint: Option<SqlType>) -> SqlResult<Value> {
     if let Some(sql_type) = hint
-        && read_by_sqlserver(sql_type)
-        && let Some(value) = crate::sqlserver_conversion::literal_of(text, sql_type)
+        && let Some(dialect) = read_by_dialect(sql_type)
     {
-        return value;
+        let read = match dialect {
+            crate::Dialect::Oracle => crate::oracle_conversion::literal_of(text, sql_type),
+            _ => crate::sqlserver_conversion::literal_of(text, sql_type),
+        };
+        if let Some(value) = read {
+            return value;
+        }
     }
     match hint {
-        Some(sql_type) if !sql_type.is_string() => parse_input(text, sql_type.without_modifier()),
+        Some(sql_type) if !sql_type.is_string() => {
+            let parsed = parse_input(text, sql_type.without_modifier());
+            if parsed.is_err()
+                && sql_type.is_numeric()
+                && crate::constraints::current_dialect() == crate::Dialect::Oracle
+                && let Some(number) = crate::oracle_conversion::literal_of(text, sql_type)
+            {
+                return number;
+            }
+            parsed
+        }
         _ => Ok(Value::Text(text.to_owned())),
     }
 }
@@ -1527,15 +1593,22 @@ fn compare_checked(left: &Value, right: &Value, symbol: &str) -> SqlResult<Order
 
 pub(crate) fn compare_truth(left: &Value, right: &Value, symbol: &str) -> SqlResult<Option<bool>> {
     engine_compare_truth(left, right, symbol).or_else(|error| {
-        if error.state() != SqlState::UNDEFINED_FUNCTION
-            || crate::constraints::current_dialect() != crate::Dialect::SqlServer
-        {
+        if error.state() != SqlState::UNDEFINED_FUNCTION {
+            return Err(error);
+        }
+        let dialect = crate::constraints::current_dialect();
+        if dialect != crate::Dialect::SqlServer && dialect != crate::Dialect::Oracle {
             return Err(error);
         }
         if left.is_null() || right.is_null() {
             return Ok(None);
         }
-        match crate::sqlserver_conversion::by_precedence(left, right) {
+        let converted = if dialect == crate::Dialect::Oracle {
+            crate::oracle_conversion::converted_for_comparison(left, right)
+        } else {
+            crate::sqlserver_conversion::by_precedence(left, right)
+        };
+        match converted {
             Some(converted) => {
                 let (left, right) = converted?;
                 engine_compare_truth(&left, &right, symbol)
@@ -1582,14 +1655,33 @@ fn division_by_zero() -> SqlError {
     SqlError::new(SqlState::DIVISION_BY_ZERO, "division by zero")
 }
 
+pub(crate) fn binary_arithmetic(
+    operator: BinaryOperator,
+    left: &Value,
+    right: &Value,
+) -> SqlResult<Value> {
+    arithmetic(operator, left, right)
+}
+
 fn arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResult<Value> {
+    if operator == BinaryOperator::Subtract
+        && matches!(left, Value::Timestamp(_) | Value::TimestampTz(_))
+        && matches!(right, Value::Timestamp(_) | Value::TimestampTz(_))
+        && crate::constraints::current_dialect() == crate::Dialect::Oracle
+        && let Some(days) = crate::oracle_conversion::arithmetic(operator, left, right)
+    {
+        return days;
+    }
     engine_arithmetic(operator, left, right).or_else(|error| {
-        if error.state() == SqlState::UNDEFINED_FUNCTION
-            && crate::constraints::current_dialect() == crate::Dialect::SqlServer
-        {
-            sqlserver_arithmetic(operator, left, right)
-        } else {
-            Err(error)
+        if error.state() != SqlState::UNDEFINED_FUNCTION {
+            return Err(error);
+        }
+        match crate::constraints::current_dialect() {
+            crate::Dialect::SqlServer => sqlserver_arithmetic(operator, left, right),
+            crate::Dialect::Oracle => {
+                crate::oracle_conversion::arithmetic(operator, left, right).unwrap_or(Err(error))
+            }
+            _ => Err(error),
         }
     })
 }

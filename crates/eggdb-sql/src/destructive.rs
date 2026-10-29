@@ -174,7 +174,21 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::Comment(_)
         | Statement::Copy(_)
         | Statement::Ignored { .. }
+        | Statement::AlterSession(_)
         | Statement::SqlServer(_) => None,
+        Statement::Merge(merge) => merge
+            .update
+            .as_ref()
+            .filter(|update| {
+                update.delete_condition.is_some() && !filters_rows(Some(&merge.on), &merge.target)
+            })
+            .map(|_| {
+                DestructiveStatement::new(
+                    DestructiveKind::DeleteWithoutFilter,
+                    vec![shown(&merge.target.name)],
+                    false,
+                )
+            }),
     }
 }
 

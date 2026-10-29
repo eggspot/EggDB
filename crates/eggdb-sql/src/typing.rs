@@ -170,6 +170,24 @@ fn bytes_concatenation(left: &Expr, right: &Expr, scope: Scope<'_>) -> bool {
 /// The type an expression's values have, when it is known before any row is read: what a
 /// client is told in a result's column description. `None` when the type depends on the
 /// values, as for a NULL or a string constant of unknown type.
+fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
+    match name {
+        "oracle_to_date" | "oracle_date_literal" | "oracle_add_months" | "oracle_last_day" => {
+            Some(SqlType::Timestamp(Some(0)))
+        }
+        "oracle_to_timestamp" => Some(SqlType::Timestamp(Some(6))),
+        "oracle_timestamp_literal" => match arguments.first().map(|argument| &argument.kind) {
+            Some(ExprKind::Literal(Literal::String(text)))
+                if crate::oracle_datetime::literal_has_offset(text) =>
+            {
+                Some(SqlType::TimestampTz(Some(6)))
+            }
+            _ => Some(SqlType::Timestamp(Some(6))),
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
     match &expr.kind {
         ExprKind::Literal(Literal::Integer(number)) => Some(if i32::try_from(*number).is_ok() {
@@ -243,7 +261,8 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
                 .then_some(first_type)
         }
         ExprKind::Function { name, arguments } => function_type(name, arguments, scope),
-        ExprKind::SqliteFunction { .. } | ExprKind::OracleFunction { .. } => None,
+        ExprKind::OracleFunction { name, arguments } => oracle_function_type(name, arguments),
+        ExprKind::SqliteFunction { .. } => None,
         ExprKind::SqlServerFunction {
             function,
             arguments,

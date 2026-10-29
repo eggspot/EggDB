@@ -189,6 +189,15 @@ pub(super) fn division(left: Expr, right: Expr) -> Expr {
     oracle_function("oracle_divide", vec![left, right], position)
 }
 
+pub(super) fn ansi_literal(date: bool, text: Expr, position: usize) -> Expr {
+    let name = if date {
+        "oracle_date_literal"
+    } else {
+        "oracle_timestamp_literal"
+    };
+    oracle_function(name, vec![text], position)
+}
+
 pub(super) fn not_below_zero(count: Expr) -> Expr {
     let position = count.position;
     oracle_function("oracle_row_count", vec![count], position)
@@ -412,7 +421,8 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.drop_sequence()?
             }
-            "merge" => return Err(self.not_supported("MERGE")),
+            "merge" => self.merge(&super::merge::MergeRules::oracle())?,
+            "alter" if self.is_word_at(1, "session") => self.alter_session()?,
             "begin" | "declare" => {
                 return Err(self.not_supported(
                     "PL/SQL blocks (Oracle starts a transaction with the first change)",
@@ -428,6 +438,40 @@ impl<'t> Parser<'t> {
             _ => return Ok(None),
         };
         Ok(Some(statement))
+    }
+
+    fn alter_session(&mut self) -> SqlResult<Statement> {
+        self.at += 2;
+        if !self.take_word("set") {
+            return Err(self.not_supported("ALTER SESSION other than SET"));
+        }
+        let mut settings = Vec::new();
+        loop {
+            let name = match self.peek_kind() {
+                TokenKind::Word(word) => word.to_ascii_lowercase(),
+                TokenKind::QuotedIdentifier(name) => name.to_ascii_lowercase(),
+                _ => break,
+            };
+            self.at += 1;
+            let _ = self.take_operator("=");
+            let value = match self.peek_kind() {
+                TokenKind::Word(word) => word.to_ascii_lowercase(),
+                TokenKind::QuotedIdentifier(name) => name.clone(),
+                TokenKind::String(text) => format!("'{text}'"),
+                TokenKind::Integer(digits) | TokenKind::Decimal(digits) => (*digits).to_owned(),
+                _ => return Err(self.unexpected()),
+            };
+            self.at += 1;
+            settings.push((name, value));
+        }
+        if settings.is_empty() {
+            return Err(
+                SqlError::new(SqlState::SYNTAX_ERROR, "invalid option for ALTER SESSION")
+                    .with_oracle_code(2248)
+                    .at(self.position()),
+            );
+        }
+        Ok(Statement::AlterSession(settings))
     }
 
     fn oracle_drop_table(&mut self) -> SqlResult<Statement> {
@@ -861,11 +905,18 @@ impl<'t> Parser<'t> {
             "sign" => ("oracle_sign", 1, 1),
             "greatest" => ("oracle_greatest", 1, usize::MAX),
             "least" => ("oracle_least", 1, usize::MAX),
-            "to_char" => ("oracle_to_char", 1, 2),
-            "to_number" => ("oracle_to_number", 1, 2),
-            "to_date" | "to_timestamp" | "add_months" | "months_between" | "last_day"
-            | "next_day" => {
-                return Err(self.not_supported("date and time values"));
+            "to_char" => ("oracle_to_char", 1, 3),
+            "to_number" => ("oracle_to_number", 1, 3),
+            "to_date" => ("oracle_to_date", 1, 3),
+            "to_timestamp" => ("oracle_to_timestamp", 1, 3),
+            "add_months" => ("oracle_add_months", 2, 2),
+            "last_day" => ("oracle_last_day", 1, 1),
+            "months_between" | "next_day" | "to_timestamp_tz" | "numtodsinterval"
+            | "numtoyminterval" => {
+                return Err(self.not_supported(&format!(
+                    "{}() in the Oracle dialect",
+                    name.text.to_ascii_uppercase()
+                )));
             }
             "listagg" => return Err(self.not_supported("LISTAGG")),
             _ => return Err(invalid_identifier(&name.text, position)),

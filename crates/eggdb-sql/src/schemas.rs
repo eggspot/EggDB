@@ -175,7 +175,8 @@ pub(crate) fn enter(settings: &Arc<Settings>, dialect: Dialect, cache: &PathCach
         _ => None,
     };
     let state = PathState {
-        settings: (dialect == Dialect::PostgreSql).then(|| Arc::clone(settings)),
+        settings: matches!(dialect, Dialect::PostgreSql | Dialect::Oracle)
+            .then(|| Arc::clone(settings)),
         resolved: None,
         relations: None,
         known,
