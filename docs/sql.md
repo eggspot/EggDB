@@ -613,8 +613,7 @@ What the server does:
   still logging in; the next gets error 17809. `--log-batches` logs the first 200 characters of
   each batch, to see what a client sends.
 
-Not yet: TLS, bulk load (`bcp`, item 46), MARS, cancelling a running batch (attention is
-answered when the batch ends), and SSMS's and Azure Data Studio's own catalog queries (the `sys`
+Not yet: TLS, MARS, cancelling a running batch (attention is answered when the batch ends), and SSMS's and Azure Data Studio's own catalog queries (the `sys`
 views and catalog procedures drivers use are in [SQL Server metadata for
 tools](#sql-server-metadata-for-tools)).
 
@@ -676,6 +675,72 @@ CI's `tds-apps` job runs a C# program through SqlClient and a Java program throu
 (parameterized CRUD, prepared statements, a committed and a rolled-back transaction, an error
 and, for SqlClient, a reused pooled connection) and compares what each prints with
 `scripts/tds-apps/expected-*.out`.
+
+## Bulk loads with bcp and SqlBulkCopy
+
+`SqlBulkCopy` and `bcp in` load rows into an EggDB table over TDS as they load them into SQL
+Server (roadmap item 46, D136), and `eggdb import --dialect sqlserver` loads the files `bcp
+... out -c` writes without a server:
+
+```csharp
+using var copier = new SqlBulkCopy(connection) { DestinationTableName = "dbo.items", BatchSize = 5000 };
+copier.WriteToServer(table);
+```
+
+```sh
+bcp shop.dbo.items in items.dat -c -S 127.0.0.1,1433 -U eggdb -P choose-one -d shop
+eggdb import --dialect sqlserver shop.db --csv items.dat --table dbo.items
+```
+
+What the server does:
+- **`SqlBulkCopy`'s description of the table**: it first sends `select @@trancount; SET FMTONLY
+  ON select * from <table> SET FMTONLY OFF exec ..sp_tablecollations_100 N'<table>'`. With
+  `SET FMTONLY ON` a query returns its columns and no rows, each described by its declared type
+  (unbounded text as `nvarchar(max)`, `bytea` as `varbinary(max)`, an unconstrained `numeric` as
+  text), and other statements but `SET` do not run. `sp_tablecollations_100` lists each column
+  with its collation (Latin1_General_100_BIN2 for the character ones, NULL for the others).
+- **`INSERT BULK table [(column type [COLLATE name], ...)] [WITH (option, ...)]`** checks the
+  table and its columns and waits for the bulk load message that must come next; any other
+  request first ends the wait. The column types are read and ignored: the values' types come
+  with the data. Without a column list the data holds every column. `KEEP_NULLS` keeps NULLs;
+  without it a NULL takes its column's default. `TABLOCK`, `CHECK_CONSTRAINTS`,
+  `FIRE_TRIGGERS`, `KEEPIDENTITY`, `ORDER (...)`, `ROWS_PER_BATCH` and `KILOBYTES_PER_BATCH` are
+  accepted; constraints are always checked, and there are no triggers yet.
+- **The bulk load message** (packet type 0x07) holds column metadata, a row token per row (or
+  a row with a null bitmap) and DONE. It is read as it arrives, a row at a time, so a load of
+  any size takes no more memory than its largest row (at most 64 MiB). The values have the
+  types of RPC parameters (above) plus `text`, `ntext` and `image`, and convert to their columns
+  as SQL Server's `INSERT` converts them. The rows load in one statement through the `INSERT`
+  path (defaults, identity, constraints, indexes, foreign keys): all of them, or none and an
+  error (a duplicate key is 2627, a missing value 515). Each `SqlBulkCopy` batch (`BatchSize`)
+  is its own `INSERT BULK` and message, so its own transaction unless
+  `SqlBulkCopyOptions.UseInternalTransaction` or an open transaction holds them. The answer is
+  a DONE with the row count. An identity column the statement names keeps the values sent
+  (`SqlBulkCopyOptions.KeepIdentity`); one it leaves out is numbered.
+- **Bad data**: bulk data that is not valid TDS is error 4804, a column type EggDB does not read
+  (`sql_variant`, `xml`, user-defined types) 4816, data with another number of columns than
+  `INSERT BULK` named, or a row over 64 MiB, 4815, Always Encrypted columns 40517, and bulk data
+  without an `INSERT BULK` before it 4002. The rest of the message is read and dropped, and the
+  connection goes on.
+
+`eggdb import --dialect sqlserver <file> --csv <data file> --table <name>` reads bcp's character
+format (`-c`): every field but the last of a row ends with the field terminator (`--delimiter`,
+bcp's `-t`, a tab by default) and the last with the row terminator (`--row-terminator`, bcp's
+`-r`, a newline by default, `\r\n` accepted with it), with bcp's escapes `\t`, `\n`, `\r`, `\0`
+and `\\`. An empty field is NULL (the column's default unless `--keep-nulls`, bcp's `-k`), a
+field that is one NUL byte is an empty string, and `--header` skips the first row (bcp's
+`-F 2`). The text must be UTF-8 (`bcp ... -c -C 65001`); invalid bytes are error 4864, a row
+cut short 4832. The rows go through `INSERT BULK` and the same load as above, in one
+transaction; values convert as SQL Server converts text (`1`/`0` for `bit`, `2024-05-06
+07:08:09.123` for `datetime2`). `bcp`'s native (`-n`) and Unicode (`-w`) formats and format
+files are not read yet.
+
+CI's `tds-apps` job loads the committed bcp file `crates/eggdb/tests/data/sqlserver/bcp/items.dat`
+with `eggdb import --dialect sqlserver` and with `SqlBulkCopy` (in batches of two, with
+`KeepNulls`, `UseInternalTransaction`, `TableLock`, and a load that fails on a duplicate key) and
+compares both tables' rows with the file and what the program prints with
+`scripts/tds-apps/expected-bulk-dotnet.out`. `bcp` itself is not run in CI: its license does not
+allow it there.
 
 ## SQL Server metadata for tools
 
@@ -2113,6 +2178,10 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   `NEWSEQUENTIALID()` gives random values, not increasing ones.
 - TDS sends `money` as `decimal(19,4)`, `datetime` as `datetime2(3)` and `tinyint` as
   `smallint`.
+- `SET FMTONLY ON` does not mark identity columns in the columns it describes, so
+  `SqlBulkCopy` sends values for an identity column that its column mappings name even without
+  `KeepIdentity`, and EggDB keeps them. A bulk load checks `CHECK` and foreign key constraints
+  even without `CHECK_CONSTRAINTS` (SQL Server skips them and marks them untrusted).
 - `DATEDIFF(nanosecond, ...)` counts microseconds times 1,000; `CONVERT` to `varbinary` of a
   string takes its UTF-8 bytes.
 - Not yet (item 39b and later): `SUBSTRING`, `LEFT`, `RIGHT`, `REPLACE`, `STUFF`,

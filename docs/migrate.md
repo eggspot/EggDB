@@ -170,7 +170,8 @@ one file, as Unicode (SSMS's default, UTF-16 with a byte-order mark) or UTF-8.
 
 `sqlpackage /Action:Script` writes a schema-only script with sqlcmd's `:setvar` lines; take the
 data from Generate Scripts with *Data only* and restore it after the schema. `bcp` files load
-through `eggdb import --csv` with `bcp -c -t,` (item 46 brings `bcp` itself).
+with `eggdb import --dialect sqlserver --csv` (bcp's character format, `bcp ... out -c`), and
+`bcp in` and `SqlBulkCopy` load over TDS (see "Bulk loads with bcp and SqlBulkCopy" in sql.md).
 
 EggDB never reads `.bak` or `.trn` backups, BACPAC or DACPAC packages, or `.mdf`, `.ndf` and
 `.ldf` files: they have no public specification (D13). `eggdb restore` recognises them by their
