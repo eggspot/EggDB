@@ -255,6 +255,11 @@ mod tests {
         let nls = NlsParameters::default();
         assert_eq!(code(nls.with("no_such_parameter", "1")), Some(2248));
         assert_eq!(code(nls.with("time_zone", "'-8:00'")), Some(3001));
+        assert_eq!(
+            code(nls.with("events", "'10046 trace name context forever'")),
+            Some(3001)
+        );
+        assert_eq!(code(nls.with("edition", "ora$base")), Some(3001));
         assert_eq!(code(nls.with("nls_sort", "XGERMAN")), Some(3001));
         assert!(nls.with("nls_sort", "BINARY").is_ok());
         assert!(nls.with("nls_comp", "binary").is_ok());
