@@ -439,13 +439,15 @@ impl Parser<'_> {
     }
 
     fn openjson_column_key(&self) -> String {
-        match self.peek_kind() {
-            TokenKind::QuotedIdentifier(text) => text.clone(),
-            _ => {
-                let token = self.peek();
-                self.text.get(token.start..token.end).unwrap_or("").to_owned()
-            }
+        let token = self.peek();
+        let written = self.text.get(token.start..token.end).unwrap_or("");
+        if let Some(inner) = written.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            return inner.replace("]]", "]");
         }
+        if let Some(inner) = written.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+            return inner.replace("\"\"", "\"");
+        }
+        written.to_owned()
     }
 
     pub(super) fn sqlserver_openjson(&mut self) -> SqlResult<TableReference> {
