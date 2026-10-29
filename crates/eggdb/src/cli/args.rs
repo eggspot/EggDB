@@ -889,7 +889,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::From => request.scan.from = Some(byte_argument()?),
             OptionName::To => request.scan.to = Some(byte_argument()?),
             OptionName::Reverse => request.scan.reverse = true,
-            OptionName::Limit | OptionName::After if command.is_noun() => {}
+            OptionName::After => {}
+            OptionName::Limit if command.is_noun() => {}
             OptionName::Limit => {
                 request.scan.limit = Some(parse_limit(&option.spelled, value).map_err(usage)?);
             }
