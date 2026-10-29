@@ -223,7 +223,7 @@ fn relation_record(relation: &Relation) -> JsonObject {
         .string("name", &relation.name)
         .string("kind", relation.kind_name())
         .number("columns", relation.column_count() as u64)
-        .optional_string("comment", relation.comment())
+        .string_if_any("comment", relation.comment())
 }
 
 fn qualified(relation: &Relation) -> String {
@@ -408,12 +408,12 @@ fn description_json(relation: &Relation, rows: &RowCount) -> String {
                         .string("name", &column.name)
                         .string("type", &column.sql_type.name())
                         .boolean("not_null", column.not_null)
-                        .optional_string("default", column.default.as_deref());
+                        .string_if_any("default", column.default.as_deref());
                     if column.auto_increment {
                         described = described.boolean("auto_increment", true);
                     }
                     described
-                        .optional_string("comment", column.comment.as_deref())
+                        .string_if_any("comment", column.comment.as_deref())
                         .object()
                 })
                 .collect();
@@ -455,7 +455,7 @@ fn description_json(relation: &Relation, rows: &RowCount) -> String {
         .boolean("exact", rows.exact)
         .object();
     object
-        .optional_string("comment", relation.comment())
+        .string_if_any("comment", relation.comment())
         .raw("rows", &counted)
         .line()
 }
