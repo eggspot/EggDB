@@ -111,11 +111,11 @@ pub(crate) enum Reader<'t> {
 
 impl Reader<'_> {
     pub(crate) fn get(self, tree: &BTree, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        match self {
+        let found = match self {
             Self::Snapshot(transaction) => transaction.get(tree, key),
             Self::Writer(transaction) => transaction.get(tree, key),
-        }
-        .map_err(Error::storage)
+        };
+        found.map_err(Error::storage)
     }
 
     pub(crate) fn get_with<R>(
@@ -124,11 +124,11 @@ impl Reader<'_> {
         key: &[u8],
         read: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>> {
-        match self {
+        let found = match self {
             Self::Snapshot(transaction) => transaction.get_with(tree, key, read),
             Self::Writer(transaction) => transaction.get_with(tree, key, read),
-        }
-        .map_err(Error::storage)
+        };
+        found.map_err(Error::storage)
     }
 
     fn lend(

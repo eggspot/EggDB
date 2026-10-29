@@ -1,4 +1,5 @@
 mod check;
+mod collections;
 mod edit;
 mod modal;
 mod query;
@@ -12,6 +13,7 @@ use crate::text_view::{self, Segment};
 use crate::theme::{Role, Symbol, Theme};
 use crate::width::text_width;
 use check::CheckRun;
+use collections::Picker;
 use edit::Edit;
 use modal::Modal;
 use query::Query;
@@ -33,6 +35,7 @@ const WAIT_FOR_A_WORKER: Duration = Duration::from_millis(1);
 enum Pane {
     Keys,
     Value,
+    Sidebar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +136,9 @@ pub struct Ui<S> {
     query: Option<Query>,
     query_open: bool,
     quit: bool,
+    collection: Option<String>,
+    collection_names: Vec<String>,
+    picker: Option<Picker>,
 }
 
 impl<S: Source> Ui<S> {
@@ -164,7 +170,11 @@ impl<S: Source> Ui<S> {
             query: None,
             query_open: false,
             quit: false,
+            collection: None,
+            collection_names: Vec::new(),
+            picker: None,
         };
+        ui.refresh_collections();
         ui.home();
         if ui.toast.is_none()
             && let Ok(summary) = &ui.summary
@@ -319,7 +329,8 @@ impl<S: Source> Ui<S> {
 
     fn list_cols(&self) -> u16 {
         if self.two_panes() {
-            let two_fifths = u32::from(self.size.cols) * 2 / 5;
+            let beside_sidebar = self.size.cols - self.sidebar_offset();
+            let two_fifths = u32::from(beside_sidebar) * 2 / 5;
             u16::try_from(two_fifths.clamp(28, 60)).unwrap_or(60)
         } else {
             self.size.cols
@@ -500,6 +511,7 @@ impl<S: Source> Ui<S> {
     }
 
     fn reload(&mut self) {
+        self.refresh_collections();
         self.reread_window();
         self.restart_count();
     }
@@ -636,6 +648,9 @@ impl<S: Source> Ui<S> {
             Event::Resize(size) => {
                 let hex_per_row = self.hex_per_row();
                 self.size = size;
+                if self.focus == Pane::Sidebar && self.sidebar_cols() == 0 {
+                    self.focus = Pane::Keys;
+                }
                 if !self.check_running() {
                     self.refit();
                     self.selection_changed();
@@ -643,7 +658,11 @@ impl<S: Source> Ui<S> {
                 }
             }
             Event::Paste(text) => {
-                if self.modal.is_some() || self.help.is_some() || self.check.is_some() {
+                if self.modal.is_some()
+                    || self.help.is_some()
+                    || self.check.is_some()
+                    || self.picker.is_some()
+                {
                     return;
                 }
                 if self.query_open {
@@ -704,6 +723,10 @@ impl<S: Source> Ui<S> {
             self.modal_key(key);
             return;
         }
+        if self.picker.is_some() {
+            self.picker_key(key);
+            return;
+        }
         if self.check.is_some() {
             self.check_key(key.code);
             return;
@@ -723,15 +746,15 @@ impl<S: Source> Ui<S> {
         if ctrl || key.modifiers.alt {
             return;
         }
+        if self.focus == Pane::Sidebar && self.sidebar_key(key.code) {
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.help = Some(0),
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.focus = match self.focus {
-                    Pane::Keys => Pane::Value,
-                    Pane::Value => Pane::Keys,
-                };
-            }
+            KeyCode::Tab => self.focus = self.next_pane(true),
+            KeyCode::BackTab => self.focus = self.next_pane(false),
+            KeyCode::Char('C') => self.open_picker(false),
             KeyCode::Char('e' | 'a' | 'd') if self.read_only() => self.info(READ_ONLY_TOAST),
             KeyCode::Char('e') => self.start_edit(),
             KeyCode::Char('a') => self.start_add(),
@@ -744,6 +767,7 @@ impl<S: Source> Ui<S> {
             _ => match self.focus {
                 Pane::Keys => self.list_key(key.code),
                 Pane::Value => self.viewer_key(key.code),
+                Pane::Sidebar => {}
             },
         }
     }
@@ -914,7 +938,7 @@ impl<S: Source> Ui<S> {
 
     fn viewer_cols(&self) -> u16 {
         if self.two_panes() {
-            self.size.cols - self.list_cols() - 1
+            self.size.cols - self.sidebar_offset() - self.list_cols() - 1
         } else {
             self.size.cols
         }
@@ -967,12 +991,27 @@ impl<S: Source> Ui<S> {
         }
         let list_cols = self.list_cols();
         if self.two_panes() {
-            self.draw_list(frame, 0, list_cols);
             let line = self.theme.symbol(Symbol::VerticalLine);
-            for row in 1..self.size.rows - 2 {
-                frame.put(list_cols, row, line, self.theme.style(Role::Plain), 1, '|');
+            let sidebar = self.sidebar_cols();
+            let offset = self.sidebar_offset();
+            if sidebar > 0 {
+                self.draw_sidebar(frame, sidebar);
+                for row in 1..self.size.rows - 2 {
+                    frame.put(sidebar, row, line, self.theme.style(Role::Plain), 1, '|');
+                }
             }
-            self.draw_value_pane(frame, list_cols + 1, self.viewer_cols());
+            self.draw_list(frame, offset, list_cols);
+            for row in 1..self.size.rows - 2 {
+                frame.put(
+                    offset + list_cols,
+                    row,
+                    line,
+                    self.theme.style(Role::Plain),
+                    1,
+                    '|',
+                );
+            }
+            self.draw_value_pane(frame, offset + list_cols + 1, self.viewer_cols());
         } else if self.focus == Pane::Keys {
             self.draw_list(frame, 0, self.size.cols);
         } else {
@@ -980,6 +1019,9 @@ impl<S: Source> Ui<S> {
         }
         self.draw_status(frame);
         self.draw_hints(frame);
+        if let Some(picker) = &self.picker {
+            self.draw_picker(frame, picker);
+        }
         if let Some(modal) = &self.modal {
             self.draw_modal(frame, modal);
         }
@@ -1147,7 +1189,9 @@ impl<S: Source> Ui<S> {
         let role = self.title_role(Pane::Keys);
         frame.fill(col, 1, width, self.theme.style(role));
         if !self.draw_key_entry(frame, col, width) {
-            let mut title = format!(" {}", self.pane_name(Pane::Keys, "Keys"));
+            let position = format!("{} ", self.position());
+            let position_width = u16::try_from(text_width(&position)).unwrap_or(width);
+            let mut title = self.keys_title(width, position_width);
             let mut cursor = None;
             if let Some(edit) = &self.filter_edit {
                 title.push_str(" /");
@@ -1158,8 +1202,6 @@ impl<S: Source> Ui<S> {
                 title.push_str(" /");
                 title.push_str(&text::escaped(&self.filter));
             }
-            let position = format!("{} ", self.position());
-            let position_width = u16::try_from(text_width(&position)).unwrap_or(width);
             self.put(
                 frame,
                 col,
@@ -1174,10 +1216,7 @@ impl<S: Source> Ui<S> {
         let size_cells = 6u16;
         if self.rows.is_empty() {
             let message = if self.filter.is_empty() {
-                format!(
-                    "empty database {} press a to add a key",
-                    self.theme.symbol(Symbol::EmDash)
-                )
+                self.empty_space_message()
             } else {
                 format!("no keys start with \"{}\"", text::escaped(&self.filter))
             };
@@ -1613,8 +1652,11 @@ impl<S: Source> Ui<S> {
                 Hint::new("\\xNN", "a byte"),
             ];
         }
+        if self.focus == Pane::Sidebar {
+            return self.sidebar_hints();
+        }
         if self.focus == Pane::Keys {
-            vec![
+            let mut hints = vec![
                 Hint::new(up_down, "move"),
                 Hint::new("/", "filter"),
                 Hint::new("e", "edit").available(writable && !self.rows.is_empty()),
@@ -1624,7 +1666,11 @@ impl<S: Source> Ui<S> {
                 Hint::new("c", "check"),
                 Hint::new("?", "help"),
                 Hint::new("q", "quit"),
-            ]
+            ];
+            if self.has_collections() {
+                hints.insert(6, Hint::new("C", "collection"));
+            }
+            hints
         } else {
             vec![
                 Hint::new(up_down, "scroll"),
@@ -1762,6 +1808,15 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
         format!("Move        {up_down} or j/k   PgUp/PgDn   Home/End or g/G   {left_right} scroll"),
         "Panes       Tab or Shift-Tab switch   Enter open the value   Esc back to keys".to_owned(),
         "Find        /  filter keys by prefix (bytes; \\xNN for a byte)   Esc restores".to_owned(),
+    ];
+    if ui.has_collections() {
+        lines.extend([
+            "Collections C  pick the collection shown (default key space first); a adds one"
+                .to_owned(),
+            "            Tab reaches the sidebar from 110 columns; the CLI deletes one".to_owned(),
+        ]);
+    }
+    lines.extend([
         "View        v  text > json > hex > auto      w  wrap long lines (text)".to_owned(),
         "Change      e  edit value   a  add key   d  delete key (asks d again)".to_owned(),
         "Check       c  verify every page and show stats     r  re-read".to_owned(),
@@ -1777,7 +1832,7 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
         "            \\n a line break in a one-line editor; a paste is taken as it is".to_owned(),
         "Every change is one transaction, written to disk before the screen redraws.".to_owned(),
         "Nothing is changed until you confirm. There is no undo after a commit.".to_owned(),
-    ];
+    ]);
     if ui.read_only() {
         lines.push(
             "Opened read-only: e, a and d are off; start without --read-only to edit.".to_owned(),

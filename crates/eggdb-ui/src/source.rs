@@ -45,6 +45,35 @@ pub trait Source {
     /// [`ErrorKind::NeedsReopen`].
     fn reopen(&mut self) -> Result<(), SourceError>;
 
+    /// The names of the database's collections, in byte order. A source without collections
+    /// has none.
+    fn collections(&self) -> Result<Vec<String>, SourceError> {
+        Ok(Vec::new())
+    }
+
+    /// Makes [`Source::keys`], [`Source::value`], [`Source::count`] and [`Source::write`] act on
+    /// the collection `name` from now on, or on the default key space for `None`. It fails with
+    /// [`ErrorKind::CollectionNotFound`] when there is no such collection.
+    fn show_collection(&mut self, name: Option<&str>) -> Result<(), SourceError> {
+        match name {
+            None => Ok(()),
+            Some(name) => Err(SourceError::new(
+                ErrorKind::CollectionNotFound,
+                format!("there is no collection named \"{name}\""),
+            )),
+        }
+    }
+
+    /// Creates an empty collection named `name` in one commit, and returns the commit's time,
+    /// UTC, as `HH:MM:SSZ`.
+    fn add_collection(&mut self, name: &str) -> Result<String, SourceError> {
+        let _ = name;
+        Err(SourceError::new(
+            ErrorKind::Other,
+            "this database has no collections",
+        ))
+    }
+
     /// Runs `text` as a SQL script, statement by statement, as `eggdb sql` does, and rolls
     /// back a transaction block the script leaves open. A source without SQL answers with an
     /// error.

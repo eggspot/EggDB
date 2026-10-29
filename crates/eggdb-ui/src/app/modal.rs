@@ -102,6 +102,13 @@ impl Modal {
         self
     }
 
+    fn in_collection(self, collection: Option<&str>) -> Self {
+        match collection {
+            Some(name) => self.line(format!("In     collection {name}")),
+            None => self,
+        }
+    }
+
     fn key(mut self, key: &'static str, label: &'static str) -> Self {
         self.keys.push((key, label));
         self
@@ -239,6 +246,7 @@ impl<S: Source> Ui<S> {
         self.modal = Some(
             Modal::new(ModalKind::ConfirmPut(pending), title)
                 .key_line(&key)
+                .in_collection(self.collection.as_deref())
                 .line(value_line)
                 .line("")
                 .line("One commit, written to disk before you continue.")
@@ -265,6 +273,7 @@ impl<S: Source> Ui<S> {
         self.modal = Some(
             Modal::new(ModalKind::ConfirmDelete(pending), "Delete key")
                 .key_line(&key)
+                .in_collection(self.collection.as_deref())
                 .line(value_line)
                 .line("")
                 .line("Deletes this one key in one commit, written to disk before you continue. There is no undo.")

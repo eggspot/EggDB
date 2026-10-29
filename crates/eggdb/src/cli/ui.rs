@@ -24,6 +24,7 @@ pub(crate) struct DatabaseSource {
     path: PathBuf,
     options: Options,
     check: Option<CheckThread>,
+    collection: Option<String>,
 }
 
 impl DatabaseSource {
@@ -34,6 +35,7 @@ impl DatabaseSource {
             name,
             options,
             check: None,
+            collection: None,
         }
     }
 
@@ -173,17 +175,27 @@ fn collect(scan: &mut Scan<'_>, descending: bool, limit: usize) -> eggdb::Result
     Ok(rows)
 }
 
-fn apply(db: &Database, change: &Change, busy: WriterBusy) -> eggdb::Result<Option<CommitStamp>> {
+fn apply(
+    db: &Database,
+    collection: Option<&str>,
+    change: &Change,
+    busy: WriterBusy,
+) -> eggdb::Result<Option<CommitStamp>> {
     let mut transaction = match busy {
         WriterBusy::Fail => db.try_begin_write()?,
         WriterBusy::Wait => db.begin_write()?,
     };
-    let changed = match change {
-        Change::Put { key, value } => {
+    let changed = match (collection, change) {
+        (None, Change::Put { key, value }) => {
             transaction.put(key, value)?;
             true
         }
-        Change::Delete { key } => transaction.delete(key)?,
+        (None, Change::Delete { key }) => transaction.delete(key)?,
+        (Some(name), Change::Put { key, value }) => {
+            transaction.collection(name)?.put(key, value)?;
+            true
+        }
+        (Some(name), Change::Delete { key }) => transaction.collection(name)?.delete(key)?,
     };
     if changed {
         transaction.commit().map(Some)
@@ -226,13 +238,22 @@ impl Source for DatabaseSource {
             return Ok(Vec::new());
         };
         let descending = matches!(start, Start::Last | Start::Before(_));
+        let collection = self.collection.as_deref();
         self.db()?
-            .read(|tx| collect(&mut tx.scan(bounds), descending, limit))
+            .read(|tx| match collection {
+                Some(name) => collect(&mut tx.collection(name)?.scan(bounds), descending, limit),
+                None => collect(&mut tx.scan(bounds), descending, limit),
+            })
             .map_err(|error| source_error(&error))
     }
 
     fn value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, SourceError> {
-        self.db()?.get(key).map_err(|error| source_error(&error))
+        let db = self.db()?;
+        let found = match &self.collection {
+            Some(name) => db.collection(name).get(key),
+            None => db.get(key),
+        };
+        found.map_err(|error| source_error(&error))
     }
 
     fn count(
@@ -248,9 +269,17 @@ impl Source for DatabaseSource {
                 resume_after: None,
             });
         };
+        let collection = self.collection.as_deref();
         self.db()?
             .read(|tx| {
-                let mut scan = tx.scan(bounds);
+                let in_collection = match collection {
+                    Some(name) => Some(tx.collection(name)?),
+                    None => None,
+                };
+                let mut scan = match &in_collection {
+                    Some(in_collection) => in_collection.scan(bounds),
+                    None => tx.scan(bounds),
+                };
                 let mut counted = 0;
                 let started = Instant::now();
                 while let Some((key, _)) = scan.next_key_and_value_len()? {
@@ -271,7 +300,7 @@ impl Source for DatabaseSource {
     }
 
     fn write(&mut self, change: &Change, busy: WriterBusy) -> Result<String, SourceError> {
-        match apply(self.db()?, change, busy) {
+        match apply(self.db()?, self.collection.as_deref(), change, busy) {
             Ok(Some(stamp)) => Ok(clock_time(stamp).unwrap_or_default()),
             Ok(None) => Err(SourceError::new(
                 ErrorKind::Other,
@@ -282,6 +311,44 @@ impl Source for DatabaseSource {
                 ),
             )),
             Err(error) => Err(source_error(&error)),
+        }
+    }
+
+    fn collections(&self) -> Result<Vec<String>, SourceError> {
+        self.db()?
+            .collection_names()
+            .map_err(|error| source_error(&error))
+    }
+
+    fn show_collection(&mut self, name: Option<&str>) -> Result<(), SourceError> {
+        if let Some(name) = name {
+            self.db()?
+                .begin_read()
+                .and_then(|tx| tx.collection(name).map(drop))
+                .map_err(|error| source_error(&error))?;
+        }
+        self.collection = name.map(str::to_owned);
+        Ok(())
+    }
+
+    fn add_collection(&mut self, name: &str) -> Result<String, SourceError> {
+        let db = self.db()?;
+        let created = db
+            .try_begin_write()
+            .and_then(|mut tx| {
+                if tx.create_collection(name)? {
+                    tx.commit().map(Some)
+                } else {
+                    tx.rollback().map(|()| None)
+                }
+            })
+            .map_err(|error| source_error(&error))?;
+        match created {
+            Some(stamp) => Ok(clock_time(stamp).unwrap_or_default()),
+            None => Err(SourceError::new(
+                ErrorKind::Other,
+                format!("Collection {name} already exists"),
+            )),
         }
     }
 
@@ -580,6 +647,51 @@ mod tests {
         assert!(shown.contains("> user:30"), "{shown}");
         assert!(shown.contains("13–32 of 32"), "{shown}");
         assert!(screen.typed("/user:2").contains("1–10 of 10"));
+    }
+
+    #[test]
+    fn the_ui_shows_edits_and_adds_collections_of_a_real_database() {
+        let (file, db) = database("collections");
+        db.create_collection("sessions")
+            .unwrap_or_else(|error| panic!("create: {error}"));
+        db.collection("sessions")
+            .put("s:1", "alice")
+            .unwrap_or_else(|error| panic!("put: {error}"));
+        db.close().unwrap_or_else(|error| panic!("close: {error}"));
+        let mut screen = Screen::new(source_at(&file.0, Options::new()));
+        let shown = screen.keys(&["C", "End", "Enter"]);
+        assert!(shown.contains(" Keys in sessions"), "{shown}");
+        assert!(shown.contains("> s:1"), "{shown}");
+        assert!(shown.contains("1–1 of 1"), "{shown}");
+        screen.keys(&["a"]);
+        screen.typed("s:2");
+        screen.keys(&["Enter"]);
+        screen.typed("bob");
+        let confirm = screen.keys(&["Enter"]);
+        assert!(confirm.contains("In     collection sessions"), "{confirm}");
+        screen.keys(&["Enter", "C", "a"]);
+        screen.typed("cache");
+        let added = screen.keys(&["Enter"]);
+        assert!(added.contains("Added collection cache at "), "{added}");
+        assert!(added.contains(" Keys in cache"), "{added}");
+        screen.close();
+
+        let db = Database::open(&file.0).unwrap_or_else(|error| panic!("open: {error}"));
+        assert_eq!(
+            db.collection_names()
+                .unwrap_or_else(|error| panic!("names: {error}")),
+            ["cache", "sessions"]
+        );
+        assert_eq!(
+            db.collection("sessions")
+                .get("s:2")
+                .unwrap_or_else(|error| panic!("get: {error}")),
+            Some(b"bob".to_vec())
+        );
+        assert_eq!(
+            db.get("s:2").unwrap_or_else(|error| panic!("get: {error}")),
+            None
+        );
     }
 
     #[test]

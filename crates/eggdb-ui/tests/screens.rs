@@ -25,6 +25,8 @@ struct Hooks {
 
 struct MapSource {
     entries: BTreeMap<Vec<u8>, Vec<u8>>,
+    collections: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
+    shown: Option<String>,
     read_only: bool,
     largest_value: usize,
     hooks: Rc<Hooks>,
@@ -43,8 +45,22 @@ fn after_prefix(prefix: &[u8]) -> Bound<Vec<u8>> {
 }
 
 impl MapSource {
+    fn space(&self) -> &BTreeMap<Vec<u8>, Vec<u8>> {
+        self.shown
+            .as_ref()
+            .and_then(|name| self.collections.get(name))
+            .unwrap_or(&self.entries)
+    }
+
+    fn space_mut(&mut self) -> &mut BTreeMap<Vec<u8>, Vec<u8>> {
+        match &self.shown {
+            Some(name) => self.collections.entry(name.clone()).or_default(),
+            None => &mut self.entries,
+        }
+    }
+
     fn matching(&self, prefix: &[u8]) -> impl DoubleEndedIterator<Item = (&Vec<u8>, &Vec<u8>)> {
-        self.entries
+        self.space()
             .range((Bound::Included(prefix.to_vec()), after_prefix(prefix)))
     }
 }
@@ -115,7 +131,7 @@ impl Source for MapSource {
     }
 
     fn value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, SourceError> {
-        Ok(self.entries.get(key).cloned())
+        Ok(self.space().get(key).cloned())
     }
 
     fn count(
@@ -184,14 +200,42 @@ impl Source for MapSource {
                 ),
             )),
             Change::Put { key, value } => {
-                self.entries.insert(key.clone(), value.clone());
+                self.space_mut().insert(key.clone(), value.clone());
                 Ok("09:14:04Z".to_owned())
             }
-            Change::Delete { key } => match self.entries.remove(key) {
+            Change::Delete { key } => match self.space_mut().remove(key) {
                 Some(_) => Ok("09:14:05Z".to_owned()),
                 None => Err(SourceError::new(ErrorKind::Other, "no such key")),
             },
         }
+    }
+
+    fn collections(&self) -> Result<Vec<String>, SourceError> {
+        Ok(self.collections.keys().cloned().collect())
+    }
+
+    fn show_collection(&mut self, name: Option<&str>) -> Result<(), SourceError> {
+        if let Some(name) = name
+            && !self.collections.contains_key(name)
+        {
+            return Err(SourceError::new(
+                ErrorKind::CollectionNotFound,
+                format!("there is no collection named \"{name}\""),
+            ));
+        }
+        self.shown = name.map(str::to_owned);
+        Ok(())
+    }
+
+    fn add_collection(&mut self, name: &str) -> Result<String, SourceError> {
+        if self.read_only {
+            return Err(SourceError::new(
+                ErrorKind::ReadOnly,
+                "the database was opened read-only",
+            ));
+        }
+        self.collections.insert(name.to_owned(), BTreeMap::new());
+        Ok("09:14:05Z".to_owned())
     }
 
     fn start_check(&mut self) -> Result<(), SourceError> {
@@ -254,6 +298,8 @@ fn fixture() -> MapSource {
     entries.insert(b"large".to_vec(), large.into_bytes());
     MapSource {
         entries,
+        collections: BTreeMap::new(),
+        shown: None,
         read_only: false,
         largest_value: 1 << 30,
         hooks: Rc::new(Hooks::default()),
@@ -1659,4 +1705,149 @@ fn a_key_pressed_after_the_quiet_window_answers_the_question() {
         Input::Bytes(b"d".to_vec()),
     ]);
     assert_eq!(ui.source().hooks.writes.get(), 1);
+}
+
+fn with_collections() -> MapSource {
+    let mut source = fixture();
+    for name in ["cache", "sessions", "users"] {
+        source.collections.insert(name.to_owned(), BTreeMap::new());
+    }
+    let users = source.collections.entry("users".to_owned()).or_default();
+    for n in 1..=3 {
+        users.insert(format!("s:{n}").into_bytes(), format!("{{\"user\":{n}}}").into_bytes());
+    }
+    source
+}
+
+#[test]
+fn scenario_33_the_picker_opens_without_collections_and_changes_nothing() {
+    let mut s = Scenario::new(80, 24);
+    s.press(&["Esc"]);
+    let before = s.screen();
+    assert!(!before.contains("C collection"), "{before}");
+    s.press(&["C"]);
+    let screen = s.screen();
+    assert!(screen.contains("┌ Collections "), "{screen}");
+    assert!(screen.contains("> default key space"), "{screen}");
+    assert!(
+        screen.contains("app.db has no collections yet. Press a to"),
+        "{screen}"
+    );
+    assert!(screen.contains("Enter show   a add   Esc back"), "{screen}");
+    s.press(&["Enter"]);
+    assert_eq!(s.screen(), before);
+}
+
+#[test]
+fn scenario_34_choosing_a_collection_shows_its_keys() {
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, with_collections());
+    assert!(s.row(23).contains("C collection"), "{}", s.row(23));
+    assert!(!s.row(23).contains("c check"), "{}", s.row(23));
+    s.press(&["/"]);
+    s.type_str("user:");
+    s.press(&["Enter", "C"]);
+    let picker = s.screen();
+    assert!(picker.contains("> default key space"), "{picker}");
+    assert!(picker.contains("  cache"), "{picker}");
+    assert!(picker.contains("Delete one after quitting, with"), "{picker}");
+    s.press(&["End", "Enter"]);
+    assert!(s.row(1).starts_with(" Keys in users"), "{}", s.row(1));
+    assert!(!s.row(1).contains("/user:"), "{}", s.row(1));
+    assert!(s.row(2).starts_with("> s:1"), "{}", s.row(2));
+    assert_eq!(s.row(22), " Showing collection users");
+    assert!(s.row(1).contains("1–3 of 3"), "{}", s.row(1));
+    s.press(&["C", "Home", "Enter"]);
+    assert!(s.row(1).starts_with(" Keys "), "{}", s.row(1));
+    assert!(!s.row(1).contains(" in "), "{}", s.row(1));
+    assert_eq!(s.row(22), " Showing the default key space");
+}
+
+#[test]
+fn scenario_35_the_picker_adds_a_collection_and_checks_the_name() {
+    let mut s = Scenario::new(80, 24);
+    s.press(&["C", "a"]);
+    assert!(s.screen().contains("Add collection: "), "{}", s.screen());
+    s.type_str("two words");
+    s.press(&["Enter"]);
+    assert_eq!(
+        s.row(22),
+        " Collection names are 1 to 128 bytes with no spaces or control characters"
+    );
+    for _ in 0.."two words".len() {
+        s.press(&["Backspace"]);
+    }
+    s.type_str("cache");
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " Added collection cache at 09:14:05Z");
+    assert!(s.row(1).starts_with(" Keys in cache"), "{}", s.row(1));
+    assert!(
+        s.screen()
+            .contains("collection cache is empty — press a to add a key"),
+        "{}",
+        s.screen()
+    );
+    assert!(s.ui.source().collections.contains_key("cache"));
+    s.press(&["C", "a"]);
+    s.type_str("cache");
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " Collection cache already exists");
+
+    let mut read_only = with_collections();
+    read_only.read_only = true;
+    let mut r = Scenario::with(80, 24, Capabilities::FULL, read_only);
+    r.press(&["C", "a"]);
+    assert!(!r.screen().contains("Add collection: "), "{}", r.screen());
+}
+
+#[test]
+fn scenario_36_the_sidebar_appears_from_110_columns_with_collections() {
+    let plain = Scenario::new(120, 40);
+    assert!(!plain.screen().contains("Collections"), "{}", plain.screen());
+    let mut s = Scenario::with(120, 40, Capabilities::FULL, with_collections());
+    assert!(s.row(1).starts_with(" Collections"), "{}", s.row(1));
+    assert!(s.row(2).contains(" > default key space"), "{}", s.row(2));
+    s.press(&["Tab", "Tab"]);
+    assert!(s.row(39).contains("switch"), "{}", s.row(39));
+    s.press(&["Down"]);
+    assert_eq!(s.row(38), " Showing collection cache");
+    assert!(s.row(3).contains(" > cache"), "{}", s.row(3));
+    s.press(&["Enter"]);
+    s.press(&["Tab"]);
+    assert!(!s.row(39).contains("switch"), "{}", s.row(39));
+}
+
+#[test]
+fn scenario_38_changes_in_a_collection_stay_in_it() {
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, with_collections());
+    s.press(&["C", "End", "Enter", "a"]);
+    s.type_str("s:9");
+    s.press(&["Enter"]);
+    s.type_str("nine");
+    s.press(&["Enter"]);
+    assert!(s.screen().contains("In     collection users"), "{}", s.screen());
+    s.press(&["Enter"]);
+    let users = &s.ui.source().collections["users"];
+    assert_eq!(users.get(b"s:9".as_slice()), Some(&b"nine".to_vec()));
+    assert_eq!(s.entries(), &fixture().entries);
+    s.press(&["Home", "d"]);
+    assert!(s.screen().contains("In     collection users"), "{}", s.screen());
+    s.press(&["d"]);
+    assert!(!s.ui.source().collections["users"].contains_key(b"s:1".as_slice()));
+    assert_eq!(s.entries(), &fixture().entries);
+}
+
+#[test]
+fn scenario_39_the_picker_fits_a_60_column_terminal() {
+    let mut s = Scenario::with(60, 20, Capabilities::FULL, with_collections());
+    s.press(&["C", "End", "Enter"]);
+    assert!(s.row(1).starts_with(" Keys in users"), "{}", s.row(1));
+    s.press(&["C"]);
+    for line in s.screen().lines() {
+        assert!(line.chars().count() <= 60, "{line}");
+    }
+    let help = {
+        s.press(&["Esc", "?"]);
+        s.screen()
+    };
+    assert!(help.contains("Collections C  pick the collection shown"), "{help}");
 }
