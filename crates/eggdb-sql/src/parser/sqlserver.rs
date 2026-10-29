@@ -301,8 +301,7 @@ const ON_ONLY_OPTIONS: [&str; 7] = [
     "ansi_null_dflt_on",
 ];
 
-const NOT_SUPPORTED_OPTIONS: [&str; 5] =
-    ["xact_abort", "rowcount", "fmtonly", "parseonly", "noexec"];
+const NOT_SUPPORTED_OPTIONS: [&str; 4] = ["xact_abort", "rowcount", "parseonly", "noexec"];
 
 const SWITCHED_INDEX_OPTIONS: [&str; 8] = [
     "pad_index",
@@ -595,6 +594,7 @@ impl<'t> Parser<'t> {
             "update" | "delete" if self.is_word_at(1, "top") => {
                 return Err(not_supported("TOP in UPDATE and DELETE").at(position));
             }
+            "insert" if self.is_word_at(1, "bulk") => self.sqlserver_insert_bulk()?,
             "insert" if self.is_word_at(1, "top") => {
                 return Err(not_supported("TOP in INSERT").at(position));
             }
@@ -788,6 +788,10 @@ impl<'t> Parser<'t> {
                 Ok(Statement::SqlServer(
                     SqlServerStatement::ImplicitTransactions(on),
                 ))
+            }
+            "fmtonly" => {
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(SqlServerStatement::FormatOnly(on)))
             }
             "numeric_roundabort" => {
                 if self.on_or_off()? {

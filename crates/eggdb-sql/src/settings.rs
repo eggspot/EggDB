@@ -328,6 +328,7 @@ pub(crate) struct SqlServerState {
     pub(crate) transaction_count: u32,
     pub(crate) no_count: bool,
     pub(crate) implicit_transactions: bool,
+    pub(crate) format_only: bool,
 }
 
 #[derive(Debug, Clone)]

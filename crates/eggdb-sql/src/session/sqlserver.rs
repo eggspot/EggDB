@@ -1,6 +1,7 @@
 use super::{Client, OutputColumn, QueryResult, Session};
 use crate::ast::{Expr, Name, ProcedureCall, SqlServerStatement};
-use crate::copy::NoCopyChannel;
+use crate::bulk_load::{BulkRows, InsertBulk};
+use crate::copy::{CopyIo, NoCopyChannel};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope};
@@ -37,6 +38,10 @@ pub struct BatchStep {
     /// Whether `SET NOCOUNT ON` is in effect after the statement, so a server leaves the
     /// count of rows out of its completion.
     pub no_count: bool,
+    /// Whether `SET FMTONLY ON` is in effect after the statement: a query's result then holds
+    /// its columns and no rows, and a server describes each column by its declared type
+    /// rather than by the values it holds.
+    pub format_only: bool,
 }
 
 /// A value for a named parameter (`@name`) of a parameterized Transact-SQL batch, as SQL
@@ -156,7 +161,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         text: &str,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
-        self.run_batch(text, Parameters::Absent, on_step)
+        self.run_batch(text, Parameters::Absent, None, on_step)
     }
 
     /// Runs `text` as a parameterized Transact-SQL batch, as SQL Server's `sp_executesql`
@@ -170,7 +175,38 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         parameters: &[NamedParameter],
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
-        self.run_batch(text, Parameters::Named(parameters), on_step)
+        self.run_batch(text, Parameters::Named(parameters), None, on_step)
+    }
+
+    /// Whether an `INSERT BULK` statement has run and waits for its rows
+    /// ([`Session::execute_bulk_load`]), as SQL Server waits for the bulk load data a client
+    /// sends after one. The next batch, connection reset or load ends the wait.
+    pub fn bulk_load_pending(&self) -> bool {
+        self.pending_bulk_load.is_some()
+    }
+
+    /// Loads `rows` into the table of the `INSERT BULK` statement this session ran last, as
+    /// SQL Server loads the bulk data `bcp in` and `SqlBulkCopy` send after one: all of them
+    /// in one statement, which an error ends with nothing loaded, each row through the
+    /// `INSERT` path (defaults, identity, constraints, indexes, foreign keys). A NULL takes
+    /// its column's default unless the statement said `KEEP_NULLS`; columns the statement
+    /// did not name take their defaults; an identity column the statement named keeps the
+    /// values given, as `SqlBulkCopyOptions.KeepIdentity` asks, and one it did not name is
+    /// numbered. `on_step` receives what the load did, as [`Session::execute_batch`] reports
+    /// a statement: `INSERT 0 n`, or the error. With no `INSERT BULK` waiting, it fails.
+    pub fn execute_bulk_load(
+        &mut self,
+        rows: &mut dyn BulkRows,
+        on_step: &mut dyn FnMut(BatchStep) -> bool,
+    ) -> SqlResult<()> {
+        let Some(text) = self.pending_bulk_load.take() else {
+            return Err(SqlError::new(
+                SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "no INSERT BULK statement is waiting for its rows",
+            )
+            .with_hint("Run INSERT BULK first; the rows must follow it before any other batch."));
+        };
+        self.run_batch(&text, Parameters::Absent, Some(rows), on_step)
     }
 
     /// Parses `text` as [`Session::execute_parameterized_batch`] would, running nothing: the
@@ -213,6 +249,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         settings.reset_all();
         settings.sqlserver.no_count = false;
         settings.sqlserver.implicit_transactions = false;
+        settings.sqlserver.format_only = false;
+        self.pending_bulk_load = None;
         self.dialect = self.connection_dialect;
         self.sync_transaction_count();
         self.identity_insert_table = None;
@@ -226,16 +264,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &mut self,
         text: &str,
         parameters: Parameters<'_>,
+        bulk_rows: Option<&mut dyn BulkRows>,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
         self.statement_start = 0;
+        self.pending_bulk_load = None;
         let tokens =
             tokenize_in(text, self.dialect).map_err(|error| self.in_dialect(text, error))?;
         self.check_batch_syntax(text, &tokens, parameters)
             .map_err(|error| self.in_dialect(text, error))?;
         self.batch_resume = Some((0, 0));
         self.table_variables = crate::table_variables::TableVariables::default();
-        let outcome = self.run_batch_statements(text, &tokens, parameters, on_step);
+        let outcome = self.run_batch_statements(text, &tokens, parameters, bulk_rows, on_step);
         self.table_variables = crate::table_variables::TableVariables::default();
         self.batch_resume = None;
         outcome
@@ -273,6 +313,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         text: &'t str,
         tokens: &[Token<'t>],
         parameters: Parameters<'_>,
+        mut bulk_rows: Option<&mut dyn BulkRows>,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
         let mut rest_in_new_dialect: Option<Vec<Token<'t>>> = None;
@@ -290,6 +331,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let mut client = Client {
                 channel: &mut NoCopyChannel,
                 script: false,
+                bulk_rows: super::reborrowed_rows(&mut bulk_rows),
             };
             let flow = self.run_tokens(
                 text,
@@ -314,6 +356,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                             statement_start,
                             in_transaction,
                             no_count: self.settings.sqlserver.no_count,
+                            format_only: self.settings.sqlserver.format_only,
                         };
                         if !on_step(step) {
                             return Ok(());
@@ -333,6 +376,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                                     statement_start: at,
                                     in_transaction: self.in_block(),
                                     no_count: self.settings.sqlserver.no_count,
+                                    format_only: self.settings.sqlserver.format_only,
                                 };
                                 on_step(step);
                                 return Ok(());
@@ -352,6 +396,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         statement_start,
                         in_transaction,
                         no_count: self.settings.sqlserver.no_count,
+                        format_only: self.settings.sqlserver.format_only,
                     };
                     if !on_step(step) || ends_batch {
                         return Ok(());
@@ -485,6 +530,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     .implicit_transactions = *on;
                 Ok(QueryResult::command("SET"))
             }
+            SqlServerStatement::FormatOnly(on) => {
+                Arc::make_mut(&mut self.settings).sqlserver.format_only = *on;
+                Ok(QueryResult::command("SET"))
+            }
+            SqlServerStatement::InsertBulk(_) => Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "an INSERT BULK statement reached the statement runner",
+            )),
             SqlServerStatement::IdentityInsert { table, on } => {
                 self.set_identity_insert(table, *on)
             }
@@ -508,6 +561,28 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 columns,
                 call,
             } => self.insert_procedure_results(variable, columns.as_deref(), call),
+        }
+    }
+
+    pub(super) fn run_insert_bulk(
+        &mut self,
+        bulk: &mut InsertBulk,
+        io: &mut CopyIo<'_, '_>,
+    ) -> SqlResult<QueryResult> {
+        let settings = Arc::clone(&self.settings);
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: false,
+        };
+        match &mut io.bulk_rows {
+            None => self.read(|reader, tables| {
+                binding.names(reader, tables, std::slice::from_mut(&mut bulk.table))?;
+                crate::bulk_load::check_target(reader, tables, bulk)
+            }),
+            Some(rows) => self.write("INSERT BULK", |writer, tables| {
+                binding.names(writer, tables, std::slice::from_mut(&mut bulk.table))?;
+                crate::bulk_load::load(writer, tables, bulk, &mut **rows)
+            }),
         }
     }
 

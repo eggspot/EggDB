@@ -133,6 +133,8 @@ pub(crate) enum SqlServerStatement {
         columns: Option<Vec<Name>>,
         call: ProcedureCall,
     },
+    FormatOnly(bool),
+    InsertBulk(crate::bulk_load::InsertBulk),
 }
 
 #[derive(Debug, Clone, PartialEq)]

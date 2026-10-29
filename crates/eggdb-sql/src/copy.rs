@@ -133,6 +133,7 @@ pub(crate) struct CopyIo<'c, 'd> {
     pub(crate) channel: &'c mut dyn CopyChannel,
     pub(crate) inline: Option<&'d [u8]>,
     pub(crate) consumed: Option<usize>,
+    pub(crate) bulk_rows: Option<&'c mut dyn crate::bulk_load::BulkRows>,
 }
 
 fn shown_name(table: &TableDefinition) -> &str {

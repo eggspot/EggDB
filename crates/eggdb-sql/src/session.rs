@@ -14,6 +14,7 @@ use crate::ast::{
     CopyDirection, CopySource, CopyStatement, DiscardTarget, MySqlStatement, SqlServerStatement,
     Statement,
 };
+use crate::bulk_load::BulkRows;
 use crate::copy::{CopyChannel, CopyIo, NoCopyChannel};
 use crate::destructive::DestructiveStatement;
 use crate::dialect::Dialect;
@@ -234,6 +235,17 @@ impl QueryResult {
 struct Client<'c> {
     channel: &'c mut dyn CopyChannel,
     script: bool,
+    bulk_rows: Option<&'c mut dyn BulkRows>,
+}
+
+fn reborrowed_rows<'r>(rows: &'r mut Option<&mut dyn BulkRows>) -> Option<&'r mut dyn BulkRows> {
+    match rows {
+        Some(rows) => {
+            let rows: &'r mut dyn BulkRows = &mut **rows;
+            Some(rows)
+        }
+        None => None,
+    }
 }
 
 enum Flow {
@@ -318,6 +330,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     implicit_transaction: bool,
     block_is_implicit: bool,
     connection_settings: Option<Arc<Settings>>,
+    pending_bulk_load: Option<String>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -363,6 +376,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             implicit_transaction: false,
             block_is_implicit: false,
             connection_settings: None,
+            pending_bulk_load: None,
         }
     }
 
@@ -888,6 +902,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut client = Client {
             channel: copy,
             script: false,
+            bulk_rows: None,
         };
         self.run_text(text, Parameters::Values(parameters), on_result, &mut client)
             .map_err(|error| self.in_dialect(text, error))
@@ -970,6 +985,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut client = Client {
             channel: copy,
             script: false,
+            bulk_rows: None,
         };
         self.run_text(text, Parameters::Absent, on_result, &mut client)
             .map_err(|error| self.in_dialect(text, error))
@@ -989,6 +1005,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut client = Client {
             channel: copy,
             script: true,
+            bulk_rows: None,
         };
         self.run_text(text, Parameters::Absent, on_result, &mut client)
             .map_err(|error| self.in_dialect(text, error))
@@ -1063,6 +1080,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut client = Client {
             channel: &mut NoCopyChannel,
             script: false,
+            bulk_rows: None,
         };
         match self.run_tokens(
             text,
@@ -1265,10 +1283,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     MySqlStatement::ShowWarnings { .. } | MySqlStatement::ShowCount { .. }
                 )
             );
+            let loads_bulk_rows = client.bulk_rows.is_some();
             let mut io = CopyIo {
                 channel: &mut *client.channel,
                 inline,
                 consumed: None,
+                bulk_rows: reborrowed_rows(&mut client.bulk_rows),
             };
             let wants_catalog = match self.dialect {
                 Dialect::PostgreSql => {
@@ -1285,6 +1305,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let result = self.run(&mut statement, &mut io);
             if let (Some(start), Some(consumed)) = (data_start, io.consumed) {
                 inline_end = Some(start + consumed);
+            }
+            if !loads_bulk_rows
+                && result.is_ok()
+                && matches!(
+                    statement,
+                    Statement::SqlServer(SqlServerStatement::InsertBulk(_))
+                )
+            {
+                let end = tokens.get(resume.0).map_or(text.len(), |token| token.start);
+                self.pending_bulk_load = text.get(self.statement_start..end).map(str::to_owned);
             }
             _path.remember(&mut self.search_path_cache);
             self.leave_sequences();
@@ -1615,6 +1645,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         None => Ok(QueryResult::command("IF")),
                     };
                 }
+                Statement::SqlServer(SqlServerStatement::InsertBulk(bulk)) => {
+                    return self.run_insert_bulk(bulk, io);
+                }
                 Statement::SqlServer(statement) => return self.run_sqlserver(statement),
                 _ => {}
             }
@@ -1640,7 +1673,27 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         };
         let binding = &binding;
         let dialect = self.dialect;
+        let format_only = self.sqlserver() && self.settings.sqlserver.format_only;
+        if format_only
+            && !matches!(
+                statement,
+                Statement::Select(_)
+                    | Statement::Query(_)
+                    | Statement::Set { .. }
+                    | Statement::Ignored { .. }
+            )
+        {
+            return Ok(QueryResult::command("FMTONLY"));
+        }
         let result = match statement {
+            Statement::Select(select) if format_only => self.read(|reader, tables| {
+                binding.select(reader, tables, select)?;
+                execute::select(reader, tables, select, true)
+            }),
+            Statement::Query(query) if format_only => self.read(|reader, tables| {
+                binding.query(reader, tables, query)?;
+                execute::query(reader, tables, query, true)
+            }),
             Statement::MySql(statement) => self.run_mysql(statement),
             Statement::Pragma(pragma) => self.run_pragma(pragma),
             Statement::Select(select)

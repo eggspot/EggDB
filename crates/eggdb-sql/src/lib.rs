@@ -22,6 +22,7 @@ mod aggregate;
 mod alter;
 mod arrays;
 mod ast;
+mod bulk_load;
 mod bytea;
 mod cancel;
 mod comments;
@@ -93,6 +94,8 @@ mod window;
 #[cfg(test)]
 mod arrays_tests;
 #[cfg(test)]
+mod bulk_load_tests;
+#[cfg(test)]
 mod constraint_tests;
 #[cfg(test)]
 mod copy_tests;
@@ -124,6 +127,7 @@ mod subquery_tests;
 mod tests;
 
 pub use arrays::{ArrayElement, ArrayValue};
+pub use bulk_load::{BcpCharacterReader, BcpTerminators, BulkRows};
 pub use cancel::CancelSignal;
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{

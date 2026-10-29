@@ -47,10 +47,11 @@ pub(crate) enum CatalogProcedure {
     ColumnsManaged,
     IndexesManaged,
     IndexColumnsManaged,
+    TableCollations100,
 }
 
 impl CatalogProcedure {
-    const ALL: [Self; 20] = [
+    const ALL: [Self; 21] = [
         Self::Tables,
         Self::Columns,
         Self::Columns100,
@@ -71,6 +72,7 @@ impl CatalogProcedure {
         Self::ColumnsManaged,
         Self::IndexesManaged,
         Self::IndexColumnsManaged,
+        Self::TableCollations100,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -95,6 +97,7 @@ impl CatalogProcedure {
             Self::ColumnsManaged => "sp_columns_managed",
             Self::IndexesManaged => "sp_indexes_managed",
             Self::IndexColumnsManaged => "sp_indexcolumns_managed",
+            Self::TableCollations100 => "sp_tablecollations_100",
         }
     }
 
@@ -172,6 +175,7 @@ impl CatalogProcedure {
             Self::IndexColumnsManaged => {
                 &["@catalog", "@owner", "@table", "@constraintname", "@column"]
             }
+            Self::TableCollations100 => &["@object"],
         }
     }
 
@@ -535,6 +539,7 @@ pub(crate) fn run_procedure(
         CatalogProcedure::ColumnsManaged => vec![columns_managed(&scope, &arguments)],
         CatalogProcedure::IndexesManaged => vec![indexes_managed(&scope, &arguments)],
         CatalogProcedure::IndexColumnsManaged => vec![index_columns_managed(&scope, &arguments)],
+        CatalogProcedure::TableCollations100 => vec![table_collations(&scope, &arguments)],
     })
 }
 
@@ -1896,4 +1901,46 @@ fn index_columns_managed(scope: &Scope<'_>, arguments: &Arguments) -> QueryResul
         }
     }
     result(INDEX_COLUMNS_MANAGED_COLUMNS, rows)
+}
+
+const TDS_COLLATION: [u8; 5] = [0x09, 0x04, 0x00, 0x22, 0x00];
+
+const TABLE_COLLATION_COLUMNS: &[(&str, SqlType)] = &[
+    ("colid", INT),
+    ("name", SYSNAME),
+    ("tds_collation_100", SqlType::Bytea),
+    ("collation_100", SYSNAME),
+];
+
+fn table_collations(scope: &Scope<'_>, arguments: &Arguments) -> QueryResult {
+    let Some(object) = arguments
+        .text(0)
+        .and_then(|written| scope.objects.resolve_name(&written))
+        .filter(|object| matches!(object.kind, ObjectKind::Table | ObjectKind::View))
+    else {
+        return result(TABLE_COLLATION_COLUMNS, Vec::new());
+    };
+    let rows = scope
+        .columns(object)
+        .iter()
+        .enumerate()
+        .map(|(position, column)| {
+            let character = column.column_type.name.is_character();
+            vec![
+                int(position as i64 + 1),
+                text(column.name),
+                if character {
+                    Value::Bytea(TDS_COLLATION.to_vec())
+                } else {
+                    Value::Null
+                },
+                if character {
+                    text(super::COLLATION)
+                } else {
+                    Value::Null
+                },
+            ]
+        })
+        .collect();
+    result(TABLE_COLLATION_COLUMNS, rows)
 }

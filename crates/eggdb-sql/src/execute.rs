@@ -1276,6 +1276,10 @@ impl<'a> StoredRows<'a> {
         stored
     }
 
+    pub(crate) fn set_identity_insert(&mut self, on: bool) {
+        self.identity_insert = on;
+    }
+
     pub(crate) fn new(table: &'a TableDefinition) -> Self {
         let key = rows_prefix(table.id);
         Self {

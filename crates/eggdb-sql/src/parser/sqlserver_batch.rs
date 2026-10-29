@@ -4,9 +4,22 @@ use crate::ast::{
     GeneratedTable, Name, ProcedureArgument, ProcedureCall, SqlServerStatement, Statement,
     TableReference,
 };
+use crate::bulk_load::InsertBulk;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 use crate::types::SqlType;
+
+const ACCEPTED_BULK_OPTIONS: [&str; 4] =
+    ["tablock", "check_constraints", "fire_triggers", "keepidentity"];
+
+fn unknown_bulk_option(shown: &str, position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        format!("'{shown}' is not a recognized BULK INSERT option."),
+    )
+    .with_sqlserver_code(195)
+    .at(position)
+}
 
 fn named_after_positional(position: usize) -> SqlError {
     SqlError::new(
@@ -41,6 +54,7 @@ impl Parser<'_> {
     }
 
     fn procedure_name(&mut self) -> SqlResult<Name> {
+        while self.take(&TokenKind::Dot) {}
         let mut name = self.name_part()?;
         while self.take(&TokenKind::Dot) {
             while self.take(&TokenKind::Dot) {}
@@ -230,6 +244,126 @@ impl Parser<'_> {
             columns,
             call,
         }))
+    }
+
+    pub(super) fn sqlserver_insert_bulk(&mut self) -> SqlResult<Statement> {
+        self.at += 2;
+        let table = self.table_name()?;
+        let mut columns: Vec<Name> = Vec::new();
+        if self.take(&TokenKind::LeftParen) {
+            loop {
+                let column = self.name_part()?;
+                if columns.iter().any(|existing| existing.text == column.text) {
+                    return Err(SqlError::new(
+                        SqlState::DUPLICATE_COLUMN,
+                        format!(
+                            "The column name '{}' is specified more than once in the column list of an INSERT BULK.",
+                            column.text
+                        ),
+                    )
+                    .with_sqlserver_code(264)
+                    .at(column.position));
+                }
+                self.skip_bulk_column_type()?;
+                columns.push(column);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        let mut keep_nulls = false;
+        if self.take_word("with") {
+            self.expect(&TokenKind::LeftParen)?;
+            loop {
+                let position = self.position();
+                let shown = self
+                    .text
+                    .get(self.peek().start..self.peek().end)
+                    .unwrap_or("")
+                    .to_ascii_uppercase();
+                let TokenKind::Word(option) = self.peek_kind() else {
+                    return Err(self.unexpected());
+                };
+                let option = option.as_ref().to_owned();
+                self.at += 1;
+                match option.as_str() {
+                    "keep_nulls" => keep_nulls = true,
+                    accepted if ACCEPTED_BULK_OPTIONS.contains(&accepted) => {}
+                    "rows_per_batch" | "kilobytes_per_batch" => {
+                        if !self.take_operator("=") {
+                            return Err(self.unexpected());
+                        }
+                        let TokenKind::Integer(_) = self.peek_kind() else {
+                            return Err(self.unexpected());
+                        };
+                        self.at += 1;
+                    }
+                    "order" => self.skip_bulk_order()?,
+                    "allow_encrypted_value_modifications" => {
+                        return Err(not_supported(
+                            "INSERT BULK ... WITH (ALLOW_ENCRYPTED_VALUE_MODIFICATIONS)",
+                        )
+                        .at(position));
+                    }
+                    _ => return Err(unknown_bulk_option(&shown, position)),
+                }
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(Statement::SqlServer(SqlServerStatement::InsertBulk(
+            InsertBulk {
+                table,
+                columns,
+                keep_nulls,
+            },
+        )))
+    }
+
+    fn skip_bulk_column_type(&mut self) -> SqlResult<()> {
+        if !matches!(
+            self.peek_kind(),
+            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+        ) {
+            return Err(self.unexpected());
+        }
+        self.at += 1;
+        if self.peek_kind() == &TokenKind::LeftParen {
+            let mut depth = 0usize;
+            loop {
+                match self.peek_kind() {
+                    TokenKind::LeftParen => depth += 1,
+                    TokenKind::RightParen => depth = depth.saturating_sub(1),
+                    TokenKind::End => return Err(self.unexpected()),
+                    _ => {}
+                }
+                self.at += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        if self.take_word("collate") {
+            self.name_part()?;
+        }
+        Ok(())
+    }
+
+    fn skip_bulk_order(&mut self) -> SqlResult<()> {
+        self.expect(&TokenKind::LeftParen)?;
+        loop {
+            self.name_part()?;
+            if !self.take_word("asc") {
+                self.take_word("desc");
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)
     }
 
     pub(super) fn table_variable_reference(&mut self) -> SqlResult<TableReference> {
