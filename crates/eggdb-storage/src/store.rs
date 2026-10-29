@@ -1,7 +1,7 @@
 use crate::btree::{AppendHint, BTree, TreeReport};
 use crate::cursor::{Cursor, KeyAndValue, KeyAndValueLen};
 use crate::error::StorageError;
-use crate::format::{Features, NO_PAGE, Superblock};
+use crate::format::{Features, NO_PAGE, PageSize, Superblock};
 use crate::hybrid_clock::{CommitStamp, HybridClock};
 use crate::log::{Durability, LogStats};
 use crate::page_cache::{CacheSize, CacheStats, PageCache, PageSource, Snapshot};
@@ -86,11 +86,14 @@ impl<F: File> Store<F> {
     pub fn begin_read(&self) -> Result<ReadTransaction<'_, F>, StorageError> {
         let mut state = self.lock()?;
         let version = state.cache.begin_snapshot()?;
+        let superblock = state.cache.superblock();
         Ok(ReadTransaction {
             store: self,
             version,
             stamp: state.last_commit,
-            catalog_root: state.cache.superblock().catalog_root,
+            catalog_root: superblock.catalog_root,
+            features: superblock.features,
+            page_size: state.cache.page_size(),
         })
     }
 
@@ -239,6 +242,8 @@ pub struct ReadTransaction<'s, F: File> {
     version: u64,
     stamp: CommitStamp,
     catalog_root: u64,
+    features: Features,
+    page_size: PageSize,
 }
 
 impl<F: File> ReadTransaction<'_, F> {
@@ -251,6 +256,16 @@ impl<F: File> ReadTransaction<'_, F> {
     /// The catalog root as of the snapshot.
     pub fn catalog_root(&self) -> u64 {
         self.catalog_root
+    }
+
+    /// The file's feature flags as of the snapshot.
+    pub fn features(&self) -> Features {
+        self.features
+    }
+
+    /// The file's page size.
+    pub fn page_size(&self) -> PageSize {
+        self.page_size
     }
 
     /// Opens the tree whose root is page `root` as of the snapshot (see [`BTree::open`]).

@@ -1498,7 +1498,7 @@ fn read_up_to(file: &impl File, buf: &mut [u8]) -> Result<usize, StorageError> {
     Ok(filled)
 }
 
-fn parent_directory(path: &Path) -> &Path {
+pub(crate) fn parent_directory(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."))

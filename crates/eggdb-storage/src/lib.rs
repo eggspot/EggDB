@@ -58,6 +58,9 @@ mod page_cache;
 mod page_file;
 mod page_set;
 mod page_table;
+mod snapshot_copy;
+#[cfg(test)]
+mod snapshot_copy_tests;
 mod store;
 #[cfg(test)]
 mod store_tests;
@@ -78,4 +81,5 @@ pub use hybrid_clock::CommitStamp;
 pub use log::{Durability, LogStats};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
 pub use page_file::{CreateOptions, PageFile};
+pub use snapshot_copy::{CopyDestination, CopyFailure, CopyReport};
 pub use store::{FileReport, ReadTransaction, Store, WriteTransaction};

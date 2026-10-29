@@ -284,6 +284,17 @@ pub enum StorageError {
     /// Every commit stamp has been handed out: the hybrid clock's high-water mark is at the
     /// largest stamp there is.
     ClockExhausted,
+    /// A copy of a snapshot, checked after it was written, does not hold what the snapshot
+    /// held, or holds pages nothing uses (see
+    /// [`ReadTransaction::copy_to`](crate::ReadTransaction::copy_to)); the copy is not kept.
+    CopyIncomplete {
+        /// The entries of the snapshot.
+        expected: u64,
+        /// The entries the copy holds.
+        found: u64,
+        /// The copy's pages that nothing uses.
+        leaked_pages: u64,
+    },
 }
 
 impl From<eggdb_platform::Error> for StorageError {
@@ -380,6 +391,14 @@ impl fmt::Display for StorageError {
             ),
             Self::ClockExhausted => f.write_str(
                 "every commit stamp has been handed out: the file's clock high-water mark is at its largest value",
+            ),
+            Self::CopyIncomplete {
+                expected,
+                found,
+                leaked_pages,
+            } => write!(
+                f,
+                "the copy was checked after it was written and holds {found} entries and {leaked_pages} unused pages, where the snapshot held {expected} entries; it was not kept"
             ),
         }
     }
