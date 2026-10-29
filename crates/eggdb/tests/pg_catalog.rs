@@ -1,9 +1,9 @@
 //! psql's `\d` family over EggDB's PostgreSQL catalog: the fixture's `pg_dump` from
-//! PostgreSQL 16 is restored, and every query psql 16 and psql 18 sent to PostgreSQL 16 for
-//! `scripts/pg-catalog/commands.txt` (recorded by `scripts/pg-catalog/record.sh`, relation OIDs
-//! written as `{schema.name}`) runs on EggDB with EggDB's OIDs in their place. Each query's rows
-//! and column types must be PostgreSQL's. The printed bytes are compared by CI's `pg-catalog`
-//! job (`scripts/pg-catalog/check.sh`).
+//! PostgreSQL 16 is restored, and every query psql 16, psql 17 and psql 18 sent to PostgreSQL
+//! for `scripts/pg-catalog/commands.txt` (recorded by `scripts/pg-catalog/record.sh`, psql 17's
+//! from CI's `pg-catalog` artifact, relation OIDs written as `{schema.name}`) runs on EggDB with
+//! EggDB's OIDs in their place. Each query's rows and column types must be PostgreSQL 16's. The
+//! printed bytes are compared by CI's `pg-catalog` job (`scripts/pg-catalog/check.sh`).
 
 use eggdb::Database;
 use eggdb::sql::{Dialect, QueryResult, Session, Store, Value};
@@ -225,6 +225,11 @@ fn compare(label: &str) {
 #[test]
 fn psql_16_describe_queries_give_postgresql_16_rows_and_types() {
     compare("psql16");
+}
+
+#[test]
+fn psql_17_describe_queries_give_postgresql_16_rows_and_types() {
+    compare("psql17");
 }
 
 #[test]

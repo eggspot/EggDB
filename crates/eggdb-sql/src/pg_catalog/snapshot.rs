@@ -1,6 +1,6 @@
 use super::CatalogRelation;
 use super::oids::{self, OidRequest, Space};
-use super::types::{RegKind, RegValue, split_qualified};
+use super::types::{RegKind, RegValue, split_object_name};
 use crate::comments::StoredComment;
 use crate::encoding::{
     SequenceDefinition, TableDefinition, ViewDefinition, prefix_end, schema_key,
@@ -34,6 +34,14 @@ const SNAPSHOT_FUNCTIONS: [&str; 13] = [
 
 const SEQUENCE_FUNCTIONS: [&str; 3] = ["nextval", "currval", "setval"];
 
+const CATALOG_TEXT_HINTS: [&str; 3] = ["reg", "pg_", "description"];
+
+pub(crate) fn text_needs_catalog(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    CATALOG_TEXT_HINTS.iter().any(|hint| lower.contains(hint))
+        && crate::lexer::tokenize(text).is_ok_and(|tokens| mentions_catalog(&tokens))
+}
+
 pub(crate) fn mentions_catalog(tokens: &[Token<'_>]) -> bool {
     let mut depth: usize = 0;
     let mut sequence_call_depths: Vec<usize> = Vec::new();
@@ -51,6 +59,14 @@ pub(crate) fn mentions_catalog(tokens: &[Token<'_>]) -> bool {
                     sequence_call_depths.pop();
                 }
                 depth = depth.saturating_sub(1);
+            }
+            TokenKind::QuotedIdentifier(word)
+                if matches!(
+                    super::cast_type_named(word),
+                    Some(crate::types::SqlType::Catalog(super::CatalogType::Reg(_)))
+                ) && sequence_call_depths.is_empty() =>
+            {
+                return true;
             }
             TokenKind::Word(word) => {
                 let named = |name: &&str| word.eq_ignore_ascii_case(name);
@@ -133,6 +149,19 @@ pub(crate) fn load_if_wanted(reader: &dyn KeyValueRead) -> SqlResult<()> {
     Ok(())
 }
 
+pub(crate) fn load_for_stored_expressions(reader: &dyn KeyValueRead) -> SqlResult<()> {
+    let missing = FRAMES.with(|frames| {
+        frames
+            .try_borrow()
+            .ok()
+            .is_some_and(|frames| frames.last().is_some_and(|frame| frame.snapshot.is_none()))
+    });
+    if missing {
+        snapshot_for(reader)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn snapshot_for(reader: &dyn KeyValueRead) -> SqlResult<Rc<CatalogSnapshot>> {
     if let Some(found) = current() {
         return Ok(found);
@@ -201,7 +230,7 @@ impl RelationKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum IndexSource {
     Primary,
     Secondary(usize),
@@ -287,6 +316,7 @@ pub(crate) struct CatalogSnapshot {
     constraint_oids: HashMap<u32, usize>,
     schema_names: HashMap<String, usize>,
     tables: HashMap<String, usize>,
+    index_entries: HashMap<(usize, IndexSource), usize>,
     rows: RefCell<HashMap<CatalogRelation, Rc<Vec<Vec<Value>>>>>,
 }
 
@@ -489,6 +519,7 @@ impl CatalogSnapshot {
             constraint_oids: HashMap::new(),
             schema_names: HashMap::new(),
             tables: HashMap::new(),
+            index_entries: HashMap::new(),
             rows: RefCell::new(HashMap::new()),
         };
         snapshot.index_relations();
@@ -505,6 +536,9 @@ impl CatalogSnapshot {
             if entry.kind == RelationKind::Table {
                 self.tables.insert(entry.internal.clone(), at);
             }
+            if let RelationSource::Index { table, index } = entry.source {
+                self.index_entries.insert((table, index), at);
+            }
         }
         for (at, schema) in self.schemas.iter().enumerate() {
             self.schema_names.insert(schema.name.clone(), at);
@@ -519,12 +553,7 @@ impl CatalogSnapshot {
             let Some(table) = entry.table() else {
                 continue;
             };
-            let index_relation = |wanted: IndexSource| {
-                self.relations.iter().position(|candidate| {
-                    matches!(candidate.source, RelationSource::Index { table, index }
-                        if table == at && index == wanted)
-                })
-            };
+            let index_relation = |wanted: IndexSource| self.index_relation(at, wanted);
             let mut add = |kind: u8, name: String, index: Option<usize>, source| {
                 pending.push((
                     OidRequest {
@@ -627,6 +656,10 @@ impl CatalogSnapshot {
         self.relation_oids
             .get(&oid)
             .and_then(|&at| self.relations.get(at))
+    }
+
+    pub(crate) fn index_relation(&self, table: usize, index: IndexSource) -> Option<usize> {
+        self.index_entries.get(&(table, index)).copied()
     }
 
     pub(crate) fn relation_index(&self, oid: u32) -> Option<usize> {
@@ -756,8 +789,11 @@ fn is_number(text: &str) -> bool {
 
 pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
     if is_number(text) {
-        let oid = super::types::parse_identifier(text, kind.type_name())?;
+        let oid = super::types::parse_identifier(text, "oid")?;
         return Ok(reg_from_oid(kind, oid));
+    }
+    if text.trim() == "-" {
+        return Ok(reg_from_oid(kind, 0));
     }
     let found = |oid: u32| RegValue {
         kind,
@@ -765,30 +801,15 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
         name: String::new(),
     };
     let reg = match kind {
-        RegKind::Type => {
-            let named = oids::builtin_type_named(text.trim())
-                .or_else(|| {
-                    split_qualified(text)
-                        .ok()
-                        .filter(|(schema, _)| {
-                            schema
-                                .as_deref()
-                                .is_none_or(|schema| schema == crate::schemas::CATALOG_SCHEMA)
-                        })
-                        .and_then(|(_, name)| oids::builtin_type_named(&name))
-                })
-                .ok_or_else(|| missing(SqlState::UNDEFINED_OBJECT, "type", text.trim()))?;
-            found(named.oid)
-        }
-        RegKind::Proc if text.trim() == "-" => found(0),
+        RegKind::Type => found(super::types::regtype_oid(text)?),
         RegKind::Proc => {
             return Err(SqlError::not_supported(
                 "regproc values naming a function are not supported yet",
             ));
         }
         RegKind::Class | RegKind::Namespace | RegKind::Role => {
+            let (schema, name) = split_object_name(text, kind)?;
             let snapshot = require()?;
-            let (schema, name) = split_qualified(text)?;
             match kind {
                 RegKind::Class => {
                     let at = snapshot
@@ -828,6 +849,13 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
 }
 
 pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
+    if oid == 0 {
+        return RegValue {
+            kind,
+            oid,
+            name: "-".to_owned(),
+        };
+    }
     let snapshot = current();
     let name = match kind {
         RegKind::Class => snapshot.as_ref().and_then(|snapshot| {
@@ -857,7 +885,6 @@ pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
                     .map(|(_, name)| (*name).to_owned())
             })
             .map(|name| quote_ident(&name)),
-        RegKind::Proc if oid == 0 => Some("-".to_owned()),
         RegKind::Proc => None,
     };
     RegValue {

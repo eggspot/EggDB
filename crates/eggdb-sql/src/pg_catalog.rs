@@ -17,7 +17,10 @@ pub(crate) use functions::{
     argument_types, function, partition_ancestors_rows, partition_ancestors_type, result_type,
 };
 pub(crate) use relations::generated_rows;
-pub(crate) use snapshot::{enter_statement, load_if_wanted, mentions_catalog};
+pub(crate) use snapshot::{
+    enter_statement, load_for_stored_expressions, load_if_wanted, mentions_catalog,
+    text_needs_catalog,
+};
 pub use types::{CatalogType, RegKind, RegValue};
 
 /// The type OID PostgreSQL gives `sql_type`, such as 23 for `integer`, 1007 for `integer[]`
@@ -26,7 +29,8 @@ pub fn type_oid(sql_type: SqlType) -> u32 {
     oids::type_oid(sql_type)
 }
 pub(crate) use types::{
-    cast_type_named, convert, convert_from, oid_number, parse_input, read_only, reg_value,
+    cast_type_named, check_expression_tree_argument, convert, convert_from, oid_number,
+    parse_input, read_only, reg_value, system_catalog,
 };
 
 pub(crate) fn catalog_reference(
@@ -62,6 +66,50 @@ pub(crate) fn catalog_reference(
         }
     }
     Ok(Some(relation))
+}
+
+pub(crate) fn refuse_catalog_change(
+    reader: &dyn crate::store::KeyValueRead,
+    name: &crate::ast::Name,
+) -> crate::error::SqlResult<()> {
+    match catalog_reference(reader, &name.text)? {
+        Some(relation) => Err(system_catalog(relation.name())),
+        None => Ok(()),
+    }
+}
+
+pub(crate) fn copy_query(
+    relation: CatalogRelation,
+    columns: &[crate::ast::Name],
+) -> crate::error::SqlResult<crate::ast::Query> {
+    let list = if columns.is_empty() {
+        "*".to_owned()
+    } else {
+        columns
+            .iter()
+            .map(|column| crate::pg_keywords::quote_ident(&column.text))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let text = format!("SELECT {list} FROM pg_catalog.{}", relation.name());
+    let tokens = crate::lexer::tokenize(&text)?;
+    let mut parser =
+        crate::parser::Parser::new(&text, &tokens).in_dialect(crate::Dialect::PostgreSql);
+    let crate::ast::Statement::Select(select) = parser.statement()? else {
+        return Err(crate::error::SqlError::new(
+            crate::error::SqlState::INTERNAL_ERROR,
+            "the query of a COPY of a catalog relation is not a SELECT",
+        ));
+    };
+    Ok(crate::ast::Query {
+        with: Vec::new(),
+        recursive: false,
+        body: crate::ast::SetExpr::Select(Box::new(select)),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        position: 0,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

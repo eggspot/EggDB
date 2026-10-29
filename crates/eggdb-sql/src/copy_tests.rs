@@ -1096,3 +1096,26 @@ fn hostile_copy_statements_and_data_never_panic() {
     }
     assert!(copy_out(&mut session, "COPY t TO STDOUT").is_ok());
 }
+
+#[test]
+fn copy_reads_a_catalog_relation_and_never_writes_one() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(&mut session, "CREATE SCHEMA shop");
+    let shown = copy_out(
+        &mut session,
+        "COPY pg_catalog.pg_namespace (nspname, nspowner) TO STDOUT (FORMAT csv)",
+    )
+    .unwrap();
+    assert!(shown.contains("pg_catalog,10\n"), "{shown}");
+    assert!(shown.contains("shop,10\n"), "{shown}");
+    assert!(shown.ends_with("COPY 5"), "{shown}");
+    let error = copy_in(&mut session, "COPY pg_namespace FROM STDIN", "x\n").unwrap_err();
+    assert_eq!(
+        (error.state(), error.message()),
+        (
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "permission denied for table pg_namespace"
+        )
+    );
+}

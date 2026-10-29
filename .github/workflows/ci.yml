@@ -311,6 +311,7 @@ jobs:
           overwrite: true
           path: |
             ${{ runner.temp }}/pg-catalog/*.queries.log
+            ${{ runner.temp }}/pg-catalog/*.oids
             ${{ runner.temp }}/pg-catalog/*.out
             ${{ runner.temp }}/pg-catalog/output.diff
           retention-days: 7

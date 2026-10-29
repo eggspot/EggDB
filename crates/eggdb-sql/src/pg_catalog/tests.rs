@@ -211,34 +211,397 @@ fn a_statement_loads_the_catalog_once_and_builds_each_relation_once() {
     assert_eq!(LOADS.with(std::cell::Cell::get), loads);
 }
 
+const DESCRIBE_TABLE_QUERIES: [&str; 11] = [
+    "SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = 'OID'",
+    "SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = 'OID' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum",
+    "SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = 'OID' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname",
+    "SELECT true as sametable, conname,
+  pg_catalog.pg_get_constraintdef(r.oid, true) as condef,
+  conrelid::pg_catalog.regclass AS ontable
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = 'OID' AND r.contype = 'f'
+     AND conparentid = 0
+ORDER BY conname",
+    "SELECT conname, conrelid::pg_catalog.regclass AS ontable,
+       pg_catalog.pg_get_constraintdef(oid, true) AS condef
+  FROM pg_catalog.pg_constraint c
+ WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors('OID')
+                     UNION ALL VALUES ('OID'::pg_catalog.regclass))
+       AND contype = 'f' AND conparentid = 0
+ORDER BY conname",
+    "SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = 'OID' ORDER BY 1",
+    "SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = 'OID'
+ORDER BY nsp, stxname",
+    "SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='OID' and pg_catalog.pg_relation_is_publishable('OID')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = 'OID'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('OID')
+ORDER BY 1",
+    "SELECT t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgenabled, t.tgisinternal,
+  CASE WHEN t.tgparentid != 0 THEN
+    (SELECT u.tgrelid::pg_catalog.regclass
+     FROM pg_catalog.pg_trigger AS u,
+          pg_catalog.pg_partition_ancestors(t.tgrelid) WITH ORDINALITY AS a(relid, depth)
+     WHERE u.tgname = t.tgname AND u.tgrelid = a.relid
+           AND u.tgparentid = 0
+     ORDER BY a.depth LIMIT 1)
+  END AS parent
+FROM pg_catalog.pg_trigger t
+WHERE t.tgrelid = 'OID' AND (NOT t.tgisinternal OR (t.tgisinternal AND t.tgenabled = 'D'))
+ORDER BY 1",
+    "SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = 'OID'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno",
+    "SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = 'OID'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text",
+];
+
+fn add_copies_of_table(store: &MemoryStore, model: &str, copies: u32) {
+    use crate::encoding::{TableDefinition, table_key};
+    use crate::store::{KeyValueRead, KeyValueStore, KeyValueWrite};
+    let reader = store.begin_read().unwrap();
+    let bytes = reader.get(&table_key(model)).unwrap().unwrap();
+    let definition = TableDefinition::decode(model, &bytes).unwrap();
+    drop(reader);
+    let mut writer = store.begin_write().unwrap();
+    for number in 1..copies {
+        let name = format!("t{number}");
+        let mut copy = definition.clone();
+        copy.id = definition.id + number * 16;
+        copy.name.clone_from(&name);
+        for (at, index) in copy.indexes.iter_mut().enumerate() {
+            index.id = copy.id + 1 + at as u32;
+            index.name = format!("{name}_u_key");
+        }
+        writer.put(&table_key(&name), &copy.encode()).unwrap();
+    }
+    writer.commit().unwrap();
+}
+
 #[test]
-fn describing_one_table_among_a_thousand_takes_seconds_not_minutes() {
+fn describing_one_table_among_ten_thousand_takes_seconds_not_minutes() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    let mut script = String::new();
-    for number in 0..1000 {
-        script.push_str(&format!(
-            "CREATE TABLE t{number} (id integer PRIMARY KEY, name text NOT NULL, amount numeric(12,2), \
-             created timestamptz, note varchar(40) DEFAULT 'x');\n"
-        ));
-    }
-    run(&mut session, &script).unwrap();
+    last(
+        &mut session,
+        "CREATE TABLE t0 (id integer PRIMARY KEY, u integer UNIQUE, name text NOT NULL, \
+         amount numeric(12,2), note varchar(40) DEFAULT 'x')",
+    );
+    add_copies_of_table(&store, "t0", 10_000);
     let started = Instant::now();
     let lookup = last(
         &mut session,
         "SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c \
          LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE c.relname OPERATOR(pg_catalog.~) '^(t500)$' COLLATE pg_catalog.default \
+         WHERE c.relname OPERATOR(pg_catalog.~) '^(t5000)$' COLLATE pg_catalog.default \
          AND pg_catalog.pg_table_is_visible(c.oid) ORDER BY 2, 3",
     );
-    assert_eq!(rows_of(&lookup).len(), 1);
-    let columns = last(&mut session, &for_table(COLUMN_QUERY, "t500"));
-    assert_eq!(rows_of(&columns).len(), 5, "{columns}");
-    let indexes = last(&mut session, &for_table(INDEX_QUERY, "t500"));
-    assert_eq!(rows_of(&indexes).len(), 1, "{indexes}");
+    let found = rows_of(&lookup);
+    assert_eq!(found.len(), 1, "{lookup}");
+    let oid = found[0].split('|').next().unwrap_or_default().to_owned();
+    let mut shown = Vec::new();
+    for query in DESCRIBE_TABLE_QUERIES {
+        shown.push(last(&mut session, &query.replace("OID", &oid)));
+    }
     let elapsed = started.elapsed();
+    assert_eq!(rows_of(&shown[1]).len(), 5, "{}", shown[1]);
+    assert_eq!(
+        rows_of(&shown[2]),
+        [
+            "t5000_pkey|t|t|f|t|CREATE UNIQUE INDEX t5000_pkey ON t5000 USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0",
+            "t5000_u_key|f|t|f|t|CREATE UNIQUE INDEX t5000_u_key ON t5000 USING btree (u)|UNIQUE (u)|u|f|f|f|0"
+        ]
+    );
     assert!(
         elapsed < Duration::from_secs(30),
-        "three describe queries over 1,000 tables took {elapsed:?}"
+        "psql's queries for \\d of one table among 10,000 took {elapsed:?}"
     );
+}
+
+#[test]
+fn stored_defaults_checks_and_views_read_the_catalog_when_they_need_it() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(
+        &mut session,
+        "CREATE TABLE customers (id integer PRIMARY KEY); CREATE SEQUENCE customers_id_seq",
+    );
+    last(
+        &mut session,
+        "CREATE TABLE d (v integer, t text DEFAULT 'customers'::regclass::text, \
+         o text DEFAULT CAST('customers' AS pg_catalog.regclass)::text)",
+    );
+    last(&mut session, "INSERT INTO d (v) VALUES (1)");
+    last(&mut session, "INSERT INTO d (v) VALUES (1 + 1)");
+    assert_eq!(
+        rows_of(&last(&mut session, "SELECT v, t, o FROM d ORDER BY v")),
+        ["1|customers|customers", "2|customers|customers"]
+    );
+    last(
+        &mut session,
+        "CREATE TABLE named (n text CHECK (n::regclass::oid > 0))",
+    );
+    last(&mut session, "INSERT INTO named VALUES ('customers')");
+    assert_eq!(
+        fails(&mut session, "INSERT INTO named VALUES ('nosuch')")
+            .state()
+            .code(),
+        "42P01"
+    );
+    last(
+        &mut session,
+        "CREATE VIEW shown AS SELECT 'customers'::regclass::text AS r",
+    );
+    assert_eq!(
+        rows_of(&last(&mut session, "SELECT r FROM shown")),
+        ["customers"]
+    );
+    last(
+        &mut session,
+        "CREATE VIEW names AS SELECT relname::text AS r FROM pg_class WHERE relname = 'd'",
+    );
+    assert_eq!(rows_of(&last(&mut session, "SELECT r FROM names")), ["d"]);
+    let refused = fails(
+        &mut session,
+        "CREATE VIEW typed AS SELECT relname FROM pg_class",
+    );
+    assert_eq!(refused.state().code(), "0A000");
+    assert!(refused.message().contains("type name"), "{refused}");
+    last(
+        &mut session,
+        "CREATE TABLE serial_cast (id bigint DEFAULT nextval(CAST('customers_id_seq' AS regclass)), v integer)",
+    );
+    let loads = LOADS.with(std::cell::Cell::get);
+    last(&mut session, "INSERT INTO serial_cast (v) VALUES (1)");
+    last(&mut session, "INSERT INTO serial_cast (v) VALUES (2)");
+    assert_eq!(LOADS.with(std::cell::Cell::get), loads);
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT nextval(CAST('customers_id_seq' AS regclass)), \
+             nextval(CAST('customers_id_seq' AS pg_catalog.regclass)), \
+             currval('customers_id_seq'::\"regclass\")"
+        )),
+        ["3|4|4"]
+    );
+    assert_eq!(LOADS.with(std::cell::Cell::get), loads);
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT id, v FROM serial_cast ORDER BY v"
+        )),
+        ["1|1", "2|2"]
+    );
+}
+
+#[test]
+fn reg_inputs_outputs_and_errors_follow_postgresql_16() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(
+        &mut session,
+        "CREATE TABLE customers (id integer PRIMARY KEY, note text DEFAULT 'x')",
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT '0'::regclass, 0::regtype, '-'::regnamespace, 0::regrole, '-'::regproc, \
+             '-'::regclass::oid, 'customers'::\"regclass\", regclass('customers'), \
+             \"regclass\"('customers'), pg_catalog.regtype('int4')"
+        )),
+        ["-|-|-|-|-|0|customers|customers|customers|integer"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT 'character varying(10)'::regtype, 'varchar(10)[]'::regtype, \
+             'numeric(12,2)'::regtype, 'timestamp(3) with time zone'::regtype, \
+             'time(2)'::regtype, 'float(10)'::regtype, 'float(40)'::regtype, \
+             'interval year to month'::regtype, 'pg_catalog.varchar(10)'::regtype, \
+             'char(2)'::regtype, 'INT4'::regtype, 'int4[]'::regtype"
+        )),
+        [
+            "character varying|character varying[]|numeric|timestamp with time zone|time without time zone|real|double precision|interval|character varying|character|integer|integer[]"
+        ]
+    );
+    for (sql, state, message) in [
+        (
+            "SELECT 'a.b.c.d'::regclass",
+            "42601",
+            "improper relation name (too many dotted names): a.b.c.d",
+        ),
+        (
+            "SELECT 'a.b.c'::regclass",
+            "0A000",
+            "cross-database references are not implemented: \"a.b.c\"",
+        ),
+        (
+            "SELECT 'a.b.c.d'::regtype",
+            "42601",
+            "improper qualified name (too many dotted names): a.b.c.d",
+        ),
+        ("SELECT 'a.b'::regnamespace", "42602", "invalid name syntax"),
+        (
+            "SELECT '99999999999'::regclass",
+            "22003",
+            "value \"99999999999\" is out of range for type oid",
+        ),
+        (
+            "SELECT 'int4(10)'::regtype",
+            "42601",
+            "type modifier is not allowed for type \"int4\"",
+        ),
+        (
+            "SELECT 'nosuch(10)'::regtype",
+            "42704",
+            "type \"nosuch\" does not exist",
+        ),
+        (
+            "SELECT 'varchar(x)'::regtype",
+            "42601",
+            "syntax error at or near \"x\"",
+        ),
+        (
+            "SELECT nextval('customers'::regclass)",
+            "42809",
+            "\"customers\" is not a sequence",
+        ),
+        (
+            "SELECT currval('customers')",
+            "42809",
+            "\"customers\" is not a sequence",
+        ),
+        (
+            "CREATE TABLE wrong (id bigint DEFAULT nextval('customers'::regclass))",
+            "42809",
+            "\"customers\" is not a sequence",
+        ),
+        (
+            "SELECT nextval('nosuch'::regclass)",
+            "42P01",
+            "relation \"nosuch\" does not exist",
+        ),
+        (
+            "SELECT pg_get_expr('abc', 1259)",
+            "0A000",
+            "cannot accept a value of type pg_node_tree",
+        ),
+        (
+            "SELECT 'abc'::pg_node_tree",
+            "0A000",
+            "cannot accept a value of type pg_node_tree",
+        ),
+        (
+            "SELECT pg_get_expr('abc'::text, 1259)",
+            "42883",
+            "function pg_get_expr(text, integer) does not exist",
+        ),
+        (
+            "SELECT pg_get_expr(adbin::text, adrelid) FROM pg_attrdef",
+            "42883",
+            "function pg_get_expr(text, oid) does not exist",
+        ),
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(
+            (error.state().code(), error.message()),
+            (state, message),
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT pg_get_expr(NULL, 1259) IS NULL"
+        )),
+        ["t"]
+    );
+}
+
+#[test]
+fn changing_a_catalog_relation_is_refused_as_postgresql_refuses_it() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    for sql in [
+        "DROP TABLE pg_class",
+        "DROP TABLE IF EXISTS pg_catalog.pg_class",
+        "ALTER TABLE pg_class ADD COLUMN x integer",
+        "COMMENT ON TABLE pg_class IS 'x'",
+        "COMMENT ON COLUMN pg_class.relname IS 'x'",
+        "CREATE INDEX ON pg_class (relname)",
+        "DROP VIEW pg_roles",
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state().code(), "42501", "{sql}");
+        assert!(
+            error.message().ends_with("is a system catalog"),
+            "{sql}: {error}"
+        );
+    }
+    last(&mut session, "CREATE TABLE public.pg_class (a integer)");
+    last(&mut session, "DROP TABLE public.pg_class");
 }

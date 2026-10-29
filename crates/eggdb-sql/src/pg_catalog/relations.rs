@@ -586,10 +586,7 @@ pub(crate) fn referenced_index(
                 .position(|index| index.unique && index.columns == positions)?,
         )
     };
-    snapshot.relations.iter().position(|candidate| {
-        matches!(candidate.source, RelationSource::Index { table, index }
-            if table == parent && index == wanted)
-    })
+    snapshot.index_relation(parent, wanted)
 }
 
 fn constraint_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {

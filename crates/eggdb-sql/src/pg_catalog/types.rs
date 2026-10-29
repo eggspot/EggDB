@@ -120,6 +120,13 @@ pub(crate) fn read_only(name: &str) -> SqlError {
     )
 }
 
+pub(crate) fn system_catalog(name: &str) -> SqlError {
+    SqlError::new(
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        format!("permission denied: \"{name}\" is a system catalog"),
+    )
+}
+
 pub(crate) fn oid_number(value: &Value) -> Option<i64> {
     match value {
         Value::Oid(oid) => Some(i64::from(*oid)),
@@ -187,12 +194,51 @@ pub(crate) fn parse_input(text: &str, kind: CatalogType) -> SqlResult<Value> {
         CatalogType::Xid => parse_identifier(text, "xid").map(Value::Oid),
         CatalogType::Name => Ok(Value::Text(truncated_name(text.to_owned()))),
         CatalogType::InternalChar => Ok(Value::Text(first_character(text))),
-        CatalogType::NodeTree => Err(SqlError::new(
-            SqlState::CANNOT_COERCE,
-            "cannot accept a value of type pg_node_tree",
-        )),
+        CatalogType::NodeTree => Err(node_tree_input()),
         CatalogType::AclItem | CatalogType::AnyArray => Err(always_null(kind)),
         CatalogType::Reg(reg) => super::snapshot::reg_from_text(reg, text).map(boxed),
+    }
+}
+
+fn node_tree_input() -> SqlError {
+    SqlError::new(
+        SqlState::FEATURE_NOT_SUPPORTED,
+        "cannot accept a value of type pg_node_tree",
+    )
+}
+
+pub(crate) fn check_expression_tree_argument(
+    function: &str,
+    arguments: &[crate::ast::Expr],
+    scope: crate::eval::Scope<'_>,
+) -> SqlResult<()> {
+    let Some(first) = arguments.first() else {
+        return Ok(());
+    };
+    if matches!(
+        first.kind,
+        crate::ast::ExprKind::Literal(crate::ast::Literal::String(_))
+    ) {
+        return Err(node_tree_input().at(first.position));
+    }
+    match crate::typing::static_type(first, scope) {
+        None | Some(SqlType::Catalog(CatalogType::NodeTree)) => Ok(()),
+        Some(_) => {
+            let types: Vec<String> = arguments
+                .iter()
+                .map(|argument| {
+                    crate::typing::static_type(argument, scope)
+                        .map_or_else(|| "unknown".to_owned(), |sql_type| sql_type.name())
+                })
+                .collect();
+            Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("function {function}({}) does not exist", types.join(", ")),
+            )
+            .with_hint(
+                "No function matches the given name and argument types. You might need to add explicit type casts.",
+            ))
+        }
     }
 }
 
@@ -286,8 +332,13 @@ pub(crate) fn convert_from(
     })
 }
 
-pub(crate) fn split_qualified(text: &str) -> SqlResult<(Option<String>, String)> {
-    let invalid = || SqlError::new(SqlState::INVALID_NAME, "invalid name syntax");
+const MOST_NAME_PARTS: usize = 16;
+
+fn invalid_name() -> SqlError {
+    SqlError::new(SqlState::INVALID_NAME, "invalid name syntax")
+}
+
+pub(crate) fn name_parts(text: &str) -> SqlResult<Vec<String>> {
     let mut parts: Vec<String> = Vec::new();
     let mut chars = text.trim().chars().peekable();
     loop {
@@ -302,7 +353,7 @@ pub(crate) fn split_qualified(text: &str) -> SqlResult<(Option<String>, String)>
                     }
                     Some('"') => break,
                     Some(c) => part.push(c),
-                    None => return Err(invalid()),
+                    None => return Err(invalid_name()),
                 }
             }
         } else {
@@ -314,17 +365,21 @@ pub(crate) fn split_qualified(text: &str) -> SqlResult<(Option<String>, String)>
                 chars.next();
             }
         }
-        if part.is_empty() || parts.len() >= 3 {
-            return Err(invalid());
+        if part.is_empty() || parts.len() >= MOST_NAME_PARTS {
+            return Err(invalid_name());
         }
         parts.push(truncated_name(part));
         match chars.next() {
             None => break,
             Some('.') => {}
-            Some(_) => return Err(invalid()),
+            Some(_) => return Err(invalid_name()),
         }
     }
-    let mut parts = parts.into_iter();
+    Ok(parts)
+}
+
+pub(crate) fn split_qualified(text: &str) -> SqlResult<(Option<String>, String)> {
+    let mut parts = name_parts(text)?.into_iter();
     match (parts.next(), parts.next(), parts.next()) {
         (Some(name), None, None) => Ok((None, name)),
         (Some(schema), Some(name), None) => Ok((Some(schema), name)),
@@ -332,4 +387,161 @@ pub(crate) fn split_qualified(text: &str) -> SqlResult<(Option<String>, String)>
             "cross-database references are not implemented",
         )),
     }
+}
+
+pub(crate) fn split_object_name(text: &str, kind: RegKind) -> SqlResult<(Option<String>, String)> {
+    let parts = name_parts(text)?;
+    let joined = || parts.join(".");
+    match (kind, parts.len()) {
+        (RegKind::Namespace | RegKind::Role, count) if count > 1 => Err(invalid_name()),
+        (_, 1 | 2) => split_qualified(text),
+        (RegKind::Class, 3) => Err(SqlError::not_supported(format!(
+            "cross-database references are not implemented: \"{}\"",
+            joined()
+        ))),
+        (_, 3) => Err(SqlError::not_supported(format!(
+            "cross-database references are not implemented: {}",
+            joined()
+        ))),
+        (RegKind::Class, _) => Err(SqlError::new(
+            SqlState::SYNTAX_ERROR,
+            format!(
+                "improper relation name (too many dotted names): {}",
+                joined()
+            ),
+        )),
+        _ => Err(SqlError::new(
+            SqlState::SYNTAX_ERROR,
+            format!(
+                "improper qualified name (too many dotted names): {}",
+                joined()
+            ),
+        )),
+    }
+}
+
+const MODIFIABLE_TYPES: [u32; 8] = [1042, 1043, 1083, 1114, 1184, 1186, 1266, 1700];
+
+fn missing_type(name: &str) -> SqlError {
+    SqlError::new(
+        SqlState::UNDEFINED_OBJECT,
+        format!("type \"{name}\" does not exist"),
+    )
+}
+
+fn syntax_error_near(token: &str) -> SqlError {
+    if token.is_empty() {
+        SqlError::new(SqlState::SYNTAX_ERROR, "syntax error at end of input")
+    } else {
+        SqlError::new(
+            SqlState::SYNTAX_ERROR,
+            format!("syntax error at or near \"{token}\""),
+        )
+    }
+}
+
+fn plain_type_oid(name: &str) -> SqlResult<Option<u32>> {
+    if let Some(found) = super::oids::builtin_type_named(name) {
+        return Ok(Some(found.oid));
+    }
+    if let Some(fields) = name.strip_prefix("interval ")
+        && fields.split_whitespace().all(|word| {
+            matches!(
+                word,
+                "year" | "month" | "day" | "hour" | "minute" | "second" | "to"
+            )
+        })
+    {
+        return Ok(Some(1186));
+    }
+    let (schema, base) = split_object_name(name, RegKind::Type)?;
+    if schema
+        .as_deref()
+        .is_some_and(|schema| schema != crate::schemas::CATALOG_SCHEMA)
+    {
+        return Ok(None);
+    }
+    Ok(super::oids::builtin_type_named(&base).map(|found| found.oid))
+}
+
+fn modifiers_are_numbers(inside: &str) -> SqlResult<()> {
+    for argument in inside.split(',') {
+        let argument = argument.trim();
+        if argument.is_empty() || !argument.bytes().all(|byte| byte.is_ascii_digit()) {
+            let token = argument
+                .split(|c: char| c.is_whitespace())
+                .next()
+                .unwrap_or_default();
+            return Err(syntax_error_near(if token.is_empty() {
+                ")"
+            } else {
+                token
+            }));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn regtype_oid(text: &str) -> SqlResult<u32> {
+    let written = text.trim();
+    let lowered;
+    let mut name = if written.contains('"') {
+        written
+    } else {
+        lowered = written
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        lowered.as_str()
+    };
+    if let Some(found) = super::oids::builtin_type_named(name) {
+        return Ok(found.oid);
+    }
+    let mut array = false;
+    while let Some(element) = name.strip_suffix("[]") {
+        name = element.trim_end();
+        array = true;
+    }
+    let (base, modified) = match name.split_once('(') {
+        Some((base, after)) => {
+            let Some((inside, rest)) = after.split_once(')') else {
+                return Err(syntax_error_near(""));
+            };
+            modifiers_are_numbers(inside)?;
+            let base = base.trim_end();
+            let rest = rest.trim();
+            if base == "float" {
+                let precision: u32 = inside.trim().parse().unwrap_or(u32::MAX);
+                let oid = if precision <= 24 { 700 } else { 701 };
+                return element_or_array(oid, array, base);
+            }
+            let full = if rest.is_empty() {
+                base.to_owned()
+            } else {
+                format!("{base} {rest}")
+            };
+            (full, Some(base))
+        }
+        None => (name.to_owned(), None),
+    };
+    let shown = modified.unwrap_or(&base);
+    let oid = plain_type_oid(&base)?.ok_or_else(|| missing_type(shown))?;
+    if modified.is_some() && !MODIFIABLE_TYPES.contains(&oid) {
+        return Err(SqlError::new(
+            SqlState::SYNTAX_ERROR,
+            format!("type modifier is not allowed for type \"{shown}\""),
+        ));
+    }
+    element_or_array(oid, array, shown)
+}
+
+fn element_or_array(oid: u32, array: bool, shown: &str) -> SqlResult<u32> {
+    if !array {
+        return Ok(oid);
+    }
+    super::oids::builtin_type(oid)
+        .map(|found| found.array)
+        .filter(|array| *array != 0)
+        .ok_or_else(|| missing_type(&format!("{shown}[]")))
 }

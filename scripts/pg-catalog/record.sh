@@ -12,7 +12,12 @@ distinct query psql sent, with its column types and rows on PostgreSQL, to
 EggDB's in their place.
 
 PostgreSQL's tools come from PG_BIN (a directory) or PATH; PGHOST, PGPORT, PGUSER and
-PGPASSWORD reach the server."
+PGPASSWORD reach the server.
+
+QUERIES names a work directory of scripts/pg-catalog/check.sh (for example CI's pg-catalog
+artifact) to record the queries another psql sent there instead of running psql here: its
+postgres.queries.log and postgres.oids (that server's relation OIDs) are read, that server's
+OIDs are put in this server's place, and the rows still come from this server."
 
 [ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
 data=$1
@@ -39,7 +44,26 @@ tool pg_dump > "$data/fixture.sql"
 tool psql -X -At -F ' ' -c "SELECT c.oid, quote_ident(n.nspname) || '.' || quote_ident(c.relname)
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid >= 16384" > "$scratch/oids"
 
-"${psql_words[@]}" -X -E -v database="$database" -f - < "$here/commands.txt" > "$scratch/log" 2>&1
+if [ -n "${QUERIES:-}" ]; then
+  awk 'FNR == NR { here[$2] = $1; next } ($2 in here) { print $1, here[$2] }' \
+    "$scratch/oids" "$QUERIES/postgres.oids" > "$scratch/foreign-oids"
+  awk '
+    FNR == NR { local[$1] = $2; next }
+    {
+      line = $0
+      out = ""
+      while (match(line, /\047[0-9]+\047/)) {
+        number = substr(line, RSTART + 1, RLENGTH - 2)
+        out = out substr(line, 1, RSTART) (number in local ? local[number] : number) "\047"
+        line = substr(line, RSTART + RLENGTH)
+      }
+      print out line
+    }' "$scratch/foreign-oids" "$QUERIES/postgres.queries.log" > "$scratch/log"
+  recorded_by="the psql of $QUERIES"
+else
+  "${psql_words[@]}" -X -E -v database="$database" -f - < "$here/commands.txt" > "$scratch/log" 2>&1
+  recorded_by=$("${psql_words[@]}" --version)
+fi
 awk '
   /^(\*{9} QUERY \*{10}|\/\*{8} QUERY \*{9}\/)$/ { inside = 1; buffer = ""; next }
   /^(\*{26}|\/\*{24}\/)$/ { if (inside) printf "%s\036", buffer; inside = 0; next }
@@ -86,4 +110,4 @@ while IFS= read -r -d $'\036' recorded; do
   } >> "$data/$label.txt"
   count=$((count + 1))
 done < "$scratch/queries"
-echo "$count distinct queries of $("${psql_words[@]}" --version) written to $data/$label.txt"
+echo "$count distinct queries of $recorded_by written to $data/$label.txt"

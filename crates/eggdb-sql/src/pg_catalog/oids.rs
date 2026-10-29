@@ -1060,21 +1060,16 @@ pub(crate) fn builtin_type(oid: u32) -> Option<&'static BuiltinType> {
 }
 
 pub(crate) fn builtin_type_named(name: &str) -> Option<&'static BuiltinType> {
+    let name = match name {
+        "int" => "int4",
+        "float" => "float8",
+        "decimal" => "numeric",
+        "character" | "char" => "bpchar",
+        other => other,
+    };
     BUILTIN_TYPES
         .iter()
         .find(|found| found.typname == name || found.shown == name)
-        .or_else(|| {
-            let alias = match name {
-                "int" => "int4",
-                "float" => "float8",
-                "decimal" => "numeric",
-                "character" | "char" => "bpchar",
-                "timestamptz" => "timestamptz",
-                "timetz" => "timetz",
-                _ => return None,
-            };
-            BUILTIN_TYPES.iter().find(|found| found.typname == alias)
-        })
 }
 
 pub(crate) fn type_oid(sql_type: SqlType) -> u32 {

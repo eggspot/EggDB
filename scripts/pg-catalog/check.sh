@@ -7,7 +7,8 @@ Fills a database of a running PostgreSQL server with scripts/pg-catalog/fixture.
 its pg_dump into EggDB with eggdb restore, serves it with eggdb serve, runs every psql command of
 scripts/pg-catalog/commands.txt against both servers and fails unless the two outputs are byte
 for byte the same. A second run with -E keeps the queries psql sent to each server in the work
-directory.
+directory, and postgres.oids keeps the relation OIDs of PostgreSQL's side
+(scripts/pg-catalog/record.sh reads both through QUERIES).
 
 PostgreSQL's tools run inside the docker container named by PG_CONTAINER, or from PG_BIN (a
 directory), or from PATH; PGHOST, PGPORT, PGUSER and PGPASSWORD reach the server. PSQL is the
@@ -45,6 +46,8 @@ PGDATABASE=postgres pg psql -X -v ON_ERROR_STOP=1 -q -c "DROP DATABASE IF EXISTS
   -c "CREATE DATABASE $database TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
 PGDATABASE=$database pg psql -X -v ON_ERROR_STOP=1 -q -f - < "$here/fixture.sql" > /dev/null
 PGDATABASE=$database pg pg_dump > "$work/dump.sql"
+PGDATABASE=$database pg psql -X -At -F ' ' -c "SELECT c.oid, quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid >= 16384" > "$work/postgres.oids"
 version=$(PGDATABASE=$database pg psql -X -At -c 'SHOW server_version')
 client=$("${psql_words[@]}" --version)
 echo "PostgreSQL $version; $client"

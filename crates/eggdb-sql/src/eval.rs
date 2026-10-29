@@ -986,7 +986,10 @@ impl Evaluator<'_> {
 
     fn cast(&self, expr: &Expr, target: SqlType) -> SqlResult<Value> {
         match &expr.kind {
-            ExprKind::Literal(Literal::String(text)) if target.is_character() => {
+            ExprKind::Literal(Literal::String(text))
+                if target.is_character()
+                    && target != SqlType::Catalog(crate::pg_catalog::CatalogType::NodeTree) =>
+            {
                 convert(Value::Text(text.clone()), target, Conversion::Explicit)
             }
             ExprKind::Literal(Literal::String(text)) => match oracle_datetime_of(text, target) {
@@ -1119,6 +1122,9 @@ impl Evaluator<'_> {
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
             _ => {}
+        }
+        if name == "pg_get_expr" {
+            crate::pg_catalog::check_expression_tree_argument(name, arguments, self.scope)?;
         }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;

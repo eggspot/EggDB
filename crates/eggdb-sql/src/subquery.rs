@@ -1342,7 +1342,7 @@ fn prepare_select(
     };
     let from = select.from.clone();
     let joined = match &from {
-        Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions)?),
+        Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions, None)?),
         _ => None,
     };
     let scope = match (&from, &joined, definitions.first()) {

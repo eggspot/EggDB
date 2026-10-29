@@ -29,6 +29,7 @@ struct StepShape<'a> {
     source: Source<'a>,
     on: Option<&'a Expr>,
     using: Vec<(usize, usize)>,
+    where_keys: Vec<(usize, usize)>,
     visible: Sources<'a>,
 }
 
@@ -75,6 +76,18 @@ pub(crate) fn type_family(sql_type: SqlType) -> u8 {
     }
 }
 
+fn has_integer_keys(sql_type: SqlType) -> bool {
+    matches!(type_family(sql_type), 0 | 16)
+}
+
+fn same_family(all: &Sources<'_>, outer: usize, inner: usize) -> bool {
+    let scope = Scope::Many(all);
+    match (scope.column_type(outer), scope.column_type(inner)) {
+        (Some(x), Some(y)) => type_family(x) == type_family(y),
+        _ => false,
+    }
+}
+
 fn no_equality(left: SqlType, right: SqlType, position: usize) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_FUNCTION,
@@ -93,6 +106,7 @@ fn no_equality(left: SqlType, right: SqlType, position: usize) -> SqlError {
 pub(crate) fn resolve<'a>(
     from: &'a FromClause,
     tables: &'a [Arc<TableDefinition>],
+    filter: Option<&Expr>,
 ) -> SqlResult<JoinedFrom<'a>> {
     let references: Vec<_> = std::iter::once(&from.first)
         .chain(from.joins.iter().map(|join| &join.table))
@@ -132,6 +146,7 @@ pub(crate) fn resolve<'a>(
                 source: right,
                 on: None,
                 using: Vec::new(),
+                where_keys: Vec::new(),
                 visible: sources_between(&list, right_index..right_index + 1, &merged),
             });
             continue;
@@ -232,11 +247,12 @@ pub(crate) fn resolve<'a>(
             source: right,
             on,
             using,
+            where_keys: Vec::new(),
             visible,
         });
     }
     star.append(&mut group_star);
-    Ok(JoinedFrom {
+    let mut joined = JoinedFrom {
         sources: Sources {
             list,
             merged,
@@ -244,7 +260,72 @@ pub(crate) fn resolve<'a>(
             star,
         },
         shapes,
-    })
+    };
+    if let Some(filter) = filter {
+        joined.add_where_keys(filter);
+    }
+    Ok(joined)
+}
+
+fn source_at(list: &[Source<'_>], offset: usize) -> Option<usize> {
+    list.iter().rposition(|source| source.offset <= offset)
+}
+
+impl JoinedFrom<'_> {
+    fn first_filtered_level(&self) -> usize {
+        self.shapes
+            .iter()
+            .rposition(|shape| matches!(shape.kind, JoinKind::Right | JoinKind::Full))
+            .map_or(0, |index| index + 1)
+    }
+
+    fn add_where_keys(&mut self, filter: &Expr) {
+        let lowest = self.first_filtered_level();
+        let mut found: Vec<(usize, usize, usize)> = Vec::new();
+        {
+            let scope = Scope::Many(&self.sources);
+            let list = &self.sources.list;
+            for conjunct in conjuncts_of(filter) {
+                let ExprKind::Binary(BinaryOperator::Equal, left, right) = &conjunct.kind else {
+                    continue;
+                };
+                let offset = |expr: &Expr| match &expr.kind {
+                    ExprKind::Column { qualifier, name } => {
+                        scope.column(qualifier.as_deref(), name, expr.position).ok()
+                    }
+                    _ => None,
+                };
+                let (Some(a), Some(b)) = (offset(left), offset(right)) else {
+                    continue;
+                };
+                let (Some(source_a), Some(source_b)) = (source_at(list, a), source_at(list, b))
+                else {
+                    continue;
+                };
+                let (outer, inner, step) = match source_a.cmp(&source_b) {
+                    Ordering::Less => (a, b, source_b),
+                    Ordering::Greater => (b, a, source_a),
+                    Ordering::Equal => continue,
+                };
+                if step < lowest || !same_family(&self.sources, outer, inner) {
+                    continue;
+                }
+                found.push((step - 1, outer, inner));
+            }
+        }
+        for (shape_at, outer, inner) in found {
+            let Some(shape) = self.shapes.get_mut(shape_at) else {
+                continue;
+            };
+            if matches!(
+                shape.kind,
+                JoinKind::Comma | JoinKind::Cross | JoinKind::Inner
+            ) && !shape.where_keys.contains(&(outer, inner))
+            {
+                shape.where_keys.push((outer, inner));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,7 +389,7 @@ impl JoinedFrom<'_> {
         self.shapes
             .iter()
             .map(|shape| {
-                let pairs = equality_pairs(shape);
+                let pairs = equality_pairs(shape, &self.sources);
                 let table = shape.source.table;
                 let offset = shape.source.offset;
                 if primary_key_lefts(table, offset, &pairs).is_some() {
@@ -409,19 +490,20 @@ pub(crate) struct JoinedRows<'a> {
     filters: Vec<Vec<Expr>>,
 }
 
-fn equality_pairs(shape: &StepShape<'_>) -> Vec<(usize, usize)> {
+fn equality_pairs(shape: &StepShape<'_>, all: &Sources<'_>) -> Vec<(usize, usize)> {
     let scope = Scope::Many(&shape.visible);
-    let same_family =
-        |outer: usize, inner: usize| match (scope.column_type(outer), scope.column_type(inner)) {
-            (Some(x), Some(y)) => type_family(x) == type_family(y),
-            _ => false,
-        };
+    let same_family = |outer: usize, inner: usize| same_family(all, outer, inner);
     let mut pairs: Vec<(usize, usize)> = shape
         .using
         .iter()
         .copied()
         .filter(|&(outer, inner)| same_family(outer, inner))
         .collect();
+    for &pair in &shape.where_keys {
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
     let Some(on) = shape.on else {
         return pairs;
     };
@@ -448,7 +530,7 @@ fn equality_pairs(shape: &StepShape<'_>) -> Vec<(usize, usize)> {
             (true, false) => (b, a),
             _ => continue,
         };
-        if same_family(outer, inner) {
+        if same_family(outer, inner) && !pairs.contains(&(outer, inner)) {
             pairs.push((outer, inner));
         }
     }
@@ -542,6 +624,7 @@ struct HashBuild<'b> {
 fn build_hash(
     reader: &dyn KeyValueRead,
     shape: &StepShape<'_>,
+    all: &Sources<'_>,
     plan: HashBuild<'_>,
     hints: &mut RowCountHints,
     memory: &mut WorkMemory,
@@ -552,12 +635,8 @@ fn build_hash(
         keep,
         limit,
     } = plan;
-    let scope = Scope::Many(&shape.visible);
-    let integer = |offset: usize| {
-        scope
-            .column_type(offset)
-            .is_some_and(|sql_type| type_family(sql_type) == 0)
-    };
+    let scope = Scope::Many(all);
+    let integer = |offset: usize| scope.column_type(offset).is_some_and(has_integer_keys);
     let integer_keys = matches!(pairs, [(outer, inner)] if integer(*outer) && integer(*inner));
     let offset = shape.source.offset;
     let build: Vec<usize> = pairs.iter().map(|&(_, inner)| inner - offset).collect();
@@ -656,9 +735,12 @@ impl<'a> JoinedRows<'a> {
             let offset = shape.source.offset;
             let mut step_needed = std::mem::take(&mut needed[index + 1]);
             let scope = Scope::Many(&shape.visible);
-            let pairs = equality_pairs(shape);
+            let pairs = equality_pairs(shape, &joined.sources);
             let own = offset..offset + table.columns.len();
-            let keep: Vec<Expr> = if shape.kind == JoinKind::Inner {
+            let keep: Vec<Expr> = if matches!(
+                shape.kind,
+                JoinKind::Inner | JoinKind::Comma | JoinKind::Cross
+            ) {
                 filters[index + 1]
                     .iter()
                     .filter(|filter| touches_only(filter, &own))
@@ -712,6 +794,7 @@ impl<'a> JoinedRows<'a> {
                     build_hash(
                         reader,
                         shape,
+                        &joined.sources,
                         HashBuild {
                             pairs: &probe_build,
                             needed: &step_needed,
@@ -739,6 +822,7 @@ impl<'a> JoinedRows<'a> {
                     build_hash(
                         reader,
                         shape,
+                        &joined.sources,
                         HashBuild {
                             pairs: &pairs,
                             needed: &step_needed,
@@ -765,6 +849,7 @@ impl<'a> JoinedRows<'a> {
                 let built = build_hash(
                     reader,
                     shape,
+                    &joined.sources,
                     HashBuild {
                         pairs: &pairs,
                         needed: &step_needed,
@@ -1213,11 +1298,7 @@ impl JoinedFrom<'_> {
         let Some(filter) = filter else {
             return levels;
         };
-        let lowest = self
-            .shapes
-            .iter()
-            .rposition(|shape| matches!(shape.kind, JoinKind::Right | JoinKind::Full))
-            .map_or(0, |index| index + 1);
+        let lowest = self.first_filtered_level();
         for conjunct in conjuncts_of(filter) {
             let mut level = 0;
             visit_exprs(conjunct, &mut |node| {

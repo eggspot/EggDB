@@ -1206,8 +1206,14 @@ relation X (`pg_catalog` is searched first unless `search_path` lists it after a
 `pg_trigger`, `pg_rewrite` and `pg_auth_members`, each with PostgreSQL 16's columns and column
 types. A statement that names them builds their rows from the stored tables, views, sequences,
 schemas and comments once, however often it reads them (correlated subqueries included); a
-statement that names none costs nothing. They are read-only (`42501 permission denied for table
-pg_class`), other dialects do not see them, and `public.pg_class` still names a table of your own.
+statement that names none costs nothing; a stored default, `CHECK` constraint or view that uses
+a catalog function or a `reg*` cast reads the catalog when a statement uses it. Equalities in
+`WHERE` between two tables of a comma (or `CROSS JOIN`) list join them by hash as an `ON`
+condition does, so psql's index query stays fast with thousands of tables. They are read-only:
+`INSERT`, `UPDATE`, `DELETE` and `COPY ... FROM` are `42501 permission denied for table
+pg_class`, and `DROP`, `ALTER`, `COMMENT ON` and `CREATE INDEX` are `42501 permission denied:
+"pg_class" is a system catalog`; `COPY pg_class TO` reads them. Other dialects do not see them,
+and `public.pg_class` still names a table of your own.
 
 **What the rows say.** Every index is `btree` and ascending, every unique index is a `UNIQUE`
 constraint, an EggDB auto-increment column (`serial`, an identity column created by EggDB) is
@@ -1231,22 +1237,32 @@ it is the same in every statement and after a restart, and changes when the obje
 `int2vector` and `oidvector` (subscripts from 0, written separated by spaces), and `regclass`,
 `regtype`, `regnamespace`, `regrole` and `regproc` work in expressions and casts but are not
 column types of tables; `"char"` is the type of the catalog's kind columns only, and `"char"`
-written by you is still `char(1)`. A `reg*` cast takes a name or a number and shows the
-object's name, qualified with its schema only when it is not visible on the search path; an
+written by you is still `char(1)`. A `reg*` cast (`x::regclass`, `CAST(x AS regclass)` or
+`regclass(x)`) takes a name or a number and shows the object's name, qualified with its schema
+only when it is not visible on the search path; OID 0 and `'-'` show as `-`; a type name may
+carry a modifier and `[]` (`'character varying(10)'::regtype` is `character varying`); an
 unknown name is `42P01` (relation), `42704` (type, role) or `3F000` (schema), and an unknown
 number shows as the number. Integers and quoted constants compare with `oid` columns, and
-`nextval('s'::regclass)` stays a plain name lookup that never builds the catalog. The functions:
+`nextval('s'::regclass)` (or `CAST('s' AS regclass)`) stays a plain name lookup that never
+builds the catalog; naming a table there is `42809 "t" is not a sequence`. `pg_get_expr` takes
+only the catalog's `pg_node_tree` columns, as PostgreSQL does. The functions:
 `format_type`, `pg_get_userbyid`, `pg_table_is_visible`, `pg_type_is_visible`, `pg_get_expr`,
 `pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef` (the view's stored text),
 `pg_relation_is_publishable`, `pg_partition_ancestors` (no rows: there are no partitions),
 `pg_encoding_to_char`, `obj_description`, `col_description`, and `pg_get_triggerdef`,
 `pg_get_ruledef`, `pg_get_statisticsobjdef_columns` and `shobj_description`, which return NULL.
 
-**Not yet:** `\d+` and `\dt+` (sizes, storage, a table's access method), `\df`, `\dT`, `\dp`,
-`\dx`, the composite row type of each table, `information_schema` (item 38), and four things
-the table definition does not store yet (roadmap 37c): an index's method other than `btree` and
-a descending order, whether a unique index was made by `CREATE UNIQUE INDEX` rather than a
-constraint, and `GENERATED ALWAYS` identities.
+**Not yet:** `\d+` and `\dt+ \dv+ \ds+ \di+ \dn+` (sizes, storage, a table's access
+method, `public`'s access privileges and description; `pg_table_size` and the rest are
+missing), `\df`, `\dT`, `\dp`, `\dx`, `\dd`, `\db` and `\dC` (they read `pg_proc`,
+`pg_extension`, `pg_opclass`, `pg_tablespace_location` and `pg_cast`, which are not there yet,
+and fail readably), the composite row type of each table, `information_schema` (item 38), a
+view column of a catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` is `0A000`;
+`relname::text` works), and four things the table definition does not store yet (roadmap
+37c): an index's method other than `btree` and a descending order, whether a unique index was
+made by `CREATE UNIQUE INDEX` rather than a constraint, and `GENERATED ALWAYS` identities.
+`\d` of a view shows the view's text as it was written (PostgreSQL shows its own pretty form;
+only `\d+` prints it).
 
 ## How SQL is stored
 
