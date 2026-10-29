@@ -464,8 +464,9 @@ SELECT @@VERSION
   `CONVERT`, `ISNULL`, `DATEADD`, `DATEDIFF` (counting boundaries crossed), `CHARINDEX`,
   `LEN`, `NEWID()`, `SCOPE_IDENTITY()`, `UPPER`, `LOWER`, `ABS`, `COALESCE`, `NULLIF` and the
   aggregates, `COUNT` returning `int`. `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`,
-  `@@LANGUAGE`, `@@ROWCOUNT`. Another function is error 195, another `@@` name or `@variable`
-  error 137.
+  `@@LANGUAGE`, `@@ROWCOUNT`. Another function is error 195, another `@@` name error 137, and so
+  is an `@variable` unless it is a parameter of a parameterized batch (`sp_executesql` and the
+  prepared statements of SqlClient and mssql-jdbc, item 23b).
 - `ORDER BY ... OFFSET n ROWS [FETCH {FIRST | NEXT} m ROWS ONLY]`, `OUTPUT inserted.*` on
   `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE`, and `SELECT total = qty * price`.
 - **Defaults** are constants (folded to the column's type: `DEFAULT ((0))` on a `bit` column
@@ -481,11 +482,18 @@ SELECT @@VERSION
 - **Transactions**: each statement commits on its own unless `BEGIN TRAN[SACTION]` opened a
   transaction; `BEGIN TRAN` nests (`@@TRANCOUNT`), the outermost `COMMIT [TRAN | WORK]`
   commits, `ROLLBACK [TRAN | WORK]` rolls everything back, and without a transaction they are
-  errors 3902 and 3903. DDL is transactional.
+  errors 3902 and 3903. DDL is transactional. With `SET IMPLICIT_TRANSACTIONS ON` (what
+  mssql-jdbc's `setAutoCommit(false)` sends) the first statement that changes data or the
+  schema starts a transaction that lasts until `COMMIT` or `ROLLBACK`.
+- **`IF condition statement [ELSE statement]`** with one statement on each side and a
+  condition that reads no table, such as mssql-jdbc's `IF @@TRANCOUNT > 0 COMMIT TRAN`;
+  `BEGIN ... END` blocks and conditions with subqueries (`IF EXISTS (...)`) come with item 47
+  and are error 40517.
 - `USE` the served database (another is error 911), and `SET NOCOUNT`, `ANSI_NULLS`,
   `QUOTED_IDENTIFIER`, `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`
-  and `ANSI_NULL_DFLT_ON` `ON`, `IMPLICIT_TRANSACTIONS OFF`, `TEXTSIZE`, `LANGUAGE us_english`,
-  `DATEFORMAT mdy`, `LOCK_TIMEOUT` and `TRANSACTION ISOLATION LEVEL` (all run serializable).
+  and `ANSI_NULL_DFLT_ON` `ON`, `IMPLICIT_TRANSACTIONS ON` and `OFF`, `TEXTSIZE`, `LANGUAGE
+  us_english`, `DATEFORMAT mdy`, `LOCK_TIMEOUT` and `TRANSACTION ISOLATION LEVEL` (all run
+  serializable).
 - **Errors** carry SQL Server's numbers, severities and wording: `Msg 208, Level 16, State 1:
   Invalid object name 'missing'.` in `eggdb sql`, and the same fields in TDS's ERROR token.
   Features EggDB lacks are 40517 (`... is not supported in this version of EggDB.`).
@@ -574,9 +582,67 @@ What the server does:
   still logging in; the next gets error 17809. `--log-batches` logs the first 200 characters of
   each batch, to see what a client sends.
 
-Not yet: TLS, Microsoft.Data.SqlClient and mssql-jdbc (they send parameterized queries as RPC
-requests, item 23b), bulk load (`bcp`, item 46), MARS, cancelling a running batch (attention is
+Not yet: TLS, bulk load (`bcp`, item 46), MARS, cancelling a running batch (attention is
 answered when the batch ends), and SSMS's and Azure Data Studio's catalog queries (item 41).
+
+## .NET and Java apps over TDS
+
+.NET apps through Microsoft.Data.SqlClient and Java apps through Microsoft's JDBC driver
+(mssql-jdbc) run against `eggdb serve --tds-listen` unchanged, apart from turning encryption
+off (roadmap item 23b, D132):
+
+```csharp
+using var connection = new SqlConnection(
+    "Server=127.0.0.1,1433;Database=shop;User ID=eggdb;Password=choose-one;Encrypt=false");
+connection.Open();
+using var insert = new SqlCommand("INSERT INTO bakes (id, name) VALUES (@id, @name)", connection);
+insert.Parameters.Add("@id", SqlDbType.Int).Value = 1;
+insert.Parameters.Add("@name", SqlDbType.NVarChar, 40).Value = "bread";
+insert.ExecuteNonQuery();
+```
+
+```java
+Connection connection = DriverManager.getConnection(
+    "jdbc:sqlserver://127.0.0.1:1433;databaseName=shop;encrypt=false", "eggdb", "choose-one");
+PreparedStatement select = connection.prepareStatement("SELECT name FROM bakes WHERE id = ?");
+select.setInt(1, 1);
+```
+
+What the server does:
+- **Parameterized statements** arrive as remote procedure calls (RPC requests), by name or by
+  the ids the drivers use: `sp_executesql` runs a batch once with its parameters;
+  `sp_prepare` and `sp_prepexec` prepare one and return its handle (an `int` output parameter,
+  numbered from 1 on each connection), `sp_execute` runs it again by its handle and
+  `sp_unprepare` forgets it (a handle it does not know is error 8179). Several calls may come in
+  one request. Each `@name` in the text takes the value of its parameter, given by name or by
+  position in the declaration list (`@p1 int, @p2 nvarchar(40) OUTPUT`), converted to its
+  declared type as `CAST` would; a declared parameter without a value is error 8178, a value
+  for an undeclared one 8145, one too many 8144. The statements run with the batch rules above
+  and the results come back as SQL Server sends them (DONEINPROC per statement, then the
+  return status 0, the output parameters and DONEPROC). A connection keeps at most 65,536
+  prepared statements and 64 MiB of their text.
+- **Parameter types** are those the drivers send: `tinyint`, `smallint`, `int` and `bigint`,
+  `bit`, `real` and `float`, `decimal`/`numeric`, `money` and `smallmoney`, `datetime` and
+  `smalldatetime`, `date`, `time`, `datetime2`, `datetimeoffset` (its instant), `uniqueidentifier`,
+  `nvarchar`/`nchar`/`ntext` (with `nvarchar(max)` in chunks), `varchar`/`char`/`text` (read as
+  Windows-1252, or UTF-8 under a UTF-8 collation) and `varbinary`/`binary`/`image`. `sql_variant`,
+  `xml`, user-defined and table-valued parameters and Always Encrypted are error 40517.
+- **Transactions** from `SqlConnection.BeginTransaction`, `Commit` and `Rollback` arrive as
+  transaction manager requests, which begin, commit and roll back as `BEGIN TRAN`, `COMMIT` and
+  `ROLLBACK` do (a commit or rollback that begins the next transaction too included) and report
+  the transaction descriptor the driver sends back; save points (`SqlTransaction.Save`) and
+  distributed transactions are error 40517. mssql-jdbc's `setAutoCommit(false)`, `commit()` and
+  `rollback()` send `SET IMPLICIT_TRANSACTIONS ON` and `IF @@TRANCOUNT > 0 COMMIT TRAN` batches,
+  which run as above.
+- **Pooled connections**: when SqlClient hands out a pooled connection again it asks for a reset
+  with its next request; the server rolls back the open transaction (unless asked to keep it),
+  puts every `SET` option back as after login and acknowledges the reset first. Prepared handles
+  stay.
+
+CI's `tds-apps` job runs a C# program through SqlClient and a Java program through mssql-jdbc
+(parameterized CRUD, prepared statements, a committed and a rolled-back transaction, an error
+and, for SqlClient, a reused pooled connection) and compares what each prints with
+`scripts/tds-apps/expected-*.out`.
 
 ## What runs today
 
@@ -1875,9 +1941,16 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   an `UPDATE` of an identity column (SQL Server's 8102), and `ROLLBACK TRAN <name>` ignores the
   name. Divide by zero and arithmetic overflow end the batch, where SQL Server ends only the
   statement.
-- `DECLARE`, `IF`, `WHILE`, `BEGIN ... END`, `TRY ... CATCH`, `PRINT`, `EXEC`, stored procedures
-  and triggers; `SAVE TRANSACTION`; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF`, `ANSI_PADDING OFF`
-  and `IMPLICIT_TRANSACTIONS ON`; three-part names and other databases.
+- `DECLARE`, `IF` with a block or a condition that reads a table, `WHILE`, `BEGIN ... END`, `TRY
+  ... CATCH`, `PRINT`, `EXEC`, stored procedures and triggers; `SAVE TRANSACTION` and save
+  points over TDS; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF` and `ANSI_PADDING OFF`; three-part
+  names and other databases.
+- Under `IMPLICIT_TRANSACTIONS ON`, a `SELECT` starts no transaction (SQL Server's does), so
+  `@@TRANCOUNT` stays 0 after reads alone.
+- Over TDS: an output parameter of `sp_executesql` comes back with the value it was sent with,
+  since nothing can assign it before item 47 brings `SET @p = ...`; `sp_prepare` returns no
+  column metadata; a `varchar` parameter under a collation other than Latin1 or UTF-8 is read as
+  Windows-1252; a `datetimeoffset` parameter keeps its instant, not its offset.
 - What SSMS and sqlpackage scripts write runs (D125): `SET IDENTITY_INSERT t ON|OFF` (explicit
   identity values, 0 and negative ones too, are kept; Msg 544, 545, 8101, 8106 and 8107),
   `INSERT` without `INTO`, `PRIMARY KEY` and `UNIQUE` with `CLUSTERED` or `NONCLUSTERED`, index

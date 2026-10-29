@@ -403,6 +403,23 @@ functions have unit tests in `crates/eggdb-sql/src/information_schema/tests.rs`,
 `pg_catalog/tests.rs`, `set_returning_tests.rs` and `window.rs`, and cases in
 `correctness/postgresql.test`.
 
+SQL Server's drivers have their own check (item 23b, D132).
+`crates/eggdb/tests/clients/java/TdsAppCheck.java` (mssql-jdbc) and
+`crates/eggdb/tests/clients/dotnet/TdsAppCheck` (Microsoft.Data.SqlClient) run parameterized CRUD
+(a prepared statement executed three times, so the drivers go through `sp_executesql`,
+`sp_prepexec` and `sp_execute`), a committed and a rolled-back transaction, a failing query and,
+for SqlClient, a reused pooled connection whose reset clears `SET NOCOUNT ON`.
+`scripts/tds-apps/check.sh <eggdb> <work>` serves a new database with `eggdb serve --tds-listen`,
+runs both and fails unless each prints exactly `scripts/tds-apps/expected-java.out` and
+`expected-dotnet.out`, written from Microsoft's documentation, since SQL Server itself cannot be a
+CI oracle under its license. CI's `tds-apps` job runs it with mssql-jdbc 12.8.1 and SqlClient
+5.2.2, downloaded as test tools and never shipped, and keeps both outputs, the server log and the
+difference. The RPC, transaction manager and reset paths have unit tests in
+`crates/eggdb-tdswire/src/rpc.rs`, `messages.rs`, `procedures.rs` and `tokens.rs`, socket tests in
+`crates/eggdb-tdswire/tests/rpc.rs`, mutated requests in `hostile_packets.rs`, and the dialect's
+parameters, implicit transactions, `IF` and resets have tests in
+`crates/eggdb-sql/src/sqlserver_tests.rs`.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.
