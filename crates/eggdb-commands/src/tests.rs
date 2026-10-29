@@ -1,8 +1,11 @@
 use crate::{
     Annotations, ArgumentTarget, COMMANDS, COMMON_OPTIONS, CORE_VERBS, Category, CommandDefinition,
-    ConfirmCheck, ERROR_CODES, Effect, Grant, KEPT_NAMES, SHIPPED_TOOL_NAMES, TOOLS, category_of,
-    command, tool,
+    ConfirmCheck, ERROR_CODES, Effect, Grant, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES, TOOLS,
+    category_of, command, tool,
 };
+
+const WITHOUT_A_FORMAT: &[&str] = &["ui", "shell", "mcp"];
+const DESCRIBED_BY_THE_MAIN_HELP: &[&str] = &["help", "version"];
 
 fn is_snake_case(name: &str) -> bool {
     !name.is_empty()
@@ -30,8 +33,8 @@ fn takes_long_option(command: &CommandDefinition, long: &str) -> bool {
 fn every_command_has_the_fields_its_slice_requires() {
     for command in COMMANDS {
         let name = command.name();
+        let main_help_only = DESCRIBED_BY_THE_MAIN_HELP.contains(&name.as_str());
         assert!(!command.words.is_empty(), "{name}");
-        assert!(!command.synopsis.is_empty(), "{name}");
         assert!(!command.summary.is_empty(), "{name}");
         assert!(
             command.description.ends_with('.'),
@@ -42,10 +45,24 @@ fn every_command_has_the_fields_its_slice_requires() {
             "{name}: {}",
             command.usage
         );
-        assert!(command.help.ends_with('\n'), "{name}");
-        assert!(command.help.contains("\nExamples:\n"), "{name}");
-        assert!(!command.operands.is_empty(), "{name}");
-        assert!(command.has_json(), "{name} has no JSON form");
+        if main_help_only {
+            assert!(command.help.is_empty(), "{name}");
+        } else {
+            assert!(!command.synopsis.is_empty(), "{name}");
+            assert!(!command.operands.is_empty(), "{name}");
+            assert!(command.help.ends_with('\n'), "{name}");
+            assert!(command.help.contains("\nExamples:\n"), "{name}");
+        }
+        assert_eq!(
+            command.has_json(),
+            !WITHOUT_A_FORMAT.contains(&name.as_str()),
+            "{name}: every command that takes --format has a JSON form"
+        );
+        assert_eq!(
+            command.outputs.is_empty(),
+            WITHOUT_A_FORMAT.contains(&name.as_str()),
+            "{name}: only a command without --format declares no output"
+        );
         assert!(!command.errors.is_empty(), "{name}");
         assert!(!command.examples.is_empty(), "{name}");
         assert!(!command.surfaces.is_empty(), "{name}");
@@ -55,7 +72,7 @@ fn every_command_has_the_fields_its_slice_requires() {
                 "{name}: {example}"
             );
             assert!(
-                command.help.contains(example),
+                main_help_only || command.help.contains(example),
                 "{name}: the help shows every example: {example}"
             );
         }
@@ -74,11 +91,30 @@ fn every_command_has_the_fields_its_slice_requires() {
 fn every_command_is_a_kept_name_or_a_noun_and_a_core_verb() {
     for command in COMMANDS {
         let fits = match command.words {
-            [word] => KEPT_NAMES.contains(word),
-            [noun, verb] => !KEPT_NAMES.contains(noun) && is_core_verb(verb),
+            [word] => KEPT_NAMES.contains(word) || is_core_verb(word),
+            [noun, verb] => {
+                NOUNS.contains(noun) && !KEPT_NAMES.contains(noun) && is_core_verb(verb)
+            }
             _ => false,
         };
         assert!(fits, "{}", command.name());
+    }
+    for kept in KEPT_NAMES {
+        assert!(
+            command(&[*kept]).is_some(),
+            "{kept} is a kept name, so it is a command in the registry"
+        );
+    }
+    for noun in NOUNS {
+        let verbs: Vec<&CommandDefinition> = COMMANDS
+            .iter()
+            .filter(|command| command.words.first() == Some(noun))
+            .collect();
+        assert!(verbs.len() > 1, "{noun} has its verbs");
+        assert!(
+            verbs.iter().all(|verb| verb.help == verbs[0].help),
+            "the commands of {noun} share one help page"
+        );
     }
     let mut names: Vec<String> = COMMANDS.iter().map(CommandDefinition::name).collect();
     names.sort();
@@ -116,6 +152,19 @@ fn every_error_code_has_one_category_and_every_command_s_codes_are_known() {
             seen.push(error.code);
         }
         assert_eq!(command.exit_for("invalid_arguments"), Some(2));
+    }
+    for known in ERROR_CODES {
+        let mut exits: Vec<u8> = COMMANDS
+            .iter()
+            .filter_map(|command| command.exit_for(known.code))
+            .collect();
+        exits.sort_unstable();
+        exits.dedup();
+        assert!(
+            exits.len() <= 1,
+            "{} exits {exits:?}: one code, one exit in every command",
+            known.code
+        );
     }
     assert_eq!(category_of("database_busy"), Some(Category::Busy));
     assert_eq!(category_of("declined_by_user"), Some(Category::Declined));
@@ -220,20 +269,17 @@ fn the_shipped_tools_keep_their_annotations() {
 #[test]
 fn every_tool_maps_onto_its_cli_twin() {
     for tool in TOOLS {
-        let twin = tool.command.map(command);
-        let Some(twin) = twin else {
-            assert!(
-                tool.arguments
-                    .iter()
-                    .all(|argument| argument.maps_to == ArgumentTarget::NoTwin),
-                "{} has no twin, so its arguments map nowhere",
-                tool.name
-            );
-            continue;
+        let Some(words) = tool.command else {
+            panic!("{} has no CLI twin: from slice 2 every tool has one", tool.name);
         };
-        let Some(twin) = twin else {
+        let Some(twin) = command(words) else {
             panic!("{}'s command is not in the registry", tool.name);
         };
+        assert!(
+            twin.max_effect != Effect::Read || tool.max_effect == Effect::Read,
+            "{}: a tool may not do more than its twin",
+            tool.name
+        );
         for fixed in tool.fixed {
             if let Some(long) = fixed.strip_prefix("--") {
                 assert!(takes_long_option(twin, long), "{}: {fixed}", tool.name);
@@ -273,6 +319,20 @@ fn every_tool_maps_onto_its_cli_twin() {
 fn lookups_find_commands_by_words_and_tools_by_name() {
     assert_eq!(command(&["get"]).map(|found| found.usage), Some("eggdb get <file> <key> [-C <name>]"));
     assert!(command(&["frob"]).is_none());
+    assert_eq!(command(&["delete"]).map(CommandDefinition::name), Some("del".to_owned()));
+    assert_eq!(
+        command(&["collection", "del"]).map(CommandDefinition::name),
+        Some("collection delete".to_owned())
+    );
+    assert_eq!(
+        command(&["table", "sample"]).map(|found| found.max_effect),
+        Some(Effect::Read)
+    );
+    assert!(command(&["table", "drop"]).is_none());
+    assert_eq!(
+        tool("run_sql").map(|found| found.fixed),
+        Some(&["--format", "json", "--read-only"][..])
+    );
     assert_eq!(tool("kv_scan").map(|found| found.title), Some("Scan keys"));
     assert!(tool("drop_table").is_none());
     let run_sql = tool("run_sql").map(|found| (found.description_for(false), found.description_for(true)));

@@ -17,7 +17,8 @@
 mod registry;
 
 pub use registry::{
-    COMMANDS, COMMON_OPTIONS, CORE_VERBS, ERROR_CODES, KEPT_NAMES, SHIPPED_TOOL_NAMES, TOOLS,
+    COMMANDS, COMMON_OPTIONS, CORE_VERBS, ERROR_CODES, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES,
+    TOOLS,
 };
 
 /// The most a use of a command or a call of a tool can do.
@@ -383,7 +384,8 @@ pub struct OutputDefinition {
 pub struct CommandDefinition {
     /// The words that name it after `eggdb`, such as `["get"]`.
     pub words: &'static [&'static str],
-    /// Other spellings that run it, such as `delete` for `del`.
+    /// Other spellings of its last word, such as `delete` for `del` and `del` for
+    /// `collection delete`.
     pub aliases: &'static [&'static str],
     /// Its operands as the main help lists them, such as `<file> <key>`.
     pub synopsis: &'static str,
@@ -393,7 +395,8 @@ pub struct CommandDefinition {
     pub description: &'static str,
     /// Its one-line usage, as `eggdb help <command>` and usage errors print it.
     pub usage: &'static str,
-    /// The text `eggdb help <command>` prints after the usage line.
+    /// The text `eggdb help <command>` prints after the usage line; the commands of one noun
+    /// share it, and it is empty for `help` and `version`, which the main help describes.
     pub help: &'static str,
     /// Its own options; [`COMMON_OPTIONS`] apply to it as well.
     pub options: &'static [OptionDefinition],
@@ -641,11 +644,14 @@ impl ToolDefinition {
     }
 }
 
-/// The command named by these words or by an alias of its one word.
+/// The command named by these words, or by them with an alias as the last word.
 pub fn command(words: &[&str]) -> Option<&'static CommandDefinition> {
+    let (last, first) = words.split_last()?;
     COMMANDS.iter().find(|command| {
         command.words == words
-            || (words.len() == 1 && command.aliases.contains(&words[0]))
+            || (command.words.len() == words.len()
+                && command.words[..first.len()] == *first
+                && command.aliases.contains(last))
     })
 }
 
