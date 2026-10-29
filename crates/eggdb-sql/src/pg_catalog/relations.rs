@@ -471,6 +471,16 @@ fn type_rows() -> Vec<Vec<Value>> {
             ] {
                 row = row.set(name, regproc_none());
             }
+            if found.category == 'A' && found.element != 0 && !matches!(found.oid, 22 | 30) {
+                row = row.set(
+                    "typinput",
+                    Value::Reg(Box::new(super::RegValue {
+                        kind: super::RegKind::Proc,
+                        oid: oids::ARRAY_IN,
+                        name: "array_in".to_owned(),
+                    })),
+                );
+            }
             row.done()
         })
         .collect()

@@ -820,3 +820,27 @@ fn client_driver_catalog_functions_settings_and_subscripts_answer() {
         ["1", "0"]
     );
 }
+
+#[test]
+fn array_types_name_array_in_as_their_input_function() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT typname, typinput = 'pg_catalog.array_in'::regproc, typinput::text \
+             FROM pg_type WHERE oid IN (23, 1007) ORDER BY oid"
+        )),
+        ["int4|f|-", "_int4|t|array_in"]
+    );
+    assert_eq!(
+        rows_of(&last(&mut session, "SELECT 'array_in'::regproc::oid")),
+        ["750"]
+    );
+    assert_eq!(
+        fails(&mut session, "SELECT 'no_such_function'::regproc")
+            .state()
+            .code(),
+        "42883"
+    );
+}

@@ -36,6 +36,10 @@ pub(crate) const PREDEFINED_ROLES: [(u32, &str); 14] = [
     (6304, "pg_create_subscription"),
 ];
 
+pub(crate) const ARRAY_IN: u32 = 750;
+
+pub(crate) const BUILTIN_FUNCTIONS: [(u32, &str); 1] = [(ARRAY_IN, "array_in")];
+
 pub(crate) const SYSTEM_SCHEMAS: [(u32, &str, u32); 4] = [
     (PG_CATALOG, "pg_catalog", SESSION_USER),
     (PG_TOAST, "pg_toast", SESSION_USER),

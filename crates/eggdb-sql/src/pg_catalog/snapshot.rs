@@ -838,9 +838,16 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
     let reg = match kind {
         RegKind::Type => found(super::types::regtype_oid(text)?),
         RegKind::Proc => {
-            return Err(SqlError::not_supported(
-                "regproc values naming a function are not supported yet",
-            ));
+            let (schema, name) = split_object_name(text, kind)?;
+            let known = schema
+                .as_deref()
+                .is_none_or(|schema| schema == crate::schemas::CATALOG_SCHEMA);
+            let oid = oids::BUILTIN_FUNCTIONS
+                .iter()
+                .find(|(_, function)| known && *function == name)
+                .map(|(oid, _)| *oid)
+                .ok_or_else(|| missing(SqlState::UNDEFINED_FUNCTION, "function", text))?;
+            found(oid)
         }
         RegKind::Class | RegKind::Namespace | RegKind::Role => {
             let (schema, name) = split_object_name(text, kind)?;
@@ -920,7 +927,10 @@ pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
                     .map(|(_, name)| (*name).to_owned())
             })
             .map(|name| quote_ident(&name)),
-        RegKind::Proc => None,
+        RegKind::Proc => oids::BUILTIN_FUNCTIONS
+            .iter()
+            .find(|(found, _)| *found == oid)
+            .map(|(_, name)| (*name).to_owned()),
     };
     RegValue {
         kind,
