@@ -71,6 +71,15 @@ pub enum ErrorKind {
     DatabaseFull,
     /// An [`Options`](crate::Options) value is outside what EggDB accepts.
     InvalidOption,
+    /// There is no collection of that name (see
+    /// [`Database::create_collection`](crate::Database::create_collection)).
+    CollectionNotFound,
+    /// The name can't name a collection: names are 1 to 128 bytes of text without whitespace or
+    /// control characters.
+    InvalidCollectionName,
+    /// The key starts with the bytes EggDB keeps for collections, `0xff 'C' 'O' 'L' 0x00`, which
+    /// the default key space refuses. Nothing changed, and the transaction stays open.
+    ReservedKey,
     /// Any other failure.
     Other,
 }
@@ -221,7 +230,11 @@ impl From<Error> for std::io::Error {
             ErrorKind::NotADatabase | ErrorKind::Incompatible | ErrorKind::Corrupt => {
                 std::io::ErrorKind::InvalidData
             }
-            ErrorKind::TooLarge | ErrorKind::InvalidOption => std::io::ErrorKind::InvalidInput,
+            ErrorKind::CollectionNotFound => std::io::ErrorKind::NotFound,
+            ErrorKind::TooLarge
+            | ErrorKind::InvalidOption
+            | ErrorKind::InvalidCollectionName
+            | ErrorKind::ReservedKey => std::io::ErrorKind::InvalidInput,
             ErrorKind::OutOfMemory => std::io::ErrorKind::OutOfMemory,
             ErrorKind::DatabaseFull => std::io::ErrorKind::StorageFull,
             _ => std::io::ErrorKind::Other,

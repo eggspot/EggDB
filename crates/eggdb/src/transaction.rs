@@ -1,3 +1,4 @@
+use crate::collection;
 use crate::database::Database;
 use crate::error::{Error, Result};
 use crate::scan::{KeyRange, Reader, Scan};
@@ -41,12 +42,29 @@ impl<'db> ReadTransaction<'db> {
         Ok(Self { inner, tree })
     }
 
-    /// The value stored under `key`, or `None` when the key is absent.
+    /// The value stored under `key` in the default key space, or `None` when the key is
+    /// absent. Keys of [collections](Self::collection) are not in the default key space.
     pub fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
+        let key = key.as_ref();
+        if collection::is_reserved(key) {
+            return Ok(None);
+        }
+        self.get_raw(key)
+    }
+
+    pub(crate) fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let Some(tree) = &self.tree else {
             return Ok(None);
         };
-        self.inner.get(tree, key.as_ref()).map_err(Error::storage)
+        self.reader().get(tree, key)
+    }
+
+    pub(crate) fn reader(&self) -> Reader<'_> {
+        Reader::Snapshot(&self.inner)
+    }
+
+    pub(crate) fn tree(&self) -> Option<BTree> {
+        self.tree
     }
 
     /// Calls `read` with the value stored under `key` where it lies, without copying it out,
@@ -58,22 +76,21 @@ impl<'db> ReadTransaction<'db> {
         key: impl AsRef<[u8]>,
         read: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>> {
-        let Some(tree) = &self.tree else {
+        let key = key.as_ref();
+        let Some(tree) = self.tree.filter(|_| !collection::is_reserved(key)) else {
             return Ok(None);
         };
-        self.inner
-            .get_with(tree, key.as_ref(), read)
-            .map_err(Error::storage)
+        self.reader().get_with(&tree, key, read)
     }
 
-    /// The entries with keys in `range`, in key order; `.rev()` gives them largest key first.
-    /// See [`Scan`] and [`KeyRange`].
+    /// The entries of the default key space with keys in `range`, in key order; `.rev()`
+    /// gives them largest key first. See [`Scan`] and [`KeyRange`].
     pub fn scan(&self, range: impl KeyRange) -> Scan<'_> {
         Scan::between(Reader::Snapshot(&self.inner), self.tree, &range)
     }
 
-    /// The entries whose keys start with `prefix`, in key order; `.rev()` gives them largest
-    /// key first. The empty prefix scans every entry.
+    /// The entries of the default key space whose keys start with `prefix`, in key order;
+    /// `.rev()` gives them largest key first. The empty prefix scans every entry.
     pub fn scan_prefix(&self, prefix: impl AsRef<[u8]>) -> Scan<'_> {
         Scan::prefix(Reader::Snapshot(&self.inner), self.tree, prefix.as_ref())
     }
@@ -146,13 +163,33 @@ impl<'db> WriteTransaction<'db> {
         })
     }
 
-    /// The value stored under `key`, this transaction's changes included, or `None` when the
-    /// key is absent.
+    /// The value stored under `key` in the default key space, this transaction's changes
+    /// included, or `None` when the key is absent.
     pub fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
+        let key = key.as_ref();
+        if collection::is_reserved(key) {
+            return Ok(None);
+        }
+        self.get_raw(key)
+    }
+
+    pub(crate) fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let Some(tree) = &self.tree else {
             return Ok(None);
         };
-        self.inner.get(tree, key.as_ref()).map_err(Error::storage)
+        self.reader().get(tree, key)
+    }
+
+    pub(crate) fn reader(&self) -> Reader<'_> {
+        Reader::Writer(&self.inner)
+    }
+
+    pub(crate) fn tree(&self) -> Option<BTree> {
+        self.tree
+    }
+
+    pub(crate) fn max_key_bytes(&self) -> usize {
+        self.database.max_key_bytes()
     }
 
     /// Calls `read` with the value stored under `key`, this transaction's changes included,
@@ -163,29 +200,32 @@ impl<'db> WriteTransaction<'db> {
         key: impl AsRef<[u8]>,
         read: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>> {
-        let Some(tree) = &self.tree else {
+        let key = key.as_ref();
+        let Some(tree) = self.tree.filter(|_| !collection::is_reserved(key)) else {
             return Ok(None);
         };
-        self.inner
-            .get_with(tree, key.as_ref(), read)
-            .map_err(Error::storage)
+        self.reader().get_with(&tree, key, read)
     }
 
-    /// The entries with keys in `range`, this transaction's changes included, in key order;
-    /// `.rev()` gives them largest key first. See [`Scan`] and [`KeyRange`].
+    /// The entries of the default key space with keys in `range`, this transaction's changes
+    /// included, in key order; `.rev()` gives them largest key first. See [`Scan`] and
+    /// [`KeyRange`].
     pub fn scan(&self, range: impl KeyRange) -> Scan<'_> {
         Scan::between(Reader::Writer(&self.inner), self.tree, &range)
     }
 
-    /// The entries whose keys start with `prefix`, this transaction's changes included, in key
-    /// order; `.rev()` gives them largest key first. The empty prefix scans every entry.
+    /// The entries of the default key space whose keys start with `prefix`, this transaction's
+    /// changes included, in key order; `.rev()` gives them largest key first. The empty prefix
+    /// scans every entry.
     pub fn scan_prefix(&self, prefix: impl AsRef<[u8]>) -> Scan<'_> {
         Scan::prefix(Reader::Writer(&self.inner), self.tree, prefix.as_ref())
     }
 
-    /// Stores `value` under `key`, replacing the value there. Any byte string is a key, the
-    /// empty one included, up to [`Database::max_key_bytes`], and any byte string is a value,
-    /// up to [`Database::max_value_bytes`].
+    /// Stores `value` under `key` in the default key space, replacing the value there. Any byte
+    /// string is a key, the empty one included, up to [`Database::max_key_bytes`], except those
+    /// that start with the bytes EggDB keeps for [collections](Self::collection), `0xff C O L
+    /// 0x00`, which fail with [`ErrorKind::ReservedKey`](crate::ErrorKind::ReservedKey). Any
+    /// byte string is a value, up to [`Database::max_value_bytes`].
     ///
     /// A value too large to sit beside its key in a B+tree leaf is stored on overflow pages
     /// of its own. Each of them stays in the page cache until the commit, like every page a
@@ -193,10 +233,12 @@ impl<'db> WriteTransaction<'db> {
     /// than [`Options::cache_bytes`](crate::Options::cache_bytes) allows fails with
     /// [`ErrorKind::TooLarge`](crate::ErrorKind::TooLarge) and changes nothing.
     pub fn put(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
-        self.put_bytes(key.as_ref(), value.as_ref())
+        let key = key.as_ref();
+        collection::refuse_reserved(key)?;
+        self.put_raw(key, value.as_ref())
     }
 
-    fn put_bytes(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub(crate) fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let tree = match self.tree {
             Some(tree) => tree,
             None => {
@@ -230,7 +272,12 @@ impl<'db> WriteTransaction<'db> {
         key: impl AsRef<[u8]>,
         value: impl AsRef<[u8]>,
     ) -> Result<bool> {
-        let (key, value) = (key.as_ref(), value.as_ref());
+        let key = key.as_ref();
+        collection::refuse_reserved(key)?;
+        self.put_if_absent_raw(key, value.as_ref())
+    }
+
+    pub(crate) fn put_if_absent_raw(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
         let tree = match self.tree {
             Some(tree) => tree,
             None => {
@@ -243,14 +290,21 @@ impl<'db> WriteTransaction<'db> {
             .map_err(Error::storage)
     }
 
-    /// Removes `key` and its value, and returns whether the key was there.
+    /// Removes `key` and its value from the default key space, and returns whether the key was
+    /// there.
     pub fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<bool> {
+        let key = key.as_ref();
+        if collection::is_reserved(key) {
+            return Ok(false);
+        }
+        self.delete_raw(key)
+    }
+
+    pub(crate) fn delete_raw(&mut self, key: &[u8]) -> Result<bool> {
         let Some(tree) = self.tree else {
             return Ok(false);
         };
-        self.inner
-            .delete(&tree, key.as_ref())
-            .map_err(Error::storage)
+        self.inner.delete(&tree, key).map_err(Error::storage)
     }
 
     /// Commits every change atomically and returns the commit's stamp, which is above every

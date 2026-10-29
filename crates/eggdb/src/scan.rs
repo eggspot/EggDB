@@ -1,3 +1,4 @@
+use crate::collection;
 use crate::error::{Error, Result};
 use eggdb_platform::OsFile;
 use eggdb_storage::{BTree, Cursor, ScanOrder, StorageError};
@@ -109,6 +110,27 @@ pub(crate) enum Reader<'t> {
 }
 
 impl Reader<'_> {
+    pub(crate) fn get(self, tree: &BTree, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        match self {
+            Self::Snapshot(transaction) => transaction.get(tree, key),
+            Self::Writer(transaction) => transaction.get(tree, key),
+        }
+        .map_err(Error::storage)
+    }
+
+    pub(crate) fn get_with<R>(
+        self,
+        tree: &BTree,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> R,
+    ) -> Result<Option<R>> {
+        match self {
+            Self::Snapshot(transaction) => transaction.get_with(tree, key, read),
+            Self::Writer(transaction) => transaction.get_with(tree, key, read),
+        }
+        .map_err(Error::storage)
+    }
+
     fn lend(
         self,
         cursor: &mut Cursor,
@@ -131,27 +153,81 @@ impl Reader<'_> {
     }
 }
 
-enum Keys {
-    Between(Bound<Vec<u8>>, Bound<Vec<u8>>),
-    Prefix(Vec<u8>),
+type Segment = (Bound<Vec<u8>>, Bound<Vec<u8>>);
+
+fn cursor_over(segment: &Segment, tree: &BTree, order: ScanOrder) -> Cursor {
+    tree.scan(
+        segment.0.as_ref().map(Vec::as_slice),
+        segment.1.as_ref().map(Vec::as_slice),
+        order,
+    )
 }
 
-impl Keys {
-    fn cursor(&self, tree: &BTree, order: ScanOrder) -> Cursor {
-        match self {
-            Self::Between(start, end) => tree.scan(
-                start.as_ref().map(Vec::as_slice),
-                end.as_ref().map(Vec::as_slice),
-                order,
-            ),
-            Self::Prefix(prefix) => tree.scan_prefix(prefix, order),
+fn segment_of(segments: &[Segment], order: ScanOrder, far: bool) -> Option<&Segment> {
+    let index = match (order, far) {
+        (ScanOrder::Ascending, false) => 0,
+        (ScanOrder::Ascending, true) => 1,
+        (ScanOrder::Descending, false) => segments.len().checked_sub(1)?,
+        (ScanOrder::Descending, true) => segments.len().checked_sub(2)?,
+    };
+    segments.get(index)
+}
+
+pub(crate) fn keys_after_prefix(prefix: &[u8]) -> Bound<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.pop() {
+        if last < u8::MAX {
+            end.push(last + 1);
+            return Bound::Excluded(end);
         }
     }
+    Bound::Unbounded
+}
+
+fn owned(bound: Bound<&[u8]>) -> Bound<Vec<u8>> {
+    bound.map(<[u8]>::to_vec)
+}
+
+fn prefixed(base: &[u8], bound: Bound<&[u8]>) -> Bound<Vec<u8>> {
+    bound.map(|key| [base, key].concat())
+}
+
+fn ends_below(end: &Bound<Vec<u8>>, at: &[u8]) -> bool {
+    match end {
+        Bound::Unbounded => false,
+        Bound::Included(key) => key.as_slice() < at,
+        Bound::Excluded(key) => key.as_slice() <= at,
+    }
+}
+
+fn starts_at_or_after(start: &Bound<Vec<u8>>, at: &[u8]) -> bool {
+    match start {
+        Bound::Unbounded => false,
+        Bound::Included(key) | Bound::Excluded(key) => key.as_slice() >= at,
+    }
+}
+
+fn outside_collections(start: Bound<Vec<u8>>, end: Bound<Vec<u8>>) -> Vec<Segment> {
+    let hidden_start = collection::COLLECTIONS_PREFIX;
+    let hidden_end = collection::COLLECTIONS_END;
+    if ends_below(&end, hidden_start) || starts_at_or_after(&start, hidden_end) {
+        return vec![(start, end)];
+    }
+    let mut segments = Vec::with_capacity(2);
+    if !starts_at_or_after(&start, hidden_start) {
+        segments.push((start, Bound::Excluded(hidden_start.to_vec())));
+    }
+    if !ends_below(&end, hidden_end) {
+        segments.push((Bound::Included(hidden_end.to_vec()), end));
+    }
+    segments
 }
 
 #[derive(Default)]
 struct End {
-    cursor: Option<Cursor>,
+    near: Option<Cursor>,
+    far: Option<Cursor>,
+    in_far: bool,
     returned_any: bool,
     last_key: Vec<u8>,
 }
@@ -206,7 +282,8 @@ struct End {
 pub struct Scan<'t> {
     reader: Reader<'t>,
     tree: Option<BTree>,
-    keys: Keys,
+    segments: Vec<Segment>,
+    base_bytes: usize,
     front: End,
     back: End,
     finished: bool,
@@ -215,23 +292,64 @@ pub struct Scan<'t> {
 impl<'t> Scan<'t> {
     pub(crate) fn between(reader: Reader<'t>, tree: Option<BTree>, range: &impl KeyRange) -> Self {
         let (start, end) = range.bounds();
-        Self::new(
-            reader,
-            tree,
-            Keys::Between(start.map(<[u8]>::to_vec), end.map(<[u8]>::to_vec)),
-        )
+        Self::new(reader, tree, outside_collections(owned(start), owned(end)), 0)
     }
 
     pub(crate) fn prefix(reader: Reader<'t>, tree: Option<BTree>, prefix: &[u8]) -> Self {
-        Self::new(reader, tree, Keys::Prefix(prefix.to_vec()))
+        let segments = if prefix.starts_with(collection::COLLECTIONS_PREFIX) {
+            Vec::new()
+        } else {
+            outside_collections(Bound::Included(prefix.to_vec()), keys_after_prefix(prefix))
+        };
+        Self::new(reader, tree, segments, 0)
     }
 
-    fn new(reader: Reader<'t>, tree: Option<BTree>, keys: Keys) -> Self {
+    pub(crate) fn within_between(
+        reader: Reader<'t>,
+        tree: Option<BTree>,
+        base: &[u8],
+        range: &impl KeyRange,
+    ) -> Self {
+        let (start, end) = range.bounds();
+        let start = match start {
+            Bound::Unbounded => Bound::Included(base.to_vec()),
+            bound => prefixed(base, bound),
+        };
+        let end = match end {
+            Bound::Unbounded => keys_after_prefix(base),
+            bound => prefixed(base, bound),
+        };
+        Self::new(reader, tree, vec![(start, end)], base.len())
+    }
+
+    pub(crate) fn within_prefix(
+        reader: Reader<'t>,
+        tree: Option<BTree>,
+        base: &[u8],
+        prefix: &[u8],
+    ) -> Self {
+        let whole = [base, prefix].concat();
+        let end = keys_after_prefix(&whole);
+        Self::new(
+            reader,
+            tree,
+            vec![(Bound::Included(whole), end)],
+            base.len(),
+        )
+    }
+
+    fn new(
+        reader: Reader<'t>,
+        tree: Option<BTree>,
+        segments: Vec<Segment>,
+        base_bytes: usize,
+    ) -> Self {
         Self {
             reader,
-            finished: tree.is_none(),
+            finished: tree.is_none() || segments.is_empty(),
             tree,
-            keys,
+            segments,
+            base_bytes,
             front: End::default(),
             back: End::default(),
         }
@@ -360,18 +478,45 @@ impl<'t> Scan<'t> {
             ScanOrder::Ascending => (&mut self.front, &self.back),
             ScanOrder::Descending => (&mut self.back, &self.front),
         };
-        let keys = &self.keys;
-        let cursor = this.cursor.get_or_insert_with(|| keys.cursor(&tree, order));
-        let entry = match self.reader.lend(cursor, wanted) {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
+        let segments = &self.segments;
+        let mut found = None;
+        if !this.in_far {
+            let Some(segment) = segment_of(segments, order, false) else {
                 self.finished = true;
                 return Ok(None);
+            };
+            let cursor = this
+                .near
+                .get_or_insert_with(|| cursor_over(segment, &tree, order));
+            match self.reader.lend(cursor, wanted) {
+                Ok(Some(entry)) => found = Some(entry),
+                Ok(None) => this.in_far = true,
+                Err(error) => {
+                    self.finished = true;
+                    return Err(Error::storage(error));
+                }
             }
-            Err(error) => {
+        }
+        if found.is_none() {
+            let Some(segment) = segment_of(segments, order, true) else {
                 self.finished = true;
-                return Err(Error::storage(error));
+                return Ok(None);
+            };
+            let cursor = this
+                .far
+                .get_or_insert_with(|| cursor_over(segment, &tree, order));
+            match self.reader.lend(cursor, wanted) {
+                Ok(Some(entry)) => found = Some(entry),
+                Ok(None) => {}
+                Err(error) => {
+                    self.finished = true;
+                    return Err(Error::storage(error));
+                }
             }
+        }
+        let Some(entry) = found else {
+            self.finished = true;
+            return Ok(None);
         };
         let key = entry.key;
         let crossed = other.returned_any
@@ -386,7 +531,10 @@ impl<'t> Scan<'t> {
         this.returned_any = true;
         this.last_key.clear();
         this.last_key.extend_from_slice(key);
-        Ok(Some(entry))
+        Ok(Some(Lent {
+            key: key.get(self.base_bytes..).unwrap_or_default(),
+            ..entry
+        }))
     }
 
     fn step_owned(&mut self, order: ScanOrder) -> Option<Result<(Vec<u8>, Vec<u8>)>> {

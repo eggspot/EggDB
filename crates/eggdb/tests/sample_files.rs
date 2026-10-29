@@ -243,6 +243,28 @@ fn a_v0_2_0_file_takes_new_commits_and_reopens() {
 }
 
 #[test]
+fn a_v0_2_0_file_takes_collections_and_keeps_its_default_key_space() {
+    let dir = TempDirectory::new("collections");
+    let path = dir.copy_of(CHECKPOINTED_SAMPLE);
+    let expected = v0_2_0_entries();
+    let db = Database::open(&path).unwrap();
+    assert_eq!(db.collection_names().unwrap(), Vec::<String>::new());
+    assert!(db.create_collection("added").unwrap());
+    db.collection("added").put("user:1", "in a collection").unwrap();
+    db.close().unwrap();
+
+    let db = Database::open(&path).unwrap();
+    assert_holds(&db, &expected);
+    assert_eq!(
+        db.collection("added").get("user:1").unwrap(),
+        Some(b"in a collection".to_vec())
+    );
+    assert_eq!(db.check().unwrap().entries, expected.len() as u64 + 3);
+    assert_eq!(db.check().unwrap().leaked_pages, 0);
+    db.close().unwrap();
+}
+
+#[test]
 fn a_v0_2_0_file_with_a_log_to_replay_recovers_every_commit() {
     let dir = TempDirectory::new("log");
     let expected = v0_2_0_log_sample_entries();

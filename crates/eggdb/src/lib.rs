@@ -46,10 +46,18 @@
 //! - [`WriteTransaction`]: the one writer, from [`begin_write`](Database::begin_write) or
 //!   [`write`](Database::write), committed atomically or rolled back.
 //! - [`Scan`]: the entries of a [`KeyRange`] or a prefix, in key order or reversed.
+//! - Collections: named key spaces in the same file beside the default one, each its own
+//!   ordered map. [`Database::create_collection`], [`Database::drop_collection`] and
+//!   [`Database::collection_names`] manage them; [`Database::collection`] gives a
+//!   [`Collection`] for one-step reads and writes, and [`ReadTransaction::collection`] and
+//!   [`WriteTransaction::collection`] a [`ReadCollection`] or [`WriteCollection`] inside a
+//!   transaction. One transaction can change several collections and the default key space
+//!   together.
 //! - [`Error`], with an [`ErrorKind`] to match on.
 //! - [`sql`]: SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, from
 //!   [`Database::sql_store`].
 
+mod collection;
 mod database;
 mod error;
 mod options;
@@ -58,6 +66,7 @@ pub mod sql;
 mod transaction;
 mod writer_slot;
 
+pub use collection::{Collection, ReadCollection, WriteCollection};
 pub use database::{CheckReport, Database, Stats};
 pub use eggdb_storage::CommitStamp;
 pub use error::{Error, ErrorKind, Result};
