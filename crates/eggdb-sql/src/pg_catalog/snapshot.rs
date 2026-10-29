@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 13] = [
+const SNAPSHOT_FUNCTIONS: [&str; 15] = [
+    "pg_get_serial_sequence",
+    "to_regclass",
     "pg_table_is_visible",
     "pg_relation_is_publishable",
     "pg_type_is_visible",
@@ -90,6 +92,7 @@ struct Frame {
     wanted: bool,
     user: String,
     database: String,
+    settings: Arc<Settings>,
     snapshot: Option<Rc<CatalogSnapshot>>,
 }
 
@@ -117,11 +120,12 @@ impl Drop for EnteredStatement {
     }
 }
 
-pub(crate) fn enter_statement(wanted: bool, settings: &Settings) -> EnteredStatement {
+pub(crate) fn enter_statement(wanted: bool, settings: &Arc<Settings>) -> EnteredStatement {
     let frame = Frame {
         wanted,
         user: settings.get("session_authorization").unwrap_or_default(),
         database: settings.database.clone(),
+        settings: Arc::clone(settings),
         snapshot: None,
     };
     let depth = FRAMES.with(|frames| match frames.try_borrow_mut() {
@@ -168,13 +172,23 @@ pub(crate) fn snapshot_for(reader: &dyn KeyValueRead) -> SqlResult<Rc<CatalogSna
     }
     let identity = FRAMES.with(|frames| {
         frames.try_borrow().ok().and_then(|frames| {
-            frames
-                .last()
-                .map(|frame| (frame.user.clone(), frame.database.clone()))
+            frames.last().map(|frame| {
+                (
+                    frame.user.clone(),
+                    frame.database.clone(),
+                    Arc::clone(&frame.settings),
+                )
+            })
         })
     });
-    let (user, database) = identity.unwrap_or_else(|| ("eggdb".to_owned(), "eggdb".to_owned()));
-    let loaded = Rc::new(CatalogSnapshot::load(reader, user, database)?);
+    let (user, database, settings) = identity.unwrap_or_else(|| {
+        (
+            "eggdb".to_owned(),
+            "eggdb".to_owned(),
+            Arc::new(Settings::default()),
+        )
+    });
+    let loaded = Rc::new(CatalogSnapshot::load(reader, user, database, settings)?);
     FRAMES.with(|frames| {
         if let Ok(mut frames) = frames.try_borrow_mut()
             && let Some(frame) = frames.last_mut()
@@ -305,6 +319,7 @@ pub(crate) struct SchemaEntry {
 pub(crate) struct CatalogSnapshot {
     pub(crate) user: String,
     pub(crate) database: String,
+    pub(crate) settings: Arc<Settings>,
     pub(crate) path: Vec<String>,
     pub(crate) schemas: Vec<SchemaEntry>,
     pub(crate) relations: Vec<RelationEntry>,
@@ -359,7 +374,12 @@ struct PendingRelation {
 }
 
 impl CatalogSnapshot {
-    fn load(reader: &dyn KeyValueRead, user: String, database: String) -> SqlResult<Self> {
+    fn load(
+        reader: &dyn KeyValueRead,
+        user: String,
+        database: String,
+        settings: Arc<Settings>,
+    ) -> SqlResult<Self> {
         #[cfg(test)]
         LOADS.with(|loads| loads.set(loads.get() + 1));
         let path = crate::schemas::relation_path(reader)?;
@@ -509,6 +529,7 @@ impl CatalogSnapshot {
         let mut snapshot = Self {
             user,
             database,
+            settings,
             path,
             schemas,
             relations,

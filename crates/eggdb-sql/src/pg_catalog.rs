@@ -162,6 +162,9 @@ pub(crate) enum CatalogRelation {
     Trigger,
     Rewrite,
     AuthMembers,
+    Settings,
+    Opclass,
+    Enum,
     Information(InformationRelation),
 }
 
@@ -190,7 +193,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const IN_PG_CATALOG: [Self; 24] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 27] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -215,6 +218,9 @@ impl CatalogRelation {
         Self::Trigger,
         Self::Rewrite,
         Self::AuthMembers,
+        Self::Settings,
+        Self::Opclass,
+        Self::Enum,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -243,6 +249,9 @@ impl CatalogRelation {
             Self::Trigger => "pg_trigger",
             Self::Rewrite => "pg_rewrite",
             Self::AuthMembers => "pg_auth_members",
+            Self::Settings => "pg_settings",
+            Self::Opclass => "pg_opclass",
+            Self::Enum => "pg_enum",
             Self::Information(relation) => relation.name(),
         }
     }
@@ -286,12 +295,15 @@ impl CatalogRelation {
             Self::Trigger => 2620,
             Self::Rewrite => 2618,
             Self::AuthMembers => 1261,
+            Self::Settings => 12001,
+            Self::Opclass => 2616,
+            Self::Enum => 3501,
             Self::Information(relation) => relation.oid(),
         }
     }
 
     pub(crate) fn is_view(self) -> bool {
-        matches!(self, Self::Roles | Self::Information(_))
+        matches!(self, Self::Roles | Self::Settings | Self::Information(_))
     }
 
     pub(crate) fn named_in(schema: &str, name: &str) -> Option<Self> {
@@ -336,6 +348,9 @@ impl CatalogRelation {
             Self::PublicationRel => &PUBLICATION_REL_COLUMNS,
             Self::PublicationNamespace => &PUBLICATION_NAMESPACE_COLUMNS,
             Self::Roles => &ROLES_COLUMNS,
+            Self::Settings => &SETTINGS_COLUMNS,
+            Self::Opclass => &OPCLASS_COLUMNS,
+            Self::Enum => &ENUM_COLUMNS,
             Self::Information(relation) => relation.columns(),
         }
     }
@@ -699,4 +714,43 @@ const ROLES_COLUMNS: [CatalogColumn; 13] = [
     column("rolbypassrls", SqlType::Boolean),
     column("rolconfig", TEXTS),
     column("oid", OID),
+];
+
+const SETTINGS_COLUMNS: [CatalogColumn; 17] = [
+    column("name", SqlType::Text),
+    column("setting", SqlType::Text),
+    column("unit", SqlType::Text),
+    column("category", SqlType::Text),
+    column("short_desc", SqlType::Text),
+    column("extra_desc", SqlType::Text),
+    column("context", SqlType::Text),
+    column("vartype", SqlType::Text),
+    column("source", SqlType::Text),
+    column("min_val", SqlType::Text),
+    column("max_val", SqlType::Text),
+    column("enumvals", TEXTS),
+    column("boot_val", SqlType::Text),
+    column("reset_val", SqlType::Text),
+    column("sourcefile", SqlType::Text),
+    column("sourceline", SqlType::Integer),
+    column("pending_restart", SqlType::Boolean),
+];
+
+const OPCLASS_COLUMNS: [CatalogColumn; 9] = [
+    column("oid", OID),
+    column("opcmethod", OID),
+    column("opcname", NAME),
+    column("opcnamespace", OID),
+    column("opcowner", OID),
+    column("opcfamily", OID),
+    column("opcintype", OID),
+    column("opcdefault", SqlType::Boolean),
+    column("opckeytype", OID),
+];
+
+const ENUM_COLUMNS: [CatalogColumn; 4] = [
+    column("oid", OID),
+    column("enumtypid", OID),
+    column("enumsortorder", SqlType::Real),
+    column("enumlabel", NAME),
 ];

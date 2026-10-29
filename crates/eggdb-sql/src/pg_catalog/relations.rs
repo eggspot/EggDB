@@ -172,7 +172,10 @@ pub(crate) fn build(
         | CatalogRelation::PublicationNamespace
         | CatalogRelation::Trigger
         | CatalogRelation::Rewrite
-        | CatalogRelation::AuthMembers => Vec::new(),
+        | CatalogRelation::AuthMembers
+        | CatalogRelation::Opclass
+        | CatalogRelation::Enum => Vec::new(),
+        CatalogRelation::Settings => setting_rows(snapshot),
         CatalogRelation::Information(relation) => {
             crate::information_schema::rows(snapshot, relation)
         }
@@ -921,4 +924,30 @@ fn tablespace_rows() -> Vec<Vec<Value>> {
             .done()
     })
     .collect()
+}
+
+fn setting_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .settings
+        .all()
+        .into_iter()
+        .map(|(name, setting, description)| {
+            let context = if crate::settings::Settings::changeable(&name) {
+                "user"
+            } else {
+                "internal"
+            };
+            Row::new(CatalogRelation::Settings)
+                .set("name", text(&name))
+                .set("setting", text(&setting))
+                .set("short_desc", text(&description))
+                .set("context", text(context))
+                .set("vartype", text("string"))
+                .set("source", text("default"))
+                .set("boot_val", text(&setting))
+                .set("reset_val", text(&setting))
+                .set("pending_restart", flag(false))
+                .done()
+        })
+        .collect()
 }

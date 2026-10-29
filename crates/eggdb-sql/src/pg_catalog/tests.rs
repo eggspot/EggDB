@@ -747,3 +747,76 @@ fn changing_a_catalog_relation_is_refused_as_postgresql_refuses_it() {
     last(&mut session, "CREATE TABLE public.pg_class (a integer)");
     last(&mut session, "DROP TABLE public.pg_class");
 }
+
+#[test]
+fn client_driver_catalog_functions_settings_and_subscripts_answer() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(&mut session, "CREATE SCHEMA app");
+    last(
+        &mut session,
+        "CREATE TABLE app.orders (id serial PRIMARY KEY, note text)",
+    );
+    last(&mut session, "CREATE TABLE plain (id integer)");
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT pg_get_serial_sequence('app.orders', 'id'), \
+             pg_get_serial_sequence('app.orders', 'note'), pg_get_serial_sequence('plain', 'id')"
+        )),
+        ["app.orders_id_seq|NULL|NULL"]
+    );
+    assert_eq!(
+        fails(&mut session, "SELECT pg_get_serial_sequence('nope', 'id')")
+            .state()
+            .code(),
+        "42P01"
+    );
+    assert_eq!(
+        fails(
+            &mut session,
+            "SELECT pg_get_serial_sequence('plain', 'nope')"
+        )
+        .state()
+        .code(),
+        "42703"
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT to_regclass('app.orders') IS NOT NULL, to_regclass('nope'), \
+             to_regtype('integer'), to_regtype('nope')"
+        )),
+        ["t|NULL|integer|NULL"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT setting, context FROM pg_catalog.pg_settings WHERE name = 'max_index_keys'"
+        )),
+        ["32|internal"]
+    );
+    assert_eq!(rows_of(&last(&mut session, "SHOW max_index_keys")), ["32"]);
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT (SELECT count(*) FROM pg_opclass), (SELECT count(*) FROM pg_enum), \
+             (SELECT relkind FROM pg_class WHERE relname = 'pg_settings')"
+        )),
+        ["0|0|v"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT s FROM generate_subscripts('{7,8,9}'::int[], 1) s"
+        )),
+        ["1", "2", "3"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT s FROM generate_subscripts('3 4'::int2vector, 1, true) s"
+        )),
+        ["1", "0"]
+    );
+}

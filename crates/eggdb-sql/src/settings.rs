@@ -178,6 +178,20 @@ const KNOWN: &[Known] = &[
         description: "Shows the maximum identifier length.",
     },
     Known {
+        name: "max_index_keys",
+        default: fixed_text!("32"),
+        change: Change::Fixed,
+        reported: false,
+        description: "Shows the maximum number of index keys.",
+    },
+    Known {
+        name: "max_function_args",
+        default: fixed_text!("100"),
+        change: Change::Fixed,
+        reported: false,
+        description: "Shows the maximum number of function arguments.",
+    },
+    Known {
         name: "row_security",
         default: fixed_text!("on"),
         change: Change::Free,
@@ -438,6 +452,10 @@ impl Settings {
         self.custom.clear();
         self.time_zone_offset = 0;
         self.set_session_user(&user);
+    }
+
+    pub(crate) fn changeable(name: &str) -> bool {
+        known(name).is_none_or(|known| !matches!(known.change, Change::Fixed))
     }
 
     pub(crate) fn name_of(name: &str) -> String {

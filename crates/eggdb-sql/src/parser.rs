@@ -180,7 +180,11 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 40] = [
     "btrim",
 ];
 
-const POSTGRESQL_ONLY_SET_RETURNING: [&str; 2] = ["regexp_matches", "regexp_split_to_table"];
+const POSTGRESQL_ONLY_SET_RETURNING: [&str; 3] = [
+    "regexp_matches",
+    "regexp_split_to_table",
+    "generate_subscripts",
+];
 
 const POSTGRESQL_FORMAT_FUNCTIONS: [&str; 4] = ["to_char", "to_date", "to_timestamp", "to_number"];
 

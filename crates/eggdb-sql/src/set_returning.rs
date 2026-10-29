@@ -17,7 +17,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 15] = [
+const FUNCTIONS: [SetReturningFunction; 16] = [
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -28,6 +28,12 @@ const FUNCTIONS: [SetReturningFunction; 15] = [
         name: "unnest",
         result_type: unnest_type,
         rows: unnest_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "generate_subscripts",
+        result_type: subscripts_type,
+        rows: subscripts_rows,
         fields: false,
     },
     SetReturningFunction {
@@ -53,9 +59,21 @@ const FUNCTIONS: [SetReturningFunction; 15] = [
     json_records("json_each_text", json_record_type, json_each_text_rows),
     json_records("jsonb_each_text", jsonb_record_type, jsonb_each_text_rows),
     json_records("json_array_elements", json_type, json_array_elements_rows),
-    json_records("jsonb_array_elements", jsonb_type, jsonb_array_elements_rows),
-    json_records("json_array_elements_text", json_text_type, json_array_elements_text_rows),
-    json_records("jsonb_array_elements_text", jsonb_text_type, jsonb_array_elements_text_rows),
+    json_records(
+        "jsonb_array_elements",
+        jsonb_type,
+        jsonb_array_elements_rows,
+    ),
+    json_records(
+        "json_array_elements_text",
+        json_text_type,
+        json_array_elements_text_rows,
+    ),
+    json_records(
+        "jsonb_array_elements_text",
+        jsonb_text_type,
+        jsonb_array_elements_text_rows,
+    ),
     SetReturningFunction {
         name: "json_object_keys",
         result_type: json_text_type,
@@ -141,11 +159,7 @@ fn jsonb_each_text_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) ->
     json_rows_of("jsonb_each_text", values, sink)
 }
 
-fn json_array_elements_rows(
-    values: &[Value],
-    _: SqlType,
-    sink: &mut RowSink<'_>,
-) -> SqlResult<()> {
+fn json_array_elements_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
     json_rows_of("json_array_elements", values, sink)
 }
 
@@ -309,6 +323,40 @@ fn unnest_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResul
     if let [Value::Array(array)] = values {
         for item in &array.items {
             sink(item.clone())?;
+        }
+    }
+    Ok(())
+}
+
+fn subscripts_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    match types {
+        [Some(SqlType::Array(_)), _] | [Some(SqlType::Array(_)), _, _] => Ok(SqlType::Integer),
+        [None, _] | [None, _, _] => Err(not_unique("generate_subscripts", types)),
+        _ => Err(does_not_exist("generate_subscripts", types)),
+    }
+}
+
+fn subscripts_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    let (Some(Value::Array(array)), Some(dimension)) = (values.first(), values.get(1)) else {
+        return Ok(());
+    };
+    if dimension.as_integer() != Some(1) {
+        return Ok(());
+    }
+    let reverse = matches!(values.get(2), Some(Value::Boolean(true)));
+    let lower = i64::from(array.lower_bound);
+    let count = array.items.len() as i64;
+    let mut emit = |offset: i64| match i32::try_from(lower + offset) {
+        Ok(subscript) => sink(Value::Integer(subscript)),
+        Err(_) => Ok(()),
+    };
+    if reverse {
+        for offset in (0..count).rev() {
+            emit(offset)?;
+        }
+    } else {
+        for offset in 0..count {
+            emit(offset)?;
         }
     }
     Ok(())
@@ -650,7 +698,13 @@ pub(crate) fn table_function_columns(
     let types = argument_types(&function.arguments, scope);
     let sql_type =
         (found.result_type)(&types).map_err(|error| error.at_if_unplaced(function.position))?;
-    Ok(function_columns(function, found, label, alias_given, sql_type))
+    Ok(function_columns(
+        function,
+        found,
+        label,
+        alias_given,
+        sql_type,
+    ))
 }
 
 pub(crate) struct BoundFunction {
