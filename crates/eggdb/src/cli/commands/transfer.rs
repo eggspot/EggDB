@@ -31,6 +31,7 @@ impl Session<'_> {
             page_size: Some(db.page_size()),
             eggdb: Some(eggdb::VERSION.to_owned()),
             exported_at: now(),
+            collections: false,
         };
         let only = self.request.collection.clone();
         if let Some(name) = &only {
