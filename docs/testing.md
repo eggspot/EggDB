@@ -190,6 +190,21 @@ deadline record readers (`expiry.rs`); the key layout is pinned by test vectors,
 `EXPIRING_KEYS` bit. The CLI, the shell and the UI scenarios 40 to 45 are in
 `cli/expiry_tests.rs` and `eggdb-ui/tests/screens.rs`, and the smoke test runs every new command.
 
+The command model (D143) has four checks. The registry test (`crates/eggdb-commands`) checks
+every command's and tool's fields, that every command is a kept name or a noun with core verbs,
+that new tool names join their command's words with `_` and shipped ones come from the list, that
+every tool's MCP annotations follow from its effect, idempotence and reach, and that every
+argument maps onto an option or operand of its CLI twin. `eggdb-mcp` keeps the shipped
+`tools/list` generator as an oracle and checks the registry's output against it byte for byte,
+with and without `--allow-write`. The parity test (`tests/command_model.rs`) runs `eggdb mcp`
+and the `eggdb` commands as real processes on the same files: `kv_get`/`get --json`,
+`kv_scan`/`scan --json`, `run_sql` and `write_sql`/`sql --json` return the same values once the
+tool's envelope is removed, and the same failure (a missing file, a failed statement) has the same
+code and category. `cli/command_model_tests.rs` checks `--json` against `--format json`, the
+JSON errors and that a pipe keeps text ones, `sql --json`, that `help --json` lists exactly the
+registry, that the text help comes from it unchanged, and that `docs/ux/command-model.md` lists
+every command, tool, error code and kept name.
+
 ## Files from released versions (D96)
 `crates/eggdb/tests/data` holds files written by released versions, which every later version
 must keep reading (D20). From their release's tag on they are never regenerated or edited, and a
