@@ -346,6 +346,28 @@ with `eggdb restore` and the `--inserts` one with `psql -f` against `eggdb serve
 `crates/eggdb/tests/data/pg_dump-sample.sql`, a small dump that PostgreSQL 18 wrote of a bakery
 schema, is the smoke test's sample, restored both ways.
 
+## Restoring SQL Server scripts (D125)
+`crates/eggdb/tests/data/sqlserver` holds `shop-ssms.sql`, an SSMS Generate Scripts script
+(UTF-16LE with its mark, CRLF) written by us in SSMS's shape: database batches, a user and a role,
+a schema, seven tables (identity with explicit 0 and negative values, `money`, `decimal`,
+`varbinary(max)`, `ROWGUIDCOL`, a computed and a `timestamp` column, an `IDENTITY(1000,10)`
+seed, `datetimeoffset`, a heap with `image` and `sysname`, an `xml` table that is skipped), two
+views (one with `TOP (100) PERCENT`), data with and without `GO` between rows (a CRLF inside a
+value, `$(document)` as data, Vietnamese text and an emoji), indexes with `INCLUDE` and a filter,
+defaults, `WITH CHECK` and `WITH NOCHECK` constraints over an orphan row, `NOCHECK CONSTRAINT`, a
+`#temp` procedure, a function, a trigger, a synonym, `GRANT` and extended properties; and
+`shop-sqlpackage.sql`, a sqlpackage script with its `:setvar` header. `shop-expected.txt` holds
+queries and their results written by hand from the scripts' data and Microsoft's documented
+semantics. `crates/eggdb/tests/restore_sqlserver.rs` restores both with the built binary and
+checks the report and every query, then UTF-8, UTF-8 with a mark, LF-only and stdin variants, a
+generated script of 5,000 rows and one 20 MiB value, errors with and without `--create` and
+`--keep-going`, the content routes and sqlcmd's commands (`:r` and `!!` never run). The reader,
+the classifier, the span finder and the column rewrite have unit tests in
+`crates/eggdb-sql/src/restore/tests_sqlserver.rs`, with a seeded fuzz of 3,000 hostile scripts
+(GO lines, quotes, brackets, comments, sqlcmd commands, byte-order marks mid-file, broken UTF-16)
+read one to seven bytes at a time. `crates/eggdb/tests/data/ssms-sample.sql` is the smoke test's
+sample, restored with `eggdb restore` and with go-sqlcmd's `-i` against `eggdb serve`.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.

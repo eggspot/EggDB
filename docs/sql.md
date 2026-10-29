@@ -1520,6 +1520,22 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - `DECLARE`, `IF`, `WHILE`, `BEGIN ... END`, `TRY ... CATCH`, `PRINT`, `EXEC`, stored procedures
   and triggers; `SAVE TRANSACTION`; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF`, `ANSI_PADDING OFF`
   and `IMPLICIT_TRANSACTIONS ON`; three-part names and other databases.
+- What SSMS and sqlpackage scripts write runs (D125): `SET IDENTITY_INSERT t ON|OFF` (explicit
+  identity values, 0 and negative ones too, are kept; Msg 544, 545, 8101, 8106 and 8107),
+  `INSERT` without `INTO`, `PRIMARY KEY` and `UNIQUE` with `CLUSTERED` or `NONCLUSTERED`, index
+  options, `ON [filegroup]`, `TEXTIMAGE_ON`, `ROWGUIDCOL`, `COLLATE`, `NOT FOR REPLICATION`,
+  `ALTER TABLE ... WITH CHECK|NOCHECK ADD`, `ADD DEFAULT ... FOR`, `CHECK CONSTRAINT n|ALL` (Msg
+  4917 when missing), `CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX` with `INCLUDE`, `WHERE` and
+  `WITH`, `DROP INDEX i ON t`, `CREATE SCHEMA ... AUTHORIZATION` and `SET NUMERIC_ROUNDABORT
+  OFF`. With these differences: filegroups, partition schemes, index options, `INCLUDE`, `DESC`
+  and `CLUSTERED` on a secondary index are accepted without effect; a non-unique filtered index
+  covers every row, and a unique one is accepted only for a `col IS NOT NULL` filter on its key
+  (EggDB's unique indexes already allow many NULLs); `COLLATE` names are accepted, but text
+  still compares by code point; `WITH NOCHECK ADD` still checks the existing rows; `ADD DEFAULT
+  ... FOR` does not keep the constraint's name; `TOP (100) PERCENT ... ORDER BY` in a view reads
+  as neither, as Microsoft documents that the `ORDER BY` there only picks `TOP`'s rows; `NOCHECK
+  CONSTRAINT`, `IGNORE_DUP_KEY = ON`, FILESTREAM, sparse, masked, encrypted, memory-optimized and
+  temporal tables are Msg 40517.
 
 ## Next parts (roadmap)
 - The rest of the JSON functions (item 36).
