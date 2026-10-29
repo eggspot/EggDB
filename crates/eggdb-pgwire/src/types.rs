@@ -69,8 +69,34 @@ pub const FLOAT4_ARRAY_OID: u32 = 1021;
 pub const FLOAT8_ARRAY_OID: u32 = 1022;
 /// `numeric[]`.
 pub const NUMERIC_ARRAY_OID: u32 = 1231;
+/// `oid`.
+pub const OID_OID: u32 = 26;
+/// `xid`.
+pub const XID_OID: u32 = 28;
+/// `"char"`.
+pub const CHAR_OID: u32 = 18;
+/// `regproc`.
+pub const REGPROC_OID: u32 = 24;
+/// `regclass`.
+pub const REGCLASS_OID: u32 = 2205;
+/// `regtype`.
+pub const REGTYPE_OID: u32 = 2206;
+/// `regnamespace`.
+pub const REGNAMESPACE_OID: u32 = 4089;
+/// `regrole`.
+pub const REGROLE_OID: u32 = 4096;
 
-const ARRAY_OIDS: [u32; 10] = [
+const IDENTIFIER_OIDS: [u32; 7] = [
+    OID_OID,
+    XID_OID,
+    REGPROC_OID,
+    REGCLASS_OID,
+    REGTYPE_OID,
+    REGNAMESPACE_OID,
+    REGROLE_OID,
+];
+
+const ARRAY_OIDS: [u32; 16] = [
     BOOL_ARRAY_OID,
     INT2_ARRAY_OID,
     INT4_ARRAY_OID,
@@ -81,6 +107,12 @@ const ARRAY_OIDS: [u32; 10] = [
     FLOAT4_ARRAY_OID,
     FLOAT8_ARRAY_OID,
     NUMERIC_ARRAY_OID,
+    1028,
+    1003,
+    1002,
+    1034,
+    22,
+    30,
 ];
 
 const MICROS_PER_DAY: i64 = 86_400_000_000;
@@ -93,45 +125,12 @@ const JSONB_VERSION: u8 = 1;
 
 /// The type OID PostgreSQL gives `sql_type`.
 pub fn oid_of(sql_type: SqlType) -> u32 {
-    match sql_type {
-        SqlType::SmallInt => INT2_OID,
-        SqlType::Integer => INT4_OID,
-        SqlType::BigInt => INT8_OID,
-        SqlType::Real => FLOAT4_OID,
-        SqlType::Double => FLOAT8_OID,
-        SqlType::Boolean => BOOL_OID,
-        SqlType::Text => TEXT_OID,
-        SqlType::Varchar(_) => VARCHAR_OID,
-        SqlType::Numeric(_) => NUMERIC_OID,
-        SqlType::Date => DATE_OID,
-        SqlType::Timestamp(_) => TIMESTAMP_OID,
-        SqlType::TimestampTz(_) => TIMESTAMPTZ_OID,
-        SqlType::Json => JSON_OID,
-        SqlType::Jsonb => JSONB_OID,
-        SqlType::Time(_) => TIME_OID,
-        SqlType::TimeTz(_) => TIMETZ_OID,
-        SqlType::Interval { .. } => INTERVAL_OID,
-        SqlType::Bytea => BYTEA_OID,
-        SqlType::Uuid => UUID_OID,
-        SqlType::Bpchar(_) => BPCHAR_OID,
-        SqlType::Array(element) => array_oid(element),
-    }
+    eggdb_sql::type_oid(sql_type)
 }
 
 /// The type OID PostgreSQL gives an array of `element`, such as 1007 for `int4[]`.
 pub fn array_oid(element: ArrayElement) -> u32 {
-    match element {
-        ArrayElement::SmallInt => INT2_ARRAY_OID,
-        ArrayElement::Integer => INT4_ARRAY_OID,
-        ArrayElement::BigInt => INT8_ARRAY_OID,
-        ArrayElement::Real => FLOAT4_ARRAY_OID,
-        ArrayElement::Double => FLOAT8_ARRAY_OID,
-        ArrayElement::Numeric => NUMERIC_ARRAY_OID,
-        ArrayElement::Boolean => BOOL_ARRAY_OID,
-        ArrayElement::Text => TEXT_ARRAY_OID,
-        ArrayElement::Varchar => VARCHAR_ARRAY_OID,
-        ArrayElement::Bpchar => BPCHAR_ARRAY_OID,
-    }
+    eggdb_sql::type_oid(SqlType::Array(element))
 }
 
 /// The SQL type a parameter declared with `oid` takes, or `None` for an unspecified or
@@ -174,6 +173,9 @@ fn type_size(oid: u32) -> i16 {
         INT8_OID | FLOAT8_OID | TIMESTAMP_OID | TIMESTAMPTZ_OID | TIME_OID => 8,
         TIMETZ_OID => 12,
         INTERVAL_OID | UUID_OID => 16,
+        CHAR_OID => 1,
+        NAME_OID => 64,
+        oid if IDENTIFIER_OIDS.contains(&oid) => 4,
         _ => -1,
     }
 }
@@ -266,6 +268,11 @@ pub fn encode_value(
         return Ok(Some(text.into_bytes()));
     }
     let bytes = match oid {
+        oid if IDENTIFIER_OIDS.contains(&oid) => match value {
+            Value::Oid(number) => number.to_be_bytes().to_vec(),
+            Value::Reg(reg) => reg.oid.to_be_bytes().to_vec(),
+            _ => return Err(cannot_send(value, oid)),
+        },
         BOOL_OID => match value {
             Value::Boolean(flag) => vec![u8::from(*flag)],
             _ => return Err(cannot_send(value, oid)),

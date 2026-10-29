@@ -1666,7 +1666,10 @@ impl<'t> Parser<'t> {
         if !self.postgresql() {
             return self.sql_type().map(|sql_type| (sql_type, false));
         }
-        let sql_type = self.element_type()?;
+        let sql_type = match self.catalog_cast_type() {
+            Some(found) => found,
+            None => self.element_type()?,
+        };
         let array = if self.take_word("array") {
             if self.peek_kind() == &TokenKind::LeftBracket {
                 self.array_dimension()?;
@@ -1680,6 +1683,17 @@ impl<'t> Parser<'t> {
             bracketed
         };
         Ok((sql_type, array))
+    }
+
+    fn catalog_cast_type(&mut self) -> Option<SqlType> {
+        let qualified = self.is_word("pg_catalog") && self.peek_kind_at(1) == &TokenKind::Dot;
+        let at = if qualified { 2 } else { 0 };
+        let TokenKind::Word(word) = self.peek_kind_at(at) else {
+            return None;
+        };
+        let found = crate::pg_catalog::cast_type_named(word)?;
+        self.at += at + 1;
+        Some(found)
     }
 
     fn array_dimension(&mut self) -> SqlResult<()> {

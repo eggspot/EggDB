@@ -61,6 +61,18 @@ pub(crate) enum CommentKind {
 }
 
 impl CommentKind {
+    fn of_code(code: u8) -> Option<Self> {
+        [
+            Self::Relation,
+            Self::Column,
+            Self::Index,
+            Self::Constraint,
+            Self::Schema,
+        ]
+        .into_iter()
+        .find(|kind| kind.code() == code)
+    }
+
     fn code(self) -> u8 {
         match self {
             Self::Relation => 1,
@@ -77,6 +89,35 @@ pub(crate) fn comments_prefix(owner: &str) -> Vec<u8> {
     key.push(COMMENT_SPACE);
     put_bytes(&mut key, owner.as_bytes());
     key
+}
+
+pub(crate) fn every_comment_prefix() -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(COMMENT_SPACE);
+    key
+}
+
+pub(crate) fn split_comment_key(rest: &[u8]) -> Option<(String, CommentKind, String)> {
+    let mut length: u64 = 0;
+    let mut shift = 0;
+    let mut at = 0;
+    loop {
+        let byte = *rest.get(at)?;
+        at += 1;
+        length |= u64::from(byte & 0x7F).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift > 63 {
+            return None;
+        }
+    }
+    let end = at.checked_add(usize::try_from(length).ok()?)?;
+    let owner = std::str::from_utf8(rest.get(at..end)?).ok()?;
+    let kind = CommentKind::of_code(*rest.get(end)?)?;
+    let part = std::str::from_utf8(rest.get(end + 1..)?).ok()?;
+    Some((owner.to_owned(), kind, part.to_owned()))
 }
 
 pub(crate) fn comment_key(owner: &str, kind: CommentKind, part: &str) -> Vec<u8> {

@@ -3,6 +3,7 @@ use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
+use crate::pg_catalog::{CatalogType, RegValue};
 use std::cmp::Ordering;
 
 /// A column type of the PostgreSQL dialect that this release stores.
@@ -64,6 +65,9 @@ pub enum SqlType {
     /// A one-dimensional array of the element type, such as `integer[]`: a value of
     /// expressions and intermediate results, not stored in table columns.
     Array(ArrayElement),
+    /// A type of PostgreSQL's system catalog, such as `oid`, `name` or `regclass`: a value of
+    /// expressions and of the catalog's rows, not stored in table columns.
+    Catalog(CatalogType),
 }
 
 /// The precision and scale of a `numeric(p, s)` column.
@@ -118,6 +122,7 @@ impl SqlType {
             Self::Bpchar(None) => "bpchar".into(),
             Self::Bpchar(Some(length)) => format!("character({length})"),
             Self::Array(element) => element.type_name(),
+            Self::Catalog(kind) => kind.name().to_owned(),
         }
     }
 
@@ -144,6 +149,7 @@ impl SqlType {
             Self::Uuid => "uuid",
             Self::Bpchar(_) => "bpchar",
             Self::Array(element) => element.internal_name(),
+            Self::Catalog(kind) => kind.internal_name(),
         }
     }
 
@@ -189,6 +195,7 @@ impl SqlType {
 
     pub(crate) fn is_string(self) -> bool {
         matches!(self, Self::Text | Self::Varchar(_))
+            || matches!(self, Self::Catalog(kind) if kind.is_text_like())
     }
 
     pub(crate) fn is_character(self) -> bool {
@@ -261,6 +268,10 @@ pub enum Value {
     Bpchar(String),
     /// A one-dimensional array.
     Array(Box<ArrayValue>),
+    /// An `oid` (or an `xid`): an unsigned 32-bit identifier.
+    Oid(u32),
+    /// A `reg*` value: an object identifier shown as the object's name.
+    Reg(Box<RegValue>),
 }
 
 impl Value {
@@ -288,6 +299,8 @@ impl Value {
             Self::Uuid(_) => SqlType::Uuid,
             Self::Bpchar(_) => SqlType::Bpchar(None),
             Self::Array(array) => SqlType::Array(array.element),
+            Self::Oid(_) => SqlType::Catalog(CatalogType::Oid),
+            Self::Reg(reg) => SqlType::Catalog(CatalogType::Reg(reg.kind)),
         })
     }
 
@@ -369,6 +382,8 @@ impl Value {
             Self::Bytea(bytes) => crate::bytea::format_hex(bytes),
             Self::Uuid(bytes) => crate::bytea::format_uuid(bytes),
             Self::Array(array) => crate::arrays::format_text(array),
+            Self::Oid(oid) => oid.to_string(),
+            Self::Reg(reg) => reg.name.clone(),
         })
     }
 
@@ -572,9 +587,9 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
             Ok(Value::Json(text.to_owned()))
         }
         SqlType::Jsonb => crate::json::normalize(text).map(Value::Jsonb),
-        SqlType::Array(element) => {
-            crate::arrays::parse_text(text, element).map(|array| Value::Array(Box::new(array)))
-        }
+        SqlType::Array(element) => crate::arrays::parse_array_text(text, element)
+            .map(|array| Value::Array(Box::new(array))),
+        SqlType::Catalog(kind) => crate::pg_catalog::parse_input(text, kind),
     }
 }
 
@@ -761,6 +776,9 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     if let SqlType::Array(element) = target {
         return crate::arrays::convert_to(value, element, conversion);
     }
+    if let SqlType::Catalog(kind) = target {
+        return crate::pg_catalog::convert(value, kind, conversion);
+    }
     if target.is_character() {
         let text = match value {
             Value::Text(text) => text,
@@ -774,6 +792,9 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
             other => other.to_text().unwrap_or_default(),
         };
         return assign_string(text, target, conversion);
+    }
+    if let Some(converted) = crate::pg_catalog::convert_from(&value, target, conversion) {
+        return converted;
     }
     if source.is_character() {
         return match (conversion, value) {
@@ -881,6 +902,18 @@ pub(crate) fn comparable(left: SqlType, right: SqlType) -> bool {
     if let (SqlType::Array(left), SqlType::Array(right)) = (left, right) {
         return left.comparable(right);
     }
+    let identifier =
+        |sql_type: SqlType| matches!(sql_type, SqlType::Catalog(kind) if kind.is_identifier());
+    if identifier(left) || identifier(right) {
+        let numbered = |sql_type: SqlType| {
+            identifier(sql_type)
+                || matches!(
+                    sql_type,
+                    SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
+                )
+        };
+        return numbered(left) && numbered(right);
+    }
     (left.is_numeric() && right.is_numeric())
         || (left.is_character() && right.is_character())
         || (left.is_datetime() && right.is_datetime())
@@ -917,6 +950,9 @@ fn is_exact_number(value: &Value) -> bool {
 
 pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
+        (Value::Oid(_) | Value::Reg(_), _) | (_, Value::Oid(_) | Value::Reg(_)) => {
+            crate::pg_catalog::oid_number(left).cmp(&crate::pg_catalog::oid_number(right))
+        }
         (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
         (Value::Text(a), Value::Text(b)) | (Value::Json(a), Value::Json(b)) => {
             a.as_bytes().cmp(b.as_bytes())
@@ -1011,6 +1047,14 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
         Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) => {
             out.push(3);
             out.extend_from_slice(&value.as_integer().unwrap_or(0).to_le_bytes());
+        }
+        Value::Oid(_) | Value::Reg(_) => {
+            out.push(3);
+            out.extend_from_slice(
+                &crate::pg_catalog::oid_number(value)
+                    .unwrap_or(0)
+                    .to_le_bytes(),
+            );
         }
         Value::Real(_) | Value::Double(_) => {
             let number = value.as_float().unwrap_or(f64::NAN);

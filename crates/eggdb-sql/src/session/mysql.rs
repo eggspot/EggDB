@@ -55,9 +55,11 @@ pub(crate) fn mysql_type_name(sql_type: SqlType) -> String {
         SqlType::Time(precision) => with_fraction("time", precision),
         SqlType::Bytea => "blob".into(),
         SqlType::Bpchar(length) => format!("char({})", length.unwrap_or(1)),
-        SqlType::TimeTz(_) | SqlType::Interval { .. } | SqlType::Uuid | SqlType::Array(_) => {
-            "text".into()
-        }
+        SqlType::TimeTz(_)
+        | SqlType::Interval { .. }
+        | SqlType::Uuid
+        | SqlType::Array(_)
+        | SqlType::Catalog(_) => "text".into(),
     }
 }
 

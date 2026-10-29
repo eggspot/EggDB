@@ -52,6 +52,7 @@ mod oracle_errors;
 mod oracle_functions;
 mod oracle_nls;
 mod parser;
+mod pg_catalog;
 mod pg_keywords;
 mod plan;
 mod random;
@@ -125,6 +126,7 @@ pub use numeric::Numeric;
 pub use parser::{
     ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION, SQLSERVER_COMPATIBLE_VERSION,
 };
+pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
 pub use random::{RandomSource, set_random_source};
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, KnownDifference, MAX_LISTED, RestoreError,

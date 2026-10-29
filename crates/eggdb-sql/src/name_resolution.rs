@@ -1,8 +1,8 @@
 use crate::OutputColumn;
 use crate::ast::{
     AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
-    FromClause, Insert, InsertSource, InsertValue, JoinCondition, MergeStatement, Name,
-    OnDuplicate, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
+    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, MergeStatement,
+    Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
 };
 use crate::dialect::Dialect;
 use crate::encoding::ViewDefinition;
@@ -182,6 +182,11 @@ impl<'a> Resolver<'a> {
     }
 
     pub(crate) fn target(&mut self, reference: &mut TableReference) -> SqlResult<()> {
+        if let Some(relation) =
+            crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?
+        {
+            return Err(crate::pg_catalog::read_only(relation.name()).at(reference.name.position));
+        }
         let resolved = self.resolve_name(&reference.name.text)?;
         if is_qualified(&reference.name.text) && reference.alias.is_none() {
             reference.alias = Some(base_name(&resolved).to_owned());
@@ -372,6 +377,15 @@ impl<'a> Resolver<'a> {
             return Ok(());
         }
         if ctes.contains(&reference.name.text) {
+            return Ok(());
+        }
+        if let Some(relation) =
+            crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?
+        {
+            if reference.alias.is_none() {
+                reference.alias = Some(relation.name().to_owned());
+            }
+            reference.generated = Some(Box::new(GeneratedTable::Catalog(relation)));
             return Ok(());
         }
         let written_qualified = is_qualified(&reference.name.text);
@@ -746,6 +760,7 @@ impl Binding<'_> {
         reader: &'r dyn KeyValueRead,
         tables: &'r mut TableCache,
     ) -> SqlResult<Resolver<'r>> {
+        crate::pg_catalog::load_if_wanted(reader)?;
         Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)
     }
 

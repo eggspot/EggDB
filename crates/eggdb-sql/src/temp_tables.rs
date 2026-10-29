@@ -292,6 +292,7 @@ impl TempTables {
 fn stored_as(value: Value, sql_type: SqlType) -> SqlResult<Value> {
     match (&value, sql_type) {
         (Value::Text(_), SqlType::Varchar(_) | SqlType::Text) => Ok(value),
+        (Value::Text(_), SqlType::Catalog(kind)) if kind.is_text_like() => Ok(value),
         _ => convert(value, sql_type, Conversion::Explicit),
     }
 }

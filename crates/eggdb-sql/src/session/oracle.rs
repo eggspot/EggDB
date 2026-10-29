@@ -105,7 +105,8 @@ fn oracle_type_name(sql_type: SqlType) -> &'static str {
         | SqlType::TimeTz(_)
         | SqlType::Interval { .. }
         | SqlType::Uuid
-        | SqlType::Array(_) => "VARCHAR2",
+        | SqlType::Array(_)
+        | SqlType::Catalog(_) => "VARCHAR2",
     }
 }
 
@@ -136,7 +137,8 @@ fn length_of(sql_type: SqlType) -> i64 {
         | SqlType::TimeTz(_)
         | SqlType::Interval { .. }
         | SqlType::Uuid
-        | SqlType::Array(_) => 64,
+        | SqlType::Array(_)
+        | SqlType::Catalog(_) => 64,
     }
 }
 

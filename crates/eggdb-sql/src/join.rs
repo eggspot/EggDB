@@ -69,6 +69,9 @@ pub(crate) fn type_family(sql_type: SqlType) -> u8 {
         SqlType::Bytea => 12,
         SqlType::Uuid => 13,
         SqlType::Array(_) => 14,
+        SqlType::Catalog(kind) if kind.is_identifier() => 16,
+        SqlType::Catalog(kind) if kind.is_text_like() => 2,
+        SqlType::Catalog(_) => 15,
     }
 }
 

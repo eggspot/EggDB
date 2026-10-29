@@ -470,6 +470,7 @@ pub(crate) enum GeneratedTable {
     Values(ValuesList),
     Function(TableFunction),
     Expansion(Box<SelectListExpansion>),
+    Catalog(crate::pg_catalog::CatalogRelation),
 }
 
 #[derive(Debug, Clone, PartialEq)]

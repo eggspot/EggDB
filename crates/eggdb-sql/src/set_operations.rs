@@ -44,6 +44,11 @@ pub(crate) fn common_type(left: SqlType, right: SqlType) -> Option<SqlType> {
             _ => SqlType::Text,
         });
     }
+    let identifier =
+        |sql_type: SqlType| matches!(sql_type, SqlType::Catalog(kind) if kind.is_identifier());
+    if identifier(left) && identifier(right) {
+        return Some(SqlType::Catalog(crate::pg_catalog::CatalogType::Oid));
+    }
     if left.without_modifier() == right.without_modifier() {
         return Some(left.without_modifier());
     }

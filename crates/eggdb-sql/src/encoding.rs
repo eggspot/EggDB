@@ -155,6 +155,7 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::Uuid => 19,
         SqlType::Bpchar(_) => 20,
         SqlType::Array(_) => 21,
+        SqlType::Catalog(_) => 22,
     }
 }
 
@@ -922,6 +923,11 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
             out.push(PRESENT);
             out.extend_from_slice(&((*micros as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
         }
+        Value::Oid(_) | Value::Reg(_) => {
+            out.push(PRESENT);
+            let number = crate::pg_catalog::oid_number(value).unwrap_or(0);
+            out.extend_from_slice(&((number as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
+        }
     }
 }
 
@@ -1033,8 +1039,35 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
                 out.push(21);
                 put_bytes(out, &crate::arrays::encode_stored(array));
             }
+            Value::Oid(oid) => {
+                out.push(OID_TAG);
+                out.extend_from_slice(&oid.to_le_bytes());
+            }
+            Value::Reg(reg) => {
+                out.push(REG_TAG);
+                out.push(reg_kind_code(reg.kind));
+                out.extend_from_slice(&reg.oid.to_le_bytes());
+                put_bytes(out, reg.name.as_bytes());
+            }
         }
     }
+}
+
+const OID_TAG: u8 = 22;
+const REG_TAG: u8 = 23;
+const REG_KINDS: [crate::pg_catalog::RegKind; 5] = [
+    crate::pg_catalog::RegKind::Class,
+    crate::pg_catalog::RegKind::Type,
+    crate::pg_catalog::RegKind::Namespace,
+    crate::pg_catalog::RegKind::Role,
+    crate::pg_catalog::RegKind::Proc,
+];
+
+fn reg_kind_code(kind: crate::pg_catalog::RegKind) -> u8 {
+    REG_KINDS
+        .iter()
+        .position(|known| *known == kind)
+        .map_or(0, |at| at as u8)
 }
 
 pub(crate) fn decode_row(bytes: &[u8], columns: &[Column]) -> SqlResult<Vec<Value>> {
@@ -1121,6 +1154,15 @@ pub(crate) fn decode_row_into(
                 micros: i64::from_le_bytes(reader.array()?),
             }),
             19 => Value::Uuid(reader.array()?),
+            OID_TAG => Value::Oid(u32::from_le_bytes(reader.array()?)),
+            REG_TAG => {
+                let kind = *REG_KINDS
+                    .get(usize::from(reader.byte()?))
+                    .ok_or_else(|| reader.damaged())?;
+                let oid = u32::from_le_bytes(reader.array()?);
+                let name = reader.text()?;
+                Value::Reg(Box::new(crate::pg_catalog::RegValue { kind, oid, name }))
+            }
             10 => {
                 let days = i32::from_le_bytes(reader.array()?);
                 if !datetime::valid_date(days) {
@@ -1152,6 +1194,11 @@ pub(crate) fn decode_row_into(
 fn value_tag(sql_type: SqlType) -> u8 {
     match sql_type {
         SqlType::Varchar(_) => type_tag(SqlType::Text),
+        SqlType::Catalog(
+            crate::pg_catalog::CatalogType::Oid | crate::pg_catalog::CatalogType::Xid,
+        ) => OID_TAG,
+        SqlType::Catalog(crate::pg_catalog::CatalogType::Reg(_)) => REG_TAG,
+        SqlType::Catalog(_) => type_tag(SqlType::Text),
         other => type_tag(other),
     }
 }
@@ -1383,7 +1430,7 @@ impl<'b> Reader<'b> {
             | SqlType::Time(_) => 8,
             SqlType::TimeTz(_) => 12,
             SqlType::Interval { .. } | SqlType::Uuid => 16,
-            SqlType::Array(_) => return Err(self.damaged()),
+            SqlType::Array(_) | SqlType::Catalog(_) => return Err(self.damaged()),
             SqlType::Numeric(_) => {
                 let rest = self.bytes.get(self.at..).unwrap_or(&[]);
                 Numeric::key_length(rest).ok_or_else(|| self.damaged())?
@@ -1496,7 +1543,7 @@ impl<'b> Reader<'b> {
                 Value::Interval(Interval::from_span(span).ok_or_else(|| self.damaged())?)
             }
             SqlType::Uuid => Value::Uuid(self.array()?),
-            SqlType::Array(_) => return Err(self.damaged()),
+            SqlType::Array(_) | SqlType::Catalog(_) => return Err(self.damaged()),
             SqlType::Text
             | SqlType::Varchar(_)
             | SqlType::Json

@@ -599,6 +599,18 @@ pub(crate) fn check_default_sequences(reader: &dyn KeyValueRead, text: &str) -> 
     Ok(())
 }
 
+pub(crate) fn name_argument<'e>(function: &str, position: usize, argument: &'e Expr) -> &'e Expr {
+    if position == 0
+        && matches!(function, "nextval" | "currval" | "setval")
+        && let ExprKind::Function { name, arguments } = &argument.kind
+        && name == "regclass_cast"
+        && let [inner] = arguments.as_slice()
+    {
+        return inner;
+    }
+    argument
+}
+
 pub(crate) fn default_sequence_names(text: &str) -> Vec<String> {
     let Ok(tokens) = tokenize(text) else {
         return Vec::new();
@@ -1114,14 +1126,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         }
         ("oracle_nextval", [Value::Text(name)]) => nextval(name),
         ("oracle_currval", [Value::Text(name)]) => currval(name),
-        ("regclass_cast", [Value::Null]) => Ok(Value::Null),
-        ("regclass_cast", [Value::Text(text)]) => {
-            regclass_name(text).map(|name| Value::Text(crate::schemas::quoted_name(&on_path(name))))
+        ("regclass_cast", [value]) => {
+            crate::pg_catalog::reg_value(crate::pg_catalog::RegKind::Class, value.clone())
         }
-        ("regclass_cast", [other]) => Err(SqlError::new(
-            SqlState::CANNOT_COERCE,
-            format!("cannot cast type {} to regclass", other.type_name()),
-        )),
         _ => return None,
     })
 }
@@ -1131,7 +1138,9 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "nextval" | "currval" | "lastval" | "setval" | "oracle_nextval" | "oracle_currval" => {
             Some(SqlType::BigInt)
         }
-        "regclass_cast" => Some(SqlType::Text),
+        "regclass_cast" => Some(SqlType::Catalog(crate::pg_catalog::CatalogType::Reg(
+            crate::pg_catalog::RegKind::Class,
+        ))),
         _ => None,
     }
 }

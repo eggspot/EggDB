@@ -1039,6 +1039,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 inline,
                 consumed: None,
             };
+            let _catalog = crate::pg_catalog::enter_statement(
+                self.dialect == Dialect::PostgreSql
+                    && statement_tokens.is_some_and(crate::pg_catalog::mentions_catalog),
+                &settings,
+            );
             self.enter_sequences(uses_sequences);
             let result = self.run(&mut statement, &mut io);
             if let (Some(start), Some(consumed)) = (data_start, io.consumed) {
