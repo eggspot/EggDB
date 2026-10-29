@@ -546,6 +546,10 @@ fn hostile_scripts_end_in_items_or_an_error_and_never_panic() {
                 Ok(_) => {}
             }
         }
+        if case % 10 == 0 {
+            let report = restore(&MemoryStore::default(), &bytes, true);
+            assert!(report.statements <= 10_000);
+        }
     }
 }
 

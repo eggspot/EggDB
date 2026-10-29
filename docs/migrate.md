@@ -220,7 +220,9 @@ listed as client commands.
   `GETDATE()` and `NEWID()`; `INCLUDE` columns, a non-unique index's filter and `DESC`;
   `datetimeoffset` offsets (values are kept in UTC); non-binary collations (text compares by code
   point); constraints disabled with `NOCHECK CONSTRAINT` (enforced here); constraints the restored
-  rows violate (not created); `SET ANSI_NULLS`, `QUOTED_IDENTIFIER` or `ANSI_PADDING OFF`.
+  rows violate (not created); an index whose name another table's index already has (EggDB's
+  index names are unique per schema, not per table: not created); `SET ANSI_NULLS`,
+  `QUOTED_IDENTIFIER` or `ANSI_PADDING OFF`.
 - **Not kept, without a note:** default-constraint names; extended properties (`MS_Description`);
   filegroups and partitioning (`ON [PRIMARY]`, `ON ps(col)`).
 - **Tables skipped, with their rows counted:** columns of `sql_variant`, `xml`, `hierarchyid` or
