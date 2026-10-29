@@ -10,12 +10,20 @@
 //! - Every error code EggDB gives has a [`Category`] shared with EggOS, so an agent or a
 //!   script can rely on the category across both products ([`ERROR_CODES`]).
 //!
+//! - A paging cursor ([`encode_cursor`], [`decode_cursor`]) is what a list command prints and
+//!   a list tool returns as `next_cursor`, so the next page starts after the last item (D145).
+//!
 //! The shared part of the model is EggOS's `docs/ux/command-model.md`; EggDB's tables are in
 //! `docs/ux/command-model.md` in this repository. The registry is `'static` data with no
 //! dependencies: nothing here runs a command.
 
+mod cursor;
 mod registry;
 
+pub use cursor::{
+    CursorList, CursorRefusal, LONGEST_CURSOR, check_cursor, decode_cursor, encode_cursor,
+    shown_cursor, table_at, table_position,
+};
 pub use registry::{
     COMMANDS, COMMON_OPTIONS, CORE_VERBS, ERROR_CODES, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES,
     TOOLS,
@@ -552,6 +560,16 @@ impl ConfirmCheck {
     pub const fn name(self) -> &'static str {
         match self {
             Self::DestructiveStatement => "destructive_statement",
+        }
+    }
+
+    /// When the check asks for confirmation, in one sentence people and agents read
+    /// (`help --json`'s `confirm_when`).
+    pub const fn when(self) -> &'static str {
+        match self {
+            Self::DestructiveStatement => {
+                "the statement is destructive: DROP, TRUNCATE, a column dropped or retyped, or a DELETE or UPDATE whose WHERE names no column of its table"
+            }
         }
     }
 }

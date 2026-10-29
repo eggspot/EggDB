@@ -193,7 +193,7 @@ pub(super) const IMPORT: CommandDefinition = CommandDefinition {
     synopsis: "<file> [in]",
     summary: "load an export, or a CSV file into a table with --csv",
     description: "Loads an eggdb export from a file or stdin, every line checked, or with --csv loads a CSV or bcp file into an existing SQL table, all rows or none. --dry-run checks an export and changes nothing.",
-    usage: "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] [-C <name>] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls]",
+    usage: "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] [-C <name>] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dry-run] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls]",
     help: "\
 Loads an export made by eggdb export into the file, from <in> or, without it or with -, from
 stdin. Every line is checked: the header, the trailer's count, the escapes, keys in ascending
@@ -223,6 +223,8 @@ cache grows with the file, since the whole load must fit in it; --cache sets it.
       --header                   the first line names the columns and is skipped
       --delimiter <c>            the field separator, a comma by default
       --null <text>              the text that stands for NULL, unquoted; empty by default
+      --dry-run                  load into a copy of the file and remove it; the report says what a
+                                 real run would do
       --dialect <name>           postgresql (default) or oracle: the table name as Oracle
                                  writes it, Oracle's NLS date formats, and empty fields as NULL
                                  (SQLcl UNLOAD and SET MARKUP CSV ON output); or sqlserver:
@@ -247,6 +249,7 @@ Examples:
   eggdb import app.db fixes.jsonl --on-conflict overwrite
   eggdb import app.db backup.jsonl --dry-run
   eggdb import app.db --csv people.csv --table people --header
+  eggdb import app.db --csv people.csv --table people --header --dry-run
   eggdb import --dialect oracle hr.db --csv EMPLOYEES_DATA_TABLE.csv --table hr.employees --header
   eggdb import --dialect sqlserver shop.db --csv items.dat --table dbo.items
 ",
@@ -263,7 +266,7 @@ Examples:
         },
         flag(
             "dry-run",
-            "check the export and report, without writing anything",
+            "check an export, or load a CSV into a copy of the file, and report without changing the file",
         ),
         OptionDefinition {
             help: "load everything into this collection, made if missing",
@@ -321,6 +324,7 @@ Examples:
         "eggdb import app.db fixes.jsonl --on-conflict overwrite",
         "eggdb import app.db backup.jsonl --dry-run",
         "eggdb import app.db --csv people.csv --table people --header",
+        "eggdb import app.db --csv people.csv --table people --header --dry-run",
         "eggdb import --dialect oracle hr.db --csv EMPLOYEES_DATA_TABLE.csv --table hr.employees --header",
         "eggdb import --dialect sqlserver shop.db --csv items.dat --table dbo.items",
     ],
@@ -333,7 +337,7 @@ pub(super) const RESTORE: CommandDefinition = CommandDefinition {
     synopsis: "<file> [dump]",
     summary: "restore a PostgreSQL dump, or a SQL Server or Oracle script",
     description: "Brings a database back from a plain SQL dump (pg_dump, a SQL Server script or an Oracle SQL*Plus script), statement by statement, and reports what it created, skipped and could not run. The dump's text is run as SQL; restore only dumps you trust.",
-    usage: "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql|sqlserver|oracle] [--define <name>=<value>]...",
+    usage: "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--dry-run] [--report <path>] [--dialect postgresql|sqlserver|oracle] [--define <name>=<value>]...",
     help: "\
 Restores a PostgreSQL dump in plain SQL form (pg_dump, or pg_restore -f dump.sql <archive>)
 into the file, statement by statement, each in its own transaction (a table's COPY data in one).
@@ -359,6 +363,9 @@ everything skipped, ignored and failed, and is one JSON object in a pipe.
       --create            create the file if it is missing (built as <file>.restoring, renamed
                           when the restore succeeded, so a failed restore leaves no file)
       --keep-going        report an error and go on; exit 3 at the end if there was one
+      --dry-run           run the restore on a copy of the file (a scratch file with --create) and
+                          remove it; the report says what a real run would do. Takes the file's
+                          size in disk space and time
       --report <path>     write the report to this file instead of stdout
       --dialect <name>    the dump's dialect: postgresql (default), sqlserver (also mssql,
                           tsql) or oracle
@@ -371,6 +378,7 @@ Examples:
   pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
   eggdb restore --dialect sqlserver --create shop.db shop.sql
   eggdb restore --dialect oracle --create hr.db hr_install.sql
+  eggdb restore app.db dump.sql --dry-run
   eggdb restore app.db dump.sql --keep-going --report restore.json --format json
 ",
     options: &[
@@ -381,6 +389,10 @@ Examples:
         flag(
             "keep-going",
             "report an error and go on; exit 3 at the end if there was one",
+        ),
+        flag(
+            "dry-run",
+            "run the restore on a copy of the file and remove it; the report says what a real run would do",
         ),
         valued(
             "report",
@@ -422,6 +434,7 @@ Examples:
         "pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql",
         "eggdb restore --dialect sqlserver --create shop.db shop.sql",
         "eggdb restore --dialect oracle --create hr.db hr_install.sql",
+        "eggdb restore app.db dump.sql --dry-run",
         "eggdb restore app.db dump.sql --keep-going --report restore.json --format json",
     ],
     surfaces: "none yet: the GUI client (D15) brings a restore dialog",

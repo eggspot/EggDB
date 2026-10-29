@@ -4,6 +4,10 @@ use crate::{
     category_of, command, tool,
 };
 
+const SHIPPED_LIST_COMMANDS: &[&str] = &["collection list"];
+const PAGED_RESULT: &[&str] = &["items", "truncated", "truncated_by", "next_cursor"];
+const EXACT_DRY_RUNS: &[&str] = &["import", "restore"];
+
 const WITHOUT_A_FORMAT: &[&str] = &["ui", "shell", "mcp"];
 const DESCRIBED_BY_THE_MAIN_HELP: &[&str] = &["help", "version"];
 
@@ -110,7 +114,7 @@ fn every_command_is_a_kept_name_or_a_noun_and_a_core_verb() {
             .iter()
             .filter(|command| command.words.first() == Some(noun))
             .collect();
-        assert!(verbs.len() > 1, "{noun} has its verbs");
+        assert!(!verbs.is_empty(), "{noun} has its verbs");
         assert!(
             verbs.iter().all(|verb| verb.help == verbs[0].help),
             "the commands of {noun} share one help page"
@@ -341,4 +345,98 @@ fn lookups_find_commands_by_words_and_tools_by_name() {
     };
     assert!(read_only.contains("read-only EggDB database"));
     assert!(writing.contains("send them with write_sql"));
+}
+
+fn is_list_command(definition: &CommandDefinition) -> bool {
+    definition.words.last() == Some(&"list")
+}
+
+#[test]
+fn new_list_commands_take_limit_and_after_and_new_list_tools_answer_in_pages() {
+    let mut paged = 0;
+    for definition in COMMANDS.iter().filter(|definition| is_list_command(definition)) {
+        let name = definition.name();
+        if SHIPPED_LIST_COMMANDS.contains(&name.as_str()) {
+            continue;
+        }
+        for long in ["limit", "after"] {
+            assert!(
+                definition.options.iter().any(|option| option.long == long),
+                "{name} is a new list command without --{long}"
+            );
+        }
+        paged += 1;
+    }
+    assert!(paged >= 2, "table list and row list page");
+    for definition in TOOLS {
+        if SHIPPED_TOOL_NAMES.contains(&definition.name) {
+            continue;
+        }
+        let Some(twin) = definition.command.and_then(command) else {
+            panic!("{} has no twin", definition.name);
+        };
+        if !is_list_command(twin) {
+            continue;
+        }
+        for field in PAGED_RESULT {
+            assert!(
+                definition.result.iter().any(|result| result.name == *field),
+                "{} answers without {field}",
+                definition.name
+            );
+        }
+        assert!(
+            definition.envelope.contains(&"truncated_by"),
+            "{}: the CLI has no byte limit, so only the tool says what cut a page",
+            definition.name
+        );
+        for field in ["truncated", "next_cursor"] {
+            assert!(
+                !definition.envelope.contains(&field),
+                "{}: the CLI prints {field} in its page trailer",
+                definition.name
+            );
+        }
+        for (argument, long) in [("limit", "limit"), ("after", "after")] {
+            let found = definition
+                .arguments
+                .iter()
+                .find(|known| known.name == argument)
+                .map(|known| known.maps_to);
+            assert_eq!(
+                found,
+                Some(ArgumentTarget::Option(long)),
+                "{}: {argument}",
+                definition.name
+            );
+        }
+    }
+}
+
+#[test]
+fn dry_run_is_offered_only_where_it_is_exact() {
+    let offering: Vec<String> = COMMANDS
+        .iter()
+        .filter(|definition| definition.options.iter().any(|option| option.long == "dry-run"))
+        .map(CommandDefinition::name)
+        .collect();
+    assert_eq!(offering, EXACT_DRY_RUNS, "never sql: a rolled-back statement still moves sequences");
+    for name in EXACT_DRY_RUNS {
+        assert_eq!(command(&[*name]).map(|found| found.max_effect), Some(Effect::Change));
+    }
+}
+
+#[test]
+fn every_confirm_check_says_when_it_asks() {
+    for definition in TOOLS {
+        if let Some(check) = definition.confirm {
+            assert!(is_snake_case(check.name()), "{}", definition.name);
+            assert!(
+                check.when().starts_with("the ") && !check.when().ends_with('.'),
+                "{}: {}",
+                definition.name,
+                check.when()
+            );
+        }
+    }
 }

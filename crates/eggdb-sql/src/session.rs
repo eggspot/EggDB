@@ -2009,7 +2009,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         result
     }
 
-    fn read<T>(
+    pub(crate) fn read<T>(
         &mut self,
         body: impl FnOnce(&dyn crate::store::KeyValueRead, &mut TableCache) -> SqlResult<T>,
     ) -> SqlResult<T> {
