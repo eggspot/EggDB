@@ -800,6 +800,10 @@ pub(crate) enum BinaryOperator {
     RegexMatchFolded,
     RegexNoMatch,
     RegexNoMatchFolded,
+    JsonHasKey,
+    JsonHasAnyKey,
+    JsonHasAllKeys,
+    JsonDeletePath,
 }
 
 impl BinaryOperator {
@@ -828,6 +832,10 @@ impl BinaryOperator {
             Self::RegexMatchFolded => "~*",
             Self::RegexNoMatch => "!~",
             Self::RegexNoMatchFolded => "!~*",
+            Self::JsonHasKey => "?",
+            Self::JsonHasAnyKey => "?|",
+            Self::JsonHasAllKeys => "?&",
+            Self::JsonDeletePath => "#-",
         }
     }
 }
@@ -840,6 +848,10 @@ pub(crate) enum AggregateFunction {
     Min,
     Max,
     StringAgg,
+    JsonAgg,
+    JsonbAgg,
+    JsonObjectAgg,
+    JsonbObjectAgg,
 }
 
 impl AggregateFunction {
@@ -854,6 +866,16 @@ impl AggregateFunction {
         })
     }
 
+    pub(crate) fn postgresql_named(name: &str) -> Option<Self> {
+        Some(match name {
+            "json_agg" => Self::JsonAgg,
+            "jsonb_agg" => Self::JsonbAgg,
+            "json_object_agg" => Self::JsonObjectAgg,
+            "jsonb_object_agg" => Self::JsonbObjectAgg,
+            _ => return None,
+        })
+    }
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Count => "count",
@@ -862,7 +884,26 @@ impl AggregateFunction {
             Self::Min => "min",
             Self::Max => "max",
             Self::StringAgg => "string_agg",
+            Self::JsonAgg => "json_agg",
+            Self::JsonbAgg => "jsonb_agg",
+            Self::JsonObjectAgg => "json_object_agg",
+            Self::JsonbObjectAgg => "jsonb_object_agg",
         }
+    }
+
+    pub(crate) fn builds_json(self) -> bool {
+        matches!(
+            self,
+            Self::JsonAgg | Self::JsonbAgg | Self::JsonObjectAgg | Self::JsonbObjectAgg
+        )
+    }
+
+    pub(crate) fn builds_object(self) -> bool {
+        matches!(self, Self::JsonObjectAgg | Self::JsonbObjectAgg)
+    }
+
+    pub(crate) fn builds_jsonb(self) -> bool {
+        matches!(self, Self::JsonbAgg | Self::JsonbObjectAgg)
     }
 }
 

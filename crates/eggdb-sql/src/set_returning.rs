@@ -14,25 +14,200 @@ pub(crate) struct SetReturningFunction {
     pub(crate) name: &'static str,
     result_type: fn(&[Option<SqlType>]) -> SqlResult<SqlType>,
     rows: fn(&[Value], SqlType, &mut RowSink<'_>) -> SqlResult<()>,
+    fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 3] = [
+const FUNCTIONS: [SetReturningFunction; 15] = [
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
         rows: series_rows,
+        fields: false,
     },
     SetReturningFunction {
         name: "unnest",
         result_type: unnest_type,
         rows: unnest_rows,
+        fields: false,
     },
     SetReturningFunction {
         name: "pg_partition_ancestors",
         result_type: crate::pg_catalog::partition_ancestors_type,
         rows: crate::pg_catalog::partition_ancestors_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "regexp_matches",
+        result_type: regexp_matches_type,
+        rows: regexp_matches_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "regexp_split_to_table",
+        result_type: regexp_split_type,
+        rows: regexp_split_rows,
+        fields: false,
+    },
+    json_records("json_each", json_record_type, json_each_rows),
+    json_records("jsonb_each", jsonb_record_type, jsonb_each_rows),
+    json_records("json_each_text", json_record_type, json_each_text_rows),
+    json_records("jsonb_each_text", jsonb_record_type, jsonb_each_text_rows),
+    json_records("json_array_elements", json_type, json_array_elements_rows),
+    json_records("jsonb_array_elements", jsonb_type, jsonb_array_elements_rows),
+    json_records("json_array_elements_text", json_text_type, json_array_elements_text_rows),
+    json_records("jsonb_array_elements_text", jsonb_text_type, jsonb_array_elements_text_rows),
+    SetReturningFunction {
+        name: "json_object_keys",
+        result_type: json_text_type,
+        rows: json_object_keys_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "jsonb_object_keys",
+        result_type: jsonb_text_type,
+        rows: jsonb_object_keys_rows,
+        fields: false,
     },
 ];
+
+const fn json_records(
+    name: &'static str,
+    result_type: fn(&[Option<SqlType>]) -> SqlResult<SqlType>,
+    rows: fn(&[Value], SqlType, &mut RowSink<'_>) -> SqlResult<()>,
+) -> SetReturningFunction {
+    SetReturningFunction {
+        name,
+        result_type,
+        rows,
+        fields: true,
+    }
+}
+
+fn one_document_argument(
+    name: &str,
+    types: &[Option<SqlType>],
+    accepted: SqlType,
+) -> SqlResult<()> {
+    match types {
+        [None] => Ok(()),
+        [Some(sql_type)] if *sql_type == accepted || sql_type.is_character() => Ok(()),
+        _ => Err(does_not_exist(name, types)),
+    }
+}
+
+fn json_record_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    one_document_argument("json_each", types, SqlType::Json).map(|()| SqlType::Text)
+}
+
+fn jsonb_record_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    one_document_argument("jsonb_each", types, SqlType::Jsonb).map(|()| SqlType::Text)
+}
+
+fn json_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    one_document_argument("json_array_elements", types, SqlType::Json).map(|()| SqlType::Json)
+}
+
+fn jsonb_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    one_document_argument("jsonb_array_elements", types, SqlType::Jsonb).map(|()| SqlType::Jsonb)
+}
+
+fn json_text_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    one_document_argument("json_object_keys", types, SqlType::Json).map(|()| SqlType::Text)
+}
+
+fn jsonb_text_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    one_document_argument("jsonb_object_keys", types, SqlType::Jsonb).map(|()| SqlType::Text)
+}
+
+fn json_rows_of(name: &str, values: &[Value], sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::json_functions::record_rows(name, values, &mut |record| {
+        sink(crate::json_functions::record_text(&record))
+    })
+}
+
+fn json_each_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    json_rows_of("json_each", values, sink)
+}
+
+fn jsonb_each_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    json_rows_of("jsonb_each", values, sink)
+}
+
+fn json_each_text_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    json_rows_of("json_each_text", values, sink)
+}
+
+fn jsonb_each_text_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    json_rows_of("jsonb_each_text", values, sink)
+}
+
+fn json_array_elements_rows(
+    values: &[Value],
+    _: SqlType,
+    sink: &mut RowSink<'_>,
+) -> SqlResult<()> {
+    json_rows_of("json_array_elements", values, sink)
+}
+
+fn jsonb_array_elements_rows(
+    values: &[Value],
+    _: SqlType,
+    sink: &mut RowSink<'_>,
+) -> SqlResult<()> {
+    json_rows_of("jsonb_array_elements", values, sink)
+}
+
+fn json_array_elements_text_rows(
+    values: &[Value],
+    _: SqlType,
+    sink: &mut RowSink<'_>,
+) -> SqlResult<()> {
+    json_rows_of("json_array_elements_text", values, sink)
+}
+
+fn jsonb_array_elements_text_rows(
+    values: &[Value],
+    _: SqlType,
+    sink: &mut RowSink<'_>,
+) -> SqlResult<()> {
+    json_rows_of("jsonb_array_elements_text", values, sink)
+}
+
+fn json_object_keys_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    json_rows_of("json_object_keys", values, sink)
+}
+
+fn jsonb_object_keys_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    json_rows_of("jsonb_object_keys", values, sink)
+}
+
+fn text_arguments(name: &str, types: &[Option<SqlType>]) -> SqlResult<()> {
+    let texts = types
+        .iter()
+        .all(|sql_type| sql_type.is_none_or(SqlType::is_character));
+    if (2..=3).contains(&types.len()) && texts {
+        Ok(())
+    } else {
+        Err(does_not_exist(name, types))
+    }
+}
+
+fn regexp_matches_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    text_arguments("regexp_matches", types)
+        .map(|()| SqlType::Array(crate::arrays::ArrayElement::Text))
+}
+
+fn regexp_split_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    text_arguments("regexp_split_to_table", types).map(|()| SqlType::Text)
+}
+
+fn regexp_matches_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::regexp_functions::matches_rows(values, sink)
+}
+
+fn regexp_split_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::regexp_functions::split_rows(values, sink)
+}
 
 pub(crate) const VALUES_LABEL: &str = "*VALUES*";
 
@@ -432,18 +607,30 @@ fn function_of(function: &TableFunction) -> SqlResult<&'static SetReturningFunct
 
 fn function_columns(
     function: &TableFunction,
+    found: &SetReturningFunction,
     label: &str,
     alias_given: bool,
     sql_type: SqlType,
 ) -> Vec<OutputColumn> {
-    let mut columns = vec![OutputColumn {
-        name: if alias_given {
-            label.to_owned()
-        } else {
-            function.name.clone()
-        },
-        sql_type: Some(sql_type),
-    }];
+    let mut columns: Vec<OutputColumn> = if found.fields {
+        crate::json_functions::record_names(found.name)
+            .iter()
+            .zip(crate::json_functions::record_types(found.name))
+            .map(|(name, sql_type)| OutputColumn {
+                name: (*name).to_owned(),
+                sql_type: Some(sql_type),
+            })
+            .collect()
+    } else {
+        vec![OutputColumn {
+            name: if alias_given {
+                label.to_owned()
+            } else {
+                function.name.clone()
+            },
+            sql_type: Some(sql_type),
+        }]
+    };
     if function.ordinality {
         columns.push(OutputColumn {
             name: "ordinality".to_owned(),
@@ -463,7 +650,7 @@ pub(crate) fn table_function_columns(
     let types = argument_types(&function.arguments, scope);
     let sql_type =
         (found.result_type)(&types).map_err(|error| error.at_if_unplaced(function.position))?;
-    Ok(function_columns(function, label, alias_given, sql_type))
+    Ok(function_columns(function, found, label, alias_given, sql_type))
 }
 
 pub(crate) struct BoundFunction {
@@ -522,7 +709,7 @@ impl BoundFunction {
         label: &str,
         alias_given: bool,
     ) -> Vec<OutputColumn> {
-        function_columns(function, label, alias_given, self.sql_type)
+        function_columns(function, self.found, label, alias_given, self.sql_type)
     }
 
     pub(crate) fn generate(
@@ -530,6 +717,20 @@ impl BoundFunction {
         store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
     ) -> SqlResult<()> {
         let mut ordinal: i64 = 0;
+        if self.found.fields {
+            return crate::json_functions::record_rows(
+                self.found.name,
+                &self.values,
+                &mut |mut record| {
+                    ordinal += 1;
+                    if self.ordinality {
+                        record.push(Value::BigInt(ordinal));
+                    }
+                    store(record)
+                },
+            )
+            .map_err(|error| error.at_if_unplaced(self.position));
+        }
         (self.found.rows)(&self.values, self.sql_type, &mut |value| {
             ordinal += 1;
             let value = conformed(value, self.sql_type)?;

@@ -370,6 +370,13 @@ pub(crate) fn normalize(text: &str) -> SqlResult<String> {
     Ok(out)
 }
 
+pub(crate) fn normalized_value(value: &Json) -> SqlResult<String> {
+    let mut out = String::new();
+    write_normalized(value, &mut out, usize::MAX, false)?;
+    crate::memory::check_value_bytes(out.len())?;
+    Ok(out)
+}
+
 pub(crate) fn comparable(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains('.') {
         return std::borrow::Cow::Borrowed(text);

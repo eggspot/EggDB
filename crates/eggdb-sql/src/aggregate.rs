@@ -207,6 +207,9 @@ pub(crate) fn bind(expr: &Expr, scope: Scope<'_>) -> SqlResult<Expr> {
                 position: expr.position,
             })
         }
+        ExprKind::Function { name, .. } if name == crate::json_functions::WHOLE_ROW => {
+            Ok(expr.clone())
+        }
         _ => rebuild(expr, &mut |child| bind(child, scope)),
     }
 }
@@ -261,12 +264,16 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
             Some(SqlType::Bytea) => Some(SqlType::Bytea),
             _ => Some(SqlType::Text),
         },
+        AggregateFunction::JsonAgg | AggregateFunction::JsonObjectAgg => Some(SqlType::Json),
+        AggregateFunction::JsonbAgg | AggregateFunction::JsonbObjectAgg => Some(SqlType::Jsonb),
     }
 }
 
 fn joined_parts(argument: &Expr) -> Option<(&Expr, &Expr)> {
     match &argument.kind {
-        ExprKind::Function { name, arguments } if name == "string_agg_arguments" => {
+        ExprKind::Function { name, arguments }
+            if name == "string_agg_arguments" || name == "object_agg_arguments" =>
+        {
             match arguments.as_slice() {
                 [value, delimiter] => Some((value, delimiter)),
                 _ => None,
@@ -678,6 +685,7 @@ enum Accumulator {
     Average { sum: Sum, count: i64 },
     Extreme(Value),
     Joined(Option<Value>),
+    JsonParts(Option<String>),
 }
 
 struct Group {
@@ -692,6 +700,7 @@ impl Accumulator {
     fn held_bytes(&self) -> usize {
         match self {
             Self::Extreme(value) | Self::Joined(Some(value)) => crate::memory::held_bytes(value),
+            Self::JsonParts(Some(text)) => text.len(),
             _ => 0,
         }
     }
@@ -716,7 +725,57 @@ impl Call {
             },
             AggregateFunction::Min | AggregateFunction::Max => Accumulator::Extreme(Value::Null),
             AggregateFunction::StringAgg => Accumulator::Joined(None),
+            AggregateFunction::JsonAgg
+            | AggregateFunction::JsonbAgg
+            | AggregateFunction::JsonObjectAgg
+            | AggregateFunction::JsonbObjectAgg => Accumulator::JsonParts(None),
         }
+    }
+
+    fn append_json(
+        &self,
+        accumulator: &mut Accumulator,
+        piece: String,
+        separator: &str,
+    ) -> SqlResult<()> {
+        let Accumulator::JsonParts(parts) = accumulator else {
+            return Ok(());
+        };
+        match parts {
+            None => {
+                crate::memory::check_value_bytes(piece.len())?;
+                *parts = Some(piece);
+            }
+            Some(text) => {
+                crate::memory::check_value_bytes(
+                    text.len()
+                        .saturating_add(separator.len())
+                        .saturating_add(piece.len()),
+                )?;
+                text.push_str(separator);
+                text.push_str(&piece);
+            }
+        }
+        Ok(())
+    }
+
+    fn add_element(
+        &self,
+        accumulator: &mut Accumulator,
+        value: &Value,
+        whole_row: bool,
+    ) -> SqlResult<()> {
+        let element = crate::json_functions::json_element(value, self.function.builds_jsonb())?;
+        let separator = crate::json_functions::aggregate_separator(value, whole_row);
+        self.append_json(accumulator, element, separator)
+    }
+
+    fn add_member(&self, accumulator: &mut Accumulator, key: &Value, value: &Value) -> SqlResult<()> {
+        let binary = self.function.builds_jsonb();
+        let key = crate::json_functions::object_key(key)?;
+        let value = crate::json_functions::json_element(value, binary)?;
+        let member = crate::json_functions::object_member(&key, &value, binary);
+        self.append_json(accumulator, member, ", ")
     }
 
     fn join(&self, accumulator: &mut Accumulator, value: Value, delimiter: Value) -> SqlResult<()> {
@@ -819,7 +878,7 @@ impl Call {
                     *best = value;
                 }
             }
-            Accumulator::Joined(_) => {}
+            Accumulator::Joined(_) | Accumulator::JsonParts(_) => {}
         }
         Ok(())
     }
@@ -922,6 +981,13 @@ impl Call {
             }
             Accumulator::Extreme(best) => best,
             Accumulator::Joined(joined) => joined.unwrap_or(Value::Null),
+            Accumulator::JsonParts(None) => Value::Null,
+            Accumulator::JsonParts(Some(text)) if self.function.builds_object() => {
+                crate::json_functions::finish_object(&text, self.function.builds_jsonb())?
+            }
+            Accumulator::JsonParts(Some(text)) => {
+                crate::json_functions::finish_list(&text, self.function.builds_jsonb())?
+            }
         })
     }
 }
@@ -1030,9 +1096,13 @@ impl Grouping {
                         };
                         (value, Some(evaluator.eval(delimiter, Some(hint))?))
                     }
+                    Some((key, member)) if call.function.builds_object() => (
+                        evaluator.eval(key, Some(SqlType::Text))?,
+                        Some(evaluator.eval(member, None)?),
+                    ),
                     _ => (evaluator.eval(argument, None)?, None),
                 };
-                if value.is_null() {
+                if value.is_null() && !call.function.builds_json() {
                     continue;
                 }
                 if call.distinct {
@@ -1045,9 +1115,18 @@ impl Grouping {
                     group.seen[number].insert(distinct_key.clone());
                 }
                 let before = group.accumulators[number].held_bytes();
+                let accumulator = &mut group.accumulators[number];
                 match delimiter {
-                    Some(delimiter) => call.join(&mut group.accumulators[number], value, delimiter),
-                    None => call.add(&mut group.accumulators[number], value),
+                    Some(member) if call.function.builds_object() => {
+                        call.add_member(accumulator, &value, &member)
+                    }
+                    Some(delimiter) => call.join(accumulator, value, delimiter),
+                    None if call.function.builds_json() => call.add_element(
+                        accumulator,
+                        &value,
+                        crate::json_functions::is_whole_row(argument),
+                    ),
+                    None => call.add(accumulator, value),
                 }
                 .map_err(|error| error.at_if_unplaced(call.position))?;
                 let grown = group.accumulators[number]
