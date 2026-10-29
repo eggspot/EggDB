@@ -462,11 +462,13 @@ fn a_crash_at_any_operation_of_a_compaction_leaves_the_old_file_or_the_compacted
 #[test]
 fn a_crash_at_any_operation_of_a_backup_leaves_no_copy_or_the_whole_copy() {
     let source = source_with_free_pages();
-    let (_, clean, operations) = copy_after_fault(&source, backup_destination(), None);
+    let (fs, clean, operations) = copy_after_fault(&source, backup_destination(), None);
     clean.unwrap();
+    end(&fs, Ending::PowerLoss(CrashMode::Torn { seed: 7 }));
+    assert_whole_database(&fs, COPY, &source.model, "clean run");
 
     let mut refused = 0;
-    let mut copies = 0;
+    let mut renames_refused = 0;
     for step in 0..operations {
         let ending = ENDINGS[step as usize % ENDINGS.len()];
         let context = format!("fault at operation {step} of {operations}, then {ending:?}");
@@ -492,7 +494,6 @@ fn a_crash_at_any_operation_of_a_backup_leaves_no_copy_or_the_whole_copy() {
         end(&fs, ending);
         assert_whole_database(&fs, DB, &source.model, &format!("{context}, the source"));
         if fs.exists(Path::new(COPY)).unwrap() {
-            copies += 1;
             assert_whole_database(&fs, COPY, &source.model, &format!("{context}, the copy"));
         }
     }
@@ -500,6 +501,5 @@ fn a_crash_at_any_operation_of_a_backup_leaves_no_copy_or_the_whole_copy() {
         refused > operations / 2,
         "{refused} of {operations} faults were reported"
     );
-    assert!(copies > 0, "no run kept its copy");
     assert!(renames_refused <= 1, "{renames_refused} refused renames");
 }
