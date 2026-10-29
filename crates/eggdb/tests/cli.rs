@@ -126,6 +126,8 @@ Commands:
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
+  collection list|add|delete <file> [name]
+                                a named key space inside the file; see eggdb help collection
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help
@@ -146,7 +148,7 @@ Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
 ";
 
 const SCAN_HELP: &str = "\
-Usage: eggdb scan <file> [--prefix <bytes> | --from <bytes> [--to <bytes>]] [-r] [-n <count>] [-k]
+Usage: eggdb scan <file> [--prefix <bytes> | --from <bytes> [--to <bytes>]] [-r] [-n <count>] [-k] [-C <name>]
 
 Lists entries in key order, from one snapshot. Keys are compared as unsigned bytes.
 
@@ -156,6 +158,7 @@ Lists entries in key order, from one snapshot. Keys are compared as unsigned byt
   -r, --reverse          largest key first
   -n, --limit <count>    stop after this many entries
   -k, --keys-only        print keys only
+  -C, --collection <name>  work in this collection instead of the default key space
 
 Examples:
   eggdb scan app.db --prefix user:
@@ -460,13 +463,13 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);
     assert_eq!(
         stderr(&option),
-        "eggdb: unknown option '--reverse' for eggdb get\n  usage: eggdb get <file> <key>\n  try: eggdb help get\n"
+        "eggdb: unknown option '--reverse' for eggdb get\n  usage: eggdb get <file> <key> [-C <name>]\n  try: eggdb help get\n"
     );
     for reserved in ["backup", "compact"] {
         let output = dir.eggdb(&[reserved, "app.db"]);

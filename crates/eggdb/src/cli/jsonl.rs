@@ -4,17 +4,27 @@ use std::io::{self, Read, Write};
 
 const FORMAT_NAME: &str = "eggdb-jsonl";
 const FORMAT_VERSION: u64 = 1;
+const COLLECTIONS_VERSION: u64 = 2;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const HEX_CHUNK_BYTES: usize = 8 * 1024;
 const LINE_SLACK_BYTES: u64 = 64 * 1024;
 const HEADER_TEXT_BYTES: usize = 256;
 const FIELD_NAME_BYTES: usize = 16;
+const COLLECTION_NAME_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Header {
     pub(crate) page_size: Option<usize>,
     pub(crate) eggdb: Option<String>,
     pub(crate) exported_at: Option<String>,
+    pub(crate) collections: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Item {
+    Entry,
+    Collection,
+    End,
 }
 
 pub(crate) fn largest_key_bytes() -> usize {
@@ -37,7 +47,14 @@ fn is_page_size(bytes: u64) -> bool {
 pub(crate) fn write_header(out: &mut dyn Write, header: &Header) -> io::Result<()> {
     let mut object = JsonObject::new()
         .string("format", FORMAT_NAME)
-        .number("version", FORMAT_VERSION);
+        .number(
+            "version",
+            if header.collections {
+                COLLECTIONS_VERSION
+            } else {
+                FORMAT_VERSION
+            },
+        );
     if let Some(eggdb) = &header.eggdb {
         object = object.string("eggdb", eggdb);
     }
@@ -51,11 +68,31 @@ pub(crate) fn write_header(out: &mut dyn Write, header: &Header) -> io::Result<(
 }
 
 pub(crate) fn write_entry(out: &mut dyn Write, key: &[u8], value: &[u8]) -> io::Result<()> {
+    write_entry_in(out, None, key, value)
+}
+
+pub(crate) fn write_entry_in(
+    out: &mut dyn Write,
+    collection: Option<&str>,
+    key: &[u8],
+    value: &[u8],
+) -> io::Result<()> {
     out.write_all(b"{")?;
+    if let Some(collection) = collection {
+        out.write_all(b"\"collection\":\"")?;
+        write_escaped(out, collection.as_bytes())?;
+        out.write_all(b"\",")?;
+    }
     write_bytes_field(out, "key", key)?;
     out.write_all(b",")?;
     write_bytes_field(out, "value", value)?;
     out.write_all(b"}\n")
+}
+
+pub(crate) fn write_collection_line(out: &mut dyn Write, collection: &str) -> io::Result<()> {
+    out.write_all(b"{\"collection\":\"")?;
+    write_escaped(out, collection.as_bytes())?;
+    out.write_all(b"\"}\n")
 }
 
 pub(crate) fn write_trailer(out: &mut dyn Write, entries: u64) -> io::Result<()> {
@@ -133,6 +170,7 @@ enum Field {
     Value,
     ValueHex,
     Entries,
+    Collection,
 }
 
 const HEADER_FIELDS: [Field; 5] = [
@@ -142,8 +180,14 @@ const HEADER_FIELDS: [Field; 5] = [
     Field::PageSize,
     Field::ExportedAt,
 ];
-const ENTRY_FIELDS: [Field; 4] = [Field::Key, Field::KeyHex, Field::Value, Field::ValueHex];
-const ALL_FIELDS: [Field; 10] = [
+const ENTRY_FIELDS: [Field; 5] = [
+    Field::Key,
+    Field::KeyHex,
+    Field::Value,
+    Field::ValueHex,
+    Field::Collection,
+];
+const ALL_FIELDS: [Field; 11] = [
     Field::Format,
     Field::Version,
     Field::Eggdb,
@@ -154,6 +198,7 @@ const ALL_FIELDS: [Field; 10] = [
     Field::Value,
     Field::ValueHex,
     Field::Entries,
+    Field::Collection,
 ];
 
 impl Field {
@@ -175,6 +220,7 @@ impl Field {
             Self::Value => "value",
             Self::ValueHex => "value_hex",
             Self::Entries => "entries",
+            Self::Collection => "collection",
         }
     }
 
@@ -239,9 +285,11 @@ pub(crate) struct ExportReader<'r> {
     line_bytes: u64,
     longest_line: u64,
     stage: Stage,
+    version: u64,
     entries: u64,
     key: Vec<u8>,
     value: Vec<u8>,
+    collection: Vec<u8>,
     field_name: Vec<u8>,
     fields: Fields,
 }
@@ -262,9 +310,11 @@ impl<'r> ExportReader<'r> {
             line_bytes: 0,
             longest_line,
             stage: Stage::Header,
+            version: FORMAT_VERSION,
             entries: 0,
             key: Vec::new(),
             value: Vec::new(),
+            collection: Vec::new(),
             field_name: Vec::new(),
             fields: Fields::default(),
         }
@@ -280,6 +330,13 @@ impl<'r> ExportReader<'r> {
 
     pub(crate) fn current_entry(&self) -> (&[u8], &[u8]) {
         (&self.key, &self.value)
+    }
+
+    pub(crate) fn current_collection(&self) -> Option<&str> {
+        if !self.fields.has(Field::Collection) {
+            return None;
+        }
+        std::str::from_utf8(&self.collection).ok()
     }
 
     pub(crate) fn read_header(&mut self) -> Result<Header, ReadError> {
@@ -313,11 +370,11 @@ impl<'r> ExportReader<'r> {
             return Err(self.invalid("the header has no \"version\""));
         }
         match self.fields.version {
-            FORMAT_VERSION => {}
+            FORMAT_VERSION | COLLECTIONS_VERSION => self.version = self.fields.version,
             0 => return Err(self.invalid("version 0 is not a version of eggdb-jsonl")),
             newer => {
                 return Err(self.invalid(format!(
-                    "this export is version {newer} of eggdb-jsonl, from a newer EggDB; this eggdb reads version {FORMAT_VERSION}. Upgrade eggdb from https://github.com/eggspot/EggDB/releases"
+                    "this export is version {newer} of eggdb-jsonl, from a newer EggDB; this eggdb reads versions {FORMAT_VERSION} and {COLLECTIONS_VERSION}. Upgrade eggdb from https://github.com/eggspot/EggDB/releases"
                 )));
             }
         }
@@ -341,22 +398,37 @@ impl<'r> ExportReader<'r> {
             page_size,
             eggdb: text(Field::Eggdb, &self.fields.eggdb),
             exported_at: text(Field::ExportedAt, &self.fields.exported_at),
+            collections: self.version == COLLECTIONS_VERSION,
         };
         self.stage = Stage::Entries;
         Ok(header)
     }
 
     pub(crate) fn read_entry(&mut self) -> Result<bool, ReadError> {
-        Ok(self.next_entry()?.is_some())
+        loop {
+            match self.read_item()? {
+                Item::Entry => return Ok(true),
+                Item::Collection => {}
+                Item::End => return Ok(false),
+            }
+        }
     }
 
     pub(crate) fn next_entry(&mut self) -> Result<Option<Entry<'_>>, ReadError> {
+        if self.read_entry()? {
+            Ok(Some((&self.key, &self.value)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn read_item(&mut self) -> Result<Item, ReadError> {
         match self.stage {
             Stage::Header => {
                 self.read_header()?;
             }
             Stage::Entries => {}
-            Stage::Finished => return Ok(None),
+            Stage::Finished => return Ok(Item::End),
         }
         if !self.read_line()? {
             return Err(self.invalid(
@@ -368,22 +440,35 @@ impl<'r> ExportReader<'r> {
         }
         if self.fields.has(Field::Entries) {
             self.finish()?;
-            return Ok(None);
+            return Ok(Item::End);
         }
         if let Some(field) = self.fields.first_outside(&ENTRY_FIELDS) {
             return Err(self.invalid(format!("\"{}\" does not belong in an entry", field.name())));
         }
-        if !self.fields.has(Field::Key) && !self.fields.has(Field::KeyHex) {
+        let has_key = self.fields.has(Field::Key) || self.fields.has(Field::KeyHex);
+        let has_value = self.fields.has(Field::Value) || self.fields.has(Field::ValueHex);
+        if self.fields.has(Field::Collection) {
+            if self.version != COLLECTIONS_VERSION {
+                return Err(self.invalid(format!(
+                    "\"collection\" belongs in version {COLLECTIONS_VERSION} exports, and this one says version {}",
+                    self.version
+                )));
+            }
+            if !has_key && !has_value {
+                return Ok(Item::Collection);
+            }
+        }
+        if !has_key {
             return Err(self.invalid("an entry needs \"key\" or \"key_hex\""));
         }
-        if !self.fields.has(Field::Value) && !self.fields.has(Field::ValueHex) {
+        if !has_value {
             return Err(self.invalid("an entry needs \"value\" or \"value_hex\""));
         }
         self.entries = self
             .entries
             .checked_add(1)
             .ok_or_else(|| self.invalid("more entries than a count can hold"))?;
-        Ok(Some((&self.key, &self.value)))
+        Ok(Item::Entry)
     }
 
     fn finish(&mut self) -> Result<(), ReadError> {
@@ -632,6 +717,22 @@ impl<'r> ExportReader<'r> {
                     Decoded::TooLong => Err(self.invalid(format!(
                         "the key is longer than {} bytes, the longest key any EggDB database stores",
                         render::count(limit as u64)
+                    ))),
+                    Decoded::NotUtf8 => Err(self.not_utf8(field)),
+                }
+            }
+            Field::Collection => {
+                let mut name = std::mem::take(&mut self.collection);
+                name.clear();
+                let decoded = self.read_string(field, &mut name, COLLECTION_NAME_BYTES);
+                self.collection = name;
+                match decoded? {
+                    Decoded::Done if self.collection.is_empty() => {
+                        Err(self.invalid("\"collection\" is empty; leave it out for the default key space"))
+                    }
+                    Decoded::Done => Ok(()),
+                    Decoded::TooLong => Err(self.invalid(format!(
+                        "\"collection\" is longer than {COLLECTION_NAME_BYTES} bytes, the longest collection name"
                     ))),
                     Decoded::NotUtf8 => Err(self.not_utf8(field)),
                 }

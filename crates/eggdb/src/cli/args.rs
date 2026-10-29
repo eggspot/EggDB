@@ -28,6 +28,14 @@ pub(crate) enum CommandName {
     Restore,
     Mcp,
     Audit,
+    Collection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollectionAction {
+    List,
+    Add,
+    Delete,
 }
 
 impl CommandName {
@@ -49,6 +57,7 @@ impl CommandName {
             b"restore" => Self::Restore,
             b"mcp" => Self::Mcp,
             b"audit" => Self::Audit,
+            b"collection" => Self::Collection,
             _ => return None,
         })
     }
@@ -71,6 +80,7 @@ impl CommandName {
             Self::Restore => "restore",
             Self::Mcp => "mcp",
             Self::Audit => "audit",
+            Self::Collection => "collection",
         }
     }
 
@@ -119,6 +129,10 @@ impl CommandName {
             | OptionName::RowTerminator
             | OptionName::KeepNulls => self == Self::Import,
             OptionName::Limit => matches!(self, Self::Scan | Self::Audit),
+            OptionName::Collection => matches!(
+                self,
+                Self::Get | Self::Put | Self::Del | Self::Scan | Self::Export | Self::Import
+            ),
             OptionName::TimeLimit | OptionName::AllowWrite => self == Self::Mcp,
             OptionName::Prefix
             | OptionName::From
@@ -220,6 +234,7 @@ enum OptionName {
     TimeLimit,
     AllowWrite,
     Define,
+    Collection,
 }
 
 impl OptionName {
@@ -266,6 +281,7 @@ impl OptionName {
             b"time-limit" => Self::TimeLimit,
             b"allow-write" => Self::AllowWrite,
             b"define" => Self::Define,
+            b"collection" => Self::Collection,
             _ => return None,
         })
     }
@@ -280,6 +296,7 @@ impl OptionName {
             b'n' => Self::Limit,
             b'k' => Self::KeysOnly,
             b'c' => Self::Command,
+            b'C' => Self::Collection,
             _ => return None,
         })
     }
@@ -339,6 +356,8 @@ pub(crate) struct Request {
     pub(crate) restore: RestoreOptions,
     pub(crate) time_limit: Option<u64>,
     pub(crate) allow_write: bool,
+    pub(crate) collection: Option<String>,
+    pub(crate) collection_action: Option<CollectionAction>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -468,7 +487,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version.",
+            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
             None,
         ));
     };
@@ -602,6 +621,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         restore: RestoreOptions::default(),
         time_limit: None,
         allow_write: false,
+        collection: None,
+        collection_action: None,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -763,6 +784,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                         })?,
                 );
             }
+            OptionName::Collection => {
+                request.collection =
+                    Some(parse_collection_name(Some(option.spelled.as_str()), value).map_err(usage)?);
+            }
             OptionName::Help | OptionName::Version => {}
         }
     }
@@ -772,6 +797,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         ));
     }
     let arguments = &tokens.positionals[1..];
+    if command == CommandName::Collection {
+        return collection_request(request, arguments);
+    }
     let (least, most) = match command {
         CommandName::Create
         | CommandName::Scan
@@ -781,7 +809,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Serve
         | CommandName::Shell
         | CommandName::Mcp
-        | CommandName::Audit => (1, 1),
+        | CommandName::Audit
+        | CommandName::Collection => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -836,6 +865,68 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     Ok(request)
 }
 
+fn collection_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
+    let command = CommandName::Collection;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    let Some(action) = arguments.first() else {
+        return Err(usage("collection needs list, add or delete".to_owned()));
+    };
+    let action = match action.as_encoded_bytes() {
+        b"list" => CollectionAction::List,
+        b"add" => CollectionAction::Add,
+        b"delete" | b"del" => CollectionAction::Delete,
+        _ => return Err(usage("collection needs list, add or delete".to_owned())),
+    };
+    let (verb, needed) = match action {
+        CollectionAction::List => ("list", 2),
+        CollectionAction::Add => ("add", 3),
+        CollectionAction::Delete => ("delete", 3),
+    };
+    if arguments.len() < needed {
+        let needs = match (action, arguments.len()) {
+            (CollectionAction::List, _) => "a file",
+            (_, 1) => "a file and a collection name",
+            _ => "a collection name",
+        };
+        return Err(usage(format!("eggdb collection {verb} needs {needs}")));
+    }
+    if arguments.len() > needed {
+        return Err(too_many_arguments(&arguments[needed..], Some(command)));
+    }
+    request.collection_action = Some(action);
+    request.file = PathBuf::from(arguments[1]);
+    if let Some(name) = arguments.get(2) {
+        request.collection = Some(parse_collection_name(None, name).map_err(usage)?);
+    }
+    Ok(request)
+}
+
+const MOST_COLLECTION_NAME_BYTES: usize = 128;
+
+pub(crate) fn is_collection_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MOST_COLLECTION_NAME_BYTES
+        && !name.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+pub(crate) fn bad_collection_name(option: Option<&str>, shown_name: &str) -> String {
+    match option {
+        Some(option) => format!(
+            "{option} needs a name of 1 to {MOST_COLLECTION_NAME_BYTES} bytes with no spaces or control characters, not '{shown_name}'"
+        ),
+        None => format!(
+            "a collection name is 1 to {MOST_COLLECTION_NAME_BYTES} bytes with no spaces or control characters, not '{shown_name}'"
+        ),
+    }
+}
+
+fn parse_collection_name(option: Option<&str>, value: &OsStr) -> Result<String, String> {
+    match value.to_str() {
+        Some(name) if is_collection_name(name) => Ok(name.to_owned()),
+        _ => Err(bad_collection_name(option, &shown(value))),
+    }
+}
+
 fn check_csv_options(request: &Request) -> Result<(), String> {
     let csv = &request.csv;
     if csv.source.is_none() {
@@ -859,6 +950,11 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     }
     if request.export_file.is_some() {
         return Err("give the CSV with --csv <file>, not as a second argument".to_owned());
+    }
+    if request.collection.is_some() {
+        return Err(
+            "--collection is for eggdb-jsonl imports; --csv loads rows into a SQL table".to_owned(),
+        );
     }
     if csv.table.is_none() {
         return Err("--csv needs --table <name>, the table to load the rows into".to_owned());
@@ -1010,7 +1106,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
             render::text(name)
         ),
         None,
@@ -1304,7 +1400,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -1347,7 +1443,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -1360,7 +1456,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),
@@ -1380,6 +1476,86 @@ mod tests {
                 format!("eggdb {name} is not in this release yet; see docs/roadmap.md")
             );
         }
+    }
+
+    #[test]
+    fn collection_takes_a_verb_a_file_and_a_name() {
+        use super::CollectionAction;
+        let list = request("collection list app.db");
+        assert_eq!(list.command, CommandName::Collection);
+        assert_eq!(list.collection_action, Some(CollectionAction::List));
+        assert_eq!(list.file, PathBuf::from("app.db"));
+        assert_eq!(list.collection, None);
+        let add = request("collection add app.db sessions --format json");
+        assert_eq!(add.collection_action, Some(CollectionAction::Add));
+        assert_eq!(add.collection.as_deref(), Some("sessions"));
+        assert_eq!(add.format, Some(Format::Json));
+        for verb in ["delete", "del"] {
+            let deleted = request(&format!("collection {verb} app.db cache"));
+            assert_eq!(deleted.collection_action, Some(CollectionAction::Delete));
+        }
+        assert_eq!(
+            usage_message("collection"),
+            "collection needs list, add or delete"
+        );
+        assert_eq!(
+            usage_message("collection rename app.db a"),
+            "collection needs list, add or delete"
+        );
+        assert_eq!(usage_message("collection list"), "eggdb collection list needs a file");
+        assert_eq!(
+            usage_message("collection add"),
+            "eggdb collection add needs a file and a collection name"
+        );
+        assert_eq!(
+            usage_message("collection add app.db"),
+            "eggdb collection add needs a collection name"
+        );
+        assert_eq!(
+            usage_message("collection list app.db extra"),
+            "too many arguments for eggdb collection: 'extra'"
+        );
+        assert!(usage_message("collection add app.db a -F hex").contains("--format hex"));
+    }
+
+    #[test]
+    fn the_collection_option_goes_on_the_commands_that_read_or_write_keys() {
+        for words in [
+            "get app.db k -C users",
+            "put app.db k v --collection users",
+            "del app.db k -C users",
+            "scan app.db -C users -p u:",
+            "export app.db out.jsonl -C users",
+            "import app.db in.jsonl --collection=users",
+        ] {
+            assert_eq!(request(words).collection.as_deref(), Some("users"), "{words}");
+        }
+        for command in ["check", "stats", "create", "ui", "sql"] {
+            assert_eq!(
+                usage_message(&format!("{command} app.db -C users")),
+                format!("unknown option '-C' for eggdb {command}")
+            );
+        }
+        let long = "n".repeat(129);
+        let bad = [String::from(""), long, String::from("tab\there")];
+        for name in &bad {
+            let args = [
+                OsString::from("get"),
+                OsString::from("app.db"),
+                OsString::from("k"),
+                OsString::from("-C"),
+                OsString::from(name),
+            ];
+            match parse(&args) {
+                Err(Failure::Usage { message, .. }) => {
+                    assert!(message.starts_with("-C "), "{message}");
+                }
+                other => panic!("{name:?}: {other:?}"),
+            }
+        }
+        assert!(
+            usage_message("import app.db --csv d.csv --table t -C users").contains("--collection")
+        );
     }
 
     #[test]

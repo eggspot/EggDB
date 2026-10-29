@@ -74,6 +74,9 @@ fn source_error(error: &eggdb::Error) -> SourceError {
         Engine::NeedsReopen => ErrorKind::NeedsReopen,
         Engine::DatabaseFull => ErrorKind::DatabaseFull,
         Engine::InvalidOption => ErrorKind::InvalidOption,
+        Engine::CollectionNotFound => ErrorKind::CollectionNotFound,
+        Engine::InvalidCollectionName => ErrorKind::InvalidCollectionName,
+        Engine::ReservedKey => ErrorKind::ReservedKey,
         _ => ErrorKind::Other,
     };
     SourceError::new(kind, error.to_string())

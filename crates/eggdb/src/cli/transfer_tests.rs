@@ -88,7 +88,7 @@ fn every_kind_of_entry_round_trips_through_a_file_and_through_a_pipe() {
     assert_eq!(
         stdout(&exported),
         format!(
-            "{{\"file\":\"{}\",\"out\":\"{}\",\"entries\":7}}\n",
+            "{{\"file\":\"{}\",\"out\":\"{}\",\"entries\":7,\"collections\":0}}\n",
             json(&source),
             json(&export)
         )
@@ -98,7 +98,7 @@ fn every_kind_of_entry_round_trips_through_a_file_and_through_a_pipe() {
     assert_eq!(
         stdout(&imported),
         format!(
-            "{{\"file\":\"{}\",\"from\":\"{}\",\"entries\":7,\"imported\":7,\"skipped\":0,\"created\":true,\"dry_run\":false}}\n",
+            "{{\"file\":\"{}\",\"from\":\"{}\",\"entries\":7,\"imported\":7,\"skipped\":0,\"created\":true,\"dry_run\":false,\"collections_added\":0}}\n",
             json(&copy),
             json(&export)
         )
@@ -404,7 +404,7 @@ fn a_dry_run_writes_nothing() {
     assert_eq!(
         stdout(&ran),
         format!(
-            "{{\"file\":\"{}\",\"from\":\"{}\",\"entries\":2,\"imported\":1,\"skipped\":1,\"created\":false,\"dry_run\":true}}\n",
+            "{{\"file\":\"{}\",\"from\":\"{}\",\"entries\":2,\"imported\":1,\"skipped\":1,\"created\":false,\"dry_run\":true,\"collections_added\":0}}\n",
             json(&target),
             json(&export)
         )

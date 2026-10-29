@@ -246,6 +246,12 @@ pub enum ErrorKind {
     DatabaseFull,
     /// An option is outside what EggDB accepts.
     InvalidOption,
+    /// There is no collection of that name.
+    CollectionNotFound,
+    /// The name can't name a collection.
+    InvalidCollectionName,
+    /// The key starts with the bytes EggDB keeps for collections.
+    ReservedKey,
     /// Anything else.
     Other,
 }
@@ -271,6 +277,9 @@ impl ErrorKind {
             Self::NeedsReopen => "NeedsReopen",
             Self::DatabaseFull => "DatabaseFull",
             Self::InvalidOption => "InvalidOption",
+            Self::CollectionNotFound => "CollectionNotFound",
+            Self::InvalidCollectionName => "InvalidCollectionName",
+            Self::ReservedKey => "ReservedKey",
             Self::Other => "Other",
         }
     }

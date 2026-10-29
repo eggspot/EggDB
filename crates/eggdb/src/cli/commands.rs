@@ -12,6 +12,7 @@ use std::io::Read;
 use std::ops::Bound;
 
 mod audit;
+mod collection;
 mod copy_io;
 mod csv_import;
 mod mcp;
@@ -151,6 +152,7 @@ fn execute_on(
             Some(CommandName::Mcp),
         )),
         CommandName::Audit => session.audit(),
+        CommandName::Collection => session.collection_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -202,7 +204,10 @@ impl<'a> Session<'a> {
             None => ByteArgument::Stdin,
         };
         let value = self.resolve(Some(value))?;
-        if self.request.create && std::fs::symlink_metadata(&self.request.file).is_err() {
+        if self.request.create
+            && self.request.collection.is_none()
+            && std::fs::symlink_metadata(&self.request.file).is_err()
+        {
             self.refuse_what_a_new_file_cannot_store(&key, &value)?;
         }
         let cache = cache_for_value(value.len());
@@ -212,8 +217,17 @@ impl<'a> Session<'a> {
             },
             Some(cache),
         )?;
-        db.put(&key, &value).map_err(|error| {
-            operation_failure(
+        let stored = match &self.request.collection {
+            Some(name) => db.write(|transaction| {
+                if self.request.create {
+                    transaction.create_collection(name)?;
+                }
+                transaction.collection(name)?.put(&key, &value)
+            }),
+            None => db.put(&key, &value),
+        };
+        stored.map_err(|error| {
+            self.key_space_failure(
                 &error,
                 &format!("cannot store {} in {}", render::text(&key), self.file),
             )
@@ -258,8 +272,12 @@ impl<'a> Session<'a> {
     fn get(&mut self) -> Result<Exit, Failure> {
         let key = self.resolve(self.request.key.clone())?;
         let db = self.open(Access::ReadOnly, None)?;
-        let found = db.get(&key).map_err(|error| {
-            operation_failure(
+        let found = match &self.request.collection {
+            Some(name) => db.collection(name).get(&key),
+            None => db.get(&key),
+        };
+        let found = found.map_err(|error| {
+            self.key_space_failure(
                 &error,
                 &format!("cannot read {} from {}", render::text(&key), self.file),
             )
@@ -295,8 +313,12 @@ impl<'a> Session<'a> {
     fn del(&mut self) -> Result<Exit, Failure> {
         let key = self.resolve(self.request.key.clone())?;
         let db = self.open(Access::Write { create: false }, None)?;
-        let deleted = db.delete(&key).map_err(|error| {
-            operation_failure(
+        let deleted = match &self.request.collection {
+            Some(name) => db.collection(name).delete(&key),
+            None => db.delete(&key),
+        };
+        let deleted = deleted.map_err(|error| {
+            self.key_space_failure(
                 &error,
                 &format!("cannot delete {} from {}", render::text(&key), self.file),
             )
@@ -332,20 +354,27 @@ impl<'a> Session<'a> {
         let transaction = db
             .begin_read()
             .map_err(|error| scan_failure(error, &self.file))?;
-        let mut scan = if has_prefix {
-            transaction.scan_prefix(&prefix)
+        let collection = match &self.request.collection {
+            Some(name) => Some(transaction.collection(name).map_err(|error| {
+                self.key_space_failure(&error, &format!("cannot scan {}", self.file))
+            })?),
+            None => None,
+        };
+        let start = if has_from {
+            Bound::Included(from)
         } else {
-            let start = if has_from {
-                Bound::Included(from)
-            } else {
-                Bound::Unbounded
-            };
-            let end = if has_to {
-                Bound::Excluded(to)
-            } else {
-                Bound::Unbounded
-            };
-            transaction.scan((start, end))
+            Bound::Unbounded
+        };
+        let end = if has_to {
+            Bound::Excluded(to)
+        } else {
+            Bound::Unbounded
+        };
+        let mut scan = match (&collection, has_prefix) {
+            (Some(collection), true) => collection.scan_prefix(&prefix),
+            (Some(collection), false) => collection.scan((start, end)),
+            (None, true) => transaction.scan_prefix(&prefix),
+            (None, false) => transaction.scan((start, end)),
         };
         let limit = self.request.scan.limit.unwrap_or(u64::MAX);
         let mut entries = 0u64;
@@ -482,6 +511,15 @@ impl<'a> Session<'a> {
             _ => reports::stats_text(&mut self.out, &self.file, &stats),
         }
         Ok(Exit::Done)
+    }
+
+    fn key_space_failure(&self, error: &Error, context: &str) -> Failure {
+        match (&self.request.collection, error.kind()) {
+            (Some(name), ErrorKind::CollectionNotFound) => {
+                missing_collection(&self.file, name, context, self.request.command)
+            }
+            _ => operation_failure(error, context),
+        }
     }
 
     fn resolve(&mut self, argument: Option<ByteArgument>) -> Result<Vec<u8>, Failure> {
@@ -680,6 +718,21 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
             ),
             Exit::for_error(kind),
         ),
+    }
+}
+
+fn missing_collection(file: &str, name: &str, context: &str, command: CommandName) -> Failure {
+    let create = if command == CommandName::Put {
+        ", or pass --create to put"
+    } else {
+        ""
+    };
+    Failure::Database {
+        message: format!(
+            "{context}: no collection named {name}. Add it with `eggdb collection add {file} {name}`{create}."
+        ),
+        try_command: Some(format!("eggdb collection add {file} {name}")),
+        exit: Exit::NotFound,
     }
 }
 

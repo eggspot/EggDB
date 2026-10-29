@@ -21,6 +21,8 @@ Commands:
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
+  collection list|add|delete <file> [name]
+                                a named key space inside the file; see eggdb help collection
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help
@@ -43,18 +45,18 @@ Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
 pub(crate) fn usage_line(command: CommandName) -> &'static str {
     match command {
         CommandName::Create => "eggdb create <file> [--page-size <bytes>]",
-        CommandName::Put => "eggdb put <file> <key> [<value>] [--create]",
-        CommandName::Get => "eggdb get <file> <key>",
-        CommandName::Del => "eggdb del <file> <key>",
+        CommandName::Put => "eggdb put <file> <key> [<value>] [--create] [-C <name>]",
+        CommandName::Get => "eggdb get <file> <key> [-C <name>]",
+        CommandName::Del => "eggdb del <file> <key> [-C <name>]",
         CommandName::Scan => {
-            "eggdb scan <file> [--prefix <bytes> | --from <bytes> [--to <bytes>]] [-r] [-n <count>] [-k]"
+            "eggdb scan <file> [--prefix <bytes> | --from <bytes> [--to <bytes>]] [-r] [-n <count>] [-k] [-C <name>]"
         }
         CommandName::Check => "eggdb check <file>",
         CommandName::Stats => "eggdb stats <file>",
         CommandName::Ui => "eggdb ui <file> [--read-only] [--mono] [--ascii] [--cache <bytes>]",
-        CommandName::Export => "eggdb export <file> [<out> | -]",
+        CommandName::Export => "eggdb export <file> [<out> | -] [-C <name>]",
         CommandName::Import => {
-            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls]"
+            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] [-C <name>] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls]"
         }
         CommandName::Sql => {
             "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--create]"
@@ -70,6 +72,9 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         }
         CommandName::Mcp => "eggdb mcp <file> [--allow-write] [--time-limit <seconds>]",
         CommandName::Audit => "eggdb audit <file> [-n <count>] [--format text|json]",
+        CommandName::Collection => {
+            "eggdb collection list <file>\n       eggdb collection add <file> <name>\n       eggdb collection delete <file> <name>"
+        }
     }
 }
 
@@ -99,8 +104,26 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Restore => RESTORE,
         CommandName::Mcp => MCP,
         CommandName::Audit => AUDIT,
+        CommandName::Collection => COLLECTION,
     }
 }
+
+const COLLECTION: &str = "\
+A collection is a named key space inside the database file, beside the default key space that
+every command uses unless given -C <name>. Names are 1 to 128 bytes of UTF-8 with no spaces or
+control characters. Deleting a collection removes every key in it, in one commit, and asks nothing.
+
+  list     print the collections, one per line, in byte order (the default key space is not one)
+  add      make an empty collection (exit 1 if it is already there)
+  delete   remove a collection and every key in it (exit 1 if it is not there)
+
+Examples:
+  eggdb collection add app.db sessions
+  eggdb put app.db -C sessions s:1 '{\"user\":1}'
+  eggdb scan app.db -C sessions
+  eggdb collection list app.db
+  eggdb export app.db backup.jsonl          # the default key space, then every collection
+";
 
 const CREATE: &str = "\
 Makes an empty database file. It fails if anything is already at that path, so it never
@@ -121,6 +144,7 @@ exactly: `echo hi |` stores a trailing newline and `printf hi |` does not. Value
 to 1 GiB; the page cache grows to fit the value.
 
       --create              create the database file if it is missing
+  -C, --collection <name>  work in this collection instead of the default key space (made with --create)
 
 Keys and values: text as typed, 0x.. for hex, @file for a file's bytes, @- for stdin,
 =text for text that starts with 0x, @ or =.
@@ -137,6 +161,8 @@ Prints the value stored under the key, or exits 1 when the key is not there. On 
 value is shown as text, or as 0x hex when it is not text; in a pipe or a file the bytes are
 written exactly, without a newline, so `eggdb get app.db photo > photo.jpg` round-trips.
 
+  -C, --collection <name>  work in this collection instead of the default key space
+
 Examples:
   eggdb get app.db user:1
   eggdb get app.db photo > photo.jpg
@@ -146,6 +172,8 @@ Examples:
 const DEL: &str = "\
 Removes the key and commits, or exits 1 when it was not there. `eggdb delete` is the same
 command.
+
+  -C, --collection <name>  work in this collection instead of the default key space
 
 Examples:
   eggdb del app.db user:4
@@ -160,6 +188,7 @@ Lists entries in key order, from one snapshot. Keys are compared as unsigned byt
   -r, --reverse          largest key first
   -n, --limit <count>    stop after this many entries
   -k, --keys-only        print keys only
+  -C, --collection <name>  work in this collection instead of the default key space
 
 Examples:
   eggdb scan app.db --prefix user:
@@ -212,7 +241,11 @@ header line, one line per entry in key order, and a trailer line with the entry 
 export is refused on import. Keys and values are text when they are UTF-8 without control
 characters other than tab and line breaks, and hex otherwise (\"key_hex\", \"value_hex\"), so
 any bytes round-trip. Without <out>, or with -, the export goes to stdout. It never replaces a
-file; a failed export removes what it wrote.
+file; a failed export removes what it wrote. A file with collections exports as version 2: the
+default key space first, then each collection's entries tagged with its name, and an empty
+collection as a line of its own.
+
+  -C, --collection <name>  write only this collection, untagged
 
 Examples:
   eggdb export app.db backup.jsonl
@@ -234,6 +267,9 @@ succeeded.
                                  default) stops the import, overwrite keeps the export's value,
                                  skip keeps the value already there
       --dry-run                  check the export and report, without writing anything
+  -C, --collection <name>        load everything into this collection, made if missing
+
+Entries tagged with a collection go into it, and the import makes every collection it meets.
 
 With --csv, it loads a CSV file (or stdin, with -) into an existing SQL table instead, as
 COPY <table> FROM STDIN (FORMAT csv) does: every row or none, in one transaction, through

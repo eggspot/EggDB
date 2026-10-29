@@ -1,5 +1,6 @@
 use super::{
-    ExportReader, Header, ReadError, largest_key_bytes, write_entry, write_header, write_trailer,
+    ExportReader, Header, Item, ReadError, largest_key_bytes, write_collection_line, write_entry,
+    write_entry_in, write_header, write_trailer,
 };
 use eggdb_storage::BTree;
 use std::io::Read;
@@ -121,6 +122,7 @@ fn the_format_reads_as_specified() {
         page_size: Some(4096),
         eggdb: Some("0.2.0".to_owned()),
         exported_at: Some("2026-10-27T09:14:07.123456Z".to_owned()),
+        collections: false,
     };
     let entries = vec![
         (b"user:1".to_vec(), b"Ada".to_vec()),
@@ -150,6 +152,7 @@ fn any_bytes_round_trip_whatever_the_reads_return() {
             page_size: [None, Some(4096), Some(65536)][rng.below(3)],
             eggdb: (rng.below(2) == 0).then(|| "0.2.0".to_owned()),
             exported_at: None,
+            collections: false,
         };
         let bytes = export(&header, &entries);
         let mut input = Trickle {
@@ -199,7 +202,13 @@ fn every_mistake_is_refused_with_its_line() {
         (b"{\"version\":1}\n", 1, "its first line has no \"format\" field"),
         (b"{\"format\":\"csv\",\"version\":1}\n", 1, "its format is \"csv\""),
         (b"{\"format\":\"eggdb-jsonl\"}\n", 1, "the header has no \"version\""),
-        (b"{\"format\":\"eggdb-jsonl\",\"version\":2}\n", 1, "version 2 of eggdb-jsonl, from a newer EggDB"),
+        (b"{\"format\":\"eggdb-jsonl\",\"version\":3}\n", 1, "version 3 of eggdb-jsonl, from a newer EggDB"),
+        (b"{\"format\":\"eggdb-jsonl\",\"version\":1}\n{\"collection\":\"c\",\"key\":\"a\",\"value\":\"\"}\n", 2, "\"collection\" belongs in version 2 exports, and this one says version 1"),
+        (b"{\"format\":\"eggdb-jsonl\",\"version\":2}\n{\"collection\":\"\",\"key\":\"a\",\"value\":\"\"}\n", 2, "\"collection\" is empty"),
+        (b"{\"format\":\"eggdb-jsonl\",\"version\":2}\n{\"collection\":\"c\",\"key\":\"a\"}\n", 2, "an entry needs \"value\" or \"value_hex\""),
+        (b"{\"format\":\"eggdb-jsonl\",\"version\":2}\n{\"collection\":\"c\",\"collection\":\"d\"}\n", 2, "\"collection\" appears twice"),
+        (b"{\"format\":\"eggdb-jsonl\",\"version\":2,\"collection\":\"c\"}\n", 1, "\"collection\" does not belong in the header"),
+        (b"{\"format\":\"eggdb-jsonl\",\"version\":2}\n{\"collection\":\"\xff\"}\n", 2, "\"collection\" is not valid UTF-8"),
         (b"{\"format\":\"eggdb-jsonl\",\"version\":1,\"page_size\":5000}\n", 1, "\"page_size\" must be a power of two"),
         (b"{\"format\":\"eggdb-jsonl\",\"version\":1,\"key\":\"k\"}\n", 1, "\"key\" does not belong in the header"),
         (b"{\"format\":\"eggdb-jsonl\",\"version\":01}\n", 1, "leading zero"),
@@ -420,6 +429,7 @@ fn hostile_exports_end_in_an_error_or_entries_never_a_panic_or_a_hang() {
                     page_size: Some(4096),
                     eggdb: Some("0.2.0".to_owned()),
                     exported_at: None,
+                    collections: false,
                 },
                 &entries,
             )
@@ -463,4 +473,55 @@ fn hostile_exports_end_in_an_error_or_entries_never_a_panic_or_a_hang() {
         "{accepted} accepted, {refused} refused"
     );
     assert!(started.elapsed() < Duration::from_secs(120));
+}
+
+#[test]
+fn version_2_tags_entries_with_their_collection_and_keeps_empty_collections() {
+    let mut out = Vec::new();
+    let header = Header {
+        collections: true,
+        ..Header::default()
+    };
+    write_header(&mut out, &header).unwrap();
+    write_entry(&mut out, b"user:1", b"Ada").unwrap();
+    write_collection_line(&mut out, "cache").unwrap();
+    write_entry_in(&mut out, Some("sessions"), b"s:1", b"{\"user\":1}").unwrap();
+    write_entry_in(&mut out, Some("sessions"), &[0x00, 0xff], &[0xde, 0xad]).unwrap();
+    write_trailer(&mut out, 3).unwrap();
+    assert_eq!(
+        String::from_utf8(out.clone()).unwrap(),
+        "{\"format\":\"eggdb-jsonl\",\"version\":2}\n\
+         {\"key\":\"user:1\",\"value\":\"Ada\"}\n\
+         {\"collection\":\"cache\"}\n\
+         {\"collection\":\"sessions\",\"key\":\"s:1\",\"value\":\"{\\\"user\\\":1}\"}\n\
+         {\"collection\":\"sessions\",\"key_hex\":\"00ff\",\"value_hex\":\"dead\"}\n\
+         {\"entries\":3}\n"
+    );
+    let mut input = &out[..];
+    let mut reader = ExportReader::new(&mut input);
+    assert!(reader.read_header().unwrap().collections);
+    let mut items = Vec::new();
+    loop {
+        match reader.read_item().unwrap() {
+            Item::End => break,
+            Item::Collection => items.push((reader.current_collection().map(str::to_owned), None)),
+            Item::Entry => items.push((
+                reader.current_collection().map(str::to_owned),
+                Some(reader.current_entry().0.to_vec()),
+            )),
+        }
+    }
+    assert_eq!(
+        items,
+        [
+            (None, Some(b"user:1".to_vec())),
+            (Some("cache".to_owned()), None),
+            (Some("sessions".to_owned()), Some(b"s:1".to_vec())),
+            (Some("sessions".to_owned()), Some(vec![0x00, 0xff])),
+        ]
+    );
+    assert_eq!(reader.entries(), 3);
+    let mut input = &out[..];
+    let (_, entries) = read_all(&mut input).unwrap();
+    assert_eq!(entries.len(), 3);
 }

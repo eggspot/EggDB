@@ -1,7 +1,7 @@
 use super::{Access, Session, cache_for_value, open_failure, operation_failure};
 use crate::cli::args::{CommandName, ConflictPolicy, ExportFile, Format};
 use crate::cli::failure::{Exit, Failure, output_failure};
-use crate::cli::jsonl::{self, ExportReader, Header, ReadError};
+use crate::cli::jsonl::{self, ExportReader, Header, Item, ReadError};
 use crate::cli::output::{Output, Style};
 use crate::cli::render::{self, JsonObject, TimeStyle};
 use eggdb::{
@@ -9,6 +9,7 @@ use eggdb::{
 };
 use eggdb_platform::{FileSystem, OsFileSystem};
 use eggdb_storage::{BTree, PageSize};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ const IMPORT_CACHE_BYTES: usize = 32 << 20;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const SHOWN_KEY_BYTES: usize = 64;
 const STAGING_SUFFIX: &str = ".importing";
+const COLLECTION_KEY_PREFIX_BYTES: usize = 10;
 
 impl Session<'_> {
     pub(super) fn export(&mut self) -> Result<Exit, Failure> {
@@ -30,10 +32,22 @@ impl Session<'_> {
             eggdb: Some(eggdb::VERSION.to_owned()),
             exported_at: now(),
         };
+        let only = self.request.collection.clone();
+        if let Some(name) = &only {
+            db.begin_read()
+                .and_then(|transaction| transaction.collection(name).map(drop))
+                .map_err(|error| {
+                    self.key_space_failure(&error, &format!("cannot export {}", self.file))
+                })?;
+        }
         let mut progress = Progress::new(self.stderr_is_terminal, "exported");
         let result = match self.request.export_file.clone() {
-            Some(ExportFile::Path(path)) => self.export_to_file(&db, &header, &path, &mut progress),
-            Some(ExportFile::Standard) | None => self.export_to_stdout(&db, &header, &mut progress),
+            Some(ExportFile::Path(path)) => {
+                self.export_to_file(&db, &header, only.as_deref(), &path, &mut progress)
+            }
+            Some(ExportFile::Standard) | None => {
+                self.export_to_stdout(&db, &header, only.as_deref(), &mut progress)
+            }
         };
         progress.clear(&mut self.messages);
         result
@@ -43,13 +57,14 @@ impl Session<'_> {
         &mut self,
         db: &Database,
         header: &Header,
+        only: Option<&str>,
         progress: &mut Progress,
     ) -> Result<Exit, Failure> {
         let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, self.out.sink()?);
-        let written = write_export(db, header, &mut writer, progress, &mut self.messages);
-        let entries = written.map_err(|failure| match failure {
+        let written = write_export(db, header, only, &mut writer, progress, &mut self.messages);
+        let exported = written.map_err(|failure| match failure {
             ExportFailure::Read(error) => {
-                operation_failure(&error, &format!("cannot export {}", self.file))
+                self.key_space_failure(&error, &format!("cannot export {}", self.file))
             }
             ExportFailure::Write(error) => output_failure(error),
             ExportFailure::SyncDirectory(error) => Failure::database(
@@ -62,7 +77,11 @@ impl Session<'_> {
             progress.clear(&mut self.messages);
             self.messages.styled(
                 Style::Dim,
-                &format!("exported {} from {}", render::entries(entries), self.file),
+                &format!(
+                    "exported {} from {}",
+                    render::entries(exported.entries),
+                    self.file
+                ),
             );
             self.messages.text("\n");
         }
@@ -73,6 +92,7 @@ impl Session<'_> {
         &mut self,
         db: &Database,
         header: &Header,
+        only: Option<&str>,
         path: &Path,
         progress: &mut Progress,
     ) -> Result<Exit, Failure> {
@@ -93,27 +113,27 @@ impl Session<'_> {
                 Failure::database(message, Exit::DatabaseError)
             })?;
         let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
-        let written = write_export(db, header, &mut writer, progress, &mut self.messages)
-            .and_then(|entries| {
+        let written = write_export(db, header, only, &mut writer, progress, &mut self.messages)
+            .and_then(|exported| {
                 writer
                     .get_ref()
                     .sync_all()
-                    .map(|()| entries)
+                    .map(|()| exported)
                     .map_err(ExportFailure::Write)
             })
-            .and_then(|entries| {
+            .and_then(|exported| {
                 OsFileSystem::new()
                     .sync_dir(directory_of(path))
-                    .map(|()| entries)
+                    .map(|()| exported)
                     .map_err(ExportFailure::SyncDirectory)
             });
         drop(writer);
-        let entries = match written {
-            Ok(entries) => entries,
+        let exported = match written {
+            Ok(exported) => exported,
             Err(failure) => {
                 let _ = std::fs::remove_file(path);
                 return Err(match failure {
-                    ExportFailure::Read(error) => operation_failure(
+                    ExportFailure::Read(error) => self.key_space_failure(
                         &error,
                         &format!("cannot export {}; {out} was removed", self.file),
                     ),
@@ -136,12 +156,13 @@ impl Session<'_> {
                 &JsonObject::new()
                     .string("file", &self.file_display)
                     .string("out", &out_display)
-                    .number("entries", entries)
+                    .number("entries", exported.entries)
+                    .number("collections", exported.collections)
                     .line(),
             ),
             _ => self.out.text(&format!(
                 "exported {} from {} to {out}\n",
-                render::entries(entries),
+                render::entries(exported.entries),
                 self.file
             )),
         }
@@ -204,6 +225,7 @@ impl Session<'_> {
             file_display: &self.file_display,
             source_shown: source_shown.clone(),
             policy: self.request.on_conflict,
+            target_collection: self.request.collection.clone(),
             cache_bytes: self.request.cache_bytes,
             requested_page_size: self.request.page_size,
             staging_opened: false,
@@ -253,22 +275,79 @@ enum ExportFailure {
 fn write_export(
     db: &Database,
     header: &Header,
+    only: Option<&str>,
     out: &mut dyn Write,
     progress: &mut Progress,
     messages: &mut Output<'_>,
-) -> Result<u64, ExportFailure> {
+) -> Result<Exported, ExportFailure> {
     let transaction = db.begin_read().map_err(ExportFailure::Read)?;
-    jsonl::write_header(out, header).map_err(ExportFailure::Write)?;
-    let mut scan = transaction.scan(..);
-    let mut entries = 0u64;
-    while let Some((key, value)) = scan.next_entry().map_err(ExportFailure::Read)? {
-        jsonl::write_entry(out, key, value).map_err(ExportFailure::Write)?;
-        entries += 1;
-        progress.tick(messages, entries);
+    let mut written = Written {
+        out: &mut *out,
+        progress: &mut *progress,
+        messages: &mut *messages,
+        exported: Exported::default(),
+    };
+    match only {
+        Some(name) => {
+            let collection = transaction
+                .collection(name)
+                .map_err(ExportFailure::Read)?;
+            jsonl::write_header(written.out, header).map_err(ExportFailure::Write)?;
+            written.all(None, collection.scan(..))?;
+        }
+        None => {
+            let names = transaction
+                .collection_names()
+                .map_err(ExportFailure::Read)?;
+            let header = Header {
+                collections: !names.is_empty(),
+                ..header.clone()
+            };
+            jsonl::write_header(written.out, &header).map_err(ExportFailure::Write)?;
+            written.all(None, transaction.scan(..))?;
+            for name in &names {
+                let collection = transaction
+                    .collection(name)
+                    .map_err(ExportFailure::Read)?;
+                written.exported.collections += 1;
+                if !written.all(Some(name), collection.scan(..))? {
+                    jsonl::write_collection_line(written.out, name)
+                        .map_err(ExportFailure::Write)?;
+                }
+            }
+        }
     }
-    jsonl::write_trailer(out, entries).map_err(ExportFailure::Write)?;
+    let exported = written.exported;
+    jsonl::write_trailer(out, exported.entries).map_err(ExportFailure::Write)?;
     out.flush().map_err(ExportFailure::Write)?;
-    Ok(entries)
+    Ok(exported)
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct Exported {
+    entries: u64,
+    collections: u64,
+}
+
+struct Written<'w, 'o> {
+    out: &'w mut dyn Write,
+    progress: &'w mut Progress,
+    messages: &'w mut Output<'o>,
+    exported: Exported,
+}
+
+impl Written<'_, '_> {
+    fn all(&mut self, collection: Option<&str>, mut scan: Scan<'_>) -> Result<bool, ExportFailure> {
+        let mut any = false;
+        while let Some((key, value)) = scan.next_entry().map_err(ExportFailure::Read)? {
+            jsonl::write_entry_in(self.out, collection, key, value)
+                .map_err(ExportFailure::Write)?;
+            any = true;
+            self.exported.entries += 1;
+            self.progress.tick(self.messages, self.exported.entries);
+        }
+        Ok(any)
+    }
 }
 
 fn now() -> Option<String> {
@@ -357,6 +436,7 @@ struct Tally {
     committed: u64,
     largest_entry_bytes: usize,
     created_page_size: Option<usize>,
+    collections_added: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,9 +453,45 @@ enum KeyLimit {
 
 #[derive(Default)]
 struct KeyOrder {
+    previous_space: Option<String>,
     previous: Vec<u8>,
     previous_line: u64,
     started: bool,
+}
+
+impl KeyOrder {
+    fn compare(&self, space: Option<&str>, key: &[u8]) -> std::cmp::Ordering {
+        space
+            .cmp(&self.previous_space.as_deref())
+            .then_with(|| key.cmp(&self.previous))
+    }
+
+    fn remember(&mut self, space: Option<&str>, key: &[u8], line: u64) {
+        if self.previous_space.as_deref() != space {
+            self.previous_space = space.map(str::to_owned);
+        }
+        self.previous.clear();
+        self.previous.extend_from_slice(key);
+        self.previous_line = line;
+        self.started = true;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EntryAt<'e> {
+    line: u64,
+    source: Option<&'e str>,
+    target: Option<&'e str>,
+    key: &'e [u8],
+}
+
+impl EntryAt<'_> {
+    fn shown(&self) -> String {
+        match self.target {
+            Some(collection) => format!("{} in collection {collection}", shown_key(self.key)),
+            None => shown_key(self.key),
+        }
+    }
 }
 
 struct WriteState {
@@ -384,6 +500,7 @@ struct WriteState {
     check_existing: bool,
     order: KeyOrder,
     pending: bool,
+    ensured: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -404,6 +521,7 @@ struct Import<'s, 'a> {
     file_display: &'s str,
     source_shown: String,
     policy: ConflictPolicy,
+    target_collection: Option<String>,
     cache_bytes: Option<usize>,
     requested_page_size: Option<usize>,
     staging_opened: bool,
@@ -594,17 +712,38 @@ impl Import<'_, '_> {
                 }
             };
             let mut order = KeyOrder::default();
-            while reader
-                .read_entry()
-                .map_err(|error| import.read_failure(error))?
-            {
-                let (key, value) = reader.current_entry();
+            let mut seen = BTreeSet::new();
+            let flatten_into = import.target_collection.clone();
+            loop {
+                let item = reader
+                    .read_item()
+                    .map_err(|error| import.read_failure(error))?;
                 let line = reader.line();
-                let decision =
-                    import.decide(line, key, max_key, &mut order, || match existing {
-                        Some(view) => contains(view.scan(key..=key)),
-                        None => Ok(false),
-                    })?;
+                match item {
+                    Item::End => break,
+                    Item::Collection => {
+                        if flatten_into.is_none() {
+                            let name = reader.current_collection().unwrap_or_default();
+                            import.would_add(line, name, existing, &mut seen)?;
+                        }
+                        continue;
+                    }
+                    Item::Entry => {}
+                }
+                let (key, value) = reader.current_entry();
+                let source = reader.current_collection();
+                let entry = EntryAt {
+                    line,
+                    source,
+                    target: flatten_into.as_deref().or(source),
+                    key,
+                };
+                if let Some(name) = entry.target {
+                    import.would_add(line, name, existing, &mut seen)?;
+                }
+                let decision = import.decide(entry, max_key, &mut order, || {
+                    existing.map_or(Ok(false), |view| contains_in(view, entry.target, key))
+                })?;
                 import.count(decision);
                 let entry_bytes = key.len().saturating_add(value.len());
                 import.tally.largest_entry_bytes =
@@ -615,6 +754,64 @@ impl Import<'_, '_> {
             import.tally.entries = reader.entries();
             Ok(())
         })
+    }
+
+    fn would_add(
+        &mut self,
+        line: u64,
+        name: &str,
+        existing: Option<&ReadTransaction<'_>>,
+        seen: &mut BTreeSet<String>,
+    ) -> Result<(), Failure> {
+        if seen.contains(name) {
+            return Ok(());
+        }
+        seen.insert(name.to_owned());
+        let exists = match existing.map(|view| view.collection(name)) {
+            None => false,
+            Some(Ok(_)) => true,
+            Some(Err(error)) if error.kind() == ErrorKind::CollectionNotFound => false,
+            Some(Err(error)) => return Err(self.collection_refused(line, name, &error)),
+        };
+        if !exists {
+            self.tally.collections_added += 1;
+        }
+        Ok(())
+    }
+
+    fn ensure(
+        &mut self,
+        line: u64,
+        open: &mut WriteTransaction<'_>,
+        ensured: &mut BTreeSet<String>,
+        name: &str,
+    ) -> Result<(), Failure> {
+        if ensured.contains(name) {
+            return Ok(());
+        }
+        let created = open
+            .create_collection(name)
+            .map_err(|error| self.collection_refused(line, name, &error))?;
+        if created {
+            self.tally.collections_added += 1;
+        }
+        ensured.insert(name.to_owned());
+        Ok(())
+    }
+
+    fn collection_refused(&self, line: u64, name: &str, error: &Error) -> Failure {
+        match error.kind() {
+            ErrorKind::InvalidCollectionName | ErrorKind::Corrupt | ErrorKind::Incompatible => {
+                Failure::database(
+                    format!(
+                        "cannot import {}: line {line}: cannot add the collection {name} to {}: {error}",
+                        self.source_shown, self.file
+                    ),
+                    Exit::for_error(error.kind()),
+                )
+            }
+            _ => self.database_failure(error),
+        }
     }
 
     fn write_pass(
@@ -629,9 +826,10 @@ impl Import<'_, '_> {
         let mut state = WriteState {
             cache,
             max_key,
-            check_existing,
+            check_existing: check_existing || self.target_collection.is_some(),
             order: KeyOrder::default(),
             pending: false,
+            ensured: BTreeSet::new(),
         };
         loop {
             match self.write_batches(reader, &db, &mut state) {
@@ -659,18 +857,40 @@ impl Import<'_, '_> {
         let batch_entries = (BATCH_PAGE_BYTES / db.page_size()).max(1) as u64;
         let mut transaction: Option<WriteTransaction<'_>> = None;
         let mut batch = Batch::default();
+        let flatten_into = self.target_collection.clone();
         loop {
             if !state.pending {
-                if !reader
-                    .read_entry()
-                    .map_err(|error| self.read_failure(error))?
-                {
-                    break;
+                let item = reader
+                    .read_item()
+                    .map_err(|error| self.read_failure(error))?;
+                match item {
+                    Item::End => break,
+                    Item::Collection => {
+                        if flatten_into.is_none() {
+                            let line = reader.line();
+                            let name = reader.current_collection().unwrap_or_default();
+                            let open = match transaction.take() {
+                                Some(open) => open,
+                                None => db
+                                    .begin_write()
+                                    .map_err(|error| self.database_failure(&error))?,
+                            };
+                            let open = transaction.insert(open);
+                            self.ensure(line, open, &mut state.ensured, name)?;
+                        }
+                        continue;
+                    }
+                    Item::Entry => state.pending = true,
                 }
-                state.pending = true;
             }
             let (key, value) = reader.current_entry();
-            let line = reader.line();
+            let source = reader.current_collection();
+            let entry = EntryAt {
+                line: reader.line(),
+                source,
+                target: flatten_into.as_deref().or(source),
+                key,
+            };
             let entry_bytes = key.len().saturating_add(value.len());
             let needed = cache_for_entry(entry_bytes);
             if !fixed_cache && needed > state.cache {
@@ -689,21 +909,32 @@ impl Import<'_, '_> {
                     .map_err(|error| self.database_failure(&error))?,
             };
             let open = transaction.insert(began);
-            let decision = self.decide(line, key, state.max_key, &mut state.order, || {
-                if state.check_existing {
-                    contains(open.scan(key..=key))
+            if let Some(name) = entry.target {
+                self.ensure(entry.line, open, &mut state.ensured, name)?;
+            }
+            let check_existing = state.check_existing;
+            let decision = self.decide(entry, state.max_key, &mut state.order, || {
+                if check_existing {
+                    contains_while_writing(open, entry.target, key)
                 } else {
                     Ok(false)
                 }
             })?;
             if decision != Decision::Skip {
-                open.put(key, value).map_err(|error| {
+                let stored = match entry.target {
+                    None => open.put(key, value),
+                    Some(name) => open
+                        .collection(name)
+                        .and_then(|mut collection| collection.put(key, value)),
+                };
+                stored.map_err(|error| {
                     operation_failure(
                         &error,
                         &format!(
-                            "cannot import {}: line {line}: cannot store {} in {}",
+                            "cannot import {}: line {}: cannot store {} in {}",
                             self.source_shown,
-                            shown_key(key),
+                            entry.line,
+                            entry.shown(),
                             self.file
                         ),
                     )
@@ -741,18 +972,26 @@ impl Import<'_, '_> {
 
     fn decide(
         &self,
-        line: u64,
-        key: &[u8],
+        entry: EntryAt<'_>,
         max_key: usize,
         order: &mut KeyOrder,
         exists: impl FnOnce() -> Result<bool, Error>,
     ) -> Result<Decision, Failure> {
+        let EntryAt { line, source, key, .. } = entry;
+        let max_key = match entry.target {
+            Some(_) => max_key.saturating_sub(COLLECTION_KEY_PREFIX_BYTES),
+            None => max_key,
+        };
         if key.len() > max_key {
+            let space = match entry.target {
+                Some(_) => "keys in a collection",
+                None => "keys",
+            };
             return Err(self.invalid(
                 line,
                 format!(
-                    "key {} is {} bytes; {} stores keys up to {} bytes with its page size, and a larger page size (up to 64k, given when the file is created) stores longer ones",
-                    shown_key(key),
+                    "key {} is {} bytes; {} stores {space} up to {} bytes with its page size, and a larger page size (up to 64k, given when the file is created) stores longer ones",
+                    entry.shown(),
                     render::count(key.len() as u64),
                     self.file,
                     render::count(max_key as u64)
@@ -760,13 +999,13 @@ impl Import<'_, '_> {
             ));
         }
         if order.started {
-            match key.cmp(&order.previous) {
+            match order.compare(source, key) {
                 std::cmp::Ordering::Less => {
                     return Err(self.invalid(
                         line,
                         format!(
                             "key {} comes after {} on line {}; an export lists its keys in ascending byte order, as eggdb export writes them",
-                            shown_key(key),
+                            entry.shown(),
                             shown_key(&order.previous),
                             order.previous_line
                         ),
@@ -780,7 +1019,7 @@ impl Import<'_, '_> {
                             line,
                             format!(
                                 "key {} appears twice, on lines {first_line} and {line}. Keep the last with --on-conflict overwrite, or the first with --on-conflict skip",
-                                shown_key(key)
+                                entry.shown()
                             ),
                         )),
                         ConflictPolicy::Overwrite => Ok(Decision::WriteAgain),
@@ -790,10 +1029,7 @@ impl Import<'_, '_> {
                 std::cmp::Ordering::Greater => {}
             }
         }
-        order.previous.clear();
-        order.previous.extend_from_slice(key);
-        order.previous_line = line;
-        order.started = true;
+        order.remember(source, key, line);
         if self.policy == ConflictPolicy::Overwrite {
             return Ok(Decision::Write);
         }
@@ -806,7 +1042,7 @@ impl Import<'_, '_> {
                 line,
                 format!(
                     "key {} is already in {}. Choose what happens to keys already there: --on-conflict overwrite or --on-conflict skip",
-                    shown_key(key),
+                    entry.shown(),
                     self.file
                 ),
             )),
@@ -836,7 +1072,11 @@ impl Import<'_, '_> {
         let view = db
             .begin_read()
             .map_err(|error| self.database_failure(&error))?;
-        let empty = !contains(view.scan(..)).map_err(|error| self.database_failure(&error))?;
+        let empty = !contains(view.scan(..)).map_err(|error| self.database_failure(&error))?
+            && view
+                .collection_names()
+                .map_err(|error| self.database_failure(&error))?
+                .is_empty();
         Ok((!empty).then_some(view))
     }
 
@@ -920,6 +1160,7 @@ impl ImportReport<'_> {
             .number("skipped", self.tally.skipped)
             .boolean("created", self.tally.created_page_size.is_some())
             .boolean("dry_run", self.dry_run)
+            .number("collections_added", self.tally.collections_added)
             .line()
     }
 
@@ -964,6 +1205,35 @@ impl ImportReport<'_> {
 
 fn contains(mut scan: Scan<'_>) -> Result<bool, Error> {
     Ok(scan.next_key_and_value_len()?.is_some())
+}
+
+fn contains_in(
+    view: &ReadTransaction<'_>,
+    collection: Option<&str>,
+    key: &[u8],
+) -> Result<bool, Error> {
+    match collection {
+        None => contains(view.scan(key..=key)),
+        Some(name) => match view.collection(name) {
+            Ok(collection) => contains(collection.scan(key..=key)),
+            Err(error) if error.kind() == ErrorKind::CollectionNotFound => Ok(false),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+fn contains_while_writing(
+    open: &mut WriteTransaction<'_>,
+    collection: Option<&str>,
+    key: &[u8],
+) -> Result<bool, Error> {
+    match collection {
+        None => contains(open.scan(key..=key)),
+        Some(name) => {
+            let collection = open.collection(name)?;
+            contains(collection.scan(key..=key))
+        }
+    }
 }
 
 fn cache_for_entry(entry_bytes: usize) -> usize {
