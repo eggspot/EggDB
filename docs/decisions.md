@@ -150,3 +150,4 @@ its full title with its status.
 - [D123](decisions/D123.md) SQL Server's types, conversions and functions in the Transact-SQL dialect: types mapped onto the engine's, SQL Server's conversion rules and styles, no file-format change
 - [D124](decisions/D124.md) Transact-SQL views and CHECK constraints in the file: SQL Server is dialect code 4 in the view and CHECK records, with no new format version
 - [D125](decisions/D125.md) Restoring a SQL Server script: SSMS Generate Scripts and sqlpackage scripts through `eggdb restore --dialect sqlserver`, sharing item 35's restore runner
+- [D126](decisions/D126.md) Oracle's types and semantics in the Oracle dialect: exact `NUMBER` values, datetime and number format models, NLS session settings and `CURRENT_SCHEMA`, Oracle's implicit conversions and date arithmetic, and `MERGE` joined directly in `merge.rs`, with no file-format change
