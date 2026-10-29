@@ -396,3 +396,274 @@ fn the_tools_list_carries_the_registry_s_names_and_annotations() {
         mcp.finish();
     }
 }
+
+fn catalog_file(name: &str) -> TempPath {
+    let file = TempPath::new(name);
+    let path = file.path().to_str().unwrap().to_owned();
+    succeeded(&eggdb(&[
+        "sql",
+        "--create",
+        &path,
+        "-c",
+        "CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, email text DEFAULT 'unknown'); \
+         COMMENT ON TABLE users IS 'the people who sign in'; \
+         CREATE INDEX users_email ON users (email); \
+         INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Margaret'); \
+         CREATE TABLE orders (id integer PRIMARY KEY, user_id integer, total numeric); \
+         CREATE SCHEMA sales; \
+         CREATE VIEW sales.totals AS SELECT user_id, sum(total) AS total FROM orders GROUP BY user_id",
+    ]));
+    file
+}
+
+fn members_of<'n>(node: &'n Node, name: &str) -> &'n [Node] {
+    match &at(node, &[name]).value {
+        Json::Array(items) => items,
+        other => panic!("{name} is not an array: {other:?}"),
+    }
+}
+
+fn with_kind(item: &Node, kind: &str) -> String {
+    let Json::Object(members) = &item.value else {
+        panic!("{item:?}");
+    };
+    let mut fields: Vec<String> = Vec::new();
+    for (name, value) in members {
+        fields.push(format!("{name:?}:{}", canonical(value)));
+        if name == "name" {
+            fields.push(format!("\"kind\":{kind:?}"));
+        }
+    }
+    format!("{{{}}}", fields.join(","))
+}
+
+#[test]
+fn the_table_tools_return_what_table_list_show_and_sample_print() {
+    let file = catalog_file("parity-tables");
+    let path = file.path().to_str().unwrap().to_owned();
+    let _audit = audit_of(file.path());
+    let mut mcp = Mcp::start(file.path(), &[]);
+
+    for (arguments, options) in [("{}", vec![]), (r#"{"schema":"sales"}"#, vec!["--schema", "sales"])] {
+        let answer = mcp.call("list_tables", arguments);
+        let result = structured(&answer, false);
+        let mut from_tool: Vec<String> = members_of(result, "tables")
+            .iter()
+            .map(|table| with_kind(table, "table"))
+            .collect();
+        from_tool.extend(members_of(result, "views").iter().map(|view| with_kind(view, "view")));
+        let mut args = vec!["table", "list", path.as_str(), "--json"];
+        args.extend(options.iter().copied());
+        let printed: Vec<String> = lines(&succeeded(&eggdb(&args))).iter().map(canonical).collect();
+        assert_eq!(from_tool, printed, "{arguments}");
+    }
+
+    for name in ["users", "USERS", "sales.totals"] {
+        let answer = mcp.call("describe_table", &format!(r#"{{"table":{name:?}}}"#));
+        let result = structured(&answer, false);
+        let printed = lines(&succeeded(&eggdb(&["table", "show", &path, name, "--json"])));
+        assert_eq!(printed.len(), 1);
+        assert_eq!(
+            canonical_without(result, envelope("describe_table")),
+            canonical(&printed[0]),
+            "{name}"
+        );
+    }
+
+    for (max_rows, limit) in [(10, "10"), (2, "2")] {
+        let answer = mcp.call("sample_rows", &format!(r#"{{"table":"users","max_rows":{max_rows}}}"#));
+        let result = structured(&answer, false);
+        let printed = lines(&succeeded(&eggdb(&["table", "sample", &path, "users", "-n", limit, "--json"])));
+        assert_eq!(printed.len(), 1);
+        let line = &printed[0];
+        assert_eq!(canonical(at(result, &["rows"])), canonical(at(line, &["rows"])), "{limit}");
+        assert_eq!(canonical(at(result, &["columns"])), canonical(at(line, &["columns"])));
+        assert_eq!(scalar(at(result, &["truncated"])), scalar(at(line, &["truncated"])));
+        assert_eq!(scalar(at(result, &["returned_rows"])), scalar(at(line, &["row_count"])));
+        if max_rows == 10 {
+            assert_eq!(
+                canonical_without(result, envelope("sample_rows")),
+                canonical(line)
+            );
+        }
+    }
+
+    let missing = mcp.call("describe_table", r#"{"table":"nowhere"}"#);
+    let tool_error = code_and_category(structured(&missing, true));
+    for verb in ["show", "sample"] {
+        let twin = eggdb(&["table", verb, &path, "nowhere", "--json"]);
+        assert_eq!(twin.status.code(), Some(1), "{verb}");
+        let (code, category) = code_and_category(&one_error(&twin));
+        assert_eq!(code, "table_not_found");
+        assert_eq!(category, tool_error.1, "the same category as the tool's {}", tool_error.0);
+        assert_eq!(
+            scalar(at(&one_error(&twin), &["error", "fix_command"])),
+            format!("eggdb table list {path}")
+        );
+    }
+    mcp.finish();
+}
+
+#[test]
+fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
+    let file = catalog_file("parity-explain");
+    let path = file.path().to_str().unwrap().to_owned();
+    let _audit = audit_of(file.path());
+    let mut mcp = Mcp::start(file.path(), &[]);
+
+    for (dialect, sql) in [
+        ("postgresql", "SELECT * FROM users WHERE id = 2"),
+        ("sqlite", "SELECT name FROM users WHERE id = 2"),
+        ("mysql", "SELECT name FROM users WHERE id = 2"),
+    ] {
+        let answer = mcp.call(
+            "explain_query",
+            &format!(r#"{{"sql":{sql:?},"dialect":"{dialect}"}}"#),
+        );
+        let result = structured(&answer, false);
+        let printed = lines(&succeeded(&eggdb(&[
+            "explain", &path, "--json", "--dialect", dialect, "-c", sql,
+        ])));
+        assert_eq!(printed.len(), 1, "{dialect}");
+        assert_eq!(
+            canonical_without(result, envelope("explain_query")),
+            canonical(&printed[0]),
+            "{dialect}: {sql}"
+        );
+    }
+    for (arguments, args) in [
+        (
+            r#"{"sql":"SELECT 1","dialect":"oracle"}"#,
+            vec!["explain", path.as_str(), "--json", "--dialect", "oracle", "-c", "SELECT 1"],
+        ),
+        (
+            r#"{"sql":"SELECT 1; SELECT 2"}"#,
+            vec!["explain", path.as_str(), "--json", "-c", "SELECT 1; SELECT 2"],
+        ),
+    ] {
+        let answer = mcp.call("explain_query", arguments);
+        let tool_error = code_and_category(structured(&answer, true));
+        let twin = eggdb(&args);
+        assert_eq!(code_and_category(&one_error(&twin)), tool_error, "{arguments}");
+    }
+    let doubled = eggdb(&["explain", &path, "-c", "EXPLAIN SELECT 1"]);
+    assert_eq!(doubled.status.code(), Some(2));
+    let text_plan = succeeded(&eggdb(&["explain", &path, "-c", "SELECT * FROM users"]));
+    assert!(text_plan.ends_with(")\n\n"), "no tag line after the plan: {text_plan}");
+
+    let select = "SELECT id, name FROM users ORDER BY id";
+    let answer = mcp.call("run_sql", &format!(r#"{{"sql":{select:?}}}"#));
+    let printed = lines(&succeeded(&eggdb(&["sql", &path, "--read-only", "--json", "-c", select])));
+    assert_eq!(printed.len(), 1);
+    assert_eq!(
+        canonical_without(structured(&answer, false), envelope("run_sql")),
+        canonical(&printed[0])
+    );
+    let write = "INSERT INTO users (id, name) VALUES (9, 'Eve')";
+    let refused = mcp.call("run_sql", &format!(r#"{{"sql":{write:?}}}"#));
+    let tool_error = code_and_category(structured(&refused, true));
+    let twin = eggdb(&["sql", &path, "--read-only", "--json", "-c", write]);
+    assert_eq!(twin.status.code(), Some(3));
+    let printed = one_error(&twin);
+    assert_eq!(code_and_category(&printed), tool_error);
+    assert_eq!(tool_error, ("read_only".to_owned(), "read_only".to_owned()));
+    assert_eq!(scalar(at(&printed, &["error", "sqlstate"])), "25006");
+    let as_text = eggdb(&["sql", &path, "--read-only", "-c", write]);
+    let shown = text(&as_text.stderr);
+    assert!(
+        shown.starts_with("ERROR:  cannot execute INSERT in a read-only transaction\n")
+            && shown.ends_with("SQLSTATE:  25006\n"),
+        "{shown}"
+    );
+    let count = succeeded(&eggdb(&["sql", &path, "-c", "SELECT count(*) FROM users"]));
+    assert!(count.contains(" 3\n"), "nothing was written: {count}");
+    mcp.finish();
+}
+
+fn words_of(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    for character in line.chars() {
+        match (quote, character) {
+            (Some(open), character) if character == open => quote = None,
+            (Some(_), character) => word.push(character),
+            (None, '"' | '\'') => {
+                quote = Some(character);
+                in_word = true;
+            }
+            (None, character) if character.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            (None, character) => {
+                word.push(character);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
+}
+
+struct ExampleDirectory(PathBuf);
+
+impl Drop for ExampleDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn every_example_of_a_reading_command_runs_against_a_temporary_file() {
+    let directory = ExampleDirectory(
+        std::env::temp_dir().join(format!("eggdb-examples-{}", std::process::id())),
+    );
+    std::fs::create_dir_all(&directory.0).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .args(args)
+            .current_dir(&directory.0)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    for setup in [
+        &["sql", "--create", "app.db", "-c", "CREATE TABLE users (id integer PRIMARY KEY, name text); INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace'); CREATE TABLE orders (id integer PRIMARY KEY, placed_at timestamp); CREATE SCHEMA sales; CREATE VIEW sales.totals AS SELECT count(*) AS n FROM orders"][..],
+        &["put", "app.db", "user:1", "Ada"],
+        &["put", "app.db", "0x00ff", "0x01"],
+        &["collection", "add", "app.db", "sessions"],
+        &["put", "app.db", "-C", "sessions", "s:1", "x", "--ttl", "30m"],
+    ] {
+        succeeded(&run(setup));
+    }
+    let mut ran = 0;
+    for command in eggdb_commands::COMMANDS {
+        if command.max_effect != eggdb_commands::Effect::Read {
+            continue;
+        }
+        for example in command.examples {
+            let one_command = example.starts_with("eggdb ")
+                && !["|", "<", ">", "$(", "&&"].iter().any(|shell| example.contains(shell));
+            if !one_command {
+                continue;
+            }
+            let words = words_of(example);
+            let args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+            let output = run(&args);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{example}: {}",
+                text(&output.stderr)
+            );
+            ran += 1;
+        }
+    }
+    assert!(ran >= 20, "{ran} examples ran");
+}

@@ -16,7 +16,8 @@ impl Session<'_> {
         }
         let file = &self.file;
         if std::fs::symlink_metadata(self.staging_path()).is_ok() {
-            return Err(Failure::database(
+            return Err(Failure::coded(
+                "already_exists",
                 format!(
                     "cannot compact {file}: {file}{COMPACTION_STAGING_SUFFIX} exists, left by a compact that did not finish or one still running. Remove it and compact again."
                 ),

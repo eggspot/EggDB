@@ -15,12 +15,14 @@ impl Session<'_> {
         let text = self.sql_text()?;
         let json = self.format == Format::Json;
         let script = !matches!(self.request.sql, Some(SqlSource::Command(_)));
-        let db = self.open(
+        let access = if self.request.read_only {
+            Access::ReadOnly
+        } else {
             Access::Write {
                 create: self.request.create,
-            },
-            Some(script_cache(&text)),
-        )?;
+            }
+        };
+        let db = self.open(access, Some(script_cache(&text)))?;
         let store = DatabaseStore(&db);
         let dialect = self.request.dialect;
         let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
@@ -139,7 +141,7 @@ pub(super) fn exit_for(error: &SqlError) -> Exit {
     }
 }
 
-fn report_error(messages: &mut Output<'_>, error: &SqlError, text: &str, json: bool) {
+pub(super) fn report_error(messages: &mut Output<'_>, error: &SqlError, text: &str, json: bool) {
     if json {
         messages.text(&error_json(error));
     } else {
@@ -151,6 +153,7 @@ pub(crate) fn error_json(error: &SqlError) -> String {
     let code = match exit_for(error) {
         Exit::Damaged => "damaged",
         Exit::Busy => "database_busy",
+        _ if error.state() == SqlState::READ_ONLY_SQL_TRANSACTION => "read_only",
         _ => "sql_error",
     };
     let category = eggdb_commands::category_of(code).unwrap_or(Category::Failed);
@@ -174,6 +177,10 @@ pub(crate) fn error_json(error: &SqlError) -> String {
 const LARGEST_EXACT_INTEGER: u64 = (1 << 53) - 1;
 
 pub(crate) fn statement_json(result: &QueryResult, dialect: Dialect) -> String {
+    statement_object(result, dialect).line()
+}
+
+pub(crate) fn statement_object(result: &QueryResult, dialect: Dialect) -> JsonObject {
     let mut object = JsonObject::new().string("tag", &result.tag);
     if let Some(columns) = &result.columns {
         let columns: Vec<String> = columns
@@ -216,7 +223,7 @@ pub(crate) fn statement_json(result: &QueryResult, dialect: Dialect) -> String {
     if !notices.is_empty() {
         object = object.raw("notices", &format!("[{}]", notices.join(",")));
     }
-    object.line()
+    object
 }
 
 fn value_json(value: &Value, dialect: Dialect) -> String {
@@ -312,8 +319,12 @@ fn line_of(text: &str, position: usize) -> (usize, &str, usize) {
     (number, line, column)
 }
 
-fn print_result(out: &mut Output<'_>, result: &QueryResult, dialect: Dialect) {
+pub(super) fn print_result(out: &mut Output<'_>, result: &QueryResult, dialect: Dialect) {
     out.text(&result_text(result, ResultMode::Table, None, dialect));
+}
+
+pub(super) fn rows_text(result: &QueryResult, dialect: Dialect) -> String {
+    result_cells(result, dialect).map_or_else(String::new, |cells| table_text(&cells))
 }
 
 pub(crate) struct ResultCells {

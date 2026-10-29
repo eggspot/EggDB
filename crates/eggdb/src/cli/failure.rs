@@ -34,6 +34,7 @@ pub(crate) enum Failure {
     Usage {
         message: String,
         command: Option<CommandName>,
+        code: &'static str,
     },
     Database {
         message: String,
@@ -49,9 +50,18 @@ pub(crate) enum Failure {
 
 impl Failure {
     pub(crate) fn usage(message: impl Into<String>, command: Option<CommandName>) -> Self {
+        Self::coded_usage(USAGE_CODE, message, command)
+    }
+
+    pub(crate) fn coded_usage(
+        code: &'static str,
+        message: impl Into<String>,
+        command: Option<CommandName>,
+    ) -> Self {
         Self::Usage {
             message: message.into(),
             command,
+            code,
         }
     }
 
@@ -79,8 +89,7 @@ impl Failure {
 
     pub(crate) fn code(&self) -> &'static str {
         match self {
-            Self::Usage { .. } => USAGE_CODE,
-            Self::Database { code, .. } => code,
+            Self::Usage { code, .. } | Self::Database { code, .. } => *code,
             Self::OutputClosed | Self::OutputFailed { .. } => OUTPUT_FAILED_CODE,
         }
     }

@@ -2,7 +2,8 @@ use super::args::{CommandName, Format};
 use super::commands::default_format;
 use super::render::{JsonObject, json_string};
 use eggdb_commands::{
-    COMMON_OPTIONS, Category, CommandDefinition, Effect, OptionDefinition, TOOLS, ToolDefinition,
+    COMMANDS, COMMON_OPTIONS, Category, CommandDefinition, Effect, OptionDefinition, TOOLS,
+    ToolDefinition,
 };
 
 pub(crate) const MAIN: &str = "\
@@ -32,6 +33,9 @@ Commands:
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, or a CSV file into a table with --csv
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
+  explain <file>                show the plan for one statement given with -c, without running it
+  table  list|show|sample <file> [table]
+                                tables and views: list them, show one, sample rows; see eggdb help table
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
@@ -56,108 +60,41 @@ Exit codes: 0 ok, 1 not found, 2 usage, 3 database error, 4 damaged, 5 busy.
 Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
 ";
 
-const IN_THE_REGISTRY: &str = "";
-
-pub(crate) fn definition(command: CommandName) -> Option<&'static CommandDefinition> {
-    eggdb_commands::command(&[command.name()])
+pub(crate) fn definitions(command: CommandName) -> Vec<&'static CommandDefinition> {
+    COMMANDS
+        .iter()
+        .filter(|definition| definition.words.first() == Some(&command.name()))
+        .collect()
 }
 
-pub(crate) fn usage_line(command: CommandName) -> &'static str {
-    if let Some(definition) = definition(command) {
-        return definition.usage;
-    }
-    match command {
-        CommandName::Create => "eggdb create <file> [--page-size <bytes>]",
-        CommandName::Put => {
-            "eggdb put <file> <key> [<value>] [--ttl <time>] [--create] [-C <name>]"
-        }
-        CommandName::Del => "eggdb del <file> <key> [-C <name>]",
-        CommandName::Backup => "eggdb backup <file> <copy>",
-        CommandName::Compact => "eggdb compact <file>",
-        CommandName::Ui => "eggdb ui <file> [--read-only] [--mono] [--ascii] [--cache <bytes>]",
-        CommandName::Import => {
-            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] [-C <name>] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls]"
-        }
-        CommandName::Shell => {
-            "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--read-only] [--create]"
-        }
-        CommandName::Serve => {
-            "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
-        }
-        CommandName::Restore => {
-            "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql|sqlserver|oracle] [--define <name>=<value>]..."
-        }
-        CommandName::Mcp => "eggdb mcp <file> [--allow-write] [--time-limit <seconds>]",
-        CommandName::Audit => "eggdb audit <file> [-n <count>] [--format text|json]",
-        CommandName::Collection => {
-            "eggdb collection list <file>\n       eggdb collection add <file> <name>\n       eggdb collection delete <file> <name>"
-        }
-        CommandName::Ttl => "eggdb ttl <file> <key> [-C <name>]",
-        CommandName::Expire => "eggdb expire <file> <key> <time> [-C <name>]",
-        CommandName::Persist => "eggdb persist <file> <key> [-C <name>]",
-        CommandName::Incr => "eggdb incr <file> <key> [<n>] [-C <name>]",
-        CommandName::Decr => "eggdb decr <file> <key> [<n>] [-C <name>]",
-        CommandName::Cas => {
-            "eggdb cas <file> <key> (<expected> | --if-absent) (<new> | --delete) [-C <name>]"
-        }
-        CommandName::Get
-        | CommandName::Scan
-        | CommandName::Check
-        | CommandName::Stats
-        | CommandName::Export
-        | CommandName::Sql => IN_THE_REGISTRY,
-    }
+pub(crate) fn usage_line(command: CommandName) -> String {
+    definitions(command)
+        .iter()
+        .map(|definition| definition.usage)
+        .collect::<Vec<_>>()
+        .join("\n       ")
 }
 
 pub(crate) fn command_help(command: CommandName) -> String {
-    format!(
-        "Usage: {}\n\n{}",
-        usage_line(command),
-        command_body(command)
-    )
+    let body = definitions(command)
+        .first()
+        .map_or("", |definition| definition.help);
+    format!("Usage: {}\n\n{body}", usage_line(command))
 }
 
-fn command_body(command: CommandName) -> &'static str {
-    if let Some(definition) = definition(command) {
-        return definition.help;
-    }
-    match command {
-        CommandName::Create => CREATE,
-        CommandName::Put => PUT,
-        CommandName::Del => DEL,
-        CommandName::Backup => BACKUP,
-        CommandName::Compact => COMPACT,
-        CommandName::Ui => UI,
-        CommandName::Import => IMPORT,
-        CommandName::Serve => SERVE,
-        CommandName::Shell => SHELL,
-        CommandName::Restore => RESTORE,
-        CommandName::Mcp => MCP,
-        CommandName::Audit => AUDIT,
-        CommandName::Collection => COLLECTION,
-        CommandName::Ttl => TTL,
-        CommandName::Expire => EXPIRE,
-        CommandName::Persist => PERSIST,
-        CommandName::Incr => INCR,
-        CommandName::Decr => DECR,
-        CommandName::Cas => CAS,
-        CommandName::Get
-        | CommandName::Scan
-        | CommandName::Check
-        | CommandName::Stats
-        | CommandName::Export
-        | CommandName::Sql => IN_THE_REGISTRY,
-    }
+pub(crate) fn registry_json(command: Option<CommandName>, verb: Option<&str>) -> String {
+    let Some(command) = command else {
+        return format!("{}\n", whole_registry_json());
+    };
+    definitions(command)
+        .into_iter()
+        .filter(|definition| verb.is_none_or(|verb| definition.words.get(1) == Some(&verb)))
+        .map(|definition| format!("{}\n", command_json(definition)))
+        .collect()
 }
 
-pub(crate) fn registry_json(command: Option<CommandName>) -> String {
-    match command {
-        Some(command) => match definition(command) {
-            Some(definition) => format!("{}\n", command_json(command, definition)),
-            None => format!("{}\n", unregistered_json(command)),
-        },
-        None => format!("{}\n", whole_registry_json()),
-    }
+pub(crate) fn version_json() -> String {
+    JsonObject::new().string("version", eggdb::VERSION).line()
 }
 
 fn whole_registry_json() -> String {
@@ -180,15 +117,7 @@ fn whole_registry_json() -> String {
         })
         .collect();
     let options: Vec<String> = COMMON_OPTIONS.iter().map(option_json).collect();
-    let commands: Vec<String> = CommandName::ALL
-        .iter()
-        .filter_map(|command| Some(command_json(*command, definition(*command)?)))
-        .collect();
-    let others: Vec<String> = CommandName::ALL
-        .iter()
-        .filter(|command| definition(**command).is_none())
-        .map(|command| unregistered_json(*command))
-        .collect();
+    let commands: Vec<String> = COMMANDS.iter().map(command_json).collect();
     let tools: Vec<String> = TOOLS.iter().map(tool_json).collect();
     JsonObject::new()
         .string("version", eggdb::VERSION)
@@ -196,7 +125,7 @@ fn whole_registry_json() -> String {
         .raw("categories", &array(&categories))
         .raw("common_options", &array(&options))
         .raw("commands", &array(&commands))
-        .raw("other_commands", &array(&others))
+        .raw("other_commands", "[]")
         .raw("tools", &array(&tools))
         .object()
 }
@@ -214,13 +143,6 @@ fn optional(text: Option<&str>) -> String {
     text.map_or_else(|| "null".to_owned(), json_string)
 }
 
-fn unregistered_json(command: CommandName) -> String {
-    JsonObject::new()
-        .raw("words", &strings(&[command.name()]))
-        .string("usage", usage_line(command))
-        .object()
-}
-
 fn option_json(option: &OptionDefinition) -> String {
     let short = option.short.map(String::from);
     JsonObject::new()
@@ -233,7 +155,21 @@ fn option_json(option: &OptionDefinition) -> String {
         .object()
 }
 
-fn command_json(command: CommandName, definition: &CommandDefinition) -> String {
+fn default_formats(definition: &CommandDefinition) -> Option<(Format, Format)> {
+    if definition.outputs.is_empty() {
+        return None;
+    }
+    let named = definition
+        .words
+        .first()
+        .and_then(|word| CommandName::named(word));
+    Some(match named {
+        Some(command) => (default_format(command, true), default_format(command, false)),
+        None => (Format::Text, Format::Text),
+    })
+}
+
+fn command_json(definition: &CommandDefinition) -> String {
     let options: Vec<String> = definition.options.iter().map(option_json).collect();
     let operands: Vec<String> = definition
         .operands
@@ -269,10 +205,15 @@ fn command_json(command: CommandName, definition: &CommandDefinition) -> String 
                 .object()
         })
         .collect();
-    let formats = JsonObject::new()
-        .string("terminal", format_name(default_format(command, true)))
-        .string("pipe", format_name(default_format(command, false)))
-        .object();
+    let formats = default_formats(definition).map_or_else(
+        || "null".to_owned(),
+        |(terminal, pipe)| {
+            JsonObject::new()
+                .string("terminal", format_name(terminal))
+                .string("pipe", format_name(pipe))
+                .object()
+        },
+    );
     let errors: Vec<String> = definition
         .errors
         .iter()
@@ -324,9 +265,12 @@ fn tool_json(tool: &ToolDefinition) -> String {
         })
         .collect();
     let mut fixed = JsonObject::new();
-    for pair in tool.fixed.chunks(2) {
-        if let [option, value] = pair {
-            fixed = fixed.string(option.trim_start_matches('-'), value);
+    let mut tokens = tool.fixed.iter().peekable();
+    while let Some(option) = tokens.next() {
+        let name = option.trim_start_matches('-');
+        match tokens.next_if(|value| !value.starts_with("--")) {
+            Some(value) => fixed = fixed.string(name, value),
+            None => fixed = fixed.boolean(name, true),
         }
     }
     let annotations = tool.annotations();
@@ -351,416 +295,3 @@ fn tool_json(tool: &ToolDefinition) -> String {
         .raw("annotations", &annotations)
         .object()
 }
-
-const TTL: &str = "\
-Prints how long the key still lives, as a time such as 29s, 1h4m12s or 412ms (whole seconds,
-rounded down; milliseconds under one second), or never when it has no time to live. Exits 1
-when the key is not there, which an expired key is not. In a pipe, one JSON line with ttl_ms
-and expires_at, both null for a permanent key.
-
-  -C, --collection <name>  work in this collection instead of the default key space
-
-Examples:
-  eggdb ttl app.db -C sessions s:1
-  eggdb ttl app.db user:1 --format json
-";
-
-const EXPIRE: &str = "\
-Gives the key a time to live and commits: when the time is up, reads and scans no longer see
-the key and it is removed. A time is a count with a unit, ms, s, m, h or d, joined from the
-largest down: 30s, 5m, 1h30m, 7d, 1500ms. A new time replaces the old. The key must exist
-(exit 1 otherwise), and 0 is refused: eggdb del removes a key at once. A later put without
---ttl, or eggdb persist, makes the key permanent again.
-
-  -C, --collection <name>  work in this collection instead of the default key space
-
-Examples:
-  eggdb expire app.db user:1 7d
-  eggdb expire app.db -C sessions s:1 30m
-";
-
-const PERSIST: &str = "\
-Removes the key's time to live and commits, so it stays until it is deleted. A key that is
-already permanent is left as it is (exit 0); a key that is not there is exit 1.
-
-  -C, --collection <name>  work in this collection instead of the default key space
-
-Examples:
-  eggdb persist app.db user:1
-";
-
-const INCR: &str = "\
-Adds n (1 without it) to the counter under the key in one commit and prints the new value. A
-counter is a whole number stored as text, from -9223372036854775808 to 9223372036854775807; a
-key that is not there counts as 0 and is made. A value that is not such a number, or a result
-outside that range, is an error (exit 3) and nothing changes. The key's time to live is kept.
-n is 0 or more; eggdb decr subtracts.
-
-  -C, --collection <name>  work in this collection instead of the default key space
-
-Examples:
-  eggdb incr app.db hits                   # 1 on a new key
-  eggdb incr app.db hits 10
-  eggdb incr app.db -C stats page:home --format json
-";
-
-const DECR: &str = "\
-Subtracts n (1 without it) from the counter under the key in one commit and prints the new
-value. A counter is a whole number stored as text, from -9223372036854775808 to
-9223372036854775807; a key that is not there counts as 0 and is made. A value that is not such
-a number, or a result outside that range, is an error (exit 3) and nothing changes. The key's
-time to live is kept. n is 0 or more; eggdb incr adds.
-
-  -C, --collection <name>  work in this collection instead of the default key space
-
-Examples:
-  eggdb decr app.db stock:apples
-  eggdb decr app.db stock:apples 12
-";
-
-const CAS: &str = "\
-Replaces the key's value with <new> only while its value is <expected>, comparing and storing
-in one transaction so nothing can change in between. With --if-absent the key is stored only
-when it is not there (a lock, a first write); with --delete it is removed instead of given a
-new value. Exit 0 when it swapped; exit 1 when it did not, saying what was found, and nothing
-changed. A swap that stores a value makes the key permanent, as put does.
-
-      --if-absent          <expected> is \"not there\": leave the <expected> argument out
-      --delete             <new> is \"remove the key\": leave the <new> argument out
-  -C, --collection <name>  work in this collection instead of the default key space
-
-Examples:
-  eggdb cas app.db lock --if-absent worker-7       # take a lock
-  eggdb cas app.db lock worker-7 --delete          # release it, only while still ours
-  eggdb cas app.db config @old.json @new.json
-";
-
-const COLLECTION: &str = "\
-A collection is a named key space inside the database file, beside the default key space that
-every command uses unless given -C <name>. Names are 1 to 128 bytes of UTF-8 with no spaces or
-control characters. Deleting a collection removes every key in it, in one commit, and asks nothing.
-
-  list     print the collections, one per line, in byte order (the default key space is not one)
-  add      make an empty collection (exit 1 if it is already there)
-  delete   remove a collection and every key in it (exit 1 if it is not there)
-
-Examples:
-  eggdb collection add app.db sessions
-  eggdb put app.db -C sessions s:1 '{\"user\":1}'
-  eggdb scan app.db -C sessions
-  eggdb collection list app.db
-  eggdb export app.db backup.jsonl          # the default key space, then every collection
-";
-
-const CREATE: &str = "\
-Makes an empty database file. It fails if anything is already at that path, so it never
-replaces a file. The other commands never create a file, except put with --create.
-
-      --page-size <bytes>   the page size: a power of two from 4k to 64k, 4k by default.
-                            Larger pages allow longer keys. It is fixed for the file's life.
-
-Examples:
-  eggdb create app.db
-  eggdb create big.db --page-size 16k
-";
-
-const PUT: &str = "\
-Stores the value under the key and commits, replacing any earlier value. Without a value
-argument, the value is what stdin holds, when stdin is not a terminal. Bytes are stored
-exactly: `echo hi |` stores a trailing newline and `printf hi |` does not. Values may be up
-to 1 GiB; the page cache grows to fit the value.
-
-      --create              create the database file if it is missing
-      --ttl <time>          the key expires after this time: 30s, 5m, 1h30m, 7d, 1500ms
-                            (a later put without --ttl makes the key permanent again)
-  -C, --collection <name>  work in this collection instead of the default key space (made with --create)
-
-Keys and values: text as typed, 0x.. for hex, @file for a file's bytes, @- for stdin,
-=text for text that starts with 0x, @ or =.
-
-Examples:
-  eggdb put app.db user:1 Ada
-  cat photo.jpg | eggdb put app.db photo
-  eggdb put app.db 0x00ff @blob.bin
-  eggdb put --create new.db greeting hello
-  eggdb put app.db -C sessions s:1 '{\"user\":1}' --ttl 30m
-";
-
-
-const DEL: &str = "\
-Removes the key and commits, or exits 1 when it was not there. `eggdb delete` is the same
-command.
-
-  -C, --collection <name>  work in this collection instead of the default key space
-
-Examples:
-  eggdb del app.db user:4
-";
-
-
-
-
-const BACKUP: &str = "\
-Writes a copy of the file's last commit to <copy>, a new file, while other readers keep working.
-The copy is rebuilt entry by entry, so it holds no free or leaked pages and may be smaller than
-the file; every collection, SQL table and time to live is kept. It is built as <copy>.backing-up
-and renamed to <copy> only once it is complete, synced and its entries counted again, so a crash
-or a full disk never leaves a partial copy. <copy> must not exist: eggdb backup never replaces a
-file. The command opens the file read-only, so a program that has it open for writing makes it
-busy (exit 5); to copy a file while a program writes to it, use backup <copy> inside eggdb shell,
-or Database::backup_to in the program. In a pipe the report is one JSON line.
-
-Examples:
-  eggdb backup app.db app.bak
-  eggdb backup app.db \"backups/app-$(date +%F).db\"
-  eggdb backup app.db app.bak --format json
-";
-
-const COMPACT: &str = "\
-Rewrites the file without its free and leaked pages and swaps the result in. The new file is
-built entry by entry as <file>.compacting, synced, its entries counted again, and then renamed
-over the file in one step, so a crash at any moment leaves either the old file or the new one,
-never a mix. Programs reading the file keep working throughout and see the new file when they
-next open it; a program that has it open for writing makes the command busy (exit 5), and so does
-eggdb shell, which holds the file: quit it first. A file with no free or leaked pages is rewritten
-all the same, which packs its pages. eggdb check says how many pages a compact would reclaim. In a
-pipe the report is one JSON line.
-
-Examples:
-  eggdb compact app.db
-  eggdb check app.db && eggdb compact app.db --format json
-";
-
-const UI: &str = "\
-Opens the file full screen: the keys in order on the left, the selected value on the right as
-text, JSON or hex. Up/Down or j/k move, PgUp/PgDn page, Home/End jump, / filters by prefix,
-v changes the view, Tab switches pane. e edits a value, a adds a key, d deletes one; each change
-asks for a confirmation and is one commit, on disk before the screen redraws. c checks every
-page, m shows the last message in full, ? shows every key, q quits. Needs a terminal on both
-stdin and stdout; in a script use eggdb get, put, del and scan.
-
-Options:
-  --read-only   open read-only: no changes, and it works beside another reader
-  --mono        no colours (also with --color never, or when NO_COLOR is set)
-  --ascii       ASCII only, no box lines or arrows; with --mono, no styles at all
-  --cache       page cache size; one edit's pages must fit in it (default 16m)
-
-Examples:
-  eggdb ui app.db
-  eggdb ui app.db --read-only
-  eggdb ui app.db --mono --ascii
-";
-
-
-const IMPORT: &str = "\
-Loads an export made by eggdb export into the file, from <in> or, without it or with -, from
-stdin. Every line is checked: the header, the trailer's count, the escapes, keys in ascending
-order and their sizes. From a regular file, the whole export is checked before anything is
-written, so a bad line changes nothing. The entries are then committed in batches; from stdin or
-a pipe, a bad line stops the import after the batches before it. With --create, a missing file is created with the
-export's page size, built under <file>.importing and renamed into place only when the import
-succeeded.
-
-      --create                   create the file if it is missing
-      --page-size <bytes>        the new file's page size, instead of the export's
-      --on-conflict <policy>     a key already there, or twice in the export: error (the
-                                 default) stops the import, overwrite keeps the export's value,
-                                 skip keeps the value already there
-      --dry-run                  check the export and report, without writing anything
-  -C, --collection <name>        load everything into this collection, made if missing
-
-Entries tagged with a collection go into it, and the import makes every collection it meets.
-
-With --csv, it loads a CSV file (or stdin, with -) into an existing SQL table instead, as
-COPY <table> FROM STDIN (FORMAT csv) does: every row or none, in one transaction, through
-the same path as INSERT (constraints, defaults, serial columns and indexes apply). The page
-cache grows with the file, since the whole load must fit in it; --cache sets it.
-
-      --csv <file>               the CSV file to load, or - for stdin
-      --table <name>             the table, as SQL writes it (users, app.\"Users\", t (a, b))
-      --header                   the first line names the columns and is skipped
-      --delimiter <c>            the field separator, a comma by default
-      --null <text>              the text that stands for NULL, unquoted; empty by default
-      --dialect <name>           postgresql (default) or oracle: the table name as Oracle
-                                 writes it, Oracle's NLS date formats, and empty fields as NULL
-                                 (SQLcl UNLOAD and SET MARKUP CSV ON output); or sqlserver:
-                                 a bcp character-format file (bcp ... out -c) loaded as bcp in
-                                 loads it, below
-
-With --dialect sqlserver, the file is in bcp's character format: every field but the last
-ends with the field terminator, the last with the row terminator, with no quoting. An empty
-field is NULL (its column's default without --keep-nulls), a field of one NUL byte is an empty
-string, values convert as SQL Server's INSERT converts text, and the text is UTF-8 (bcp -C
-65001). Without a column list the file has a field for every column, identity values kept.
-
-      --delimiter <text>         the field terminator, bcp's -t: a tab by default; \\t, \\n,
-                                 \\r, \\0 and \\\\ are bcp's escapes
-      --row-terminator <text>    the row terminator, bcp's -r: a newline (or \\r\\n) by default
-      --header                   skip the first row, as bcp's -F 2
-      --keep-nulls               keep empty fields NULL rather than the column's default, bcp's -k
-
-Examples:
-  eggdb import --create copy.db backup.jsonl
-  gunzip -c backup.jsonl.gz | eggdb import --create copy.db
-  eggdb import app.db fixes.jsonl --on-conflict overwrite
-  eggdb import app.db backup.jsonl --dry-run
-  eggdb import app.db --csv people.csv --table people --header
-  eggdb import --dialect oracle hr.db --csv EMPLOYEES_DATA_TABLE.csv --table hr.employees --header
-  eggdb import --dialect sqlserver shop.db --csv items.dat --table dbo.items
-";
-
-
-const SHELL: &str = "\
-An interactive prompt on one database file: the key-value commands without their 'eggdb
-<command> <file>' prefix (put, get, del, scan, check, stats), SQL in the PostgreSQL dialect
-(or MySQL's, SQLite's, Oracle's or SQL Server's, with --dialect mysql, sqlite, oracle or
-sqlserver) until a semicolon,
-.help, .tables, .schema, .collection, .mode, .timer, .quit, and psql's \\copy, which reads and writes files
-on this machine. COPY ... FROM STDIN reads the lines after it up to a line \\. as its data.
-Tab completes, Up/Down and Ctrl-R recall the history, which is kept in
-$XDG_STATE_HOME/eggdb/history (EGGDB_HISTORY=<path> moves it; set empty, turns it off).
-BEGIN holds a transaction across prompts until COMMIT or ROLLBACK. With -c, or with stdin not
-a terminal, it runs the text as a batch: plain output, no prompt, and it stops at the first
-failure unless --keep-going.
-
-  -c, --command <text>   a line to run, repeatable; runs in order, then exits
-      --keep-going       run on after a failure, exiting with the first failure's code
-      --mode <mode>      table (default), expanded or csv
-      --dialect <name>   SQL in postgresql (default), mysql, sqlite, oracle or sqlserver
-      --read-only        open the file read-only
-      --create           create the database file if it is missing
-
-Examples:
-  eggdb shell app.db
-  eggdb shell app.db -c \"put user:1 Ada\" -c \"select count(*) from users;\"
-  eggdb shell app.db < session.txt
-";
-
-const SERVE: &str = "\
-Serves the file to PostgreSQL clients: psql and PostgreSQL drivers connect to it unchanged and
-run the SQL of eggdb sql. Clients log in as one user with a password (SCRAM-SHA-256), which
-comes from EGGDB_PASSWORD or --password-file, never from the command line. Until EggDB speaks
-TLS the server listens only on this machine, on a loopback address. The first line printed says
-where it listens; in a pipe it is one JSON line, so a script can read the port. While it runs
-the file is open for writing, so other eggdb commands on it exit 5. Ctrl-C or SIGTERM finishes
-the running statements, rolls back open transactions and stops with exit 0.
-
-      --listen <address>          host:port, [::1]:port, or a port alone on 127.0.0.1; port 0
-                                  takes any free port (default 127.0.0.1:5432)
-      --mysql-listen <address>    also serve MySQL's protocol there, to the mysql client and
-                                  MySQL drivers (MySQL's SQL; port 3306 is MySQL's)
-      --tds-listen <address>      also serve SQL Server's TDS protocol there, to sqlcmd
-                                  (go-sqlcmd), Microsoft.Data.SqlClient and mssql-jdbc,
-                                  without encryption: connect with sqlcmd's default, -N
-                                  disable or Encrypt=false (Transact-SQL; port 1433 is SQL
-                                  Server's)
-      --log-batches               log the first 200 characters of each TDS batch and RPC
-                                  call, to see what a client sends (never the login or its
-                                  password)
-      --user <name>               the user clients log in as (default eggdb)
-      --password-file <file>      the password is the file's first line; - reads stdin
-      --database <name>           the name clients connect to (default: the file name
-                                  without its extension, so app.db is app)
-      --max-connections <count>   connections open at once, one thread each (default 64)
-      --read-only                 no writes, and it works beside other readers
-      --create                    create the database file if it is missing
-
-Examples:
-  eggdb serve app.db --password-file ~/.eggdb-password
-  EGGDB_PASSWORD=secret eggdb serve app.db --listen 127.0.0.1:5433
-  eggdb serve --create new.db --password-file - < password.txt
-  psql postgresql://eggdb@127.0.0.1:5432/app
-  eggdb serve app.db --password-file pw.txt --mysql-listen 127.0.0.1:3306
-  eggdb serve app.db --password-file pw.txt --tds-listen 127.0.0.1:1433
-  SQLCMDPASSWORD=secret sqlcmd -S 127.0.0.1,1433 -U eggdb -d app -Q \"SELECT @@VERSION\"
-";
-
-const RESTORE: &str = "\
-Restores a PostgreSQL dump in plain SQL form (pg_dump, or pg_restore -f dump.sql <archive>)
-into the file, statement by statement, each in its own transaction (a table's COPY data in one).
-Objects EggDB does not have yet (functions, triggers, types, policies, partitioned tables,
-extensions other than plpgsql, ...) are skipped and listed in the report with their line in the
-dump; GRANT, REVOKE and OWNER TO are ignored (no roles yet); a statement that fails only because
-it uses a skipped object is a consequence, not an error. An error in a supported statement (a
-COPY row breaking a constraint, bad syntax, a failed INSERT) stops the restore at that line, and
-the statements before it stay committed. Custom, directory and tar archives are not read:
-convert them first with pg_restore -f dump.sql <archive>. With --dialect sqlserver it restores
-a SQL Server script instead (SSMS Generate Scripts with Schema and data, or sqlpackage
-/Action:Script; UTF-16 or UTF-8), batch by batch, and lists under known differences what EggDB
-keeps differently from SQL Server (IDENTITY seeds, datetimeoffset offsets, computed columns,
-index filters, disabled constraints). With --dialect oracle it restores a SQL*Plus-style script
-(SQL Developer or SQLcl exports, impdp ... SQLFILE= output, installers such as Oracle's sample
-schemas): statements end at ; or a / line, @, @@ and START include other scripts, DEFINE and
-&name substitute, users become schemas, PL/SQL other than blocks of INSERT, UPDATE, DELETE and
-COMMIT is listed and skipped, and other SQL*Plus commands are listed, never run. Data Pump .dmp
-and RMAN files are not read: write their DDL with impdp ... SQLFILE= and their rows as CSV with
-SQLcl's UNLOAD (eggdb import --dialect oracle --csv). The report counts what was created, lists
-everything skipped, ignored and failed, and is one JSON object in a pipe.
-
-      --create            create the file if it is missing (built as <file>.restoring, renamed
-                          when the restore succeeded, so a failed restore leaves no file)
-      --keep-going        report an error and go on; exit 3 at the end if there was one
-      --report <path>     write the report to this file instead of stdout
-      --dialect <name>    the dump's dialect: postgresql (default), sqlserver (also mssql,
-                          tsql) or oracle
-      --define <n>=<v>    with --dialect oracle, a substitution variable the script starts
-                          with, as DEFINE n = v; repeat it for more
-
-Examples:
-  eggdb restore --create app.db app.sql
-  pg_dump app | eggdb restore --create app.db
-  pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
-  eggdb restore --dialect sqlserver --create shop.db shop.sql
-  eggdb restore --dialect oracle --create hr.db hr_install.sql
-  eggdb restore app.db dump.sql --keep-going --report restore.json --format json
-";
-
-const MCP: &str = "\
-Serves the file to an AI agent over the Model Context Protocol (MCP) on stdin and stdout. The
-agent's client (Claude Code, for one) starts eggdb mcp itself and talks JSON-RPC to it, so there
-is nothing to type here. The agent gets tools to list and describe tables, run and explain SQL,
-sample rows and read keys. Without --allow-write every call is read-only and a write is refused
-with an error the agent can read. With it the agent also gets write_sql, one statement per call
-that may change the file, run in its own transaction; the file is opened read-write for that call
-only. A statement that destroys data (DROP, TRUNCATE, a DELETE or UPDATE whose WHERE names no
-column of the table, dropping a column, constraint or primary key, changing a column's type) runs
-only after you confirm it: in a client that can ask you, a dialog; in one that cannot, the agent
-must pass confirm: true, so set that client to ask you before write_sql runs. Each read call
-opens the file read-only for at most the time limit and closes it again, so other readers run
-beside it; while a call runs, a program that wants to write the file is refused, and while
-another program has the file open for writing a call fails and the agent is told to try again.
-A write_sql call holds the file alone while its statement runs (the time limit bounds it),
-commits and closes the file, and never while you are asked.
-Every call is appended to <file>.mcp-audit.jsonl next to the file (readable by its owner only),
-which eggdb audit shows; if that file cannot be written the server does not start. A statement
-still running a second past its time limit cannot be stopped, so the server records it and exits
-for the client to restart it, never once a write has begun to commit. Closing stdin stops the
-server with exit 0.
-stdout carries the protocol only; every message goes to stderr.
-
-      --allow-write            add write_sql: one statement per call that may change the file
-      --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
-
-Examples:
-  claude mcp add mydb -- eggdb mcp app.db
-  claude mcp add mydb -- eggdb mcp app.db --allow-write
-  claude mcp add mydb -- eggdb mcp app.db --time-limit 30
-  eggdb audit app.db
-";
-
-const AUDIT: &str = "\
-Lists what AI agents did through eggdb mcp: every call in <file>.mcp-audit.jsonl, oldest first,
-one line each with its time (UTC), duration, tool, outcome, rows and arguments (SQL as the agent
-sent it, on one line, cut at 120 columns). Server starts and time-limit exits are lines too, and
-a write whose server stopped before it finished shows its outcome as unknown. The
-database itself is never opened, so audit works while eggdb mcp or any other command has it.
---format json prints the records re-encoded as ASCII JSON, one per line, with the client's name and
-version, the protocol version, the SQLSTATE and the result's size.
-
-  -n, --limit <count>   only the newest lines (the file's last ones)
-
-Examples:
-  eggdb audit app.db
-  eggdb audit app.db -n 20
-  eggdb audit app.db --format json
-";

@@ -37,6 +37,8 @@ pub(crate) enum CommandName {
     Incr,
     Decr,
     Cas,
+    Explain,
+    Table,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,8 +48,25 @@ pub(crate) enum CollectionAction {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TableAction {
+    List,
+    Show,
+    Sample,
+}
+
+impl TableAction {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Show => "show",
+            Self::Sample => "sample",
+        }
+    }
+}
+
 impl CommandName {
-    pub(crate) const ALL: [Self; 25] = [
+    pub(crate) const ALL: [Self; 27] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -67,6 +86,8 @@ impl CommandName {
         Self::Export,
         Self::Import,
         Self::Sql,
+        Self::Explain,
+        Self::Table,
         Self::Serve,
         Self::Shell,
         Self::Restore,
@@ -74,6 +95,10 @@ impl CommandName {
         Self::Mcp,
         Self::Audit,
     ];
+
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        Self::from_name(name.as_bytes())
+    }
 
     fn from_name(name: &[u8]) -> Option<Self> {
         Some(match name {
@@ -102,6 +127,8 @@ impl CommandName {
             b"incr" => Self::Incr,
             b"decr" => Self::Decr,
             b"cas" => Self::Cas,
+            b"explain" => Self::Explain,
+            b"table" => Self::Table,
             _ => return None,
         })
     }
@@ -133,7 +160,13 @@ impl CommandName {
             Self::Incr => "incr",
             Self::Decr => "decr",
             Self::Cas => "cas",
+            Self::Explain => "explain",
+            Self::Table => "table",
         }
+    }
+
+    pub(crate) fn is_noun(self) -> bool {
+        matches!(self, Self::Collection | Self::Table)
     }
 
     pub(crate) fn takes_format_option(self) -> bool {
@@ -148,7 +181,7 @@ impl CommandName {
                 !matches!(self, Self::Ui | Self::Shell | Self::Mcp)
             }
             OptionName::Mono | OptionName::Ascii => self == Self::Ui,
-            OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve | Self::Shell),
+            OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve | Self::Shell | Self::Sql),
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
             OptionName::Create => {
                 matches!(
@@ -169,10 +202,11 @@ impl CommandName {
             | OptionName::PasswordFile
             | OptionName::Database
             | OptionName::MaxConnections => self == Self::Serve,
-            OptionName::Command => matches!(self, Self::Sql | Self::Shell),
-            OptionName::Dialect => {
-                matches!(self, Self::Sql | Self::Shell | Self::Restore | Self::Import)
-            }
+            OptionName::Command => matches!(self, Self::Sql | Self::Shell | Self::Explain),
+            OptionName::Dialect => matches!(
+                self,
+                Self::Sql | Self::Shell | Self::Restore | Self::Import | Self::Explain
+            ),
             OptionName::Define => self == Self::Restore,
             OptionName::KeepGoing => matches!(self, Self::Shell | Self::Restore),
             OptionName::Report => self == Self::Restore,
@@ -186,7 +220,8 @@ impl CommandName {
             | OptionName::Null
             | OptionName::RowTerminator
             | OptionName::KeepNulls => self == Self::Import,
-            OptionName::Limit => matches!(self, Self::Scan | Self::Audit),
+            OptionName::Limit => matches!(self, Self::Scan | Self::Audit | Self::Table),
+            OptionName::Schema => self == Self::Table,
             OptionName::Collection => matches!(
                 self,
                 Self::Get
@@ -310,6 +345,7 @@ enum OptionName {
     Ttl,
     IfAbsent,
     Delete,
+    Schema,
 }
 
 impl OptionName {
@@ -361,6 +397,7 @@ impl OptionName {
             b"ttl" => Self::Ttl,
             b"if-absent" => Self::IfAbsent,
             b"delete" => Self::Delete,
+            b"schema" => Self::Schema,
             _ => return None,
         })
     }
@@ -407,9 +444,10 @@ impl OptionName {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Invocation {
     Help(Option<CommandName>),
-    HelpJson(Option<CommandName>),
+    HelpJson(Option<CommandName>, Option<&'static str>),
     NoArguments,
     Version,
+    VersionJson,
     Run(Box<Request>),
 }
 
@@ -441,6 +479,9 @@ pub(crate) struct Request {
     pub(crate) allow_write: bool,
     pub(crate) collection: Option<String>,
     pub(crate) collection_action: Option<CollectionAction>,
+    pub(crate) table_action: Option<TableAction>,
+    pub(crate) table: Option<OsString>,
+    pub(crate) schema: Option<String>,
     pub(crate) ttl: Option<Duration>,
     pub(crate) step: Option<u64>,
     pub(crate) swap: SwapOptions,
@@ -599,40 +640,48 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     let command = first.and_then(CommandName::from_name);
     let has = |name| tokens.options.iter().any(|option| option.name == name);
     let json = asks_for_json(&tokens);
-    let help = |command: Option<CommandName>| {
+    let help = |command: Option<CommandName>, verb: Option<&'static str>| {
         if json {
-            Invocation::HelpJson(command)
+            Invocation::HelpJson(command, verb)
         } else {
             Invocation::Help(command)
         }
     };
     if has(OptionName::Help) {
-        return match first {
-            Some(b"help" | b"version") | None => Ok(help(None)),
-            Some(name) if command.is_none() => Err(unknown_command(name)),
-            _ => Ok(help(command)),
+        return match (first, command) {
+            (Some(b"help" | b"version") | None, _) => Ok(help(None, None)),
+            (Some(name), None) => Err(unknown_command(name)),
+            (_, Some(command)) => {
+                let verb = tokens
+                    .positionals
+                    .get(1)
+                    .and_then(|verb| verb_of(command, verb));
+                Ok(help(Some(command), verb))
+            }
         };
     }
+    let version = if json {
+        Invocation::VersionJson
+    } else {
+        Invocation::Version
+    };
     if has(OptionName::Version) {
-        return Ok(Invocation::Version);
+        return Ok(version);
     }
     let Some(first) = first else {
         if json {
-            return Ok(help(None));
+            return Ok(help(None, None));
         }
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
+            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version.",
             None,
         ));
     };
     match first {
         b"help" => {
-            return parse_help(&tokens.positionals[1..]).map(|invocation| match invocation {
-                Invocation::Help(command) => help(command),
-                other => other,
-            });
+            return parse_help(&tokens.positionals[1..]).map(|(command, verb)| help(command, verb));
         }
-        b"version" if tokens.positionals.len() == 1 => return Ok(Invocation::Version),
+        b"version" if tokens.positionals.len() == 1 => return Ok(version),
         b"version" => return Err(too_many_arguments(&tokens.positionals[1..], None)),
         _ => {}
     }
@@ -717,19 +766,48 @@ fn split_option(arg: &OsStr) -> (&OsStr, Option<&OsStr>) {
     }
 }
 
-fn parse_help(arguments: &[&OsStr]) -> Result<Invocation, Failure> {
-    match arguments {
-        [] => Ok(Invocation::Help(None)),
-        [name] => {
-            let name = name.as_encoded_bytes();
-            match CommandName::from_name(name) {
-                Some(command) => Ok(Invocation::Help(Some(command))),
-                None if name == b"help" || name == b"version" => Ok(Invocation::Help(None)),
-                None => Err(unknown_command(name)),
+type HelpTopic = (Option<CommandName>, Option<&'static str>);
+
+fn parse_help(arguments: &[&OsStr]) -> Result<HelpTopic, Failure> {
+    let Some((name, rest)) = arguments.split_first() else {
+        return Ok((None, None));
+    };
+    let name = name.as_encoded_bytes();
+    let command = match CommandName::from_name(name) {
+        Some(command) => command,
+        None if !rest.is_empty() => return Err(too_many_arguments(rest, None)),
+        None if name == b"help" || name == b"version" => return Ok((None, None)),
+        None => return Err(unknown_command(name)),
+    };
+    match rest {
+        [] => Ok((Some(command), None)),
+        [verb, extra @ ..] if command.is_noun() => {
+            let Some(verb) = verb_of(command, verb) else {
+                return Err(noun_needs_a_verb(command));
+            };
+            if extra.is_empty() {
+                Ok((Some(command), Some(verb)))
+            } else {
+                Err(too_many_arguments(extra, None))
             }
         }
-        [_, extra @ ..] => Err(too_many_arguments(extra, None)),
+        extra => Err(too_many_arguments(extra, None)),
     }
+}
+
+fn verb_of(noun: CommandName, verb: &OsStr) -> Option<&'static str> {
+    let verb = verb.to_str()?;
+    let definition = eggdb_commands::command(&[noun.name(), verb])?;
+    definition.words.get(1).copied()
+}
+
+fn noun_needs_a_verb(noun: CommandName) -> Failure {
+    let message = if noun == CommandName::Table {
+        TABLE_NEEDS_A_VERB
+    } else {
+        COLLECTION_NEEDS_A_VERB
+    };
+    Failure::usage(message, Some(noun))
 }
 
 fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, Failure> {
@@ -761,6 +839,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         allow_write: false,
         collection: None,
         collection_action: None,
+        table_action: None,
+        table: None,
+        schema: None,
         ttl: None,
         step: None,
         swap: SwapOptions::default(),
@@ -798,6 +879,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::From => request.scan.from = Some(byte_argument()?),
             OptionName::To => request.scan.to = Some(byte_argument()?),
             OptionName::Reverse => request.scan.reverse = true,
+            OptionName::Limit if command == CommandName::Table => {
+                request.scan.limit =
+                    Some(parse_sample_rows(&option.spelled, value).map_err(usage)?);
+            }
             OptionName::Limit => {
                 request.scan.limit = Some(parse_limit(&option.spelled, value).map_err(usage)?);
             }
@@ -934,6 +1019,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Ttl => {
                 request.ttl = Some(parse_ttl_option(&option.spelled, value).map_err(usage)?);
             }
+            OptionName::Schema => {
+                request.schema = Some(parse_name(&option.spelled, value).map_err(usage)?);
+            }
             OptionName::IfAbsent => request.swap.if_absent = true,
             OptionName::Delete => request.swap.delete = true,
             OptionName::Help | OptionName::Version => {}
@@ -947,6 +1035,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     let arguments = &tokens.positionals[1..];
     if command == CommandName::Collection {
         return collection_request(request, arguments);
+    }
+    if command == CommandName::Table {
+        return table_request(request, tokens, arguments);
     }
     if request.swap.if_absent && request.swap.delete {
         return Err(usage(
@@ -966,7 +1057,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Shell
         | CommandName::Mcp
         | CommandName::Audit
-        | CommandName::Collection => (1, 1),
+        | CommandName::Explain
+        | CommandName::Collection
+        | CommandName::Table => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -983,7 +1076,17 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         return Err(too_many_arguments(&arguments[most..], Some(command)));
     }
     request.file = PathBuf::from(arguments[0]);
+    if command == CommandName::Explain {
+        let given = matches!(&request.sql, Some(SqlSource::Command(text)) if !text.trim().is_empty());
+        if !given {
+            return Err(usage(EXPLAIN_NEEDS_A_STATEMENT.to_owned()));
+        }
+        return Ok(request);
+    }
     if command == CommandName::Sql {
+        if request.read_only && request.create {
+            return Err(usage(READ_ONLY_CANNOT_CREATE.to_owned()));
+        }
         match (arguments.get(1), &request.sql) {
             (Some(_), Some(_)) => {
                 return Err(usage(
@@ -1105,13 +1208,13 @@ fn collection_request(mut request: Request, arguments: &[&OsStr]) -> Result<Requ
     let command = CommandName::Collection;
     let usage = |message: String| Failure::usage(message, Some(command));
     let Some(action) = arguments.first() else {
-        return Err(usage("collection needs list, add or delete".to_owned()));
+        return Err(usage(COLLECTION_NEEDS_A_VERB.to_owned()));
     };
     let action = match action.as_encoded_bytes() {
         b"list" => CollectionAction::List,
         b"add" => CollectionAction::Add,
         b"delete" | b"del" => CollectionAction::Delete,
-        _ => return Err(usage("collection needs list, add or delete".to_owned())),
+        _ => return Err(usage(COLLECTION_NEEDS_A_VERB.to_owned())),
     };
     let (verb, needed) = match action {
         CollectionAction::List => ("list", 2),
@@ -1136,6 +1239,70 @@ fn collection_request(mut request: Request, arguments: &[&OsStr]) -> Result<Requ
     }
     Ok(request)
 }
+
+fn table_request(
+    mut request: Request,
+    tokens: &Tokens<'_>,
+    arguments: &[&OsStr],
+) -> Result<Request, Failure> {
+    let command = CommandName::Table;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    let action = match arguments.first().map(|action| action.as_encoded_bytes()) {
+        Some(b"list") => TableAction::List,
+        Some(b"show") => TableAction::Show,
+        Some(b"sample") => TableAction::Sample,
+        _ => return Err(usage(TABLE_NEEDS_A_VERB.to_owned())),
+    };
+    let foreign = tokens.options.iter().find(|option| match option.name {
+        OptionName::Limit => action != TableAction::Sample,
+        OptionName::Schema => action != TableAction::List,
+        _ => false,
+    });
+    if let Some(option) = foreign {
+        return Err(usage(format!(
+            "unknown option '{}' for eggdb table {}",
+            option.spelled,
+            action.name()
+        )));
+    }
+    let needed = if action == TableAction::List { 2 } else { 3 };
+    if arguments.len() < needed {
+        let needs = match (action, arguments.len()) {
+            (TableAction::List, _) => "a file",
+            (_, 1) => "a file and a table name",
+            _ => "a table name",
+        };
+        return Err(usage(format!(
+            "eggdb table {} needs {needs}",
+            action.name()
+        )));
+    }
+    if arguments.len() > needed {
+        return Err(too_many_arguments(&arguments[needed..], Some(command)));
+    }
+    request.table_action = Some(action);
+    request.file = PathBuf::from(arguments[1]);
+    request.table = arguments.get(2).map(|name| name.to_os_string());
+    Ok(request)
+}
+
+fn parse_sample_rows(option: &str, value: &OsStr) -> Result<u64, String> {
+    parse_whole_number(value.as_encoded_bytes())
+        .filter(|rows| (1..=MOST_SAMPLE_ROWS).contains(rows))
+        .ok_or_else(|| {
+            format!(
+                "{option} needs a whole number from 1 to {MOST_SAMPLE_ROWS}, not '{}'; for more rows use eggdb sql",
+                shown(value)
+            )
+        })
+}
+
+const EXPLAIN_NEEDS_A_STATEMENT: &str = "eggdb explain needs a statement: give it with -c";
+const READ_ONLY_CANNOT_CREATE: &str =
+    "--read-only cannot be combined with --create: a read-only open never creates a file";
+const TABLE_NEEDS_A_VERB: &str = "table needs list, show or sample";
+const COLLECTION_NEEDS_A_VERB: &str = "collection needs list, add or delete";
+pub(crate) const MOST_SAMPLE_ROWS: u64 = 1_000;
 
 const MOST_COLLECTION_NAME_BYTES: usize = 128;
 
@@ -1354,7 +1521,7 @@ fn shown(argument: &OsStr) -> String {
 fn unknown_command(name: &[u8]) -> Failure {
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version.",
             render::text(name)
         ),
         None,
@@ -1656,7 +1823,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -1699,7 +1866,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -1712,7 +1879,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),
@@ -1826,6 +1993,87 @@ mod tests {
         assert!(
             usage_message("import app.db --csv d.csv --table t -C users").contains("--collection")
         );
+    }
+
+    #[test]
+    fn table_takes_a_verb_a_file_and_a_table_and_explain_takes_a_statement() {
+        use super::{SqlSource, TableAction};
+        let list = request("table list app.db --schema sales --json");
+        assert_eq!(list.command, CommandName::Table);
+        assert_eq!(list.table_action, Some(TableAction::List));
+        assert_eq!(list.schema.as_deref(), Some("sales"));
+        assert_eq!(list.format, Some(Format::Json));
+        let sample = request("table sample app.db users -n 50");
+        assert_eq!(sample.table_action, Some(TableAction::Sample));
+        assert_eq!(sample.table, Some(OsString::from("users")));
+        assert_eq!(sample.scan.limit, Some(50));
+        assert_eq!(request("table show app.db sales.totals").file, PathBuf::from("app.db"));
+        assert_eq!(usage_message("table"), "table needs list, show or sample");
+        assert_eq!(usage_message("table frob app.db"), "table needs list, show or sample");
+        assert_eq!(usage_message("table list"), "eggdb table list needs a file");
+        assert_eq!(
+            usage_message("table show"),
+            "eggdb table show needs a file and a table name"
+        );
+        assert_eq!(usage_message("table sample app.db"), "eggdb table sample needs a table name");
+        assert_eq!(
+            usage_message("table list app.db -n 5"),
+            "unknown option '-n' for eggdb table list"
+        );
+        assert_eq!(
+            usage_message("table show app.db users --schema x"),
+            "unknown option '--schema' for eggdb table show"
+        );
+        assert_eq!(
+            usage_message("table sample app.db users --limit 5000"),
+            "--limit needs a whole number from 1 to 1000, not '5000'; for more rows use eggdb sql"
+        );
+        assert_eq!(
+            usage_message("table sample app.db users -n 0"),
+            "-n needs a whole number from 1 to 1000, not '0'; for more rows use eggdb sql"
+        );
+        let explain = request("explain app.db --dialect sqlite -c select");
+        assert_eq!(explain.command, CommandName::Explain);
+        assert_eq!(explain.dialect, eggdb_sql::Dialect::Sqlite);
+        assert_eq!(explain.sql, Some(SqlSource::Command("select".to_owned())));
+        assert_eq!(
+            usage_message("explain app.db"),
+            "eggdb explain needs a statement: give it with -c"
+        );
+        assert!(usage_message("explain app.db -F hex -c x").contains("--format hex"));
+    }
+
+    #[test]
+    fn sql_opens_read_only_with_read_only_but_never_creates_then() {
+        assert!(request("sql app.db --read-only -c select").read_only);
+        assert_eq!(
+            usage_message("sql app.db --read-only --create -c select"),
+            "--read-only cannot be combined with --create: a read-only open never creates a file"
+        );
+    }
+
+    #[test]
+    fn help_names_a_noun_and_one_of_its_verbs() {
+        for words in ["help table", "help table list", "help collection del", "table --help"] {
+            assert!(
+                matches!(parse_words(words), Ok(Invocation::Help(Some(_)))),
+                "{words}"
+            );
+        }
+        assert_eq!(
+            parse_words("help table sample --json"),
+            Ok(Invocation::HelpJson(Some(CommandName::Table), Some("sample")))
+        );
+        assert_eq!(
+            parse_words("table show --help --json"),
+            Ok(Invocation::HelpJson(Some(CommandName::Table), Some("show")))
+        );
+        assert_eq!(usage_message("help table frob"), "table needs list, show or sample");
+        assert_eq!(
+            usage_message("help scan extra"),
+            "too many arguments for eggdb: 'extra'"
+        );
+        assert_eq!(parse_words("version --json"), Ok(Invocation::VersionJson));
     }
 
     #[test]

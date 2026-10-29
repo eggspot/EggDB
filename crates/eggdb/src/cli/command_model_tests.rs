@@ -274,10 +274,7 @@ fn help_json_lists_exactly_the_registry() {
             .collect();
         let expected: Vec<&str> = TOOLS.iter().map(|tool| tool.name).collect();
         assert_eq!(tools, expected, "{args:?}");
-        assert_eq!(
-            items(registry, "other_commands").len(),
-            CommandName::ALL.len() - COMMANDS.len()
-        );
+        assert!(items(registry, "other_commands").is_empty(), "{args:?}");
         assert_eq!(items(registry, "categories").len(), 13);
     }
     for args in [&["help", "get", "--json"][..], &["get", "--help", "--json"]] {
@@ -294,52 +291,116 @@ fn help_json_lists_exactly_the_registry() {
             Some("raw")
         );
     }
-    let unregistered = piped(&["help", "put", "--json"]);
-    assert_eq!(unregistered.exit, 0);
-    let put = &json_lines(&unregistered.stdout)[0];
-    assert_eq!(string_at(put, &["usage"]).as_deref(), Some(help::usage_line(CommandName::Put)));
-    assert!(member(put, "outputs").is_none());
+    let put = piped(&["help", "put", "--json"]);
+    assert_eq!(put.exit, 0);
+    let put = &json_lines(&put.stdout)[0];
+    assert_eq!(
+        string_at(put, &["usage"]),
+        Some(help::usage_line(CommandName::Put))
+    );
+    assert_eq!(string_at(put, &["max_effect"]).as_deref(), Some("change"));
+    assert!(member(put, "outputs").is_some());
+    let table = piped(&["help", "table", "--json"]);
+    assert_eq!(table.exit, 0, "{}", text(&table.stderr));
+    let verbs: Vec<String> = json_lines(&table.stdout)
+        .iter()
+        .filter_map(|command| string_at(command, &["usage"]))
+        .collect();
+    assert_eq!(
+        verbs,
+        help::definitions(CommandName::Table)
+            .iter()
+            .map(|definition| definition.usage.to_owned())
+            .collect::<Vec<_>>()
+    );
+    for args in [&["help", "table", "sample", "--json"][..], &["table", "sample", "--help", "--json"]] {
+        let ran = piped(args);
+        assert_eq!(ran.exit, 0, "{args:?}");
+        let lines = json_lines(&ran.stdout);
+        assert_eq!(lines.len(), 1, "{args:?}");
+        assert_eq!(
+            string_at(&lines[0], &["usage"]).as_deref(),
+            Some("eggdb table sample <file> <table> [-n <count>]")
+        );
+    }
+    let collection = piped(&["help", "collection", "del"]);
+    assert_eq!(collection.exit, 0);
+    assert_eq!(text(&collection.stdout), help::command_help(CommandName::Collection));
+    let wrong_verb = piped(&["help", "table", "frob"]);
+    assert_eq!(wrong_verb.exit, 2);
+    assert!(text(&wrong_verb.stderr).starts_with("eggdb: table needs list, show or sample\n"));
+    let ui = piped(&["help", "ui", "--json"]);
+    let ui = &json_lines(&ui.stdout)[0];
+    assert!(items(ui, "outputs").is_empty());
+    assert_eq!(member(ui, "default_format").map(|node| &node.value), Some(&Json::Null));
+    let version = piped(&["version", "--json"]);
+    assert_eq!(
+        text(&version.stdout),
+        format!("{{\"version\":\"{}\"}}\n", eggdb::VERSION)
+    );
+    assert_eq!(text(&piped(&["version"]).stdout), format!("eggdb {}\n", eggdb::VERSION));
     let unknown = piped(&["help", "frob", "--json"]);
     assert_eq!(unknown.exit, 2);
     let error = one_json_error(&unknown.stderr);
     assert_eq!(string_at(&error, &["error", "code"]).as_deref(), Some("invalid_arguments"));
 }
 
+fn main_help_line(left: &str, summary: &str) -> String {
+    if left.chars().count() < 30 {
+        format!("\n  {left:<29} {summary}\n")
+    } else {
+        format!("\n  {left}\n{}{summary}\n", " ".repeat(32))
+    }
+}
+
 #[test]
-fn the_text_help_comes_from_the_registry_unchanged() {
-    for definition in COMMANDS {
-        let Some(command) = CommandName::ALL
-            .into_iter()
-            .find(|command| definition.words == [command.name()])
-        else {
-            panic!("{} is not a command of eggdb", definition.name());
+fn the_text_help_comes_from_the_registry() {
+    for command in CommandName::ALL {
+        let definitions = help::definitions(command);
+        let Some(first) = definitions.first() else {
+            panic!("{} is not in the registry", command.name());
         };
-        assert_eq!(help::definition(command), Some(definition));
+        let usages: Vec<&str> = definitions.iter().map(|definition| definition.usage).collect();
         assert_eq!(
             help::command_help(command),
-            format!("Usage: {}\n\n{}", definition.usage, definition.help)
+            format!("Usage: {}\n\n{}", usages.join("\n       "), first.help)
         );
-        let listed = format!(
-            "\n  {:<6} {:<22} {}\n",
-            definition.name(),
-            definition.synopsis,
-            definition.summary
-        );
-        assert!(help::MAIN.contains(&listed), "the main help lists {listed:?}");
         let ran = piped(&["help", command.name()]);
         assert_eq!(text(&ran.stdout), help::command_help(command));
+        let listed = match definitions.as_slice() {
+            [definition] => main_help_line(
+                format!("{:<6} {}", command.name(), definition.synopsis).trim_end(),
+                definition.summary,
+            ),
+            verbs => {
+                let verbs: Vec<&str> = verbs.iter().map(|verb| verb.words[1]).collect();
+                format!("\n  {:<6} {} ", command.name(), verbs.join("|"))
+            }
+        };
+        assert!(help::MAIN.contains(&listed), "the main help lists {listed:?}");
+    }
+    for name in ["help", "version"] {
+        let Some(definition) = eggdb_commands::command(&[name]) else {
+            panic!("{name} is not in the registry");
+        };
+        let listed = main_help_line(
+            format!("{name:<6} {}", definition.synopsis).trim_end(),
+            definition.summary,
+        );
+        assert!(help::MAIN.contains(&listed), "the main help lists {listed:?}");
     }
 }
 
 #[test]
 fn every_command_is_a_kept_name_or_a_noun_and_its_core_verbs() {
+    let is_core_verb = |word: &str| CORE_VERBS.iter().any(|core| core.name == word);
     for command in CommandName::ALL {
         let name = command.name();
         let fits = match command {
-            CommandName::Collection => ["list", "add", "delete"]
+            CommandName::Collection | CommandName::Table => help::definitions(command)
                 .iter()
-                .all(|verb| CORE_VERBS.iter().any(|core| core.name == *verb)),
-            _ => KEPT_NAMES.contains(&name),
+                .all(|definition| definition.words.len() == 2 && is_core_verb(definition.words[1])),
+            _ => KEPT_NAMES.contains(&name) || is_core_verb(name),
         };
         assert!(fits, "{name} is neither a kept name nor a noun with core verbs");
     }
@@ -372,5 +433,92 @@ fn the_command_model_doc_lists_every_command_tool_and_error_code() {
     }
     for kept in KEPT_NAMES {
         assert!(doc.contains(&format!("`{kept}`")), "{kept}");
+    }
+}
+
+pub(super) fn words_of(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    for character in line.chars() {
+        match (quote, character) {
+            (Some(open), character) if character == open => quote = None,
+            (Some(_), character) => word.push(character),
+            (None, '"' | '\'') => {
+                quote = Some(character);
+                in_word = true;
+            }
+            (None, character) if character.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            (None, character) => {
+                word.push(character);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
+}
+
+pub(super) fn is_one_eggdb_command(example: &str) -> bool {
+    example.starts_with("eggdb ")
+        && !["|", "<", ">", "$(", "&&"]
+            .iter()
+            .any(|shell| example.contains(shell))
+}
+
+#[test]
+fn every_example_is_a_command_line_the_parser_takes() {
+    let mut parsed = 0;
+    for definition in COMMANDS {
+        for example in definition.examples {
+            let example = match example.find("eggdb ") {
+                Some(start) => &example[start..],
+                None => panic!("{}: {example}", definition.name()),
+            };
+            let Some(line) = example.split(" | ").next().filter(|line| is_one_eggdb_command(line))
+            else {
+                continue;
+            };
+            let words = words_of(line);
+            let args: Vec<std::ffi::OsString> =
+                words[1..].iter().map(std::ffi::OsString::from).collect();
+            match super::args::parse(&args) {
+                Ok(_) => parsed += 1,
+                Err(failure) => panic!("{}: {line}: {failure:?}", definition.name()),
+            }
+        }
+    }
+    assert!(parsed > COMMANDS.len(), "{parsed} examples parsed");
+}
+
+#[test]
+fn every_command_of_the_parser_is_in_the_registry_with_its_json_form() {
+    for command in CommandName::ALL {
+        let definitions = help::definitions(command);
+        assert!(!definitions.is_empty(), "{} is not in the registry", command.name());
+        for definition in definitions {
+            assert_eq!(
+                definition.has_json(),
+                command.takes_format_option(),
+                "{}",
+                definition.name()
+            );
+        }
+    }
+    for definition in COMMANDS {
+        let first = definition.words[0];
+        assert!(
+            ["help", "version"].contains(&first) || CommandName::named(first).is_some(),
+            "{} is in the registry but the parser does not know it",
+            definition.name()
+        );
     }
 }

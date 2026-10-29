@@ -2062,7 +2062,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 format!("cannot execute {command} in a read-only transaction"),
             )),
             Block::None | Block::Failed => {
-                let mut writer = self.store.begin_write()?;
+                let mut writer = self
+                    .store
+                    .begin_write()
+                    .map_err(|error| read_only_refusal(error, command))?;
                 match body(&mut writer, tables) {
                     Ok(result)
                         if keep_open
@@ -2266,5 +2269,16 @@ impl KeyValueWrite for TrackedWrite<'_> {
 
     fn rollback(self) -> SqlResult<()> {
         Ok(())
+    }
+}
+
+fn read_only_refusal(error: SqlError, command: &str) -> SqlError {
+    if error.state() == SqlState::READ_ONLY_SQL_TRANSACTION {
+        SqlError::new(
+            SqlState::READ_ONLY_SQL_TRANSACTION,
+            format!("cannot execute {command} in a read-only transaction"),
+        )
+    } else {
+        error
     }
 }

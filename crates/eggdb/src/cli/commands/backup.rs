@@ -1,6 +1,6 @@
 use super::{Access, Session};
 use crate::cli::args::Format;
-use crate::cli::failure::{Exit, Failure};
+use crate::cli::failure::{Exit, Failure, code_for_error};
 use crate::cli::render;
 use crate::cli::reports::{self, Copied};
 use eggdb::{Error, ErrorKind};
@@ -64,7 +64,8 @@ impl Session<'_> {
             ));
         }
         if std::fs::symlink_metadata(copy).is_ok() {
-            return Err(Failure::database(
+            return Err(Failure::coded(
+                "already_exists",
                 format!(
                     "cannot back up {file} to {copy_shown}: {copy_shown} already exists; eggdb backup never replaces a file. Choose another name, or remove it first."
                 ),
@@ -72,7 +73,8 @@ impl Session<'_> {
             ));
         }
         if std::fs::symlink_metadata(staging_path(copy)).is_ok() {
-            return Err(Failure::database(
+            return Err(Failure::coded(
+                "already_exists",
                 format!(
                     "cannot back up {file} to {copy_shown}: {copy_shown}{BACKUP_STAGING_SUFFIX} exists, left by a backup that did not finish or one still running. Remove it and back up again."
                 ),
@@ -99,7 +101,11 @@ impl Session<'_> {
 }
 
 pub(super) fn engine_failure(error: &Error) -> Failure {
-    Failure::database(error.to_string(), Exit::for_error(error.kind()))
+    Failure::coded(
+        code_for_error(error.kind()),
+        error.to_string(),
+        Exit::for_error(error.kind()),
+    )
 }
 
 fn with_writer_hint(failure: Failure) -> Failure {

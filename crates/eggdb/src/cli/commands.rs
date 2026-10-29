@@ -18,12 +18,14 @@ mod compact;
 mod copy_io;
 mod csv_import;
 mod expiry;
+mod explain;
 mod mcp;
 mod restore;
 mod serve;
 mod shell;
 mod shell_copy;
 pub(super) mod sql;
+mod table;
 mod transfer;
 
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
@@ -164,6 +166,8 @@ fn execute_on(
         CommandName::Persist => session.persist(),
         CommandName::Incr | CommandName::Decr => session.counter(),
         CommandName::Cas => session.compare_and_set(),
+        CommandName::Explain => session.explain(),
+        CommandName::Table => session.table_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -175,7 +179,8 @@ fn execute_on(
 impl<'a> Session<'a> {
     fn create(&mut self) -> Result<Exit, Failure> {
         if std::fs::symlink_metadata(&self.request.file).is_ok() {
-            return Err(Failure::database(
+            return Err(Failure::coded(
+                "already_exists",
                 format!(
                     "{} already exists; eggdb create never replaces a file. Use it as it is, or choose another name.",
                     self.file

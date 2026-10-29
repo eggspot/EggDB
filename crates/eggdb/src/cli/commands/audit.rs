@@ -60,7 +60,8 @@ impl Session<'_> {
         })?;
         let Some(totals) = totals else {
             if std::fs::symlink_metadata(&self.request.file).is_err() {
-                return Err(Failure::database(
+                return Err(Failure::coded(
+                    "not_found",
                     format!("cannot open {}: no such file. Check the path.", self.file),
                     Exit::DatabaseError,
                 ));

@@ -36,12 +36,15 @@ pub(crate) fn run(args: &[OsString], console: &mut Console<'_>) -> u8 {
     let exit = match args::parse(args) {
         Ok(Invocation::Help(None)) => print(console.stdout, help::MAIN),
         Ok(Invocation::Help(Some(command))) => print(console.stdout, &help::command_help(command)),
-        Ok(Invocation::HelpJson(command)) => print(console.stdout, &help::registry_json(command)),
+        Ok(Invocation::HelpJson(command, verb)) => {
+            print(console.stdout, &help::registry_json(command, verb))
+        }
         Ok(Invocation::NoArguments) => {
             let _ = console.stderr.write_all(help::MAIN.as_bytes());
             Exit::Usage
         }
         Ok(Invocation::Version) => print(console.stdout, &format!("eggdb {}\n", eggdb::VERSION)),
+        Ok(Invocation::VersionJson) => print(console.stdout, &help::version_json()),
         Ok(Invocation::Run(request)) => {
             let color = request.color;
             let json = request.format == Some(Format::Json);
@@ -94,7 +97,9 @@ fn report_as(
     let color = commands::uses_color(color, console.terminal.stderr_color);
     let mut messages = Output::new(&mut *console.stderr, color);
     match failure {
-        Failure::Usage { message, command } => {
+        Failure::Usage {
+            message, command, ..
+        } => {
             error_line(&mut messages, message);
             if let Some(command) = command {
                 usage_line(&mut messages, *command);
@@ -143,7 +148,7 @@ fn error_json(failure: &Failure) -> String {
         ..
     } = failure
     {
-        error = error.string("usage", help::usage_line(*command));
+        error = error.string("usage", &help::usage_line(*command));
     }
     if let Some(command) = fix_command(failure) {
         error = error.string("fix_command", &command);
@@ -162,7 +167,7 @@ fn usage_line(messages: &mut Output<'_>, command: CommandName) {
     messages.text("  ");
     messages.styled(Style::Bold, "usage:");
     messages.text(" ");
-    messages.text(help::usage_line(command));
+    messages.text(&help::usage_line(command));
     messages.text("\n");
 }
 

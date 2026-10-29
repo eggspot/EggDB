@@ -375,7 +375,7 @@ fn verdict_ok(out: &mut Output<'_>, text: &str) {
     out.text("\n");
 }
 
-fn label(out: &mut Output<'_>, name: &str, value: &str, style: Style) {
+pub(crate) fn label(out: &mut Output<'_>, name: &str, value: &str, style: Style) {
     label_start(out, name, style);
     out.text(value);
     out.text("\n");
