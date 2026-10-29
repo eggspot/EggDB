@@ -1,14 +1,17 @@
 use super::{Client, QueryResult, Session};
-use crate::ast::SqlServerStatement;
+use crate::ast::{Name, SqlServerStatement};
 use crate::copy::NoCopyChannel;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::execute::Relation;
 use crate::lexer::tokenize_in;
+use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
 use crate::store::KeyValueStore;
 use std::sync::Arc;
 
-const STATEMENT_TERMINATING_ERRORS: [u16; 9] = [2627, 2601, 547, 515, 544, 2628, 8152, 3902, 3903];
+const STATEMENT_TERMINATING_ERRORS: [u16; 10] =
+    [2627, 2601, 547, 515, 544, 545, 2628, 8152, 3902, 3903];
 
 /// What one statement of a Transact-SQL batch did, as [`Session::execute_batch`] reports it.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +42,38 @@ fn rows_counted(result: &QueryResult) -> i64 {
         .last()
         .and_then(|count| count.parse().ok())
         .unwrap_or(0)
+}
+
+pub(crate) struct ParsedStatement {
+    pub(crate) first_token: usize,
+    pub(crate) outcome: SqlResult<(usize, usize)>,
+}
+
+pub(crate) fn parse_next_statement(
+    text: &str,
+    tokens: &[crate::lexer::Token<'_>],
+    settings: &crate::settings::Settings,
+    dialect: Dialect,
+    resume: (usize, usize),
+) -> Option<ParsedStatement> {
+    let mut parser = Parser::new(text, tokens)
+        .with_context(Parameters::Absent, settings)
+        .in_dialect(dialect)
+        .resuming_at(resume);
+    parser.skip_empty_statements();
+    if parser.at_end() {
+        return None;
+    }
+    let first_token = parser.resume_point().0;
+    let outcome = if parser.literal_rows().is_none() {
+        parser.statement().map(|_| parser.resume_point())
+    } else {
+        Ok(parser.resume_point())
+    };
+    Some(ParsedStatement {
+        first_token,
+        outcome,
+    })
 }
 
 fn no_transaction(code: u16, message: &str) -> SqlError {
@@ -81,20 +116,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
         let settings = Arc::clone(&self.settings);
         let mut resume = (0, 0);
-        loop {
-            let mut parser = Parser::new(text, tokens)
-                .with_context(Parameters::Absent, &settings)
-                .in_dialect(self.dialect)
-                .resuming_at(resume);
-            parser.skip_empty_statements();
-            if parser.at_end() {
-                return Ok(());
-            }
-            if parser.literal_rows().is_none() {
-                parser.statement()?;
-            }
-            resume = parser.resume_point();
+        while let Some(parsed) = parse_next_statement(text, tokens, &settings, self.dialect, resume)
+        {
+            resume = parsed.outcome?;
         }
+        Ok(())
     }
 
     fn run_batch_statements(
@@ -271,6 +297,73 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Arc::make_mut(&mut self.settings).sqlserver.no_count = *on;
                 Ok(QueryResult::command("SET"))
             }
+            SqlServerStatement::IdentityInsert { table, on } => {
+                self.set_identity_insert(table, *on)
+            }
         }
+    }
+
+    fn set_identity_insert(&mut self, table: &Name, on: bool) -> SqlResult<QueryResult> {
+        let settings = Arc::clone(&self.settings);
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: false,
+        };
+        let mut resolved = table.clone();
+        let relation = self.read(|reader, tables| {
+            binding.names(reader, tables, std::slice::from_mut(&mut resolved))?;
+            tables.relation(reader, &resolved.text)
+        })?;
+        let shown = crate::schemas::display(&resolved.text);
+        let has_identity = match relation {
+            None => {
+                return Err(SqlError::new(
+                    SqlState::UNDEFINED_TABLE,
+                    format!(
+                        "Cannot find the object \"{shown}\" because it does not exist or you do not have permissions."
+                    ),
+                )
+                .with_sqlserver_code(1088)
+                .at(table.position));
+            }
+            Some(Relation::Table(definition)) => definition.auto_increment_column().is_some(),
+            Some(Relation::View(_)) => false,
+        };
+        if !has_identity {
+            return Err(SqlError::new(
+                SqlState::WRONG_OBJECT_TYPE,
+                format!(
+                    "Table '{shown}' does not have the identity property. Cannot perform SET operation."
+                ),
+            )
+            .with_sqlserver_code(8106)
+            .at(table.position));
+        }
+        let already_on = self.identity_insert_table.as_deref() == Some(resolved.text.as_str());
+        if on
+            && !already_on
+            && let Some(current) = &self.identity_insert_table
+        {
+            let schema = match crate::schemas::schema_of(current) {
+                crate::schemas::DEFAULT_SCHEMA => "dbo",
+                other => other,
+            };
+            return Err(SqlError::new(
+                SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!(
+                    "IDENTITY_INSERT is already ON for table '{}.{schema}.{}'. Cannot perform SET operation for table '{shown}'.",
+                    self.settings.database,
+                    crate::schemas::base_name(current)
+                ),
+            )
+            .with_sqlserver_code(8107)
+            .at(table.position));
+        }
+        if on {
+            self.identity_insert_table = Some(resolved.text);
+        } else if already_on {
+            self.identity_insert_table = None;
+        }
+        Ok(QueryResult::command("SET"))
     }
 }

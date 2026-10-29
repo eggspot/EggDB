@@ -25,6 +25,7 @@ struct Context {
     foreign_keys: bool,
     database: String,
     owner: String,
+    identity_insert_table: Option<String>,
 }
 
 thread_local! {
@@ -45,12 +46,14 @@ pub(crate) fn enter(
     foreign_keys: bool,
     database: String,
     owner: String,
+    identity_insert_table: Option<String>,
 ) -> ContextGuard {
     let context = Context {
         dialect,
         foreign_keys,
         database,
         owner,
+        identity_insert_table,
     };
     ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
 }
@@ -62,12 +65,23 @@ fn context() -> Context {
             foreign_keys: true,
             database: String::new(),
             owner: String::new(),
+            identity_insert_table: None,
         })
     })
 }
 
 pub(crate) fn current_dialect() -> Dialect {
     context().dialect
+}
+
+pub(crate) fn identity_insert_is_on(table: &str) -> bool {
+    CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .and_then(|context| context.identity_insert_table.as_deref())
+            == Some(table)
+    })
 }
 
 fn foreign_keys_enforced() -> bool {

@@ -78,6 +78,7 @@ pub(crate) enum Statement {
 pub(crate) enum SqlServerStatement {
     Use(Name),
     NoCount(bool),
+    IdentityInsert { table: Name, on: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -287,6 +288,12 @@ pub(crate) enum AlterAction {
         sequence: Option<Name>,
         options: SequenceOptions,
     },
+    AddDefault {
+        column: Name,
+        default: Expr,
+        position: usize,
+    },
+    EnableConstraint(Name),
     Accepted,
 }
 

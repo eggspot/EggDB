@@ -2,7 +2,7 @@ use crate::error::SqlError;
 
 const GENERIC_ERROR: u16 = 50000;
 
-const SEVERITIES: [(u16, u8); 67] = [
+const SEVERITIES: [(u16, u8); 74] = [
     (102, 15),
     (103, 15),
     (105, 15),
@@ -26,7 +26,14 @@ const SEVERITIES: [(u16, u8); 67] = [
     (512, 16),
     (515, 16),
     (544, 16),
+    (545, 16),
     (547, 16),
+    (1088, 16),
+    (1754, 16),
+    (4917, 16),
+    (8101, 16),
+    (8106, 16),
+    (8107, 16),
     (911, 16),
     (1002, 16),
     (1222, 16),
@@ -378,7 +385,7 @@ pub(crate) fn translate(error: SqlError, text: &str, statement: &str, database: 
         "42P01" => (208, format!("Invalid object name '{first}'.")),
         "42703" => (207, format!("Invalid column name '{first}'.")),
         "42702" => (209, format!("Ambiguous column name '{first}'.")),
-        "42P07" | "42S01" | "42710" => (
+        "42P07" | "42S01" | "42710" | "42P06" => (
             2714,
             format!("There is already an object named '{first}' in the database."),
         ),

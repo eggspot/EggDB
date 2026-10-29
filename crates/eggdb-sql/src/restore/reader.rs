@@ -647,3 +647,39 @@ fn is_copy_from_stdin(text: &str) -> bool {
     }
     false
 }
+
+impl super::script::ScriptSource for DumpReader<'_> {
+    fn next_item(&mut self) -> SqlResult<super::script::ScriptItem> {
+        use super::script::{ClientCommand, ScriptItem, ScriptStatement};
+        Ok(match DumpReader::next_item(self)? {
+            Item::Statement(statement) => ScriptItem::Statement(ScriptStatement {
+                copy_from_stdin: statement.copy_from_stdin,
+                ..ScriptStatement::plain(statement.text, statement.line, statement.end_line)
+            }),
+            Item::Meta(meta) => ScriptItem::ClientCommand(ClientCommand {
+                shown: format!("\\{}", meta.name),
+                name: meta.name,
+                argument: meta.argument,
+                line: meta.line,
+                script: 0,
+            }),
+            Item::End => ScriptItem::End,
+        })
+    }
+
+    fn line_number(&self) -> u64 {
+        DumpReader::line_number(self)
+    }
+
+    fn skip_data(&mut self) -> SqlResult<u64> {
+        self.skip_copy_data()
+    }
+
+    fn copy_data(&mut self, out: &mut Vec<u8>) -> SqlResult<bool> {
+        DumpReader::copy_data(self, out)
+    }
+
+    fn copy_lines(&self) -> u64 {
+        DumpReader::copy_lines(self)
+    }
+}

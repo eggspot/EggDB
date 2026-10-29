@@ -524,7 +524,15 @@ fn index_missing(name: &Name, dialect: Dialect) -> SqlError {
             "specified index does not exist".to_owned(),
         )
         .with_oracle_code(1418),
-        Dialect::PostgreSql | Dialect::SqlServer => SqlError::new(
+        Dialect::SqlServer => SqlError::new(
+            SqlState::UNDEFINED_OBJECT,
+            format!(
+                "Cannot drop the index '{}', because it does not exist or you do not have permission.",
+                name.text
+            ),
+        )
+        .with_sqlserver_code(3701),
+        Dialect::PostgreSql => SqlError::new(
             SqlState::UNDEFINED_OBJECT,
             format!("index \"{}\" does not exist", name.text),
         ),

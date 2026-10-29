@@ -1,0 +1,39 @@
+== SELECT Id, Name, Email, CAST(Active AS int) FROM dbo.Customers ORDER BY Id
+-5|Legacy|legacy@example.com|0
+0|Nobody|NULL|0
+1|Ann O'Brien|ann@example.com|1
+2|Nguyễn Văn An|an@example.vn|1
+== SELECT LEN(Notes) FROM dbo.Customers WHERE Id = 1 AND Notes LIKE N'line one%line two'
+18
+== SELECT Notes FROM dbo.Customers WHERE Id = 2
+cà phê 🎉 $(document)
+== SELECT Id, Name, CAST(Price * 100 AS int), CAST(Cost * 100 AS int) FROM dbo.Products ORDER BY Id
+1|Coffee|1250|820
+2|Tea|475|210
+3|Mug|999|300
+== SELECT COUNT(*) FROM dbo.Products WHERE Photo = 0x89504E47 AND Guid = '6F9619FF-8B86-D011-B42D-00C04FC964FF'
+1
+== SELECT Id, Code FROM dbo.Coupons ORDER BY Id
+1000|WELCOME
+1010|SPRING
+== SELECT Id, CustomerId, CONVERT(varchar(10), ShipDate, 23), CAST(Status AS int) FROM sales.Orders ORDER BY Id
+1|1|2024-05-03|2
+2|2|NULL|1
+3|1|2024-07-01|1
+== SELECT COUNT(*) FROM sales.Orders WHERE PlacedAt = CAST('2024-05-01T07:30:00+00:00' AS datetimeoffset)
+1
+== SELECT OrderId, [LineNo], ProductId, Quantity FROM sales.OrderLines ORDER BY OrderId, [LineNo]
+1|1|1|2
+1|2|2|1
+2|1|3|4
+3|1|1|1
+3|2|99|1
+== SELECT COUNT(*), COUNT(Blob) FROM dbo.AuditLog
+2|1
+== SELECT Id, Name, Items, Shipped FROM sales.vOrderTotals ORDER BY Id
+1|Ann O'Brien|3|2024-05-03
+2|Nguyễn Văn An|4|NULL
+3|Ann O'Brien|2|2024-07-01
+== SELECT Id, Name FROM dbo.vActiveCustomers ORDER BY Id
+1|Ann O'Brien
+2|Nguyễn Văn An

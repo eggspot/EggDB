@@ -301,15 +301,58 @@ const ON_ONLY_OPTIONS: [&str; 7] = [
     "ansi_null_dflt_on",
 ];
 
-const NOT_SUPPORTED_OPTIONS: [&str; 7] = [
-    "xact_abort",
-    "identity_insert",
-    "rowcount",
-    "numeric_roundabort",
-    "fmtonly",
-    "parseonly",
-    "noexec",
+const NOT_SUPPORTED_OPTIONS: [&str; 5] =
+    ["xact_abort", "rowcount", "fmtonly", "parseonly", "noexec"];
+
+const SWITCHED_INDEX_OPTIONS: [&str; 8] = [
+    "pad_index",
+    "statistics_norecompute",
+    "statistics_incremental",
+    "allow_row_locks",
+    "allow_page_locks",
+    "optimize_for_sequential_key",
+    "sort_in_tempdb",
+    "online",
 ];
+
+const OFF_ONLY_INDEX_OPTIONS: [&str; 3] = ["ignore_dup_key", "drop_existing", "resumable"];
+
+const OFF_ONLY_TABLE_OPTIONS: [&str; 3] = ["memory_optimized", "system_versioning", "ledger"];
+
+const COMPRESSIONS: [&str; 3] = ["none", "row", "page"];
+
+fn index_option_accepted(option: &str, value: &str) -> bool {
+    let number = !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    match option {
+        "fillfactor" | "maxdop" => number,
+        "data_compression" => COMPRESSIONS.contains(&value),
+        _ if SWITCHED_INDEX_OPTIONS.contains(&option) => value == "on" || value == "off",
+        _ if OFF_ONLY_INDEX_OPTIONS.contains(&option) => value == "off",
+        _ => false,
+    }
+}
+
+fn table_option_accepted(option: &str, value: &str) -> bool {
+    match option {
+        "data_compression" => COMPRESSIONS.contains(&value),
+        _ if OFF_ONLY_TABLE_OPTIONS.contains(&option) => value == "off",
+        _ => false,
+    }
+}
+
+fn filters_out_nulls_only(filter: &Expr, key: &[Name]) -> bool {
+    match &filter.kind {
+        ExprKind::And(operands) => operands
+            .iter()
+            .all(|operand| filters_out_nulls_only(operand, key)),
+        ExprKind::IsNull {
+            expr,
+            negated: true,
+        } => matches!(&expr.kind, ExprKind::Column { qualifier: None, name }
+            if key.iter().any(|column| &column.text == name)),
+        _ => false,
+    }
+}
 
 pub(crate) fn is_reserved(word: &str) -> bool {
     RESERVED.binary_search(&word).is_ok()
@@ -438,7 +481,7 @@ fn folded_default(expr: &Expr, column_type: SqlType) -> Option<String> {
     postgresql_literal(&value)
 }
 
-pub(super) fn default_source(expr: &Expr, column_type: SqlType) -> Option<String> {
+pub(crate) fn default_source(expr: &Expr, column_type: SqlType) -> Option<String> {
     match &expr.kind {
         ExprKind::Cast {
             expr: clock,
@@ -597,11 +640,19 @@ impl<'t> Parser<'t> {
                 let on = self.on_or_off()?;
                 Ok(Statement::SqlServer(SqlServerStatement::NoCount(on)))
             }
-            "implicit_transactions" => {
+            "implicit_transactions" | "numeric_roundabort" => {
                 if self.on_or_off()? {
-                    return Err(not_supported("SET IMPLICIT_TRANSACTIONS ON").at(position));
+                    return Err(not_supported(&format!("SET {shown} ON")).at(position));
                 }
                 Ok(accepted_set())
+            }
+            "identity_insert" => {
+                let table = self.table_name()?;
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(SqlServerStatement::IdentityInsert {
+                    table,
+                    on,
+                }))
             }
             "textsize" | "lock_timeout" => {
                 self.take_operator("-");
@@ -959,7 +1010,7 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    pub(super) fn sqlserver_top(&mut self) -> SqlResult<Expr> {
+    pub(super) fn sqlserver_top(&mut self) -> SqlResult<Option<Expr>> {
         self.at += 1;
         let position = self.position();
         let count = if self.take(&TokenKind::LeftParen) {
@@ -982,13 +1033,226 @@ impl<'t> Parser<'t> {
                 }
             }
         };
-        if self.is_word("percent") {
-            return Err(not_supported("TOP ... PERCENT").at(self.position()));
+        let whole_view = self.is_word("percent");
+        if whole_view {
+            if !(self.at_view_top_level()
+                && matches!(count.kind, ExprKind::Literal(Literal::Integer(100))))
+            {
+                return Err(not_supported("TOP ... PERCENT").at(self.position()));
+            }
+            self.at += 1;
         }
         if self.is_word("with") && self.is_word_at(1, "ties") {
             return Err(not_supported("TOP ... WITH TIES").at(self.position()));
         }
-        Ok(count)
+        if whole_view {
+            self.ignored_view_top = true;
+            return Ok(None);
+        }
+        Ok(Some(count))
+    }
+
+    pub(super) fn at_view_top_level(&self) -> bool {
+        self.view_query_depth == Some(self.query_depth)
+    }
+
+    pub(super) fn skip_not_for_replication(&mut self) -> bool {
+        if self.sqlserver()
+            && self.is_word("not")
+            && self.is_word_at(1, "for")
+            && self.is_word_at(2, "replication")
+        {
+            self.at += 3;
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn sqlserver_column_option(&mut self) -> SqlResult<bool> {
+        let position = self.position();
+        if self.skip_not_for_replication() || self.take_word("rowguidcol") {
+            return Ok(true);
+        }
+        if self.take_word("collate") {
+            self.label()?;
+            return Ok(true);
+        }
+        let refused = if self.is_word("sparse") {
+            "SPARSE columns"
+        } else if self.is_word("filestream") {
+            "FILESTREAM columns"
+        } else if self.is_word("masked") {
+            "MASKED WITH (dynamic data masking)"
+        } else if self.is_word("encrypted") {
+            "ENCRYPTED WITH (Always Encrypted)"
+        } else if self.is_word("generated") {
+            "GENERATED ALWAYS AS ROW (system-versioned temporal tables)"
+        } else {
+            return Ok(false);
+        };
+        Err(not_supported(refused).at(position))
+    }
+
+    pub(super) fn skip_clustering(&mut self) {
+        let _ = self.take_word("clustered") || self.take_word("nonclustered");
+    }
+
+    pub(super) fn sqlserver_key_columns(&mut self) -> SqlResult<Vec<Name>> {
+        self.skip_clustering();
+        let columns = self.index_column_list(true)?;
+        self.skip_key_options()?;
+        Ok(columns)
+    }
+
+    pub(super) fn skip_key_options(&mut self) -> SqlResult<()> {
+        self.skip_index_options()?;
+        self.skip_storage_clause()
+    }
+
+    pub(super) fn skip_index_options(&mut self) -> SqlResult<()> {
+        if !self.is_word("with") {
+            return Ok(());
+        }
+        if self.peek_kind_at(1) == &TokenKind::LeftParen {
+            self.at += 2;
+            loop {
+                self.sqlserver_option("index", index_option_accepted)?;
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        } else if self.is_word_at(1, "fillfactor") {
+            self.at += 1;
+            self.sqlserver_option("index", index_option_accepted)?;
+        }
+        Ok(())
+    }
+
+    fn sqlserver_option(&mut self, kind: &str, accepted: fn(&str, &str) -> bool) -> SqlResult<()> {
+        let position = self.position();
+        let TokenKind::Word(word) = self.peek_kind() else {
+            return Err(self.unexpected());
+        };
+        let option = word.as_ref().to_owned();
+        let shown = self.keyword_text();
+        self.at += 1;
+        if !self.take_operator("=") {
+            return Err(self.unexpected());
+        }
+        let value = match self.peek_kind() {
+            TokenKind::Word(word) => word.as_ref().to_owned(),
+            TokenKind::Integer(digits) => (*digits).to_owned(),
+            _ => return Err(self.unexpected()),
+        };
+        self.at += 1;
+        let qualified = self.peek_kind() == &TokenKind::LeftParen
+            || (self.is_word("on") && self.is_word_at(1, "partitions"));
+        if !accepted(&option, &value) || qualified {
+            return Err(not_supported(&format!(
+                "The {kind} option {shown} = {}",
+                value.to_ascii_uppercase()
+            ))
+            .at(position));
+        }
+        Ok(())
+    }
+
+    pub(super) fn skip_storage_clause(&mut self) -> SqlResult<()> {
+        if !self.take_word("on") {
+            return Ok(());
+        }
+        self.label()?;
+        if self.take(&TokenKind::LeftParen) {
+            self.label()?;
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn sqlserver_table_tail(&mut self) -> SqlResult<()> {
+        loop {
+            let position = self.position();
+            if self.is_word("on") {
+                self.skip_storage_clause()?;
+            } else if self.take_word("textimage_on") {
+                self.label()?;
+            } else if self.is_word("filestream_on") {
+                return Err(not_supported("FILESTREAM_ON").at(position));
+            } else if self.is_word("with") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+                self.at += 2;
+                loop {
+                    self.sqlserver_option("table", table_option_accepted)?;
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RightParen)?;
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    pub(super) fn sqlserver_table_element_refused(&self) -> Option<SqlError> {
+        let refused = if self.is_word("period") && self.is_word_at(1, "for") {
+            "PERIOD FOR SYSTEM_TIME (system-versioned temporal tables)"
+        } else if self.is_word("index") {
+            "An INDEX inside CREATE TABLE"
+        } else {
+            return None;
+        };
+        Some(not_supported(refused).at(self.position()))
+    }
+
+    pub(super) fn sqlserver_special_index(&self) -> Option<SqlError> {
+        let first = usize::from(
+            self.is_word("primary")
+                || self.is_word("selective")
+                || self.is_word("clustered")
+                || self.is_word("nonclustered"),
+        );
+        let kind = if self.is_word_at(first, "xml") {
+            "CREATE XML INDEX"
+        } else if self.is_word_at(first, "spatial") {
+            "CREATE SPATIAL INDEX"
+        } else if self.is_word_at(first, "columnstore") {
+            "CREATE COLUMNSTORE INDEX"
+        } else if self.is_word_at(first, "fulltext") {
+            "CREATE FULLTEXT INDEX"
+        } else {
+            return None;
+        };
+        self.is_word_at(first + 1, "index")
+            .then(|| not_supported(kind).at(self.position()))
+    }
+
+    pub(super) fn sqlserver_index_tail(&mut self, unique: bool, key: &[Name]) -> SqlResult<()> {
+        loop {
+            let position = self.position();
+            if self.take_word("include") {
+                self.name_list()?;
+            } else if self.take_word("where") {
+                let filter = self.expression()?;
+                if unique && !filters_out_nulls_only(&filter, key) {
+                    return Err(not_supported(
+                        "A filtered UNIQUE index other than WHERE <key column> IS NOT NULL",
+                    )
+                    .at(position));
+                }
+            } else if self.is_word("with")
+                && (self.peek_kind_at(1) == &TokenKind::LeftParen
+                    || self.is_word_at(1, "fillfactor"))
+            {
+                self.skip_index_options()?;
+            } else if self.is_word("on") {
+                self.skip_storage_clause()?;
+            } else if self.is_word("filestream_on") {
+                return Err(not_supported("FILESTREAM_ON").at(position));
+            } else {
+                return Ok(());
+            }
+        }
     }
 
     pub(super) fn sqlserver_primary(

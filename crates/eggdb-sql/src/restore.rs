@@ -1,5 +1,11 @@
 mod classify;
+mod classify_sqlserver;
+mod column_rewrite;
 mod reader;
+mod script;
+mod script_reader;
+mod script_text;
+mod statement_spans;
 mod words;
 
 use crate::copy::{CopyChannel, CopyStart};
@@ -8,10 +14,12 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::{QueryResult, Session};
 use crate::store::KeyValueStore;
 use classify::{Action, Effect, Ignored, Skip};
-use reader::{DumpReader, DumpStatement, Item, MetaCommand};
+use reader::DumpReader;
+use script::{ClientCommand, DifferenceNote, ScriptItem, ScriptSource, ScriptStatement};
+use statement_spans::SqlServerScript;
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
-use words::{Token, Words};
+use words::{Token, WordRules, Words};
 
 /// The most items each list of a [`RestoreReport`] holds; past it, only a count grows.
 pub const MAX_LISTED: usize = 10_000;
@@ -52,6 +60,8 @@ pub struct TableRows {
 pub struct SkippedObject {
     /// The line of the dump where its statement starts.
     pub line: u64,
+    /// The script the line is in, an index into [`RestoreReport::scripts`].
+    pub script: u32,
     /// Its kind, in `pg_dump`'s lower-case words: `function`, `trigger`, `table`, ...
     pub kind: String,
     /// Its name as the dump writes it.
@@ -69,6 +79,8 @@ pub struct SkippedObject {
 pub struct Consequence {
     /// The line of the dump where the statement starts.
     pub line: u64,
+    /// The script the line is in, an index into [`RestoreReport::scripts`].
+    pub script: u32,
     /// The start of the statement, cut after 48 characters.
     pub statement: String,
     /// The skipped object it uses, such as `function public.touch()`.
@@ -77,12 +89,15 @@ pub struct Consequence {
     pub error: SqlError,
 }
 
-/// A psql meta-command of the dump that was not run.
+/// A client command of the dump that was not run as a statement: a psql meta-command such as
+/// `\connect`, or a sqlcmd command such as `:setvar` or `:r`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IgnoredMetaCommand {
     /// Its line in the dump.
     pub line: u64,
-    /// The command, such as `\connect`.
+    /// The script the line is in, an index into [`RestoreReport::scripts`].
+    pub script: u32,
+    /// The command as written, such as `\connect` or `:setvar`.
     pub command: String,
     /// Why it was not run.
     pub reason: String,
@@ -116,6 +131,8 @@ pub struct RestoreError {
     /// The line of the dump where it failed: the statement's line, the line its error points
     /// at, or the line of the `COPY` data that broke.
     pub line: u64,
+    /// The script the line is in, an index into [`RestoreReport::scripts`].
+    pub script: u32,
     /// The start of the statement, cut after 48 characters; empty when the dump itself could
     /// not be read.
     pub statement: String,
@@ -123,6 +140,20 @@ pub struct RestoreError {
     pub error: SqlError,
     /// How many statements of the dump were read before it.
     pub statements_before: u64,
+}
+
+/// Something restored that is not kept as the source database had it, such as a `datetimeoffset`
+/// column whose offsets are lost or an index whose filter is not kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownDifference {
+    /// The line of the dump where the statement starts.
+    pub line: u64,
+    /// The script the line is in, an index into [`RestoreReport::scripts`].
+    pub script: u32,
+    /// The object it concerns, in the dump's own naming, such as `dbo.Orders.PlacedAt`.
+    pub object: String,
+    /// What differs, in one clause.
+    pub difference: String,
 }
 
 /// What a restore did: what it created and loaded, what it skipped, ignored and why, and the
@@ -171,9 +202,21 @@ pub struct RestoreReport {
     pub errors_not_listed: u64,
     /// The error that stopped the restore, if one did.
     pub error: Option<RestoreError>,
+    /// What was restored but is not kept as the source had it.
+    pub differences: Vec<KnownDifference>,
+    /// Known differences beyond the [`MAX_LISTED`] in `differences`.
+    pub differences_not_listed: u64,
+    /// The names of the scripts read, which the caller fills: index 0 is the one restored, and
+    /// each listed item's `script` is an index into it.
+    pub scripts: Vec<String>,
 }
 
 impl RestoreReport {
+    /// How many known differences there were, listed or not.
+    pub fn difference_count(&self) -> u64 {
+        self.differences.len() as u64 + self.differences_not_listed
+    }
+
     /// How many objects were skipped, listed or not.
     pub fn skipped_count(&self) -> u64 {
         self.skipped.len() as u64 + self.skipped_not_listed
@@ -196,51 +239,121 @@ impl RestoreReport {
 }
 
 /// Restores the dump read from `input` through `session`, statement by statement, each in its
-/// own transaction as `psql -f` runs it (a `COPY` and its data in one), and reports what it
-/// did. The dump is PostgreSQL's plain SQL form: `pg_dump`'s output, or `pg_restore -f`'s.
+/// own transaction as `psql -f` or `sqlcmd -i` runs it (a `COPY` and its data in one), and
+/// reports what it did. The session's dialect says what the dump is:
+///
+/// - **PostgreSQL**: PostgreSQL's plain SQL form, `pg_dump`'s output or `pg_restore -f`'s.
+///   psql's meta-commands are handled as psql would for what `pg_dump` writes: `\connect` is
+///   noted and ignored (one database per file), `\restrict` and `\unrestrict` must carry the
+///   same key, and no other meta-command is ever run.
+/// - **SQL Server**: a Transact-SQL script as SSMS Generate Scripts or `sqlpackage
+///   /Action:Script` writes it, in UTF-8 or UTF-16LE with its byte-order mark, in batches ended
+///   by `GO`. sqlcmd's `:setvar` defines the `$(name)` variables it replaces once the script has
+///   used a sqlcmd command; `:r`, `!!` and the other sqlcmd commands are listed and never run.
+///   What EggDB keeps differently from SQL Server is listed as a known difference.
 ///
 /// The dump is read one line at a time (lines and statements up to 1 GiB), never whole.
-/// psql's meta-commands are handled as psql would for what `pg_dump` writes: `\connect` is
-/// noted and ignored (one database per file), `\restrict` and `\unrestrict` must carry the same
-/// key, and no other meta-command is ever run. Objects EggDB cannot create yet (functions,
-/// triggers, types, partitioned tables, ...) are skipped and listed; `GRANT`, `REVOKE`,
-/// `OWNER TO` and unknown `SET` parameters are counted and ignored; a statement that fails only
-/// because it uses a skipped object is a consequence, and a schema statement that EggDB answers
-/// with `0A000` is skipped as not supported yet. Any other error stops the restore, unless
-/// [`RestoreOptions::keep_going`], with the statements before it committed; `progress` is
-/// called as the restore moves on. The session must use the PostgreSQL dialect and be outside
-/// a transaction block.
+/// Objects EggDB cannot create yet (functions, procedures, triggers, types, partitioned tables,
+/// ...) are skipped and listed; `GRANT`, `REVOKE`, `OWNER TO`, unknown `SET` parameters and the
+/// like are counted and ignored; a statement that fails only because it uses a skipped object is
+/// a consequence, and a schema statement that EggDB answers with `0A000` is skipped as not
+/// supported yet. Any other error stops the restore, unless [`RestoreOptions::keep_going`], with
+/// the statements before it committed; `progress` is called as the restore moves on. The session
+/// must use the PostgreSQL or the SQL Server dialect and be outside a transaction block.
 pub fn restore_dump<S: KeyValueStore>(
     session: &mut Session<'_, S>,
     input: &mut dyn BufRead,
     options: RestoreOptions,
     progress: &mut dyn FnMut(&RestoreProgress),
 ) -> RestoreReport {
-    let mut report = RestoreReport::default();
-    if session.dialect() != Dialect::PostgreSql {
-        report.error = Some(RestoreError {
-            line: 0,
-            statement: String::new(),
-            error: SqlError::not_supported("restoring a dump in a dialect other than PostgreSQL"),
-            statements_before: 0,
-        });
-        return report;
+    match session.dialect() {
+        Dialect::PostgreSql => {
+            let mut reader = DumpReader::new(input);
+            Restore::new(
+                session,
+                &mut reader,
+                RestoreRules::postgresql(),
+                options,
+                progress,
+            )
+            .run()
+        }
+        Dialect::SqlServer => {
+            let mut script = SqlServerScript::new(input);
+            Restore::new(
+                session,
+                &mut script,
+                RestoreRules::sqlserver(),
+                options,
+                progress,
+            )
+            .run()
+        }
+        _ => RestoreReport {
+            error: Some(RestoreError {
+                line: 0,
+                script: 0,
+                statement: String::new(),
+                error: SqlError::not_supported(
+                    "restoring a dump in a dialect other than PostgreSQL and SQL Server",
+                ),
+                statements_before: 0,
+            }),
+            ..RestoreReport::default()
+        },
     }
-    let mut restore = Restore {
-        session,
-        reader: DumpReader::new(input),
-        report,
-        options,
-        progress,
-        restricted: None,
-        skipped_names: HashMap::new(),
-        skipped_tables: HashMap::new(),
-        table_rows: HashMap::new(),
-        set_names: HashSet::new(),
-        skipped_sequences: HashSet::new(),
-    };
-    restore.run();
-    restore.report
+}
+
+type Classifier = fn(&str, &dyn Fn(&str) -> bool) -> Action;
+
+#[derive(Clone, Copy)]
+struct RestoreRules {
+    classify: Classifier,
+    table_key: fn(&str, &str) -> String,
+    name_key: fn(&str) -> String,
+    words: WordRules,
+    client_command_reason: fn(&str) -> &'static str,
+    differences: fn(&str) -> Vec<DifferenceNote>,
+    not_supported: fn(&SqlError) -> bool,
+    psql_meta_commands: bool,
+    default_schema: &'static str,
+}
+
+impl RestoreRules {
+    fn postgresql() -> Self {
+        Self {
+            classify: classify::classify,
+            table_key: postgresql_table_key,
+            name_key: str::to_owned,
+            words: WordRules::POSTGRESQL,
+            client_command_reason: psql_command_reason,
+            differences: |_| Vec::new(),
+            not_supported: |error| error.state() == SqlState::FEATURE_NOT_SUPPORTED,
+            psql_meta_commands: true,
+            default_schema: "public",
+        }
+    }
+
+    fn sqlserver() -> Self {
+        Self {
+            classify: classify_sqlserver::classify_sqlserver,
+            table_key: classify_sqlserver::sqlserver_table_key,
+            name_key: classify_sqlserver::sqlserver_name_key,
+            words: WordRules::SQLSERVER,
+            client_command_reason: classify_sqlserver::sqlcmd_command_reason,
+            differences: classify_sqlserver::sqlserver_differences,
+            not_supported: classify_sqlserver::refused_as_not_supported,
+            psql_meta_commands: false,
+            default_schema: "public",
+        }
+    }
+}
+
+fn psql_command_reason(name: &str) -> &'static str {
+    match name {
+        "connect" | "c" => "one database per file",
+        _ => "never run",
+    }
 }
 
 enum Flow {
@@ -254,7 +367,8 @@ struct SkippedTable {
 
 struct Restore<'a, 's, S: KeyValueStore> {
     session: &'a mut Session<'s, S>,
-    reader: DumpReader<'a>,
+    reader: &'a mut dyn ScriptSource,
+    rules: RestoreRules,
     report: RestoreReport,
     options: RestoreOptions,
     progress: &'a mut dyn FnMut(&RestoreProgress),
@@ -266,14 +380,47 @@ struct Restore<'a, 's, S: KeyValueStore> {
     skipped_sequences: HashSet<String>,
 }
 
-impl<S: KeyValueStore> Restore<'_, '_, S> {
-    fn run(&mut self) {
+impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
+    fn new(
+        session: &'a mut Session<'s, S>,
+        reader: &'a mut dyn ScriptSource,
+        rules: RestoreRules,
+        options: RestoreOptions,
+        progress: &'a mut dyn FnMut(&RestoreProgress),
+    ) -> Self {
+        Self {
+            session,
+            reader,
+            rules,
+            report: RestoreReport::default(),
+            options,
+            progress,
+            restricted: None,
+            skipped_names: HashMap::new(),
+            skipped_tables: HashMap::new(),
+            table_rows: HashMap::new(),
+            set_names: HashSet::new(),
+            skipped_sequences: HashSet::new(),
+        }
+    }
+
+    fn run(mut self) -> RestoreReport {
+        self.run_items();
+        self.report
+    }
+
+    fn table_key(&self, name: &str) -> String {
+        (self.rules.table_key)(name, self.rules.default_schema)
+    }
+
+    fn run_items(&mut self) {
         loop {
             let item = match self.reader.next_item() {
                 Ok(item) => item,
                 Err(error) => {
                     self.report.error = Some(RestoreError {
                         line: self.reader.line_number(),
+                        script: 0,
                         statement: String::new(),
                         error,
                         statements_before: self.report.statements,
@@ -282,7 +429,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                 }
             };
             let flow = match item {
-                Item::End => {
+                ScriptItem::End => {
                     if let Some((_, line)) = self.restricted.take() {
                         let error = SqlError::new(
                             SqlState::SYNTAX_ERROR,
@@ -293,6 +440,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                         .with_hint("The dump is cut short; take it again, or copy all of it.");
                         self.genuine_error(RestoreError {
                             line: self.reader.line_number(),
+                            script: 0,
                             statement: String::new(),
                             error,
                             statements_before: self.report.statements,
@@ -300,8 +448,8 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                     }
                     return;
                 }
-                Item::Meta(meta) => self.meta_command(meta),
-                Item::Statement(statement) => {
+                ScriptItem::ClientCommand(command) => self.client_command(command),
+                ScriptItem::Statement(statement) => {
                     self.report.statements += 1;
                     self.statement(statement)
                 }
@@ -317,7 +465,12 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         }
     }
 
-    fn meta_command(&mut self, meta: MetaCommand) -> Flow {
+    fn client_command(&mut self, meta: ClientCommand) -> Flow {
+        if !self.rules.psql_meta_commands {
+            let reason = (self.rules.client_command_reason)(&meta.name);
+            self.note_meta(&meta, reason);
+            return Flow::Continue;
+        }
         match meta.name.as_str() {
             "restrict" => {
                 self.restricted = Some((meta.argument, meta.line));
@@ -335,34 +488,33 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                 ),
             },
             "." => Flow::Continue,
-            "connect" | "c" => {
-                self.note_meta(&meta, "one database per file");
-                Flow::Continue
-            }
-            _ => {
-                self.note_meta(&meta, "never run");
+            name => {
+                let reason = (self.rules.client_command_reason)(name);
+                self.note_meta(&meta, reason);
                 Flow::Continue
             }
         }
     }
 
-    fn fail_meta(&mut self, meta: &MetaCommand, message: String) -> Flow {
+    fn fail_meta(&mut self, meta: &ClientCommand, message: String) -> Flow {
         let error = SqlError::new(SqlState::SYNTAX_ERROR, message)
             .with_hint("The dump was altered after pg_dump wrote it; take it again.");
         self.genuine_error(RestoreError {
             line: meta.line,
-            statement: format!("\\{}", meta.name),
+            script: meta.script,
+            statement: meta.shown.clone(),
             error,
             statements_before: self.report.statements,
         })
     }
 
-    fn note_meta(&mut self, meta: &MetaCommand, reason: &str) {
+    fn note_meta(&mut self, meta: &ClientCommand, reason: &str) {
         let ignored = &mut self.report.ignored;
         if ignored.meta_commands.len() < MAX_LISTED {
             ignored.meta_commands.push(IgnoredMetaCommand {
                 line: meta.line,
-                command: format!("\\{}", meta.name),
+                script: meta.script,
+                command: meta.shown.clone(),
                 reason: reason.to_owned(),
             });
         } else {
@@ -370,12 +522,20 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         }
     }
 
-    fn statement(&mut self, statement: DumpStatement) -> Flow {
+    fn statement(&mut self, statement: ScriptStatement) -> Flow {
+        if let Some(error) = &statement.refused
+            && !(self.rules.not_supported)(error)
+        {
+            let error = error.clone();
+            return self.failed(&statement, &Effect::Other, error);
+        }
         let session = &*self.session;
-        let action = classify::classify(&statement.text, &|name| session.parameter(name).is_ok());
+        let action =
+            (self.rules.classify)(&statement.text, &|name| session.parameter(name).is_ok());
         match action {
             Action::Ignore(kind) => {
                 self.ignore(kind);
+                self.note_differences(&statement);
                 Flow::Continue
             }
             Action::Skip(skip) => self.skip(&statement, skip),
@@ -385,8 +545,33 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                 {
                     return self.data_of_skipped_table(&statement, &key);
                 }
+                if let Some(error) = statement.refused.clone() {
+                    return self.failed(&statement, &effect, error);
+                }
                 self.execute(statement, &effect)
             }
+        }
+    }
+
+    fn note_differences(&mut self, statement: &ScriptStatement) {
+        for note in &statement.differences {
+            self.note_difference(statement, note.object.clone(), note.difference.clone());
+        }
+        for note in (self.rules.differences)(&statement.text) {
+            self.note_difference(statement, note.object, note.difference);
+        }
+    }
+
+    fn note_difference(&mut self, statement: &ScriptStatement, object: String, difference: String) {
+        if self.report.differences.len() < MAX_LISTED {
+            self.report.differences.push(KnownDifference {
+                line: statement.line,
+                script: statement.script,
+                object,
+                difference,
+            });
+        } else {
+            self.report.differences_not_listed += 1;
         }
     }
 
@@ -410,9 +595,9 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         }
     }
 
-    fn skip(&mut self, statement: &DumpStatement, skip: Skip) -> Flow {
+    fn skip(&mut self, statement: &ScriptStatement, skip: Skip) -> Flow {
         let rows = if statement.copy_from_stdin {
-            match self.reader.skip_copy_data() {
+            match self.reader.skip_data() {
                 Ok(rows) => Some(rows),
                 Err(error) => return self.unreadable(error),
             }
@@ -424,6 +609,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         }
         let listed = self.list_skipped(SkippedObject {
             line: statement.line,
+            script: statement.script,
             kind: skip.kind.to_owned(),
             name: skip.name.clone(),
             reason: skip.reason.to_owned(),
@@ -440,6 +626,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
     fn unreadable(&mut self, error: SqlError) -> Flow {
         self.report.error = Some(RestoreError {
             line: self.reader.line_number(),
+            script: 0,
             statement: String::new(),
             error,
             statements_before: self.report.statements,
@@ -463,14 +650,15 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             return;
         }
         self.skipped_names
-            .entry(key.to_owned())
+            .entry((self.rules.name_key)(key))
             .or_insert_with(|| format!("{kind} {name}"));
     }
 
     fn remember_skipped_sequence(&mut self, name: &str) {
         self.remember_skipped("sequence", name);
         if self.skipped_sequences.len() < MAX_REMEMBERED_NAMES {
-            self.skipped_sequences.insert(table_key(name));
+            let key = self.table_key(name);
+            self.skipped_sequences.insert(key);
         }
     }
 
@@ -487,24 +675,24 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
 
     fn remember_skipped_table(&mut self, name: &str, listed: Option<usize>) {
         if self.skipped_tables.len() < MAX_REMEMBERED_NAMES {
-            self.skipped_tables
-                .insert(table_key(name), SkippedTable { listed });
+            let key = self.table_key(name);
+            self.skipped_tables.insert(key, SkippedTable { listed });
         }
     }
 
     fn skipped_table_key(&self, table: &str) -> Option<String> {
-        let key = table_key(table);
+        let key = self.table_key(table);
         self.skipped_tables.contains_key(&key).then_some(key)
     }
 
-    fn data_of_skipped_table(&mut self, statement: &DumpStatement, key: &str) -> Flow {
+    fn data_of_skipped_table(&mut self, statement: &ScriptStatement, key: &str) -> Flow {
         let rows = if statement.copy_from_stdin {
-            match self.reader.skip_copy_data() {
+            match self.reader.skip_data() {
                 Ok(rows) => rows,
                 Err(error) => return self.unreadable(error),
             }
         } else {
-            classify::insert_rows(&statement.text)
+            classify::insert_rows(&statement.text, self.rules.words)
         };
         self.report.rows_skipped += rows;
         if let Some(SkippedTable {
@@ -517,10 +705,10 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         Flow::Continue
     }
 
-    fn execute(&mut self, statement: DumpStatement, effect: &Effect) -> Flow {
+    fn execute(&mut self, statement: ScriptStatement, effect: &Effect) -> Flow {
         let mut loaded = 0u64;
         let mut copy = DumpCopy {
-            reader: &mut self.reader,
+            reader: &mut *self.reader,
             progress: &mut *self.progress,
             tables: self.report.tables,
             rows: self.report.rows,
@@ -534,13 +722,14 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             &mut copy,
         );
         if statement.copy_from_stdin
-            && let Err(error) = self.reader.skip_copy_data()
+            && let Err(error) = self.reader.skip_data()
         {
             return self.unreadable(error);
         }
         match outcome {
             Ok(()) => {
                 self.count(effect, loaded);
+                self.note_differences(&statement);
                 Flow::Continue
             }
             Err(error) => self.failed(&statement, effect, error),
@@ -567,11 +756,14 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                 report.sequences += identity_sequences.len() as u64;
             }
             Effect::Comment => report.comments += 1,
+            Effect::AddConstraint { .. } => report.constraints += 1,
             Effect::Copy(table) | Effect::Insert(table) => {
                 report.rows += loaded;
                 self.add_rows(table, loaded);
             }
             Effect::SequenceCall(_)
+            | Effect::IdentityInsert(_)
+            | Effect::SetDefault { .. }
             | Effect::Setting
             | Effect::Data
             | Effect::OtherDdl
@@ -580,7 +772,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
     }
 
     fn add_rows(&mut self, table: &str, rows: u64) {
-        let key = table_key(table);
+        let key = self.table_key(table);
         if let Some(&index) = self.table_rows.get(&key) {
             self.report.rows_per_table[index].rows += rows;
             return;
@@ -597,14 +789,39 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         });
     }
 
-    fn failed(&mut self, statement: &DumpStatement, effect: &Effect, error: SqlError) -> Flow {
+    fn failed(&mut self, statement: &ScriptStatement, effect: &Effect, error: SqlError) -> Flow {
         let state = error.state();
         let code = state.code();
         let missing_object = matches!(code, "42704" | "42883" | "42P01" | "3F000");
         let refused_definition = matches!(code, "0A000" | "42601" | "42809");
+        let not_supported = (self.rules.not_supported)(&error);
+        if let Effect::AddConstraint { table, name } = effect
+            && matches!(code, "23505" | "23503" | "23514")
+        {
+            let object = name.as_deref().unwrap_or(table).to_owned();
+            if let Some(name) = name {
+                self.remember_skipped("constraint", name);
+            }
+            self.note_difference(
+                statement,
+                object,
+                "not created: existing rows violate it (rows the source kept under a disabled constraint, or a collation, padding or LIKE difference)".to_owned(),
+            );
+            return Flow::Continue;
+        }
+        if let Effect::SetDefault { object, default } = effect
+            && not_supported
+        {
+            self.note_difference(
+                statement,
+                object.clone(),
+                format!("default not kept: {default}"),
+            );
+            return Flow::Continue;
+        }
         let uses = match effect {
             Effect::SequenceCall(sequence)
-                if missing_object && self.skipped_sequences.contains(&table_key(sequence)) =>
+                if missing_object && self.skipped_sequences.contains(&self.table_key(sequence)) =>
             {
                 Some(format!("sequence {sequence}"))
             }
@@ -625,6 +842,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             if self.report.consequences.len() < MAX_LISTED {
                 self.report.consequences.push(Consequence {
                     line: statement.line,
+                    script: statement.script,
                     statement: shortened(&statement.text),
                     uses,
                     error,
@@ -634,7 +852,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             }
             return Flow::Continue;
         }
-        if error.state() == SqlState::FEATURE_NOT_SUPPORTED && effect.is_ddl() {
+        if not_supported && effect.is_ddl() {
             self.remember_identity_sequences(effect);
             let (kind, name) = effect
                 .created()
@@ -645,6 +863,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
             let is_table = kind == "table";
             let listed = self.list_skipped(SkippedObject {
                 line: statement.line,
+                script: statement.script,
                 kind: kind.to_owned(),
                 name: name.clone(),
                 reason: error.message().to_owned(),
@@ -660,6 +879,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         let line = error_line(statement, &error);
         self.genuine_error(RestoreError {
             line,
+            script: statement.script,
             statement: shortened(&statement.text),
             error,
             statements_before: self.report.statements.saturating_sub(1),
@@ -685,8 +905,14 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
         }
         let mut chain = String::new();
         let mut after_dot = false;
-        for token in Words::new(text) {
-            match token.name_part() {
+        let words = self.rules.words;
+        for token in Words::with_rules(text, words) {
+            let part = if words.bracketed_names {
+                token.plain_name_part().map(str::to_owned)
+            } else {
+                token.name_part()
+            };
+            match part {
                 Some(part) => {
                     if !after_dot {
                         chain.clear();
@@ -695,7 +921,7 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
                     }
                     chain.push_str(&part);
                     after_dot = false;
-                    if let Some(shown) = self.skipped_names.get(&chain) {
+                    if let Some(shown) = self.skipped_names.get(&(self.rules.name_key)(&chain)) {
                         return Some(shown.clone());
                     }
                 }
@@ -711,14 +937,14 @@ impl<S: KeyValueStore> Restore<'_, '_, S> {
     }
 }
 
-struct DumpCopy<'r, 'd> {
-    reader: &'r mut DumpReader<'d>,
+struct DumpCopy<'r> {
+    reader: &'r mut dyn ScriptSource,
     progress: &'r mut dyn FnMut(&RestoreProgress),
     tables: u64,
     rows: u64,
 }
 
-impl CopyChannel for DumpCopy<'_, '_> {
+impl CopyChannel for DumpCopy<'_> {
     fn start_copy_in(&mut self, _start: &CopyStart) -> SqlResult<()> {
         Ok(())
     }
@@ -760,11 +986,11 @@ fn rows_of(tag: &str) -> u64 {
     count.parse().unwrap_or(0)
 }
 
-fn table_key(name: &str) -> String {
+fn postgresql_table_key(name: &str, default_schema: &str) -> String {
     if name.contains('.') {
         name.to_owned()
     } else {
-        format!("public.{name}")
+        format!("{default_schema}.{name}")
     }
 }
 
@@ -795,7 +1021,7 @@ fn shortened(text: &str) -> String {
     shown
 }
 
-fn error_line(statement: &DumpStatement, error: &SqlError) -> u64 {
+fn error_line(statement: &ScriptStatement, error: &SqlError) -> u64 {
     if let Some(data_line) = error
         .context()
         .filter(|context| context.starts_with("COPY "))
@@ -819,3 +1045,5 @@ fn error_line(statement: &DumpStatement, error: &SqlError) -> u64 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_sqlserver;

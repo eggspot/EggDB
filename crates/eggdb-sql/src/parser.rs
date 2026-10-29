@@ -12,7 +12,10 @@ mod sqlserver_functions;
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved};
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
-pub(crate) use sqlserver::is_reserved as is_sqlserver_reserved;
+pub(crate) use sqlserver::{
+    default_source as sqlserver_default_source, is_reserved as is_sqlserver_reserved,
+    not_supported as sqlserver_not_supported, starts_statement as sqlserver_starts_statement,
+};
 
 pub(crate) use schemas::Nesting;
 pub use sqlite::SQLITE_COMPATIBLE_VERSION;
@@ -194,6 +197,8 @@ pub(crate) struct Parser<'t> {
     queries: usize,
     setting_changes: Vec<(String, String)>,
     pending_top: Option<Expr>,
+    view_query_depth: Option<usize>,
+    ignored_view_top: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -304,6 +309,8 @@ impl<'t> Parser<'t> {
             queries: 0,
             setting_changes: Vec::new(),
             pending_top: None,
+            view_query_depth: None,
+            ignored_view_top: false,
         }
     }
 
@@ -1067,10 +1074,15 @@ impl<'t> Parser<'t> {
 
     fn create(&mut self) -> SqlResult<Statement> {
         self.at += 1;
+        if self.sqlserver()
+            && let Some(refused) = self.sqlserver_special_index()
+        {
+            return Err(refused);
+        }
         if self.at_index_definition() {
             return self.create_index();
         }
-        if self.postgresql() && self.is_word("schema") {
+        if (self.postgresql() || self.sqlserver()) && self.is_word("schema") {
             return self.create_schema();
         }
         if self.postgresql() && self.is_word("extension") {
@@ -1170,7 +1182,11 @@ impl<'t> Parser<'t> {
                     indexes.push(self.unique_constraint(constraint, position)?);
                 } else if self.take_word("primary") {
                     self.expect_word("key")?;
-                    let key = self.name_list()?;
+                    let key = if self.sqlserver() {
+                        self.sqlserver_key_columns()?
+                    } else {
+                        self.name_list()?
+                    };
                     if primary_key.is_some() {
                         return Err(multiple_primary_keys(&name, position));
                     }
@@ -1196,6 +1212,10 @@ impl<'t> Parser<'t> {
                 indexes.push(index);
             } else if self.is_word("exclude") || self.is_word("like") {
                 return Err(self.table_constraint_not_supported());
+            } else if self.sqlserver()
+                && let Some(refused) = self.sqlserver_table_element_refused()
+            {
+                return Err(refused);
             } else if self.sqlite() {
                 let (column, exact_integer) = self.sqlite_column_definition()?;
                 integer_columns.push(exact_integer);
@@ -1215,6 +1235,9 @@ impl<'t> Parser<'t> {
         };
         if self.sqlite() {
             self.sqlite_table_finish(&name, &mut columns, &primary_key, &integer_columns)?;
+        }
+        if self.sqlserver() {
+            self.sqlserver_table_tail()?;
         }
         if self.is_word("partition") || self.is_word("inherits") || self.is_word("with") {
             return Err(self.not_supported("table options"));
@@ -1257,7 +1280,11 @@ impl<'t> Parser<'t> {
         if self.is_word("nulls") {
             return Err(self.not_supported("UNIQUE NULLS [NOT] DISTINCT"));
         }
-        let columns = self.index_column_list(true)?;
+        let columns = if self.sqlserver() {
+            self.sqlserver_key_columns()?
+        } else {
+            self.index_column_list(true)?
+        };
         if self.sqlite() {
             self.sqlite_conflict_clause()?;
         }
@@ -1281,6 +1308,9 @@ impl<'t> Parser<'t> {
 
     fn column_definition(&mut self) -> SqlResult<ColumnDefinition> {
         let name = self.name()?;
+        if self.sqlserver() && self.is_word("as") {
+            return Err(sqlserver::not_supported("Computed columns").at(self.position()));
+        }
         let serial = self.serial_type();
         let sql_type = match serial {
             Some(sql_type) => sql_type,
@@ -1301,6 +1331,9 @@ impl<'t> Parser<'t> {
             if self.mysql() && self.mysql_column_option(&mut column)? {
                 continue;
             }
+            if self.sqlserver() && self.sqlserver_column_option()? {
+                continue;
+            }
             let constraint = if self.take_word("constraint") {
                 Some(self.name()?)
             } else {
@@ -1312,6 +1345,10 @@ impl<'t> Parser<'t> {
                     return Err(self.not_supported("UNIQUE NULLS [NOT] DISTINCT"));
                 }
                 column.unique = Some(constraint);
+                if self.sqlserver() {
+                    self.skip_clustering();
+                    self.skip_key_options()?;
+                }
             } else if self.take_word("not") {
                 self.expect_word("null")?;
                 column.not_null = true;
@@ -1320,6 +1357,10 @@ impl<'t> Parser<'t> {
             } else if self.take_word("primary") {
                 self.expect_word("key")?;
                 column.primary_key = true;
+                if self.sqlserver() {
+                    self.skip_clustering();
+                    self.skip_key_options()?;
+                }
             } else if self.is_word("default") {
                 self.at += 1;
                 let start = self.position();
@@ -1682,7 +1723,7 @@ impl<'t> Parser<'t> {
         if self.is_word("index") {
             return self.drop_index();
         }
-        if self.postgresql() && self.is_word("schema") {
+        if (self.postgresql() || self.sqlserver()) && self.is_word("schema") {
             return self.drop_schema();
         }
         if self.is_word("view") {
@@ -1772,6 +1813,8 @@ impl<'t> Parser<'t> {
                 (on_duplicate, rollback_on_conflict) = self.sqlite_conflict_resolution()?;
             }
             self.expect_word("into")?;
+        } else if self.sqlserver() {
+            self.take_word("into");
         } else {
             self.expect_word("into")?;
         }
@@ -1967,7 +2010,7 @@ impl<'t> Parser<'t> {
             self.take_word("all");
         }
         let top = if self.sqlserver() && self.is_word("top") {
-            Some(self.sqlserver_top()?)
+            self.sqlserver_top()?
         } else {
             None
         };

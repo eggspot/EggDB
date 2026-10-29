@@ -33,7 +33,11 @@ impl Parser<'_> {
             if self.mysql() && self.take_word("using") {
                 self.label()?;
             }
-            let columns = self.index_column_list(true)?;
+            let columns = if self.sqlserver() {
+                self.sqlserver_key_columns()?
+            } else {
+                self.index_column_list(true)?
+            };
             ConstraintKind::PrimaryKey(columns)
         } else if self.is_word("unique") {
             let spec = self.unique_constraint(None, position)?;
@@ -82,6 +86,7 @@ impl Parser<'_> {
                 return Err(self.not_supported("disabled constraints"));
             } else if self.sqlite() && self.is_word("on") && self.is_word_at(1, "conflict") {
                 self.sqlite_conflict_clause()?;
+            } else if self.skip_not_for_replication() {
             } else {
                 return Ok(());
             }
@@ -89,6 +94,7 @@ impl Parser<'_> {
     }
 
     fn check_body(&mut self) -> SqlResult<ConstraintKind> {
+        self.skip_not_for_replication();
         self.expect(&TokenKind::LeftParen)?;
         let start = self.position();
         let expr = self.expression()?;
@@ -429,16 +435,15 @@ impl Parser<'_> {
         }
         let name = self.table_name()?;
         let mut actions = Vec::new();
-        loop {
-            if actions.len() >= MAX_ALTER_ACTIONS {
-                return Err(SqlError::new(
-                    SqlState::STATEMENT_TOO_COMPLEX,
-                    format!("ALTER TABLE takes at most {MAX_ALTER_ACTIONS} actions"),
-                ));
-            }
-            self.alter_action(&mut actions)?;
-            if self.sqlite() || !self.take(&TokenKind::Comma) {
-                break;
+        if self.sqlserver() {
+            self.sqlserver_alter_actions(&mut actions)?;
+        } else {
+            loop {
+                check_action_count(&actions)?;
+                self.alter_action(&mut actions)?;
+                if self.sqlite() || !self.take(&TokenKind::Comma) {
+                    break;
+                }
             }
         }
         Ok(Statement::AlterTable(AlterTable {
@@ -446,6 +451,134 @@ impl Parser<'_> {
             if_exists,
             actions,
         }))
+    }
+
+    fn sqlserver_alter_actions(&mut self, actions: &mut Vec<AlterAction>) -> SqlResult<()> {
+        let checking = self.take_word("with");
+        if checking && !self.take_word("check") {
+            self.expect_word("nocheck")?;
+        }
+        let position = self.position();
+        if self.take_word("nocheck") {
+            self.expect_word("constraint")?;
+            return Err(super::sqlserver::not_supported("NOCHECK CONSTRAINT").at(position));
+        }
+        if self.take_word("check") {
+            self.expect_word("constraint")?;
+            if self.take_word("all") {
+                actions.push(AlterAction::Accepted);
+                return Ok(());
+            }
+            loop {
+                check_action_count(actions)?;
+                actions.push(AlterAction::EnableConstraint(self.name()?));
+                if !self.take(&TokenKind::Comma) {
+                    return Ok(());
+                }
+            }
+        }
+        if checking || self.is_word("add") {
+            self.expect_word("add")?;
+            loop {
+                check_action_count(actions)?;
+                self.sqlserver_add_item(actions)?;
+                if !self.take(&TokenKind::Comma) {
+                    return Ok(());
+                }
+            }
+        }
+        if self.take_word("drop") {
+            return self.sqlserver_drop_items(actions);
+        }
+        if self.take_word("alter") {
+            self.expect_word("column")?;
+            let column = self.name()?;
+            let sql_type = self.sql_type()?;
+            if self.take_word("collate") {
+                self.label()?;
+            }
+            let not_null = if self.take_word("not") {
+                self.expect_word("null")?;
+                true
+            } else {
+                self.take_word("null");
+                false
+            };
+            actions.push(AlterAction::SetType {
+                column: column.clone(),
+                sql_type,
+            });
+            actions.push(AlterAction::SetNotNull { column, not_null });
+            return Ok(());
+        }
+        if self.is_word("set") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+            self.at += 2;
+            self.expect_word("lock_escalation")?;
+            if !self.take_operator("=") {
+                return Err(self.unexpected());
+            }
+            self.label()?;
+            self.expect(&TokenKind::RightParen)?;
+            actions.push(AlterAction::Accepted);
+            return Ok(());
+        }
+        Err(self.unexpected())
+    }
+
+    fn sqlserver_add_item(&mut self, actions: &mut Vec<AlterAction>) -> SqlResult<()> {
+        let position = self.position();
+        let named_default = self.is_word("constraint") && self.is_word_at(2, "default");
+        if !named_default && !self.is_word("default") {
+            return self.add_action(actions, position);
+        }
+        if named_default {
+            self.at += 2;
+        }
+        self.expect_word("default")?;
+        let start = self.position();
+        let default = self.binary_operand()?;
+        self.expect_word("for")?;
+        let column = self.name()?;
+        actions.push(AlterAction::AddDefault {
+            column,
+            default,
+            position: start,
+        });
+        Ok(())
+    }
+
+    fn sqlserver_drop_items(&mut self, actions: &mut Vec<AlterAction>) -> SqlResult<()> {
+        let mut columns = false;
+        loop {
+            check_action_count(actions)?;
+            if self.take_word("column") {
+                columns = true;
+            } else if self.take_word("constraint") {
+                columns = false;
+            }
+            let if_exists = self.is_word("if") && self.is_word_at(1, "exists");
+            if if_exists {
+                self.at += 2;
+            }
+            let name = self.name()?;
+            actions.push(if columns {
+                AlterAction::DropColumn {
+                    name,
+                    if_exists,
+                    cascade: false,
+                }
+            } else {
+                AlterAction::DropConstraint {
+                    name,
+                    if_exists,
+                    cascade: false,
+                }
+            });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.skip_index_options()
     }
 
     fn alter_action(&mut self, actions: &mut Vec<AlterAction>) -> SqlResult<()> {
@@ -847,6 +980,16 @@ impl Parser<'_> {
         }
         Ok(AlterAction::SetType { column, sql_type })
     }
+}
+
+fn check_action_count(actions: &[AlterAction]) -> SqlResult<()> {
+    if actions.len() >= MAX_ALTER_ACTIONS {
+        return Err(SqlError::new(
+            SqlState::STATEMENT_TOO_COMPLEX,
+            format!("ALTER TABLE takes at most {MAX_ALTER_ACTIONS} actions"),
+        ));
+    }
+    Ok(())
 }
 
 fn merged_options(earlier: SequenceOptions, later: SequenceOptions) -> SequenceOptions {
