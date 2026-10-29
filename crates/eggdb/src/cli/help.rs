@@ -20,7 +20,7 @@ Commands:
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
-  restore <file> [dump]         restore a PostgreSQL dump or a SQL Server script into the file
+  restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help
@@ -54,7 +54,7 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Ui => "eggdb ui <file> [--read-only] [--mono] [--ascii] [--cache <bytes>]",
         CommandName::Export => "eggdb export <file> [<out> | -]",
         CommandName::Import => {
-            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>]"
+            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle]"
         }
         CommandName::Sql => {
             "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--create]"
@@ -66,7 +66,7 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
             "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
         }
         CommandName::Restore => {
-            "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql|sqlserver]"
+            "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql|sqlserver|oracle] [--define <name>=<value>]..."
         }
         CommandName::Mcp => "eggdb mcp <file> [--allow-write] [--time-limit <seconds>]",
         CommandName::Audit => "eggdb audit <file> [-n <count>] [--format text|json]",
@@ -245,6 +245,9 @@ cache grows with the file, since the whole load must fit in it; --cache sets it.
       --header                   the first line names the columns and is skipped
       --delimiter <c>            the field separator, a comma by default
       --null <text>              the text that stands for NULL, unquoted; empty by default
+      --dialect <name>           postgresql (default) or oracle: the table name as Oracle
+                                 writes it, Oracle's NLS date formats, and empty fields as NULL
+                                 (SQLcl UNLOAD and SET MARKUP CSV ON output)
 
 Examples:
   eggdb import --create copy.db backup.jsonl
@@ -252,6 +255,7 @@ Examples:
   eggdb import app.db fixes.jsonl --on-conflict overwrite
   eggdb import app.db backup.jsonl --dry-run
   eggdb import app.db --csv people.csv --table people --header
+  eggdb import --dialect oracle hr.db --csv EMPLOYEES_DATA_TABLE.csv --table hr.employees --header
 ";
 
 const SQL: &str = "\
@@ -366,21 +370,30 @@ convert them first with pg_restore -f dump.sql <archive>. With --dialect sqlserv
 a SQL Server script instead (SSMS Generate Scripts with Schema and data, or sqlpackage
 /Action:Script; UTF-16 or UTF-8), batch by batch, and lists under known differences what EggDB
 keeps differently from SQL Server (IDENTITY seeds, datetimeoffset offsets, computed columns,
-index filters, disabled constraints). The report counts what was created, lists everything
-skipped, ignored and failed, and is one JSON object in a pipe.
+index filters, disabled constraints). With --dialect oracle it restores a SQL*Plus-style script
+(SQL Developer or SQLcl exports, impdp ... SQLFILE= output, installers such as Oracle's sample
+schemas): statements end at ; or a / line, @, @@ and START include other scripts, DEFINE and
+&name substitute, users become schemas, PL/SQL other than blocks of INSERT, UPDATE, DELETE and
+COMMIT is listed and skipped, and other SQL*Plus commands are listed, never run. Data Pump .dmp
+and RMAN files are not read: write their DDL with impdp ... SQLFILE= and their rows as CSV with
+SQLcl's UNLOAD (eggdb import --dialect oracle --csv). The report counts what was created, lists
+everything skipped, ignored and failed, and is one JSON object in a pipe.
 
       --create            create the file if it is missing (built as <file>.restoring, renamed
                           when the restore succeeded, so a failed restore leaves no file)
       --keep-going        report an error and go on; exit 3 at the end if there was one
       --report <path>     write the report to this file instead of stdout
-      --dialect <name>    the dump's dialect: postgresql (default) or sqlserver (also mssql,
-                          tsql; oracle comes later)
+      --dialect <name>    the dump's dialect: postgresql (default), sqlserver (also mssql,
+                          tsql) or oracle
+      --define <n>=<v>    with --dialect oracle, a substitution variable the script starts
+                          with, as DEFINE n = v; repeat it for more
 
 Examples:
   eggdb restore --create app.db app.sql
   pg_dump app | eggdb restore --create app.db
   pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
   eggdb restore --dialect sqlserver --create shop.db shop.sql
+  eggdb restore --dialect oracle --create hr.db hr_install.sql
   eggdb restore app.db dump.sql --keep-going --report restore.json --format json
 ";
 

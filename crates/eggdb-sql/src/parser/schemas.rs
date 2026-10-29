@@ -205,6 +205,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("with") {
             return Err(self.not_supported("CREATE VIEW ... WITH (options)"));
         }
+        if self.oracle() {
+            self.oracle_view_options()?;
+        }
         if self.sqlserver() && self.take_word("with") {
             self.sqlserver_view_attributes()?;
         }

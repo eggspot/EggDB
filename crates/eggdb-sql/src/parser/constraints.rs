@@ -41,6 +41,9 @@ impl Parser<'_> {
             ConstraintKind::PrimaryKey(columns)
         } else if self.is_word("unique") {
             let spec = self.unique_constraint(None, position)?;
+            if self.oracle() {
+                self.constraint_tail()?;
+            }
             return Ok(ConstraintSpec {
                 name: name.or(spec.name),
                 kind: ConstraintKind::Unique(spec.columns),
@@ -59,7 +62,7 @@ impl Parser<'_> {
         })
     }
 
-    fn constraint_tail(&mut self) -> SqlResult<()> {
+    pub(super) fn constraint_tail(&mut self) -> SqlResult<()> {
         loop {
             if self.is_word("not") && self.is_word_at(1, "deferrable") {
                 self.at += 2;
@@ -76,14 +79,17 @@ impl Parser<'_> {
             } else if self.mysql() && self.is_word("not") && self.is_word_at(1, "enforced") {
                 return Err(self.not_supported("NOT ENFORCED constraints"));
             } else if self.oracle()
-                && (self.take_word("enable")
-                    || self.take_word("validate")
-                    || self.take_word("novalidate")
-                    || self.take_word("rely")
-                    || self.take_word("norely"))
+                && (self.is_word("enable")
+                    || self.is_word("disable")
+                    || self.is_word("validate")
+                    || self.is_word("novalidate")
+                    || self.is_word("rely")
+                    || self.is_word("norely")
+                    || (self.is_word("using") && self.is_word_at(1, "index")))
             {
-            } else if self.oracle() && self.is_word("disable") {
-                return Err(self.not_supported("disabled constraints"));
+                if !self.oracle_constraint_states()? {
+                    return Err(self.not_supported("disabled constraints"));
+                }
             } else if self.sqlite() && self.is_word("on") && self.is_word_at(1, "conflict") {
                 self.sqlite_conflict_clause()?;
             } else if self.skip_not_for_replication() {
@@ -297,9 +303,15 @@ impl Parser<'_> {
                     || self.take_word("keep")
                     || self.take_word("nokeep")
                     || self.take_word("noscale")
+                    || self.take_word("scale")
+                    || self.take_word("extend")
+                    || self.take_word("noextend")
+                    || self.take_word("noshard")
                     || self.take_word("global")
                     || self.take_word("session"))
             {
+            } else if self.oracle() && self.is_word("shard") {
+                return Err(self.not_supported("sharded sequences (SHARD)"));
             } else if !self.oracle() && self.take_word("owned") {
                 self.expect_word("by")?;
                 if self.take_word("none") {
@@ -662,6 +674,7 @@ impl Parser<'_> {
         if !self.is_word("default")
             && !self.is_word("not")
             && !self.is_word("null")
+            && !self.is_word("constraint")
             && matches!(self.peek_kind(), TokenKind::Word(_))
         {
             let sql_type = self.sql_type()?;
@@ -681,13 +694,18 @@ impl Parser<'_> {
                     column: column.clone(),
                     default: Some((expr, source)),
                 });
+            } else if self.take_word("constraint") {
+                self.name()?;
+                continue;
             } else if self.take_word("not") {
                 self.expect_word("null")?;
+                let enabled = self.oracle_constraint_states()?;
                 actions.push(AlterAction::SetNotNull {
                     column: column.clone(),
-                    not_null: true,
+                    not_null: enabled,
                 });
             } else if self.take_word("null") {
+                self.oracle_constraint_states()?;
                 actions.push(AlterAction::SetNotNull {
                     column: column.clone(),
                     not_null: false,
@@ -763,11 +781,28 @@ impl Parser<'_> {
         }
         if self.oracle() && self.take(&TokenKind::LeftParen) {
             loop {
-                let column = self.column_definition()?;
-                actions.push(AlterAction::AddColumn {
-                    column,
-                    if_not_exists: false,
-                });
+                check_action_count(actions)?;
+                let element = self.position();
+                if self.is_word("constraint")
+                    || self.is_word("primary")
+                    || self.is_word("unique")
+                    || self.is_word("foreign")
+                    || self.is_word("check")
+                {
+                    let name = if self.take_word("constraint") {
+                        Some(self.name()?)
+                    } else {
+                        None
+                    };
+                    let spec = self.table_constraint_body(name, element)?;
+                    actions.push(AlterAction::AddConstraint(spec));
+                } else {
+                    let column = self.column_definition()?;
+                    actions.push(AlterAction::AddColumn {
+                        column,
+                        if_not_exists: false,
+                    });
+                }
                 if !self.take(&TokenKind::Comma) {
                     break;
                 }

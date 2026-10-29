@@ -1234,3 +1234,87 @@ fn quoted_in(name: &str, dialect: Dialect) -> String {
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConstraintClauseKind {
+    Key,
+    ForeignKey,
+    Check,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConstraintClause {
+    pub(crate) kind: ConstraintClauseKind,
+    pub(crate) table: String,
+    pub(crate) clause: Option<String>,
+}
+
+fn oracle_quoted(name: &str) -> String {
+    format!("\"{}\"", swap_uniform_case(name).replace('"', "\"\""))
+}
+
+pub(crate) fn oracle_qualified(internal: &str) -> String {
+    format!(
+        "{}.{}",
+        oracle_quoted(crate::schemas::schema_of(internal)),
+        oracle_quoted(crate::schemas::base_name(internal))
+    )
+}
+
+pub(crate) fn constraint_clause(table: &TableDefinition, name: &str) -> Option<ConstraintClause> {
+    let shown_table = oracle_qualified(&table.name);
+    if let Some(key) = table.foreign_keys.iter().find(|key| key.name == name) {
+        let columns: Vec<String> = key
+            .columns
+            .iter()
+            .filter_map(|&index| table.columns.get(index))
+            .map(|column| oracle_quoted(&column.name))
+            .collect();
+        let parent_columns: Vec<String> = key
+            .parent_columns
+            .iter()
+            .map(|column| oracle_quoted(column))
+            .collect();
+        let on_delete = match key.on_delete {
+            ReferentialAction::Cascade => " ON DELETE CASCADE",
+            ReferentialAction::SetNull => " ON DELETE SET NULL",
+            _ => "",
+        };
+        let clause = format!(
+            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){on_delete}",
+            oracle_quoted(name),
+            columns.join(", "),
+            oracle_qualified(&key.parent),
+            parent_columns.join(", ")
+        );
+        return Some(ConstraintClause {
+            kind: ConstraintClauseKind::ForeignKey,
+            table: shown_table,
+            clause: Some(clause),
+        });
+    }
+    if let Some(check) = table.checks.iter().find(|check| check.name == name) {
+        let clause = (check.dialect == Dialect::Oracle).then(|| {
+            format!(
+                "CONSTRAINT {} CHECK ({})",
+                oracle_quoted(name),
+                check.expression
+            )
+        });
+        return Some(ConstraintClause {
+            kind: ConstraintClauseKind::Check,
+            table: shown_table,
+            clause,
+        });
+    }
+    let primary = !table.primary_key.is_empty() && table.primary_key_constraint_name() == name;
+    let unique = table
+        .indexes
+        .iter()
+        .any(|index| index.unique && index.name == name);
+    (primary || unique).then(|| ConstraintClause {
+        kind: ConstraintClauseKind::Key,
+        table: shown_table,
+        clause: None,
+    })
+}

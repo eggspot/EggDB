@@ -23,6 +23,7 @@ pub(crate) struct ScriptStatement {
     pub(crate) script: u32,
     pub(crate) copy_from_stdin: bool,
     pub(crate) refused: Option<SqlError>,
+    pub(crate) unresolved: Option<SqlError>,
     pub(crate) differences: Vec<DifferenceNote>,
 }
 
@@ -35,6 +36,7 @@ impl ScriptStatement {
             script: 0,
             copy_from_stdin: false,
             refused: None,
+            unresolved: None,
             differences: Vec::new(),
         }
     }
@@ -53,7 +55,16 @@ pub(crate) struct ClientCommand {
 pub(crate) enum ScriptItem {
     Statement(ScriptStatement),
     ClientCommand(ClientCommand),
+    Failed(ScriptFailure),
     End,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScriptFailure {
+    pub(crate) line: u64,
+    pub(crate) script: u32,
+    pub(crate) shown: String,
+    pub(crate) error: SqlError,
 }
 
 pub(crate) trait ScriptSource {
@@ -66,4 +77,12 @@ pub(crate) trait ScriptSource {
     fn copy_data(&mut self, out: &mut Vec<u8>) -> SqlResult<bool>;
 
     fn copy_lines(&self) -> u64;
+
+    fn script_index(&self) -> u32 {
+        0
+    }
+
+    fn script_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

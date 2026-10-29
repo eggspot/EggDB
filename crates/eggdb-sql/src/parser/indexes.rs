@@ -53,9 +53,15 @@ impl Parser<'_> {
         let columns = self.index_column_list(unique)?;
         if self.sqlserver() {
             self.sqlserver_index_tail(unique, &columns)?;
+        } else if self.oracle() {
+            self.skip_physical_properties()?;
         } else {
             self.index_tail()?;
         }
+        let name = match name {
+            Some(name) if self.oracle() => Some(self.oracle_index_name(name, &table)?),
+            name => name,
+        };
         Ok(Statement::CreateIndex(CreateIndex {
             index: IndexSpec {
                 name,
@@ -66,6 +72,27 @@ impl Parser<'_> {
             table,
             if_not_exists,
         }))
+    }
+
+    fn oracle_index_name(&self, name: Name, table: &Name) -> SqlResult<Name> {
+        if !crate::schemas::is_qualified(&name.text) {
+            return Ok(name);
+        }
+        let schema = crate::schemas::schema_of(&name.text);
+        let table_schema = if crate::schemas::is_qualified(&table.text) {
+            Some(crate::schemas::schema_of(&table.text))
+        } else {
+            None
+        };
+        if table_schema.is_some_and(|table_schema| table_schema != schema) {
+            return Err(self
+                .not_supported("an index in another schema than its table's")
+                .at(name.position));
+        }
+        Ok(Name {
+            text: crate::schemas::base_name(&name.text).to_owned(),
+            position: name.position,
+        })
     }
 
     fn index_method(&mut self) -> SqlResult<()> {
@@ -87,24 +114,6 @@ impl Parser<'_> {
                 self.at += 1;
                 self.take_operator("=");
                 self.label()?;
-            } else if self.oracle()
-                && [
-                    "online",
-                    "logging",
-                    "nologging",
-                    "noparallel",
-                    "compress",
-                    "nocompress",
-                ]
-                .iter()
-                .any(|word| self.is_word(word))
-            {
-                self.at += 1;
-            } else if self.oracle() && self.take_word("tablespace") {
-                self.name()?;
-            } else if self.oracle() && self.is_word("compute") {
-                self.at += 1;
-                self.expect_word("statistics")?;
             } else if self.is_word("where") && !self.mysql() && !self.oracle() {
                 return Err(self.not_supported("partial indexes (CREATE INDEX ... WHERE)"));
             } else if !self.mysql()

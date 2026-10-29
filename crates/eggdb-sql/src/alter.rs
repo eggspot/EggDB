@@ -1500,6 +1500,12 @@ fn add_constraint(
     spec: &ConstraintSpec,
     dialect: Dialect,
 ) -> SqlResult<()> {
+    if dialect == Dialect::Oracle
+        && let Some(given) = &spec.name
+        && take_over_index(writer, tables, name, spec, given, dialect)?
+    {
+        return Ok(());
+    }
     let mut table = current(writer, tables, name)?;
     if let Some(given) = &spec.name
         && table.constraint_name_taken(&given.text)
@@ -1607,6 +1613,50 @@ fn add_constraint(
             rebuild(writer, &table, new, &mut map, Some(index_name))?;
             Ok(())
         }
+    }
+}
+
+fn take_over_index(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    spec: &ConstraintSpec,
+    given: &Name,
+    dialect: Dialect,
+) -> SqlResult<bool> {
+    let table = current(writer, tables, name)?;
+    let Some(index) = table.index_named(&given.text).cloned() else {
+        return Ok(false);
+    };
+    let (ConstraintKind::PrimaryKey(columns) | ConstraintKind::Unique(columns)) = &spec.kind else {
+        return Ok(false);
+    };
+    let mut wanted = Vec::with_capacity(columns.len());
+    for column in columns {
+        wanted.push(column_index(&table, column, dialect)?);
+    }
+    let same_columns = index.columns == wanted;
+    match &spec.kind {
+        ConstraintKind::Unique(_) if !index.unique => Err(SqlError::new(
+            SqlState::DUPLICATE_TABLE,
+            "name is already used by an existing object",
+        )
+        .with_oracle_code(955)
+        .at(given.position)),
+        ConstraintKind::Unique(_) => Ok(same_columns),
+        ConstraintKind::PrimaryKey(_) if same_columns => {
+            let drop = crate::ast::DropIndex {
+                names: vec![given.clone()],
+                table: Some(Name {
+                    text: table.name.clone(),
+                    position: given.position,
+                }),
+                if_exists: false,
+            };
+            indexes::drop_index(writer, tables, &drop, dialect)?;
+            Ok(false)
+        }
+        _ => Ok(false),
     }
 }
 

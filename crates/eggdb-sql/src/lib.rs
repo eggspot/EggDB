@@ -129,8 +129,9 @@ pub use parser::{
 pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
 pub use random::{RandomSource, set_random_source};
 pub use restore::{
-    Consequence, IgnoredMetaCommand, IgnoredStatements, KnownDifference, MAX_LISTED, RestoreError,
-    RestoreOptions, RestoreProgress, RestoreReport, SkippedObject, TableRows, restore_dump,
+    Consequence, IgnoredMetaCommand, IgnoredStatements, IncludeBase, IncludeOpener,
+    IncludeRequest, KnownDifference, MAX_LISTED, RestoreError, RestoreOptions, RestoreProgress,
+    RestoreReport, SkippedObject, TableRows, restore_dump,
 };
 pub use schema::{ColumnSchema, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted};
 pub use session::{

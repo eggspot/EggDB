@@ -433,7 +433,7 @@ impl<'t> Parser<'t> {
                 ));
             }
             "start" | "end" | "abort" | "show" | "reset" | "values" | "table" | "listen"
-            | "notify" | "unlisten" | "vacuum" | "discard" | "copy" => {
+            | "notify" | "unlisten" | "vacuum" | "discard" => {
                 return Err(self.unexpected());
             }
             "insert" if self.is_word_at(1, "all") || self.is_word_at(1, "first") => {
@@ -963,5 +963,298 @@ impl<'t> Parser<'t> {
             _ => oracle_function(internal, arguments, position),
         };
         Ok(Some(expr))
+    }
+}
+
+pub(crate) fn oracle_table_name(text: &str, settings: &Settings) -> SqlResult<Name> {
+    let tokens = crate::lexer::tokenize_in(text, crate::dialect::Dialect::Oracle)?;
+    let mut parser = Parser::new(text, &tokens)
+        .with_context(super::Parameters::Absent, settings)
+        .in_dialect(crate::dialect::Dialect::Oracle);
+    let name = parser.table_name()?;
+    if !matches!(parser.peek_kind(), TokenKind::End | TokenKind::Semicolon) {
+        return Err(parser.unexpected());
+    }
+    Ok(name)
+}
+
+const BINARY_COLLATIONS: [&str; 3] = ["using_nls_comp", "binary", "using_nls_sort"];
+
+impl Parser<'_> {
+    pub(super) fn oracle_collation(&mut self) -> SqlResult<()> {
+        let position = self.position();
+        let name = self.label()?.to_ascii_lowercase();
+        if BINARY_COLLATIONS.contains(&name.as_str()) {
+            return Ok(());
+        }
+        Err(self
+            .not_supported(&format!("the collation {}", name.to_ascii_uppercase()))
+            .at(position))
+    }
+
+    pub(super) fn oracle_view_options(&mut self) -> SqlResult<()> {
+        loop {
+            if self.is_word("default") && self.is_word_at(1, "collation") {
+                self.at += 2;
+                self.oracle_collation()?;
+            } else if self.take_word("bequeath") {
+                if !self.take_word("current_user") {
+                    self.expect_word("definer")?;
+                }
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    fn skip_balanced(&mut self) -> SqlResult<()> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.peek_kind() {
+                TokenKind::End => return Err(self.unexpected()),
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => depth -= 1,
+                _ => {}
+            }
+            self.at += 1;
+        }
+        Ok(())
+    }
+
+    fn take_integer(&mut self) -> bool {
+        if matches!(self.peek_kind(), TokenKind::Integer(_)) {
+            self.at += 1;
+            return true;
+        }
+        false
+    }
+
+    fn skip_compression(&mut self) {
+        if self.take_integer() {
+            return;
+        }
+        let _ = self.take_word("basic") || self.take_word("advanced");
+        if self.take_word("for") {
+            while ["oltp", "query", "archive", "all", "direct_load", "operations", "low", "high"]
+                .iter()
+                .any(|word| self.is_word(word))
+            {
+                self.at += 1;
+            }
+        }
+    }
+
+    fn skip_partitioning(&mut self) -> SqlResult<()> {
+        loop {
+            match self.peek_kind() {
+                TokenKind::LeftParen => self.skip_balanced()?,
+                TokenKind::Integer(_) => self.at += 1,
+                TokenKind::Word(word)
+                    if [
+                        "partition",
+                        "subpartition",
+                        "by",
+                        "range",
+                        "list",
+                        "hash",
+                        "reference",
+                        "system",
+                        "interval",
+                        "template",
+                        "partitions",
+                        "subpartitions",
+                        "store",
+                        "in",
+                        "automatic",
+                        "consistent",
+                        "columns",
+                    ]
+                    .contains(&word.as_ref()) =>
+                {
+                    self.at += 1;
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    pub(super) fn skip_physical_properties(&mut self) -> SqlResult<()> {
+        loop {
+            if self.is_word("segment") && self.is_word_at(1, "creation") {
+                self.at += 2;
+                if !self.take_word("immediate") {
+                    self.expect_word("deferred")?;
+                }
+            } else if ["pctfree", "pctused", "initrans", "maxtrans", "pctthreshold"]
+                .iter()
+                .any(|word| self.is_word(word))
+            {
+                self.at += 1;
+                if !self.take_integer() {
+                    return Err(self.unexpected());
+                }
+            } else if (self.is_word("storage") || self.is_word("result_cache"))
+                && self.peek_kind_at(1) == &TokenKind::LeftParen
+            {
+                self.at += 1;
+                self.skip_balanced()?;
+            } else if self.take_word("tablespace") {
+                self.take_word("set");
+                self.name()?;
+            } else if [
+                "logging",
+                "nologging",
+                "filesystem_like_logging",
+                "nocompress",
+                "cache",
+                "nocache",
+                "monitoring",
+                "nomonitoring",
+                "rowdependencies",
+                "norowdependencies",
+                "noparallel",
+                "reverse",
+                "visible",
+                "invisible",
+                "online",
+                "overflow",
+                "noinmemory",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
+            {
+                self.at += 1;
+            } else if self.take_word("compress") {
+                self.skip_compression();
+            } else if (self.is_word("row") || self.is_word("column"))
+                && self.is_word_at(1, "store")
+                && self.is_word_at(2, "compress")
+            {
+                self.at += 3;
+                self.skip_compression();
+            } else if self.take_word("parallel") {
+                self.take_integer();
+            } else if (self.is_word("enable") || self.is_word("disable"))
+                && self.is_word_at(1, "row")
+                && self.is_word_at(2, "movement")
+            {
+                self.at += 3;
+            } else if self.is_word("no") && self.is_word_at(1, "inmemory") {
+                self.at += 2;
+            } else if self.take_word("inmemory") {
+                if self.peek_kind() == &TokenKind::LeftParen {
+                    self.skip_balanced()?;
+                }
+            } else if self.is_word("organization") {
+                if self.is_word_at(1, "heap") || self.is_word_at(1, "index") {
+                    self.at += 2;
+                } else {
+                    return Err(self.not_supported("ORGANIZATION EXTERNAL tables"));
+                }
+            } else if self.take_word("including") {
+                self.name()?;
+            } else if self.is_word("lob") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+                self.at += 1;
+                self.skip_balanced()?;
+                self.expect_word("store")?;
+                self.expect_word("as")?;
+                let _ = self.take_word("securefile") || self.take_word("basicfile");
+                if !matches!(self.peek_kind(), TokenKind::LeftParen) && !self.at_physical_end() {
+                    self.name()?;
+                }
+                if self.peek_kind() == &TokenKind::LeftParen {
+                    self.skip_balanced()?;
+                }
+            } else if self.is_word("compute") && self.is_word_at(1, "statistics") {
+                self.at += 2;
+            } else if self.is_word("default") && self.is_word_at(1, "collation") {
+                self.at += 2;
+                self.oracle_collation()?;
+            } else if self.is_word("partition") && self.is_word_at(1, "by") {
+                self.skip_partitioning()?;
+            } else if self.is_word("cluster") {
+                return Err(self.not_supported("tables in a CLUSTER"));
+            } else if self.is_word("nested") || self.is_word("xmltype") {
+                return Err(self.not_supported("NESTED TABLE and XMLTYPE storage clauses"));
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    fn at_physical_end(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::End | TokenKind::Semicolon)
+            || [
+                "tablespace",
+                "storage",
+                "logging",
+                "nologging",
+                "enable",
+                "disable",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
+    }
+
+    pub(super) fn oracle_using_index(&mut self) -> SqlResult<()> {
+        if self.peek_kind() == &TokenKind::LeftParen {
+            return self.skip_balanced();
+        }
+        if matches!(
+            self.peek_kind(),
+            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+        ) && !self.at_physical_end()
+            && ![
+                "pctfree",
+                "initrans",
+                "maxtrans",
+                "compute",
+                "compress",
+                "nocompress",
+                "pctused",
+                "reverse",
+                "local",
+                "global",
+                "online",
+                "visible",
+                "invisible",
+                "noparallel",
+                "parallel",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
+        {
+            self.table_name()?;
+        }
+        while self.take_word("local") || self.take_word("global") {
+            if self.is_word("partition") && self.is_word_at(1, "by") {
+                self.skip_partitioning()?;
+            } else if self.peek_kind() == &TokenKind::LeftParen {
+                self.skip_balanced()?;
+            }
+        }
+        self.skip_physical_properties()
+    }
+
+    pub(super) fn oracle_constraint_states(&mut self) -> SqlResult<bool> {
+        let mut enabled = true;
+        loop {
+            if self.take_word("enable") {
+                enabled = true;
+            } else if self.take_word("disable") {
+                enabled = false;
+            } else if self.take_word("validate")
+                || self.take_word("novalidate")
+                || self.take_word("rely")
+                || self.take_word("norely")
+            {
+            } else if self.is_word("using") && self.is_word_at(1, "index") {
+                self.at += 2;
+                self.oracle_using_index()?;
+            } else {
+                return Ok(enabled);
+            }
+        }
     }
 }

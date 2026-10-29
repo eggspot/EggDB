@@ -225,6 +225,7 @@ struct Loader<'t> {
     force_null: Vec<bool>,
     defaults: ColumnDefaults,
     fields: Fields,
+    empty_is_null: bool,
 }
 
 impl Loader<'_> {
@@ -315,6 +316,11 @@ impl Loader<'_> {
                     match field.kind {
                         format::FieldKind::Null => Ok(Value::Null),
                         format::FieldKind::Default => self.defaults.value(index, column),
+                        format::FieldKind::Value
+                            if self.empty_is_null && self.fields.value(field).is_empty() =>
+                        {
+                            Ok(Value::Null)
+                        }
                         format::FieldKind::Value => {
                             let bytes = self.fields.value(field);
                             format::utf8_text(bytes)
@@ -373,6 +379,7 @@ pub(crate) fn copy_from_client(
         defaults: ColumnDefaults::of(&table)?,
         fields: Fields::default(),
         targets,
+        empty_is_null: crate::constraints::current_dialect() == crate::dialect::Dialect::Oracle,
     };
     let start = CopyStart {
         format: copy.options.format,

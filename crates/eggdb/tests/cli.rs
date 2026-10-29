@@ -125,7 +125,7 @@ Commands:
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
-  restore <file> [dump]         restore a PostgreSQL dump or a SQL Server script into the file
+  restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help

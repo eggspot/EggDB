@@ -1,11 +1,14 @@
 mod classify;
+mod classify_oracle;
 mod classify_sqlserver;
 mod column_rewrite;
 mod reader;
 mod script;
 mod script_reader;
 mod script_text;
+mod sqlplus_reader;
 mod statement_spans;
+mod table_rewrite_oracle;
 mod words;
 
 use crate::copy::{CopyChannel, CopyStart};
@@ -13,11 +16,12 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::{QueryResult, Session};
 use crate::store::KeyValueStore;
-use classify::{Action, Effect, Ignored, Skip};
+use classify::{Action, Effect, Ignored, Skip, ToggledConstraint};
 use reader::DumpReader;
 use script::{ClientCommand, DifferenceNote, ScriptItem, ScriptSource, ScriptStatement};
+use sqlplus_reader::SqlPlusReader;
 use statement_spans::SqlServerScript;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
 use words::{Token, WordRules, Words};
 
@@ -29,10 +33,57 @@ const SHOWN_STATEMENT_CHARS: usize = 48;
 const PROGRESS_EVERY_LINES: u64 = 4096;
 
 /// How [`restore_dump`] runs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RestoreOptions {
+#[derive(Clone, Copy, Default)]
+pub struct RestoreOptions<'a> {
     /// Record an error in a supported statement and go on, instead of stopping at it.
     pub keep_going: bool,
+    /// Opens the scripts an Oracle script includes with `@`, `@@` or `START`; without it every
+    /// include is an error.
+    pub includes: Option<&'a dyn IncludeOpener>,
+    /// Substitution variables an Oracle script starts with, as `DEFINE name = value` would set
+    /// them.
+    pub defines: &'a [(String, String)],
+}
+
+impl std::fmt::Debug for RestoreOptions<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RestoreOptions")
+            .field("keep_going", &self.keep_going)
+            .field("includes", &self.includes.is_some())
+            .field("defines", &self.defines.len())
+            .finish()
+    }
+}
+
+/// Where an included script's name is resolved from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncludeBase {
+    /// The folder of the script that includes it (`@@`), an index into
+    /// [`RestoreReport::scripts`].
+    IncludingScript(u32),
+    /// The working directory (`@` and `START`).
+    WorkingDirectory,
+}
+
+/// A script an Oracle script asks to include.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncludeRequest<'n> {
+    /// The name as the script writes it, with `.sql` added when it has no extension.
+    pub name: &'n str,
+    /// What the name is relative to.
+    pub relative_to: IncludeBase,
+    /// The index the script will have in [`RestoreReport::scripts`] once opened.
+    pub script: u32,
+    /// The line of the including script.
+    pub line: u64,
+}
+
+/// Opens the scripts that an Oracle script includes, for [`restore_dump`]: the library itself
+/// never opens a file.
+pub trait IncludeOpener {
+    /// Opens the script `request` names, or says why it cannot.
+    fn open<'s>(&'s self, request: &IncludeRequest<'_>) -> SqlResult<Box<dyn BufRead + 's>>;
 }
 
 /// Where a restore has got to, handed to the progress callback of [`restore_dump`].
@@ -239,8 +290,8 @@ impl RestoreReport {
 }
 
 /// Restores the dump read from `input` through `session`, statement by statement, each in its
-/// own transaction as `psql -f` or `sqlcmd -i` runs it (a `COPY` and its data in one), and
-/// reports what it did. The session's dialect says what the dump is:
+/// own transaction as `psql -f`, `sqlcmd -i` or SQL*Plus runs it (a `COPY` and its data in one),
+/// and reports what it did. The session's dialect says what the dump is:
 ///
 /// - **PostgreSQL**: PostgreSQL's plain SQL form, `pg_dump`'s output or `pg_restore -f`'s.
 ///   psql's meta-commands are handled as psql would for what `pg_dump` writes: `\connect` is
@@ -251,6 +302,14 @@ impl RestoreReport {
 ///   by `GO`. sqlcmd's `:setvar` defines the `$(name)` variables it replaces once the script has
 ///   used a sqlcmd command; `:r`, `!!` and the other sqlcmd commands are listed and never run.
 ///   What EggDB keeps differently from SQL Server is listed as a known difference.
+/// - **Oracle**: a SQL*Plus-style script, as SQL Developer, SQLcl, `impdp SQLFILE=` or an
+///   installer such as Oracle's sample schemas write it. Statements end at `;` or a `/` line,
+///   PL/SQL units at a `/` line; SQL*Plus commands are handled as SQL*Plus would for a restore
+///   (`DEFINE` and `&name` substitution, `SET DEFINE`, `CONNECT` choosing the schema, `@`, `@@`
+///   and `START` through [`RestoreOptions::includes`]) and never run otherwise. Anonymous blocks
+///   of `INSERT`, `UPDATE`, `DELETE` and `COMMIT` run, each as one transaction; other PL/SQL is
+///   listed and skipped. Users become schemas, and a constraint disabled and enabled again is
+///   dropped and re-added.
 ///
 /// The dump is read one line at a time (lines and statements up to 1 GiB), never whole.
 /// Objects EggDB cannot create yet (functions, procedures, triggers, types, partitioned tables,
@@ -259,11 +318,11 @@ impl RestoreReport {
 /// a consequence, and a schema statement that EggDB answers with `0A000` is skipped as not
 /// supported yet. Any other error stops the restore, unless [`RestoreOptions::keep_going`], with
 /// the statements before it committed; `progress` is called as the restore moves on. The session
-/// must use the PostgreSQL or the SQL Server dialect and be outside a transaction block.
+/// must use the PostgreSQL, SQL Server or Oracle dialect and be outside a transaction block.
 pub fn restore_dump<S: KeyValueStore>(
     session: &mut Session<'_, S>,
     input: &mut dyn BufRead,
-    options: RestoreOptions,
+    options: RestoreOptions<'_>,
     progress: &mut dyn FnMut(&RestoreProgress),
 ) -> RestoreReport {
     match session.dialect() {
@@ -289,18 +348,38 @@ pub fn restore_dump<S: KeyValueStore>(
             )
             .run()
         }
-        _ => RestoreReport {
-            error: Some(RestoreError {
-                line: 0,
-                script: 0,
-                statement: String::new(),
-                error: SqlError::not_supported(
-                    "restoring a dump in a dialect other than PostgreSQL and SQL Server",
-                ),
-                statements_before: 0,
-            }),
-            ..RestoreReport::default()
-        },
+        Dialect::Oracle => {
+            let mut reader = SqlPlusReader::new(input, options.includes);
+            for (name, value) in options.defines {
+                if let Err(error) = reader.define(name, value) {
+                    return failed_before_start(error);
+                }
+            }
+            Restore::new(
+                session,
+                &mut reader,
+                RestoreRules::oracle(),
+                options,
+                progress,
+            )
+            .run()
+        }
+        _ => failed_before_start(SqlError::not_supported(
+            "restoring a dump in a dialect other than PostgreSQL, SQL Server and Oracle",
+        )),
+    }
+}
+
+fn failed_before_start(error: SqlError) -> RestoreReport {
+    RestoreReport {
+        error: Some(RestoreError {
+            line: 0,
+            script: 0,
+            statement: String::new(),
+            error,
+            statements_before: 0,
+        }),
+        ..RestoreReport::default()
     }
 }
 
@@ -318,6 +397,7 @@ struct RestoreRules {
     psql_meta_commands: bool,
     index_names_per_table: bool,
     default_schema: &'static str,
+    oracle: bool,
 }
 
 impl RestoreRules {
@@ -333,6 +413,7 @@ impl RestoreRules {
             psql_meta_commands: true,
             index_names_per_table: false,
             default_schema: "public",
+            oracle: false,
         }
     }
 
@@ -348,6 +429,23 @@ impl RestoreRules {
             psql_meta_commands: false,
             index_names_per_table: true,
             default_schema: "public",
+            oracle: false,
+        }
+    }
+
+    fn oracle() -> Self {
+        Self {
+            classify: classify_oracle::classify_oracle,
+            table_key: classify_oracle::oracle_table_key,
+            name_key: classify_oracle::oracle_name_key,
+            words: words::WordRules::ORACLE,
+            client_command_reason: classify_oracle::sqlplus_command_reason,
+            differences: classify_oracle::oracle_differences,
+            not_supported: classify_oracle::refused_as_not_supported,
+            psql_meta_commands: false,
+            index_names_per_table: false,
+            default_schema: "public",
+            oracle: true,
         }
     }
 }
@@ -368,12 +466,18 @@ struct SkippedTable {
     listed: Option<usize>,
 }
 
+struct DisabledConstraint {
+    table: String,
+    statement: String,
+    default_schema: String,
+}
+
 struct Restore<'a, 's, S: KeyValueStore> {
     session: &'a mut Session<'s, S>,
     reader: &'a mut dyn ScriptSource,
     rules: RestoreRules,
     report: RestoreReport,
-    options: RestoreOptions,
+    options: RestoreOptions<'a>,
     progress: &'a mut dyn FnMut(&RestoreProgress),
     restricted: Option<(String, u64)>,
     skipped_names: HashMap<String, String>,
@@ -381,6 +485,9 @@ struct Restore<'a, 's, S: KeyValueStore> {
     table_rows: HashMap<String, usize>,
     set_names: HashSet<String>,
     skipped_sequences: HashSet<String>,
+    default_schema: String,
+    ensured_schemas: HashSet<String>,
+    disabled: BTreeMap<(String, String), DisabledConstraint>,
 }
 
 impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
@@ -388,7 +495,7 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
         session: &'a mut Session<'s, S>,
         reader: &'a mut dyn ScriptSource,
         rules: RestoreRules,
-        options: RestoreOptions,
+        options: RestoreOptions<'a>,
         progress: &'a mut dyn FnMut(&RestoreProgress),
     ) -> Self {
         Self {
@@ -404,16 +511,26 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             table_rows: HashMap::new(),
             set_names: HashSet::new(),
             skipped_sequences: HashSet::new(),
+            default_schema: rules.default_schema.to_owned(),
+            ensured_schemas: HashSet::new(),
+            disabled: BTreeMap::new(),
         }
     }
 
     fn run(mut self) -> RestoreReport {
         self.run_items();
+        if self.report.error.is_none() {
+            self.note_still_disabled();
+        }
+        let names = self.reader.script_names();
+        if !names.is_empty() {
+            self.report.scripts = names;
+        }
         self.report
     }
 
     fn table_key(&self, name: &str) -> String {
-        (self.rules.table_key)(name, self.rules.default_schema)
+        (self.rules.table_key)(name, &self.default_schema)
     }
 
     fn run_items(&mut self) {
@@ -423,7 +540,7 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                 Err(error) => {
                     self.report.error = Some(RestoreError {
                         line: self.reader.line_number(),
-                        script: 0,
+                        script: self.reader.script_index(),
                         statement: String::new(),
                         error,
                         statements_before: self.report.statements,
@@ -452,6 +569,13 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                     return;
                 }
                 ScriptItem::ClientCommand(command) => self.client_command(command),
+                ScriptItem::Failed(failure) => self.genuine_error(RestoreError {
+                    line: failure.line,
+                    script: failure.script,
+                    statement: failure.shown,
+                    error: failure.error,
+                    statements_before: self.report.statements,
+                }),
                 ScriptItem::Statement(statement) => {
                     self.report.statements += 1;
                     self.statement(statement)
@@ -469,6 +593,17 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
     }
 
     fn client_command(&mut self, meta: ClientCommand) -> Flow {
+        if self.rules.oracle && meta.name == "connect" {
+            if let Err(error) = self.use_schema(&meta.argument) {
+                return self.genuine_error(RestoreError {
+                    line: meta.line,
+                    script: meta.script,
+                    statement: meta.shown.clone(),
+                    error,
+                    statements_before: self.report.statements,
+                });
+            }
+        }
         if !self.rules.psql_meta_commands {
             let reason = (self.rules.client_command_reason)(&meta.name);
             self.note_meta(&meta, reason);
@@ -542,7 +677,17 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                 Flow::Continue
             }
             Action::Skip(skip) => self.skip(&statement, skip),
+            Action::Run(Effect::User(name)) => self.create_user(&statement, &name),
             Action::Run(effect) => {
+                if let Some(error) = statement.unresolved.clone() {
+                    return self.genuine_error(RestoreError {
+                        line: statement.line,
+                        script: statement.script,
+                        statement: shortened(&statement.text),
+                        error,
+                        statements_before: self.report.statements.saturating_sub(1),
+                    });
+                }
                 if let Some(table) = effect.data_target()
                     && let Some(key) = self.skipped_table_key(table)
                 {
@@ -551,7 +696,374 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                 if let Some(error) = statement.refused.clone() {
                     return self.failed(&statement, &effect, error);
                 }
-                self.execute(statement, &effect)
+                match effect {
+                    Effect::AnonymousBlock { statements } => self.run_block(&statement, &statements),
+                    Effect::ToggleConstraint {
+                        table,
+                        target,
+                        enable,
+                        novalidate,
+                    } => self.toggle_constraint(&statement, &table, target, enable, novalidate),
+                    Effect::DisabledConstraint { table, name } => {
+                        self.remember_disabled_text(&statement, &table, &name)
+                    }
+                    effect => self.run_statement(statement, &effect),
+                }
+            }
+        }
+    }
+
+    fn run_statement(&mut self, mut statement: ScriptStatement, effect: &Effect) -> Flow {
+        if !self.rules.oracle {
+            return self.execute(statement, effect, true);
+        }
+        let schema = match effect {
+            Effect::Table { name, .. } | Effect::View(name) | Effect::Sequence(name) => {
+                name.split_once('.').map(|(schema, _)| schema.to_owned())
+            }
+            Effect::SessionSetting {
+                current_schema: Some(schema),
+            } => Some(schema.clone()),
+            _ => None,
+        };
+        if let Some(schema) = schema
+            && let Err(error) = self.ensure_schema(&schema)
+        {
+            return self.failed(&statement, effect, error);
+        }
+        if let Effect::Table { name, .. } = effect
+            && let Some(rewrite) = table_rewrite_oracle::rewritten_table(&statement.text)
+        {
+            statement.text = rewrite.text;
+            for note in rewrite.notes {
+                statement.differences.push(note);
+            }
+            for element in rewrite.disabled {
+                self.remember_disabled(
+                    name,
+                    &element.name,
+                    format!("ALTER TABLE {} ADD {}", element.table, element.clause),
+                );
+            }
+        }
+        let flow = self.execute(statement, effect, true);
+        if let Effect::SessionSetting {
+            current_schema: Some(schema),
+        } = effect
+            && self.session.parameter("search_path").is_ok_and(|path| {
+                crate::schemas::path_entries(&path).first() == Some(schema)
+            })
+        {
+            self.default_schema = schema.clone();
+        }
+        flow
+    }
+
+    fn end_transaction(&mut self, commit: bool) -> SqlResult<()> {
+        if !self.rules.oracle {
+            return Ok(());
+        }
+        let text = if commit { "COMMIT" } else { "ROLLBACK" };
+        self.session.execute(text, &mut |_| {})
+    }
+
+    fn session_user(&self) -> String {
+        self.session
+            .parameter("session_authorization")
+            .unwrap_or_default()
+            .to_lowercase()
+    }
+
+    fn ensure_schema(&mut self, schema: &str) -> SqlResult<()> {
+        if schema == "public" || self.ensured_schemas.contains(schema) {
+            return Ok(());
+        }
+        if schema == self.session_user() {
+            return Ok(());
+        }
+        if self.session.ensure_schema(schema)? {
+            self.report.schemas += 1;
+        }
+        if self.ensured_schemas.len() < MAX_REMEMBERED_NAMES {
+            self.ensured_schemas.insert(schema.to_owned());
+        }
+        Ok(())
+    }
+
+    fn use_schema(&mut self, schema: &str) -> SqlResult<()> {
+        self.ensure_schema(schema)?;
+        let text = format!(
+            "ALTER SESSION SET CURRENT_SCHEMA = {}",
+            oracle_quoted(schema)
+        );
+        self.session.execute(&text, &mut |_| {})?;
+        self.default_schema = schema.to_owned();
+        Ok(())
+    }
+
+    fn create_user(&mut self, statement: &ScriptStatement, name: &str) -> Flow {
+        if name.is_empty() || name.contains('&') {
+            let error = statement.unresolved.clone().unwrap_or_else(|| {
+                SqlError::new(SqlState::SYNTAX_ERROR, "CREATE USER needs a user name")
+            });
+            return self.genuine_error(RestoreError {
+                line: statement.line,
+                script: statement.script,
+                statement: shortened(&statement.text),
+                error,
+                statements_before: self.report.statements.saturating_sub(1),
+            });
+        }
+        if let Err(error) = self.ensure_schema(name) {
+            return self.failed(statement, &Effect::Other, error);
+        }
+        self.ignore(Ignored::Other(classify_oracle::USERS));
+        Flow::Continue
+    }
+
+    fn run_block(&mut self, statement: &ScriptStatement, ranges: &[std::ops::Range<usize>]) -> Flow {
+        let mut pending: Vec<(String, u64)> = Vec::new();
+        let mut loaded_total = 0u64;
+        for range in ranges {
+            let Some(piece) = statement.text.get(range.clone()) else {
+                continue;
+            };
+            let line = statement.line
+                + statement.text[..range.start].matches('\n').count() as u64;
+            let mut words = words::Words::oracle(piece);
+            if words.next().is_some_and(|token| token.is_word("commit")) {
+                if let Err(error) = self.end_transaction(true) {
+                    return self.block_failed(statement, piece, line, error);
+                }
+                self.add_pending_rows(&mut pending, &mut loaded_total);
+                continue;
+            }
+            let effect = match classify_oracle::classify_oracle(piece, &|_| false) {
+                Action::Run(effect) => effect,
+                Action::Skip(_) | Action::Ignore(_) => Effect::Data,
+            };
+            if let Some(table) = effect.data_target()
+                && let Some(key) = self.skipped_table_key(table)
+            {
+                let rows = classify::insert_rows(piece, self.rules.words);
+                self.report.rows_skipped += rows;
+                if let Some(SkippedTable {
+                    listed: Some(index),
+                }) = self.skipped_tables.get(&key)
+                    && let Some(object) = self.report.skipped.get_mut(*index)
+                {
+                    *object.rows.get_or_insert(0) += rows;
+                }
+                continue;
+            }
+            let mut loaded = 0u64;
+            let outcome = self.session.execute(piece, &mut |result: QueryResult| {
+                loaded += rows_of(&result.tag);
+            });
+            if let Err(error) = outcome {
+                let _ = self.end_transaction(false);
+                return self.block_failed(statement, piece, line, error);
+            }
+            if let Some(table) = effect.data_target() {
+                match pending.iter_mut().find(|(known, _)| known == table) {
+                    Some((_, rows)) => *rows += loaded,
+                    None => pending.push((table.to_owned(), loaded)),
+                }
+            }
+        }
+        if let Err(error) = self.end_transaction(true) {
+            return self.block_failed(statement, "END;", statement.end_line, error);
+        }
+        self.add_pending_rows(&mut pending, &mut loaded_total);
+        Flow::Continue
+    }
+
+    fn add_pending_rows(&mut self, pending: &mut Vec<(String, u64)>, total: &mut u64) {
+        for (table, rows) in pending.drain(..) {
+            self.report.rows += rows;
+            *total += rows;
+            self.add_rows(&table, rows);
+        }
+    }
+
+    fn block_failed(
+        &mut self,
+        statement: &ScriptStatement,
+        piece: &str,
+        line: u64,
+        error: SqlError,
+    ) -> Flow {
+        let error = error.with_hint(format!(
+            "The anonymous block at line {} loads all its rows or none, as Oracle runs it; none of its rows since its last COMMIT were kept.",
+            statement.line
+        ));
+        self.genuine_error(RestoreError {
+            line,
+            script: statement.script,
+            statement: shortened(piece),
+            error,
+            statements_before: self.report.statements.saturating_sub(1),
+        })
+    }
+
+    fn remember_disabled(&mut self, table: &str, name: &str, statement: String) {
+        if self.disabled.len() >= MAX_REMEMBERED_NAMES {
+            return;
+        }
+        let key = (self.table_key(table), name.to_owned());
+        self.disabled.insert(
+            key,
+            DisabledConstraint {
+                table: table.to_owned(),
+                statement,
+                default_schema: self.default_schema.clone(),
+            },
+        );
+    }
+
+    fn remember_disabled_text(
+        &mut self,
+        statement: &ScriptStatement,
+        table: &str,
+        name: &str,
+    ) -> Flow {
+        let Some(text) = table_rewrite_oracle::without_disable(&statement.text) else {
+            return self.skip(
+                statement,
+                Skip {
+                    kind: "constraint",
+                    name: name.to_owned(),
+                    reason: "not supported yet",
+                    detail: None,
+                    is_table: false,
+                    names_an_object: false,
+                },
+            );
+        };
+        self.remember_disabled(table, name, text);
+        Flow::Continue
+    }
+
+    fn toggle_constraint(
+        &mut self,
+        statement: &ScriptStatement,
+        table: &str,
+        target: ToggledConstraint,
+        enable: bool,
+        novalidate: bool,
+    ) -> Flow {
+        let name = match target {
+            ToggledConstraint::Named(name) => name,
+            ToggledConstraint::PrimaryKey | ToggledConstraint::Unique => {
+                if !enable {
+                    self.note_difference(
+                        statement,
+                        table.to_owned(),
+                        "kept enforced: EggDB doesn't disable keys".to_owned(),
+                    );
+                }
+                return Flow::Continue;
+            }
+        };
+        let key = (self.table_key(table), name.clone());
+        if enable {
+            let Some(disabled) = self.disabled.remove(&key) else {
+                return Flow::Continue;
+            };
+            if novalidate {
+                self.note_difference(
+                    statement,
+                    format!("{table}.{name}"),
+                    "existing rows are checked here; Oracle's NOVALIDATE doesn't check them"
+                        .to_owned(),
+                );
+            }
+            return self.re_add(statement, &disabled, &name);
+        }
+        if self.disabled.contains_key(&key) {
+            return Flow::Continue;
+        }
+        let clause = match self.session.oracle_constraint_clause(table, &name) {
+            Ok(clause) => clause,
+            Err(error) => return self.failed(statement, &Effect::OtherDdl, error),
+        };
+        let Some(clause) = clause else {
+            self.note_difference(
+                statement,
+                format!("{table}.{name}"),
+                "not found, so nothing was disabled (EggDB keeps no names for NOT NULL constraints)"
+                    .to_owned(),
+            );
+            return Flow::Continue;
+        };
+        let Some(text) = clause.clause else {
+            let difference = match clause.kind {
+                crate::constraints::ConstraintClauseKind::Key => {
+                    "kept enforced: EggDB doesn't disable keys"
+                }
+                _ => "kept enforced: its CHECK was written in another dialect",
+            };
+            self.note_difference(statement, format!("{table}.{name}"), difference.to_owned());
+            return Flow::Continue;
+        };
+        let drop = format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            clause.table,
+            oracle_quoted(&name)
+        );
+        let dropped = self
+            .session
+            .execute(&drop, &mut |_| {})
+            .and_then(|()| self.end_transaction(true));
+        if let Err(error) = dropped {
+            let _ = self.end_transaction(false);
+            return self.failed(statement, &Effect::OtherDdl, error);
+        }
+        self.remember_disabled(
+            table,
+            &name,
+            format!("ALTER TABLE {} ADD {text}", clause.table),
+        );
+        Flow::Continue
+    }
+
+    fn re_add(
+        &mut self,
+        statement: &ScriptStatement,
+        disabled: &DisabledConstraint,
+        name: &str,
+    ) -> Flow {
+        let switch = disabled.default_schema != self.default_schema;
+        let current = self.default_schema.clone();
+        if switch && let Err(error) = self.use_schema(&disabled.default_schema) {
+            return self.failed(statement, &Effect::Other, error);
+        }
+        let mut adding = statement.clone();
+        adding.text = disabled.statement.clone();
+        let effect = Effect::AddConstraint {
+            table: disabled.table.clone(),
+            name: Some(name.to_owned()),
+        };
+        let flow = self.execute(adding, &effect, false);
+        if switch && let Err(error) = self.use_schema(&current) {
+            return self.failed(statement, &Effect::Other, error);
+        }
+        flow
+    }
+
+    fn note_still_disabled(&mut self) {
+        let disabled = std::mem::take(&mut self.disabled);
+        for ((_, name), constraint) in disabled {
+            if self.report.differences.len() < MAX_LISTED {
+                self.report.differences.push(KnownDifference {
+                    line: 0,
+                    script: 0,
+                    object: format!("{}.{name}", constraint.table),
+                    difference: "disabled in the source: not created here, so not enforced"
+                        .to_owned(),
+                });
+            } else {
+                self.report.differences_not_listed += 1;
             }
         }
     }
@@ -610,11 +1122,20 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
         if skip.names_an_object {
             self.remember_skipped(skip.kind, &skip.name);
         }
+        let name = if self.rules.oracle
+            && skip.names_an_object
+            && !skip.name.contains('.')
+            && self.default_schema != "public"
+        {
+            format!("{}.{}", self.default_schema, skip.name)
+        } else {
+            skip.name.clone()
+        };
         let listed = self.list_skipped(SkippedObject {
             line: statement.line,
             script: statement.script,
             kind: skip.kind.to_owned(),
-            name: skip.name.clone(),
+            name,
             reason: skip.reason.to_owned(),
             detail: skip.detail.map(str::to_owned),
             rows: skip.is_table.then_some(rows.unwrap_or(0)),
@@ -708,7 +1229,7 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
         Flow::Continue
     }
 
-    fn execute(&mut self, statement: ScriptStatement, effect: &Effect) -> Flow {
+    fn execute(&mut self, statement: ScriptStatement, effect: &Effect, counted: bool) -> Flow {
         let mut loaded = 0u64;
         let mut copy = DumpCopy {
             reader: &mut *self.reader,
@@ -729,9 +1250,18 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
         {
             return self.unreadable(error);
         }
+        let outcome = match outcome {
+            Ok(()) => self.end_transaction(true),
+            Err(error) => {
+                let _ = self.end_transaction(false);
+                Err(error)
+            }
+        };
         match outcome {
             Ok(()) => {
-                self.count(effect, loaded);
+                if counted {
+                    self.count(effect, loaded);
+                }
                 self.note_differences(&statement);
                 Flow::Continue
             }
@@ -768,6 +1298,12 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             | Effect::IdentityInsert(_)
             | Effect::SetDefault { .. }
             | Effect::Setting
+            | Effect::SessionSetting { .. }
+            | Effect::User(_)
+            | Effect::AnonymousBlock { .. }
+            | Effect::ToggleConstraint { .. }
+            | Effect::DisabledConstraint { .. }
+            | Effect::Drop
             | Effect::Data
             | Effect::OtherDdl
             | Effect::Other => {}
@@ -776,6 +1312,12 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
 
     fn add_rows(&mut self, table: &str, rows: u64) {
         let key = self.table_key(table);
+        let table = if self.rules.oracle {
+            key.strip_prefix("public.").unwrap_or(&key).to_owned()
+        } else {
+            table.to_owned()
+        };
+        let table = table.as_str();
         if let Some(&index) = self.table_rows.get(&key) {
             self.report.rows_per_table[index].rows += rows;
             return;
@@ -798,6 +1340,18 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
         let missing_object = matches!(code, "42704" | "42883" | "42P01" | "3F000");
         let refused_definition = matches!(code, "0A000" | "42601" | "42809");
         let not_supported = (self.rules.not_supported)(&error);
+        if let Effect::Drop = effect
+            && matches!(code, "42P01" | "42704")
+        {
+            self.ignore(Ignored::Other(classify_oracle::NOTHING_TO_DROP));
+            return Flow::Continue;
+        }
+        if let Effect::SessionSetting { .. } = effect
+            && matches!(error.vendor_code(), Some(3001 | 2248))
+        {
+            self.ignore(Ignored::Set(session_parameter(&statement.text)));
+            return Flow::Continue;
+        }
         if let Effect::AddConstraint { table, name } = effect
             && matches!(code, "23505" | "23503" | "23514")
         {
@@ -1000,6 +1554,24 @@ fn rows_of(tag: &str) -> u64 {
     count.parse().unwrap_or(0)
 }
 
+fn oracle_quoted(name: &str) -> String {
+    format!(
+        "\"{}\"",
+        crate::lexer::swap_uniform_case(name).replace('"', "\"\"")
+    )
+}
+
+fn session_parameter(text: &str) -> String {
+    let mut words = words::Words::oracle(text);
+    let found = words.find(|token| token.is_word("set")).is_some();
+    let name = if found {
+        words.next().and_then(|token| token.plain_name_part().map(str::to_owned))
+    } else {
+        None
+    };
+    name.unwrap_or_default().to_ascii_uppercase()
+}
+
 fn postgresql_table_key(name: &str, default_schema: &str) -> String {
     if name.contains('.') {
         name.to_owned()
@@ -1008,7 +1580,26 @@ fn postgresql_table_key(name: &str, default_schema: &str) -> String {
     }
 }
 
+fn before_password(text: &str) -> &str {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = lower.get(from..).and_then(|rest| rest.find("identified")) {
+        let at = from + offset;
+        let before = at.checked_sub(1).map(|index| bytes[index]);
+        let after = bytes.get(at + "identified".len()).copied();
+        let boundary =
+            |byte: Option<u8>| byte.is_none_or(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_'));
+        if boundary(before) && boundary(after) {
+            return text.get(..at).unwrap_or(text);
+        }
+        from = at + "identified".len();
+    }
+    text
+}
+
 fn shortened(text: &str) -> String {
+    let text = before_password(text);
     let mut shown = String::new();
     let mut space = false;
     for (count, character) in text
@@ -1059,5 +1650,7 @@ fn error_line(statement: &ScriptStatement, error: &SqlError) -> u64 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_oracle;
 #[cfg(test)]
 mod tests_sqlserver;

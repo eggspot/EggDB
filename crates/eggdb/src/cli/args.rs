@@ -102,7 +102,10 @@ impl CommandName {
             | OptionName::Database
             | OptionName::MaxConnections => self == Self::Serve,
             OptionName::Command => matches!(self, Self::Sql | Self::Shell),
-            OptionName::Dialect => matches!(self, Self::Sql | Self::Shell | Self::Restore),
+            OptionName::Dialect => {
+                matches!(self, Self::Sql | Self::Shell | Self::Restore | Self::Import)
+            }
+            OptionName::Define => self == Self::Restore,
             OptionName::KeepGoing => matches!(self, Self::Shell | Self::Restore),
             OptionName::Report => self == Self::Restore,
             OptionName::Mode => self == Self::Shell,
@@ -212,6 +215,7 @@ enum OptionName {
     Report,
     TimeLimit,
     AllowWrite,
+    Define,
 }
 
 impl OptionName {
@@ -255,6 +259,7 @@ impl OptionName {
             b"report" => Self::Report,
             b"time-limit" => Self::TimeLimit,
             b"allow-write" => Self::AllowWrite,
+            b"define" => Self::Define,
             _ => return None,
         })
     }
@@ -334,6 +339,7 @@ pub(crate) struct RestoreOptions {
     pub(crate) dump: Option<ExportFile>,
     pub(crate) report: Option<PathBuf>,
     pub(crate) keep_going: bool,
+    pub(crate) defines: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -646,6 +652,13 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Dialect if command == CommandName::Restore => {
                 request.dialect = check_restore_dialect(value).map_err(usage)?;
             }
+            OptionName::Dialect if command == CommandName::Import => {
+                request.dialect = check_import_dialect(value).map_err(usage)?;
+            }
+            OptionName::Define => {
+                let definition = parse_define(&option.spelled, value).map_err(usage)?;
+                request.restore.defines.push(definition);
+            }
             OptionName::Mode => {
                 let name = value.to_str().unwrap_or_default();
                 request.shell.mode = Some(ResultMode::parse(name).ok_or_else(|| {
@@ -788,6 +801,12 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     }
     if command == CommandName::Restore {
         request.restore.dump = arguments.get(1).map(|argument| export_file(argument));
+        if !request.restore.defines.is_empty() && request.dialect != eggdb_sql::Dialect::Oracle {
+            return Err(usage(
+                "--define sets SQL*Plus substitution variables, so it goes with --dialect oracle"
+                    .to_owned(),
+            ));
+        }
         return Ok(request);
     }
     if matches!(command, CommandName::Export | CommandName::Import) {
@@ -812,10 +831,15 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
             (csv.delimiter.is_some(), "--delimiter"),
             (csv.null.is_some(), "--null"),
         ];
-        return match given.iter().find(|(given, _)| *given) {
-            Some((_, option)) => Err(format!("{option} goes with --csv <file>")),
-            None => Ok(()),
-        };
+        if let Some((_, option)) = given.iter().find(|(given, _)| *given) {
+            return Err(format!("{option} goes with --csv <file>"));
+        }
+        if request.command == CommandName::Import
+            && request.dialect != eggdb_sql::Dialect::PostgreSql
+        {
+            return Err("--dialect goes with --csv <file>".to_owned());
+        }
+        return Ok(());
     }
     if request.export_file.is_some() {
         return Err("give the CSV with --csv <file>, not as a second argument".to_owned());
@@ -841,11 +865,12 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     Ok(())
 }
 
-const RESTORE_DIALECTS: [(&str, eggdb_sql::Dialect); 4] = [
+const RESTORE_DIALECTS: [(&str, eggdb_sql::Dialect); 5] = [
     ("postgresql", eggdb_sql::Dialect::PostgreSql),
     ("sqlserver", eggdb_sql::Dialect::SqlServer),
     ("mssql", eggdb_sql::Dialect::SqlServer),
     ("tsql", eggdb_sql::Dialect::SqlServer),
+    ("oracle", eggdb_sql::Dialect::Oracle),
 ];
 
 fn check_restore_dialect(value: &OsStr) -> Result<eggdb_sql::Dialect, String> {
@@ -853,16 +878,48 @@ fn check_restore_dialect(value: &OsStr) -> Result<eggdb_sql::Dialect, String> {
     if let Some((_, dialect)) = RESTORE_DIALECTS.iter().find(|(known, _)| *known == name) {
         return Ok(*dialect);
     }
-    if name == "oracle" {
-        return Err(
-            "--dialect oracle comes in a later release (docs/roadmap.md, item 43); eggdb restore reads PostgreSQL dumps and SQL Server scripts now."
-                .to_owned(),
-        );
-    }
     Err(format!(
-        "--dialect must be postgresql or sqlserver (oracle comes in a later release), not '{}'",
+        "--dialect must be postgresql, sqlserver or oracle, not '{}'",
         shown(value)
     ))
+}
+
+fn check_import_dialect(value: &OsStr) -> Result<eggdb_sql::Dialect, String> {
+    match value.to_str().unwrap_or_default() {
+        "postgresql" => Ok(eggdb_sql::Dialect::PostgreSql),
+        "oracle" => Ok(eggdb_sql::Dialect::Oracle),
+        _ => Err(format!(
+            "--dialect for import --csv must be postgresql or oracle, not '{}'",
+            shown(value)
+        )),
+    }
+}
+
+const MAX_DEFINE_VALUE_BYTES: usize = 240;
+
+fn parse_define(spelled: &str, value: &OsStr) -> Result<(String, String), String> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| format!("{spelled} must be UTF-8 text"))?;
+    let Some((name, definition)) = text.split_once('=') else {
+        return Err(format!("{spelled} takes name=value, such as {spelled} pass=secret"));
+    };
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '#'))
+    {
+        return Err(format!(
+            "{spelled} needs a variable name of letters, digits, _, $ and #, not '{name}'"
+        ));
+    }
+    if definition.len() > MAX_DEFINE_VALUE_BYTES {
+        return Err(format!(
+            "the value of {spelled} {name} is longer than {MAX_DEFINE_VALUE_BYTES} bytes, SQL*Plus's DEFINE limit"
+        ));
+    }
+    Ok((name.to_owned(), definition.to_owned()))
 }
 
 fn export_file(argument: &OsStr) -> ExportFile {

@@ -36,6 +36,8 @@ pub(crate) struct WordRules {
     pub(crate) bracketed_names: bool,
     pub(crate) dollar_quotes: bool,
     pub(crate) escape_prefixes: bool,
+    pub(crate) q_quotes: bool,
+    pub(crate) quoted_names_swap_case: bool,
 }
 
 impl WordRules {
@@ -43,12 +45,24 @@ impl WordRules {
         bracketed_names: false,
         dollar_quotes: true,
         escape_prefixes: true,
+        q_quotes: false,
+        quoted_names_swap_case: false,
     };
 
     pub(crate) const SQLSERVER: Self = Self {
         bracketed_names: true,
         dollar_quotes: false,
         escape_prefixes: false,
+        q_quotes: false,
+        quoted_names_swap_case: false,
+    };
+
+    pub(crate) const ORACLE: Self = Self {
+        bracketed_names: false,
+        dollar_quotes: false,
+        escape_prefixes: false,
+        q_quotes: true,
+        quoted_names_swap_case: true,
     };
 }
 
@@ -65,6 +79,10 @@ impl<'t> Words<'t> {
 
     pub(crate) fn sqlserver(text: &'t str) -> Self {
         Self::with_rules(text, WordRules::SQLSERVER)
+    }
+
+    pub(crate) fn oracle(text: &'t str) -> Self {
+        Self::with_rules(text, WordRules::ORACLE)
     }
 
     pub(crate) fn with_rules(text: &'t str, rules: WordRules) -> Self {
@@ -143,6 +161,28 @@ impl<'t> Words<'t> {
         content
     }
 
+    fn q_quoted(&mut self) {
+        self.at += 1;
+        let Some(open) = self.peek(0) else {
+            return;
+        };
+        let close = match open {
+            b'[' => b']',
+            b'{' => b'}',
+            b'<' => b'>',
+            b'(' => b')',
+            other => other,
+        };
+        self.at += 1;
+        while let Some(byte) = self.peek(0) {
+            self.at += 1;
+            if byte == close && self.peek(0) == Some(b'\'') {
+                self.at += 1;
+                return;
+            }
+        }
+    }
+
     pub(crate) fn literal_text(&mut self) -> Option<String> {
         self.skip_space_and_comments();
         if self.peek(0) != Some(b'\'') {
@@ -195,7 +235,11 @@ impl Iterator for Words<'_> {
         }
         if byte == b'"' {
             let name = self.quoted(b'"', false);
-            return Some(Token::Quoted(String::from_utf8_lossy(&name).into_owned()));
+            let name = String::from_utf8_lossy(&name).into_owned();
+            if self.rules.quoted_names_swap_case {
+                return Some(Token::Quoted(crate::lexer::swap_uniform_case(&name)));
+            }
+            return Some(Token::Quoted(name));
         }
         if byte == b'[' && self.rules.bracketed_names {
             let name = self.quoted_until(b']', false);
@@ -227,6 +271,13 @@ impl Iterator for Words<'_> {
                 self.at += 1;
             }
             let word = String::from_utf8_lossy(&self.bytes[start..self.at]).to_ascii_lowercase();
+            if self.rules.q_quotes
+                && self.peek(0) == Some(b'\'')
+                && matches!(word.as_str(), "q" | "nq")
+            {
+                self.q_quoted();
+                return Some(Token::Literal);
+            }
             if self.peek(0) == Some(b'\'')
                 && (word == "n"
                     || self.rules.escape_prefixes && matches!(word.as_str(), "e" | "x" | "b"))

@@ -5,7 +5,7 @@ use crate::cli::args::{CommandName, ExportFile, Format};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject};
 use eggdb::sql::Store as DatabaseStore;
-use eggdb_sql::{Dialect, QueryResult};
+use eggdb_sql::QueryResult;
 use std::cell::Cell;
 use std::fs::File;
 use std::io::Read;
@@ -69,7 +69,7 @@ impl Session<'_> {
         let sql = format!("COPY {table} FROM STDIN ({})", copy_options.join(", "));
         let db = self.open(Access::Write { create: false }, Some(bulk_cache(size)))?;
         let store = DatabaseStore(&db);
-        let mut session = eggdb_sql::Session::with_dialect(&store, Dialect::PostgreSql);
+        let mut session = eggdb_sql::Session::with_dialect(&store, self.request.dialect);
         let copied_out = Cell::new(false);
         let mut rows = 0u64;
         let outcome = {

@@ -1,5 +1,6 @@
 mod mysql;
 mod oracle;
+mod restore;
 mod sqlite;
 pub(crate) mod sqlserver;
 

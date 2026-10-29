@@ -48,7 +48,10 @@ fn restore(store: &MemoryStore, dump: &str, keep_going: bool) -> RestoreReport {
     let report = restore_dump(
         &mut session,
         &mut input,
-        RestoreOptions { keep_going },
+        RestoreOptions {
+            keep_going,
+            ..RestoreOptions::default()
+        },
         &mut |_| {},
     );
     assert_eq!(session.close(), Ok(false));

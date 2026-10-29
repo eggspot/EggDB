@@ -12,7 +12,7 @@ mod sqlserver;
 mod sqlserver_functions;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
-pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved};
+pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved, oracle_table_name};
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
     default_source as sqlserver_default_source, is_reserved as is_sqlserver_reserved,
@@ -646,22 +646,17 @@ impl<'t> Parser<'t> {
         if self.oracle() && self.peek_kind() == &TokenKind::Dot {
             self.at += 1;
             let table = self.name()?;
-            if swap_uniform_case(&name.text) != self.oracle_user() {
-                return Err(SqlError::new(
-                    SqlState::UNDEFINED_TABLE,
-                    "table or view does not exist",
-                )
-                .with_oracle_code(942)
-                .at(name.position));
-            }
-            if oracle::is_dictionary_name(&table.text) {
+            let own = swap_uniform_case(&name.text) == self.oracle_user();
+            if (own || name.text == "sys") && oracle::is_dictionary_name(&table.text) {
                 return Ok(table);
             }
+            let schema = if own {
+                crate::schemas::DEFAULT_SCHEMA
+            } else {
+                name.text.as_str()
+            };
             return Ok(Name {
-                text: crate::schemas::written_qualified(
-                    crate::schemas::DEFAULT_SCHEMA,
-                    &table.text,
-                ),
+                text: crate::schemas::written_qualified(schema, &table.text),
                 position: table.position,
             });
         }
@@ -756,7 +751,7 @@ impl<'t> Parser<'t> {
             "grant" if self.postgresql() => self.grant_or_revoke("GRANT"),
             "revoke" if self.postgresql() => self.grant_or_revoke("REVOKE"),
             "comment" if self.postgresql() || self.oracle() => self.comment(),
-            "copy" if self.postgresql() => self.copy(),
+            "copy" if self.postgresql() || self.oracle() => self.copy(),
             "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
             | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
             | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),
@@ -1209,6 +1204,7 @@ impl<'t> Parser<'t> {
                 };
                 if self.is_word("unique") {
                     indexes.push(self.unique_constraint(constraint, position)?);
+                    self.oracle_enabled_constraint()?;
                 } else if self.take_word("primary") {
                     self.expect_word("key")?;
                     let key = if self.sqlserver() {
@@ -1224,6 +1220,7 @@ impl<'t> Parser<'t> {
                     if self.sqlite() {
                         self.sqlite_conflict_clause()?;
                     }
+                    self.oracle_enabled_constraint()?;
                 } else if self.at_table_constraint() {
                     constraints.push(self.table_constraint_body(constraint, position)?);
                 } else {
@@ -1235,6 +1232,7 @@ impl<'t> Parser<'t> {
             } else if self.is_word("unique") {
                 let position = self.position();
                 indexes.push(self.unique_constraint(None, position)?);
+                self.oracle_enabled_constraint()?;
             } else if self.mysql()
                 && let Some(index) = self.mysql_index_entry()?
             {
@@ -1268,6 +1266,9 @@ impl<'t> Parser<'t> {
         if self.sqlserver() {
             self.sqlserver_table_tail()?;
         }
+        if self.oracle() {
+            self.skip_physical_properties()?;
+        }
         if self.is_word("partition") || self.is_word("inherits") || self.is_word("with") {
             return Err(self.not_supported("table options"));
         }
@@ -1281,6 +1282,13 @@ impl<'t> Parser<'t> {
             constraints,
             comment,
         }))
+    }
+
+    fn oracle_enabled_constraint(&mut self) -> SqlResult<()> {
+        if self.oracle() && !self.oracle_constraint_states()? {
+            return Err(self.not_supported("disabled constraints"));
+        }
+        Ok(())
     }
 
     fn table_constraint_not_supported(&self) -> SqlError {
@@ -1378,11 +1386,15 @@ impl<'t> Parser<'t> {
                     self.skip_clustering();
                     self.skip_key_options()?;
                 }
+                self.oracle_enabled_constraint()?;
             } else if self.take_word("not") {
                 self.expect_word("null")?;
-                column.not_null = true;
+                column.not_null = !self.oracle() || self.oracle_constraint_states()?;
             } else if self.take_word("null") {
                 column.not_null = false;
+                if self.oracle() {
+                    self.oracle_constraint_states()?;
+                }
             } else if self.take_word("primary") {
                 self.expect_word("key")?;
                 column.primary_key = true;
@@ -1390,6 +1402,9 @@ impl<'t> Parser<'t> {
                     self.skip_clustering();
                     self.skip_key_options()?;
                 }
+                self.oracle_enabled_constraint()?;
+            } else if self.oracle() && self.take_word("collate") {
+                self.oracle_collation()?;
             } else if self.is_word("default") {
                 self.at += 1;
                 let start = self.position();

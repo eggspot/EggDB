@@ -27,6 +27,13 @@ pub(crate) enum Ignored {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToggledConstraint {
+    Named(String),
+    PrimaryKey,
+    Unique,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Effect {
     Schema(String),
     Table {
@@ -54,6 +61,24 @@ pub(crate) enum Effect {
     IdentityInsert(String),
     SequenceCall(String),
     Setting,
+    SessionSetting {
+        current_schema: Option<String>,
+    },
+    User(String),
+    AnonymousBlock {
+        statements: Vec<std::ops::Range<usize>>,
+    },
+    ToggleConstraint {
+        table: String,
+        target: ToggledConstraint,
+        enable: bool,
+        novalidate: bool,
+    },
+    DisabledConstraint {
+        table: String,
+        name: String,
+    },
+    Drop,
     Data,
     OtherDdl,
     Other,
@@ -72,6 +97,7 @@ impl Effect {
                 | Self::AddConstraint { .. }
                 | Self::SetDefault { .. }
                 | Self::Comment
+                | Self::Drop
                 | Self::OtherDdl
         )
     }

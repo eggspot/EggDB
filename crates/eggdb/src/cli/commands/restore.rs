@@ -8,10 +8,14 @@ use crate::cli::render::{self, JsonObject};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb::{Database, Durability, Options};
 use eggdb_platform::{FileSystem, OsFileSystem};
-use eggdb_sql::{Dialect, RestoreOptions, RestoreProgress, RestoreReport};
+use eggdb_sql::{
+    Dialect, IncludeBase, IncludeOpener, IncludeRequest, RestoreOptions, RestoreProgress,
+    RestoreReport, SqlError, SqlResult, SqlState,
+};
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -50,6 +54,64 @@ const SQLSERVER_FILE_WORDS: [(&str, &str); 7] = [
 ];
 
 const SCRIPT_ROUTE: &str = "Restore it into a SQL Server you run, script it from there (SSMS: Tasks, Generate Scripts, Schema and data), then restore the script (docs/migrate.md).";
+
+const ORACLE_ROUTE: &str = "Write its DDL with impdp ... SQLFILE= and its rows with SQLcl's UNLOAD, then restore the DDL and import the CSV (docs/migrate.md#oracle).";
+
+struct FileIncludes {
+    scripts: RefCell<Vec<Option<PathBuf>>>,
+}
+
+impl FileIncludes {
+    fn new(main: Option<PathBuf>) -> Self {
+        Self {
+            scripts: RefCell::new(vec![main]),
+        }
+    }
+
+    fn base(&self, relative_to: IncludeBase) -> Option<PathBuf> {
+        let IncludeBase::IncludingScript(index) = relative_to else {
+            return None;
+        };
+        let scripts = self.scripts.borrow();
+        let script = scripts.get(usize::try_from(index).ok()?)?.as_ref()?;
+        script
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    }
+}
+
+impl IncludeOpener for FileIncludes {
+    fn open<'s>(&'s self, request: &IncludeRequest<'_>) -> SqlResult<Box<dyn BufRead + 's>> {
+        let path = match self.base(request.relative_to) {
+            Some(directory) => directory.join(request.name),
+            None => PathBuf::from(request.name),
+        };
+        let failure = |what: String| {
+            SqlError::new(
+                SqlState::IO_ERROR,
+                format!("line {}: cannot include {}: {what}", request.line, request.name),
+            )
+        };
+        let file = File::open(&path).map_err(|error| failure(error.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| failure(error.to_string()))?;
+        if !metadata.is_file() {
+            return Err(failure(
+                "it is not a regular file (eggdb restore includes only script files)".to_owned(),
+            ));
+        }
+        let mut scripts = self.scripts.borrow_mut();
+        if let Ok(index) = usize::try_from(request.script) {
+            if scripts.len() <= index {
+                scripts.resize(index + 1, None);
+            }
+            scripts[index] = Some(path);
+        }
+        Ok(Box::new(BufReader::with_capacity(READ_BUFFER_BYTES, file)))
+    }
+}
 
 struct Outcome<'r> {
     report: &'r RestoreReport,
@@ -92,6 +154,7 @@ impl Session<'_> {
                         true,
                         None,
                         &self.file,
+                        self.request.dialect,
                     ));
                 }
                 return Err(usage(format!(
@@ -125,6 +188,7 @@ impl Session<'_> {
                 path.is_some(),
                 extension.as_deref(),
                 &self.file,
+                dialect,
             ));
         }
         let mut input = BufReader::with_capacity(READ_BUFFER_BYTES, Cursor::new(head).chain(raw));
@@ -175,15 +239,25 @@ impl Session<'_> {
         })?;
         let started = Instant::now();
         let mut progress = Progress::new(self.stderr_is_terminal, &dump_shown);
+        let includes = FileIncludes::new(path.clone());
+        let defines = self.request.restore.defines.clone();
+        let options = RestoreOptions {
+            keep_going: self.request.restore.keep_going,
+            includes: Some(&includes),
+            defines: &defines,
+        };
         let mut report = run_restore(
             &db,
             &mut input,
             dialect,
-            self.request.restore.keep_going,
+            options,
             &mut progress,
             &mut self.messages,
         );
-        report.scripts = vec![dump_display.clone()];
+        match report.scripts.first_mut() {
+            Some(first) => first.clone_from(&dump_display),
+            None => report.scripts.push(dump_display.clone()),
+        }
         progress.clear(&mut self.messages);
         let elapsed = started.elapsed();
         let stopped = report.error.is_some();
@@ -327,7 +401,7 @@ fn run_restore(
     db: &Database,
     input: &mut dyn std::io::BufRead,
     dialect: Dialect,
-    keep_going: bool,
+    options: RestoreOptions<'_>,
     progress: &mut Progress,
     messages: &mut Output<'_>,
 ) -> RestoreReport {
@@ -336,7 +410,7 @@ fn run_restore(
     let report = eggdb_sql::restore_dump(
         &mut session,
         input,
-        RestoreOptions { keep_going },
+        options,
         &mut |step: &RestoreProgress| progress.tick(messages, step),
     );
     let _ = session.close();
@@ -420,6 +494,22 @@ fn sqlserver_file_words(extension: Option<&str>) -> Option<&'static str> {
         .map(|(_, words)| *words)
 }
 
+fn oracle_binary_failure(shown: &str, extension: Option<&str>, file: &str) -> Failure {
+    let what = match extension {
+        Some("dmp") => "an Oracle Data Pump or exp dump file",
+        _ => "a binary file, perhaps an RMAN backup",
+    };
+    Failure::Database {
+        message: format!(
+            "cannot restore {shown}: it is {what}, which eggdb restore does not read. {ORACLE_ROUTE}"
+        ),
+        try_command: Some(format!(
+            "impdp system DIRECTORY=dp DUMPFILE=<file.dmp> SCHEMAS=<schema> SQLFILE=tables.sql EXCLUDE=REF_CONSTRAINT,STATISTICS, then eggdb restore --dialect oracle --create {file} tables.sql"
+        )),
+        exit: Exit::Usage,
+    }
+}
+
 fn binary_failure(
     kind: BinaryKind,
     shown: &str,
@@ -475,9 +565,13 @@ fn archive_failure(
     named: bool,
     extension: Option<&str>,
     file: &str,
+    dialect: Dialect,
 ) -> Failure {
     let target = if named { shown } else { "<archive>" };
     let (what, try_command) = match archive {
+        Archive::Binary { .. } if dialect == Dialect::Oracle => {
+            return oracle_binary_failure(shown, extension, file);
+        }
         Archive::Binary { kind } => return binary_failure(kind, shown, named, extension, file),
         Archive::Utf16Text => {
             let target = if named { shown } else { "<script.sql>" };
@@ -732,10 +826,26 @@ fn fact(out: &mut Output<'_>, label: &str, value: &str) {
     out.text(&format!("  {label:<16}{value}\n"));
 }
 
-fn listed_lines(out: &mut Output<'_>, rows: &[(u64, String, String)], more: u64, what: &str) {
+fn place(report: &RestoreReport, script: u32, line: u64) -> String {
+    let at = if line == 0 {
+        "end".to_owned()
+    } else {
+        format!("line {}", render::count(line))
+    };
+    match usize::try_from(script)
+        .ok()
+        .filter(|&index| index > 0)
+        .and_then(|index| report.scripts.get(index))
+    {
+        Some(name) => format!("{} {at}", render::text(name.as_bytes())),
+        None => at,
+    }
+}
+
+fn listed_lines(out: &mut Output<'_>, rows: &[(String, String, String)], more: u64, what: &str) {
     let number_width = rows
         .iter()
-        .map(|(line, _, _)| render::count(*line).len())
+        .map(|(place, _, _)| place.chars().count())
         .max()
         .unwrap_or(1);
     let description_width = rows
@@ -744,12 +854,11 @@ fn listed_lines(out: &mut Output<'_>, rows: &[(u64, String, String)], more: u64,
         .max()
         .unwrap_or(0)
         .min(SHOWN_DESCRIPTION_CHARS);
-    for (line, description, note) in rows {
+    for (place, description, note) in rows {
         let description = cut(description, SHOWN_DESCRIPTION_CHARS);
         let fill = description_width.saturating_sub(description.chars().count());
         out.text(&format!(
-            "  line {:<number_width$}  {description}{}   {note}\n",
-            render::count(*line),
+            "  {place:<number_width$}  {description}{}   {note}\n",
             " ".repeat(fill)
         ));
     }
@@ -865,7 +974,7 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
     }
     if !report.skipped.is_empty() {
         out.text("skipped (not in EggDB yet; docs/roadmap.md)\n");
-        let rows: Vec<(u64, String, String)> = report
+        let rows: Vec<(String, String, String)> = report
             .skipped
             .iter()
             .map(|object| {
@@ -878,19 +987,23 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
                 if let Some(rows) = object.rows.filter(|&rows| rows > 0) {
                     description.push_str(&format!(", {}", counted(rows, "row", "rows")));
                 }
-                (object.line, description, object.reason.clone())
+                (
+                    place(report, object.script, object.line),
+                    description,
+                    object.reason.clone(),
+                )
             })
             .collect();
         listed_lines(out, &rows, report.skipped_not_listed, "objects");
     }
     if !report.consequences.is_empty() {
         out.text("consequences (fail only because of a skipped object)\n");
-        let rows: Vec<(u64, String, String)> = report
+        let rows: Vec<(String, String, String)> = report
             .consequences
             .iter()
             .map(|consequence| {
                 (
-                    consequence.line,
+                    place(report, consequence.script, consequence.line),
                     consequence.statement.clone(),
                     format!("uses {}", consequence.uses),
                 )
@@ -900,12 +1013,12 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
     }
     if !report.differences.is_empty() {
         out.text("known differences (restored, but not as the source had it)\n");
-        let rows: Vec<(u64, String, String)> = report
+        let rows: Vec<(String, String, String)> = report
             .differences
             .iter()
             .map(|difference| {
                 (
-                    difference.line,
+                    place(report, difference.script, difference.line),
                     difference.object.clone(),
                     difference.difference.clone(),
                 )
@@ -913,13 +1026,13 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
             .collect();
         listed_lines(out, &rows, report.differences_not_listed, "differences");
     }
-    let failures: Vec<(u64, String, String)> = report
+    let failures: Vec<(String, String, String)> = report
         .errors
         .iter()
         .chain(report.error.iter())
         .map(|error| {
             (
-                error.line,
+                place(report, error.script, error.line),
                 error.statement.clone(),
                 error.error.message().to_owned(),
             )
@@ -968,21 +1081,31 @@ fn ignored_lines(out: &mut Output<'_>, report: &RestoreReport, dialect: Dialect)
     for (kind, count) in &ignored.other {
         lines.push((kind.clone(), statements(*count)));
     }
-    let mut commands: Vec<(&str, Vec<u64>, &str)> = Vec::new();
+    let mut commands: Vec<(&str, u32, Vec<u64>, &str)> = Vec::new();
     for note in &ignored.meta_commands {
-        match commands
-            .iter_mut()
-            .find(|(command, _, reason)| *command == note.command && *reason == note.reason)
-        {
-            Some((_, lines, _)) => lines.push(note.line),
-            None => commands.push((note.command.as_str(), vec![note.line], note.reason.as_str())),
+        match commands.iter_mut().find(|(command, script, _, reason)| {
+            *command == note.command && *script == note.script && *reason == note.reason
+        }) {
+            Some((_, _, lines, _)) => lines.push(note.line),
+            None => commands.push((
+                note.command.as_str(),
+                note.script,
+                vec![note.line],
+                note.reason.as_str(),
+            )),
         }
     }
-    for (command, numbers, reason) in commands {
+    for (command, script, numbers, reason) in commands {
         let shown: Vec<String> = numbers.iter().take(10).map(|n| render::count(*n)).collect();
         let more = if numbers.len() > 10 { ", …" } else { "" };
+        let in_script = usize::try_from(script)
+            .ok()
+            .filter(|&index| index > 0)
+            .and_then(|index| report.scripts.get(index))
+            .map(|name| format!("{} ", render::text(name.as_bytes())))
+            .unwrap_or_default();
         let where_ = format!(
-            "{} {}{more}",
+            "{in_script}{} {}{more}",
             if numbers.len() == 1 { "line" } else { "lines" },
             shown.join(", ")
         );

@@ -13,7 +13,7 @@ pub(crate) enum ScriptEncoding {
 }
 
 pub(crate) struct DecodedLines<'r> {
-    input: &'r mut dyn BufRead,
+    input: Box<dyn BufRead + 'r>,
     encoding: Option<ScriptEncoding>,
     pending: Vec<u8>,
     pending_at: usize,
@@ -24,10 +24,14 @@ pub(crate) struct DecodedLines<'r> {
 
 impl<'r> DecodedLines<'r> {
     pub(crate) fn new(input: &'r mut dyn BufRead) -> Self {
+        Self::owning(Box::new(input))
+    }
+
+    pub(crate) fn owning(input: Box<dyn BufRead + 'r>) -> Self {
         Self::with_max_line(input, MAX_LINE_BYTES)
     }
 
-    pub(crate) fn with_max_line(input: &'r mut dyn BufRead, max_line: usize) -> Self {
+    pub(crate) fn with_max_line(input: Box<dyn BufRead + 'r>, max_line: usize) -> Self {
         Self {
             input,
             encoding: None,

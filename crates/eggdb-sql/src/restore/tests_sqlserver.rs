@@ -63,7 +63,10 @@ fn restore(store: &MemoryStore, script: &[u8], keep_going: bool) -> RestoreRepor
     let report = restore_dump(
         &mut session,
         &mut input,
-        RestoreOptions { keep_going },
+        RestoreOptions {
+            keep_going,
+            ..RestoreOptions::default()
+        },
         &mut |_| {},
     );
     assert_eq!(session.close(), Ok(false));
