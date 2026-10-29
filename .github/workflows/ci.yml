@@ -385,11 +385,21 @@ jobs:
         run: |
           docker run -d --name pg --network host -e POSTGRES_USER=eggdb -e POSTGRES_PASSWORD=apps-oracle \
             -e POSTGRES_DB=eggdb -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" postgres:17
-      - name: Install pgjdbc, psycopg 3 and SQLAlchemy (test clients only, never shipped)
+      - name: Install pgjdbc, psycopg 3, SQLAlchemy and Flyway Community (Apache-2.0) with its jackson jars (test clients only, never shipped)
         run: |
-          mkdir -p "$RUNNER_TEMP/clients"
-          curl -fsSL -o "$RUNNER_TEMP/clients/postgresql.jar" \
+          mkdir -p "$RUNNER_TEMP/clients/flyway"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/clients/postgresql.jar" \
             https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar
+          for jar in \
+            org/flywaydb/flyway-core/10.20.1/flyway-core-10.20.1.jar \
+            org/flywaydb/flyway-database-postgresql/10.20.1/flyway-database-postgresql-10.20.1.jar \
+            com/fasterxml/jackson/dataformat/jackson-dataformat-toml/2.15.2/jackson-dataformat-toml-2.15.2.jar \
+            com/fasterxml/jackson/datatype/jackson-datatype-jsr310/2.15.2/jackson-datatype-jsr310-2.15.2.jar \
+            com/fasterxml/jackson/core/jackson-databind/2.15.2/jackson-databind-2.15.2.jar \
+            com/fasterxml/jackson/core/jackson-core/2.15.2/jackson-core-2.15.2.jar \
+            com/fasterxml/jackson/core/jackson-annotations/2.15.2/jackson-annotations-2.15.2.jar; do
+            curl --retry 3 -fsSL -o "$RUNNER_TEMP/clients/flyway/$(basename "$jar")" "https://repo1.maven.org/maven2/$jar"
+          done
           python3 -m venv "$RUNNER_TEMP/clients/venv"
           "$RUNNER_TEMP/clients/venv/bin/pip" install --quiet "psycopg[binary]==3.2.3" "SQLAlchemy==2.0.36"
       - name: Build eggdb
@@ -401,7 +411,7 @@ jobs:
             sleep 1
           done
           docker exec pg pg_isready -h 127.0.0.1 -U eggdb
-      - name: Run pgjdbc, psycopg 3, SQLAlchemy Core and Npgsql (PostgreSQL License; restored from NuGet, never shipped) on PostgreSQL 17 and on EggDB and compare the bytes
+      - name: Run pgjdbc, psycopg 3, SQLAlchemy Core and ORM, Npgsql (PostgreSQL License; restored from NuGet, never shipped) and Flyway on PostgreSQL 17 and on EggDB and compare the bytes
         env:
           PG_CONTAINER: pg
           PGHOST: 127.0.0.1
@@ -410,7 +420,9 @@ jobs:
           PGPASSWORD: apps-oracle
           PGJDBC_JAR: ${{ runner.temp }}/clients/postgresql.jar
           PYTHON: ${{ runner.temp }}/clients/venv/bin/python
-        run: scripts/pg-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-apps"
+        run: |
+          FLYWAY_CLASSPATH="$PGJDBC_JAR$(printf ':%s' "$RUNNER_TEMP"/clients/flyway/*.jar)" \
+            scripts/pg-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-apps"
       - name: Keep both outputs and any difference
         if: always()
         uses: actions/upload-artifact@v7
@@ -419,6 +431,7 @@ jobs:
           overwrite: true
           path: |
             ${{ runner.temp }}/pg-apps/*.out
+            ${{ runner.temp }}/pg-apps/*.flyway.err
             ${{ runner.temp }}/pg-apps/serve.err
             ${{ runner.temp }}/pg-apps/output.diff
             ${{ runner.temp }}/pg-apps/dotnet-build.log
@@ -441,7 +454,7 @@ jobs:
             ~/.cargo/git
             ~/.nuget/packages
             target
-          key: cargo-tds-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/TdsAppCheck/TdsAppCheck.csproj') }}
+          key: cargo-tds-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/TdsAppCheck/TdsAppCheck.csproj', 'crates/eggdb/tests/clients/dotnet/EfCoreAppCheck/EfCoreAppCheck.csproj') }}
       - name: Download mssql-jdbc (MIT; test client only, never shipped)
         run: |
           mkdir -p "$RUNNER_TEMP/clients"
@@ -449,7 +462,7 @@ jobs:
             https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.8.1.jre11/mssql-jdbc-12.8.1.jre11.jar
       - name: Build eggdb
         run: cargo build -p eggdb
-      - name: Run mssql-jdbc and Microsoft.Data.SqlClient (MIT; restored from NuGet, never shipped) against eggdb serve --tds-listen
+      - name: Run mssql-jdbc, Microsoft.Data.SqlClient and EF Core (MIT; restored from NuGet, never shipped) against eggdb serve --tds-listen
         env:
           MSSQL_JDBC_JAR: ${{ runner.temp }}/clients/mssql-jdbc.jar
         run: scripts/tds-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/tds-apps"

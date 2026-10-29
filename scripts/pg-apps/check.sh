@@ -7,17 +7,23 @@ Fills a database of a running PostgreSQL server with scripts/pg-catalog/fixture.
 pg_dump into EggDB with eggdb restore and serves it with eggdb serve. Then runs the same client
 programs against both servers: crates/eggdb/tests/clients/java/AppCheck.java through pgjdbc
 (CRUD, prepared statements, a transaction and DatabaseMetaData),
-crates/eggdb/tests/clients/python/app_check.py through psycopg 3 and SQLAlchemy Core (CRUD and
-MetaData.reflect()) and crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck through Npgsql (type
+crates/eggdb/tests/clients/python/app_check.py through psycopg 3 and SQLAlchemy (CRUD,
+MetaData.reflect() and an ORM app: create_all, a session's inserts, queries, updates, a rollback
+and cascading deletes) and crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck through Npgsql (type
 loading, CRUD over pooled connections, transactions, a batch, a batch that fails half way and a
-cancelled query). Fails unless each program prints the same bytes on both servers.
+cancelled query). Then runs crates/eggdb/tests/clients/java/FlywayCheck.java through Flyway's
+Java API (migrate, info, validate and a later pending migration from
+crates/eggdb/tests/clients/java/flyway/) against a new, empty database on each server, with
+Flyway's session-level advisory lock (flyway.postgresql.transactional.lock=false). Fails unless
+each program prints the same bytes on both servers.
 
 PostgreSQL's tools run inside the docker container named by PG_CONTAINER, or from PG_BIN (a
 directory), or from PATH; PGHOST, PGPORT, PGUSER and PGPASSWORD reach the server. PGJDBC_JAR names
-the pgjdbc jar, JAVA the java launcher (default java) and PYTHON a python with psycopg and
-SQLAlchemy installed (default python3) and DOTNET the dotnet command (default dotnet), whose SDK
-restores Npgsql from NuGet. DATABASE names the database on both servers (default
-eggdb_apps); it is dropped and created again."
+the pgjdbc jar, FLYWAY_CLASSPATH the class path of Flyway's jars and pgjdbc, JAVA the java
+launcher (default java) and PYTHON a python with psycopg and SQLAlchemy installed (default
+python3) and DOTNET the dotnet command (default dotnet), whose SDK restores Npgsql from NuGet.
+DATABASE names the database on both servers (default eggdb_apps) and FLYWAY_DATABASE Flyway's
+(default eggdb_flyway); both are dropped and created again."
 
 [ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
 eggdb=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -31,6 +37,8 @@ java=${JAVA:-java}
 python=${PYTHON:-python3}
 dotnet=${DOTNET:-dotnet}
 : "${PGJDBC_JAR:?PGJDBC_JAR must name the pgjdbc jar}"
+: "${FLYWAY_CLASSPATH:?FLYWAY_CLASSPATH must hold Flyway's jars and pgjdbc}"
+flyway_database=${FLYWAY_DATABASE:-eggdb_flyway}
 : "${PGHOST:?PGHOST must reach PostgreSQL}"
 : "${PGUSER:?PGUSER must name a PostgreSQL superuser}"
 export PGTZ=UTC PGCLIENTENCODING=UTF8
@@ -54,7 +62,9 @@ fail() {
 }
 
 PGDATABASE=postgres pg psql -X -v ON_ERROR_STOP=1 -q -c "DROP DATABASE IF EXISTS $database" \
-  -c "CREATE DATABASE $database TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
+  -c "CREATE DATABASE $database TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'" \
+  -c "DROP DATABASE IF EXISTS $flyway_database" \
+  -c "CREATE DATABASE $flyway_database TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
 PGDATABASE=$database pg psql -X -v ON_ERROR_STOP=1 -q -f - < "$here/../pg-catalog/fixture.sql" > /dev/null
 PGDATABASE=$database pg pg_dump > "$work/dump.sql"
 version=$(PGDATABASE=$database pg psql -X -At -c 'SHOW server_version')
@@ -68,16 +78,29 @@ rm -f "$work/apps.db"
 
 eggdb_password=apps-secret
 printf '%s\n' "$eggdb_password" > "$work/password.txt"
-"$eggdb" serve "$work/apps.db" --listen 127.0.0.1:0 --password-file "$work/password.txt" \
-  --database "$database" > "$work/serve.out" 2> "$work/serve.err" &
-server=$!
-trap 'kill "$server" 2> /dev/null || true' EXIT
-for _ in $(seq 1 100); do
-  [ -s "$work/serve.out" ] && break
-  sleep 0.1
-done
-eggdb_port=$(sed -n 's/.*"port":\([0-9]*\).*/\1/p' "$work/serve.out" | head -n 1)
-[ -n "$eggdb_port" ] || fail "eggdb serve printed no port: $(cat "$work/serve.out") $(cat "$work/serve.err")"
+: > "$work/serve.err"
+
+serve() {
+  local file=$1 name=$2
+  "$eggdb" serve "$file" --listen 127.0.0.1:0 --password-file "$work/password.txt" \
+    --database "$name" > "$work/serve-$name.out" 2>> "$work/serve.err" &
+  server=$!
+  trap 'kill "$server" 2> /dev/null || true' EXIT
+  for _ in $(seq 1 100); do
+    [ -s "$work/serve-$name.out" ] && break
+    sleep 0.1
+  done
+  eggdb_port=$(sed -n 's/.*"port":\([0-9]*\).*/\1/p' "$work/serve-$name.out" | head -n 1)
+  [ -n "$eggdb_port" ] || fail "eggdb serve printed no port: $(cat "$work/serve-$name.out") $(cat "$work/serve.err")"
+}
+
+stop() {
+  kill -TERM "$server"
+  wait "$server" || fail "eggdb serve exited badly: $(cat "$work/serve.err")"
+  trap - EXIT
+}
+
+serve "$work/apps.db" "$database"
 
 run_java() {
   local port=$1 user=$2 password=$3
@@ -104,14 +127,25 @@ run_python "$pg_port" "$PGUSER" "$pg_password" > "$work/postgres.python.out" || 
 run_python "$eggdb_port" eggdb "$eggdb_password" > "$work/eggdb.python.out" || true
 run_dotnet "$pg_port" "$PGUSER" "$pg_password" > "$work/postgres.dotnet.out" || true
 run_dotnet "$eggdb_port" eggdb "$eggdb_password" > "$work/eggdb.dotnet.out" || true
+stop
 
-kill -TERM "$server"
-wait "$server" || fail "eggdb serve exited badly: $(cat "$work/serve.err")"
-trap - EXIT
+run_flyway() {
+  local port=$1 user=$2 password=$3 server_name=$4
+  "$java" -Duser.timezone=UTC -cp "$FLYWAY_CLASSPATH" "$clients/java/FlywayCheck.java" \
+    "jdbc:postgresql://$PGHOST:$port/$flyway_database" "$user" "$password" "$clients/java/flyway" session-lock \
+    2> "$work/$server_name.flyway.err"
+}
+
+rm -f "$work/flyway.db"
+"$eggdb" create "$work/flyway.db" > /dev/null || fail "eggdb create failed"
+serve "$work/flyway.db" "$flyway_database"
+run_flyway "$pg_port" "$PGUSER" "$pg_password" postgres > "$work/postgres.flyway.out" || true
+run_flyway "$eggdb_port" eggdb "$eggdb_password" eggdb > "$work/eggdb.flyway.out" || true
+stop
 
 : > "$work/output.diff"
 different=""
-for program in java python dotnet; do
+for program in java python dotnet flyway; do
   if ! cmp -s "$work/postgres.$program.out" "$work/eggdb.$program.out"; then
     diff -u "$work/postgres.$program.out" "$work/eggdb.$program.out" >> "$work/output.diff" || true
     different="$different $program"
@@ -121,4 +155,4 @@ if [ -n "$different" ]; then
   head -n 120 "$work/output.diff" >&2
   fail "the$different client programs printed different bytes on EggDB (whole diff in $work/output.diff)"
 fi
-echo "pg-apps check passed: pgjdbc, psycopg 3, SQLAlchemy Core and Npgsql print the same bytes on PostgreSQL $version and EggDB"
+echo "pg-apps check passed: pgjdbc, psycopg 3, SQLAlchemy Core and its ORM, Npgsql and Flyway print the same bytes on PostgreSQL $version and EggDB"

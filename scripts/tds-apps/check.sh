@@ -18,13 +18,18 @@ metadata mode (SqlConnection.GetSchema). Last, loads the committed bcp character
 crates/eggdb/tests/data/sqlserver/bcp/items.dat (bcp ... out -c; bcp itself is not run here,
 its license keeps it out of CI) into a third database twice: with eggdb import --dialect
 sqlserver, and with SqlBulkCopy in the .NET program's bulk mode, which compares both tables'
-rows with the file. Fails unless each program prints exactly scripts/tds-apps/expected-java.out,
-expected-dotnet.out, expected-logic-dotnet.out, expected-metadata-java.out,
-expected-metadata-dotnet.out and expected-bulk-dotnet.out, written from Microsoft's
-documentation of SQL Server's behavior.
+rows with the file. Then serves a fourth, new database to the EF Core app
+crates/eggdb/tests/clients/dotnet/EfCoreAppCheck: its migrations applied with
+Database.Migrate(), SaveChanges batches (MERGE ... OUTPUT for several inserts, UPDATE and DELETE
+with OUTPUT 1), LINQ queries (OFFSET ... FETCH, joins, EXISTS, GROUP BY, OPENJSON for Contains)
+and a rolled-back transaction with EF's save point. Fails unless each program prints exactly
+scripts/tds-apps/expected-java.out, expected-dotnet.out, expected-logic-dotnet.out,
+expected-metadata-java.out, expected-metadata-dotnet.out, expected-bulk-dotnet.out and
+expected-efcore-dotnet.out, written from Microsoft's documentation of SQL Server's behavior.
 
 MSSQL_JDBC_JAR names the mssql-jdbc jar, JAVA the java launcher (default java) and DOTNET the
-dotnet command (default dotnet), whose SDK restores Microsoft.Data.SqlClient from NuGet."
+dotnet command (default dotnet), whose SDK restores Microsoft.Data.SqlClient and EF Core from
+NuGet."
 
 [ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
 eggdb=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -48,6 +53,8 @@ fail() {
 echo "$("$java" -version 2>&1 | head -n 1); .NET SDK $("$dotnet" --version)"
 "$dotnet" build "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" > "$work/dotnet-build.log" 2>&1 ||
   fail "the .NET program did not build: $(tail -n 40 "$work/dotnet-build.log")"
+"$dotnet" build "$clients/dotnet/EfCoreAppCheck" -c Release --artifacts-path "$work/dotnet" >> "$work/dotnet-build.log" 2>&1 ||
+  fail "the EF Core program did not build: $(tail -n 40 "$work/dotnet-build.log")"
 
 password=apps-secret
 printf '%s\n' "$password" > "$work/password.txt"
@@ -74,7 +81,7 @@ stop() {
 }
 
 : > "$work/serve.err"
-rm -f "$work/apps.db" "$work/shop.db" "$work/bulk.db"
+rm -f "$work/apps.db" "$work/shop.db" "$work/bulk.db" "$work/efcore.db"
 "$eggdb" create "$work/apps.db" > /dev/null || fail "eggdb create failed"
 serve apps apps
 "$java" -cp "$MSSQL_JDBC_JAR" "$clients/java/TdsAppCheck.java" \
@@ -109,9 +116,16 @@ serve bulk bulk
   > "$work/bulk-dotnet.out" 2>&1 || true
 stop
 
+"$eggdb" create "$work/efcore.db" > /dev/null || fail "eggdb create failed"
+serve efcore efcore
+"$dotnet" run --no-build --project "$clients/dotnet/EfCoreAppCheck" -c Release --artifacts-path "$work/dotnet" -- \
+  "Server=127.0.0.1,$port;Database=efcore;User ID=eggdb;Password=$password;Encrypt=false;Connect Timeout=10" \
+  > "$work/efcore-dotnet.out" 2>&1 || true
+stop
+
 : > "$work/output.diff"
 different=""
-for program in java dotnet logic-dotnet metadata-java metadata-dotnet bulk-dotnet; do
+for program in java dotnet logic-dotnet metadata-java metadata-dotnet bulk-dotnet efcore-dotnet; do
   if ! cmp -s "$here/expected-$program.out" "$work/$program.out"; then
     diff -u "$here/expected-$program.out" "$work/$program.out" >> "$work/output.diff" || true
     different="$different $program"
@@ -122,4 +136,4 @@ if [ -n "$different" ]; then
   tail -n 40 "$work/serve.err" >&2
   fail "the$different client programs printed something else on EggDB (whole diff in $work/output.diff)"
 fi
-echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD, transactions and Transact-SQL batch logic, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import on EggDB"
+echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD, transactions and Transact-SQL batch logic, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import, and an EF Core app migrates, saves and queries on EggDB"

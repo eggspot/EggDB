@@ -1,0 +1,51 @@
+== migrate
+applied 20261029000001_CreateBlogs
+applied 20261029000002_AddPosts
+== migrate again
+pending 0
+== insert
+saved 8
+blog|1|Kitchen
+post|1|1|Bread basics
+post|2|1|Egg timing
+post|3|1|Pie crust
+post|4|1|Tart shells
+post|5|1|Scone glaze
+blog|2|Garden
+post|6|2|Herb pots
+== query
+page|3|Pie crust|2024-01-04 10:15:00|Kitchen
+page|4|Tart shells|2024-01-04 10:15:00|Kitchen
+count 3
+any Garden 1
+any Attic 0
+first|1|Kitchen|https://example.com/kitchen|5
+first post|1|Bread basics|5|2024-01-05 08:00:00|12.50
+first post|2|Egg timing|2|2024-01-03 09:30:00|0.35
+first post|3|Pie crust|4|2024-01-04 10:15:00|7.25
+first post|4|Tart shells|3|2024-01-04 10:15:00|4.20
+first post|5|Scone glaze|1|2024-01-06 07:45:00|2.00
+missing none
+group|1|5|26.30
+group|2|1|15.00
+chosen Bread basics,Pie crust,Scone glaze
+== update
+saved 3
+post|1|1|Bread basics|5|2024-01-05 08:00:00|12.50
+post|2|1|Egg timing|4|2024-01-03 09:30:00|0.35
+post|3|1|Pie crust|4|2024-01-04 10:15:00|7.25
+post|4|1|Tart shells|3|2024-01-04 10:15:00|4.20
+post|5|1|Scone glaze|1|2024-01-06 07:45:00|2.50
+post|6|2|Herb pots|4|2024-01-02 06:00:00|15.00
+blog|1|Kitchen|https://example.com/kitchen
+blog|2|Garden|https://example.com/garden
+== delete
+saved 2
+post|1|1|Bread basics|5|2024-01-05 08:00:00|12.50
+post|2|1|Egg timing|4|2024-01-03 09:30:00|0.35
+post|3|1|Pie crust|4|2024-01-04 10:15:00|7.25
+post|6|2|Herb pots|4|2024-01-02 06:00:00|15.00
+== transaction
+saved 1
+inside 5
+after 4
