@@ -1,0 +1,20 @@
+== tables
+shop|dbo|customers|BASE TABLE
+shop|sales|orders|BASE TABLE
+== columns of dbo.customers
+id|1|NO|int|NULL|10|0|NULL
+name|2|NO|nvarchar|100|NULL|NULL|NULL
+email|3|YES|nvarchar|200|NULL|NULL|NULL
+active|4|NO|bit|NULL|NULL|NULL|((1))
+== columns of sales.orders
+id|1|NO|bigint|NULL|19|0|NULL
+customerid|2|NO|int|NULL|10|0|NULL
+total|3|NO|decimal|NULL|10|2|NULL
+== indexes of sales.orders
+sales|orders|ix_orders_customer|NONCLUSTERED
+sales|orders|pk_orders|CLUSTERED
+== index columns of sales.orders
+ix_orders_customer|customerid|1|56
+pk_orders|id|1|127
+== foreign keys
+sales|fk_orders_customers|sales|orders|FOREIGN KEY|NO|NO

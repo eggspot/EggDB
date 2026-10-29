@@ -8,9 +8,13 @@ internal static class TdsAppCheck
 {
     private static int Main(string[] arguments)
     {
+        if (arguments.Length == 2 && arguments[1] == "metadata")
+        {
+            return TdsMetadataCheck.Run(arguments[0]);
+        }
         if (arguments.Length != 1)
         {
-            Console.Error.WriteLine("usage: dotnet run --project TdsAppCheck -- <connection string>");
+            Console.Error.WriteLine("usage: dotnet run --project TdsAppCheck -- <connection string> [metadata]");
             return 2;
         }
         var connectionString = arguments[0];

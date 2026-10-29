@@ -9,8 +9,12 @@ crates/eggdb/tests/clients/java/TdsAppCheck.java through mssql-jdbc and
 crates/eggdb/tests/clients/dotnet/TdsAppCheck through Microsoft.Data.SqlClient. Each runs
 parameterized CRUD (sp_executesql, sp_prepexec and sp_execute), a committed and a rolled-back
 transaction and a failing query; the .NET program also reuses a pooled connection, which resets
-it. Fails unless each program prints exactly scripts/tds-apps/expected-java.out and
-expected-dotnet.out, written from Microsoft's documentation of SQL Server's behavior.
+it. Then restores the sqlpackage fixture crates/eggdb/tests/data/sqlserver/shop-sqlpackage.sql
+into a second database and lists it through each driver's metadata calls:
+crates/eggdb/tests/clients/java/TdsMetadataCheck.java (DatabaseMetaData) and the .NET program's
+metadata mode (SqlConnection.GetSchema). Fails unless each program prints exactly
+scripts/tds-apps/expected-java.out, expected-dotnet.out, expected-metadata-java.out and
+expected-metadata-dotnet.out, written from Microsoft's documentation of SQL Server's behavior.
 
 MSSQL_JDBC_JAR names the mssql-jdbc jar, JAVA the java launcher (default java) and DOTNET the
 dotnet command (default dotnet), whose SDK restores Microsoft.Data.SqlClient from NuGet."
@@ -20,6 +24,7 @@ eggdb=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 work=$2
 here=$(cd "$(dirname "$0")" && pwd)
 clients=$(cd "$here/../../crates/eggdb/tests/clients" && pwd)
+fixture=$(cd "$here/../../crates/eggdb/tests/data/sqlserver" && pwd)/shop-sqlpackage.sql
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
 java=${JAVA:-java}
@@ -36,34 +41,56 @@ echo "$("$java" -version 2>&1 | head -n 1); .NET SDK $("$dotnet" --version)"
 "$dotnet" build "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" > "$work/dotnet-build.log" 2>&1 ||
   fail "the .NET program did not build: $(tail -n 40 "$work/dotnet-build.log")"
 
-rm -f "$work/apps.db"
 password=apps-secret
 printf '%s\n' "$password" > "$work/password.txt"
-"$eggdb" serve "$work/apps.db" --create --listen 127.0.0.1:0 --tds-listen 127.0.0.1:0 \
-  --password-file "$work/password.txt" --database apps --log-batches > "$work/serve.out" 2> "$work/serve.err" &
-server=$!
-trap 'kill "$server" 2> /dev/null || true' EXIT
-for _ in $(seq 1 100); do
-  [ -s "$work/serve.out" ] && break
-  sleep 0.1
-done
-port=$(sed -n 's/.*"tds_port":\([0-9]*\).*/\1/p' "$work/serve.out" | head -n 1)
-[ -n "$port" ] || fail "eggdb serve printed no TDS port: $(cat "$work/serve.out") $(cat "$work/serve.err")"
 
+serve() {
+  local database=$1 name=$2
+  "$eggdb" serve "$work/$name.db" --listen 127.0.0.1:0 --tds-listen 127.0.0.1:0 \
+    --password-file "$work/password.txt" --database "$database" --log-batches \
+    > "$work/serve-$name.out" 2>> "$work/serve.err" &
+  server=$!
+  trap 'kill "$server" 2> /dev/null || true' EXIT
+  for _ in $(seq 1 100); do
+    [ -s "$work/serve-$name.out" ] && break
+    sleep 0.1
+  done
+  port=$(sed -n 's/.*"tds_port":\([0-9]*\).*/\1/p' "$work/serve-$name.out" | head -n 1)
+  [ -n "$port" ] || fail "eggdb serve printed no TDS port: $(cat "$work/serve-$name.out") $(cat "$work/serve.err")"
+}
+
+stop() {
+  kill -TERM "$server"
+  wait "$server" || fail "eggdb serve exited badly: $(cat "$work/serve.err")"
+  trap - EXIT
+}
+
+: > "$work/serve.err"
+rm -f "$work/apps.db" "$work/shop.db"
+"$eggdb" create "$work/apps.db" > /dev/null || fail "eggdb create failed"
+serve apps apps
 "$java" -cp "$MSSQL_JDBC_JAR" "$clients/java/TdsAppCheck.java" \
   "jdbc:sqlserver://127.0.0.1:$port;databaseName=apps;encrypt=false;loginTimeout=10" eggdb "$password" \
   > "$work/java.out" 2>&1 || true
 "$dotnet" run --no-build --project "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" -- \
   "Server=127.0.0.1,$port;Database=apps;User ID=eggdb;Password=$password;Encrypt=false;Connect Timeout=10" \
   > "$work/dotnet.out" 2>&1 || true
+stop
 
-kill -TERM "$server"
-wait "$server" || fail "eggdb serve exited badly: $(cat "$work/serve.err")"
-trap - EXIT
+"$eggdb" restore --dialect sqlserver --create "$work/shop.db" "$fixture" > "$work/restore.out" 2>&1 ||
+  fail "the sqlpackage fixture did not restore: $(cat "$work/restore.out")"
+serve shop shop
+"$java" -cp "$MSSQL_JDBC_JAR" "$clients/java/TdsMetadataCheck.java" \
+  "jdbc:sqlserver://127.0.0.1:$port;databaseName=shop;encrypt=false;loginTimeout=10" eggdb "$password" \
+  > "$work/metadata-java.out" 2>&1 || true
+"$dotnet" run --no-build --project "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" -- \
+  "Server=127.0.0.1,$port;Database=shop;User ID=eggdb;Password=$password;Encrypt=false;Connect Timeout=10" metadata \
+  > "$work/metadata-dotnet.out" 2>&1 || true
+stop
 
 : > "$work/output.diff"
 different=""
-for program in java dotnet; do
+for program in java dotnet metadata-java metadata-dotnet; do
   if ! cmp -s "$here/expected-$program.out" "$work/$program.out"; then
     diff -u "$here/expected-$program.out" "$work/$program.out" >> "$work/output.diff" || true
     different="$different $program"
@@ -74,4 +101,4 @@ if [ -n "$different" ]; then
   tail -n 40 "$work/serve.err" >&2
   fail "the$different client programs printed something else on EggDB (whole diff in $work/output.diff)"
 fi
-echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD and transactions on EggDB"
+echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD and transactions and list the restored fixture's metadata on EggDB"
