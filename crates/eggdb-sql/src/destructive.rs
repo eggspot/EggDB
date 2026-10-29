@@ -179,7 +179,7 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         Statement::Merge(merge) => merge
             .update
             .as_ref()
-            .filter(|_| !filters_rows(Some(&merge.on), &merge.target))
+            .filter(|_| !names_target_qualified(&merge.on, &merge.target))
             .map(|update| {
                 let kind = if update.delete_condition.is_some() {
                     DestructiveKind::DeleteWithoutFilter
@@ -254,20 +254,27 @@ fn shown(name: &Name) -> String {
     name.text.replace(crate::schemas::QUALIFIER, ".")
 }
 
+fn qualifies_target(qualifier: &str, table: &TableReference) -> bool {
+    table
+        .alias
+        .as_deref()
+        .is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
+        || qualifier.eq_ignore_ascii_case(crate::schemas::base_name(&table.name.text))
+        || qualifier.eq_ignore_ascii_case(&shown(&table.name))
+}
+
 fn filters_rows(filter: Option<&Expr>, table: &TableReference) -> bool {
-    let base = crate::schemas::base_name(&table.name.text);
-    let names_target = |qualifier: Option<&str>| match qualifier {
-        None => true,
-        Some(qualifier) => {
-            table
-                .alias
-                .as_deref()
-                .is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
-                || qualifier.eq_ignore_ascii_case(base)
-                || qualifier.eq_ignore_ascii_case(&shown(&table.name))
-        }
+    let names_target = |qualifier: Option<&str>| {
+        qualifier.is_none_or(|qualifier| qualifies_target(qualifier, table))
     };
     filter.is_some_and(|filter| names_column(filter, &names_target))
+}
+
+fn names_target_qualified(condition: &Expr, table: &TableReference) -> bool {
+    let names_target = |qualifier: Option<&str>| {
+        qualifier.is_some_and(|qualifier| qualifies_target(qualifier, table))
+    };
+    names_column(condition, &names_target)
 }
 
 fn names_column(expr: &Expr, names_target: &dyn Fn(Option<&str>) -> bool) -> bool {
