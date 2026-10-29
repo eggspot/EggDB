@@ -3,17 +3,20 @@ use crate::expiry::Moment;
 use crate::options::Options;
 use crate::transaction::{ReadTransaction, WriteTransaction};
 use crate::writer_slot::WriterSlot;
-use eggdb_platform::{Clock, OsFile, OsFileSystem, OsMemory};
+use eggdb_platform::{Clock, FileSystem, OsFile, OsFileSystem, OsMemory};
 use eggdb_storage::{
-    Access, BTree, CacheSize, CommitStamp, CreateOptions, Features, FileId, NO_PAGE, PageCache,
-    PageFile, PageSize, StorageError, Store,
+    Access, BTree, CacheSize, CommitStamp, CopyDestination, CopyFailure, CreateOptions, Features,
+    FileId, NO_PAGE, PageCache, PageFile, PageSize, StorageError, Store,
 };
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const NANOS_PER_MICRO: u64 = 1_000;
+const BACKUP_STAGING_SUFFIX: &str = ".backing-up";
+const COMPACTION_STAGING_SUFFIX: &str = ".compacting";
 
 /// An EggDB database in one file, opened in this process: an ordered map from byte-string keys
 /// to byte-string values, with transactions.
@@ -146,6 +149,48 @@ pub struct CheckReport {
     /// log. They do no harm, but the file lost track of them and never reuses them; a healthy
     /// database has none.
     pub leaked_pages: u64,
+}
+
+/// What [`Database::backup_to`] wrote: a new database file holding one commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct BackupReport {
+    /// The stamp of the commit the copy holds: the last commit before the backup began.
+    pub stamp: CommitStamp,
+    /// The entries copied, counted as [`CheckReport::entries`] counts them: every key of the
+    /// default key space, of the collections and of SQL tables, with the records EggDB keeps
+    /// beside them, such as keys' deadlines.
+    pub entries: u64,
+    /// The bytes of every key copied.
+    pub key_bytes: u64,
+    /// The bytes of every value copied.
+    pub value_bytes: u64,
+    /// The copy's pages, as [`Stats::page_count`] counts them.
+    pub page_count: u64,
+    /// The copy's size: `page_count × page_size`.
+    pub file_bytes: u64,
+}
+
+/// What [`Database::compact`] did: the file before, and the compacted file that replaced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct CompactReport {
+    /// The stamp of the commit the compacted file holds: the file's last commit.
+    pub stamp: CommitStamp,
+    /// The entries the compacted file holds, counted as [`CheckReport::entries`] counts them.
+    pub entries: u64,
+    /// The file's pages before, as [`Stats::page_count`] counts them.
+    pub pages_before: u64,
+    /// The free pages it had, as [`Stats::free_pages`] counts them.
+    pub free_pages_before: u64,
+    /// The pages it had lost track of, as [`CheckReport::leaked_pages`] counts them.
+    pub leaked_pages_before: u64,
+    /// The compacted file's pages.
+    pub pages_after: u64,
+    /// The file's size before: `pages_before × page_size`.
+    pub bytes_before: u64,
+    /// The compacted file's size: `pages_after × page_size`.
+    pub bytes_after: u64,
 }
 
 impl Database {
@@ -434,6 +479,217 @@ impl Database {
         self.store.checkpoint().map_err(Error::storage)
     }
 
+    /// Writes a copy of the database's last commit to a new file at `path`, while readers and
+    /// the writer keep working: the backup reads one snapshot, as a read transaction does, so
+    /// commits made while it runs are not in the copy, and it never waits for them.
+    ///
+    /// The copy is rebuilt key by key, with every collection, SQL table and time to live, so
+    /// it holds no free or leaked pages and is often smaller than the file. It is built as
+    /// `<path>.backing-up` beside `path`, then synced and checked: its entries must be
+    /// exactly the snapshot's. Only then is it renamed to `path`, so a crash never leaves part
+    /// of a copy at `path`. After an error the `.backing-up` file is removed, except when
+    /// only the rename failed: then it is the complete copy, and the error says so. Its
+    /// commits stamp above the copied one, so keys that had expired stay expired.
+    ///
+    /// A file at `path` fails with [`ErrorKind::AlreadyExists`](crate::ErrorKind::AlreadyExists),
+    /// since a backup never replaces a file, and so does a `<path>.backing-up` left by a
+    /// backup that did not finish, which the backup leaves alone. A writer that changes more
+    /// pages than the snapshot memory holds while the backup runs makes it fail with
+    /// [`ErrorKind::SnapshotTooOld`](crate::ErrorKind::SnapshotTooOld) (see
+    /// [`Options::snapshot_memory_bytes`]). The backup takes a page cache of its own, 16 MiB
+    /// or the size of the largest value.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-backup-{}.db", std::process::id()));
+    /// # let copy = std::env::temp_dir().join(format!("eggdb-doc-backup-{}-copy.db", std::process::id()));
+    /// let db = eggdb::Database::open(&path)?;
+    /// db.put("k", "v")?;
+    /// let report = db.backup_to(&copy)?;
+    /// assert_eq!(report.entries, 1);
+    /// db.put("k", "w")?;
+    /// assert_eq!(eggdb::Database::open(&copy)?.get("k")?, Some(b"v".to_vec()));
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # std::fs::remove_file(&copy)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<BackupReport> {
+        let copy = path.as_ref();
+        let staging = staging_path(copy, BACKUP_STAGING_SUFFIX);
+        let snapshot = self.store.begin_read().map_err(Error::storage)?;
+        let destination = CopyDestination {
+            path: copy,
+            staging: &staging,
+            replaces: false,
+        };
+        let report = snapshot
+            .copy_to(
+                &OsFileSystem::new(),
+                &OsMemory::new(),
+                Arc::clone(&self.clock.0),
+                destination,
+            )
+            .map_err(|failure| self.backup_failure(failure, destination))?;
+        Ok(BackupReport {
+            stamp: report.stamp,
+            entries: report.entries,
+            key_bytes: report.key_bytes,
+            value_bytes: report.value_bytes,
+            page_count: report.page_count,
+            file_bytes: self.bytes_of(report.page_count),
+        })
+    }
+
+    /// Opens the database file at `path` read-only and compacts it (see
+    /// [`Database::compact`]), so programs reading the file keep working throughout.
+    pub fn compact_file(path: impl AsRef<Path>) -> Result<CompactReport> {
+        let options = Options::new().read_only(true);
+        Self::open_with(path, options)?.compact()
+    }
+
+    /// Rewrites the database's file without free or leaked pages and puts the rewritten file
+    /// in its place atomically, then closes the database.
+    ///
+    /// The file is first checked as [`Database::check`] checks it, so a damaged file fails
+    /// with [`ErrorKind::Corrupt`](crate::ErrorKind::Corrupt) and is left as it is. Then it is
+    /// rebuilt key by key as [`Database::backup_to`] builds a copy, as `<path>.compacting`
+    /// beside it, synced and checked, and renamed over the file. A crash at any moment leaves
+    /// the old file or the compacted one, each whole; a `<path>.compacting` left by a crash
+    /// fails the next compaction with
+    /// [`ErrorKind::AlreadyExists`](crate::ErrorKind::AlreadyExists) until it is removed.
+    ///
+    /// Opened read-only, as [`Database::compact_file`] opens it, the database shares the file
+    /// with programs reading it, which keep reading the file they opened until they open it
+    /// again; a program that has it open for writing makes the open fail with
+    /// [`ErrorKind::Locked`](crate::ErrorKind::Locked). Opened for writing, nobody else has
+    /// the file, and taking the database by value ends its use, so no commit can go to the
+    /// file that was replaced.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-compact-{}.db", std::process::id()));
+    /// let db = eggdb::Database::open(&path)?;
+    /// db.write(|tx| {
+    ///     for i in 0..2000 {
+    ///         tx.put(format!("key{i:04}"), [7u8; 100])?;
+    ///     }
+    ///     Ok(())
+    /// })?;
+    /// db.write(|tx| {
+    ///     for i in 10..2000 {
+    ///         tx.delete(format!("key{i:04}"))?;
+    ///     }
+    ///     Ok(())
+    /// })?;
+    /// let report = db.compact()?;
+    /// assert!(report.pages_after < report.pages_before);
+    /// assert_eq!(eggdb::Database::open(&path)?.get("key0003")?, Some(vec![7u8; 100]));
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn compact(self) -> Result<CompactReport> {
+        let staging = staging_path(&self.path, COMPACTION_STAGING_SUFFIX);
+        let before = self.store.superblock().map_err(Error::storage)?;
+        let checked = self
+            .store
+            .check()
+            .map_err(|error| self.compaction_check_failure(error))?;
+        let snapshot = self.store.begin_read().map_err(Error::storage)?;
+        let destination = CopyDestination {
+            path: &self.path,
+            staging: &staging,
+            replaces: true,
+        };
+        let report = snapshot
+            .copy_to(
+                &OsFileSystem::new(),
+                &OsMemory::new(),
+                Arc::clone(&self.clock.0),
+                destination,
+            )
+            .map_err(|failure| self.compaction_failure(failure, destination))?;
+        drop(snapshot);
+        Ok(CompactReport {
+            stamp: report.stamp,
+            entries: report.entries,
+            pages_before: before.page_count,
+            free_pages_before: checked.free_pages,
+            leaked_pages_before: checked.leaked_pages,
+            pages_after: report.page_count,
+            bytes_before: self.bytes_of(before.page_count),
+            bytes_after: self.bytes_of(report.page_count),
+        })
+    }
+
+    fn backup_failure(&self, failure: CopyFailure, destination: CopyDestination<'_>) -> Error {
+        let file = self.path.display();
+        let copy = destination.path.display();
+        let staging = destination.staging.display();
+        match failure {
+            CopyFailure::NotCopied(error) if is_already_exists(&error) => {
+                let message = if staging_exists(destination) {
+                    format!(
+                        "cannot back up {file} to {copy}: {staging} exists, left by a backup that did not finish or one still running. Remove it and back up again."
+                    )
+                } else {
+                    format!(
+                        "cannot back up {file} to {copy}: {copy} already exists, and a backup never replaces a file. Choose another name, or remove it first."
+                    )
+                };
+                Error::storage(error).explained(message)
+            }
+            CopyFailure::NotCopied(error) => {
+                let message = format!(
+                    "cannot back up {file} to {copy}: {error}. Nothing is left behind: {copy} does not exist and {staging} was removed."
+                );
+                Error::storage(error).explained(message)
+            }
+            CopyFailure::NotRenamed(error) => {
+                let message = format!(
+                    "cannot rename {staging} to {copy}: {error}. The copy is complete and verified; rename it yourself."
+                );
+                Error::storage(error).explained(message)
+            }
+            CopyFailure::RenameNotDurable(error) => {
+                let message = format!(
+                    "backed up {file} to {copy}, but cannot sync its directory, so a power loss could still undo the rename: {error}"
+                );
+                Error::storage(error).explained(message)
+            }
+        }
+    }
+
+    fn compaction_check_failure(&self, error: StorageError) -> Error {
+        let file = self.path.display();
+        let message = format!("cannot compact {file}: {error}. {file} is unchanged.");
+        Error::storage(error).explained(message)
+    }
+
+    fn compaction_failure(&self, failure: CopyFailure, destination: CopyDestination<'_>) -> Error {
+        let file = self.path.display();
+        let staging = destination.staging.display();
+        let message = match &failure {
+            CopyFailure::NotCopied(error) if is_already_exists(error) => format!(
+                "cannot compact {file}: {staging} exists, left by a compaction that did not finish or one still running. Remove it and compact again."
+            ),
+            CopyFailure::NotCopied(error) => format!(
+                "cannot compact {file}: {error}. {file} is unchanged and {staging} was removed."
+            ),
+            CopyFailure::NotRenamed(error) => format!(
+                "cannot rename {staging} over {file}: {error}. {file} is unchanged; the compacted file is {staging}, complete and verified."
+            ),
+            CopyFailure::RenameNotDurable(error) => format!(
+                "compacted {file}, but cannot sync its directory, so a power loss could still undo the rename: {error}"
+            ),
+        };
+        Error::storage(failure.into_error()).explained(message)
+    }
+
+    fn bytes_of(&self, pages: u64) -> u64 {
+        pages.saturating_mul(self.page_size.bytes() as u64)
+    }
+
     /// The path the database was opened at.
     pub fn path(&self) -> &Path {
         &self.path
@@ -555,6 +811,22 @@ fn explain_open_error(error: StorageError, options: &Options) -> Error {
     } else {
         "the file does not exist; open it with `Options::create_if_missing(true)` to create it"
     })
+}
+
+fn staging_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = OsString::from(path.as_os_str());
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn is_already_exists(error: &StorageError) -> bool {
+    matches!(error, StorageError::Io(io) if io.kind() == eggdb_platform::ErrorKind::AlreadyExists)
+}
+
+fn staging_exists(destination: CopyDestination<'_>) -> bool {
+    OsFileSystem::new()
+        .exists(destination.staging)
+        .unwrap_or(false)
 }
 
 fn is_kind<T>(

@@ -75,7 +75,7 @@ mod transaction;
 mod writer_slot;
 
 pub use collection::{Collection, ReadCollection, WriteCollection};
-pub use database::{CheckReport, Database, Stats};
+pub use database::{BackupReport, CheckReport, CompactReport, Database, Stats};
 pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;
 pub use error::{Error, ErrorKind, Result};

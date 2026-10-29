@@ -80,6 +80,11 @@ pub enum ErrorKind {
     /// The key starts with the bytes EggDB keeps for collections, `0xff 'C' 'O' 'L' 0x00`, which
     /// the default key space refuses. Nothing changed, and the transaction stays open.
     ReservedKey,
+    /// A file is already where a new one would go: a backup never replaces a file (see
+    /// [`Database::backup_to`](crate::Database::backup_to)), and the file a backup or a
+    /// compaction builds beside its destination is left by one that did not finish, or by
+    /// one still running.
+    AlreadyExists,
     /// The value is not a counter (see
     /// [`WriteTransaction::increment`](crate::WriteTransaction::increment)): not a decimal
     /// integer from `i64::MIN` to `i64::MAX`, or adding the step would take it out of that
@@ -158,6 +163,7 @@ fn kind_of(error: &StorageError) -> ErrorKind {
             eggdb_platform::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
             eggdb_platform::ErrorKind::Locked => ErrorKind::Locked,
             eggdb_platform::ErrorKind::OutOfMemory => ErrorKind::OutOfMemory,
+            eggdb_platform::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
             _ => ErrorKind::Io,
         },
         StorageError::Format(error) => kind_of_format(error),
@@ -236,6 +242,7 @@ impl From<Error> for std::io::Error {
                 std::io::ErrorKind::InvalidData
             }
             ErrorKind::CollectionNotFound => std::io::ErrorKind::NotFound,
+            ErrorKind::AlreadyExists => std::io::ErrorKind::AlreadyExists,
             ErrorKind::TooLarge
             | ErrorKind::InvalidOption
             | ErrorKind::InvalidCollectionName
