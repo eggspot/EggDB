@@ -4,13 +4,15 @@ mod restore;
 mod sqlite;
 pub(crate) mod sqlserver;
 
-pub use sqlserver::BatchStep;
+pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration};
 
 pub(crate) use oracle::create_text as oracle_create_text;
 
 pub(crate) use sqlite::create_text as sqlite_create_text;
 
-use crate::ast::{CopyDirection, CopySource, CopyStatement, MySqlStatement, Statement};
+use crate::ast::{
+    CopyDirection, CopySource, CopyStatement, MySqlStatement, SqlServerStatement, Statement,
+};
 use crate::copy::{CopyChannel, CopyIo, NoCopyChannel};
 use crate::destructive::DestructiveStatement;
 use crate::dialect::Dialect;
@@ -382,14 +384,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &self.settings.database
     }
 
-    /// Whether statements outside a `BEGIN` block commit on their own: always in PostgreSQL,
-    /// SQLite and SQL Server, in MySQL unless `SET autocommit = 0`, and never in Oracle, where
-    /// the first change starts a transaction that lasts until `COMMIT`, `ROLLBACK` or DDL.
+    /// Whether statements outside a `BEGIN` block commit on their own: always in PostgreSQL and
+    /// SQLite, in MySQL unless `SET autocommit = 0`, in SQL Server unless `SET
+    /// IMPLICIT_TRANSACTIONS ON` (then the first change, DDL included, starts a transaction
+    /// that lasts until `COMMIT` or `ROLLBACK`), and never in Oracle, where the first change
+    /// starts a transaction that lasts until `COMMIT`, `ROLLBACK` or DDL.
     pub fn autocommit(&self) -> bool {
         match self.dialect {
             Dialect::MySql => self.settings.mysql.autocommit(),
+            Dialect::SqlServer => !self.settings.sqlserver.implicit_transactions,
             Dialect::Oracle => false,
-            Dialect::PostgreSql | Dialect::Sqlite | Dialect::SqlServer => true,
+            Dialect::PostgreSql | Dialect::Sqlite => true,
         }
     }
 
@@ -1340,6 +1345,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Statement::Begin { .. } => return self.sqlserver_begin(),
                 Statement::Commit => return self.sqlserver_commit(),
                 Statement::Rollback => return self.sqlserver_rollback(),
+                Statement::SqlServer(SqlServerStatement::If {
+                    condition,
+                    then,
+                    otherwise,
+                }) => {
+                    let chosen = if self.sqlserver_condition_holds(condition)? {
+                        Some(then)
+                    } else {
+                        otherwise.as_mut()
+                    };
+                    return match chosen {
+                        Some(chosen) => self.run(chosen, io),
+                        None => Ok(QueryResult::command("IF")),
+                    };
+                }
                 Statement::SqlServer(statement) => return self.run_sqlserver(statement),
                 _ => {}
             }
@@ -1660,6 +1680,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Ok(result)
         };
         let keep_open = !self.autocommit();
+        let keeps_ddl_open = self.sqlserver();
         let tables = &mut self.tables;
         match &mut self.block {
             Block::Writing(writer) if self.dialect != Dialect::PostgreSql => {
@@ -1687,8 +1708,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 match body(&mut writer, tables) {
                     Ok(result)
                         if keep_open
-                            && !matches!(
-                                command,
+                            && (keeps_ddl_open
+                                || !matches!(
+                                    command,
                                 "CREATE TABLE"
                                     | "DROP TABLE"
                                     | "TRUNCATE TABLE"
@@ -1705,7 +1727,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                                     | "DROP VIEW"
                                     | "ALTER VIEW"
                                     | "COMMENT"
-                            ) =>
+                                )) =>
                     {
                         self.block = Block::Writing(writer);
                         Ok(result)

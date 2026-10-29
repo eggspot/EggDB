@@ -104,7 +104,16 @@ pub(crate) struct MergeInsert {
 pub(crate) enum SqlServerStatement {
     Use(Name),
     NoCount(bool),
-    IdentityInsert { table: Name, on: bool },
+    ImplicitTransactions(bool),
+    IdentityInsert {
+        table: Name,
+        on: bool,
+    },
+    If {
+        condition: Expr,
+        then: Box<Statement>,
+        otherwise: Option<Box<Statement>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

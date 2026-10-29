@@ -141,8 +141,9 @@ pub use restore::{
 };
 pub use schema::{ColumnSchema, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted};
 pub use session::{
-    BatchStep, OneStatementError, OneStatementRefusal, OutputColumn, Parameter, PreparedStatement,
-    QueryResult, Session, StatementDescription, TransactionStatus,
+    BatchStep, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn, Parameter,
+    ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
+    TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;

@@ -1,11 +1,13 @@
-use super::Parser;
+use super::{Parameters, Parser};
 use crate::ast::{
     ColumnDefinition, Expr, ExprKind, Literal, Name, Query, SetExpr, SqlServerStatement, Statement,
     TableReference,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope};
-use crate::lexer::TokenKind;
+use crate::dialect::Dialect;
+use crate::lexer::{TokenKind, tokenize_in};
+use crate::session::sqlserver::ParameterDeclaration;
 use crate::settings::Settings;
 use crate::sqlserver_functions::Function;
 use crate::sqlserver_types::{
@@ -239,10 +241,9 @@ const STATEMENT_WORDS: [&str; 29] = [
     "with",
 ];
 
-const NOT_SUPPORTED_STATEMENTS: [&str; 22] = [
+const NOT_SUPPORTED_STATEMENTS: [&str; 21] = [
     "declare",
     "print",
-    "if",
     "while",
     "exec",
     "execute",
@@ -545,6 +546,7 @@ impl<'t> Parser<'t> {
                 }
             }
             "save" => return Err(not_supported("SAVE TRANSACTION").at(position)),
+            "if" => self.sqlserver_if()?,
             "create" | "alter"
                 if self.is_word_at(1, "view")
                     || (self.is_word_at(1, "or") && self.is_word_at(3, "view")) =>
@@ -576,6 +578,102 @@ impl<'t> Parser<'t> {
             _ => return Ok(None),
         };
         Ok(Some(statement))
+    }
+
+    fn sqlserver_if(&mut self) -> SqlResult<Statement> {
+        let position = self.position();
+        self.at += 1;
+        let condition = self.expression()?;
+        if reads_rows(&condition) {
+            return Err(not_supported("IF with a condition that reads a table").at(position));
+        }
+        let then = Box::new(self.statement_body()?);
+        if self.peek_kind() == &TokenKind::Semicolon && self.is_word_at(1, "else") {
+            self.at += 1;
+        }
+        let otherwise = if self.take_word("else") {
+            Some(Box::new(self.statement_body()?))
+        } else {
+            None
+        };
+        Ok(Statement::SqlServer(SqlServerStatement::If {
+            condition,
+            then,
+            otherwise,
+        }))
+    }
+
+    fn bound_parameter(&self, name: &str, position: usize) -> SqlResult<Expr> {
+        let Parameters::Named(parameters) = self.parameters else {
+            return Err(undeclared_variable(name, position));
+        };
+        let Some(parameter) = parameters
+            .iter()
+            .find(|parameter| parameter.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(undeclared_variable(name, position));
+        };
+        let constant = Expr {
+            kind: ExprKind::Constant {
+                value: parameter.value.clone(),
+                sql_type: parameter.value.sql_type().or(parameter.declared_type),
+            },
+            position,
+        };
+        Ok(match parameter.declared_type {
+            Some(sql_type) if !parameter.value.is_null() => Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(constant),
+                    sql_type,
+                },
+                position,
+            },
+            _ => constant,
+        })
+    }
+
+    fn parameter_declaration_list(&mut self) -> SqlResult<Vec<ParameterDeclaration>> {
+        let mut declarations: Vec<ParameterDeclaration> = Vec::new();
+        if self.at_end() {
+            return Ok(declarations);
+        }
+        loop {
+            let position = self.position();
+            let name = match self.peek_kind() {
+                TokenKind::Variable(name) if !name.starts_with("@@") => name.as_ref().to_owned(),
+                _ => return Err(self.unexpected()),
+            };
+            self.at += 1;
+            self.take_word("as");
+            let sql_type = self.sqlserver_type()?;
+            let output = self.take_word("output") || self.take_word("out");
+            self.take_word("readonly");
+            if declarations
+                .iter()
+                .any(|declaration| declaration.name == name)
+            {
+                return Err(SqlError::new(
+                    SqlState::DUPLICATE_OBJECT,
+                    format!(
+                        "The variable name '{name}' has already been declared. Variable names must be unique within a query batch or stored procedure."
+                    ),
+                )
+                .with_sqlserver_code(134)
+                .at(position));
+            }
+            declarations.push(ParameterDeclaration {
+                name,
+                sql_type,
+                output,
+            });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        if !self.at_end() {
+            return Err(self.unexpected());
+        }
+        Ok(declarations)
     }
 
     fn optional_transaction_name(&mut self) {
@@ -640,7 +738,13 @@ impl<'t> Parser<'t> {
                 let on = self.on_or_off()?;
                 Ok(Statement::SqlServer(SqlServerStatement::NoCount(on)))
             }
-            "implicit_transactions" | "numeric_roundabort" => {
+            "implicit_transactions" => {
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(SqlServerStatement::ImplicitTransactions(
+                    on,
+                )))
+            }
+            "numeric_roundabort" => {
                 if self.on_or_off()? {
                     return Err(not_supported(&format!("SET {shown} ON")).at(position));
                 }
@@ -1261,9 +1365,13 @@ impl<'t> Parser<'t> {
         position: usize,
     ) -> SqlResult<Option<Expr>> {
         let expr = match kind {
-            TokenKind::Variable(name) => {
+            TokenKind::Variable(name) if name.starts_with("@@") => {
                 self.at += 1;
                 self.system_variable(name, position)?
+            }
+            TokenKind::Variable(name) => {
+                self.at += 1;
+                self.bound_parameter(name, position)?
             }
             TokenKind::Binary(digits) => {
                 self.at += 1;
@@ -1358,6 +1466,23 @@ impl<'t> Parser<'t> {
         }
         self.qualified_part(&schema)
     }
+}
+
+fn reads_rows(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Column { .. }
+        | ExprKind::Subquery(_)
+        | ExprKind::Aggregate { .. }
+        | ExprKind::OuterColumn { .. }
+        | ExprKind::Slot { .. } => true,
+        _ => crate::eval::children(expr).into_iter().any(reads_rows),
+    }
+}
+
+pub(crate) fn parameter_declarations(text: &str) -> SqlResult<Vec<ParameterDeclaration>> {
+    let tokens = tokenize_in(text, Dialect::SqlServer)?;
+    let mut parser = Parser::new(text, &tokens).in_dialect(Dialect::SqlServer);
+    parser.parameter_declaration_list()
 }
 
 fn accepted_set() -> Statement {

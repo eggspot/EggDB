@@ -1,13 +1,15 @@
 use super::{Client, QueryResult, Session};
-use crate::ast::{Name, SqlServerStatement};
+use crate::ast::{Expr, Name, SqlServerStatement};
 use crate::copy::NoCopyChannel;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::eval::{Evaluator, Scope};
 use crate::execute::Relation;
 use crate::lexer::tokenize_in;
 use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
 use crate::store::KeyValueStore;
+use crate::types::{SqlType, Value};
 use std::sync::Arc;
 
 const STATEMENT_TERMINATING_ERRORS: [u16; 17] = [
@@ -27,6 +29,31 @@ pub struct BatchStep {
     /// Whether `SET NOCOUNT ON` is in effect after the statement, so a server leaves the
     /// count of rows out of its completion.
     pub no_count: bool,
+}
+
+/// A value for a named parameter (`@name`) of a parameterized Transact-SQL batch, as SQL
+/// Server's `sp_executesql` binds one ([`Session::execute_parameterized_batch`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedParameter {
+    /// The parameter's name with its `@`, matched without regard to case.
+    pub name: String,
+    /// The type the parameter was declared with: a non-NULL value converts to it as `CAST`
+    /// would, and NULL takes it. `None` keeps the value's own type.
+    pub declared_type: Option<SqlType>,
+    /// The value.
+    pub value: Value,
+}
+
+/// One declaration of a parameterized batch's parameter list, such as `@p1 nvarchar(40)
+/// OUTPUT` in `sp_executesql`'s `@params` ([`Session::parse_parameter_declarations`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParameterDeclaration {
+    /// The name with its `@`, in lower case.
+    pub name: String,
+    /// The engine type the declared SQL Server type is kept as.
+    pub sql_type: SqlType,
+    /// Whether it is declared `OUTPUT` (or `OUT`).
+    pub output: bool,
 }
 
 fn rows_counted(result: &QueryResult) -> i64 {
@@ -57,8 +84,19 @@ pub(crate) fn parse_next_statement(
     dialect: Dialect,
     resume: (usize, usize),
 ) -> Option<ParsedStatement> {
+    parse_next_parameterized_statement(text, tokens, settings, dialect, resume, Parameters::Absent)
+}
+
+fn parse_next_parameterized_statement(
+    text: &str,
+    tokens: &[crate::lexer::Token<'_>],
+    settings: &crate::settings::Settings,
+    dialect: Dialect,
+    resume: (usize, usize),
+    parameters: Parameters<'_>,
+) -> Option<ParsedStatement> {
     let mut parser = Parser::new(text, tokens)
-        .with_context(Parameters::Absent, settings)
+        .with_context(parameters, settings)
         .in_dialect(dialect)
         .resuming_at(resume);
     parser.skip_empty_statements();
@@ -96,13 +134,83 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         text: &str,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
+        self.run_batch(text, Parameters::Absent, on_step)
+    }
+
+    /// Runs `text` as a parameterized Transact-SQL batch, as SQL Server's `sp_executesql`
+    /// does: like [`Session::execute_batch`], with each `@name` that is not a declared variable
+    /// read as the value of the parameter of that name in `parameters` (converted to its
+    /// declared type). A name with no parameter is error 137. Only the SQL Server dialect reads
+    /// `@name`s.
+    pub fn execute_parameterized_batch(
+        &mut self,
+        text: &str,
+        parameters: &[NamedParameter],
+        on_step: &mut dyn FnMut(BatchStep) -> bool,
+    ) -> SqlResult<()> {
+        self.run_batch(text, Parameters::Named(parameters), on_step)
+    }
+
+    /// Parses `text` as [`Session::execute_parameterized_batch`] would, running nothing: the
+    /// syntax error it would fail with, if any, as `sp_prepare` reports it.
+    pub fn check_parameterized_batch(
+        &mut self,
+        text: &str,
+        parameters: &[NamedParameter],
+    ) -> SqlResult<()> {
         self.statement_start = 0;
         let tokens =
             tokenize_in(text, self.dialect).map_err(|error| self.in_dialect(text, error))?;
-        self.check_batch_syntax(text, &tokens)
+        self.check_batch_syntax(text, &tokens, Parameters::Named(parameters))
+            .map_err(|error| self.in_dialect(text, error))
+    }
+
+    /// Reads a parameter list as `sp_executesql` and `sp_prepare` take it: `@name type
+    /// [OUTPUT]` declarations separated by commas, with SQL Server's types. An empty text
+    /// declares nothing. A repeated name is error 134 and an unknown type error 2715.
+    pub fn parse_parameter_declarations(
+        &mut self,
+        text: &str,
+    ) -> SqlResult<Vec<ParameterDeclaration>> {
+        self.statement_start = 0;
+        crate::parser::sqlserver_parameter_declarations(text)
+            .map_err(|error| self.in_dialect(text, error))
+    }
+
+    /// Resets the session as SQL Server resets a connection a pool hands out again: an open
+    /// transaction rolls back unless `keep_transaction`, and the `SET` options,
+    /// `IDENTITY_INSERT`, `@@ROWCOUNT` and `SCOPE_IDENTITY()` return to their state after
+    /// login. The user, the database and `@@SPID` stay. An error is the rollback's.
+    pub fn reset_connection(&mut self, keep_transaction: bool) -> SqlResult<()> {
+        let rolled_back = if keep_transaction || !self.in_block() {
+            Ok(())
+        } else {
+            self.rollback().map(|_| ())
+        };
+        let settings = Arc::make_mut(&mut self.settings);
+        settings.reset_all();
+        settings.sqlserver.no_count = false;
+        settings.sqlserver.implicit_transactions = false;
+        self.sync_transaction_count();
+        self.identity_insert_table = None;
+        self.sqlserver_status = crate::sqlserver_functions::SessionStatus::default();
+        self.warnings.clear();
+        rolled_back
+    }
+
+    fn run_batch(
+        &mut self,
+        text: &str,
+        parameters: Parameters<'_>,
+        on_step: &mut dyn FnMut(BatchStep) -> bool,
+    ) -> SqlResult<()> {
+        self.statement_start = 0;
+        let tokens =
+            tokenize_in(text, self.dialect).map_err(|error| self.in_dialect(text, error))?;
+        self.check_batch_syntax(text, &tokens, parameters)
             .map_err(|error| self.in_dialect(text, error))?;
         self.batch_resume = Some((0, 0));
-        let outcome = self.run_batch_statements(text, &tokens, on_step);
+        let outcome = self.run_batch_statements(text, &tokens, parameters, on_step);
         self.batch_resume = None;
         outcome
     }
@@ -111,14 +219,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &mut self,
         text: &str,
         tokens: &[crate::lexer::Token<'_>],
+        parameters: Parameters<'_>,
     ) -> SqlResult<()> {
         if self.sqlserver() {
             self.sync_transaction_count();
         }
         let settings = Arc::clone(&self.settings);
         let mut resume = (0, 0);
-        while let Some(parsed) = parse_next_statement(text, tokens, &settings, self.dialect, resume)
-        {
+        while let Some(parsed) = parse_next_parameterized_statement(
+            text,
+            tokens,
+            &settings,
+            self.dialect,
+            resume,
+            parameters,
+        ) {
             resume = parsed.outcome?;
         }
         Ok(())
@@ -128,6 +243,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &mut self,
         text: &str,
         tokens: &[crate::lexer::Token<'_>],
+        parameters: Parameters<'_>,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
         loop {
@@ -146,7 +262,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let flow = self.run_tokens(
                 text,
                 tokens,
-                Parameters::Absent,
+                parameters,
                 &mut |result| {
                     results.push(result);
                     false
@@ -298,10 +414,32 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Arc::make_mut(&mut self.settings).sqlserver.no_count = *on;
                 Ok(QueryResult::command("SET"))
             }
+            SqlServerStatement::ImplicitTransactions(on) => {
+                Arc::make_mut(&mut self.settings)
+                    .sqlserver
+                    .implicit_transactions = *on;
+                Ok(QueryResult::command("SET"))
+            }
             SqlServerStatement::IdentityInsert { table, on } => {
                 self.set_identity_insert(table, *on)
             }
+            SqlServerStatement::If { .. } => Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "an IF statement reached the statement runner",
+            )),
         }
+    }
+
+    pub(super) fn sqlserver_condition_holds(&self, condition: &Expr) -> SqlResult<bool> {
+        let evaluator = Evaluator {
+            scope: Scope::empty(),
+            row: &[],
+            correlation: None,
+        };
+        Ok(matches!(
+            evaluator.eval(condition, None)?,
+            Value::Boolean(true)
+        ))
     }
 
     fn set_identity_insert(&mut self, table: &Name, on: bool) -> SqlResult<QueryResult> {

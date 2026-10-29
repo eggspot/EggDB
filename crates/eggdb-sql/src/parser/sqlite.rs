@@ -666,7 +666,7 @@ impl<'t> Parser<'t> {
 
     pub(super) fn sqlite_parameter(&mut self, number: usize, position: usize) -> SqlResult<Expr> {
         let bound = match self.parameters {
-            super::Parameters::Absent => false,
+            super::Parameters::Absent | super::Parameters::Named(_) => false,
             super::Parameters::Values(values) => number <= values.len(),
             super::Parameters::Types(_) => true,
         };

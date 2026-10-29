@@ -888,3 +888,229 @@ fn hostile_views_and_checks_in_transact_sql_return_errors_and_never_panic() {
         assert!(error.vendor_code().is_some(), "{error}");
     }
 }
+
+fn parameterized(
+    session: &mut Session<'_, MemoryStore>,
+    text: &str,
+    parameters: &[crate::NamedParameter],
+) -> Result<Vec<BatchStep>, SqlError> {
+    let mut steps = Vec::new();
+    session.execute_parameterized_batch(text, parameters, &mut |step| {
+        steps.push(step);
+        true
+    })?;
+    Ok(steps)
+}
+
+fn named(name: &str, declared_type: Option<crate::SqlType>, value: Value) -> crate::NamedParameter {
+    crate::NamedParameter {
+        name: name.to_owned(),
+        declared_type,
+        value,
+    }
+}
+
+fn rows_of(steps: &[BatchStep]) -> Vec<Vec<Value>> {
+    steps
+        .iter()
+        .rev()
+        .find_map(|step| step.outcome.as_ref().ok().filter(|result| result.columns.is_some()))
+        .map(|result| result.rows.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn named_parameters_bind_typed_values_converted_to_their_declared_types() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE items (id INT PRIMARY KEY, name NVARCHAR(40), price DECIMAL(10,2))",
+    );
+    let price = crate::SqlType::Numeric(Some(crate::NumericModifier {
+        precision: 10,
+        scale: 2,
+    }));
+    let steps = parameterized(
+        &mut session,
+        "INSERT INTO items VALUES (@id, @Name, @price)",
+        &[
+            named("@ID", Some(crate::SqlType::Integer), Value::Integer(7)),
+            named(
+                "@name",
+                Some(crate::SqlType::Varchar(Some(40))),
+                Value::Text("egg".into()),
+            ),
+            named(
+                "@price",
+                Some(price),
+                Value::Numeric(crate::Numeric::parse("12.5").unwrap()),
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(steps[0].outcome.as_ref().unwrap().tag.starts_with("INSERT"));
+    let found = parameterized(
+        &mut session,
+        "SELECT name, CAST(price AS varchar(20)) AS price FROM items WHERE id = @p1",
+        &[named("@p1", Some(crate::SqlType::Integer), Value::Text("7".into()))],
+    )
+    .unwrap();
+    assert_eq!(
+        rows_of(&found),
+        vec![vec![Value::Text("egg".into()), Value::Text("12.50".into())]]
+    );
+    let nothing = parameterized(
+        &mut session,
+        "SELECT COUNT(*) AS n FROM items WHERE name = @p1",
+        &[named("@p1", Some(crate::SqlType::Text), Value::Null)],
+    )
+    .unwrap();
+    assert_eq!(rows_of(&nothing), vec![vec![Value::Integer(0)]]);
+    let error = parameterized(&mut session, "SELECT @missing", &[]).expect_err("undeclared");
+    assert_eq!(error.vendor_code(), Some(137));
+    let error = batch(&mut session, "SELECT @p1").expect_err("no parameters");
+    assert_eq!(error.vendor_code(), Some(137));
+    session
+        .check_parameterized_batch("SELECT @p1", &[named("@p1", None, Value::Null)])
+        .unwrap();
+    let error = session
+        .check_parameterized_batch(
+            "SELECT * FORM t WHERE id = @p1",
+            &[named("@p1", None, Value::Null)],
+        )
+        .expect_err("a syntax error");
+    assert_eq!(error.vendor_code(), Some(102));
+}
+
+#[test]
+fn parameter_declarations_read_names_types_and_output_markers() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let declared = session
+        .parse_parameter_declarations(
+            "@P0 int,@p1 nvarchar(4000) OUTPUT, @p2 decimal(5,2) out, @p3 nvarchar(max),@p4 datetime2",
+        )
+        .unwrap();
+    let shown: Vec<(String, crate::SqlType, bool)> = declared
+        .into_iter()
+        .map(|declaration| (declaration.name, declaration.sql_type, declaration.output))
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("@p0".into(), crate::SqlType::Integer, false),
+            ("@p1".into(), crate::SqlType::Varchar(Some(4000)), true),
+            (
+                "@p2".into(),
+                crate::SqlType::Numeric(Some(crate::NumericModifier {
+                    precision: 5,
+                    scale: 2
+                })),
+                true
+            ),
+            ("@p3".into(), crate::SqlType::Text, false),
+            ("@p4".into(), crate::SqlType::Timestamp(Some(6)), false),
+        ]
+    );
+    assert!(session.parse_parameter_declarations("").unwrap().is_empty());
+    for (text, code) in [
+        ("@p1 foo", 2715),
+        ("@p1 int, @P1 int", 134),
+        ("p1 int", 102),
+        ("@p1 int @p2 int", 102),
+        ("@@p1 int", 102),
+    ] {
+        let error = session
+            .parse_parameter_declarations(text)
+            .expect_err(text);
+        assert_eq!(error.vendor_code(), Some(code), "{text}");
+    }
+}
+
+#[test]
+fn implicit_transactions_keep_changes_open_until_commit_or_rollback() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let steps = batch(
+        &mut session,
+        "set implicit_transactions on INSERT INTO t VALUES (1) SELECT @@TRANCOUNT AS n",
+    )
+    .unwrap();
+    assert!(!steps[0].in_transaction);
+    assert!(steps[1].in_transaction);
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(1)]]);
+    let steps = batch(&mut session, "IF @@TRANCOUNT > 0 ROLLBACK TRAN").unwrap();
+    assert_eq!(steps[0].outcome.as_ref().unwrap().tag, "ROLLBACK");
+    assert!(!steps[0].in_transaction);
+    let steps = batch(
+        &mut session,
+        "CREATE TABLE u (id INT PRIMARY KEY) INSERT INTO t VALUES (2) IF @@TRANCOUNT > 0 COMMIT TRAN",
+    )
+    .unwrap();
+    assert!(steps[0].in_transaction);
+    assert!(!steps[2].in_transaction);
+    let steps = batch(
+        &mut session,
+        "set implicit_transactions off IF @@TRANCOUNT > 0 COMMIT TRAN INSERT INTO t VALUES (3)",
+    )
+    .unwrap();
+    assert_eq!(steps[1].outcome.as_ref().unwrap().tag, "IF");
+    assert!(steps.iter().all(|step| !step.in_transaction));
+    assert_eq!(
+        values(&mut session, "SELECT id FROM t ORDER BY id"),
+        vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) AS n FROM u"),
+        vec![vec![Value::Integer(0)]]
+    );
+}
+
+#[test]
+fn if_runs_one_statement_by_a_condition_that_reads_no_table() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let steps = batch(&mut session, "IF 1 = 0 SELECT 1 AS n ELSE SELECT 2 AS n").unwrap();
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(2)]]);
+    let steps = batch(&mut session, "IF 'a' = 'a' SELECT 3 AS n; ELSE SELECT 4 AS n").unwrap();
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(3)]]);
+    let steps = batch(&mut session, "IF NULL = 1 SELECT 5 AS n SELECT 6 AS n").unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0].outcome.as_ref().unwrap().tag, "IF");
+    for text in [
+        "IF EXISTS (SELECT 1 FROM t) SELECT 1",
+        "IF id = 1 SELECT 1",
+        "IF 1 = 1 BEGIN SELECT 1 END",
+    ] {
+        let error = batch(&mut session, text).expect_err(text);
+        assert_eq!(error.vendor_code(), Some(40517), "{text}");
+    }
+}
+
+#[test]
+fn a_connection_reset_rolls_back_and_restores_the_options_of_a_new_login() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let steps = batch(
+        &mut session,
+        "SET NOCOUNT ON SET IMPLICIT_TRANSACTIONS ON BEGIN TRAN INSERT INTO t VALUES (1)",
+    )
+    .unwrap();
+    assert!(steps.last().unwrap().no_count);
+    session.reset_connection(true).unwrap();
+    assert!(session.in_block());
+    session.reset_connection(false).unwrap();
+    assert!(!session.in_block());
+    let steps = batch(&mut session, "INSERT INTO t VALUES (2) SELECT @@TRANCOUNT AS n").unwrap();
+    assert!(!steps[0].no_count);
+    assert!(!steps[0].in_transaction);
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(0)]]);
+    assert_eq!(
+        values(&mut session, "SELECT id FROM t"),
+        vec![vec![Value::Integer(2)]]
+    );
+}

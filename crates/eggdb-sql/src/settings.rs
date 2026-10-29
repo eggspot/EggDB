@@ -324,6 +324,7 @@ pub(crate) struct SqlServerState {
     pub(crate) connection_id: u32,
     pub(crate) transaction_count: u32,
     pub(crate) no_count: bool,
+    pub(crate) implicit_transactions: bool,
 }
 
 #[derive(Debug, Clone)]

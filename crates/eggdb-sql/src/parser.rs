@@ -16,7 +16,8 @@ pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved, o
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
     default_source as sqlserver_default_source, is_reserved as is_sqlserver_reserved,
-    not_supported as sqlserver_not_supported, starts_statement as sqlserver_starts_statement,
+    not_supported as sqlserver_not_supported, parameter_declarations as sqlserver_parameter_declarations,
+    starts_statement as sqlserver_starts_statement,
 };
 
 pub(crate) use schemas::Nesting;
@@ -33,7 +34,7 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::IntervalFields;
 use crate::lexer::{Token, TokenKind, swap_uniform_case};
-use crate::session::Parameter;
+use crate::session::{NamedParameter, Parameter};
 use crate::settings::Settings;
 use crate::types::{NumericModifier, SqlType, Value};
 use std::borrow::Cow;
@@ -269,6 +270,7 @@ pub(crate) enum Parameters<'t> {
     Absent,
     Values(&'t [Parameter]),
     Types(&'t [Option<SqlType>]),
+    Named(&'t [NamedParameter]),
 }
 
 const MAX_PARAMETER_NUMBER: u32 = 65535;
@@ -992,7 +994,7 @@ impl<'t> Parser<'t> {
         };
         let number = parameter_number(digits).ok_or_else(missing)?;
         let (declared_type, value) = match self.parameters {
-            Parameters::Absent => return Err(missing()),
+            Parameters::Absent | Parameters::Named(_) => return Err(missing()),
             Parameters::Values(values) => {
                 let parameter = values.get(number - 1).ok_or_else(missing)?;
                 (parameter.declared_type, parameter.value.clone())
