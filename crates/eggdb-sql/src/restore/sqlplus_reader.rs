@@ -276,6 +276,33 @@ struct Pending {
     ended_by_semicolon: bool,
 }
 
+struct LineRest {
+    line: String,
+    from: usize,
+    number: u64,
+}
+
+struct Handled {
+    item: Option<ScriptItem>,
+    rest_from: Option<usize>,
+}
+
+impl Handled {
+    fn item(item: Option<ScriptItem>) -> Self {
+        Self {
+            item,
+            rest_from: None,
+        }
+    }
+
+    fn after(self, consumed: usize) -> Self {
+        Self {
+            item: self.item,
+            rest_from: self.rest_from.map(|from| consumed + from),
+        }
+    }
+}
+
 pub(crate) struct SqlPlusReader<'r> {
     scripts: Vec<IncludedScript<'r>>,
     opener: Option<&'r dyn IncludeOpener>,
@@ -286,7 +313,7 @@ pub(crate) struct SqlPlusReader<'r> {
     pending: Option<Pending>,
     comment_between: bool,
     last_ended_by_semicolon: bool,
-    queued: Vec<ScriptItem>,
+    line_rest: Option<LineRest>,
     opened: usize,
     refusing_includes: bool,
     ended: bool,
@@ -449,7 +476,7 @@ impl<'r> SqlPlusReader<'r> {
             pending: None,
             comment_between: false,
             last_ended_by_semicolon: false,
-            queued: Vec::new(),
+            line_rest: None,
             opened: 0,
             refusing_includes: false,
             ended: false,
@@ -544,84 +571,86 @@ impl<'r> SqlPlusReader<'r> {
         item
     }
 
-    fn handle_line(&mut self, line: &str, number: u64) -> SqlResult<Option<ScriptItem>> {
-        let content = line.trim_end_matches(['\n', '\r']);
-        if self.pending.is_some() {
-            return self.continue_statement(content, number);
-        }
-        if self.comment_between {
-            match content.find("*/") {
-                Some(end) => {
-                    self.comment_between = false;
-                    let rest = content[end + 2..].to_owned();
-                    if rest.trim().is_empty() {
-                        return Ok(None);
-                    }
-                    return self.handle_line(&rest, number);
-                }
-                None => return Ok(None),
+    fn handle_line(&mut self, line: &str, number: u64) -> SqlResult<Handled> {
+        let line = line.trim_end_matches(['\n', '\r']);
+        let mut start = 0;
+        loop {
+            let content = &line[start..];
+            if self.pending.is_some() {
+                return Ok(self.continue_statement(content, number)?.after(start));
             }
-        }
-        let trimmed = content.trim();
-        if trimmed.is_empty() || trimmed.starts_with("--") {
-            return Ok(None);
-        }
-        if let Some(after) = trimmed.strip_prefix("/*") {
-            match after.find("*/") {
-                Some(end) => {
-                    let rest = after[end + 2..].to_owned();
-                    if rest.trim().is_empty() {
-                        return Ok(None);
-                    }
-                    return self.handle_line(&rest, number);
+            if self.comment_between {
+                let Some(end) = content.find("*/") else {
+                    return Ok(Handled::item(None));
+                };
+                self.comment_between = false;
+                start += end + 2;
+                if line[start..].trim().is_empty() {
+                    return Ok(Handled::item(None));
                 }
-                None => {
+                continue;
+            }
+            let leading = content.len() - content.trim_start().len();
+            let trimmed = content.trim();
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                return Ok(Handled::item(None));
+            }
+            if let Some(after) = trimmed.strip_prefix("/*") {
+                let Some(end) = after.find("*/") else {
                     self.comment_between = true;
                     self.lex_line = number;
-                    return Ok(None);
+                    return Ok(Handled::item(None));
+                };
+                start += leading + 2 + end + 2;
+                if line[start..].trim().is_empty() {
+                    return Ok(Handled::item(None));
                 }
+                continue;
             }
-        }
-        if trimmed == "/" {
-            if self.last_ended_by_semicolon {
-                self.last_ended_by_semicolon = false;
-                return Ok(Some(self.command_item(
-                    "/",
-                    "/".to_owned(),
-                    String::new(),
-                    number,
-                )));
+            if trimmed == "/" {
+                if self.last_ended_by_semicolon {
+                    self.last_ended_by_semicolon = false;
+                    return Ok(Handled::item(Some(self.command_item(
+                        "/",
+                        "/".to_owned(),
+                        String::new(),
+                        number,
+                    ))));
+                }
+                return Ok(Handled::item(None));
             }
-            return Ok(None);
+            if trimmed == "." {
+                return Ok(Handled::item(None));
+            }
+            self.last_ended_by_semicolon = false;
+            if starts_statement(trimmed) {
+                self.pending = Some(Pending {
+                    text: String::new(),
+                    line: number,
+                    script: self.current_script(),
+                    mode: StatementMode::Undecided,
+                    ended_by_semicolon: false,
+                });
+                let statement = &content[leading..];
+                return Ok(self
+                    .continue_statement(statement, number)?
+                    .after(start + leading));
+            }
+            return Ok(Handled::item(self.command(trimmed, number)?));
         }
-        if trimmed == "." {
-            return Ok(None);
-        }
-        self.last_ended_by_semicolon = false;
-        if starts_statement(trimmed) {
-            self.pending = Some(Pending {
-                text: String::new(),
-                line: number,
-                script: self.current_script(),
-                mode: StatementMode::Undecided,
-                ended_by_semicolon: false,
-            });
-            return self.continue_statement(content.trim_start(), number);
-        }
-        self.command(trimmed, number)
     }
 
-    fn continue_statement(&mut self, content: &str, number: u64) -> SqlResult<Option<ScriptItem>> {
+    fn continue_statement(&mut self, content: &str, number: u64) -> SqlResult<Handled> {
         let Some(pending) = self.pending.as_mut() else {
-            return Ok(None);
+            return Ok(Handled::item(None));
         };
         if self.lex == Lex::Normal && !pending.text.trim().is_empty() {
             if is_line_terminator(content, "/") {
-                return self.finish_statement(number);
+                return Ok(Handled::item(self.finish_statement(number)?));
             }
             if is_line_terminator(content, ".") {
                 let pending = self.pending.take();
-                return Ok(pending.map(|pending| {
+                return Ok(Handled::item(pending.map(|pending| {
                     ScriptItem::ClientCommand(ClientCommand {
                         name: ".".to_owned(),
                         shown: super::shortened(&pending.text),
@@ -629,7 +658,7 @@ impl<'r> SqlPlusReader<'r> {
                         line: pending.line,
                         script: pending.script,
                     })
-                }));
+                })));
             }
         }
         if pending.text.len() + content.len() + 1 > MAX_STATEMENT_BYTES {
@@ -644,40 +673,35 @@ impl<'r> SqlPlusReader<'r> {
         if !pending.text.is_empty() {
             pending.text.push('\n');
         }
-        let offset = pending.text.len();
-        pending.text.push_str(content);
         if pending.mode == StatementMode::Undecided {
-            pending.mode = mode_of(&pending.text);
+            pending.mode = if pending.text.is_empty() {
+                mode_of(content)
+            } else {
+                let offset = pending.text.len();
+                pending.text.push_str(content);
+                let mode = mode_of(&pending.text);
+                pending.text.truncate(offset);
+                mode
+            };
         }
         let plsql = pending.mode == StatementMode::PlSql;
-        let end = self.scan(offset, number, !plsql);
-        if let Some(at) = end {
-            let Some(pending) = self.pending.as_mut() else {
-                return Ok(None);
-            };
-            let rest = pending.text[at + 1..].to_owned();
-            pending.text.truncate(at);
-            pending.ended_by_semicolon = true;
-            let item = self.finish_statement(number)?;
-            if !rest.trim().is_empty() {
-                self.queue_rest(rest, number)?;
+        let Some(at) = self.scan(content.as_bytes(), number, !plsql) else {
+            if let Some(pending) = self.pending.as_mut() {
+                pending.text.push_str(content);
             }
-            return Ok(item);
+            return Ok(Handled::item(None));
+        };
+        if let Some(pending) = self.pending.as_mut() {
+            pending.text.push_str(&content[..at]);
+            pending.ended_by_semicolon = true;
         }
-        Ok(None)
+        let item = self.finish_statement(number)?;
+        let rest_from = (!content[at + 1..].trim().is_empty()).then_some(at + 1);
+        Ok(Handled { item, rest_from })
     }
 
-    fn queue_rest(&mut self, rest: String, number: u64) -> SqlResult<()> {
-        if let Some(item) = self.handle_line(&rest, number)? {
-            self.queued.push(item);
-        }
-        Ok(())
-    }
-
-    fn scan(&mut self, from: usize, number: u64, semicolon_ends: bool) -> Option<usize> {
-        let pending = self.pending.as_ref()?;
-        let bytes = pending.text.as_bytes();
-        let mut at = from;
+    fn scan(&mut self, bytes: &[u8], number: u64, semicolon_ends: bool) -> Option<usize> {
+        let mut at = 0;
         while at < bytes.len() {
             let byte = bytes[at];
             let next = bytes.get(at + 1).copied();
@@ -1252,29 +1276,40 @@ fn oracle_hint(error: SqlError) -> SqlError {
 impl ScriptSource for SqlPlusReader<'_> {
     fn next_item(&mut self) -> SqlResult<ScriptItem> {
         loop {
-            if !self.queued.is_empty() {
-                return Ok(self.queued.remove(0));
-            }
             if self.ended {
                 return Ok(ScriptItem::End);
             }
-            if self.scripts.is_empty() {
-                self.ended = true;
-                return Ok(ScriptItem::End);
-            }
-            let Some(number) = self.read_line()? else {
-                if let Some(item) = self.end_of_script() {
-                    return Ok(item);
+            let (line, from, number) = match self.line_rest.take() {
+                Some(rest) => (rest.line, rest.from, rest.number),
+                None => {
+                    if self.scripts.is_empty() {
+                        self.ended = true;
+                        return Ok(ScriptItem::End);
+                    }
+                    let Some(number) = self.read_line()? else {
+                        if let Some(item) = self.end_of_script() {
+                            return Ok(item);
+                        }
+                        continue;
+                    };
+                    (std::mem::take(&mut self.line), 0, number)
                 }
-                continue;
             };
-            let line = std::mem::take(&mut self.line);
-            let item = self.handle_line(&line, number);
-            self.line = line;
-            if let Some(item) = item? {
+            let handled = self.handle_line(&line[from..], number)?;
+            match handled.rest_from {
+                Some(rest_from) => {
+                    self.line_rest = Some(LineRest {
+                        line,
+                        from: from + rest_from,
+                        number,
+                    });
+                }
+                None => self.line = line,
+            }
+            if let Some(item) = handled.item {
                 if self.ended {
                     self.pending = None;
-                    self.queued.clear();
+                    self.line_rest = None;
                 }
                 return Ok(item);
             }
