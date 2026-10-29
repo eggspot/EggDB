@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    Client, TestServer, Token, call_by_id, call_by_name, decimal_parameter, errors,
-    int_parameter, rows, text_parameter,
+    Client, TestServer, Token, call_by_id, call_by_name, decimal_parameter, errors, int_parameter,
+    rows, text_parameter,
 };
 
 const SP_EXECUTESQL: u16 = 10;
@@ -65,7 +65,8 @@ fn environment_changes(tokens: &[Token]) -> Vec<u8> {
 
 fn logged_in_with_table(server: &TestServer) -> Client {
     let mut client = Client::login(server.address);
-    let created = client.batch("CREATE TABLE items (id INT PRIMARY KEY, name NVARCHAR(40), price DECIMAL(10,2))");
+    let created = client
+        .batch("CREATE TABLE items (id INT PRIMARY KEY, name NVARCHAR(40), price DECIMAL(10,2))");
     assert!(errors(&created).is_empty(), "{created:?}");
     client
 }
@@ -78,20 +79,31 @@ fn sp_executesql_runs_parameterized_crud_with_typed_values() {
         SP_EXECUTESQL,
         &[
             text_parameter("", Some("INSERT INTO items VALUES (@p1, @p2, @p3)"), false),
-            text_parameter("", Some("@p1 int,@p2 nvarchar(40),@p3 decimal(10,2)"), false),
+            text_parameter(
+                "",
+                Some("@p1 int,@p2 nvarchar(40),@p3 decimal(10,2)"),
+                false,
+            ),
             int_parameter("@p1", Some(1), false),
             text_parameter("@p2", Some("egg"), false),
             decimal_parameter("@p3", 1250, 10, 2),
         ],
     )]);
     assert!(errors(&inserted).is_empty(), "{inserted:?}");
-    assert_eq!(counts_in_procedures(&inserted), vec![(DONE_COUNT | DONE_MORE, 1)]);
+    assert_eq!(
+        counts_in_procedures(&inserted),
+        vec![(DONE_COUNT | DONE_MORE, 1)]
+    );
     assert!(inserted.contains(&Token::ReturnStatus(0)));
     assert_eq!(procedure_dones(&inserted), vec![0]);
     let positional = client.rpc(&[call_by_name(
         "sys.sp_executesql",
         &[
-            text_parameter("", Some("INSERT INTO items (id, name) VALUES (@P0, @P1)"), false),
+            text_parameter(
+                "",
+                Some("INSERT INTO items (id, name) VALUES (@P0, @P1)"),
+                false,
+            ),
             text_parameter("", Some("@P0 int,@P1 nvarchar(4000)"), false),
             int_parameter("", Some(2), false),
             text_parameter("", None, false),
@@ -120,7 +132,13 @@ fn sp_executesql_runs_parameterized_crud_with_typed_values() {
     let updated = client.rpc(&[call_by_id(
         SP_EXECUTESQL,
         &[
-            text_parameter("", Some("UPDATE items SET name = @n WHERE id = @id; DELETE FROM items WHERE id = @gone"), false),
+            text_parameter(
+                "",
+                Some(
+                    "UPDATE items SET name = @n WHERE id = @id; DELETE FROM items WHERE id = @gone",
+                ),
+                false,
+            ),
             text_parameter("", Some("@n nvarchar(40), @id int, @gone int"), false),
             text_parameter("@n", Some("bread"), false),
             int_parameter("@id", Some(1), false),
@@ -146,13 +164,20 @@ fn prepared_handles_run_until_unprepared() {
         &[
             int_parameter("", None, true),
             text_parameter("", Some("@p1 int, @p2 nvarchar(40)"), false),
-            text_parameter("", Some("INSERT INTO items (id, name) VALUES (@p1, @p2)"), false),
+            text_parameter(
+                "",
+                Some("INSERT INTO items (id, name) VALUES (@p1, @p2)"),
+                false,
+            ),
             int_parameter("", Some(10), false),
             text_parameter("", Some("ten"), false),
         ],
     )]);
     assert!(errors(&prepared).is_empty(), "{prepared:?}");
-    assert_eq!(returned(&prepared), vec![(0, String::new(), Some("1".to_owned()))]);
+    assert_eq!(
+        returned(&prepared),
+        vec![(0, String::new(), Some("1".to_owned()))]
+    );
     let status_at = prepared
         .iter()
         .position(|token| token == &Token::ReturnStatus(0))
@@ -187,17 +212,30 @@ fn prepared_handles_run_until_unprepared() {
         &[
             int_parameter("@handle", None, true),
             text_parameter("", Some("@low int"), false),
-            text_parameter("", Some("SELECT COUNT(*) AS n FROM items WHERE id >= @low"), false),
+            text_parameter(
+                "",
+                Some("SELECT COUNT(*) AS n FROM items WHERE id >= @low"),
+                false,
+            ),
             int_parameter("", Some(1), false),
         ],
     )]);
-    assert_eq!(returned(&handle), vec![(0, "@handle".to_owned(), Some("2".to_owned()))]);
+    assert_eq!(
+        returned(&handle),
+        vec![(0, "@handle".to_owned(), Some("2".to_owned()))]
+    );
     let counted = client.rpc(&[call_by_id(
         SP_EXECUTE,
-        &[int_parameter("", Some(2), false), int_parameter("", Some(11), false)],
+        &[
+            int_parameter("", Some(2), false),
+            int_parameter("", Some(11), false),
+        ],
     )]);
     assert_eq!(rows(&counted), vec![vec![Some("2".to_owned())]]);
-    let unprepared = client.rpc(&[call_by_id(SP_UNPREPARE, &[int_parameter("", Some(1), false)])]);
+    let unprepared = client.rpc(&[call_by_id(
+        SP_UNPREPARE,
+        &[int_parameter("", Some(1), false)],
+    )]);
     assert!(errors(&unprepared).is_empty(), "{unprepared:?}");
     let gone = client.rpc(&[call_by_id(
         SP_EXECUTE,
@@ -287,10 +325,7 @@ fn missing_and_unknown_arguments_and_procedures_get_sql_servers_errors() {
     assert_eq!(errors(&unknown)[0].0, 2812);
     let cursor = client.rpc(&[call_by_id(2, &[])]);
     assert_eq!(errors(&cursor)[0].0, 2812);
-    let variant = client.rpc(&[call_by_id(
-        SP_EXECUTESQL,
-        &[vec![0, 0, 0x62, 0, 0, 0, 0]],
-    )]);
+    let variant = client.rpc(&[call_by_id(SP_EXECUTESQL, &[vec![0, 0, 0x62, 0, 0, 0, 0]])]);
     assert_eq!(errors(&variant)[0].0, 40517);
     assert_eq!(
         rows(&client.batch("SELECT 1")),
@@ -344,7 +379,11 @@ fn the_reset_flag_rolls_back_restores_options_and_is_acknowledged_first() {
     let server = TestServer::start(8);
     let mut client = logged_in_with_table(&server);
     client.batch("SET NOCOUNT ON BEGIN TRAN INSERT INTO items (id) VALUES (7)");
-    client.send_with_status(0x01, 0x08, &common::batch_body("INSERT INTO items (id) VALUES (8)"));
+    client.send_with_status(
+        0x01,
+        0x08,
+        &common::batch_body("INSERT INTO items (id) VALUES (8)"),
+    );
     let (_, body) = client.read_message().unwrap();
     let tokens = common::parse_tokens(&body);
     assert_eq!(
@@ -355,7 +394,11 @@ fn the_reset_flag_rolls_back_restores_options_and_is_acknowledged_first() {
             old: Vec::new()
         })
     );
-    assert!(common::dones(&tokens).iter().any(|(status, rows)| status & DONE_COUNT != 0 && *rows == 1));
+    assert!(
+        common::dones(&tokens)
+            .iter()
+            .any(|(status, rows)| status & DONE_COUNT != 0 && *rows == 1)
+    );
     assert_eq!(
         rows(&client.batch("SELECT id FROM items")),
         vec![vec![Some("8".to_owned())]]

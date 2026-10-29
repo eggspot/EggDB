@@ -39,6 +39,8 @@ const DAYS_FROM_YEAR_ONE_TO_2000: i64 = 730_119;
 const LAST_DAY_FROM_YEAR_ONE: i64 = 3_652_058;
 const DAYS_FROM_1900_TO_2000: i64 = 36_524;
 const DATETIME_TICKS_PER_DAY: i64 = 300 * 86_400;
+const FIRST_DATETIME_DAY: i64 = -53_690;
+const LAST_DATETIME_DAY: i64 = 2_958_463;
 const MINUTES_PER_DAY: i64 = 1440;
 const MICROS_PER_MINUTE: i64 = 60_000_000;
 const MONEY_SCALE: u8 = 4;
@@ -268,9 +270,9 @@ enum Shape {
     Integer { width: u8 },
     Bit,
     Float { width: u8 },
-    Money { width: u8 },
-    DateTime { width: u8 },
-    Decimal { precision: u8, scale: u8 },
+    Money,
+    DateTime,
+    Decimal { scale: u8 },
     Date,
     Time { scale: u8 },
     DateTime2 { scale: u8 },
@@ -294,7 +296,9 @@ fn width(reader: &mut Reader<'_>, allowed: &[u8]) -> Result<u8, RpcError> {
     if allowed.contains(&width) {
         Ok(width)
     } else {
-        Err(malformed("a parameter's TYPE_INFO has a length its type does not take"))
+        Err(malformed(
+            "a parameter's TYPE_INFO has a length its type does not take",
+        ))
     }
 }
 
@@ -329,10 +333,10 @@ fn read_type_info(reader: &mut Reader<'_>) -> Result<(Shape, Length), RpcError> 
         0x32 => (Shape::Bit, Length::Fixed(1)),
         0x3B => (Shape::Float { width: 4 }, Length::Fixed(4)),
         0x3E => (Shape::Float { width: 8 }, Length::Fixed(8)),
-        0x7A => (Shape::Money { width: 4 }, Length::Fixed(4)),
-        0x3C => (Shape::Money { width: 8 }, Length::Fixed(8)),
-        0x3A => (Shape::DateTime { width: 4 }, Length::Fixed(4)),
-        0x3D => (Shape::DateTime { width: 8 }, Length::Fixed(8)),
+        0x7A => (Shape::Money, Length::Fixed(4)),
+        0x3C => (Shape::Money, Length::Fixed(8)),
+        0x3A => (Shape::DateTime, Length::Fixed(4)),
+        0x3D => (Shape::DateTime, Length::Fixed(8)),
         0x26 => (
             Shape::Integer {
                 width: width(reader, &[1, 2, 4, 8])?,
@@ -349,18 +353,14 @@ fn read_type_info(reader: &mut Reader<'_>) -> Result<(Shape, Length), RpcError> 
             },
             Length::Byte,
         ),
-        0x6E => (
-            Shape::Money {
-                width: width(reader, &[4, 8])?,
-            },
-            Length::Byte,
-        ),
-        0x6F => (
-            Shape::DateTime {
-                width: width(reader, &[4, 8])?,
-            },
-            Length::Byte,
-        ),
+        0x6E => {
+            width(reader, &[4, 8])?;
+            (Shape::Money, Length::Byte)
+        }
+        0x6F => {
+            width(reader, &[4, 8])?;
+            (Shape::DateTime, Length::Byte)
+        }
         0x6A | 0x6C | 0x37 | 0x3F => {
             width(reader, &[5, 9, 13, 17])?;
             let precision = reader.byte()?;
@@ -370,7 +370,7 @@ fn read_type_info(reader: &mut Reader<'_>) -> Result<(Shape, Length), RpcError> 
                     "a decimal parameter's precision or scale is out of range",
                 ));
             }
-            (Shape::Decimal { precision, scale }, Length::Byte)
+            (Shape::Decimal { scale }, Length::Byte)
         }
         0x24 => {
             width(reader, &[16])?;
@@ -401,7 +401,9 @@ fn read_type_info(reader: &mut Reader<'_>) -> Result<(Shape, Length), RpcError> 
             let length = match (longest, kind) {
                 (MAX_LENGTH, 0xE7 | 0xA7) => Length::PartiallyLengthPrefixed,
                 (MAX_LENGTH, _) => {
-                    return Err(malformed("a fixed-length character parameter has no length"));
+                    return Err(malformed(
+                        "a fixed-length character parameter has no length",
+                    ));
                 }
                 _ => Length::UnsignedShort,
             };
@@ -587,7 +589,7 @@ fn decode(shape: Shape, data: Option<&[u8]>) -> Result<Value, RpcError> {
             }
             _ => return Err(malformed("a float parameter has an odd length")),
         },
-        Shape::Money { .. } => {
+        Shape::Money => {
             let units = match data.len() {
                 8 => {
                     let high = i64::from(i32::from_le_bytes([data[0], data[1], data[2], data[3]]));
@@ -599,12 +601,15 @@ fn decode(shape: Shape, data: Option<&[u8]>) -> Result<Value, RpcError> {
             };
             numeric(units < 0, u128::from(units.unsigned_abs()), MONEY_SCALE)?
         }
-        Shape::DateTime { .. } => match data.len() {
+        Shape::DateTime => match data.len() {
             8 => {
                 let days = i64::from(i32::from_le_bytes([data[0], data[1], data[2], data[3]]));
                 let ticks = i64::from(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
                 if ticks >= DATETIME_TICKS_PER_DAY {
                     return Err(malformed("a datetime parameter is past midnight"));
+                }
+                if !(FIRST_DATETIME_DAY..=LAST_DATETIME_DAY).contains(&days) {
+                    return Err(malformed("a datetime parameter is outside 1753 to 9999"));
                 }
                 let micros = (ticks * 10_000 + 1) / 3;
                 Value::Timestamp((days - DAYS_FROM_1900_TO_2000) * MICROS_PER_DAY + micros)
@@ -621,7 +626,7 @@ fn decode(shape: Shape, data: Option<&[u8]>) -> Result<Value, RpcError> {
             }
             _ => return Err(malformed("a datetime parameter has an odd length")),
         },
-        Shape::Decimal { scale, .. } => {
+        Shape::Decimal { scale } => {
             let Some((&sign, magnitude)) = data.split_first() else {
                 return Err(ends_early());
             };
@@ -635,7 +640,9 @@ fn decode(shape: Shape, data: Option<&[u8]>) -> Result<Value, RpcError> {
                 return Err(malformed("a date parameter is not 3 bytes"));
             }
             let days = days_since_2000(data)?;
-            Value::Date(i32::try_from(days).map_err(|_| malformed("a date parameter is out of range"))?)
+            Value::Date(
+                i32::try_from(days).map_err(|_| malformed("a date parameter is out of range"))?,
+            )
         }
         Shape::Time { scale } => Value::Time(time_micros(data, scale)?),
         Shape::DateTime2 { scale } => {
@@ -649,11 +656,11 @@ fn decode(shape: Shape, data: Option<&[u8]>) -> Result<Value, RpcError> {
                 .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
                 .ok_or_else(ends_early)?;
             if !(-MAX_OFFSET_MINUTES..=MAX_OFFSET_MINUTES).contains(&offset) {
-                return Err(malformed("a datetimeoffset parameter's offset is out of range"));
+                return Err(malformed(
+                    "a datetimeoffset parameter's offset is out of range",
+                ));
             }
-            Value::TimestampTz(
-                days_since_2000(date)? * MICROS_PER_DAY + time_micros(time, scale)?,
-            )
+            Value::TimestampTz(days_since_2000(date)? * MICROS_PER_DAY + time_micros(time, scale)?)
         }
         Shape::Guid => guid(data)?,
         Shape::Text(Encoding::Utf16) => Value::Text(utf16_text(
@@ -831,26 +838,29 @@ mod tests {
                 parameter("@p2", 0, &[0x6A, 5, 5, 2, 0, 0xE2, 0x04, 0, 0]),
                 parameter("@p3", 0, &[0x26, 8, 0]),
                 parameter("@p4", 0, &plp),
-                parameter(
-                    "@p5",
-                    0,
-                    &[0x6F, 8, 8, 0xAC, 0x8E, 0, 0, 0x2C, 0x01, 0, 0],
-                ),
+                parameter("@p5", 0, &[0x6F, 8, 8, 0xAC, 0x8E, 0, 0, 0x2C, 0x01, 0, 0]),
                 parameter(
                     "@p6",
                     0,
                     &[
-                        0x24, 16, 16, 0xFF, 0x19, 0x96, 0x6F, 0x86, 0x8B, 0x11, 0xD0, 0xB4,
-                        0x2D, 0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
+                        0x24, 16, 16, 0xFF, 0x19, 0x96, 0x6F, 0x86, 0x8B, 0x11, 0xD0, 0xB4, 0x2D,
+                        0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF,
                     ],
                 ),
                 parameter("@p7", 0, &[0x2A, 3, 7, 0, 0, 0, 0, 0x07, 0x24, 0x0B]),
-                parameter("@p8", 0, &[0xA7, 10, 0, 0x09, 0x04, 0xD0, 0x00, 0x34, 2, 0, 0x80, b'a']),
+                parameter(
+                    "@p8",
+                    0,
+                    &[0xA7, 10, 0, 0x09, 0x04, 0xD0, 0x00, 0x34, 2, 0, 0x80, b'a'],
+                ),
                 parameter("@p9", 0, &[0x6E, 8, 8, 0, 0, 0, 0, 0x10, 0x27, 0, 0]),
             ],
         ));
         body.push(0xFF);
-        body.extend(call_by_id(SP_EXECUTE, &[parameter("", 0, &[0x38, 3, 0, 0, 0])]));
+        body.extend(call_by_id(
+            SP_EXECUTE,
+            &[parameter("", 0, &[0x38, 3, 0, 0, 0])],
+        ));
         body.push(0xFF);
         body
     }
@@ -866,7 +876,11 @@ mod tests {
             call.procedure.system_procedure(),
             Some(SystemProcedure::ExecuteSql)
         );
-        let values: Vec<&Value> = call.parameters.iter().map(|parameter| &parameter.value).collect();
+        let values: Vec<&Value> = call
+            .parameters
+            .iter()
+            .map(|parameter| &parameter.value)
+            .collect();
         assert_eq!(values[0], &Value::Text("SELECT @p1".into()));
         assert_eq!(values[2], &Value::Integer(-2));
         assert_eq!(
@@ -879,8 +893,8 @@ mod tests {
         assert_eq!(
             values[7],
             &Value::Uuid([
-                0x6F, 0x96, 0x19, 0xFF, 0x8B, 0x86, 0xD0, 0x11, 0xB4, 0x2D, 0x00, 0xC0, 0x4F,
-                0xC9, 0x64, 0xFF
+                0x6F, 0x96, 0x19, 0xFF, 0x8B, 0x86, 0xD0, 0x11, 0xB4, 0x2D, 0x00, 0xC0, 0x4F, 0xC9,
+                0x64, 0xFF
             ])
         );
         assert_eq!(values[8], &Value::Timestamp(0));
@@ -901,14 +915,22 @@ mod tests {
 
     #[test]
     fn names_of_system_procedures_are_found_in_any_spelling() {
-        for name in ["sp_executesql", "SP_EXECUTESQL", "sys.sp_executesql", "[master]..[sp_executesql]"] {
+        for name in [
+            "sp_executesql",
+            "SP_EXECUTESQL",
+            "sys.sp_executesql",
+            "[master]..[sp_executesql]",
+        ] {
             assert_eq!(
                 Procedure::Name(name.into()).system_procedure(),
                 Some(SystemProcedure::ExecuteSql),
                 "{name}"
             );
         }
-        assert_eq!(Procedure::Name("dbo.orders_by_day".into()).system_procedure(), None);
+        assert_eq!(
+            Procedure::Name("dbo.orders_by_day".into()).system_procedure(),
+            None
+        );
         assert_eq!(Procedure::Id(2).system_procedure(), None);
         assert_eq!(Procedure::Id(SP_EXECUTE).shown(), "sp_execute");
     }
@@ -934,7 +956,10 @@ mod tests {
             Err(RpcError::EncryptedParameter)
         );
         let mut bad_width = headers();
-        bad_width.extend(call_by_id(SP_EXECUTESQL, &[parameter("", 0, &[0x26, 3, 0])]));
+        bad_width.extend(call_by_id(
+            SP_EXECUTESQL,
+            &[parameter("", 0, &[0x26, 3, 0])],
+        ));
         assert!(matches!(
             parse_rpc_request(&bad_width),
             Err(RpcError::Malformed(_))

@@ -1711,22 +1711,22 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                             && (keeps_ddl_open
                                 || !matches!(
                                     command,
-                                "CREATE TABLE"
-                                    | "DROP TABLE"
-                                    | "TRUNCATE TABLE"
-                                    | "CREATE INDEX"
-                                    | "DROP INDEX"
-                                    | "CREATE SEQUENCE"
-                                    | "ALTER SEQUENCE"
-                                    | "DROP SEQUENCE"
-                                    | "ALTER TABLE"
-                                    | "CREATE SCHEMA"
-                                    | "DROP SCHEMA"
-                                    | "ALTER SCHEMA"
-                                    | "CREATE VIEW"
-                                    | "DROP VIEW"
-                                    | "ALTER VIEW"
-                                    | "COMMENT"
+                                    "CREATE TABLE"
+                                        | "DROP TABLE"
+                                        | "TRUNCATE TABLE"
+                                        | "CREATE INDEX"
+                                        | "DROP INDEX"
+                                        | "CREATE SEQUENCE"
+                                        | "ALTER SEQUENCE"
+                                        | "DROP SEQUENCE"
+                                        | "ALTER TABLE"
+                                        | "CREATE SCHEMA"
+                                        | "DROP SCHEMA"
+                                        | "ALTER SCHEMA"
+                                        | "CREATE VIEW"
+                                        | "DROP VIEW"
+                                        | "ALTER VIEW"
+                                        | "COMMENT"
                                 )) =>
                     {
                         self.block = Block::Writing(writer);

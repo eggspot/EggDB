@@ -914,7 +914,12 @@ fn rows_of(steps: &[BatchStep]) -> Vec<Vec<Value>> {
     steps
         .iter()
         .rev()
-        .find_map(|step| step.outcome.as_ref().ok().filter(|result| result.columns.is_some()))
+        .find_map(|step| {
+            step.outcome
+                .as_ref()
+                .ok()
+                .filter(|result| result.columns.is_some())
+        })
         .map(|result| result.rows.clone())
         .unwrap_or_default()
 }
@@ -953,7 +958,11 @@ fn named_parameters_bind_typed_values_converted_to_their_declared_types() {
     let found = parameterized(
         &mut session,
         "SELECT name, CAST(price AS varchar(20)) AS price FROM items WHERE id = @p1",
-        &[named("@p1", Some(crate::SqlType::Integer), Value::Text("7".into()))],
+        &[named(
+            "@p1",
+            Some(crate::SqlType::Integer),
+            Value::Text("7".into()),
+        )],
     )
     .unwrap();
     assert_eq!(
@@ -1021,9 +1030,7 @@ fn parameter_declarations_read_names_types_and_output_markers() {
         ("@p1 int @p2 int", 102),
         ("@@p1 int", 102),
     ] {
-        let error = session
-            .parse_parameter_declarations(text)
-            .expect_err(text);
+        let error = session.parse_parameter_declarations(text).expect_err(text);
         assert_eq!(error.vendor_code(), Some(code), "{text}");
     }
 }
@@ -1075,7 +1082,11 @@ fn if_runs_one_statement_by_a_condition_that_reads_no_table() {
     values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
     let steps = batch(&mut session, "IF 1 = 0 SELECT 1 AS n ELSE SELECT 2 AS n").unwrap();
     assert_eq!(rows_of(&steps), vec![vec![Value::Integer(2)]]);
-    let steps = batch(&mut session, "IF 'a' = 'a' SELECT 3 AS n; ELSE SELECT 4 AS n").unwrap();
+    let steps = batch(
+        &mut session,
+        "IF 'a' = 'a' SELECT 3 AS n; ELSE SELECT 4 AS n",
+    )
+    .unwrap();
     assert_eq!(rows_of(&steps), vec![vec![Value::Integer(3)]]);
     let steps = batch(&mut session, "IF NULL = 1 SELECT 5 AS n SELECT 6 AS n").unwrap();
     assert_eq!(steps.len(), 2);
@@ -1105,7 +1116,11 @@ fn a_connection_reset_rolls_back_and_restores_the_options_of_a_new_login() {
     assert!(session.in_block());
     session.reset_connection(false).unwrap();
     assert!(!session.in_block());
-    let steps = batch(&mut session, "INSERT INTO t VALUES (2) SELECT @@TRANCOUNT AS n").unwrap();
+    let steps = batch(
+        &mut session,
+        "INSERT INTO t VALUES (2) SELECT @@TRANCOUNT AS n",
+    )
+    .unwrap();
     assert!(!steps[0].no_count);
     assert!(!steps[0].in_transaction);
     assert_eq!(rows_of(&steps), vec![vec![Value::Integer(0)]]);

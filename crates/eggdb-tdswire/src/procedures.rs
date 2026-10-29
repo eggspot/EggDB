@@ -114,10 +114,7 @@ struct Called {
     failed_write: bool,
 }
 
-fn character_argument(
-    parameter: Option<&RpcParameter>,
-    name: &str,
-) -> Result<String, CallError> {
+fn character_argument(parameter: Option<&RpcParameter>, name: &str) -> Result<String, CallError> {
     match parameter.map(|parameter| &parameter.value) {
         None | Some(Value::Null) => Ok(String::new()),
         Some(Value::Text(text)) => Ok(text.clone()),
@@ -502,7 +499,10 @@ impl Connection<'_> {
             parameters.get(3..).unwrap_or_default(),
         )?;
         let handle = self.prepared.prepare(batch)?;
-        let batch = self.prepared.get(handle).ok_or_else(|| unknown_handle(handle))?;
+        let batch = self
+            .prepared
+            .get(handle)
+            .ok_or_else(|| unknown_handle(handle))?;
         let mut called = self.run_bound(session, &batch, &bound);
         called.returned = vec![returned_handle(parameters.first(), handle)];
         called.returned.extend(returned_values(parameters, 3));
@@ -515,7 +515,10 @@ impl Connection<'_> {
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
         let handle = handle_argument(parameters.first(), SystemProcedure::Execute)?;
-        let batch = self.prepared.get(handle).ok_or_else(|| unknown_handle(handle))?;
+        let batch = self
+            .prepared
+            .get(handle)
+            .ok_or_else(|| unknown_handle(handle))?;
         let bound = bound_parameters(
             SystemProcedure::Execute,
             &batch,
@@ -570,9 +573,7 @@ mod tests {
         }
     }
 
-    fn number(
-        result: Result<Vec<eggdb_sql::NamedParameter>, super::CallError>,
-    ) -> Option<u32> {
+    fn number(result: Result<Vec<eggdb_sql::NamedParameter>, super::CallError>) -> Option<u32> {
         result.err().map(|error| error.number)
     }
 
@@ -651,6 +652,9 @@ mod tests {
         assert!(prepared.unprepare(first));
         assert!(!prepared.unprepare(first));
         assert!(prepared.get(first).is_none());
-        assert_eq!(prepared.bytes, batch().text.len() + batch().declarations_text.len());
+        assert_eq!(
+            prepared.bytes,
+            batch().text.len() + batch().declarations_text.len()
+        );
     }
 }

@@ -533,9 +533,7 @@ fn b_varchar(body: &[u8], at: &mut usize) -> Result<String, MalformedMessage> {
 }
 
 fn isolation_level(body: &[u8], at: &mut usize) -> Result<u8, MalformedMessage> {
-    let level = *body
-        .get(*at)
-        .ok_or(malformed("the message ends early"))?;
+    let level = *body.get(*at).ok_or(malformed("the message ends early"))?;
     if level > HIGHEST_ISOLATION_LEVEL {
         return Err(malformed("an unknown isolation level"));
     }
@@ -857,11 +855,9 @@ mod tests {
 
     #[test]
     fn transaction_manager_requests_read_their_kind_isolation_level_and_names() {
-        let begin = parse_transaction_manager_request(&transaction_request(
-            5,
-            &[2, 2, b't', 0, b'x', 0],
-        ))
-        .unwrap();
+        let begin =
+            parse_transaction_manager_request(&transaction_request(5, &[2, 2, b't', 0, b'x', 0]))
+                .unwrap();
         assert_eq!(begin.transaction_descriptor, 7);
         assert_eq!(
             begin.request,

@@ -679,7 +679,11 @@ impl Connection<'_> {
         }
     }
 
-    fn run_batch_text<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, text: &str) -> bool {
+    fn run_batch_text<S: KeyValueStore>(
+        &mut self,
+        session: &mut Session<'_, S>,
+        text: &str,
+    ) -> bool {
         if !self.begin_response() {
             return false;
         }

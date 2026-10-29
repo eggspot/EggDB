@@ -3,9 +3,9 @@ use crate::ast::{
     ColumnDefinition, Expr, ExprKind, Literal, Name, Query, SetExpr, SqlServerStatement, Statement,
     TableReference,
 };
+use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope};
-use crate::dialect::Dialect;
 use crate::lexer::{TokenKind, tokenize_in};
 use crate::session::sqlserver::ParameterDeclaration;
 use crate::settings::Settings;
@@ -740,9 +740,9 @@ impl<'t> Parser<'t> {
             }
             "implicit_transactions" => {
                 let on = self.on_or_off()?;
-                Ok(Statement::SqlServer(SqlServerStatement::ImplicitTransactions(
-                    on,
-                )))
+                Ok(Statement::SqlServer(
+                    SqlServerStatement::ImplicitTransactions(on),
+                ))
             }
             "numeric_roundabort" => {
                 if self.on_or_off()? {

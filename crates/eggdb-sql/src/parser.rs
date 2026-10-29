@@ -16,7 +16,8 @@ pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved, o
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
     default_source as sqlserver_default_source, is_reserved as is_sqlserver_reserved,
-    not_supported as sqlserver_not_supported, parameter_declarations as sqlserver_parameter_declarations,
+    not_supported as sqlserver_not_supported,
+    parameter_declarations as sqlserver_parameter_declarations,
     starts_statement as sqlserver_starts_statement,
 };
 

@@ -83,7 +83,11 @@ fn seeds() -> Vec<Vec<u8>> {
                 10,
                 &[
                     text_parameter("", Some("SELECT @p1, @p2 WHERE @p3 > 0"), false),
-                    text_parameter("", Some("@p1 int, @p2 nvarchar(40), @p3 decimal(5,2)"), false),
+                    text_parameter(
+                        "",
+                        Some("@p1 int, @p2 nvarchar(40), @p3 decimal(5,2)"),
+                        false,
+                    ),
                     int_parameter("@p1", Some(-7), true),
                     text_parameter("@p2", None, false),
                     decimal_parameter("@p3", 1250, 5, 2),
