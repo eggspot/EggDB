@@ -256,7 +256,10 @@ What it reads, on top of the statements of "What runs today":
 Language Reference documents it (roadmap item 25, D108), on the same tables as the other
 dialects. There is no Oracle wire protocol: Oracle's own clients and drivers (SQL*Plus, JDBC
 thin, OCI) cannot connect, and none is implemented until a lawful public specification of the
-protocol exists (D10). Oracle's SQL runs here, through the CLI and the embedded API.
+protocol exists (D10). Oracle's SQL runs here, through the CLI and the embedded API, and through
+PostgreSQL and TDS drivers on a connection that chooses the dialect
+([Oracle SQL over PostgreSQL and TDS connections](#oracle-sql-over-postgresql-and-tds-connections),
+D134).
 
 ```sh
 eggdb sql --create hr.db --dialect oracle -c "CREATE TABLE emp (empno NUMBER(4) PRIMARY KEY, ename VARCHAR2(10) NOT NULL, sal NUMBER(7,2))"
@@ -385,12 +388,24 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   other dialects.
 - **Length limit**: `LPAD`, `RPAD`, `REPLACE`, `||`, `UPPER`, `LOWER`, `INITCAP` and `TO_CHAR` refuse a result longer than
   1,000,000,000 bytes with `ORA-01489` before they build it.
-- **The data dictionary**: `USER_TABLES` and `ALL_TABLES` (`TABLE_NAME`, `TABLESPACE_NAME`,
-  and `OWNER` in `ALL_`), `USER_TAB_COLUMNS` and `ALL_TAB_COLUMNS` (`TABLE_NAME`,
-  `COLUMN_NAME`, `DATA_TYPE`, `DATA_LENGTH`, `DATA_PRECISION`, `DATA_SCALE`, `NULLABLE`,
-  `COLUMN_ID`), with `WHERE`, `ORDER BY` and the rest of `SELECT` on them. The owner is the
-  session user in upper case (`EGGDB` by default), and `EGGDB.EMP` names the same table as
-  `EMP`.
+- **The data dictionary** (D134): `USER_`, `ALL_` and `DBA_` `TABLES`, `TAB_COLUMNS`,
+  `TAB_COLS`, `CONSTRAINTS`, `CONS_COLUMNS`, `INDEXES`, `IND_COLUMNS`, `SEQUENCES`, `VIEWS`,
+  `OBJECTS`, `TAB_COMMENTS`, `COL_COMMENTS` and `USERS`, the synonyms `TABS`, `COLS`, `IND`,
+  `SEQ` and `OBJ`, `V$VERSION`, `NLS_SESSION_PARAMETERS` and `NLS_DATABASE_PARAMETERS`, with
+  Oracle's column names and the rest of `SELECT` on them: joins (`USER_CONSTRAINTS` with
+  `USER_CONS_COLUMNS`), grouping, subqueries. They are built from the catalog once per
+  statement, as PostgreSQL's catalog is (D129), and are read-only. `SYS.USER_TABLES` and the
+  session user's own prefix name them too; a table of the user's own named like one
+  (`TABS`) comes first, as a private object hides Oracle's public synonym. The owner of a
+  schema's objects is its name in upper case; the session user's own schema is the schema named
+  after it when one exists (`HR` for the user `hr` after HR's installer restored), otherwise the
+  default schema, shown with the session user's name (`EGGDB` by default) and as `PUBLIC` to a
+  user with a schema of its own. Unqualified names and `HR.EMPLOYEES` resolve in that schema.
+- **`SYS_CONTEXT('USERENV', parameter)`** (D134): `CURRENT_USER`, `SESSION_USER`,
+  `CURRENT_SCHEMA`, `DB_NAME`, `DB_UNIQUE_NAME`, `CON_NAME`, `INSTANCE_NAME`, `SERVICE_NAME`,
+  `SID`, `SESSIONID`, `ISDBA`, `LANGUAGE`, `NLS_DATE_FORMAT`, `NLS_TERRITORY` and the other
+  documented parameters; NULL for what EggDB does not know (`HOST`, `OS_USER`, `MODULE`, ...)
+  and for another namespace; `ORA-02003` for an undocumented parameter.
 - **Errors** with Oracle's numbers and wording: `ORA-00942: table or view does not exist`,
   `ORA-00904: "X": invalid identifier`, `ORA-00001: unique constraint (EGGDB.EMP_PKEY)
   violated`, `ORA-01400: cannot insert NULL into ("EGGDB"."EMP"."ENAME")`, `ORA-01407`,
@@ -709,6 +724,68 @@ CI's `tds-apps` job restores the sqlpackage fixture
 (`crates/eggdb/tests/data/sqlserver/shop-sqlpackage.sql`) and compares what mssql-jdbc's
 `DatabaseMetaData` and SqlClient's `GetSchema` list for it with
 `scripts/tds-apps/expected-metadata-*.out`.
+
+## Oracle SQL over PostgreSQL and TDS connections
+
+Apps reach Oracle's SQL through the drivers EggDB already speaks (roadmap item 44, D134): a
+connection chooses the dialect its statements are read in with the setting `eggdb.dialect`,
+whose value is the connection's own dialect or `oracle`. On a PostgreSQL connection it comes in
+the startup packet's `options` (`-c eggdb.dialect=oracle`), which psql takes from `PGOPTIONS`,
+pgjdbc from its `options` property and libpq-based drivers from `options` in the connection
+string; or later with `SET eggdb.dialect = oracle` (or `TO`), from either dialect. On a TDS
+connection a batch sends `SET eggdb.dialect oracle` (or `= oracle`).
+
+```sh
+eggdb restore --dialect oracle --create hr.db hr_install.sql   # Oracle's HR sample schema
+EGGDB_PASSWORD=secret eggdb serve hr.db --user hr
+PGPASSWORD=secret PGOPTIONS='-c eggdb.dialect=oracle' psql -h 127.0.0.1 -U hr hr
+hr=> SELECT table_name FROM user_tables;
+hr=> SELECT last_name FROM employees ORDER BY employee_id FETCH FIRST 3 ROWS ONLY;
+```
+
+```java
+Properties properties = new Properties();
+properties.setProperty("user", "hr");
+properties.setProperty("password", "secret");
+properties.setProperty("options", "-c eggdb.dialect=oracle");
+Connection connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1:5432/hr", properties);
+```
+
+- **What the choice changes**: the statements after it are read and answered as in
+  [the Oracle dialect](#the-oracle-dialect): Oracle's names, functions, `''` as NULL, `DUAL`,
+  `ROWNUM`, `ORA-` errors (sent with their SQLSTATE), the data dictionary and `SYS_CONTEXT`.
+  `SET eggdb.dialect = postgresql` (or `= DEFAULT`) goes back; `RESET eggdb.dialect` and `SHOW
+  eggdb.dialect` work in PostgreSQL's dialect. Another dialect is `0A000`, an unknown name
+  `22023` (and ends a connection that sent it at startup), and a change inside a transaction
+  `25001`.
+- **Where it applies**: in a query string with several statements (psql `-c`, a simple query),
+  the statements after the `SET` run in the new dialect. In a Transact-SQL batch the statements
+  after `SET eggdb.dialect oracle` are read in Oracle's dialect, checked before any of them
+  runs.
+- **Transactions follow the connection**: drivers control them as their protocol does, so a
+  PostgreSQL connection commits each statement outside `BEGIN` ... `COMMIT` (pgjdbc's
+  `setAutoCommit(false)` sends `BEGIN`, which Oracle's dialect takes as the start of a
+  transaction when it stands alone), and a TDS connection keeps SQL Server's rules
+  (`IMPLICIT_TRANSACTIONS`, transaction manager requests, which run as Transact-SQL whichever
+  dialect the connection chose). Oracle's DDL still commits what is open.
+- **Parameters and values**: pgjdbc's and libpq's `$1` placeholders work in Oracle's dialect
+  next to Oracle's `:name` and `:1`. Values go out with the protocol's closest types (`NUMBER`
+  as `numeric`, `DATE` as `timestamp(0)`, `VARCHAR2` as `text` or `varchar`, over TDS as SQL
+  Server's), so the drivers read them unchanged. A pooled TDS connection's reset returns to
+  Transact-SQL.
+
+Known differences: a query string that the previous dialect cannot split into tokens (an
+Oracle `q'[...]'` literal sent in one psql `-c` with the `SET` before it) fails before anything
+runs, so send the `SET` on its own; psql's backslash commands and pgjdbc's `DatabaseMetaData`
+read PostgreSQL's catalog, which Oracle's dialect does not answer (use the data dictionary); over
+TDS, `sp_executesql` parameters (`@name`) are read only in Transact-SQL, and mssql-jdbc's
+`setAutoCommit(false)` sends Transact-SQL (`set implicit_transactions on`) that Oracle's dialect
+refuses, so use plain batches there.
+
+CI's `oracle-apps` job restores HR's installer unchanged, serves it as the user `hr` and runs
+`scripts/oracle-apps/commands.sql` through psql and `crates/eggdb/tests/clients/java/OracleAppCheck.java`
+through pgjdbc with `-c eggdb.dialect=oracle`, comparing their output with
+`scripts/oracle-apps/expected-*.out`.
 
 ## What runs today
 
@@ -1948,12 +2025,19 @@ And more, not in the suite yet:
   deleted last row (Oracle's identity is a sequence that never goes back).
 - Result columns of expressions are named after the expression in upper case with spaces
   removed outside quotes, close to SQL*Plus's headings; `SELECT *` from `USER_TABLES` shows the
-  three columns above, not Oracle's fifty.
+  twenty columns apps read (`TABLE_NAME`, `TABLESPACE_NAME`, `STATUS`, `NUM_ROWS`, ...), not
+  Oracle's fifty, and the other dictionary views likewise show their commonly read columns.
+- The data dictionary (D134): `NOT NULL` constraints are not listed in `USER_CONSTRAINTS`;
+  `CREATED` and `LAST_DDL_TIME` are 2000-01-01 and the statistics (`NUM_ROWS`, `BLOCKS`, ...)
+  NULL, since EggDB keeps neither; every index is `NORMAL`, every table in `USERS`; the
+  session user's own schema is fixed when the connection chooses Oracle's dialect (a schema
+  made for the user later is used from the next connection).
+- `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
+  is accepted and ignored.
 - Not supported yet: `CONNECT BY`, outer joins with `(+)`, PL/SQL (`BEGIN ... END`,
   procedures, packages), `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms, database
   links, `ROWID`, the regular-expression, analytic and XML functions, and views `WITH CHECK
-  OPTION` (refused). A name qualified with another owner (`HR.T`) is `ORA-00942`; unqualified
-  names reach another schema through `ALTER SESSION SET CURRENT_SCHEMA`.
+  OPTION` (refused).
 - `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where
   Oracle raises `ORA-01426`, and a magnitude below `1e-130` does not underflow to 0.
 

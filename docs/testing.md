@@ -420,6 +420,25 @@ difference. The RPC, transaction manager and reset paths have unit tests in
 parameters, implicit transactions, `IF` and resets have tests in
 `crates/eggdb-sql/src/sqlserver_tests.rs`.
 
+Oracle SQL over PostgreSQL and TDS connections has its own check (item 44, D134).
+`scripts/oracle-apps/check.sh <eggdb> <work>` restores Oracle's HR installer unchanged, serves it
+as the user `hr`, and runs `scripts/oracle-apps/commands.sql` through psql with `PGOPTIONS='-c
+eggdb.dialect=oracle'` (HR's queries, joins and grouping, `FETCH FIRST`, `TO_CHAR` of a date,
+`SYS_CONTEXT`, the data dictionary and `NLS_SESSION_PARAMETERS`, HR's own verification query)
+and `crates/eggdb/tests/clients/java/OracleAppCheck.java` through pgjdbc with the same option in
+its `options` property (prepared statements with `?`, a dictionary self-join, a rolled-back and a
+committed transaction, a missing table's SQLSTATE). It fails unless they print exactly
+`scripts/oracle-apps/expected-psql.out` and `expected-java.out`, written from HR's documented
+data, since Oracle Database cannot be a CI oracle under its license. CI's `oracle-apps` job runs
+it with pgjdbc 42.7.4 and the `postgres:17` image's psql, test tools never shipped. The dictionary,
+`SYS_CONTEXT`, the dialect switch on PostgreSQL and Transact-SQL sessions, `$n` parameters and
+the user's own schema have unit tests in `crates/eggdb-sql/src/oracle_dictionary/tests.rs`; the
+startup option, a refused dialect and the extended protocol in Oracle's dialect have socket tests
+in `crates/eggdb-pgwire/tests/protocol.rs`, and a TDS batch that switches, with transaction
+manager requests after it, in `crates/eggdb-tdswire/tests/protocol.rs`; the hostile Oracle
+statement fuzzer in `crates/eggdb-sql/src/tests.rs` covers the new views, `SYS_CONTEXT` and the
+`SET`.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.
