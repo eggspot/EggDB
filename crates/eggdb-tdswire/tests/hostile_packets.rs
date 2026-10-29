@@ -15,6 +15,7 @@ use common::{
 use eggdb_tdswire::messages::{
     parse_login7, parse_prelogin, parse_sql_batch, parse_transaction_manager_request,
 };
+use eggdb_tdswire::bulk::parse_bulk_load;
 use eggdb_tdswire::rpc::parse_rpc_request;
 use std::time::Duration;
 
@@ -108,7 +109,33 @@ fn seeds() -> Vec<Vec<u8>> {
             call_by_name("sp_unprepare", &[int_parameter("", Some(1), false)]),
         ]),
         transaction_body(7, &[1, b't', 0, 1, 2, 0]),
+        bulk_load_body(),
     ]
+}
+
+fn bulk_load_body() -> Vec<u8> {
+    let mut body = vec![0x81, 3, 0];
+    for (name, type_info) in [
+        ("id", &[0x26u8, 4][..]),
+        ("name", &[0xE7, 0xFF, 0xFF, 0x09, 0x04, 0x00, 0x22, 0x00][..]),
+        ("notes", &[0x63, 0, 0, 0, 0x7F, 0x09, 0x04, 0x00, 0x22, 0x00, 1, 0, b't', 0][..]),
+    ] {
+        body.extend_from_slice(&[0, 0, 0, 0, 0x09, 0x00]);
+        body.extend_from_slice(type_info);
+        body.push(name.len() as u8);
+        body.extend(common::utf16(name));
+    }
+    body.extend_from_slice(&[0xD1, 4, 1, 0, 0, 0]);
+    body.extend_from_slice(&4u64.to_le_bytes());
+    body.extend_from_slice(&4u32.to_le_bytes());
+    body.extend_from_slice(&[b'a', 0, b'b', 0, 0, 0, 0, 0]);
+    body.push(16);
+    body.extend_from_slice(&[0; 24]);
+    body.extend_from_slice(&2u32.to_le_bytes());
+    body.extend_from_slice(&[b'n', 0]);
+    body.extend_from_slice(&[0xD2, 0b0000_0110, 4, 2, 0, 0, 0]);
+    body.extend_from_slice(&[0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    body
 }
 
 #[test]
@@ -129,7 +156,31 @@ fn mutated_messages_never_panic_a_parser() {
         let _ = parse_sql_batch(&bytes);
         let _ = parse_rpc_request(&bytes);
         let _ = parse_transaction_manager_request(&bytes);
+        let _ = parse_bulk_load(&bytes);
     }
+}
+
+#[test]
+fn the_bulk_load_seed_reads_and_its_mutations_never_panic_over_a_socket() {
+    let (columns, rows) = parse_bulk_load(&bulk_load_body()).unwrap();
+    assert_eq!(columns.len(), 3);
+    assert_eq!(rows.len(), 2);
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    client.batch("CREATE TABLE t (id INT PRIMARY KEY, name NVARCHAR(MAX), notes NVARCHAR(MAX))");
+    let mut rng = Rng(setting("EGGDB_FUZZ_SEED", 0xB01C_10AD));
+    let cases = setting("EGGDB_FUZZ_CASES", 20_000).min(200);
+    for _ in 0..cases {
+        client.batch("INSERT BULK t (id Int, name NVarChar(max), notes NText)");
+        let bytes = mutate(&mut rng, &bulk_load_body());
+        client.send(0x07, &bytes);
+        assert!(client.read_message().is_some());
+        client.batch("DELETE FROM t");
+    }
+    assert_eq!(
+        rows(&client.batch("SELECT 1")),
+        vec![vec![Some("1".to_owned())]]
+    );
 }
 
 #[test]

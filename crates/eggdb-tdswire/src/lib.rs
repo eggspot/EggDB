@@ -23,11 +23,16 @@
 //!   and mssql-jdbc run parameterized statements; transaction manager requests begin, commit
 //!   and roll back transactions, and the connection-reset flag of pooled connections resets
 //!   the session.
+//! - Bulk loads run as SQL Server runs them for `bcp in` and `SqlBulkCopy`: an `INSERT BULK`
+//!   statement, then a bulk load message whose rows [`bulk`] reads as they arrive and
+//!   [`eggdb_sql::Session::execute_bulk_load`] loads in one statement; `SET FMTONLY ON` and
+//!   `sp_tablecollations_100` describe the target table first, as `SqlBulkCopy` asks.
 //!
-//! The guides are "Connecting with sqlcmd" and ".NET and Java apps over TDS" in `docs/sql.md`
-//! in the repository.
+//! The guides are "Connecting with sqlcmd", ".NET and Java apps over TDS" and "Bulk loads
+//! with bcp and SqlBulkCopy" in `docs/sql.md` in the repository.
 
 mod auth;
+pub mod bulk;
 mod connection;
 pub mod messages;
 mod procedures;

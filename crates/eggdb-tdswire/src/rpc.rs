@@ -71,8 +71,10 @@ fn malformed(reason: &'static str) -> RpcError {
     RpcError::Malformed(MalformedMessage { reason })
 }
 
+pub(crate) const ENDS_EARLY: &str = "the message ends early";
+
 fn ends_early() -> RpcError {
-    malformed("the RPC request ends early")
+    malformed(ENDS_EARLY)
 }
 
 /// The procedure an RPC call names.
@@ -190,13 +192,13 @@ pub struct RpcRequest {
     pub calls: Vec<ProcedureCall>,
 }
 
-struct Reader<'b> {
-    bytes: &'b [u8],
-    at: usize,
+pub(crate) struct Reader<'b> {
+    pub(crate) bytes: &'b [u8],
+    pub(crate) at: usize,
 }
 
 impl<'b> Reader<'b> {
-    fn take(&mut self, count: usize) -> Result<&'b [u8], RpcError> {
+    pub(crate) fn take(&mut self, count: usize) -> Result<&'b [u8], RpcError> {
         let end = self
             .at
             .checked_add(count)
@@ -207,21 +209,21 @@ impl<'b> Reader<'b> {
         Ok(taken)
     }
 
-    fn byte(&mut self) -> Result<u8, RpcError> {
+    pub(crate) fn byte(&mut self) -> Result<u8, RpcError> {
         self.take(1)?.first().copied().ok_or_else(ends_early)
     }
 
-    fn u16(&mut self) -> Result<u16, RpcError> {
+    pub(crate) fn u16(&mut self) -> Result<u16, RpcError> {
         let bytes = self.take(2)?;
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
-    fn u32(&mut self) -> Result<u32, RpcError> {
+    pub(crate) fn u32(&mut self) -> Result<u32, RpcError> {
         let bytes = self.take(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
-    fn u64(&mut self) -> Result<u64, RpcError> {
+    pub(crate) fn u64(&mut self) -> Result<u64, RpcError> {
         let bytes = self.take(8)?;
         let mut eight = [0u8; 8];
         eight.copy_from_slice(bytes);
@@ -233,7 +235,7 @@ impl<'b> Reader<'b> {
     }
 }
 
-fn utf16_text(bytes: &[u8], reason: &'static str) -> Result<String, RpcError> {
+pub(crate) fn utf16_text(bytes: &[u8], reason: &'static str) -> Result<String, RpcError> {
     if !bytes.len().is_multiple_of(2) {
         return Err(malformed(reason));
     }
@@ -258,14 +260,14 @@ fn windows_1252_text(bytes: &[u8]) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Encoding {
+pub(crate) enum Encoding {
     Utf16,
     Utf8,
     Windows1252,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shape {
+pub(crate) enum Shape {
     Null,
     Integer { width: u8 },
     Bit,
@@ -283,7 +285,7 @@ enum Shape {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Length {
+pub(crate) enum Length {
     Fixed(usize),
     Byte,
     UnsignedShort,
@@ -322,7 +324,7 @@ fn character_encoding(reader: &mut Reader<'_>, unicode: bool) -> Result<Encoding
     })
 }
 
-fn read_type_info(reader: &mut Reader<'_>) -> Result<(Shape, Length), RpcError> {
+pub(crate) fn read_type_info(reader: &mut Reader<'_>) -> Result<(Shape, Length), RpcError> {
     let kind = reader.byte()?;
     Ok(match kind {
         0x1F => (Shape::Null, Length::Fixed(0)),
@@ -433,7 +435,10 @@ fn read_type_info(reader: &mut Reader<'_>) -> Result<(Shape, Length), RpcError> 
     })
 }
 
-fn read_data(reader: &mut Reader<'_>, length: Length) -> Result<Option<Vec<u8>>, RpcError> {
+pub(crate) fn read_data(
+    reader: &mut Reader<'_>,
+    length: Length,
+) -> Result<Option<Vec<u8>>, RpcError> {
     Ok(match length {
         Length::Fixed(0) => None,
         Length::Fixed(count) => Some(reader.take(count)?.to_vec()),
@@ -566,7 +571,7 @@ fn guid(data: &[u8]) -> Result<Value, RpcError> {
     Ok(Value::Uuid(uuid))
 }
 
-fn decode(shape: Shape, data: Option<&[u8]>) -> Result<Value, RpcError> {
+pub(crate) fn decode(shape: Shape, data: Option<&[u8]>) -> Result<Value, RpcError> {
     let Some(data) = data else {
         return Ok(Value::Null);
     };

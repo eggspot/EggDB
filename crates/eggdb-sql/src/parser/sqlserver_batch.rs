@@ -324,6 +324,9 @@ impl Parser<'_> {
     }
 
     fn skip_bulk_column_type(&mut self) -> SqlResult<()> {
+        if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RightParen) {
+            return Ok(());
+        }
         if !matches!(
             self.peek_kind(),
             TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)

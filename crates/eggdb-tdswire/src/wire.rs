@@ -31,6 +31,13 @@ pub(crate) struct Message {
     pub(crate) body: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Packet {
+    pub(crate) kind: u8,
+    pub(crate) status: u8,
+    pub(crate) last: bool,
+}
+
 pub(crate) struct Wire<'a> {
     stream: TcpStream,
     stop: &'a (dyn Fn() -> bool + Sync),
@@ -125,47 +132,76 @@ impl<'a> Wire<'a> {
         body: &mut Vec<u8>,
         limit: usize,
     ) -> Result<(u8, u8), WireError> {
-        let mut kind = None;
-        let mut status = 0;
-        loop {
-            let mut header = [0u8; HEADER_BYTES];
-            self.read_exact(&mut header[..1])?;
-            if kind.is_none() && header[0] == TLS_HANDSHAKE {
-                return Err(WireError::Tls);
-            }
-            self.read_exact(&mut header[1..])?;
-            let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
-            if length < HEADER_BYTES {
-                return Err(WireError::Malformed("a packet is shorter than its header"));
-            }
-            match kind {
-                None => {
-                    kind = Some(header[0]);
-                    status = header[1];
-                }
-                Some(first) if first != header[0] => {
-                    return Err(WireError::Malformed(
-                        "the packets of one message have different types",
-                    ));
-                }
-                Some(_) => {}
-            }
-            let payload = length - HEADER_BYTES;
-            if body.len() + payload > limit {
-                return Err(WireError::TooLarge);
-            }
-            let mut read = 0;
-            while read < payload {
-                let chunk = (payload - read).min(READ_CHUNK_BYTES);
-                let start = body.len();
-                body.resize(start + chunk, 0);
-                self.read_exact(&mut body[start..])?;
-                read += chunk;
-            }
-            if header[1] & END_OF_MESSAGE != 0 {
-                return Ok((kind.unwrap_or(0), status));
-            }
+        let first = self.read_packet(body, limit, true)?;
+        self.read_rest_of_message(&first, body, limit)?;
+        Ok((first.kind, first.status))
+    }
+
+    pub(crate) fn read_first_packet(
+        &mut self,
+        body: &mut Vec<u8>,
+        limit: usize,
+    ) -> Result<Packet, WireError> {
+        let read = self.read_packet(body, limit, true);
+        if read.is_err() {
+            body.fill(0);
+            std::hint::black_box(&*body);
         }
+        read
+    }
+
+    pub(crate) fn read_rest_of_message(
+        &mut self,
+        first: &Packet,
+        body: &mut Vec<u8>,
+        limit: usize,
+    ) -> Result<(), WireError> {
+        let mut last = first.last;
+        while !last {
+            let packet = self.read_packet(body, limit, false)?;
+            if packet.kind != first.kind {
+                return Err(WireError::Malformed(
+                    "the packets of one message have different types",
+                ));
+            }
+            last = packet.last;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_packet(
+        &mut self,
+        body: &mut Vec<u8>,
+        limit: usize,
+        first: bool,
+    ) -> Result<Packet, WireError> {
+        let mut header = [0u8; HEADER_BYTES];
+        self.read_exact(&mut header[..1])?;
+        if first && header[0] == TLS_HANDSHAKE {
+            return Err(WireError::Tls);
+        }
+        self.read_exact(&mut header[1..])?;
+        let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+        if length < HEADER_BYTES {
+            return Err(WireError::Malformed("a packet is shorter than its header"));
+        }
+        let payload = length - HEADER_BYTES;
+        if body.len().saturating_add(payload) > limit {
+            return Err(WireError::TooLarge);
+        }
+        let mut read = 0;
+        while read < payload {
+            let chunk = (payload - read).min(READ_CHUNK_BYTES);
+            let start = body.len();
+            body.resize(start + chunk, 0);
+            self.read_exact(&mut body[start..])?;
+            read += chunk;
+        }
+        Ok(Packet {
+            kind: header[0],
+            status: header[1],
+            last: header[1] & END_OF_MESSAGE != 0,
+        })
     }
 
     pub(crate) fn begin_message(&mut self, kind: u8) {

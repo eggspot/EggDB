@@ -94,6 +94,15 @@ pub struct BcpCharacterReader<'r> {
     rows_to_skip: u64,
 }
 
+impl std::fmt::Debug for BcpCharacterReader<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BcpCharacterReader")
+            .field("terminators", &self.terminators)
+            .field("rows_read", &self.rows_read)
+            .finish()
+    }
+}
+
 impl<'r> BcpCharacterReader<'r> {
     /// A reader of `input`, a whole data file, with these terminators.
     pub fn new(input: &'r mut dyn Read, terminators: BcpTerminators) -> Self {
