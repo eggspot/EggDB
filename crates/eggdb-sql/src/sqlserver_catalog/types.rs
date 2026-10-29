@@ -66,7 +66,7 @@ const fn system_type(
     }
 }
 
-pub(crate) const SYSTEM_TYPES: [SystemType; 30] = [
+pub(crate) static SYSTEM_TYPES: [SystemType; 30] = [
     system_type(SqlServerTypeName::Image, 34, 16, 0, 0, false),
     system_type(SqlServerTypeName::Text, 35, 16, 0, 0, true),
     system_type(SqlServerTypeName::UniqueIdentifier, 36, 16, 0, 0, false),
@@ -606,7 +606,7 @@ impl DataTypeInfo {
     }
 }
 
-pub(crate) const DATA_TYPES: [DataTypeInfo; 36] = [
+pub(crate) static DATA_TYPES: [DataTypeInfo; 36] = [
     info("sql_variant", SqlServerTypeName::SqlVariant, 8000, false),
     info(
         "uniqueidentifier",
