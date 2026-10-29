@@ -73,29 +73,57 @@ as EggOS's `wm restore` brings a window back to its size and its Trash brings a 
 
 ## The commands in the registry
 
-Slice 1 holds the commands agents use; slice 2 adds every other command, after which the
-registry test requires all of them. `eggdb help --json` prints these definitions; the
-`default_format` column is what a terminal and a pipe get without `--format`.
+Every command of `eggdb` is in the registry (slice 2, D144), and the registry test fails on a
+command of the parser that is not. `eggdb help --json` prints these definitions; the
+`default_format` column is what a terminal and a pipe get without `--format` (`ui`, `shell` and
+`mcp` take no `--format`, so theirs is `null`).
 
 | Command | Max effect | Default format (terminal, pipe) | JSON form | Twin of |
 |---------|------------|---------------------------------|-----------|---------|
+| `create` | change | text, json | one object, `file` and `page_size` | |
+| `put` | change | text, json | one object, `key`, `stored`, and `ttl_ms`/`expires_at` with `--ttl` | |
 | `get` | read | text, raw | one object, `key`/`key_hex` and `value`/`value_hex` | `kv_get` |
+| `del` | destroy | text, json | one object, `key` and `deleted` | |
 | `scan` | read | text, json | records, `key`/`key_hex` and `value`/`value_hex` | `kv_scan` |
+| `ttl` | read | text, json | one object, `key`, `ttl_ms`, `expires_at` | |
+| `expire` | change | text, json | one object, `key`, `expires`, `ttl_ms`, `expires_at` | |
+| `persist` | change | text, json | one object, `key` and `persisted` | |
+| `incr` | change | text, json | one object, `key` and `value` | |
+| `decr` | change | text, json | one object, `key` and `value` | |
+| `cas` | destroy | text, json | one object, `key`, `swapped`, and `value` when it did not swap | |
 | `check` | read | text, json | one object, the check report | |
 | `stats` | read | text, json | one object, the stats report | |
+| `backup` | change | text, json | one object, the backup report | |
+| `compact` | change | text, json | one object, the compaction report | |
+| `ui` | destroy | none | none: it draws a screen | |
 | `export` | read | text, json | one object about the export file; without a file, the export itself | |
-| `sql` | destroy | text, text | one line per statement: `tag`, and `columns`, `rows`, `row_count`, `notices` when it has them | `run_sql`, `write_sql` |
+| `import` | change | text, json | one object, the import report | |
+| `sql` | destroy | text, text | one line per statement: `tag`, and `columns`, `rows`, `row_count`, `notices` when it has them | `run_sql` (with `--read-only`), `write_sql` |
+| `explain` | read | text, json | one `sql --json` line, `"tag":"EXPLAIN"` | `explain_query` |
+| `table list` | read | text, json | records, `schema`, `name`, `kind`, `columns`, `comment` | `list_tables` |
+| `table show` | read | text, json | one object, the tool's description without `notice` | `describe_table` |
+| `table sample` | read | text, json | one `sql --json` line plus `truncated` | `sample_rows` |
+| `serve` | destroy | text, json | records: where it listens, then that it stopped | |
+| `shell` | destroy | none | none: its own `--mode table\|expanded\|csv` | |
+| `restore` | change | text, json | one object, the restore report | |
+| `collection list` | read | text, json | one object, `file` and `collections` | |
+| `collection add` | change | text, json | one object, `file`, `collection`, `added` | |
+| `collection delete` | destroy | text, json | one object, `file`, `collection`, `deleted` | |
+| `mcp` | destroy | none | none: stdout carries the protocol | |
+| `audit` | read | text, json | records, the audit file's lines | |
+| `help` | read | text, text | `--json`: the registry, one object; for a noun, one object per verb | |
+| `version` | read | text, text | `--json`: `{"version"}` | |
 
 ## The tools
 
 | Tool | CLI twin | Max effect | Grant | Idempotent | Confirm | Envelope (what the twin does not print) |
 |------|----------|------------|-------|------------|---------|------------------------------------------|
-| `list_tables` | slice 2: `table list` | read | | yes | | `notice` |
-| `describe_table` | slice 2: `table show` | read | | yes | | `notice` |
-| `run_sql` | `sql --json` (slice 2: `sql --read-only`) | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
+| `list_tables` | `table list --json` | read | | yes | | `notice`; `schemas` (the records' `schema` values); `tables` and `views` become records with `kind` |
+| `describe_table` | `table show --json` | read | | yes | | `notice` |
+| `run_sql` | `sql --read-only --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
 | `write_sql` | `sql --json` | destroy | `--allow-write` | no | destructive statements (D121) | the same, and `rows_changed`, `committed`, `warning` |
-| `explain_query` | slice 2: `explain` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
-| `sample_rows` | slice 2: `table sample` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
+| `explain_query` | `explain --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
+| `sample_rows` | `table sample --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated_by`; `tag` and `row_count` count the rows shown, not the `LIMIT n+1` read |
 | `kv_get` | `get --json` | read | | yes | | `notice`, `found`; in `entry`, `key_hex` when `key` is there, and `value_bytes` |
 | `kv_scan` | `scan --json` | read | | yes | | `notice`, `returned_entries`, `truncated`, `next_start_hex`; in each entry, as `kv_get` |
 
@@ -103,9 +131,12 @@ No tool reaches outside the database (`openWorldHint` is false for all). Their n
 shipped ones (D119, D121); a new tool's name joins its command's words with `_`. Arguments map
 to the twin: `sql` to `-c`, `dialect` to `--dialect`, `key` and `key_hex` to the key operand
 (hex as `0x…`), `prefix`, `start` and `end` (and their `_hex` forms) to `--prefix`, `--from` and
-`--to`, `max_entries` to `--limit`, `keys_only` to `--keys-only`; `max_rows` is a limit of the
-call, and `confirm` the user's confirmation, which the CLI never asks for. A missing key is
-`found: false` from `kv_get` and exit 1 with nothing printed from `get`, a result in both.
+`--to`, `max_entries` to `--limit`, `keys_only` to `--keys-only`, `schema` to `--schema`, `table`
+to the table operand, `sample_rows`'s `max_rows` to `--limit`; `run_sql`'s and `write_sql`'s
+`max_rows` is a limit of the call, and `confirm` the user's confirmation, which the CLI never
+asks for. A missing key is `found: false` from `kv_get` and exit 1 with nothing printed from
+`get`, a result in both. A missing table is `not_found` from the tools and `table_not_found`
+(exit 1) from `table show` and `table sample`: the same category, `not_found` (D144).
 
 ## Error codes
 
@@ -116,15 +147,16 @@ that declares the code; `-` marks a code only MCP gives.
 | Code | Category | Exit | When |
 |------|----------|------|------|
 | `invalid_arguments` | `usage` | 2 | CLI: an unknown command or option, a missing or extra argument, a bad value. MCP: an argument missing, unknown or of the wrong type |
-| `one_statement_per_call` | `usage` | - | the SQL text holds a second statement |
+| `one_statement_per_call` | `usage` | 2 | the SQL text holds a second statement; CLI: `eggdb explain` |
 | `unknown_tool` | `usage` | - | the call named no tool of this server (audit only) |
 | `invalid_request` | `usage` | - | the request was not a well-formed call (audit only) |
 | `not_initialized` | `usage` | - | a call came before `initialize` (audit only) |
 | `not_found` | `not_found` | 3 | the database file does not exist; MCP also: no such table or view |
+| `table_not_found` | `not_found` | 1 | CLI: `table show` or `table sample` named no table or view; `fix_command` is `eggdb table list <file>` |
 | `collection_not_found` | `not_found` | 1 | `-C <name>` names no collection; `fix_command` is `eggdb collection add <file> <name>` |
-| `already_exists` | `exists` | 3 | `export` to a file that is there |
+| `already_exists` | `exists` | 3 | `export`, `create` or `backup` to a file that is there, or a staging file left by `backup` or `compact` |
 | `database_busy` | `busy` | 5 | another program holds the file |
-| `read_only` | `read_only` | - | a write without `--allow-write`, or sent to `run_sql` |
+| `read_only` | `read_only` | 3 | MCP: a write without `--allow-write`, or sent to `run_sql`. CLI: a statement refused with SQLSTATE 25006, as `sql --read-only` refuses writes |
 | `needs_confirmation` | `needs_confirmation` | - | a destructive `write_sql` without `confirm: true` on a client that cannot ask |
 | `declined_by_user` | `declined` | - | the user said no |
 | `cancelled` | `declined` | - | the client cancelled the call while the user was asked |
@@ -134,7 +166,7 @@ that declares the code; `-` marks a code only MCP gives.
 | `not_writable` | `refused` | - | the file or its directory cannot be opened for writing |
 | `transaction_control_refused` | `refused` | - | `BEGIN`, `COMMIT`, `ROLLBACK` |
 | `copy_not_available` | `refused` | - | `COPY` |
-| `not_supported` | `refused` | - | a dialect's form EggDB does not have yet, such as Oracle's `EXPLAIN PLAN` |
+| `not_supported` | `refused` | 3 | a dialect's form EggDB does not have yet, such as Oracle's `EXPLAIN PLAN` |
 | `too_large` | `too_large` | 3 | a key or value over the file's limit |
 | `write_too_large` | `too_large` | - | one call changed more than 256 MiB |
 | `time_limit` | `timeout` | - | the call ran past `--time-limit` |
@@ -147,7 +179,8 @@ that declares the code; `-` marks a code only MCP gives.
 | `audit_unavailable` | `failed` | - | the call could not be recorded, so its result is withheld |
 
 A SQL error whose SQLSTATE means corruption or a lock is `damaged` or `database_busy` in
-`eggdb sql --json`, so its code and its exit agree.
+`eggdb sql --json`, and one refused because the session is read-only (25006) is `read_only`, so
+its code and its exit agree.
 
 ## Pending differences
 

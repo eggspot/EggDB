@@ -55,7 +55,9 @@ eggdb <command> <file> [arguments] [options]
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below) |
 | `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below); with `--csv <file> --table <name>`, a CSV file into a SQL table |
-| `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
+| `sql <file> [-c <sql> \| <script> \| -]` | for writing (`--read-only`: no); `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
+| `explain <file> -c <sql>` | read-only | shows the plan for one statement, in its dialect's EXPLAIN form, without running it (below) |
+| `table list\|show\|sample <file> [<table>]` | read-only | lists the tables and views, shows one in full, or prints its first rows (below) |
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, into the file, with a report (below, and [migrate.md](migrate.md)) |
@@ -63,7 +65,7 @@ eggdb <command> <file> [arguments] [options]
 | `audit <file>` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below) |
 | `collection list\|add\|delete <file> [<name>]` | read-only for `list`, for writing otherwise | lists, adds or deletes the named key spaces in the file (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
-| `version` | | the version; also `--version` and `-V` |
+| `version` | | the version; also `--version` and `-V`; `--json` prints `{"version":…}` |
 
 The command comes first and the file second; options may go anywhere after the command, and
 `--` ends them, so `eggdb get app.db -- -k` reads the key `-k`.
@@ -72,7 +74,7 @@ The command comes first and the file second; options may go anywhere after the c
 as `app.bd` is an error that says how to create the file, never a new empty database that later
 reads as "empty".
 
-**Read-only commands share the file.** `get`, `scan`, `check`, `stats`, `backup`, `compact` and `export` can run
+**Read-only commands share the file.** `get`, `scan`, `check`, `stats`, `backup`, `compact`, `export`, `table`, `explain` and `sql --read-only` can run
 together, and next to an application that has the file open read-only. A program that has it
 open for writing keeps them out, and `put`, `del`, `import` and `sql` wait for nobody: they exit 5 at
 once when the file is open anywhere (see "Exit codes"). That includes an AI agent's call through
@@ -111,7 +113,8 @@ is an error, never an empty value. Stdin can be read once per command.
 `--format text|json|hex|raw` (short `-F`), and `--json`, the same as `--format json` (the last
 of them given wins). By default a terminal gets `text`, and a pipe or a file gets `json`, except
 `get`, which gets `raw` so that `eggdb get app.db photo > photo.jpg` gives back the bytes, and
-`sql`, which keeps its text tables in a pipe. `hex` and `raw` are for `get` and `scan`, the
+`sql`, `help` and `version`, which keep their text in a pipe. `ui`, `shell` and `mcp` take no
+`--format`. `hex` and `raw` are for `get` and `scan`, the
 commands that print data.
 
 | Format | `get` | `scan` | `put`, `del`, `create`, `check`, `stats`, `export`, `import` |
@@ -135,6 +138,11 @@ lowercase hex, instead of `key` or `value`. Numbers are plain integers. The fiel
 | `stats` | `{"file","page_size","pages","free_pages","file_bytes","last_commit_stamp","last_commit_time","log_bytes_since_checkpoint"}`; the commit fields are `null` before the first commit |
 | `export` | `{"file","out","entries","collections"}` when the export goes to a file; to stdout, the export itself |
 | `sql` | with `--json`, one line per statement: `{"tag","columns","rows","row_count","notices"}`, the last four only when the statement has them, as MCP's `run_sql` returns them without its envelope |
+| `explain` | one `sql --json` line, `{"tag":"EXPLAIN","columns","rows","row_count"}` |
+| `table list` | one record per table and view, tables first: `{"schema","name","kind","columns","comment"}`, `comment` only when there is one |
+| `table show` | `{"schema","name","kind","columns","primary_key","indexes","comment","rows":{"count","exact"}}`, as MCP's `describe_table` without its notice; a view has no `primary_key` or `indexes` |
+| `table sample` | one `sql --json` line plus `"truncated"`, `true` when the table has more rows than shown |
+| `version` | with `--json`, `{"version":…}` |
 | `import` | `{"file","from","entries","imported","skipped","created","dry_run"}`; `from` is `-` for stdin; `imported` counts the keys stored, so a key repeated in the export counts once under `--on-conflict overwrite`; with `--dry-run` the counts and `created` say what the import would do |
 
 `text` shows bytes as text when they are valid UTF-8 without control characters, and as `0x`
@@ -752,6 +760,58 @@ SQLSTATE:  42P01
   `-c` and a script together, a script that cannot be read, or SQL that is not UTF-8 are usage
   errors (exit 2).
 
+### `sql --read-only`
+
+`--read-only` opens the file read-only, beside other readers, as `get` and `scan` do: the
+statements that read run as usual, and the first one that writes fails with SQLSTATE `25006`
+(`ERROR:  cannot execute INSERT in a read-only transaction`), exit 3, and in JSON code
+`read_only`. It is the CLI twin of MCP's `run_sql`. It cannot go with `--create`.
+
+```
+eggdb sql app.db --read-only -c "SELECT count(*) FROM users"
+```
+
+## Tables and plans: `eggdb table` and `eggdb explain`
+
+The CLI twins of the MCP tools `list_tables`, `describe_table`, `sample_rows` and
+`explain_query` (D144). Each opens the file read-only, so it runs beside other readers.
+
+```
+$ eggdb table list app.db
+public.orders  table  5 columns
+public.users   table  4 columns  the people who sign in
+sales.totals   view   2 columns
+2 tables, 1 view
+$ eggdb table sample app.db users -n 2
+ id | name
+----+-------
+  1 | Ada
+  2 | Grace
+(2 rows)
+
+more rows follow: -n shows up to 1,000, eggdb sql shows them all
+$ eggdb explain app.db -c "SELECT * FROM users WHERE id = 2"
+              QUERY PLAN
+--------------------------------------
+ Index Scan using users_pkey on users
+(1 row)
+
+```
+
+- `table list [--schema <name>]`: one line per table and view (tables first), with its kind,
+  column count and comment; the count on stderr.
+- `table show <table>`: the kind, row count (exact up to 10,000, otherwise `more than 10,000`),
+  columns with types, `not null`, `auto increment`, defaults and comments, primary key, indexes
+  and comment.
+- `table sample <table> [-n <count>]`: the first rows as stored (10, up to 1,000), printed as
+  `eggdb sql` prints a SELECT; a dim line on stderr says when more rows follow.
+- `<table>` is a name or `schema.name`, matched as typed and then lower-cased. A table that is
+  not there is exit 1, `table_not_found`, with `try: eggdb table list <file>`.
+- `explain -c <sql> [--dialect …]`: one statement, without `EXPLAIN`, which it adds (`EXPLAIN
+  QUERY PLAN` in SQLite's dialect); the plan prints as a table. Oracle's `EXPLAIN PLAN` and SQL
+  Server's showplan are not in EggDB yet (`not_supported`, exit 3); a second statement is a
+  usage error. The full design is [ux/cli.md](ux/cli.md) section 24.
+
 ## `eggdb shell`
 
 ```
@@ -1067,7 +1127,7 @@ last 3 of 41 calls, 2 errors, by claude-code 2.1.0 (the name the client gave)
 | Code | Meaning |
 |------|---------|
 | 0 | done; `check` found no damage |
-| 1 | not found: `get` or `del` of a key that is not there |
+| 1 | not found: `get` or `del` of a key that is not there; `table show` or `table sample` of a table that is not there |
 | 2 | usage: unknown command or option, missing argument, bad hex, an unreadable `@file`, export file or SQL script |
 | 3 | database error: no such file, not an EggDB file, written by a newer EggDB, permission denied, I/O failure, key or value too large, disk full; an export that is not valid, or a key already there (`import`); an output file that exists (`export`, `backup`); a SQL statement that failed (`sql`) |
 | 4 | damaged: `check` found damage, or any command read a damaged page |
@@ -1106,12 +1166,12 @@ pipe alone keeps the text form. The exit code is the same.
 and `position` MCP gives. Every code, its category and its exit are listed in
 [ux/command-model.md](ux/command-model.md).
 
-`eggdb help --json` prints the commands and the MCP tools as one JSON object: each command's
+`eggdb help --json` prints every command and the MCP tools as one JSON object: each command's
 options, operands, output per format, default formats, most it can do (`read`, `change`,
 `destroy`), errors with their exit codes and examples, and each tool's arguments, its CLI twin,
-grant and annotations; `eggdb help <command> --json` prints one command. In this release it
-describes `get`, `scan`, `check`, `stats`, `export` and `sql` in full, and the other commands by
-their usage line.
+grant and annotations; `eggdb help <command> --json` prints one command, `eggdb help table
+--json` one line per verb of the noun, and `eggdb help table list --json` that verb alone.
+`other_commands` is an empty array: every command is in the registry.
 
 ## Colour
 

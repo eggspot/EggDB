@@ -200,7 +200,15 @@ with and without `--allow-write`. The parity test (`tests/command_model.rs`) run
 and the `eggdb` commands as real processes on the same files: `kv_get`/`get --json`,
 `kv_scan`/`scan --json`, `run_sql` and `write_sql`/`sql --json` return the same values once the
 tool's envelope is removed, and the same failure (a missing file, a failed statement) has the same
-code and category. `cli/command_model_tests.rs` checks `--json` against `--format json`, the
+code and category. From slice 2 (D144) it also runs `list_tables`/`table list`,
+`describe_table`/`table show`, `sample_rows`/`table sample` (with and without more rows than
+asked for), `explain_query`/`explain` in three dialects and with its refusals, and
+`run_sql`/`sql --read-only` with a write refused as `read_only`; a missing table is `not_found`
+from a tool and `table_not_found` from its twin, compared by category. A third test runs every
+example of every reading command in the registry against a temporary file and requires exit 0,
+and a unit test parses every example of every command. The registry test also requires every
+command of the parser, a JSON form exactly where `--format` is taken, one exit per error code
+across commands, and a CLI twin for every tool. `cli/command_model_tests.rs` checks `--json` against `--format json`, the
 JSON errors and that a pipe keeps text ones, `sql --json`, that `help --json` lists exactly the
 registry, that the text help comes from it unchanged, and that `docs/ux/command-model.md` lists
 every command, tool, error code and kept name.

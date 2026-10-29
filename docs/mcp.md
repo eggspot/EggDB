@@ -56,8 +56,10 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 
 The tools, their arguments, descriptions and annotations come from EggDB's command registry
 (D143), the same definitions `eggdb help --json` prints, with each tool's CLI twin: `kv_get` is
-`eggdb get --json`, `kv_scan` is `eggdb scan --json`, `run_sql` and `write_sql` are
-`eggdb sql --json`, and each returns the same values as its twin once its envelope (the data
+`eggdb get --json`, `kv_scan` is `eggdb scan --json`, `run_sql` is `eggdb sql --read-only
+--json`, `write_sql` is `eggdb sql --json`, `list_tables`, `describe_table` and `sample_rows` are
+`eggdb table list|show|sample --json`, and `explain_query` is `eggdb explain --json` (D144), so
+what an agent did can be repeated at the command line. Each returns the same values as its twin once its envelope (the data
 notice, the per-call limits and what the call reports about itself) is taken away. The
 `instructions` the server sends at `initialize` are generated from it too: the effects (`read`,
 `change`, `destroy`), what this session may do, and the error categories.

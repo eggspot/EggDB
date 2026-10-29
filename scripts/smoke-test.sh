@@ -105,6 +105,23 @@ expect_exit 0 "$eggdb" sql --create sql-json.db --json -c "CREATE TABLE t (id in
   fail "sql --json printed $(cat last.out)"
 pass "--json, JSON errors, help --json and sql --json"
 
+expect_exit 0 "$eggdb" table list sql-json.db --json
+[ "$(cat last.out)" = '{"schema":"public","name":"t","kind":"table","columns":1}' ] ||
+  fail "table list printed $(cat last.out)"
+expect_exit 0 "$eggdb" table show sql-json.db t --json
+grep -q '"primary_key":\["id"\]' last.out || fail "table show printed $(cat last.out)"
+expect_exit 0 "$eggdb" table sample sql-json.db t --json
+grep -q '"rows":\[\[7\]\],"row_count":1,"truncated":false' last.out || fail "table sample printed $(cat last.out)"
+expect_exit 1 "$eggdb" table show sql-json.db nowhere --json
+grep -q '"code":"table_not_found"' last.err || fail "a missing table read $(cat last.err)"
+expect_exit 0 "$eggdb" explain sql-json.db --json -c "SELECT * FROM t WHERE id = 7"
+grep -q '^{"tag":"EXPLAIN"' last.out || fail "explain printed $(cat last.out)"
+expect_exit 3 "$eggdb" sql sql-json.db --read-only --json -c "INSERT INTO t VALUES (8)"
+grep -q '"code":"read_only"' last.err || fail "a read-only write read $(cat last.err)"
+expect_exit 0 "$eggdb" version --json
+grep -q '^{"version":"' last.out || fail "version --json printed $(cat last.out)"
+pass "table list, show and sample, explain, sql --read-only and version --json"
+
 expect_exit 0 "$eggdb" export app.db app.jsonl
 expect_exit 0 "$eggdb" import --create copy.db app.jsonl
 expect_exit 0 "$eggdb" export copy.db copy.jsonl
