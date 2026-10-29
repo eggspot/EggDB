@@ -6,9 +6,9 @@ use crate::watchdog::Watchdog;
 use eggdb_commands::{ArgumentType, Category, TOOLS, ToolDefinition};
 use eggdb_sql::json::{Json, Node};
 use eggdb_sql::{
-    DestructiveStatement, Dialect, KeyValueRead, KeyValueStore, OneStatementError,
-    OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX, ScanDirection, Session, SqlError,
-    SqlState, TableSchema, Value, ViewSchema, destructive_statement, quoted,
+    DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead, KeyValueStore,
+    OneStatementError, OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX, Relation,
+    RelationKind, ScanDirection, Session, SqlError, SqlState, Value, destructive_statement,
 };
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,6 @@ const DEFAULT_SAMPLE_ROWS: u64 = 10;
 const LARGEST_SAMPLE_ROWS: u64 = 1_000;
 const DEFAULT_MAX_ENTRIES: u64 = 100;
 const LARGEST_MAX_ENTRIES: u64 = 1_000;
-const EXACT_ROW_COUNT_UP_TO: i64 = 10_000;
 const BUSY_RETRY: Duration = Duration::from_secs(1);
 const BUSY_POLL: Duration = Duration::from_millis(50);
 const FAR_END_BYTES: usize = 16 * 1024;
@@ -903,90 +902,25 @@ fn explain_query<O: DatabaseOpener>(
     })
 }
 
-struct Relation {
-    schema: String,
-    base: String,
-    kind: RelationKind,
-}
-
-enum RelationKind {
-    Table(TableSchema),
-    View(ViewSchema),
-}
-
-impl Relation {
-    fn sql_name(&self) -> String {
-        if self.schema == "public" {
-            quoted(&self.base)
-        } else {
-            format!("{}.{}", quoted(&self.schema), quoted(&self.base))
-        }
-    }
-}
-
-fn base_of(name: &str, schema: &str) -> String {
-    if schema == "public" {
-        return name.to_owned();
-    }
-    name.strip_prefix(schema)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .unwrap_or(name)
-        .to_owned()
-}
-
 fn catalog<S: KeyValueStore, O: DatabaseOpener>(
     store: &S,
     limits: &CallLimits,
     call: &Call<'_, O>,
 ) -> Result<Vec<Relation>, ToolError> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
-    let tables = session.tables();
-    let views = session.views();
+    let relations = session.relations();
     let _ = session.close();
-    let tables = tables.map_err(|error| call.sql_failure(limits, error))?;
-    let views = views.map_err(|error| call.sql_failure(limits, error))?;
-    let mut relations: Vec<Relation> = tables
-        .into_iter()
-        .map(|table| Relation {
-            base: base_of(&table.name, &table.schema),
-            schema: table.schema.clone(),
-            kind: RelationKind::Table(table),
-        })
-        .chain(views.into_iter().map(|view| Relation {
-            base: base_of(&view.name, &view.schema),
-            schema: view.schema.clone(),
-            kind: RelationKind::View(view),
-        }))
-        .collect();
-    relations.sort_by(|a, b| (&a.schema, &a.base).cmp(&(&b.schema, &b.base)));
-    Ok(relations)
+    relations.map_err(|error| call.sql_failure(limits, error))
 }
 
 fn find_relation(relations: Vec<Relation>, wanted: &str) -> Result<Relation, ToolError> {
-    let (schema, base) = match wanted.split_once('.') {
-        Some((schema, base)) => (schema, base),
-        None => ("public", wanted),
-    };
-    let matches = |relation: &Relation, schema: &str, base: &str| {
-        relation.schema == schema && relation.base == base
-    };
-    let lower = (schema.to_lowercase(), base.to_lowercase());
-    let position = relations
-        .iter()
-        .position(|relation| matches(relation, schema, base))
-        .or_else(|| {
-            relations
-                .iter()
-                .position(|relation| matches(relation, &lower.0, &lower.1))
-        });
-    match position.and_then(|position| relations.into_iter().nth(position)) {
-        Some(relation) => Ok(relation),
-        None => Err(ToolError::new(
+    eggdb_sql::find_relation(relations, wanted).ok_or_else(|| {
+        ToolError::new(
             "not_found",
             format!("There is no table or view named {}.", shown_name(wanted)),
         )
-        .with_fix("list_tables shows the names.")),
-    }
+        .with_fix("list_tables shows the names.")
+    })
 }
 
 fn list_tables<O: DatabaseOpener>(
@@ -1018,17 +952,15 @@ fn list_tables<O: DatabaseOpener>(
     for (key, want_tables) in [("tables", true), ("views", false)] {
         out.key(key).begin_array();
         for relation in &relations {
-            let (columns, comment) = match &relation.kind {
-                RelationKind::Table(table) if want_tables => (table.columns.len(), &table.comment),
-                RelationKind::View(view) if !want_tables => (view.columns.len(), &view.comment),
-                _ => continue,
-            };
+            if matches!(relation.kind, RelationKind::Table(_)) != want_tables {
+                continue;
+            }
             out.begin_object().key("schema");
             results::text(&mut out, &relation.schema);
             out.key("name");
-            results::text(&mut out, &relation.base);
-            out.key("columns").unsigned(columns as u64);
-            if let Some(comment) = comment {
+            results::text(&mut out, &relation.name);
+            out.key("columns").unsigned(relation.column_count() as u64);
+            if let Some(comment) = relation.comment() {
                 out.key("comment");
                 results::text(&mut out, comment);
             }
@@ -1048,7 +980,7 @@ fn describe_relation(out: &mut JsonOut, relation: &Relation) {
     out.key("schema");
     results::text(out, &relation.schema);
     out.key("name");
-    results::text(out, &relation.base);
+    results::text(out, &relation.name);
     match &relation.kind {
         RelationKind::Table(table) => {
             out.key("kind").string("table").key("columns").begin_array();
@@ -1123,11 +1055,7 @@ fn describe_table<O: DatabaseOpener>(
     let wanted = arguments.required_string("table")?;
     call.with_database(|store, limits| {
         let relation = find_relation(catalog(store, limits, call)?, wanted)?;
-        let count_sql = format!(
-            "SELECT count(*) FROM (SELECT 1 FROM {} LIMIT {}) AS counted",
-            relation.sql_name(),
-            EXACT_ROW_COUNT_UP_TO + 1
-        );
+        let count_sql = relation.bounded_count_statement(EXACT_ROW_COUNT_UP_TO);
         let counted = one_statement(store, limits, call, Dialect::PostgreSql, &count_sql)?
             .and_then(|result| result.rows.into_iter().next())
             .and_then(|row| row.into_iter().next());
@@ -1163,11 +1091,7 @@ fn sample_rows<O: DatabaseOpener>(
     let max_rows = arguments.integer("max_rows", LARGEST_SAMPLE_ROWS, DEFAULT_SAMPLE_ROWS)?;
     call.with_database(|store, limits| {
         let relation = find_relation(catalog(store, limits, call)?, wanted)?;
-        let sql = format!(
-            "SELECT * FROM {} LIMIT {}",
-            relation.sql_name(),
-            max_rows + 1
-        );
+        let sql = relation.first_rows_statement(max_rows + 1);
         let result = one_statement(store, limits, call, Dialect::PostgreSql, &sql)?;
         Ok(statement_success(result, Dialect::PostgreSql, max_rows))
     })

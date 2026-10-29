@@ -66,6 +66,7 @@ mod plan;
 mod random;
 mod regex;
 mod regexp_functions;
+mod relations;
 mod restore;
 mod schema;
 mod schemas;
@@ -153,6 +154,7 @@ pub use parser::{
 };
 pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
 pub use random::{RandomSource, set_random_source};
+pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation};
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, IncludeBase, IncludeOpener, IncludeRequest,
     KnownDifference, MAX_LISTED, RestoreError, RestoreOptions, RestoreProgress, RestoreReport,
