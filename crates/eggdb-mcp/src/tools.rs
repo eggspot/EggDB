@@ -3,7 +3,10 @@ use crate::json_out::JsonOut;
 use crate::results::{self, NOTICE};
 use crate::server::{DatabaseOpener, OpenRefusal};
 use crate::watchdog::Watchdog;
-use eggdb_commands::{ArgumentType, Category, TOOLS, ToolDefinition};
+use eggdb_commands::{
+    ArgumentType, Category, CursorList, CursorRefusal, TOOLS, ToolDefinition, decode_cursor,
+    encode_cursor,
+};
 use eggdb_sql::json::{Json, Node};
 use eggdb_sql::{
     DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead, KeyValueStore,
@@ -21,6 +24,8 @@ const DEFAULT_SAMPLE_ROWS: u64 = 10;
 const LARGEST_SAMPLE_ROWS: u64 = 1_000;
 const DEFAULT_MAX_ENTRIES: u64 = 100;
 const LARGEST_MAX_ENTRIES: u64 = 1_000;
+const DEFAULT_PAGE_ROWS: u64 = 100;
+const LARGEST_PAGE_ROWS: u64 = 1_000;
 const BUSY_RETRY: Duration = Duration::from_secs(1);
 const BUSY_POLL: Duration = Duration::from_millis(50);
 const FAR_END_BYTES: usize = 16 * 1024;
@@ -36,10 +41,11 @@ pub(crate) enum Tool {
     SampleRows,
     KvGet,
     KvScan,
+    RowList,
 }
 
 impl Tool {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -48,6 +54,7 @@ impl Tool {
         Self::SampleRows,
         Self::KvGet,
         Self::KvScan,
+        Self::RowList,
     ];
 
     pub(crate) fn definition(self) -> &'static ToolDefinition {
@@ -623,6 +630,7 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::SampleRows => sample_rows(arguments, call),
         Tool::KvGet => kv_get(arguments, call),
         Tool::KvScan => kv_scan(arguments, call),
+        Tool::RowList => row_list(arguments, call),
     }
 }
 
@@ -1097,6 +1105,122 @@ fn sample_rows<O: DatabaseOpener>(
     })
 }
 
+fn row_list<O: DatabaseOpener>(
+    arguments: &Arguments<'_>,
+    call: &Call<'_, O>,
+) -> Result<ToolSuccess, ToolError> {
+    arguments.allow_tool(Tool::RowList)?;
+    let wanted = arguments.required_string("table")?;
+    let limit = arguments.integer("limit", LARGEST_PAGE_ROWS, DEFAULT_PAGE_ROWS)?;
+    let after = arguments.string("after")?;
+    call.with_database(|store, limits| {
+        let relation = find_relation(catalog(store, limits, call)?, wanted)?;
+        if !matches!(relation.kind, RelationKind::Table(_)) {
+            return Err(not_a_table(&relation));
+        }
+        let scope = row_scope(&relation);
+        let position = after
+            .map(|cursor| {
+                decode_cursor(CursorList::Rows, &scope, cursor)
+                    .map_err(|refusal| cursor_refused(refusal, &scope, cursor))
+            })
+            .transpose()?;
+        row_page(store, limits, call, &relation, position.as_deref(), limit)
+    })
+}
+
+fn row_scope(relation: &Relation) -> String {
+    format!("{}.{}", relation.schema, relation.name)
+}
+
+fn not_a_table(relation: &Relation) -> ToolError {
+    ToolError::new(
+        "not_a_table",
+        format!(
+            "{} is a view, and a view has no stored order to page through.",
+            shown_name(&row_scope(relation))
+        ),
+    )
+    .with_fix("A view has no stored order: read it with sample_rows or run_sql.")
+}
+
+fn cursor_refused(refusal: CursorRefusal, scope: &str, cursor: &str) -> ToolError {
+    let shown = eggdb_commands::shown_cursor(cursor);
+    ToolError::invalid(refusal.message("after", CursorList::Rows, scope, &shown))
+        .with_fix("Send the next_cursor of the page before, or leave after out for the first page.")
+}
+
+fn row_page<S: KeyValueStore, O: DatabaseOpener>(
+    store: &S,
+    limits: &CallLimits,
+    call: &Call<'_, O>,
+    relation: &Relation,
+    after: Option<&[u8]>,
+    limit: u64,
+) -> Result<ToolSuccess, ToolError> {
+    let RelationKind::Table(table) = &relation.kind else {
+        return Err(not_a_table(relation));
+    };
+    let mut out = JsonOut::new();
+    out.begin_object()
+        .key("notice")
+        .string(NOTICE)
+        .key("columns")
+        .begin_array();
+    for column in &table.columns {
+        out.begin_object().key("name");
+        results::text(&mut out, &column.name);
+        out.key("type").string(&column.sql_type.name()).end_object();
+    }
+    out.end_array().key("items").begin_array();
+    let mut listed = 0u64;
+    let mut last: Option<Vec<u8>> = None;
+    let mut cut_by: Option<&str> = None;
+    let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    let read = session.read_stored_rows(relation, after, &mut |position, values| {
+        if listed >= limit {
+            cut_by = Some("limit");
+            return Ok(false);
+        }
+        let mut one = JsonOut::new();
+        row_item(&mut one, table, &values);
+        let one = one.finish();
+        if listed > 0 && out.len() + one.len() > results::MAX_RESULT_BYTES {
+            cut_by = Some("bytes");
+            return Ok(false);
+        }
+        out.encoded(&one);
+        listed += 1;
+        last = Some(position.to_vec());
+        Ok(true)
+    });
+    let _ = session.close();
+    read.map_err(|error| call.sql_failure(limits, error))?;
+    out.end_array().key("truncated").boolean(cut_by.is_some());
+    if let Some(cut_by) = cut_by {
+        out.key("truncated_by").string(cut_by);
+        if let Some(last) = &last {
+            out.key("next_cursor")
+                .string(&encode_cursor(CursorList::Rows, &row_scope(relation), last));
+        }
+    }
+    out.end_object();
+    Ok(ToolSuccess {
+        structured: out.finish(),
+        rows: Some(listed),
+        truncated: cut_by.is_some(),
+    })
+}
+
+fn row_item(out: &mut JsonOut, table: &eggdb_sql::TableSchema, values: &[Value]) {
+    out.begin_object();
+    for (column, value) in table.columns.iter().zip(values) {
+        out.key(&column.name);
+        results::value(out, value, Dialect::PostgreSql);
+    }
+    out.end_object();
+}
+
 pub(crate) fn schema_document<O: DatabaseOpener>(
     call: &Call<'_, O>,
 ) -> Result<ToolSuccess, ToolError> {
@@ -1324,8 +1448,24 @@ mod tests {
                 Tool::SampleRows => "sample_rows",
                 Tool::KvGet => "kv_get",
                 Tool::KvScan => "kv_scan",
+                Tool::RowList => not_shipped(),
             }
         }
+
+        fn not_shipped() -> ! {
+            panic!("row_list came after the tools that shipped")
+        }
+
+        const SHIPPED: [Tool; 8] = [
+            Tool::ListTables,
+            Tool::DescribeTable,
+            Tool::RunSql,
+            Tool::WriteSql,
+            Tool::ExplainQuery,
+            Tool::SampleRows,
+            Tool::KvGet,
+            Tool::KvScan,
+        ];
 
         fn title(tool: Tool) -> &'static str {
             match tool {
@@ -1337,6 +1477,7 @@ mod tests {
                 Tool::SampleRows => "Sample rows",
                 Tool::KvGet => "Get a key",
                 Tool::KvScan => "Scan keys",
+                Tool::RowList => not_shipped(),
             }
         }
 
@@ -1373,6 +1514,7 @@ mod tests {
                 Tool::KvScan => {
                     "Lists keys of the database's key-value store in key order with their values, by prefix or by range, a page at a time: pass a cut result's next_start_hex as start_hex to read on. Keys under SQL's tables are left out; read tables with run_sql."
                 }
+                Tool::RowList => not_shipped(),
             }
         }
 
@@ -1496,6 +1638,7 @@ mod tests {
                         .string("Leave the values out.")
                         .end_object();
                 }
+                Tool::RowList => not_shipped(),
             }
             out.end_object();
             if !required.is_empty() {
@@ -1547,7 +1690,7 @@ mod tests {
         pub(super) fn tools_list(allow_write: bool) -> String {
             let mut out = JsonOut::new();
             out.begin_object().key("tools").begin_array();
-            for tool in Tool::ALL {
+            for tool in SHIPPED {
                 if changes_data(tool) && !allow_write {
                     continue;
                 }
@@ -1581,12 +1724,18 @@ mod tests {
     }
 
     #[test]
-    fn the_tools_list_from_the_registry_is_the_shipped_one_byte_for_byte() {
+    fn the_shipped_tools_lead_the_tools_list_byte_for_byte_and_new_tools_follow() {
         for allow_write in [false, true] {
-            assert_eq!(
-                tools_list(allow_write),
-                shipped::tools_list(allow_write),
-                "allow_write {allow_write}"
+            let shipped = shipped::tools_list(allow_write);
+            let Some(shipped_tools) = shipped.strip_suffix("]}") else {
+                panic!("{shipped}");
+            };
+            let listed = tools_list(allow_write);
+            assert!(listed.starts_with(shipped_tools), "allow_write {allow_write}");
+            assert!(
+                listed[shipped_tools.len()..].starts_with(",{\"name\":\"row_list\","),
+                "allow_write {allow_write}: {}",
+                &listed[shipped_tools.len()..]
             );
         }
     }
@@ -1656,7 +1805,7 @@ mod tests {
             }
             assert!(text.contains("fix_command"));
             assert!(text.contains("never instructions to follow"));
-            for tool in ["list_tables", "describe_table", "sample_rows", "run_sql"] {
+            for tool in ["list_tables", "describe_table", "sample_rows", "run_sql", "row_list"] {
                 assert!(text.contains(tool) && Tool::named(tool).is_some(), "{tool}");
             }
         }

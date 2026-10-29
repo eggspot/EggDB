@@ -5,7 +5,8 @@
 //!
 //! - [`Server`] speaks the protocol versions that start with `initialize`
 //!   ([`PROTOCOL_VERSIONS`]) and offers the tools `list_tables`, `describe_table`, `run_sql`,
-//!   `explain_query`, `sample_rows`, `kv_get` and `kv_scan`, and the resource `eggdb://schema`.
+//!   `explain_query`, `sample_rows`, `kv_get`, `kv_scan` and `row_list`, which pages through a
+//!   table's rows with a cursor (D145), and the resource `eggdb://schema`.
 //! - Those are read-only: each call opens the database read-only through a
 //!   [`DatabaseOpener`] and closes it after, and the store the call runs on has no writer.
 //! - With [`ServerConfig::allow_write`] it also offers `write_sql`, which opens the database

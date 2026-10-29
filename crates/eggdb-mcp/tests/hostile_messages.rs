@@ -36,7 +36,7 @@ fn setting(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-const VALID: [&str; 16] = [
+const VALID: [&str; 18] = [
     r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fuzz","version":"1"}}}"#,
     r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
@@ -53,6 +53,8 @@ const VALID: [&str; 16] = [
     r#"{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{"uri":"eggdb://schema"}}"#,
     r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"DELETE FROM users"}}}"#,
     r#"{"jsonrpc":"2.0","id":15,"result":{}}"#,
+    r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"row_list","arguments":{"table":"users","limit":2}}}"#,
+    r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"row_list","arguments":{"table":"users","limit":1,"after":"r1.8f8c271a0180000001"}}}"#,
 ];
 
 const FRAGMENTS: [&str; 24] = [
