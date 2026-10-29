@@ -1,4 +1,4 @@
-use crate::ast::{AlterAction, Expr, ExprKind, Name, Statement, TableReference};
+use crate::ast::{AlterAction, Expr, ExprKind, MergeStatement, Name, Statement, TableReference};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult};
 use crate::session::{OneStatementError, Session};
@@ -179,7 +179,7 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         Statement::Merge(merge) => merge
             .update
             .as_ref()
-            .filter(|_| !names_target_qualified(&merge.on, &merge.target))
+            .filter(|_| !names_target_qualified(merge))
             .map(|update| {
                 let kind = if update.delete_condition.is_some() {
                     DestructiveKind::DeleteWithoutFilter
@@ -270,11 +270,23 @@ fn filters_rows(filter: Option<&Expr>, table: &TableReference) -> bool {
     filter.is_some_and(|filter| names_column(filter, &names_target))
 }
 
-fn names_target_qualified(condition: &Expr, table: &TableReference) -> bool {
-    let names_target = |qualifier: Option<&str>| {
-        qualifier.is_some_and(|qualifier| qualifies_target(qualifier, table))
+fn names_target_qualified(merge: &MergeStatement) -> bool {
+    let names_source = |qualifier: &str| {
+        merge
+            .source_label
+            .as_deref()
+            .is_some_and(|label| {
+                qualifier.eq_ignore_ascii_case(label)
+                    || qualifier.eq_ignore_ascii_case(crate::schemas::base_name(label))
+                    || qualifier.eq_ignore_ascii_case(&label.replace(crate::schemas::QUALIFIER, "."))
+            })
     };
-    names_column(condition, &names_target)
+    let names_target = |qualifier: Option<&str>| {
+        qualifier.is_some_and(|qualifier| {
+            qualifies_target(qualifier, &merge.target) && !names_source(qualifier)
+        })
+    };
+    names_column(&merge.on, &names_target)
 }
 
 fn names_column(expr: &Expr, names_target: &dyn Fn(Option<&str>) -> bool) -> bool {

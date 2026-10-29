@@ -204,6 +204,10 @@ fn merge_is_destructive_when_on_does_not_restrict_the_rows_it_updates_or_deletes
         &mut session,
         "MERGE INTO accounts USING (SELECT 1 x FROM dual) s ON (accounts.id = s.x) WHEN MATCHED THEN UPDATE SET balance = 0"
     ));
+    assert!(classify(
+        &mut session,
+        "MERGE INTO accounts t USING (SELECT 1 id FROM dual) accounts ON (accounts.id = 1) WHEN MATCHED THEN UPDATE SET t.balance = 0"
+    ));
 }
 
 #[test]
