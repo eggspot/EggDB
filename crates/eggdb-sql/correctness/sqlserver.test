@@ -1543,3 +1543,125 @@ SELECT 2
 
 ok
 DROP TABLE Bakes47, Guard47
+
+chapter "MERGE (Transact-SQL)"
+ok
+CREATE TABLE Blogs48 ([Id] int NOT NULL IDENTITY, [Name] nvarchar(100) NOT NULL, [Url] nvarchar(max) NULL, CONSTRAINT [PK_Blogs48] PRIMARY KEY ([Id]))
+
+rows
+SET IMPLICIT_TRANSACTIONS OFF;
+SET NOCOUNT ON;
+MERGE [Blogs48] USING (
+VALUES (N'Kitchen', N'https://example.com/kitchen', 0),
+(N'Garden', NULL, 1)) AS i ([Name], [Url], _Position) ON 1=0
+WHEN NOT MATCHED THEN
+INSERT ([Name], [Url])
+VALUES (i.[Name], i.[Url])
+OUTPUT INSERTED.[Id], i._Position;
+----
+id|_position
+1|0
+2|1
+MERGE 2
+
+rows
+MERGE INTO Blogs48 AS t USING (VALUES (1, N'Kitchen and Bakery'), (3, N'Attic')) AS s (id, name) ON t.Id = s.id
+WHEN MATCHED THEN UPDATE SET Name = s.name
+WHEN NOT MATCHED BY TARGET THEN INSERT (Name) VALUES (s.name)
+OUTPUT inserted.Id, inserted.Name, deleted.Name AS old_name;
+----
+id|name|old_name
+1|Kitchen and Bakery|Kitchen
+3|Attic|NULL
+MERGE 2
+
+rows
+MERGE Blogs48 USING (VALUES (2)) AS s (id) ON Blogs48.Id = s.id
+WHEN MATCHED THEN DELETE
+OUTPUT deleted.Id, deleted.Name;
+----
+id|name
+2|Garden
+MERGE 1
+
+rows
+MERGE Blogs48 AS t USING (VALUES (1, N'x'), (3, N'y')) AS s (id, name) ON t.Id = s.id
+WHEN MATCHED AND s.name = N'y' THEN UPDATE SET Url = s.name;
+SELECT Id, Name, Url FROM Blogs48 ORDER BY Id
+----
+id|name|url
+1|Kitchen and Bakery|https://example.com/kitchen
+3|Attic|y
+SELECT 2
+
+error 42601 10713
+MERGE Blogs48 USING (VALUES (1)) AS s (id) ON 1=0;
+
+error 0A000 40517
+MERGE Blogs48 USING (VALUES (1)) AS s (id) ON Blogs48.Id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE;
+
+chapter "INSERT (Transact-SQL)"
+rows
+INSERT INTO Blogs48 (Name) OUTPUT inserted.Name SELECT N'Copy of ' + Name FROM Blogs48 WHERE Id = 1
+----
+name
+Copy of Kitchen and Bakery
+INSERT 0 1
+
+chapter "SAVE TRANSACTION (Transact-SQL)"
+rows
+BEGIN TRAN;
+INSERT INTO Blogs48 (Name) VALUES (N'Shed');
+SAVE TRANSACTION before_more;
+SELECT @@TRANCOUNT AS depth
+----
+depth
+1
+SELECT 1
+
+error 0A000 40517
+ROLLBACK TRANSACTION before_more
+
+rows
+ROLLBACK;
+SELECT count(*) AS n FROM Blogs48 WHERE Name = N'Shed'
+----
+n
+0
+SELECT 1
+
+chapter "OPENJSON (Transact-SQL)"
+rows
+SELECT Name FROM Blogs48 WHERE Id IN (SELECT [c].[value] FROM OPENJSON(N'[1,3,5]') WITH ([value] int '$') AS [c]) ORDER BY Id
+----
+name
+Kitchen and Bakery
+Attic
+SELECT 2
+
+rows
+SELECT j.id, j.name, j.tag FROM OPENJSON(N'{"items":[{"id":1,"name":"rye","tags":["a"]},{"id":2,"name":"pie"}]}', '$.items') WITH (id int, name nvarchar(20) '$.name', tag nvarchar(10) '$.tags[0]') AS j
+----
+id|name|tag
+1|rye|a
+2|pie|NULL
+SELECT 2
+
+rows
+SELECT o.a, o.b FROM OPENJSON(N'{"a":7,"b":{"c":true}}') WITH (a int, b nvarchar(max) AS JSON) AS o
+----
+a|b
+7|{"c":true}
+SELECT 1
+
+error 0A000 40517
+SELECT * FROM OPENJSON(N'[1]')
+
+error 22023 13607
+SELECT * FROM OPENJSON(N'[1]') WITH (a int 'a') AS o
+
+error 22023 13609
+SELECT * FROM OPENJSON(N'7') WITH (a int '$') AS o
+
+ok
+DROP TABLE Blogs48

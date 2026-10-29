@@ -1,6 +1,9 @@
 use super::Parser;
 use super::sqlserver::not_supported;
-use crate::ast::{AggregateFunction, Expr, ExprKind, Name, SelectItem};
+use crate::ast::{
+    AggregateFunction, DerivedTable, Expr, ExprKind, FromClause, GeneratedTable, Literal, Name,
+    Query, Select, SelectItem, TableFunction, TableReference,
+};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 use crate::sqlserver_functions::{DatePart, Function};
@@ -418,5 +421,166 @@ impl Parser<'_> {
         };
         self.at += 1;
         Ok(Some(alias))
+    }
+}
+
+impl Parser<'_> {
+    pub(super) fn at_openjson(&self) -> bool {
+        self.is_word("openjson") && self.peek_kind_at(1) == &TokenKind::LeftParen
+    }
+
+    fn string_constant(&mut self) -> Option<String> {
+        let TokenKind::String(text) = self.peek_kind() else {
+            return None;
+        };
+        let text = text.as_ref().to_owned();
+        self.at += 1;
+        Some(text)
+    }
+
+    fn openjson_column_key(&self) -> String {
+        match self.peek_kind() {
+            TokenKind::QuotedIdentifier(text) => text.clone(),
+            _ => {
+                let token = self.peek();
+                self.text.get(token.start..token.end).unwrap_or("").to_owned()
+            }
+        }
+    }
+
+    pub(super) fn sqlserver_openjson(&mut self) -> SqlResult<TableReference> {
+        let position = self.position();
+        self.at += 1;
+        self.expect(&TokenKind::LeftParen)?;
+        let mut document = self.expression()?;
+        if self.take(&TokenKind::Comma) {
+            let path_position = self.position();
+            let Some(path) = self.string_constant() else {
+                return Err(not_supported("OPENJSON with a path that is not a string constant")
+                    .at(path_position));
+            };
+            let steps = crate::json_functions::sqlserver_path_steps(&path)
+                .map_err(|error| error.at_if_unplaced(path_position))?;
+            document = json_path_call("json_extract_path", document, &steps, path_position);
+        }
+        self.expect(&TokenKind::RightParen)?;
+        if !self.take_word("with") {
+            return Err(not_supported("OPENJSON without a WITH clause").at(position));
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        let element = Expr {
+            kind: ExprKind::Column {
+                qualifier: None,
+                name: crate::set_returning::OPENJSON_FUNCTION.to_owned(),
+            },
+            position,
+        };
+        let mut items = Vec::new();
+        loop {
+            let column_position = self.position();
+            let key = self.openjson_column_key();
+            let name = self.name()?;
+            let target = self.sqlserver_declared_type(true)?;
+            let path_position = self.position();
+            let path = self.string_constant();
+            let as_json = self.is_word("as") && self.is_word_at(1, "json");
+            if as_json {
+                self.at += 2;
+            }
+            let steps = match &path {
+                Some(path) => crate::json_functions::sqlserver_path_steps(path)
+                    .map_err(|error| error.at_if_unplaced(path_position))?,
+                None => vec![key],
+            };
+            let extracted = json_path_call(
+                if as_json {
+                    crate::json_functions::OPENJSON_JSON
+                } else {
+                    crate::json_functions::OPENJSON_VALUE
+                },
+                element.clone(),
+                &steps,
+                column_position,
+            );
+            items.push(SelectItem::Expr {
+                expr: call(
+                    Function::Convert {
+                        target,
+                        style: None,
+                    },
+                    vec![extracted],
+                    column_position,
+                ),
+                alias: Some(name.text),
+            });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let alias = if self.take_word("as") || self.at_bare_alias() {
+            Some(self.name()?.text)
+        } else {
+            None
+        };
+        let rows = TableReference {
+            name: Name {
+                text: crate::set_returning::OPENJSON_FUNCTION.to_owned(),
+                position,
+            },
+            alias: None,
+            derived: None,
+            generated: Some(Box::new(GeneratedTable::Function(TableFunction {
+                name: crate::set_returning::OPENJSON_FUNCTION.to_owned(),
+                arguments: vec![document],
+                ordinality: false,
+                column_names: Vec::new(),
+                position,
+            }))),
+        };
+        let select = Select {
+            distinct: false,
+            items,
+            from: Some(FromClause {
+                first: rows,
+                joins: Vec::new(),
+            }),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            source_row_limit: None,
+        };
+        Ok(TableReference {
+            name: Name {
+                text: alias.clone().unwrap_or_else(|| "openjson".to_owned()),
+                position,
+            },
+            alias,
+            derived: Some(Box::new(DerivedTable {
+                query: Query::of_select(select, position),
+                column_names: Vec::new(),
+                dialect: self.dialect,
+            })),
+            generated: None,
+        })
+    }
+}
+
+fn json_path_call(function: &str, document: Expr, steps: &[String], position: usize) -> Expr {
+    let mut arguments = Vec::with_capacity(steps.len() + 1);
+    arguments.push(document);
+    arguments.extend(steps.iter().map(|step| Expr {
+        kind: ExprKind::Literal(Literal::String(step.clone())),
+        position,
+    }));
+    Expr {
+        kind: ExprKind::Function {
+            name: function.to_owned(),
+            arguments,
+        },
+        position,
     }
 }

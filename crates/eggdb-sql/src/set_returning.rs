@@ -17,7 +17,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 16] = [
+const FUNCTIONS: [SetReturningFunction; 17] = [
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -86,7 +86,31 @@ const FUNCTIONS: [SetReturningFunction; 16] = [
         rows: jsonb_object_keys_rows,
         fields: false,
     },
+    SetReturningFunction {
+        name: OPENJSON_FUNCTION,
+        result_type: openjson_type,
+        rows: openjson_rows,
+        fields: false,
+    },
 ];
+
+pub(crate) const OPENJSON_FUNCTION: &str = "*openjson*";
+
+fn openjson_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    match types {
+        [None] => Ok(SqlType::Json),
+        [Some(sql_type)] if sql_type.is_character() || *sql_type == SqlType::Json => {
+            Ok(SqlType::Json)
+        }
+        _ => Err(does_not_exist("OPENJSON", types)),
+    }
+}
+
+fn openjson_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::json_functions::openjson_rows(values, &mut |record| {
+        sink(crate::json_functions::record_text(&record))
+    })
+}
 
 const fn json_records(
     name: &'static str,

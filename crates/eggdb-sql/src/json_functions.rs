@@ -39,6 +39,8 @@ pub(crate) const SET_RETURNING: [&str; 10] = [
 
 pub(crate) const WHOLE_ROW: &str = "whole_row";
 pub(crate) const ROW_OBJECT: &str = "json_row";
+pub(crate) const OPENJSON_VALUE: &str = "*openjson value*";
+pub(crate) const OPENJSON_JSON: &str = "*openjson json*";
 
 const WHOLE_ROW_CALLERS: [&str; 7] = [
     "row_to_json",
@@ -582,6 +584,11 @@ fn row_to_json(values: &[Value]) -> Option<SqlResult<Value>> {
 }
 
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    match name {
+        OPENJSON_VALUE => return openjson_extracted(values, false),
+        OPENJSON_JSON => return openjson_extracted(values, true),
+        _ => {}
+    }
     if !FUNCTIONS.contains(&name) {
         return None;
     }
@@ -867,6 +874,136 @@ pub(crate) fn record_rows(name: &str, values: &[Value], sink: &mut RecordSink<'_
         }
     }
     Ok(())
+}
+
+fn not_sqlserver_json() -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        "JSON text is not properly formatted.",
+    )
+    .with_sqlserver_code(13609)
+}
+
+/// The rows SQL Server's `OPENJSON` with a `WITH` clause reads from `values[0]`: each element
+/// of a JSON array, or a JSON object as one row; NULL gives no rows.
+pub(crate) fn openjson_rows(values: &[Value], sink: &mut RecordSink<'_>) -> SqlResult<()> {
+    let Some(value) = values.first() else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let document = match document(value, false) {
+        Some(Ok(document)) => document,
+        Some(Err(_)) | None => return Err(not_sqlserver_json()),
+    };
+    match &document.root.value {
+        Json::Array(items) => {
+            for node in items {
+                sink(vec![rendered(&document, node, false)?])?;
+            }
+        }
+        Json::Object(_) => sink(vec![rendered(&document, &document.root, false)?])?,
+        _ => return Err(not_sqlserver_json()),
+    }
+    Ok(())
+}
+
+fn openjson_extracted(values: &[Value], as_json: bool) -> Option<SqlResult<Value>> {
+    let (first, steps) = values.split_first()?;
+    if first.is_null() {
+        return Some(Ok(Value::Null));
+    }
+    let steps: Option<Vec<String>> = steps
+        .iter()
+        .map(|step| step.character_text().map(str::to_owned))
+        .collect();
+    let steps = steps?;
+    let document = match document(first, false)? {
+        Ok(document) => document,
+        Err(error) => return Some(Err(error)),
+    };
+    let mut node = &document.root;
+    for step in &steps {
+        match json::child(node, &json::Step::Key(step.clone()), false) {
+            Some(next) => node = next,
+            None => return Some(Ok(Value::Null)),
+        }
+    }
+    let composite = matches!(node.value, Json::Object(_) | Json::Array(_));
+    if composite != as_json {
+        return Some(Ok(Value::Null));
+    }
+    Some(
+        json::render_text(&document.text, node, false)
+            .map(|text| text.map_or(Value::Null, Value::Text)),
+    )
+}
+
+fn bad_sqlserver_path(path: &str, at: usize) -> SqlError {
+    let found = path[at..].chars().next().map_or_else(String::new, String::from);
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        format!(
+            "JSON path is not properly formatted. Unexpected character '{found}' is found at position {at}."
+        ),
+    )
+    .with_sqlserver_code(13607)
+}
+
+/// The steps of a SQL Server JSON path (`$`, `$.key`, `$."quoted key"`, `$[2]`, with an
+/// optional `lax` mode), as the keys and array indexes `json_extract_path` takes. A `strict`
+/// path is refused.
+pub(crate) fn sqlserver_path_steps(path: &str) -> SqlResult<Vec<String>> {
+    let trimmed = path.trim_start();
+    let offset = path.len() - trimmed.len();
+    let (rest, offset) = if let Some(rest) = trimmed.strip_prefix("lax ") {
+        (rest.trim_start(), path.len() - rest.trim_start().len())
+    } else if trimmed.starts_with("strict ") {
+        return Err(SqlError::not_supported(
+            "OPENJSON with a strict JSON path is not supported yet",
+        ));
+    } else {
+        (trimmed, offset)
+    };
+    let Some(mut rest) = rest.strip_prefix('$') else {
+        return Err(bad_sqlserver_path(path, offset));
+    };
+    let mut steps = Vec::new();
+    loop {
+        let at = path.len() - rest.len();
+        if rest.is_empty() {
+            return Ok(steps);
+        }
+        if let Some(after) = rest.strip_prefix(".\"") {
+            let Some(end) = after.find('"') else {
+                return Err(bad_sqlserver_path(path, at));
+            };
+            steps.push(after[..end].to_owned());
+            rest = &after[end + 1..];
+        } else if let Some(after) = rest.strip_prefix('.') {
+            let end = after
+                .find(|character: char| character == '.' || character == '[')
+                .unwrap_or(after.len());
+            if end == 0 {
+                return Err(bad_sqlserver_path(path, at + 1));
+            }
+            steps.push(after[..end].to_owned());
+            rest = &after[end..];
+        } else if let Some(after) = rest.strip_prefix('[') {
+            let Some(end) = after.find(']') else {
+                return Err(bad_sqlserver_path(path, at));
+            };
+            let index = after[..end].trim();
+            if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(bad_sqlserver_path(path, at + 1));
+            }
+            steps.push(index.to_owned());
+            rest = &after[end + 1..];
+        } else {
+            return Err(bad_sqlserver_path(path, at));
+        }
+    }
 }
 
 pub(crate) fn record_types(name: &str) -> Vec<SqlType> {

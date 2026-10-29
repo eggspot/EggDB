@@ -2106,6 +2106,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
         }
+        if self.sqlserver() && self.at_openjson() {
+            return self.sqlserver_openjson();
+        }
         self.table_reference()
     }
 
