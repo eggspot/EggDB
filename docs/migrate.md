@@ -9,7 +9,7 @@ describes is created in an EggDB file that every dialect and protocol then reads
 | PostgreSQL | `pg_dump` plain SQL, restored by `eggdb restore` or `psql -f` against `eggdb serve` | this page |
 | PostgreSQL CSV, any table | `eggdb import --csv` ([cli.md](cli.md)) | available |
 | SQL Server | SSMS Generate Scripts, `sqlpackage /Action:Script`, restored by `eggdb restore --dialect sqlserver` or `sqlcmd -i` against `eggdb serve` | this page |
-| Oracle | `impdp ... SQLFILE=`, SQLcl and SQL Developer exports | roadmap item 43 |
+| Oracle | SQL Developer and SQLcl exports, `impdp ... SQLFILE=` for the DDL and SQLcl CSV for the rows, installers such as Oracle's sample schemas, restored by `eggdb restore --dialect oracle` | this page |
 
 ## PostgreSQL
 
@@ -251,3 +251,125 @@ listed as client commands.
 - Behaviour of restored `CHECK`s and views used from another dialect follows that dialect's
   conversions and error numbers (D124).
 
+## Oracle
+
+### 1. Export with Oracle's own tools
+
+SQL*Plus, SQLcl and SQL Developer cannot connect to EggDB (EggDB has no Oracle wire protocol,
+D10), so a schema moves as a script that `eggdb restore --dialect oracle` reads.
+
+- **SQL Developer:** Tools, **Database Export**: DDL and data, data in *insert* format, one file,
+  encoding UTF-8, *Include Drop Statements* off. Set the NLS date and timestamp formats first
+  (Preferences, Database, NLS: `YYYY-MM-DD HH24:MI:SS` and `YYYY-MM-DD HH24:MI:SS.FF6`), so no
+  time of day or century is lost.
+- **SQLcl:** `ddl` for the schema, then `set sqlformat insert` with `spool` for the rows; or
+  `UNLOAD` per table for CSV, after `ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'`
+  and the timestamp format.
+- **A Data Pump `.dmp` file:** EggDB never reads it (no public specification, D13). Write its DDL
+  with `impdp` and take the rows from the database it came from:
+
+  ```sh
+  impdp system DIRECTORY=dp DUMPFILE=hr.dmp SCHEMAS=hr SQLFILE=hr_tables.sql EXCLUDE=REF_CONSTRAINT,STATISTICS
+  impdp system DIRECTORY=dp DUMPFILE=hr.dmp SCHEMAS=hr SQLFILE=hr_refs.sql INCLUDE=REF_CONSTRAINT
+  ```
+
+  `impdp` writes the file in the database's character set: convert it to UTF-8 if that is not
+  AL32UTF8 (`iconv -f CP1252 -t UTF-8 hr_tables.sql > hr_tables_utf8.sql`). The rows come as CSV
+  from SQLcl's `UNLOAD` (`REGIONS_DATA_TABLE.csv` and so on), or from SQL*Plus with
+  `SET MARKUP CSV ON QUOTE ON`, `SET FEEDBACK OFF`, `SET TERMOUT OFF` and `SPOOL`.
+- **An RMAN backup or a legacy `exp` file:** restore it into an Oracle database first, then use
+  one of the routes above. `eggdb restore` recognises these binary files by their content and
+  prints the `impdp` route.
+
+### 2. Restore into EggDB
+
+```sh
+eggdb restore --dialect oracle --create hr.db hr_export.sql
+```
+
+For the Data Pump route, restore the tables, load each CSV (in any order), then add the foreign
+keys:
+
+```sh
+eggdb restore --dialect oracle --create hr.db hr_tables.sql
+eggdb import --dialect oracle hr.db --csv EMPLOYEES_DATA_TABLE.csv --table hr.employees --header
+eggdb restore --dialect oracle hr.db hr_refs.sql
+```
+
+Installers such as Oracle's HR sample schema (`hr_install.sql`) restore as they are, following
+their `@@` includes: `eggdb restore --dialect oracle --create hr.db hr_install.sql`.
+
+The script is read as SQL*Plus reads it. A statement ends at `;` (outside strings, `q'[...]'`
+quotes, quoted names and comments) or at a line holding only `/`; a PL/SQL unit (`CREATE
+PROCEDURE`, `PACKAGE`, `TRIGGER`, `TYPE`, `DECLARE`, `BEGIN`) ends only at a `/` line, and a line
+holding only `.` ends a statement without running it. Each statement runs in its own transaction;
+an anonymous block of `INSERT`, `UPDATE`, `DELETE`, `MERGE` and `COMMIT` statements (HR loads its
+rows that way) runs as one transaction, all or nothing. In the CSV route, an empty field is NULL
+and dates are read by Oracle's NLS format (`DD-MON-RR`), then as ISO 8601.
+
+SQL*Plus commands:
+
+- `DEFINE`, `UNDEFINE`, `SET DEFINE`, `SET ESCAPE` and `SET CONCAT` work, and `&name`, `&&name`
+  and `&name.` are replaced as SQL*Plus replaces them. `ACCEPT` never prompts: its variable takes
+  its `DEFAULT`, or stays undefined. `--define name=value` defines a variable from the command
+  line. An undefined variable is an error only in a statement that runs, a user or schema name or
+  an included file's name.
+- `@file`, `@@file` and `START file` include another script, with `.sql` added when the name has
+  no extension: `@@` from the including script's folder, `@` from the working directory, regular
+  files only, at most 20 deep and 10,000 in one restore, never a URL.
+- `CONNECT user` puts the objects after it in schema `user` (no login is made, and the password is
+  never stored or shown); `EXIT` and `QUIT` end the restore.
+- `SET SQLTERMINATOR`, `SET BLOCKTERMINATOR`, `SET SQLPREFIX` and `SET SQLBLANKLINES OFF` change
+  how a script is read and are refused. `WHENEVER` is listed: `--keep-going` decides.
+- Every other command (`SET`, `PROMPT`, `SPOOL`, `COLUMN`, `HOST`, ...) is listed and never run.
+
+Users become schemas: `CREATE USER hr`, `CONNECT hr`, `ALTER SESSION SET CURRENT_SCHEMA = hr` and
+`CREATE TABLE hr.t` make schema `hr` when it is missing. Query it in Oracle SQL after `ALTER
+SESSION SET CURRENT_SCHEMA = HR`, or in PostgreSQL SQL as `hr.employees`.
+
+### 3. Read the report
+
+The report is the SQL Server one, in Oracle's words. **Skipped** lists stored PL/SQL (procedures,
+functions, packages, triggers, types, Java), PL/SQL blocks that are not plain SQL, synonyms,
+database links, materialized views and the like, each with its script and line. **Ignored**
+counts `GRANT`, users (*schema created, login not*), `COMMIT`, queries, storage settings
+(`ALTER INDEX ... NOPARALLEL` and the like), PL/SQL settings (`ALTER TRIGGER ... DISABLE`,
+`ALTER PROCEDURE ... COMPILE`) and the `ALTER SESSION` parameters EggDB does not have
+(`EVENTS`). SQL*Plus commands are listed as client commands; a script included with `@@` shows
+as `hr_populate.sql line 61`.
+
+A constraint disabled with `ALTER TABLE ... DISABLE CONSTRAINT` is dropped and added again by the
+matching `ENABLE` (HR loads its departments that way), checking the rows then. Known differences:
+
+```
+known differences (restored, but not as the source had it)
+  line 12   scott.emp.emp_boss_fk  existing rows are checked here; Oracle's NOVALIDATE doesn't check them
+  line 14   scott.emp              kept enforced: EggDB doesn't disable keys
+  end       hr.c.c_fk              disabled in the source: not created here, so not enforced
+```
+
+### Limits
+
+- **Never read:** Data Pump `.dmp` and legacy `exp` files, RMAN backups (above).
+- **Not run:** stored PL/SQL and PL/SQL blocks other than plain SQL ones (PL/SQL comes after
+  v0.2.0); synonyms, database links, materialized views, directories, tablespaces, roles,
+  profiles and the other objects EggDB does not have; logins, passwords and grants; queries in
+  scripts.
+- **Not kept:** storage clauses, `ORGANIZATION INDEX`, LOB storage and other physical properties
+  (accepted with no effect); a separate index taken over by a primary key (its name becomes the
+  key's); collations other than binary.
+- **Not kept, and listed as known differences:** constraints left disabled (not created);
+  disabled keys (enforced); `ENABLE NOVALIDATE` (rows are checked); identity columns with
+  options (the column and its values are kept, the identity is not); virtual columns (left out);
+  partitioning (one unpartitioned table); `ROLLBACK` (the statements before it were committed).
+- **SQL*Plus behaviour:** `/` after a statement ended by `;` does not run it again; blank lines
+  never end a statement (SQL*Plus's `SQLBLANKLINES ON`); a `/` line inside a string or a block
+  comment is part of it; `WHENEVER` is decided by `--keep-going`; `ACCEPT` never prompts;
+  `SQLPATH` is not searched; scripts from URLs are never fetched; SQL*Plus commands do not work in
+  `eggdb sql` or `eggdb shell`.
+- **Scripts:** UTF-8 or UTF-16LE with its byte-order mark; other encodings are refused with an
+  `iconv` example. An anonymous block is one transaction, so one larger than the page cache fails
+  at its commit.
+- **Taking over an index:** a primary key or unique constraint takes over an index of the same
+  name on the same columns; an index named differently in `USING INDEX` is not taken over yet
+  (the key gets its own index).

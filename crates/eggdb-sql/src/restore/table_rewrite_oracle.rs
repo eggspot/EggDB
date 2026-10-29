@@ -299,7 +299,11 @@ pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
         });
         element_start = index + 1;
     }
-    let table_name = name_of(lexemes.get(table_at + 1)).unwrap_or_default();
+    let table_name = lexemes[table_at + 1..open]
+        .iter()
+        .rev()
+        .find_map(|lexeme| name_of(Some(lexeme)))
+        .unwrap_or_default();
     let mut kept: Vec<String> = Vec::new();
     let mut notes = Vec::new();
     let mut disabled = Vec::new();

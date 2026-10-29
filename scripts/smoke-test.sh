@@ -158,6 +158,18 @@ expect_exit 2 "$eggdb" restore --dialect sqlserver --create shop.db shop.bak
 grep -q 'a SQL Server backup (it starts with TAPE)' last.err || fail "a SQL Server backup said $(cat last.err)"
 pass "restore: an SSMS Generate Scripts sample (UTF-16) with its report, and a SQL Server backup routed"
 
+expect_exit 0 "$eggdb" restore --dialect oracle --create ora.db "$samples/oracle-sample.sql" --format text
+grep -q '^ok: every table and row of the script is in ora.db; ' last.out || fail "the Oracle restore said $(cat last.out)"
+grep -q 'procedure rye_count' last.out || fail "the Oracle restore did not list the skipped procedure: $(cat last.out)"
+expect_exit 0 "$eggdb" sql --dialect oracle ora.db -c "SELECT COUNT(*) n FROM loaves l JOIN bakers b ON b.baker_id = l.baker_id WHERE b.name = 'Ada & Co'"
+grep -q '^ *2$' last.out || fail "the Oracle query printed $(cat last.out)"
+expect_output "$(printf '2')" "$eggdb" sql ora.db -c "COPY (SELECT count(*) FROM loaves l JOIN bakers b ON b.baker_id = l.baker_id WHERE b.name = 'Ada & Co') TO STDOUT"
+printf '\003\000\001\000EXPORT:V19\000' > hr.dmp
+expect_exit 2 "$eggdb" restore --dialect oracle --create hr.db hr.dmp
+grep -q 'an Oracle Data Pump or exp dump file' last.err || fail "a Data Pump file said $(cat last.err)"
+grep -q 'impdp' last.err || fail "a Data Pump file did not give the impdp route: $(cat last.err)"
+pass "restore: an Oracle SQL*Plus sample with its report, the same data in Oracle and PostgreSQL SQL, and a Data Pump file routed"
+
 expect_exit 0 "$eggdb" sql --dialect sqlite shop.db -c "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('a'), ('b'); INSERT OR REPLACE INTO notes VALUES (1, 'c')"
 expect_output '2|b' sh -c "\"$eggdb\" sql --dialect sqlite shop.db -c 'SELECT id, body FROM notes WHERE NOT id - 2' | sed -n 3p | tr -d ' '"
 expect_exit 3 "$eggdb" sql --dialect sqlite shop.db -c "SELECT * FROM nowhere"

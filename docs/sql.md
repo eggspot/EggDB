@@ -317,8 +317,26 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `NLS_TERRITORY` (America, which resets the formats it implies), `NLS_NUMERIC_CHARACTERS='.,'`,
   `NLS_SORT=BINARY`, `NLS_COMP=BINARY` and `CURRENT_SCHEMA` (as `search_path`; the Oracle
   dialect has no `CREATE SCHEMA` or `CREATE USER`, so it reaches schemas made in another dialect
-  or by a restore, and `EGGDB.T`, the session user's own table, keeps naming it). Defaults are
-  `DD-MON-RR` and `DD-MON-RR HH.MI.SSXFF AM`.
+  or by a restore, and `EGGDB.T`, the session user's own table, keeps naming it; `HR.T` names
+  schema `hr`, D127). Defaults are `DD-MON-RR` and `DD-MON-RR HH.MI.SSXFF AM`.
+- **DDL as Oracle's tools write it** (D127): physical properties after `CREATE TABLE`, `CREATE
+  INDEX` and `USING INDEX` (`SEGMENT CREATION`, `PCTFREE`, `PCTUSED`, `INITRANS`, `MAXTRANS`,
+  `STORAGE (...)`, `TABLESPACE`, `[NO]LOGGING`, `[NO]COMPRESS`, `[NO]CACHE`, `[NO]PARALLEL`,
+  `ROW MOVEMENT`, `INMEMORY`, `ORGANIZATION HEAP | INDEX` with `PCTTHRESHOLD`, `INCLUDING` and
+  `OVERFLOW`, `LOB (...) STORE AS`, `COMPUTE STATISTICS`, `REVERSE`, `VISIBLE`, `ONLINE`),
+  constraint states (`ENABLE`, `VALIDATE`, `NOVALIDATE`, `RELY`, `NORELY`, `USING INDEX`),
+  `DEFAULT COLLATION`, `BEQUEATH` and `COLLATE USING_NLS_COMP | BINARY | USING_NLS_SORT`, and
+  `SCALE`, `EXTEND` and `NOSHARD` on sequences are accepted with no effect; `PARTITION BY ...`
+  makes one unpartitioned table. `NOT NULL DISABLE` leaves the column nullable; other disabled
+  constraints are `ORA-03001`. `ALTER TABLE t ADD (column, CONSTRAINT ..., ...)` applies each
+  element in order, and `MODIFY (c CONSTRAINT n NOT NULL ENABLE)` works. A primary key named
+  like an index of its table on the same columns takes that index over (the separate index is
+  gone, and dropping the key later drops it), a unique constraint named like such a unique index
+  is that index, and a non-unique index with the name is `ORA-00955`. `CREATE INDEX "HR"."X" ON
+  "HR"."T"` works; an index in another schema than its table's is `ORA-03001`. `ORGANIZATION
+  EXTERNAL`, clusters, nested-table storage and `SHARD` are `ORA-03001`. `COPY` loads and
+  unloads tables in the Oracle dialect too, an empty field loading as NULL. SQL*Plus commands
+  (`SET`, `DEFINE`, `@`, `/`) are read by `eggdb restore --dialect oracle`, not by `eggdb sql`.
 - **Implicit conversions** (D126): text compared with or assigned to a `DATE` or `TIMESTAMP`,
   and `CAST(text AS DATE)`, is read by the NLS format, then as strict ISO 8601; text meets a
   number as `TO_NUMBER` reads it (`'20.5'` into `NUMBER(4)` stores 21, `'5.5' + 1` is 6.5);
@@ -1060,8 +1078,8 @@ schema of the path that exists, in order; `pg_catalog` is searched first for fun
 (`pg_catalog.nextval`, `pg_catalog.set_config` and the other functions that exist). New objects
 are created in the first schema of the path that exists (`3F000 no schema has been selected to
 create in` when there is none). The other dialects have one schema: SQLite's `main.t` (`temp.t`
-is `0A000`: no temporary tables yet), Oracle's `USER.t` for the session's user (another schema
-is ORA-00942), MySQL's `db.t` for the connected database.
+is `0A000`: no temporary tables yet), Oracle's `USER.t` for the session's user's own tables and
+`hr.t` for schema `hr` (D127), MySQL's `db.t` for the connected database.
 
 **Views**, in every dialect: `CREATE [OR REPLACE] VIEW name [(columns)] AS query`, `DROP VIEW
 [IF EXISTS] name [, ...] [CASCADE | RESTRICT]`, and in PostgreSQL `ALTER VIEW [IF EXISTS] name

@@ -368,6 +368,24 @@ the classifier, the span finder and the column rewrite have unit tests in
 read one to seven bytes at a time. `crates/eggdb/tests/data/ssms-sample.sql` is the smoke test's
 sample, restored with `eggdb restore` and with go-sqlcmd's `-i` against `eggdb serve`.
 
+**Restoring Oracle scripts (item 43, D127).** `crates/eggdb/tests/data/oracle/hr/` holds Oracle's
+own HR sample-schema scripts, unchanged (MIT, from `oracle-samples/db-sample-schemas`; the
+folder's README names the commit). `crates/eggdb/tests/restore_oracle.rs` restores
+`hr_install.sql` with the built binary from another working directory, so its `@@` includes are
+found beside it, and checks the documented counts (regions 5, countries 25, locations 23,
+departments 27, jobs 19, employees 107, job_history 10) through Oracle and PostgreSQL SQL, the
+installer's own verification query (`provided` equals `actual` on every row), spot values from
+the scripts (employee 100 hired 2013-06-17, `employees_seq.NEXTVAL` 207, 106 rows in
+`emp_details_view`) and the enforced constraints (ORA-02291, ORA-02290, ORA-00001); then the
+three sub-scripts restored one by one; our own SQL Developer, `impdp SQLFILE=` and SQLcl CSV
+fixtures (`hr-sqldeveloper.sql`, `hr-impdp-tables.sql`, `hr-impdp-refs.sql`, `csv/`), written in
+the tools' documented shapes from HR's values with one value holding `&` and one a newline;
+content routes; all-or-nothing blocks; substitution, includes, `CONNECT` and password redaction.
+The reader, the classifier, the table rewrites and the catalog-built constraint clauses have unit
+tests in `crates/eggdb-sql/src/restore/tests_oracle.rs`, with a seeded fuzz of 2,000 hostile
+scripts (`EGGDB_FUZZ_CASES`, `EGGDB_FUZZ_SEED`) through `MemoryIncludes`, so it never touches the
+disk. `crates/eggdb/tests/data/oracle-sample.sql` is the smoke test's sample.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.

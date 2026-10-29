@@ -580,8 +580,43 @@ pub(crate) fn oracle_differences(text: &str) -> Vec<DifferenceNote> {
             "ROLLBACK",
             "the statements before it were already committed, each on its own",
         )],
+        (Some("create"), _) if partitioned(text) => {
+            let mut at = kind_after_create(&tokens);
+            while matches!(word_at(&tokens, at), Some("global" | "private" | "temporary")) {
+                at += 1;
+            }
+            at += 1;
+            vec![DifferenceNote::new(
+                name_at(&tokens, &mut at),
+                "partitioning not kept: one unpartitioned table here",
+            )]
+        }
         _ => Vec::new(),
     }
+}
+
+fn partitioned(text: &str) -> bool {
+    let mut depth = 0u32;
+    let mut previous_partition = false;
+    let mut seen_table = false;
+    for token in Words::oracle(text) {
+        if token.is_symbol(b'(') {
+            depth += 1;
+        } else if token.is_symbol(b')') {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 {
+            if token.is_word("table") {
+                seen_table = true;
+            }
+            if seen_table && previous_partition && token.is_word("by") {
+                return true;
+            }
+            previous_partition = token.is_word("partition");
+            continue;
+        }
+        previous_partition = false;
+    }
+    false
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

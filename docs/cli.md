@@ -49,7 +49,7 @@ eggdb <command> <file> [arguments] [options]
 | `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
-| `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, into the file, with a report (below, and [migrate.md](migrate.md)) |
+| `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
 | `audit <file>` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
@@ -430,7 +430,7 @@ second, and erase it when they end.
 ### Loading a CSV file into a table: `import --csv`
 
 ```
-eggdb import <file> --csv <csv file | -> --table <name> [--header] [--delimiter <c>] [--null <text>]
+eggdb import <file> --csv <csv file | -> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle]
 ```
 
 With `--csv`, `import` loads a CSV file (or stdin, with `-`) into an existing SQL table instead,
@@ -446,6 +446,9 @@ exits 3. The page cache grows with the file (four times its size plus 16 MiB, be
 and 1 GiB) since the load must fit in it; `--cache` sets it for larger files. `--dry-run`,
 `--on-conflict` and `--page-size` are for eggdb-jsonl imports, and `--create` is refused: a new
 file has no table to load into, so create the file and the table with `eggdb sql --create`.
+`--dialect oracle` loads SQLcl `UNLOAD` and SQL*Plus `SET MARKUP CSV ON` files: the table name is
+read as Oracle writes it (`hr.employees`), dates by Oracle's NLS format (`DD-MON-RR`) and then
+as ISO 8601, and an empty field, quoted or not, is NULL, since Oracle keeps no empty strings.
 
 ```sh
 eggdb sql app.db -c "CREATE TABLE people (id integer PRIMARY KEY, name text, born date)"
@@ -777,7 +780,16 @@ eggdb restore app.db app.sql --keep-going --report restore.json
   restored but not as SQL Server had it, and lists sqlcmd's commands as client commands. A SQL
   Server backup (`TAPE`), a BACPAC or other zip, or a binary file is refused by its content with
   the route to a script; a UTF-16 file without `--dialect sqlserver` is refused with that advice
-  ([migrate.md](migrate.md)). Oracle's scripts come in a later release (item 43).
+  ([migrate.md](migrate.md)).
+- `--dialect oracle` restores a SQL*Plus-style script (SQL Developer or SQLcl exports, `impdp
+  ... SQLFILE=` output, installers such as Oracle's sample schemas): statements end at `;` or a
+  `/` line, PL/SQL units at a `/` line; `DEFINE`, `&name` substitution, `@`, `@@` and `START`
+  (regular files only), `CONNECT` (the schema, never a login) and `EXIT` act, other SQL*Plus
+  commands are listed as client commands; users become schemas, blocks of `INSERT`, `UPDATE`,
+  `DELETE` and `COMMIT` run as one transaction, other PL/SQL is skipped and listed, and a
+  constraint disabled and enabled again is dropped and re-added. `--define name=value` (repeat
+  it) gives a substitution variable. A Data Pump `.dmp`, `exp` or RMAN file is refused by its
+  content with the `impdp ... SQLFILE=` route ([migrate.md](migrate.md#oracle), D127).
 
 ```
 restored app.sql into app.db (1,204 statements, 2.3 s)

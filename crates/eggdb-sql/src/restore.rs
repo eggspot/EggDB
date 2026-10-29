@@ -717,6 +717,8 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
         if !self.rules.oracle {
             return self.execute(statement, effect, true);
         }
+        let adjusted;
+        let mut effect = effect;
         let schema = match effect {
             Effect::Table { name, .. } | Effect::View(name) | Effect::Sequence(name) => {
                 name.split_once('.').map(|(schema, _)| schema.to_owned())
@@ -738,6 +740,7 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             for note in rewrite.notes {
                 statement.differences.push(note);
             }
+            let disabled = rewrite.disabled.len() as u64;
             for element in rewrite.disabled {
                 self.remember_disabled(
                     name,
@@ -745,8 +748,40 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                     format!("ALTER TABLE {} ADD {}", element.table, element.clause),
                 );
             }
+            if let Effect::Table { name, constraints } = effect
+                && disabled > 0
+            {
+                adjusted = Effect::Table {
+                    name: name.clone(),
+                    constraints: constraints.saturating_sub(disabled),
+                };
+                effect = &adjusted;
+            }
+        }
+        let owner = match effect {
+            Effect::View(name) => name
+                .split_once('.')
+                .map(|(schema, _)| schema.to_owned())
+                .filter(|schema| *schema != self.default_schema),
+            _ => None,
+        };
+        let current = self.default_schema.clone();
+        if let Some(owner) = &owner
+            && let Err(error) = self.use_schema(owner)
+        {
+            return self.failed(&statement, effect, error);
         }
         let flow = self.execute(statement, effect, true);
+        if owner.is_some() && let Err(error) = self.use_schema(&current) {
+            self.report.error = Some(RestoreError {
+                line: self.reader.line_number(),
+                script: self.reader.script_index(),
+                statement: String::new(),
+                error,
+                statements_before: self.report.statements,
+            });
+            return Flow::Stop;
+        }
         if let Effect::SessionSetting {
             current_schema: Some(schema),
         } = effect

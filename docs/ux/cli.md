@@ -1230,13 +1230,13 @@ grammar, the report in every outcome, the three verdicts, `--create`, `--keep-go
 needs.
 
 ```
-eggdb restore <file> [<script.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql|sqlserver]
+eggdb restore <file> [<script.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql|sqlserver|oracle] [--define <name>=<value>]...
 ```
 
 ### Help: `eggdb help restore`
 The command list of section 9 reads
-`  restore <file> [dump]         restore a PostgreSQL dump or a SQL Server script into the file`.
-In the command's help, the usage line takes `[--dialect postgresql|sqlserver]`, and this follows
+`  restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script`.
+In the command's help, the usage line takes `[--dialect postgresql|sqlserver|oracle]`, and this follows
 "convert them first with pg_restore -f dump.sql <archive>.":
 ```
 With --dialect sqlserver it restores a SQL Server script instead (SSMS Generate Scripts with
