@@ -160,10 +160,10 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-cross-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL, SQL Server and MCP servers and the embedded API for each target
+      - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL, SQL Server and MCP servers, the command registry and the embedded API for each target
         run: |
           for target in $TARGETS; do
-            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-mcp -p eggdb-tdswire -p eggdb --all-targets --target "$target" -- -D warnings
+            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-commands -p eggdb-mcp -p eggdb-tdswire -p eggdb --all-targets --target "$target" -- -D warnings
           done
 
   bench:
