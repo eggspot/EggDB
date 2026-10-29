@@ -84,6 +84,22 @@ fn export(header: &Header, entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
 
 type Entries = Vec<(Vec<u8>, Vec<u8>)>;
 
+fn export_with_collections(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let header = Header {
+        collections: true,
+        ..Header::default()
+    };
+    write_header(&mut out, &header).unwrap();
+    write_collection_line(&mut out, "empty").unwrap();
+    for (index, (key, value)) in entries.iter().enumerate() {
+        let collection = ["sessions", "users"].get(index % 3).copied();
+        write_entry_in(&mut out, collection, key, value).unwrap();
+    }
+    write_trailer(&mut out, entries.len() as u64).unwrap();
+    out
+}
+
 fn read_all(input: &mut dyn Read) -> Result<(Header, Entries), ReadError> {
     let mut reader = ExportReader::new(input);
     let header = reader.read_header()?;
@@ -355,6 +371,9 @@ fn mutate(rng: &mut Rng, bytes: &mut Vec<u8>) {
         b"key_hex",
         b"value_hex",
         b"entries",
+        b"collection",
+        b"\"collection\":\"c\",",
+        b"\"version\":2",
         b"\"format\":\"eggdb-jsonl\"",
         b"99999999999999999999",
     ];
@@ -423,6 +442,8 @@ fn hostile_exports_end_in_an_error_or_entries_never_a_panic_or_a_hang() {
         let mut bytes = if rng.below(10) == 0 {
             let length = rng.below(400);
             rng.bytes(length)
+        } else if rng.below(3) == 0 {
+            export_with_collections(&entries)
         } else {
             export(
                 &Header {
