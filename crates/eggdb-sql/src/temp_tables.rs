@@ -144,6 +144,28 @@ impl TempTables {
         shape: Intermediate<'_>,
         rows: Vec<Vec<Value>>,
     ) -> SqlResult<String> {
+        let definition = self.define(names, shape, |index| value_type(&rows, index))?;
+        self.fill(&definition, rows)?;
+        self.register(definition)
+    }
+
+    pub(crate) fn add_streamed(
+        &mut self,
+        names: &TempTableNames,
+        shape: Intermediate<'_>,
+        produce: impl FnOnce(&mut dyn FnMut(Vec<Value>) -> SqlResult<()>) -> SqlResult<()>,
+    ) -> SqlResult<String> {
+        let definition = self.define(names, shape, |_| SqlType::Text)?;
+        self.fill_streamed(&definition, produce)?;
+        self.register(definition)
+    }
+
+    fn define(
+        &mut self,
+        names: &TempTableNames,
+        shape: Intermediate<'_>,
+        undeclared_type: impl Fn(usize) -> SqlType,
+    ) -> SqlResult<TableDefinition> {
         let Intermediate {
             columns,
             renamed,
@@ -176,13 +198,13 @@ impl TempTables {
         let unique = unique_names(shown, dialect, position)?;
         let mut definition = TableDefinition {
             id,
-            name: name.clone(),
+            name,
             columns: Vec::with_capacity(columns.len()),
             primary_key: Vec::new(),
             ..TableDefinition::default()
         };
         for (index, (column, column_name)) in columns.iter().zip(unique).enumerate() {
-            let sql_type = column.sql_type.unwrap_or_else(|| value_type(&rows, index));
+            let sql_type = column.sql_type.unwrap_or_else(|| undeclared_type(index));
             definition.columns.push(Column {
                 name: column_name,
                 sql_type,
@@ -197,25 +219,11 @@ impl TempTables {
             .map(|column| column.name.len() + ENTRY_OVERHEAD)
             .sum();
         self.memory.charge(column_bytes + ENTRY_OVERHEAD)?;
-        let prefix = rows_prefix(id);
-        let width = definition.columns.len();
-        let mut stored = Vec::with_capacity(rows.len());
-        for (number, mut row) in rows.into_iter().enumerate() {
-            row.resize(width, Value::Null);
-            for (value, column) in row.iter_mut().zip(&definition.columns) {
-                if !value.is_null() && value.sql_type() != Some(column.sql_type) {
-                    let original = std::mem::replace(value, Value::Null);
-                    *value = stored_as(original, column.sql_type)?;
-                }
-            }
-            let mut key = prefix.clone();
-            key.extend_from_slice(&(number as u64).to_be_bytes());
-            let bytes = encode_row(&row);
-            self.memory
-                .charge(key.len() + bytes.len() + ENTRY_OVERHEAD)?;
-            stored.push((key, bytes));
-        }
-        self.entries.extend(stored);
+        Ok(definition)
+    }
+
+    fn register(&mut self, definition: TableDefinition) -> SqlResult<String> {
+        let name = definition.name.clone();
         let registered = DEFINITIONS.with(|definitions| {
             definitions
                 .try_borrow_mut()
@@ -232,6 +240,52 @@ impl TempTables {
         }
         self.registered.push(name.clone());
         Ok(name)
+    }
+
+    pub(crate) fn fill(
+        &mut self,
+        definition: &TableDefinition,
+        rows: Vec<Vec<Value>>,
+    ) -> SqlResult<()> {
+        self.fill_streamed(definition, |store| rows.into_iter().try_for_each(store))
+    }
+
+    pub(crate) fn fill_streamed(
+        &mut self,
+        definition: &TableDefinition,
+        produce: impl FnOnce(&mut dyn FnMut(Vec<Value>) -> SqlResult<()>) -> SqlResult<()>,
+    ) -> SqlResult<()> {
+        let prefix = rows_prefix(definition.id);
+        let mut number: u64 = 0;
+        produce(&mut |row| {
+            self.store_row(definition, &prefix, number, row)?;
+            number += 1;
+            Ok(())
+        })
+    }
+
+    fn store_row(
+        &mut self,
+        definition: &TableDefinition,
+        prefix: &[u8],
+        number: u64,
+        mut row: Vec<Value>,
+    ) -> SqlResult<()> {
+        row.resize(definition.columns.len(), Value::Null);
+        for (value, column) in row.iter_mut().zip(&definition.columns) {
+            if !value.is_null() && value.sql_type() != Some(column.sql_type) {
+                let original = std::mem::replace(value, Value::Null);
+                *value = stored_as(original, column.sql_type)?;
+            }
+        }
+        let mut key = Vec::with_capacity(prefix.len() + 8);
+        key.extend_from_slice(prefix);
+        key.extend_from_slice(&number.to_be_bytes());
+        let bytes = encode_row(&row);
+        self.memory
+            .charge(key.capacity() + bytes.capacity() + ENTRY_OVERHEAD)?;
+        self.entries.insert(key, bytes);
+        Ok(())
     }
 }
 

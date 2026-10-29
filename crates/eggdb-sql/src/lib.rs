@@ -20,6 +20,7 @@
 
 mod aggregate;
 mod alter;
+mod arrays;
 mod ast;
 mod bytea;
 mod comments;
@@ -51,14 +52,17 @@ mod oracle_errors;
 mod oracle_functions;
 mod oracle_nls;
 mod parser;
+mod pg_keywords;
 mod plan;
 mod random;
+mod regex;
 mod restore;
 mod schema;
 mod schemas;
 mod sequences;
 mod session;
 mod set_operations;
+mod set_returning;
 mod settings;
 mod sqlite_errors;
 mod sqlite_functions;
@@ -67,6 +71,7 @@ mod sqlserver_errors;
 mod sqlserver_functions;
 mod sqlserver_types;
 mod store;
+mod string_functions;
 mod subquery;
 mod temp_tables;
 mod temporal;
@@ -74,6 +79,8 @@ mod types;
 mod typing;
 mod views;
 
+#[cfg(test)]
+mod arrays_tests;
 #[cfg(test)]
 mod constraint_tests;
 #[cfg(test)]
@@ -91,7 +98,11 @@ mod one_statement_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]
+mod regex_tests;
+#[cfg(test)]
 mod schema_tests;
+#[cfg(test)]
+mod set_returning_tests;
 #[cfg(test)]
 mod sqlserver_tests;
 #[cfg(test)]
@@ -99,6 +110,7 @@ mod subquery_tests;
 #[cfg(test)]
 mod tests;
 
+pub use arrays::{ArrayElement, ArrayValue};
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{
     DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,

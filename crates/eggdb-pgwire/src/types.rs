@@ -1,7 +1,9 @@
 //! PostgreSQL's type OIDs for EggDB's SQL types, and values in their text and binary forms.
 
 use crate::messages::{ColumnDescription, Format};
-use eggdb_sql::{Interval, OutputColumn, SqlError, SqlState, SqlType, Value};
+use eggdb_sql::{
+    ArrayElement, ArrayValue, Interval, OutputColumn, SqlError, SqlState, SqlType, Value,
+};
 
 /// `bool`.
 pub const BOOL_OID: u32 = 16;
@@ -47,6 +49,39 @@ pub const UUID_OID: u32 = 2950;
 pub const NUMERIC_OID: u32 = 1700;
 /// `jsonb`.
 pub const JSONB_OID: u32 = 3802;
+/// `bool[]`.
+pub const BOOL_ARRAY_OID: u32 = 1000;
+/// `int2[]`.
+pub const INT2_ARRAY_OID: u32 = 1005;
+/// `int4[]`.
+pub const INT4_ARRAY_OID: u32 = 1007;
+/// `text[]`.
+pub const TEXT_ARRAY_OID: u32 = 1009;
+/// `bpchar[]`.
+pub const BPCHAR_ARRAY_OID: u32 = 1014;
+/// `varchar[]`.
+pub const VARCHAR_ARRAY_OID: u32 = 1015;
+/// `int8[]`.
+pub const INT8_ARRAY_OID: u32 = 1016;
+/// `float4[]`.
+pub const FLOAT4_ARRAY_OID: u32 = 1021;
+/// `float8[]`.
+pub const FLOAT8_ARRAY_OID: u32 = 1022;
+/// `numeric[]`.
+pub const NUMERIC_ARRAY_OID: u32 = 1231;
+
+const ARRAY_OIDS: [u32; 10] = [
+    BOOL_ARRAY_OID,
+    INT2_ARRAY_OID,
+    INT4_ARRAY_OID,
+    TEXT_ARRAY_OID,
+    BPCHAR_ARRAY_OID,
+    VARCHAR_ARRAY_OID,
+    INT8_ARRAY_OID,
+    FLOAT4_ARRAY_OID,
+    FLOAT8_ARRAY_OID,
+    NUMERIC_ARRAY_OID,
+];
 
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 const MAX_OFFSET: i32 = 15 * 3600 + 59 * 60 + 59;
@@ -79,6 +114,23 @@ pub fn oid_of(sql_type: SqlType) -> u32 {
         SqlType::Bytea => BYTEA_OID,
         SqlType::Uuid => UUID_OID,
         SqlType::Bpchar(_) => BPCHAR_OID,
+        SqlType::Array(element) => array_oid(element),
+    }
+}
+
+/// The type OID PostgreSQL gives an array of `element`, such as 1007 for `int4[]`.
+pub fn array_oid(element: ArrayElement) -> u32 {
+    match element {
+        ArrayElement::SmallInt => INT2_ARRAY_OID,
+        ArrayElement::Integer => INT4_ARRAY_OID,
+        ArrayElement::BigInt => INT8_ARRAY_OID,
+        ArrayElement::Real => FLOAT4_ARRAY_OID,
+        ArrayElement::Double => FLOAT8_ARRAY_OID,
+        ArrayElement::Numeric => NUMERIC_ARRAY_OID,
+        ArrayElement::Boolean => BOOL_ARRAY_OID,
+        ArrayElement::Text => TEXT_ARRAY_OID,
+        ArrayElement::Varchar => VARCHAR_ARRAY_OID,
+        ArrayElement::Bpchar => BPCHAR_ARRAY_OID,
     }
 }
 
@@ -200,6 +252,13 @@ pub fn encode_value(
     format: Format,
     offset_seconds: i32,
 ) -> Result<Option<Vec<u8>>, SqlError> {
+    if format == Format::Binary && ARRAY_OIDS.contains(&oid) {
+        return match value {
+            Value::Null => Ok(None),
+            Value::Array(array) => array_binary(array, offset_seconds).map(Some),
+            _ => Err(cannot_send(value, oid)),
+        };
+    }
     let Some(text) = value.to_text_at(offset_seconds) else {
         return Ok(None);
     };
@@ -292,6 +351,37 @@ pub fn encode_value(
         _ => text.into_bytes(),
     };
     Ok(Some(bytes))
+}
+
+fn array_binary(array: &ArrayValue, offset_seconds: i32) -> Result<Vec<u8>, SqlError> {
+    let element_oid = oid_of(array.element.sql_type());
+    let too_long = || {
+        cannot_send(
+            &Value::Array(Box::new(array.clone())),
+            oid_of(SqlType::Array(array.element)),
+        )
+    };
+    let length = i32::try_from(array.items.len()).map_err(|_| too_long())?;
+    let mut out = Vec::with_capacity(20 + array.items.len() * 8);
+    let dimensions: i32 = if array.items.is_empty() { 0 } else { 1 };
+    out.extend_from_slice(&dimensions.to_be_bytes());
+    out.extend_from_slice(&i32::from(array.items.iter().any(Value::is_null)).to_be_bytes());
+    out.extend_from_slice(&element_oid.to_be_bytes());
+    if dimensions == 1 {
+        out.extend_from_slice(&length.to_be_bytes());
+        out.extend_from_slice(&array.lower_bound.to_be_bytes());
+    }
+    for item in &array.items {
+        match encode_value(item, element_oid, Format::Binary, offset_seconds)? {
+            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+            Some(bytes) => {
+                let size = i32::try_from(bytes.len()).map_err(|_| too_long())?;
+                out.extend_from_slice(&size.to_be_bytes());
+                out.extend_from_slice(&bytes);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn numeric_binary(text: &str) -> Vec<u8> {
@@ -465,6 +555,12 @@ pub fn decode_parameter(
             .map(str::to_owned)
             .map_err(|_| invalid_utf8())
     };
+    if ARRAY_OIDS.contains(&oid) {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            format!("array parameters (type OID {oid}, parameter ${number}) are not supported yet"),
+        ));
+    }
     if format == Format::Text {
         return text(bytes);
     }
@@ -646,6 +742,82 @@ mod tests {
             state(decode_parameter(&[2, b'{'], JSONB_OID, Format::Binary, 1)),
             "22P03"
         );
+    }
+
+    #[test]
+    fn arrays_take_postgresqls_array_oids_and_binary_form() {
+        let array = Value::Array(Box::new(ArrayValue {
+            element: ArrayElement::Integer,
+            lower_bound: 1,
+            items: vec![Value::Integer(7), Value::Null],
+        }));
+        let mut expected = Vec::new();
+        for word in [1i32, 1, 23, 2, 1, 4, 7, -1] {
+            expected.extend_from_slice(&word.to_be_bytes());
+        }
+        assert_eq!(
+            encode_value(&array, INT4_ARRAY_OID, Format::Binary, 0).unwrap(),
+            Some(expected)
+        );
+        assert_eq!(
+            encode_value(&array, INT4_ARRAY_OID, Format::Text, 0).unwrap(),
+            Some(b"{7,NULL}".to_vec())
+        );
+        assert_eq!(
+            encode_value(&Value::Null, INT4_ARRAY_OID, Format::Binary, 0).unwrap(),
+            None
+        );
+        assert!(encode_value(&Value::Integer(7), INT4_ARRAY_OID, Format::Binary, 0).is_err());
+        let empty = Value::Array(Box::new(ArrayValue {
+            element: ArrayElement::Text,
+            lower_bound: 1,
+            items: Vec::new(),
+        }));
+        let mut expected = Vec::new();
+        for word in [0i32, 0, 25] {
+            expected.extend_from_slice(&word.to_be_bytes());
+        }
+        assert_eq!(
+            encode_value(&empty, TEXT_ARRAY_OID, Format::Binary, 0).unwrap(),
+            Some(expected)
+        );
+        let texts = Value::Array(Box::new(ArrayValue {
+            element: ArrayElement::Varchar,
+            lower_bound: 1,
+            items: vec![Value::Text("ab".into())],
+        }));
+        let mut expected = Vec::new();
+        for word in [1i32, 0, 1043, 1, 1, 2] {
+            expected.extend_from_slice(&word.to_be_bytes());
+        }
+        expected.extend_from_slice(b"ab");
+        assert_eq!(
+            encode_value(&texts, VARCHAR_ARRAY_OID, Format::Binary, 0).unwrap(),
+            Some(expected)
+        );
+        let pairs = [
+            (ArrayElement::SmallInt, 1005),
+            (ArrayElement::Integer, 1007),
+            (ArrayElement::BigInt, 1016),
+            (ArrayElement::Real, 1021),
+            (ArrayElement::Double, 1022),
+            (ArrayElement::Numeric, 1231),
+            (ArrayElement::Boolean, 1000),
+            (ArrayElement::Text, 1009),
+            (ArrayElement::Varchar, 1015),
+            (ArrayElement::Bpchar, 1014),
+        ];
+        for (element, oid) in pairs {
+            assert_eq!(oid_of(SqlType::Array(element)), oid);
+            assert_eq!(sql_type_of(oid), None);
+            assert_eq!(
+                decode_parameter(b"{1}", oid, Format::Text, 1)
+                    .unwrap_err()
+                    .state()
+                    .code(),
+                "0A000"
+            );
+        }
     }
 
     #[test]

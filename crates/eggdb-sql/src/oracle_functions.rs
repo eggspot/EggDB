@@ -217,7 +217,8 @@ fn number_of(value: &Value) -> SqlResult<Option<Number>> {
         | Value::TimeTz { .. }
         | Value::Interval(_)
         | Value::Bytea(_)
-        | Value::Uuid(_) => {
+        | Value::Uuid(_)
+        | Value::Array(_) => {
             return Err(invalid_number());
         }
     }))

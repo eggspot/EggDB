@@ -631,6 +631,22 @@ fn a_row_that_breaks_a_constraint_stops_the_restore_at_its_data_line() {
 }
 
 #[test]
+fn a_varchar_check_against_a_text_array_holds_after_a_restore() {
+    let store = MemoryStore::default();
+    let dump = "CREATE TABLE logs (\n    id integer NOT NULL,\n    level character varying(10),\n    CONSTRAINT logs_level_check CHECK (((level)::text = ANY ((ARRAY['debug'::character varying, 'info'::character varying])::text[])))\n);\nCOPY public.logs (id, level) FROM stdin;\n1\tdebug\n2\tinfo\n\\.\n";
+    let report = restore(&store, dump, false);
+    assert_eq!(report.error, None);
+    assert_eq!(
+        query(&store, "SELECT level FROM logs ORDER BY id"),
+        "level\ndebug\ninfo\nSELECT 2"
+    );
+    let refused = Session::new(&store)
+        .execute("INSERT INTO logs VALUES (3, 'trace')", &mut |_| {})
+        .expect_err("the CHECK holds");
+    assert_eq!(refused.state().code(), "23514");
+}
+
+#[test]
 fn keep_going_lists_every_error_and_restores_the_rest() {
     let store = MemoryStore::default();
     let dump = "CREATE TABLE t (id integer PRIMARY KEY);\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (1);\nSELEC 2;\nINSERT INTO t VALUES (2);\n\\unrestrict nope\n";
