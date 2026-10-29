@@ -329,7 +329,7 @@ fn use_set_nocount_and_unsupported_requests_answer_as_sql_server_does() {
     );
     assert_eq!(errors(&client.batch("SELECT version()"))[0].0, 195);
     assert_eq!(errors(&client.batch("SELECT @x"))[0].0, 137);
-    client.send(0x03, &[1, 2, 3]);
+    client.send(0x07, &[1, 2, 3]);
     let (_, body) = client.read_message().unwrap();
     assert_eq!(errors(&common::parse_tokens(&body))[0].0, 40517);
     client.send(0x06, &[]);

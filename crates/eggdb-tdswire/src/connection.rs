@@ -1,7 +1,10 @@
 use crate::messages::{
-    ATTENTION, BULK_LOAD, LOGIN7, Login7, PRELOGIN, PreLogin, RPC, SQL_BATCH, TABULAR_RESULT,
-    TDS_7_4, TRANSACTION_MANAGER, parse_login7, parse_prelogin, parse_sql_batch, prelogin_response,
+    ATTENTION, BULK_LOAD, LOGIN7, Login7, PRELOGIN, PreLogin, RESET_CONNECTION,
+    RESET_CONNECTION_SKIP_TRANSACTION, RPC, SQL_BATCH, TABULAR_RESULT, TDS_7_4,
+    TRANSACTION_MANAGER, TransactionRequest, parse_login7, parse_prelogin, parse_sql_batch,
+    parse_transaction_manager_request, prelogin_response,
 };
+use crate::procedures::PreparedBatches;
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::tokens::{
     self, DONE, DONE_ATTENTION, DONE_COUNT, DONE_ERROR, DONE_IN_TRANSACTION, DONE_MORE,
@@ -11,7 +14,8 @@ use crate::tokens::{
 use crate::types::{push_value, wire_columns};
 use crate::wire::{DEFAULT_PACKET_SIZE, POLL_INTERVAL, Wire, WireError};
 use eggdb_sql::{
-    BatchStep, Dialect, KeyValueStore, QueryResult, SQLSERVER_COMPATIBLE_VERSION, Session, SqlError,
+    BatchStep, Dialect, KeyValueStore, NamedParameter, QueryResult, SQLSERVER_COMPATIBLE_VERSION,
+    Session, SqlError,
 };
 use std::time::{Duration, Instant};
 
@@ -30,9 +34,9 @@ const UPDATE_COMMAND: u16 = 0xC5;
 const LOGIN_FAILED: u32 = 18_456;
 const CANNOT_OPEN_DATABASE: u32 = 4060;
 const TOO_MANY_CONNECTIONS: u32 = 17_809;
-const NOT_SUPPORTED: u32 = 40_517;
+pub(crate) const NOT_SUPPORTED: u32 = 40_517;
 const PROTOCOL_ERROR: u32 = 4002;
-const LOGGED_BATCH_CHARACTERS: usize = 200;
+pub(crate) const LOGGED_BATCH_CHARACTERS: usize = 200;
 const MAX_RESULT_COLUMNS: usize = 4096;
 const TOO_MANY_RESULT_COLUMNS: u32 = 1056;
 
@@ -146,7 +150,7 @@ fn login_failed(user: &str) -> String {
     format!("Login failed for user '{user}'.")
 }
 
-fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error: &WireError) {
+pub(crate) fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error: &WireError) {
     match error {
         WireError::Tls => (shared.log)(&format!(
             "{}  client requires TLS (TDS 8 / encrypt=strict); EggDB has no TLS yet",
@@ -447,22 +451,32 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         shared,
         next_transaction: 1,
         transaction: None,
+        prepared: PreparedBatches::default(),
+        acknowledge_reset: false,
     };
     connection.run(&mut session);
     let _ = session.close();
 }
 
-struct Connection<'a> {
-    wire: Wire<'a>,
-    shared: &'a Shared<'a>,
+pub(crate) struct Connection<'a> {
+    pub(crate) wire: Wire<'a>,
+    pub(crate) shared: &'a Shared<'a>,
     next_transaction: u64,
     transaction: Option<u64>,
+    pub(crate) prepared: PreparedBatches,
+    acknowledge_reset: bool,
 }
 
-struct PendingDone {
-    status: u16,
-    command: u16,
-    rows: u64,
+pub(crate) struct PendingDone {
+    pub(crate) status: u16,
+    pub(crate) command: u16,
+    pub(crate) rows: u64,
+}
+
+pub(crate) struct Ran {
+    pub(crate) last: Option<PendingDone>,
+    pub(crate) wrote_error: bool,
+    pub(crate) failed_write: bool,
 }
 
 impl Connection<'_> {
@@ -481,17 +495,17 @@ impl Connection<'_> {
                     return;
                 }
             };
+            if matches!(message.kind, SQL_BATCH | RPC | TRANSACTION_MANAGER)
+                && message.status & (RESET_CONNECTION | RESET_CONNECTION_SKIP_TRANSACTION) != 0
+            {
+                self.reset(session, message.status & RESET_CONNECTION == 0);
+            }
             let keep_going = match message.kind {
                 SQL_BATCH => self.batch(session, &message.body),
+                RPC => self.rpc(session, &message.body),
+                TRANSACTION_MANAGER => self.transaction_request(session, &message.body),
                 ATTENTION => self.send_done(DONE_ATTENTION),
-                RPC | TRANSACTION_MANAGER | BULK_LOAD => {
-                    let what = match message.kind {
-                        RPC => "Remote procedure calls (RPC requests, such as sp_executesql)",
-                        TRANSACTION_MANAGER => "Transaction manager requests",
-                        _ => "Bulk load",
-                    };
-                    self.send_not_supported(what)
-                }
+                BULK_LOAD => self.send_not_supported("Bulk load"),
                 _ => {
                     report_wire_error(
                         self.shared,
@@ -507,22 +521,102 @@ impl Connection<'_> {
         }
     }
 
+    fn reset<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, keep_transaction: bool) {
+        let keep_transaction = keep_transaction && self.transaction.is_some();
+        if let Err(error) = session.reset_connection(keep_transaction) {
+            (self.shared.log)(&format!(
+                "{}  the connection reset could not roll back: {}",
+                self.wire.peer(),
+                error.message()
+            ));
+        }
+        if !keep_transaction {
+            self.transaction = None;
+        }
+        self.acknowledge_reset = true;
+    }
+
+    pub(crate) fn begin_response(&mut self) -> bool {
+        self.wire.begin_message(TABULAR_RESULT);
+        if std::mem::take(&mut self.acknowledge_reset) {
+            return self
+                .wire
+                .write(&tokens::env_change_reset_acknowledged())
+                .is_ok();
+        }
+        true
+    }
+
+    fn send_response(&mut self, body: &[u8]) -> bool {
+        self.begin_response() && self.wire.write(body).is_ok() && self.wire.end_message().is_ok()
+    }
+
     fn send_done(&mut self, status: u16) -> bool {
-        self.wire
-            .send_message(TABULAR_RESULT, &tokens::done(DONE, status, 0, 0))
-            .is_ok()
+        self.send_response(&tokens::done(DONE, status, 0, 0))
+    }
+
+    pub(crate) fn send_error(&mut self, number: u32, severity: u8, text: &str) -> bool {
+        let mut body = tokens::error(&ServerMessage {
+            number,
+            severity,
+            text,
+            line: 1,
+        });
+        body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
+        self.send_response(&body)
     }
 
     fn send_not_supported(&mut self, what: &str) -> bool {
         let text = format!("{what} are not supported in this version of EggDB.");
-        let mut body = tokens::error(&ServerMessage {
-            number: NOT_SUPPORTED,
-            severity: 16,
-            text: &text,
-            line: 1,
-        });
-        body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
-        self.wire.send_message(TABULAR_RESULT, &body).is_ok()
+        self.send_error(NOT_SUPPORTED, 16, &text)
+    }
+
+    fn transaction_request<S: KeyValueStore>(
+        &mut self,
+        session: &mut Session<'_, S>,
+        body: &[u8],
+    ) -> bool {
+        let request = match parse_transaction_manager_request(body) {
+            Ok(request) => request,
+            Err(error) => {
+                report_wire_error(
+                    self.shared,
+                    &mut self.wire,
+                    &WireError::Malformed(error.reason),
+                );
+                return false;
+            }
+        };
+        let text = match &request.request {
+            TransactionRequest::Begin { .. } => "BEGIN TRANSACTION",
+            TransactionRequest::Commit {
+                begin_next: None, ..
+            } => "COMMIT TRANSACTION",
+            TransactionRequest::Commit {
+                begin_next: Some(_),
+                ..
+            } => "COMMIT TRANSACTION BEGIN TRANSACTION",
+            TransactionRequest::Rollback {
+                begin_next: None, ..
+            } => "ROLLBACK TRANSACTION",
+            TransactionRequest::Rollback {
+                begin_next: Some(_),
+                ..
+            } => "ROLLBACK TRANSACTION BEGIN TRANSACTION",
+            TransactionRequest::Save { .. } => {
+                return self.send_not_supported("Transaction save points");
+            }
+            TransactionRequest::Distributed(_) => {
+                return self.send_not_supported("Distributed transactions");
+            }
+        };
+        if self.shared.config.log_batches {
+            (self.shared.log)(&format!(
+                "{}  transaction manager: {text}",
+                self.wire.peer()
+            ));
+        }
+        self.run_batch_text(session, text)
     }
 
     fn batch<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, body: &[u8]) -> bool {
@@ -545,28 +639,56 @@ impl Connection<'_> {
                 printable(&shown)
             ));
         }
-        let text = batch.text;
-        self.wire.begin_message(TABULAR_RESULT);
+        self.run_batch_text(session, &batch.text)
+    }
+
+    pub(crate) fn run_statements<S: KeyValueStore>(
+        &mut self,
+        session: &mut Session<'_, S>,
+        text: &str,
+        parameters: Option<&[NamedParameter]>,
+        done_token: u8,
+    ) -> Ran {
         let mut pending: Option<PendingDone> = None;
         let mut failed_write = false;
         let database = session.database().to_owned();
         let mut writer = StepWriter {
             connection: self,
-            text: &text,
+            text,
             lines: LineCursor::new(),
             database,
             pending: &mut pending,
             failed_write: &mut failed_write,
+            done_token,
+            wrote_error: false,
         };
-        let outcome = session.execute_batch(&text, &mut |step| writer.step(step));
+        let outcome = match parameters {
+            None => session.execute_batch(text, &mut |step| writer.step(step)),
+            Some(parameters) => {
+                session.execute_parameterized_batch(text, parameters, &mut |step| writer.step(step))
+            }
+        };
         if let Err(error) = outcome {
             writer.error(&error, 0);
         }
-        let in_transaction = session.transaction_status() != eggdb_sql::TransactionStatus::Idle;
-        if failed_write {
+        let wrote_error = writer.wrote_error;
+        Ran {
+            last: pending,
+            wrote_error,
+            failed_write,
+        }
+    }
+
+    fn run_batch_text<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, text: &str) -> bool {
+        if !self.begin_response() {
             return false;
         }
-        let last = pending.take().unwrap_or(PendingDone {
+        let ran = self.run_statements(session, text, None, DONE);
+        let in_transaction = session.transaction_status() != eggdb_sql::TransactionStatus::Idle;
+        if ran.failed_write {
+            return false;
+        }
+        let last = ran.last.unwrap_or(PendingDone {
             status: if in_transaction {
                 DONE_IN_TRANSACTION
             } else {
@@ -599,6 +721,8 @@ struct StepWriter<'w, 'a> {
     database: String,
     pending: &'w mut Option<PendingDone>,
     failed_write: &'w mut bool,
+    done_token: u8,
+    wrote_error: bool,
 }
 
 impl StepWriter<'_, '_> {
@@ -615,7 +739,12 @@ impl StepWriter<'_, '_> {
             return true;
         };
         let status = pending.status | DONE_MORE;
-        self.write(&tokens::done(DONE, status, pending.command, pending.rows))
+        self.write(&tokens::done(
+            self.done_token,
+            status,
+            pending.command,
+            pending.rows,
+        ))
     }
 
     fn transaction_change(&mut self, in_transaction: bool, committed: bool) -> bool {
@@ -652,6 +781,7 @@ impl StepWriter<'_, '_> {
             line,
         });
         if self.write(&token) {
+            self.wrote_error = true;
             *self.pending = Some(PendingDone {
                 status: DONE_ERROR,
                 command: 0,

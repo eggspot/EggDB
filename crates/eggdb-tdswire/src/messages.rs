@@ -1,6 +1,7 @@
 //! Reading the messages a TDS client sends and building the server's PRELOGIN answer, as
 //! [MS-TDS] 2.2.6 defines them. Every reader takes untrusted bytes and returns
 //! [`MalformedMessage`] for anything truncated, oversized or inconsistent; none panics.
+//! Remote procedure calls are read by [`crate::rpc`].
 
 use std::fmt;
 
@@ -22,6 +23,26 @@ pub const LOGIN7: u8 = 0x10;
 pub const SSPI: u8 = 0x11;
 /// The packet type of a PRELOGIN request.
 pub const PRELOGIN: u8 = 0x12;
+
+/// The packet status bit with which a client asks the server to reset the connection before
+/// running the request, as a connection pool does when it hands a connection out again.
+pub const RESET_CONNECTION: u8 = 0x08;
+/// The packet status bit that resets the connection but keeps its open transaction.
+pub const RESET_CONNECTION_SKIP_TRANSACTION: u8 = 0x10;
+
+/// The transaction manager request that begins a transaction.
+pub const TM_BEGIN_XACT: u16 = 5;
+/// The transaction manager request that commits the transaction.
+pub const TM_COMMIT_XACT: u16 = 7;
+/// The transaction manager request that rolls the transaction back.
+pub const TM_ROLLBACK_XACT: u16 = 8;
+/// The transaction manager request that sets a save point.
+pub const TM_SAVE_XACT: u16 = 9;
+const TM_GET_DTC_ADDRESS: u16 = 0;
+const TM_PROPAGATE_XACT: u16 = 1;
+const TM_PROMOTE_XACT: u16 = 6;
+const BEGIN_NEXT_TRANSACTION: u8 = 0x01;
+const HIGHEST_ISOLATION_LEVEL: u8 = 5;
 
 /// The only TDS version EggDB speaks: 7.4, as LOGIN7 carries it in a little-endian DWORD.
 pub const TDS_7_4: u32 = 0x7400_0004;
@@ -437,6 +458,164 @@ pub struct SqlBatch {
 /// each header's length, type and data, with exactly one transaction descriptor header, each
 /// type at most once) and the batch text in UTF-16, refused when it is not valid UTF-16.
 pub fn parse_sql_batch(body: &[u8]) -> Result<SqlBatch, MalformedMessage> {
+    let (transaction_descriptor, total) = read_all_headers(body)?;
+    let text_bytes = &body[total..];
+    if !text_bytes.len().is_multiple_of(2) {
+        return Err(malformed("the batch text has an odd number of bytes"));
+    }
+    let text = char::decode_utf16(utf16_units(text_bytes))
+        .collect::<Result<String, _>>()
+        .map_err(|_| malformed("the batch text is not valid UTF-16"))?;
+    Ok(SqlBatch {
+        text,
+        transaction_descriptor,
+    })
+}
+
+/// What a transaction manager request asks for ([MS-TDS] 2.2.6.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionRequest {
+    /// Begin a transaction (`TM_BEGIN_XACT`).
+    Begin {
+        /// The isolation level asked for: 0 to keep the current one, then read uncommitted,
+        /// read committed, repeatable read, serializable and snapshot (1 to 5).
+        isolation_level: u8,
+        /// The transaction's name, or empty.
+        name: String,
+    },
+    /// Commit the transaction (`TM_COMMIT_XACT`), and begin another one when asked.
+    Commit {
+        /// The transaction's name, or empty.
+        name: String,
+        /// The isolation level and name of a transaction to begin right after, when asked.
+        begin_next: Option<(u8, String)>,
+    },
+    /// Roll the transaction back (`TM_ROLLBACK_XACT`), and begin another one when asked.
+    Rollback {
+        /// The transaction's or a save point's name, or empty.
+        name: String,
+        /// The isolation level and name of a transaction to begin right after, when asked.
+        begin_next: Option<(u8, String)>,
+    },
+    /// Set a save point (`TM_SAVE_XACT`).
+    Save {
+        /// The save point's name.
+        name: String,
+    },
+    /// A request for a distributed transaction (get the DTC address, propagate or promote a
+    /// transaction), named by its request type.
+    Distributed(u16),
+}
+
+/// A transaction manager request: what it asks for and the transaction descriptor of its
+/// headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionManagerRequest {
+    /// The request.
+    pub request: TransactionRequest,
+    /// The transaction descriptor the client sent, read but not enforced in this version.
+    pub transaction_descriptor: u64,
+}
+
+fn b_varchar(body: &[u8], at: &mut usize) -> Result<String, MalformedMessage> {
+    let Some(&characters) = body.get(*at) else {
+        return Err(malformed("the message ends early"));
+    };
+    let start = *at + 1;
+    let end = start + usize::from(characters) * 2;
+    let bytes = body
+        .get(start..end)
+        .ok_or(malformed("the message ends early"))?;
+    *at = end;
+    char::decode_utf16(utf16_units(bytes))
+        .collect::<Result<String, _>>()
+        .map_err(|_| malformed("a transaction name is not valid UTF-16"))
+}
+
+fn isolation_level(body: &[u8], at: &mut usize) -> Result<u8, MalformedMessage> {
+    let level = *body
+        .get(*at)
+        .ok_or(malformed("the message ends early"))?;
+    if level > HIGHEST_ISOLATION_LEVEL {
+        return Err(malformed("an unknown isolation level"));
+    }
+    *at += 1;
+    Ok(level)
+}
+
+fn optional_name(body: &[u8], at: &mut usize) -> Result<String, MalformedMessage> {
+    if *at == body.len() {
+        return Ok(String::new());
+    }
+    b_varchar(body, at)
+}
+
+fn begin_next(body: &[u8], at: &mut usize) -> Result<Option<(u8, String)>, MalformedMessage> {
+    let Some(&flags) = body.get(*at) else {
+        return Ok(None);
+    };
+    *at += 1;
+    if flags & BEGIN_NEXT_TRANSACTION == 0 {
+        return Ok(None);
+    }
+    let level = isolation_level(body, at)?;
+    let name = optional_name(body, at)?;
+    Ok(Some((level, name)))
+}
+
+/// Reads a transaction manager request's body ([MS-TDS] 2.2.6.9): its ALL_HEADERS, as
+/// [`parse_sql_batch`] reads them, the request type and its payload. A name a client leaves
+/// out at the end of the message reads as empty; anything after the payload is refused.
+pub fn parse_transaction_manager_request(
+    body: &[u8],
+) -> Result<TransactionManagerRequest, MalformedMessage> {
+    let (transaction_descriptor, start) = read_all_headers(body)?;
+    let kind = u16_le(body, start)?;
+    let mut at = start + 2;
+    let request = match kind {
+        TM_BEGIN_XACT => {
+            let isolation_level = if at == body.len() {
+                0
+            } else {
+                isolation_level(body, &mut at)?
+            };
+            TransactionRequest::Begin {
+                isolation_level,
+                name: optional_name(body, &mut at)?,
+            }
+        }
+        TM_COMMIT_XACT | TM_ROLLBACK_XACT => {
+            let name = optional_name(body, &mut at)?;
+            let begin_next = begin_next(body, &mut at)?;
+            if kind == TM_COMMIT_XACT {
+                TransactionRequest::Commit { name, begin_next }
+            } else {
+                TransactionRequest::Rollback { name, begin_next }
+            }
+        }
+        TM_SAVE_XACT => TransactionRequest::Save {
+            name: optional_name(body, &mut at)?,
+        },
+        TM_GET_DTC_ADDRESS | TM_PROPAGATE_XACT | TM_PROMOTE_XACT => {
+            at = body.len();
+            TransactionRequest::Distributed(kind)
+        }
+        _ => return Err(malformed("an unknown transaction manager request")),
+    };
+    if at != body.len() {
+        return Err(malformed(
+            "a transaction manager request has bytes after its payload",
+        ));
+    }
+    Ok(TransactionManagerRequest {
+        request,
+        transaction_descriptor,
+    })
+}
+
+/// Reads the ALL_HEADERS that start a SQL batch, an RPC and a transaction manager request:
+/// the transaction descriptor and where the headers end.
+pub(crate) fn read_all_headers(body: &[u8]) -> Result<(u64, usize), MalformedMessage> {
     let total = u32_le(body, 0)? as usize;
     if total < 4 || total > body.len() {
         return Err(malformed(
@@ -478,24 +657,14 @@ pub fn parse_sql_batch(body: &[u8]) -> Result<SqlBatch, MalformedMessage> {
     let Some(transaction_descriptor) = transaction_descriptor else {
         return Err(malformed("ALL_HEADERS holds no transaction descriptor"));
     };
-    let text_bytes = &body[total..];
-    if !text_bytes.len().is_multiple_of(2) {
-        return Err(malformed("the batch text has an odd number of bytes"));
-    }
-    let text = char::decode_utf16(utf16_units(text_bytes))
-        .collect::<Result<String, _>>()
-        .map_err(|_| malformed("the batch text is not valid UTF-16"))?;
-    Ok(SqlBatch {
-        text,
-        transaction_descriptor,
-    })
+    Ok((transaction_descriptor, total))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON, PreLogin, parse_login7, parse_prelogin,
-        parse_sql_batch, prelogin_response,
+        ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON, PreLogin, TransactionRequest, parse_login7,
+        parse_prelogin, parse_sql_batch, parse_transaction_manager_request, prelogin_response,
     };
 
     fn obfuscated(password: &str) -> Vec<u8> {
@@ -675,5 +844,77 @@ mod tests {
         surrogate.extend_from_slice(&0xD800u16.to_le_bytes());
         assert!(parse_sql_batch(&surrogate).is_err());
         assert!(parse_sql_batch(&[1, 0, 0]).is_err());
+    }
+
+    fn transaction_request(kind: u16, payload: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&22u32.to_le_bytes());
+        body.extend_from_slice(&descriptor_header());
+        body.extend_from_slice(&kind.to_le_bytes());
+        body.extend_from_slice(payload);
+        body
+    }
+
+    #[test]
+    fn transaction_manager_requests_read_their_kind_isolation_level_and_names() {
+        let begin = parse_transaction_manager_request(&transaction_request(
+            5,
+            &[2, 2, b't', 0, b'x', 0],
+        ))
+        .unwrap();
+        assert_eq!(begin.transaction_descriptor, 7);
+        assert_eq!(
+            begin.request,
+            TransactionRequest::Begin {
+                isolation_level: 2,
+                name: "tx".into()
+            }
+        );
+        assert_eq!(
+            parse_transaction_manager_request(&transaction_request(7, &[0, 0]))
+                .unwrap()
+                .request,
+            TransactionRequest::Commit {
+                name: String::new(),
+                begin_next: None
+            }
+        );
+        assert_eq!(
+            parse_transaction_manager_request(&transaction_request(8, &[0, 1, 4, 0]))
+                .unwrap()
+                .request,
+            TransactionRequest::Rollback {
+                name: String::new(),
+                begin_next: Some((4, String::new()))
+            }
+        );
+        assert_eq!(
+            parse_transaction_manager_request(&transaction_request(7, &[]))
+                .unwrap()
+                .request,
+            TransactionRequest::Commit {
+                name: String::new(),
+                begin_next: None
+            }
+        );
+        assert_eq!(
+            parse_transaction_manager_request(&transaction_request(1, &[9, 9, 9]))
+                .unwrap()
+                .request,
+            TransactionRequest::Distributed(1)
+        );
+        for bad in [
+            transaction_request(5, &[6]),
+            transaction_request(5, &[2, 3, b'a', 0]),
+            transaction_request(7, &[0, 0, 0]),
+            transaction_request(42, &[]),
+            transaction_request(5, &[2, 1, 0x00, 0xD8]),
+        ] {
+            assert!(parse_transaction_manager_request(&bad).is_err());
+        }
+        let whole = transaction_request(7, &[1, b'n', 0, 1, 2, 1, b'm', 0]);
+        for cut in 0..whole.len() {
+            let _ = parse_transaction_manager_request(&whole[..cut]);
+        }
     }
 }

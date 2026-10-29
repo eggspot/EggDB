@@ -7,7 +7,11 @@ use crate::types::WireColumn;
 pub const COLLATION: [u8; 5] = [0x09, 0x04, 0x00, 0x22, 0x00];
 
 pub(crate) const DONE: u8 = 0xFD;
+pub(crate) const DONE_PROC: u8 = 0xFE;
+pub(crate) const DONE_IN_PROC: u8 = 0xFF;
 const COLMETADATA: u8 = 0x81;
+const RETURN_STATUS: u8 = 0x79;
+const RETURN_VALUE: u8 = 0xAC;
 const ROW: u8 = 0xD1;
 const ERROR: u8 = 0xAA;
 const INFO: u8 = 0xAB;
@@ -27,6 +31,9 @@ const ENV_COLLATION: u8 = 7;
 const ENV_BEGIN_TRANSACTION: u8 = 8;
 pub(crate) const ENV_COMMIT_TRANSACTION: u8 = 9;
 pub(crate) const ENV_ROLLBACK_TRANSACTION: u8 = 10;
+const ENV_RESET_CONNECTION: u8 = 18;
+const OUTPUT_PARAMETER: u8 = 0x01;
+const NULLABLE: u16 = 0x0001;
 
 pub(crate) const SERVER_NAME: &str = "EggDB";
 const MAX_B_VARCHAR_UNITS: usize = 255;
@@ -96,6 +103,27 @@ pub(crate) fn env_change_end(kind: u8, descriptor: u64) -> Vec<u8> {
     with_length(ENVCHANGE, body)
 }
 
+pub(crate) fn env_change_reset_acknowledged() -> Vec<u8> {
+    with_length(ENVCHANGE, vec![ENV_RESET_CONNECTION, 0, 0])
+}
+
+pub(crate) fn return_status(status: i32) -> Vec<u8> {
+    let mut out = vec![RETURN_STATUS];
+    out.extend_from_slice(&status.to_le_bytes());
+    out
+}
+
+pub(crate) fn return_value(ordinal: u16, name: &str, type_and_value: &[u8]) -> Vec<u8> {
+    let mut out = vec![RETURN_VALUE];
+    out.extend_from_slice(&ordinal.to_le_bytes());
+    push_b_varchar(&mut out, name);
+    out.push(OUTPUT_PARAMETER);
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&NULLABLE.to_le_bytes());
+    out.extend_from_slice(type_and_value);
+    out
+}
+
 pub(crate) struct ServerMessage<'m> {
     pub(crate) number: u32,
     pub(crate) severity: u8,
@@ -145,7 +173,7 @@ pub(crate) fn column_metadata(columns: &[WireColumn]) -> Vec<u8> {
     out.extend_from_slice(&(columns.len() as u16).to_le_bytes());
     for column in columns {
         out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&0x0001u16.to_le_bytes());
+        out.extend_from_slice(&NULLABLE.to_le_bytes());
         column.kind.push_type_info(&mut out);
         push_b_varchar(&mut out, &column.name);
     }
@@ -160,7 +188,8 @@ pub(crate) fn row_start() -> u8 {
 mod tests {
     use super::{
         COLLATION, DONE, DONE_COUNT, DONE_MORE, ENV_COMMIT_TRANSACTION, ServerMessage, done,
-        env_change_begin, env_change_end, env_change_text, error, login_ack,
+        env_change_begin, env_change_end, env_change_reset_acknowledged, env_change_text, error,
+        login_ack, return_status, return_value,
     };
 
     #[test]
@@ -209,5 +238,17 @@ mod tests {
                 b'D', 0, b'B', 0, 0, 2, 0, 0, 0
             ]
         );
+    }
+
+    #[test]
+    fn procedure_tokens_have_the_layouts_of_the_specification() {
+        assert_eq!(return_status(0), [0x79, 0, 0, 0, 0]);
+        assert_eq!(
+            return_value(0, "@h", &[0x26, 4, 4, 1, 0, 0, 0]),
+            [
+                0xAC, 0, 0, 2, b'@', 0, b'h', 0, 1, 0, 0, 0, 0, 1, 0, 0x26, 4, 4, 1, 0, 0, 0
+            ]
+        );
+        assert_eq!(env_change_reset_acknowledged(), [0xE3, 3, 0, 18, 0, 0]);
     }
 }

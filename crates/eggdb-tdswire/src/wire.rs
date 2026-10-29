@@ -27,6 +27,7 @@ pub(crate) enum WireError {
 
 pub(crate) struct Message {
     pub(crate) kind: u8,
+    pub(crate) status: u8,
     pub(crate) body: Vec<u8>,
 }
 
@@ -116,11 +117,16 @@ impl<'a> Wire<'a> {
             body.fill(0);
             std::hint::black_box(&body);
         }
-        read.map(|kind| Message { kind, body })
+        read.map(|(kind, status)| Message { kind, status, body })
     }
 
-    fn read_message_into(&mut self, body: &mut Vec<u8>, limit: usize) -> Result<u8, WireError> {
+    fn read_message_into(
+        &mut self,
+        body: &mut Vec<u8>,
+        limit: usize,
+    ) -> Result<(u8, u8), WireError> {
         let mut kind = None;
+        let mut status = 0;
         loop {
             let mut header = [0u8; HEADER_BYTES];
             self.read_exact(&mut header[..1])?;
@@ -133,7 +139,10 @@ impl<'a> Wire<'a> {
                 return Err(WireError::Malformed("a packet is shorter than its header"));
             }
             match kind {
-                None => kind = Some(header[0]),
+                None => {
+                    kind = Some(header[0]);
+                    status = header[1];
+                }
                 Some(first) if first != header[0] => {
                     return Err(WireError::Malformed(
                         "the packets of one message have different types",
@@ -154,7 +163,7 @@ impl<'a> Wire<'a> {
                 read += chunk;
             }
             if header[1] & END_OF_MESSAGE != 0 {
-                return Ok(kind.unwrap_or(0));
+                return Ok((kind.unwrap_or(0), status));
             }
         }
     }

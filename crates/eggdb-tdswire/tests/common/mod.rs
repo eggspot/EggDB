@@ -314,6 +314,20 @@ pub enum Token {
         command: u16,
         rows: u64,
     },
+    DoneInProc {
+        status: u16,
+        command: u16,
+        rows: u64,
+    },
+    DoneProc {
+        status: u16,
+    },
+    ReturnStatus(i32),
+    ReturnValue {
+        ordinal: u16,
+        name: String,
+        value: Option<String>,
+    },
 }
 
 pub struct Client {
@@ -671,13 +685,44 @@ pub fn parse_tokens(body: &[u8]) -> Vec<Token> {
                     .collect();
                 tokens.push(Token::Row(row));
             }
-            0xFD..=0xFF => {
+            0xFD => {
                 tokens.push(Token::Done {
                     status: u16_at(body, at),
                     command: u16_at(body, at + 2),
                     rows: u64_at(body, at + 4),
                 });
                 at += 12;
+            }
+            0xFE => {
+                tokens.push(Token::DoneProc {
+                    status: u16_at(body, at),
+                });
+                at += 12;
+            }
+            0xFF => {
+                tokens.push(Token::DoneInProc {
+                    status: u16_at(body, at),
+                    command: u16_at(body, at + 2),
+                    rows: u64_at(body, at + 4),
+                });
+                at += 12;
+            }
+            0x79 => {
+                tokens.push(Token::ReturnStatus(u32_at(body, at) as i32));
+                at += 4;
+            }
+            0xAC => {
+                let ordinal = u16_at(body, at);
+                at += 2;
+                let name = read_b_varchar(body, &mut at);
+                at += 1 + 4 + 2;
+                let kind = read_type(body, &mut at);
+                let value = read_value(body, &mut at, kind);
+                tokens.push(Token::ReturnValue {
+                    ordinal,
+                    name,
+                    value,
+                });
             }
             other => panic!("unexpected token 0x{other:02x} at {at}"),
         }
@@ -789,6 +834,114 @@ impl Client {
         let (_, body) = self.read_message().expect("a batch reply");
         parse_tokens(&body)
     }
+
+    pub fn send_with_status(&mut self, kind: u8, status: u8, body: &[u8]) {
+        let mut packet = vec![kind, 0x01 | status];
+        packet.extend_from_slice(&((body.len() + 8) as u16).to_be_bytes());
+        packet.extend_from_slice(&[0, 0, 1, 0]);
+        packet.extend_from_slice(body);
+        self.stream.write_all(&packet).unwrap();
+    }
+
+    pub fn rpc(&mut self, calls: &[Vec<u8>]) -> Vec<Token> {
+        self.send(0x03, &rpc_body(calls));
+        let (_, body) = self.read_message().expect("an RPC reply");
+        parse_tokens(&body)
+    }
+
+    pub fn transaction(&mut self, request: u16, payload: &[u8]) -> Vec<Token> {
+        self.send(0x0E, &transaction_body(request, payload));
+        let (_, body) = self.read_message().expect("a transaction manager reply");
+        parse_tokens(&body)
+    }
+}
+
+fn all_headers() -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&22u32.to_le_bytes());
+    body.extend_from_slice(&18u32.to_le_bytes());
+    body.extend_from_slice(&2u16.to_le_bytes());
+    body.extend_from_slice(&0u64.to_le_bytes());
+    body.extend_from_slice(&1u32.to_le_bytes());
+    body
+}
+
+pub fn rpc_body(calls: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = all_headers();
+    for (index, call) in calls.iter().enumerate() {
+        if index > 0 {
+            body.push(0xFF);
+        }
+        body.extend_from_slice(call);
+    }
+    body
+}
+
+pub fn call_by_id(id: u16, parameters: &[Vec<u8>]) -> Vec<u8> {
+    let mut call = vec![0xFF, 0xFF];
+    call.extend_from_slice(&id.to_le_bytes());
+    call.extend_from_slice(&[0, 0]);
+    for parameter in parameters {
+        call.extend_from_slice(parameter);
+    }
+    call
+}
+
+pub fn call_by_name(name: &str, parameters: &[Vec<u8>]) -> Vec<u8> {
+    let mut call = (name.encode_utf16().count() as u16).to_le_bytes().to_vec();
+    call.extend(utf16(name));
+    call.extend_from_slice(&[0, 0]);
+    for parameter in parameters {
+        call.extend_from_slice(parameter);
+    }
+    call
+}
+
+fn parameter(name: &str, output: bool, type_and_value: &[u8]) -> Vec<u8> {
+    let mut out = vec![name.encode_utf16().count() as u8];
+    out.extend(utf16(name));
+    out.push(u8::from(output));
+    out.extend_from_slice(type_and_value);
+    out
+}
+
+pub fn int_parameter(name: &str, value: Option<i32>, output: bool) -> Vec<u8> {
+    let mut type_and_value = vec![0x26, 4];
+    match value {
+        Some(value) => {
+            type_and_value.push(4);
+            type_and_value.extend_from_slice(&value.to_le_bytes());
+        }
+        None => type_and_value.push(0),
+    }
+    parameter(name, output, &type_and_value)
+}
+
+pub fn text_parameter(name: &str, value: Option<&str>, output: bool) -> Vec<u8> {
+    let mut type_and_value = vec![0xE7, 0x40, 0x1F];
+    type_and_value.extend_from_slice(&eggdb_tdswire::COLLATION);
+    match value {
+        Some(text) => {
+            let bytes = utf16(text);
+            type_and_value.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+            type_and_value.extend(bytes);
+        }
+        None => type_and_value.extend_from_slice(&[0xFF, 0xFF]),
+    }
+    parameter(name, output, &type_and_value)
+}
+
+pub fn decimal_parameter(name: &str, units: u32, precision: u8, scale: u8) -> Vec<u8> {
+    let mut type_and_value = vec![0x6A, 17, precision, scale, 5, 1];
+    type_and_value.extend_from_slice(&units.to_le_bytes());
+    parameter(name, false, &type_and_value)
+}
+
+pub fn transaction_body(request: u16, payload: &[u8]) -> Vec<u8> {
+    let mut body = all_headers();
+    body.extend_from_slice(&request.to_le_bytes());
+    body.extend_from_slice(payload);
+    body
 }
 
 pub fn rows(tokens: &[Token]) -> Vec<Vec<Option<String>>> {

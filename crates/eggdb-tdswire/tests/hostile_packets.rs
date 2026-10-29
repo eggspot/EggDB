@@ -1,16 +1,21 @@
 //! Hostile input for the TDS server (D9, D35): a seeded fuzzer that mutates valid PRELOGIN,
-//! LOGIN7 and SQL batch messages and feeds them to every parser, which must answer with an
-//! error or a value and never panic; and the same mutations sent over real sockets before and
-//! after login, with oversized lengths, packets shorter than their header and stalled clients,
-//! after which the server must still serve a well-behaved client.
+//! LOGIN7, SQL batch, RPC and transaction manager messages and feeds them to every parser,
+//! which must answer with an error or a value and never panic; and the same mutations sent over
+//! real sockets before and after login, with oversized lengths, packets shorter than their
+//! header and stalled clients, after which the server must still serve a well-behaved client.
 //! `EGGDB_FUZZ_CASES` and `EGGDB_FUZZ_SEED` run longer campaigns.
 
 mod common;
 
 use common::{
-    Client, LoginOptions, TestServer, batch_body, errors, login7_body, prelogin_body, rows,
+    Client, LoginOptions, TestServer, batch_body, call_by_id, call_by_name, decimal_parameter,
+    errors, int_parameter, login7_body, prelogin_body, rows, rpc_body, text_parameter,
+    transaction_body,
 };
-use eggdb_tdswire::messages::{parse_login7, parse_prelogin, parse_sql_batch};
+use eggdb_tdswire::messages::{
+    parse_login7, parse_prelogin, parse_sql_batch, parse_transaction_manager_request,
+};
+use eggdb_tdswire::rpc::parse_rpc_request;
 use std::time::Duration;
 
 struct Rng(u64);
@@ -73,6 +78,32 @@ fn seeds() -> Vec<Vec<u8>> {
         batch_body("SELECT TOP (2) [a] FROM dbo.t WHERE b = N'x' -- c\nSELECT @@VERSION"),
         batch_body("BEGIN TRAN INSERT INTO t VALUES (1) COMMIT SET NOCOUNT ON USE shop"),
         batch_body("CREATE TABLE [t] ([id] INT IDENTITY(1,1) PRIMARY KEY, n NVARCHAR(max))"),
+        rpc_body(&[
+            call_by_id(
+                10,
+                &[
+                    text_parameter("", Some("SELECT @p1, @p2 WHERE @p3 > 0"), false),
+                    text_parameter("", Some("@p1 int, @p2 nvarchar(40), @p3 decimal(5,2)"), false),
+                    int_parameter("@p1", Some(-7), true),
+                    text_parameter("@p2", None, false),
+                    decimal_parameter("@p3", 1250, 5, 2),
+                ],
+            ),
+            call_by_id(12, &[int_parameter("", Some(1), false)]),
+        ]),
+        rpc_body(&[
+            call_by_id(
+                13,
+                &[
+                    int_parameter("", None, true),
+                    text_parameter("", Some("@a int"), false),
+                    text_parameter("", Some("SELECT @a"), false),
+                    int_parameter("", Some(3), false),
+                ],
+            ),
+            call_by_name("sp_unprepare", &[int_parameter("", Some(1), false)]),
+        ]),
+        transaction_body(7, &[1, b't', 0, 1, 2, 0]),
     ]
 }
 
@@ -92,6 +123,8 @@ fn mutated_messages_never_panic_a_parser() {
                 .map(|password| password.bytes().len());
         }
         let _ = parse_sql_batch(&bytes);
+        let _ = parse_rpc_request(&bytes);
+        let _ = parse_transaction_manager_request(&bytes);
     }
 }
 
@@ -101,7 +134,8 @@ fn mutated_messages_over_sockets_leave_the_server_serving() {
     let mut rng = Rng(setting("EGGDB_FUZZ_SEED", 0x0BAD_07D5));
     let cases = setting("EGGDB_FUZZ_CASES", 20_000).min(200);
     for case in 0..cases {
-        let bytes = mutate(&mut rng, &seeds()[case as usize % 5]);
+        let seeds = seeds();
+        let bytes = mutate(&mut rng, &seeds[case as usize % 5]);
         let mut client = Client::connect(server.address);
         match case % 4 {
             0 => client.send(0x12, &bytes),
@@ -112,7 +146,14 @@ fn mutated_messages_over_sockets_leave_the_server_serving() {
             2 => {
                 let (mut logged_in, _) =
                     Client::login_with(server.address, &LoginOptions::default());
-                logged_in.send(0x01, &bytes);
+                let seed = 2 + rng.below(seeds.len() - 2);
+                let request = mutate(&mut rng, &seeds[seed]);
+                let kind = match seed {
+                    5 | 6 => 0x03,
+                    7 => 0x0E,
+                    _ => 0x01,
+                };
+                logged_in.send(kind, &request);
                 let _ = logged_in.read_message();
                 continue;
             }
