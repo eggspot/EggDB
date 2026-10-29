@@ -1,0 +1,18 @@
+[package]
+name = "eggdb-capi"
+description = "EggDB's C API: the embedded database for any language that calls C, declared in include/eggdb.h."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "eggdb_capi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb = { path = "../eggdb" }
