@@ -583,7 +583,9 @@ What the server does:
   each batch, to see what a client sends.
 
 Not yet: TLS, bulk load (`bcp`, item 46), MARS, cancelling a running batch (attention is
-answered when the batch ends), and SSMS's and Azure Data Studio's catalog queries (item 41).
+answered when the batch ends), and SSMS's and Azure Data Studio's own catalog queries (the `sys`
+views and catalog procedures drivers use are in [SQL Server metadata for
+tools](#sql-server-metadata-for-tools)).
 
 ## .NET and Java apps over TDS
 
@@ -643,6 +645,70 @@ CI's `tds-apps` job runs a C# program through SqlClient and a Java program throu
 (parameterized CRUD, prepared statements, a committed and a rolled-back transaction, an error
 and, for SqlClient, a reused pooled connection) and compares what each prints with
 `scripts/tds-apps/expected-*.out`.
+
+## SQL Server metadata for tools
+
+Metadata tools and drivers browse an EggDB database over TDS as they browse SQL Server (roadmap
+item 41, D133): mssql-jdbc's `DatabaseMetaData` (`getTables`, `getColumns`, `getPrimaryKeys`,
+`getImportedKeys`, `getIndexInfo`, `getTypeInfo`, `getCatalogs`, `getUserName`) and SqlClient's
+`GetSchema("Tables" | "Columns" | "Indexes" | "IndexColumns" | "ForeignKeys")` list its schemas,
+tables, views, columns, keys and indexes, and so do queries written against `sys` and
+`INFORMATION_SCHEMA`:
+
+```sql
+SELECT s.name, t.name, c.name, c.system_type_id, c.max_length, c.is_nullable
+FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+JOIN sys.columns c ON c.object_id = t.object_id ORDER BY s.name, t.name, c.column_id
+SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+EXEC sp_columns @table_name = N'orders', @table_owner = N'sales'
+EXEC sp_help 'sales.orders'
+SELECT OBJECT_ID('sales.orders'), SERVERPROPERTY('ProductVersion'), DB_NAME(), SCHEMA_NAME()
+```
+
+- **`sys` views**: `sys.objects`, `sys.tables`, `sys.views`, `sys.columns`, `sys.types`,
+  `sys.schemas`, `sys.indexes`, `sys.index_columns`, `sys.foreign_keys`,
+  `sys.foreign_key_columns`, `sys.key_constraints`, `sys.default_constraints`,
+  `sys.check_constraints`, `sys.identity_columns`, `sys.sequences`, `sys.databases` and
+  `sys.sql_modules` with SQL Server 2022's columns; `sys.procedures`, `sys.parameters`,
+  `sys.triggers` and `sys.extended_properties` are empty. They are built for each statement that
+  names them from the stored tables, views and sequences, read-only, and reached only with their
+  schema (`sys.tables`, not `tables`).
+- **`INFORMATION_SCHEMA`**: `SCHEMATA`, `TABLES`, `COLUMNS`, `VIEWS`, `VIEW_TABLE_USAGE`,
+  `SEQUENCES`, `TABLE_CONSTRAINTS`, `KEY_COLUMN_USAGE`, `REFERENTIAL_CONSTRAINTS`,
+  `CONSTRAINT_COLUMN_USAGE`, `CONSTRAINT_TABLE_USAGE` and `CHECK_CONSTRAINTS` with SQL Server's
+  columns and values (schema `dbo`, `nvarchar`, `BASE TABLE`); `ROUTINES` and `PARAMETERS` are
+  empty.
+- **Ids**: a table, view, sequence or constraint has an `object_id` made from a hash of its
+  kind, table and name, the same in every statement and after a restart; it changes when the
+  object is renamed. `dbo` is schema 1, `sys` 4, other schemas count from 5 in name order; the
+  database is `database_id` 5. A primary key is the table's clustered index 1, a table without
+  one is a heap (index 0), other indexes count from 2.
+- **Functions**: `SERVERPROPERTY` (`ProductVersion` `16.0.1000.0`, `EngineEdition` 3, `Edition`
+  `EggDB (64-bit)`, `Collation`, ...), `DATABASEPROPERTYEX`, `DB_NAME`, `DB_ID`, `OBJECT_ID`
+  (with a type: `OBJECT_ID('t', 'U')`), `OBJECT_NAME`, `OBJECT_SCHEMA_NAME`, `SCHEMA_NAME`,
+  `SCHEMA_ID`, `TYPE_NAME`, `TYPE_ID`, `COLUMNPROPERTY`, `OBJECTPROPERTY`, `OBJECTPROPERTYEX`,
+  `COL_NAME`, `COL_LENGTH`, `IS_SRVROLEMEMBER`, `IS_MEMBER`, `HAS_DBACCESS`, `SUSER_SNAME()`,
+  `ORIGINAL_LOGIN()`, `USER_NAME()`, `SYSTEM_USER` (the login), `CURRENT_USER`, `SESSION_USER`
+  and `USER` (`dbo`), and `@@MICROSOFTVERSION`, `@@SERVICENAME`, `@@MAX_PRECISION`,
+  `@@DATEFIRST`, `@@LANGID`, `@@LOCK_TIMEOUT`, `@@TEXTSIZE`, `@@MAX_CONNECTIONS`, `@@NESTLEVEL`
+  and `@@PROCID`.
+- **Catalog procedures**, by `EXEC` (arguments by position or as `@name = value`, `DEFAULT`), as
+  the first statement of a batch without `EXEC`, and by RPC: `sp_tables`, `sp_columns`,
+  `sp_columns_100`, `sp_pkeys`, `sp_fkeys`, `sp_statistics`, `sp_statistics_100`,
+  `sp_special_columns`, `sp_datatype_info`, `sp_datatype_info_100`, `sp_stored_procedures`,
+  `sp_sproc_columns`, `sp_help` (its several result sets), `sp_helpindex`, `sp_databases`, and
+  `sp_columns_managed`, `sp_indexes_managed` and `sp_indexcolumns_managed`, which SqlClient's
+  `GetSchema` calls. Name arguments take SQL Server's `LIKE` patterns where the procedure does
+  (`%`, `_`, `[...]`), compared without regard to case. Another procedure is Msg 2812.
+- **Table variables for `INSERT ... EXEC`**: `DECLARE @t TABLE (column type [NULL | NOT NULL],
+  ...)`, `INSERT [INTO] @t [(columns)] EXEC procedure ...` and `SELECT ... FROM @t [alias]` within
+  one batch, as mssql-jdbc's `getColumns` and `getImportedKeys` send them; `COLLATE` in an
+  expression is accepted without effect.
+
+CI's `tds-apps` job restores the sqlpackage fixture
+(`crates/eggdb/tests/data/sqlserver/shop-sqlpackage.sql`) and compares what mssql-jdbc's
+`DatabaseMetaData` and SqlClient's `GetSchema` list for it with
+`scripts/tds-apps/expected-metadata-*.out`.
 
 ## What runs today
 
@@ -1941,10 +2007,24 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   an `UPDATE` of an identity column (SQL Server's 8102), and `ROLLBACK TRAN <name>` ignores the
   name. Divide by zero and arithmetic overflow end the batch, where SQL Server ends only the
   statement.
-- `DECLARE`, `IF` with a block or a condition that reads a table, `WHILE`, `BEGIN ... END`, `TRY
-  ... CATCH`, `PRINT`, `EXEC`, stored procedures and triggers; `SAVE TRANSACTION` and save
-  points over TDS; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF` and `ANSI_PADDING OFF`; three-part
-  names and other databases.
+- `DECLARE` of variables, `IF` with a block or a condition that reads a table, `WHILE`, `BEGIN
+  ... END`, `TRY ... CATCH`, `PRINT`, `EXEC` of anything but the catalog procedures, stored
+  procedures and triggers; table variables filled other than by `INSERT ... EXEC`; `SAVE
+  TRANSACTION` and save points over TDS; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF` and
+  `ANSI_PADDING OFF`; three-part names and other databases.
+- The catalog (D133) shows each column as the SQL Server type its engine type is most often
+  declared with: `varchar` and `char` columns as `nvarchar` and `nchar`, `tinyint` as `smallint`,
+  `money` as `decimal(19,4)`, `smalldatetime` and `datetime2(0)` as `datetime2(0)`, `datetime2(3)`
+  as `datetime`, `binary` as `varbinary(max)`, `sysname` as `nvarchar(128)`. A unique index made
+  by `CREATE UNIQUE INDEX` shows as a unique constraint, a default constraint is named
+  `df__<table>__<column>` (its own name is not kept), `create_date` and `modify_date` are
+  2000-01-01, and a `CHECK`'s definition is its stored text in parentheses rather than SQL
+  Server's normalized form. `sp_statistics` reports no row counts or pages; `sp_tables` and
+  `sp_columns` list the database's own tables and views, not the `sys` and `INFORMATION_SCHEMA`
+  views. Object ids change when an object is renamed.
+- `GetSchema("Databases")` (it runs `EXEC sp_executesql` inside a batch over
+  `master..sysdatabases`) and mssql-jdbc's `getSchemas()` (it names `sys.schemas.name` with three
+  parts) are not answered yet.
 - Under `IMPLICIT_TRANSACTIONS ON`, a `SELECT` starts no transaction (SQL Server's does), so
   `@@TRANCOUNT` stays 0 after reads alone.
 - Over TDS: an output parameter of `sp_executesql` comes back with the value it was sent with,
