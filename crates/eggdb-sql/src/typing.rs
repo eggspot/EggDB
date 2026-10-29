@@ -90,9 +90,57 @@ fn arithmetic_type(
     }
 }
 
+fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Option<SqlType>> {
+    let argument_type = |at: usize| arguments.get(at).and_then(|argument| static_type(argument, scope));
+    Some(match name {
+        "split_part" | "concat" | "concat_ws" | "replace" | "left" | "right" | "lpad" | "rpad"
+        | "repeat" | "initcap" | "translate" | "reverse" | "chr" | "md5" | "format"
+        | "overlay" | "quote_literal" | "quote_nullable" | "regexp_replace" | "regexp_substr"
+        | "similar_to_escape" | "similar_substring_pattern" | "to_char" | "jsonb_pretty"
+        | "json_extract_path_text" | "jsonb_extract_path_text" => Some(SqlType::Text),
+        "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => {
+            Some(SqlType::Integer)
+        }
+        "starts_with" | "regexp_like" | "isfinite" => Some(SqlType::Boolean),
+        "regexp_match" | "regexp_split_to_array" => {
+            Some(SqlType::Array(crate::arrays::ArrayElement::Text))
+        }
+        "substr" => match argument_type(0) {
+            Some(SqlType::Bytea) => Some(SqlType::Bytea),
+            _ => Some(SqlType::Text),
+        },
+        "to_date" | "make_date" => Some(SqlType::Date),
+        "to_timestamp" | "make_timestamptz" => Some(SqlType::TimestampTz(None)),
+        "to_number" => Some(SqlType::Numeric(None)),
+        "make_time" => Some(SqlType::Time(None)),
+        "make_timestamp" => Some(SqlType::Timestamp(None)),
+        "make_interval" => Some(SqlType::INTERVAL),
+        "date_bin" => match argument_type(1) {
+            Some(SqlType::TimestampTz(_)) => Some(SqlType::TimestampTz(None)),
+            Some(_) => Some(SqlType::Timestamp(None)),
+            None => None,
+        },
+        "timezone" => match argument_type(1) {
+            Some(SqlType::Timestamp(_) | SqlType::Date) => Some(SqlType::TimestampTz(None)),
+            Some(SqlType::Time(_) | SqlType::TimeTz(_)) => Some(SqlType::TimeTz(None)),
+            Some(_) => Some(SqlType::Timestamp(None)),
+            None => None,
+        },
+        "to_json" | "row_to_json" | "json_build_object" | "json_build_array"
+        | "json_strip_nulls" | "json_extract_path" | crate::json_functions::WHOLE_ROW
+        | crate::json_functions::ROW_OBJECT => Some(SqlType::Json),
+        "to_jsonb" | "jsonb_build_object" | "jsonb_build_array" | "jsonb_set" | "jsonb_insert"
+        | "jsonb_strip_nulls" | "jsonb_extract_path" => Some(SqlType::Jsonb),
+        _ => return None,
+    })
+}
+
 fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<SqlType> {
     if let Some(sql_type) = crate::sequences::result_type(name) {
         return Some(sql_type);
+    }
+    if let Some(sql_type) = added_function_type(name, arguments, scope) {
+        return sql_type;
     }
     if let Some(sql_type) = crate::pg_catalog::result_type(name) {
         return Some(sql_type);
@@ -178,6 +226,12 @@ fn concatenation_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> SqlType {
         }
     };
     let (left_type, right_type) = (operand_type(left), operand_type(right));
+    let jsonb = |sql_type: Option<SqlType>| sql_type == Some(SqlType::Jsonb);
+    if (jsonb(left_type) && (jsonb(right_type) || is_untyped_literal(right)))
+        || (jsonb(right_type) && is_untyped_literal(left))
+    {
+        return SqlType::Jsonb;
+    }
     if let Some(array) = crate::arrays::concat_type(left_type, right_type) {
         return array;
     }
@@ -255,7 +309,14 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::RegexMatch
             | BinaryOperator::RegexMatchFolded
             | BinaryOperator::RegexNoMatch
-            | BinaryOperator::RegexNoMatchFolded => Some(SqlType::Boolean),
+            | BinaryOperator::RegexNoMatchFolded
+            | BinaryOperator::JsonHasKey
+            | BinaryOperator::JsonHasAnyKey
+            | BinaryOperator::JsonHasAllKeys => Some(SqlType::Boolean),
+            BinaryOperator::JsonDeletePath => Some(SqlType::Jsonb),
+            BinaryOperator::Subtract if static_type(left, scope) == Some(SqlType::Jsonb) => {
+                Some(SqlType::Jsonb)
+            }
             BinaryOperator::Concat => Some(concatenation_type(left, right, scope)),
             BinaryOperator::JsonFieldText | BinaryOperator::JsonPathText => Some(SqlType::Text),
             BinaryOperator::JsonContains | BinaryOperator::JsonContainedIn => {

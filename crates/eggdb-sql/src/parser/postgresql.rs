@@ -111,6 +111,10 @@ impl Parser<'_> {
             "#>>" => Some(BinaryOperator::JsonPathText),
             "@>" => Some(BinaryOperator::JsonContains),
             "<@" => Some(BinaryOperator::JsonContainedIn),
+            "?" => Some(BinaryOperator::JsonHasKey),
+            "?|" => Some(BinaryOperator::JsonHasAnyKey),
+            "?&" => Some(BinaryOperator::JsonHasAllKeys),
+            "#-" => Some(BinaryOperator::JsonDeletePath),
             _ => None,
         });
         if operator.is_none() && like.is_none() {
@@ -432,6 +436,122 @@ impl Parser<'_> {
         }
         self.expect(&TokenKind::RightParen)?;
         Ok(function(internal, arguments, name.position))
+    }
+
+    pub(super) fn postgresql_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
+        match name.text.as_str() {
+            "position" => self.position_call(name).map(Some),
+            "overlay" => self.overlay_call(name).map(Some),
+            "row_to_json" if self.is_word_at(1, "row") && self.peek_kind_at(2) == &TokenKind::LeftParen => {
+                self.row_to_json_call(name).map(Some)
+            }
+            "json_object_agg" | "jsonb_object_agg" => self.object_agg(name).map(Some),
+            text => match AggregateFunction::postgresql_named(text) {
+                Some(function) => self.aggregate(name.clone(), function).map(Some),
+                None => Ok(None),
+            },
+        }
+    }
+
+    fn position_call(&mut self, name: &Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let wanted = self.expression_above(Level::Other)?;
+        self.expect_word("in")?;
+        let text = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        Ok(function("position", vec![text, wanted], name.position))
+    }
+
+    fn overlay_call(&mut self, name: &Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let text = self.expression()?;
+        let mut arguments = vec![text];
+        if self.take_word("placing") {
+            arguments.push(self.expression()?);
+            self.expect_word("from")?;
+            arguments.push(self.expression()?);
+            if self.take_word("for") {
+                arguments.push(self.expression()?);
+            }
+        } else {
+            while self.take(&TokenKind::Comma) {
+                arguments.push(self.expression()?);
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(function("overlay", arguments, name.position))
+    }
+
+    fn row_to_json_call(&mut self, name: &Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let row_position = self.position();
+        self.at += 1;
+        self.expect(&TokenKind::LeftParen)?;
+        let mut fields = Vec::new();
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                fields.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        let mut arguments = vec![function(
+            crate::json_functions::ROW_OBJECT,
+            fields,
+            row_position,
+        )];
+        if self.take(&TokenKind::Comma) {
+            arguments.push(self.expression()?);
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(function("row_to_json", arguments, name.position))
+    }
+
+    fn object_agg(&mut self, name: &Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let distinct = self.take_word("distinct");
+        if !distinct {
+            self.take_word("all");
+        }
+        let mut arguments = vec![self.expression()?];
+        while self.take(&TokenKind::Comma) {
+            arguments.push(self.expression()?);
+        }
+        if self.is_word("order") {
+            return Err(self.not_supported("ORDER BY inside an aggregate's arguments"));
+        }
+        self.expect(&TokenKind::RightParen)?;
+        if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
+            return Err(self.not_supported("window and aggregate clauses"));
+        }
+        let Some(aggregate) = AggregateFunction::postgresql_named(&name.text) else {
+            return Err(self.unexpected());
+        };
+        if arguments.len() != 2 {
+            let unknown = vec!["unknown"; arguments.len()].join(", ");
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("function {}({unknown}) does not exist", name.text),
+            )
+            .with_hint(
+                "No function matches the given name and argument types. You might need to add explicit type casts.",
+            )
+            .at(name.position));
+        }
+        Ok(Expr {
+            kind: ExprKind::Aggregate {
+                function: aggregate,
+                argument: Some(Box::new(function(
+                    "object_agg_arguments",
+                    arguments,
+                    name.position,
+                ))),
+                distinct,
+            },
+            position: name.position,
+        })
     }
 
     pub(super) fn string_agg(&mut self, name: Name) -> SqlResult<Expr> {

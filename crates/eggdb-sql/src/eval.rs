@@ -358,6 +358,7 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
                 .as_deref()
                 .map_or(Ok(()), |otherwise| check_columns(otherwise, scope))
         }
+        ExprKind::Function { name, .. } if name == crate::json_functions::WHOLE_ROW => Ok(()),
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
         | ExprKind::OracleFunction { arguments, .. }
@@ -788,6 +789,28 @@ impl Evaluator<'_> {
             BinaryOperator::Concat => self
                 .concatenation(left, right)
                 .map(|concatenated| concatenated.value),
+            BinaryOperator::Subtract if !is_unknown_literal(left) => {
+                let left_value = self.eval(left, None)?;
+                let left_type = self.type_of(&left_value, left);
+                if left_type == Some(SqlType::Jsonb) {
+                    let right_value = self.eval(right, None)?;
+                    return crate::json_functions::subtract(&left_value, &right_value);
+                }
+                let right_value = self.eval(right, left_type)?;
+                arithmetic(operator, &left_value, &right_value)
+            }
+            BinaryOperator::JsonHasKey
+            | BinaryOperator::JsonHasAnyKey
+            | BinaryOperator::JsonHasAllKeys => {
+                let document = self.eval(left, Some(SqlType::Jsonb))?;
+                let keys = self.eval(right, Some(SqlType::Text))?;
+                crate::json_functions::has_key(operator.symbol(), &document, &keys)
+            }
+            BinaryOperator::JsonDeletePath => {
+                let document = self.eval(left, Some(SqlType::Jsonb))?;
+                let path = self.eval(right, Some(SqlType::Text))?;
+                crate::json_functions::delete_path(&document, &path)
+            }
             BinaryOperator::Equal
             | BinaryOperator::NotEqual
             | BinaryOperator::Less
@@ -856,6 +879,17 @@ impl Evaluator<'_> {
                 (left, left_operand),
                 (right, right_operand),
             );
+        }
+        let jsonb_pair = match (&left_operand.value, &right_operand.value) {
+            (Value::Jsonb(_), Value::Jsonb(_) | Value::Null)
+            | (Value::Null, Value::Jsonb(_)) => true,
+            (Value::Jsonb(_), Value::Text(_)) => is_unknown_literal(right),
+            (Value::Text(_), Value::Jsonb(_)) => is_unknown_literal(left),
+            _ => false,
+        };
+        if jsonb_pair {
+            return crate::json_functions::concatenated(&left_operand.value, &right_operand.value)
+                .map(Concatenated::scalar);
         }
         let (left, right) = (left_operand.value, right_operand.value);
         if let Some(joined) = bytes_concatenated(&left, &right) {
@@ -1121,6 +1155,17 @@ impl Evaluator<'_> {
             "array_any" => return crate::arrays::quantified(self, arguments, false),
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
+            crate::json_functions::WHOLE_ROW => {
+                return crate::json_functions::whole_row(self, arguments);
+            }
+            crate::json_functions::ROW_OBJECT => {
+                return crate::json_functions::row_object(self, arguments);
+            }
+            "substring" => {
+                if let Some(result) = crate::regexp_functions::substring(self, arguments) {
+                    return result;
+                }
+            }
             _ => {}
         }
         if name == "pg_get_expr" {
@@ -1171,6 +1216,22 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = json_function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::json_functions::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::regexp_functions::function(name, &values) {
+            return result;
+        }
+        let formatted = match name {
+            "to_char" => crate::pg_format::to_char(&values),
+            "to_date" => crate::pg_format::to_date(&values),
+            "to_timestamp" => crate::pg_format::to_timestamp(&values),
+            "to_number" => crate::pg_format::to_number(&values),
+            _ => None,
+        };
+        if let Some(result) = formatted {
             return result;
         }
         if let Some(result) = crate::temporal::function(name, &values) {
@@ -1282,6 +1343,54 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "array_ndims" | "cardinality" => &[None],
         "btrim" | "ltrim" | "rtrim" => &[Some(SqlType::Text), Some(SqlType::Text)],
         "quote_ident" => &[Some(SqlType::Text)],
+        _ => return function_argument_types(name),
+    })
+}
+
+fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
+    const TEXT: Option<SqlType> = Some(SqlType::Text);
+    const INTEGER: Option<SqlType> = Some(SqlType::Integer);
+    const DOUBLE: Option<SqlType> = Some(SqlType::Double);
+    const BOOLEAN: Option<SqlType> = Some(SqlType::Boolean);
+    const JSONB: Option<SqlType> = Some(SqlType::Jsonb);
+    const JSON: Option<SqlType> = Some(SqlType::Json);
+    const INTERVAL: Option<SqlType> = Some(SqlType::INTERVAL);
+    Some(match name {
+        "split_part" => &[TEXT, TEXT, INTEGER],
+        "replace" | "translate" => &[TEXT, TEXT, TEXT],
+        "strpos" | "position" | "starts_with" => &[TEXT, TEXT],
+        "left" | "right" | "repeat" => &[TEXT, INTEGER],
+        "lpad" | "rpad" => &[TEXT, INTEGER, TEXT],
+        "initcap" | "reverse" | "ascii" | "md5" | "quote_literal" => &[TEXT],
+        "chr" => &[INTEGER],
+        "overlay" => &[TEXT, TEXT, INTEGER, INTEGER],
+        "substr" => &[None, INTEGER, INTEGER],
+        "format" => &[TEXT],
+        "regexp_like" | "regexp_match" | "regexp_split_to_array" | "similar_to_escape"
+        | "similar_substring_pattern" => &[TEXT, TEXT, TEXT],
+        "regexp_replace" => &[TEXT, TEXT, TEXT],
+        "regexp_count" => &[TEXT, TEXT, INTEGER, TEXT],
+        "regexp_instr" => &[TEXT, TEXT, INTEGER, INTEGER, INTEGER, TEXT, INTEGER],
+        "regexp_substr" => &[TEXT, TEXT, INTEGER, INTEGER, TEXT, INTEGER],
+        "to_char" => &[None, TEXT],
+        "to_date" | "to_number" => &[TEXT, TEXT],
+        "to_timestamp" => &[None, TEXT],
+        "make_date" => &[INTEGER, INTEGER, INTEGER],
+        "make_time" => &[INTEGER, INTEGER, DOUBLE],
+        "make_timestamp" => &[INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, DOUBLE],
+        "make_timestamptz" => &[INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, DOUBLE, TEXT],
+        "make_interval" => &[INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, DOUBLE],
+        "date_bin" => &[INTERVAL, None, None],
+        "timezone" => &[None, Some(SqlType::TimestampTz(None))],
+        "jsonb_set" | "jsonb_insert" => &[JSONB, None, JSONB, BOOLEAN],
+        "jsonb_strip_nulls" | "jsonb_pretty" => &[JSONB],
+        "json_strip_nulls" => &[JSON],
+        "json_extract_path" | "json_extract_path_text" => &[JSON],
+        "jsonb_extract_path" | "jsonb_extract_path_text" => &[JSONB],
+        "row_to_json" => &[None, BOOLEAN],
+        "concat" | "concat_ws" | "json_build_object" | "jsonb_build_object"
+        | "json_build_array" | "jsonb_build_array" | "to_json" | "to_jsonb"
+        | "quote_nullable" | "isfinite" => &[],
         _ => return None,
     })
 }

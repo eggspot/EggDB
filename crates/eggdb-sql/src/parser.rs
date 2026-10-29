@@ -54,6 +54,8 @@ const AGGREGATES: &[&str] = &[
     "array_agg",
     "json_agg",
     "jsonb_agg",
+    "json_object_agg",
+    "jsonb_object_agg",
     "stddev",
     "variance",
 ];
@@ -178,7 +180,39 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 40] = [
     "btrim",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 18] = [
+const POSTGRESQL_ONLY_SET_RETURNING: [&str; 2] = ["regexp_matches", "regexp_split_to_table"];
+
+const POSTGRESQL_FORMAT_FUNCTIONS: [&str; 4] = ["to_char", "to_date", "to_timestamp", "to_number"];
+
+fn is_postgresql_only(name: &str) -> bool {
+    POSTGRESQL_ONLY_FUNCTIONS.contains(&name)
+        || POSTGRESQL_ONLY_SET_RETURNING.contains(&name)
+        || POSTGRESQL_FORMAT_FUNCTIONS.contains(&name)
+        || crate::string_functions::FUNCTIONS.contains(&name)
+        || crate::regexp_functions::FUNCTIONS.contains(&name)
+        || crate::json_functions::FUNCTIONS.contains(&name)
+        || crate::json_functions::SET_RETURNING.contains(&name)
+        || crate::temporal::CONSTRUCTORS.contains(&name)
+}
+
+const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
+    (
+        "make_interval",
+        &["years", "months", "weeks", "days", "hours", "mins", "secs"],
+    ),
+    ("make_date", &["year", "month", "day"]),
+    ("make_time", &["hour", "min", "sec"]),
+    (
+        "make_timestamp",
+        &["year", "month", "mday", "hour", "min", "sec"],
+    ),
+    (
+        "make_timestamptz",
+        &["year", "month", "mday", "hour", "min", "sec", "timezone"],
+    ),
+];
+
+const INTERNAL_FUNCTIONS: [&str; 22] = [
     "regclass_cast",
     "oracle_nextval",
     "oracle_currval",
@@ -197,6 +231,10 @@ const INTERNAL_FUNCTIONS: [&str; 18] = [
     "array_all",
     "string_agg_arguments",
     "collate",
+    "object_agg_arguments",
+    "similar_substring_pattern",
+    crate::json_functions::WHOLE_ROW,
+    crate::json_functions::ROW_OBJECT,
 ];
 
 const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
@@ -2210,6 +2248,11 @@ impl<'t> Parser<'t> {
         if top.is_some() {
             self.pending_top = top;
         }
+        let items = if self.postgresql() {
+            crate::json_functions::with_whole_rows(items, from.as_ref())
+        } else {
+            items
+        };
         Ok(Select {
             distinct,
             items,
@@ -2592,11 +2635,13 @@ impl<'t> Parser<'t> {
                 "or" => Some(Level::Or),
                 "and" => Some(Level::And),
                 "is" | "isnull" | "notnull" => Some(Level::Is),
-                "between" | "in" | "like" | "ilike" | "similar" => Some(Level::Pattern),
+                "between" | "in" | "like" | "ilike" => Some(Level::Pattern),
+                "similar" if self.is_word_at(1, "to") => Some(Level::Pattern),
                 "not"
-                    if ["between", "in", "like", "ilike", "similar"]
+                    if ["between", "in", "like", "ilike"]
                         .iter()
-                        .any(|word| self.is_word_at(1, word)) =>
+                        .any(|word| self.is_word_at(1, word))
+                        || (self.is_word_at(1, "similar") && self.is_word_at(2, "to")) =>
                 {
                     Some(Level::Pattern)
                 }
@@ -2777,6 +2822,10 @@ impl<'t> Parser<'t> {
             "#>>" => BinaryOperator::JsonPathText,
             "@>" => BinaryOperator::JsonContains,
             "<@" => BinaryOperator::JsonContainedIn,
+            "?" => BinaryOperator::JsonHasKey,
+            "?|" => BinaryOperator::JsonHasAnyKey,
+            "?&" => BinaryOperator::JsonHasAllKeys,
+            "#-" => BinaryOperator::JsonDeletePath,
             _ => return None,
         })
     }
@@ -2846,6 +2895,26 @@ impl<'t> Parser<'t> {
                 negated,
                 case_insensitive,
             }
+        } else if self.postgresql() && self.take_word("similar") {
+            self.expect_word("to")?;
+            let pattern = self.expression_above(Level::Other)?;
+            let mut arguments = vec![pattern];
+            if self.take_word("escape") {
+                arguments.push(self.expression_above(Level::Other)?);
+            }
+            let converted = Expr {
+                kind: ExprKind::Function {
+                    name: "similar_to_escape".to_owned(),
+                    arguments,
+                },
+                position,
+            };
+            let operator = if negated {
+                BinaryOperator::RegexNoMatch
+            } else {
+                BinaryOperator::RegexMatch
+            };
+            return Ok(Self::binary(expr, operator, converted));
         } else {
             return Err(self.not_supported("SIMILAR TO"));
         };
@@ -2913,6 +2982,22 @@ impl<'t> Parser<'t> {
                 expr = self.collate(expr)?;
             } else if self.is_word("collate") {
                 return Err(self.not_supported("COLLATE"));
+            } else if self.is_word("at") && self.is_word_at(1, "time") && self.postgresql() {
+                self.at += 2;
+                self.expect_word("zone")?;
+                self.depth += 1;
+                if self.depth > MAX_NESTING {
+                    return Err(too_deep(self.position()));
+                }
+                let zone = self.primary()?;
+                let position = expr.position;
+                expr = Expr {
+                    kind: ExprKind::Function {
+                        name: "timezone".to_owned(),
+                        arguments: vec![zone, expr],
+                    },
+                    position,
+                };
             } else if self.is_word("at") && self.is_word_at(1, "time") {
                 return Err(self.not_supported("AT TIME ZONE"));
             } else {
@@ -3313,7 +3398,7 @@ impl<'t> Parser<'t> {
             return Ok(expr);
         }
         let text = name.text.as_str();
-        let postgresql_only = (!self.postgresql() && POSTGRESQL_ONLY_FUNCTIONS.contains(&text))
+        let postgresql_only = (!self.postgresql() && is_postgresql_only(text))
             || (self.mysql() && NOT_IN_MYSQL.contains(&text))
             || (self.sqlite() && NOT_IN_SQLITE.contains(&text));
         if postgresql_only || INTERNAL_FUNCTIONS.contains(&name.text.as_str()) {
@@ -3334,6 +3419,9 @@ impl<'t> Parser<'t> {
         }
         if text == "string_agg" && self.postgresql() {
             return self.string_agg(name);
+        }
+        if self.postgresql() && let Some(expr) = self.postgresql_function(&name)? {
+            return Ok(expr);
         }
         if !self.sqlite()
             && !self.oracle()
@@ -3358,12 +3446,23 @@ impl<'t> Parser<'t> {
         }
         self.expect(&TokenKind::LeftParen)?;
         let mut arguments = Vec::new();
+        let mut named: Vec<(Name, Expr)> = Vec::new();
         if !self.take(&TokenKind::RightParen) {
             if self.is_word("distinct") || self.is_operator("*") {
                 return Err(self.not_supported("DISTINCT and * arguments"));
             }
             loop {
-                arguments.push(self.expression()?);
+                if let Some(parameter) = self.named_argument_name()? {
+                    let value = self.expression()?;
+                    named.push((parameter, value));
+                } else if let Some((parameter, _)) = named.first() {
+                    return Err(SqlError::syntax(
+                        "positional argument cannot follow named argument",
+                        parameter.position,
+                    ));
+                } else {
+                    arguments.push(self.expression()?);
+                }
                 if !self.take(&TokenKind::Comma) {
                     break;
                 }
@@ -3372,6 +3471,9 @@ impl<'t> Parser<'t> {
         }
         if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
             return Err(self.not_supported("window and aggregate clauses"));
+        }
+        if !named.is_empty() {
+            arguments = named_arguments(&name, arguments, named)?;
         }
         Ok(Expr {
             kind: ExprKind::Function {
@@ -3382,9 +3484,39 @@ impl<'t> Parser<'t> {
         })
     }
 
+    fn named_argument_name(&mut self) -> SqlResult<Option<Name>> {
+        if !self.postgresql() || self.peek_kind_at(1) != &TokenKind::Operator("=>") {
+            return Ok(None);
+        }
+        let parameter = self.name()?;
+        self.at += 1;
+        Ok(Some(parameter))
+    }
+
     fn substring(&mut self, name: Name) -> SqlResult<Expr> {
         self.expect(&TokenKind::LeftParen)?;
         let mut arguments = vec![self.expression()?];
+        if self.take_word("similar") {
+            let pattern = self.expression()?;
+            self.expect_word("escape")?;
+            let escape = self.expression()?;
+            self.expect(&TokenKind::RightParen)?;
+            let position = pattern.position;
+            arguments.push(Expr {
+                kind: ExprKind::Function {
+                    name: "similar_substring_pattern".to_owned(),
+                    arguments: vec![pattern, escape],
+                },
+                position,
+            });
+            return Ok(Expr {
+                kind: ExprKind::Function {
+                    name: name.text,
+                    arguments,
+                },
+                position: name.position,
+            });
+        }
         if self.take_word("from") {
             arguments.push(self.expression()?);
             if self.take_word("for") {
@@ -3675,6 +3807,61 @@ fn elements_cast(expr: Expr, sql_type: SqlType) -> Option<Expr> {
         kind: ExprKind::Function { name, arguments },
         position,
     })
+}
+
+fn named_arguments(
+    function: &Name,
+    positional: Vec<Expr>,
+    named: Vec<(Name, Expr)>,
+) -> SqlResult<Vec<Expr>> {
+    let undefined = || {
+        SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            format!("function {}() does not exist", function.text),
+        )
+        .with_hint(
+            "No function matches the given name and argument types. You might need to add explicit argument names or casts.",
+        )
+        .at(function.position)
+    };
+    let Some((_, parameters)) = NAMED_PARAMETERS
+        .iter()
+        .find(|(name, _)| *name == function.text)
+    else {
+        return Err(undefined());
+    };
+    if positional.len() > parameters.len() {
+        return Err(undefined());
+    }
+    let mut slots: Vec<Option<Expr>> = positional.into_iter().map(Some).collect();
+    slots.resize(parameters.len(), None);
+    for (parameter, value) in named {
+        let Some(at) = parameters.iter().position(|known| *known == parameter.text) else {
+            return Err(undefined());
+        };
+        if slots[at].is_some() {
+            return Err(SqlError::syntax(
+                format!("argument name \"{}\" used more than once", parameter.text),
+                parameter.position,
+            ));
+        }
+        slots[at] = Some(value);
+    }
+    let defaulted = function.text == "make_interval";
+    let last_given = slots.iter().rposition(Option::is_some).map_or(0, |at| at + 1);
+    let mut arguments = Vec::with_capacity(slots.len());
+    for (at, slot) in slots.into_iter().enumerate() {
+        match slot {
+            Some(value) => arguments.push(value),
+            None if defaulted => arguments.push(Expr {
+                kind: ExprKind::Literal(Literal::Integer(0)),
+                position: function.position,
+            }),
+            None if at >= last_given && function.text == "make_timestamptz" && at == 6 => {}
+            None => return Err(undefined()),
+        }
+    }
+    Ok(arguments)
 }
 
 fn too_deep(position: usize) -> SqlError {
