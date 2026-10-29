@@ -593,16 +593,17 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
     }
 
     fn client_command(&mut self, meta: ClientCommand) -> Flow {
-        if self.rules.oracle && meta.name == "connect" {
-            if let Err(error) = self.use_schema(&meta.argument) {
-                return self.genuine_error(RestoreError {
-                    line: meta.line,
-                    script: meta.script,
-                    statement: meta.shown.clone(),
-                    error,
-                    statements_before: self.report.statements,
-                });
-            }
+        if self.rules.oracle
+            && meta.name == "connect"
+            && let Err(error) = self.use_schema(&meta.argument)
+        {
+            return self.genuine_error(RestoreError {
+                line: meta.line,
+                script: meta.script,
+                statement: meta.shown.clone(),
+                error,
+                statements_before: self.report.statements,
+            });
         }
         if !self.rules.psql_meta_commands {
             let reason = (self.rules.client_command_reason)(&meta.name);
@@ -697,7 +698,9 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                     return self.failed(&statement, &effect, error);
                 }
                 match effect {
-                    Effect::AnonymousBlock { statements } => self.run_block(&statement, &statements),
+                    Effect::AnonymousBlock { statements } => {
+                        self.run_block(&statement, &statements)
+                    }
                     Effect::ToggleConstraint {
                         table,
                         target,
@@ -772,7 +775,9 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             return self.failed(&statement, effect, error);
         }
         let flow = self.execute(statement, effect, true);
-        if owner.is_some() && let Err(error) = self.use_schema(&current) {
+        if owner.is_some()
+            && let Err(error) = self.use_schema(&current)
+        {
             self.report.error = Some(RestoreError {
                 line: self.reader.line_number(),
                 script: self.reader.script_index(),
@@ -785,9 +790,10 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
         if let Effect::SessionSetting {
             current_schema: Some(schema),
         } = effect
-            && self.session.parameter("search_path").is_ok_and(|path| {
-                crate::schemas::path_entries(&path).first() == Some(schema)
-            })
+            && self
+                .session
+                .parameter("search_path")
+                .is_ok_and(|path| crate::schemas::path_entries(&path).first() == Some(schema))
         {
             self.default_schema = schema.clone();
         }
@@ -856,15 +862,18 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
         Flow::Continue
     }
 
-    fn run_block(&mut self, statement: &ScriptStatement, ranges: &[std::ops::Range<usize>]) -> Flow {
+    fn run_block(
+        &mut self,
+        statement: &ScriptStatement,
+        ranges: &[std::ops::Range<usize>],
+    ) -> Flow {
         let mut pending: Vec<(String, u64)> = Vec::new();
         let mut loaded_total = 0u64;
         for range in ranges {
             let Some(piece) = statement.text.get(range.clone()) else {
                 continue;
             };
-            let line = statement.line
-                + statement.text[..range.start].matches('\n').count() as u64;
+            let line = statement.line + statement.text[..range.start].matches('\n').count() as u64;
             let mut words = words::Words::oracle(piece);
             if words.next().is_some_and(|token| token.is_word("commit")) {
                 if let Err(error) = self.end_transaction(true) {
@@ -1600,7 +1609,9 @@ fn session_parameter(text: &str) -> String {
     let mut words = words::Words::oracle(text);
     let found = words.find(|token| token.is_word("set")).is_some();
     let name = if found {
-        words.next().and_then(|token| token.plain_name_part().map(str::to_owned))
+        words
+            .next()
+            .and_then(|token| token.plain_name_part().map(str::to_owned))
     } else {
         None
     };
@@ -1623,8 +1634,9 @@ fn before_password(text: &str) -> &str {
         let at = from + offset;
         let before = at.checked_sub(1).map(|index| bytes[index]);
         let after = bytes.get(at + "identified".len()).copied();
-        let boundary =
-            |byte: Option<u8>| byte.is_none_or(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_'));
+        let boundary = |byte: Option<u8>| {
+            byte.is_none_or(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_'))
+        };
         if boundary(before) && boundary(after) {
             return text.get(..at).unwrap_or(text);
         }

@@ -154,7 +154,11 @@ fn assert_hr_counts(db: &Database, schema: &str) {
             Dialect::Oracle,
             &format!("ALTER SESSION SET CURRENT_SCHEMA = {schema}; SELECT COUNT(*) FROM {table}"),
         );
-        assert_eq!(oracle, format!("{rows}\n"), "{schema}.{table} through Oracle SQL");
+        assert_eq!(
+            oracle,
+            format!("{rows}\n"),
+            "{schema}.{table} through Oracle SQL"
+        );
         let qualified = if schema.eq_ignore_ascii_case("public") {
             table.to_owned()
         } else {
@@ -165,7 +169,11 @@ fn assert_hr_counts(db: &Database, schema: &str) {
             Dialect::PostgreSql,
             &format!("SELECT count(*) FROM {qualified}"),
         );
-        assert_eq!(postgresql, format!("{rows}\n"), "{qualified} through PostgreSQL SQL");
+        assert_eq!(
+            postgresql,
+            format!("{rows}\n"),
+            "{qualified} through PostgreSQL SQL"
+        );
     }
 }
 
@@ -233,7 +241,11 @@ fn the_hr_installer_restores_unchanged_from_another_directory() {
     ] {
         assert!(report.contains(part), "{part:?} in\n{report}");
     }
-    assert_eq!(report.matches("\"kind\":\"PL/SQL block\"").count(), 3, "{report}");
+    assert_eq!(
+        report.matches("\"kind\":\"PL/SQL block\"").count(),
+        3,
+        "{report}"
+    );
     let db = Database::open(&target).unwrap();
     assert_hr_counts(&db, "HR");
     let hr = |sql: &str| {
@@ -259,11 +271,17 @@ fn the_hr_installer_restores_unchanged_from_another_directory() {
     assert_eq!(hr("SELECT employees_seq.NEXTVAL FROM dual"), "207\n");
     let in_hr = |sql: &str| format!("ALTER SESSION SET CURRENT_SCHEMA = HR; {sql}");
     assert_eq!(
-        oracle_error(&db, &in_hr("INSERT INTO departments VALUES (999, 'X', 999, 1700)")),
+        oracle_error(
+            &db,
+            &in_hr("INSERT INTO departments VALUES (999, 'X', 999, 1700)")
+        ),
         Some(2291)
     );
     assert_eq!(
-        oracle_error(&db, &in_hr("UPDATE employees SET salary = 0 WHERE employee_id = 100")),
+        oracle_error(
+            &db,
+            &in_hr("UPDATE employees SET salary = 0 WHERE employee_id = 100")
+        ),
         Some(2290)
     );
     assert_eq!(
@@ -288,7 +306,12 @@ fn the_hr_sub_scripts_restore_one_by_one_into_the_default_schema() {
     assert_eq!(created.status.code(), Some(0), "{}", everything(&created));
     let populated = restore(None, &target, &fixture("hr/hr_populate.sql"), &[]);
     let report = text(&populated.stdout);
-    assert_eq!(populated.status.code(), Some(0), "{}", everything(&populated));
+    assert_eq!(
+        populated.status.code(),
+        Some(0),
+        "{}",
+        everything(&populated)
+    );
     for part in ["\"rows\":216", "\"constraints\":0", "\"differences\":[]"] {
         assert!(report.contains(part), "{part:?} in\n{report}");
     }
@@ -307,7 +330,12 @@ fn the_hr_sub_scripts_restore_one_by_one_into_the_default_schema() {
 fn a_sql_developer_export_restores_with_its_storage_clauses_and_plsql_listed() {
     let directory = TempDirectory::new("sqldeveloper");
     let target = directory.join("hr.db");
-    let output = restore(None, &target, &fixture("hr-sqldeveloper.sql"), &["--create"]);
+    let output = restore(
+        None,
+        &target,
+        &fixture("hr-sqldeveloper.sql"),
+        &["--create"],
+    );
     let report = text(&output.stdout);
     assert_eq!(
         output.status.code(),
@@ -372,7 +400,12 @@ fn a_sql_developer_export_restores_with_its_storage_clauses_and_plsql_listed() {
 fn impdp_ddl_sqlcl_csv_and_the_reference_constraints_restore_in_three_steps() {
     let directory = TempDirectory::new("impdp");
     let target = directory.join("hr.db");
-    let tables = restore(None, &target, &fixture("hr-impdp-tables.sql"), &["--create"]);
+    let tables = restore(
+        None,
+        &target,
+        &fixture("hr-impdp-tables.sql"),
+        &["--create"],
+    );
     let report = text(&tables.stdout);
     assert_eq!(tables.status.code(), Some(0), "{}", everything(&tables));
     for part in [
@@ -411,7 +444,12 @@ fn impdp_ddl_sqlcl_csv_and_the_reference_constraints_restore_in_three_steps() {
     }
     let references = restore(None, &target, &fixture("hr-impdp-refs.sql"), &[]);
     let report = text(&references.stdout);
-    assert_eq!(references.status.code(), Some(0), "{}", everything(&references));
+    assert_eq!(
+        references.status.code(),
+        Some(0),
+        "{}",
+        everything(&references)
+    );
     assert!(report.contains("\"constraints\":10"), "{report}");
     let db = Database::open(&target).unwrap();
     assert_hr_counts(&db, "HR");
@@ -431,7 +469,9 @@ fn impdp_ddl_sqlcl_csv_and_the_reference_constraints_restore_in_three_steps() {
         "2011-01-13\n"
     );
     assert_eq!(
-        hr("SELECT NVL(TO_CHAR(commission_pct), 'none'), NVL(TO_CHAR(manager_id), 'none') FROM employees WHERE employee_id = 100"),
+        hr(
+            "SELECT NVL(TO_CHAR(commission_pct), 'none'), NVL(TO_CHAR(manager_id), 'none') FROM employees WHERE employee_id = 100"
+        ),
         "none|none\n"
     );
     assert_eq!(
@@ -453,7 +493,10 @@ fn data_pump_and_rman_files_are_routed_by_content_and_a_text_dmp_restores() {
     let refused = restore(None, &target, &dump, &["--create"]);
     let message = everything(&refused);
     assert_eq!(refused.status.code(), Some(2), "{message}");
-    assert!(message.contains("an Oracle Data Pump or exp dump file"), "{message}");
+    assert!(
+        message.contains("an Oracle Data Pump or exp dump file"),
+        "{message}"
+    );
     assert!(message.contains("impdp"), "{message}");
     assert!(!target.exists());
     let backup = directory.join("hr.bkp");
@@ -463,7 +506,10 @@ fn data_pump_and_rman_files_are_routed_by_content_and_a_text_dmp_restores() {
     assert_eq!(refused.status.code(), Some(2), "{message}");
     assert!(message.contains("perhaps an RMAN backup"), "{message}");
     assert!(!target.exists());
-    let text_dump = directory.write("text.dmp", "CREATE TABLE t (a NUMBER);\nINSERT INTO t VALUES (1);\n");
+    let text_dump = directory.write(
+        "text.dmp",
+        "CREATE TABLE t (a NUMBER);\nINSERT INTO t VALUES (1);\n",
+    );
     let restored = restore(None, &target, &text_dump, &["--create"]);
     assert_eq!(restored.status.code(), Some(0), "{}", everything(&restored));
 }
@@ -495,7 +541,15 @@ fn an_error_without_create_keeps_the_statements_before_it() {
     let target = directory.join("kept.db");
     let created = eggdb_in(
         None,
-        &[&"sql", &"--dialect", &"oracle", &"--create", &target, &"-c", &"CREATE TABLE seed (a NUMBER)"],
+        &[
+            &"sql",
+            &"--dialect",
+            &"oracle",
+            &"--create",
+            &target,
+            &"-c",
+            &"CREATE TABLE seed (a NUMBER)",
+        ],
         b"",
     );
     assert_eq!(created.status.code(), Some(0), "{}", everything(&created));
@@ -506,7 +560,10 @@ fn an_error_without_create_keeps_the_statements_before_it() {
     let output = restore(None, &target, &script, &[]);
     assert_eq!(output.status.code(), Some(3), "{}", everything(&output));
     let db = Database::open(&target).unwrap();
-    assert_eq!(query(&db, Dialect::Oracle, "SELECT COUNT(*) FROM before_error"), "1\n");
+    assert_eq!(
+        query(&db, Dialect::Oracle, "SELECT COUNT(*) FROM before_error"),
+        "1\n"
+    );
     assert!(oracle_error(&db, "SELECT COUNT(*) FROM after_error").is_some());
     db.close().unwrap();
 }
@@ -514,10 +571,17 @@ fn an_error_without_create_keeps_the_statements_before_it() {
 #[test]
 fn substitution_variables_fail_only_where_they_would_be_used() {
     let directory = TempDirectory::new("substitution");
-    let (output, target) = restore_script(&directory, "PROMPT &unused\nCREATE TABLE &missing (a NUMBER);\n", &[]);
+    let (output, target) = restore_script(
+        &directory,
+        "PROMPT &unused\nCREATE TABLE &missing (a NUMBER);\n",
+        &[],
+    );
     let message = everything(&output);
     assert_eq!(output.status.code(), Some(3), "{message}");
-    assert!(message.contains("substitution variable &missing has no value"), "{message}");
+    assert!(
+        message.contains("substitution variable &missing has no value"),
+        "{message}"
+    );
     assert!(!target.exists());
     let script = "ACCEPT tbs PROMPT 'Tablespace: ' DEFAULT '&var_default'\n\
                   PROMPT installing &nothing\n\
@@ -550,15 +614,24 @@ fn substitution_variables_fail_only_where_they_would_be_used() {
     );
     assert_eq!(output.status.code(), Some(0), "{}", everything(&output));
     let db = Database::open(&target).unwrap();
-    assert_eq!(query(&db, Dialect::Oracle, "SELECT COUNT(*) FROM from_flag"), "0\n");
+    assert_eq!(
+        query(&db, Dialect::Oracle, "SELECT COUNT(*) FROM from_flag"),
+        "0\n"
+    );
     db.close().unwrap();
 }
 
 #[test]
 fn includes_are_followed_only_through_regular_files() {
     let directory = TempDirectory::new("includes");
-    directory.write("sub/inner.sql", "CREATE TABLE inner_t (a NUMBER);\n@@deeper\n");
-    directory.write("sub/deeper.sql", "CREATE TABLE deeper_t (a NUMBER);\nEXIT\nCREATE TABLE never_t (a NUMBER);\n");
+    directory.write(
+        "sub/inner.sql",
+        "CREATE TABLE inner_t (a NUMBER);\n@@deeper\n",
+    );
+    directory.write(
+        "sub/deeper.sql",
+        "CREATE TABLE deeper_t (a NUMBER);\nEXIT\nCREATE TABLE never_t (a NUMBER);\n",
+    );
     let main = directory.write(
         "main.sql",
         "@@sub/inner.sql\nCREATE TABLE after_exit (a NUMBER);\n",
@@ -568,7 +641,10 @@ fn includes_are_followed_only_through_regular_files() {
     let report = text(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{}", everything(&output));
     assert!(report.contains("\"tables\":2"), "{report}");
-    assert!(report.contains("\"sub/inner.sql\",\"deeper.sql\"]"), "{report}");
+    assert!(
+        report.contains("\"sub/inner.sql\",\"deeper.sql\"]"),
+        "{report}"
+    );
     let missing = directory.write("missing.sql", "CREATE TABLE a (x NUMBER);\n@@nowhere.sql\n");
     let output = restore(None, &directory.join("missing.db"), &missing, &["--create"]);
     let message = everything(&output);
@@ -578,7 +654,10 @@ fn includes_are_followed_only_through_regular_files() {
     let output = restore(None, &directory.join("url.db"), &url, &["--create"]);
     let message = everything(&output);
     assert_eq!(output.status.code(), Some(3), "{message}");
-    assert!(message.contains("never fetches a script from a URL"), "{message}");
+    assert!(
+        message.contains("never fetches a script from a URL"),
+        "{message}"
+    );
     let folder = directory.write("folder.sql", "@@sub\n");
     std::fs::create_dir_all(directory.join("sub.sql")).unwrap();
     let output = restore(None, &directory.join("folder.db"), &folder, &["--create"]);
@@ -586,7 +665,12 @@ fn includes_are_followed_only_through_regular_files() {
     assert_eq!(output.status.code(), Some(3), "{message}");
     assert!(message.contains("cannot include sub.sql"), "{message}");
     directory.write("loop.sql", "@@loop.sql\n");
-    let output = restore(None, &directory.join("loop.db"), &directory.join("loop.sql"), &["--create"]);
+    let output = restore(
+        None,
+        &directory.join("loop.db"),
+        &directory.join("loop.sql"),
+        &["--create"],
+    );
     let message = everything(&output);
     assert_eq!(output.status.code(), Some(3), "{message}");
     assert!(message.contains("nested more than 20 deep"), "{message}");
@@ -598,15 +682,32 @@ fn includes_are_followed_only_through_regular_files() {
             sentinel.display()
         ),
     );
-    let output = restore(None, &directory.join("commands.db"), &commands, &["--create"]);
+    let output = restore(
+        None,
+        &directory.join("commands.db"),
+        &commands,
+        &["--create"],
+    );
     assert_eq!(output.status.code(), Some(0), "{}", everything(&output));
     assert!(!sentinel.exists());
     let from_stdin = eggdb_in(
         Some(&directory.path),
-        &[&"restore", &"--dialect", &"oracle", &"--create", &"stdin.db", &"-"],
+        &[
+            &"restore",
+            &"--dialect",
+            &"oracle",
+            &"--create",
+            &"stdin.db",
+            &"-",
+        ],
         b"@@sub/deeper.sql\n",
     );
-    assert_eq!(from_stdin.status.code(), Some(0), "{}", everything(&from_stdin));
+    assert_eq!(
+        from_stdin.status.code(),
+        Some(0),
+        "{}",
+        everything(&from_stdin)
+    );
 }
 
 #[test]
@@ -644,19 +745,36 @@ fn sql_plus_statement_rules_and_connect_are_followed_and_secrets_never_shown() {
     assert!(!all.contains("tiger"), "{all}");
     assert!(!all.contains("hunter2"), "{all}");
     let db = Database::open(&target).unwrap();
-    assert_eq!(query(&db, Dialect::PostgreSql, "SELECT count(*) FROM scott.emp"), "1\n");
-    assert_eq!(query(&db, Dialect::PostgreSql, "SELECT count(*) FROM once"), "0\n");
+    assert_eq!(
+        query(&db, Dialect::PostgreSql, "SELECT count(*) FROM scott.emp"),
+        "1\n"
+    );
+    assert_eq!(
+        query(&db, Dialect::PostgreSql, "SELECT count(*) FROM once"),
+        "0\n"
+    );
     db.close().unwrap();
     let (output, _) = restore_script(
         &directory,
         "CREATE USER u IDENTIFIED BY hunter2 DEFAULT TABLESPACE users QUOTA 5 ON nowhere;\nCREATE TABLE \"u\".t (a NUMBER;\n",
         &["--format", "text"],
     );
-    assert!(!everything(&output).contains("hunter2"), "{}", everything(&output));
-    let (output, _) = restore_script(&directory, "SET SQLTERMINATOR #\nCREATE TABLE t (a NUMBER)#\n", &[]);
+    assert!(
+        !everything(&output).contains("hunter2"),
+        "{}",
+        everything(&output)
+    );
+    let (output, _) = restore_script(
+        &directory,
+        "SET SQLTERMINATOR #\nCREATE TABLE t (a NUMBER)#\n",
+        &[],
+    );
     let message = everything(&output);
     assert_eq!(output.status.code(), Some(3), "{message}");
-    assert!(message.contains("changes how the script is read"), "{message}");
+    assert!(
+        message.contains("changes how the script is read"),
+        "{message}"
+    );
     let (output, _) = restore_script(&directory, "INSERT INTO nosuch.t VALUES (1);\n", &[]);
     assert_eq!(output.status.code(), Some(3), "{}", everything(&output));
 }
@@ -672,9 +790,17 @@ fn a_disabled_foreign_key_over_orphan_rows_is_listed_not_failed() {
     let (output, target) = restore_script(&directory, script, &[]);
     let report = text(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{}", everything(&output));
-    assert!(report.contains("\"object\":\"child_parent_fk\",\"difference\":\"not created: existing rows violate it"), "{report}");
+    assert!(
+        report.contains(
+            "\"object\":\"child_parent_fk\",\"difference\":\"not created: existing rows violate it"
+        ),
+        "{report}"
+    );
     let db = Database::open(&target).unwrap();
-    assert_eq!(query(&db, Dialect::Oracle, "SELECT COUNT(*) FROM child"), "1\n");
+    assert_eq!(
+        query(&db, Dialect::Oracle, "SELECT COUNT(*) FROM child"),
+        "1\n"
+    );
     db.close().unwrap();
     let still = "CREATE TABLE p (id NUMBER PRIMARY KEY);\n\
                  CREATE TABLE c (pid NUMBER, CONSTRAINT c_fk FOREIGN KEY (pid) REFERENCES p (id) DISABLE);\n\
@@ -682,5 +808,8 @@ fn a_disabled_foreign_key_over_orphan_rows_is_listed_not_failed() {
     let (output, _) = restore_script(&directory, still, &[]);
     let report = text(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{}", everything(&output));
-    assert!(report.contains("disabled in the source: not created here, so not enforced"), "{report}");
+    assert!(
+        report.contains("disabled in the source: not created here, so not enforced"),
+        "{report}"
+    );
 }

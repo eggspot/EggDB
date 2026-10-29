@@ -195,7 +195,10 @@ fn identity_span(element: &Element) -> Option<Range<usize>> {
         + start;
     let mut end = identity + 1;
     let mut options = false;
-    if matches!(lexemes.get(end).map(|lexeme| &lexeme.piece), Some(Piece::Open)) {
+    if matches!(
+        lexemes.get(end).map(|lexeme| &lexeme.piece),
+        Some(Piece::Open)
+    ) {
         let depth = lexemes[end].depth;
         end += 1;
         while end < lexemes.len()
@@ -234,13 +237,14 @@ fn identity_span(element: &Element) -> Option<Range<usize>> {
 
 fn is_virtual(element: &Element) -> bool {
     let lexemes = &element.lexemes;
-    if lexemes.iter().any(|lexeme| is_word(Some(lexeme), "identity")) {
+    if lexemes
+        .iter()
+        .any(|lexeme| is_word(Some(lexeme), "identity"))
+    {
         return false;
     }
     lexemes.windows(2).any(|pair| {
-        pair[0].depth == 1
-            && is_word(Some(&pair[0]), "as")
-            && matches!(pair[1].piece, Piece::Open)
+        pair[0].depth == 1 && is_word(Some(&pair[0]), "as") && matches!(pair[1].piece, Piece::Open)
     })
 }
 
@@ -266,7 +270,10 @@ pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
         .position(|lexeme| lexeme.piece == Piece::Open && lexeme.depth == 0)?
         + table_at;
     let table_start = lexemes.get(table_at + 1)?.span.start;
-    let table = text.get(table_start..lexemes[open].span.start)?.trim().to_owned();
+    let table = text
+        .get(table_start..lexemes[open].span.start)?
+        .trim()
+        .to_owned();
     let close = lexemes
         .iter()
         .skip(open + 1)

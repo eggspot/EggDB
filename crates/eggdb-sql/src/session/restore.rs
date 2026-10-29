@@ -52,6 +52,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     .with_oracle_code(942),
             );
         };
-        Ok(crate::constraints::constraint_clause(&definition, constraint))
+        Ok(crate::constraints::constraint_clause(
+            &definition,
+            constraint,
+        ))
     }
 }

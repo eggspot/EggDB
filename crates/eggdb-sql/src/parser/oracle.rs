@@ -1036,9 +1036,18 @@ impl Parser<'_> {
         }
         let _ = self.take_word("basic") || self.take_word("advanced");
         if self.take_word("for") {
-            while ["oltp", "query", "archive", "all", "direct_load", "operations", "low", "high"]
-                .iter()
-                .any(|word| self.is_word(word))
+            while [
+                "oltp",
+                "query",
+                "archive",
+                "all",
+                "direct_load",
+                "operations",
+                "low",
+                "high",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
             {
                 self.at += 1;
             }

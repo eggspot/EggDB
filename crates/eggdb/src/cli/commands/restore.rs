@@ -90,7 +90,10 @@ impl IncludeOpener for FileIncludes {
         let failure = |what: String| {
             SqlError::new(
                 SqlState::IO_ERROR,
-                format!("line {}: cannot include {}: {what}", request.line, request.name),
+                format!(
+                    "line {}: cannot include {}: {what}",
+                    request.line, request.name
+                ),
             )
         };
         let file = File::open(&path).map_err(|error| failure(error.to_string()))?;

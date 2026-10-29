@@ -168,7 +168,9 @@ impl SubstitutionVariables {
         if !self.values.contains_key(&key) && self.values.len() >= MAX_SUBSTITUTION_VARIABLES {
             return Err(SqlError::new(
                 SqlState::PROGRAM_LIMIT_EXCEEDED,
-                format!("the script defines more than {MAX_SUBSTITUTION_VARIABLES} substitution variables"),
+                format!(
+                    "the script defines more than {MAX_SUBSTITUTION_VARIABLES} substitution variables"
+                ),
             ));
         }
         self.values.insert(key, value.to_owned());
@@ -403,9 +405,7 @@ fn include_name(argument: &str) -> (String, Vec<String>) {
             None => (quoted.to_owned(), ""),
         }
     } else {
-        let end = argument
-            .find(char::is_whitespace)
-            .unwrap_or(argument.len());
+        let end = argument.find(char::is_whitespace).unwrap_or(argument.len());
         (argument[..end].to_owned(), &argument[end..])
     };
     let arguments = rest.split_whitespace().map(str::to_owned).collect();
@@ -707,15 +707,14 @@ impl<'r> SqlPlusReader<'r> {
                         let starts_word = before.is_none_or(|byte| {
                             !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#'))
                         });
-                        let quote_at = if matches!(byte, b'n' | b'N')
-                            && matches!(next, Some(b'q' | b'Q'))
-                        {
-                            at + 2
-                        } else if matches!(byte, b'q' | b'Q') {
-                            at + 1
-                        } else {
-                            usize::MAX
-                        };
+                        let quote_at =
+                            if matches!(byte, b'n' | b'N') && matches!(next, Some(b'q' | b'Q')) {
+                                at + 2
+                            } else if matches!(byte, b'q' | b'Q') {
+                                at + 1
+                            } else {
+                                usize::MAX
+                            };
                         if starts_word
                             && bytes.get(quote_at) == Some(&b'\'')
                             && let Some(&open) = bytes.get(quote_at + 1)
@@ -812,7 +811,12 @@ impl<'r> SqlPlusReader<'r> {
     fn command(&mut self, line: &str, number: u64) -> SqlResult<Option<ScriptItem>> {
         let raw = self.command_text(line, number)?;
         if let Some(rest) = raw.strip_prefix("@@") {
-            return self.include(rest, IncludeBase::IncludingScript(self.current_script()), "@@", number);
+            return self.include(
+                rest,
+                IncludeBase::IncludingScript(self.current_script()),
+                "@@",
+                number,
+            );
         }
         if let Some(rest) = raw.strip_prefix('@') {
             return self.include(rest, IncludeBase::WorkingDirectory, "@", number);
@@ -924,7 +928,12 @@ impl<'r> SqlPlusReader<'r> {
                     _ => return Ok(Some(self.bad_setting(&shown, number))),
                 },
             }
-            return Ok(Some(self.command_item("set define", shown, String::new(), number)));
+            return Ok(Some(self.command_item(
+                "set define",
+                shown,
+                String::new(),
+                number,
+            )));
         }
         if named("escape", 3) {
             match value_word.as_str() {
@@ -935,7 +944,12 @@ impl<'r> SqlPlusReader<'r> {
                     None => return Ok(Some(self.bad_setting(&shown, number))),
                 },
             }
-            return Ok(Some(self.command_item("set define", shown, String::new(), number)));
+            return Ok(Some(self.command_item(
+                "set define",
+                shown,
+                String::new(),
+                number,
+            )));
         }
         if named("concat", 3) {
             match value_word.as_str() {
@@ -946,9 +960,15 @@ impl<'r> SqlPlusReader<'r> {
                     None => return Ok(Some(self.bad_setting(&shown, number))),
                 },
             }
-            return Ok(Some(self.command_item("set define", shown, String::new(), number)));
+            return Ok(Some(self.command_item(
+                "set define",
+                shown,
+                String::new(),
+                number,
+            )));
         }
-        let changes_reading = (named("sqlterminator", 4) && !matches!(value_word.as_str(), "on" | ";"))
+        let changes_reading = (named("sqlterminator", 4)
+            && !matches!(value_word.as_str(), "on" | ";"))
             || (named("blockterminator", 3) && !matches!(value_word.as_str(), "on" | "."))
             || (named("sqlprefix", 6) && value_word != "#")
             || (named("sqlblanklines", 5) && value_word == "off");
@@ -991,7 +1011,12 @@ impl<'r> SqlPlusReader<'r> {
             } else {
                 format!("DEFINE {}", name.to_ascii_uppercase())
             };
-            return Ok(Some(self.command_item("define", shown, String::new(), number)));
+            return Ok(Some(self.command_item(
+                "define",
+                shown,
+                String::new(),
+                number,
+            )));
         };
         let value = value.trim();
         let value = if let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
@@ -1015,7 +1040,12 @@ impl<'r> SqlPlusReader<'r> {
         if let Err(error) = self.variables.define(name, &value) {
             return Ok(Some(self.failure(number, shown, error)));
         }
-        Ok(Some(self.command_item("define", shown, String::new(), number)))
+        Ok(Some(self.command_item(
+            "define",
+            shown,
+            String::new(),
+            number,
+        )))
     }
 
     fn accept(&mut self, argument: &str, number: u64) -> SqlResult<Option<ScriptItem>> {
@@ -1034,12 +1064,20 @@ impl<'r> SqlPlusReader<'r> {
             } else {
                 after.split_whitespace().next().unwrap_or("").to_owned()
             };
-            let resolved = !self.variables.define_character.is_some_and(|define| value.contains(define));
+            let resolved = !self
+                .variables
+                .define_character
+                .is_some_and(|define| value.contains(define));
             if resolved && let Err(error) = self.variables.define(&name, &value) {
                 return Ok(Some(self.failure(number, shown, error)));
             }
         }
-        Ok(Some(self.command_item("accept", shown, String::new(), number)))
+        Ok(Some(self.command_item(
+            "accept",
+            shown,
+            String::new(),
+            number,
+        )))
     }
 
     fn connect(
@@ -1049,7 +1087,9 @@ impl<'r> SqlPlusReader<'r> {
         number: u64,
     ) -> SqlResult<Option<ScriptItem>> {
         let user = argument
-            .split(|character: char| character == '/' || character == '@' || character.is_whitespace())
+            .split(|character: char| {
+                character == '/' || character == '@' || character.is_whitespace()
+            })
             .next()
             .unwrap_or("");
         if let Some(name) = unresolved
@@ -1062,9 +1102,7 @@ impl<'r> SqlPlusReader<'r> {
             )));
         }
         let schema = schema_of_user(user);
-        let _ = self
-            .variables
-            .define("_USER", &schema.to_ascii_uppercase());
+        let _ = self.variables.define("_USER", &schema.to_ascii_uppercase());
         let shown = if user.is_empty() {
             "CONNECT /".to_owned()
         } else {
@@ -1086,7 +1124,11 @@ impl<'r> SqlPlusReader<'r> {
         if let Some(variable) = substituted.unresolved
             && name.contains('&')
         {
-            return Ok(Some(self.failure(number, shown, unresolved_error(&variable, number))));
+            return Ok(Some(self.failure(
+                number,
+                shown,
+                unresolved_error(&variable, number),
+            )));
         }
         if name.is_empty() {
             return Ok(Some(self.failure(
@@ -1103,15 +1145,17 @@ impl<'r> SqlPlusReader<'r> {
             .iter()
             .any(|scheme| lower.starts_with(scheme))
         {
-            return Ok(Some(self.failure(
-                number,
-                shown,
-                SqlError::new(
-                    SqlState::FEATURE_NOT_SUPPORTED,
-                    format!("line {number}: eggdb restore never fetches a script from a URL"),
-                )
-                .with_hint("Download the script and include it by its file name."),
-            )));
+            return Ok(Some(
+                self.failure(
+                    number,
+                    shown,
+                    SqlError::new(
+                        SqlState::FEATURE_NOT_SUPPORTED,
+                        format!("line {number}: eggdb restore never fetches a script from a URL"),
+                    )
+                    .with_hint("Download the script and include it by its file name."),
+                ),
+            ));
         }
         for (index, value) in arguments.iter().enumerate() {
             if let Err(error) = self.variables.define(&(index + 1).to_string(), value) {
@@ -1185,8 +1229,9 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
         let at = from + offset;
         let before = at.checked_sub(1).map(|index| bytes[index]);
         let after = bytes.get(at + word.len()).copied();
-        let boundary =
-            |byte: Option<u8>| byte.is_none_or(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_'));
+        let boundary = |byte: Option<u8>| {
+            byte.is_none_or(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_'))
+        };
         if boundary(before) && boundary(after) {
             return Some(at);
         }

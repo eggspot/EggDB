@@ -248,7 +248,10 @@ fn create(tokens: &[Token], text: &str) -> Action {
         "type" => skip("type", name_at(tokens, &mut at), PLSQL_LATER),
         "library" => skip("library", name_at(tokens, &mut at), PLSQL_LATER),
         "java" => {
-            while matches!(word_at(tokens, at), Some("source" | "class" | "resource" | "named")) {
+            while matches!(
+                word_at(tokens, at),
+                Some("source" | "class" | "resource" | "named")
+            ) {
                 at += 1;
             }
             skip("java source", name_at(tokens, &mut at), PLSQL_LATER)
@@ -352,10 +355,12 @@ fn drop(tokens: &[Token]) -> Action {
     match word_at(tokens, 1) {
         Some("table" | "view" | "sequence" | "index") => Action::Run(Effect::Drop),
         Some("user") => ignore(USERS),
-        Some("materialized" | "public" | "synonym" | "database" | "directory" | "procedure"
-            | "function" | "package" | "trigger" | "type" | "library" | "java" | "role"
-            | "profile" | "context" | "tablespace" | "cluster" | "dimension" | "operator"
-            | "indextype" | "edition" | "audit") => ignore(NOTHING_TO_DROP),
+        Some(
+            "materialized" | "public" | "synonym" | "database" | "directory" | "procedure"
+            | "function" | "package" | "trigger" | "type" | "library" | "java" | "role" | "profile"
+            | "context" | "tablespace" | "cluster" | "dimension" | "operator" | "indextype"
+            | "edition" | "audit",
+        ) => ignore(NOTHING_TO_DROP),
         _ => Action::Run(Effect::OtherDdl),
     }
 }
@@ -377,11 +382,13 @@ fn alter(tokens: &[Token], text: &str) -> Action {
             }
         }
         Some(
-            "trigger" | "procedure" | "function" | "package" | "type" | "library" | "java"
-            | "view",
+            "trigger" | "procedure" | "function" | "package" | "type" | "library" | "java" | "view",
         ) if tokens.iter().any(|token| {
-            token.is_word("compile") || token.is_word("enable") || token.is_word("disable")
-                || token.is_word("editionable") || token.is_word("noneditionable")
+            token.is_word("compile")
+                || token.is_word("enable")
+                || token.is_word("disable")
+                || token.is_word("editionable")
+                || token.is_word("noneditionable")
         }) =>
         {
             ignore(PLSQL_SETTINGS)
@@ -395,7 +402,9 @@ fn alter(tokens: &[Token], text: &str) -> Action {
 }
 
 fn current_schema_of(tokens: &[Token]) -> Option<String> {
-    let at = tokens.iter().position(|token| token.is_word("current_schema"))?;
+    let at = tokens
+        .iter()
+        .position(|token| token.is_word("current_schema"))?;
     let mut value_at = at + 1;
     if tokens
         .get(value_at)
@@ -438,7 +447,11 @@ fn alter_table(tokens: &[Token], text: &str) -> Action {
             identity_sequences: Vec::new(),
         });
     };
-    let novalidate_in = |from: usize| tokens[from..].iter().any(|token| token.is_word("novalidate"));
+    let novalidate_in = |from: usize| {
+        tokens[from..]
+            .iter()
+            .any(|token| token.is_word("novalidate"))
+    };
     match action {
         "enable" | "disable" => {
             let enable = action == "enable";
@@ -533,7 +546,11 @@ fn add(tokens: &[Token], at: usize, table: String, text: &str) -> Action {
     if tokens.get(at).is_some_and(|token| token.is_symbol(b'(')) {
         let constraints = parenthesized_constraints(tokens, at);
         if disabled_at_top(tokens, at) && constraints > 0 {
-            return skip_statement("statement", text, "constraints disabled in ADD (...) come later");
+            return skip_statement(
+                "statement",
+                text,
+                "constraints disabled in ADD (...) come later",
+            );
         }
         return Action::Run(Effect::AlterTable {
             constraints,
@@ -582,7 +599,10 @@ pub(crate) fn oracle_differences(text: &str) -> Vec<DifferenceNote> {
         )],
         (Some("create"), _) if partitioned(text) => {
             let mut at = kind_after_create(&tokens);
-            while matches!(word_at(&tokens, at), Some("global" | "private" | "temporary")) {
+            while matches!(
+                word_at(&tokens, at),
+                Some("global" | "private" | "temporary")
+            ) {
                 at += 1;
             }
             at += 1;
@@ -656,14 +676,14 @@ fn top_level_pieces(text: &str) -> Vec<Range<usize>> {
                     let starts_word = before.is_none_or(|byte| {
                         !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#'))
                     });
-                    let quote_at = if matches!(byte, b'n' | b'N') && matches!(next, Some(b'q' | b'Q'))
-                    {
-                        at + 2
-                    } else if matches!(byte, b'q' | b'Q') {
-                        at + 1
-                    } else {
-                        usize::MAX
-                    };
+                    let quote_at =
+                        if matches!(byte, b'n' | b'N') && matches!(next, Some(b'q' | b'Q')) {
+                            at + 2
+                        } else if matches!(byte, b'q' | b'Q') {
+                            at + 1
+                        } else {
+                            usize::MAX
+                        };
                     if starts_word
                         && bytes.get(quote_at) == Some(&b'\'')
                         && let Some(&open) = bytes.get(quote_at + 1)
@@ -759,7 +779,11 @@ pub(crate) fn anonymous_block_statements(text: &str) -> Option<Vec<Range<usize>>
         let first = word_at(&tokens, 0);
         match first {
             Some("end") => {
-                if tokens.len() > 2 || tokens.get(1).is_some_and(|token| token.plain_name_part().is_none()) {
+                if tokens.len() > 2
+                    || tokens
+                        .get(1)
+                        .is_some_and(|token| token.plain_name_part().is_none())
+                {
                     return None;
                 }
                 ended = true;

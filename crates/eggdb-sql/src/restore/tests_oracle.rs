@@ -66,7 +66,9 @@ fn read_with(text: &str, includes: Option<&dyn IncludeOpener>) -> SqlResult<Vec<
             ScriptItem::ClientCommand(command) => {
                 items.push(Read::Command(command.name, command.shown));
             }
-            ScriptItem::Failed(failure) => items.push(Read::Failed(failure.error.message().to_owned())),
+            ScriptItem::Failed(failure) => {
+                items.push(Read::Failed(failure.error.message().to_owned()))
+            }
         }
         if items.len() > 10_000 {
             return Ok(items);
@@ -156,7 +158,10 @@ fn plsql_units_end_only_at_a_slash_line() {
         assert_eq!(mode_of(head), StatementMode::PlSql, "{head}");
     }
     assert_eq!(mode_of("CREATE OR REPLACE"), StatementMode::Undecided);
-    assert_eq!(mode_of("CREATE OR REPLACE FORCE VIEW v AS"), StatementMode::Sql);
+    assert_eq!(
+        mode_of("CREATE OR REPLACE FORCE VIEW v AS"),
+        StatementMode::Sql
+    );
     assert_eq!(
         statements("CREATE OR REPLACE\nPROCEDURE p IS\nBEGIN\n  NULL;\nEND;\n/\n").len(),
         1
@@ -184,9 +189,13 @@ fn slash_dot_and_end_of_file_follow_sql_plus() {
         ]
     );
     let items = read("SELECT 'open\n");
-    assert!(matches!(items.as_slice(), [Read::Failed(message)] if message.contains("inside a string")));
+    assert!(
+        matches!(items.as_slice(), [Read::Failed(message)] if message.contains("inside a string"))
+    );
     let items = read("/* never closed\n");
-    assert!(matches!(items.as_slice(), [Read::Failed(message)] if message.contains("inside a comment")));
+    assert!(
+        matches!(items.as_slice(), [Read::Failed(message)] if message.contains("inside a comment"))
+    );
 }
 
 #[test]
@@ -200,7 +209,9 @@ fn sql_plus_commands_are_recognized_with_their_abbreviations() {
     assert_eq!(command_named("del"), None);
     assert_eq!(command_named("re"), None);
     assert_eq!(
-        commands("rem one\nRem\ttwo\nREMARK three -\ncontinued\nPRO hello\nSET DEFINE OFF;\nSET ECHO -\nOFF\nDEL 1\n"),
+        commands(
+            "rem one\nRem\ttwo\nREMARK three -\ncontinued\nPRO hello\nSET DEFINE OFF;\nSET ECHO -\nOFF\nDEL 1\n"
+        ),
         vec!["prompt", "set define", "set", "unknown"]
     );
     assert_eq!(
@@ -215,7 +226,9 @@ fn sql_plus_commands_are_recognized_with_their_abbreviations() {
         ]
     );
     assert_eq!(
-        commands("-- CONNECT HR\n/* CONNECT HR\n   ; */\nHOST rm -rf /\n!ls\nSPOOL x.log\nEXIT\nSELECT 1 FROM dual;"),
+        commands(
+            "-- CONNECT HR\n/* CONNECT HR\n   ; */\nHOST rm -rf /\n!ls\nSPOOL x.log\nEXIT\nSELECT 1 FROM dual;"
+        ),
         vec!["host", "host", "spool", "exit"]
     );
 }
@@ -262,8 +275,13 @@ fn reading_settings_that_change_terminators_are_refused() {
 fn substitution_follows_define_escape_and_concat() {
     let mut variables = SubstitutionVariables::default();
     variables.define("t", "notes").unwrap();
-    let substituted = variables.substitute("CREATE TABLE &t.x (a), &T..y, &&t, AT& T, &").unwrap();
-    assert_eq!(substituted.text, "CREATE TABLE notesx (a), notes.y, notes, AT& T, &");
+    let substituted = variables
+        .substitute("CREATE TABLE &t.x (a), &T..y, &&t, AT& T, &")
+        .unwrap();
+    assert_eq!(
+        substituted.text,
+        "CREATE TABLE notesx (a), notes.y, notes, AT& T, &"
+    );
     assert_eq!(substituted.unresolved, None);
     let substituted = variables.substitute("'&missing' &other").unwrap();
     assert_eq!(substituted.text, "'&missing' &other");
@@ -297,26 +315,41 @@ fn substitution_follows_define_escape_and_concat() {
 #[test]
 fn includes_go_through_the_opener_with_limits() {
     let includes = MemoryIncludes::new(&[
-        ("inner.sql", "CREATE TABLE inner_t (a NUMBER);\nSELECT 'loose' FROM dual"),
+        (
+            "inner.sql",
+            "CREATE TABLE inner_t (a NUMBER);\nSELECT 'loose' FROM dual",
+        ),
         ("self.sql", "@@self\n@@self\n"),
         ("args.sql", "SELECT '&1-&2' FROM dual;\n"),
     ]);
-    let items = read_with("@@inner\nCREATE TABLE after_t (a NUMBER);\n", Some(&includes)).unwrap();
+    let items = read_with(
+        "@@inner\nCREATE TABLE after_t (a NUMBER);\n",
+        Some(&includes),
+    )
+    .unwrap();
     assert_eq!(
         items,
         vec![
             Read::Command("include".to_owned(), "@@inner".to_owned()),
             Read::Statement("CREATE TABLE inner_t (a NUMBER)".to_owned(), 1),
-            Read::Command("unterminated".to_owned(), "SELECT 'loose' FROM dual".to_owned()),
+            Read::Command(
+                "unterminated".to_owned(),
+                "SELECT 'loose' FROM dual".to_owned()
+            ),
             Read::Statement("CREATE TABLE after_t (a NUMBER)".to_owned(), 2),
         ]
     );
     let items = read_with("@args one two\n", Some(&includes)).unwrap();
-    assert_eq!(items[1], Read::Statement("SELECT 'one-two' FROM dual".to_owned(), 1));
+    assert_eq!(
+        items[1],
+        Read::Statement("SELECT 'one-two' FROM dual".to_owned(), 1)
+    );
     let items = read_with("@@self\n", Some(&includes)).unwrap();
     let failures = items
         .iter()
-        .filter(|item| matches!(item, Read::Failed(message) if message.contains("nested more than")))
+        .filter(
+            |item| matches!(item, Read::Failed(message) if message.contains("nested more than")),
+        )
         .count();
     assert!(failures > 0, "{items:?}");
     let depth = items
@@ -326,7 +359,9 @@ fn includes_go_through_the_opener_with_limits() {
     assert!(depth <= super::sqlplus_reader::MAX_INCLUDES_OPENED);
     assert!(depth >= MAX_INCLUDE_DEPTH);
     let items = read("@@anything\n");
-    assert!(matches!(&items[0], Read::Failed(message) if message.contains("includes need the script as a file")));
+    assert!(
+        matches!(&items[0], Read::Failed(message) if message.contains("includes need the script as a file"))
+    );
     let items = read_with("@https://example.invalid/x.sql\n", Some(&includes)).unwrap();
     assert!(matches!(&items[0], Read::Failed(message) if message.contains("URL")));
     let items = read_with("@&name\n", Some(&includes)).unwrap();
@@ -341,7 +376,10 @@ fn the_include_tree_is_capped_at_ten_thousand_opens() {
         .iter()
         .filter(|item| matches!(item, Read::Command(name, _) if name == "include"))
         .count();
-    assert!(opened <= super::sqlplus_reader::MAX_INCLUDES_OPENED, "{opened}");
+    assert!(
+        opened <= super::sqlplus_reader::MAX_INCLUDES_OPENED,
+        "{opened}"
+    );
 }
 
 fn skip_of(text: &str) -> Skip {
@@ -362,13 +400,18 @@ fn the_classifier_names_oracle_kinds() {
         other => panic!("{text}: {other:?}"),
     };
     assert_eq!(
-        run("CREATE TABLE \"HR\".\"REGIONS\" (\"REGION_ID\" NUMBER CONSTRAINT \"R_NN\" NOT NULL ENABLE, CONSTRAINT r_pk PRIMARY KEY (region_id), x NUMBER REFERENCES p, CONSTRAINT fk FOREIGN KEY (x) REFERENCES p (id), CHECK (x > 0))"),
+        run(
+            "CREATE TABLE \"HR\".\"REGIONS\" (\"REGION_ID\" NUMBER CONSTRAINT \"R_NN\" NOT NULL ENABLE, CONSTRAINT r_pk PRIMARY KEY (region_id), x NUMBER REFERENCES p, CONSTRAINT fk FOREIGN KEY (x) REFERENCES p (id), CHECK (x > 0))"
+        ),
         Effect::Table {
             name: "hr.regions".to_owned(),
             constraints: 4
         }
     );
-    assert_eq!(run("CREATE USER hr IDENTIFIED BY x"), Effect::User("hr".to_owned()));
+    assert_eq!(
+        run("CREATE USER hr IDENTIFIED BY x"),
+        Effect::User("hr".to_owned())
+    );
     assert_eq!(
         run("ALTER SESSION SET CURRENT_SCHEMA=HR"),
         Effect::SessionSetting {
@@ -403,7 +446,9 @@ fn the_classifier_names_oracle_kinds() {
         }
     );
     assert_eq!(
-        run("ALTER TABLE employees ADD ( CONSTRAINT a PRIMARY KEY (x), CONSTRAINT b FOREIGN KEY (y) REFERENCES p )"),
+        run(
+            "ALTER TABLE employees ADD ( CONSTRAINT a PRIMARY KEY (x), CONSTRAINT b FOREIGN KEY (y) REFERENCES p )"
+        ),
         Effect::AlterTable {
             constraints: 2,
             identity_sequences: Vec::new()
@@ -417,35 +462,72 @@ fn the_classifier_names_oracle_kinds() {
         }
     );
     assert_eq!(run("DROP TABLE t CASCADE CONSTRAINTS PURGE"), Effect::Drop);
-    assert_eq!(run("INSERT INTO hr.t VALUES (1)"), Effect::Insert("hr.t".to_owned()));
+    assert_eq!(
+        run("INSERT INTO hr.t VALUES (1)"),
+        Effect::Insert("hr.t".to_owned())
+    );
     assert_eq!(ignored("SELECT 1 FROM dual"), QUERIES);
-    assert_eq!(ignored("ALTER TRIGGER secure_employees DISABLE"), PLSQL_SETTINGS);
+    assert_eq!(
+        ignored("ALTER TRIGGER secure_employees DISABLE"),
+        PLSQL_SETTINGS
+    );
     assert_eq!(ignored("ALTER PROCEDURE p COMPILE"), PLSQL_SETTINGS);
-    assert_eq!(ignored("ALTER INDEX \"HR\".\"X\" NOPARALLEL"), STORAGE_SETTINGS);
+    assert_eq!(
+        ignored("ALTER INDEX \"HR\".\"X\" NOPARALLEL"),
+        STORAGE_SETTINGS
+    );
     assert_eq!(ignored("ALTER TABLE t NOLOGGING"), STORAGE_SETTINGS);
-    assert_eq!(ignored("ALTER TABLE t ENABLE ROW MOVEMENT"), STORAGE_SETTINGS);
-    assert_eq!(ignored("ALTER TABLE t DISABLE ALL TRIGGERS"), PLSQL_SETTINGS);
+    assert_eq!(
+        ignored("ALTER TABLE t ENABLE ROW MOVEMENT"),
+        STORAGE_SETTINGS
+    );
+    assert_eq!(
+        ignored("ALTER TABLE t DISABLE ALL TRIGGERS"),
+        PLSQL_SETTINGS
+    );
     assert_eq!(ignored("ALTER USER hr DEFAULT ROLE ALL"), USERS);
-    assert_eq!(ignored("DROP PROCEDURE p"), super::classify_oracle::NOTHING_TO_DROP);
+    assert_eq!(
+        ignored("DROP PROCEDURE p"),
+        super::classify_oracle::NOTHING_TO_DROP
+    );
     assert_eq!(ignored("COMMIT"), "COMMIT");
     assert!(matches!(
         classify_oracle("GRANT SELECT ON t TO u", &|_| false),
         Action::Ignore(Ignored::Grant)
     ));
     for (text, kind, name) in [
-        ("CREATE OR REPLACE PROCEDURE secure_dml IS", "procedure", "secure_dml"),
-        ("CREATE OR REPLACE EDITIONABLE TRIGGER \"HR\".\"T1\" BEFORE", "trigger", "hr.t1"),
+        (
+            "CREATE OR REPLACE PROCEDURE secure_dml IS",
+            "procedure",
+            "secure_dml",
+        ),
+        (
+            "CREATE OR REPLACE EDITIONABLE TRIGGER \"HR\".\"T1\" BEFORE",
+            "trigger",
+            "hr.t1",
+        ),
         ("CREATE PACKAGE BODY pk AS", "package body", "pk"),
         ("CREATE TYPE t AS OBJECT (a NUMBER)", "type", "t"),
         ("CREATE PUBLIC SYNONYM s FOR t", "synonym", "s"),
-        ("CREATE DATABASE LINK l CONNECT TO u IDENTIFIED BY p USING 'x'", "database link", "l"),
-        ("CREATE MATERIALIZED VIEW mv AS SELECT 1 FROM dual", "materialized view", "mv"),
+        (
+            "CREATE DATABASE LINK l CONNECT TO u IDENTIFIED BY p USING 'x'",
+            "database link",
+            "l",
+        ),
+        (
+            "CREATE MATERIALIZED VIEW mv AS SELECT 1 FROM dual",
+            "materialized view",
+            "mv",
+        ),
         ("CREATE DIRECTORY d AS '/tmp'", "directory", "d"),
     ] {
         let skip = skip_of(text);
         assert_eq!((skip.kind, skip.name.as_str()), (kind, name), "{text}");
     }
-    assert_eq!(skip_of("DECLARE x NUMBER; BEGIN NULL; END;").kind, "PL/SQL block");
+    assert_eq!(
+        skip_of("DECLARE x NUMBER; BEGIN NULL; END;").kind,
+        "PL/SQL block"
+    );
     assert_eq!(skip_of("EXECUTE p(1)").kind, "PL/SQL call");
     assert_eq!(skip_of("CALL p(1)").kind, "PL/SQL call");
 }
@@ -453,8 +535,14 @@ fn the_classifier_names_oracle_kinds() {
 #[test]
 fn only_blocks_of_plain_sql_statements_run() {
     assert_eq!(
-        block_texts("BEGIN\n  INSERT INTO t VALUES ('a;b');\n  UPDATE t SET a = 1;\n  COMMIT;\n  NULL;\nEND;"),
-        Some(vec!["INSERT INTO t VALUES ('a;b')", "UPDATE t SET a = 1", "COMMIT"])
+        block_texts(
+            "BEGIN\n  INSERT INTO t VALUES ('a;b');\n  UPDATE t SET a = 1;\n  COMMIT;\n  NULL;\nEND;"
+        ),
+        Some(vec![
+            "INSERT INTO t VALUES ('a;b')",
+            "UPDATE t SET a = 1",
+            "COMMIT"
+        ])
     );
     assert!(block_texts("BEGIN\nEND outer;").is_some());
     for text in [
@@ -516,7 +604,11 @@ fn create_table_rewrites_strip_identity_virtual_columns_and_disabled_constraints
         rewrite.text,
         "CREATE TABLE \"HR\".\"T\" (\"ID\" NUMBER NOT NULL ENABLE, \"P\" NUMBER) TABLESPACE \"USERS\""
     );
-    let objects: Vec<&str> = rewrite.notes.iter().map(|note| note.object.as_str()).collect();
+    let objects: Vec<&str> = rewrite
+        .notes
+        .iter()
+        .map(|note| note.object.as_str())
+        .collect();
     assert_eq!(objects, vec!["t.id", "t.total"]);
     assert_eq!(rewrite.disabled.len(), 1);
     assert_eq!(rewrite.disabled[0].name, "t_fk");
@@ -525,7 +617,10 @@ fn create_table_rewrites_strip_identity_virtual_columns_and_disabled_constraints
         rewrite.disabled[0].clause,
         "CONSTRAINT \"T_FK\" FOREIGN KEY (\"P\") REFERENCES \"HR\".\"P\" (\"ID\")"
     );
-    assert_eq!(rewritten_table("CREATE TABLE t (id NUMBER GENERATED AS IDENTITY, a NUMBER)"), None);
+    assert_eq!(
+        rewritten_table("CREATE TABLE t (id NUMBER GENERATED AS IDENTITY, a NUMBER)"),
+        None
+    );
     assert_eq!(
         without_disable("ALTER TABLE t ADD CONSTRAINT c CHECK (a > 0) DISABLE NOVALIDATE"),
         Some("ALTER TABLE t ADD CONSTRAINT c CHECK (a > 0)".to_owned())
@@ -554,33 +649,52 @@ fn constraint_clauses_are_built_from_the_catalog() {
     );
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
     let clause = |session: &mut Session<'_, MemoryStore>, name: &str| {
-        session.oracle_constraint_clause("c", name).unwrap().unwrap()
+        session
+            .oracle_constraint_clause("c", name)
+            .unwrap()
+            .unwrap()
     };
     let listed = clause(&mut session, "c_listed");
     assert_eq!(listed.kind, ConstraintClauseKind::ForeignKey);
     assert_eq!(listed.table, "\"PUBLIC\".\"C\"");
     assert_eq!(
         listed.clause.as_deref(),
-        Some("CONSTRAINT \"C_LISTED\" FOREIGN KEY (\"PID\") REFERENCES \"PUBLIC\".\"P\" (\"ID\") ON DELETE CASCADE")
+        Some(
+            "CONSTRAINT \"C_LISTED\" FOREIGN KEY (\"PID\") REFERENCES \"PUBLIC\".\"P\" (\"ID\") ON DELETE CASCADE"
+        )
     );
     let implied = clause(&mut session, "c_implied");
     assert_eq!(
         implied.clause.as_deref(),
-        Some("CONSTRAINT \"C_IMPLIED\" FOREIGN KEY (\"CODE\") REFERENCES \"PUBLIC\".\"P\" (\"ID\")")
+        Some(
+            "CONSTRAINT \"C_IMPLIED\" FOREIGN KEY (\"CODE\") REFERENCES \"PUBLIC\".\"P\" (\"ID\")"
+        )
     );
     let check = clause(&mut session, "c_check");
     assert_eq!(check.kind, ConstraintClauseKind::Check);
-    assert_eq!(check.clause.as_deref(), Some("CONSTRAINT \"C_CHECK\" CHECK (id > 0)"));
-    assert_eq!(session.oracle_constraint_clause("c", "nothing").unwrap(), None);
+    assert_eq!(
+        check.clause.as_deref(),
+        Some("CONSTRAINT \"C_CHECK\" CHECK (id > 0)")
+    );
+    assert_eq!(
+        session.oracle_constraint_clause("c", "nothing").unwrap(),
+        None
+    );
     assert!(session.oracle_constraint_clause("missing", "x").is_err());
     session.close().unwrap();
     let mut postgresql = Session::new(&store);
     postgresql
-        .execute("CREATE TABLE pg (a int CONSTRAINT pg_check CHECK (a > 0))", &mut |_| {})
+        .execute(
+            "CREATE TABLE pg (a int CONSTRAINT pg_check CHECK (a > 0))",
+            &mut |_| {},
+        )
         .unwrap();
     postgresql.close().unwrap();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
-    let check = session.oracle_constraint_clause("pg", "pg_check").unwrap().unwrap();
+    let check = session
+        .oracle_constraint_clause("pg", "pg_check")
+        .unwrap()
+        .unwrap();
     assert_eq!(check.clause, None);
     session.close().unwrap();
 }
@@ -611,10 +725,7 @@ fn a_trigger_setting_after_a_skipped_trigger_is_a_plsql_setting_not_a_consequenc
     );
     assert!(report.succeeded(), "{report:?}");
     assert!(report.consequences.is_empty());
-    assert_eq!(
-        report.ignored.other,
-        vec![(PLSQL_SETTINGS.to_owned(), 1)]
-    );
+    assert_eq!(report.ignored.other, vec![(PLSQL_SETTINGS.to_owned(), 1)]);
     assert_eq!(report.skipped[0].kind, "trigger");
 }
 
@@ -679,11 +790,51 @@ fn seeded_random_scripts_never_panic() {
         state
     };
     let pieces = [
-        ";", "\n", "/\n", ".\n", "q'[", "]'", "q'{", "}'", "nq'<", ">'", "q'!", "'", "\"", "--",
-        "/*", "*/", "&", "&&", "&x.", "DEFINE x = 1\n", "SET DEFINE OFF\n", "SET DEFINE ON\n",
-        "@@inc\n", "@inc\n", "START inc\n", "BEGIN ", "END;", "DECLARE ", "CREATE PROCEDURE p IS ",
-        "INSERT INTO t VALUES (1)", "SELECT 1 FROM dual", "\r", "\0", "<<l>>", "EXIT\n", "REM -\n",
-        "CONNECT a/b\n", "x", " ", "(", ")", "COMMIT", "NULL", ":a", "%",
+        ";",
+        "\n",
+        "/\n",
+        ".\n",
+        "q'[",
+        "]'",
+        "q'{",
+        "}'",
+        "nq'<",
+        ">'",
+        "q'!",
+        "'",
+        "\"",
+        "--",
+        "/*",
+        "*/",
+        "&",
+        "&&",
+        "&x.",
+        "DEFINE x = 1\n",
+        "SET DEFINE OFF\n",
+        "SET DEFINE ON\n",
+        "@@inc\n",
+        "@inc\n",
+        "START inc\n",
+        "BEGIN ",
+        "END;",
+        "DECLARE ",
+        "CREATE PROCEDURE p IS ",
+        "INSERT INTO t VALUES (1)",
+        "SELECT 1 FROM dual",
+        "\r",
+        "\0",
+        "<<l>>",
+        "EXIT\n",
+        "REM -\n",
+        "CONNECT a/b\n",
+        "x",
+        " ",
+        "(",
+        ")",
+        "COMMIT",
+        "NULL",
+        ":a",
+        "%",
     ];
     let includes = MemoryIncludes::new(&[("inc.sql", "@@inc\nSELECT 1 FROM dual;\n")]);
     for _ in 0..cases {

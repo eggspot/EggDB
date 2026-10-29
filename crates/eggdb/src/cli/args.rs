@@ -902,13 +902,15 @@ fn parse_define(spelled: &str, value: &OsStr) -> Result<(String, String), String
         .to_str()
         .ok_or_else(|| format!("{spelled} must be UTF-8 text"))?;
     let Some((name, definition)) = text.split_once('=') else {
-        return Err(format!("{spelled} takes name=value, such as {spelled} pass=secret"));
+        return Err(format!(
+            "{spelled} takes name=value, such as {spelled} pass=secret"
+        ));
     };
     let name = name.trim();
     if name.is_empty()
-        || !name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '#'))
+        || !name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '#')
+        })
     {
         return Err(format!(
             "{spelled} needs a variable name of letters, digits, _, $ and #, not '{name}'"

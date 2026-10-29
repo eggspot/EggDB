@@ -1312,7 +1312,7 @@ pub(crate) fn constraint_clause(table: &TableDefinition, name: &str) -> Option<C
         .indexes
         .iter()
         .any(|index| index.unique && index.name == name);
-    (primary || unique).then(|| ConstraintClause {
+    (primary || unique).then_some(ConstraintClause {
         kind: ConstraintClauseKind::Key,
         table: shown_table,
         clause: None,
