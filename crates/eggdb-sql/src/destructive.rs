@@ -272,14 +272,11 @@ fn filters_rows(filter: Option<&Expr>, table: &TableReference) -> bool {
 
 fn names_target_qualified(merge: &MergeStatement) -> bool {
     let names_source = |qualifier: &str| {
-        merge
-            .source_label
-            .as_deref()
-            .is_some_and(|label| {
-                qualifier.eq_ignore_ascii_case(label)
-                    || qualifier.eq_ignore_ascii_case(crate::schemas::base_name(label))
-                    || qualifier.eq_ignore_ascii_case(&label.replace(crate::schemas::QUALIFIER, "."))
-            })
+        merge.source_label.as_deref().is_some_and(|label| {
+            qualifier.eq_ignore_ascii_case(label)
+                || qualifier.eq_ignore_ascii_case(crate::schemas::base_name(label))
+                || qualifier.eq_ignore_ascii_case(&label.replace(crate::schemas::QUALIFIER, "."))
+        })
     };
     let names_target = |qualifier: Option<&str>| {
         qualifier.is_some_and(|qualifier| {
