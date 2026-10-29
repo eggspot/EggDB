@@ -52,6 +52,7 @@ eggdb <command> <file> [arguments] [options]
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
 | `audit <file>` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below) |
+| `collection list\|add\|delete <file> [<name>]` | read-only for `list`, for writing otherwise | lists, adds or deletes the named key spaces in the file (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V` |
 
@@ -68,6 +69,10 @@ open for writing keeps them out, and `put`, `del`, `import` and `sql` wait for n
 once when the file is open anywhere (see "Exit codes"). That includes an AI agent's call through
 `eggdb mcp`, which holds the file read-only for up to its time limit; the busy message says it
 may be one.
+
+**Collections.** `-C <name>` (`--collection <name>`) on `get`, `put`, `del`, `scan`, `export`
+and `import` makes the command work in that collection instead of the default key space (see
+"Collections" below).
 
 **Large values.** `put` sizes its page cache to the value, so any value up to 1 GiB works
 without an option. `--cache <bytes>` sets the cache for any command (`--cache 64m`).
@@ -427,6 +432,16 @@ entry above about 30 MiB), as `put` does.
 **Progress.** On a terminal, both show `imported 1,204,000 entries…` on stderr, redrawn once a
 second, and erase it when they end.
 
+**Collections.** A file with collections exports as version 2 (below): the default key space
+first, then each collection's entries tagged with its name, and an empty collection as a line of
+its own. `import` puts every entry back into its collection and makes the collections it meets
+(`"collections_added"` in its JSON summary; `export` to a file reports `"collections"`).
+`export -C <name>` writes only that collection, as a plain version 1 export, and
+`import -C <name>` loads every entry of an export into that collection, made if missing, whatever
+collection the entries came from, so `eggdb export app.db -C users | eggdb import archive.db -C
+users` copies one collection. `--on-conflict` applies within a key space: the same key in two
+collections is not a conflict, except when `import -C` puts them into one.
+
 ### Loading a CSV file into a table: `import --csv`
 
 ```
@@ -459,7 +474,7 @@ gunzip -c more.csv.gz | eggdb import app.db --csv - --table "people (name, id)"
 To unload a table as CSV, run `COPY ... TO STDOUT` with `eggdb sql`:
 `eggdb sql app.db -c "COPY people TO STDOUT (FORMAT csv, HEADER)" > people.csv`.
 
-### The export format, eggdb-jsonl version 1
+### The export format, eggdb-jsonl versions 1 and 2
 
 UTF-8 text with one JSON object per line, each line ended by a line feed:
 
@@ -482,13 +497,81 @@ UTF-8 text with one JSON object per line, each line ended by a line feed:
 - **The trailer** comes last: `{"entries":N}` with the number of entry lines. A file without it,
   or with a count that differs, was cut or changed and is refused.
 
+**Version 2** is version 1 plus collections, and `export` writes it only for a file that has
+collections, so an export of a file without them stays byte for byte a version 1 export and an
+older `eggdb` refuses a version 2 file as made by a newer EggDB instead of failing on a field:
+
+```
+{"format":"eggdb-jsonl","version":2,"eggdb":"0.3.0","page_size":4096,"exported_at":"2026-10-30T09:14:07.123456Z"}
+{"key":"user:1","value":"Ada"}
+{"collection":"cache"}
+{"collection":"sessions","key":"s:1","value":"{\"user\":1}"}
+{"collection":"sessions","key_hex":"00ff","value_hex":"deadbeef"}
+{"entries":3}
+```
+
+- An entry with a `collection` field (its name, 1 to 128 bytes of text) belongs to that
+  collection; one without belongs to the default key space. Export writes the field first, the
+  default key space's entries first, then each collection's in byte order of its name, each in
+  key order.
+- A line with only `collection` is a **collection line**: the collection exists, even with no
+  entry. Export writes one for each empty collection; import makes it.
+- The trailer counts entry lines; collection lines are not entries.
+- `collection` in a version 1 file, or in the header or the trailer, is refused.
+
 Import accepts any JSON that means the same thing (spaces between tokens, fields in any order,
 every JSON escape including `\uXXXX` and surrogate pairs) and refuses everything else with the
 line number and what is wrong: an unknown or repeated field, a raw control character, a lone
 surrogate, invalid UTF-8 in `key` or `value`, an odd number of hex digits, an empty line,
-anything after the trailer, or a `version` above 1 (made by a newer EggDB: upgrade).
+anything after the trailer, or a `version` above 2 (made by a newer EggDB: upgrade).
 `scan --format json` prints entry lines in the same spelling, except that it writes text for any
 UTF-8, so its lines are valid entries too.
+
+## Collections
+
+A collection is a named key space inside the database file, beside the default key space that
+every command uses unless given `-C <name>` (D139; [embedded.md](embedded.md) "Collections").
+Names are 1 to 128 bytes of UTF-8 with no spaces or control characters. Keys of a collection
+never appear in a scan of the default key space.
+
+```
+eggdb collection list <file>
+eggdb collection add <file> <name>
+eggdb collection delete <file> <name>
+```
+
+```sh
+eggdb collection add app.db sessions
+eggdb put app.db -C sessions s:1 '{"user":1}'
+eggdb get app.db -C sessions s:1
+eggdb scan app.db -C sessions --prefix s:
+eggdb put --create app.db -C cache c:1 hot       # makes the collection (and the file) on the way
+eggdb collection list app.db
+eggdb collection delete app.db cache
+```
+
+- `list` prints the names in byte order, one per line, and the count on stderr (`3 collections`,
+  `no collections`); in a pipe, `{"file":"app.db","collections":["cache","sessions"]}`.
+- `add` prints `added collection sessions to app.db`; `delete` removes the collection and every
+  key in it in one commit, asks nothing, and prints `deleted collection cache from app.db`. In a
+  pipe they print `{"file":…,"collection":…,"added":true}` and `…"deleted":true}`.
+- `add` of a collection already there, and `delete` of one that is not, exit 1 with
+  `nothing to add: …` or `nothing to delete: …`, as `del` of a missing key does.
+- `-C` on a collection that does not exist exits 1, with the command that adds it:
+  ```
+  eggdb: cannot read s:1 from app.db: no collection named sessions. Add it with `eggdb collection add app.db sessions`.
+    try: eggdb collection add app.db sessions
+  ```
+  `put --create -C <name>` and `import -C <name>` make it instead. A name that cannot be one is
+  a usage error (exit 2).
+- A collection's keys are ten bytes shorter than the default key space's (502 bytes with 4 KiB
+  pages), since ten bytes of each say which collection it is in.
+- `eggdb shell` works in one key space at a time: `.collection` lists them, `.collection <name>`
+  chooses one and `.collection -` returns to the default key space, and the prompt shows the
+  choice (`app[sessions]=> `). `eggdb ui` shows one key space at a time too: `C` opens the
+  collection picker, which also adds collections, and from 110 columns a sidebar lists them
+  ([ux/ui.md](ux/ui.md) "Collections").
+- SQL does not see collections in this release, and `check` and `stats` report the whole file.
 
 ## `eggdb sql`
 
@@ -626,6 +709,7 @@ block fail with the busy error (exit 5): the block holds the one write transacti
 |---------------|------|
 | `.tables` | the tables, one per line |
 | `.schema [table]` | the `CREATE TABLE` statements, all or one |
+| `.collection [name\|-]` | alone, the key spaces with `*` before the one in use; a name makes `put`, `get`, `del` and `scan` work in that collection, and `-` returns to the default key space (see "Collections") |
 | `.mode [table\|expanded\|csv]` | how results print: psql's aligned table (the default; on a terminal a result wider than the window prints expanded), one record per block, or CSV with a header row; no argument shows the mode |
 | `.timer [on\|off]` | `Time: 1.234 ms` on stderr after every statement and command |
 | `.help` | the commands, keys and the history file |
@@ -894,7 +978,7 @@ and add a `try:` line when the fix is a command:
 eggdb: cannot open app.db: no such file. Create it with `eggdb create app.db`, or pass --create to put, sql or serve.
   try: eggdb create app.db
 eggdb: unknown option '--reverse' for eggdb get
-  usage: eggdb get <file> <key>
+  usage: eggdb get <file> <key> [-C <name>]
   try: eggdb help get
 ```
 

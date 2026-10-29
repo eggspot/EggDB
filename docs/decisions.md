@@ -111,7 +111,7 @@ its full title with its status.
 - [D84](decisions/D084.md) Checkpoints at the log's append position, recycled segments, and segment sequences never used twice
 - [D85](decisions/D085.md) Crash tests across the whole storage stack: a sweep that fails every I/O operation of a B+tree workload
 - [D86](decisions/D086.md) Transactions: one writer and snapshot readers over the page cache, before-images in memory, hybrid-clock commit stamps
-- [D87](decisions/D087.md) The embedded Rust API: `Database`, two transaction types, double-ended scans and errors with a kind
+- [D87](decisions/D087.md) The embedded Rust API: `Database`, two transaction types, double-ended scans and errors with a kind (superseded in part by D139: collections as key prefixes)
 - [D88](decisions/D088.md) Large values on chains of overflow pages, a 1 GiB value limit, and a check that accounts for every page
 - [D89](decisions/D089.md) A model test against an in-memory map, a seeded fuzzer for hostile files, and the older header slot made a copy when a file opens for writing
 - [D90](decisions/D090.md) The `eggdb` command: command first, byte arguments, formats chosen by the terminal, exit codes 0 to 5, terminal detection in the platform layer
@@ -122,7 +122,7 @@ its full title with its status.
 - [D95](decisions/D095.md) A file lock is released when its handle drops, even while a child process is starting
 - [D96](decisions/D096.md) Release engineering for v0.2.0: a smoke test of every release binary, sample files frozen at the tag, guides checked by the tests
 - [D97](decisions/D097.md) A flush longer than the recycled log segments ends in one of them, and the checkpoint after it cuts its new segments off the file
-- [D98](decisions/D098.md) The SQL core, part 1: a storage-agnostic `eggdb-sql` crate, SQL in a reserved key prefix, order-preserving primary keys, PostgreSQL's errors and blocks
+- [D98](decisions/D098.md) The SQL core, part 1: a storage-agnostic `eggdb-sql` crate, SQL in a reserved key prefix, order-preserving primary keys, PostgreSQL's errors and blocks (superseded in part by D139: SQL stays in its prefix)
 - [D99](decisions/D099.md) SQL is slower than SQLite for now: gated, scheduled and not waived; the binary grows by the SQL core (superseded in part by D101)
 - [D100](decisions/D100.md) Joins and GROUP BY in the SQL core: left-to-right joins by key lookup, hash table or nested loop, grouping in a hash table, a 1 GiB bound per statement, and the join's gap to SQLite gated and scheduled (superseded in part by D101)
 - [D101](decisions/D101.md) Benchmarks are reported on pull requests and only a slowdown of more than 2x blocks; one final `check` job is the required check and auto-merge is allowed
@@ -163,3 +163,4 @@ its full title with its status.
 - [D136](decisions/D136.md) Bulk loads from `bcp in` and `SqlBulkCopy`: `INSERT BULK` waits in the session for rows a server streams from the bulk load message, loaded in one statement through the `INSERT` path; `SET FMTONLY` describes declared types; bcp's character format read in the engine
 - [D137](decisions/D137.md) Transact-SQL batch logic: the batch compiled once into a program of jumps over the parser's statements, each statement parsed again right before it runs with variables as constants; `TRY` blocks as instruction ranges; dynamic SQL as nested batches with their own scope; `INFO` messages and raised errors with their numbers and states (supersedes the single-statement `IF` of D132)
 - [D138](decisions/D138.md) ORMs and migration tools unchanged: `INSERT ... SELECT` through the `INSERT` path, advisory locks in one table per process keyed by store, Flyway with its session-level lock while there is one writer, Transact-SQL `MERGE` with `OUTPUT` on the `MERGE` executor, `SAVE TRANSACTION` recorded but not rolled back to, `OPENJSON ... WITH` as a derived table, EF Core 8
+- [D139](decisions/D139.md) Collections: named key spaces as key prefixes in the file's one tree, with a catalog of names to never-reused numbers, hidden from and refused by the default key space; eggdb-jsonl version 2; the CLI, the shell and the UI as Claude Fable designed them (supersedes in part D87 and D98)

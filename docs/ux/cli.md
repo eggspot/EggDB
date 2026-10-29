@@ -1335,3 +1335,254 @@ The script routes end with `  try: eggdb restore --dialect sqlserver --create <f
 As designed, except: the `try:` line names the file being restored and `<script.sql>`; the
 `differences` fact shows only for the SQL Server dialect, and `script` is the last field of each
 listed item, so a pg_dump's report keeps its earlier text and field order.
+
+## 20. Collections (item 26)
+
+A collection is a named key space inside the database file, beside the default key space that
+every command of this document uses unless told otherwise (`Database::collection(name)` in
+[embedded.md](../embedded.md)). Names are 1 to 128 bytes of UTF-8 with no whitespace or control
+characters; a name is written as it is on the command line, never as a byte argument. Keys of a
+collection never appear in a scan of the default key space. Designed by Claude Fable (D15). The
+grammar of section 1 and the formats, exit codes and message shape of sections 4, 7 and 10 stay;
+this section adds one option, one command and one meta-command.
+
+### `-C <name>`: the option
+`--collection <name>`, short `-C`, on `get`, `put`, `del`, `scan`, `export` and `import` makes the
+command work in that collection instead of the default key space. Everything else about the
+command is unchanged: `scan -C users --format json` prints plain entry lines, `get -C users s:1`
+prints the value, `del` exits 1 when the key is not there. On `check`, `stats`, `create` and
+`ui` the option is unknown (exit 2, section 10's unknown-option line).
+
+```
+eggdb collection add app.db sessions
+eggdb put app.db -C sessions s:1 '{"user":1}'
+eggdb get app.db -C sessions s:1
+eggdb scan app.db -C sessions --prefix s:
+eggdb put --create app.db -C cache c:1 hot          # creates the collection (and the file) on the way
+```
+
+Collections are made explicitly, like files (section 2): `-C` on a collection that does not
+exist is an error, not a new collection. The two exceptions mirror `--create` for files:
+`put --create -C x` makes the collection (and the file when it is missing), and `import -C x`
+makes `x`, since an import is a restore.
+
+### `eggdb collection list|add|delete`
+```
+eggdb collection list <file>
+eggdb collection add <file> <name>
+eggdb collection delete <file> <name>
+```
+The verb comes before the file, as `git remote add <name>` reads and as `eggdb help collection`
+lists the verbs; `collection list`, `collection add` and `collection delete` are three two-word
+commands to the parser. `add`, not `create`, because `create` is the file command and `a add` is
+the UI's word; `del` is accepted as an alias of `delete`, as `delete` is of `del`. `list` opens
+the file read-only; `add` and `delete` open it for writing (section 7's busy rules, so an open
+`eggdb ui` or `eggdb shell` must quit first, which both say). `delete` removes the collection and
+every key in it in one commit and asks nothing, as `del` asks nothing: the command line is for
+scripts, and the shell and the UI name the command rather than offering it.
+
+**`text`** (a terminal):
+```
+$ eggdb collection add app.db sessions
+added collection sessions to app.db
+$ eggdb collection list app.db
+cache
+sessions
+users
+3 collections
+$ eggdb collection delete app.db cache
+deleted collection cache from app.db
+```
+`list` prints the names in byte order, one per line, then the count on **stderr** as `scan`
+does: `3 collections`, `1 collection`, or `no collections` alone when there are none (exit 0).
+`add` of a name already there and `delete` of one that is not are exit 1 with a stderr line in
+the shape of `del`'s: `nothing to add: sessions is already a collection in app.db`,
+`nothing to delete: cache is not a collection in app.db`. A bad name is a usage error (exit 2):
+`a collection name is 1 to 128 bytes with no spaces or control characters, not 'a b'`.
+
+**`json`** (a pipe), one object, fields stable:
+```
+{"file":"app.db","collections":["cache","sessions","users"]}        list; [] when there are none
+{"file":"app.db","collection":"sessions","added":true}              add; false with exit 1
+{"file":"app.db","collection":"cache","deleted":true}               delete; false with exit 1
+```
+Names are always JSON strings (a name is UTF-8 by definition, so there is no `_hex` form).
+`hex` and `raw` are usage errors here, as for `check` (section 13, item 4).
+
+### Errors for a missing collection
+A `-C` on a collection that does not exist is **exit 1**, not found, the kind's own name
+(`ErrorKind::CollectionNotFound`), on every format; stdout carries nothing, the error goes to
+stderr in section 7's shape with the library's message after the CLI's context, and the fix is a
+`try:` line:
+```
+eggdb: cannot read s:1 from app.db: no collection named sessions. Add it with `eggdb collection add app.db sessions`.
+  try: eggdb collection add app.db sessions
+```
+| Command | Context, then the library's message and the fix |
+|---------|------------------------------------------------|
+| `get` | `cannot read {key} from {file}: no collection named {name}. Add it with ` `` `eggdb collection add {file} {name}` ``. |
+| `put` | `cannot store {key} in {file}: no collection named {name}. Add it with ` `` `eggdb collection add {file} {name}` ``, `or pass --create to put.` |
+| `del` | `cannot delete {key} from {file}: no collection named {name}. Add it with …` |
+| `scan` | `cannot scan {file}: no collection named {name}. Add it with …` |
+| `export -C` | `cannot export {file}: no collection named {name}. Add it with …` |
+| every one | `  try: eggdb collection add {file} {name}` |
+
+A bad `-C` value is a usage error (exit 2): `--collection needs a name of 1 to 128 bytes with
+no spaces or control characters, not '{name}'`. `collection` without a verb, or with another
+word: `collection needs list, add or delete`, then the usage lines and `try: eggdb help
+collection` (section 13, item 5).
+
+### `export` and `import` with collections
+`export` without `-C` writes the whole file: the default key space's entries first, exactly as
+today, then each collection in byte order of its name, its entries in key order, every one of
+them carrying a `collection` field, written first on the line so a reader knows where the entry
+goes before it sees the key. An empty collection is kept too, as a **collection line** with no
+key, so a restore gives an application the collections it expects:
+```
+{"format":"eggdb-jsonl","version":2,"eggdb":"0.3.0","page_size":4096,"exported_at":"2026-10-30T09:14:07.123456Z"}
+{"key":"user:1","value":"Ada"}
+{"collection":"cache"}
+{"collection":"sessions","key":"s:1","value":"{\"user\":1}"}
+{"collection":"sessions","key_hex":"00ff","value_hex":"deadbeef"}
+{"entries":3}
+```
+- The header's `version` is `2` when the file has at least one collection and `1` otherwise, so
+  an export of a file without collections is byte for byte what it was, and an older `eggdb`
+  given a version 2 file says "made by a newer EggDB: upgrade" instead of failing on a field.
+- The trailer counts entry lines (lines with a key); collection lines are not entries.
+- `export -C users` writes only that collection as a plain version 1 export, its lines untagged:
+  one key space, movable anywhere (`export -C users | import -C archive`).
+- `import` of a version 2 file puts each tagged entry into its collection and makes every
+  collection it meets (a collection line or a tagged entry) that the file does not have yet;
+  untagged entries go to the default key space. `--on-conflict` applies within a key space: the
+  same key in two collections is not a conflict. `import -C x` puts every entry into `x`,
+  whatever its tag says, makes `x` when it is missing, and ignores collection lines; a tagged file
+  loaded this way therefore flattens into one space, which is what `-C` asks for. `--dry-run`
+  reports what would be made.
+- The `export` summary to a file gains `"collections":3` (collections written, empty ones
+  included); the `import` summary gains `"collections_added":2`. The text progress lines are
+  unchanged.
+
+### Help text
+The command list of section 9 gains, after `restore`, two lines (the usage does not fit the
+description column, so the description takes the line below, at the column):
+```
+  collection list|add|delete <file> [name]
+                                a named key space inside the file; see eggdb help collection
+```
+Each of `get`, `put`, `del`, `scan` adds to its options
+`  -C, --collection <name>  work in this collection instead of the default key space` (put's
+ends `(made with --create)`); `export` adds `  -C, --collection <name>  write only this
+collection, untagged`; `import` adds `  -C, --collection <name>  load everything into this
+collection, made if missing`. `eggdb help collection`:
+```
+Usage: eggdb collection list <file>
+       eggdb collection add <file> <name>
+       eggdb collection delete <file> <name>
+
+A collection is a named key space inside the database file, beside the default key space that
+every command uses unless given -C <name>. Names are 1 to 128 bytes of UTF-8 with no spaces or
+control characters. Deleting a collection removes every key in it, in one commit, and asks nothing.
+
+  list     print the collections, one per line, in byte order (the default key space is not one)
+  add      make an empty collection (exit 1 if it is already there)
+  delete   remove a collection and every key in it (exit 1 if it is not there)
+
+Examples:
+  eggdb collection add app.db sessions
+  eggdb put app.db -C sessions s:1 '{"user":1}'
+  eggdb scan app.db -C sessions
+  eggdb collection list app.db
+  eggdb export app.db backup.jsonl          # the default key space, then every collection
+```
+
+### The shell: `.collection`
+The shell works in one key space at a time, the default key space at start. `.collection`
+chooses, lists, and returns:
+
+| Line | Does |
+|------|------|
+| `.collection` | lists the key spaces, the default key space first and then the names in byte order, `*` before the one in use |
+| `.collection <name>` | works in that collection from now on; answers `collection: sessions` |
+| `.collection -` | returns to the default key space; answers `collection: default key space` |
+
+```
+app=> .collection
+* default key space
+  cache
+  sessions
+app=> .collection sessions
+collection: sessions
+app[sessions]=> scan -n 1
+s:1       {"user":1}
+1 entry
+app[sessions]=> get -C cache c:1
+hot
+app[sessions]=> .collection
+  default key space
+  cache
+* sessions
+app[sessions]=> .collection -
+collection: default key space
+app=>
+```
+The prompt carries the collection in brackets after the stem and before psql's markers:
+`app[sessions]=> `, `app[sessions]-> `, `app[sessions]=*> `, `app[sessions]=!> `; the default
+key space keeps `app=> `. A name longer than 16 characters is cut to 15 plus `…`. `-` is the
+return word because no collection is ever called that on a prompt (`-` is this grammar's word
+for stdin and stdout, section 1); a collection literally named `-` is reached with `-C -` on a
+key-value line. `.collection` with no collections prints `* default key space` and then
+`no collections` dimmed, as `.tables` prints `no tables`.
+
+The key-value commands `put`, `get`, `del` and `scan` act on the collection in use; `-C <name>`
+on the line overrides it for that line, and `put --create -C x` makes `x`, as on the command
+line, which is how a collection is added without leaving the shell (the shell holds the file, so
+`eggdb collection add` from another terminal gets the busy message meanwhile). `.collection`
+itself never makes one: a missing name answers `eggdb: no collection named orders in app.db`
+with `  try: .collection` (lists them), exit 1 in batch; a bad one answers the name error
+above (`a collection name is 1 to 128 bytes …`), exit 2; two words answer `eggdb: .collection takes one name, or - for the default key
+space`, exit 2. A collection in use that another program drops is reported by the next command's
+error (`no collection named sessions`), and the shell returns to the default key space with
+`WARNING:  collection sessions is gone; back to the default key space` on stderr. SQL does not
+see collections in this release. The choice is not stored: every session starts on the default
+key space. In batch (`-c`) `.collection sessions` works as typed and prints its answer.
+
+The banner's parentheses count them when there are any: `(2 tables, 3 collections)`,
+`(3 collections)` with no tables. Completion: after `.collection` the names and `-`; after `-C`
+the names. `.help` gains, under the key-value commands,
+```
+  -C <name> on put, get, del or scan   work in that collection for this line
+```
+and, under Shell commands, before `.mode`,
+```
+  .collection [name|-]         work in a collection: alone lists them (* marks the one in use),
+                               a name chooses one, - returns to the default key space
+```
+
+### Decided by this design
+1. `-C`/`--collection` is an option on the six commands that read or write keys, never a change
+   to the positional grammar, so every existing command line keeps its meaning.
+2. The verb comes before the file in `eggdb collection <verb> <file> [name]`; `add` and `delete`
+   are the verbs, `del` an alias.
+3. A missing collection is exit 1 (not found), its message naming `eggdb collection add` and, for
+   `put`, `--create`; a bad name is exit 2.
+4. `add` of an existing and `delete` of a missing collection are exit 1 with `nothing to …`, as
+   `del` of a missing key.
+5. The export format becomes version 2 only when a file has collections; entries carry
+   `collection` first on the line, empty collections are kept as collection lines, and `-C` on
+   `export` writes a plain version 1 file.
+6. The shell's `.collection` lists with `*`, chooses by name, returns with `-`, and shows the
+   choice in the prompt as `app[sessions]=> `; it never creates (`put --create -C` does).
+7. `collection list` prints names on stdout and the count on stderr, as `scan` does; JSON is one
+   object with an array.
+
+Not in this release: `eggdb ui -C <name>` to open on a collection, `collection rename`, a
+per-collection key count in `list` and `stats`, `-C` on `check`, and collections in SQL.
+
+### As built (D139)
+- The shell's "collection dropped by another program" warning is left out: the shell holds the
+  file's lock, so no other program can drop a collection while it is open.
+- `export` to a file reports `"collections"` and `import` reports `"collections_added"` in
+  their JSON summaries always, 0 for a file without collections.
+- `import -C` checks every key against the collection it loads into, so the same key in two
+  collections of a version 2 export follows `--on-conflict` when they are flattened into one.

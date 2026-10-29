@@ -410,6 +410,22 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
 - **Prefix truncation:** B+tree pages keep low and high fence keys and store the prefix those
   keys share only once. So an unused prefix costs nothing, and a used one costs about nothing
   per entry.
+- **Collections (D139)** are key prefixes in the same tree, not trees of their own. Every key
+  that starts with the five bytes `0xff 'C' 'O' 'L' 0x00` belongs to them, and the default key
+  space neither shows nor accepts such keys. Below that prefix:
+
+  | Key | Value |
+  |-----|-------|
+  | prefix, `0x01` | the catalog: a version byte (1) and the next collection number (4 bytes, big-endian) |
+  | prefix, `0x02`, name (UTF-8) | the collection: a version byte (1) and its number (4 bytes, big-endian) |
+  | prefix, `0x03`, number (4 bytes, big-endian), key | the value stored under `key` in that collection |
+
+  Numbers start at 1 and are never reused, so a key of a dropped collection can never be read
+  as a key of a later one. A record with a version above 1 is refused as written by a newer
+  release; any other record that is not five bytes is damage. Files without collections hold
+  none of these keys, so the layout needs no feature flag: a v0.2.0 file opens unchanged and
+  takes collections, and a release before collections reads such a file and shows these keys as
+  ordinary keys of its one key space.
 
 ### B+tree pages (types 2 and 3, layout 1)
 A tree is a B+tree (D77, D82): values live in leaf pages (type 3), and inner pages (type 2)

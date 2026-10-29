@@ -157,6 +157,66 @@ fn main() -> eggdb::Result<()> {
 - A write transaction's scans include its own changes. A scan borrows its transaction, so
   nothing changes under it.
 
+## Collections
+A database holds the **default key space**, which `get`, `put`, `delete` and `scan` on the
+database and its transactions use, and any number of **collections**: named key spaces in the
+same file, each its own ordered map from byte-string keys to byte-string values (D139).
+`db.create_collection(name)` makes one and `db.drop_collection(name)` removes it with every key
+in it, each in one commit; `db.collection_names()` lists them in byte order. A name is 1 to 128
+bytes of text without whitespace or control characters.
+
+`tx.collection(name)` gives the collection as a transaction sees it: a `ReadCollection` from a
+read transaction, a `WriteCollection` from the write transaction, with the default key space's
+methods (`get`, `get_with`, `scan`, `scan_prefix`, and `put`, `put_if_absent` and `delete` when
+writing). One write transaction changes any number of collections and the default key space,
+and commits them together. `db.collection(name)` gives a `Collection` whose `get`, `put` and
+`delete` are transactions of one step.
+
+```rust,no_run
+use eggdb::Database;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    db.create_collection("users")?;
+    db.create_collection("sessions")?;
+    db.write(|tx| {
+        tx.collection("users")?.put("1", "Ada")?;
+        tx.collection("sessions")?.put("s1", "user 1")?;
+        tx.put("config:theme", "dark")?;
+        Ok(())
+    })?;
+    let tx = db.begin_read()?;
+    let users = tx.collection("users")?;
+    for entry in users.scan(..) {
+        let (id, name) = entry?;
+        println!("{id:?} = {name:?}");
+    }
+    assert_eq!(tx.scan(..).count(), 1);
+    drop(users);
+    drop(tx);
+    println!("{:?}", db.collection_names()?);
+    db.collection("sessions").delete("s1")?;
+    db.drop_collection("sessions")?;
+    Ok(())
+}
+```
+
+- **Missing collections** are errors, never empty: `collection` fails with
+  `ErrorKind::CollectionNotFound` until `create_collection` made it (in this transaction or a
+  committed one). `create_collection` returns `false` for one that exists; `drop_collection`
+  returns `false` for one that does not.
+- **Keys** in a collection are up to `db.max_collection_key_bytes()`, ten bytes shorter than in
+  the default key space (502 with 4 KiB pages): the ten bytes say which collection a key is in.
+- **The default key space never shows a collection's keys**: its scans skip them, and its `put`
+  refuses keys that start with the bytes kept for collections, `0xff 'C' 'O' 'L' 0x00`, with
+  `ErrorKind::ReservedKey`. SQL's tables stay in the default key space under their own prefix
+  (`sql.md`), as before.
+- **Dropping** deletes every key of the collection in one transaction, so a collection that
+  changes more pages than the page cache holds fails with `CacheFull`; open the database with a
+  larger `Options::cache_bytes`.
+- A read transaction keeps its snapshot: a collection dropped or changed after it began is still
+  there, as it was, for it.
+
 ## SQL
 `eggdb::sql` runs SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, all on
 the same tables ([sql.md](sql.md)). `db.sql_store()` gives the database as a SQL store, and
@@ -290,6 +350,8 @@ for AI models; `error.kind()` is an `ErrorKind` to match on:
 | `SnapshotTooOld` | a read transaction's snapshot expired; begin a new one |
 | `TransactionFailed` | the write transaction failed earlier; begin a new one |
 | `NeedsReopen` | a write or sync failed; open the database again to recover |
+| `CollectionNotFound`, `InvalidCollectionName` | no collection of that name, or a name no collection can have |
+| `ReservedKey` | a key of the default key space that starts with the bytes kept for collections |
 | `DatabaseFull`, `OutOfMemory`, `InvalidOption`, `Other` | the rest |
 
 `ErrorKind` may gain kinds in later releases, so a `match` needs a wildcard arm. An
@@ -372,8 +434,9 @@ fn main() -> eggdb::Result<()> {
   commit, so a transaction larger than `cache_bytes` fails with `CacheFull`. Split bulk loads
   into several transactions.
 - **One writer at a time** in the whole file; any number of readers.
-- **One key space** per database. Named collections come later, as an addition: the default key
-  space stays what `get`, `put`, `delete` and `scan` use (D87).
+- **Collections** share the file's one B+tree, each under its own key prefix (D139), so a
+  collection's keys are ten bytes shorter than the default key space's, and dropping one
+  deletes its keys one by one in a single transaction.
 - **No in-memory database** yet: every database is a file (D87).
 - **The file format** is version 1 ([format.md](format.md)). Every later release reads the
   files v0.2.0 writes, and CI keeps opening the v0.2.0 sample files to hold it to that (D20,
