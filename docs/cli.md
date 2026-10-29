@@ -108,9 +108,11 @@ is an error, never an empty value. Stdin can be read once per command.
 
 ## Output formats
 
-`--format text|json|hex|raw` (short `-F`). By default a terminal gets `text`, and a pipe or a
-file gets `json`, except `get`, which gets `raw` so that `eggdb get app.db photo > photo.jpg`
-gives back the bytes. `hex` and `raw` are for `get` and `scan`, the commands that print data.
+`--format text|json|hex|raw` (short `-F`), and `--json`, the same as `--format json` (the last
+of them given wins). By default a terminal gets `text`, and a pipe or a file gets `json`, except
+`get`, which gets `raw` so that `eggdb get app.db photo > photo.jpg` gives back the bytes, and
+`sql`, which keeps its text tables in a pipe. `hex` and `raw` are for `get` and `scan`, the
+commands that print data.
 
 | Format | `get` | `scan` | `put`, `del`, `create`, `check`, `stats`, `export`, `import` |
 |--------|-------|--------|------------------------------------------|
@@ -131,7 +133,8 @@ lowercase hex, instead of `key` or `value`. Numbers are plain integers. The fiel
 | `scan` | `{"key":…,"value":…}` per entry, `{"key":…}` with `--keys-only` |
 | `check` | `{"ok":true,"file","commit_stamp","commit_time","page_size","pages","file_bytes","entries","key_bytes","value_bytes","tree_height","tree_pages","overflow_values","overflow_pages","free_pages","log_pages","leaked_pages"}`; when damaged `{"ok":false,"file","problem","page","what_to_do"}`, `page` only when the problem names one |
 | `stats` | `{"file","page_size","pages","free_pages","file_bytes","last_commit_stamp","last_commit_time","log_bytes_since_checkpoint"}`; the commit fields are `null` before the first commit |
-| `export` | `{"file","out","entries"}` when the export goes to a file; to stdout, the export itself |
+| `export` | `{"file","out","entries","collections"}` when the export goes to a file; to stdout, the export itself |
+| `sql` | with `--json`, one line per statement: `{"tag","columns","rows","row_count","notices"}`, the last four only when the statement has them, as MCP's `run_sql` returns them without its envelope |
 | `import` | `{"file","from","entries","imported","skipped","created","dry_run"}`; `from` is `-` for stdin; `imported` counts the keys stored, so a key repeated in the export counts once under `--on-conflict overwrite`; with `--dry-run` the counts and `created` say what the import would do |
 
 `text` shows bytes as text when they are valid UTF-8 without control characters, and as `0x`
@@ -1087,6 +1090,28 @@ eggdb: unknown option '--reverse' for eggdb get
   usage: eggdb get <file> <key> [-C <name>]
   try: eggdb help get
 ```
+
+When the command line asks for JSON (`--json`, `--format json`), an error is one JSON line on
+stderr instead, for scripts and agents: a `code`, its `category` (shared with EggOS: `usage`,
+`not_found`, `exists`, `busy`, `refused`, `too_large`, `damaged`, `failed` and the rest), the
+same `message`, the `usage` line for a usage error, and the `try:` command as `fix_command`. A
+pipe alone keeps the text form. The exit code is the same.
+
+```
+{"error":{"code":"not_found","category":"not_found","message":"cannot open app.db: no such file. Create it with `eggdb create app.db`, or pass --create to put, sql or serve.","fix_command":"eggdb create app.db"}}
+{"error":{"code":"invalid_arguments","category":"usage","message":"unknown option '--reverse' for eggdb get","usage":"eggdb get <file> <key> [-C <name>]","fix_command":"eggdb help get"}}
+```
+
+`eggdb sql --json` reports a failed statement the same way, with the `sqlstate`, `detail`, `hint`
+and `position` MCP gives. Every code, its category and its exit are listed in
+[ux/command-model.md](ux/command-model.md).
+
+`eggdb help --json` prints the commands and the MCP tools as one JSON object: each command's
+options, operands, output per format, default formats, most it can do (`read`, `change`,
+`destroy`), errors with their exit codes and examples, and each tool's arguments, its CLI twin,
+grant and annotations; `eggdb help <command> --json` prints one command. In this release it
+describes `get`, `scan`, `check`, `stats`, `export` and `sql` in full, and the other commands by
+their usage line.
 
 ## Colour
 

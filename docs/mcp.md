@@ -54,6 +54,14 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key |
 | `kv_scan` | keys and values in key order, by prefix or range, a page at a time |
 
+The tools, their arguments, descriptions and annotations come from EggDB's command registry
+(D143), the same definitions `eggdb help --json` prints, with each tool's CLI twin: `kv_get` is
+`eggdb get --json`, `kv_scan` is `eggdb scan --json`, `run_sql` and `write_sql` are
+`eggdb sql --json`, and each returns the same values as its twin once its envelope (the data
+notice, the per-call limits and what the call reports about itself) is taken away. The
+`instructions` the server sends at `initialize` are generated from it too: the effects (`read`,
+`change`, `destroy`), what this session may do, and the error categories.
+
 The resource `eggdb://schema` is the whole catalog as one JSON document. Every tool but
 `write_sql` is marked `readOnlyHint`, so a client can let it run without asking each time;
 `write_sql` is marked `destructiveHint` and not idempotent, so a client asks before it runs.
@@ -136,8 +144,13 @@ data, and keep a backup.
 ## Errors
 
 A refused or failed call is a tool result with `isError: true` and
-`structuredContent.error`: a `code`, a `message`, and a `fix` when there is one; SQL errors add
-the `sqlstate`, `detail`, `hint` and `position` in the statement. The codes:
+`structuredContent.error`: a `code`, its `category`, a `message`, and a `fix` when there is one;
+`damaged` adds `fix_command`, the command for the user (`eggdb check <file>`); SQL errors add the
+`sqlstate`, `detail`, `hint` and `position` in the statement. The category is the one EggDB and
+EggOS share (`usage`, `not_found`, `exists`, `busy`, `read_only`, `needs_grant`,
+`needs_confirmation`, `declined`, `refused`, `too_large`, `timeout`, `damaged`, `failed`), so an
+agent can act on it whatever the code; every code's category is in
+[ux/command-model.md](ux/command-model.md). The codes:
 
 | Code | When | Fix |
 |------|------|-----|
