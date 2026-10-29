@@ -19,6 +19,9 @@
 //!   before it runs.
 //! - Results are structured data marked as data, never instructions, and every message out is
 //!   one line of ASCII, so stored text cannot change the protocol.
+//! - The tools (names, descriptions, input schemas, annotations) and the `instructions` come from
+//!   EggDB's command registry, `eggdb-commands` (D143), and every error carries its code's
+//!   category shared with EggOS.
 //!
 //! The guide is `docs/mcp.md` in the repository.
 
