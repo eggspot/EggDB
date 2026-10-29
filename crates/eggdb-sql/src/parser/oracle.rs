@@ -414,8 +414,10 @@ impl<'t> Parser<'t> {
             ExprKind::Literal(Literal::String(text)) => Some(text.clone()),
             _ => None,
         };
-        let (Some(namespace), Some(parameter)) = (constant(&arguments[0]), constant(&arguments[1]))
-        else {
+        let (Some(namespace), Some(parameter)) = (
+            arguments.first().and_then(constant),
+            arguments.get(1).and_then(constant),
+        ) else {
             return Err(
                 self.not_supported("SYS_CONTEXT with arguments other than text constants")
             );
