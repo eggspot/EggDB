@@ -2,6 +2,7 @@ use crate::messages::{
     ColumnDescription, Format, FrontendMessage, ReportField, StartupRequest, Target, TooLarge,
     parse_message, parse_sasl_initial_response, parse_startup,
 };
+use crate::backend_keys::SECRET_KEY_BYTES;
 use crate::scram::{SCRAM_SHA_256, ScramExchange, ScramFailure, ScramVerifier};
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::types::{
@@ -10,8 +11,8 @@ use crate::types::{
 };
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_sql::{
-    CopyChannel, CopyStart, KeyValueStore, OutputColumn, Parameter, QueryResult, Session, SqlError,
-    SqlResult, SqlState, SqlType, TransactionStatus,
+    CancelSignal, CopyChannel, CopyStart, KeyValueStore, OutputColumn, Parameter, QueryResult,
+    Session, SqlError, SqlResult, SqlState, SqlType, TransactionStatus,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -259,6 +260,7 @@ impl CopyChannel for WireCopy<'_, '_, '_> {
 }
 
 const DIALECT_PARAMETER: &str = "eggdb.dialect";
+const DISCARD_ALL_TAG: &str = "DISCARD ALL";
 
 pub(crate) struct Startup {
     user: String,
@@ -308,7 +310,21 @@ fn options_parameters(options: &str) -> Vec<(String, String)> {
     parameters
 }
 
-fn read_startup(wire: &mut Wire<'_>) -> Option<Startup> {
+fn cancel_running_statement(
+    wire: &Wire<'_>,
+    shared: &Shared<'_>,
+    process_id: i32,
+    secret_key: &[u8],
+) {
+    if !shared.backend_keys.cancel(process_id, secret_key) {
+        (shared.log)(&format!(
+            "{}  cancel request for process {process_id} ignored: no such process, or a wrong secret key",
+            wire.peer()
+        ));
+    }
+}
+
+fn read_startup(wire: &mut Wire<'_>, shared: &Shared<'_>) -> Option<Startup> {
     for _ in 0..=MAX_ENCRYPTION_REQUESTS {
         let body = match wire.read_startup_packet() {
             Ok(body) => body,
@@ -329,7 +345,13 @@ fn read_startup(wire: &mut Wire<'_>) -> Option<Startup> {
                     return None;
                 }
             }
-            Ok(StartupRequest::Cancel { .. }) => return None,
+            Ok(StartupRequest::Cancel {
+                process_id,
+                secret_key,
+            }) => {
+                cancel_running_statement(wire, shared, process_id, &secret_key);
+                return None;
+            }
             Ok(StartupRequest::Startup { major, minor, .. }) if major != 3 => {
                 fatal(
                     wire,
@@ -385,8 +407,8 @@ fn read_startup(wire: &mut Wire<'_>) -> Option<Startup> {
     None
 }
 
-pub(crate) fn refuse_too_many(wire: &mut Wire<'_>) {
-    if read_startup(wire).is_some() {
+pub(crate) fn refuse_too_many(wire: &mut Wire<'_>, shared: &Shared<'_>) {
+    if read_startup(wire, shared).is_some() {
         fatal(
             wire,
             SqlState::TOO_MANY_CONNECTIONS,
@@ -578,6 +600,8 @@ pub(crate) struct Connection<'a, 's, S: KeyValueStore + 's> {
     portals: HashMap<String, Portal>,
     skipping_to_sync: bool,
     lost: Option<Lost>,
+    cancel: CancelSignal,
+    idle: bool,
 }
 
 pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
@@ -593,10 +617,10 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
             wire.peer()
         ));
         wire.deadline = Some(Instant::now() + REFUSAL_TIMEOUT);
-        refuse_too_many(&mut wire);
+        refuse_too_many(&mut wire, shared);
         return;
     };
-    let Some(startup) = read_startup(&mut wire) else {
+    let Some(startup) = read_startup(&mut wire, shared) else {
         return;
     };
     match authenticate(&mut wire, shared, &startup.user) {
@@ -654,6 +678,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
             return;
         }
     }
+    session.remember_connection_settings();
     if startup.minor > 0 || !unrecognized_options.is_empty() {
         wire.outbox
             .negotiate_protocol_version(0, &unrecognized_options);
@@ -662,10 +687,13 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     for (name, value) in &reported {
         wire.outbox.parameter_status(name, value);
     }
-    let mut secret = [0u8; 4];
-    let _ = eggdb_platform::secure_random::fill(&mut secret);
+    let cancel = session.cancel_signal();
+    let mut secret_key = [0u8; SECRET_KEY_BYTES];
+    let keyed = eggdb_platform::secure_random::fill(&mut secret_key).is_ok();
     wire.outbox
-        .backend_key_data(process_id, i32::from_be_bytes(secret));
+        .backend_key_data(process_id, i32::from_be_bytes(secret_key));
+    let _registration =
+        keyed.then(|| shared.backend_keys.register(process_id, secret_key, cancel.clone()));
     let mut connection = Connection {
         wire,
         shared,
@@ -675,6 +703,8 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         portals: HashMap::new(),
         skipping_to_sync: false,
         lost: None,
+        cancel,
+        idle: true,
     };
     connection.ready_for_query();
     if connection.wire.flush().is_ok() {
@@ -685,6 +715,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
 
 impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
     fn ready_for_query(&mut self) {
+        self.idle = true;
         let status = match self.session.transaction_status() {
             TransactionStatus::Idle => b'I',
             TransactionStatus::InBlock => b'T',
@@ -726,6 +757,15 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 }
             };
             drop(body);
+            if self.idle
+                && !matches!(
+                    message,
+                    FrontendMessage::Sync | FrontendMessage::Flush | FrontendMessage::Terminate
+                )
+            {
+                self.idle = false;
+                self.cancel.clear();
+            }
             if self.skipping_to_sync
                 && !matches!(message, FrontendMessage::Sync | FrontendMessage::Terminate)
             {
@@ -768,7 +808,8 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                     true
                 }
                 FrontendMessage::Sync => {
-                    self.skipping_to_sync = false;
+                    let failed = std::mem::take(&mut self.skipping_to_sync);
+                    self.finish_implicit_transaction(!failed);
                     self.ready_for_query();
                     self.wire.flush().is_ok()
                 }
@@ -787,6 +828,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                         ),
                         None,
                     );
+                    self.finish_implicit_transaction(false);
                     self.ready_for_query();
                     self.wire.flush().is_ok()
                 }
@@ -834,10 +876,30 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         }
     }
 
+    fn finish_implicit_transaction(&mut self, succeeded: bool) {
+        let ended = if succeeded {
+            self.session.commit_implicit_transaction()
+        } else {
+            self.session.roll_back_implicit_transaction()
+        };
+        if let Err(error) = ended {
+            report_error(&mut self.wire, Severity::Error, &error, None);
+        }
+        if self.session.transaction_status() == TransactionStatus::Idle {
+            self.portals.clear();
+        }
+    }
+
+    fn discard_all(&mut self) {
+        self.statements.clear();
+        self.portals.clear();
+    }
+
     fn extended(
         &mut self,
         step: impl FnOnce(&mut Self) -> Result<(), (SqlError, Option<String>)>,
     ) -> bool {
+        self.session.start_implicit_transaction();
         if let Err((error, text)) = step(self) {
             if self.lost.is_none() {
                 report_error(&mut self.wire, Severity::Error, &error, text.as_deref());
@@ -863,9 +925,11 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
     }
 
     fn simple_query(&mut self, text: &str) -> bool {
+        self.session.start_implicit_transaction();
         let mut results = 0usize;
         let mut sent = true;
         let mut unsendable = None;
+        let mut discarded_all = false;
         let wire = RefCell::new(&mut self.wire);
         let mut copy = WireCopy {
             wire: &wire,
@@ -875,6 +939,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             text,
             &mut |result| {
                 results += 1;
+                discarded_all |= result.tag == DISCARD_ALL_TAG;
                 let mut wire = wire.borrow_mut();
                 for notice in &result.notices {
                     send_notice(&mut wire, notice);
@@ -914,12 +979,17 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             Some(error) => Err(error),
             None => outcome,
         };
+        let succeeded = outcome.is_ok();
         match outcome {
             Ok(()) if results == 0 => self.wire.outbox.empty_query_response(),
             Ok(()) => {}
             Err(_) if self.lost.is_some() => return true,
             Err(error) => report_error(&mut self.wire, Severity::Error, &error, Some(text)),
         }
+        if discarded_all {
+            self.discard_all();
+        }
+        self.finish_implicit_transaction(succeeded);
         self.report_changed_parameters();
         self.ready_for_query();
         self.wire.flush().is_ok()
@@ -1219,6 +1289,9 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             self.wire.outbox.empty_query_response();
             return Ok(());
         };
+        if result.tag == DISCARD_ALL_TAG {
+            self.discard_all();
+        }
         if let Some(portal) = self.portals.get_mut(name) {
             portal.run = PortalRun::Finished(result.tag.clone());
         }

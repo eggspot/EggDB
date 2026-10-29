@@ -1,3 +1,4 @@
+use crate::backend_keys::BackendKeys;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::scram::ScramVerifier;
 use crate::wire::Wire;
@@ -118,6 +119,7 @@ pub(crate) struct Shared<'a> {
     pub(crate) log: &'a (dyn Fn(&str) + Sync),
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) secret: [u8; 32],
+    pub(crate) backend_keys: BackendKeys,
     pub(crate) unauthenticated: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
 }
@@ -164,6 +166,7 @@ pub fn serve<S: KeyValueStore + Sync>(
         log,
         throttle: AuthenticationThrottle::new(),
         secret,
+        backend_keys: BackendKeys::new(),
         unauthenticated: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
     };
@@ -239,7 +242,7 @@ fn run_connection<S: KeyValueStore>(
 fn refuse_connection(stream: TcpStream, shared: &Shared<'_>) {
     let deadline = Instant::now() + REFUSAL_TIMEOUT;
     if let Ok(mut wire) = Wire::new(stream, shared.stop, Some(deadline)) {
-        refuse_too_many(&mut wire);
+        refuse_too_many(&mut wire, shared);
     }
 }
 

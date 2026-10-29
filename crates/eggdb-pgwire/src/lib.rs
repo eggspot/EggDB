@@ -14,12 +14,18 @@
 //! - The simple query protocol and the extended one (`Parse`, `Bind`, `Describe`, `Execute`,
 //!   `Close`, `Sync`, `Flush`) with `$n` parameters in text or binary form and results in
 //!   either.
+//! - Implicit transactions as PostgreSQL runs them: the statements of one `Query` message, and
+//!   of an extended-query pipeline up to its `Sync`, commit or roll back together unless a
+//!   `BEGIN` opened a block.
+//! - `CancelRequest`: a client that sends the process ID and secret key a connection received
+//!   in its `BackendKeyData` stops the statement that connection is running, with `57014`.
 //! - The copy sub-protocol: `COPY ... FROM STDIN` (`CopyInResponse`, then the client's
 //!   `CopyData`, `CopyDone` or `CopyFail`) and `COPY ... TO STDOUT` (`CopyOutResponse`, one
 //!   `CopyData` per row, `CopyDone`), in the text and CSV formats, which psql's `\copy` uses.
 //!
 //! The guide is "Connecting with psql" in `docs/sql.md` in the repository.
 
+mod backend_keys;
 mod connection;
 pub mod messages;
 mod scram;
