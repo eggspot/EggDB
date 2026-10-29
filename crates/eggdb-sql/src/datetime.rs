@@ -794,7 +794,7 @@ pub(crate) fn unknown_unit(name: &str, kind: DateTimeKind) -> SqlError {
     )
 }
 
-fn iso_week(days: i64) -> (i64, i64) {
+pub(crate) fn iso_week(days: i64) -> (i64, i64) {
     let weekday = (days + 5).rem_euclid(7) + 1;
     let thursday = days - weekday + 4;
     let (iso_year, _, _) = civil_from_days(thursday);

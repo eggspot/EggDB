@@ -12,7 +12,7 @@ const NAME_WIDTH: usize = 9;
 const JULIAN_DAY_OF_EPOCH: i64 = 2_451_545;
 const NANOS_PER_MICRO: i64 = 1000;
 
-const MONTHS: [&str; 12] = [
+pub(crate) const MONTHS: [&str; 12] = [
     "JANUARY",
     "FEBRUARY",
     "MARCH",
@@ -27,7 +27,7 @@ const MONTHS: [&str; 12] = [
     "DECEMBER",
 ];
 
-const DAYS: [&str; 7] = [
+pub(crate) const DAYS: [&str; 7] = [
     "SUNDAY",
     "MONDAY",
     "TUESDAY",
