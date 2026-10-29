@@ -30,22 +30,28 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             runs_here: true
+            capi: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
             runs_here: true
+            capi: true
           - target: aarch64-apple-darwin
             os: macos-latest
             runs_here: true
+            capi: true
           - target: x86_64-apple-darwin
             os: macos-latest
             runs_here: false
+            capi: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             runs_here: true
+            capi: true
             exe: .exe
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             runs_here: false
+            capi: true
             exe: .exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -77,7 +83,7 @@ jobs:
           fi
       - name: Check the shipped binary depends only on our own crates
         run: |
-          foreign=$(cargo tree -p eggdb -e normal,build --prefix none --target "$TARGET" \
+          foreign=$(cargo tree -p eggdb -p eggdb-capi -e normal,build --prefix none --target "$TARGET" \
             | grep -v -E ' \((/|[A-Za-z]:)' || true)
           if [ -n "$foreign" ]; then
             echo "::error::third-party crates in the shipped binary (D1): $foreign"
@@ -110,6 +116,30 @@ jobs:
           archive_bytes=$(wc -c < "$archive" | tr -d ' ')
           printf '| `%s` | %s | %s |\n' "$TARGET" "$binary_bytes" "$archive_bytes" > "$PACKAGE.size"
           rm -r "$PACKAGE"
+      - name: Build the C API library
+        if: matrix.capi
+        run: cargo build --release --locked -p eggdb-capi --target "$TARGET"
+      - name: Check the built C API from C, C++ and Python
+        if: matrix.capi && matrix.runs_here && !matrix.exe
+        run: scripts/c-api/check.sh "target/$TARGET/release" "$RUNNER_TEMP/c-api"
+      - name: Package the C API
+        if: matrix.capi
+        run: |
+          capi="eggdb-capi-$VERSION-$TARGET"
+          release="target/$TARGET/release"
+          mkdir -p "dist/$capi/include" "dist/$capi/lib"
+          cp crates/eggdb-capi/include/eggdb.h "dist/$capi/include/"
+          for library in libeggdb_capi.so libeggdb_capi.dylib libeggdb_capi.a eggdb_capi.dll eggdb_capi.dll.lib eggdb_capi.lib; do
+            if [ -f "$release/$library" ]; then cp "$release/$library" "dist/$capi/lib/"; fi
+          done
+          cp examples/python/eggdb_ctypes.py docs/c-api.md LICENSE-MIT LICENSE-APACHE "dist/$capi/"
+          cd dist
+          if [ -n "$EXE" ]; then
+            7z a -tzip -mx=9 "$capi.zip" "$capi" > /dev/null
+          else
+            tar -czf "$capi.tar.gz" "$capi"
+          fi
+          rm -r "$capi"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.PACKAGE }}

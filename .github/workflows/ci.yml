@@ -34,7 +34,7 @@ jobs:
       - name: Check the shipped crates are only our own
         run: |
           set -o pipefail
-          shipped=$(cargo tree -p eggdb -e normal,build --target all --prefix none --format '{p}' \
+          shipped=$(cargo tree -p eggdb -p eggdb-capi -e normal,build --target all --prefix none --format '{p}' \
             | awk '{print $1}' | sort -u)
           if [ -z "$shipped" ]; then
             echo "::error::cargo tree listed no crates for eggdb"
@@ -71,6 +71,8 @@ jobs:
           echo "EGGDB_SMOKE_SQLCMD=$tool" >> "$GITHUB_ENV"
       - name: Smoke test the eggdb command
         run: cargo build -p eggdb && scripts/smoke-test.sh target/debug/eggdb
+      - name: Check the C API from C, C++ and Python
+        run: cargo build -p eggdb-capi && scripts/c-api/check.sh target/debug "$RUNNER_TEMP/c-api"
       - name: Docs
         run: cargo doc --workspace --no-deps
         env:
@@ -109,6 +111,11 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
           cargo build -p eggdb
           scripts/smoke-test.sh "target/debug/eggdb$exe"
+      - name: Check the C API from C, C++ and Python (from Python alone on Windows)
+        run: |
+          cargo build -p eggdb-capi
+          if [ "$RUNNER_OS" = Windows ]; then export NO_C_COMPILER=1 PYTHON=python; fi
+          scripts/c-api/check.sh target/debug "$(mktemp -d)"
 
   musl:
     runs-on: ubuntu-latest
