@@ -164,8 +164,12 @@ pub struct Features {
 impl Features {
     /// The compatible features this release knows: none yet.
     pub const KNOWN_COMPATIBLE: u64 = 0;
-    /// The read-only-compatible features this release knows: none yet.
-    pub const KNOWN_READ_ONLY_COMPATIBLE: u64 = 0;
+    /// The read-only-compatible bit of a file that has held keys with a time to live (D140):
+    /// a release that does not know it would show expired keys and could write keys without
+    /// their deadlines, so it may only read the file.
+    pub const EXPIRING_KEYS: u64 = 1 << 0;
+    /// The read-only-compatible features this release knows: [`Features::EXPIRING_KEYS`].
+    pub const KNOWN_READ_ONLY_COMPATIBLE: u64 = Self::EXPIRING_KEYS;
     /// The incompatible features this release knows: none yet.
     pub const KNOWN_INCOMPATIBLE: u64 = 0;
 
@@ -182,6 +186,15 @@ impl Features {
             return Err(FormatError::ReadOnlyFeatures { bits: read_only });
         }
         Ok(())
+    }
+
+    /// The features in `self` or in `other`.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            compatible: self.compatible | other.compatible,
+            read_only_compatible: self.read_only_compatible | other.read_only_compatible,
+            incompatible: self.incompatible | other.incompatible,
+        }
     }
 }
 
@@ -870,6 +883,25 @@ mod tests {
         let refused = Err(FormatError::UnsupportedFeatures { bits: 1 << 63 });
         assert_eq!(incompatible.check(Access::ReadOnly), refused);
         assert_eq!(incompatible.check(Access::ReadWrite), refused);
+    }
+
+    #[test]
+    fn expiring_keys_are_a_known_read_only_compatible_bit_zero() {
+        assert_eq!(Features::EXPIRING_KEYS, 1);
+        let expiring = Features {
+            read_only_compatible: Features::EXPIRING_KEYS,
+            ..Features::default()
+        };
+        assert_eq!(expiring.check(Access::ReadWrite), Ok(()));
+        let with_unknown = expiring.union(Features {
+            read_only_compatible: 1 << 1,
+            ..Features::default()
+        });
+        assert_eq!(with_unknown.read_only_compatible, 0b11);
+        assert_eq!(
+            with_unknown.check(Access::ReadWrite),
+            Err(FormatError::ReadOnlyFeatures { bits: 1 << 1 })
+        );
     }
 
     #[test]

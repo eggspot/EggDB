@@ -80,6 +80,11 @@ pub enum ErrorKind {
     /// The key starts with the bytes EggDB keeps for collections, `0xff 'C' 'O' 'L' 0x00`, which
     /// the default key space refuses. Nothing changed, and the transaction stays open.
     ReservedKey,
+    /// The value is not a counter (see
+    /// [`WriteTransaction::increment`](crate::WriteTransaction::increment)): not a decimal
+    /// integer from `i64::MIN` to `i64::MAX`, or adding the step would take it out of that
+    /// range. Nothing changed, and the transaction stays open.
+    NotAnInteger,
     /// Any other failure.
     Other,
 }
@@ -234,7 +239,8 @@ impl From<Error> for std::io::Error {
             ErrorKind::TooLarge
             | ErrorKind::InvalidOption
             | ErrorKind::InvalidCollectionName
-            | ErrorKind::ReservedKey => std::io::ErrorKind::InvalidInput,
+            | ErrorKind::ReservedKey
+            | ErrorKind::NotAnInteger => std::io::ErrorKind::InvalidInput,
             ErrorKind::OutOfMemory => std::io::ErrorKind::OutOfMemory,
             ErrorKind::DatabaseFull => std::io::ErrorKind::StorageFull,
             _ => std::io::ErrorKind::Other,

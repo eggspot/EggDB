@@ -1,8 +1,10 @@
 use crate::database::Database;
 use crate::error::{Error, ErrorKind, Result};
+use crate::expiry::{self, Moment};
 use crate::scan::{KeyRange, Reader, Scan};
 use crate::transaction::{ReadTransaction, WriteTransaction};
 use eggdb_storage::BTree;
+use std::time::Duration;
 
 pub(crate) const COLLECTIONS_PREFIX: &[u8] = b"\xffCOL\x00";
 pub(crate) const COLLECTIONS_END: &[u8] = b"\xffCOL\x01";
@@ -27,7 +29,7 @@ pub(crate) fn refuse_reserved(key: &[u8]) -> Result<()> {
     }
     Err(Error::new(
         ErrorKind::ReservedKey,
-        "keys that start with the bytes 0xff 'C' 'O' 'L' 0x00 hold EggDB's collections, so the default key space refuses them; store the key in a collection, or choose another first byte",
+        "keys that start with the bytes 0xff 'C' 'O' 'L' 0x00 hold EggDB's collections and keys' times to live, so the default key space refuses them; store the key in a collection, or choose another first byte",
     ))
 }
 
@@ -191,14 +193,67 @@ impl<'db> Collection<'db> {
     /// Removes `key` from the collection and commits, and returns whether the key was there.
     /// Nothing is committed when it was absent.
     pub fn delete(&self, key: impl AsRef<[u8]>) -> Result<bool> {
-        let mut transaction = self.database.begin_write()?;
-        if transaction.collection(&self.name)?.delete(key)? {
-            transaction.commit()?;
-            Ok(true)
-        } else {
-            transaction.rollback()?;
-            Ok(false)
-        }
+        self.database
+            .write_if(|transaction| transaction.collection(&self.name)?.delete(key))
+    }
+
+    /// Stores `value` under `key` in the collection with a time to live of `ttl`, and commits
+    /// (see [`WriteTransaction::put_with_expiry`]).
+    pub fn put_with_expiry(
+        &self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+        ttl: Duration,
+    ) -> Result<()> {
+        self.database.write(|transaction| {
+            transaction
+                .collection(&self.name)?
+                .put_with_expiry(key, value, ttl)
+        })
+    }
+
+    /// Gives `key` in the collection a time to live of `ttl` and commits, and returns whether the
+    /// key was there (see [`WriteTransaction::set_expiry`]).
+    pub fn set_expiry(&self, key: impl AsRef<[u8]>, ttl: Duration) -> Result<bool> {
+        self.database
+            .write_if(|transaction| transaction.collection(&self.name)?.set_expiry(key, ttl))
+    }
+
+    /// Removes the time to live of `key` in the collection and commits, and returns whether it
+    /// had one (see [`WriteTransaction::clear_expiry`]).
+    pub fn clear_expiry(&self, key: impl AsRef<[u8]>) -> Result<bool> {
+        self.database
+            .write_if(|transaction| transaction.collection(&self.name)?.clear_expiry(key))
+    }
+
+    /// How long `key` in the collection has left before it expires as of the last commit, or
+    /// `None` when it has no time to live or is absent.
+    pub fn time_to_live(&self, key: impl AsRef<[u8]>) -> Result<Option<Duration>> {
+        self.database
+            .read(|transaction| transaction.collection(&self.name)?.time_to_live(key))
+    }
+
+    /// Adds `by` to the counter under `key` in the collection, commits, and returns the new
+    /// count (see [`WriteTransaction::increment`]).
+    pub fn increment(&self, key: impl AsRef<[u8]>, by: i64) -> Result<i64> {
+        self.database
+            .write(|transaction| transaction.collection(&self.name)?.increment(key, by))
+    }
+
+    /// Stores `new` under `key` in the collection (or removes it, for `None`) only when its
+    /// value is `expected`, commits, and returns whether it did (see
+    /// [`WriteTransaction::compare_and_set`]).
+    pub fn compare_and_set(
+        &self,
+        key: impl AsRef<[u8]>,
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> Result<bool> {
+        self.database.write_if(|transaction| {
+            transaction
+                .collection(&self.name)?
+                .compare_and_set(key, expected, new)
+        })
     }
 }
 
@@ -209,6 +264,7 @@ pub struct ReadCollection<'t> {
     tree: Option<BTree>,
     base: Vec<u8>,
     name: Box<str>,
+    expiry_now: Option<Moment>,
 }
 
 impl ReadCollection<'_> {
@@ -217,12 +273,24 @@ impl ReadCollection<'_> {
         &self.name
     }
 
-    /// The value stored under `key` in the collection, or `None` when the key is absent.
+    /// The value stored under `key` in the collection, or `None` when the key is absent or has
+    /// expired.
     pub fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
-        let Some(tree) = &self.tree else {
-            return Ok(None);
-        };
-        self.reader.get(tree, &[self.base.as_slice(), key.as_ref()].concat())
+        self.get_with(key, <[u8]>::to_vec)
+    }
+
+    fn has_expired(&self, tree: &BTree, stored: &[u8]) -> Result<bool> {
+        match self.expiry_now {
+            Some(now) => expiry::has_expired(self.reader, tree, stored, now),
+            None => Ok(false),
+        }
+    }
+
+    /// How long `key` in the collection has left before it expires, or `None` when it has no
+    /// time to live or is absent, as [`ReadTransaction::time_to_live`] says.
+    pub fn time_to_live(&self, key: impl AsRef<[u8]>) -> Result<Option<Duration>> {
+        let stored = [self.base.as_slice(), key.as_ref()].concat();
+        expiry::time_left(self.reader, self.tree, &stored, self.expiry_now)
     }
 
     /// Calls `read` with the value stored under `key` where it lies, as
@@ -235,20 +303,26 @@ impl ReadCollection<'_> {
         let Some(tree) = &self.tree else {
             return Ok(None);
         };
-        self.reader
-            .get_with(tree, &[self.base.as_slice(), key.as_ref()].concat(), read)
+        let stored = [self.base.as_slice(), key.as_ref()].concat();
+        if self.has_expired(tree, &stored)? {
+            return Ok(None);
+        }
+        self.reader.get_with(tree, &stored, read)
     }
 
     /// The collection's entries with keys in `range`, in key order; `.rev()` gives them
-    /// largest key first. See [`Scan`] and [`KeyRange`].
+    /// largest key first. Expired keys are left out. See [`Scan`] and [`KeyRange`].
     pub fn scan(&self, range: impl KeyRange) -> Scan<'_> {
         Scan::within_between(self.reader, self.tree, &self.base, &range)
+            .hiding_expired(self.expiry_now)
     }
 
     /// The collection's entries whose keys start with `prefix`, in key order; `.rev()` gives
-    /// them largest key first. The empty prefix scans the whole collection.
+    /// them largest key first. The empty prefix scans the whole collection. Expired keys are
+    /// left out.
     pub fn scan_prefix(&self, prefix: impl AsRef<[u8]>) -> Scan<'_> {
         Scan::within_prefix(self.reader, self.tree, &self.base, prefix.as_ref())
+            .hiding_expired(self.expiry_now)
     }
 }
 
@@ -280,9 +354,9 @@ impl WriteCollection<'_, '_> {
     }
 
     /// The value stored under `key` in the collection, this transaction's changes included, or
-    /// `None` when the key is absent.
+    /// `None` when the key is absent or has expired.
     pub fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
-        self.transaction.get_raw(&self.key(key.as_ref()))
+        self.transaction.get_live(&self.key(key.as_ref()))
     }
 
     /// Calls `read` with the value stored under `key` where it lies, as
@@ -292,16 +366,12 @@ impl WriteCollection<'_, '_> {
         key: impl AsRef<[u8]>,
         read: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>> {
-        let Some(tree) = self.transaction.tree() else {
-            return Ok(None);
-        };
         self.transaction
-            .reader()
-            .get_with(&tree, &self.key(key.as_ref()), read)
+            .get_live_with(&self.key(key.as_ref()), read)
     }
 
     /// The collection's entries with keys in `range`, this transaction's changes included, in
-    /// key order; `.rev()` gives them largest key first.
+    /// key order; `.rev()` gives them largest key first. Expired keys are left out.
     pub fn scan(&self, range: impl KeyRange) -> Scan<'_> {
         Scan::within_between(
             self.transaction.reader(),
@@ -309,10 +379,12 @@ impl WriteCollection<'_, '_> {
             &self.base,
             &range,
         )
+        .hiding_expired(self.transaction.expiry_now())
     }
 
     /// The collection's entries whose keys start with `prefix`, this transaction's changes
-    /// included, in key order; `.rev()` gives them largest key first.
+    /// included, in key order; `.rev()` gives them largest key first. Expired keys are left
+    /// out.
     pub fn scan_prefix(&self, prefix: impl AsRef<[u8]>) -> Scan<'_> {
         Scan::within_prefix(
             self.transaction.reader(),
@@ -320,13 +392,74 @@ impl WriteCollection<'_, '_> {
             &self.base,
             prefix.as_ref(),
         )
+        .hiding_expired(self.transaction.expiry_now())
     }
 
-    /// Stores `value` under `key` in the collection, replacing the value there. Limits and
-    /// failures are those of [`WriteTransaction::put`], with keys ten bytes shorter.
+    /// Stores `value` under `key` in the collection, replacing the value there and any time to
+    /// live. Limits and failures are those of [`WriteTransaction::put`], with keys ten bytes
+    /// shorter.
     pub fn put(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
         let key = self.checked_key(key.as_ref())?;
-        self.transaction.put_raw(&key, value.as_ref())
+        self.transaction.put_live(&key, value.as_ref())
+    }
+
+    /// Stores `value` under `key` in the collection with a time to live of `ttl`, as
+    /// [`WriteTransaction::put_with_expiry`] does; such a key is at most
+    /// [`Database::max_collection_key_bytes`] less 14 bytes long.
+    pub fn put_with_expiry(
+        &mut self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+        ttl: Duration,
+    ) -> Result<()> {
+        let key = key.as_ref();
+        let stored = self.checked_key(key)?;
+        self.transaction
+            .put_expiring(&stored, key.len(), value.as_ref(), ttl)
+    }
+
+    /// Gives `key` in the collection a time to live of `ttl` from now, and returns whether the
+    /// key was there, as [`WriteTransaction::set_expiry`] does.
+    pub fn set_expiry(&mut self, key: impl AsRef<[u8]>, ttl: Duration) -> Result<bool> {
+        let key = key.as_ref();
+        let stored = self.key(key);
+        self.transaction.expire_stored(&stored, key.len(), ttl)
+    }
+
+    /// Removes the time to live of `key` in the collection, and returns whether it had one.
+    pub fn clear_expiry(&mut self, key: impl AsRef<[u8]>) -> Result<bool> {
+        let stored = self.key(key.as_ref());
+        self.transaction.persist_stored(&stored)
+    }
+
+    /// How long `key` in the collection has left before it expires, this transaction's changes
+    /// included, or `None` when it has no time to live or is absent.
+    pub fn time_to_live(&self, key: impl AsRef<[u8]>) -> Result<Option<Duration>> {
+        self.transaction.time_to_live_stored(&self.key(key.as_ref()))
+    }
+
+    /// Adds `by` to the counter under `key` in the collection and returns the new count, as
+    /// [`WriteTransaction::increment`] does.
+    pub fn increment(&mut self, key: impl AsRef<[u8]>, by: i64) -> Result<i64> {
+        let stored = self.checked_key(key.as_ref())?;
+        self.transaction.increment_stored(&stored, by)
+    }
+
+    /// Stores `new` under `key` in the collection (or removes it, for `None`) only when its
+    /// value is `expected` (`None`: absent), and returns whether it did, as
+    /// [`WriteTransaction::compare_and_set`] does.
+    pub fn compare_and_set(
+        &mut self,
+        key: impl AsRef<[u8]>,
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> Result<bool> {
+        let stored = match new {
+            Some(_) => self.checked_key(key.as_ref())?,
+            None => self.key(key.as_ref()),
+        };
+        self.transaction
+            .compare_and_set_stored(&stored, expected, new)
     }
 
     /// Stores `value` under `key` in the collection only when `key` is absent, and returns
@@ -337,12 +470,13 @@ impl WriteCollection<'_, '_> {
         value: impl AsRef<[u8]>,
     ) -> Result<bool> {
         let key = self.checked_key(key.as_ref())?;
-        self.transaction.put_if_absent_raw(&key, value.as_ref())
+        self.transaction.put_if_absent_live(&key, value.as_ref())
     }
 
-    /// Removes `key` and its value from the collection, and returns whether the key was there.
+    /// Removes `key` and its value from the collection, and returns whether the key was there;
+    /// an expired key was not.
     pub fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<bool> {
-        self.transaction.delete_raw(&self.key(key.as_ref()))
+        self.transaction.delete_live(&self.key(key.as_ref()))
     }
 
     fn key(&self, key: &[u8]) -> Vec<u8> {
@@ -388,6 +522,7 @@ impl ReadTransaction<'_> {
             tree: self.tree(),
             base: entries_prefix(number),
             name: name.into(),
+            expiry_now: self.expiry_now(),
         })
     }
 
@@ -493,7 +628,7 @@ impl<'db> WriteTransaction<'db> {
                 break;
             }
             for key in &keys {
-                self.delete_raw(key)?;
+                self.remove_stored(key)?;
             }
         }
         self.delete_raw(&key)?;

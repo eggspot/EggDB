@@ -1,7 +1,7 @@
 use crate::btree::{AppendHint, BTree, TreeReport};
 use crate::cursor::{Cursor, KeyAndValue, KeyAndValueLen};
 use crate::error::StorageError;
-use crate::format::{NO_PAGE, Superblock};
+use crate::format::{Features, NO_PAGE, Superblock};
 use crate::hybrid_clock::{CommitStamp, HybridClock};
 use crate::log::{Durability, LogStats};
 use crate::page_cache::{CacheSize, CacheStats, PageCache, PageSource, Snapshot};
@@ -111,6 +111,7 @@ impl<F: File> Store<F> {
             finished: false,
             began_after: state.last_commit,
             catalog_root: state.cache.superblock().catalog_root,
+            features: Features::default(),
             append_hint: AppendHint::default(),
         })
     }
@@ -362,6 +363,7 @@ pub struct WriteTransaction<'s, F: File> {
     finished: bool,
     began_after: CommitStamp,
     catalog_root: u64,
+    features: Features,
     append_hint: AppendHint,
 }
 
@@ -380,6 +382,12 @@ impl<F: File> WriteTransaction<'_, F> {
     /// created.
     pub fn set_catalog_root(&mut self, root: u64) {
         self.catalog_root = root;
+    }
+
+    /// Adds `features` to the feature flags this transaction's commit writes, beside the
+    /// file's own; a flag once committed stays set.
+    pub fn add_features(&mut self, features: Features) {
+        self.features = self.features.union(features);
     }
 
     /// Creates an empty tree (see [`BTree::create`]).
@@ -498,8 +506,10 @@ impl<F: File> WriteTransaction<'_, F> {
             }
         };
         let catalog_root = self.catalog_root;
+        let features = self.features;
         let committed = state.cache.commit_stamped(stamp.bits(), |superblock| {
             superblock.catalog_root = catalog_root;
+            superblock.features = superblock.features.union(features);
             superblock.clock_high_water = stamp.bits();
         });
         match committed {

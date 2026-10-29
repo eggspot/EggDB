@@ -53,6 +53,13 @@
 //!   [`WriteTransaction::collection`] a [`ReadCollection`] or [`WriteCollection`] inside a
 //!   transaction. One transaction can change several collections and the default key space
 //!   together.
+//! - Expiring keys and counters: [`WriteTransaction::put_with_expiry`],
+//!   [`set_expiry`](WriteTransaction::set_expiry), [`clear_expiry`](WriteTransaction::clear_expiry)
+//!   and [`time_to_live`](ReadTransaction::time_to_live) give keys a time to live, after which
+//!   no read sees them and commits remove them; [`WriteTransaction::increment`] adds to a
+//!   counter and [`WriteTransaction::compare_and_set`] changes a value only when it is the one
+//!   expected, each atomic. [`Database`] and [`Collection`] have one-step versions of each, and
+//!   [`Options::clock`] sets the clock time is read from, a [`SimClock`] in tests.
 //! - [`Error`], with an [`ErrorKind`] to match on.
 //! - [`sql`]: SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, from
 //!   [`Database::sql_store`].
@@ -60,6 +67,7 @@
 mod collection;
 mod database;
 mod error;
+mod expiry;
 mod options;
 mod scan;
 pub mod sql;
@@ -68,6 +76,7 @@ mod writer_slot;
 
 pub use collection::{Collection, ReadCollection, WriteCollection};
 pub use database::{CheckReport, Database, Stats};
+pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;
 pub use error::{Error, ErrorKind, Result};
 pub use options::{Durability, Options};

@@ -183,6 +183,15 @@ impl Cursor {
         )))
     }
 
+    /// Makes the next call return again the entry the last call returned, from the buffer,
+    /// without reading a page: a reader that looked at an entry and decided to keep it reads
+    /// it once more. It does nothing before the first entry of a batch, and the next call must
+    /// be of the same kind as the last one ([`Cursor::next`] or
+    /// [`Cursor::next_key_and_value_len`]).
+    pub fn step_back(&mut self) {
+        self.position = self.position.saturating_sub(1);
+    }
+
     fn advance(
         &mut self,
         pages: &impl PageSource,

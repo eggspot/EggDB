@@ -1,15 +1,19 @@
 use crate::error::{Error, Result};
+use crate::expiry::Moment;
 use crate::options::Options;
 use crate::transaction::{ReadTransaction, WriteTransaction};
 use crate::writer_slot::WriterSlot;
-use eggdb_platform::{OsFile, OsFileSystem, OsMemory, SystemClock};
+use eggdb_platform::{Clock, OsFile, OsFileSystem, OsMemory};
 use eggdb_storage::{
-    Access, BTree, CacheSize, CommitStamp, CreateOptions, FileId, NO_PAGE, PageCache, PageFile,
-    PageSize, StorageError, Store,
+    Access, BTree, CacheSize, CommitStamp, CreateOptions, Features, FileId, NO_PAGE, PageCache,
+    PageFile, PageSize, StorageError, Store,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+const NANOS_PER_MICRO: u64 = 1_000;
 
 /// An EggDB database in one file, opened in this process: an ordered map from byte-string keys
 /// to byte-string values, with transactions.
@@ -67,6 +71,16 @@ pub struct Database {
     page_size: PageSize,
     read_only: bool,
     write_timeout: Duration,
+    clock: ClockHandle,
+    expiring_keys: AtomicBool,
+}
+
+struct ClockHandle(Arc<dyn Clock>);
+
+impl std::fmt::Debug for ClockHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Clock")
+    }
 }
 
 /// What [`Database::stats`] reports: the file's size and free space, the last commit, and
@@ -190,7 +204,10 @@ impl Database {
             CacheSize::Bytes(options.cache_bytes),
         )
         .map_err(Error::storage)?;
-        let store = Store::new(cache, Arc::new(SystemClock::new()));
+        let clock = options.clock.clock();
+        let store = Store::new(cache, Arc::clone(&clock));
+        let features = store.superblock().map_err(Error::storage)?.features;
+        let expiring_keys = features.read_only_compatible & Features::EXPIRING_KEYS != 0;
         let configured = store
             .set_durability(options.durability.to_storage())
             .and_then(|()| store.set_auto_checkpoint_bytes(options.auto_checkpoint_log_bytes))
@@ -204,6 +221,8 @@ impl Database {
             page_size,
             read_only: options.read_only,
             write_timeout: options.write_timeout,
+            clock: ClockHandle(clock),
+            expiring_keys: AtomicBool::new(expiring_keys),
         })
     }
 
@@ -468,6 +487,24 @@ impl Database {
 
     pub(crate) fn remember_tree(&self, tree: BTree) {
         let _ = self.tree.set(tree);
+    }
+
+    pub(crate) fn has_expiring_keys(&self) -> bool {
+        self.expiring_keys.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn note_expiring_keys(&self) {
+        self.expiring_keys.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn now_after(&self, last_commit: CommitStamp) -> Moment {
+        let wall = self.clock.0.unix_time_nanos() / NANOS_PER_MICRO;
+        let committed = if last_commit == CommitStamp::NONE {
+            0
+        } else {
+            last_commit.unix_micros()
+        };
+        Moment::from_unix_micros(wall.max(committed))
     }
 }
 

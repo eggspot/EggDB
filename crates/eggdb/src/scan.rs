@@ -1,5 +1,6 @@
 use crate::collection;
 use crate::error::{Error, Result};
+use crate::expiry::{self, Moment};
 use eggdb_platform::OsFile;
 use eggdb_storage::{BTree, Cursor, ScanOrder, StorageError};
 use std::iter::FusedIterator;
@@ -153,6 +154,28 @@ impl Reader<'_> {
     }
 }
 
+fn lend_live<'c>(
+    reader: Reader<'_>,
+    cursor: &'c mut Cursor,
+    wanted: Wanted,
+    tree: &BTree,
+    live_at: Option<Moment>,
+) -> Result<Option<Lent<'c>>> {
+    if let Some(now) = live_at {
+        loop {
+            let expired = match reader.lend(cursor, wanted).map_err(Error::storage)? {
+                None => return Ok(None),
+                Some(entry) => expiry::has_expired(reader, tree, entry.key, now)?,
+            };
+            if !expired {
+                cursor.step_back();
+                break;
+            }
+        }
+    }
+    reader.lend(cursor, wanted).map_err(Error::storage)
+}
+
 type Segment = (Bound<Vec<u8>>, Bound<Vec<u8>>);
 
 fn cursor_over(segment: &Segment, tree: &BTree, order: ScanOrder) -> Cursor {
@@ -254,6 +277,9 @@ struct End {
 /// most one large value; as an owned item it is copied once more, so it costs twice its size
 /// in memory until the item is dropped.
 ///
+/// **Expired keys.** A scan leaves out keys whose time to live has run out, as of the moment
+/// its transaction began.
+///
 /// **Errors.** A failure, such as a damaged page or an expired snapshot, is returned as one
 /// `Err` item, after which the scan yields nothing more.
 ///
@@ -284,6 +310,7 @@ pub struct Scan<'t> {
     tree: Option<BTree>,
     segments: Vec<Segment>,
     base_bytes: usize,
+    live_at: Option<Moment>,
     front: End,
     back: End,
     finished: bool,
@@ -350,9 +377,15 @@ impl<'t> Scan<'t> {
             tree,
             segments,
             base_bytes,
+            live_at: None,
             front: End::default(),
             back: End::default(),
         }
+    }
+
+    pub(crate) fn hiding_expired(mut self, now: Option<Moment>) -> Self {
+        self.live_at = now;
+        self
     }
 
     /// The next entry from the front, lent rather than copied: the key and value stay valid
@@ -488,12 +521,12 @@ impl<'t> Scan<'t> {
             let cursor = this
                 .near
                 .get_or_insert_with(|| cursor_over(segment, &tree, order));
-            match self.reader.lend(cursor, wanted) {
+            match lend_live(self.reader, cursor, wanted, &tree, self.live_at) {
                 Ok(Some(entry)) => found = Some(entry),
                 Ok(None) => this.in_far = true,
                 Err(error) => {
                     self.finished = true;
-                    return Err(Error::storage(error));
+                    return Err(error);
                 }
             }
         }
@@ -505,12 +538,12 @@ impl<'t> Scan<'t> {
             let cursor = this
                 .far
                 .get_or_insert_with(|| cursor_over(segment, &tree, order));
-            match self.reader.lend(cursor, wanted) {
+            match lend_live(self.reader, cursor, wanted, &tree, self.live_at) {
                 Ok(Some(entry)) => found = Some(entry),
                 Ok(None) => {}
                 Err(error) => {
                     self.finished = true;
-                    return Err(Error::storage(error));
+                    return Err(error);
                 }
             }
         }

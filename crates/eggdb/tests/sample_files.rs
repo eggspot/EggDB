@@ -265,6 +265,45 @@ fn a_v0_2_0_file_takes_collections_and_keeps_its_default_key_space() {
 }
 
 #[test]
+fn a_v0_2_0_file_takes_expiring_keys_and_then_carries_their_feature_flag() {
+    let dir = TempDirectory::new("expiring");
+    let path = dir.copy_of(CHECKPOINTED_SAMPLE);
+    let expected = v0_2_0_entries();
+    let features = |path: &Path| {
+        PageFile::open(&OsFileSystem::new(), path, Access::ReadOnly)
+            .unwrap()
+            .superblock()
+            .features
+    };
+    assert_eq!(features(&path).read_only_compatible, 0);
+    let db = Database::open(&path).unwrap();
+    assert_holds(&db, &expected);
+    db.put("plain", "no time to live").unwrap();
+    db.close().unwrap();
+    assert_eq!(features(&path).read_only_compatible, 0);
+
+    let db = Database::open(&path).unwrap();
+    db.put_with_expiry("session", "for an hour", std::time::Duration::from_secs(3600))
+        .unwrap();
+    assert_eq!(db.increment("visits", 2).unwrap(), 2);
+    db.close().unwrap();
+    assert_eq!(
+        features(&path).read_only_compatible,
+        eggdb_storage::Features::EXPIRING_KEYS
+    );
+
+    let db = Database::open(&path).unwrap();
+    let mut with_new = expected.clone();
+    with_new.insert(b"plain".to_vec(), b"no time to live".to_vec());
+    with_new.insert(b"session".to_vec(), b"for an hour".to_vec());
+    with_new.insert(b"visits".to_vec(), b"2".to_vec());
+    assert_holds(&db, &with_new);
+    assert!(db.time_to_live("session").unwrap().is_some());
+    assert_eq!(db.check().unwrap().leaked_pages, 0);
+    db.close().unwrap();
+}
+
+#[test]
 fn a_v0_2_0_file_with_a_log_to_replay_recovers_every_commit() {
     let dir = TempDirectory::new("log");
     let expected = v0_2_0_log_sample_entries();

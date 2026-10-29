@@ -1,7 +1,7 @@
 use crate::btree::BTree;
 use crate::cursor::ScanOrder;
 use crate::error::StorageError;
-use crate::format::{Access, FileId, PageSize};
+use crate::format::{Access, Features, FileId, PageSize};
 use crate::hybrid_clock::CommitStamp;
 use crate::log::Durability;
 use crate::page_cache::{CacheSize, PageCache};
@@ -845,4 +845,60 @@ fn a_check_of_a_snapshot_counts_its_commit_while_the_writer_changes_the_tree() {
     let latest = store.begin_read().unwrap().check(&tree).unwrap();
     assert_eq!(latest.entries, 500);
     assert!(latest.leaf_pages < after.leaf_pages);
+}
+
+#[test]
+fn a_cursor_stepped_back_returns_the_same_entry_again_and_then_moves_on() {
+    let fs = SimFileSystem::new();
+    let (store, tree) = created(&fs, 64, &october_clock());
+    fill(&store, &tree, 300, 4);
+    let read = store.begin_read().unwrap();
+    let mut cursor = tree.scan(Bound::Unbounded, Bound::Unbounded, ScanOrder::Ascending);
+    let mut seen = Vec::new();
+    while let Some((key, _)) = read.next(&mut cursor).unwrap() {
+        let key = key.to_vec();
+        cursor.step_back();
+        let again = read.next(&mut cursor).unwrap().unwrap().0.to_vec();
+        assert_eq!(again, key);
+        seen.push(key);
+    }
+    assert_eq!(seen, (0..300).map(key).collect::<Vec<_>>());
+    let mut lengths = tree.scan(Bound::Unbounded, Bound::Unbounded, ScanOrder::Descending);
+    let last = read.next_key_and_value_len(&mut lengths).unwrap().unwrap().0.to_vec();
+    lengths.step_back();
+    let again = read.next_key_and_value_len(&mut lengths).unwrap().unwrap();
+    assert_eq!((again.0.to_vec(), again.1), (last, 4));
+}
+
+#[test]
+fn features_a_commit_adds_stay_set_through_a_checkpoint_and_a_reopen() {
+    let fs = SimFileSystem::new();
+    let clock = october_clock();
+    let (store, tree) = created(&fs, 32, &clock);
+    assert_eq!(store.superblock().unwrap().features, Features::default());
+    let mut write = store.begin_write().unwrap();
+    write.put(&tree, b"k", b"v").unwrap();
+    write.add_features(Features {
+        read_only_compatible: Features::EXPIRING_KEYS,
+        ..Features::default()
+    });
+    write.commit().unwrap();
+    let mut write = store.begin_write().unwrap();
+    write.put(&tree, b"k", b"w").unwrap();
+    write.commit().unwrap();
+    let features = store.superblock().unwrap().features;
+    assert_eq!(features.read_only_compatible, Features::EXPIRING_KEYS);
+    drop(store);
+    let (store, _) = reopened(&fs, 32, &clock);
+    assert_eq!(
+        store.superblock().unwrap().features.read_only_compatible,
+        Features::EXPIRING_KEYS
+    );
+    store.checkpoint().unwrap();
+    drop(store);
+    let (store, _) = reopened(&fs, 32, &clock);
+    assert_eq!(
+        store.superblock().unwrap().features.read_only_compatible,
+        Features::EXPIRING_KEYS
+    );
 }
