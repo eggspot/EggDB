@@ -1251,7 +1251,7 @@ fn max_key_bytes(page_size: usize) -> usize {
     )
 }
 
-fn staging_path(target: &Path) -> PathBuf {
+pub(super) fn staging_path(target: &Path) -> PathBuf {
     let mut name = OsString::from(target.as_os_str());
     name.push(STAGING_SUFFIX);
     PathBuf::from(name)

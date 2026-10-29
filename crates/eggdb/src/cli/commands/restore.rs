@@ -125,6 +125,7 @@ struct Outcome<'r> {
     dialect: Dialect,
     created: bool,
     left_nothing: bool,
+    dry_run: bool,
     elapsed: Duration,
 }
 
@@ -197,25 +198,37 @@ impl Session<'_> {
         let mut input = BufReader::with_capacity(READ_BUFFER_BYTES, Cursor::new(head).chain(raw));
         let target = self.request.file.clone();
         let exists = std::fs::symlink_metadata(&target).is_ok();
+        let dry_run = self.request.dry_run;
         if !exists && !self.request.create {
+            let flag = if dry_run { " --dry-run" } else { "" };
             return Err(Failure::Database {
                 message: format!(
                     "cannot open {}: no such file. Pass --create to restore into a new file.",
                     self.file
                 ),
                 try_command: Some(format!(
-                    "eggdb restore --create {} {}",
+                    "eggdb restore --create {} {}{flag}",
                     self.file, dump_shown
                 )),
                 exit: Exit::DatabaseError,
                 code: "not_found",
             });
         }
-        let staging = (!exists).then(|| staging_path(&target));
+        let staging = (!exists || dry_run).then(|| staging_path(&target));
         if let Some(staging) = &staging
             && std::fs::symlink_metadata(staging).is_ok()
         {
             let staging_shown = render::text(staging.display().to_string().as_bytes());
+            if exists {
+                return Err(Failure::coded(
+                    "already_exists",
+                    format!(
+                        "cannot copy {} for the dry run: {staging_shown} exists, left by a restore that did not finish or one still running. Remove it and try again.",
+                        self.file
+                    ),
+                    Exit::DatabaseError,
+                ));
+            }
             return Err(Failure::database(
                 format!(
                     "cannot create {}: {staging_shown} exists, left by a restore that did not finish or one still running. Remove it and restore again.",
@@ -224,21 +237,31 @@ impl Session<'_> {
                 Exit::DatabaseError,
             ));
         }
+        if let Some(staging) = staging.as_ref().filter(|_| exists) {
+            copy_for_dry_run(
+                &self.file,
+                &self.file_display,
+                &target,
+                self.request.cache_bytes,
+                staging,
+            )?;
+        }
         let open_path = staging.clone().unwrap_or_else(|| target.clone());
         let cache = self.request.cache_bytes.unwrap_or_else(|| bulk_cache(size));
         let options = Options::new()
             .cache_bytes(cache)
             .durability(Durability::Normal)
-            .create_if_missing(staging.is_some());
+            .create_if_missing(!exists);
         let db = Database::open_with(&open_path, options).map_err(|error| {
+            if exists && let Some(staging) = &staging {
+                let _ = std::fs::remove_file(staging);
+            }
             let display = open_path.display().to_string();
             open_failure(
                 &render::text(display.as_bytes()),
                 &display,
                 &error,
-                Access::Write {
-                    create: staging.is_some(),
-                },
+                Access::Write { create: !exists },
             )
         })?;
         let started = Instant::now();
@@ -266,11 +289,11 @@ impl Session<'_> {
         let elapsed = started.elapsed();
         let stopped = report.error.is_some();
         let closed = db.close();
-        let mut left_nothing = false;
+        let unfinished = stopped || closed.is_err();
+        let left_nothing = !exists && unfinished;
         if let Some(staging) = &staging {
-            if stopped || closed.is_err() {
+            if dry_run || unfinished {
                 let _ = std::fs::remove_file(staging);
-                left_nothing = true;
             } else {
                 self.move_into_place(staging, &target)?;
             }
@@ -290,13 +313,34 @@ impl Session<'_> {
             dump_shown: &dump_shown,
             dump_display: &dump_display,
             dialect,
-            created: staging.is_some(),
+            created: !exists,
             left_nothing,
+            dry_run,
             elapsed,
         };
         self.print_report(&outcome)?;
         if let Some(error) = &report.error {
             error_block(&mut self.messages, &error.error);
+            if dry_run {
+                let after = if exists {
+                    format!(
+                        "A real run would leave the {} before it in {} and run nothing after it.",
+                        statements(error.statements_before),
+                        self.file
+                    )
+                } else {
+                    "A real run would create nothing.".to_owned()
+                };
+                return Err(Failure::database(
+                    format!(
+                        "cannot restore {dump_shown} into {} (dry run): line {}: {}. {after} Fix the dump, or add --keep-going to run on and list every error.",
+                        self.file,
+                        render::count(error.line),
+                        error.error.message()
+                    ),
+                    exit_for(&error.error),
+                ));
+            }
             let after = if left_nothing {
                 format!(
                     "Nothing was created; {} does not exist. Fix the dump, or add --keep-going to run on and list every error.",
@@ -320,10 +364,14 @@ impl Session<'_> {
             ));
         }
         if report.error_count() > 0 {
+            let into = match (dry_run, exists) {
+                (false, _) => self.file.clone(),
+                (true, true) => format!("a copy of {}", self.file),
+                (true, false) => format!("a scratch file for {}", self.file),
+            };
             return Err(Failure::database(
                 format!(
-                    "restored {dump_shown} into {} with {} ignored (--keep-going); the report lists them.",
-                    self.file,
+                    "restored {dump_shown} into {into} with {} ignored (--keep-going); the report lists them.",
                     counted(report.error_count(), "error", "errors")
                 ),
                 Exit::DatabaseError,
@@ -399,6 +447,32 @@ impl Session<'_> {
             )
         })
     }
+}
+
+fn copy_for_dry_run(
+    file: &str,
+    file_display: &str,
+    source: &Path,
+    cache_bytes: Option<usize>,
+    copy: &Path,
+) -> Result<(), Failure> {
+    let mut options = Options::new().read_only(true).create_if_missing(false);
+    if let Some(cache_bytes) = cache_bytes {
+        options = options.cache_bytes(cache_bytes);
+    }
+    let db = Database::open_with(source, options)
+        .map_err(|error| open_failure(file, file_display, &error, Access::ReadOnly))?;
+    let copied = db.backup_to(copy);
+    let _ = db.close();
+    copied.map(|_| ()).map_err(|error| {
+        let _ = std::fs::remove_file(copy);
+        Failure::database(
+            format!(
+                "cannot copy {file} for the dry run: {error}. Free space next to the file, or check the directory's permissions."
+            ),
+            Exit::for_error(error.kind()),
+        )
+    })
 }
 
 fn run_restore(
@@ -740,7 +814,14 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
     let report = outcome.report;
     let file = outcome.file;
     if let Some(error) = &report.error {
-        let after = if outcome.left_nothing {
+        let after = if outcome.dry_run && outcome.created {
+            format!("A real run would create nothing; {file} does not exist.")
+        } else if outcome.dry_run {
+            format!(
+                "A real run would leave the {} before it in {file} and run nothing after it.",
+                statements(error.statements_before)
+            )
+        } else if outcome.left_nothing {
             format!("Nothing was created; {file} does not exist.")
         } else {
             format!(
@@ -769,11 +850,16 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
         } else {
             String::new()
         };
+        let holds = if outcome.dry_run {
+            "would hold"
+        } else {
+            "holds"
+        };
         return (
             "errors ignored:",
             Style::Red,
             format!(
-                "{} failed and {} skipped (--keep-going), listed above; {file} holds everything else{not_restored}.",
+                "{} failed and {} skipped (--keep-going), listed above; {file} {holds} everything else{not_restored}.",
                 statements(count),
                 if count == 1 { "was" } else { "were" }
             ),
@@ -797,18 +883,23 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
             counted(consequences, "consequence", "consequences")
         )
     };
+    let (are, is) = if outcome.dry_run {
+        ("would be", "would be")
+    } else {
+        ("are", "is")
+    };
     let text = if report.tables_skipped > 0 || report.rows_skipped > 0 {
         format!(
-            "{} of {} tables and {} of {} rows are in {file}; {listed}",
+            "{} of {} tables and {} of {} rows {are} in {file}; {listed}",
             render::count(report.tables),
             render::count(total_tables(report)),
             render::count(report.rows),
             render::count(total_rows(report)),
         )
     } else if skipped > 0 || consequences > 0 || differences > 0 {
-        format!("every table and row of the {source} is in {file}; {listed}")
+        format!("every table and row of the {source} {is} in {file}; {listed}")
     } else {
-        format!("every table and row of the {source} is in {file}.")
+        format!("every table and row of the {source} {is} in {file}.")
     };
     ("ok:", Style::Green, text)
 }
@@ -881,10 +972,14 @@ fn listed_lines(out: &mut Output<'_>, rows: &[(String, String, String)], more: u
 
 fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
     let report = outcome.report;
+    let into = match (outcome.dry_run, outcome.created) {
+        (false, _) => outcome.file.to_owned(),
+        (true, false) => format!("a copy of {}, then removed the copy", outcome.file),
+        (true, true) => format!("a scratch file for {}, then removed it", outcome.file),
+    };
     out.text(&format!(
-        "restored {} into {} ({}, {})\n",
+        "restored {} into {into} ({}, {})\n",
         outcome.dump_shown,
-        outcome.file,
         statements(report.statements),
         seconds(outcome.elapsed)
     ));
@@ -1267,12 +1362,16 @@ fn json_report(outcome: &Outcome<'_>) -> String {
         })
         .collect();
     let (_, _, verdict_text) = verdict(outcome);
-    JsonObject::new()
+    let mut object = JsonObject::new()
         .boolean("ok", report.succeeded())
         .string("file", outcome.file_display)
         .string("dump", outcome.dump_display)
         .raw("scripts", &json_string_list(&report.scripts))
-        .boolean("created", outcome.created && !outcome.left_nothing)
+        .boolean("created", outcome.created && !outcome.left_nothing);
+    if outcome.dry_run {
+        object = object.boolean("dry_run", true);
+    }
+    object
         .string("dialect", outcome.dialect.name())
         .number("statements", report.statements)
         .number(

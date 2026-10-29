@@ -226,7 +226,7 @@ pub(crate) fn statement_object(result: &QueryResult, dialect: Dialect) -> JsonOb
     object
 }
 
-fn value_json(value: &Value, dialect: Dialect) -> String {
+pub(super) fn value_json(value: &Value, dialect: Dialect) -> String {
     match value {
         Value::Null => "null".to_owned(),
         Value::Boolean(flag) => flag.to_string(),

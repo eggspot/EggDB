@@ -276,6 +276,19 @@ fn help_json_lists_exactly_the_registry() {
         assert_eq!(tools, expected, "{args:?}");
         assert!(items(registry, "other_commands").is_empty(), "{args:?}");
         assert_eq!(items(registry, "categories").len(), 13);
+        for tool in items(registry, "tools") {
+            let name = string_at(tool, &["name"]).unwrap_or_default();
+            let when = member(tool, "confirm_when").map(|node| &node.value);
+            if name == "write_sql" {
+                assert_eq!(string_at(tool, &["confirm"]).as_deref(), Some("destructive_statement"));
+                assert!(
+                    matches!(when, Some(Json::String(text)) if text.starts_with("the statement is destructive: DROP, TRUNCATE")),
+                    "{when:?}"
+                );
+            } else {
+                assert_eq!(when, Some(&Json::Null), "{name}");
+            }
+        }
     }
     for args in [&["help", "get", "--json"][..], &["get", "--help", "--json"]] {
         let ran = piped(args);
@@ -368,7 +381,7 @@ fn the_text_help_comes_from_the_registry() {
         let ran = piped(&["help", command.name()]);
         assert_eq!(text(&ran.stdout), help::command_help(command));
         let listed = match definitions.as_slice() {
-            [definition] => main_help_line(
+            [definition] if !command.is_noun() => main_help_line(
                 format!("{:<6} {}", command.name(), definition.synopsis).trim_end(),
                 definition.summary,
             ),
@@ -397,7 +410,7 @@ fn every_command_is_a_kept_name_or_a_noun_and_its_core_verbs() {
     for command in CommandName::ALL {
         let name = command.name();
         let fits = match command {
-            CommandName::Collection | CommandName::Table => help::definitions(command)
+            CommandName::Collection | CommandName::Table | CommandName::Row => help::definitions(command)
                 .iter()
                 .all(|definition| definition.words.len() == 2 && is_core_verb(definition.words[1])),
             _ => KEPT_NAMES.contains(&name) || is_core_verb(name),

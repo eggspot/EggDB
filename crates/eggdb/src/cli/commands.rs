@@ -21,6 +21,7 @@ mod expiry;
 mod explain;
 mod mcp;
 mod restore;
+mod row;
 mod serve;
 mod shell;
 mod shell_copy;
@@ -168,6 +169,7 @@ fn execute_on(
         CommandName::Cas => session.compare_and_set(),
         CommandName::Explain => session.explain(),
         CommandName::Table => session.table_command(),
+        CommandName::Row => session.row_list(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();

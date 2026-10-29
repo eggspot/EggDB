@@ -36,6 +36,7 @@ Commands:
   explain <file>                show the plan for one statement given with -c, without running it
   table  list|show|sample <file> [table]
                                 tables and views: list them, show one, sample rows; see eggdb help table
+  row    list <file> <table>    the rows of one table, as stored, a page at a time; see eggdb help row
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
@@ -292,6 +293,7 @@ fn tool_json(tool: &ToolDefinition) -> String {
         .boolean("idempotent", tool.idempotent)
         .boolean("open_world", tool.open_world)
         .raw("confirm", &optional(tool.confirm.map(|check| check.name())))
+        .raw("confirm_when", &optional(tool.confirm.map(|check| check.when())))
         .raw("annotations", &annotations)
         .object()
 }

@@ -1,3 +1,4 @@
+use super::row::{cursor_refused, page_trailer};
 use super::sql::{exit_for, print_result, statement_object};
 use super::{Access, Session};
 use crate::cli::args::{CommandName, Format, TableAction};
@@ -7,6 +8,7 @@ use crate::cli::render::{self, JsonObject, json_string};
 use crate::cli::reports::label;
 use eggdb::Database;
 use eggdb::sql::Store as DatabaseStore;
+use eggdb_commands::{CursorList, decode_cursor, encode_cursor, table_at, table_position};
 use eggdb_sql::{
     Dialect, EXACT_ROW_COUNT_UP_TO, QueryResult, Relation, RelationKind, SqlError, Value,
     find_relation,
@@ -35,6 +37,16 @@ impl Session<'_> {
     }
 
     fn list_tables(&mut self) -> Result<Exit, Failure> {
+        let start = match &self.request.after {
+            Some(cursor) => {
+                let refused = |refusal| cursor_refused(CursorList::Tables, refusal, "", cursor);
+                let position = decode_cursor(CursorList::Tables, "", cursor).map_err(refused)?;
+                Some(table_at(&position).ok_or_else(|| {
+                    refused(eggdb_commands::CursorRefusal::Malformed)
+                })?)
+            }
+            None => None,
+        };
         let db = self.open(Access::ReadOnly, None)?;
         let relations = read_relations(&db).map_err(|error| self.catalog_failure(&error))?;
         drop(db);
@@ -42,12 +54,36 @@ impl Session<'_> {
         let listed: Vec<&Relation> = tables_then_views(&relations)
             .into_iter()
             .filter(|relation| only.as_deref().is_none_or(|schema| relation.schema == schema))
+            .filter(|relation| {
+                start.as_ref().is_none_or(|(is_view, schema, name)| {
+                    (is_a_view(relation), relation.schema.as_str(), relation.name.as_str())
+                        > (*is_view, schema.as_str(), name.as_str())
+                })
+            })
             .collect();
+        let limit = self
+            .request
+            .scan
+            .limit
+            .map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
+        let shown = limit.map_or(listed.len(), |rows| rows.min(listed.len()));
+        let next_cursor = (shown < listed.len())
+            .then(|| listed[..shown].last())
+            .flatten()
+            .map(|relation| {
+                let position =
+                    table_position(is_a_view(relation), &relation.schema, &relation.name);
+                encode_cursor(CursorList::Tables, "", &position)
+            });
+        let listed = &listed[..shown];
         match self.format {
             Format::Json => {
-                for relation in &listed {
+                for relation in listed {
                     self.out.text(&relation_record(relation).line());
                     self.out.line_done()?;
+                }
+                if let Some(cursor) = &next_cursor {
+                    self.out.text(&page_trailer(cursor));
                 }
             }
             _ => {
@@ -59,15 +95,35 @@ impl Session<'_> {
                 self.out.finish()?;
                 let tables = listed
                     .iter()
-                    .filter(|relation| matches!(relation.kind, RelationKind::Table(_)))
+                    .filter(|relation| !is_a_view(relation))
                     .count();
                 let views = listed.len() - tables;
                 self.messages
                     .styled(Style::Dim, &relation_counts(tables, views));
                 self.messages.text("\n");
+                if let Some(cursor) = &next_cursor {
+                    let next = self.next_tables_page(cursor);
+                    self.messages.styled(Style::Dim, &next);
+                    self.messages.text("\n");
+                }
             }
         }
         Ok(Exit::Done)
+    }
+
+    fn next_tables_page(&self, cursor: &str) -> String {
+        let mut next = format!(
+            "more tables or views follow; next page: eggdb table list {}",
+            self.file
+        );
+        if let Some(schema) = &self.request.schema {
+            next.push_str(&format!(" --schema {}", render::text(schema.as_bytes())));
+        }
+        if let Some(rows) = self.request.scan.limit {
+            next.push_str(&format!(" --limit {rows}"));
+        }
+        next.push_str(&format!(" --after {cursor}"));
+        next
     }
 
     fn show_table(&mut self) -> Result<Exit, Failure> {
@@ -129,7 +185,7 @@ impl Session<'_> {
         Ok(Exit::Done)
     }
 
-    fn catalog_failure(&self, error: &SqlError) -> Failure {
+    pub(super) fn catalog_failure(&self, error: &SqlError) -> Failure {
         let exit = exit_for(error);
         let code = match exit {
             Exit::Damaged => "damaged",
@@ -143,7 +199,7 @@ impl Session<'_> {
         )
     }
 
-    fn missing_table(&self, verb: &str, wanted: &OsStr) -> Failure {
+    pub(super) fn missing_table(&self, verb: &str, wanted: &OsStr) -> Failure {
         let file = &self.file;
         let shown = shown_name(wanted);
         Failure::Database {
@@ -157,7 +213,7 @@ impl Session<'_> {
     }
 }
 
-fn shown_name(wanted: &OsStr) -> String {
+pub(super) fn shown_name(wanted: &OsStr) -> String {
     match wanted.to_str() {
         Some(name) => {
             let cut: String = name.chars().take(SHOWN_NAME_CHARACTERS).collect();
@@ -167,11 +223,11 @@ fn shown_name(wanted: &OsStr) -> String {
     }
 }
 
-fn named_in(relations: Vec<Relation>, wanted: &OsStr) -> Option<Relation> {
+pub(super) fn named_in(relations: Vec<Relation>, wanted: &OsStr) -> Option<Relation> {
     find_relation(relations, wanted.to_str()?)
 }
 
-fn read_relations(db: &Database) -> Result<Vec<Relation>, SqlError> {
+pub(super) fn read_relations(db: &Database) -> Result<Vec<Relation>, SqlError> {
     let store = DatabaseStore(db);
     let mut session = eggdb_sql::Session::with_dialect(&store, Dialect::PostgreSql);
     let relations = session.relations();
@@ -211,10 +267,13 @@ fn first_rows(
 }
 
 fn tables_then_views(relations: &[Relation]) -> Vec<&Relation> {
-    let is_table = |relation: &&Relation| matches!(relation.kind, RelationKind::Table(_));
-    let tables = relations.iter().filter(is_table);
-    let views = relations.iter().filter(|relation| !is_table(relation));
+    let tables = relations.iter().filter(|relation| !is_a_view(relation));
+    let views = relations.iter().filter(|relation| is_a_view(relation));
     tables.chain(views).collect()
+}
+
+fn is_a_view(relation: &Relation) -> bool {
+    matches!(relation.kind, RelationKind::View(_))
 }
 
 fn relation_record(relation: &Relation) -> JsonObject {

@@ -1,6 +1,7 @@
 use super::byte_argument::ByteArgument;
 use super::failure::Failure;
 use super::render;
+use eggdb_commands::{CursorList, CursorRefusal, check_cursor, decode_cursor, shown_cursor};
 use std::ffi::{OsStr, OsString};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -39,6 +40,7 @@ pub(crate) enum CommandName {
     Cas,
     Explain,
     Table,
+    Row,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +68,7 @@ impl TableAction {
 }
 
 impl CommandName {
-    pub(crate) const ALL: [Self; 27] = [
+    pub(crate) const ALL: [Self; 28] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -88,6 +90,7 @@ impl CommandName {
         Self::Sql,
         Self::Explain,
         Self::Table,
+        Self::Row,
         Self::Serve,
         Self::Shell,
         Self::Restore,
@@ -129,6 +132,7 @@ impl CommandName {
             b"cas" => Self::Cas,
             b"explain" => Self::Explain,
             b"table" => Self::Table,
+            b"row" => Self::Row,
             _ => return None,
         })
     }
@@ -162,11 +166,12 @@ impl CommandName {
             Self::Cas => "cas",
             Self::Explain => "explain",
             Self::Table => "table",
+            Self::Row => "row",
         }
     }
 
     pub(crate) fn is_noun(self) -> bool {
-        matches!(self, Self::Collection | Self::Table)
+        matches!(self, Self::Collection | Self::Table | Self::Row)
     }
 
     pub(crate) fn takes_format_option(self) -> bool {
@@ -211,8 +216,8 @@ impl CommandName {
             OptionName::KeepGoing => matches!(self, Self::Shell | Self::Restore),
             OptionName::Report => self == Self::Restore,
             OptionName::Mode => self == Self::Shell,
+            OptionName::DryRun => matches!(self, Self::Import | Self::Restore),
             OptionName::OnConflict
-            | OptionName::DryRun
             | OptionName::Csv
             | OptionName::Table
             | OptionName::Header
@@ -220,7 +225,8 @@ impl CommandName {
             | OptionName::Null
             | OptionName::RowTerminator
             | OptionName::KeepNulls => self == Self::Import,
-            OptionName::Limit => matches!(self, Self::Scan | Self::Audit | Self::Table),
+            OptionName::Limit => matches!(self, Self::Scan | Self::Audit | Self::Table | Self::Row),
+            OptionName::After => matches!(self, Self::Table | Self::Row),
             OptionName::Schema => self == Self::Table,
             OptionName::Collection => matches!(
                 self,
@@ -346,6 +352,7 @@ enum OptionName {
     IfAbsent,
     Delete,
     Schema,
+    After,
 }
 
 impl OptionName {
@@ -398,6 +405,7 @@ impl OptionName {
             b"if-absent" => Self::IfAbsent,
             b"delete" => Self::Delete,
             b"schema" => Self::Schema,
+            b"after" => Self::After,
             _ => return None,
         })
     }
@@ -482,6 +490,7 @@ pub(crate) struct Request {
     pub(crate) table_action: Option<TableAction>,
     pub(crate) table: Option<OsString>,
     pub(crate) schema: Option<String>,
+    pub(crate) after: Option<String>,
     pub(crate) ttl: Option<Duration>,
     pub(crate) step: Option<u64>,
     pub(crate) swap: SwapOptions,
@@ -673,7 +682,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
             return Ok(help(None, None));
         }
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version.",
+            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version.",
             None,
         ));
     };
@@ -802,10 +811,10 @@ fn verb_of(noun: CommandName, verb: &OsStr) -> Option<&'static str> {
 }
 
 fn noun_needs_a_verb(noun: CommandName) -> Failure {
-    let message = if noun == CommandName::Table {
-        TABLE_NEEDS_A_VERB
-    } else {
-        COLLECTION_NEEDS_A_VERB
+    let message = match noun {
+        CommandName::Table => TABLE_NEEDS_A_VERB,
+        CommandName::Row => ROW_NEEDS_A_VERB,
+        _ => COLLECTION_NEEDS_A_VERB,
     };
     Failure::usage(message, Some(noun))
 }
@@ -842,6 +851,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         table_action: None,
         table: None,
         schema: None,
+        after: None,
         ttl: None,
         step: None,
         swap: SwapOptions::default(),
@@ -879,10 +889,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::From => request.scan.from = Some(byte_argument()?),
             OptionName::To => request.scan.to = Some(byte_argument()?),
             OptionName::Reverse => request.scan.reverse = true,
-            OptionName::Limit if command == CommandName::Table => {
-                request.scan.limit =
-                    Some(parse_sample_rows(&option.spelled, value).map_err(usage)?);
-            }
+            OptionName::Limit | OptionName::After if command.is_noun() => {}
             OptionName::Limit => {
                 request.scan.limit = Some(parse_limit(&option.spelled, value).map_err(usage)?);
             }
@@ -1039,6 +1046,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if command == CommandName::Table {
         return table_request(request, tokens, arguments);
     }
+    if command == CommandName::Row {
+        return row_request(request, tokens, arguments);
+    }
     if request.swap.if_absent && request.swap.delete {
         return Err(usage(
             "--if-absent with --delete would change nothing: an absent key cannot be deleted"
@@ -1059,7 +1069,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Audit
         | CommandName::Explain
         | CommandName::Collection
-        | CommandName::Table => (1, 1),
+        | CommandName::Table
+        | CommandName::Row => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -1254,8 +1265,8 @@ fn table_request(
         _ => return Err(usage(TABLE_NEEDS_A_VERB.to_owned())),
     };
     let foreign = tokens.options.iter().find(|option| match option.name {
-        OptionName::Limit => action != TableAction::Sample,
-        OptionName::Schema => action != TableAction::List,
+        OptionName::Limit => action == TableAction::Show,
+        OptionName::Schema | OptionName::After => action != TableAction::List,
         _ => false,
     });
     if let Some(option) = foreign {
@@ -1280,10 +1291,93 @@ fn table_request(
     if arguments.len() > needed {
         return Err(too_many_arguments(&arguments[needed..], Some(command)));
     }
+    request.scan.limit = match given_limit(tokens) {
+        Some((spelled, value)) if action == TableAction::Sample => {
+            Some(parse_sample_rows(spelled, value).map_err(usage)?)
+        }
+        Some((spelled, value)) => Some(parse_page_limit(spelled, value).map_err(usage)?),
+        None => None,
+    };
+    request.after = given_cursor(tokens, CursorList::Tables).map_err(usage)?;
     request.table_action = Some(action);
     request.file = PathBuf::from(arguments[1]);
     request.table = arguments.get(2).map(|name| name.to_os_string());
     Ok(request)
+}
+
+fn row_request(
+    mut request: Request,
+    tokens: &Tokens<'_>,
+    arguments: &[&OsStr],
+) -> Result<Request, Failure> {
+    let command = CommandName::Row;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    if arguments.first().map(|verb| verb.as_encoded_bytes()) != Some(b"list".as_slice()) {
+        return Err(usage(ROW_NEEDS_A_VERB.to_owned()));
+    }
+    if arguments.len() < 3 {
+        let needs = if arguments.len() == 1 {
+            "a file and a table name"
+        } else {
+            "a table name"
+        };
+        return Err(usage(format!("eggdb row list needs {needs}")));
+    }
+    if arguments.len() > 3 {
+        return Err(too_many_arguments(&arguments[3..], Some(command)));
+    }
+    request.scan.limit = given_limit(tokens)
+        .map(|(spelled, value)| parse_page_limit(spelled, value))
+        .transpose()
+        .map_err(usage)?;
+    request.after = given_cursor(tokens, CursorList::Rows).map_err(usage)?;
+    request.file = PathBuf::from(arguments[1]);
+    request.table = Some(arguments[2].to_os_string());
+    Ok(request)
+}
+
+fn given_limit<'t>(tokens: &'t Tokens<'_>) -> Option<(&'t str, &'t OsStr)> {
+    tokens
+        .options
+        .iter()
+        .rev()
+        .find(|option| option.name == OptionName::Limit)
+        .map(|option| (option.spelled.as_str(), option.value.unwrap_or_default()))
+}
+
+fn given_cursor(tokens: &Tokens<'_>, list: CursorList) -> Result<Option<String>, String> {
+    let Some(option) = tokens
+        .options
+        .iter()
+        .rev()
+        .find(|option| option.name == OptionName::After)
+    else {
+        return Ok(None);
+    };
+    let value = option.value.unwrap_or_default();
+    let refused = |refusal: CursorRefusal| {
+        refusal.message(&option.spelled, list, "", &shown_cursor(&shown(value)))
+    };
+    let Some(text) = value.to_str() else {
+        return Err(refused(CursorRefusal::Malformed));
+    };
+    let checked = match list {
+        CursorList::Tables => decode_cursor(list, "", text).map(|_| ()),
+        CursorList::Rows => check_cursor(list, text),
+    };
+    checked.map_err(refused)?;
+    Ok(Some(text.to_owned()))
+}
+
+fn parse_page_limit(option: &str, value: &OsStr) -> Result<u64, String> {
+    parse_whole_number(value.as_encoded_bytes())
+        .filter(|&count| count >= 1)
+        .ok_or_else(|| {
+            format!(
+                "{option} needs a whole number of at least 1, not '{}'",
+                shown(value)
+            )
+        })
 }
 
 fn parse_sample_rows(option: &str, value: &OsStr) -> Result<u64, String> {
@@ -1301,6 +1395,7 @@ const EXPLAIN_NEEDS_A_STATEMENT: &str = "eggdb explain needs a statement: give i
 const READ_ONLY_CANNOT_CREATE: &str =
     "--read-only cannot be combined with --create: a read-only open never creates a file";
 const TABLE_NEEDS_A_VERB: &str = "table needs list, show or sample";
+const ROW_NEEDS_A_VERB: &str = "row needs list";
 const COLLECTION_NEEDS_A_VERB: &str = "collection needs list, add or delete";
 pub(crate) const MOST_SAMPLE_ROWS: u64 = 1_000;
 
@@ -1381,13 +1476,9 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
                 .to_owned(),
         );
     }
-    if request.dry_run
-        || request.on_conflict != ConflictPolicy::Error
-        || request.page_size.is_some()
-    {
+    if request.on_conflict != ConflictPolicy::Error || request.page_size.is_some() {
         return Err(
-            "--dry-run, --on-conflict and --page-size are for eggdb-jsonl imports, not --csv"
-                .to_owned(),
+            "--on-conflict and --page-size are for eggdb-jsonl imports, not --csv".to_owned(),
         );
     }
     Ok(())
@@ -1521,7 +1612,7 @@ fn shown(argument: &OsStr) -> String {
 fn unknown_command(name: &[u8]) -> Failure {
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version.",
             render::text(name)
         ),
         None,
@@ -1823,7 +1914,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -1866,7 +1957,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -1879,7 +1970,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),
@@ -2016,9 +2107,19 @@ mod tests {
             "eggdb table show needs a file and a table name"
         );
         assert_eq!(usage_message("table sample app.db"), "eggdb table sample needs a table name");
+        assert_eq!(request("table list app.db -n 5").scan.limit, Some(5));
+        assert_eq!(request("table list app.db --limit 5000").scan.limit, Some(5000));
         assert_eq!(
-            usage_message("table list app.db -n 5"),
-            "unknown option '-n' for eggdb table list"
+            usage_message("table show app.db users -n 5"),
+            "unknown option '-n' for eggdb table show"
+        );
+        assert_eq!(
+            usage_message("table sample app.db users --after t1.811c9dc5"),
+            "unknown option '--after' for eggdb table sample"
+        );
+        assert_eq!(
+            request("table list app.db --after t1.811c9dc5").after.as_deref(),
+            Some("t1.811c9dc5")
         );
         assert_eq!(
             usage_message("table show app.db users --schema x"),
@@ -2041,6 +2142,55 @@ mod tests {
             "eggdb explain needs a statement: give it with -c"
         );
         assert!(usage_message("explain app.db -F hex -c x").contains("--format hex"));
+    }
+
+    #[test]
+    fn row_list_takes_a_file_a_table_a_page_size_and_a_cursor_of_its_own_list() {
+        let page = request("row list app.db orders -n 2 --after r1.818549630180000002 --json");
+        assert_eq!(page.command, CommandName::Row);
+        assert_eq!(page.file, PathBuf::from("app.db"));
+        assert_eq!(page.table, Some(OsString::from("orders")));
+        assert_eq!(page.scan.limit, Some(2));
+        assert_eq!(page.after.as_deref(), Some("r1.818549630180000002"));
+        assert_eq!(page.format, Some(Format::Json));
+        let all = request("row list app.db sales.orders");
+        assert_eq!((all.scan.limit, all.after), (None, None));
+        assert_eq!(usage_message("row"), "row needs list");
+        assert_eq!(usage_message("row show app.db orders"), "row needs list");
+        assert_eq!(usage_message("row list"), "eggdb row list needs a file and a table name");
+        assert_eq!(usage_message("row list app.db"), "eggdb row list needs a table name");
+        assert_eq!(
+            usage_message("row list app.db orders extra"),
+            "too many arguments for eggdb row: 'extra'"
+        );
+        assert_eq!(
+            usage_message("row list app.db orders --limit 0"),
+            "--limit needs a whole number of at least 1, not '0'"
+        );
+        assert_eq!(
+            usage_message("row list app.db orders -n x"),
+            "-n needs a whole number of at least 1, not 'x'"
+        );
+        assert_eq!(
+            usage_message("row list app.db orders --after 42"),
+            "--after needs the cursor printed at the end of the page before, not '42'. Leave --after out for the first page."
+        );
+        assert_eq!(
+            usage_message("row list app.db orders --after t1.811c9dc5"),
+            "--after got a cursor of eggdb table list ('t1.811c9dc5'), which eggdb row list cannot use. Page each list with the cursors its own pages print."
+        );
+        assert_eq!(
+            usage_message("table list app.db --after r1.818549630180000002"),
+            "--after got a cursor of eggdb row list ('r1.818549630180000002'), which eggdb table list cannot use. Page each list with the cursors its own pages print."
+        );
+        assert_eq!(
+            usage_message("row list app.db orders --schema x"),
+            "unknown option '--schema' for eggdb row"
+        );
+        assert_eq!(
+            parse_words("help row list --json"),
+            Ok(Invocation::HelpJson(Some(CommandName::Row), Some("list")))
+        );
     }
 
     #[test]
