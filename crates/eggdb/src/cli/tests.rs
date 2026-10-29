@@ -81,6 +81,18 @@ const VOCABULARY: &[&str] = &[
     "del",
     "delete",
     "scan",
+    "ttl",
+    "expire",
+    "persist",
+    "incr",
+    "decr",
+    "cas",
+    "--ttl",
+    "30s",
+    "1h30m",
+    "0s",
+    "--if-absent",
+    "--delete",
     "check",
     "stats",
     "help",
@@ -185,7 +197,10 @@ fn random_commands_against_real_files_never_panic_and_exit_with_a_designed_code(
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     for round in 0..600 {
         let mut words: Vec<&str> = Vec::new();
-        words.push(rng.pick(&["put", "get", "del", "scan", "check", "stats", "frob"]));
+        words.push(rng.pick(&[
+            "put", "get", "del", "scan", "check", "stats", "ttl", "expire", "persist", "incr",
+            "decr", "cas", "frob",
+        ]));
         words.push(rng.pick(&files));
         for _ in 0..rng.below(6) {
             words.push(rng.pick(VOCABULARY));

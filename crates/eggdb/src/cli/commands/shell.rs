@@ -21,7 +21,10 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const KEY_VALUE_COMMANDS: [&str; 6] = ["put", "get", "del", "scan", "check", "stats"];
+const KEY_VALUE_COMMANDS: [&str; 12] = [
+    "put", "get", "del", "scan", "check", "stats", "ttl", "expire", "persist", "incr", "decr",
+    "cas",
+];
 const META_COMMANDS: [&str; 8] = [
     ".help",
     ".tables",
@@ -32,7 +35,10 @@ const META_COMMANDS: [&str; 8] = [
     ".quit",
     ".exit",
 ];
-const KEY_SPACE_COMMANDS: [&str; 4] = ["put", "get", "del", "scan"];
+const KEY_SPACE_COMMANDS: [&str; 10] = [
+    "put", "get", "del", "scan", "ttl", "expire", "persist", "incr", "decr", "cas",
+];
+const ONE_KEY_COMMANDS: [&str; 8] = ["get", "del", "ttl", "expire", "persist", "incr", "decr", "cas"];
 const DEFAULT_KEY_SPACE: &str = "default key space";
 const LONGEST_PROMPT_COLLECTION: usize = 16;
 const STATEMENT_KEYWORDS: [&str; 15] = [
@@ -823,13 +829,18 @@ impl<'s> Shell<'s> {
         };
         format!(
             "Key-value commands, as on the command line without 'eggdb <command> {file}':
-  put <key> <value>            store a value (text, 0x.. hex, @file, =text)
+  put <key> <value> [--ttl t]  store a value (text, 0x.. hex, @file, =text); --ttl 30s expires it
   get <key>                    print a value
   del <key>                    remove a key
   scan [--prefix p] [--from a] [--to b] [-r] [-n count] [-k]
+  ttl <key>                    how long a key still lives: 29s, 1h4m12s, never
+  expire <key> <time>          give a key a time to live (30s, 5m, 1h30m, 7d, 1500ms)
+  persist <key>                remove a key's time to live
+  incr <key> [n]               add n (1) to a counter and print the new value; decr subtracts
+  cas <key> <expected> <new>   replace a value only while it is <expected>; --if-absent, --delete
   check                        read every page and report the file's health
   stats                        size, pages, last commit and log
-  -C <name> on put, get, del or scan   work in that collection for this line
+  -C <name> on a key command   work in that collection for this line
 SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
   (docs/sql.md); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
@@ -952,7 +963,7 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
                     completion.candidates = self.collections_starting_with(word, false);
                     return completion;
                 }
-                let takes_key = (matches!(first, "get" | "del") && previous.len() == 1)
+                let takes_key = (ONE_KEY_COMMANDS.contains(&first) && previous.len() == 1)
                     || (first == "scan" && matches!(last, "--prefix" | "-p" | "--from" | "--to"));
                 if takes_key {
                     completion.candidates = self.keys_starting_with(word);

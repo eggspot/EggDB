@@ -124,6 +124,8 @@ mod collection_tests;
 #[cfg(test)]
 mod copy_tests;
 #[cfg(test)]
+mod expiry_tests;
+#[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
 mod tests;

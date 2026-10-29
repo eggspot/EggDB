@@ -26,6 +26,7 @@ mod terminal;
 mod text;
 mod text_view;
 mod theme;
+mod time_to_live;
 mod width;
 
 pub use app::{Ui, UiOptions};
@@ -40,6 +41,9 @@ pub use source::{
     SqlTable, Start, Summary, WriterBusy,
 };
 pub use terminal::{Capabilities, Colors, Event, KeyCode, KeyEvent, Modifiers, Size, Terminal};
+pub use time_to_live::{
+    TimeToLiveError, format_time_left, format_time_left_short, parse_time_to_live,
+};
 
 use std::io;
 use std::time::Duration;

@@ -12,6 +12,13 @@ Commands:
   get    <file> <key>           print a value (exit 1 if the key is not there)
   del    <file> <key>           remove a key (exit 1 if it was not there)
   scan   <file>                 list entries in key order; see --prefix, --from, --to
+  ttl    <file> <key>           print how long a key still lives (exit 1 if it is not there)
+  expire <file> <key> <time>    give a key a time to live: 30s, 5m, 1h30m, 7d, 1500ms
+  persist <file> <key>          remove a key's time to live, so it stays until deleted
+  incr   <file> <key> [n]       add n (1) to a counter and print the new value
+  decr   <file> <key> [n]       subtract n (1) from a counter and print the new value
+  cas    <file> <key> <expected> <new>
+                                replace a value only while it is <expected>; see eggdb help cas
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
   ui     <file>                 browse and edit keys full screen in the terminal
@@ -45,7 +52,9 @@ Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
 pub(crate) fn usage_line(command: CommandName) -> &'static str {
     match command {
         CommandName::Create => "eggdb create <file> [--page-size <bytes>]",
-        CommandName::Put => "eggdb put <file> <key> [<value>] [--create] [-C <name>]",
+        CommandName::Put => {
+            "eggdb put <file> <key> [<value>] [--ttl <time>] [--create] [-C <name>]"
+        }
         CommandName::Get => "eggdb get <file> <key> [-C <name>]",
         CommandName::Del => "eggdb del <file> <key> [-C <name>]",
         CommandName::Scan => {
@@ -74,6 +83,14 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Audit => "eggdb audit <file> [-n <count>] [--format text|json]",
         CommandName::Collection => {
             "eggdb collection list <file>\n       eggdb collection add <file> <name>\n       eggdb collection delete <file> <name>"
+        }
+        CommandName::Ttl => "eggdb ttl <file> <key> [-C <name>]",
+        CommandName::Expire => "eggdb expire <file> <key> <time> [-C <name>]",
+        CommandName::Persist => "eggdb persist <file> <key> [-C <name>]",
+        CommandName::Incr => "eggdb incr <file> <key> [<n>] [-C <name>]",
+        CommandName::Decr => "eggdb decr <file> <key> [<n>] [-C <name>]",
+        CommandName::Cas => {
+            "eggdb cas <file> <key> (<expected> | --if-absent) (<new> | --delete) [-C <name>]"
         }
     }
 }
@@ -105,8 +122,97 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Mcp => MCP,
         CommandName::Audit => AUDIT,
         CommandName::Collection => COLLECTION,
+        CommandName::Ttl => TTL,
+        CommandName::Expire => EXPIRE,
+        CommandName::Persist => PERSIST,
+        CommandName::Incr => INCR,
+        CommandName::Decr => DECR,
+        CommandName::Cas => CAS,
     }
 }
+
+const TTL: &str = "\
+Prints how long the key still lives, as a time such as 29s, 1h4m12s or 412ms (whole seconds,
+rounded down; milliseconds under one second), or never when it has no time to live. Exits 1
+when the key is not there, which an expired key is not. In a pipe, one JSON line with ttl_ms
+and expires_at, both null for a permanent key.
+
+  -C, --collection <name>  work in this collection instead of the default key space
+
+Examples:
+  eggdb ttl app.db -C sessions s:1
+  eggdb ttl app.db user:1 --format json
+";
+
+const EXPIRE: &str = "\
+Gives the key a time to live and commits: when the time is up, reads and scans no longer see
+the key and it is removed. A time is a count with a unit, ms, s, m, h or d, joined from the
+largest down: 30s, 5m, 1h30m, 7d, 1500ms. A new time replaces the old. The key must exist
+(exit 1 otherwise), and 0 is refused: eggdb del removes a key at once. A later put without
+--ttl, or eggdb persist, makes the key permanent again.
+
+  -C, --collection <name>  work in this collection instead of the default key space
+
+Examples:
+  eggdb expire app.db user:1 7d
+  eggdb expire app.db -C sessions s:1 30m
+";
+
+const PERSIST: &str = "\
+Removes the key's time to live and commits, so it stays until it is deleted. A key that is
+already permanent is left as it is (exit 0); a key that is not there is exit 1.
+
+  -C, --collection <name>  work in this collection instead of the default key space
+
+Examples:
+  eggdb persist app.db user:1
+";
+
+const INCR: &str = "\
+Adds n (1 without it) to the counter under the key in one commit and prints the new value. A
+counter is a whole number stored as text, from -9223372036854775808 to 9223372036854775807; a
+key that is not there counts as 0 and is made. A value that is not such a number, or a result
+outside that range, is an error (exit 3) and nothing changes. The key's time to live is kept.
+n is 0 or more; eggdb decr subtracts.
+
+  -C, --collection <name>  work in this collection instead of the default key space
+
+Examples:
+  eggdb incr app.db hits                   # 1 on a new key
+  eggdb incr app.db hits 10
+  eggdb incr app.db -C stats page:home --format json
+";
+
+const DECR: &str = "\
+Subtracts n (1 without it) from the counter under the key in one commit and prints the new
+value. A counter is a whole number stored as text, from -9223372036854775808 to
+9223372036854775807; a key that is not there counts as 0 and is made. A value that is not such
+a number, or a result outside that range, is an error (exit 3) and nothing changes. The key's
+time to live is kept. n is 0 or more; eggdb incr adds.
+
+  -C, --collection <name>  work in this collection instead of the default key space
+
+Examples:
+  eggdb decr app.db stock:apples
+  eggdb decr app.db stock:apples 12
+";
+
+const CAS: &str = "\
+Replaces the key's value with <new> only while its value is <expected>, comparing and storing
+in one transaction so nothing can change in between. With --if-absent the key is stored only
+when it is not there (a lock, a first write); with --delete it is removed instead of given a
+new value. Exit 0 when it swapped; exit 1 when it did not, saying what was found, and nothing
+changed. A swap that stores a value makes the key permanent, as put does.
+
+      --if-absent          <expected> is \"not there\": leave the <expected> argument out
+      --delete             <new> is \"remove the key\": leave the <new> argument out
+  -C, --collection <name>  work in this collection instead of the default key space
+
+Examples:
+  eggdb cas app.db lock --if-absent worker-7       # take a lock
+  eggdb cas app.db lock worker-7 --delete          # release it, only while still ours
+  eggdb cas app.db config @old.json @new.json
+";
 
 const COLLECTION: &str = "\
 A collection is a named key space inside the database file, beside the default key space that
@@ -144,6 +250,8 @@ exactly: `echo hi |` stores a trailing newline and `printf hi |` does not. Value
 to 1 GiB; the page cache grows to fit the value.
 
       --create              create the database file if it is missing
+      --ttl <time>          the key expires after this time: 30s, 5m, 1h30m, 7d, 1500ms
+                            (a later put without --ttl makes the key permanent again)
   -C, --collection <name>  work in this collection instead of the default key space (made with --create)
 
 Keys and values: text as typed, 0x.. for hex, @file for a file's bytes, @- for stdin,
@@ -154,6 +262,7 @@ Examples:
   cat photo.jpg | eggdb put app.db photo
   eggdb put app.db 0x00ff @blob.bin
   eggdb put --create new.db greeting hello
+  eggdb put app.db -C sessions s:1 '{\"user\":1}' --ttl 30m
 ";
 
 const GET: &str = "\

@@ -4,6 +4,7 @@ use super::render;
 use std::ffi::{OsStr, OsString};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 const RESERVED_COMMANDS: [&str; 2] = ["backup", "compact"];
 const SMALLEST_PAGE_SIZE: usize = 4096;
@@ -29,6 +30,12 @@ pub(crate) enum CommandName {
     Mcp,
     Audit,
     Collection,
+    Ttl,
+    Expire,
+    Persist,
+    Incr,
+    Decr,
+    Cas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +65,12 @@ impl CommandName {
             b"mcp" => Self::Mcp,
             b"audit" => Self::Audit,
             b"collection" => Self::Collection,
+            b"ttl" => Self::Ttl,
+            b"expire" => Self::Expire,
+            b"persist" => Self::Persist,
+            b"incr" => Self::Incr,
+            b"decr" => Self::Decr,
+            b"cas" => Self::Cas,
             _ => return None,
         })
     }
@@ -81,8 +94,15 @@ impl CommandName {
             Self::Mcp => "mcp",
             Self::Audit => "audit",
             Self::Collection => "collection",
+            Self::Ttl => "ttl",
+            Self::Expire => "expire",
+            Self::Persist => "persist",
+            Self::Incr => "incr",
+            Self::Decr => "decr",
+            Self::Cas => "cas",
         }
     }
+
 
     fn takes(self, option: OptionName) -> bool {
         match option {
@@ -131,8 +151,21 @@ impl CommandName {
             OptionName::Limit => matches!(self, Self::Scan | Self::Audit),
             OptionName::Collection => matches!(
                 self,
-                Self::Get | Self::Put | Self::Del | Self::Scan | Self::Export | Self::Import
+                Self::Get
+                    | Self::Put
+                    | Self::Del
+                    | Self::Scan
+                    | Self::Export
+                    | Self::Import
+                    | Self::Ttl
+                    | Self::Expire
+                    | Self::Persist
+                    | Self::Incr
+                    | Self::Decr
+                    | Self::Cas
             ),
+            OptionName::Ttl => self == Self::Put,
+            OptionName::IfAbsent | OptionName::Delete => self == Self::Cas,
             OptionName::TimeLimit | OptionName::AllowWrite => self == Self::Mcp,
             OptionName::Prefix
             | OptionName::From
@@ -235,6 +268,9 @@ enum OptionName {
     AllowWrite,
     Define,
     Collection,
+    Ttl,
+    IfAbsent,
+    Delete,
 }
 
 impl OptionName {
@@ -282,6 +318,9 @@ impl OptionName {
             b"allow-write" => Self::AllowWrite,
             b"define" => Self::Define,
             b"collection" => Self::Collection,
+            b"ttl" => Self::Ttl,
+            b"if-absent" => Self::IfAbsent,
+            b"delete" => Self::Delete,
             _ => return None,
         })
     }
@@ -318,6 +357,8 @@ impl OptionName {
                 | Self::KeepNulls
                 | Self::AllowWrite
                 | Self::LogBatches
+                | Self::IfAbsent
+                | Self::Delete
         )
     }
 }
@@ -358,6 +399,16 @@ pub(crate) struct Request {
     pub(crate) allow_write: bool,
     pub(crate) collection: Option<String>,
     pub(crate) collection_action: Option<CollectionAction>,
+    pub(crate) ttl: Option<Duration>,
+    pub(crate) step: Option<u64>,
+    pub(crate) swap: SwapOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SwapOptions {
+    pub(crate) expected: Option<ByteArgument>,
+    pub(crate) if_absent: bool,
+    pub(crate) delete: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -487,7 +538,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
+            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
             None,
         ));
     };
@@ -623,6 +674,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         allow_write: false,
         collection: None,
         collection_action: None,
+        ttl: None,
+        step: None,
+        swap: SwapOptions::default(),
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -788,6 +842,11 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.collection =
                     Some(parse_collection_name(Some(option.spelled.as_str()), value).map_err(usage)?);
             }
+            OptionName::Ttl => {
+                request.ttl = Some(parse_ttl_option(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::IfAbsent => request.swap.if_absent = true,
+            OptionName::Delete => request.swap.delete = true,
             OptionName::Help | OptionName::Version => {}
         }
     }
@@ -800,6 +859,13 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if command == CommandName::Collection {
         return collection_request(request, arguments);
     }
+    if request.swap.if_absent && request.swap.delete {
+        return Err(usage(
+            "--if-absent with --delete would change nothing: an absent key cannot be deleted"
+                .to_owned(),
+        ));
+    }
+    let swap_arguments = 2 + usize::from(!request.swap.if_absent) + usize::from(!request.swap.delete);
     let (least, most) = match command {
         CommandName::Create
         | CommandName::Scan
@@ -814,8 +880,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
-        CommandName::Get | CommandName::Del => (2, 2),
-        CommandName::Put => (2, 3),
+        CommandName::Get | CommandName::Del | CommandName::Ttl | CommandName::Persist => (2, 2),
+        CommandName::Put | CommandName::Incr | CommandName::Decr => (2, 3),
+        CommandName::Expire => (3, 3),
+        CommandName::Cas => (swap_arguments, swap_arguments),
     };
     if arguments.len() < least {
         return Err(usage(missing_arguments(command, arguments.len())));
@@ -861,8 +929,72 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         ByteArgument::parse(argument).map_err(|message| Failure::usage(message, Some(command)))
     };
     request.key = arguments.get(1).map(byte_argument).transpose()?;
-    request.value = arguments.get(2).map(byte_argument).transpose()?;
+    match command {
+        CommandName::Expire => {
+            let time = arguments.get(2).copied().unwrap_or_default();
+            request.ttl = Some(parse_expire_time(time, arguments[1]).map_err(usage)?);
+        }
+        CommandName::Incr | CommandName::Decr => {
+            request.step = arguments
+                .get(2)
+                .map(|step| parse_step(command, step))
+                .transpose()
+                .map_err(usage)?;
+        }
+        CommandName::Cas => {
+            let mut rest = arguments[2..].iter();
+            if !request.swap.if_absent {
+                request.swap.expected = rest.next().map(byte_argument).transpose()?;
+            }
+            if !request.swap.delete {
+                request.value = rest.next().map(byte_argument).transpose()?;
+            }
+        }
+        _ => request.value = arguments.get(2).map(byte_argument).transpose()?,
+    }
     Ok(request)
+}
+
+const TIME_EXAMPLES: &str = "30s, 5m, 1h30m, 7d or 1500ms";
+
+fn parse_ttl_option(spelled: &str, value: &OsStr) -> Result<Duration, String> {
+    match eggdb_ui::parse_time_to_live(value.to_str().unwrap_or_default()) {
+        Ok(ttl) => Ok(ttl),
+        Err(eggdb_ui::TimeToLiveError::Zero) => Err(format!(
+            "{spelled} 0 would remove the key as soon as it is stored; leave {spelled} out, or give a time above 0"
+        )),
+        Err(eggdb_ui::TimeToLiveError::NotATime) => Err(format!(
+            "{spelled} needs a time such as {TIME_EXAMPLES}, not '{}'",
+            shown(value)
+        )),
+    }
+}
+
+fn parse_expire_time(value: &OsStr, key: &OsStr) -> Result<Duration, String> {
+    match eggdb_ui::parse_time_to_live(value.to_str().unwrap_or_default()) {
+        Ok(ttl) => Ok(ttl),
+        Err(eggdb_ui::TimeToLiveError::Zero) => Err(format!(
+            "a time to live of 0 would remove {} now; use eggdb del",
+            shown(key)
+        )),
+        Err(eggdb_ui::TimeToLiveError::NotATime) => Err(format!(
+            "expire needs a time such as {TIME_EXAMPLES}, not '{}'",
+            shown(value)
+        )),
+    }
+}
+
+fn parse_step(command: CommandName, value: &OsStr) -> Result<u64, String> {
+    parse_whole_number(value.as_encoded_bytes())
+        .filter(|&step| i64::try_from(step).is_ok())
+        .ok_or_else(|| {
+            format!(
+                "{} needs a whole number from 0 to {}, not '{}'",
+                command.name(),
+                i64::MAX,
+                shown(value)
+            )
+        })
 }
 
 fn collection_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
@@ -1062,8 +1194,36 @@ fn missing_arguments(command: CommandName, given: usize) -> String {
     let needs = match (command, given) {
         (CommandName::Put, 0) => "a file and a key, and a value or stdin",
         (CommandName::Put, _) => "a key, and a value or stdin",
-        (CommandName::Get | CommandName::Del, 0) => "a file and a key",
-        (CommandName::Get | CommandName::Del, _) => "a key",
+        (
+            CommandName::Get
+            | CommandName::Del
+            | CommandName::Ttl
+            | CommandName::Persist
+            | CommandName::Incr
+            | CommandName::Decr,
+            0,
+        ) => "a file and a key",
+        (
+            CommandName::Get
+            | CommandName::Del
+            | CommandName::Ttl
+            | CommandName::Persist
+            | CommandName::Incr
+            | CommandName::Decr,
+            _,
+        ) => "a key",
+        (CommandName::Expire, 0) => "a file, a key and a time such as 30s",
+        (CommandName::Expire, 1) => "a key and a time such as 30s",
+        (CommandName::Expire, _) => "a time such as 30s, 5m, 1h30m, 7d or 1500ms",
+        (CommandName::Cas, 0) => {
+            "a file, a key, the value expected (or --if-absent) and the new value (or --delete)"
+        }
+        (CommandName::Cas, 1) => {
+            "a key, the value expected (or --if-absent) and the new value (or --delete)"
+        }
+        (CommandName::Cas, _) => {
+            "the value expected (or --if-absent) and the new value (or --delete)"
+        }
         _ => "a file",
     };
     format!("eggdb {} needs {needs}", command.name())
@@ -1106,7 +1266,7 @@ fn unknown_command(name: &[u8]) -> Failure {
     }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
             render::text(name)
         ),
         None,
@@ -1114,8 +1274,16 @@ fn unknown_command(name: &[u8]) -> Failure {
 }
 
 fn unknown_option(spelled: &str, command: CommandName) -> Failure {
+    let negative_step = spelled
+        .strip_prefix('-')
+        .is_some_and(|digits| parse_whole_number(digits.as_bytes()).is_some());
+    let hint = match command {
+        CommandName::Incr if negative_step => "; to subtract, use eggdb decr",
+        CommandName::Decr if negative_step => "; to add, use eggdb incr",
+        _ => "",
+    };
     Failure::usage(
-        format!("unknown option '{spelled}' for eggdb {}", command.name()),
+        format!("unknown option '{spelled}' for eggdb {}{hint}", command.name()),
         Some(command),
     )
 }
@@ -1400,7 +1568,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -1443,7 +1611,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -1456,7 +1624,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),

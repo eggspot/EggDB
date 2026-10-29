@@ -15,6 +15,7 @@ mod audit;
 mod collection;
 mod copy_io;
 mod csv_import;
+mod expiry;
 mod mcp;
 mod restore;
 mod serve;
@@ -26,6 +27,7 @@ mod transfer;
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
 const CACHE_HEADROOM_BYTES: usize = 1 << 20;
 const SCAN_VALUE_SHOWN_BYTES: usize = 128;
+const EXPIRY_KEY_OVERHEAD_BYTES: usize = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Access {
@@ -153,6 +155,11 @@ fn execute_on(
         )),
         CommandName::Audit => session.audit(),
         CommandName::Collection => session.collection_command(),
+        CommandName::Ttl => session.ttl(),
+        CommandName::Expire => session.expire(),
+        CommandName::Persist => session.persist(),
+        CommandName::Incr | CommandName::Decr => session.counter(),
+        CommandName::Cas => session.compare_and_set(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -208,7 +215,7 @@ impl<'a> Session<'a> {
             && self.request.collection.is_none()
             && std::fs::symlink_metadata(&self.request.file).is_err()
         {
-            self.refuse_what_a_new_file_cannot_store(&key, &value)?;
+            self.refuse_what_a_new_file_cannot_store(&key, &value, self.request.ttl.is_some())?;
         }
         let cache = cache_for_value(value.len());
         let db = self.open(
@@ -217,14 +224,20 @@ impl<'a> Session<'a> {
             },
             Some(cache),
         )?;
-        let stored = match &self.request.collection {
-            Some(name) => db.write(|transaction| {
+        let ttl = self.request.ttl;
+        let stored = match (&self.request.collection, ttl) {
+            (Some(name), _) => db.write(|transaction| {
                 if self.request.create {
                     transaction.create_collection(name)?;
                 }
-                transaction.collection(name)?.put(&key, &value)
+                let mut collection = transaction.collection(name)?;
+                match ttl {
+                    Some(ttl) => collection.put_with_expiry(&key, &value, ttl),
+                    None => collection.put(&key, &value),
+                }
             }),
-            None => db.put(&key, &value),
+            (None, Some(ttl)) => db.put_with_expiry(&key, &value, ttl),
+            (None, None) => db.put(&key, &value),
         };
         stored.map_err(|error| {
             self.key_space_failure(
@@ -234,18 +247,26 @@ impl<'a> Session<'a> {
         })?;
         self.close(db)?;
         if self.format == Format::Json {
-            self.out.text(
-                &JsonObject::new()
-                    .bytes("key", &key)
-                    .boolean("stored", true)
-                    .line(),
-            );
+            let object = JsonObject::new()
+                .bytes("key", &key)
+                .boolean("stored", true);
+            let object = match ttl {
+                Some(ttl) => expiry::with_time_to_live(object, Some(ttl)),
+                None => object,
+            };
+            self.out.text(&object.line());
         }
         Ok(Exit::Done)
     }
 
-    fn refuse_what_a_new_file_cannot_store(&self, key: &[u8], value: &[u8]) -> Result<(), Failure> {
-        let max_key = BTree::max_key_bytes(PageSize::DEFAULT);
+    fn refuse_what_a_new_file_cannot_store(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        expires: bool,
+    ) -> Result<(), Failure> {
+        let deadline_bytes = if expires { EXPIRY_KEY_OVERHEAD_BYTES } else { 0 };
+        let max_key = BTree::max_key_bytes(PageSize::DEFAULT).saturating_sub(deadline_bytes);
         let refusal = if key.len() > max_key {
             StorageError::KeyTooLarge {
                 bytes: key.len(),

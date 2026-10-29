@@ -117,6 +117,13 @@ Commands:
   get    <file> <key>           print a value (exit 1 if the key is not there)
   del    <file> <key>           remove a key (exit 1 if it was not there)
   scan   <file>                 list entries in key order; see --prefix, --from, --to
+  ttl    <file> <key>           print how long a key still lives (exit 1 if it is not there)
+  expire <file> <key> <time>    give a key a time to live: 30s, 5m, 1h30m, 7d, 1500ms
+  persist <file> <key>          remove a key's time to live, so it stays until deleted
+  incr   <file> <key> [n]       add n (1) to a counter and print the new value
+  decr   <file> <key> [n]       subtract n (1) from a counter and print the new value
+  cas    <file> <key> <expected> <new>
+                                replace a value only while it is <expected>; see eggdb help cas
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
   ui     <file>                 browse and edit keys full screen in the terminal
@@ -463,7 +470,7 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);
