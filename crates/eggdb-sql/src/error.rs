@@ -50,6 +50,8 @@ impl SqlState {
     pub const INVALID_PARAMETER_VALUE: Self = Self(*b"22023");
     /// `22011` substring_error.
     pub const SUBSTRING_ERROR: Self = Self(*b"22011");
+    /// `22004` null_value_not_allowed.
+    pub const NULL_VALUE_NOT_ALLOWED: Self = Self(*b"22004");
     /// `22015` interval_field_overflow.
     pub const INTERVAL_FIELD_OVERFLOW: Self = Self(*b"22015");
     /// `2202E` array_subscript_error.
