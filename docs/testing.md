@@ -496,6 +496,24 @@ manager requests after it, in `crates/eggdb-tdswire/tests/protocol.rs`; the host
 statement fuzzer in `crates/eggdb-sql/src/tests.rs` covers the new views, `SYS_CONTEXT` and the
 `SET`.
 
+## The C API (D142)
+`crates/eggdb-capi/tests/api.rs` calls every function of `eggdb.h` the way a C program does,
+through raw pointers: commits and rollbacks across a reopen, a read transaction refusing a
+change, scans of 1,000 keys in batches forward, backward, by range and by prefix, a scan
+continued in a later transaction that sees the writes ahead of it, collections kept apart from
+the default key space, times to live, counters and compare-and-set, SQL in PostgreSQL's and
+SQLite's dialects with typed values, a failing statement's SQLSTATE, parameters carrying a
+quote and a semicolon, a transaction block rolled back and one left open at close, backup and
+compaction, `eggdb_close` refusing while a transaction or session is open, four threads reading
+through one handle, and misuse (NULL handles and buffers, text that is not UTF-8, unknown flags
+and dialects) answered with `EGGDB_ERR_INVALID_ARGUMENT`. `tests/header.rs` parses `eggdb.h` and
+fails when a constant, a function's parameter count or a struct's fields differ from the Rust
+code. `scripts/c-api/check.sh <library directory> <work>` compiles
+`crates/eggdb-capi/tests/c/api_check.c` with `-Wall -Wextra -Wpedantic -Werror`, compiles the
+header as C++11, runs the program and then `examples/python/eggdb_ctypes.py`; CI runs it in
+`lint-and-test` (Linux) and `platforms` (macOS; the Python part on Windows), and the release
+workflow on the release libraries of the Linux and macOS targets its runners can load.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.

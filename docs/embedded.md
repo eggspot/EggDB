@@ -7,6 +7,9 @@ bytes, and every change commits atomically and survives a crash. The API is the 
 `cargo test` (the `EmbeddedGuide` doctests in `crates/eggdb/src/lib.rs`), so none of them can
 drift from the API.
 
+From C and any other language that calls C (Python, .NET, Java, Go and the rest), the same
+database is a C library with the header `eggdb.h`: see [c-api.md](c-api.md).
+
 ## Adding it to a project
 EggDB is not on crates.io yet (publishing waits for the project's accounts). Depend on a
 release tag from the repository, which uses no other crate:

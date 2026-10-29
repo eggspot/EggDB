@@ -134,6 +134,7 @@ fn main() -> eggdb::Result<()> {
 }
 ```
 
-Transactions, scans, durability, errors and limits: [docs/embedded.md](docs/embedded.md).
+Transactions, scans, durability, errors and limits: [docs/embedded.md](docs/embedded.md). From C, Python
+and any language that calls C: [docs/c-api.md](docs/c-api.md).
 
 Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.
