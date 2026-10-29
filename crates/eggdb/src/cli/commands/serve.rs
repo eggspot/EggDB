@@ -265,6 +265,7 @@ impl Session<'_> {
                     address.port()
                 )),
                 exit: Exit::Usage,
+                code: crate::cli::failure::USAGE_CODE,
             }),
             Err(Some(error)) => {
                 let in_use = error.kind() == std::io::ErrorKind::AddrInUse;
@@ -284,6 +285,7 @@ impl Session<'_> {
                         )
                     }),
                     exit: Exit::DatabaseError,
+                    code: if in_use { "database_busy" } else { "database_failed" },
                 })
             }
         }

@@ -208,6 +208,7 @@ impl Session<'_> {
                     self.file, dump_shown
                 )),
                 exit: Exit::DatabaseError,
+                code: "not_found",
             });
         }
         let staging = (!exists).then(|| staging_path(&target));
@@ -510,6 +511,7 @@ fn oracle_binary_failure(shown: &str, extension: Option<&str>, file: &str) -> Fa
             "impdp system DIRECTORY=dp DUMPFILE=<file.dmp> SCHEMAS=<schema> SQLFILE=tables.sql EXCLUDE=REF_CONSTRAINT,STATISTICS, then eggdb restore --dialect oracle --create {file} tables.sql"
         )),
         exit: Exit::Usage,
+        code: crate::cli::failure::USAGE_CODE,
     }
 }
 
@@ -559,6 +561,7 @@ fn binary_failure(
         ),
         try_command,
         exit: Exit::Usage,
+        code: crate::cli::failure::USAGE_CODE,
     }
 }
 
@@ -586,6 +589,7 @@ fn archive_failure(
                     "eggdb restore --dialect sqlserver --create {file} {target}"
                 )),
                 exit: Exit::Usage,
+                code: crate::cli::failure::USAGE_CODE,
             };
         }
         Archive::Custom => (
@@ -619,6 +623,7 @@ fn archive_failure(
         ),
         try_command: Some(try_command),
         exit: Exit::Usage,
+        code: crate::cli::failure::USAGE_CODE,
     }
 }
 

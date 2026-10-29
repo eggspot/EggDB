@@ -1,7 +1,7 @@
 use super::Console;
 use super::args::{ColorChoice, CommandName, Format, Request};
 use super::byte_argument::ByteArgument;
-use super::failure::{Exit, Failure};
+use super::failure::{Exit, Failure, code_for_error};
 use super::output::{Output, Style};
 use super::render::{self, JsonObject, LineBreaks};
 use super::reports::{self, Damage};
@@ -69,7 +69,7 @@ struct Session<'a> {
 
 pub(crate) fn default_format(command: CommandName, stdout_is_terminal: bool) -> Format {
     match (stdout_is_terminal, command) {
-        (true, _) => Format::Text,
+        (true, _) | (false, CommandName::Sql) => Format::Text,
         (false, CommandName::Get) => Format::Raw,
         (false, _) => Format::Json,
     }
@@ -694,7 +694,8 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
     let creates = matches!(access, Access::Write { create: true });
     match error.kind() {
         ErrorKind::NotFound if !creates => match access {
-            Access::ReadOnly => Failure::database(
+            Access::ReadOnly => Failure::coded(
+                "not_found",
                 format!(
                     "cannot open {file}: no such file. Check the path, or create it with `eggdb create {file}`"
                 ),
@@ -706,6 +707,7 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
                 ),
                 try_command: Some(format!("eggdb create {file}")),
                 exit: Exit::DatabaseError,
+                code: "not_found",
             },
         },
         ErrorKind::Locked => match access {
@@ -723,20 +725,23 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
                 Exit::Busy,
             ),
         },
-        ErrorKind::NotADatabase => Failure::database(
+        ErrorKind::NotADatabase => Failure::coded(
+            "not_a_database",
             format!(
                 "cannot open {file}: not an EggDB database. If it is a database of another kind, EggDB restores its backups in a later release (docs/roadmap.md)."
             ),
             Exit::DatabaseError,
         ),
-        ErrorKind::Incompatible => Failure::database(
+        ErrorKind::Incompatible => Failure::coded(
+            "incompatible",
             format!(
                 "cannot open {file}: it was written by a newer EggDB ({}). Upgrade eggdb from https://github.com/eggspot/EggDB/releases.",
                 incompatibility(error, file_display)
             ),
             Exit::DatabaseError,
         ),
-        kind => Failure::database(
+        kind => Failure::coded(
+            code_for_error(kind),
             format!(
                 "cannot open {file}: {}",
                 without_open_prefix(&error.to_string(), file_display)
@@ -758,6 +763,7 @@ fn missing_collection(file: &str, name: &str, context: &str, command: CommandNam
         ),
         try_command: Some(format!("eggdb collection add {file} {name}")),
         exit: Exit::NotFound,
+        code: "collection_not_found",
     }
 }
 
@@ -775,7 +781,11 @@ fn cache_for_value(value_bytes: usize) -> usize {
 }
 
 fn operation_failure(error: &Error, context: &str) -> Failure {
-    Failure::database(format!("{context}: {error}"), Exit::for_error(error.kind()))
+    Failure::coded(
+        code_for_error(error.kind()),
+        format!("{context}: {error}"),
+        Exit::for_error(error.kind()),
+    )
 }
 
 fn without_open_prefix(message: &str, file: &str) -> String {
@@ -810,12 +820,13 @@ mod tests {
     use crate::cli::args::{ColorChoice, CommandName, Format};
 
     #[test]
-    fn a_pipe_gets_json_except_get_which_gets_raw_bytes() {
+    fn a_pipe_gets_json_except_get_which_gets_raw_bytes_and_sql_which_keeps_its_text() {
         assert_eq!(default_format(CommandName::Get, true), Format::Text);
         assert_eq!(default_format(CommandName::Scan, true), Format::Text);
         assert_eq!(default_format(CommandName::Get, false), Format::Raw);
         assert_eq!(default_format(CommandName::Scan, false), Format::Json);
         assert_eq!(default_format(CommandName::Check, false), Format::Json);
+        assert_eq!(default_format(CommandName::Sql, false), Format::Text);
     }
 
     #[test]

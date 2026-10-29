@@ -65,5 +65,6 @@ pub(super) fn shell_holds_the_file(file: &str) -> Failure {
         message: "compact needs the file to itself, and this shell holds it. Quit the shell, then run it from the command line.".to_owned(),
         try_command: Some(format!("eggdb compact {file}")),
         exit: Exit::Usage,
+        code: "database_busy",
     }
 }

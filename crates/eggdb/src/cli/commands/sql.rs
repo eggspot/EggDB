@@ -1,9 +1,11 @@
 use super::copy_io::{StreamCopy, script_cache};
 use super::{Access, Session};
-use crate::cli::args::{CommandName, ResultMode, SqlSource};
+use crate::cli::args::{CommandName, Format, ResultMode, SqlSource};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
+use crate::cli::render::{JsonObject, json_string};
 use eggdb::sql::Store as DatabaseStore;
+use eggdb_commands::Category;
 use eggdb_sql::{Dialect, QueryResult, SqlError, SqlState, TransactionStatus, Value};
 use std::cell::{Cell, RefCell};
 use std::io::Read;
@@ -11,6 +13,7 @@ use std::io::Read;
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
         let text = self.sql_text()?;
+        let json = self.format == Format::Json;
         let script = !matches!(self.request.sql, Some(SqlSource::Command(_)));
         let db = self.open(
             Access::Write {
@@ -33,19 +36,25 @@ impl Session<'_> {
                 copied_out: &copied_out,
             };
             let mut on_result = |result: QueryResult| {
-                for notice in &result.notices {
-                    messages.text(notice);
-                    messages.text("\n");
-                }
-                for warning in &result.warnings {
-                    messages.text(&format!(
-                        "{} {}: {}\n",
-                        warning.level, warning.code, warning.message
-                    ));
+                if !json {
+                    for notice in &result.notices {
+                        messages.text(notice);
+                        messages.text("\n");
+                    }
+                    for warning in &result.warnings {
+                        messages.text(&format!(
+                            "{} {}: {}\n",
+                            warning.level, warning.code, warning.message
+                        ));
+                    }
                 }
                 let mut out = out.borrow_mut();
                 if !(copied_out.replace(false) && result.tag.starts_with("COPY ")) {
-                    print_result(&mut out, &result, dialect);
+                    if json {
+                        out.text(&statement_json(&result, dialect));
+                    } else {
+                        print_result(&mut out, &result, dialect);
+                    }
                 }
                 printed = out.line_done();
                 printed.is_ok()
@@ -59,19 +68,19 @@ impl Session<'_> {
         let exit = match outcome {
             Ok(()) => Exit::Done,
             Err(error) => {
-                print_error(&mut self.messages, &error, &text);
+                report_error(&mut self.messages, &error, &text, json);
                 exit_for(&error)
             }
         };
         if let Err(error) = commit_on_exit(&mut session) {
-            print_error(&mut self.messages, &error, &text);
+            report_error(&mut self.messages, &error, &text, json);
         }
         match session.close() {
             Ok(true) if exit == Exit::Done => self.messages.text(
                 "WARNING:  the SQL ended inside a transaction block (BEGIN without COMMIT); it was rolled back\n",
             ),
             Ok(_) => {}
-            Err(error) => print_error(&mut self.messages, &error, &text),
+            Err(error) => report_error(&mut self.messages, &error, &text, json),
         }
         self.close(db)?;
         printed?;
@@ -127,6 +136,101 @@ pub(super) fn exit_for(error: &SqlError) -> Exit {
         SqlState::DATA_CORRUPTED => Exit::Damaged,
         SqlState::LOCK_NOT_AVAILABLE => Exit::Busy,
         _ => Exit::DatabaseError,
+    }
+}
+
+fn report_error(messages: &mut Output<'_>, error: &SqlError, text: &str, json: bool) {
+    if json {
+        messages.text(&error_json(error));
+    } else {
+        print_error(messages, error, text);
+    }
+}
+
+pub(crate) fn error_json(error: &SqlError) -> String {
+    let code = match exit_for(error) {
+        Exit::Damaged => "damaged",
+        Exit::Busy => "database_busy",
+        _ => "sql_error",
+    };
+    let category = eggdb_commands::category_of(code).unwrap_or(Category::Failed);
+    let mut object = JsonObject::new()
+        .string("code", code)
+        .string("category", category.name())
+        .string("message", error.message())
+        .string("sqlstate", error.state().code());
+    if let Some(detail) = error.detail() {
+        object = object.string("detail", detail);
+    }
+    if let Some(hint) = error.hint() {
+        object = object.string("hint", hint);
+    }
+    if let Some(position) = error.position() {
+        object = object.number("position", position as u64);
+    }
+    JsonObject::new().raw("error", &object.object()).line()
+}
+
+const LARGEST_EXACT_INTEGER: u64 = (1 << 53) - 1;
+
+pub(crate) fn statement_json(result: &QueryResult, dialect: Dialect) -> String {
+    let mut object = JsonObject::new().string("tag", &result.tag);
+    if let Some(columns) = &result.columns {
+        let columns: Vec<String> = columns
+            .iter()
+            .map(|column| {
+                let kind = column
+                    .sql_type
+                    .map_or_else(|| "null".to_owned(), |sql_type| json_string(&sql_type.name()));
+                JsonObject::new()
+                    .string("name", &column.name)
+                    .raw("type", &kind)
+                    .object()
+            })
+            .collect();
+        let rows: Vec<String> = result
+            .rows
+            .iter()
+            .map(|row| {
+                let cells: Vec<String> = row.iter().map(|cell| value_json(cell, dialect)).collect();
+                format!("[{}]", cells.join(","))
+            })
+            .collect();
+        object = object
+            .raw("columns", &format!("[{}]", columns.join(",")))
+            .raw("rows", &format!("[{}]", rows.join(",")))
+            .number("row_count", result.rows.len() as u64);
+    }
+    let notices: Vec<String> = result
+        .notices
+        .iter()
+        .cloned()
+        .chain(
+            result
+                .warnings
+                .iter()
+                .map(|warning| format!("{} {}: {}", warning.level, warning.code, warning.message)),
+        )
+        .map(|notice| json_string(&notice))
+        .collect();
+    if !notices.is_empty() {
+        object = object.raw("notices", &format!("[{}]", notices.join(",")));
+    }
+    object.line()
+}
+
+fn value_json(value: &Value, dialect: Dialect) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Boolean(flag) => flag.to_string(),
+        Value::SmallInt(number) => number.to_string(),
+        Value::Integer(number) => number.to_string(),
+        Value::BigInt(number) if number.unsigned_abs() <= LARGEST_EXACT_INTEGER => {
+            number.to_string()
+        }
+        other => dialect
+            .value_text(other)
+            .map_or_else(|| "null".to_owned(), |shown| json_string(&shown)),
     }
 }
 

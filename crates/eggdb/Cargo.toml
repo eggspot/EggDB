@@ -15,6 +15,7 @@ name = "eggdb"
 path = "src/main.rs"
 
 [dependencies]
+eggdb-commands = { path = "../eggdb-commands" }
 eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }

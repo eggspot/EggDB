@@ -47,6 +47,34 @@ pub(crate) enum CollectionAction {
 }
 
 impl CommandName {
+    pub(crate) const ALL: [Self; 25] = [
+        Self::Create,
+        Self::Put,
+        Self::Get,
+        Self::Del,
+        Self::Scan,
+        Self::Ttl,
+        Self::Expire,
+        Self::Persist,
+        Self::Incr,
+        Self::Decr,
+        Self::Cas,
+        Self::Check,
+        Self::Stats,
+        Self::Backup,
+        Self::Compact,
+        Self::Ui,
+        Self::Export,
+        Self::Import,
+        Self::Sql,
+        Self::Serve,
+        Self::Shell,
+        Self::Restore,
+        Self::Collection,
+        Self::Mcp,
+        Self::Audit,
+    ];
+
     fn from_name(name: &[u8]) -> Option<Self> {
         Some(match name {
             b"create" => Self::Create,
@@ -108,12 +136,17 @@ impl CommandName {
         }
     }
 
+    pub(crate) fn takes_format_option(self) -> bool {
+        self.takes(OptionName::Format)
+    }
 
     fn takes(self, option: OptionName) -> bool {
         match option {
             OptionName::Cache | OptionName::Help | OptionName::Version => true,
             OptionName::Color => true,
-            OptionName::Format => !matches!(self, Self::Ui | Self::Sql | Self::Shell | Self::Mcp),
+            OptionName::Format | OptionName::Json => {
+                !matches!(self, Self::Ui | Self::Shell | Self::Mcp)
+            }
             OptionName::Mono | OptionName::Ascii => self == Self::Ui,
             OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve | Self::Shell),
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
@@ -232,6 +265,7 @@ pub(crate) enum ColorChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptionName {
     Format,
+    Json,
     Color,
     Cache,
     Help,
@@ -282,6 +316,7 @@ impl OptionName {
     fn from_long(name: &[u8]) -> Option<Self> {
         Some(match name {
             b"format" => Self::Format,
+            b"json" => Self::Json,
             b"color" => Self::Color,
             b"cache" => Self::Cache,
             b"help" => Self::Help,
@@ -349,6 +384,7 @@ impl OptionName {
         !matches!(
             self,
             Self::Help
+                | Self::Json
                 | Self::Version
                 | Self::Create
                 | Self::Reverse
@@ -371,6 +407,7 @@ impl OptionName {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Invocation {
     Help(Option<CommandName>),
+    HelpJson(Option<CommandName>),
     NoArguments,
     Version,
     Run(Box<Request>),
@@ -521,6 +558,35 @@ pub(crate) fn color_choice_of(args: &[OsString]) -> ColorChoice {
         .unwrap_or_default()
 }
 
+pub(crate) fn json_errors_requested(args: &[OsString]) -> bool {
+    let tokens = tokenize(args);
+    if !asks_for_json(&tokens) {
+        return false;
+    }
+    let first = tokens
+        .positionals
+        .first()
+        .map(|name| name.as_encoded_bytes());
+    first
+        .and_then(CommandName::from_name)
+        .is_none_or(CommandName::takes_format_option)
+}
+
+fn asks_for_json(tokens: &Tokens<'_>) -> bool {
+    tokens
+        .options
+        .iter()
+        .rev()
+        .find_map(|option| match option.name {
+            OptionName::Json => Some(true),
+            OptionName::Format => {
+                Some(option.value.is_some_and(|value| value.as_encoded_bytes() == b"json"))
+            }
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     if args.is_empty() {
         return Ok(Invocation::NoArguments);
@@ -532,24 +598,40 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
         .map(|name| name.as_encoded_bytes());
     let command = first.and_then(CommandName::from_name);
     let has = |name| tokens.options.iter().any(|option| option.name == name);
+    let json = asks_for_json(&tokens);
+    let help = |command: Option<CommandName>| {
+        if json {
+            Invocation::HelpJson(command)
+        } else {
+            Invocation::Help(command)
+        }
+    };
     if has(OptionName::Help) {
         return match first {
-            Some(b"help" | b"version") | None => Ok(Invocation::Help(None)),
+            Some(b"help" | b"version") | None => Ok(help(None)),
             Some(name) if command.is_none() => Err(unknown_command(name)),
-            _ => Ok(Invocation::Help(command)),
+            _ => Ok(help(command)),
         };
     }
     if has(OptionName::Version) {
         return Ok(Invocation::Version);
     }
     let Some(first) = first else {
+        if json {
+            return Ok(help(None));
+        }
         return Err(Failure::usage(
             "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
             None,
         ));
     };
     match first {
-        b"help" => return parse_help(&tokens.positionals[1..]),
+        b"help" => {
+            return parse_help(&tokens.positionals[1..]).map(|invocation| match invocation {
+                Invocation::Help(command) => help(command),
+                other => other,
+            });
+        }
         b"version" if tokens.positionals.len() == 1 => return Ok(Invocation::Version),
         b"version" => return Err(too_many_arguments(&tokens.positionals[1..], None)),
         _ => {}
@@ -703,6 +785,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 }
                 request.format = Some(format);
             }
+            OptionName::Json => request.format = Some(Format::Json),
             OptionName::Color => request.color = parse_color(value).map_err(usage)?,
             OptionName::Cache => {
                 request.cache_bytes = Some(parse_size(&option.spelled, value).map_err(usage)?);

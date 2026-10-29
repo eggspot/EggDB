@@ -236,6 +236,7 @@ impl Session<'_> {
             ),
             try_command: Some(start),
             exit: Exit::DatabaseError,
+            code: "database_failed",
         }
     }
 

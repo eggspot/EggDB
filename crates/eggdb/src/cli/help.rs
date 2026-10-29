@@ -1,4 +1,9 @@
-use super::args::CommandName;
+use super::args::{CommandName, Format};
+use super::commands::default_format;
+use super::render::{JsonObject, json_string};
+use eggdb_commands::{
+    COMMON_OPTIONS, Category, CommandDefinition, Effect, OptionDefinition, TOOLS, ToolDefinition,
+};
 
 pub(crate) const MAIN: &str = "\
 eggdb: one database for every kind of data. This release: an embedded key-value store in one file,
@@ -51,28 +56,27 @@ Exit codes: 0 ok, 1 not found, 2 usage, 3 database error, 4 damaged, 5 busy.
 Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
 ";
 
+const IN_THE_REGISTRY: &str = "";
+
+pub(crate) fn definition(command: CommandName) -> Option<&'static CommandDefinition> {
+    eggdb_commands::command(&[command.name()])
+}
+
 pub(crate) fn usage_line(command: CommandName) -> &'static str {
+    if let Some(definition) = definition(command) {
+        return definition.usage;
+    }
     match command {
         CommandName::Create => "eggdb create <file> [--page-size <bytes>]",
         CommandName::Put => {
             "eggdb put <file> <key> [<value>] [--ttl <time>] [--create] [-C <name>]"
         }
-        CommandName::Get => "eggdb get <file> <key> [-C <name>]",
         CommandName::Del => "eggdb del <file> <key> [-C <name>]",
-        CommandName::Scan => {
-            "eggdb scan <file> [--prefix <bytes> | --from <bytes> [--to <bytes>]] [-r] [-n <count>] [-k] [-C <name>]"
-        }
-        CommandName::Check => "eggdb check <file>",
-        CommandName::Stats => "eggdb stats <file>",
         CommandName::Backup => "eggdb backup <file> <copy>",
         CommandName::Compact => "eggdb compact <file>",
         CommandName::Ui => "eggdb ui <file> [--read-only] [--mono] [--ascii] [--cache <bytes>]",
-        CommandName::Export => "eggdb export <file> [<out> | -] [-C <name>]",
         CommandName::Import => {
             "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] [-C <name>] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls]"
-        }
-        CommandName::Sql => {
-            "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--create]"
         }
         CommandName::Shell => {
             "eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--read-only] [--create]"
@@ -96,6 +100,12 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Cas => {
             "eggdb cas <file> <key> (<expected> | --if-absent) (<new> | --delete) [-C <name>]"
         }
+        CommandName::Get
+        | CommandName::Scan
+        | CommandName::Check
+        | CommandName::Stats
+        | CommandName::Export
+        | CommandName::Sql => IN_THE_REGISTRY,
     }
 }
 
@@ -108,20 +118,17 @@ pub(crate) fn command_help(command: CommandName) -> String {
 }
 
 fn command_body(command: CommandName) -> &'static str {
+    if let Some(definition) = definition(command) {
+        return definition.help;
+    }
     match command {
         CommandName::Create => CREATE,
         CommandName::Put => PUT,
-        CommandName::Get => GET,
         CommandName::Del => DEL,
-        CommandName::Scan => SCAN,
-        CommandName::Check => CHECK,
-        CommandName::Stats => STATS,
         CommandName::Backup => BACKUP,
         CommandName::Compact => COMPACT,
         CommandName::Ui => UI,
-        CommandName::Export => EXPORT,
         CommandName::Import => IMPORT,
-        CommandName::Sql => SQL,
         CommandName::Serve => SERVE,
         CommandName::Shell => SHELL,
         CommandName::Restore => RESTORE,
@@ -134,7 +141,215 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Incr => INCR,
         CommandName::Decr => DECR,
         CommandName::Cas => CAS,
+        CommandName::Get
+        | CommandName::Scan
+        | CommandName::Check
+        | CommandName::Stats
+        | CommandName::Export
+        | CommandName::Sql => IN_THE_REGISTRY,
     }
+}
+
+pub(crate) fn registry_json(command: Option<CommandName>) -> String {
+    match command {
+        Some(command) => match definition(command) {
+            Some(definition) => format!("{}\n", command_json(command, definition)),
+            None => format!("{}\n", unregistered_json(command)),
+        },
+        None => format!("{}\n", whole_registry_json()),
+    }
+}
+
+fn whole_registry_json() -> String {
+    let effects: Vec<String> = Effect::ALL
+        .iter()
+        .map(|effect| {
+            JsonObject::new()
+                .string("name", effect.name())
+                .string("means", effect.meaning())
+                .object()
+        })
+        .collect();
+    let categories: Vec<String> = Category::ALL
+        .iter()
+        .map(|category| {
+            JsonObject::new()
+                .string("name", category.name())
+                .string("means", category.meaning())
+                .object()
+        })
+        .collect();
+    let options: Vec<String> = COMMON_OPTIONS.iter().map(option_json).collect();
+    let commands: Vec<String> = CommandName::ALL
+        .iter()
+        .filter_map(|command| Some(command_json(*command, definition(*command)?)))
+        .collect();
+    let others: Vec<String> = CommandName::ALL
+        .iter()
+        .filter(|command| definition(**command).is_none())
+        .map(|command| unregistered_json(*command))
+        .collect();
+    let tools: Vec<String> = TOOLS.iter().map(tool_json).collect();
+    JsonObject::new()
+        .string("version", eggdb::VERSION)
+        .raw("effects", &array(&effects))
+        .raw("categories", &array(&categories))
+        .raw("common_options", &array(&options))
+        .raw("commands", &array(&commands))
+        .raw("other_commands", &array(&others))
+        .raw("tools", &array(&tools))
+        .object()
+}
+
+fn array(items: &[String]) -> String {
+    format!("[{}]", items.join(","))
+}
+
+fn strings(items: &[&str]) -> String {
+    let items: Vec<String> = items.iter().map(|item| json_string(item)).collect();
+    array(&items)
+}
+
+fn optional(text: Option<&str>) -> String {
+    text.map_or_else(|| "null".to_owned(), json_string)
+}
+
+fn unregistered_json(command: CommandName) -> String {
+    JsonObject::new()
+        .raw("words", &strings(&[command.name()]))
+        .string("usage", usage_line(command))
+        .object()
+}
+
+fn option_json(option: &OptionDefinition) -> String {
+    let short = option.short.map(String::from);
+    JsonObject::new()
+        .raw("short", &optional(short.as_deref()))
+        .string("long", option.long)
+        .raw("value", &optional(option.value))
+        .boolean("repeatable", option.repeatable)
+        .raw("default", &optional(option.default))
+        .string("help", option.help)
+        .object()
+}
+
+fn command_json(command: CommandName, definition: &CommandDefinition) -> String {
+    let options: Vec<String> = definition.options.iter().map(option_json).collect();
+    let operands: Vec<String> = definition
+        .operands
+        .iter()
+        .map(|operand| {
+            JsonObject::new()
+                .string("name", operand.name)
+                .string("type", operand.kind.name())
+                .string("count", operand.count.name())
+                .boolean("standard_stream", operand.standard_stream)
+                .object()
+        })
+        .collect();
+    let outputs: Vec<String> = definition
+        .outputs
+        .iter()
+        .map(|output| {
+            let fields: Vec<String> = output
+                .kind
+                .fields()
+                .iter()
+                .map(|field| {
+                    JsonObject::new()
+                        .string("name", field.name)
+                        .string("type", field.kind.name())
+                        .object()
+                })
+                .collect();
+            JsonObject::new()
+                .string("format", output.format.name())
+                .string("kind", output.kind.name())
+                .raw("fields", &array(&fields))
+                .object()
+        })
+        .collect();
+    let formats = JsonObject::new()
+        .string("terminal", format_name(default_format(command, true)))
+        .string("pipe", format_name(default_format(command, false)))
+        .object();
+    let errors: Vec<String> = definition
+        .errors
+        .iter()
+        .map(|error| {
+            let category = eggdb_commands::category_of(error.code).unwrap_or(Category::Failed);
+            JsonObject::new()
+                .string("code", error.code)
+                .string("category", category.name())
+                .number("exit", u64::from(error.exit))
+                .object()
+        })
+        .collect();
+    JsonObject::new()
+        .raw("words", &strings(definition.words))
+        .raw("aliases", &strings(definition.aliases))
+        .string("summary", definition.summary)
+        .string("description", definition.description)
+        .string("usage", definition.usage)
+        .raw("options", &array(&options))
+        .raw("operands", &array(&operands))
+        .raw("outputs", &array(&outputs))
+        .raw("default_format", &formats)
+        .string("max_effect", definition.max_effect.name())
+        .raw("errors", &array(&errors))
+        .raw("examples", &strings(definition.examples))
+        .string("surfaces", definition.surfaces)
+        .object()
+}
+
+fn format_name(format: Format) -> &'static str {
+    match format {
+        Format::Text => "text",
+        Format::Json => "json",
+        Format::Hex => "hex",
+        Format::Raw => "raw",
+    }
+}
+
+fn tool_json(tool: &ToolDefinition) -> String {
+    let arguments: Vec<String> = tool
+        .arguments
+        .iter()
+        .map(|argument| {
+            JsonObject::new()
+                .string("name", argument.name)
+                .string("type", argument.kind.json_type())
+                .raw("maps_to", &optional(argument.maps_to.json_name().as_deref()))
+                .object()
+        })
+        .collect();
+    let mut fixed = JsonObject::new();
+    for pair in tool.fixed.chunks(2) {
+        if let [option, value] = pair {
+            fixed = fixed.string(option.trim_start_matches('-'), value);
+        }
+    }
+    let annotations = tool.annotations();
+    let annotations = JsonObject::new()
+        .string("title", tool.title)
+        .boolean("readOnlyHint", annotations.read_only)
+        .boolean("destructiveHint", annotations.destructive)
+        .boolean("idempotentHint", annotations.idempotent)
+        .boolean("openWorldHint", annotations.open_world)
+        .object();
+    let command = tool.command.map(strings);
+    JsonObject::new()
+        .string("name", tool.name)
+        .raw("command", &command.unwrap_or_else(|| "null".to_owned()))
+        .raw("fixed", &fixed.object())
+        .raw("arguments", &array(&arguments))
+        .string("max_effect", tool.max_effect.name())
+        .raw("grant", &optional(tool.grant.name()))
+        .boolean("idempotent", tool.idempotent)
+        .boolean("open_world", tool.open_world)
+        .raw("confirm", &optional(tool.confirm.map(|check| check.name())))
+        .raw("annotations", &annotations)
+        .object()
 }
 
 const TTL: &str = "\
@@ -271,18 +486,6 @@ Examples:
   eggdb put app.db -C sessions s:1 '{\"user\":1}' --ttl 30m
 ";
 
-const GET: &str = "\
-Prints the value stored under the key, or exits 1 when the key is not there. On a terminal the
-value is shown as text, or as 0x hex when it is not text; in a pipe or a file the bytes are
-written exactly, without a newline, so `eggdb get app.db photo > photo.jpg` round-trips.
-
-  -C, --collection <name>  work in this collection instead of the default key space
-
-Examples:
-  eggdb get app.db user:1
-  eggdb get app.db photo > photo.jpg
-  eggdb get app.db 0x00ff --format hex
-";
 
 const DEL: &str = "\
 Removes the key and commits, or exits 1 when it was not there. `eggdb delete` is the same
@@ -294,41 +497,8 @@ Examples:
   eggdb del app.db user:4
 ";
 
-const SCAN: &str = "\
-Lists entries in key order, from one snapshot. Keys are compared as unsigned bytes.
 
-  -p, --prefix <bytes>   keys that start with these bytes
-      --from <bytes>     first key, inclusive
-      --to <bytes>       end key, exclusive
-  -r, --reverse          largest key first
-  -n, --limit <count>    stop after this many entries
-  -k, --keys-only        print keys only
-  -C, --collection <name>  work in this collection instead of the default key space
 
-Examples:
-  eggdb scan app.db --prefix user:
-  eggdb scan app.db --from 2026-01 --to 2026-02 --format json
-  eggdb scan app.db -r -n 1
-";
-
-const CHECK: &str = "\
-Reads every page of the file as of its last commit: every checksum, the order of every key,
-every large value, and what each page of the file is used for. Exits 0 when nothing is
-damaged and 4 when something is, with what to do next.
-
-Examples:
-  eggdb check app.db
-  eggdb check app.db --format json
-";
-
-const STATS: &str = "\
-Prints the page size, the pages and free pages, the file's size, the last commit and the log
-written since the last checkpoint. It reads no page, so it is instant on a file of any size.
-
-Examples:
-  eggdb stats app.db
-  eggdb stats app.db --format json
-";
 
 const BACKUP: &str = "\
 Writes a copy of the file's last commit to <copy>, a new file, while other readers keep working.
@@ -381,22 +551,6 @@ Examples:
   eggdb ui app.db --mono --ascii
 ";
 
-const EXPORT: &str = "\
-Writes every entry of the file, from one snapshot, to <out> as JSON lines (eggdb-jsonl): a
-header line, one line per entry in key order, and a trailer line with the entry count, so a cut
-export is refused on import. Keys and values are text when they are UTF-8 without control
-characters other than tab and line breaks, and hex otherwise (\"key_hex\", \"value_hex\"), so
-any bytes round-trip. Without <out>, or with -, the export goes to stdout. It never replaces a
-file; a failed export removes what it wrote. A file with collections exports as version 2: the
-default key space first, then each collection's entries tagged with its name, and an empty
-collection as a line of its own.
-
-  -C, --collection <name>  write only this collection, untagged
-
-Examples:
-  eggdb export app.db backup.jsonl
-  eggdb export app.db | gzip > backup.jsonl.gz
-";
 
 const IMPORT: &str = "\
 Loads an export made by eggdb export into the file, from <in> or, without it or with -, from
@@ -455,42 +609,6 @@ Examples:
   eggdb import --dialect sqlserver shop.db --csv items.dat --table dbo.items
 ";
 
-const SQL: &str = "\
-Runs SQL statements, separated by semicolons, from -c, from a script file, or from stdin (a
-script of - or none at all), in order. This release runs the first parts of the PostgreSQL
-dialect: CREATE TABLE with a PRIMARY KEY, DROP TABLE, INSERT, SELECT with WHERE, inner, left
-and cross joins, GROUP BY with count, sum, avg, min and max, HAVING, DISTINCT, ORDER BY,
-LIMIT and OFFSET, UPDATE, DELETE, BEGIN, COMMIT and ROLLBACK, with the integer,
-floating-point, exact numeric, boolean, text, char(n), bytea, uuid, date, time, timetz,
-timestamp, timestamptz, interval, json and jsonb types and serial and identity columns; with --dialect mysql, MySQL's SQL on the same tables, with MySQL's
-errors, and with --dialect sqlite, SQLite's SQL (type affinity, INTEGER PRIMARY KEY row ids,
-PRAGMAs, sqlite_schema), with SQLite's errors and result codes, and with --dialect oracle,
-Oracle's SQL (DUAL, ROWNUM, FETCH FIRST, upper-case names, '' as NULL), with ORA- errors,
-and with --dialect sqlserver, SQL Server's Transact-SQL ([brackets], TOP, IDENTITY,
-GETDATE()), with SQL Server's error numbers.
-Results print as aligned tables, like psql. Each statement outside BEGIN ... COMMIT is its own
-transaction; in Oracle's dialect the first change starts a transaction that COMMIT, ROLLBACK
-or DDL ends, and the run commits it at the end, as SQL*Plus does. The first failing statement
-stops the run with exit 3 and the dialect's error on stderr; statements before it stay
-committed, and a block left open is rolled back. CREATE INDEX and UNIQUE speed up WHERE and
-ORDER BY in every dialect. Views (CREATE VIEW) work in every dialect, schemas with
-search_path in PostgreSQL's and COMMENT ON in PostgreSQL's and Oracle's. COPY ... FROM STDIN and
-COPY ... TO STDOUT (text and CSV) load and unload tables in PostgreSQL's dialect: in a script the
-data follows the COPY line up to a line \\., as pg_dump writes it; with -c it comes from stdin;
-COPY ... TO STDOUT prints the rows. More types and the rest come next (docs/sql.md).
-
-  -c, --command <sql>   the statements to run
-      --dialect <name>  postgresql (default), mysql, sqlite, oracle or sqlserver
-      --create          create the database file if it is missing
-
-Examples:
-  eggdb sql --create app.db -c \"CREATE TABLE users (id integer PRIMARY KEY, name text)\"
-  eggdb sql app.db -c \"INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace')\"
-  eggdb sql app.db -c \"SELECT name FROM users WHERE id = 2\"
-  eggdb sql app.db schema.sql
-  cat queries.sql | eggdb sql app.db
-  eggdb sql app.db -c \"COPY users FROM STDIN (FORMAT csv)\" < users.csv
-";
 
 const SHELL: &str = "\
 An interactive prompt on one database file: the key-value commands without their 'eggdb

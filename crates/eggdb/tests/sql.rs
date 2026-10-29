@@ -128,7 +128,7 @@ fn usage_mistakes_exit_2() {
         vec!["-c", "SELECT 1", "script.sql"],
         vec!["-c", "SELECT 1", "-c", "SELECT 2"],
         vec!["missing-script.sql"],
-        vec!["--format", "json", "-c", "SELECT 1"],
+        vec!["--format", "hex", "-c", "SELECT 1"],
     ] {
         let output = eggdb_sql(file.path(), &args, b"");
         assert_eq!(

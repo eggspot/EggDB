@@ -91,6 +91,7 @@ impl Session<'_> {
                 ),
                 try_command: Some(format!("mkdir {directory}")),
                 exit: Exit::DatabaseError,
+                code: "not_found",
             });
         }
         Ok(())
@@ -107,10 +108,12 @@ fn with_writer_hint(failure: Failure) -> Failure {
             message,
             try_command,
             exit,
+            code,
         } => Failure::Database {
             message: format!("{message}\n{WRITER_HOLDS_THE_FILE}"),
             try_command,
             exit,
+            code,
         },
         failure => failure,
     }

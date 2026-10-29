@@ -104,14 +104,16 @@ impl Session<'_> {
             .create_new(true)
             .open(path)
             .map_err(|error| {
-                let message = if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    format!(
-                        "{out} already exists; eggdb export never replaces a file. Choose another name, or remove it first."
-                    )
-                } else {
-                    format!("cannot create {out}: {error}")
-                };
-                Failure::database(message, Exit::DatabaseError)
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Failure::coded(
+                        "already_exists",
+                        format!(
+                            "{out} already exists; eggdb export never replaces a file. Choose another name, or remove it first."
+                        ),
+                        Exit::DatabaseError,
+                    );
+                }
+                Failure::database(format!("cannot create {out}: {error}"), Exit::DatabaseError)
             })?;
         let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
         let written = write_export(db, header, only, &mut writer, progress, &mut self.messages)
@@ -1271,10 +1273,12 @@ fn with_note(failure: Failure, note: &str) -> Failure {
             message,
             try_command,
             exit,
+            code,
         } => Failure::Database {
             message: format!("{}. {note}", message.trim_end_matches('.')),
             try_command,
             exit,
+            code,
         },
         other => other,
     }

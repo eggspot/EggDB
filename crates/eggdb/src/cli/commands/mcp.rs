@@ -88,6 +88,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
                 ),
                 try_command: Some(format!("eggdb create {file}")),
                 exit: Exit::DatabaseError,
+                code: "not_found",
             });
         }
         Err(error) => {
