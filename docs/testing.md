@@ -403,6 +403,23 @@ functions have unit tests in `crates/eggdb-sql/src/information_schema/tests.rs`,
 `pg_catalog/tests.rs`, `set_returning_tests.rs` and `window.rs`, and cases in
 `correctness/postgresql.test`.
 
+## .NET apps through Npgsql (D135)
+`crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck` is a C# program on Npgsql 8.0.5: it opens a
+data source (Npgsql's type loading), then, each step on a connection taken from the pool again
+(so each reuse sends `DISCARD ALL`), does CRUD with typed parameters, reads an `integer[]`
+column, rolls back and commits a transaction, runs an `NpgsqlBatch`, runs a batch whose second
+command fails and checks that nothing of it stayed, and cancels `SELECT pg_sleep(30)` with
+`NpgsqlCommand.Cancel()` after one second. `scripts/pg-apps/check.sh` builds it with the .NET
+SDK (Npgsql restored from NuGet, a test tool never shipped) and runs it against PostgreSQL 17 and
+EggDB next to the Java and Python programs, requiring the same bytes. Below the driver,
+`crates/eggdb-pgwire/tests/transactions_and_cancel.rs` speaks the protocol directly: pipelines
+that commit at `Sync` or leave nothing, one `Query` message's statements as one transaction, a
+`BEGIN` inside a pipeline, portals closed at the end of their transaction, `DISCARD ALL`,
+`CancelRequest` with right and wrong keys and one that rolls back a pipeline, and Npgsql's
+type-loading queries, kept in `crates/eggdb/tests/data/npgsql/load-types.sql`, which
+`pg_catalog/tests.rs` also runs through a session. `implicit_transaction_tests.rs` and
+`cancel.rs` in `eggdb-sql`, and `backend_keys.rs` in `eggdb-pgwire`, test the pieces.
+
 SQL Server's drivers have their own check (item 23b, D132).
 `crates/eggdb/tests/clients/java/TdsAppCheck.java` (mssql-jdbc) and
 `crates/eggdb/tests/clients/dotnet/TdsAppCheck` (Microsoft.Data.SqlClient) run parameterized CRUD

@@ -80,15 +80,31 @@ relations psql's `\d` family reads.
 - **Several connections**, one thread and one session each, up to `--max-connections` (64),
   at most 16 of them still logging in; readers run side by side, writers one at a time (a
   second waits 5 s, then `55P03`: retry once the other session's transaction ends).
+- **Implicit transactions, as PostgreSQL runs them** (D135): outside `BEGIN`, the statements of
+  one `Query` message, and of an extended-protocol pipeline up to its `Sync`, commit together or
+  not at all: `INSERT ...; INSERT ...; SELECT 1/0` leaves nothing, and so does a batch of
+  prepared statements whose second one fails. A `BEGIN` among them opens a block that includes
+  the statements before it; a `COMMIT` or `ROLLBACK` among them ends what came before with the
+  warning "there is no transaction in progress". Portals end with their transaction: after a
+  `Sync` outside a block they are gone (`34000`), inside a block they live to its end. A
+  pipeline that only reads never takes the database's one writer.
+- **Cancelling a running statement** (D135): each connection gets a random secret key in its
+  `BackendKeyData`; a `CancelRequest` with that process ID and key (psql's Ctrl-C,
+  `PQcancel`, pgjdbc's `Statement.cancel()`, Npgsql's `NpgsqlCommand.Cancel()`) stops the
+  statement the connection is running at its next row with `57014` "canceling statement due to
+  user request", and rolls back what it wrote. A request with a wrong key changes nothing and is
+  logged. `pg_sleep(seconds)` waits and can be cancelled the same way.
+- **`DISCARD ALL`**, which connection pools send before reusing a connection, forgets the
+  connection's prepared statements and portals and returns every setting to the value the client
+  sent when it connected (`RESET` and `RESET ALL` do the same); `DISCARD PLANS`, `TEMP` and
+  `SEQUENCES` are accepted too. Inside a block `DISCARD ALL` is `25001`.
 
 psql's `\d` family (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du`) reads EggDB's
 catalog: see [The PostgreSQL catalog](#the-postgresql-catalog).
 
 Not yet (each fails readably or is ignored harmlessly): TLS, `\d+`, `\df` and the other psql
-commands beyond the `\d` family, the catalog queries of GUI tools beyond it, `COPY` in the binary format, `LISTEN`/`NOTIFY`, cancelling a running
-query, the implicit transaction around a multi-statement `Query` or an extended-protocol
-pipeline (each statement commits on its own outside `BEGIN`), stored users and roles, and
-non-ASCII passwords.
+commands beyond the `\d` family, the catalog queries of GUI tools beyond it, `COPY` in the binary format, `LISTEN`/`NOTIFY`, stored
+users and roles, and non-ASCII passwords.
 
 ## The MySQL dialect
 
@@ -1492,8 +1508,9 @@ relation X (`pg_catalog` is searched first unless `search_path` lists it after a
 `pg_sequence`, `pg_depend`, `pg_tablespace` and `pg_settings` (the session's settings, one row
 each), and the empty `pg_inherits`, `pg_policy`, `pg_statistic_ext`, `pg_publication`,
 `pg_publication_rel`, `pg_publication_namespace`, `pg_trigger`, `pg_rewrite`,
-`pg_auth_members`, `pg_opclass` and `pg_enum`, each with PostgreSQL 16's columns and column
-types. `information_schema`'s views are catalog relations too: see
+`pg_auth_members`, `pg_opclass`, `pg_enum` and `pg_range`, and `pg_proc` with the array
+functions `array_in`, `array_out`, `array_recv` and `array_send` (D135), each with PostgreSQL
+16's columns and column types. `information_schema`'s views are catalog relations too: see
 [Java and Python apps](#java-and-python-apps-and-information_schema). A statement that names them builds their rows from the stored tables, views, sequences,
 schemas and comments once, however often it reads them (correlated subqueries included); a
 statement that names none costs nothing; a stored default, `CHECK` constraint or view that uses
@@ -1543,14 +1560,15 @@ only the catalog's `pg_node_tree` columns, as PostgreSQL does. The functions:
 sequence a `serial` column owns, schema-qualified, or NULL), `to_regclass` and `to_regtype`
 (NULL for a name that does not exist), `generate_subscripts`, and `pg_get_triggerdef`,
 `pg_get_ruledef`, `pg_get_statisticsobjdef_columns` and `shobj_description`, which return NULL.
-`regproc` takes and shows the name of the built-in function EggDB names: `array_in`, the
-`typinput` of every array type in `pg_type`; another name is `42883`.
+`regproc` takes and shows the name of the built-in functions EggDB names: `array_in`,
+`array_out`, `array_recv` and `array_send`, the `typinput`, `typoutput`, `typreceive` and
+`typsend` of every array type in `pg_type`; another name is `42883`.
 
 **Not yet:** `\d+` and `\dt+ \dv+ \ds+ \di+ \dn+` (sizes, storage, a table's access
 method, `public`'s access privileges and description; `pg_table_size` and the rest are
-missing), `\df`, `\dT`, `\dp`, `\dx`, `\dd`, `\db` and `\dC` (they read `pg_proc`,
-`pg_extension`, `pg_tablespace_location` and `pg_cast`, which are not there yet, and fail
-readably), the composite row type of each table, a view column of a catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` is `0A000`;
+missing), `\df`, `\dT`, `\dp`, `\dx`, `\dd`, `\db` and `\dC` (they read `pg_proc`'s other
+functions, `pg_extension`, `pg_tablespace_location` and `pg_cast`, which are not there yet, and
+fail readably or list nothing), the composite row type of each table, a view column of a catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` is `0A000`;
 `relname::text` works), and four things the table definition does not store yet (roadmap
 37c): an index's method other than `btree` and a descending order, whether a unique index was
 made by `CREATE UNIQUE INDEX` rather than a constraint, and `GENERATED ALWAYS` identities.
@@ -1562,6 +1580,39 @@ without PostgreSQL's extra parentheses around nested casts. A `reg*` cast Postgr
 while planning (`'t'::regclass::regtype`) fails here when the cast runs, so not on zero rows or
 a NULL; `numeric` with a negative scale and `interval year(3)` are not taken by `regtype`, and
 `timestamp(7)` gives no warning.
+
+## .NET apps through Npgsql
+
+.NET apps through Npgsql run against `eggdb serve` unchanged (roadmap item 45, D135), with an
+ordinary connection string such as
+`Host=127.0.0.1;Port=5432;Username=eggdb;Password=...;Database=shop`:
+
+- **Type loading.** When a data source first connects, Npgsql reads the server's types from
+  `pg_type`, `pg_namespace`, `pg_class`, `pg_proc` (to find array types by their receive
+  function `array_recv`), `pg_range`, `pg_attribute` and `pg_enum` in one message; EggDB answers
+  with its built-in types and their arrays, so `integer[]` and the other array columns read as
+  .NET arrays.
+- **Commands and batches.** Commands with typed parameters (`int`, `long`, `short`, `decimal`,
+  `double`, `float`, `bool`, `string`, `DateTime`, `TimeSpan`, `Guid`, `byte[]`), readers in
+  binary form, `BeginTransaction` with `Commit` and `Rollback`, and `NpgsqlBatch`, whose
+  commands commit together or not at all.
+- **Pooled connections.** A connection taken from the pool again is reset with `DISCARD ALL`,
+  which keeps the settings of the connection string.
+- **Cancelling.** `NpgsqlCommand.Cancel()` and a cancelled `CancellationToken` stop the running
+  command with `57014`; the connection stays usable.
+
+CI's `pg-apps` job runs `crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck` (Npgsql 8.0.5)
+against PostgreSQL 17 and against EggDB and requires the same output: type loading, CRUD over
+pooled connections, an `int[]` column, a rolled-back and a committed transaction, a batch, a
+batch that fails half way and leaves nothing, and `SELECT pg_sleep(30)` cancelled after one
+second.
+
+Known differences: Npgsql resets a connection that holds prepared statements (after
+`NpgsqlCommand.Prepare()`, or with `Max Auto Prepare` set) with `SET SESSION AUTHORIZATION
+DEFAULT`, `CLOSE ALL`, `UNLISTEN *` and `pg_advisory_unlock_all()`, which EggDB does not run
+yet: such apps add `No Reset On Close=true` to their connection string for now. Array
+parameters are not supported yet (array results are). `pg_sleep`'s result column is `text`
+where PostgreSQL's is `void`.
 
 ## Java and Python apps and information_schema
 
@@ -2141,4 +2192,4 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   aggregates.
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
-  binary `COPY` and query cancellation (M6a).
+  binary `COPY` and `LISTEN`/`NOTIFY` (M6a).

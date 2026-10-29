@@ -66,10 +66,10 @@ stops. The details of every test are in [testing.md](testing.md); this page is t
 - **A real process killed in the middle of a commit.** That is covered by the simulator, which
   stops at every I/O operation; no test kills a running `eggdb` process during a write.
 - **The PostgreSQL protocol's limits.** No TLS, so `eggdb serve` listens on loopback only
-  (D102); no query cancellation, `COPY`, `LISTEN`/`NOTIFY` or catalog queries, and psql's `\d`
-  commands fail with an error. A multi-statement `Query` and an extended-protocol pipeline do
-  not run in one implicit transaction: outside `BEGIN`, each statement commits on its own. Only
-  psql and pg8000 are run in CI; other drivers and GUI tools are not tested yet. The SCRAM code
+  (D102); no `LISTEN`/`NOTIFY`, and the catalog queries of GUI tools beyond psql's `\d` family
+  are not answered yet. Implicit transactions and cancellation (D135) are checked by the
+  socket tests and by Npgsql in CI's `pg-apps` job, not against every driver. psql, pg8000,
+  pgjdbc, psycopg 3, SQLAlchemy Core and Npgsql are run in CI; GUI tools are not tested yet. The SCRAM code
   had no external security audit; D35's second, security-focused review is done by a review
   agent, not a person. Timing side channels are limited to constant-time comparisons of the
   proof and nonce; PBKDF2 and HMAC are not hardened against cache-timing attacks.
