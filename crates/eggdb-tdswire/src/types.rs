@@ -4,6 +4,7 @@ use eggdb_sql::{Dialect, OutputColumn, SqlType, Value};
 const MAX_FIXED_NVARCHAR_UNITS: usize = 4000;
 const MAX_FIXED_VARBINARY_BYTES: usize = 8000;
 const MAX_DECIMAL_PRECISION: u16 = 38;
+const LONGEST_DECIMAL_BYTES: u8 = 17;
 const DAYS_FROM_YEAR_ONE_TO_2000: i64 = 730_119;
 const LAST_DAY_FROM_YEAR_ONE: i64 = 3_652_058;
 const MICROS_PER_DAY: i64 = 86_400_000_000;
@@ -69,7 +70,7 @@ impl WireType {
             Self::Float(width) => out.extend_from_slice(&[0x6D, width]),
             Self::Bit => out.extend_from_slice(&[0x68, 1]),
             Self::Decimal { precision, scale } => {
-                out.extend_from_slice(&[0x6A, decimal_bytes(precision), precision, scale]);
+                out.extend_from_slice(&[0x6A, LONGEST_DECIMAL_BYTES, precision, scale]);
             }
             Self::DateTime2 { scale } => out.extend_from_slice(&[0x2A, scale]),
             Self::Date => out.push(0x28),

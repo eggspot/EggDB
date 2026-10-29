@@ -12,9 +12,14 @@ internal static class TdsAppCheck
         {
             return TdsMetadataCheck.Run(arguments[0]);
         }
+        if (arguments.Length == 3 && arguments[1] == "bulk")
+        {
+            return TdsBulkCheck.Run(arguments[0], arguments[2]);
+        }
         if (arguments.Length != 1)
         {
-            Console.Error.WriteLine("usage: dotnet run --project TdsAppCheck -- <connection string> [metadata]");
+            Console.Error.WriteLine(
+                "usage: dotnet run --project TdsAppCheck -- <connection string> [metadata | bulk <bcp -c file>]");
             return 2;
         }
         var connectionString = arguments[0];

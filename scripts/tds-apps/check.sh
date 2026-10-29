@@ -12,9 +12,13 @@ transaction and a failing query; the .NET program also reuses a pooled connectio
 it. Then restores the sqlpackage fixture crates/eggdb/tests/data/sqlserver/shop-sqlpackage.sql
 into a second database and lists it through each driver's metadata calls:
 crates/eggdb/tests/clients/java/TdsMetadataCheck.java (DatabaseMetaData) and the .NET program's
-metadata mode (SqlConnection.GetSchema). Fails unless each program prints exactly
-scripts/tds-apps/expected-java.out, expected-dotnet.out, expected-metadata-java.out and
-expected-metadata-dotnet.out, written from Microsoft's documentation of SQL Server's behavior.
+metadata mode (SqlConnection.GetSchema). Last, loads the committed bcp character-format file
+crates/eggdb/tests/data/sqlserver/bcp/items.dat (bcp ... out -c; bcp itself is not run here,
+its license keeps it out of CI) into a third database twice: with eggdb import --dialect
+sqlserver, and with SqlBulkCopy in the .NET program's bulk mode, which compares both tables'
+rows with the file. Fails unless each program prints exactly scripts/tds-apps/expected-java.out,
+expected-dotnet.out, expected-metadata-java.out, expected-metadata-dotnet.out and
+expected-bulk-dotnet.out, written from Microsoft's documentation of SQL Server's behavior.
 
 MSSQL_JDBC_JAR names the mssql-jdbc jar, JAVA the java launcher (default java) and DOTNET the
 dotnet command (default dotnet), whose SDK restores Microsoft.Data.SqlClient from NuGet."
@@ -25,6 +29,7 @@ work=$2
 here=$(cd "$(dirname "$0")" && pwd)
 clients=$(cd "$here/../../crates/eggdb/tests/clients" && pwd)
 fixture=$(cd "$here/../../crates/eggdb/tests/data/sqlserver" && pwd)/shop-sqlpackage.sql
+bcp=$(cd "$here/../../crates/eggdb/tests/data/sqlserver/bcp" && pwd)
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
 java=${JAVA:-java}
@@ -66,7 +71,7 @@ stop() {
 }
 
 : > "$work/serve.err"
-rm -f "$work/apps.db" "$work/shop.db"
+rm -f "$work/apps.db" "$work/shop.db" "$work/bulk.db"
 "$eggdb" create "$work/apps.db" > /dev/null || fail "eggdb create failed"
 serve apps apps
 "$java" -cp "$MSSQL_JDBC_JAR" "$clients/java/TdsAppCheck.java" \
@@ -88,9 +93,19 @@ serve shop shop
   > "$work/metadata-dotnet.out" 2>&1 || true
 stop
 
+"$eggdb" sql --create --dialect sqlserver "$work/bulk.db" "$bcp/items.sql" > "$work/bulk-setup.out" 2>&1 ||
+  fail "the bulk load table was not created: $(cat "$work/bulk-setup.out")"
+"$eggdb" import --dialect sqlserver "$work/bulk.db" --csv "$bcp/items.dat" --table dbo.items_imported \
+  > "$work/bulk-import.out" 2>&1 || fail "eggdb import of the bcp file failed: $(cat "$work/bulk-import.out")"
+serve bulk bulk
+"$dotnet" run --no-build --project "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" -- \
+  "Server=127.0.0.1,$port;Database=bulk;User ID=eggdb;Password=$password;Encrypt=false;Connect Timeout=10" bulk "$bcp/items.dat" \
+  > "$work/bulk-dotnet.out" 2>&1 || true
+stop
+
 : > "$work/output.diff"
 different=""
-for program in java dotnet metadata-java metadata-dotnet; do
+for program in java dotnet metadata-java metadata-dotnet bulk-dotnet; do
   if ! cmp -s "$here/expected-$program.out" "$work/$program.out"; then
     diff -u "$here/expected-$program.out" "$work/$program.out" >> "$work/output.diff" || true
     different="$different $program"
@@ -101,4 +116,4 @@ if [ -n "$different" ]; then
   tail -n 40 "$work/serve.err" >&2
   fail "the$different client programs printed something else on EggDB (whole diff in $work/output.diff)"
 fi
-echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD and transactions and list the restored fixture's metadata on EggDB"
+echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD and transactions, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import on EggDB"

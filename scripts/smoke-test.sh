@@ -158,6 +158,11 @@ expect_exit 2 "$eggdb" restore --dialect sqlserver --create shop.db shop.bak
 grep -q 'a SQL Server backup (it starts with TAPE)' last.err || fail "a SQL Server backup said $(cat last.err)"
 pass "restore: an SSMS Generate Scripts sample (UTF-16) with its report, and a SQL Server backup routed"
 
+expect_exit 0 "$eggdb" sql --create --dialect sqlserver bcp.db "$samples/sqlserver/bcp/items.sql"
+expect_exit 0 "$eggdb" import --dialect sqlserver bcp.db --csv "$samples/sqlserver/bcp/items.dat" --table dbo.items_imported
+expect_output "$(printf '6\t2')" "$eggdb" sql bcp.db -c "COPY (SELECT count(*), count(*) - count(code) FROM items_imported) TO STDOUT"
+pass "import: a bcp character-format file loaded with --dialect sqlserver"
+
 expect_exit 0 "$eggdb" restore --dialect oracle --create ora.db "$samples/oracle-sample.sql" --format text
 grep -q '^ok: every table and row of the script is in ora.db; ' last.out || fail "the Oracle restore said $(cat last.out)"
 grep -q 'procedure rye_count' last.out || fail "the Oracle restore did not list the skipped procedure: $(cat last.out)"
