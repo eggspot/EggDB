@@ -58,6 +58,7 @@ eggdb <command> <file> [arguments] [options]
 | `sql <file> [-c <sql> \| <script> \| -]` | for writing (`--read-only`: no); `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
 | `explain <file> -c <sql>` | read-only | shows the plan for one statement, in its dialect's EXPLAIN form, without running it (below) |
 | `table list\|show\|sample <file> [<table>]` | read-only | lists the tables and views, shows one in full, or prints its first rows (below) |
+| `row list <file> <table>` | read-only | the rows of one table in the order they are stored, a page at a time with `--limit` and `--after` (below) |
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, into the file, with a report (below, and [migrate.md](migrate.md)) |
@@ -74,7 +75,7 @@ The command comes first and the file second; options may go anywhere after the c
 as `app.bd` is an error that says how to create the file, never a new empty database that later
 reads as "empty".
 
-**Read-only commands share the file.** `get`, `scan`, `check`, `stats`, `backup`, `compact`, `export`, `table`, `explain` and `sql --read-only` can run
+**Read-only commands share the file.** `get`, `scan`, `check`, `stats`, `backup`, `compact`, `export`, `table`, `row`, `explain`, `sql --read-only`, `restore --dry-run` and `import --csv --dry-run` can run
 together, and next to an application that has the file open read-only. A program that has it
 open for writing keeps them out, and `put`, `del`, `import` and `sql` wait for nobody: they exit 5 at
 once when the file is open anywhere (see "Exit codes"). That includes an AI agent's call through
@@ -525,8 +526,11 @@ separator (a comma) and the unquoted text that means NULL (empty). It prints `im
 from people.csv into people in app.db`, or in a pipe one JSON line with `file`, `from`, `table`
 and `rows`; a bad row prints the error with its line and column, `Nothing was imported`, and
 exits 3. The page cache grows with the file (four times its size plus 16 MiB, between 256 MiB
-and 1 GiB) since the load must fit in it; `--cache` sets it for larger files. `--dry-run`,
-`--on-conflict` and `--page-size` are for eggdb-jsonl imports, and `--create` is refused: a new
+and 1 GiB) since the load must fit in it; `--cache` sets it for larger files. `--dry-run` loads
+the CSV into a copy of the file (`<file>.importing`, removed after) and prints `checked
+people.csv: 2 rows would be imported into people in app.db` (`"dry_run":true` in JSON), so a bad
+row is found without touching the file or moving its sequences. `--on-conflict` and
+`--page-size` are for eggdb-jsonl imports, and `--create` is refused: a new
 file has no table to load into, so create the file and the table with `eggdb sql --create`.
 `--dialect oracle` loads SQLcl `UNLOAD` and SQL*Plus `SET MARKUP CSV ON` files: the table name is
 read as Oracle writes it (`hr.employees`), dates by Oracle's NLS format (`DD-MON-RR`) and then
@@ -811,6 +815,43 @@ $ eggdb explain app.db -c "SELECT * FROM users WHERE id = 2"
   QUERY PLAN` in SQLite's dialect); the plan prints as a table. Oracle's `EXPLAIN PLAN` and SQL
   Server's showplan are not in EggDB yet (`not_supported`, exit 3); a second statement is a
   usage error. The full design is [ux/cli.md](ux/cli.md) section 24.
+- `table list -n <count> [--after <cursor>]`: a page of tables and views; the next page's
+  command goes to stderr, and in JSON a last line `{"truncated":true,"next_cursor":"t1.…"}`
+  follows the records.
+
+### Reading a table a page at a time: `eggdb row list`
+
+`eggdb row list <file> <table>` prints the rows of one table in the order they are stored
+(primary-key order; a table without a primary key in the order its rows were added), the CLI twin
+of the MCP tool `row_list` (D145). The file is opened read-only.
+
+```
+$ eggdb row list app.db orders --limit 2
+ id | customer | total | placed_at
+----+----------+-------+------------------------
+  1 | Ada      | 12.50 | 2026-03-01 09:14:07+00
+  2 | Grace    |  8.00 | 2026-03-01 09:20:41+00
+(2 rows)
+
+more rows follow; next page: eggdb row list app.db orders --limit 2 --after r1.818549630180000002
+$ eggdb row list app.db orders --limit 2 --json
+{"id":1,"customer":"Ada","total":"12.50","placed_at":"2026-03-01 09:14:07+00"}
+{"id":2,"customer":"Grace","total":"8.00","placed_at":"2026-03-01 09:20:41+00"}
+{"truncated":true,"next_cursor":"r1.818549630180000002"}
+```
+
+- `-n, --limit <count>` is the page size, 1 or more. Without it, text shows a page of 100 rows
+  and JSON streams every row, so `eggdb row list app.db orders > orders.jsonl` dumps a table.
+- `--after <cursor>` starts just after the cursor the page before printed. A cursor names a
+  position in the table, not a count, so pages neither repeat nor skip a row while other programs
+  write between them: rows added before the cursor are not read, rows added after it are, and
+  deleted rows do not appear. Each page reads one snapshot.
+- In JSON each row is one object of column to value (integers and booleans as JSON, `NULL` as
+  `null`, other values as PostgreSQL prints them), and when `--limit` cut the page a last line
+  holds the cursor; with `--limit n`, a script reads at most `n` records and then that line.
+- A view has no stored order: it is refused (`not_a_table`, exit 3) with `try: eggdb table
+  sample <file> <view>`. A table that is not there is exit 1, `table_not_found`. A cursor that
+  is not one, of `table list`, or of another table is a usage error (exit 2).
 
 ## `eggdb shell`
 
@@ -999,6 +1040,7 @@ pg_dump app > app.sql
 eggdb restore --create app.db app.sql
 pg_dump app | eggdb restore --create app.db
 pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
+eggdb restore app.db app.sql --dry-run
 eggdb restore app.db app.sql --keep-going --report restore.json
 ```
 
@@ -1027,6 +1069,13 @@ eggdb restore app.db app.sql --keep-going --report restore.json
   table), and every skipped object, consequence, ignored kind and error. It is text on a
   terminal and one JSON object in a pipe or with `--format json`; `--report <path>` writes it to
   a file (JSON for a `.json` path) and leaves only the verdict line on stdout.
+- `--dry-run` runs the real restore on a scratch copy and throws the copy away (D145): the file's
+  last commit is copied to `<file>.restoring` as `eggdb backup` copies it (the file is opened
+  read-only), or with `--create` the restore builds `<file>.restoring` as usual, and the copy is
+  removed instead of renamed. The report is exactly what a real run would report, with its first
+  line and verdict in the conditional (`ok: every table and row of the dump would be in
+  app.db.`) and `"dry_run":true` in JSON; the exit code is a real run's. The file and its
+  sequences do not change. The copy takes the file's size in disk space and time.
 - A custom-format archive (it starts with `PGDMP`), a directory or tar archive, or a dump
   compressed with gzip, zstd or lz4 is not read: the command exits 2 before any file is touched
   and prints the exact `pg_restore -f dump.sql <archive>` or decompress command to run first.

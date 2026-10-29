@@ -204,7 +204,20 @@ code and category. From slice 2 (D144) it also runs `list_tables`/`table list`,
 `describe_table`/`table show`, `sample_rows`/`table sample` (with and without more rows than
 asked for), `explain_query`/`explain` in three dialects and with its refusals, and
 `run_sql`/`sql --read-only` with a write refused as `read_only`; a missing table is `not_found`
-from a tool and `table_not_found` from its twin, compared by category. A third test runs every
+from a tool and `table_not_found` from its twin, compared by category. From slice 3 (D145) it
+pages `row_list` and `row list --json` side by side, comparing each page's items with the
+records and the tool's `next_cursor` with the twin's trailer line, and compares their refusals
+(a view, a cursor of another table, a malformed cursor, a missing table). `tests/paging.rs`
+pages a 10,000-row table 1,000 rows at a time while a writer inserts rows before and after the
+cursor and deletes rows ahead of it between pages, and requires no row repeated or skipped,
+rows added ahead read and rows added behind or removed never read; it does the same for
+`table list` while tables are created, follows the text form's next-page command, and pages a
+table without a primary key. `tests/dry_run.rs` runs `restore --dry-run` and a real restore of
+the same dump on two copies of a file and requires the same report, the file unchanged byte for
+byte and its sequence unmoved, and checks `--create` dry runs, failures and a leftover scratch
+file; it does the same for `import --csv --dry-run`. `eggdb-mcp`'s server tests page `row_list`
+with a cursor, cut a page at 1 MiB, and refuse views and bad cursors, and its message fuzzer
+sends `row_list` calls; `eggdb-commands` tests the cursor format against hostile text. A third test runs every
 example of every reading command in the registry against a temporary file and requires exit 0,
 and a unit test parses every example of every command. The registry test also requires every
 command of the parser, a JSON form exactly where `--format` is taken, one exit per error code

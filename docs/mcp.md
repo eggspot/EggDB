@@ -53,12 +53,14 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `sample_rows` | the first rows of a table or view as stored: a table's in primary-key order, a view's in its query's order; not a random sample (10 by default, at most 1,000) |
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key |
 | `kv_scan` | keys and values in key order, by prefix or range, a page at a time |
+| `row_list` | the rows of one table in the order they are stored, a page at a time: `limit` rows (100 by default, at most 1,000) and at most 1 MiB, then `next_cursor` to send back as `after`; pages neither repeat nor skip rows while others write (D145) |
 
 The tools, their arguments, descriptions and annotations come from EggDB's command registry
 (D143), the same definitions `eggdb help --json` prints, with each tool's CLI twin: `kv_get` is
 `eggdb get --json`, `kv_scan` is `eggdb scan --json`, `run_sql` is `eggdb sql --read-only
 --json`, `write_sql` is `eggdb sql --json`, `list_tables`, `describe_table` and `sample_rows` are
-`eggdb table list|show|sample --json`, and `explain_query` is `eggdb explain --json` (D144), so
+`eggdb table list|show|sample --json`, `explain_query` is `eggdb explain --json` (D144), and
+`row_list` is `eggdb row list --json` (D145), so
 what an agent did can be repeated at the command line. Each returns the same values as its twin once its envelope (the data
 notice, the per-call limits and what the call reports about itself) is taken away. The
 `instructions` the server sends at `initialize` are generated from it too: the effects (`read`,
@@ -72,6 +74,13 @@ Results come back as structured JSON (`structuredContent`, with the same JSON as
 names and types, rows, how many rows there were and whether the result was cut (`truncated`,
 `truncated_by`: `max_rows` or `bytes`). Integers are JSON numbers; other values are text as the
 dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..., "bytes": n}`.
+`row_list` answers in pages: `{"columns": [...], "items": [{column: value, ...}], "truncated":
+true, "truncated_by": "limit" | "bytes", "next_cursor": "r1.…"}`, the last two only on a cut
+page; a cursor names the place after the last row, so it stays right while others write. A view
+is refused with `not_a_table` (read it with `sample_rows` or `run_sql`), and an `after` that is
+not a cursor of this table with `invalid_arguments`. Each tool's confirmation check is in
+`eggdb help --json` (`confirm`, `confirm_when`), and the server asks for confirmation exactly as
+that check says.
 
 ## What the agent can't do (yet)
 

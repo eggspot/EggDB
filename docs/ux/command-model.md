@@ -67,6 +67,8 @@ file holds only EggDB's own tables, and the registry test checks them against th
 | `help` | kept | shipped |
 | `version` | kept | shipped |
 | `collection list`, `collection add`, `collection delete` | `<noun> <verb>` | the noun `collection` with the core verbs `list`, `add` and `delete` |
+| `table list`, `table show`, `table sample` | `<noun> <verb>` | the noun `table` with the core verbs `list`, `show` and `sample` (D144) |
+| `row list` | `<noun> <verb>` | the noun `row` with the core verb `list`, a table's rows a page at a time (D145) |
 
 `restore` keeps one meaning, "bring back": EggDB's `restore` brings a database back from a dump,
 as EggOS's `wm restore` brings a window back to its size and its Trash brings a file back.
@@ -103,6 +105,7 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `table list` | read | text, json | records, `schema`, `name`, `kind`, `columns`, `comment` | `list_tables` |
 | `table show` | read | text, json | one object, the tool's description without `notice` | `describe_table` |
 | `table sample` | read | text, json | one `sql --json` line plus `truncated` | `sample_rows` |
+| `row list` | read | text, json | records, one object of column to value per row, then a trailer line `{"truncated","next_cursor"}` when `--limit` cut the page | `row_list` |
 | `serve` | destroy | text, json | records: where it listens, then that it stopped | |
 | `shell` | destroy | none | none: its own `--mode table\|expanded\|csv` | |
 | `restore` | change | text, json | one object, the restore report | |
@@ -121,14 +124,17 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `list_tables` | `table list --json` | read | | yes | | `notice`; `schemas` (the records' `schema` values); `tables` and `views` become records with `kind` |
 | `describe_table` | `table show --json` | read | | yes | | `notice` |
 | `run_sql` | `sql --read-only --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
-| `write_sql` | `sql --json` | destroy | `--allow-write` | no | destructive statements (D121) | the same, and `rows_changed`, `committed`, `warning` |
+| `write_sql` | `sql --json` | destroy | `--allow-write` | no | `destructive_statement`: the statement is destructive (DROP, TRUNCATE, a column dropped or retyped, or a DELETE or UPDATE whose WHERE names no column of its table) (D121) | the same, and `rows_changed`, `committed`, `warning` |
 | `explain_query` | `explain --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
 | `sample_rows` | `table sample --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated_by`; `tag` and `row_count` count the rows shown, not the `LIMIT n+1` read |
 | `kv_get` | `get --json` | read | | yes | | `notice`, `found`; in `entry`, `key_hex` when `key` is there, and `value_bytes` |
 | `kv_scan` | `scan --json` | read | | yes | | `notice`, `returned_entries`, `truncated`, `next_start_hex`; in each entry, as `kv_get` |
+| `row_list` | `row list --json` | read | | yes | | `notice`, `columns`, `truncated_by`; `truncated` and `next_cursor` are the twin's page trailer |
 
 No tool reaches outside the database (`openWorldHint` is false for all). Their names are the
-shipped ones (D119, D121); a new tool's name joins its command's words with `_`. Arguments map
+shipped ones (D119, D121), and `row_list` (D145) joins its command's words with `_`, as every
+new tool's name does. `help --json` shows each tool's `confirm` check by name and, in
+`confirm_when`, the sentence saying when it asks. Arguments map
 to the twin: `sql` to `-c`, `dialect` to `--dialect`, `key` and `key_hex` to the key operand
 (hex as `0x…`), `prefix`, `start` and `end` (and their `_hex` forms) to `--prefix`, `--from` and
 `--to`, `max_entries` to `--limit`, `keys_only` to `--keys-only`, `schema` to `--schema`, `table`
@@ -146,15 +152,16 @@ that declares the code; `-` marks a code only MCP gives.
 
 | Code | Category | Exit | When |
 |------|----------|------|------|
-| `invalid_arguments` | `usage` | 2 | CLI: an unknown command or option, a missing or extra argument, a bad value. MCP: an argument missing, unknown or of the wrong type |
+| `invalid_arguments` | `usage` | 2 | CLI: an unknown command or option, a missing or extra argument, a bad value, a cursor that is not one, of another list or of another table. MCP: an argument missing, unknown or of the wrong type, or such a cursor in `after` |
 | `one_statement_per_call` | `usage` | 2 | the SQL text holds a second statement; CLI: `eggdb explain` |
 | `unknown_tool` | `usage` | - | the call named no tool of this server (audit only) |
 | `invalid_request` | `usage` | - | the request was not a well-formed call (audit only) |
 | `not_initialized` | `usage` | - | a call came before `initialize` (audit only) |
 | `not_found` | `not_found` | 3 | the database file does not exist; MCP also: no such table or view |
 | `table_not_found` | `not_found` | 1 | CLI: `table show` or `table sample` named no table or view; `fix_command` is `eggdb table list <file>` |
+| `not_a_table` | `refused` | 3 | `row list` or `row_list` named a view, which has no stored order to page through; `fix_command` is `eggdb table sample <file> <table>` |
 | `collection_not_found` | `not_found` | 1 | `-C <name>` names no collection; `fix_command` is `eggdb collection add <file> <name>` |
-| `already_exists` | `exists` | 3 | `export`, `create` or `backup` to a file that is there, or a staging file left by `backup` or `compact` |
+| `already_exists` | `exists` | 3 | `export`, `create` or `backup` to a file that is there, or a staging file left by `backup` or `compact`, or the scratch copy (`<file>.restoring`, `<file>.importing`) a dry run of `restore` or `import --csv` would write |
 | `database_busy` | `busy` | 5 | another program holds the file |
 | `read_only` | `read_only` | 3 | MCP: a write without `--allow-write`, or sent to `run_sql`. CLI: a statement refused with SQLSTATE 25006, as `sql --read-only` refuses writes |
 | `needs_confirmation` | `needs_confirmation` | - | a destructive `write_sql` without `confirm: true` on a client that cannot ask |
@@ -182,7 +189,27 @@ A SQL error whose SQLSTATE means corruption or a lock is `damaged` or `database_
 `eggdb sql --json`, and one refused because the session is read-only (25006) is `read_only`, so
 its code and its exit agree.
 
+## Pages and previews (slice 3, D145)
+
+- **Pages.** The new list commands, `table list` and `row list`, take `-n, --limit <count>` and
+  `--after <cursor>`; the shipped `collection list` and the shipped tools keep their own forms.
+  The new list tool `row_list` takes `limit` (1 to 1,000, 100 by default) and `after`, mapped to
+  those options, and answers `{notice, columns, items, truncated, truncated_by, next_cursor}`
+  (`truncated_by` and `next_cursor` only when the page was cut, by `limit` or by 1 MiB). A
+  cursor is `<list letter><version>.<hex>` (`r1.…` for rows, `t1.…` for tables): it names the
+  position after the last item returned, never a count, so pages neither repeat nor skip an
+  item that stays while others write. A row cursor carries a check of its table. In text the
+  next page's command goes to stderr; in JSON the records stay one per line and a trailer line
+  `{"truncated":true,"next_cursor":"…"}` follows them only when `--limit` cut the page.
+- **Dry runs, only where exact.** `restore --dry-run` and `import --csv --dry-run` run the real
+  restore or load on a scratch copy of the file (`<file>.restoring`, `<file>.importing`) and
+  remove it, so the report is a real run's, with `"dry_run":true`, and the file and its
+  sequences do not change; `import`'s eggdb-jsonl `--dry-run` checks the export as before. SQL
+  has none: a rolled-back statement still moves sequences (D114), and `explain` is SQL's preview.
+- **Confirmation checks.** The MCP server picks its confirmation flow from each tool's `confirm`
+  field; `help --json` shows it with `confirm_when`. No CLI command prompts a person.
+
 ## Pending differences
 
-None yet: EggDB's slice 1 follows the approved design as it stands. When EggOS's canonical copy
+None yet: EggDB's slices 1 to 3 follow the approved design as it stands. When EggOS's canonical copy
 lands, this file links to it alone for the shared part.

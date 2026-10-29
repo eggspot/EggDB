@@ -3131,3 +3131,17 @@ core verb.
 13. The main help gains one `row` line after `table`; the usage errors' command lists gain `row`
     after `table`; `help row` is a one-verb noun page; the `table`, `restore` and `import` pages
     change only in the lines named in 25.9.
+
+### As built (command model slice 3, D145)
+1. The help's `--after` example carries a real cursor, `r1.818549630180000002` (the position after
+   `id` 2 of `public.orders`), instead of the illustrative one above, so the example runs as a test
+   against the examples' `app.db`; the examples' file gained a table `sales.orders` for the `-n 20`
+   example. Cursors elsewhere in this section are illustrative.
+2. A `t1.` cursor whose check does not match is "not a cursor" (the first message of 25.1): a
+   table cursor names no table, so only a damaged one can fail its check.
+3. An option `row list` does not take reads `unknown option '--schema' for eggdb row`, as
+   `collection`'s do (`table` names its verb because its verbs take different options).
+4. `row_list`'s refusal of a view reads `"sales.totals" is a view, and a view has no stored order
+   to page through.`, with 25.4's `fix`; its cursor refusals are 25.1's messages with `after`.
+5. The cursor codec and its messages live in `eggdb-commands`, shared by the CLI and the MCP
+   server; the rows come from `eggdb_sql::Session::read_stored_rows`, shared by both.
