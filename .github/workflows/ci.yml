@@ -423,8 +423,50 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  tds-apps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.nuget/packages
+            target
+          key: cargo-tds-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/TdsAppCheck/TdsAppCheck.csproj') }}
+      - name: Download mssql-jdbc (MIT; test client only, never shipped)
+        run: |
+          mkdir -p "$RUNNER_TEMP/clients"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/clients/mssql-jdbc.jar" \
+            https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.8.1.jre11/mssql-jdbc-12.8.1.jre11.jar
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Run mssql-jdbc and Microsoft.Data.SqlClient (MIT; restored from NuGet, never shipped) against eggdb serve --tds-listen
+        env:
+          MSSQL_JDBC_JAR: ${{ runner.temp }}/clients/mssql-jdbc.jar
+        run: scripts/tds-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/tds-apps"
+      - name: Keep the outputs, the server log and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tds-apps-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/tds-apps/*.out
+            ${{ runner.temp }}/tds-apps/serve.err
+            ${{ runner.temp }}/tds-apps/output.diff
+            ${{ runner.temp }}/tds-apps/dotnet-build.log
+          retention-days: 7
+          if-no-files-found: ignore
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps]
+    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

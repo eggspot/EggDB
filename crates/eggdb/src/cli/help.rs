@@ -335,10 +335,13 @@ the running statements, rolls back open transactions and stops with exit 0.
       --mysql-listen <address>    also serve MySQL's protocol there, to the mysql client and
                                   MySQL drivers (MySQL's SQL; port 3306 is MySQL's)
       --tds-listen <address>      also serve SQL Server's TDS protocol there, to sqlcmd
-                                  (go-sqlcmd), without encryption: connect with its default
-                                  or -N disable (Transact-SQL; port 1433 is SQL Server's)
-      --log-batches               log the first 200 characters of each TDS batch, to see what
-                                  a client sends (never the login or its password)
+                                  (go-sqlcmd), Microsoft.Data.SqlClient and mssql-jdbc,
+                                  without encryption: connect with sqlcmd's default, -N
+                                  disable or Encrypt=false (Transact-SQL; port 1433 is SQL
+                                  Server's)
+      --log-batches               log the first 200 characters of each TDS batch and RPC
+                                  call, to see what a client sends (never the login or its
+                                  password)
       --user <name>               the user clients log in as (default eggdb)
       --password-file <file>      the password is the file's first line; - reads stdin
       --database <name>           the name clients connect to (default: the file name

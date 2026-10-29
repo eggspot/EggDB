@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage="usage: scripts/tds-apps/check.sh <eggdb binary> <work directory>
+
+Serves a new EggDB database over SQL Server's TDS protocol with eggdb serve --tds-listen and runs
+two client programs against it through Microsoft's own drivers, without encryption:
+crates/eggdb/tests/clients/java/TdsAppCheck.java through mssql-jdbc and
+crates/eggdb/tests/clients/dotnet/TdsAppCheck through Microsoft.Data.SqlClient. Each runs
+parameterized CRUD (sp_executesql, sp_prepexec and sp_execute), a committed and a rolled-back
+transaction and a failing query; the .NET program also reuses a pooled connection, which resets
+it. Fails unless each program prints exactly scripts/tds-apps/expected-java.out and
+expected-dotnet.out, written from Microsoft's documentation of SQL Server's behavior.
+
+MSSQL_JDBC_JAR names the mssql-jdbc jar, JAVA the java launcher (default java) and DOTNET the
+dotnet command (default dotnet), whose SDK restores Microsoft.Data.SqlClient from NuGet."
+
+[ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
+eggdb=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+work=$2
+here=$(cd "$(dirname "$0")" && pwd)
+clients=$(cd "$here/../../crates/eggdb/tests/clients" && pwd)
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+java=${JAVA:-java}
+dotnet=${DOTNET:-dotnet}
+: "${MSSQL_JDBC_JAR:?MSSQL_JDBC_JAR must name the mssql-jdbc jar}"
+export DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+
+fail() {
+  echo "tds-apps check FAILED: $*" >&2
+  exit 1
+}
+
+echo "$("$java" -version 2>&1 | head -n 1); .NET SDK $("$dotnet" --version)"
+"$dotnet" build "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" > "$work/dotnet-build.log" 2>&1 ||
+  fail "the .NET program did not build: $(tail -n 40 "$work/dotnet-build.log")"
+
+rm -f "$work/apps.db"
+password=apps-secret
+printf '%s\n' "$password" > "$work/password.txt"
+"$eggdb" serve "$work/apps.db" --create --listen 127.0.0.1:0 --tds-listen 127.0.0.1:0 \
+  --password-file "$work/password.txt" --database apps --log-batches > "$work/serve.out" 2> "$work/serve.err" &
+server=$!
+trap 'kill "$server" 2> /dev/null || true' EXIT
+for _ in $(seq 1 100); do
+  [ -s "$work/serve.out" ] && break
+  sleep 0.1
+done
+port=$(sed -n 's/.*"tds_port":\([0-9]*\).*/\1/p' "$work/serve.out" | head -n 1)
+[ -n "$port" ] || fail "eggdb serve printed no TDS port: $(cat "$work/serve.out") $(cat "$work/serve.err")"
+
+"$java" -cp "$MSSQL_JDBC_JAR" "$clients/java/TdsAppCheck.java" \
+  "jdbc:sqlserver://127.0.0.1:$port;databaseName=apps;encrypt=false;loginTimeout=10" eggdb "$password" \
+  > "$work/java.out" 2>&1 || true
+"$dotnet" run --no-build --project "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" -- \
+  "Server=127.0.0.1,$port;Database=apps;User ID=eggdb;Password=$password;Encrypt=false;Connect Timeout=10" \
+  > "$work/dotnet.out" 2>&1 || true
+
+kill -TERM "$server"
+wait "$server" || fail "eggdb serve exited badly: $(cat "$work/serve.err")"
+trap - EXIT
+
+: > "$work/output.diff"
+different=""
+for program in java dotnet; do
+  if ! cmp -s "$here/expected-$program.out" "$work/$program.out"; then
+    diff -u "$here/expected-$program.out" "$work/$program.out" >> "$work/output.diff" || true
+    different="$different $program"
+  fi
+done
+if [ -n "$different" ]; then
+  head -n 120 "$work/output.diff" >&2
+  tail -n 40 "$work/serve.err" >&2
+  fail "the$different client programs printed something else on EggDB (whole diff in $work/output.diff)"
+fi
+echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD and transactions on EggDB"

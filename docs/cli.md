@@ -686,7 +686,9 @@ PostgreSQL driver connect to it unchanged and run the SQL of `eggdb sql` ([sql.m
 so the `mysql` client and MySQL drivers connect and run MySQL's SQL on the same tables
 ([sql.md](sql.md), "Connecting with mysql", D106). With `--tds-listen` it also serves SQL
 Server's TDS protocol, so Microsoft's `sqlcmd` (go-sqlcmd) connects and runs Transact-SQL
-batches on the same tables ([sql.md](sql.md), "Connecting with sqlcmd", D122). The design is [ux/cli.md](ux/cli.md), section 14.
+batches on the same tables ([sql.md](sql.md), "Connecting with sqlcmd", D122), and .NET and Java
+apps run parameterized statements and transactions through Microsoft.Data.SqlClient and
+mssql-jdbc ([sql.md](sql.md), ".NET and Java apps over TDS", D132). The design is [ux/cli.md](ux/cli.md), section 14.
 
 ```sh
 export EGGDB_PASSWORD='choose-one'
@@ -702,8 +704,8 @@ eggdb serve --create app.db
 |--------|---------|
 | `--listen <address>` | `host:port`, `[::1]:port`, `localhost:port` or a port alone (on `127.0.0.1`); port 0 takes any free port. Default `127.0.0.1:5432`. **Loopback addresses only** (below) |
 | `--mysql-listen <address>` | also serve MySQL's protocol there, the same forms as `--listen` (MySQL's port is 3306); same user, password and database, `caching_sha2_password` or `mysql_native_password`, and its own `--max-connections`. **Loopback addresses only**, like `--listen` |
-| `--tds-listen <address>` | also serve SQL Server's TDS 7.4 protocol there, the same forms as `--listen` (SQL Server's port is 1433); same user, password and database as a SQL login, **no encryption** (connect with go-sqlcmd's default or `-N disable`), and its own `--max-connections`. **Loopback addresses only**, like `--listen` |
-| `--log-batches` | log the first 200 characters of each TDS batch to stderr, to see what a client sends; never the login or its password. Off by default |
+| `--tds-listen <address>` | also serve SQL Server's TDS 7.4 protocol there, the same forms as `--listen` (SQL Server's port is 1433); same user, password and database as a SQL login, **no encryption** (connect with go-sqlcmd's default or `-N disable`, SqlClient's `Encrypt=false`, mssql-jdbc's `encrypt=false`), and its own `--max-connections`. **Loopback addresses only**, like `--listen` |
+| `--log-batches` | log the first 200 characters of each TDS batch and RPC call (`sp_executesql` and the prepared-statement procedures) and each transaction manager request to stderr, to see what a client sends; never the login or its password. Off by default |
 | `--user <name>` | the one user clients log in as, with SCRAM-SHA-256 (and MySQL's methods on `--mysql-listen`). Default `eggdb` |
 | `--password-file <file>` | the password is the file's first line; `-` reads it from stdin. Without it, `EGGDB_PASSWORD`. Never on the command line. ASCII only in this release (SASLprep is not implemented). Prefer the file: `EGGDB_PASSWORD` stays in the server's environment for as long as it runs, where the same user (and on some systems an administrator) can read it, for example through `/proc/<pid>/environ` on Linux |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
