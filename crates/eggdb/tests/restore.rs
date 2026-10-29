@@ -352,10 +352,7 @@ fn files_the_restore_cannot_use_are_refused() {
         std::fs::read(directory.join("app.db.restoring")).unwrap(),
         b"left over"
     );
-    for (dialect, said) in [
-        ("oracle", "item 43"),
-        ("mysql", "--dialect must be postgresql or sqlserver"),
-    ] {
+    for (dialect, said) in [("mysql", "--dialect must be postgresql, sqlserver or oracle")] {
         let output = eggdb(
             &[
                 &"restore",

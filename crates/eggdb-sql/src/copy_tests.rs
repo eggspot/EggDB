@@ -783,7 +783,7 @@ fn force_null_and_force_not_null_change_what_csv_reads_as_null() {
 #[test]
 fn other_dialects_refuse_copy_with_their_own_errors() {
     let store = MemoryStore::default();
-    for dialect in [Dialect::MySql, Dialect::Sqlite, Dialect::Oracle] {
+    for dialect in [Dialect::MySql, Dialect::Sqlite] {
         let mut session = Session::with_dialect(&store, dialect);
         let _ = run(&mut session, "CREATE TABLE t (a integer)");
         let error = failure(copy_in(&mut session, "COPY t FROM STDIN", "1\n"));
@@ -796,6 +796,36 @@ fn other_dialects_refuse_copy_with_their_own_errors() {
             .unwrap_err();
         assert_eq!(error.vendor(), Some(dialect), "{dialect:?}: {error}");
     }
+}
+
+#[test]
+fn oracle_copies_csv_with_empty_fields_as_null() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    run(
+        &mut session,
+        "CREATE TABLE t (a NUMBER, b VARCHAR2(5), d DATE)",
+    )
+    .unwrap();
+    copy_in(
+        &mut session,
+        "COPY t FROM STDIN (FORMAT csv, HEADER)",
+        "\"A\",\"B\",\"D\"\n1,,17-JUN-13\n2,\"\",2013-06-18 00:00:00\n",
+    )
+    .unwrap();
+    run(&mut session, "COMMIT").unwrap();
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT a, NVL(b, 'null'), TO_CHAR(d, 'YYYY-MM-DD') FROM t ORDER BY a"
+        )
+        .unwrap(),
+        "A|NVL(B,'NULL')|TO_CHAR(D,'YYYY-MM-DD')\n1|null|2013-06-17\n2|null|2013-06-18\nSELECT 2"
+    );
+    assert_eq!(
+        copy_out(&mut session, "COPY (SELECT a FROM t ORDER BY a) TO STDOUT").unwrap(),
+        "1\n2\nCOPY 2"
+    );
 }
 
 #[test]
