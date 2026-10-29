@@ -343,9 +343,9 @@ matching `ENABLE` (HR loads its departments that way), checking the rows then. K
 
 ```
 known differences (restored, but not as the source had it)
-  line 12   scott.emp.emp_boss_fk  existing rows are checked here; Oracle's NOVALIDATE doesn't check them
-  line 14   scott.emp              kept enforced: EggDB doesn't disable keys
-  end       hr.c.c_fk              disabled in the source: not created here, so not enforced
+  line 12   emp.emp_boss_fk  existing rows are checked here; Oracle's NOVALIDATE doesn't check them
+  line 13   emp              kept enforced: EggDB doesn't disable keys
+  end       c.c_fk           disabled in the source: not created here, so not enforced
 ```
 
 ### Limits
