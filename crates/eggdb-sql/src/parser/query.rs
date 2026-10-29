@@ -337,40 +337,46 @@ impl Parser<'_> {
         Ok(())
     }
 
+    pub(super) fn order_items(&mut self) -> SqlResult<Vec<OrderItem>> {
+        let mut order_by = Vec::new();
+        loop {
+            let expr = self.expression()?;
+            let descending = if self.take_word("desc") {
+                true
+            } else {
+                self.take_word("asc");
+                false
+            };
+            if self.is_word("using") {
+                return Err(self.not_supported("ORDER BY ... USING"));
+            }
+            let nulls_first = if self.take_word("nulls") {
+                if self.take_word("first") {
+                    Some(true)
+                } else {
+                    self.expect_word("last")?;
+                    Some(false)
+                }
+            } else {
+                None
+            };
+            order_by.push(OrderItem {
+                expr,
+                descending,
+                nulls_first,
+            });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(order_by)
+    }
+
     pub(super) fn query_tail(&mut self) -> SqlResult<QueryTail> {
         let mut order_by = Vec::new();
         if self.take_word("order") {
             self.expect_word("by")?;
-            loop {
-                let expr = self.expression()?;
-                let descending = if self.take_word("desc") {
-                    true
-                } else {
-                    self.take_word("asc");
-                    false
-                };
-                if self.is_word("using") {
-                    return Err(self.not_supported("ORDER BY ... USING"));
-                }
-                let nulls_first = if self.take_word("nulls") {
-                    if self.take_word("first") {
-                        Some(true)
-                    } else {
-                        self.expect_word("last")?;
-                        Some(false)
-                    }
-                } else {
-                    None
-                };
-                order_by.push(OrderItem {
-                    expr,
-                    descending,
-                    nulls_first,
-                });
-                if !self.take(&TokenKind::Comma) {
-                    break;
-                }
-            }
+            order_by = self.order_items()?;
         }
         let mut limit = None;
         let mut offset = None;

@@ -852,6 +852,10 @@ pub(crate) enum AggregateFunction {
     JsonbAgg,
     JsonObjectAgg,
     JsonbObjectAgg,
+    ArrayAgg,
+    BoolAnd,
+    BoolOr,
+    Every,
 }
 
 impl AggregateFunction {
@@ -872,6 +876,10 @@ impl AggregateFunction {
             "jsonb_agg" => Self::JsonbAgg,
             "json_object_agg" => Self::JsonObjectAgg,
             "jsonb_object_agg" => Self::JsonbObjectAgg,
+            "array_agg" => Self::ArrayAgg,
+            "bool_and" => Self::BoolAnd,
+            "bool_or" => Self::BoolOr,
+            "every" => Self::Every,
             _ => return None,
         })
     }
@@ -888,7 +896,19 @@ impl AggregateFunction {
             Self::JsonbAgg => "jsonb_agg",
             Self::JsonObjectAgg => "json_object_agg",
             Self::JsonbObjectAgg => "jsonb_object_agg",
+            Self::ArrayAgg => "array_agg",
+            Self::BoolAnd => "bool_and",
+            Self::BoolOr => "bool_or",
+            Self::Every => "every",
         }
+    }
+
+    pub(crate) fn keeps_nulls(self) -> bool {
+        self.builds_json() || self == Self::ArrayAgg
+    }
+
+    pub(crate) fn combines_truth(self) -> bool {
+        matches!(self, Self::BoolAnd | Self::BoolOr | Self::Every)
     }
 
     pub(crate) fn builds_json(self) -> bool {

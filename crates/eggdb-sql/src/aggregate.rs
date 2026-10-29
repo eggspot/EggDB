@@ -1,4 +1,4 @@
-use crate::ast::{AggregateFunction, Expr, ExprKind, Literal, Select, SelectItem};
+use crate::ast::{AggregateFunction, Expr, ExprKind, Literal, OrderItem, Select, SelectItem};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, check_columns, first_aggregate, output_name};
 use crate::hash_index::SeededIntegerHash;
@@ -19,9 +19,91 @@ enum GroupColumn {
 struct Call {
     function: AggregateFunction,
     argument: Option<Expr>,
+    argument_type: Option<SqlType>,
     distinct: bool,
     position: usize,
     shape: Expr,
+}
+
+pub(crate) const ORDERED_ARGUMENTS: &str = "ordered_aggregate_arguments";
+
+pub(crate) fn ordered_arguments(argument: Expr, order: Vec<OrderItem>) -> Expr {
+    let position = argument.position;
+    let directions: String = order
+        .iter()
+        .flat_map(|item| {
+            let nulls_first = item.nulls_first.unwrap_or(item.descending);
+            [
+                if item.descending { 'D' } else { 'A' },
+                if nulls_first { 'F' } else { 'L' },
+            ]
+        })
+        .collect();
+    let mut arguments = Vec::with_capacity(order.len() + 2);
+    arguments.push(argument);
+    arguments.push(Expr {
+        kind: ExprKind::Literal(Literal::String(directions)),
+        position,
+    });
+    arguments.extend(order.into_iter().map(|item| item.expr));
+    Expr {
+        kind: ExprKind::Function {
+            name: ORDERED_ARGUMENTS.to_owned(),
+            arguments,
+        },
+        position,
+    }
+}
+
+fn ordered_parts(argument: &Expr) -> (&Expr, Option<(&str, &[Expr])>) {
+    if let ExprKind::Function { name, arguments } = &argument.kind
+        && name == ORDERED_ARGUMENTS
+        && let [inner, directions, keys @ ..] = arguments.as_slice()
+        && let ExprKind::Literal(Literal::String(directions)) = &directions.kind
+    {
+        return (inner, Some((directions.as_str(), keys)));
+    }
+    (argument, None)
+}
+
+struct SortKey {
+    descending: bool,
+    nulls_first: bool,
+}
+
+fn sort_keys(directions: &str) -> Vec<SortKey> {
+    directions
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| SortKey {
+            descending: pair.first() == Some(&b'D'),
+            nulls_first: pair.get(1) == Some(&b'F'),
+        })
+        .collect()
+}
+
+fn compare_sort_keys(keys: &[SortKey], left: &[Value], right: &[Value]) -> Ordering {
+    for ((key, left), right) in keys.iter().zip(left).zip(right) {
+        let ordering = match (left.is_null(), right.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) if key.nulls_first => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            (false, true) if key.nulls_first => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) if key.descending => compare_values(left, right).reverse(),
+            (false, false) => compare_values(left, right),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+struct OrderedInput {
+    keys: Vec<Value>,
+    value: Value,
+    extra: Option<Value>,
 }
 
 pub(crate) struct Grouping {
@@ -266,6 +348,12 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
         },
         AggregateFunction::JsonAgg | AggregateFunction::JsonObjectAgg => Some(SqlType::Json),
         AggregateFunction::JsonbAgg | AggregateFunction::JsonbObjectAgg => Some(SqlType::Jsonb),
+        AggregateFunction::ArrayAgg => argument
+            .and_then(|sql_type| crate::arrays::ArrayElement::of(sql_type.without_modifier()))
+            .map(SqlType::Array),
+        AggregateFunction::BoolAnd | AggregateFunction::BoolOr | AggregateFunction::Every => {
+            Some(SqlType::Boolean)
+        }
     }
 }
 
@@ -288,6 +376,7 @@ fn argument_type(
     argument: &Expr,
     scope: Scope<'_>,
 ) -> Option<SqlType> {
+    let (argument, _) = ordered_parts(argument);
     match (function, joined_parts(argument)) {
         (AggregateFunction::StringAgg, Some((value, _))) => {
             static_type(value, scope).or_else(|| crate::typing::static_type(value, scope))
@@ -325,6 +414,16 @@ fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlRes
                 function,
                 &format!("{}, unknown", name()),
             ))
+        }
+        AggregateFunction::BoolAnd | AggregateFunction::BoolOr | AggregateFunction::Every
+            if sql_type != SqlType::Boolean =>
+        {
+            Err(undefined_aggregate(function, &name()))
+        }
+        AggregateFunction::ArrayAgg
+            if crate::arrays::ArrayElement::of(sql_type.without_modifier()).is_none() =>
+        {
+            Err(crate::arrays::unsupported_element(sql_type))
         }
         _ => Ok(()),
     }
@@ -470,6 +569,9 @@ impl Analyzer<'_> {
                                 .as_deref()
                                 .map(|argument| bind(argument, self.scope))
                                 .transpose()?,
+                            argument_type: argument.as_deref().and_then(|argument| {
+                                argument_type(*function, argument, self.scope)
+                            }),
                             distinct: *distinct,
                             position: expr.position,
                             shape,
@@ -686,6 +788,9 @@ enum Accumulator {
     Extreme(Value),
     Joined(Option<Value>),
     JsonParts(Option<String>),
+    Collected(Vec<Value>),
+    Truth(Option<bool>),
+    Ordered(Vec<OrderedInput>),
 }
 
 struct Group {
@@ -701,6 +806,19 @@ impl Accumulator {
         match self {
             Self::Extreme(value) | Self::Joined(Some(value)) => crate::memory::held_bytes(value),
             Self::JsonParts(Some(text)) => text.len(),
+            Self::Collected(values) => values.iter().map(crate::memory::held_bytes).sum(),
+            Self::Ordered(inputs) => inputs
+                .iter()
+                .map(|input| {
+                    input
+                        .keys
+                        .iter()
+                        .chain(std::iter::once(&input.value))
+                        .chain(input.extra.iter())
+                        .map(crate::memory::held_bytes)
+                        .sum::<usize>()
+                })
+                .sum(),
             _ => 0,
         }
     }
@@ -716,6 +834,17 @@ fn add_float(total: f64, value: f64) -> SqlResult<f64> {
 
 impl Call {
     fn start(&self) -> Accumulator {
+        if self
+            .argument
+            .as_ref()
+            .is_some_and(|argument| ordered_parts(argument).1.is_some())
+        {
+            return Accumulator::Ordered(Vec::new());
+        }
+        self.start_unordered()
+    }
+
+    fn start_unordered(&self) -> Accumulator {
         match self.function {
             AggregateFunction::Count => Accumulator::Count(0),
             AggregateFunction::Sum => Accumulator::Sum(Sum::Empty),
@@ -729,7 +858,43 @@ impl Call {
             | AggregateFunction::JsonbAgg
             | AggregateFunction::JsonObjectAgg
             | AggregateFunction::JsonbObjectAgg => Accumulator::JsonParts(None),
+            AggregateFunction::ArrayAgg => Accumulator::Collected(Vec::new()),
+            AggregateFunction::BoolAnd | AggregateFunction::BoolOr | AggregateFunction::Every => {
+                Accumulator::Truth(None)
+            }
         }
+    }
+
+    fn feed(
+        &self,
+        accumulator: &mut Accumulator,
+        value: Value,
+        extra: Option<Value>,
+        whole_row: bool,
+    ) -> SqlResult<()> {
+        match extra {
+            Some(member) if self.function.builds_object() => {
+                self.add_member(accumulator, &value, &member)
+            }
+            Some(delimiter) => self.join(accumulator, value, delimiter),
+            None if self.function.builds_json() => self.add_element(accumulator, &value, whole_row),
+            None => self.add(accumulator, value),
+        }
+    }
+
+    fn finish_ordered(&self, mut inputs: Vec<OrderedInput>) -> SqlResult<Value> {
+        let Some((argument, Some((directions, _)))) = self.argument.as_ref().map(ordered_parts)
+        else {
+            return Ok(Value::Null);
+        };
+        let keys = sort_keys(directions);
+        inputs.sort_by(|left, right| compare_sort_keys(&keys, &left.keys, &right.keys));
+        let whole_row = crate::json_functions::is_whole_row(argument);
+        let mut accumulator = self.start_unordered();
+        for input in inputs {
+            self.feed(&mut accumulator, input.value, input.extra, whole_row)?;
+        }
+        self.finish(accumulator)
     }
 
     fn append_json(
@@ -770,7 +935,12 @@ impl Call {
         self.append_json(accumulator, element, separator)
     }
 
-    fn add_member(&self, accumulator: &mut Accumulator, key: &Value, value: &Value) -> SqlResult<()> {
+    fn add_member(
+        &self,
+        accumulator: &mut Accumulator,
+        key: &Value,
+        value: &Value,
+    ) -> SqlResult<()> {
         let binary = self.function.builds_jsonb();
         let key = crate::json_functions::object_key(key)?;
         let value = crate::json_functions::json_element(value, binary)?;
@@ -878,7 +1048,18 @@ impl Call {
                     *best = value;
                 }
             }
-            Accumulator::Joined(_) | Accumulator::JsonParts(_) => {}
+            Accumulator::Collected(values) => values.push(value),
+            Accumulator::Truth(state) => {
+                let Value::Boolean(next) = value else {
+                    return Err(undefined_aggregate(self.function, &value.type_name()));
+                };
+                *state = Some(match (*state, self.function) {
+                    (None, _) => next,
+                    (Some(now), AggregateFunction::BoolOr) => now || next,
+                    (Some(now), _) => now && next,
+                });
+            }
+            Accumulator::Joined(_) | Accumulator::JsonParts(_) | Accumulator::Ordered(_) => {}
         }
         Ok(())
     }
@@ -988,6 +1169,12 @@ impl Call {
             Accumulator::JsonParts(Some(text)) => {
                 crate::json_functions::finish_list(&text, self.function.builds_jsonb())?
             }
+            Accumulator::Collected(values) if values.is_empty() => Value::Null,
+            Accumulator::Collected(values) => {
+                crate::arrays::from_rows(values, self.argument_type.map(SqlType::without_modifier))?
+            }
+            Accumulator::Truth(state) => state.map_or(Value::Null, Value::Boolean),
+            Accumulator::Ordered(inputs) => self.finish_ordered(inputs)?,
         })
     }
 }
@@ -1086,6 +1273,7 @@ impl Grouping {
                     }
                     continue;
                 };
+                let (argument, order) = ordered_parts(argument);
                 let (value, delimiter) = match joined_parts(argument) {
                     Some((value, delimiter)) if call.function == AggregateFunction::StringAgg => {
                         let value = evaluator.eval(value, Some(SqlType::Text))?;
@@ -1102,7 +1290,7 @@ impl Grouping {
                     ),
                     _ => (evaluator.eval(argument, None)?, None),
                 };
-                if value.is_null() && !call.function.builds_json() {
+                if value.is_null() && !call.function.keeps_nulls() {
                     continue;
                 }
                 if call.distinct {
@@ -1116,17 +1304,27 @@ impl Grouping {
                 }
                 let before = group.accumulators[number].held_bytes();
                 let accumulator = &mut group.accumulators[number];
-                match delimiter {
-                    Some(member) if call.function.builds_object() => {
-                        call.add_member(accumulator, &value, &member)
+                match order {
+                    Some((_, keys)) => {
+                        let keys = keys
+                            .iter()
+                            .map(|key| evaluator.eval(key, None))
+                            .collect::<SqlResult<Vec<Value>>>()?;
+                        if let Accumulator::Ordered(inputs) = accumulator {
+                            inputs.push(OrderedInput {
+                                keys,
+                                value,
+                                extra: delimiter,
+                            });
+                        }
+                        Ok(())
                     }
-                    Some(delimiter) => call.join(accumulator, value, delimiter),
-                    None if call.function.builds_json() => call.add_element(
+                    None => call.feed(
                         accumulator,
-                        &value,
+                        value,
+                        delimiter,
                         crate::json_functions::is_whole_row(argument),
                     ),
-                    None => call.add(accumulator, value),
                 }
                 .map_err(|error| error.at_if_unplaced(call.position))?;
                 let grown = group.accumulators[number]

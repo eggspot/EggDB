@@ -212,7 +212,7 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 22] = [
+const INTERNAL_FUNCTIONS: [&str; 23] = [
     "regclass_cast",
     "oracle_nextval",
     "oracle_currval",
@@ -235,6 +235,7 @@ const INTERNAL_FUNCTIONS: [&str; 22] = [
     "similar_substring_pattern",
     crate::json_functions::WHOLE_ROW,
     crate::json_functions::ROW_OBJECT,
+    crate::aggregate::ORDERED_ARGUMENTS,
 ];
 
 const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
@@ -3634,11 +3635,8 @@ impl<'t> Parser<'t> {
                     position: name.position,
                 });
             }
-            (Some(Box::new(first)), distinct)
+            (Some(Box::new(self.aggregate_order(first)?)), distinct)
         };
-        if self.is_word("order") {
-            return Err(self.not_supported("ORDER BY inside an aggregate's arguments"));
-        }
         self.expect(&TokenKind::RightParen)?;
         if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
             return Err(self.not_supported("window and aggregate clauses"));
@@ -3651,6 +3649,15 @@ impl<'t> Parser<'t> {
             },
             position: name.position,
         })
+    }
+
+    fn aggregate_order(&mut self, argument: Expr) -> SqlResult<Expr> {
+        if !self.take_word("order") {
+            return Ok(argument);
+        }
+        self.expect_word("by")?;
+        let order = self.order_items()?;
+        Ok(crate::aggregate::ordered_arguments(argument, order))
     }
 
     fn cast(&mut self) -> SqlResult<Expr> {

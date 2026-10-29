@@ -585,7 +585,6 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
     for sql in [
         "SELECT * FROM people a FULL JOIN people b USING (id)",
         "SELECT * FROM people a NATURAL JOIN people b",
-        "SELECT array_agg(name) FROM people",
         "SELECT age FROM people GROUP BY ROLLUP (age)",
         "SELECT DISTINCT ON (age) age FROM people",
         "SELECT * FROM people, LATERAL (SELECT 1) x",
@@ -1689,7 +1688,6 @@ fn grouping_errors_follow_postgresql() {
         ("SELECT DISTINCT ON (person_id) amount FROM orders", "0A000"),
         ("SELECT age FROM people GROUP BY ROLLUP (age)", "0A000"),
         ("SELECT age FROM people GROUP BY ()", "0A000"),
-        ("SELECT array_agg(name) FROM people", "0A000"),
         ("SELECT count(*) OVER () FROM people", "0A000"),
         ("SELECT count(*) FILTER (WHERE true) FROM people", "0A000"),
         ("UPDATE people SET age = count(*)", "42803"),

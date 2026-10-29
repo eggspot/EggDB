@@ -4163,6 +4163,39 @@ error 0A000
 SET TRANSACTION SNAPSHOT '00000003-0000001B-1'
 
 
+chapter functions-aggregate, "Aggregate Functions": array_agg, bool_and, bool_or, every and ORDER BY inside the call
+rows
+SELECT array_agg(n ORDER BY n DESC), array_agg(n), bool_and(n > 0), bool_or(n > 2), every(n < 3) FROM (VALUES (1), (2), (3)) v(n)
+----
+array_agg|array_agg|bool_and|bool_or|every
+{3,2,1}|{1,2,3}|t|t|f
+SELECT 1
+
+rows
+SELECT string_agg(s, ',' ORDER BY s), array_agg(s ORDER BY s NULLS FIRST) FROM (VALUES ('b'), (NULL), ('a')) v(s)
+----
+string_agg|array_agg
+a,b|{NULL,a,b}
+SELECT 1
+
+rows
+SELECT g, array_agg(n ORDER BY n) FROM (VALUES (1, 30), (2, 10), (1, 20)) v(g, n) GROUP BY g ORDER BY g
+----
+g|array_agg
+1|{20,30}
+2|{10}
+SELECT 2
+
+rows
+SELECT array_agg(n), bool_and(n > 0) FROM (VALUES (1)) v(n) WHERE false
+----
+array_agg|bool_and
+NULL|NULL
+SELECT 1
+
+error 42883
+SELECT bool_and(n) FROM (VALUES (1)) v(n)
+
 chapter infoschema-tables, "information_schema": tables, columns and constraints
 ok
 CREATE TABLE infoschema_parent (id integer PRIMARY KEY, code varchar(10) UNIQUE)

@@ -18,6 +18,14 @@ fn function(name: &str, arguments: Vec<Expr>, position: usize) -> Expr {
     }
 }
 
+fn ordered(argument: Expr, order: Vec<crate::ast::OrderItem>) -> Expr {
+    if order.is_empty() {
+        argument
+    } else {
+        crate::aggregate::ordered_arguments(argument, order)
+    }
+}
+
 fn no_operator(symbol: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_FUNCTION,
@@ -519,9 +527,12 @@ impl Parser<'_> {
         while self.take(&TokenKind::Comma) {
             arguments.push(self.expression()?);
         }
-        if self.is_word("order") {
-            return Err(self.not_supported("ORDER BY inside an aggregate's arguments"));
-        }
+        let order = if self.take_word("order") {
+            self.expect_word("by")?;
+            self.order_items()?
+        } else {
+            Vec::new()
+        };
         self.expect(&TokenKind::RightParen)?;
         if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
             return Err(self.not_supported("window and aggregate clauses"));
@@ -543,10 +554,9 @@ impl Parser<'_> {
         Ok(Expr {
             kind: ExprKind::Aggregate {
                 function: aggregate,
-                argument: Some(Box::new(function(
-                    "object_agg_arguments",
-                    arguments,
-                    name.position,
+                argument: Some(Box::new(ordered(
+                    function("object_agg_arguments", arguments, name.position),
+                    order,
                 ))),
                 distinct,
             },
@@ -564,9 +574,12 @@ impl Parser<'_> {
         while self.take(&TokenKind::Comma) {
             arguments.push(self.expression()?);
         }
-        if self.is_word("order") {
-            return Err(self.not_supported("ORDER BY inside an aggregate's arguments"));
-        }
+        let order = if self.take_word("order") {
+            self.expect_word("by")?;
+            self.order_items()?
+        } else {
+            Vec::new()
+        };
         self.expect(&TokenKind::RightParen)?;
         if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
             return Err(self.not_supported("window and aggregate clauses"));
@@ -585,10 +598,9 @@ impl Parser<'_> {
         Ok(Expr {
             kind: ExprKind::Aggregate {
                 function: AggregateFunction::StringAgg,
-                argument: Some(Box::new(function(
-                    "string_agg_arguments",
-                    arguments,
-                    name.position,
+                argument: Some(Box::new(ordered(
+                    function("string_agg_arguments", arguments, name.position),
+                    order,
                 ))),
                 distinct,
             },
