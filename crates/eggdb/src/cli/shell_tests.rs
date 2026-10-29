@@ -178,3 +178,61 @@ fn backslashes_and_tabs_in_sql_reach_the_table_unchanged() {
         text(&ran.stdout)
     );
 }
+
+#[test]
+fn collection_chooses_the_key_space_of_the_key_value_commands() {
+    let directory = TempDirectory::new("shell-collection");
+    let file = created(&directory);
+    let added = run_with(&["collection", "add", &file, "sessions"], b"", Terminal::default());
+    assert_eq!(added.exit, 0, "{}", text(&added.stderr));
+    let script = "put k default\n\
+        .collection\n\
+        .collection sessions\n\
+        put k in-sessions\n\
+        get k\n\
+        get -C sessions k\n\
+        scan -k\n\
+        .collection\n\
+        .collection -\n\
+        get k\n\
+        put --create -C cache c:1 hot\n\
+        .collection\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "* default key space\n  sessions\n\
+         collection: sessions\n\
+         in-sessions\n\
+         in-sessions\n\
+         k\n\
+         \u{20} default key space\n* sessions\n\
+         collection: default key space\n\
+         default\n\
+         * default key space\n  cache\n  sessions\n"
+    );
+}
+
+#[test]
+fn collection_mistakes_name_the_problem() {
+    let directory = TempDirectory::new("shell-collection-errors");
+    let file = created(&directory);
+    let missing = shell(&file, &[], ".collection orders\n");
+    assert_eq!(missing.exit, 1);
+    assert!(
+        text(&missing.stderr).contains("no collection named orders in")
+            && text(&missing.stderr).contains("try: .collection"),
+        "{}",
+        text(&missing.stderr)
+    );
+    let two = shell(&file, &[], ".collection a b\n");
+    assert_eq!(two.exit, 2);
+    assert!(
+        text(&two.stderr).contains(".collection takes one name, or - for the default key space"),
+        "{}",
+        text(&two.stderr)
+    );
+    let none = shell(&file, &[], ".collection\n");
+    assert_eq!(none.exit, 0);
+    assert_eq!(text(&none.stdout), "* default key space\nno collections\n");
+}

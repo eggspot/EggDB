@@ -351,7 +351,7 @@ An interactive prompt on one database file: the key-value commands without their
 <command> <file>' prefix (put, get, del, scan, check, stats), SQL in the PostgreSQL dialect
 (or MySQL's, SQLite's, Oracle's or SQL Server's, with --dialect mysql, sqlite, oracle or
 sqlserver) until a semicolon,
-.help, .tables, .schema, .mode, .timer, .quit, and psql's \\copy, which reads and writes files
+.help, .tables, .schema, .collection, .mode, .timer, .quit, and psql's \\copy, which reads and writes files
 on this machine. COPY ... FROM STDIN reads the lines after it up to a line \\. as its data.
 Tab completes, Up/Down and Ctrl-R recall the history, which is kept in
 $XDG_STATE_HOME/eggdb/history (EGGDB_HISTORY=<path> moves it; set empty, turns it off).

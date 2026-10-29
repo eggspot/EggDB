@@ -4,6 +4,7 @@ use super::shell_copy::{
 use super::sql::{error_lines, exit_for, result_text};
 use super::{Access, execute_on, session_for, uses_color};
 use crate::cli::args::{self, CommandName, Invocation, Request, ResultMode};
+use super::collection::collections_count;
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use crate::cli::{Console, Terminal, help, report};
@@ -21,9 +22,19 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const KEY_VALUE_COMMANDS: [&str; 6] = ["put", "get", "del", "scan", "check", "stats"];
-const META_COMMANDS: [&str; 7] = [
-    ".help", ".tables", ".schema", ".mode", ".timer", ".quit", ".exit",
+const META_COMMANDS: [&str; 8] = [
+    ".help",
+    ".tables",
+    ".schema",
+    ".collection",
+    ".mode",
+    ".timer",
+    ".quit",
+    ".exit",
 ];
+const KEY_SPACE_COMMANDS: [&str; 4] = ["put", "get", "del", "scan"];
+const DEFAULT_KEY_SPACE: &str = "default key space";
+const LONGEST_PROMPT_COLLECTION: usize = 16;
 const STATEMENT_KEYWORDS: [&str; 15] = [
     "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "BEGIN", "COMMIT", "ROLLBACK", "SET",
     "SHOW", "RESET", "START", "END", "ABORT",
@@ -184,6 +195,7 @@ struct Shell<'s> {
     history_notice: Option<String>,
     pending: VecDeque<String>,
     line_reader: Option<LineReader>,
+    collection: Option<String>,
 }
 
 struct CopyFiles {
@@ -226,6 +238,7 @@ impl<'s> Shell<'s> {
             history_notice,
             pending: VecDeque::new(),
             line_reader: None,
+            collection: None,
         }
     }
 
@@ -357,10 +370,20 @@ impl<'s> Shell<'s> {
             "read-write"
         };
         let tables = self.sql.tables().map(|tables| tables.len()).unwrap_or(0);
-        let counts = match tables {
-            0 => String::new(),
-            1 => " (1 table)".to_owned(),
-            count => format!(" ({count} tables)"),
+        let collections = self.collection_names().len();
+        let mut parts = Vec::new();
+        match tables {
+            0 => {}
+            1 => parts.push("1 table".to_owned()),
+            count => parts.push(format!("{count} tables")),
+        }
+        if collections > 0 {
+            parts.push(collections_count(collections));
+        }
+        let counts = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
         };
         let text = format!(
             "EggDB {}: {}, open {access}{counts}\nType .help for help. SQL ends with ; and .quit or Ctrl-D quits.\n",
@@ -385,7 +408,15 @@ impl<'s> Shell<'s> {
             TransactionStatus::InBlock => "*",
             TransactionStatus::Failed => "!",
         };
-        format!("{}{state}{block}> ", self.stem)
+        let collection = match &self.collection {
+            Some(name) if name.chars().count() > LONGEST_PROMPT_COLLECTION => {
+                let cut: String = name.chars().take(LONGEST_PROMPT_COLLECTION - 1).collect();
+                format!("[{cut}…]")
+            }
+            Some(name) => format!("[{name}]"),
+            None => String::new(),
+        };
+        format!("{}{collection}{state}{block}> ", self.stem)
     }
 
     fn pending(&self) -> Pending {
@@ -569,6 +600,13 @@ impl<'s> Shell<'s> {
         let mut words = line.split_whitespace();
         let command = words.next().unwrap_or_default();
         let argument = words.next();
+        if command == ".collection" && words.next().is_some() {
+            return self.fail(
+                console,
+                ".collection takes one name, or - for the default key space",
+                Exit::Usage,
+            );
+        }
         if words.next().is_some() {
             return self.fail(
                 console,
@@ -610,6 +648,8 @@ impl<'s> Shell<'s> {
                 self.time(console, started.elapsed());
                 step
             }
+            (".collection", None) => self.list_collections(console),
+            (".collection", Some(name)) => self.choose_collection(console, name),
             (".mode", None) => {
                 let text = format!("mode: {}\n", self.mode.name());
                 self.print(console, &text);
@@ -696,6 +736,83 @@ impl<'s> Shell<'s> {
         Step::Continue(Exit::Done)
     }
 
+    fn collection_names(&self) -> Vec<String> {
+        self.db.collection_names().unwrap_or_default()
+    }
+
+    fn list_collections(&mut self, console: &mut Console<'_>) -> Step {
+        let names = match self.db.collection_names() {
+            Ok(names) => names,
+            Err(error) => {
+                return self.fail(
+                    console,
+                    &format!("cannot list the collections of {}: {error}", self.file),
+                    Exit::for_error(error.kind()),
+                );
+            }
+        };
+        let marker = |shown: bool| if shown { "* " } else { "  " };
+        let mut text = format!(
+            "{}{DEFAULT_KEY_SPACE}\n",
+            marker(self.collection.is_none())
+        );
+        for name in &names {
+            let shown = self.collection.as_deref() == Some(name.as_str());
+            text.push_str(&format!("{}{name}\n", marker(shown)));
+        }
+        self.print(console, &text);
+        if names.is_empty() {
+            let mut out = Output::new(&mut *console.stdout, self.color_out);
+            out.styled(Style::Dim, "no collections");
+            out.text("\n");
+            let _ = out.finish();
+        }
+        Step::Continue(Exit::Done)
+    }
+
+    fn choose_collection(&mut self, console: &mut Console<'_>, name: &str) -> Step {
+        if name == "-" {
+            self.collection = None;
+            self.print(console, &format!("collection: {DEFAULT_KEY_SPACE}\n"));
+            return Step::Continue(Exit::Done);
+        }
+        if !args::is_collection_name(name) {
+            return self.fail(
+                console,
+                &args::bad_collection_name(None, name),
+                Exit::Usage,
+            );
+        }
+        let exists = self
+            .db
+            .begin_read()
+            .and_then(|transaction| transaction.collection(name).map(drop));
+        match exists {
+            Ok(()) => {
+                self.collection = Some(name.to_owned());
+                self.print(console, &format!("collection: {name}\n"));
+                Step::Continue(Exit::Done)
+            }
+            Err(error) if error.kind() == eggdb::ErrorKind::CollectionNotFound => {
+                let mut messages = Output::new(&mut *console.stderr, self.color_err);
+                crate::cli::error_line(
+                    &mut messages,
+                    &format!("no collection named {name} in {}", self.file),
+                );
+                messages.text("  ");
+                messages.styled(Style::Bold, "try:");
+                messages.text(" .collection\n");
+                let _ = messages.finish();
+                Step::Continue(Exit::NotFound)
+            }
+            Err(error) => self.fail(
+                console,
+                &format!("cannot read {}: {error}", self.file),
+                Exit::for_error(error.kind()),
+            ),
+        }
+    }
+
     fn help_text(&self) -> String {
         let history = match &self.history_path {
             Some(path) => format!(
@@ -712,6 +829,7 @@ impl<'s> Shell<'s> {
   scan [--prefix p] [--from a] [--to b] [-r] [-n count] [-k]
   check                        read every page and report the file's health
   stats                        size, pages, last commit and log
+  -C <name> on put, get, del or scan   work in that collection for this line
 SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
   (docs/sql.md); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
@@ -719,6 +837,8 @@ SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, st
 Shell commands:
   .tables                      list the tables
   .schema [table]              CREATE TABLE statements, all or one
+  .collection [name|-]         work in a collection: alone lists them (* marks the one in use),
+                               a name chooses one, - returns to the default key space
   .mode [table|expanded|csv]   how results print; no argument shows the current mode
   .timer [on|off]              print each command's time
   \\copy t from 'file' [options]  load a file into a table, read here (also: from stdin)
@@ -756,6 +876,11 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
         }
         let mut arguments: Vec<OsString> = vec![OsString::from(&words[0])];
         arguments.push(self.request.file.clone().into_os_string());
+        let in_key_space = KEY_SPACE_COMMANDS.contains(&words[0].as_str());
+        if let Some(name) = self.collection.as_ref().filter(|_| in_key_space) {
+            arguments.push(OsString::from("--collection"));
+            arguments.push(OsString::from(name));
+        }
         arguments.extend(words[1..].iter().map(OsString::from));
         let terminal = Terminal {
             stdin: true,
@@ -823,6 +948,10 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
         if !continuing && let Some(first) = first {
             if KEY_VALUE_COMMANDS.contains(&first) {
                 let last = previous.last().copied().unwrap_or_default();
+                if matches!(last, "-C" | "--collection") {
+                    completion.candidates = self.collections_starting_with(word, false);
+                    return completion;
+                }
                 let takes_key = (matches!(first, "get" | "del") && previous.len() == 1)
                     || (first == "scan" && matches!(last, "--prefix" | "-p" | "--from" | "--to"));
                 if takes_key {
@@ -834,6 +963,7 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             if first.starts_with('.') {
                 completion.candidates = match (first, previous.len()) {
                     (".schema", 1) => self.table_names(word),
+                    (".collection", 1) => self.collections_starting_with(word, true),
                     (".mode", 1) => ["table", "expanded", "csv"]
                         .iter()
                         .filter(|mode| mode.starts_with(word))
@@ -899,11 +1029,34 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
         columns
     }
 
+    fn collections_starting_with(&self, word: &str, with_default: bool) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        if with_default && "-".starts_with(word) {
+            names.push("-".to_owned());
+        }
+        names.extend(
+            self.collection_names()
+                .into_iter()
+                .filter(|name| name.starts_with(word)),
+        );
+        names
+    }
+
     fn keys_starting_with(&self, word: &str) -> Vec<String> {
         let Ok(transaction) = self.db.begin_read() else {
             return Vec::new();
         };
-        let mut scan = transaction.scan_prefix(word.as_bytes());
+        let collection = match &self.collection {
+            Some(name) => match transaction.collection(name) {
+                Ok(collection) => Some(collection),
+                Err(_) => return Vec::new(),
+            },
+            None => None,
+        };
+        let mut scan = match &collection {
+            Some(collection) => collection.scan_prefix(word.as_bytes()),
+            None => transaction.scan_prefix(word.as_bytes()),
+        };
         let mut keys = Vec::new();
         while keys.len() < KEY_CANDIDATES {
             match scan.next_entry() {
