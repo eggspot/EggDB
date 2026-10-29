@@ -43,14 +43,12 @@ fn placements_that_do_not_run_yet_are_0a000() {
         "SELECT * FROM upper('x')",
         "SELECT * FROM t, generate_series(1, t.n)",
         "SELECT * FROM t, generate_series(1, n)",
-        "SELECT generate_series(1, 2), unnest(ARRAY[1])",
         "SELECT generate_series(1, 2) + 1",
         "SELECT n FROM t ORDER BY generate_series(1, 2)",
         "SELECT n FROM t GROUP BY generate_series(1, 2)",
         "SELECT * FROM generate_series(1, unnest(ARRAY[3]))",
         "SELECT * FROM generate_series(1.5, 3)",
         "UPDATE t SET n = generate_series(1, 2)",
-        "SELECT string_agg(n::text, ',' ORDER BY n) FROM t",
         "SELECT (SELECT generate_series(1, t.n)) FROM t",
     ] {
         assert_eq!(state(&mut session, sql), "0A000", "{sql}");
@@ -287,4 +285,67 @@ fn a_function_in_from_naming_a_sibling_through_a_subquery_is_0a000() {
         ),
         "42703"
     );
+}
+
+#[test]
+fn set_returning_functions_in_one_select_list_run_in_lock_step() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE t (n integer PRIMARY KEY)").unwrap();
+    run(&mut session, "INSERT INTO t VALUES (1), (2)").unwrap();
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT n, generate_series(1, n) AS g, unnest(ARRAY['a', 'b', 'c']) AS u FROM t ORDER BY n, u"
+        )
+        .unwrap(),
+        "n|g|u\n1|1|a\n1|NULL|b\n1|NULL|c\n2|1|a\n2|2|b\n2|NULL|c\nSELECT 6"
+    );
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT unnest('{}'::integer[]) AS a, generate_series(1, 0) AS b"
+        )
+        .unwrap(),
+        "a|b\nSELECT 0"
+    );
+}
+
+#[test]
+fn window_ranking_functions_number_rows_and_describe_as_bigint() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE TABLE t (id integer PRIMARY KEY, g integer)",
+    )
+    .unwrap();
+    run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 1), (3, 2)").unwrap();
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT id, row_number() OVER (PARTITION BY g ORDER BY id DESC) AS r FROM t ORDER BY id"
+        )
+        .unwrap(),
+        "id|r\n1|2\n2|1\n3|1\nSELECT 3"
+    );
+    let description = session
+        .describe("SELECT id, rank() OVER (ORDER BY g) FROM t", &[])
+        .unwrap();
+    let types: Vec<Option<SqlType>> = description
+        .columns
+        .unwrap_or_default()
+        .into_iter()
+        .map(|column| column.sql_type)
+        .collect();
+    assert_eq!(types, [Some(SqlType::Integer), Some(SqlType::BigInt)]);
+    for sql in [
+        "SELECT row_number() OVER () + 1 FROM t",
+        "SELECT id FROM t ORDER BY row_number() OVER ()",
+        "SELECT row_number() OVER (ROWS UNBOUNDED PRECEDING) FROM t",
+        "SELECT row_number() OVER w FROM t",
+        "SELECT row_number() OVER (), generate_series(1, 2) FROM t",
+    ] {
+        assert_eq!(state(&mut session, sql), "0A000", "{sql}");
+    }
 }

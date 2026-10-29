@@ -492,12 +492,24 @@ pub(crate) struct TableFunction {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SelectListExpansion {
     pub(crate) query: Query,
-    pub(crate) function: String,
-    pub(crate) arguments: usize,
-    pub(crate) before_columns: Option<usize>,
-    pub(crate) after_columns: Option<usize>,
-    pub(crate) output_name: String,
+    pub(crate) items: Vec<ExpandedItem>,
     pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ExpandedItem {
+    Columns(Option<usize>),
+    SetReturning {
+        function: String,
+        arguments: usize,
+        output_name: String,
+        position: usize,
+    },
+    Window {
+        spec: crate::window::WindowSpec,
+        keys: usize,
+        output_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

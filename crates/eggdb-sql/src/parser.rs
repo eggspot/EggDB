@@ -216,7 +216,7 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 23] = [
+const INTERNAL_FUNCTIONS: [&str; 24] = [
     "regclass_cast",
     "oracle_nextval",
     "oracle_currval",
@@ -240,6 +240,7 @@ const INTERNAL_FUNCTIONS: [&str; 23] = [
     crate::json_functions::WHOLE_ROW,
     crate::json_functions::ROW_OBJECT,
     crate::aggregate::ORDERED_ARGUMENTS,
+    crate::window::WINDOW_CALL,
 ];
 
 const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
@@ -3472,7 +3473,9 @@ impl<'t> Parser<'t> {
         if text == "string_agg" && self.postgresql() {
             return self.string_agg(name);
         }
-        if self.postgresql() && let Some(expr) = self.postgresql_function(&name)? {
+        if self.postgresql()
+            && let Some(expr) = self.postgresql_function(&name)?
+        {
             return Ok(expr);
         }
         if !self.sqlite()
@@ -3521,6 +3524,13 @@ impl<'t> Parser<'t> {
             }
             self.expect(&TokenKind::RightParen)?;
         }
+        if self.is_word("over")
+            && arguments.is_empty()
+            && named.is_empty()
+            && let Some(function) = crate::window::WindowFunction::named(&name.text)
+        {
+            return self.window_call(function, name.position);
+        }
         if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
             return Err(self.not_supported("window and aggregate clauses"));
         }
@@ -3534,6 +3544,42 @@ impl<'t> Parser<'t> {
             },
             position: name.position,
         })
+    }
+
+    fn window_call(
+        &mut self,
+        function: crate::window::WindowFunction,
+        position: usize,
+    ) -> SqlResult<Expr> {
+        self.expect_word("over")?;
+        if self.peek_kind() != &TokenKind::LeftParen {
+            return Err(self.not_supported("named windows"));
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        let mut partition = Vec::new();
+        if self.take_word("partition") {
+            self.expect_word("by")?;
+            loop {
+                partition.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        let order = if self.take_word("order") {
+            self.expect_word("by")?;
+            self.order_items()?
+        } else {
+            Vec::new()
+        };
+        if ["rows", "range", "groups"]
+            .iter()
+            .any(|word| self.is_word(word))
+        {
+            return Err(self.not_supported("window frames"));
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(crate::window::call(function, partition, order, position))
     }
 
     fn named_argument_name(&mut self) -> SqlResult<Option<Name>> {
@@ -3906,7 +3952,10 @@ fn named_arguments(
         slots[at] = Some(value);
     }
     let defaulted = function.text == "make_interval";
-    let last_given = slots.iter().rposition(Option::is_some).map_or(0, |at| at + 1);
+    let last_given = slots
+        .iter()
+        .rposition(Option::is_some)
+        .map_or(0, |at| at + 1);
     let mut arguments = Vec::with_capacity(slots.len());
     for (at, slot) in slots.into_iter().enumerate() {
         match slot {

@@ -4,7 +4,10 @@ use crate::eval::{Evaluator, Scope, check_columns, first_aggregate, output_name}
 use crate::hash_index::SeededIntegerHash;
 use crate::memory::WorkMemory;
 use crate::numeric::Numeric;
-use crate::types::{SqlType, Value, compare_values, equality_key, float_overflow};
+use crate::types::{
+    SortDirection, SqlType, Value, compare_in_directions, compare_values, decode_directions,
+    encode_directions, equality_key, float_overflow,
+};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
@@ -29,16 +32,9 @@ pub(crate) const ORDERED_ARGUMENTS: &str = "ordered_aggregate_arguments";
 
 pub(crate) fn ordered_arguments(argument: Expr, order: Vec<OrderItem>) -> Expr {
     let position = argument.position;
-    let directions: String = order
-        .iter()
-        .flat_map(|item| {
-            let nulls_first = item.nulls_first.unwrap_or(item.descending);
-            [
-                if item.descending { 'D' } else { 'A' },
-                if nulls_first { 'F' } else { 'L' },
-            ]
-        })
-        .collect();
+    let directions = encode_directions(
+        &order.iter().map(SortDirection::of).collect::<Vec<_>>(),
+    );
     let mut arguments = Vec::with_capacity(order.len() + 2);
     arguments.push(argument);
     arguments.push(Expr {
@@ -64,40 +60,6 @@ fn ordered_parts(argument: &Expr) -> (&Expr, Option<(&str, &[Expr])>) {
         return (inner, Some((directions.as_str(), keys)));
     }
     (argument, None)
-}
-
-struct SortKey {
-    descending: bool,
-    nulls_first: bool,
-}
-
-fn sort_keys(directions: &str) -> Vec<SortKey> {
-    directions
-        .as_bytes()
-        .chunks(2)
-        .map(|pair| SortKey {
-            descending: pair.first() == Some(&b'D'),
-            nulls_first: pair.get(1) == Some(&b'F'),
-        })
-        .collect()
-}
-
-fn compare_sort_keys(keys: &[SortKey], left: &[Value], right: &[Value]) -> Ordering {
-    for ((key, left), right) in keys.iter().zip(left).zip(right) {
-        let ordering = match (left.is_null(), right.is_null()) {
-            (true, true) => Ordering::Equal,
-            (true, false) if key.nulls_first => Ordering::Less,
-            (true, false) => Ordering::Greater,
-            (false, true) if key.nulls_first => Ordering::Greater,
-            (false, true) => Ordering::Less,
-            (false, false) if key.descending => compare_values(left, right).reverse(),
-            (false, false) => compare_values(left, right),
-        };
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-    Ordering::Equal
 }
 
 struct OrderedInput {
@@ -887,8 +849,8 @@ impl Call {
         else {
             return Ok(Value::Null);
         };
-        let keys = sort_keys(directions);
-        inputs.sort_by(|left, right| compare_sort_keys(&keys, &left.keys, &right.keys));
+        let directions = decode_directions(directions);
+        inputs.sort_by(|left, right| compare_in_directions(&directions, &left.keys, &right.keys));
         let whole_row = crate::json_functions::is_whole_row(argument);
         let mut accumulator = self.start_unordered();
         for input in inputs {

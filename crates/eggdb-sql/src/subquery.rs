@@ -826,7 +826,7 @@ pub(crate) fn needs_preparation(select: &Select) -> bool {
         || select_expressions(select)
             .into_iter()
             .any(mentions_subquery)
-        || crate::set_returning::select_mentions_set_returning(select)
+        || crate::set_returning::select_needs_expansion(select)
 }
 
 pub(crate) fn prepare_in_place(
@@ -1310,7 +1310,7 @@ fn prepare_select(
     prepared: &mut Prepared,
 ) -> SqlResult<bool> {
     let mut correlated_from = false;
-    if crate::set_returning::select_mentions_set_returning(select) {
+    if crate::set_returning::select_needs_expansion(select) {
         crate::set_returning::check_placement(select)?;
         crate::set_returning::expand_select_list(select)?;
     }

@@ -450,7 +450,9 @@ impl Parser<'_> {
         match name.text.as_str() {
             "position" => self.position_call(name).map(Some),
             "overlay" => self.overlay_call(name).map(Some),
-            "row_to_json" if self.is_word_at(1, "row") && self.peek_kind_at(2) == &TokenKind::LeftParen => {
+            "row_to_json"
+                if self.is_word_at(1, "row") && self.peek_kind_at(2) == &TokenKind::LeftParen =>
+            {
                 self.row_to_json_call(name).map(Some)
             }
             "json_object_agg" | "jsonb_object_agg" => self.object_agg(name).map(Some),

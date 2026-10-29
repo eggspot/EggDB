@@ -1,6 +1,6 @@
 use crate::ast::{
-    Expr, ExprKind, FromClause, GeneratedTable, JoinCondition, Literal, Name, Query, Select,
-    SelectItem, SelectListExpansion, TableFunction, TableReference, ValuesList,
+    ExpandedItem, Expr, ExprKind, FromClause, GeneratedTable, JoinCondition, Literal, Name, Query,
+    Select, SelectItem, SelectListExpansion, TableFunction, TableReference, ValuesList,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, children, first_aggregate};
@@ -456,43 +456,82 @@ pub(crate) fn select_mentions_set_returning(select: &Select) -> bool {
         })
 }
 
+pub(crate) fn select_mentions_window(select: &Select) -> bool {
+    let mentions = |expr: &Expr| crate::window::first_call(expr).is_some();
+    select.items.iter().any(|item| match item {
+        SelectItem::Expr { expr, .. } => mentions(expr),
+        SelectItem::Wildcard { .. } => false,
+    }) || select.filter.iter().any(mentions)
+        || select.group_by.iter().any(mentions)
+        || select.having.iter().any(mentions)
+        || select.order_by.iter().any(|item| mentions(&item.expr))
+}
+
+pub(crate) fn select_needs_expansion(select: &Select) -> bool {
+    select_mentions_set_returning(select) || select_mentions_window(select)
+}
+
+fn refuse_window(expr: &Expr, place: &str) -> SqlResult<()> {
+    match crate::window::first_call(expr) {
+        Some(found) => Err(SqlError::not_supported(format!(
+            "a window function {place} is not supported yet"
+        ))
+        .with_hint("Call it alone as a select-list item.")
+        .at(found.position)),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn check_placement(select: &Select) -> SqlResult<()> {
     let mut calls = 0;
+    let mut windows = 0;
     for item in &select.items {
         let SelectItem::Expr { expr, .. } = item else {
             continue;
         };
         if is_top_level_call(expr) {
             calls += 1;
-            if calls > 1 {
-                return Err(SqlError::not_supported(
-                    "more than one set-returning function in a select list is not supported yet",
-                )
-                .at(expr.position));
-            }
             for argument in children(expr) {
                 refuse_nested(argument)?;
+                refuse_window(argument, "inside an argument of a set-returning function")?;
+            }
+        } else if crate::window::is_call(expr) {
+            windows += 1;
+            for key in children(expr) {
+                refuse_nested(key)?;
+                refuse_window(key, "inside a window definition")?;
             }
         } else {
             refuse_nested(expr)?;
+            refuse_window(expr, "inside an expression")?;
+        }
+        if calls > 0 && windows > 0 {
+            return Err(SqlError::not_supported(
+                "a window function beside a set-returning function in one select list is not supported yet",
+            )
+            .at(expr.position));
         }
     }
     if let Some(filter) = &select.filter {
         refuse_in(filter, "WHERE")?;
+        refuse_window(filter, "in WHERE")?;
     }
     for key in &select.group_by {
         refuse_in(key, "GROUP BY")?;
+        refuse_window(key, "in GROUP BY")?;
     }
     if let Some(having) = &select.having {
         refuse_in(having, "HAVING")?;
+        refuse_window(having, "in HAVING")?;
     }
     for item in &select.order_by {
         refuse_in(&item.expr, "ORDER BY")?;
-        if calls > 0
+        refuse_window(&item.expr, "in ORDER BY")?;
+        if calls + windows > 0
             && let Some(aggregate) = first_aggregate(&item.expr)
         {
             return Err(SqlError::not_supported(
-                "an aggregate in the ORDER BY of a select list with a set-returning function is not supported yet",
+                "an aggregate in the ORDER BY of a select list with a set-returning or window function is not supported yet",
             )
             .with_hint("Name the aggregate in the select list and order by its output column.")
             .at(aggregate.position));
@@ -500,56 +539,114 @@ pub(crate) fn check_placement(select: &Select) -> SqlResult<()> {
     }
     for expr in select.limit.iter().chain(select.offset.iter()) {
         refuse_in(expr, "LIMIT")?;
+        refuse_window(expr, "in LIMIT")?;
     }
     if let Some(from) = &select.from {
         for join in &from.joins {
             if let JoinCondition::On(on) = &join.condition {
                 refuse_in(on, "JOIN conditions")?;
+                refuse_window(on, "in JOIN conditions")?;
             }
         }
     }
     Ok(())
 }
 
+fn computed_item(item: &SelectItem) -> Option<usize> {
+    match item {
+        SelectItem::Expr { expr, .. }
+            if is_top_level_call(expr) || crate::window::is_call(expr) =>
+        {
+            Some(expr.position)
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
-    let Some(at) = select
-        .items
-        .iter()
-        .position(|item| matches!(item, SelectItem::Expr { expr, .. } if is_top_level_call(expr)))
-    else {
+    let Some(position) = select.items.iter().find_map(computed_item) else {
         return Ok(());
     };
-    let SelectItem::Expr { expr, alias } = select.items.remove(at) else {
-        return Ok(());
+    let mut inner_items: Vec<SelectItem> = Vec::with_capacity(select.items.len());
+    let mut items: Vec<ExpandedItem> = Vec::new();
+    let mut label: Option<String> = None;
+    let mut run: Option<Option<usize>> = None;
+    let mut unknown_runs = 0;
+    let mut close_run = |run: &mut Option<Option<usize>>, items: &mut Vec<ExpandedItem>| {
+        if let Some(width) = run.take() {
+            if width.is_none() {
+                unknown_runs += 1;
+            }
+            items.push(ExpandedItem::Columns(width));
+        }
     };
-    let position = expr.position;
-    let ExprKind::Function { name, arguments } = expr.kind else {
-        return Ok(());
-    };
-    let wildcard = |items: &[SelectItem]| {
-        items
-            .iter()
-            .any(|item| matches!(item, SelectItem::Wildcard { .. }))
-    };
-    let (before, after) = select.items.split_at(at);
-    let before_columns = (!wildcard(before)).then_some(before.len());
-    let after_columns = (!wildcard(after)).then_some(after.len());
-    if before_columns.is_none() && after_columns.is_none() {
+    for item in std::mem::take(&mut select.items) {
+        match item {
+            SelectItem::Expr { expr, alias } if is_top_level_call(&expr) => {
+                close_run(&mut run, &mut items);
+                let at = expr.position;
+                let ExprKind::Function { name, arguments } = expr.kind else {
+                    continue;
+                };
+                let output_name = alias.unwrap_or_else(|| name.clone());
+                label.get_or_insert_with(|| output_name.clone());
+                items.push(ExpandedItem::SetReturning {
+                    function: name,
+                    arguments: arguments.len(),
+                    output_name,
+                    position: at,
+                });
+                inner_items.extend(arguments.into_iter().map(|argument| SelectItem::Expr {
+                    expr: argument,
+                    alias: None,
+                }));
+            }
+            SelectItem::Expr { expr, alias } if crate::window::is_call(&expr) => {
+                close_run(&mut run, &mut items);
+                let at = expr.position;
+                let Some((spec, keys)) = crate::window::split(expr) else {
+                    return Err(SqlError::new(
+                        SqlState::INTERNAL_ERROR,
+                        "a window call lost its definition",
+                    )
+                    .at(at));
+                };
+                let output_name = alias.unwrap_or_else(|| spec.function.name().to_owned());
+                label.get_or_insert_with(|| output_name.clone());
+                items.push(ExpandedItem::Window {
+                    keys: keys.len(),
+                    spec,
+                    output_name,
+                });
+                inner_items.extend(keys.into_iter().map(|key| SelectItem::Expr {
+                    expr: key,
+                    alias: None,
+                }));
+            }
+            other => {
+                let width = match &other {
+                    SelectItem::Wildcard { .. } => None,
+                    SelectItem::Expr { .. } => Some(1),
+                };
+                run = Some(match (run.take(), width) {
+                    (None, width) => width,
+                    (Some(Some(known)), Some(more)) => Some(known + more),
+                    _ => None,
+                });
+                inner_items.push(other);
+            }
+        }
+    }
+    close_run(&mut run, &mut items);
+    if unknown_runs > 1 {
         return Err(SqlError::not_supported(
-            "a set-returning function between two * items in a select list is not supported yet",
+            "a set-returning or window function between two * items in a select list is not supported yet",
         )
         .at(position));
     }
-    let argument_count = arguments.len();
-    let mut items: Vec<SelectItem> = before.to_vec();
-    items.extend(arguments.into_iter().map(|argument| SelectItem::Expr {
-        expr: argument,
-        alias: None,
-    }));
-    items.extend(after.iter().cloned());
     let inner = Select {
         distinct: false,
-        items,
+        items: inner_items,
         from: select.from.take(),
         filter: select.filter.take(),
         group_by: std::mem::take(&mut select.group_by),
@@ -559,7 +656,6 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
         offset: None,
         source_row_limit: select.source_row_limit.take(),
     };
-    let output_name = alias.unwrap_or_else(|| name.clone());
     select.items = vec![SelectItem::Wildcard {
         qualifier: None,
         position,
@@ -567,7 +663,7 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
     select.from = Some(FromClause {
         first: TableReference {
             name: Name {
-                text: output_name.clone(),
+                text: label.unwrap_or_default(),
                 position,
             },
             alias: None,
@@ -575,11 +671,7 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
             generated: Some(Box::new(GeneratedTable::Expansion(Box::new(
                 SelectListExpansion {
                     query: Query::of_select(inner, position),
-                    function: name,
-                    arguments: argument_count,
-                    before_columns,
-                    after_columns,
-                    output_name,
+                    items,
                     position,
                 },
             )))),
@@ -906,83 +998,194 @@ pub(crate) fn values_rows(
     })
 }
 
-pub(crate) fn expanded(
-    expansion: &SelectListExpansion,
-    inner: QueryResult,
-) -> SqlResult<GeneratedRows> {
-    let inner_columns = inner.columns.unwrap_or_default();
-    let total = inner_columns.len();
-    let count = expansion.arguments;
-    let before = match (expansion.before_columns, expansion.after_columns) {
-        (Some(before), _) => before,
-        (None, Some(after)) => total.saturating_sub(count).saturating_sub(after),
-        (None, None) => 0,
-    };
-    let after_start = before.saturating_add(count).min(total);
-    let found = named(&expansion.function).ok_or_else(|| {
-        SqlError::not_supported(format!(
-            "the set-returning function {}() is not supported yet",
-            expansion.function
-        ))
-    })?;
-    let declared: Vec<Option<SqlType>> = inner_columns
-        .get(before..after_start)
-        .unwrap_or(&[])
-        .iter()
-        .map(|column| column.sql_type)
-        .collect();
-    let resolved = |types: &[Option<SqlType>]| {
-        (found.result_type)(types).map_err(|error| error.at_if_unplaced(expansion.position))
-    };
-    let mut sql_type = if declared.iter().all(Option::is_some) {
-        Some(resolved(&declared)?)
-    } else {
-        None
-    };
-    let mut collector = RowCollector::new();
-    for row in inner.rows {
-        let arguments = row.get(before..after_start).unwrap_or(&[]);
-        let output_type = match sql_type {
-            Some(found) => found,
-            None => {
-                let found = resolved(&value_types(arguments, &declared))?;
-                sql_type = Some(found);
-                found
-            }
-        };
+struct ResolvedFunction {
+    found: &'static SetReturningFunction,
+    declared: Vec<Option<SqlType>>,
+    sql_type: Option<SqlType>,
+    position: usize,
+}
+
+impl ResolvedFunction {
+    fn output_type(&mut self, arguments: &[Value]) -> SqlResult<SqlType> {
+        if let Some(found) = self.sql_type {
+            return Ok(found);
+        }
+        let resolved = (self.found.result_type)(&value_types(arguments, &self.declared))
+            .map_err(|error| error.at_if_unplaced(self.position))?;
+        self.sql_type = Some(resolved);
+        Ok(resolved)
+    }
+
+    fn values(&mut self, arguments: &[Value], pending: &mut WorkMemory) -> SqlResult<Vec<Value>> {
+        let output_type = self.output_type(arguments)?;
         let arguments: Vec<Value> = arguments
             .iter()
             .map(|value| {
-                if found.name == "generate_series" {
+                if self.found.name == "generate_series" {
                     conformed(value.clone(), output_type)
                 } else {
                     Ok(value.clone())
                 }
             })
             .collect::<SqlResult<_>>()?;
-        let head = row.get(..before).unwrap_or(&[]);
-        let tail = row.get(after_start..).unwrap_or(&[]);
-        (found.rows)(&arguments, output_type, &mut |value| {
-            let mut expanded = Vec::with_capacity(head.len() + 1 + tail.len());
-            expanded.extend_from_slice(head);
-            expanded.push(conformed(value, output_type)?);
-            expanded.extend_from_slice(tail);
-            collector.push(expanded)
+        let mut values = Vec::new();
+        (self.found.rows)(&arguments, output_type, &mut |value| {
+            let value = conformed(value, output_type)?;
+            pending.charge(crate::memory::held_bytes(&value).saturating_add(16))?;
+            values.push(value);
+            Ok(())
         })
-        .map_err(|error| error.at_if_unplaced(expansion.position))?;
+        .map_err(|error| error.at_if_unplaced(self.position))?;
+        Ok(values)
     }
-    let mut columns: Vec<OutputColumn> = inner_columns.get(..before).unwrap_or(&[]).to_vec();
-    columns.push(OutputColumn {
-        name: expansion.output_name.clone(),
-        sql_type: Some(sql_type.unwrap_or(SqlType::Integer)),
-    });
-    columns.extend(
-        inner_columns
-            .get(after_start..)
-            .unwrap_or(&[])
-            .iter()
-            .cloned(),
-    );
+}
+
+fn item_spans(items: &[ExpandedItem], total: usize) -> Vec<std::ops::Range<usize>> {
+    let known: usize = items
+        .iter()
+        .map(|item| match item {
+            ExpandedItem::Columns(width) => width.unwrap_or(0),
+            ExpandedItem::SetReturning { arguments, .. } => *arguments,
+            ExpandedItem::Window { keys, .. } => *keys,
+        })
+        .sum();
+    let unknown = total.saturating_sub(known);
+    let mut spans = Vec::with_capacity(items.len());
+    let mut at = 0;
+    for item in items {
+        let width = match item {
+            ExpandedItem::Columns(width) => width.unwrap_or(unknown),
+            ExpandedItem::SetReturning { arguments, .. } => *arguments,
+            ExpandedItem::Window { keys, .. } => *keys,
+        };
+        let end = at.saturating_add(width).min(total);
+        spans.push(at..end);
+        at = end;
+    }
+    spans
+}
+
+pub(crate) fn expanded(
+    expansion: &SelectListExpansion,
+    inner: QueryResult,
+) -> SqlResult<GeneratedRows> {
+    let inner_columns = inner.columns.unwrap_or_default();
+    let spans = item_spans(&expansion.items, inner_columns.len());
+    let mut functions: Vec<Option<ResolvedFunction>> = Vec::with_capacity(expansion.items.len());
+    let mut windows: Vec<Option<Vec<i64>>> = Vec::with_capacity(expansion.items.len());
+    for (item, span) in expansion.items.iter().zip(&spans) {
+        match item {
+            ExpandedItem::SetReturning {
+                function, position, ..
+            } => {
+                let found = named(function).ok_or_else(|| {
+                    SqlError::not_supported(format!(
+                        "the set-returning function {function}() is not supported yet"
+                    ))
+                })?;
+                let declared: Vec<Option<SqlType>> = inner_columns
+                    .get(span.clone())
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|column| column.sql_type)
+                    .collect();
+                let sql_type = if declared.iter().all(Option::is_some) {
+                    Some(
+                        (found.result_type)(&declared)
+                            .map_err(|error| error.at_if_unplaced(*position))?,
+                    )
+                } else {
+                    None
+                };
+                functions.push(Some(ResolvedFunction {
+                    found,
+                    declared,
+                    sql_type,
+                    position: *position,
+                }));
+                windows.push(None);
+            }
+            ExpandedItem::Window { spec, .. } => {
+                let keys: Vec<Vec<Value>> = inner
+                    .rows
+                    .iter()
+                    .map(|row| row.get(span.clone()).unwrap_or(&[]).to_vec())
+                    .collect();
+                functions.push(None);
+                windows.push(Some(crate::window::numbers(spec, &keys)));
+            }
+            ExpandedItem::Columns(_) => {
+                functions.push(None);
+                windows.push(None);
+            }
+        }
+    }
+    let sets_rows = functions.iter().any(Option::is_some);
+    let mut collector = RowCollector::new();
+    for (row_at, row) in inner.rows.iter().enumerate() {
+        if sets_rows {
+            let mut pending = WorkMemory::new();
+            let mut produced: Vec<Option<Vec<Value>>> = Vec::with_capacity(functions.len());
+            let mut longest = 0;
+            for (function, span) in functions.iter_mut().zip(&spans) {
+                let Some(function) = function else {
+                    produced.push(None);
+                    continue;
+                };
+                let values = function.values(row.get(span.clone()).unwrap_or(&[]), &mut pending)?;
+                longest = longest.max(values.len());
+                produced.push(Some(values));
+            }
+            for index in 0..longest {
+                let mut expanded = Vec::with_capacity(row.len());
+                for (values, span) in produced.iter().zip(&spans) {
+                    match values {
+                        Some(values) => {
+                            expanded.push(values.get(index).cloned().unwrap_or(Value::Null));
+                        }
+                        None => expanded.extend_from_slice(row.get(span.clone()).unwrap_or(&[])),
+                    }
+                }
+                collector.push(expanded)?;
+            }
+        } else {
+            let mut expanded = Vec::with_capacity(row.len());
+            for (numbers, span) in windows.iter().zip(&spans) {
+                match numbers {
+                    Some(numbers) => expanded.push(Value::BigInt(
+                        numbers.get(row_at).copied().unwrap_or_default(),
+                    )),
+                    None => expanded.extend_from_slice(row.get(span.clone()).unwrap_or(&[])),
+                }
+            }
+            collector.push(expanded)?;
+        }
+    }
+    let mut columns: Vec<OutputColumn> = Vec::with_capacity(inner_columns.len());
+    for ((item, span), function) in expansion.items.iter().zip(&spans).zip(&functions) {
+        match item {
+            ExpandedItem::Columns(_) => columns.extend(
+                inner_columns
+                    .get(span.clone())
+                    .unwrap_or(&[])
+                    .iter()
+                    .cloned(),
+            ),
+            ExpandedItem::SetReturning { output_name, .. } => columns.push(OutputColumn {
+                name: output_name.clone(),
+                sql_type: Some(
+                    function
+                        .as_ref()
+                        .and_then(|function| function.sql_type)
+                        .unwrap_or(SqlType::Integer),
+                ),
+            }),
+            ExpandedItem::Window { output_name, .. } => columns.push(OutputColumn {
+                name: output_name.clone(),
+                sql_type: Some(SqlType::BigInt),
+            }),
+        }
+    }
     let (rows, charge) = collector.finish();
     Ok(GeneratedRows {
         columns,

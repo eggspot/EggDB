@@ -84,6 +84,7 @@ mod temporal;
 mod types;
 mod typing;
 mod views;
+mod window;
 
 #[cfg(test)]
 mod arrays_tests;

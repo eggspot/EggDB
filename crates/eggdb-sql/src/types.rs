@@ -948,6 +948,66 @@ fn is_exact_number(value: &Value) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SortDirection {
+    pub(crate) descending: bool,
+    pub(crate) nulls_first: bool,
+}
+
+impl SortDirection {
+    pub(crate) fn of(item: &crate::ast::OrderItem) -> Self {
+        Self {
+            descending: item.descending,
+            nulls_first: item.nulls_first.unwrap_or(item.descending),
+        }
+    }
+}
+
+pub(crate) fn encode_directions(directions: &[SortDirection]) -> String {
+    directions
+        .iter()
+        .flat_map(|direction| {
+            [
+                if direction.descending { 'D' } else { 'A' },
+                if direction.nulls_first { 'F' } else { 'L' },
+            ]
+        })
+        .collect()
+}
+
+pub(crate) fn decode_directions(encoded: &str) -> Vec<SortDirection> {
+    encoded
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| SortDirection {
+            descending: pair.first() == Some(&b'D'),
+            nulls_first: pair.get(1) == Some(&b'F'),
+        })
+        .collect()
+}
+
+pub(crate) fn compare_in_directions(
+    directions: &[SortDirection],
+    left: &[Value],
+    right: &[Value],
+) -> Ordering {
+    for ((direction, left), right) in directions.iter().zip(left).zip(right) {
+        let ordering = match (left.is_null(), right.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) if direction.nulls_first => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            (false, true) if direction.nulls_first => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) if direction.descending => compare_values(left, right).reverse(),
+            (false, false) => compare_values(left, right),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
 pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Oid(_) | Value::Reg(_), _) | (_, Value::Oid(_) | Value::Reg(_)) => {
