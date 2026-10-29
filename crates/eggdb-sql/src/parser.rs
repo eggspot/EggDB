@@ -9,6 +9,7 @@ mod query;
 mod schemas;
 mod sqlite;
 mod sqlserver;
+mod sqlserver_batch;
 mod sqlserver_functions;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
@@ -1998,6 +1999,11 @@ impl<'t> Parser<'t> {
     }
 
     fn table_reference(&mut self) -> SqlResult<TableReference> {
+        if self.sqlserver()
+            && matches!(self.peek_kind(), TokenKind::Variable(name) if !name.starts_with("@@"))
+        {
+            return self.table_variable_reference();
+        }
         if self.peek_kind() == &TokenKind::LeftParen {
             if self.at_derived_table() {
                 return self.derived_table();
@@ -2499,7 +2505,8 @@ impl<'t> Parser<'t> {
         let alias = if self.take_word("as")
             || matches!(self.peek_kind(), TokenKind::Word(word) if !self.reserved(word) && !self.clause_word(word))
             || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_))
-            || (self.mysql() || self.sqlite()) && matches!(self.peek_kind(), TokenKind::String(_))
+            || (self.mysql() || self.sqlite() || self.sqlserver())
+                && matches!(self.peek_kind(), TokenKind::String(_))
         {
             Some(self.label()?)
         } else if self.mysql()
@@ -2526,7 +2533,7 @@ impl<'t> Parser<'t> {
 
     fn label(&mut self) -> SqlResult<String> {
         match self.peek_kind() {
-            TokenKind::String(text) if self.mysql() || self.sqlite() => {
+            TokenKind::String(text) if self.mysql() || self.sqlite() || self.sqlserver() => {
                 let text = text.as_ref().to_owned();
                 self.at += 1;
                 Ok(text)
@@ -3036,6 +3043,9 @@ impl<'t> Parser<'t> {
                 return Err(self.not_supported("array subscripts"));
             } else if self.is_word("collate") && self.postgresql() {
                 expr = self.collate(expr)?;
+            } else if self.is_word("collate") && self.sqlserver() {
+                self.at += 1;
+                self.name()?;
             } else if self.is_word("collate") {
                 return Err(self.not_supported("COLLATE"));
             } else if self.is_word("at") && self.is_word_at(1, "time") && self.postgresql() {

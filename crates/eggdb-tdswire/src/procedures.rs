@@ -1,7 +1,9 @@
 use crate::connection::{
     Connection, LOGGED_BATCH_CHARACTERS, NOT_SUPPORTED, printable, report_wire_error,
 };
-use crate::rpc::{ProcedureCall, RpcError, RpcParameter, SystemProcedure, parse_rpc_request};
+use crate::rpc::{
+    Procedure, ProcedureCall, RpcError, RpcParameter, SystemProcedure, parse_rpc_request,
+};
 use crate::tokens::{
     self, DONE_ERROR, DONE_IN_PROC, DONE_IN_TRANSACTION, DONE_MORE, DONE_PROC, ServerMessage,
 };
@@ -251,6 +253,28 @@ fn returned_handle(parameter: Option<&RpcParameter>, handle: i32) -> Vec<u8> {
     tokens::return_value(0, name, &type_and_value)
 }
 
+fn catalog_procedure_name(procedure: &Procedure) -> Option<String> {
+    let Procedure::Name(name) = procedure else {
+        return None;
+    };
+    let bare = name
+        .rsplit('.')
+        .next()
+        .unwrap_or(name)
+        .trim_matches(|character| character == '[' || character == ']')
+        .to_ascii_lowercase();
+    eggdb_sql::is_catalog_procedure(&bare).then_some(bare)
+}
+
+fn is_parameter_name(name: &str) -> bool {
+    name.strip_prefix('@').is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .chars()
+                .all(|character| character.is_alphanumeric() || "_@#$".contains(character))
+    })
+}
+
 impl Connection<'_> {
     pub(crate) fn rpc<S: KeyValueStore>(
         &mut self,
@@ -343,13 +367,16 @@ impl Connection<'_> {
             Some(SystemProcedure::PrepareExecute) => self.prepare_and_execute(session, parameters),
             Some(SystemProcedure::Execute) => self.execute_prepared(session, parameters),
             Some(SystemProcedure::Unprepare) => self.unprepare(parameters),
-            None => Err(CallError::new(
-                UNKNOWN_PROCEDURE,
-                format!(
-                    "Could not find stored procedure '{}'.",
-                    call.procedure.shown()
-                ),
-            )),
+            None => match catalog_procedure_name(&call.procedure) {
+                Some(name) => self.catalog_procedure(session, &name, parameters),
+                None => Err(CallError::new(
+                    UNKNOWN_PROCEDURE,
+                    format!(
+                        "Could not find stored procedure '{}'.",
+                        call.procedure.shown()
+                    ),
+                )),
+            },
         };
         let in_transaction = if session.transaction_status() == TransactionStatus::Idle {
             0
@@ -529,6 +556,49 @@ impl Connection<'_> {
         Ok(called)
     }
 
+    fn catalog_procedure<S: KeyValueStore>(
+        &mut self,
+        session: &mut Session<'_, S>,
+        name: &str,
+        parameters: &[RpcParameter],
+    ) -> Result<Called, CallError> {
+        let mut text = format!("EXEC {name}");
+        let mut bound: Vec<NamedParameter> = Vec::with_capacity(parameters.len());
+        for (index, parameter) in parameters.iter().enumerate() {
+            text.push_str(if index == 0 { " " } else { ", " });
+            if !parameter.name.is_empty() {
+                if !is_parameter_name(&parameter.name) {
+                    return Err(CallError::new(
+                        NOT_A_PARAMETER,
+                        format!(
+                            "{} is not a parameter for procedure {name}.",
+                            printable(&parameter.name)
+                        ),
+                    ));
+                }
+                text.push_str(&parameter.name);
+                text.push_str(" = ");
+            }
+            if parameter.uses_default {
+                text.push_str("DEFAULT");
+                continue;
+            }
+            let placeholder = format!("@eggdb_rpc_argument_{index}");
+            text.push_str(&placeholder);
+            bound.push(NamedParameter {
+                name: placeholder,
+                declared_type: None,
+                value: parameter.value.clone(),
+            });
+        }
+        let batch = PreparedBatch {
+            text,
+            declarations_text: String::new(),
+            declarations: Vec::new(),
+        };
+        Ok(self.run_bound(session, &batch, &bound))
+    }
+
     fn unprepare(&mut self, parameters: &[RpcParameter]) -> Result<Called, CallError> {
         let handle = handle_argument(parameters.first(), SystemProcedure::Unprepare)?;
         if !self.prepared.unprepare(handle) {
@@ -540,8 +610,10 @@ impl Connection<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PreparedBatch, PreparedBatches, bound_parameters};
-    use crate::rpc::{RpcParameter, SystemProcedure};
+    use super::{
+        PreparedBatch, PreparedBatches, bound_parameters, catalog_procedure_name, is_parameter_name,
+    };
+    use crate::rpc::{Procedure, RpcParameter, SystemProcedure};
     use eggdb_sql::{ParameterDeclaration, SqlType, Value};
 
     fn batch() -> PreparedBatch {
@@ -656,5 +728,32 @@ mod tests {
             prepared.bytes,
             batch().text.len() + batch().declarations_text.len()
         );
+    }
+
+    #[test]
+    fn catalog_procedures_are_called_by_their_last_name_part_in_any_case() {
+        for (sent, expected) in [
+            ("sp_tables", Some("sp_tables")),
+            ("[sys].[SP_COLUMNS_100]", Some("sp_columns_100")),
+            ("master.dbo.sp_pkeys", Some("sp_pkeys")),
+            ("sp_nothing", None),
+        ] {
+            assert_eq!(
+                catalog_procedure_name(&Procedure::Name(sent.into())).as_deref(),
+                expected,
+                "{sent}"
+            );
+        }
+        assert_eq!(catalog_procedure_name(&Procedure::Id(10)), None);
+    }
+
+    #[test]
+    fn only_plain_parameter_names_reach_the_generated_exec_text() {
+        assert!(is_parameter_name("@table_name"));
+        assert!(is_parameter_name("@ODBCVer"));
+        assert!(!is_parameter_name("table_name"));
+        assert!(!is_parameter_name("@"));
+        assert!(!is_parameter_name("@a = 1; DROP TABLE t; --"));
+        assert!(!is_parameter_name("@a'"));
     }
 }

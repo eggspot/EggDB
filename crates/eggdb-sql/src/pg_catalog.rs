@@ -14,16 +14,19 @@ use crate::arrays::ArrayElement;
 use crate::types::SqlType;
 
 use crate::information_schema::InformationRelation;
+use crate::sqlserver_catalog::SqlServerRelation;
 pub(crate) use deparse::{check_text, default_text};
 pub(crate) use functions::{
     argument_types, function, partition_ancestors_rows, partition_ancestors_type, result_type,
 };
+pub(crate) use oids::{OidRequest, Space as OidSpace, assign as assign_oids};
 pub(crate) use oids::{builtin_type, format_type, type_modifier};
 pub(crate) use relations::generated_rows;
+pub(crate) use relations::{index_columns, index_is_unique};
 pub(crate) use snapshot::{
-    CatalogSnapshot, ConstraintSource, RelationEntry, RelationSource, enter_statement,
-    load_for_stored_expressions, load_if_wanted, mentions_catalog, names_non_sequence_relation,
-    text_needs_catalog,
+    CatalogSnapshot, ConstraintSource, IndexSource, RelationEntry, RelationKind, RelationSource,
+    current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
+    mentions_catalog, names_non_sequence_relation, snapshot_for, text_needs_catalog,
 };
 pub use types::{CatalogType, RegKind, RegValue};
 
@@ -48,9 +51,19 @@ pub(crate) fn catalog_reference(
     reader: &dyn crate::store::KeyValueRead,
     name: &str,
 ) -> crate::error::SqlResult<Option<CatalogRelation>> {
-    if crate::constraints::current_dialect() != crate::Dialect::PostgreSql {
-        return Ok(None);
+    match crate::constraints::current_dialect() {
+        crate::Dialect::PostgreSql => postgresql_catalog_reference(reader, name),
+        crate::Dialect::SqlServer => {
+            Ok(SqlServerRelation::referenced(name).map(CatalogRelation::SqlServer))
+        }
+        _ => Ok(None),
     }
+}
+
+fn postgresql_catalog_reference(
+    reader: &dyn crate::store::KeyValueRead,
+    name: &str,
+) -> crate::error::SqlResult<Option<CatalogRelation>> {
     if let Some((schema, base)) = name.split_once(crate::schemas::QUALIFIER) {
         return Ok(CatalogRelation::named_in(schema, base));
     }
@@ -166,6 +179,7 @@ pub(crate) enum CatalogRelation {
     Opclass,
     Enum,
     Information(InformationRelation),
+    SqlServer(SqlServerRelation),
 }
 
 pub(crate) struct CatalogColumn {
@@ -253,12 +267,14 @@ impl CatalogRelation {
             Self::Opclass => "pg_opclass",
             Self::Enum => "pg_enum",
             Self::Information(relation) => relation.name(),
+            Self::SqlServer(relation) => relation.name(),
         }
     }
 
     pub(crate) fn schema(self) -> &'static str {
         match self {
             Self::Information(_) => crate::schemas::INFORMATION_SCHEMA,
+            Self::SqlServer(relation) => relation.schema(),
             _ => crate::schemas::CATALOG_SCHEMA,
         }
     }
@@ -299,11 +315,15 @@ impl CatalogRelation {
             Self::Opclass => 2616,
             Self::Enum => 3501,
             Self::Information(relation) => relation.oid(),
+            Self::SqlServer(_) => 0,
         }
     }
 
     pub(crate) fn is_view(self) -> bool {
-        matches!(self, Self::Roles | Self::Settings | Self::Information(_))
+        matches!(
+            self,
+            Self::Roles | Self::Settings | Self::Information(_) | Self::SqlServer(_)
+        )
     }
 
     pub(crate) fn named_in(schema: &str, name: &str) -> Option<Self> {
@@ -352,6 +372,7 @@ impl CatalogRelation {
             Self::Opclass => &OPCLASS_COLUMNS,
             Self::Enum => &ENUM_COLUMNS,
             Self::Information(relation) => relation.columns(),
+            Self::SqlServer(relation) => relation.columns(),
         }
     }
 }

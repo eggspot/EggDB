@@ -97,6 +97,7 @@ pub(crate) enum Function {
     RowCount,
     ScopeIdentity,
     AggregateResult(AggregateFunction),
+    Metadata(crate::sqlserver_catalog::MetadataFunction),
 }
 
 impl Function {
@@ -112,6 +113,7 @@ impl Function {
             Self::RowCount => "@@rowcount",
             Self::ScopeIdentity => "scope_identity",
             Self::AggregateResult(function) => function.name(),
+            Self::Metadata(function) => function.name(),
         }
     }
 
@@ -138,6 +140,7 @@ impl Function {
                 scale: 0,
             }))),
             Self::AggregateResult(_) => None,
+            Self::Metadata(function) => function.result_type(),
         }
     }
 }
@@ -494,6 +497,9 @@ pub(crate) fn call(function: Function, arguments: &[Value]) -> SqlResult<Value> 
             None => Value::Null,
         }),
         Function::AggregateResult(aggregate) => aggregate_result(aggregate, argument(0)),
+        Function::Metadata(function) => {
+            crate::sqlserver_catalog::call_metadata(function, arguments)
+        }
     }
 }
 

@@ -11,7 +11,7 @@ use crate::pg_keywords::quote_ident;
 use crate::settings::Settings;
 use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::Value;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -333,6 +333,7 @@ pub(crate) struct CatalogSnapshot {
     tables: HashMap<String, usize>,
     index_entries: HashMap<(usize, IndexSource), usize>,
     rows: RefCell<HashMap<CatalogRelation, Rc<Vec<Vec<Value>>>>>,
+    sqlserver: OnceCell<crate::sqlserver_catalog::SqlServerObjects>,
 }
 
 fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
@@ -543,6 +544,7 @@ impl CatalogSnapshot {
             tables: HashMap::new(),
             index_entries: HashMap::new(),
             rows: RefCell::new(HashMap::new()),
+            sqlserver: OnceCell::new(),
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();
@@ -779,6 +781,11 @@ impl CatalogSnapshot {
             .iter()
             .find(|(found, _)| *found == oid)
             .map(|(_, name)| (*name).to_owned())
+    }
+
+    pub(crate) fn sqlserver_objects(&self) -> &crate::sqlserver_catalog::SqlServerObjects {
+        self.sqlserver
+            .get_or_init(|| crate::sqlserver_catalog::SqlServerObjects::build(self))
     }
 
     pub(crate) fn rows(&self, relation: CatalogRelation) -> SqlResult<Rc<Vec<Vec<Value>>>> {

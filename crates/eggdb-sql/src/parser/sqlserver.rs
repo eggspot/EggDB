@@ -21,7 +21,7 @@ use crate::types::Value;
 /// read it from `@@VERSION` and the TDS login acknowledgement.
 pub const SQLSERVER_COMPATIBLE_VERSION: &str = "16.0.1000";
 
-const RESERVED: [&str; 185] = [
+const RESERVED: [&str; 184] = [
     "add",
     "all",
     "alter",
@@ -142,7 +142,6 @@ const RESERVED: [&str; 185] = [
     "percent",
     "pivot",
     "plan",
-    "precision",
     "primary",
     "print",
     "proc",
@@ -379,6 +378,23 @@ pub(crate) fn version_text() -> String {
     )
 }
 
+fn microsoft_version() -> i64 {
+    let mut parts = SQLSERVER_COMPATIBLE_VERSION
+        .split('.')
+        .map(|part| part.parse::<i64>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let build = parts.next().unwrap_or(0);
+    (major << 24) | (minor << 16) | build
+}
+
+pub(super) fn login_text(name: &'static str, value: String, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::SessionValue { name, value },
+        position,
+    }
+}
+
 fn undeclared_variable(name: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_PARAMETER,
@@ -506,7 +522,7 @@ pub(crate) fn default_source(expr: &Expr, column_type: SqlType) -> Option<String
 }
 
 impl<'t> Parser<'t> {
-    fn sqlserver_settings<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
+    pub(super) fn sqlserver_settings<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
         match self.settings {
             Some(settings) => read(settings),
             None => read(&Settings::default()),
@@ -547,6 +563,17 @@ impl<'t> Parser<'t> {
             }
             "save" => return Err(not_supported("SAVE TRANSACTION").at(position)),
             "if" => self.sqlserver_if()?,
+            "exec" | "execute" => self.sqlserver_execute()?,
+            "declare" => match self.sqlserver_declare()? {
+                Some(statement) => statement,
+                None => return Err(not_supported("DECLARE").at(position)),
+            },
+            "insert" if self.at_insert_into_variable() => self.sqlserver_insert_execute()?,
+            word if self.first_in_batch()
+                && crate::sqlserver_catalog::CatalogProcedure::named(word).is_some() =>
+            {
+                self.sqlserver_bare_procedure()?
+            }
             "create" | "alter"
                 if self.is_word_at(1, "view")
                     || (self.is_word_at(1, "or") && self.is_word_at(3, "view")) =>
@@ -1388,6 +1415,21 @@ impl<'t> Parser<'t> {
                     self.at += 1;
                     clock(3, position)
                 }
+                "current_user" | "session_user" | "user"
+                    if self.peek_kind_at(1) != &TokenKind::LeftParen =>
+                {
+                    self.at += 1;
+                    login_text(
+                        "current_user",
+                        crate::sqlserver_catalog::DBO.to_owned(),
+                        position,
+                    )
+                }
+                "system_user" if self.peek_kind_at(1) != &TokenKind::LeftParen => {
+                    self.at += 1;
+                    let login = self.sqlserver_login();
+                    login_text("system_user", login, position)
+                }
                 "true" | "false" | "current_date" | "current_time" | "localtimestamp"
                 | "localtime" => {
                     let name = Name {
@@ -1429,6 +1471,14 @@ impl<'t> Parser<'t> {
             "@@servername" => session_text("EggDB".to_owned(), position),
             "@@trancount" => integer(i64::from(state.transaction_count), position),
             "@@language" => session_text("us_english".to_owned(), position),
+            "@@microsoftversion" => integer(microsoft_version(), position),
+            "@@servicename" => session_text("MSSQLSERVER".to_owned(), position),
+            "@@max_precision" => integer(38, position),
+            "@@datefirst" => integer(7, position),
+            "@@langid" | "@@nestlevel" | "@@procid" => integer(0, position),
+            "@@lock_timeout" => integer(-1, position),
+            "@@textsize" => integer(i64::from(i32::MAX), position),
+            "@@max_connections" => integer(32_767, position),
             "@@rowcount" => Expr {
                 kind: ExprKind::SqlServerFunction {
                     function: crate::sqlserver_functions::Function::RowCount,
@@ -1458,6 +1508,12 @@ impl<'t> Parser<'t> {
             return Ok(None);
         }
         Err(unknown_function(&name.text, name.position))
+    }
+
+    pub(super) fn sqlserver_login(&self) -> String {
+        self.sqlserver_settings(|settings| {
+            settings.get("session_authorization").unwrap_or_default()
+        })
     }
 
     pub(super) fn sqlserver_qualified_name(&mut self, schema: Name) -> SqlResult<Name> {

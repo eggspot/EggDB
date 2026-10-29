@@ -114,6 +114,28 @@ pub(crate) enum SqlServerStatement {
         then: Box<Statement>,
         otherwise: Option<Box<Statement>>,
     },
+    Execute(ProcedureCall),
+    DeclareTable {
+        name: Name,
+        columns: Vec<(Name, SqlType)>,
+    },
+    InsertExecute {
+        variable: Name,
+        columns: Option<Vec<Name>>,
+        call: ProcedureCall,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcedureCall {
+    pub(crate) procedure: Name,
+    pub(crate) arguments: Vec<ProcedureArgument>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcedureArgument {
+    pub(crate) name: Option<String>,
+    pub(crate) value: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -480,6 +502,7 @@ pub(crate) enum GeneratedTable {
     Function(TableFunction),
     Expansion(Box<SelectListExpansion>),
     Catalog(crate::pg_catalog::CatalogRelation),
+    Variable(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

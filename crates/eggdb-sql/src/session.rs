@@ -303,6 +303,8 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     oracle_nls: Arc<crate::oracle_nls::NlsParameters>,
     identity_insert_table: Option<String>,
     statement_start: usize,
+    table_variables: crate::table_variables::TableVariables,
+    extra_results: Vec<QueryResult>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -341,6 +343,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             oracle_nls: Arc::new(crate::oracle_nls::NlsParameters::default()),
             identity_insert_table: None,
             statement_start: 0,
+            table_variables: crate::table_variables::TableVariables::default(),
+            extra_results: Vec::new(),
         }
     }
 
@@ -1000,6 +1004,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             self.statement_start = parser.position();
             let _status = self.enter_sqlserver_status();
+            let _variables = self
+                .sqlserver()
+                .then(|| crate::table_variables::enter(&self.table_variables));
             let _constraints = self.enter_constraints();
             let _nls = self.enter_oracle_nls();
             if let Some(mut rows) = parser.literal_rows() {
@@ -1047,12 +1054,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 inline,
                 consumed: None,
             };
-            let _catalog = crate::pg_catalog::enter_statement(
-                self.dialect == Dialect::PostgreSql
-                    && statement_tokens.is_some_and(crate::pg_catalog::mentions_catalog),
-                &settings,
-            );
+            let wants_catalog = match self.dialect {
+                Dialect::PostgreSql => {
+                    statement_tokens.is_some_and(crate::pg_catalog::mentions_catalog)
+                }
+                Dialect::SqlServer => {
+                    statement_tokens.is_some_and(crate::sqlserver_catalog::mentions_metadata)
+                }
+                _ => false,
+            };
+            let _catalog = crate::pg_catalog::enter_statement(wants_catalog, &settings);
             self.enter_sequences(uses_sequences);
+            self.extra_results.clear();
             let result = self.run(&mut statement, &mut io);
             if let (Some(start), Some(consumed)) = (data_start, io.consumed) {
                 inline_end = Some(start + consumed);
@@ -1064,7 +1077,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 result.and_then(|result| self.apply_setting_changes(result, &setting_changes));
             let result = self.after_statement(result?, diagnostic);
             settled?;
-            if !on_result(result) {
+            let mut keep_going = on_result(result);
+            for extra in std::mem::take(&mut self.extra_results) {
+                keep_going = on_result(extra) && keep_going;
+            }
+            if !keep_going {
                 return Ok(Flow::Stopped);
             }
         }
@@ -1350,6 +1367,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     then,
                     otherwise,
                 }) => {
+                    self.read(|reader, _| crate::pg_catalog::load_if_wanted(reader))?;
                     let chosen = if self.sqlserver_condition_holds(condition)? {
                         Some(then)
                     } else {

@@ -72,6 +72,7 @@ mod set_returning;
 mod settings;
 mod sqlite_errors;
 mod sqlite_functions;
+mod sqlserver_catalog;
 mod sqlserver_conversion;
 mod sqlserver_errors;
 mod sqlserver_functions;
@@ -79,6 +80,7 @@ mod sqlserver_types;
 mod store;
 mod string_functions;
 mod subquery;
+mod table_variables;
 mod temp_tables;
 mod temporal;
 mod types;
@@ -147,6 +149,7 @@ pub use session::{
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;
+pub use sqlserver_catalog::is_catalog_procedure;
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, StoreFailure,
 };

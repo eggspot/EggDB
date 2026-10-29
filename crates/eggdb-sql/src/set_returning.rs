@@ -1198,7 +1198,9 @@ pub(crate) fn expressions(generated: &GeneratedTable) -> Vec<&Expr> {
     match generated {
         GeneratedTable::Values(list) => list.rows.iter().flatten().collect(),
         GeneratedTable::Function(function) => function.arguments.iter().collect(),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => Vec::new(),
+        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
+            Vec::new()
+        }
     }
 }
 
@@ -1206,7 +1208,9 @@ pub(crate) fn expressions_mut(generated: &mut GeneratedTable) -> Vec<&mut Expr> 
     match generated {
         GeneratedTable::Values(list) => list.rows.iter_mut().flatten().collect(),
         GeneratedTable::Function(function) => function.arguments.iter_mut().collect(),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => Vec::new(),
+        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
+            Vec::new()
+        }
     }
 }
 
@@ -1233,6 +1237,8 @@ pub(crate) fn generate_rows(
             .into_iter()
             .try_for_each(store),
         GeneratedTable::Function(function) => bind_function(function, evaluator)?.generate(store),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => Ok(()),
+        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
+            Ok(())
+        }
     }
 }

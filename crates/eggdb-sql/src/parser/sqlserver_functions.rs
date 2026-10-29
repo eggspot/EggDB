@@ -218,7 +218,38 @@ impl Parser<'_> {
 
     pub(super) fn sqlserver_call(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let position = name.position;
+        if let Some(function) = crate::sqlserver_catalog::MetadataFunction::named(&name.text) {
+            let mut arguments = self.sqlserver_arguments(name, function.arguments())?;
+            if function.takes_the_database() {
+                let database = self.sqlserver_settings(|settings| settings.database.clone());
+                arguments.push(Expr {
+                    kind: ExprKind::Constant {
+                        value: Value::Text(database),
+                        sql_type: Some(SqlType::Varchar(Some(128))),
+                    },
+                    position,
+                });
+            }
+            return Ok(Some(call(
+                Function::Metadata(function),
+                arguments,
+                position,
+            )));
+        }
         let expr = match name.text.as_str() {
+            "suser_sname" | "suser_name" | "original_login" => {
+                self.sqlserver_arguments(name, 0..=1)?;
+                let login = self.sqlserver_login();
+                super::sqlserver::login_text("system_user", login, position)
+            }
+            "user_name" => {
+                self.sqlserver_arguments(name, 0..=1)?;
+                super::sqlserver::login_text(
+                    "current_user",
+                    crate::sqlserver_catalog::DBO.to_owned(),
+                    position,
+                )
+            }
             "isnull" => call(
                 Function::IsNull,
                 self.sqlserver_arguments(name, 2..=2)?,

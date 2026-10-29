@@ -1678,6 +1678,10 @@ fn prepare_generated(
             *relation,
             env.columns_only,
         )?),
+        GeneratedTable::Variable(name) => Filling::Rows(crate::table_variables::generated_rows(
+            name,
+            env.columns_only,
+        )?),
         GeneratedTable::Values(_) | GeneratedTable::Function(_) => {
             lateral_reference(env, tables, prepared, &generated, siblings)?;
             let mut correlated = false;
@@ -1744,7 +1748,9 @@ fn prepare_generated(
                 GeneratedTable::Values(list) => {
                     Filling::Rows(crate::set_returning::values_rows(list, &evaluator)?)
                 }
-                GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => {
+                GeneratedTable::Expansion(_)
+                | GeneratedTable::Catalog(_)
+                | GeneratedTable::Variable(_) => {
                     Filling::Rows(crate::set_returning::GeneratedRows::empty(Vec::new()))
                 }
             }
@@ -1753,7 +1759,9 @@ fn prepare_generated(
     let renamed = match &generated {
         GeneratedTable::Function(function) => function.column_names.clone(),
         GeneratedTable::Values(list) => list.column_names.clone(),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => Vec::new(),
+        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
+            Vec::new()
+        }
     };
     let (columns, rows, streamed, charge) = match built {
         Filling::Rows(built) => (built.columns, built.rows, None, Some(built.charge)),

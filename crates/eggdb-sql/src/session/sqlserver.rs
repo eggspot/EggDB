@@ -1,5 +1,5 @@
-use super::{Client, QueryResult, Session};
-use crate::ast::{Expr, Name, SqlServerStatement};
+use super::{Client, OutputColumn, QueryResult, Session};
+use crate::ast::{Expr, Name, ProcedureCall, SqlServerStatement};
 use crate::copy::NoCopyChannel;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -11,6 +11,14 @@ use crate::parser::{Parameters, Parser};
 use crate::store::KeyValueStore;
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
+
+const RPC_PROCEDURES: [&str; 5] = [
+    "sp_executesql",
+    "sp_prepare",
+    "sp_prepexec",
+    "sp_execute",
+    "sp_unprepare",
+];
 
 const STATEMENT_TERMINATING_ERRORS: [u16; 17] = [
     2627, 2601, 547, 515, 544, 545, 339, 2628, 8152, 3902, 3903, 1088, 8106, 8107, 4917, 1754, 3701,
@@ -193,6 +201,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         settings.sqlserver.implicit_transactions = false;
         self.sync_transaction_count();
         self.identity_insert_table = None;
+        self.table_variables = crate::table_variables::TableVariables::default();
         self.sqlserver_status = crate::sqlserver_functions::SessionStatus::default();
         self.warnings.clear();
         rolled_back
@@ -210,7 +219,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.check_batch_syntax(text, &tokens, parameters)
             .map_err(|error| self.in_dialect(text, error))?;
         self.batch_resume = Some((0, 0));
+        self.table_variables = crate::table_variables::TableVariables::default();
         let outcome = self.run_batch_statements(text, &tokens, parameters, on_step);
+        self.table_variables = crate::table_variables::TableVariables::default();
         self.batch_resume = None;
         outcome
     }
@@ -427,7 +438,166 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 SqlState::INTERNAL_ERROR,
                 "an IF statement reached the statement runner",
             )),
+            SqlServerStatement::Execute(call) => {
+                let mut results = self.procedure_results(call)?.into_iter();
+                let first = results
+                    .next()
+                    .unwrap_or_else(|| QueryResult::command("EXECUTE"));
+                self.extra_results.extend(results);
+                Ok(first)
+            }
+            SqlServerStatement::DeclareTable { name, columns } => {
+                self.declare_table_variable(name, columns)
+            }
+            SqlServerStatement::InsertExecute {
+                variable,
+                columns,
+                call,
+            } => self.insert_procedure_results(variable, columns.as_deref(), call),
         }
+    }
+
+    fn procedure_results(&mut self, call: &ProcedureCall) -> SqlResult<Vec<QueryResult>> {
+        let name = call.procedure.text.as_str();
+        let Some(procedure) = crate::sqlserver_catalog::CatalogProcedure::named(name) else {
+            if RPC_PROCEDURES.contains(&name) {
+                return Err(crate::parser::sqlserver_not_supported(&format!(
+                    "EXEC {name} in a batch"
+                ))
+                .at(call.procedure.position));
+            }
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("Could not find stored procedure '{name}'."),
+            )
+            .with_sqlserver_code(2812)
+            .at(call.procedure.position));
+        };
+        let evaluator = Evaluator {
+            scope: Scope::empty(),
+            row: &[],
+            correlation: None,
+        };
+        let arguments = call
+            .arguments
+            .iter()
+            .map(|argument| {
+                let value = match &argument.value {
+                    Some(expr) => Some(evaluator.eval(expr, None)?),
+                    None => None,
+                };
+                Ok((argument.name.clone(), value))
+            })
+            .collect::<SqlResult<Vec<_>>>()?;
+        let bound = crate::sqlserver_catalog::bind_arguments(procedure, arguments)
+            .map_err(|error| error.at(call.procedure.position))?;
+        self.read(|reader, _| {
+            let snapshot = crate::pg_catalog::snapshot_for(reader)?;
+            crate::sqlserver_catalog::run_procedure(&snapshot, procedure, bound)
+        })
+    }
+
+    fn declare_table_variable(
+        &mut self,
+        name: &Name,
+        columns: &[(Name, SqlType)],
+    ) -> SqlResult<QueryResult> {
+        if self.table_variables.contains_key(&name.text) {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_OBJECT,
+                format!(
+                    "The variable name '{}' has already been declared. Variable names must be unique within a query batch or stored procedure.",
+                    name.text
+                ),
+            )
+            .with_sqlserver_code(134)
+            .at(name.position));
+        }
+        let variable = crate::table_variables::TableVariable {
+            columns: columns
+                .iter()
+                .map(|(column, sql_type)| OutputColumn {
+                    name: column.text.clone(),
+                    sql_type: Some(*sql_type),
+                })
+                .collect(),
+            rows: Vec::new(),
+        };
+        Arc::make_mut(&mut self.table_variables).insert(name.text.clone(), variable);
+        Ok(QueryResult::command("DECLARE"))
+    }
+
+    fn insert_procedure_results(
+        &mut self,
+        variable: &Name,
+        columns: Option<&[Name]>,
+        call: &ProcedureCall,
+    ) -> SqlResult<QueryResult> {
+        let Some(declared) = self.table_variables.get(&variable.text) else {
+            return Err(crate::table_variables::undeclared(&variable.text).at(variable.position));
+        };
+        let targets: Vec<(usize, SqlType)> = match columns {
+            None => declared
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(at, column)| (at, column.sql_type.unwrap_or(SqlType::Text)))
+                .collect(),
+            Some(names) => names
+                .iter()
+                .map(|name| {
+                    declared
+                        .columns
+                        .iter()
+                        .position(|column| column.name == name.text)
+                        .map(|at| {
+                            let sql_type = declared
+                                .columns
+                                .get(at)
+                                .and_then(|column| column.sql_type)
+                                .unwrap_or(SqlType::Text);
+                            (at, sql_type)
+                        })
+                        .ok_or_else(|| {
+                            SqlError::new(
+                                SqlState::UNDEFINED_COLUMN,
+                                format!("Invalid column name '{}'.", name.text),
+                            )
+                            .with_sqlserver_code(207)
+                            .at(name.position)
+                        })
+                })
+                .collect::<SqlResult<_>>()?,
+        };
+        let width = declared.columns.len();
+        let results = self.procedure_results(call)?;
+        let mut appended: Vec<Vec<Value>> = Vec::new();
+        for result in results {
+            let count = result.columns.as_ref().map_or(0, Vec::len);
+            if count != targets.len() {
+                return Err(SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    "Column name or number of supplied values does not match table definition.",
+                )
+                .with_sqlserver_code(213)
+                .at(variable.position));
+            }
+            for row in result.rows {
+                let mut full = vec![Value::Null; width];
+                for ((at, sql_type), value) in targets.iter().zip(row) {
+                    let converted = crate::sqlserver_conversion::implicit(value, *sql_type)?;
+                    if let Some(slot) = full.get_mut(*at) {
+                        *slot = converted;
+                    }
+                }
+                appended.push(full);
+            }
+        }
+        let inserted = appended.len();
+        if let Some(target) = Arc::make_mut(&mut self.table_variables).get_mut(&variable.text) {
+            target.rows.extend(appended);
+        }
+        Ok(QueryResult::command(format!("INSERT 0 {inserted}")))
     }
 
     pub(super) fn sqlserver_condition_holds(&self, condition: &Expr) -> SqlResult<bool> {
