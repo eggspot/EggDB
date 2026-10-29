@@ -180,6 +180,7 @@ pub(crate) fn build(
             crate::information_schema::rows(snapshot, relation)
         }
         CatalogRelation::SqlServer(relation) => crate::sqlserver_catalog::rows(snapshot, relation),
+        CatalogRelation::Oracle(relation) => crate::oracle_dictionary::rows(snapshot, relation),
     })
 }
 

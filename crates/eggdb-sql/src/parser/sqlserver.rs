@@ -754,6 +754,24 @@ impl<'t> Parser<'t> {
             }
             return Ok(accepted_set());
         }
+        if self.is_word("eggdb")
+            && self.peek_kind_at(1) == &TokenKind::Dot
+            && self.is_word_at(2, "dialect")
+        {
+            self.at += 3;
+            self.take_operator("=");
+            let value = match self.peek_kind() {
+                TokenKind::Word(word) => word.as_ref().to_owned(),
+                TokenKind::String(text) => text.as_ref().to_owned(),
+                TokenKind::QuotedIdentifier(name) => name.clone(),
+                _ => return Err(self.unexpected()),
+            };
+            self.at += 1;
+            return Ok(Statement::Set {
+                name: crate::settings::DIALECT_SETTING.to_owned(),
+                value: Some(value),
+            });
+        }
         let option = match self.peek_kind() {
             TokenKind::Word(word) => word.as_ref().to_owned(),
             _ => return Err(self.unexpected()),

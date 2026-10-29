@@ -409,3 +409,34 @@ fn a_malformed_batch_header_ends_the_connection_with_a_protocol_error() {
     assert_eq!(errors(&common::parse_tokens(&reply))[0].0, 4002);
     assert!(client.is_closed());
 }
+
+#[test]
+fn a_connection_reads_oracle_sql_after_set_eggdb_dialect_and_keeps_its_transaction_requests() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    let created = client.batch(
+        "CREATE TABLE emp (id INT PRIMARY KEY, name NVARCHAR(20))\n\
+         SET eggdb.dialect oracle\n\
+         INSERT INTO emp VALUES (1, 'Ada')",
+    );
+    assert!(errors(&created).is_empty(), "{created:?}");
+    let listed = client.batch(
+        "SELECT table_name FROM user_tables; SELECT NVL(name, 'x') AS name FROM emp WHERE ROWNUM <= 1",
+    );
+    assert!(errors(&listed).is_empty(), "{listed:?}");
+    assert_eq!(
+        rows(&listed),
+        vec![vec![Some("EMP".to_owned())], vec![Some("Ada".to_owned())]]
+    );
+    let begun = client.transaction(5, &[0, 0]);
+    assert!(errors(&begun).is_empty(), "{begun:?}");
+    client.batch("INSERT INTO emp VALUES (2, 'Bob')");
+    let rolled_back = client.transaction(8, &[0, 0]);
+    assert!(errors(&rolled_back).is_empty(), "{rolled_back:?}");
+    assert_eq!(
+        rows(&client.batch("SELECT COUNT(*) AS n FROM emp")),
+        vec![vec![Some("1".to_owned())]]
+    );
+    let back = client.batch("SET eggdb.dialect = sqlserver\nSELECT TOP 1 name FROM emp");
+    assert_eq!(rows(&back), vec![vec![Some("Ada".to_owned())]], "{back:?}");
+}

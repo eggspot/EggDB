@@ -7,6 +7,8 @@ pub const POSTGRESQL_COMPATIBLE_VERSION: &str = "16.0";
 
 const POSTGRESQL_COMPATIBLE_VERSION_NUMBER: &str = "160000";
 
+pub(crate) const DIALECT_SETTING: &str = "eggdb.dialect";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Change {
     Free,
@@ -317,6 +319,7 @@ pub(crate) struct Settings {
     pub(crate) mysql: crate::mysql_variables::MySqlVariables,
     pub(crate) sqlite: SqliteState,
     pub(crate) sqlserver: SqlServerState,
+    pub(crate) oracle_user_schema: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -365,6 +368,7 @@ impl Default for Settings {
             mysql: crate::mysql_variables::MySqlVariables::default(),
             sqlite: SqliteState::default(),
             sqlserver: SqlServerState::default(),
+            oracle_user_schema: None,
         }
     }
 }

@@ -7,6 +7,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use crate::pg_catalog::CatalogRow;
 use crate::pg_catalog::{
     CatalogColumn, CatalogSnapshot, ConstraintSource, IndexSource, OidRequest, OidSpace,
     RelationEntry, RelationKind, RelationSource, assign_oids,
@@ -88,33 +89,6 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: SqlServerRelation) -> V
     match relation {
         SqlServerRelation::System(view) => system_views::rows(snapshot, view),
         SqlServerRelation::Information(view) => information_schema::rows(snapshot, view),
-    }
-}
-
-pub(crate) struct CatalogRow {
-    columns: &'static [CatalogColumn],
-    values: Vec<Value>,
-}
-
-impl CatalogRow {
-    pub(crate) fn new(columns: &'static [CatalogColumn]) -> Self {
-        Self {
-            columns,
-            values: vec![Value::Null; columns.len()],
-        }
-    }
-
-    pub(crate) fn set(mut self, name: &str, value: Value) -> Self {
-        if let Some(at) = self.columns.iter().position(|column| column.name == name)
-            && let Some(slot) = self.values.get_mut(at)
-        {
-            *slot = value;
-        }
-        self
-    }
-
-    pub(crate) fn done(self) -> Vec<Value> {
-        self.values
     }
 }
 

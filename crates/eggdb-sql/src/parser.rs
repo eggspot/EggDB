@@ -13,7 +13,7 @@ mod sqlserver_batch;
 mod sqlserver_functions;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
-pub(crate) use oracle::{is_dictionary_view, is_reserved as is_oracle_reserved, oracle_table_name};
+pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
     default_source as sqlserver_default_source, is_reserved as is_sqlserver_reserved,
@@ -695,16 +695,24 @@ impl<'t> Parser<'t> {
             self.at += 1;
             let table = self.name()?;
             let own = swap_uniform_case(&name.text) == self.oracle_user();
-            if (own || name.text == "sys") && oracle::is_dictionary_name(&table.text) {
-                return Ok(table);
+            if oracle::is_dictionary_name(&table.text) {
+                if name.text == "sys" {
+                    return Ok(Name {
+                        text: crate::schemas::written_qualified("sys", &table.text),
+                        position: table.position,
+                    });
+                }
+                if own {
+                    return Ok(table);
+                }
             }
             let schema = if own {
-                crate::schemas::DEFAULT_SCHEMA
+                self.oracle_user_schema()
             } else {
-                name.text.as_str()
+                name.text.clone()
             };
             return Ok(Name {
-                text: crate::schemas::written_qualified(schema, &table.text),
+                text: crate::schemas::written_qualified(&schema, &table.text),
                 position: table.position,
             });
         }

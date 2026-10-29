@@ -430,12 +430,12 @@ impl<'t> Parser<'t> {
         if self.oracle() {
             let own = crate::lexer::swap_uniform_case(&schema.text) == self.oracle_user();
             let schema_name = if own {
-                crate::schemas::DEFAULT_SCHEMA
+                self.oracle_user_schema()
             } else {
-                schema.text.as_str()
+                schema.text.clone()
             };
             return Ok(Name {
-                text: written_qualified(schema_name, &table.text),
+                text: written_qualified(&schema_name, &table.text),
                 position: schema.position,
             });
         }

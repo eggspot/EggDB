@@ -616,7 +616,7 @@ impl Connection<'_> {
                 self.wire.peer()
             ));
         }
-        self.run_batch_text(session, text)
+        session.in_connection_dialect(|session| self.run_batch_text(session, text))
     }
 
     fn batch<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, body: &[u8]) -> bool {

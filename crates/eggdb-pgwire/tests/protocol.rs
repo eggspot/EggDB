@@ -1041,3 +1041,67 @@ fn logins_in_progress_are_capped_below_the_connection_limit() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn a_connection_reads_oracle_sql_after_choosing_the_dialect_in_its_startup_options() {
+    let server = TestServer::start(8);
+    let mut client = Client::connect(server.address);
+    client.send_startup(
+        196_608,
+        &[
+            ("user", USER),
+            ("database", DATABASE),
+            ("options", "-c eggdb.dialect=oracle"),
+        ],
+    );
+    assert_eq!(client.authenticate(common::PASSWORD).tag, b'R');
+    client.read_until_ready();
+    let answer = client.query(
+        "CREATE TABLE emp (id NUMBER(9) PRIMARY KEY, name VARCHAR2(20));
+         INSERT INTO emp VALUES (1, 'Ada');
+         SELECT table_name FROM user_tables;
+         SELECT name FROM emp WHERE ROWNUM <= 1",
+    );
+    assert_eq!(
+        rows(&answer),
+        [vec![Some("EMP".into())], vec![Some("Ada".into())]]
+    );
+    assert_eq!(ready_status(&answer), b'I');
+    client.send(
+        b'P',
+        &parse("", "SELECT name FROM emp WHERE id = $1", &[23]),
+    );
+    client.send(b'B', &bind("", "", &[0], &[Some(b"1")], &[]));
+    client.send(b'D', b"P\0");
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12TDCZ");
+    assert_eq!(answer[2].column_types()[0].0, "NAME");
+    assert_eq!(rows(&answer), [vec![Some("Ada".into())]]);
+    let answer = client.query("SET eggdb.dialect = postgresql; SELECT name FROM emp");
+    assert_eq!(rows(&answer), [vec![Some("Ada".into())]]);
+    let refused = client.query("SET eggdb.dialect = mysql");
+    assert_eq!(refused[0].code(), "0A000");
+}
+
+#[test]
+fn an_unknown_dialect_in_the_startup_options_ends_the_connection() {
+    let server = TestServer::start(8);
+    let mut client = Client::connect(server.address);
+    client.send_startup(
+        196_608,
+        &[
+            ("user", USER),
+            ("database", DATABASE),
+            ("options", "-c eggdb.dialect=cobol"),
+        ],
+    );
+    assert_eq!(client.authenticate(common::PASSWORD).tag, b'R');
+    let refused = client.read().unwrap();
+    assert_eq!(
+        (refused.code(), refused.field(b'S').as_deref()),
+        ("22023".to_owned(), Some("FATAL"))
+    );
+    assert_eq!(client.read(), None);
+}

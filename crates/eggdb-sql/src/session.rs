@@ -18,12 +18,12 @@ use crate::destructive::DestructiveStatement;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
-use crate::lexer::{CopyStop, Token, TokenKind, tokenize_in, tokenize_script};
+use crate::lexer::{CopyStop, Token, TokenKind, tokenize_from, tokenize_in, tokenize_script};
 use crate::mysql_errors::{self, Warning};
 use crate::name_resolution::Binding;
 use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
 use crate::sequences::{self, SequenceAdvance, SessionSequences};
-use crate::settings::Settings;
+use crate::settings::{DIALECT_SETTING, Settings};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
@@ -238,6 +238,11 @@ struct Client<'c> {
 enum Flow {
     Stopped,
     Finished { inline_end: Option<usize> },
+    DialectChanged { at: usize },
+}
+
+fn is_dialect_setting(name: &str) -> bool {
+    name.eq_ignore_ascii_case(DIALECT_SETTING)
 }
 
 fn line_end_within(text: &str, from: usize, end: usize) -> usize {
@@ -289,6 +294,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     tables: TableCache,
     settings: Arc<Settings>,
     dialect: Dialect,
+    connection_dialect: Dialect,
     warnings: Vec<Warning>,
     sequence_values: SessionSequences,
     pending_sequences: Vec<SequenceAdvance>,
@@ -329,6 +335,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             tables: TableCache::default(),
             settings: Arc::new(Settings::default()),
             dialect,
+            connection_dialect: dialect,
             warnings: Vec::new(),
             sequence_values: SessionSequences::default(),
             pending_sequences: Vec::new(),
@@ -365,9 +372,82 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.max_row_bytes = bytes;
     }
 
-    /// The dialect this session reads.
+    /// The dialect this session reads: the one it was opened in, or the one a client chose
+    /// with `eggdb.dialect`.
     pub fn dialect(&self) -> Dialect {
         self.dialect
+    }
+
+    /// The dialect the session was opened in, such as PostgreSQL's for a PostgreSQL protocol
+    /// connection: `RESET eggdb.dialect` returns to it, and its rules for transactions stay
+    /// in force whichever dialect `eggdb.dialect` chooses.
+    pub fn connection_dialect(&self) -> Dialect {
+        self.connection_dialect
+    }
+
+    /// Runs `body` with the session reading its connection's dialect, then reads the dialect
+    /// chosen with `eggdb.dialect` again, so a server can run the statements its own protocol
+    /// stands for (such as a TDS transaction-manager request) whichever dialect the client
+    /// chose.
+    pub fn in_connection_dialect<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> T {
+        let chosen = self.dialect;
+        self.dialect = self.connection_dialect;
+        let result = body(self);
+        if self.dialect == self.connection_dialect {
+            self.dialect = chosen;
+        }
+        result
+    }
+
+    fn choose_dialect(&mut self, value: Option<&str>) -> SqlResult<()> {
+        let chosen = match value {
+            None => self.connection_dialect,
+            Some(name) => Dialect::named(name.trim()).ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    format!("invalid value for parameter \"{DIALECT_SETTING}\": \"{name}\""),
+                )
+                .with_hint("Choose oracle, or the connection's own dialect.")
+            })?,
+        };
+        if chosen != self.connection_dialect && chosen != Dialect::Oracle {
+            return Err(SqlError::not_supported(format!(
+                "{DIALECT_SETTING} = {} on a {} connection; it can be {} or oracle",
+                chosen.name(),
+                self.connection_dialect.name(),
+                self.connection_dialect.name()
+            )));
+        }
+        if chosen == self.dialect {
+            return Ok(());
+        }
+        if self.in_block() {
+            return Err(SqlError::new(
+                SqlState::ACTIVE_SQL_TRANSACTION,
+                format!("{DIALECT_SETTING} cannot change inside a transaction"),
+            )
+            .with_hint("Commit or roll back the transaction first."));
+        }
+        self.dialect = chosen;
+        Arc::make_mut(&mut self.settings).set(DIALECT_SETTING, Some(chosen.name()))?;
+        if chosen == Dialect::Oracle {
+            self.refresh_oracle_user_schema()?;
+        }
+        Ok(())
+    }
+
+    fn refresh_oracle_user_schema(&mut self) -> SqlResult<()> {
+        let user = self
+            .settings
+            .get("session_authorization")
+            .unwrap_or_default();
+        let internal = crate::lexer::swap_uniform_case(&user.to_uppercase());
+        let exists = self.read(|reader, _| crate::schemas::schema_exists(reader, &internal))?;
+        let schema = crate::oracle_dictionary::user_schema_of(&user, exists);
+        if self.settings.oracle_user_schema != schema {
+            Arc::make_mut(&mut self.settings).oracle_user_schema = schema;
+        }
+        Ok(())
     }
 
     /// Sets the number MySQL's `CONNECTION_ID()` and SQL Server's `@@SPID` return.
@@ -392,9 +472,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// SQLite, in MySQL unless `SET autocommit = 0`, in SQL Server unless `SET
     /// IMPLICIT_TRANSACTIONS ON` (then the first change, DDL included, starts a transaction
     /// that lasts until `COMMIT` or `ROLLBACK`), and never in Oracle, where the first change
-    /// starts a transaction that lasts until `COMMIT`, `ROLLBACK` or DDL.
+    /// starts a transaction that lasts until `COMMIT`, `ROLLBACK` or DDL. The rule is the
+    /// connection's dialect's: a PostgreSQL or TDS connection that chose Oracle's dialect with
+    /// `eggdb.dialect` keeps its protocol's rule, as the drivers on it expect.
     pub fn autocommit(&self) -> bool {
-        match self.dialect {
+        match self.connection_dialect {
             Dialect::MySql => self.settings.mysql.autocommit(),
             Dialect::SqlServer => !self.settings.sqlserver.implicit_transactions,
             Dialect::Oracle => false,
@@ -455,11 +537,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let settings = Arc::make_mut(&mut self.settings);
         settings.set_session_user(user);
         settings.database = database.to_owned();
+        if self.dialect == Dialect::Oracle {
+            let _ = self.refresh_oracle_user_schema();
+        }
     }
 
     /// Sets the run-time parameter `name` (case-insensitive) as `SET name = value` would, for
-    /// the parameters a client sends when it connects.
+    /// the parameters a client sends when it connects. `eggdb.dialect` chooses the dialect
+    /// the session reads from its next statement: the connection's own or `oracle`.
     pub fn set_parameter(&mut self, name: &str, value: &str) -> SqlResult<()> {
+        if is_dialect_setting(name) {
+            return self.choose_dialect(Some(value));
+        }
         Arc::make_mut(&mut self.settings).set(name, Some(value))
     }
 
@@ -557,6 +646,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let settings = Arc::clone(&self.settings);
         let _path = self.enter_search_path(&settings);
         let _catalog = crate::pg_catalog::enter_statement(false, &settings);
+        let _constraints = self.enter_constraints();
+        let _nls = self.enter_oracle_nls();
         let mut parser = Parser::new(text, &tokens)
             .with_context(Parameters::Types(declared_types), &settings)
             .in_dialect(self.dialect);
@@ -604,16 +695,6 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         .is_some_and(|from| crate::parser::is_schema_table(&from.first)) =>
             {
                 self.select_schema(select, true)
-                    .map(|result| result.columns)
-            }
-            Statement::Select(select)
-                if self.oracle()
-                    && select
-                        .from
-                        .as_ref()
-                        .is_some_and(|from| crate::parser::is_dictionary_view(&from.first)) =>
-            {
-                self.select_dictionary(select, true)
                     .map(|result| result.columns)
             }
             Statement::Select(select) => self
@@ -925,16 +1006,20 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     ) -> SqlResult<()> {
         self.statement_start = 0;
         if !client.script {
-            let tokens = match tokenize_in(text, self.dialect) {
-                Ok(tokens) => tokens,
-                Err(error) => {
-                    self.fail_block_in_postgresql();
-                    return Err(error);
+            let mut start = 0;
+            loop {
+                let tokens = match tokenize_from(text, self.dialect, start) {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        self.fail_block_in_postgresql();
+                        return Err(error);
+                    }
+                };
+                match self.run_tokens(text, &tokens, parameters, on_result, client, None)? {
+                    Flow::DialectChanged { at } => start = at,
+                    Flow::Stopped | Flow::Finished { .. } => return Ok(()),
                 }
-            };
-            return self
-                .run_tokens(text, &tokens, parameters, on_result, client, None)
-                .map(|_| ());
+            }
         }
         let mut ranges: Vec<std::ops::Range<usize>> = std::iter::once(0..text.len()).collect();
         loop {
@@ -956,6 +1041,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 client,
                 data_start,
             )?;
+            if let Flow::DialectChanged { at } = flow {
+                ranges = ranges
+                    .iter()
+                    .filter(|range| range.end > at)
+                    .map(|range| range.start.max(at)..range.end)
+                    .collect();
+                if ranges.is_empty() {
+                    return Ok(());
+                }
+                continue;
+            }
             let (Some(stop), Some(data_start), Flow::Finished { inline_end }) =
                 (script.copy_stop, data_start, flow)
             else {
@@ -984,6 +1080,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut inline_end = None;
         let mut resume = self.batch_resume.unwrap_or((0, 0));
         loop {
+            let statement_dialect = self.dialect;
             if self.sqlserver() {
                 self.sync_transaction_count();
             }
@@ -1084,6 +1181,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             if !keep_going {
                 return Ok(Flow::Stopped);
             }
+            if self.dialect != statement_dialect {
+                let at = tokens.get(resume.0).map_or(text.len(), |token| token.start);
+                return Ok(Flow::DialectChanged { at });
+            }
         }
     }
 
@@ -1154,6 +1255,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         changes: &[(String, String)],
     ) -> SqlResult<QueryResult> {
         for (name, value) in changes {
+            if is_dialect_setting(name) {
+                self.choose_dialect(Some(value))?;
+                continue;
+            }
             Arc::make_mut(&mut self.settings).set(name, Some(value))?;
         }
         Ok(result)
@@ -1334,6 +1439,19 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         statement: &mut Statement,
         io: &mut CopyIo<'_, '_>,
     ) -> SqlResult<QueryResult> {
+        match statement {
+            Statement::Set { name, value } if is_dialect_setting(name) => {
+                return self
+                    .choose_dialect(value.as_deref())
+                    .map(|()| QueryResult::command("SET"));
+            }
+            Statement::Reset { name: Some(name) } if is_dialect_setting(name) => {
+                return self
+                    .choose_dialect(None)
+                    .map(|()| QueryResult::command("RESET"));
+            }
+            _ => {}
+        }
         if self.sqlite() {
             match statement {
                 Statement::Begin { .. } if self.in_block() => {
@@ -1414,15 +1532,6 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         .is_some_and(|from| crate::parser::is_schema_table(&from.first)) =>
             {
                 self.select_schema(select, false)
-            }
-            Statement::Select(select)
-                if self.oracle()
-                    && select
-                        .from
-                        .as_ref()
-                        .is_some_and(|from| crate::parser::is_dictionary_view(&from.first)) =>
-            {
-                self.select_dictionary(select, false)
             }
             Statement::Truncate(table) => self.write("TRUNCATE TABLE", |writer, tables| {
                 binding.target(writer, tables, table)?;
@@ -1630,6 +1739,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
 
     fn show(&self, name: Option<&str>) -> SqlResult<QueryResult> {
         let rows = match name {
+            Some(name) if is_dialect_setting(name) => {
+                vec![vec![Value::Text(self.dialect.name().to_owned())]]
+            }
             Some(name) => vec![vec![Value::Text(self.settings.get(name)?)]],
             None => self
                 .settings

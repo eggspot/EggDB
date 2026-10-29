@@ -5,7 +5,7 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope};
 use crate::execute::Relation;
-use crate::lexer::tokenize_in;
+use crate::lexer::{Token, TokenKind, tokenize_from, tokenize_in};
 use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
 use crate::store::KeyValueStore;
@@ -83,6 +83,15 @@ fn rows_counted(result: &QueryResult) -> i64 {
 pub(crate) struct ParsedStatement {
     pub(crate) first_token: usize,
     pub(crate) outcome: SqlResult<(usize, usize)>,
+    pub(crate) chooses_dialect: bool,
+}
+
+fn chooses_dialect(statement: &crate::ast::Statement) -> bool {
+    match statement {
+        crate::ast::Statement::Set { name, .. } => super::is_dialect_setting(name),
+        crate::ast::Statement::Reset { name: Some(name) } => super::is_dialect_setting(name),
+        _ => false,
+    }
 }
 
 pub(crate) fn parse_next_statement(
@@ -112,14 +121,19 @@ fn parse_next_parameterized_statement(
         return None;
     }
     let first_token = parser.resume_point().0;
+    let mut chooses = false;
     let outcome = if parser.literal_rows().is_none() {
-        parser.statement().map(|_| parser.resume_point())
+        parser.statement().map(|statement| {
+            chooses = chooses_dialect(&statement);
+            parser.resume_point()
+        })
     } else {
         Ok(parser.resume_point())
     };
     Some(ParsedStatement {
         first_token,
         outcome,
+        chooses_dialect: chooses,
     })
 }
 
@@ -186,9 +200,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     /// Resets the session as SQL Server resets a connection a pool hands out again: an open
-    /// transaction rolls back unless `keep_transaction`, and the `SET` options,
-    /// `IDENTITY_INSERT`, `@@ROWCOUNT` and `SCOPE_IDENTITY()` return to their state after
-    /// login. The user, the database and `@@SPID` stay. An error is the rollback's.
+    /// transaction rolls back unless `keep_transaction`, and the `SET` options (`eggdb.dialect`
+    /// among them), `IDENTITY_INSERT`, `@@ROWCOUNT` and `SCOPE_IDENTITY()` return to their
+    /// state after login. The user, the database and `@@SPID` stay. An error is the rollback's.
     pub fn reset_connection(&mut self, keep_transaction: bool) -> SqlResult<()> {
         let rolled_back = if keep_transaction || !self.in_block() {
             Ok(())
@@ -199,6 +213,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         settings.reset_all();
         settings.sqlserver.no_count = false;
         settings.sqlserver.implicit_transactions = false;
+        self.dialect = self.connection_dialect;
         self.sync_transaction_count();
         self.identity_insert_table = None;
         self.table_variables = crate::table_variables::TableVariables::default();
@@ -246,23 +261,29 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             parameters,
         ) {
             resume = parsed.outcome?;
+            if parsed.chooses_dialect {
+                break;
+            }
         }
         Ok(())
     }
 
-    fn run_batch_statements(
+    fn run_batch_statements<'t>(
         &mut self,
-        text: &str,
-        tokens: &[crate::lexer::Token<'_>],
+        text: &'t str,
+        tokens: &[Token<'t>],
         parameters: Parameters<'_>,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<()> {
+        let mut rest_in_new_dialect: Option<Vec<Token<'t>>> = None;
         loop {
+            let tokens: &[Token<'t>] = rest_in_new_dialect.as_deref().unwrap_or(tokens);
+            let statement_dialect = self.dialect;
             let (first_token, _) = self.batch_resume.unwrap_or((0, 0));
             let statement_start = tokens
                 .iter()
                 .skip(first_token)
-                .find(|token| token.kind != crate::lexer::TokenKind::Semicolon)
+                .find(|token| token.kind != TokenKind::Semicolon)
                 .map_or(text.len(), |token| token.start);
             let was_in_transaction = self.in_block();
             let mut results = Vec::new();
@@ -283,7 +304,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             );
             let in_transaction = self.in_block();
             match flow {
-                Ok(super::Flow::Finished { .. }) => return Ok(()),
+                Ok(super::Flow::Finished { .. } | super::Flow::DialectChanged { .. }) => {
+                    return Ok(());
+                }
                 Ok(super::Flow::Stopped) => {
                     for result in results {
                         let step = BatchStep {
@@ -294,6 +317,26 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         };
                         if !on_step(step) {
                             return Ok(());
+                        }
+                    }
+                    if self.dialect != statement_dialect {
+                        let (next, _) = self.batch_resume.unwrap_or((0, 0));
+                        let at = tokens.get(next).map_or(text.len(), |token| token.start);
+                        match self.rest_of_batch(text, at, parameters) {
+                            Ok(rest) => {
+                                rest_in_new_dialect = Some(rest);
+                                self.batch_resume = Some((0, 0));
+                            }
+                            Err(error) => {
+                                let step = BatchStep {
+                                    outcome: Err(self.in_dialect(text, error)),
+                                    statement_start: at,
+                                    in_transaction: self.in_block(),
+                                    no_count: self.settings.sqlserver.no_count,
+                                };
+                                on_step(step);
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -316,6 +359,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 }
             }
         }
+    }
+
+    fn rest_of_batch<'t>(
+        &mut self,
+        text: &'t str,
+        at: usize,
+        parameters: Parameters<'_>,
+    ) -> SqlResult<Vec<Token<'t>>> {
+        let tokens = tokenize_from(text, self.dialect, at)?;
+        self.check_batch_syntax(text, &tokens, parameters)?;
+        Ok(tokens)
     }
 
     pub(super) fn enter_sqlserver_status(

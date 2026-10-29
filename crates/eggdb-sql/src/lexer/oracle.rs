@@ -61,6 +61,12 @@ impl<'t> Lexer<'t> {
                 self.at += 1;
                 Ok(TokenKind::Colon)
             }
+            b'$' if self.peek(1).is_some_and(|next| next.is_ascii_digit()) => {
+                self.at += 1;
+                let digits_start = self.at;
+                self.digits();
+                Ok(TokenKind::Parameter(&self.text[digits_start..self.at]))
+            }
             _ if super::is_identifier_start(byte) => self.oracle_word(),
             _ => {
                 let rest = &self.text[self.at..];

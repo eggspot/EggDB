@@ -14,25 +14,6 @@ pub const ORACLE_COMPATIBLE_VERSION: &str = "23ai";
 
 const MAX_DECODE_ARGUMENTS: usize = 255;
 
-const DICTIONARY_VIEWS: [&str; 16] = [
-    "user_views",
-    "all_views",
-    "user_tab_comments",
-    "all_tab_comments",
-    "user_col_comments",
-    "all_col_comments",
-    "user_tables",
-    "all_tables",
-    "user_tab_columns",
-    "all_tab_columns",
-    "user_tab_cols",
-    "all_tab_cols",
-    "user_indexes",
-    "all_indexes",
-    "user_ind_columns",
-    "all_ind_columns",
-];
-
 pub(crate) fn is_reserved(word: &str) -> bool {
     matches!(
         word,
@@ -152,11 +133,7 @@ pub(super) fn is_clause_word(word: &str) -> bool {
 }
 
 pub(super) fn is_dictionary_name(name: &str) -> bool {
-    DICTIONARY_VIEWS.contains(&name)
-}
-
-pub(crate) fn is_dictionary_view(table: &TableReference) -> bool {
-    table.derived.is_none() && DICTIONARY_VIEWS.contains(&table.name.text.as_str())
+    crate::oracle_dictionary::OracleRelation::named(name).is_some()
 }
 
 fn literal(literal: Literal, position: usize) -> Expr {
@@ -401,6 +378,76 @@ impl<'t> Parser<'t> {
         })
     }
 
+    pub(super) fn oracle_user_schema(&self) -> String {
+        self.oracle_settings(|settings| {
+            settings
+                .oracle_user_schema
+                .clone()
+                .unwrap_or_else(|| crate::schemas::DEFAULT_SCHEMA.to_owned())
+        })
+    }
+
+    fn oracle_current_schema(&self) -> String {
+        let user_schema = self.oracle_user_schema();
+        let first = self.oracle_settings(|settings| {
+            crate::schemas::path_entries(&settings.get("search_path").unwrap_or_default())
+                .into_iter()
+                .next()
+        });
+        let schema = match first {
+            Some(entry) if entry != "$user" => entry,
+            _ => user_schema.clone(),
+        };
+        crate::oracle_dictionary::owner_name(&schema, &self.oracle_user(), &user_schema)
+    }
+
+    fn sys_context(&mut self, name: &Name) -> SqlResult<Expr> {
+        let position = name.position;
+        let arguments = self.oracle_arguments()?;
+        if arguments.len() < 2 {
+            return Err(wrong_argument_count(name, true));
+        }
+        if arguments.len() > 3 {
+            return Err(wrong_argument_count(name, false));
+        }
+        let constant = |expr: &Expr| match &expr.kind {
+            ExprKind::Literal(Literal::String(text)) => Some(text.clone()),
+            _ => None,
+        };
+        let (Some(namespace), Some(parameter)) = (constant(&arguments[0]), constant(&arguments[1]))
+        else {
+            return Err(
+                self.not_supported("SYS_CONTEXT with arguments other than text constants")
+            );
+        };
+        if !namespace.trim().eq_ignore_ascii_case("userenv") {
+            return Ok(literal(Literal::Null, position));
+        }
+        let user = self.oracle_user();
+        let current_schema = self.oracle_current_schema();
+        let (database, session_id) = self.oracle_settings(|settings| {
+            (settings.database.clone(), settings.sqlserver.connection_id)
+        });
+        let facts = crate::oracle_dictionary::SessionFacts {
+            user: &user,
+            current_schema: &current_schema,
+            database: &database,
+            session_id,
+        };
+        let value = crate::oracle_dictionary::userenv(&parameter, &facts)
+            .map_err(|error| error.at(position))?;
+        Ok(match value {
+            Some(value) => Expr {
+                kind: ExprKind::SessionValue {
+                    name: "sys_context",
+                    value,
+                },
+                position,
+            },
+            None => literal(Literal::Null, position),
+        })
+    }
+
     pub(super) fn oracle_statement(&mut self) -> SqlResult<Option<Statement>> {
         let TokenKind::Word(word) = self.peek_kind() else {
             return Ok(None);
@@ -427,6 +474,14 @@ impl<'t> Parser<'t> {
             }
             "merge" => self.merge(&super::merge::MergeRules::oracle())?,
             "alter" if self.is_word_at(1, "session") => self.alter_session()?,
+            "begin"
+                if matches!(
+                    self.peek_kind_at(1),
+                    TokenKind::End | TokenKind::Semicolon
+                ) =>
+            {
+                return Ok(None);
+            }
             "begin" | "declare" => {
                 return Err(self.not_supported(
                     "PL/SQL blocks (Oracle starts a transaction with the first change)",
@@ -874,6 +929,9 @@ impl<'t> Parser<'t> {
         let position = name.position;
         if name.text == "trim" {
             return self.oracle_trim(name).map(Some);
+        }
+        if name.text == "sys_context" {
+            return self.sys_context(name).map(Some);
         }
         if crate::ast::AggregateFunction::named(&name.text).is_some() {
             return Ok(None);

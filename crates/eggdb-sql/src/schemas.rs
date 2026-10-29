@@ -266,7 +266,10 @@ fn compute_path(
     let mut existing: Vec<String> = Vec::new();
     for entry in path_entries(&settings.get("search_path").unwrap_or_default()) {
         let name = if entry == "$user" && dialect == Dialect::Oracle {
-            DEFAULT_SCHEMA.to_owned()
+            settings
+                .oracle_user_schema
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SCHEMA.to_owned())
         } else if entry == "$user" {
             user.clone()
         } else {

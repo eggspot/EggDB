@@ -51,6 +51,7 @@ mod name_resolution;
 mod numeric;
 mod oracle_conversion;
 mod oracle_datetime;
+mod oracle_dictionary;
 mod oracle_errors;
 mod oracle_functions;
 mod oracle_nls;

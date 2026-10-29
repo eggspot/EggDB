@@ -14,6 +14,7 @@ use crate::arrays::ArrayElement;
 use crate::types::SqlType;
 
 use crate::information_schema::InformationRelation;
+use crate::oracle_dictionary::OracleRelation;
 use crate::sqlserver_catalog::SqlServerRelation;
 pub(crate) use deparse::{check_text, default_text};
 pub(crate) use functions::{
@@ -56,7 +57,10 @@ pub(crate) fn catalog_reference(
         crate::Dialect::SqlServer => {
             Ok(SqlServerRelation::referenced(name).map(CatalogRelation::SqlServer))
         }
-        _ => Ok(None),
+        crate::Dialect::Oracle => {
+            Ok(crate::oracle_dictionary::reference(reader, name)?.map(CatalogRelation::Oracle))
+        }
+        crate::Dialect::MySql | crate::Dialect::Sqlite => Ok(None),
     }
 }
 
@@ -105,6 +109,9 @@ pub(crate) fn refuse_catalog_change(
     reader: &dyn crate::store::KeyValueRead,
     name: &crate::ast::Name,
 ) -> crate::error::SqlResult<()> {
+    if crate::constraints::current_dialect() == crate::Dialect::Oracle {
+        return Ok(());
+    }
     match catalog_reference(reader, &name.text)? {
         Some(relation) => Err(system_catalog(relation.name())),
         None => Ok(()),
@@ -180,11 +187,39 @@ pub(crate) enum CatalogRelation {
     Enum,
     Information(InformationRelation),
     SqlServer(SqlServerRelation),
+    Oracle(OracleRelation),
 }
 
 pub(crate) struct CatalogColumn {
     pub(crate) name: &'static str,
     pub(crate) sql_type: SqlType,
+}
+
+pub(crate) struct CatalogRow {
+    columns: &'static [CatalogColumn],
+    values: Vec<crate::types::Value>,
+}
+
+impl CatalogRow {
+    pub(crate) fn new(columns: &'static [CatalogColumn]) -> Self {
+        Self {
+            columns,
+            values: vec![crate::types::Value::Null; columns.len()],
+        }
+    }
+
+    pub(crate) fn set(mut self, name: &str, value: crate::types::Value) -> Self {
+        if let Some(at) = self.columns.iter().position(|column| column.name == name)
+            && let Some(slot) = self.values.get_mut(at)
+        {
+            *slot = value;
+        }
+        self
+    }
+
+    pub(crate) fn done(self) -> Vec<crate::types::Value> {
+        self.values
+    }
 }
 
 const fn column(name: &'static str, sql_type: SqlType) -> CatalogColumn {
@@ -268,6 +303,7 @@ impl CatalogRelation {
             Self::Enum => "pg_enum",
             Self::Information(relation) => relation.name(),
             Self::SqlServer(relation) => relation.name(),
+            Self::Oracle(relation) => relation.name(),
         }
     }
 
@@ -275,6 +311,7 @@ impl CatalogRelation {
         match self {
             Self::Information(_) => crate::schemas::INFORMATION_SCHEMA,
             Self::SqlServer(relation) => relation.schema(),
+            Self::Oracle(relation) => relation.schema(),
             _ => crate::schemas::CATALOG_SCHEMA,
         }
     }
@@ -315,14 +352,18 @@ impl CatalogRelation {
             Self::Opclass => 2616,
             Self::Enum => 3501,
             Self::Information(relation) => relation.oid(),
-            Self::SqlServer(_) => 0,
+            Self::SqlServer(_) | Self::Oracle(_) => 0,
         }
     }
 
     pub(crate) fn is_view(self) -> bool {
         matches!(
             self,
-            Self::Roles | Self::Settings | Self::Information(_) | Self::SqlServer(_)
+            Self::Roles
+                | Self::Settings
+                | Self::Information(_)
+                | Self::SqlServer(_)
+                | Self::Oracle(_)
         )
     }
 
@@ -373,6 +414,7 @@ impl CatalogRelation {
             Self::Enum => &ENUM_COLUMNS,
             Self::Information(relation) => relation.columns(),
             Self::SqlServer(relation) => relation.columns(),
+            Self::Oracle(relation) => relation.columns(),
         }
     }
 }

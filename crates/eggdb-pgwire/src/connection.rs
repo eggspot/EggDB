@@ -258,6 +258,8 @@ impl CopyChannel for WireCopy<'_, '_, '_> {
     }
 }
 
+const DIALECT_PARAMETER: &str = "eggdb.dialect";
+
 pub(crate) struct Startup {
     user: String,
     database: String,
@@ -644,7 +646,13 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         }
     }
     for (name, value) in settings {
-        let _ = session.set_parameter(&name, &value);
+        let applied = session.set_parameter(&name, &value);
+        if let Err(error) = applied
+            && name.eq_ignore_ascii_case(DIALECT_PARAMETER)
+        {
+            fatal(&mut wire, error.state(), error.message());
+            return;
+        }
     }
     if startup.minor > 0 || !unrecognized_options.is_empty() {
         wire.outbox
