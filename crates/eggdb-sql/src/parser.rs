@@ -847,7 +847,7 @@ impl<'t> Parser<'t> {
         }
         let _ = self.take_word("session");
         if self.is_word("characteristics") || self.is_word("transaction") {
-            return Err(self.not_supported("SET TRANSACTION"));
+            return self.set_transaction();
         }
         if self.is_word("role") || self.is_word("authorization") || self.is_word("constraints") {
             return Err(self.not_supported(&format!(
@@ -883,6 +883,61 @@ impl<'t> Parser<'t> {
             name,
             value: self.setting_value()?,
         })
+    }
+
+    fn set_transaction(&mut self) -> SqlResult<Statement> {
+        let characteristics = self.take_word("characteristics");
+        if characteristics {
+            self.expect_word("as")?;
+        }
+        self.expect_word("transaction")?;
+        if self.is_word("snapshot") {
+            return Err(self.not_supported("SET TRANSACTION SNAPSHOT"));
+        }
+        let mut read_only = None;
+        loop {
+            if self.take_word("isolation") {
+                self.isolation_level()?;
+            } else if self.take_word("read") {
+                if self.take_word("only") {
+                    read_only = Some(true);
+                } else {
+                    self.expect_word("write")?;
+                    read_only = Some(false);
+                }
+            } else if self.take_word("not") {
+                self.expect_word("deferrable")?;
+            } else if !self.take_word("deferrable") {
+                break;
+            }
+            self.take(&TokenKind::Comma);
+        }
+        match (characteristics, read_only) {
+            (true, Some(read_only)) => Ok(Statement::Set {
+                name: "default_transaction_read_only".to_owned(),
+                value: Some(if read_only { "on" } else { "off" }.to_owned()),
+            }),
+            (false, Some(true)) => Err(self.not_supported("SET TRANSACTION READ ONLY")),
+            _ => Ok(Statement::Ignored {
+                tag: "SET",
+                notice: None,
+            }),
+        }
+    }
+
+    fn isolation_level(&mut self) -> SqlResult<()> {
+        self.expect_word("level")?;
+        if self.take_word("serializable") {
+            return Ok(());
+        }
+        if self.take_word("repeatable") {
+            return self.expect_word("read");
+        }
+        if self.take_word("read") && (self.take_word("committed") || self.take_word("uncommitted"))
+        {
+            return Ok(());
+        }
+        Err(self.unexpected())
     }
 
     fn show(&mut self) -> SqlResult<Statement> {
@@ -1115,15 +1170,7 @@ impl<'t> Parser<'t> {
                     read_only = false;
                 }
             } else if self.take_word("isolation") {
-                self.expect_word("level")?;
-                if self.take_word("serializable") {
-                } else if self.take_word("repeatable") || self.take_word("read") {
-                    if !(self.take_word("read") || self.take_word("committed")) {
-                        self.take_word("uncommitted");
-                    }
-                } else {
-                    return Err(self.unexpected());
-                }
+                self.isolation_level()?;
             } else if self.is_word("deferrable") || self.is_word("not") {
                 return Err(self.not_supported("DEFERRABLE"));
             } else {
