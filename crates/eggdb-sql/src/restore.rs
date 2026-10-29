@@ -316,6 +316,7 @@ struct RestoreRules {
     differences: fn(&str) -> Vec<DifferenceNote>,
     not_supported: fn(&SqlError) -> bool,
     psql_meta_commands: bool,
+    index_names_per_table: bool,
     default_schema: &'static str,
 }
 
@@ -330,6 +331,7 @@ impl RestoreRules {
             differences: |_| Vec::new(),
             not_supported: |error| error.state() == SqlState::FEATURE_NOT_SUPPORTED,
             psql_meta_commands: true,
+            index_names_per_table: false,
             default_schema: "public",
         }
     }
@@ -344,6 +346,7 @@ impl RestoreRules {
             differences: classify_sqlserver::sqlserver_differences,
             not_supported: classify_sqlserver::refused_as_not_supported,
             psql_meta_commands: false,
+            index_names_per_table: true,
             default_schema: "public",
         }
     }
@@ -806,6 +809,17 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                 statement,
                 object,
                 "not created: existing rows violate it (rows the source kept under a disabled constraint, or a collation, padding or LIKE difference)".to_owned(),
+            );
+            return Flow::Continue;
+        }
+        if self.rules.index_names_per_table
+            && let Effect::Index(name) = effect
+            && code == "42P07"
+        {
+            self.note_difference(
+                statement,
+                format!("index {name}"),
+                "not created: another table's index or a table has its name, and EggDB index names are unique per schema".to_owned(),
             );
             return Flow::Continue;
         }

@@ -871,6 +871,9 @@ INSERT INTO Tools40 (Name) VALUES (N'Hammer')
 error 42P10 8101
 INSERT INTO Tools40 VALUES (10, N'Hammer')
 
+error 23502 339
+INSERT INTO Tools40 (ToolID, Name) VALUES (NULL, N'Chisel')
+
 rows
 INSERT INTO Tools40 (ToolID, Name) VALUES (0, N'Rasp'), (-3, N'File'); INSERT INTO Tools40 (ToolID, Name) VALUES (10, N'Hammer'); SELECT SCOPE_IDENTITY() AS id
 ----

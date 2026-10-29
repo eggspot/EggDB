@@ -1295,7 +1295,11 @@ impl<'a> StoredRows<'a> {
         let column = &self.table.columns[index];
         let given = row[index].as_integer();
         if self.identity_insert && given.is_none() {
-            return Ok(());
+            return Err(SqlError::new(
+                SqlState::NOT_NULL_VIOLATION,
+                "DEFAULT or NULL are not allowed as explicit identity values.",
+            )
+            .with_sqlserver_code(339));
         }
         let next = match self.next_auto_value {
             Some(next) => next,

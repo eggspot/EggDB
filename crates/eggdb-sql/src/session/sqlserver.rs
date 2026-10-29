@@ -10,8 +10,9 @@ use crate::parser::{Parameters, Parser};
 use crate::store::KeyValueStore;
 use std::sync::Arc;
 
-const STATEMENT_TERMINATING_ERRORS: [u16; 10] =
-    [2627, 2601, 547, 515, 544, 545, 2628, 8152, 3902, 3903];
+const STATEMENT_TERMINATING_ERRORS: [u16; 17] = [
+    2627, 2601, 547, 515, 544, 545, 339, 2628, 8152, 3902, 3903, 1088, 8106, 8107, 4917, 1754, 3701,
+];
 
 /// What one statement of a Transact-SQL batch did, as [`Session::execute_batch`] reports it.
 #[derive(Debug, Clone, PartialEq)]
@@ -340,6 +341,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             .at(table.position));
         }
         let already_on = self.identity_insert_table.as_deref() == Some(resolved.text.as_str());
+        if on
+            && !already_on
+            && let Some(current) = self.identity_insert_table.clone()
+            && self
+                .read(|reader, tables| tables.relation(reader, &current))?
+                .is_none()
+        {
+            self.identity_insert_table = None;
+        }
         if on
             && !already_on
             && let Some(current) = &self.identity_insert_table

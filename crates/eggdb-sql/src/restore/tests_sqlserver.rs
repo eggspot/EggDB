@@ -581,3 +581,15 @@ fn the_ssms_sample_runs_batch_by_batch_as_sqlcmd_sends_it() {
     assert_eq!(session.close(), Ok(false));
     assert!(rows[0].contains("\n2\n"), "{rows:?}");
 }
+
+#[test]
+fn an_index_name_another_table_already_uses_is_a_known_difference() {
+    let store = MemoryStore::default();
+    let script = b"CREATE TABLE [dbo].[A]([Id] [int] NOT NULL PRIMARY KEY, [At] [datetime] NULL)\nGO\nCREATE TABLE [dbo].[B]([Id] [int] NOT NULL PRIMARY KEY, [At] [datetime] NULL)\nGO\nCREATE NONCLUSTERED INDEX [IX_At] ON [dbo].[A] ([At] ASC)\nGO\nCREATE NONCLUSTERED INDEX [IX_At] ON [dbo].[B] ([At] ASC)\nGO\n";
+    let report = restore(&store, script, false);
+    assert_eq!(report.error, None, "{report:?}");
+    assert_eq!(report.indexes, 1);
+    assert_eq!(report.differences.len(), 1);
+    assert_eq!(report.differences[0].line, 7);
+    assert_eq!(report.differences[0].object, "index IX_At");
+}

@@ -532,7 +532,8 @@ impl Parser<'_> {
             return self.add_action(actions, position);
         }
         if named_default {
-            self.at += 2;
+            self.at += 1;
+            self.name()?;
         }
         self.expect_word("default")?;
         let start = self.position();

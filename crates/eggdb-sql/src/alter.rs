@@ -1067,7 +1067,11 @@ fn add_default(
     if target.auto_increment {
         return Err(SqlError::new(
             SqlState::INVALID_TABLE_DEFINITION,
-            "Defaults cannot be created on columns with an IDENTITY attribute.",
+            format!(
+                "Defaults cannot be created on columns with an IDENTITY attribute. Table '{}', column '{}'.",
+                crate::schemas::base_name(&table.name),
+                target.name
+            ),
         )
         .with_sqlserver_code(1754)
         .at(column.position));

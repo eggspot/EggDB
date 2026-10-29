@@ -12,7 +12,6 @@ use crate::lexer::tokenize_in;
 use crate::parser::sqlserver_starts_statement;
 use crate::session::sqlserver::parse_next_statement;
 use crate::settings::Settings;
-use std::collections::VecDeque;
 use std::io::BufRead;
 use std::ops::Range;
 
@@ -20,7 +19,9 @@ const SPAN_BYTES: usize = 4 << 20;
 
 pub(crate) struct SqlServerScript<'r> {
     reader: ScriptReader<'r>,
-    queue: VecDeque<ScriptItem>,
+    batch: Vec<ScriptStatement>,
+    next: usize,
+    repeats_left: u64,
     settings: Settings,
 }
 
@@ -28,8 +29,35 @@ impl<'r> SqlServerScript<'r> {
     pub(crate) fn new(input: &'r mut dyn BufRead) -> Self {
         Self {
             reader: ScriptReader::new(input),
-            queue: VecDeque::new(),
+            batch: Vec::new(),
+            next: 0,
+            repeats_left: 0,
             settings: Settings::default(),
+        }
+    }
+
+    fn next_of_batch(&mut self) -> Option<ScriptStatement> {
+        loop {
+            if self.next >= self.batch.len() {
+                if self.repeats_left <= 1 || self.batch.is_empty() {
+                    self.batch.clear();
+                    self.repeats_left = 0;
+                    return None;
+                }
+                self.repeats_left -= 1;
+                self.next = 0;
+            }
+            let at = self.next;
+            self.next += 1;
+            if self.repeats_left > 1 {
+                return self.batch.get(at).cloned();
+            }
+            if let Some(statement) = self.batch.get_mut(at) {
+                return Some(std::mem::replace(
+                    statement,
+                    ScriptStatement::plain(String::new(), 0, 0),
+                ));
+            }
         }
     }
 }
@@ -37,8 +65,8 @@ impl<'r> SqlServerScript<'r> {
 impl ScriptSource for SqlServerScript<'_> {
     fn next_item(&mut self) -> SqlResult<ScriptItem> {
         loop {
-            if let Some(item) = self.queue.pop_front() {
-                return Ok(item);
+            if let Some(statement) = self.next_of_batch() {
+                return Ok(ScriptItem::Statement(statement));
             }
             match self.reader.next_item()? {
                 BatchItem::End => return Ok(ScriptItem::End),
@@ -52,11 +80,9 @@ impl ScriptSource for SqlServerScript<'_> {
                     }));
                 }
                 BatchItem::Batch(batch) => {
-                    let statements = statements_of(&batch, &self.settings);
-                    for _ in 0..batch.repeat {
-                        self.queue
-                            .extend(statements.iter().cloned().map(ScriptItem::Statement));
-                    }
+                    self.batch = statements_of(&batch, &self.settings);
+                    self.next = 0;
+                    self.repeats_left = batch.repeat;
                 }
             }
         }
