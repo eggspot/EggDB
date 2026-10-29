@@ -51,15 +51,16 @@ Parsing rules, in order:
 `delete` is accepted as an alias of `del`; `del` is the documented name because it matches
 `put` and `get` in length and is what Redis users type.
 
-**Reserved names**, so nobody builds a script around a name that later changes meaning:
-`export`, `import`, `shell`, `backup`, `compact`, `ui`. In v0.2.0, before each ships, typing one
-prints `eggdb <name> is not in this release yet; see docs/roadmap.md` and exits 2. How they fit
-the grammar when they come: `export <file> [<out>|-]` and `import <file> [<in>|-]` (JSON lines,
-same byte rules as section 4; shipped as designed, D93); `shell <file>` runs the commands of this
-document without the `eggdb <command> <file>` prefix, one per line, and SQL (shipped, section
-15); `backup <file> <copy>` copies a consistent snapshot while others write; `compact <file>`
-rewrites the file without free or leaked pages; `ui <file>` opens the terminal UI (its own
-design document).
+**Reserved names** were kept so nobody would build a script around a name that later changed
+meaning: `export`, `import`, `shell`, `backup`, `compact`, `ui`. Before each shipped, typing it
+printed `eggdb <name> is not in this release yet; see docs/roadmap.md` and exited 2. All six have
+shipped as designed: `export <file> [<out>|-]` and `import <file> [<in>|-]` (JSON lines, same
+byte rules as section 4; D93); `shell <file>` runs the commands of this document without the
+`eggdb <command> <file>` prefix, one per line, and SQL (section 15); `backup <file> <copy>` copies
+one commit to a new file while others read, and from inside `eggdb shell` while it writes
+(section 22); `compact <file>` rewrites the file without free or leaked pages and swaps it in
+whole (section 22); `ui <file>` opens the terminal UI (its own design document). No name is
+reserved now, and the reserved-command message is retired.
 
 ### Creating a file: explicit, never by accident
 `put` and `del` **do not create** a database. A typo in the path (`app.bd`) must not leave a
@@ -320,6 +321,8 @@ Commands:
   scan   <file>                 list entries in key order; see --prefix, --from, --to
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
+  backup <file> <copy>          write a consistent copy of the file while readers keep working
+  compact <file>                rewrite the file without free or leaked pages, in place
   help   [command]              this text, or one command's help
   version                       print the version
 
@@ -419,8 +422,9 @@ eggdb stats app.db
 9. Colour only on a terminal with `NO_COLOR` unset and `TERM` not `dumb`; 16-colour SGR; data
    is never coloured.
 10. `stats` omits the page-cache counters; `check` with leaked pages is still `ok` (exit 0).
-11. Reserved: `backup`, `compact`; they answer with the roadmap until they ship (`ui`,
-    `export`, `import`, `sql`, `serve` and `shell` have shipped).
+11. No reserved names remain: `backup` and `compact` shipped last (section 22), after `ui`,
+    `export`, `import`, `sql`, `serve` and `shell`; until it shipped, a reserved name answered
+    with the roadmap.
 
 ## 13. As built in v0.2.0 (D90)
 
@@ -618,6 +622,7 @@ Key-value commands, as on the command line without 'eggdb <command> app.db':
   scan [--prefix p] [--from a] [--to b] [-r] [-n count] [-k]
   check                        read every page and report the file's health
   stats                        size, pages, last commit and log
+  backup <copy>                write a consistent copy of app.db to a new file, while open here
 SQL: PostgreSQL dialect, statements ended by ; (docs/sql.md); BEGIN spans prompts:
   app=*> is inside a transaction block, app=!> a failed one (ROLLBACK ends it).
   'delete' starts a DELETE statement here; the key-value command is 'del'.
@@ -1760,3 +1765,176 @@ absent" needs it in one commit), remaining times in `scan` and `expires_at` in `
   store (about 584,000 years from 1970), so such a key never expires in practice.
 - `expires_at` is the command's clock plus the time left, so it can differ from the engine's
   deadline by the time the command took.
+
+## 22. `eggdb backup` and `eggdb compact`: a copy of the file, and the file rewritten (item 28)
+
+Both take the two names that section 2 reserved for them and keep the grammar of section 1, the
+formats of section 4, the report shape of section 6 and the exit codes and message shape of
+sections 7 and 10. Designed by Claude Fable (D15). Each rebuilds the file entry by entry from one
+commit, so the result holds no free or leaked pages, keeps every collection, SQL table and time
+to live, and may be smaller than the file it came from. Each writes to a staging file next to
+its target, syncs it, counts its entries again, and renames it only then, so a crash, a full
+disk or a Ctrl-C at any moment leaves the target as it was: `<copy>` does not exist yet, or
+`<file>` is still the old file. Neither shows progress in this release; each prints one report
+when it is done.
+
+```
+eggdb backup <file> <copy>
+eggdb compact <file>
+```
+`backup` opens `<file>` read-only, so it runs beside every reader and is busy (exit 5) under a
+writer; a file a program writes to is copied from inside that program (`backup <copy>` in `eggdb
+shell`, `Database::backup_to` in code). `compact` also opens read-only: readers in other programs
+keep working and see the compacted file when they next open it, a writer makes it busy, and it
+cannot run inside the shell, which holds the file. The copy's path is checked (same file, exists,
+staging file, directory) before `<file>` is opened, so a typo costs nothing. `<copy>` never
+replaces a file, as `create` and `export` never do, and `-` is refused: a backup is synced and
+verified, which stdout cannot be.
+
+### The reports
+Section 6's shape: a fixed first line that names the commit (as `check` prints it, `none` for a
+never-written file), labelled facts at `check`'s label width, a verdict line. Time is whole
+milliseconds under one second (`412 ms`), else seconds with one decimal (`2.3 s`).
+```
+$ eggdb backup app.db app.bak
+backed up app.db to app.bak as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
+  entries         12,480
+  copy            1.7 MiB, 441 pages of 4 KiB
+  time            812 ms
+ok: app.bak is complete: its 12,480 entries were counted again after writing and syncing.
+$ eggdb compact app.db
+compacted app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
+  entries         12,480
+  before          2.0 MiB, 512 pages of 4 KiB
+  after           1.7 MiB, 441 pages
+  reclaimed       43 pages (40 free, 3 leaked)
+  time            903 ms
+ok: app.db was rewritten without free or leaked pages and swapped in whole; 43 pages reclaimed.
+```
+`reclaimed` counts the old file's free and leaked pages; `before` and `after` tell the rest (log
+pages gone, leaves packed). A file with none is **rewritten all the same**, since the rewrite
+also packs it and the command's promise is a fresh file, and its verdict says so: `ok: app.db had
+no free or leaked pages; it was rewritten and swapped in whole all the same.` Counts of one read
+`1 entry`, `1 page reclaimed (1 free, 0 leaked)`.
+
+JSON, one line, stable fields, every number a plain integer; `ok` is always `true` here, since a
+failure prints no report:
+```
+{"ok":true,"file":"app.db","copy":"app.bak","commit_stamp":"1793006047123456.0003","commit_time":"2026-10-26T09:14:07.123456Z","entries":12480,"page_size":4096,"copy_pages":441,"copy_bytes":1806336,"elapsed_ms":812}
+{"ok":true,"file":"app.db","commit_stamp":"1793006047123456.0003","commit_time":"2026-10-26T09:14:07.123456Z","entries":12480,"page_size":4096,"pages_before":512,"file_bytes_before":2097152,"pages_after":441,"file_bytes_after":1806336,"free_pages_before":40,"leaked_pages_before":3,"pages_reclaimed":43,"elapsed_ms":903}
+```
+`commit_stamp` and `commit_time` are `null` for a never-written file, as in `stats`. `hex` and
+`raw` are usage errors, as for `check` (section 13, item 4).
+
+### Help
+The command list of section 9 gains two lines after `stats`:
+```
+  backup <file> <copy>          write a consistent copy of the file while readers keep working
+  compact <file>                rewrite the file without free or leaked pages, in place
+```
+`eggdb help backup`:
+```
+Usage: eggdb backup <file> <copy>
+
+Writes a copy of the file's last commit to <copy>, a new file, while other readers keep working.
+The copy is rebuilt entry by entry, so it holds no free or leaked pages and may be smaller than
+the file; every collection, SQL table and time to live is kept. It is built as <copy>.backing-up
+and renamed to <copy> only once it is complete, synced and its entries counted again, so a crash
+or a full disk never leaves a partial copy. <copy> must not exist: eggdb backup never replaces a
+file. The command opens the file read-only, so a program that has it open for writing makes it
+busy (exit 5); to copy a file while a program writes to it, use backup <copy> inside eggdb shell,
+or Database::backup_to in the program. In a pipe the report is one JSON line.
+
+Examples:
+  eggdb backup app.db app.bak
+  eggdb backup app.db "backups/app-$(date +%F).db"
+  eggdb backup app.db app.bak --format json
+```
+`eggdb help compact`:
+```
+Usage: eggdb compact <file>
+
+Rewrites the file without its free and leaked pages and swaps the result in. The new file is
+built entry by entry as <file>.compacting, synced, its entries counted again, and then renamed
+over the file in one step, so a crash at any moment leaves either the old file or the new one,
+never a mix. Programs reading the file keep working throughout and see the new file when they
+next open it; a program that has it open for writing makes the command busy (exit 5), and so does
+eggdb shell, which holds the file: quit it first. A file with no free or leaked pages is rewritten
+all the same, which packs its pages. eggdb check says how many pages a compact would reclaim. In a
+pipe the report is one JSON line.
+
+Examples:
+  eggdb compact app.db
+  eggdb check app.db && eggdb compact app.db --format json
+```
+
+### Messages (stderr, section 7's shape)
+| When | Exit | Message |
+|------|------|---------|
+| `<copy>` is `<file>` (the same path, or a path to the same file) | 3 | `cannot back up {file} to itself. Give the copy another name.` |
+| `<copy>` exists | 3 | `cannot back up {file} to {copy}: {copy} already exists; eggdb backup never replaces a file. Choose another name, or remove it first.` |
+| `<copy>` is `-` | 2 | `backup writes a file it can sync and verify, and stdout is not one. Give a path.` |
+| `<copy>.backing-up` exists | 3 | `cannot back up {file} to {copy}: {copy}.backing-up exists, left by a backup that did not finish or one still running. Remove it and back up again.` |
+| `<file>.compacting` exists | 3 | `cannot compact {file}: {file}.compacting exists, left by a compact that did not finish or one still running. Remove it and compact again.` |
+| the copy's directory is missing | 3 | `cannot back up {file} to {copy}: the directory {dir} does not exist. Create it first.` + `  try: mkdir {dir}` |
+| `<file>` missing (both) | 3 | `cannot open {file}: no such file. Check the path.` |
+| busy, `backup` | 5 | section 10's read-command busy line, then a second line indented like `try:`: `  to copy a file while a program writes to it, use backup <copy> inside eggdb shell, or Database::backup_to in the program.` |
+| busy, `compact` | 5 | section 10's read-command busy line, unchanged |
+| write failed, disk full, `backup` | 3 | `cannot back up {file} to {copy}: {error}. Nothing is left behind: {copy} does not exist and {copy}.backing-up was removed.` |
+| write failed, disk full, `compact` | 3 | `cannot compact {file}: {error}. {file} is unchanged and {file}.compacting was removed.` |
+| the count after writing differs | 3 | `cannot back up {file} to {copy}: the copy holds {m} entries, the file {n}. {copy}.backing-up was removed; check the file.` (`cannot compact {file}: … {file} is unchanged and {file}.compacting was removed; check the file.`) + `  try: eggdb check {file}` |
+| the rename fails | 3 | `cannot rename {copy}.backing-up to {copy}: {error}. The copy is complete and verified; rename it yourself.` (`cannot rename {file}.compacting over {file}: {error}. {file} is unchanged; the compacted file is {file}.compacting, complete and verified.`) |
+| not a database, newer format, damaged | 3, 3, 4 | section 10's read-only open lines; `Corrupt` met while reading is exit 4 and the staging file is removed |
+
+The rename case is import's rule (section 13, item 17): a complete, verified file is never
+deleted. Every other failure removes the staging file, so a failed command leaves the directory
+as it found it. A wrong number of arguments is section 13's usage error (item 5).
+
+### The shell
+`backup <copy>` joins the key-value words of section 15: lower case at the start of a statement,
+one line, split like a shell, printing the report above (`--format json` on the line switches it).
+It copies from the shell's own open database, so it works while the shell holds the file for
+writing, and a `backup` inside a transaction block copies the last commit, not the block. The
+T-SQL dialect's `BACKUP DATABASE` is a statement EggDB never runs (the parser lists it as not
+supported), so the no-prefix rule of section 15 holds; a `backup` line with any other number of
+words answers `eggdb: backup takes one argument, the file to write (T-SQL's BACKUP DATABASE is
+not a statement EggDB runs)`, exit 2 in batch. `compact` is recognised too, and refused:
+```
+app=> compact
+eggdb: compact needs the file to itself, and this shell holds it. Quit the shell, then run it from the command line.
+  try: eggdb compact app.db
+```
+(exit 2 in batch, whatever follows the word). `.help` gains one line under the key-value
+commands, after `stats`:
+```
+  backup <copy>                write a consistent copy of app.db to a new file, while open here
+```
+Completion offers paths after `backup` as it offers keys after `get`, nothing more.
+
+### Decided by this design
+1. Both commands open the file read-only: readers keep working, a writer makes them busy, and the
+   writer's own path (`shell`, `Database::backup_to`) is named in the busy message and the help.
+2. The staging file is `<copy>.backing-up` or `<file>.compacting`, next to its target, as
+   `import` and `restore` do; a leftover is refused with import's words, never reused or removed.
+3. A compact with nothing to reclaim rewrites anyway: the result is packed, the report is the
+   same shape, and the verdict says what was found.
+4. Every failure before the rename removes the staging file and says so; a failed rename keeps
+   the complete, verified file and names it.
+5. `-` as the copy is refused (exit 2) rather than streamed: a backup is synced and verified.
+6. The shell recognises `compact` only to say why it cannot run there, with the command to type.
+
+Not in this release, for the roadmap: progress on stderr (the library has no callback), a backup
+to stdout or a remote, incremental and scheduled backups, `--replace` on `backup`, compaction of
+a file held by `serve`, and `compact` in the shell and the UI.
+
+### As built (item 28, D141)
+The implementation follows this section, except:
+1. A missing `<file>` answers with section 10's read-only open line as every read command does
+   (`... Check the path, or create it with `eggdb create app.db``), not a shorter one.
+2. A copy whose entries do not match after writing fails with the library's message (`the copy
+   was checked after it was written and holds m entries ... where the snapshot held n entries;
+   it was not kept`) inside the write-failed line, with no `try:` line: the library reports the
+   mismatch as a storage error like any other, and it has never been seen outside a bug.
+3. Completion after `backup` in the shell offers nothing; paths are typed whole.
+4. `compact` reads the whole file once before rewriting it, as `eggdb check` does, so a damaged
+   file is refused (exit 4) and left as it is, and the report can count its leaked pages.

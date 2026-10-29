@@ -149,6 +149,26 @@ expect_exit 0 "$eggdb" check expiry.db --format json
 grep -q '"leaked_pages":0}' last.out || fail "check after expiring keys found $(cat last.out)"
 pass "expiring keys and counters: put --ttl, ttl, expire, persist, incr, decr and cas"
 
+expect_exit 0 "$eggdb" backup expiry.db expiry.bak --format json
+grep -q '^{"ok":true,"file":"expiry.db","copy":"expiry.bak",' last.out || fail "backup reported $(cat last.out)"
+[ ! -e expiry.bak.backing-up ] || fail "backup left its staging file"
+expect_output 3 "$eggdb" get expiry.bak -C stats page
+expect_output 9 "$eggdb" get expiry.bak hits
+expect_exit 0 "$eggdb" ttl expiry.bak s:1 --format text
+expect_exit 3 "$eggdb" backup expiry.db expiry.bak
+grep -q 'never replaces a file' last.err || fail "a backup over a file said $(cat last.err)"
+expect_exit 2 "$eggdb" backup expiry.db -
+expect_exit 0 "$eggdb" compact app.db --format json
+grep -q '^{"ok":true,"file":"app.db",' last.out || fail "compact reported $(cat last.out)"
+[ ! -e app.db.compacting ] || fail "compact left its staging file"
+expect_output alice "$eggdb" get app.db -C sessions s:1
+expect_output Ada "$eggdb" get app.db user:1
+expect_exit 0 "$eggdb" check app.db --format json
+grep -q '"leaked_pages":0}' last.out || fail "check after compact found $(cat last.out)"
+expect_exit 0 "$eggdb" check expiry.bak --format json
+grep -q '"leaked_pages":0}' last.out || fail "check of a backup found $(cat last.out)"
+pass "backup and compact"
+
 expect_exit 0 "$eggdb" sql --create shop.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL, price double precision)"
 printf '%s\n' "INSERT INTO items VALUES (1, 'egg', 0.25), (2, 'bread', 2.5);" "UPDATE items SET price = price * 2 WHERE id = 1;" > shop.sql
 expect_exit 0 "$eggdb" sql shop.db shop.sql

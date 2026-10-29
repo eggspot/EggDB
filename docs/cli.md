@@ -22,6 +22,8 @@ eggdb scan app.db --format json | jq .key    # for scripts and agents
 eggdb check app.db                           # "ok: every page passed its checksum …"
 eggdb stats app.db
 eggdb ui app.db                              # browse it full screen; q quits
+eggdb backup app.db app.bak                  # a consistent copy, while others read
+eggdb compact app.db                         # give free and leaked pages back to the disk
 eggdb export app.db backup.jsonl             # every entry, as JSON lines
 eggdb import --create copy.db backup.jsonl   # and back, into a new file
 eggdb sql app.db -c "CREATE TABLE users (id integer PRIMARY KEY, name text)"
@@ -48,6 +50,8 @@ eggdb <command> <file> [arguments] [options]
 | `cas <file> <key> (<expected> \| --if-absent) (<new> \| --delete)` | for writing | replaces the value only while it is `<expected>`; exits 1 when it is not |
 | `check <file>` | read-only | reads every page and reports the file's health |
 | `stats <file>` | read-only | the page size, pages, file size, last commit and log, without reading a page |
+| `backup <file> <copy>` | read-only | writes a copy of the last commit to the new file `<copy>`, while other readers keep working (below) |
+| `compact <file>` | read-only | rewrites the file without free or leaked pages and swaps it in atomically, while readers in other programs keep working (below) |
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below) |
 | `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below); with `--csv <file> --table <name>`, a CSV file into a SQL table |
@@ -68,7 +72,7 @@ The command comes first and the file second; options may go anywhere after the c
 as `app.bd` is an error that says how to create the file, never a new empty database that later
 reads as "empty".
 
-**Read-only commands share the file.** `get`, `scan`, `check`, `stats` and `export` can run
+**Read-only commands share the file.** `get`, `scan`, `check`, `stats`, `backup`, `compact` and `export` can run
 together, and next to an application that has the file open read-only. A program that has it
 open for writing keeps them out, and `put`, `del`, `import` and `sql` wait for nobody: they exit 5 at
 once when the file is open anywhere (see "Exit codes"). That includes an AI agent's call through
@@ -193,6 +197,51 @@ app.db
   last commit     2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
   log since checkpoint  0 B (the next open replays nothing)
 ```
+
+## `backup` and `compact`
+
+```
+$ eggdb backup app.db app.bak
+backed up app.db to app.bak as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
+  entries         12,480
+  copy            1.7 MiB, 441 pages of 4 KiB
+  time            812 ms
+ok: app.bak is complete: its 12,480 entries were counted again after writing and syncing.
+$ eggdb compact app.db
+compacted app.db as of commit 2026-10-26 09:14:07.123456 UTC (stamp 1793006047123456.0003)
+  entries         12,480
+  before          2.0 MiB, 512 pages of 4 KiB
+  after           1.7 MiB, 441 pages
+  reclaimed       43 pages (40 free, 3 leaked)
+  time            903 ms
+ok: app.db was rewritten without free or leaked pages and swapped in whole; 43 pages reclaimed.
+```
+
+`backup` copies one commit, entry by entry, with every collection, SQL table and time to live,
+so the copy has no free or leaked pages and is often smaller than the file. It is built as
+`<copy>.backing-up`, synced, its entries counted again, and only then renamed to `<copy>`, so a
+crash, a full disk or Ctrl-C never leaves part of a copy. `<copy>` must not exist: a backup never
+replaces a file, and `-` is refused. A `<copy>.backing-up` left by a backup that did not finish
+is refused too, and never removed for you: remove it and back up again. Both commands open the
+file read-only, so they run beside other readers and exit 5 when a program has it open for
+writing. To back up a file a program writes to, back up from inside it: `backup <copy>` in
+`eggdb shell` (which holds the file), or `Database::backup_to` in an application
+([embedded.md](embedded.md)).
+
+`compact` checks the file first (a damaged file exits 4 and is left as it is), rebuilds it as
+`<file>.compacting`, syncs and counts it, and renames it over the file in one step: a crash at
+any moment leaves the old file or the compacted one, never a mix. Programs reading the file keep
+reading the one they opened until they open it again. A file with nothing to reclaim is
+rewritten all the same, which packs it. `eggdb shell` cannot compact the file it holds; quit it
+first.
+
+In a pipe each prints one JSON line: `backup` gives `file`, `copy`, `commit_stamp`,
+`commit_time`, `entries`, `page_size`, `copy_pages`, `copy_bytes` and `elapsed_ms`; `compact`
+gives `file`, `commit_stamp`, `commit_time`, `entries`, `page_size`, `pages_before`,
+`file_bytes_before`, `pages_after`, `file_bytes_after`, `free_pages_before`,
+`leaked_pages_before`, `pages_reclaimed` and `elapsed_ms`. A backup is a file EggDB opens as it
+is; `export` is the text form that other databases and older releases read. Design:
+[ux/cli.md](ux/cli.md) section 22, [decision D141](decisions/D141.md).
 
 ## `eggdb ui`
 
@@ -744,13 +793,16 @@ app=> .quit
 ```
 
 **What a line is.** A line that starts with `.` is a shell command. A line whose first word is
-`put`, `get`, `del`, `scan`, `ttl`, `expire`, `persist`, `incr`, `decr`, `cas`, `check` or `stats`
-(lower case) is that key-value command, with the
+`put`, `get`, `del`, `scan`, `ttl`, `expire`, `persist`, `incr`, `decr`, `cas`, `check`, `stats`
+or `backup` (lower case) is that key-value command, with the
 arguments and options it takes on the command line, split like a shell splits them (`"..."` and
 `'...'` hold spaces); `@-` is refused, since stdin is the shell's own. Anything else is SQL,
 which continues over lines until a `;` outside quotes, comments and `$$` bodies. `delete` starts
-a SQL `DELETE`; the key-value command is `del`. Shell and key-value commands are recognised only
-at the start of a statement, not on its continuation lines.
+a SQL `DELETE`; the key-value command is `del`. `backup <copy>` copies the shell's own open
+database, so it works while the shell holds the file for writing; inside a transaction block it
+copies the last commit. `compact` is refused with the command to run after quitting. Shell and
+key-value commands are recognised only at the start of a statement, not on its continuation
+lines.
 
 **The prompt** is the file's stem with psql's markers: `app=>` for a new statement, `app->` while
 one continues, `app'>` and `app">` inside an unfinished string or quoted name, `app=*>` inside a
@@ -1013,8 +1065,8 @@ last 3 of 41 calls, 2 errors, by claude-code 2.1.0 (the name the client gave)
 |------|---------|
 | 0 | done; `check` found no damage |
 | 1 | not found: `get` or `del` of a key that is not there |
-| 2 | usage: unknown command or option, missing argument, bad hex, an unreadable `@file`, export file or SQL script, a command not in this release |
-| 3 | database error: no such file, not an EggDB file, written by a newer EggDB, permission denied, I/O failure, key or value too large, disk full; an export that is not valid, or a key already there (`import`); an output file that exists (`export`); a SQL statement that failed (`sql`) |
+| 2 | usage: unknown command or option, missing argument, bad hex, an unreadable `@file`, export file or SQL script |
+| 3 | database error: no such file, not an EggDB file, written by a newer EggDB, permission denied, I/O failure, key or value too large, disk full; an export that is not valid, or a key already there (`import`); an output file that exists (`export`, `backup`); a SQL statement that failed (`sql`) |
 | 4 | damaged: `check` found damage, or any command read a damaged page |
 | 5 | busy: another program has the file open |
 
@@ -1035,10 +1087,6 @@ eggdb: unknown option '--reverse' for eggdb get
   usage: eggdb get <file> <key> [-C <name>]
   try: eggdb help get
 ```
-
-The commands that are coming (`backup`, `compact`) answer
-`eggdb <name> is not in this release yet; see docs/roadmap.md` and exit 2, so no script is built
-on a name that later changes meaning.
 
 ## Colour
 

@@ -388,6 +388,40 @@ open replays the log since the last checkpoint, about a megabyte at most by defa
 `Normal`, commits since the last sync stay exposed to a power loss until the next open syncs
 them. `db.checkpoint()` writes a checkpoint without closing.
 
+## Backup and compaction
+`db.backup_to("app.bak")` writes a copy of the last commit to a new file while the database keeps
+working: readers and the writer go on, and commits made while it runs are not in the copy. The
+copy is rebuilt key by key, with every collection, SQL table and time to live, so it has no free
+or leaked pages; it is built as `app.bak.backing-up`, synced, checked (its entries counted
+again) and only then renamed to `app.bak`, so a crash never leaves part of a copy. A backup never
+replaces a file: an existing `app.bak`, or a `app.bak.backing-up` left by a backup that did not
+finish, fails with `ErrorKind::AlreadyExists`. It returns a `BackupReport` (the commit's stamp,
+the entries, the copy's pages and bytes). A writer that changes more pages than the snapshot
+memory holds while a long backup runs makes it fail with `SnapshotTooOld`; give it more
+`snapshot_memory_bytes`, or back up again.
+
+`db.compact()` rewrites the database's file without free or leaked pages and puts it in place
+atomically, then closes the database: the file is checked first (a damaged one is refused and
+left as it is), rebuilt as `app.db.compacting`, synced, checked and renamed over `app.db`, so a
+crash leaves the old file or the compacted one. `Database::compact_file("app.db")` opens the file
+read-only and compacts it, so programs reading it keep working (they read the file they opened
+until they open it again); one that has it open for writing makes it fail with `Locked`. It
+returns a `CompactReport` (pages and bytes before and after, the free and leaked pages
+reclaimed). Both are [decision D141](decisions/D141.md).
+
+```rust,no_run
+use eggdb::Database;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    let backup = db.backup_to("app.bak")?;
+    println!("{} entries in {} bytes", backup.entries, backup.file_bytes);
+    let compacted = db.compact()?;
+    println!("{} pages, then {}", compacted.pages_before, compacted.pages_after);
+    Ok(())
+}
+```
+
 ## Errors
 Every error is an `eggdb::Error`. Its message says what happened and what to do, for people and
 for AI models; `error.kind()` is an `ErrorKind` to match on:
@@ -407,6 +441,7 @@ for AI models; `error.kind()` is an `ErrorKind` to match on:
 | `CollectionNotFound`, `InvalidCollectionName` | no collection of that name, or a name no collection can have |
 | `ReservedKey` | a key of the default key space that starts with the bytes kept for collections |
 | `NotAnInteger` | `increment` on a value that is not a counter, or a sum outside `i64`'s range |
+| `AlreadyExists` | a backup's destination exists, or a staging file a backup or a compaction left |
 | `DatabaseFull`, `OutOfMemory`, `InvalidOption`, `Other` | the rest |
 
 `ErrorKind` may gain kinds in later releases, so a `match` needs a wildcard arm. An

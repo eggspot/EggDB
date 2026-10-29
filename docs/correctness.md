@@ -26,6 +26,7 @@ stops. The details of every test are in [testing.md](testing.md); this page is t
 |------|-----|-------|
 | Crash at any moment | A seeded workload through the page cache, the log and the file, in each durability mode, fails every one of its I/O operations in turn and ends in a reopen, a power loss that drops unsynced writes, or one that tears them into 512-byte pieces; the reopened file must hold exactly one commit, no older than promised, with every page accounted for. A sample of those points also crashes during recovery, and writes after it. | [testing.md](testing.md), "The whole stack" (D85) |
 | Transactions under crashes | The same sweep through write and read transactions: atomic commits, rollbacks, snapshot readers that keep their view, and a handle that refuses work after a failed sync instead of retrying it as a success. | testing.md (D86) |
+| Backups and compaction under crashes | Every I/O operation of a backup and of a compaction fails in turn, then the file system is reopened, or loses power dropping unsynced writes, or tears them; afterwards the source holds every entry with its feature flags, and the copy's path holds nothing, the whole copy, or (for a compaction) the old file or the compacted one, each checked page by page with no page leaked. A backup taken while another thread commits must hold exactly one commit. | `crates/eggdb-storage/src/snapshot_copy_tests.rs`, `crates/eggdb/tests/backup.rs` (D141) |
 | Injected faults | The simulated file system fails any operation on request; every layer (page file, log, checkpoints, page cache, B+tree) has its own crash and fault tests. | testing.md, "Each layer" |
 | Behaves like a map | Seeded random transactions, rollbacks, large values, scans, checks, reopens, power losses and faults compared with Rust's `BTreeMap`, through the storage engine and through the embedded API on real files. | testing.md, "Against a model" (D89) |
 | Hostile files | A seeded fuzzer damages five kinds of valid files 22 ways (bit flips, cuts, swapped pages, rewritten fields with valid checksums, damaged logs), opens each read-only and for writing, reads, scans, checks and writes; 800 cases in every CI run. | testing.md, "Hostile files" (D89) |
@@ -88,7 +89,7 @@ stops. The details of every test are in [testing.md](testing.md); this page is t
 - **No outside audit.** No Jepsen-style test or independent review outside the project has
   checked EggDB yet; every test here is our own.
 - **Damage to synced bytes** is detected by checksums, not repaired: EggDB has no repair yet, so
-  restore from a backup (`eggdb export`, or a copy of the closed file).
+  restore from a backup (`eggdb backup`, `Database::backup_to` or `eggdb export`).
 - **Network and shared file systems** (NFS, SMB) and their locks.
 - **Large files and long runs.** The tests use small files; the largest value written end to end
   is 20 MiB, against a limit of 1 GiB, and there is no soak test of days or of databases of many
