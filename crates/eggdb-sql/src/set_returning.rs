@@ -374,6 +374,17 @@ fn conformed(value: Value, sql_type: SqlType) -> SqlResult<Value> {
 pub(crate) struct GeneratedRows {
     pub(crate) columns: Vec<OutputColumn>,
     pub(crate) rows: Vec<Vec<Value>>,
+    pub(crate) charge: WorkMemory,
+}
+
+impl GeneratedRows {
+    pub(crate) fn empty(columns: Vec<OutputColumn>) -> Self {
+        Self {
+            columns,
+            rows: Vec::new(),
+            charge: WorkMemory::new(),
+        }
+    }
 }
 
 struct RowCollector {
@@ -399,8 +410,8 @@ impl RowCollector {
         Ok(())
     }
 
-    fn finish(self) -> Vec<Vec<Value>> {
-        self.rows
+    fn finish(self) -> (Vec<Vec<Value>>, WorkMemory) {
+        (self.rows, self.memory)
     }
 }
 
@@ -450,12 +461,18 @@ pub(crate) fn table_function_columns(
     Ok(function_columns(function, label, alias_given, sql_type))
 }
 
-pub(crate) fn table_function(
+pub(crate) struct BoundFunction {
+    found: &'static SetReturningFunction,
+    values: Vec<Value>,
+    sql_type: SqlType,
+    ordinality: bool,
+    position: usize,
+}
+
+pub(crate) fn bind_function(
     function: &TableFunction,
-    label: &str,
-    alias_given: bool,
     evaluator: &Evaluator<'_>,
-) -> SqlResult<GeneratedRows> {
+) -> SqlResult<BoundFunction> {
     let found = function_of(function)?;
     let declared = argument_types(&function.arguments, evaluator.scope);
     let series_type = (found.name == "generate_series")
@@ -484,23 +501,41 @@ pub(crate) fn table_function(
         .collect();
     let sql_type =
         (found.result_type)(&types).map_err(|error| error.at_if_unplaced(function.position))?;
-    let mut collector = RowCollector::new();
-    let mut ordinal: i64 = 0;
-    (found.rows)(&values, sql_type, &mut |value| {
-        ordinal += 1;
-        let value = conformed(value, sql_type)?;
-        let row = if function.ordinality {
-            vec![value, Value::BigInt(ordinal)]
-        } else {
-            vec![value]
-        };
-        collector.push(row)
+    Ok(BoundFunction {
+        found,
+        values,
+        sql_type,
+        ordinality: function.ordinality,
+        position: function.position,
     })
-    .map_err(|error| error.at_if_unplaced(function.position))?;
-    Ok(GeneratedRows {
-        columns: function_columns(function, label, alias_given, sql_type),
-        rows: collector.finish(),
-    })
+}
+
+impl BoundFunction {
+    pub(crate) fn columns(
+        &self,
+        function: &TableFunction,
+        label: &str,
+        alias_given: bool,
+    ) -> Vec<OutputColumn> {
+        function_columns(function, label, alias_given, self.sql_type)
+    }
+
+    pub(crate) fn generate(
+        &self,
+        store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
+    ) -> SqlResult<()> {
+        let mut ordinal: i64 = 0;
+        (self.found.rows)(&self.values, self.sql_type, &mut |value| {
+            ordinal += 1;
+            let value = conformed(value, self.sql_type)?;
+            store(if self.ordinality {
+                vec![value, Value::BigInt(ordinal)]
+            } else {
+                vec![value]
+            })
+        })
+        .map_err(|error| error.at_if_unplaced(self.position))
+    }
 }
 
 fn values_mismatch(left: SqlType, right: SqlType, position: usize) -> SqlError {
@@ -572,7 +607,7 @@ pub(crate) fn values_rows(
         }
         collector.push(values)?;
     }
-    let mut rows = collector.finish();
+    let (mut rows, charge) = collector.finish();
     let mut columns = Vec::with_capacity(types.len());
     for (index, declared) in types.iter().enumerate() {
         let sql_type = match declared {
@@ -604,7 +639,11 @@ pub(crate) fn values_rows(
             }
         }
     }
-    Ok(GeneratedRows { columns, rows })
+    Ok(GeneratedRows {
+        columns,
+        rows,
+        charge,
+    })
 }
 
 pub(crate) fn expanded(
@@ -684,9 +723,11 @@ pub(crate) fn expanded(
             .iter()
             .cloned(),
     );
+    let (rows, charge) = collector.finish();
     Ok(GeneratedRows {
         columns,
-        rows: collector.finish(),
+        rows,
+        charge,
     })
 }
 
@@ -718,15 +759,17 @@ pub(crate) fn refuse_nested_in_from(generated: &GeneratedTable) -> SqlResult<()>
     Ok(())
 }
 
-pub(crate) fn rows_of(
+pub(crate) fn generate_rows(
     generated: &GeneratedTable,
     evaluator: &Evaluator<'_>,
-) -> SqlResult<Vec<Vec<Value>>> {
+    store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
+) -> SqlResult<()> {
     match generated {
-        GeneratedTable::Values(list) => values_rows(list, evaluator).map(|built| built.rows),
-        GeneratedTable::Function(function) => {
-            table_function(function, &function.name, false, evaluator).map(|built| built.rows)
-        }
-        GeneratedTable::Expansion(_) => Ok(Vec::new()),
+        GeneratedTable::Values(list) => values_rows(list, evaluator)?
+            .rows
+            .into_iter()
+            .try_for_each(store),
+        GeneratedTable::Function(function) => bind_function(function, evaluator)?.generate(store),
+        GeneratedTable::Expansion(_) => Ok(()),
     }
 }

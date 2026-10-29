@@ -145,6 +145,15 @@ fn malformed_patterns_are_2201b_with_postgresqls_reason() {
         ("^*", "quantifier operand invalid"),
         ("$*", "quantifier operand invalid"),
         ("a(*)", "quantifier operand invalid"),
+        ("[\\D-z]", "invalid character range"),
+        ("[[.ab.]]", "invalid collating element"),
+        ("[[=ab=]]", "invalid collating element"),
+        ("[[..]]", "invalid collating element"),
+        ("[[.Hyphen.]]", "invalid collating element"),
+        (
+            "[[.left-curly-bracket-and-then-some-more.]]",
+            "invalid collating element",
+        ),
     ];
     for (pattern, reason) in cases {
         let (state, message) = refusal(pattern);
@@ -162,7 +171,7 @@ fn malformed_patterns_are_2201b_with_postgresqls_reason() {
 fn constructs_not_run_yet_are_0a000() {
     for pattern in [
         "(a)\\1", "(?=a)", "(?!a)", "(?<=a)", "(?<!a)", "\\ma", "a\\M", "\\ya", "\\Ya", "(?i)A",
-        "***=a", "[[.ab.]]",
+        "***=a",
     ] {
         assert_eq!(refusal(pattern).0, "0A000", "{pattern}");
     }
@@ -290,5 +299,47 @@ fn seeded_random_patterns_and_texts_never_panic() {
         if let Ok(regex) = Regex::compile(&pattern, CaseSensitivity::Sensitive) {
             let _ = regex.is_match(&pattern, &mut StepBudget::new(1_000_000));
         }
+    }
+}
+
+#[test]
+fn negated_class_escapes_work_inside_brackets() {
+    let cases = [
+        ("x", "[\\D]", true),
+        ("5", "[\\D]", false),
+        ("5", "[\\Da]", false),
+        ("a", "[^\\D]", false),
+        ("5", "[^\\D]", true),
+        (" ", "[\\S]", false),
+        ("a", "[\\W]", false),
+        ("_", "[\\W]", false),
+        ("-", "[\\W]", true),
+        ("\u{e9}", "[\\W]", true),
+        ("\u{e9}", "[\\D]", true),
+    ];
+    for (text, pattern, expected) in cases {
+        assert_eq!(matches(text, pattern), expected, "{text} ~ {pattern}");
+    }
+    assert!(matches_folded("A", "[\\D]"));
+}
+
+#[test]
+fn collating_elements_take_posix_names_for_the_portable_characters() {
+    let cases = [
+        ("-", "[[.hyphen.]]", true),
+        ("-", "[[=hyphen=]]", true),
+        ("-", "[[.hyphen-minus.]]", true),
+        (" ", "[[.space.]]", true),
+        ("\t", "[[.tab.]]", true),
+        ("\u{7f}", "[[.DEL.]]", true),
+        ("{", "[[.left-curly-bracket.]]", true),
+        ("\\", "[[.reverse-solidus.]]", true),
+        ("b", "[[.a.]-c]", true),
+        ("/", "[[.hyphen.]-0]", true),
+        ("a", "[[.NUL.]]", false),
+        ("a", "[^[.NUL.]]", true),
+    ];
+    for (text, pattern, expected) in cases {
+        assert_eq!(matches(text, pattern), expected, "{text:?} ~ {pattern}");
     }
 }

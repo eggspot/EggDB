@@ -1,7 +1,7 @@
 use super::{Level, Parser};
 use crate::ast::{
     AggregateFunction, BinaryOperator, Expr, ExprKind, FromClause, GeneratedTable, Literal, Name,
-    Select, SelectItem, SubqueryTest, TableFunction, TableReference, ValuesList,
+    Query, Select, SelectItem, SetExpr, SubqueryTest, TableFunction, TableReference, ValuesList,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -209,14 +209,6 @@ impl Parser<'_> {
         Ok(function("array_constructor", elements, position))
     }
 
-    pub(super) fn at_array_list(&self) -> bool {
-        let mut ahead = 1;
-        while self.peek_kind_at(ahead) == &TokenKind::LeftParen {
-            ahead += 1;
-        }
-        self.is_word_at(ahead, "array") && self.peek_kind_at(ahead + 1) == &TokenKind::LeftBracket
-    }
-
     pub(super) fn quantified_expression(
         &mut self,
         left: Expr,
@@ -227,6 +219,10 @@ impl Parser<'_> {
         self.expect(&TokenKind::LeftParen)?;
         let array = self.expression()?;
         self.expect(&TokenKind::RightParen)?;
+        let (left, array) = match Self::quantified_list(left, operator, all, array) {
+            Ok(listed) => return Ok(listed),
+            Err(operands) => *operands,
+        };
         let symbol = Expr {
             kind: ExprKind::Literal(Literal::String(operator.symbol().to_owned())),
             position,
@@ -346,6 +342,7 @@ impl Parser<'_> {
                     derived: None,
                     generated: Some(Box::new(GeneratedTable::Values(ValuesList {
                         rows,
+                        column_names: Vec::new(),
                         position,
                     }))),
                 },
@@ -359,6 +356,24 @@ impl Parser<'_> {
             offset: None,
             source_row_limit: None,
         })
+    }
+
+    pub(super) fn values_table(query: &mut Query) -> Option<ValuesList> {
+        let bare = query.with.is_empty()
+            && query.order_by.is_empty()
+            && query.limit.is_none()
+            && query.offset.is_none();
+        let SetExpr::Select(select) = &mut query.body else {
+            return None;
+        };
+        if !bare || !is_values_select(select) {
+            return None;
+        }
+        let generated = select.from.as_mut()?.first.generated.take()?;
+        let GeneratedTable::Values(list) = *generated else {
+            return None;
+        };
+        Some(list)
     }
 
     pub(super) fn postgresql_trim(&mut self, name: Name) -> SqlResult<Expr> {
@@ -434,4 +449,30 @@ impl Parser<'_> {
             position: name.position,
         })
     }
+}
+
+fn is_values_select(select: &Select) -> bool {
+    let Some(from) = &select.from else {
+        return false;
+    };
+    !select.distinct
+        && matches!(
+            select.items.as_slice(),
+            [SelectItem::Wildcard {
+                qualifier: None,
+                ..
+            }]
+        )
+        && from.joins.is_empty()
+        && from.first.name.text == crate::set_returning::VALUES_LABEL
+        && matches!(
+            from.first.generated.as_deref(),
+            Some(GeneratedTable::Values(_))
+        )
+        && select.filter.is_none()
+        && select.group_by.is_empty()
+        && select.having.is_none()
+        && select.order_by.is_empty()
+        && select.limit.is_none()
+        && select.offset.is_none()
 }

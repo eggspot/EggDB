@@ -1,11 +1,12 @@
 use super::{Parser, oracle, sqlite};
 use crate::ast::{
-    BinaryOperator, CommonTable, DerivedTable, Expr, ExprKind, Literal, Name, OrderItem, Query,
-    Select, SetExpr, SetOperation, SetOperator, Statement, Subquery, SubqueryState, SubqueryTest,
-    TableReference,
+    BinaryOperator, CommonTable, DerivedTable, Expr, ExprKind, GeneratedTable, Literal, Name,
+    OrderItem, Query, Select, SetExpr, SetOperation, SetOperator, Statement, Subquery,
+    SubqueryState, SubqueryTest, TableReference,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
+use crate::types::SqlType;
 
 pub(super) const MAX_QUERY_NESTING: usize = 32;
 pub(super) const MAX_QUERIES: usize = 1024;
@@ -463,7 +464,7 @@ impl Parser<'_> {
         let position = self.position();
         self.expect(&TokenKind::LeftParen)?;
         self.count_query()?;
-        let query = self.nested_query()?;
+        let mut query = self.nested_query()?;
         self.expect(&TokenKind::RightParen)?;
         let alias = if self.take_word("as") || self.at_bare_alias() {
             Some(self.name()?.text)
@@ -486,13 +487,25 @@ impl Parser<'_> {
         } else {
             Vec::new()
         };
+        let name = Name {
+            text: alias
+                .clone()
+                .unwrap_or_else(|| "unnamed_subquery".to_owned()),
+            position,
+        };
+        if self.postgresql()
+            && let Some(mut list) = Self::values_table(&mut query)
+        {
+            list.column_names = column_names;
+            return Ok(TableReference {
+                name,
+                alias,
+                derived: None,
+                generated: Some(Box::new(GeneratedTable::Values(list))),
+            });
+        }
         Ok(TableReference {
-            name: Name {
-                text: alias
-                    .clone()
-                    .unwrap_or_else(|| "unnamed_subquery".to_owned()),
-                position,
-            },
+            name,
             alias,
             derived: Some(Box::new(DerivedTable {
                 query,
@@ -548,13 +561,6 @@ impl Parser<'_> {
         let all = self.is_word("all");
         self.at += 1;
         if !self.starts_query_at(1) {
-            if self.postgresql() && self.at_array_list() {
-                let (at, depth, queries) = (self.at, self.depth, self.queries);
-                if let Ok(expr) = self.quantified_array(left.clone(), operator, all) {
-                    return Ok(expr);
-                }
-                (self.at, self.depth, self.queries) = (at, depth, queries);
-            }
             if self.postgresql() {
                 return self.quantified_expression(left, operator, all);
             }
@@ -571,23 +577,24 @@ impl Parser<'_> {
         )
     }
 
-    fn quantified_array(
-        &mut self,
+    pub(super) fn quantified_list(
         left: Expr,
         operator: BinaryOperator,
         all: bool,
-    ) -> SqlResult<Expr> {
+        array: Expr,
+    ) -> Result<Expr, Box<(Expr, Expr)>> {
         let position = left.position;
-        self.expect(&TokenKind::LeftParen)?;
-        let entry_depth = self.depth;
-        let elements = self.array_operand();
-        self.depth = entry_depth;
-        let elements = elements?;
-        self.expect(&TokenKind::RightParen)?;
         let membership = match (operator, all) {
             (BinaryOperator::Equal, false) => Some(false),
             (BinaryOperator::NotEqual, true) => Some(true),
             _ => None,
+        };
+        if membership.is_none() && !is_cheap_to_repeat(&left) && !is_empty_constructor(&array) {
+            return Err(Box::new((left, array)));
+        }
+        let elements = match listed_elements(array) {
+            Ok(elements) => elements,
+            Err(array) => return Err(Box::new((left, array))),
         };
         if elements.is_empty() {
             let constant = || Expr {
@@ -613,12 +620,6 @@ impl Parser<'_> {
                 position,
             });
         }
-        if !is_cheap_to_repeat(&left) {
-            return Err(SqlError::not_supported(
-                "ANY and ALL over an array with this operator on anything but a column or a constant",
-            )
-            .at(position));
-        }
         let mut comparisons: Vec<Expr> = elements
             .into_iter()
             .map(|element| Self::binary(left.clone(), operator, element))
@@ -636,58 +637,55 @@ impl Parser<'_> {
         })
     }
 
-    fn array_operand(&mut self) -> SqlResult<Vec<Expr>> {
-        self.depth += 1;
-        if self.depth > super::MAX_NESTING {
-            return Err(super::too_deep(self.position()));
-        }
-        let mut elements = if self.take(&TokenKind::LeftParen) {
-            let elements = self.array_operand()?;
-            self.expect(&TokenKind::RightParen)?;
-            elements
-        } else if self.is_word("array") && self.peek_kind_at(1) == &TokenKind::LeftBracket {
-            self.at += 2;
-            let mut elements = Vec::new();
-            if !self.take(&TokenKind::RightBracket) {
-                loop {
-                    elements.push(self.expression()?);
-                    if !self.take(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                self.expect(&TokenKind::RightBracket)?;
-            }
-            elements
-        } else {
-            return Err(
-                self.not_supported("ANY, SOME and ALL over anything but an ARRAY[...] list")
-            );
-        };
-        while self.take(&TokenKind::DoubleColon) {
-            let sql_type = self.element_type()?;
-            self.expect(&TokenKind::LeftBracket)?;
-            self.expect(&TokenKind::RightBracket)?;
-            elements = elements
-                .into_iter()
-                .map(|element| {
-                    let position = element.position;
-                    Expr {
-                        kind: ExprKind::Cast {
-                            expr: Box::new(element),
-                            sql_type,
-                        },
-                        position,
-                    }
-                })
-                .collect();
-        }
-        Ok(elements)
-    }
-
     pub(super) fn select_core(&mut self) -> SqlResult<Select> {
         let mut select = self.select_clauses()?;
         select.order_by = Vec::new();
         Ok(select)
+    }
+}
+
+fn constructor_elements(expr: &Expr) -> Option<&[Expr]> {
+    match &expr.kind {
+        ExprKind::Function { name, arguments } if name == "array_constructor" => Some(arguments),
+        ExprKind::Cast {
+            expr,
+            sql_type: SqlType::Array(_),
+        } => constructor_elements(expr),
+        _ => None,
+    }
+}
+
+fn is_empty_constructor(expr: &Expr) -> bool {
+    constructor_elements(expr).is_some_and(<[Expr]>::is_empty)
+}
+
+fn listed_elements(array: Expr) -> Result<Vec<Expr>, Expr> {
+    if constructor_elements(&array).is_none() {
+        return Err(array);
+    }
+    Ok(constructor_elements_owned(array))
+}
+
+fn constructor_elements_owned(array: Expr) -> Vec<Expr> {
+    match array.kind {
+        ExprKind::Function { arguments, .. } => arguments,
+        ExprKind::Cast {
+            expr,
+            sql_type: SqlType::Array(element),
+        } => constructor_elements_owned(*expr)
+            .into_iter()
+            .map(|item| {
+                let position = item.position;
+                Expr {
+                    kind: ExprKind::Cast {
+                        expr: Box::new(item),
+                        sql_type: element.sql_type(),
+                    },
+                    position,
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

@@ -264,3 +264,148 @@ fn hostile_statements_with_arrays_regular_expressions_and_values_never_panic() {
     ];
     fuzz(&mut session, &fragments);
 }
+
+fn parsed(sql: &str) -> crate::ast::Expr {
+    let tokens = crate::lexer::tokenize_in(sql, crate::dialect::Dialect::PostgreSql)
+        .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    let mut parser =
+        crate::parser::Parser::new(sql, &tokens).in_dialect(crate::dialect::Dialect::PostgreSql);
+    let expr = parser
+        .expression()
+        .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    assert!(parser.at_end(), "{sql}");
+    expr
+}
+
+#[test]
+fn any_over_an_array_constructor_under_casts_is_parsed_once_into_an_in_list() {
+    for sql in [
+        "(level)::text = ANY ((ARRAY['debug'::character varying, 'info'::character varying])::text[])",
+        "level = ANY (ARRAY['a', 'b'])",
+        "level <> ALL (((ARRAY['a', 'b']))::varchar[]::text[])",
+        "day = ANY (ARRAY['2024-01-01', '2024-01-02']::date[])",
+    ] {
+        assert!(
+            matches!(parsed(sql).kind, crate::ast::ExprKind::InList { .. }),
+            "{sql}"
+        );
+    }
+    for sql in [
+        "n = ANY (ARRAY[1, 2] || ARRAY[3])",
+        "n = ANY ('{1,2}'::int[])",
+        "n + 1 < ANY (ARRAY[1, 2])",
+    ] {
+        assert!(
+            matches!(&parsed(sql).kind, crate::ast::ExprKind::Function { name, .. } if name == "array_any"),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn nested_any_over_arrays_fails_fast() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let mut nested = "true".to_owned();
+    for _ in 0..16 {
+        nested = format!("1 = ANY(ARRAY[{nested},{nested}] || ARRAY[true])");
+    }
+    let started = std::time::Instant::now();
+    assert_eq!(
+        state(&mut session, &format!("SELECT {nested} FROM")),
+        "42601"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn concatenation_takes_the_common_element_type_statically_and_at_run_time() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let cases = [
+        ("ARRAY[1,2] || 3.5", "{1,2,3.5}"),
+        ("ARRAY[1,2] || 3.5::float8", "{1,2,3.5}"),
+        ("ARRAY[2147483647] || 2147483648", "{2147483647,2147483648}"),
+        ("ARRAY[1] || ARRAY[1::bigint]", "{1,1}"),
+        ("ARRAY[1.5,2] || ARRAY[1]", "{1.5,2,1}"),
+        ("3.5 || ARRAY[1,2]", "{3.5,1,2}"),
+        ("ARRAY[1::smallint] || 70000", "{1,70000}"),
+        ("ARRAY[1::real] || 1.5::numeric", "{1,1.5}"),
+        ("NULL::int[] || 1", "{1}"),
+        ("1 || NULL::int[]", "{1}"),
+        ("'a'::text || NULL::text[]", "{a}"),
+        ("NULL::int[] || NULL::int", "{NULL}"),
+        ("NULL::int[] || 1.5", "{1.5}"),
+        ("NULL::int[] || '{1,2}'", "{1,2}"),
+        ("ARRAY[1] || NULL::numeric", "{1,NULL}"),
+        ("NULL || ARRAY[1]", "{1}"),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(
+            run(&mut session, &format!("SELECT {sql} AS a")).unwrap(),
+            format!("a\n{expected}\nSELECT 1"),
+            "{sql}"
+        );
+        let derived = format!("SELECT a FROM (SELECT {sql} AS a) s");
+        assert_eq!(
+            run(&mut session, &derived).unwrap(),
+            format!("a\n{expected}\nSELECT 1"),
+            "{derived}"
+        );
+    }
+    let typed = [
+        ("ARRAY[1,2] || 3.5", ArrayElement::Numeric),
+        ("ARRAY[1::real] || 1.5::numeric", ArrayElement::Real),
+        ("ARRAY[1] || ARRAY[1::bigint]", ArrayElement::BigInt),
+        ("NULL::int[] || 1.5", ArrayElement::Numeric),
+        ("ARRAY['a'::varchar] || 'b'::text", ArrayElement::Varchar),
+        ("ARRAY[1] || '{2}'", ArrayElement::Integer),
+    ];
+    for (sql, element) in typed {
+        assert_eq!(
+            crate::typing::static_type(&parsed(sql), crate::eval::Scope::empty()),
+            Some(crate::types::SqlType::Array(element)),
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT NULL::int[] || NULL::int[] IS NULL AS a"
+        )
+        .unwrap(),
+        "a\nt\nSELECT 1"
+    );
+    for sql in [
+        "SELECT ARRAY[1] || true",
+        "SELECT ARRAY[1] || ARRAY[true]",
+        "SELECT ARRAY['a'] || 1",
+    ] {
+        assert_eq!(state(&mut session, sql), "42883", "{sql}");
+    }
+}
+
+#[test]
+fn subscripts_outside_the_integer_range_are_22003() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "SELECT (ARRAY[1,2,3])[2147483648]",
+        "SELECT (ARRAY[1,2,3])[-2147483649]",
+        "SELECT (ARRAY[1,2,3])[2147483647.6]",
+    ] {
+        assert_eq!(state(&mut session, sql), "22003", "{sql}");
+    }
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT (ARRAY[1,2,3])[2147483647] IS NULL AS a, (ARRAY[1,2,3])[1.6] AS b"
+        )
+        .unwrap(),
+        "a|b\nt|2\nSELECT 1"
+    );
+}

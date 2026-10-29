@@ -558,7 +558,10 @@ answered when the batch ends), and SSMS's and Azure Data Studio's catalog querie
   a column list a one-column function's column takes the alias (`FROM generate_series(1, 3) s`
   makes `s` a column). The arguments are constants, parameters or, in a correlated subquery,
   the outer query's columns (the rows are made again for each outer value); naming another item
-  of the same `FROM` (PostgreSQL's implicit `LATERAL`) is `0A000`. One `generate_series` or
+  of the same `FROM` (PostgreSQL's implicit `LATERAL`), with or without its name and whether it
+  comes before or after the function, is `0A000` ("a function in FROM that names another FROM
+  item (LATERAL) is not supported yet"). A `VALUES` list in `FROM` may name the outer query's
+  columns too and, as in PostgreSQL, does not see the other items of its `FROM`. One `generate_series` or
   `unnest` call may also stand alone as an item of a select list, giving a row for each of its
   values (none when it returns none); a second one, one inside an expression, and one in
   `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` or an aggregate answer `0A000`, and the `ORDER BY` of
@@ -788,8 +791,12 @@ and of results, with one dimension and elements of `smallint`, `integer`, `bigin
 (elements of the common type; `ARRAY[]` needs a cast, `42P18`), `ARRAY(SELECT ...)` (one
 column, `42601` otherwise), PostgreSQL's literals (`'{1,2,NULL}'::int[]`, `'{"a b",c}'::text[]`,
 with quotes, backslashes and `NULL`; a malformed one is `22P02` with PostgreSQL's detail), casts
-between array types element by element and to and from text, `a[i]` (NULL outside the array),
-`||` between two arrays or an array and an element (a NULL array counts as empty),
+between array types element by element and to and from text, `a[i]` (NULL outside the array;
+a subscript outside the `integer` range is `22003`), `||` between two arrays or an array and an
+element, of the element types' common type as `UNION` finds it (`ARRAY[1, 2] || 3.5` is
+`{1,2,3.5}`, a `numeric[]`; text types keep the first operand's type; `integer[] || boolean` is
+`42883`), where a NULL array, typed or not, counts as empty (`NULL::int[] || 1` is `{1}`, two NULL
+arrays give NULL),
 `= <> < <= > >=` element by element (NULL elements equal each other and sort last; two arrays of
 different element types are `42883`), `IS [NULL]` and the functions `array_to_string(a, sep [,
 null_text])`, `array_length(a, 1)`, `array_upper`, `array_lower`, `array_ndims` and
@@ -804,7 +811,9 @@ hold at most 2^27 elements (`54000`) and counts against the session's value limi
 - Arithmetic `+ - * / % ^`, unary `-` and `+`, string concatenation `||`.
 - Regular expressions (D128): `text ~ pattern`, `~*` (ignoring case), `!~` and `!~*`, with
   PostgreSQL's advanced syntax: `.`, bracket expressions (`[a-z]`, `[^0-9]`, `[[:alpha:]]` and the
-  other classes), `\d \w \s \D \W \S`, character escapes (`\n`, `\t`, `\x41`, `\u00e9`), `^`
+  other classes, `\d \w \s \D \W \S` inside brackets too, collating elements such as
+  `[[.hyphen.]]` and `[[=a=]]` by POSIX's names for the portable characters), `\d \w \s \D \W \S`,
+  character escapes (`\n`, `\t`, `\x41`, `\u00e9`), `^`
   and `$`, groups `(...)` and `(?:...)`, `|`, and `* + ? {m} {m,} {m,n}` with their lazy forms.
   Matching takes time linear in the text (no backtracking); a malformed pattern is `2201B` with
   PostgreSQL's reason (`invalid regular expression: parentheses () not balanced`), and a
@@ -1357,8 +1366,8 @@ until they are fixed:
 - Arrays and set-returning functions (D128): arrays cannot be stored in a table or a view, have
   one dimension, and take the element types above; `x[1:2]`, `'[1:2]={1,2}'`, `ARRAY[[1, 2]]`
   and array parameters answer `0A000`. Only `generate_series` (over integers) and `unnest` run in
-  `FROM`, one per select list, and a function or `VALUES` list in `FROM` cannot name another item
-  of the same `FROM`. `COLLATE` takes only the `C`-like collations. The aggregate `string_agg`
+  `FROM`, one per select list, and a function in `FROM` cannot name another item of the same
+  `FROM` (PostgreSQL's implicit `LATERAL`). `COLLATE` takes only the `C`-like collations. The aggregate `string_agg`
   takes no `ORDER BY` inside its call; its rows are joined in the order they are read.
   When the output stops being read (`eggdb sql ... | head`), the command stops before the next
   statement.

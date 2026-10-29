@@ -754,7 +754,11 @@ impl Evaluator<'_> {
         match operator {
             BinaryOperator::Concat => {
                 let (left_value, right_value) = self.concatenated(left, right)?;
-                if matches!(left_value, Value::Array(_)) || matches!(right_value, Value::Array(_)) {
+                let array_operand = matches!(left_value, Value::Array(_))
+                    || matches!(right_value, Value::Array(_))
+                    || ((left_value.is_null() || right_value.is_null())
+                        && crate::arrays::concat_type(left, right, self.scope).is_some());
+                if array_operand {
                     return crate::arrays::concatenation(
                         self,
                         left,

@@ -66,12 +66,7 @@ impl ArrayElement {
     }
 
     pub(crate) fn required(sql_type: SqlType) -> SqlResult<Self> {
-        Self::of(sql_type).ok_or_else(|| {
-            SqlError::not_supported(format!(
-                "arrays of type {} are not supported yet",
-                sql_type.name()
-            ))
-        })
+        Self::of(sql_type).ok_or_else(|| unsupported_element(sql_type))
     }
 
     pub(crate) fn type_name(self) -> String {
@@ -129,6 +124,13 @@ pub(crate) fn held_bytes(array: &ArrayValue) -> usize {
         .iter()
         .map(|item| ITEM_OVERHEAD.saturating_add(crate::memory::held_bytes(item)))
         .fold(ITEM_OVERHEAD, usize::saturating_add)
+}
+
+pub(crate) fn unsupported_element(sql_type: SqlType) -> SqlError {
+    SqlError::not_supported(format!(
+        "arrays of type {} are not supported yet",
+        sql_type.name()
+    ))
 }
 
 fn too_many_items() -> SqlError {
@@ -537,28 +539,33 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("array_ndims", []) => integer(1),
         ("cardinality", []) => integer(array.items.len() as i64),
         ("array_subscript", [Value::Null]) => Ok(Value::Null),
-        ("array_subscript", [subscript]) => {
-            let whole = match subscript {
-                Value::Numeric(number) => number
-                    .to_i128_rounded()
-                    .and_then(|whole| i64::try_from(whole).ok()),
-                other => other.as_integer(),
-            };
-            let Some(subscript) = whole else {
-                return Some(Err(SqlError::new(
-                    SqlState::DATATYPE_MISMATCH,
-                    "array subscript must have type integer",
-                )));
-            };
-            let index = subscript.checked_sub(i64::from(array.lower_bound));
-            Ok(index
-                .and_then(|index| usize::try_from(index).ok())
-                .and_then(|index| array.items.get(index))
-                .cloned()
-                .unwrap_or(Value::Null))
-        }
+        ("array_subscript", [subscript]) => subscripted(array, subscript),
         _ => return None,
     })
+}
+
+fn subscripted(array: &ArrayValue, subscript: &Value) -> SqlResult<Value> {
+    let whole = match subscript {
+        Value::Numeric(number) => number.to_i128_rounded(),
+        other => match other.as_integer() {
+            Some(whole) => Some(i128::from(whole)),
+            None => {
+                return Err(SqlError::new(
+                    SqlState::DATATYPE_MISMATCH,
+                    "array subscript must have type integer",
+                ));
+            }
+        },
+    };
+    let subscript = whole
+        .and_then(|whole| i32::try_from(whole).ok())
+        .ok_or_else(|| crate::types::out_of_range(SqlType::Integer))?;
+    let index = i64::from(subscript) - i64::from(array.lower_bound);
+    Ok(usize::try_from(index)
+        .ok()
+        .and_then(|index| array.items.get(index))
+        .cloned()
+        .unwrap_or(Value::Null))
 }
 
 fn is_unknown(expr: &Expr) -> bool {
@@ -757,11 +764,71 @@ fn no_concatenation(left: &str, right: &str) -> SqlError {
     )
 }
 
-fn shown_type(value: &Value, declared: Option<SqlType>) -> String {
-    value
-        .sql_type()
-        .or(declared)
-        .map_or_else(|| "unknown".to_owned(), SqlType::name)
+#[derive(Clone, Copy)]
+enum Operand {
+    Array(ArrayElement),
+    Element(SqlType),
+    Unknown,
+}
+
+impl Operand {
+    fn of(value: &Value, declared: Option<SqlType>) -> Self {
+        match (value, declared) {
+            (Value::Array(array), _) => Self::Array(array.element),
+            (Value::Null, Some(SqlType::Array(element))) => Self::Array(element),
+            (Value::Null, Some(sql_type)) => Self::Element(sql_type),
+            (Value::Null, None) => Self::Unknown,
+            (value, declared) => value
+                .sql_type()
+                .or(declared)
+                .map_or(Self::Unknown, Self::Element),
+        }
+    }
+
+    fn of_type(sql_type: Option<SqlType>) -> Self {
+        match sql_type {
+            Some(SqlType::Array(element)) => Self::Array(element),
+            Some(sql_type) => Self::Element(sql_type),
+            None => Self::Unknown,
+        }
+    }
+
+    fn shown(self) -> String {
+        match self {
+            Self::Array(element) => element.type_name(),
+            Self::Element(sql_type) => sql_type.name(),
+            Self::Unknown => "unknown".to_owned(),
+        }
+    }
+}
+
+fn joined_element(first: ArrayElement, second: ArrayElement) -> Option<ArrayElement> {
+    let (first_type, second_type) = (first.sql_type(), second.sql_type());
+    if first == second || (first_type.is_character() && second_type.is_character()) {
+        return Some(first);
+    }
+    if first_type.is_numeric() && second_type.is_numeric() {
+        return crate::set_operations::common_type(first_type, second_type)
+            .and_then(ArrayElement::of);
+    }
+    None
+}
+
+fn concatenated_element(left: Operand, right: Operand) -> Option<Option<ArrayElement>> {
+    let element_of = |sql_type: SqlType| ArrayElement::of(sql_type);
+    Some(match (left, right) {
+        (Operand::Array(left), Operand::Array(right)) => joined_element(left, right),
+        (Operand::Array(array), Operand::Element(element)) => {
+            element_of(element).and_then(|element| joined_element(array, element))
+        }
+        (Operand::Element(element), Operand::Array(array)) => {
+            element_of(element).and_then(|element| joined_element(element, array))
+        }
+        (Operand::Array(array), Operand::Unknown) | (Operand::Unknown, Operand::Array(array)) => {
+            Some(array)
+        }
+        _ => return None,
+    })
 }
 
 pub(crate) fn concatenation(
@@ -771,98 +838,92 @@ pub(crate) fn concatenation(
     left_value: Value,
     right_value: Value,
 ) -> SqlResult<Value> {
-    let array_type = match (&left_value, &right_value) {
-        (Value::Array(array), _) | (_, Value::Array(array)) => SqlType::Array(array.element),
-        _ => return concatenate(left_value, right_value, None, None),
+    let declared = |expr: &Expr| {
+        evaluator
+            .declared_type(expr)
+            .or_else(|| crate::typing::static_type(expr, evaluator.scope))
     };
-    let left_value = if is_unknown(left) && !left_value.is_null() {
-        evaluator.eval(left, Some(array_type))?
-    } else {
-        left_value
+    let operand = |expr: &Expr, value: &Value| {
+        if is_unknown(expr) {
+            Operand::Unknown
+        } else {
+            Operand::of(value, declared(expr))
+        }
     };
-    let right_value = if is_unknown(right) && !right_value.is_null() {
-        evaluator.eval(right, Some(array_type))?
-    } else {
-        right_value
+    let left_operand = operand(left, &left_value);
+    let right_operand = operand(right, &right_value);
+    let array_type = match (left_operand, right_operand) {
+        (Operand::Array(element), _) | (_, Operand::Array(element)) => SqlType::Array(element),
+        _ => {
+            return Err(no_concatenation(
+                &left_operand.shown(),
+                &right_operand.shown(),
+            ));
+        }
     };
-    let left_declared = evaluator.declared_type(left);
-    let right_declared = evaluator.declared_type(right);
-    concatenate(left_value, right_value, left_declared, right_declared)
+    let reread = |expr: &Expr, value: Value| {
+        if is_unknown(expr) && !value.is_null() {
+            evaluator.eval(expr, Some(array_type))
+        } else {
+            Ok(value)
+        }
+    };
+    let left_value = reread(left, left_value)?;
+    let right_value = reread(right, right_value)?;
+    let left_operand = match left_operand {
+        Operand::Unknown => Operand::of(&left_value, None),
+        known => known,
+    };
+    let right_operand = match right_operand {
+        Operand::Unknown => Operand::of(&right_value, None),
+        known => known,
+    };
+    let Some(Some(element)) = concatenated_element(left_operand, right_operand) else {
+        return Err(no_concatenation(
+            &left_operand.shown(),
+            &right_operand.shown(),
+        ));
+    };
+    concatenate(
+        element,
+        (left_operand, left_value),
+        (right_operand, right_value),
+    )
 }
 
-pub(crate) fn concatenate(
-    left: Value,
-    right: Value,
-    left_declared: Option<SqlType>,
-    right_declared: Option<SqlType>,
+fn concatenate(
+    element: ArrayElement,
+    left: (Operand, Value),
+    right: (Operand, Value),
 ) -> SqlResult<Value> {
-    let declared_array = |value: &Value, declared: Option<SqlType>| {
-        matches!(value, Value::Array(_))
-            || matches!(declared, Some(SqlType::Array(_)) | None) && value.is_null()
-    };
-    let left_is_array = declared_array(&left, left_declared);
-    let right_is_array = declared_array(&right, right_declared);
-    let shown_left = shown_type(&left, left_declared);
-    let shown_right = shown_type(&right, right_declared);
-    match (left, right) {
-        (Value::Null, Value::Null) => Ok(Value::Null),
-        (Value::Array(array), Value::Null) if right_is_array => Ok(Value::Array(array)),
-        (Value::Null, Value::Array(array)) if left_is_array => Ok(Value::Array(array)),
-        (Value::Array(left_array), Value::Array(right_array)) => {
-            if !left_array.element.comparable(right_array.element) {
-                return Err(no_concatenation(&shown_left, &shown_right));
-            }
-            let lower_bound = if left_array.items.is_empty() {
-                right_array.lower_bound
-            } else {
-                left_array.lower_bound
-            };
-            let mut builder = ArrayBuilder::new(left_array.element);
-            builder.bytes = held_bytes(&left_array);
-            builder.items = left_array.items;
-            for item in right_array.items {
-                builder.push(item)?;
-            }
-            let mut joined = builder.finish();
-            joined.lower_bound = lower_bound;
-            Ok(Value::Array(Box::new(joined)))
-        }
-        (Value::Array(array), element) => {
-            let fits = element.sql_type().is_none_or(|sql_type| {
-                ArrayElement::of(sql_type).is_some_and(|found| found.comparable(array.element))
-                    || (sql_type.is_numeric() && array.element.sql_type().is_numeric())
-            });
-            if !fits {
-                return Err(no_concatenation(&shown_left, &shown_right));
-            }
-            let lower_bound = array.lower_bound;
-            let mut builder = ArrayBuilder::new(array.element);
-            builder.bytes = held_bytes(&array);
-            builder.items = array.items;
-            builder.push(element)?;
-            let mut joined = builder.finish();
-            joined.lower_bound = lower_bound;
-            Ok(Value::Array(Box::new(joined)))
-        }
-        (element, Value::Array(array)) => {
-            let fits = element.sql_type().is_none_or(|sql_type| {
-                ArrayElement::of(sql_type).is_some_and(|found| found.comparable(array.element))
-                    || (sql_type.is_numeric() && array.element.sql_type().is_numeric())
-            });
-            if !fits {
-                return Err(no_concatenation(&shown_left, &shown_right));
-            }
-            let mut builder = ArrayBuilder::new(array.element);
-            builder.push(element)?;
-            for item in array.items {
-                builder.push(item)?;
-            }
-            let mut joined = builder.finish();
-            joined.lower_bound = array.lower_bound;
-            Ok(Value::Array(Box::new(joined)))
-        }
-        (_, _) => Err(no_concatenation(&shown_left, &shown_right)),
+    let is_array = |operand: Operand| matches!(operand, Operand::Array(_) | Operand::Unknown);
+    if left.1.is_null() && right.1.is_null() && is_array(left.0) && is_array(right.0) {
+        return Ok(Value::Null);
     }
+    let lower_bound = match (&left.1, &right.1) {
+        (Value::Array(array), _) if !array.items.is_empty() => array.lower_bound,
+        (_, Value::Array(array)) => array.lower_bound,
+        _ => 1,
+    };
+    let mut builder = ArrayBuilder::new(element);
+    for (operand, value) in [left, right] {
+        match value {
+            Value::Array(array) if array.element == element && builder.items.is_empty() => {
+                builder.bytes = held_bytes(&array);
+                builder.items = array.items;
+            }
+            Value::Array(array) => {
+                for item in array.items {
+                    builder.push(item)?;
+                }
+            }
+            Value::Null if is_array(operand) => {}
+            value => builder.push(value)?,
+        }
+    }
+    let mut joined = builder.finish();
+    joined.lower_bound = lower_bound;
+    Ok(Value::Array(Box::new(joined)))
 }
 
 pub(crate) fn function_type(
@@ -893,11 +954,20 @@ pub(crate) fn function_type(
 }
 
 pub(crate) fn concat_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> Option<SqlType> {
-    match (
-        crate::typing::static_type(left, scope),
-        crate::typing::static_type(right, scope),
-    ) {
-        (Some(found @ SqlType::Array(_)), _) | (_, Some(found @ SqlType::Array(_))) => Some(found),
-        _ => None,
-    }
+    let operand = |expr: &Expr| {
+        if is_unknown(expr) {
+            Operand::Unknown
+        } else {
+            Operand::of_type(crate::typing::static_type(expr, scope))
+        }
+    };
+    let (left, right) = (operand(left), operand(right));
+    let first_array = match (left, right) {
+        (Operand::Array(element), _) | (_, Operand::Array(element)) => element,
+        _ => return None,
+    };
+    let element = concatenated_element(left, right)
+        .flatten()
+        .unwrap_or(first_array);
+    Some(SqlType::Array(element))
 }

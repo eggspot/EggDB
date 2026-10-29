@@ -14,9 +14,38 @@ fn text_of(value: &Value) -> Option<&str> {
     value.character_text()
 }
 
+struct CharacterSet {
+    ascii: u128,
+    others: Vec<char>,
+}
+
+impl CharacterSet {
+    fn of(characters: &str) -> Self {
+        let mut ascii = 0u128;
+        let mut others = Vec::new();
+        for character in characters.chars() {
+            if character.is_ascii() {
+                ascii |= 1u128 << u32::from(character);
+            } else {
+                others.push(character);
+            }
+        }
+        others.sort_unstable();
+        others.dedup();
+        Self { ascii, others }
+    }
+
+    fn contains(&self, character: char) -> bool {
+        if character.is_ascii() {
+            return self.ascii & (1u128 << u32::from(character)) != 0;
+        }
+        self.others.binary_search(&character).is_ok()
+    }
+}
+
 fn trimmed(text: &str, characters: &str, ends: Ends) -> String {
-    let set: Vec<char> = characters.chars().collect();
-    let in_set = |character: char| set.contains(&character);
+    let set = CharacterSet::of(characters);
+    let in_set = |character: char| set.contains(character);
     let text = if ends != Ends::Trailing {
         text.trim_start_matches(in_set)
     } else {

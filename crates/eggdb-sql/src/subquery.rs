@@ -1,7 +1,7 @@
 use crate::ast::{
-    BinaryOperator, CommonTable, Expr, ExprKind, GeneratedTable, JoinCondition, Literal, Query,
-    Select, SelectItem, SetExpr, Subquery, SubqueryRows, SubqueryState, SubqueryTest,
-    TableReference,
+    BinaryOperator, CommonTable, Expr, ExprKind, FromClause, GeneratedTable, JoinCondition,
+    Literal, Query, Select, SelectItem, SetExpr, Subquery, SubqueryRows, SubqueryState,
+    SubqueryTest, TableReference,
 };
 use crate::dialect::Dialect;
 use crate::encoding::{TableDefinition, encode_row};
@@ -635,9 +635,10 @@ fn generated_rows(query: &mut Query) -> SqlResult<Option<TempTables>> {
                     row: &[],
                     correlation: None,
                 };
-                let rows = crate::set_returning::rows_of(generated, &evaluator)?;
                 temp.get_or_insert_with(TempTables::new)
-                    .fill(&definition, rows)
+                    .fill_streamed(&definition, |store| {
+                        crate::set_returning::generate_rows(generated, &evaluator, store)
+                    })
             })();
             if let Err(error) = filled {
                 failure = Some(error);
@@ -1311,24 +1312,21 @@ fn prepare_select(
         crate::set_returning::expand_select_list(select)?;
     }
     if let Some(from) = &mut select.from {
-        let labels: Vec<(String, String)> = std::iter::once(&from.first)
-            .chain(from.joins.iter().map(|join| &join.table))
-            .filter(|table| table.derived.is_none() && table.generated.is_none())
-            .map(|table| {
-                (
-                    table
-                        .alias
-                        .clone()
-                        .unwrap_or_else(|| table.name.text.clone()),
-                    table.name.text.clone(),
-                )
-            })
-            .collect();
-        let references = std::iter::once(&mut from.first)
-            .chain(from.joins.iter_mut().map(|join| &mut join.table));
-        for reference in references {
+        for index in 0..=from.joins.len() {
+            let checked = std::iter::once(&from.first)
+                .chain(from.joins.iter().map(|join| &join.table))
+                .nth(index)
+                .is_some_and(may_name_siblings);
+            let siblings = if checked {
+                siblings_of(from, index, ctes)
+            } else {
+                Vec::new()
+            };
+            let Some(reference) = reference_mut(from, index) else {
+                continue;
+            };
             correlated_from |=
-                prepare_reference(env, tables, reference, parent, ctes, prepared, &labels)?;
+                prepare_reference(env, tables, reference, parent, ctes, prepared, &siblings)?;
         }
     }
     let overlay = Overlay::new(env.reader, &prepared.temp);
@@ -1414,7 +1412,7 @@ fn prepare_reference(
     parent: Option<&Outer<'_>>,
     ctes: Option<&CteScope<'_>>,
     prepared: &mut Prepared,
-    siblings: &[(String, String)],
+    siblings: &[Sibling],
 ) -> SqlResult<bool> {
     if let Some(generated) = reference.generated.take() {
         return prepare_generated(
@@ -1463,14 +1461,53 @@ fn prepare_reference(
 struct Surroundings<'s> {
     parent: Option<&'s Outer<'s>>,
     ctes: Option<&'s CteScope<'s>>,
-    siblings: &'s [(String, String)],
+    siblings: &'s [Sibling],
 }
 
-fn first_column(expr: &Expr) -> Option<(Option<&str>, &str, usize)> {
-    if let ExprKind::Column { qualifier, name } = &expr.kind {
-        return Some((qualifier.as_deref(), name, expr.position));
+struct Sibling {
+    label: String,
+    table: Option<String>,
+}
+
+fn reference_mut(from: &mut FromClause, index: usize) -> Option<&mut TableReference> {
+    match index.checked_sub(1) {
+        None => Some(&mut from.first),
+        Some(join) => from.joins.get_mut(join).map(|join| &mut join.table),
     }
-    children(expr).into_iter().find_map(first_column)
+}
+
+fn may_name_siblings(reference: &TableReference) -> bool {
+    matches!(
+        reference.generated.as_deref(),
+        Some(GeneratedTable::Function(_))
+    )
+}
+
+fn siblings_of(from: &FromClause, index: usize, ctes: Option<&CteScope<'_>>) -> Vec<Sibling> {
+    std::iter::once(&from.first)
+        .chain(from.joins.iter().map(|join| &join.table))
+        .enumerate()
+        .filter(|(other, _)| *other != index)
+        .map(|(_, reference)| {
+            let name = &reference.name.text;
+            let readable = reference.derived.is_none()
+                && (reference.generated.is_none() || crate::temp_tables::is_temp_table(name));
+            Sibling {
+                label: reference.alias.clone().unwrap_or_else(|| name.clone()),
+                table: readable.then(|| find_cte(ctes, name).unwrap_or(name).to_owned()),
+            }
+        })
+        .collect()
+}
+
+fn column_references<'e>(expr: &'e Expr, found: &mut Vec<(Option<&'e str>, &'e str, usize)>) {
+    if let ExprKind::Column { qualifier, name } = &expr.kind {
+        found.push((qualifier.as_deref(), name, expr.position));
+        return;
+    }
+    for child in children(expr) {
+        column_references(child, found);
+    }
 }
 
 fn lateral_reference(
@@ -1478,37 +1515,49 @@ fn lateral_reference(
     tables: &mut TableCache,
     prepared: &Prepared,
     generated: &GeneratedTable,
-    siblings: &[(String, String)],
+    siblings: &[Sibling],
 ) -> SqlResult<()> {
+    if siblings.is_empty() {
+        return Ok(());
+    }
+    let mut references = Vec::new();
     for expr in crate::set_returning::expressions(generated) {
-        let Some((qualifier, name, position)) = first_column(expr) else {
-            continue;
+        column_references(expr, &mut references);
+    }
+    let overlay = Overlay::new(env.reader, &prepared.temp);
+    for (qualifier, name, position) in references {
+        let names_sibling = match qualifier {
+            Some(qualifier) => siblings.iter().any(|sibling| sibling.label == qualifier),
+            None => siblings.iter().any(|sibling| {
+                sibling.table.as_ref().is_some_and(|table| {
+                    tables
+                        .require(
+                            &overlay,
+                            &crate::ast::Name {
+                                text: table.clone(),
+                                position,
+                            },
+                        )
+                        .is_ok_and(|definition| definition.column_index(name).is_some())
+                })
+            }),
         };
-        let overlay = Overlay::new(env.reader, &prepared.temp);
-        let mut sibling_column = false;
-        for (label, table) in siblings {
-            if let Some(qualifier) = qualifier {
-                sibling_column |= qualifier == label;
-                continue;
-            }
-            if let Ok(definition) = tables.require(
-                &overlay,
-                &crate::ast::Name {
-                    text: table.clone(),
-                    position,
-                },
-            ) {
-                sibling_column |= definition.column_index(name).is_some();
-            }
-        }
-        if sibling_column {
+        if names_sibling {
             return Err(SqlError::not_supported(
-                "a function or VALUES list in FROM that names another FROM item (LATERAL) is not supported yet",
+                "a function in FROM that names another FROM item (LATERAL) is not supported yet",
             )
             .at(position));
         }
     }
     Ok(())
+}
+
+enum Filling {
+    Rows(crate::set_returning::GeneratedRows),
+    Streamed {
+        columns: Vec<crate::session::OutputColumn>,
+        function: crate::set_returning::BoundFunction,
+    },
 }
 
 fn prepare_generated(
@@ -1548,9 +1597,10 @@ fn prepare_generated(
                     error
                 }
             })?;
-            crate::set_returning::expanded(expansion, inner)?
+            Filling::Rows(crate::set_returning::expanded(expansion, inner)?)
         }
         GeneratedTable::Values(_) | GeneratedTable::Function(_) => {
+            lateral_reference(env, tables, prepared, &generated, siblings)?;
             let mut correlated = false;
             {
                 let overlay = Overlay::new(env.reader, &prepared.temp);
@@ -1575,7 +1625,6 @@ fn prepare_generated(
                     .at(position));
                 }
             }
-            lateral_reference(env, tables, prepared, &generated, siblings)?;
             deferred = correlated;
             let evaluator = Evaluator {
                 scope: Scope::empty(),
@@ -1584,50 +1633,59 @@ fn prepare_generated(
             };
             match &generated {
                 GeneratedTable::Function(function) if correlated || env.columns_only => {
-                    crate::set_returning::GeneratedRows {
-                        columns: crate::set_returning::table_function_columns(
+                    Filling::Rows(crate::set_returning::GeneratedRows::empty(
+                        crate::set_returning::table_function_columns(
                             function,
                             &label,
                             alias_given,
                             Scope::empty(),
                         )?,
-                        rows: Vec::new(),
-                    }
+                    ))
                 }
                 GeneratedTable::Values(list) if correlated || env.columns_only => {
-                    crate::set_returning::GeneratedRows {
-                        columns: crate::set_returning::values_columns(list, Scope::empty())?,
-                        rows: Vec::new(),
-                    }
+                    Filling::Rows(crate::set_returning::GeneratedRows::empty(
+                        crate::set_returning::values_columns(list, Scope::empty())?,
+                    ))
                 }
                 GeneratedTable::Function(function) => {
-                    crate::set_returning::table_function(function, &label, alias_given, &evaluator)?
+                    let bound = crate::set_returning::bind_function(function, &evaluator)?;
+                    Filling::Streamed {
+                        columns: bound.columns(function, &label, alias_given),
+                        function: bound,
+                    }
                 }
                 GeneratedTable::Values(list) => {
-                    crate::set_returning::values_rows(list, &evaluator)?
+                    Filling::Rows(crate::set_returning::values_rows(list, &evaluator)?)
                 }
-                GeneratedTable::Expansion(_) => crate::set_returning::GeneratedRows {
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                },
+                GeneratedTable::Expansion(_) => {
+                    Filling::Rows(crate::set_returning::GeneratedRows::empty(Vec::new()))
+                }
             }
         }
     };
     let renamed = match &generated {
         GeneratedTable::Function(function) => function.column_names.clone(),
-        _ => Vec::new(),
+        GeneratedTable::Values(list) => list.column_names.clone(),
+        GeneratedTable::Expansion(_) => Vec::new(),
     };
-    let temp = prepared.temp.add(
-        env.names,
-        Intermediate {
-            columns: &built.columns,
-            renamed: &renamed,
-            label: &label,
-            dialect: Dialect::PostgreSql,
-            position,
-        },
-        built.rows,
-    )?;
+    let (columns, rows, streamed, charge) = match built {
+        Filling::Rows(built) => (built.columns, built.rows, None, Some(built.charge)),
+        Filling::Streamed { columns, function } => (columns, Vec::new(), Some(function), None),
+    };
+    let shape = Intermediate {
+        columns: &columns,
+        renamed: &renamed,
+        label: &label,
+        dialect: Dialect::PostgreSql,
+        position,
+    };
+    let temp = match streamed {
+        Some(function) => prepared
+            .temp
+            .add_streamed(env.names, shape, |store| function.generate(store))?,
+        None => prepared.temp.add(env.names, shape, rows)?,
+    };
+    drop(charge);
     reference.name.text = temp;
     reference.alias = Some(label);
     if deferred {

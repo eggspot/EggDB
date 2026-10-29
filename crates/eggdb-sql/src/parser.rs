@@ -1641,10 +1641,20 @@ impl<'t> Parser<'t> {
     }
 
     pub(crate) fn cast_type(&mut self) -> SqlResult<SqlType> {
-        if !self.postgresql() {
-            return self.sql_type();
-        }
         let position = self.position();
+        let (sql_type, array) = self.cast_target()?;
+        if !array {
+            return Ok(sql_type);
+        }
+        crate::arrays::ArrayElement::required(sql_type)
+            .map(SqlType::Array)
+            .map_err(|error| error.at(position))
+    }
+
+    fn cast_target(&mut self) -> SqlResult<(SqlType, bool)> {
+        if !self.postgresql() {
+            return self.sql_type().map(|sql_type| (sql_type, false));
+        }
         let sql_type = self.element_type()?;
         let array = if self.take_word("array") {
             if self.peek_kind() == &TokenKind::LeftBracket {
@@ -1658,12 +1668,7 @@ impl<'t> Parser<'t> {
             }
             bracketed
         };
-        if !array {
-            return Ok(sql_type);
-        }
-        crate::arrays::ArrayElement::required(sql_type)
-            .map(SqlType::Array)
-            .map_err(|error| error.at(position))
+        Ok((sql_type, array))
     }
 
     fn array_dimension(&mut self) -> SqlResult<()> {
@@ -2832,8 +2837,24 @@ impl<'t> Parser<'t> {
                     };
                     continue;
                 }
-                let sql_type = self.cast_type()?;
+                let type_position = self.position();
+                let (sql_type, array) = self.cast_target()?;
                 let position = expr.position;
+                if array && crate::arrays::ArrayElement::of(sql_type).is_none() {
+                    let Some(cast) = elements_cast(expr, sql_type) else {
+                        return Err(crate::arrays::unsupported_element(sql_type).at(type_position));
+                    };
+                    expr = cast;
+                    continue;
+                }
+                let sql_type = if array {
+                    SqlType::Array(
+                        crate::arrays::ArrayElement::required(sql_type)
+                            .map_err(|error| error.at(type_position))?,
+                    )
+                } else {
+                    sql_type
+                };
                 expr = Expr {
                     kind: ExprKind::Cast {
                         expr: Box::new(expr),
@@ -3504,6 +3525,33 @@ fn truth(expr: Expr, test: TruthTest, negated: bool) -> ExprKind {
         test,
         negated,
     }
+}
+
+fn elements_cast(expr: Expr, sql_type: SqlType) -> Option<Expr> {
+    let position = expr.position;
+    let ExprKind::Function { name, arguments } = expr.kind else {
+        return None;
+    };
+    if name != "array_constructor" {
+        return None;
+    }
+    let arguments = arguments
+        .into_iter()
+        .map(|item| {
+            let position = item.position;
+            Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(item),
+                    sql_type,
+                },
+                position,
+            }
+        })
+        .collect();
+    Some(Expr {
+        kind: ExprKind::Function { name, arguments },
+        position,
+    })
 }
 
 fn too_deep(position: usize) -> SqlError {

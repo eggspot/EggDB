@@ -449,6 +449,7 @@ pub(crate) enum GeneratedTable {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ValuesList {
     pub(crate) rows: Vec<Vec<Expr>>,
+    pub(crate) column_names: Vec<Name>,
     pub(crate) position: usize,
 }
 

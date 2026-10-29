@@ -172,3 +172,91 @@ fn generated_rows_feed_aggregates_and_regular_expressions() {
         "count\n12\nSELECT 1"
     );
 }
+
+#[test]
+fn a_function_naming_any_sibling_from_item_is_0a000_even_when_the_outer_query_has_that_name() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE t1 (x integer PRIMARY KEY)").unwrap();
+    run(&mut session, "CREATE TABLE t2 (y integer PRIMARY KEY)").unwrap();
+    run(&mut session, "INSERT INTO t1 VALUES (1)").unwrap();
+    run(&mut session, "INSERT INTO t2 VALUES (2), (3)").unwrap();
+    for sql in [
+        "SELECT t2.y, (SELECT count(*) FROM t2, generate_series(t1.x, t2.y) g) FROM t1, t2 ORDER BY 1",
+        "SELECT t2.y, (SELECT count(*) FROM t2, generate_series(t1.x, y) g) FROM t1, t2 ORDER BY 1",
+        "SELECT * FROM generate_series(1, 2) g JOIN generate_series(1, g.g) h ON true",
+        "SELECT * FROM generate_series(1, 2) g, generate_series(1, g) h",
+        "SELECT * FROM generate_series(1, g.g) h, generate_series(1, 2) g",
+        "SELECT * FROM (SELECT 2 AS n) d, generate_series(1, d.n) h",
+        "SELECT * FROM (SELECT 2 AS n) d, generate_series(1, n) h",
+        "SELECT * FROM (VALUES (2)) v(n), generate_series(1, n + 1) h",
+        "SELECT * FROM t1, generate_series(1, 1 + abs(x)) h",
+    ] {
+        assert_eq!(state(&mut session, sql), "0A000", "{sql}");
+    }
+}
+
+#[test]
+fn a_values_list_in_from_names_the_outer_query_and_never_its_siblings() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE t1 (x integer PRIMARY KEY)").unwrap();
+    run(&mut session, "CREATE TABLE t2 (y integer PRIMARY KEY)").unwrap();
+    run(&mut session, "INSERT INTO t1 VALUES (1)").unwrap();
+    run(&mut session, "INSERT INTO t2 VALUES (2), (3)").unwrap();
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT x, (SELECT max(c) FROM (VALUES (x), (2)) v(c)) FROM (VALUES (1),(3)) t(x) ORDER BY 1"
+        )
+        .unwrap(),
+        "x|max\n1|2\n3|3\nSELECT 2"
+    );
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT t2.y, (SELECT count(*) FROM t2, (VALUES (t2.y)) v) FROM t1, t2 ORDER BY 1"
+        )
+        .unwrap(),
+        "y|count\n2|2\n3|2\nSELECT 2"
+    );
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS v(n) ORDER BY n DESC"
+        )
+        .unwrap(),
+        "n|column2\n2|b\n1|a\nSELECT 2"
+    );
+    assert_eq!(
+        state(&mut session, "SELECT * FROM (VALUES (1)) v(a, b)"),
+        "42P10"
+    );
+    assert_eq!(
+        state(&mut session, "SELECT * FROM t2, (VALUES (y)) v"),
+        "42703"
+    );
+}
+
+#[test]
+fn rows_go_into_the_intermediate_once_and_every_copy_held_is_charged() {
+    let budget = 3600 * 1024;
+    for (sql, fits) in [
+        ("SELECT count(*) FROM generate_series(1, 20000)", true),
+        (
+            "SELECT count(*) FROM (SELECT generate_series(1, 20000)) g",
+            false,
+        ),
+    ] {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        let _shared = share_statement_memory();
+        let mut held = WorkMemory::new();
+        held.charge(WORK_MEMORY_LIMIT - budget).unwrap();
+        if fits {
+            assert_eq!(run(&mut session, sql).unwrap(), "count\n20000\nSELECT 1");
+        } else {
+            assert_eq!(state(&mut session, sql), "53200", "{sql}");
+        }
+    }
+}

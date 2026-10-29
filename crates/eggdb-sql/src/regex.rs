@@ -112,6 +112,7 @@ impl NamedClass {
 enum ClassItem {
     Range(char, char),
     Named(NamedClass),
+    Excluded(NamedClass),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +133,7 @@ impl CharClass {
         self.items.iter().any(|item| match *item {
             ClassItem::Range(low, high) => low <= character && character <= high,
             ClassItem::Named(named) => named.contains(character),
+            ClassItem::Excluded(named) => !named.contains(character),
         })
     }
 
@@ -528,11 +530,11 @@ impl PatternParser {
             }
             first = false;
             match self.bracket_element()? {
-                BracketElement::Named(named) => {
+                BracketElement::Class(item) => {
                     if self.peek() == Some('-') && self.peek_at(1).is_some_and(|next| next != ']') {
                         return Err(invalid("invalid character range"));
                     }
-                    items.push(ClassItem::Named(named));
+                    items.push(item);
                 }
                 BracketElement::Character(low) => {
                     if self.peek() == Some('-') && self.peek_at(1).is_some_and(|next| next != ']') {
@@ -562,19 +564,17 @@ impl PatternParser {
             match self.peek() {
                 Some(':') => {
                     self.at += 1;
-                    let name = self.until_closing(':')?;
+                    let name = self.until_closing(':', "invalid character class")?;
                     return NamedClass::named(&name)
-                        .map(BracketElement::Named)
+                        .map(|named| BracketElement::Class(ClassItem::Named(named)))
                         .ok_or_else(|| invalid("invalid character class"));
                 }
                 Some(delimiter @ ('.' | '=')) => {
                     self.at += 1;
-                    let name = self.until_closing(delimiter)?;
-                    let mut characters = name.chars();
-                    return match (characters.next(), characters.next()) {
-                        (Some(only), None) => Ok(BracketElement::Character(only)),
-                        _ => Err(unsupported("multi-character collating elements")),
-                    };
+                    let name = self.until_closing(delimiter, "invalid collating element")?;
+                    return collating_element(&name)
+                        .map(BracketElement::Character)
+                        .ok_or_else(|| invalid("invalid collating element"));
                 }
                 _ => return Ok(BracketElement::Character('[')),
             }
@@ -585,17 +585,23 @@ impl PatternParser {
             };
             self.at += 1;
             return match escaped {
-                'd' => Ok(BracketElement::Named(NamedClass::Digit)),
-                'w' => Ok(BracketElement::Named(NamedClass::Word)),
-                's' => Ok(BracketElement::Named(NamedClass::Space)),
-                'D' | 'W' | 'S' => Err(invalid("invalid escape \\ sequence")),
+                'd' => Ok(BracketElement::Class(ClassItem::Named(NamedClass::Digit))),
+                'w' => Ok(BracketElement::Class(ClassItem::Named(NamedClass::Word))),
+                's' => Ok(BracketElement::Class(ClassItem::Named(NamedClass::Space))),
+                'D' => Ok(BracketElement::Class(ClassItem::Excluded(
+                    NamedClass::Digit,
+                ))),
+                'W' => Ok(BracketElement::Class(ClassItem::Excluded(NamedClass::Word))),
+                'S' => Ok(BracketElement::Class(ClassItem::Excluded(
+                    NamedClass::Space,
+                ))),
                 other => self.escaped_character(other).map(BracketElement::Character),
             };
         }
         Ok(BracketElement::Character(character))
     }
 
-    fn until_closing(&mut self, delimiter: char) -> SqlResult<String> {
+    fn until_closing(&mut self, delimiter: char, too_long: &str) -> SqlResult<String> {
         let mut name = String::new();
         loop {
             match (self.peek(), self.peek_at(1)) {
@@ -607,7 +613,7 @@ impl PatternParser {
                     self.at += 1;
                     name.push(character);
                     if name.len() > 32 {
-                        return Err(invalid("invalid character class"));
+                        return Err(invalid(too_long));
                     }
                 }
                 (None, _) => return Err(invalid("brackets [] not balanced")),
@@ -618,7 +624,116 @@ impl PatternParser {
 
 enum BracketElement {
     Character(char),
-    Named(NamedClass),
+    Class(ClassItem),
+}
+
+const COLLATING_ELEMENTS: &[(&str, char)] = &[
+    ("NUL", '\u{0}'),
+    ("SOH", '\u{1}'),
+    ("STX", '\u{2}'),
+    ("ETX", '\u{3}'),
+    ("EOT", '\u{4}'),
+    ("ENQ", '\u{5}'),
+    ("ACK", '\u{6}'),
+    ("BEL", '\u{7}'),
+    ("alert", '\u{7}'),
+    ("BS", '\u{8}'),
+    ("backspace", '\u{8}'),
+    ("HT", '\t'),
+    ("tab", '\t'),
+    ("LF", '\n'),
+    ("newline", '\n'),
+    ("VT", '\u{b}'),
+    ("vertical-tab", '\u{b}'),
+    ("FF", '\u{c}'),
+    ("form-feed", '\u{c}'),
+    ("CR", '\r'),
+    ("carriage-return", '\r'),
+    ("SO", '\u{e}'),
+    ("SI", '\u{f}'),
+    ("DLE", '\u{10}'),
+    ("DC1", '\u{11}'),
+    ("DC2", '\u{12}'),
+    ("DC3", '\u{13}'),
+    ("DC4", '\u{14}'),
+    ("NAK", '\u{15}'),
+    ("SYN", '\u{16}'),
+    ("ETB", '\u{17}'),
+    ("CAN", '\u{18}'),
+    ("EM", '\u{19}'),
+    ("SUB", '\u{1a}'),
+    ("ESC", '\u{1b}'),
+    ("IS4", '\u{1c}'),
+    ("FS", '\u{1c}'),
+    ("IS3", '\u{1d}'),
+    ("GS", '\u{1d}'),
+    ("IS2", '\u{1e}'),
+    ("RS", '\u{1e}'),
+    ("IS1", '\u{1f}'),
+    ("US", '\u{1f}'),
+    ("space", ' '),
+    ("exclamation-mark", '!'),
+    ("quotation-mark", '"'),
+    ("number-sign", '#'),
+    ("dollar-sign", '$'),
+    ("percent-sign", '%'),
+    ("ampersand", '&'),
+    ("apostrophe", '\''),
+    ("left-parenthesis", '('),
+    ("right-parenthesis", ')'),
+    ("asterisk", '*'),
+    ("plus-sign", '+'),
+    ("comma", ','),
+    ("hyphen", '-'),
+    ("hyphen-minus", '-'),
+    ("period", '.'),
+    ("full-stop", '.'),
+    ("slash", '/'),
+    ("solidus", '/'),
+    ("zero", '0'),
+    ("one", '1'),
+    ("two", '2'),
+    ("three", '3'),
+    ("four", '4'),
+    ("five", '5'),
+    ("six", '6'),
+    ("seven", '7'),
+    ("eight", '8'),
+    ("nine", '9'),
+    ("colon", ':'),
+    ("semicolon", ';'),
+    ("less-than-sign", '<'),
+    ("equals-sign", '='),
+    ("greater-than-sign", '>'),
+    ("question-mark", '?'),
+    ("commercial-at", '@'),
+    ("left-square-bracket", '['),
+    ("backslash", '\\'),
+    ("reverse-solidus", '\\'),
+    ("right-square-bracket", ']'),
+    ("circumflex", '^'),
+    ("circumflex-accent", '^'),
+    ("underscore", '_'),
+    ("low-line", '_'),
+    ("grave-accent", '`'),
+    ("left-brace", '{'),
+    ("left-curly-bracket", '{'),
+    ("vertical-line", '|'),
+    ("right-brace", '}'),
+    ("right-curly-bracket", '}'),
+    ("tilde", '~'),
+    ("DEL", '\u{7f}'),
+];
+
+fn collating_element(name: &str) -> Option<char> {
+    let mut characters = name.chars();
+    if let (Some(only), None) = (characters.next(), characters.next()) {
+        return Some(only);
+    }
+    COLLATING_ELEMENTS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, character)| *character)
 }
 
 struct Compiler {
