@@ -364,8 +364,67 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  pg-apps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-pg-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Start the official postgres:17 container (test oracle only, never shipped)
+        run: |
+          docker run -d --name pg --network host -e POSTGRES_USER=eggdb -e POSTGRES_PASSWORD=apps-oracle \
+            -e POSTGRES_DB=eggdb -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" postgres:17
+      - name: Install pgjdbc, psycopg 3 and SQLAlchemy (test clients only, never shipped)
+        run: |
+          mkdir -p "$RUNNER_TEMP/clients"
+          curl -fsSL -o "$RUNNER_TEMP/clients/postgresql.jar" \
+            https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar
+          python3 -m venv "$RUNNER_TEMP/clients/venv"
+          "$RUNNER_TEMP/clients/venv/bin/pip" install --quiet "psycopg[binary]==3.2.3" "SQLAlchemy==2.0.36"
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in $(seq 1 60); do
+            docker exec pg pg_isready -h 127.0.0.1 -U eggdb -q && break
+            sleep 1
+          done
+          docker exec pg pg_isready -h 127.0.0.1 -U eggdb
+      - name: Run pgjdbc, psycopg 3 and SQLAlchemy Core on PostgreSQL 17 and on EggDB and compare the bytes
+        env:
+          PG_CONTAINER: pg
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: eggdb
+          PGPASSWORD: apps-oracle
+          PGJDBC_JAR: ${{ runner.temp }}/clients/postgresql.jar
+          PYTHON: ${{ runner.temp }}/clients/venv/bin/python
+        run: scripts/pg-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-apps"
+      - name: Keep both outputs and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-apps-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/pg-apps/*.out
+            ${{ runner.temp }}/pg-apps/serve.err
+            ${{ runner.temp }}/pg-apps/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions]
+    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
