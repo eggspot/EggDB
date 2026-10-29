@@ -353,12 +353,8 @@ fn files_the_restore_cannot_use_are_refused() {
         b"left over"
     );
     for (dialect, said) in [
-        (
-            "sqlserver",
-            "comes in a later release (docs/roadmap.md, item 40)",
-        ),
         ("oracle", "item 43"),
-        ("mysql", "--dialect must be postgresql"),
+        ("mysql", "--dialect must be postgresql or sqlserver"),
     ] {
         let output = eggdb(
             &[

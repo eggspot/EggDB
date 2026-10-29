@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 const STAGING_SUFFIX: &str = ".restoring";
 const READ_BUFFER_BYTES: usize = 64 * 1024;
-const HEAD_BYTES: usize = 512;
+const HEAD_BYTES: usize = 64 * 1024;
 const SHOWN_TABLES: usize = 20;
 const SHOWN_DESCRIPTION_CHARS: usize = 60;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
@@ -28,7 +28,28 @@ enum Archive {
     Directory,
     Tar { pg_dump: bool },
     Compressed(&'static str),
+    Binary { kind: BinaryKind },
+    Utf16Text,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinaryKind {
+    TapeBackup,
+    Zip,
+    NulBytes,
+}
+
+const SQLSERVER_FILE_WORDS: [(&str, &str); 7] = [
+    ("bak", "a SQL Server backup"),
+    ("trn", "a SQL Server log backup"),
+    ("bacpac", "a BACPAC package"),
+    ("dacpac", "a DACPAC package"),
+    ("mdf", "a SQL Server data file"),
+    ("ndf", "a SQL Server data file"),
+    ("ldf", "a SQL Server log file"),
+];
+
+const SCRIPT_ROUTE: &str = "Restore it into a SQL Server you run, script it from there (SSMS: Tasks, Generate Scripts, Schema and data), then restore the script (docs/migrate.md).";
 
 struct Outcome<'r> {
     report: &'r RestoreReport,
@@ -36,6 +57,7 @@ struct Outcome<'r> {
     file_display: &'r str,
     dump_shown: &'r str,
     dump_display: &'r str,
+    dialect: Dialect,
     created: bool,
     left_nothing: bool,
     elapsed: Duration,
@@ -64,7 +86,13 @@ impl Session<'_> {
         if let Some(path) = &path {
             if path.is_dir() {
                 if path.join("toc.dat").is_file() {
-                    return Err(archive_failure(Archive::Directory, &dump_shown, true));
+                    return Err(archive_failure(
+                        Archive::Directory,
+                        &dump_shown,
+                        true,
+                        None,
+                        &self.file,
+                    ));
                 }
                 return Err(usage(format!(
                     "cannot restore {dump_shown}: it is a directory, not a dump"
@@ -84,8 +112,20 @@ impl Session<'_> {
         };
         let head =
             read_head(raw).map_err(|error| usage(format!("cannot read {dump_shown}: {error}")))?;
-        if let Some(archive) = archive_of(&head) {
-            return Err(archive_failure(archive, &dump_shown, path.is_some()));
+        let dialect = self.request.dialect;
+        if let Some(archive) = archive_of(&head, dialect) {
+            let extension = path
+                .as_ref()
+                .and_then(|path| path.extension())
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase);
+            return Err(archive_failure(
+                archive,
+                &dump_shown,
+                path.is_some(),
+                extension.as_deref(),
+                &self.file,
+            ));
         }
         let mut input = BufReader::with_capacity(READ_BUFFER_BYTES, Cursor::new(head).chain(raw));
         let target = self.request.file.clone();
@@ -135,13 +175,15 @@ impl Session<'_> {
         })?;
         let started = Instant::now();
         let mut progress = Progress::new(self.stderr_is_terminal, &dump_shown);
-        let report = run_restore(
+        let mut report = run_restore(
             &db,
             &mut input,
+            dialect,
             self.request.restore.keep_going,
             &mut progress,
             &mut self.messages,
         );
+        report.scripts = vec![dump_display.clone()];
         progress.clear(&mut self.messages);
         let elapsed = started.elapsed();
         let stopped = report.error.is_some();
@@ -169,6 +211,7 @@ impl Session<'_> {
             file_display: &file_display,
             dump_shown: &dump_shown,
             dump_display: &dump_display,
+            dialect,
             created: staging.is_some(),
             left_nothing,
             elapsed,
@@ -283,12 +326,13 @@ impl Session<'_> {
 fn run_restore(
     db: &Database,
     input: &mut dyn std::io::BufRead,
+    dialect: Dialect,
     keep_going: bool,
     progress: &mut Progress,
     messages: &mut Output<'_>,
 ) -> RestoreReport {
     let store = DatabaseStore(db);
-    let mut session = store.session(Dialect::PostgreSql);
+    let mut session = store.session(dialect);
     let report = eggdb_sql::restore_dump(
         &mut session,
         input,
@@ -329,7 +373,7 @@ fn read_head(input: &mut dyn Read) -> std::io::Result<Vec<u8>> {
     Ok(head)
 }
 
-fn archive_of(head: &[u8]) -> Option<Archive> {
+fn archive_of(head: &[u8], dialect: Dialect) -> Option<Archive> {
     if head.starts_with(b"PGDMP") {
         return Some(Archive::Custom);
     }
@@ -347,12 +391,106 @@ fn archive_of(head: &[u8]) -> Option<Archive> {
     if head.starts_with(&[0x04, 0x22, 0x4d, 0x18]) {
         return Some(Archive::Compressed("lz4"));
     }
+    if head.starts_with(b"TAPE") {
+        return Some(Archive::Binary {
+            kind: BinaryKind::TapeBackup,
+        });
+    }
+    if head.starts_with(b"PK\x03\x04") {
+        return Some(Archive::Binary {
+            kind: BinaryKind::Zip,
+        });
+    }
+    if head.starts_with(b"\xFF\xFE") || head.starts_with(b"\xFE\xFF") {
+        return (dialect == Dialect::PostgreSql).then_some(Archive::Utf16Text);
+    }
+    if head.contains(&0) {
+        return Some(Archive::Binary {
+            kind: BinaryKind::NulBytes,
+        });
+    }
     None
 }
 
-fn archive_failure(archive: Archive, shown: &str, named: bool) -> Failure {
+fn sqlserver_file_words(extension: Option<&str>) -> Option<&'static str> {
+    let extension = extension?;
+    SQLSERVER_FILE_WORDS
+        .iter()
+        .find(|(known, _)| *known == extension)
+        .map(|(_, words)| *words)
+}
+
+fn binary_failure(
+    kind: BinaryKind,
+    shown: &str,
+    named: bool,
+    extension: Option<&str>,
+    file: &str,
+) -> Failure {
+    let target = if named { shown } else { "<script.sql>" };
+    let script_command = format!("eggdb restore --dialect sqlserver --create {file} <script.sql>");
+    let words = sqlserver_file_words(extension);
+    let (what, advice, try_command) = match kind {
+        BinaryKind::TapeBackup => (
+            format!(
+                "{} (it starts with TAPE)",
+                words.unwrap_or("a SQL Server backup")
+            ),
+            SCRIPT_ROUTE.to_owned(),
+            Some(script_command),
+        ),
+        BinaryKind::Zip if matches!(extension, Some("bacpac" | "dacpac")) => (
+            format!("{} (a zip archive)", words.unwrap_or("a BACPAC or DACPAC package")),
+            "Import it into a SQL Server you run with sqlpackage /Action:Import first, script it from there (SSMS: Tasks, Generate Scripts, Schema and data), then restore the script (docs/migrate.md).".to_owned(),
+            Some(script_command),
+        ),
+        BinaryKind::Zip => (
+            "a zip archive, not a script".to_owned(),
+            "Unpack it first.".to_owned(),
+            Some(format!("unzip -l {target}")),
+        ),
+        BinaryKind::NulBytes if words.is_some() => (
+            words.unwrap_or_default().to_owned(),
+            "Attach it to a SQL Server you run, script it from there (SSMS: Tasks, Generate Scripts, Schema and data), then restore the script (docs/migrate.md).".to_owned(),
+            Some(script_command),
+        ),
+        BinaryKind::NulBytes => (
+            "binary data (it holds NUL bytes), not a script".to_owned(),
+            "If it is a backup, restore it into the database that made it and script it from there (docs/migrate.md).".to_owned(),
+            None,
+        ),
+    };
+    Failure::Database {
+        message: format!(
+            "cannot restore {shown}: it is {what}, which eggdb restore does not read. {advice}"
+        ),
+        try_command,
+        exit: Exit::Usage,
+    }
+}
+
+fn archive_failure(
+    archive: Archive,
+    shown: &str,
+    named: bool,
+    extension: Option<&str>,
+    file: &str,
+) -> Failure {
     let target = if named { shown } else { "<archive>" };
     let (what, try_command) = match archive {
+        Archive::Binary { kind } => return binary_failure(kind, shown, named, extension, file),
+        Archive::Utf16Text => {
+            let target = if named { shown } else { "<script.sql>" };
+            return Failure::Database {
+                message: format!(
+                    "cannot restore {shown}: it is UTF-16 text, which pg_dump never writes and SSMS Generate Scripts does. Add --dialect sqlserver."
+                ),
+                try_command: Some(format!(
+                    "eggdb restore --dialect sqlserver --create {file} {target}"
+                )),
+                exit: Exit::Usage,
+            };
+        }
         Archive::Custom => (
             "a pg_dump custom-format archive (it starts with PGDMP)".to_owned(),
             format!("pg_restore -f dump.sql {target}"),
@@ -449,7 +587,23 @@ fn ignored_total(report: &RestoreReport) -> u64 {
         + ignored.meta_commands_not_listed
 }
 
-fn ignored_summary(report: &RestoreReport) -> String {
+fn source_word(dialect: Dialect) -> &'static str {
+    if dialect == Dialect::PostgreSql {
+        "dump"
+    } else {
+        "script"
+    }
+}
+
+fn client_commands_word(dialect: Dialect) -> &'static str {
+    if dialect == Dialect::PostgreSql {
+        "meta-commands"
+    } else {
+        "client commands"
+    }
+}
+
+fn ignored_summary(report: &RestoreReport, dialect: Dialect) -> String {
     let ignored = &report.ignored;
     let mut parts = Vec::new();
     for (label, count) in [
@@ -467,7 +621,7 @@ fn ignored_summary(report: &RestoreReport) -> String {
     }
     let meta = ignored.meta_commands.len() as u64 + ignored.meta_commands_not_listed;
     if meta > 0 {
-        parts.push(format!("meta-commands {meta}"));
+        parts.push(format!("{} {meta}", client_commands_word(dialect)));
     }
     parts.join(", ")
 }
@@ -525,11 +679,22 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
     }
     let skipped = report.skipped_count();
     let consequences = report.consequence_count();
-    let listed = format!(
-        "{} skipped and {}, listed above.",
-        counted(skipped, "object", "objects"),
-        counted(consequences, "consequence", "consequences")
-    );
+    let differences = report.difference_count();
+    let source = source_word(outcome.dialect);
+    let listed = if differences > 0 {
+        format!(
+            "{} skipped, {} and {}, listed above.",
+            counted(skipped, "object", "objects"),
+            counted(consequences, "consequence", "consequences"),
+            counted(differences, "known difference", "known differences")
+        )
+    } else {
+        format!(
+            "{} skipped and {}, listed above.",
+            counted(skipped, "object", "objects"),
+            counted(consequences, "consequence", "consequences")
+        )
+    };
     let text = if report.tables_skipped > 0 || report.rows_skipped > 0 {
         format!(
             "{} of {} tables and {} of {} rows are in {file}; {listed}",
@@ -538,10 +703,10 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
             render::count(report.rows),
             render::count(total_rows(report)),
         )
-    } else if skipped > 0 || consequences > 0 {
-        format!("every table and row of the dump is in {file}; {listed}")
+    } else if skipped > 0 || consequences > 0 || differences > 0 {
+        format!("every table and row of the {source} is in {file}; {listed}")
     } else {
-        format!("every table and row of the dump is in {file}.")
+        format!("every table and row of the {source} is in {file}.")
     };
     ("ok:", Style::Green, text)
 }
@@ -640,6 +805,13 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
         "consequences",
         &render::count(report.consequence_count()),
     );
+    if outcome.dialect != Dialect::PostgreSql {
+        fact(
+            out,
+            "differences",
+            &render::count(report.difference_count()),
+        );
+    }
     let ignored = ignored_total(report);
     fact(
         out,
@@ -647,7 +819,11 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
         &if ignored == 0 {
             "0".to_owned()
         } else {
-            format!("{} ({})", render::count(ignored), ignored_summary(report))
+            format!(
+                "{} ({})",
+                render::count(ignored),
+                ignored_summary(report, outcome.dialect)
+            )
         },
     );
     if !report.rows_per_table.is_empty() {
@@ -722,6 +898,21 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
             .collect();
         listed_lines(out, &rows, report.consequences_not_listed, "consequences");
     }
+    if !report.differences.is_empty() {
+        out.text("known differences (restored, but not as the source had it)\n");
+        let rows: Vec<(u64, String, String)> = report
+            .differences
+            .iter()
+            .map(|difference| {
+                (
+                    difference.line,
+                    difference.object.clone(),
+                    difference.difference.clone(),
+                )
+            })
+            .collect();
+        listed_lines(out, &rows, report.differences_not_listed, "differences");
+    }
     let failures: Vec<(u64, String, String)> = report
         .errors
         .iter()
@@ -744,12 +935,12 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
     }
     if ignored > 0 {
         out.text("ignored\n");
-        ignored_lines(out, report);
+        ignored_lines(out, report, outcome.dialect);
     }
     verdict_line(out, outcome);
 }
 
-fn ignored_lines(out: &mut Output<'_>, report: &RestoreReport) {
+fn ignored_lines(out: &mut Output<'_>, report: &RestoreReport, dialect: Dialect) {
     let ignored = &report.ignored;
     let mut lines: Vec<(String, String)> = Vec::new();
     if ignored.owner_to > 0 {
@@ -803,11 +994,17 @@ fn ignored_lines(out: &mut Output<'_>, report: &RestoreReport) {
         lines.push((command.to_owned(), text));
     }
     if ignored.meta_commands_not_listed > 0 {
+        let label = if dialect == Dialect::PostgreSql {
+            "\\…"
+        } else {
+            ":…"
+        };
         lines.push((
-            "\\…".to_owned(),
+            label.to_owned(),
             format!(
-                "{} more meta-commands, never run",
-                render::count(ignored.meta_commands_not_listed)
+                "{} more {}, never run",
+                render::count(ignored.meta_commands_not_listed),
+                client_commands_word(dialect)
             ),
         ));
     }
@@ -832,7 +1029,8 @@ fn json_error(error: &eggdb_sql::RestoreError, stopped: bool) -> String {
         .number("line", error.line)
         .string("statement", &error.statement)
         .string("error", error.error.message())
-        .string("sqlstate", error.error.state().code());
+        .string("sqlstate", error.error.state().code())
+        .number("script", u64::from(error.script));
     if stopped {
         object = object.number("committed_statements", error.statements_before);
     }
@@ -862,7 +1060,8 @@ fn json_report(outcome: &Outcome<'_>) -> String {
                 .number("line", object.line)
                 .string("kind", &object.kind)
                 .string("name", &object.name)
-                .string("reason", &object.reason);
+                .string("reason", &object.reason)
+                .number("script", u64::from(object.script));
             if let Some(detail) = &object.detail {
                 json = json.string("detail", detail);
             }
@@ -882,6 +1081,7 @@ fn json_report(outcome: &Outcome<'_>) -> String {
                 .string("uses", &consequence.uses)
                 .string("error", consequence.error.message())
                 .string("sqlstate", consequence.error.state().code())
+                .number("script", u64::from(consequence.script))
                 .object()
         })
         .collect();
@@ -894,6 +1094,7 @@ fn json_report(outcome: &Outcome<'_>) -> String {
                 .number("line", note.line)
                 .string("command", &note.command)
                 .string("reason", &note.reason)
+                .number("script", u64::from(note.script))
                 .object()
         })
         .collect();
@@ -922,13 +1123,26 @@ fn json_report(outcome: &Outcome<'_>) -> String {
         .iter()
         .map(|error| json_error(error, false))
         .collect();
+    let differences: Vec<String> = report
+        .differences
+        .iter()
+        .map(|difference| {
+            JsonObject::new()
+                .number("line", difference.line)
+                .string("object", &difference.object)
+                .string("difference", &difference.difference)
+                .number("script", u64::from(difference.script))
+                .object()
+        })
+        .collect();
     let (_, _, verdict_text) = verdict(outcome);
     JsonObject::new()
         .boolean("ok", report.succeeded())
         .string("file", outcome.file_display)
         .string("dump", outcome.dump_display)
+        .raw("scripts", &json_string_list(&report.scripts))
         .boolean("created", outcome.created && !outcome.left_nothing)
-        .string("dialect", "postgresql")
+        .string("dialect", outcome.dialect.name())
         .number("statements", report.statements)
         .number(
             "elapsed_ms",
@@ -950,6 +1164,8 @@ fn json_report(outcome: &Outcome<'_>) -> String {
         .number("skipped_not_listed", report.skipped_not_listed)
         .raw("consequences", &format!("[{}]", consequences.join(",")))
         .number("consequences_not_listed", report.consequences_not_listed)
+        .raw("differences", &format!("[{}]", differences.join(",")))
+        .number("differences_not_listed", report.differences_not_listed)
         .raw("ignored", &ignored_json)
         .raw("errors", &format!("[{}]", errors.join(",")))
         .number("errors_not_listed", report.errors_not_listed)
@@ -1015,24 +1231,57 @@ impl Progress {
 
 #[cfg(test)]
 mod tests {
-    use super::{Archive, archive_of, cut, plural};
+    use super::{Archive, BinaryKind, archive_of, cut, plural};
+    use eggdb_sql::Dialect;
 
     #[test]
     fn archives_are_known_by_their_first_bytes() {
-        assert_eq!(archive_of(b"PGDMP\x01\x10"), Some(Archive::Custom));
+        let postgresql = |head: &[u8]| archive_of(head, Dialect::PostgreSql);
+        assert_eq!(postgresql(b"PGDMP\x01\x10"), Some(Archive::Custom));
         let mut tar = vec![0u8; 512];
         tar[..8].copy_from_slice(b"toc.dat\0");
         tar[257..262].copy_from_slice(b"ustar");
-        assert_eq!(archive_of(&tar), Some(Archive::Tar { pg_dump: true }));
+        assert_eq!(postgresql(&tar), Some(Archive::Tar { pg_dump: true }));
         tar[..8].copy_from_slice(b"other\0\0\0");
-        assert_eq!(archive_of(&tar), Some(Archive::Tar { pg_dump: false }));
+        assert_eq!(postgresql(&tar), Some(Archive::Tar { pg_dump: false }));
         assert_eq!(
-            archive_of(&[0x1f, 0x8b, 8, 0]),
+            postgresql(&[0x1f, 0x8b, 8, 0]),
             Some(Archive::Compressed("gzip"))
         );
-        assert_eq!(archive_of(b"--\n-- PostgreSQL database dump\n"), None);
-        assert_eq!(archive_of(b""), None);
-        assert_eq!(archive_of(b"PGDM"), None);
+        assert_eq!(postgresql(b"--\n-- PostgreSQL database dump\n"), None);
+        assert_eq!(postgresql(b""), None);
+        assert_eq!(postgresql(b"PGDM"), None);
+    }
+
+    #[test]
+    fn sql_server_files_that_are_not_scripts_are_known_by_their_content() {
+        for dialect in [Dialect::PostgreSql, Dialect::SqlServer] {
+            assert_eq!(
+                archive_of(b"TAPE\0\0\x03\0", dialect),
+                Some(Archive::Binary {
+                    kind: BinaryKind::TapeBackup
+                })
+            );
+            assert_eq!(
+                archive_of(b"PK\x03\x04\x14\0", dialect),
+                Some(Archive::Binary {
+                    kind: BinaryKind::Zip
+                })
+            );
+            assert_eq!(
+                archive_of(b"\x01\x0f\0\0\0\0data", dialect),
+                Some(Archive::Binary {
+                    kind: BinaryKind::NulBytes
+                })
+            );
+            assert_eq!(archive_of(b"CREATE TABLE t (a int);\n", dialect), None);
+        }
+        let utf16 = b"\xFF\xFEU\0S\0E\0";
+        assert_eq!(
+            archive_of(utf16, Dialect::PostgreSql),
+            Some(Archive::Utf16Text)
+        );
+        assert_eq!(archive_of(utf16, Dialect::SqlServer), None);
     }
 
     #[test]

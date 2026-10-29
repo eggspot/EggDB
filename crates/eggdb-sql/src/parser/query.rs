@@ -102,6 +102,13 @@ impl Parser<'_> {
         let body = self.set_expression()?;
         let top = self.pending_top.take();
         let mut tail = self.query_tail()?;
+        if self.ignored_view_top && self.at_view_top_level() {
+            self.ignored_view_top = false;
+            if !matches!(body, SetExpr::Select(_)) {
+                return Err(super::sqlserver::not_supported("TOP ... PERCENT").at(position));
+            }
+            tail.order_by.clear();
+        }
         if let Some(top) = top {
             if !matches!(body, SetExpr::Select(_)) {
                 return Err(

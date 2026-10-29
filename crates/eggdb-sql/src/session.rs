@@ -1,7 +1,7 @@
 mod mysql;
 mod oracle;
 mod sqlite;
-mod sqlserver;
+pub(crate) mod sqlserver;
 
 pub use sqlserver::BatchStep;
 
@@ -297,6 +297,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     max_row_bytes: usize,
     batch_resume: Option<(usize, usize)>,
     sqlserver_status: crate::sqlserver_functions::SessionStatus,
+    identity_insert_table: Option<String>,
     statement_start: usize,
 }
 
@@ -333,6 +334,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             max_row_bytes: usize::MAX,
             batch_resume: None,
             sqlserver_status: crate::sqlserver_functions::SessionStatus::default(),
+            identity_insert_table: None,
             statement_start: 0,
         }
     }
@@ -879,20 +881,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         if parser.at_end() {
             return Ok(Err(OneStatementRefusal::Empty));
         }
-        let _constraints = crate::constraints::enter(
-            self.dialect,
-            !self.sqlite() || self.settings.sqlite.foreign_keys,
-            if self.mysql() {
-                self.settings.database.clone()
-            } else {
-                String::new()
-            },
-            if self.oracle() {
-                self.oracle_user()
-            } else {
-                String::new()
-            },
-        );
+        let _constraints = self.enter_constraints();
         let destructive = if parser.literal_rows().is_none() {
             match parser.statement()? {
                 Statement::Begin { .. } | Statement::Commit | Statement::Rollback => {
@@ -1001,20 +990,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             self.statement_start = parser.position();
             let _status = self.enter_sqlserver_status();
-            let _constraints = crate::constraints::enter(
-                self.dialect,
-                !self.sqlite() || self.settings.sqlite.foreign_keys,
-                if self.mysql() {
-                    self.settings.database.clone()
-                } else {
-                    String::new()
-                },
-                if self.oracle() {
-                    self.oracle_user()
-                } else {
-                    String::new()
-                },
-            );
+            let _constraints = self.enter_constraints();
             if let Some(mut rows) = parser.literal_rows() {
                 resume = parser.resume_point();
                 if self.batch_resume.is_some() {
@@ -1075,6 +1051,24 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 return Ok(Flow::Stopped);
             }
         }
+    }
+
+    fn enter_constraints(&self) -> crate::constraints::ContextGuard {
+        crate::constraints::enter(
+            self.dialect,
+            !self.sqlite() || self.settings.sqlite.foreign_keys,
+            if self.mysql() {
+                self.settings.database.clone()
+            } else {
+                String::new()
+            },
+            if self.oracle() {
+                self.oracle_user()
+            } else {
+                String::new()
+            },
+            self.identity_insert_table.clone(),
+        )
     }
 
     fn enter_search_path(&self, settings: &Arc<Settings>) -> crate::schemas::EnteredPath {

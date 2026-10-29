@@ -474,7 +474,8 @@ pub(crate) fn create_schema(
 ) -> SqlResult<QueryResult> {
     let tag = command_tag(dialect, "CREATE");
     check_new_schema_name(name, dialect)?;
-    if schema_exists(writer, &name.text)? || is_system_schema(&name.text) {
+    let owner_schema = dialect == Dialect::SqlServer && name.text == "dbo";
+    if schema_exists(writer, &name.text)? || is_system_schema(&name.text) || owner_schema {
         if if_not_exists {
             return Ok(QueryResult::command(tag).with_notice(format!(
                 "NOTICE:  schema \"{}\" already exists, skipping",

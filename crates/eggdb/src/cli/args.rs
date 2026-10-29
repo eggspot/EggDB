@@ -644,7 +644,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::KeepGoing => request.shell.keep_going = true,
             OptionName::Report => request.restore.report = Some(PathBuf::from(value)),
             OptionName::Dialect if command == CommandName::Restore => {
-                check_restore_dialect(value).map_err(usage)?;
+                request.dialect = check_restore_dialect(value).map_err(usage)?;
             }
             OptionName::Mode => {
                 let name = value.to_str().unwrap_or_default();
@@ -841,22 +841,28 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     Ok(())
 }
 
-fn check_restore_dialect(value: &OsStr) -> Result<(), String> {
-    match value.to_str().unwrap_or_default() {
-        "postgresql" => Ok(()),
-        "sqlserver" => Err(
-            "--dialect sqlserver comes in a later release (docs/roadmap.md, item 40); eggdb restore reads PostgreSQL dumps now."
-                .to_owned(),
-        ),
-        "oracle" => Err(
-            "--dialect oracle comes in a later release (docs/roadmap.md, item 43); eggdb restore reads PostgreSQL dumps now."
-                .to_owned(),
-        ),
-        _ => Err(format!(
-            "--dialect must be postgresql (sqlserver and oracle come in a later release), not '{}'",
-            shown(value)
-        )),
+const RESTORE_DIALECTS: [(&str, eggdb_sql::Dialect); 4] = [
+    ("postgresql", eggdb_sql::Dialect::PostgreSql),
+    ("sqlserver", eggdb_sql::Dialect::SqlServer),
+    ("mssql", eggdb_sql::Dialect::SqlServer),
+    ("tsql", eggdb_sql::Dialect::SqlServer),
+];
+
+fn check_restore_dialect(value: &OsStr) -> Result<eggdb_sql::Dialect, String> {
+    let name = value.to_str().unwrap_or_default();
+    if let Some((_, dialect)) = RESTORE_DIALECTS.iter().find(|(known, _)| *known == name) {
+        return Ok(*dialect);
     }
+    if name == "oracle" {
+        return Err(
+            "--dialect oracle comes in a later release (docs/roadmap.md, item 43); eggdb restore reads PostgreSQL dumps and SQL Server scripts now."
+                .to_owned(),
+        );
+    }
+    Err(format!(
+        "--dialect must be postgresql or sqlserver (oracle comes in a later release), not '{}'",
+        shown(value)
+    ))
 }
 
 fn export_file(argument: &OsStr) -> ExportFile {

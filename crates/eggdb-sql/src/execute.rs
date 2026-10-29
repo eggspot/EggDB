@@ -877,24 +877,28 @@ pub(crate) fn insert(
     let scope = scope_of(&table, &insert.table);
     let sqlserver = crate::constraints::current_dialect() == crate::dialect::Dialect::SqlServer;
     let identity = sqlserver.then(|| table.auto_increment_column()).flatten();
+    let identity_insert =
+        identity.is_some() && constraints::identity_insert_is_on(&insert.table.name.text);
     let rule = assignment_rule(sqlserver);
     let targets = match &insert.columns {
         Some(names) => {
             let targets = target_columns(&table, names)?;
             if let Some(identity) = identity
-                && targets.contains(&identity)
+                && targets.contains(&identity) != identity_insert
             {
-                return Err(SqlError::new(
-                    SqlState::INVALID_COLUMN_REFERENCE,
-                    format!(
-                        "Cannot insert explicit value for identity column in table '{}' when IDENTITY_INSERT is set to OFF.",
-                        crate::schemas::display(&insert.table.name.text)
-                    ),
-                )
-                .with_sqlserver_code(544)
-                .at(insert.table.name.position));
+                return Err(if identity_insert {
+                    identity_value_missing(&insert.table.name)
+                } else {
+                    identity_insert_off(&insert.table.name)
+                });
             }
             targets
+        }
+        None if identity_insert => {
+            return Err(match insert.source {
+                InsertSource::Values(_) => identity_needs_column_list(&insert.table.name),
+                InsertSource::DefaultValues => identity_value_missing(&insert.table.name),
+            });
         }
         None => (0..table.columns.len())
             .filter(|&index| Some(index) != identity)
@@ -945,6 +949,7 @@ pub(crate) fn insert(
     };
     let mut stored = StoredRows::new(&table);
     stored.checks = Some(&checks);
+    stored.identity_insert = identity_insert;
     stored.track = !matches!(insert.on_duplicate, OnDuplicate::Fail | OnDuplicate::Ignore)
         && constraints::is_referenced(&table);
     let mut inserted_children = ChildRows::new(&table);
@@ -1026,6 +1031,45 @@ pub(crate) fn insert(
     result.last_insert_rowid = last_rowid;
     result.last_identity_value = last_identity;
     Ok(result)
+}
+
+fn identity_column_error(code: u16, message: String, table: &Name) -> SqlError {
+    SqlError::new(SqlState::INVALID_COLUMN_REFERENCE, message)
+        .with_sqlserver_code(code)
+        .at(table.position)
+}
+
+fn identity_insert_off(table: &Name) -> SqlError {
+    identity_column_error(
+        544,
+        format!(
+            "Cannot insert explicit value for identity column in table '{}' when IDENTITY_INSERT is set to OFF.",
+            crate::schemas::display(&table.text)
+        ),
+        table,
+    )
+}
+
+fn identity_value_missing(table: &Name) -> SqlError {
+    identity_column_error(
+        545,
+        format!(
+            "Explicit value must be specified for identity column in table '{}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.",
+            crate::schemas::display(&table.text)
+        ),
+        table,
+    )
+}
+
+fn identity_needs_column_list(table: &Name) -> SqlError {
+    identity_column_error(
+        8101,
+        format!(
+            "An explicit value for the identity column in table '{}' can only be specified when a column list is used and IDENTITY_INSERT is ON.",
+            crate::schemas::display(&table.text)
+        ),
+        table,
+    )
 }
 
 pub(crate) struct ChildRows<'t> {
@@ -1176,6 +1220,7 @@ pub(crate) struct StoredRows<'a> {
     encoded: Vec<u8>,
     next_row_id: NextRowId,
     auto_increment: Option<usize>,
+    identity_insert: bool,
     next_auto_value: Option<i64>,
     first_generated: Option<u64>,
     last_rowid: Option<i64>,
@@ -1206,6 +1251,7 @@ impl<'a> StoredRows<'a> {
             encoded: Vec::new(),
             next_row_id: NextRowId::Unknown,
             auto_increment: table.auto_increment_column(),
+            identity_insert: false,
             next_auto_value: None,
             first_generated: None,
             last_rowid: None,
@@ -1248,6 +1294,13 @@ impl<'a> StoredRows<'a> {
         };
         let column = &self.table.columns[index];
         let given = row[index].as_integer();
+        if self.identity_insert && given.is_none() {
+            return Err(SqlError::new(
+                SqlState::NOT_NULL_VIOLATION,
+                "DEFAULT or NULL are not allowed as explicit identity values.",
+            )
+            .with_sqlserver_code(339));
+        }
         let next = match self.next_auto_value {
             Some(next) => next,
             None => self
@@ -1255,15 +1308,19 @@ impl<'a> StoredRows<'a> {
                 .checked_add(1)
                 .ok_or_else(|| auto_increment_exhausted(column))?,
         };
+        let kept = match given {
+            Some(0) => self.identity_insert,
+            other => other.is_some(),
+        };
         match given {
-            None | Some(0) => {
+            Some(value) if kept && value >= next => self.next_auto_value = value.checked_add(1),
+            Some(_) if kept => self.next_auto_value = Some(next),
+            _ => {
                 row[index] = convert(Value::BigInt(next), column.sql_type, Conversion::Assignment)
                     .map_err(|_| auto_increment_exhausted(column))?;
                 self.first_generated.get_or_insert(next as u64);
                 self.next_auto_value = next.checked_add(1);
             }
-            Some(value) if value >= next => self.next_auto_value = value.checked_add(1),
-            Some(_) => self.next_auto_value = Some(next),
         }
         Ok(())
     }

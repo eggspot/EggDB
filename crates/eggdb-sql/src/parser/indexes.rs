@@ -5,12 +5,22 @@ use crate::lexer::TokenKind;
 
 impl Parser<'_> {
     pub(super) fn at_index_definition(&self) -> bool {
+        if self.sqlserver() {
+            let mut ahead = usize::from(self.is_word("unique"));
+            if self.is_word_at(ahead, "clustered") || self.is_word_at(ahead, "nonclustered") {
+                ahead += 1;
+            }
+            return self.is_word_at(ahead, "index");
+        }
         self.is_word("index") || self.is_word("unique") && self.is_word_at(1, "index")
     }
 
     pub(super) fn create_index(&mut self) -> SqlResult<Statement> {
         let position = self.position();
         let unique = self.take_word("unique");
+        if self.sqlserver() {
+            self.skip_clustering();
+        }
         self.expect_word("index")?;
         if self.is_word("concurrently") {
             return Err(self.not_supported("CREATE INDEX CONCURRENTLY"));
@@ -41,7 +51,11 @@ impl Parser<'_> {
             self.index_method()?;
         }
         let columns = self.index_column_list(unique)?;
-        self.index_tail()?;
+        if self.sqlserver() {
+            self.sqlserver_index_tail(unique, &columns)?;
+        } else {
+            self.index_tail()?;
+        }
         Ok(Statement::CreateIndex(CreateIndex {
             index: IndexSpec {
                 name,
@@ -188,6 +202,9 @@ impl Parser<'_> {
 
     pub(super) fn drop_index(&mut self) -> SqlResult<Statement> {
         self.expect_word("index")?;
+        if self.sqlserver() {
+            return self.sqlserver_drop_index();
+        }
         if self.is_word("concurrently") {
             return Err(self.not_supported("DROP INDEX CONCURRENTLY"));
         }
@@ -224,6 +241,27 @@ impl Parser<'_> {
         }
         Ok(Statement::DropIndex(DropIndex {
             names,
+            table,
+            if_exists,
+        }))
+    }
+
+    fn sqlserver_drop_index(&mut self) -> SqlResult<Statement> {
+        let if_exists = self.is_word("if") && self.is_word_at(1, "exists");
+        if if_exists {
+            self.at += 2;
+        }
+        let first = self.name()?;
+        let (index, table) = if self.take(&TokenKind::Dot) {
+            (self.name()?, Some(first))
+        } else if self.take_word("on") {
+            (first, Some(self.table_name()?))
+        } else {
+            (first, None)
+        };
+        self.skip_index_options()?;
+        Ok(Statement::DropIndex(DropIndex {
+            names: vec![index],
             table,
             if_exists,
         }))

@@ -185,6 +185,22 @@ fn apply(
         AlterAction::SetDefault { column, default } => {
             set_default(writer, tables, name, column, default.as_ref(), dialect).map(|()| None)
         }
+        AlterAction::AddDefault {
+            column,
+            default,
+            position,
+        } => add_default(writer, tables, name, column, default, *position, dialect).map(|()| None),
+        AlterAction::EnableConstraint(constraint) => {
+            if current(writer, tables, name)?.constraint_name_taken(&constraint.text) {
+                return Ok(None);
+            }
+            Err(SqlError::new(
+                SqlState::UNDEFINED_OBJECT,
+                format!("Constraint '{}' does not exist.", constraint.text),
+            )
+            .with_sqlserver_code(4917)
+            .at(constraint.position))
+        }
         AlterAction::SetNotNull { column, not_null } => {
             set_not_null(writer, tables, name, column, *not_null, dialect).map(|()| None)
         }
@@ -1035,6 +1051,44 @@ fn set_default(
     target.default = default.map(|(_, text)| text.clone());
     target.auto_increment = false;
     save(writer, &table)
+}
+
+fn add_default(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &Name,
+    default: &crate::ast::Expr,
+    position: usize,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let table = current(writer, tables, name)?;
+    let target = &table.columns[column_index(&table, column, dialect)?];
+    if target.auto_increment {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            format!(
+                "Defaults cannot be created on columns with an IDENTITY attribute. Table '{}', column '{}'.",
+                crate::schemas::base_name(&table.name),
+                target.name
+            ),
+        )
+        .with_sqlserver_code(1754)
+        .at(column.position));
+    }
+    let source =
+        crate::parser::sqlserver_default_source(default, target.sql_type).ok_or_else(|| {
+            crate::parser::sqlserver_not_supported("A DEFAULT other than a constant or GETDATE()")
+                .at(position)
+        })?;
+    set_default(
+        writer,
+        tables,
+        name,
+        column,
+        Some(&(default.clone(), source)),
+        dialect,
+    )
 }
 
 fn add_identity(

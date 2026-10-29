@@ -222,6 +222,8 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::AddConstraint(_)
             | AlterAction::SetSchema(_)
             | AlterAction::AddIdentity { .. }
+            | AlterAction::AddDefault { .. }
+            | AlterAction::EnableConstraint(_)
             | AlterAction::Accepted => continue,
         };
         match &mut found {

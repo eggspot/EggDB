@@ -1,4 +1,4 @@
-use super::words::{Token, Words, qualified_name};
+use super::words::{Token, WordRules, Words, qualified_name};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -40,9 +40,18 @@ pub(crate) enum Effect {
         constraints: u64,
         identity_sequences: Vec<String>,
     },
+    AddConstraint {
+        table: String,
+        name: Option<String>,
+    },
+    SetDefault {
+        object: String,
+        default: String,
+    },
     Comment,
     Copy(String),
     Insert(String),
+    IdentityInsert(String),
     SequenceCall(String),
     Setting,
     Data,
@@ -60,6 +69,8 @@ impl Effect {
                 | Self::Sequence(_)
                 | Self::Index(_)
                 | Self::AlterTable { .. }
+                | Self::AddConstraint { .. }
+                | Self::SetDefault { .. }
                 | Self::Comment
                 | Self::OtherDdl
         )
@@ -78,7 +89,7 @@ impl Effect {
 
     pub(crate) fn data_target(&self) -> Option<&str> {
         match self {
-            Self::Copy(table) | Self::Insert(table) => Some(table),
+            Self::Copy(table) | Self::Insert(table) | Self::IdentityInsert(table) => Some(table),
             _ => None,
         }
     }
@@ -736,11 +747,11 @@ pub(crate) fn sequence_call(text: &str) -> Option<String> {
     words.literal_text()
 }
 
-pub(crate) fn insert_rows(text: &str) -> u64 {
+pub(crate) fn insert_rows(text: &str, rules: WordRules) -> u64 {
     let mut depth = 0u32;
     let mut after_values = false;
     let mut rows = 0u64;
-    for token in Words::new(text) {
+    for token in Words::with_rules(text, rules) {
         if token.is_symbol(b'(') {
             if depth == 0 && after_values {
                 rows += 1;

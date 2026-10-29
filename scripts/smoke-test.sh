@@ -149,6 +149,15 @@ grep -q 'line 4: duplicate key value' last.err || fail "a broken restore said $(
 [ ! -e broken.db ] && [ ! -e broken.db.restoring ] || fail "a failed restore with --create left a file"
 pass "restore: a pg_dump sample with its report, a second restore stopped, an archive refused, a failed --create leaves no file"
 
+expect_exit 0 "$eggdb" restore --dialect sqlserver --create ssms.db "$samples/ssms-sample.sql" --format text
+grep -q '^ok: every table and row of the script is in ssms.db; ' last.out || fail "the SQL Server restore said $(cat last.out)"
+grep -q 'procedure dbo.RyeCount' last.out || fail "the SQL Server restore did not list the skipped procedure: $(cat last.out)"
+expect_output "$(printf '4\t3\t2')" "$eggdb" sql ssms.db -c "COPY (SELECT count(*), count(DISTINCT l.kind), count(DISTINCT b.id) FROM loaves l JOIN bakers b ON b.id = l.bakerid) TO STDOUT"
+printf 'TAPE\000\000\003\000' > shop.bak
+expect_exit 2 "$eggdb" restore --dialect sqlserver --create shop.db shop.bak
+grep -q 'a SQL Server backup (it starts with TAPE)' last.err || fail "a SQL Server backup said $(cat last.err)"
+pass "restore: an SSMS Generate Scripts sample (UTF-16) with its report, and a SQL Server backup routed"
+
 expect_exit 0 "$eggdb" sql --dialect sqlite shop.db -c "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('a'), ('b'); INSERT OR REPLACE INTO notes VALUES (1, 'c')"
 expect_output '2|b' sh -c "\"$eggdb\" sql --dialect sqlite shop.db -c 'SELECT id, body FROM notes WHERE NOT id - 2' | sed -n 3p | tr -d ' '"
 expect_exit 3 "$eggdb" sql --dialect sqlite shop.db -c "SELECT * FROM nowhere"
@@ -339,9 +348,12 @@ SELECT @@VERSION" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd failed: $(cat sqlcm
 INSERT INTO [dbo].[Typed] ([flag], [price], [at], [guid], [bytes]) VALUES (1, 32.3800, CAST(N'2020-07-04T13:05:09.1234567' AS DateTime2), N'6f9619ff-8b86-d011-b42d-00c04fc964ff', 0x0102FF), (0, NULL, NULL, NULL, NULL)
 SELECT CONVERT(varchar(10), [at], 103) + '|' + CONVERT(varchar(36), [guid]) + '|' + CAST(CAST([price] AS decimal(10,2)) AS varchar(20)) FROM [dbo].[Typed] ORDER BY [id] OFFSET 0 ROWS FETCH NEXT 1 ROW ONLY" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd's typed batch failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
     grep -qx '04/07/2020|6F9619FF-8B86-D011-B42D-00C04FC964FF|32.38' sqlcmd.out || fail "sqlcmd's typed batch printed $(cat sqlcmd.out) server: $(cat serve.err)"
+    run_sqlcmd pg-secret -h -1 -W -N disable -i "$samples/ssms-sample.sql" > sqlcmd.out 2> sqlcmd.err || true
+    run_sqlcmd pg-secret -b -h -1 -W -Q "SELECT COUNT(*) FROM dbo.Loaves WHERE Kind = N'rye'" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd after the SSMS sample failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
+    grep -qx '2' sqlcmd.out || fail "sqlcmd -i of the SSMS sample left $(cat sqlcmd.out) server: $(cat serve.err)"
     run_sqlcmd wrong -b -Q "SELECT 1" > sqlcmd.out 2>&1 && fail "sqlcmd connected with a wrong password"
     grep -q "Login failed for user 'eggdb'" sqlcmd.out || fail "a wrong sqlcmd password said $(cat sqlcmd.out)"
-    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches, SQL Server types and an -i script with GO; errors and a wrong password are refused"
+    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches, SQL Server types, an -i script with GO and the UTF-16 SSMS sample; errors and a wrong password are refused"
   else
     echo "skip sqlcmd: EGGDB_SMOKE_SQLCMD names no go-sqlcmd binary (CI's Linux job downloads one; a sqlcmd on PATH is never used)"
   fi

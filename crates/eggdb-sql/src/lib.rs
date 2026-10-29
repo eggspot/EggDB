@@ -109,8 +109,8 @@ pub use parser::{
 };
 pub use random::{RandomSource, set_random_source};
 pub use restore::{
-    Consequence, IgnoredMetaCommand, IgnoredStatements, MAX_LISTED, RestoreError, RestoreOptions,
-    RestoreProgress, RestoreReport, SkippedObject, TableRows, restore_dump,
+    Consequence, IgnoredMetaCommand, IgnoredStatements, KnownDifference, MAX_LISTED, RestoreError,
+    RestoreOptions, RestoreProgress, RestoreReport, SkippedObject, TableRows, restore_dump,
 };
 pub use schema::{ColumnSchema, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted};
 pub use session::{

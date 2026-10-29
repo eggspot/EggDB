@@ -1218,3 +1218,120 @@ are any; `--format json` prints `call_started` and `call` records as stored.
   run of backticks in it. Names also have Markdown characters escaped with a backslash (not `_`,
   so `order_items` reads as written); the `run` field's title is plain text.
 - The warning line under a call is indented to the tool column.
+
+## 19. `eggdb restore --dialect sqlserver`: SSMS and sqlpackage scripts (item 40)
+
+`eggdb restore --dialect sqlserver` (aliases `mssql` and `tsql`) reads a Transact-SQL script as
+SSMS "Generate Scripts" (Schema and data) or `sqlpackage /Action:Script` writes it, in UTF-16
+(SSMS's default, recognised by its byte-order mark) or UTF-8, batch by batch (`GO`), each
+statement in its own transaction, into one EggDB file. Everything in section 16 stays: the
+grammar, the report in every outcome, the three verdicts, `--create`, `--keep-going` and
+`--report`. Designed by Claude Fable (D15); this section adds only what a script from SQL Server
+needs.
+
+```
+eggdb restore <file> [<script.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql|sqlserver]
+```
+
+### Help: `eggdb help restore`
+The command list of section 9 reads
+`  restore <file> [dump]         restore a PostgreSQL dump or a SQL Server script into the file`.
+In the command's help, the usage line takes `[--dialect postgresql|sqlserver]`, and this follows
+"convert them first with pg_restore -f dump.sql <archive>.":
+```
+With --dialect sqlserver it restores a SQL Server script instead (SSMS Generate Scripts with
+Schema and data, or sqlpackage /Action:Script; UTF-16 or UTF-8), batch by batch, and lists under
+known differences what EggDB keeps differently from SQL Server (IDENTITY seeds, datetimeoffset
+offsets, computed columns, index filters, disabled constraints).
+```
+The option line becomes `--dialect <name>    the dump's dialect: postgresql (default) or
+sqlserver (also mssql, tsql; oracle comes later)`, and the examples gain
+`  eggdb restore --dialect sqlserver --create shop.db shop.sql` after the `pg_restore` one.
+
+### The text report: known differences
+A new list, `known differences`, holds what got into the file but not as SQL Server had it. It is
+dialect-neutral (item 43 lists Oracle's the same way): one entry per object, with the script
+line, the object in the dialect's own naming and the difference in one clause. It sits after
+`consequences` and before `error`/`errors`, so the report reads "left out, failed because of
+that, kept differently, failed, ignored". Its summary line in the facts block is
+`differences    7` (between `consequences` and `ignored`, for this dialect only); the header is
+`known differences (restored, but not as the source had it)`. Differences do not change the
+verdict's label.
+```
+  differences     7
+known differences (restored, but not as the source had it)
+  line 88   sales.Orders.PlacedAt   values are stored in UTC; their offsets are lost
+  line 102  dbo.Coupons.Id          IDENTITY(1000, 10) restored as IDENTITY(1, 1); new values continue after the highest stored one
+  line 140  dbo.Products.Margin     computed column not kept
+  line 141  sales.Orders.Created    default not kept: (dateadd(day,(30),getdate()))
+  line 377  FK_orphan               not created: existing rows violate it (rows the source kept under a disabled constraint, or a collation, padding or LIKE difference)
+  line 380  sales.Orders            a constraint disabled in the source (NOCHECK CONSTRAINT) is enforced here
+  line 402  index IX_Orders_Open    INCLUDE columns, the filter (a full index here) not kept
+```
+Entries come in script order, cut and padded like `skipped`; at most 10,000 are listed, then
+`  … and 2,310 more differences (the report keeps the first 10,000)`. The `ok` verdict names
+them: `ok: every table and row of the script is in shop.db; 3 objects skipped, 1 consequence and
+7 known differences, listed above.` For this dialect the verdicts say `script` where section 16
+says `dump`.
+
+### Client commands under `ignored`
+sqlcmd's commands are "client commands" in this dialect, never psql's "meta-commands": the
+summary reads `ignored        9 (SET 4, USE 1, client commands 4)`, and the `ignored` list gives
+each command its lines and its reason, in section 16's shape:
+```
+ignored
+  :setvar     lines 1, 2 (used for $(name))
+  :on error   line 4 (eggdb restore's own flags decide)
+  :connect    line 5 (one database per file)
+  :r          line 7, never run
+  !!          line 9, never run
+  :…          12 more client commands, never run
+```
+`GO` is the batch separator, not a command, and is never listed. `:setvar` is honoured for
+`$(name)` and still listed, so the report says where a value came from. `:on error exit` is not
+obeyed: `--keep-going` and its absence decide.
+
+### The JSON report
+`dump` keeps its name and value. New or changed:
+```
+{"ok":true,"file":"shop.db","dump":"shop.sql","scripts":["shop.sql"],"created":true,"dialect":"sqlserver",
+ …,"differences":[{"line":88,"object":"sales.Orders.PlacedAt","difference":"values are stored in UTC; their offsets are lost","script":0}],
+ "differences_not_listed":0,
+ "ignored":{…,"meta_commands":[{"line":7,"command":":r","reason":"never run","script":0}],…},…}
+```
+- `dialect` is the session's dialect name: `sqlserver` whatever alias was typed.
+- `scripts` lists the files read, and every listed item (`skipped`, `consequences`,
+  `differences`, `errors`, `error`, `meta_commands`) carries `script`, an index into it; 0 is the
+  file restored. `:r` never runs today, so the array has one entry; a release that follows `:r`
+  adds the included files and the report's shape stays.
+- `meta_commands` keeps its field name for both dialects; the `command` values tell them apart.
+
+### Messages (stderr, section 7's shape)
+Printed with exit 2, before the database is opened or created, from the first 64 KiB, in
+`archive_failure`'s shape. A UTF-16 byte-order mark is checked before the NUL test. The extension
+only words the message; the bytes decide.
+| When | Message |
+|------|---------|
+| starts with `TAPE` | `cannot restore shop.bak: it is a SQL Server backup (it starts with TAPE), which eggdb restore does not read. Restore it into a SQL Server you run, script it from there (SSMS: Tasks, Generate Scripts, Schema and data), then restore the script (docs/migrate.md).` |
+| `PK\x03\x04`, `.bacpac`/`.dacpac` | `... it is a BACPAC package (a zip archive) ... Import it into a SQL Server you run with sqlpackage /Action:Import first, script it from there ...` |
+| `PK\x03\x04`, other | `... it is a zip archive, not a script ... Unpack it first.` + `try: unzip -l shop.zip` |
+| NUL bytes, `.mdf`/`.ndf`/`.ldf` | `... it is a SQL Server data file ... Attach it to a SQL Server you run, script it from there ...` |
+| NUL bytes, other | `... it is binary data (it holds NUL bytes), not a script ... If it is a backup, restore it into the database that made it and script it from there (docs/migrate.md).` |
+| UTF-16 mark, no `--dialect sqlserver` | `cannot restore shop.sql: it is UTF-16 text, which pg_dump never writes and SSMS Generate Scripts does. Add --dialect sqlserver.` |
+
+The script routes end with `  try: eggdb restore --dialect sqlserver --create <file> <script.sql>`.
+
+### Decided by this design
+1. Known differences are a list of their own, after consequences and before errors: they are
+   neither failures nor skips, and a migration review reads them object by object.
+2. Differences never change the verdict's label; the `ok` verdict counts them.
+3. Client commands keep the JSON field `meta_commands` and get their own words in the text.
+4. `scripts` and `script` go into the JSON now, so following `:r` later changes no field.
+5. Backups, packages and data files are routed, never read, in the pg_dump archives' shape.
+6. UTF-16 without `--dialect sqlserver` is refused with the fix, not read as a dump that fails on
+   line 1.
+
+### As built in v0.2.0 (D125)
+As designed, except: the `try:` line names the file being restored and `<script.sql>`; the
+`differences` fact shows only for the SQL Server dialect, and `script` is the last field of each
+listed item, so a pg_dump's report keeps its earlier text and field order.

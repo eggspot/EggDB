@@ -20,7 +20,7 @@ Commands:
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
-  restore <file> [dump]         restore a PostgreSQL dump (pg_dump's plain SQL) into the file
+  restore <file> [dump]         restore a PostgreSQL dump or a SQL Server script into the file
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help
@@ -66,7 +66,7 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
             "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]"
         }
         CommandName::Restore => {
-            "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql]"
+            "eggdb restore <file> [<dump.sql> | -] [--create] [--keep-going] [--report <path>] [--dialect postgresql|sqlserver]"
         }
         CommandName::Mcp => "eggdb mcp <file> [--allow-write] [--time-limit <seconds>]",
         CommandName::Audit => "eggdb audit <file> [-n <count>] [--format text|json]",
@@ -362,19 +362,25 @@ dump; GRANT, REVOKE and OWNER TO are ignored (no roles yet); a statement that fa
 it uses a skipped object is a consequence, not an error. An error in a supported statement (a
 COPY row breaking a constraint, bad syntax, a failed INSERT) stops the restore at that line, and
 the statements before it stay committed. Custom, directory and tar archives are not read:
-convert them first with pg_restore -f dump.sql <archive>. The report counts what was created,
-lists everything skipped, ignored and failed, and is one JSON object in a pipe.
+convert them first with pg_restore -f dump.sql <archive>. With --dialect sqlserver it restores
+a SQL Server script instead (SSMS Generate Scripts with Schema and data, or sqlpackage
+/Action:Script; UTF-16 or UTF-8), batch by batch, and lists under known differences what EggDB
+keeps differently from SQL Server (IDENTITY seeds, datetimeoffset offsets, computed columns,
+index filters, disabled constraints). The report counts what was created, lists everything
+skipped, ignored and failed, and is one JSON object in a pipe.
 
       --create            create the file if it is missing (built as <file>.restoring, renamed
                           when the restore succeeded, so a failed restore leaves no file)
       --keep-going        report an error and go on; exit 3 at the end if there was one
       --report <path>     write the report to this file instead of stdout
-      --dialect <name>    the dump's dialect: postgresql (sqlserver and oracle come later)
+      --dialect <name>    the dump's dialect: postgresql (default) or sqlserver (also mssql,
+                          tsql; oracle comes later)
 
 Examples:
   eggdb restore --create app.db app.sql
   pg_dump app | eggdb restore --create app.db
   pg_restore -f dump.sql app.dump && eggdb restore --create app.db dump.sql
+  eggdb restore --dialect sqlserver --create shop.db shop.sql
   eggdb restore app.db dump.sql --keep-going --report restore.json --format json
 ";
 

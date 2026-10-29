@@ -25,11 +25,22 @@ impl<'t> Parser<'t> {
     }
 
     pub(crate) fn view_query(&mut self) -> SqlResult<(Query, usize)> {
-        let query = self.query()?;
+        let query = self.view_body()?;
         if !self.at_end() {
             return Err(self.unexpected());
         }
         Ok((query, self.queries.max(1)))
+    }
+
+    fn view_body(&mut self) -> SqlResult<Query> {
+        if !self.sqlserver() {
+            return self.query();
+        }
+        let outer = self.view_query_depth.replace(self.query_depth);
+        let query = self.query();
+        self.view_query_depth = outer;
+        self.ignored_view_top = false;
+        query
     }
 
     pub(super) fn qualified_part(&mut self, schema: &Name) -> SqlResult<Name> {
@@ -202,7 +213,7 @@ impl<'t> Parser<'t> {
         if !self.starts_query() && self.peek_kind() != &TokenKind::LeftParen {
             return Err(self.unexpected());
         }
-        let query = self.query()?;
+        let query = self.view_body()?;
         let first = self.tokens.get(start).map_or(0, |token| token.start);
         let last = self
             .tokens

@@ -8,7 +8,7 @@ describes is created in an EggDB file that every dialect and protocol then reads
 |------|-----|--------|
 | PostgreSQL | `pg_dump` plain SQL, restored by `eggdb restore` or `psql -f` against `eggdb serve` | this page |
 | PostgreSQL CSV, any table | `eggdb import --csv` ([cli.md](cli.md)) | available |
-| SQL Server | SSMS Generate Scripts, `sqlpackage` scripts | roadmap item 40 |
+| SQL Server | SSMS Generate Scripts, `sqlpackage /Action:Script`, restored by `eggdb restore --dialect sqlserver` or `sqlcmd -i` against `eggdb serve` | this page |
 | Oracle | `impdp ... SQLFILE=`, SQLcl and SQL Developer exports | roadmap item 43 |
 
 ## PostgreSQL
@@ -144,3 +144,96 @@ table and row of the dump is in the file, or how many of them are.
 - `pg_dump --clean` is not supported (EggDB's `public` schema cannot be dropped); restore into a
   new file instead.
 - Large objects (`lo_*`), and dumps in encodings other than UTF-8, are not restored.
+
+## SQL Server
+
+### 1. Export with SQL Server's own tools
+
+In SQL Server Management Studio, right-click the database, then **Tasks, Generate Scripts**:
+script the entire database, and under **Advanced** set **Types of data to script** to *Schema and
+data* and **Script Indexes** to *True*; leave **Check for object existence** at *False*. Save to
+one file, as Unicode (SSMS's default, UTF-16 with a byte-order mark) or UTF-8.
+
+`sqlpackage /Action:Script` writes a schema-only script with sqlcmd's `:setvar` lines; take the
+data from Generate Scripts with *Data only* and restore it after the schema. `bcp` files load
+through `eggdb import --csv` with `bcp -c -t,` (item 46 brings `bcp` itself).
+
+EggDB never reads `.bak` or `.trn` backups, BACPAC or DACPAC packages, or `.mdf`, `.ndf` and
+`.ldf` files: they have no public specification (D13). `eggdb restore` recognises them by their
+content and says what to do: restore the backup (or import the BACPAC with `sqlpackage
+/Action:Import`, or attach the files) into a SQL Server you run, then Generate Scripts there.
+
+### 2. Restore into EggDB
+
+```sh
+eggdb restore --dialect sqlserver --create shop.db shop.sql
+```
+
+`--dialect mssql` and `--dialect tsql` mean the same. The script runs batch by batch (`GO` ends a
+batch, `GO 3` repeats it), each statement in its own transaction, through EggDB's Transact-SQL
+dialect: `[dbo]` is EggDB's `public` schema, and names are kept in lower case, as `sqlcmd` users
+of EggDB see them (D122). sqlcmd's `:setvar` variables are replaced in the lines after the
+script's first sqlcmd command; `:r`, `!!` and every other sqlcmd command are listed and never
+run. `--create`, `--keep-going`, `--report` and the exit codes work as for a PostgreSQL dump.
+
+An SSMS script also restores through the TDS protocol, with Microsoft's go-sqlcmd:
+
+```sh
+eggdb serve --create shop.db --password-file pw.txt --tds-listen 127.0.0.1:1433 &
+SQLCMDPASSWORD=secret sqlcmd -S 127.0.0.1,1433 -U eggdb -d shop -N disable -x -i shop.sql
+```
+
+go-sqlcmd reads the UTF-16 file by its byte-order mark; `-x` keeps a `$(...)` inside the data as
+written. Statements EggDB does not run print an error and sqlcmd goes on (without `-b`); the
+report of `eggdb restore` lists the same objects instead. A sqlpackage script restores only
+through `eggdb restore`: its own `:on error exit` stops sqlcmd at the first refused batch.
+
+### 3. Read the report
+
+The report is the PostgreSQL one with one more list, **known differences**: what is in the file
+but not as SQL Server had it. For each, the script line, the object and the difference:
+
+```
+known differences (restored, but not as the source had it)
+  line 88   sales.Orders.PlacedAt   values are stored in UTC; their offsets are lost
+  line 102  dbo.Coupons.Id          IDENTITY(1000, 10) restored as IDENTITY(1, 1); new values continue after the highest stored one
+  line 140  dbo.Products.Margin     computed column not kept
+  line 377  FK_OrderLines_Products  not created: existing rows violate it (...)
+```
+
+Skipped objects (procedures, functions, triggers, synonyms, users and roles, batch logic such as
+SSMS's `IF` blocks) are listed with their line; `USE`, `CREATE DATABASE`, `ALTER DATABASE`,
+`GRANT`, `PRINT`, extended properties and the like are counted as ignored; sqlcmd's commands are
+listed as client commands.
+
+### Limits
+
+- **Never read:** `.bak`, `.trn`, BACPAC, DACPAC, `.mdf`, `.ndf`, `.ldf` (above).
+- **Not run:** procedures, functions, triggers, synonyms and table types; users, logins, roles
+  and permissions; rules and bound defaults; Service Broker; full-text, XML, spatial and
+  columnstore indexes, and XML schema collections; Transact-SQL batch logic (`IF`, `WHILE`,
+  `DECLARE`, `BEGIN ... END`, including SSMS's *Check for object existence* guards, item 47);
+  `MERGE`, `DBCC`, `BULK INSERT` and other statements EggDB does not have, which are skipped and
+  listed.
+- **Not kept, and listed as known differences:** computed and `rowversion` columns; `IDENTITY`
+  seeds and increments other than (1, 1); `DEFAULT` expressions other than constants,
+  `GETDATE()` and `NEWID()`; `INCLUDE` columns, a non-unique index's filter and `DESC`;
+  `datetimeoffset` offsets (values are kept in UTC); non-binary collations (text compares by code
+  point); constraints disabled with `NOCHECK CONSTRAINT` (enforced here); constraints the restored
+  rows violate (not created); an index whose name another table's index already has (EggDB's
+  index names are unique per schema, not per table: not created); `SET ANSI_NULLS`,
+  `QUOTED_IDENTIFIER` or `ANSI_PADDING OFF`.
+- **Not kept, without a note:** default-constraint names; extended properties (`MS_Description`);
+  filegroups and partitioning (`ON [PRIMARY]`, `ON ps(col)`).
+- **Tables skipped, with their rows counted:** columns of `sql_variant`, `xml`, `hierarchyid` or
+  the spatial types; alias types; tables with `IGNORE_DUP_KEY = ON`, FILESTREAM, sparse, masked,
+  Always Encrypted, memory-optimized, temporal or system-versioned columns; an identity column
+  that is not the first primary-key column, or a heap with one.
+- **Scripts:** UTF-8 or UTF-16LE with its byte-order mark (UTF-16 big-endian is refused with the
+  `iconv` command to convert it); three-part names; a batch holding more than 4 MiB of statements
+  other than one `INSERT` must be split with `GO`; `GO 2` and more only after a batch under 1 MiB;
+  a syntax error in one part of a batch does not stop the batch's earlier parts, as SQL Server's
+  compile-first would.
+- Behaviour of restored `CHECK`s and views used from another dialect follows that dialect's
+  conversions and error numbers (D124).
+

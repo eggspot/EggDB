@@ -49,7 +49,7 @@ eggdb <command> <file> [arguments] [options]
 | `sql <file> [-c <sql> \| <script> \| -]` | for writing; `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
 | `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
-| `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s) into the file, with a report (below, and [migrate.md](migrate.md)) |
+| `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
 | `audit <file>` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
@@ -772,8 +772,12 @@ eggdb restore app.db app.sql --keep-going --report restore.json
 - A custom-format archive (it starts with `PGDMP`), a directory or tar archive, or a dump
   compressed with gzip, zstd or lz4 is not read: the command exits 2 before any file is touched
   and prints the exact `pg_restore -f dump.sql <archive>` or decompress command to run first.
-- `--dialect postgresql` is the only dialect for now; SQL Server's and Oracle's scripts come in
-  later releases (roadmap items 40 and 43).
+- `--dialect sqlserver` (or `mssql`, `tsql`) restores an SSMS Generate Scripts or sqlpackage
+  script instead, UTF-16 or UTF-8, batch by batch; its report adds **known differences**, what is
+  restored but not as SQL Server had it, and lists sqlcmd's commands as client commands. A SQL
+  Server backup (`TAPE`), a BACPAC or other zip, or a binary file is refused by its content with
+  the route to a script; a UTF-16 file without `--dialect sqlserver` is refused with that advice
+  ([migrate.md](migrate.md)). Oracle's scripts come in a later release (item 43).
 
 ```
 restored app.sql into app.db (1,204 statements, 2.3 s)

@@ -22,18 +22,56 @@ impl Token {
             Self::Symbol(_) | Self::Literal => None,
         }
     }
+
+    pub(crate) fn plain_name_part(&self) -> Option<&str> {
+        match self {
+            Self::Word(name) | Self::Quoted(name) => Some(name),
+            Self::Symbol(_) | Self::Literal => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WordRules {
+    pub(crate) bracketed_names: bool,
+    pub(crate) dollar_quotes: bool,
+    pub(crate) escape_prefixes: bool,
+}
+
+impl WordRules {
+    pub(crate) const POSTGRESQL: Self = Self {
+        bracketed_names: false,
+        dollar_quotes: true,
+        escape_prefixes: true,
+    };
+
+    pub(crate) const SQLSERVER: Self = Self {
+        bracketed_names: true,
+        dollar_quotes: false,
+        escape_prefixes: false,
+    };
 }
 
 pub(crate) struct Words<'t> {
     bytes: &'t [u8],
     at: usize,
+    rules: WordRules,
 }
 
 impl<'t> Words<'t> {
     pub(crate) fn new(text: &'t str) -> Self {
+        Self::with_rules(text, WordRules::POSTGRESQL)
+    }
+
+    pub(crate) fn sqlserver(text: &'t str) -> Self {
+        Self::with_rules(text, WordRules::SQLSERVER)
+    }
+
+    pub(crate) fn with_rules(text: &'t str, rules: WordRules) -> Self {
         Self {
             bytes: text.as_bytes(),
             at: 0,
+            rules,
         }
     }
 
@@ -77,6 +115,10 @@ impl<'t> Words<'t> {
     }
 
     fn quoted(&mut self, quote: u8, backslash_escapes: bool) -> Vec<u8> {
+        self.quoted_until(quote, backslash_escapes)
+    }
+
+    fn quoted_until(&mut self, quote: u8, backslash_escapes: bool) -> Vec<u8> {
         let mut content = Vec::new();
         self.at += 1;
         while let Some(byte) = self.peek(0) {
@@ -155,7 +197,11 @@ impl Iterator for Words<'_> {
             let name = self.quoted(b'"', false);
             return Some(Token::Quoted(String::from_utf8_lossy(&name).into_owned()));
         }
-        if byte == b'$' {
+        if byte == b'[' && self.rules.bracketed_names {
+            let name = self.quoted_until(b']', false);
+            return Some(Token::Quoted(String::from_utf8_lossy(&name).into_owned()));
+        }
+        if byte == b'$' && self.rules.dollar_quotes {
             if let Some(length) = self.dollar_tag_length() {
                 self.dollar_quoted(length);
                 return Some(Token::Literal);
@@ -181,11 +227,18 @@ impl Iterator for Words<'_> {
                 self.at += 1;
             }
             let word = String::from_utf8_lossy(&self.bytes[start..self.at]).to_ascii_lowercase();
-            if self.peek(0) == Some(b'\'') && matches!(word.as_str(), "e" | "x" | "b" | "n") {
+            if self.peek(0) == Some(b'\'')
+                && (word == "n"
+                    || self.rules.escape_prefixes && matches!(word.as_str(), "e" | "x" | "b"))
+            {
                 self.quoted(b'\'', word == "e");
                 return Some(Token::Literal);
             }
-            if word == "u" && self.peek(0) == Some(b'&') && self.peek(1) == Some(b'\'') {
+            if self.rules.escape_prefixes
+                && word == "u"
+                && self.peek(0) == Some(b'&')
+                && self.peek(1) == Some(b'\'')
+            {
                 self.at += 1;
                 self.quoted(b'\'', false);
                 return Some(Token::Literal);
@@ -199,6 +252,20 @@ impl Iterator for Words<'_> {
 
 pub(crate) fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+pub(crate) fn plain_qualified_name(tokens: &[Token], at: &mut usize) -> Option<String> {
+    let mut name = tokens.get(*at)?.plain_name_part()?.to_owned();
+    *at += 1;
+    while tokens.get(*at).is_some_and(|token| token.is_symbol(b'.')) {
+        let Some(part) = tokens.get(*at + 1).and_then(Token::plain_name_part) else {
+            break;
+        };
+        name.push('.');
+        name.push_str(part);
+        *at += 2;
+    }
+    Some(name)
 }
 
 pub(crate) fn qualified_name(tokens: &[Token], at: &mut usize) -> Option<String> {
