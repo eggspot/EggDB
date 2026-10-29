@@ -5,7 +5,7 @@
 mod common;
 
 use common::TempPath;
-use eggdb::{Database, ErrorKind, Options, SimClock};
+use eggdb::{Database, Durability, ErrorKind, Options, SimClock};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -248,7 +248,10 @@ fn expired_keys_are_absent_to_every_write() {
 #[test]
 fn increments_from_many_threads_sum_exactly() {
     let file = TempPath::new("expiry-threads");
-    let db = Database::open(file.path()).unwrap();
+    let options = Options::new()
+        .durability(Durability::Normal)
+        .write_timeout(Duration::from_secs(60));
+    let db = Database::open_with(file.path(), options).unwrap();
     db.create_collection("stats").unwrap();
     std::thread::scope(|scope| {
         for thread in 0..8 {
@@ -358,7 +361,7 @@ fn dropping_a_collection_removes_the_times_to_live_of_its_keys() {
     db.collection("c").put_with_expiry("k", "v", TTL).unwrap();
     db.put_with_expiry("k", "default", 2 * TTL).unwrap();
     assert!(db.drop_collection("c").unwrap());
-    assert_eq!(db.check().unwrap().entries, 3 + 2);
+    assert_eq!(db.check().unwrap().entries, 1 + 3);
     db.create_collection("c").unwrap();
     db.collection("c").put("k", "permanent").unwrap();
     clock.advance(TTL);

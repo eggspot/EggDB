@@ -26,10 +26,6 @@ impl Moment {
         Self(micros)
     }
 
-    pub(crate) const fn unix_micros(self) -> u64 {
-        self.0
-    }
-
     pub(crate) fn after(self, ttl: Duration) -> Self {
         let micros = u64::try_from(ttl.as_micros()).unwrap_or(u64::MAX).max(1);
         Self(self.0.saturating_add(micros))
@@ -64,7 +60,7 @@ pub(crate) fn deadline_key(stored: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) fn by_deadline_key(deadline: Moment, stored: &[u8]) -> Vec<u8> {
-    tagged(BY_DEADLINE_TAG, &[&deadline.0.to_be_bytes(), stored])
+    tagged(BY_DEADLINE_TAG, &[&deadline.0.to_be_bytes()[..], stored])
 }
 
 pub(crate) fn by_deadline_prefix() -> Vec<u8> {

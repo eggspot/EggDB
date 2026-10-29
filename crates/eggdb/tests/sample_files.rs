@@ -275,12 +275,12 @@ fn a_v0_2_0_file_takes_expiring_keys_and_then_carries_their_feature_flag() {
             .superblock()
             .features
     };
-    assert_eq!(features(&path).read_only_compatible, 0);
+    assert_eq!(features(path.as_path()).read_only_compatible, 0);
     let db = Database::open(&path).unwrap();
     assert_holds(&db, &expected);
     db.put("plain", "no time to live").unwrap();
     db.close().unwrap();
-    assert_eq!(features(&path).read_only_compatible, 0);
+    assert_eq!(features(path.as_path()).read_only_compatible, 0);
 
     let db = Database::open(&path).unwrap();
     db.put_with_expiry("session", "for an hour", std::time::Duration::from_secs(3600))
@@ -288,7 +288,7 @@ fn a_v0_2_0_file_takes_expiring_keys_and_then_carries_their_feature_flag() {
     assert_eq!(db.increment("visits", 2).unwrap(), 2);
     db.close().unwrap();
     assert_eq!(
-        features(&path).read_only_compatible,
+        features(path.as_path()).read_only_compatible,
         eggdb_storage::Features::EXPIRING_KEYS
     );
 

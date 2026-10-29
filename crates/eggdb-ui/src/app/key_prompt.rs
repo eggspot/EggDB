@@ -102,7 +102,8 @@ impl<S: Source> Ui<S> {
         };
         let typed = prompt.editor.text().trim().to_owned();
         let key = prompt.key.clone();
-        match prompt.kind {
+        let kind = prompt.kind;
+        match kind {
             PromptKind::TimeToLive { left } => self.confirm_time_to_live(key, left, &typed),
             PromptKind::Counter { decrement } => match whole_number(&typed) {
                 Some(amount) => {
