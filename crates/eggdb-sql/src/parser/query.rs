@@ -52,7 +52,11 @@ impl Parser<'_> {
     fn starts_query_at(&self, ahead: usize) -> bool {
         self.is_word_at(ahead, "select")
             || self.is_word_at(ahead, "with")
-            || (self.postgresql() && self.is_word_at(ahead, "values"))
+            || (self.reads_values_lists() && self.is_word_at(ahead, "values"))
+    }
+
+    fn reads_values_lists(&self) -> bool {
+        self.postgresql() || self.sqlserver()
     }
 
     fn starts_query_in_parentheses(&self) -> bool {
@@ -322,7 +326,7 @@ impl Parser<'_> {
                 body => SetExpr::Query(Box::new(Query { body, ..query })),
             });
         }
-        if self.postgresql() && self.is_word("values") {
+        if self.reads_values_lists() && self.is_word("values") {
             return Ok(SetExpr::Select(Box::new(self.values_list()?)));
         }
         if !self.is_word("select") {
@@ -504,7 +508,7 @@ impl Parser<'_> {
                 .unwrap_or_else(|| "unnamed_subquery".to_owned()),
             position,
         };
-        if self.postgresql()
+        if self.reads_values_lists()
             && let Some(mut list) = Self::values_table(&mut query)
         {
             list.column_names = column_names;

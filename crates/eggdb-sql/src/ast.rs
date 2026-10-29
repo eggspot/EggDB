@@ -93,6 +93,7 @@ pub(crate) struct MergeStatement {
     pub(crate) on: Expr,
     pub(crate) update: Option<MergeUpdate>,
     pub(crate) insert: Option<MergeInsert>,
+    pub(crate) output: Option<Vec<SelectItem>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +154,8 @@ pub(crate) enum SqlServerStatement {
     RaiseError(RaiseError),
     Throw(Option<ThrowArguments>),
     ExecuteDynamic(DynamicSql),
+    SaveTransaction(Name),
+    RollbackTo(Name),
 }
 
 #[derive(Debug, Clone, PartialEq)]

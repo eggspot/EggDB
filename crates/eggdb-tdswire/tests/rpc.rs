@@ -422,8 +422,15 @@ fn transaction_manager_requests_begin_commit_and_roll_back_with_their_descriptor
         rows(&client.batch("SELECT COUNT(*) AS n FROM items")),
         vec![vec![Some("1".to_owned())]]
     );
-    let save = client.transaction(9, &[1, b's', 0]);
-    assert_eq!(errors(&save)[0].0, 40517);
+    let save_outside = client.transaction(9, &[1, b's', 0]);
+    assert_eq!(errors(&save_outside)[0].0, 628);
+    client.transaction(5, &[0, 0]);
+    let saved = client.transaction(9, &[1, b's', 0]);
+    assert!(errors(&saved).is_empty(), "{saved:?}");
+    let to_save_point = client.transaction(8, &[1, b's', 0, 0]);
+    assert_eq!(errors(&to_save_point)[0].0, 40517);
+    let rolled_back_whole = client.transaction(8, &[0, 0]);
+    assert_eq!(environment_changes(&rolled_back_whole), vec![10]);
     let distributed = client.transaction(1, &[]);
     assert_eq!(errors(&distributed)[0].0, 40517);
 }

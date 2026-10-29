@@ -240,10 +240,9 @@ const STATEMENT_WORDS: [&str; 29] = [
     "with",
 ];
 
-const NOT_SUPPORTED_STATEMENTS: [&str; 13] = [
+const NOT_SUPPORTED_STATEMENTS: [&str; 12] = [
     "goto",
     "waitfor",
-    "merge",
     "grant",
     "revoke",
     "deny",
@@ -553,18 +552,31 @@ impl<'t> Parser<'t> {
             "commit" | "rollback" => {
                 let commit = word == "commit";
                 self.at += 1;
-                if !self.take_word("work")
+                let name = if !self.take_word("work")
                     && (self.take_word("tran") || self.take_word("transaction"))
                 {
-                    self.optional_transaction_name();
-                }
-                if commit {
-                    Statement::Commit
+                    self.transaction_name()?
                 } else {
-                    Statement::Rollback
+                    None
+                };
+                match (commit, name) {
+                    (true, _) => Statement::Commit,
+                    (false, Some(name)) => {
+                        Statement::SqlServer(SqlServerStatement::RollbackTo(name))
+                    }
+                    (false, None) => Statement::Rollback,
                 }
             }
-            "save" => return Err(not_supported("SAVE TRANSACTION").at(position)),
+            "save" => {
+                self.at += 1;
+                if !self.take_word("tran") {
+                    self.expect_word("transaction")?;
+                }
+                match self.transaction_name()? {
+                    Some(name) => Statement::SqlServer(SqlServerStatement::SaveTransaction(name)),
+                    None => return Err(self.unexpected()),
+                }
+            }
             word if BATCH_LOGIC_STATEMENTS.contains(&word) => {
                 return Err(outside_a_batch(&self.keyword_text()).at(position));
             }
@@ -606,6 +618,7 @@ impl<'t> Parser<'t> {
                 return Err(not_supported("TOP in UPDATE and DELETE").at(position));
             }
             "insert" if self.is_word_at(1, "bulk") => self.sqlserver_insert_bulk()?,
+            "merge" => self.sqlserver_merge()?,
             "insert" if self.is_word_at(1, "top") => {
                 return Err(not_supported("TOP in INSERT").at(position));
             }
@@ -705,6 +718,18 @@ impl<'t> Parser<'t> {
             return Err(self.unexpected());
         }
         Ok(declarations)
+    }
+
+    fn transaction_name(&mut self) -> SqlResult<Option<Name>> {
+        let named = matches!(
+            self.peek_kind(),
+            TokenKind::Word(word) if !is_reserved(word) && !starts_statement(word)
+        ) || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_));
+        if named {
+            Ok(Some(self.name()?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn optional_transaction_name(&mut self) {

@@ -1645,6 +1645,24 @@ enum ProjectedItem<'a> {
     Expr(&'a Expr),
 }
 
+pub(crate) fn project_rows(
+    items: &[SelectItem],
+    scope: Scope<'_>,
+    rows: &[Vec<Value>],
+) -> SqlResult<(Vec<OutputColumn>, Vec<Vec<Value>>)> {
+    for item in items {
+        if let SelectItem::Expr { expr, .. } = item {
+            reject_aggregates(expr, "OUTPUT")?;
+        }
+    }
+    let projection = Projection::new(items, scope)?;
+    let mut projected = Vec::with_capacity(rows.len());
+    for row in rows {
+        projected.push(projection.project(row)?);
+    }
+    Ok((projection.columns, projected))
+}
+
 fn returning<'a>(
     items: &'a Option<Vec<SelectItem>>,
     scope: Scope<'a>,

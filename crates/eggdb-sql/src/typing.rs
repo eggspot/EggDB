@@ -91,6 +91,9 @@ fn arithmetic_type(
 }
 
 fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Option<SqlType>> {
+    if let Some(sql_type) = crate::advisory_locks::result_type(name) {
+        return Some(Some(sql_type));
+    }
     let argument_type = |at: usize| arguments.get(at).and_then(|argument| static_type(argument, scope));
     Some(match name {
         "split_part" | "concat" | "concat_ws" | "replace" | "left" | "right" | "lpad" | "rpad"

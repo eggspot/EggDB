@@ -360,6 +360,8 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     unprepare_requests: Vec<i32>,
     parameter_values: Vec<NamedParameter>,
     set_error: Option<u32>,
+    save_points: Vec<String>,
+    advisory_locks: crate::advisory_locks::AdvisoryLocks,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -414,6 +416,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             unprepare_requests: Vec::new(),
             parameter_values: Vec::new(),
             set_error: None,
+            save_points: Vec::new(),
+            advisory_locks: crate::advisory_locks::AdvisoryLocks::new(
+                std::ptr::from_ref(store).addr(),
+            ),
         }
     }
 
@@ -682,6 +688,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
 
     fn end_implicit_transaction(&mut self, commit: bool) -> SqlResult<()> {
         self.implicit_transaction = false;
+        if !self.in_block() {
+            self.advisory_locks.release_transaction_locks();
+        }
         if !std::mem::take(&mut self.block_is_implicit) {
             return Ok(());
         }
@@ -1151,7 +1160,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let _constraints = self.enter_constraints();
         let destructive = if parser.literal_rows().is_none() {
             match parser.statement()? {
-                Statement::Begin { .. } | Statement::Commit | Statement::Rollback => {
+                Statement::Begin { .. }
+                | Statement::Commit
+                | Statement::Rollback
+                | Statement::SqlServer(
+                    SqlServerStatement::SaveTransaction(_) | SqlServerStatement::RollbackTo(_),
+                ) => {
                     return Ok(Err(OneStatementRefusal::TransactionControl));
                 }
                 Statement::Copy(_) => return Ok(Err(OneStatementRefusal::Copy)),
@@ -1266,6 +1280,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let settings = Arc::clone(&self.settings);
             let context = Arc::clone(&self.batch_context);
             let _cancel = crate::cancel::enter(&self.cancel);
+            let _advisory = crate::advisory_locks::enter(
+                &self.advisory_locks,
+                !matches!(self.block, Block::None) || self.implicit_transaction,
+            );
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _regex = crate::regex::enter_statement();
             let _bytes = crate::bytea::enter_dialect(self.dialect);
@@ -2139,6 +2157,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn commit(&mut self) -> SqlResult<QueryResult> {
+        self.save_points.clear();
+        self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
         if matches!(self.block, Block::Failed) {
             self.restore_search_path();
@@ -2166,6 +2186,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn rollback(&mut self) -> SqlResult<QueryResult> {
+        self.save_points.clear();
+        self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
         self.restore_search_path();
         match std::mem::replace(&mut self.block, Block::None) {

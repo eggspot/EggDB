@@ -878,6 +878,7 @@ impl Binding<'_> {
             exprs.extend(insert.values.iter_mut());
             exprs.extend(insert.condition.iter_mut());
         }
+        exprs.extend(returning_exprs(&mut merge.output));
         resolver.expressions(exprs)
     }
 

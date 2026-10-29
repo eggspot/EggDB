@@ -32,6 +32,7 @@ const SELECT_COMMAND: u16 = 0xC1;
 const INSERT_COMMAND: u16 = 0xC3;
 const DELETE_COMMAND: u16 = 0xC4;
 const UPDATE_COMMAND: u16 = 0xC5;
+const MERGE_COMMAND: u16 = 0x117;
 const LOGIN_FAILED: u32 = 18_456;
 const CANNOT_OPEN_DATABASE: u32 = 4060;
 const TOO_MANY_CONNECTIONS: u32 = 17_809;
@@ -72,12 +73,17 @@ pub(crate) fn printable(text: &str) -> String {
     shown
 }
 
+fn bracketed(name: &str) -> String {
+    format!("[{}]", name.replace(']', "]]"))
+}
+
 fn changed_rows(tag: &str) -> Option<(u16, u64)> {
     let mut words = tag.split_whitespace();
     let command = match words.next()? {
         "INSERT" => INSERT_COMMAND,
         "UPDATE" => UPDATE_COMMAND,
         "DELETE" => DELETE_COMMAND,
+        "MERGE" => MERGE_COMMAND,
         _ => return None,
     };
     Some((command, words.last()?.parse().ok()?))
@@ -700,23 +706,27 @@ impl Connection<'_> {
             }
         };
         let text = match &request.request {
-            TransactionRequest::Begin { .. } => "BEGIN TRANSACTION",
+            TransactionRequest::Begin { .. } => "BEGIN TRANSACTION".to_owned(),
             TransactionRequest::Commit {
                 begin_next: None, ..
-            } => "COMMIT TRANSACTION",
+            } => "COMMIT TRANSACTION".to_owned(),
             TransactionRequest::Commit {
                 begin_next: Some(_),
                 ..
-            } => "COMMIT TRANSACTION BEGIN TRANSACTION",
-            TransactionRequest::Rollback {
-                begin_next: None, ..
-            } => "ROLLBACK TRANSACTION",
-            TransactionRequest::Rollback {
-                begin_next: Some(_),
-                ..
-            } => "ROLLBACK TRANSACTION BEGIN TRANSACTION",
-            TransactionRequest::Save { .. } => {
-                return self.send_not_supported("Transaction save points");
+            } => "COMMIT TRANSACTION BEGIN TRANSACTION".to_owned(),
+            TransactionRequest::Rollback { name, begin_next } => {
+                let mut text = "ROLLBACK TRANSACTION".to_owned();
+                if !name.is_empty() {
+                    text.push(' ');
+                    text.push_str(&bracketed(name));
+                }
+                if begin_next.is_some() {
+                    text.push_str(" BEGIN TRANSACTION");
+                }
+                text
+            }
+            TransactionRequest::Save { name } => {
+                format!("SAVE TRANSACTION {}", bracketed(name))
             }
             TransactionRequest::Distributed(_) => {
                 return self.send_not_supported("Distributed transactions");
@@ -728,7 +738,7 @@ impl Connection<'_> {
                 self.wire.peer()
             ));
         }
-        session.in_connection_dialect(|session| self.run_batch_text(session, text))
+        session.in_connection_dialect(|session| self.run_batch_text(session, &text))
     }
 
     fn batch<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, body: &[u8]) -> bool {
@@ -1161,6 +1171,7 @@ impl StepWriter<'_, '_> {
             Some("INSERT") => INSERT_COMMAND,
             Some("UPDATE") => UPDATE_COMMAND,
             Some("DELETE") => DELETE_COMMAND,
+            Some("MERGE") => MERGE_COMMAND,
             _ => 0,
         };
         let rows = if command == 0 {

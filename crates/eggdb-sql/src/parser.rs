@@ -887,7 +887,10 @@ impl<'t> Parser<'t> {
         if self.is_word("characteristics") || self.is_word("transaction") {
             return self.set_transaction();
         }
-        if self.is_word("role") || self.is_word("authorization") || self.is_word("constraints") {
+        if self.is_word("role") {
+            return self.set_role();
+        }
+        if self.is_word("authorization") || self.is_word("constraints") {
             return Err(self.not_supported(&format!(
                 "SET {}",
                 self.text
@@ -920,6 +923,39 @@ impl<'t> Parser<'t> {
         Ok(Statement::Set {
             name,
             value: self.setting_value()?,
+        })
+    }
+
+    fn set_role(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        let position = self.position();
+        let role = match self.peek_kind() {
+            TokenKind::String(text) => {
+                let text = text.as_ref().to_owned();
+                self.at += 1;
+                text
+            }
+            TokenKind::Word(word) if word == "none" => {
+                self.at += 1;
+                return Ok(Statement::Ignored {
+                    tag: "SET",
+                    notice: None,
+                });
+            }
+            _ => self.name()?.text,
+        };
+        let user = self
+            .settings
+            .and_then(|settings| settings.get("session_authorization").ok());
+        if user.is_some_and(|user| user != role) {
+            return Err(SqlError::not_supported(
+                "SET ROLE to a role other than the session's user is not supported yet",
+            )
+            .at(position));
+        }
+        Ok(Statement::Ignored {
+            tag: "SET",
+            notice: None,
         })
     }
 
@@ -1020,6 +1056,12 @@ impl<'t> Parser<'t> {
         if self.take_word("all") {
             return Ok(Statement::Reset { name: None });
         }
+        if self.take_word("role") {
+            return Ok(Statement::Ignored {
+                tag: "RESET",
+                notice: None,
+            });
+        }
         let name = if self.is_word("time") && self.is_word_at(1, "zone") {
             self.at += 2;
             "TimeZone".to_owned()
@@ -1100,21 +1142,44 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn set_config(&mut self, position: usize) -> SqlResult<Expr> {
-        let constant = |parser: &Self| match parser.peek_kind() {
-            TokenKind::String(text) => Ok(text.as_ref().to_owned()),
-            _ => Err(parser.not_supported("set_config with arguments other than constants")),
+    fn set_config_argument(&mut self) -> SqlResult<Option<String>> {
+        let refused = |parser: &Self| {
+            parser.not_supported("set_config with arguments other than constants and parameters")
         };
-        let setting = constant(self)?;
+        let value = match self.peek_kind() {
+            TokenKind::String(text) => Some(text.as_ref().to_owned()),
+            TokenKind::Parameter(digits) if !self.mysql() && !self.sqlite() => {
+                let number = parameter_number(digits).ok_or_else(|| refused(self))?;
+                match self.parameters {
+                    Parameters::Values(values) => Some(
+                        values
+                            .get(number - 1)
+                            .and_then(|parameter| parameter.value.clone())
+                            .ok_or_else(|| refused(self))?,
+                    ),
+                    Parameters::Types(_) => None,
+                    Parameters::Absent | Parameters::Named(_) => return Err(refused(self)),
+                }
+            }
+            _ => return Err(refused(self)),
+        };
         self.at += 1;
+        Ok(value)
+    }
+
+    fn set_config(&mut self, position: usize) -> SqlResult<Expr> {
+        let setting = self.set_config_argument()?;
         self.expect(&TokenKind::Comma)?;
-        let value = constant(self)?;
-        self.at += 1;
+        let value = self.set_config_argument()?;
         self.expect(&TokenKind::Comma)?;
         let local = match self.peek_kind() {
             TokenKind::Word(word) if word == "true" => true,
             TokenKind::Word(word) if word == "false" => false,
-            _ => return Err(self.not_supported("set_config with arguments other than constants")),
+            _ => {
+                return Err(
+                    self.not_supported("set_config with arguments other than constants and parameters")
+                );
+            }
         };
         self.at += 1;
         self.expect(&TokenKind::RightParen)?;
@@ -1124,11 +1189,13 @@ impl<'t> Parser<'t> {
             )
             .at(position));
         }
-        self.setting_changes.push((setting, value.clone()));
+        if let (Some(setting), Some(value)) = (setting, &value) {
+            self.setting_changes.push((setting, value.clone()));
+        }
         Ok(Expr {
             kind: ExprKind::SessionValue {
                 name: "set_config",
-                value,
+                value: value.unwrap_or_default(),
             },
             position,
         })

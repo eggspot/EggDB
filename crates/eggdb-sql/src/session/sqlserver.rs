@@ -441,7 +441,34 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             SqlServerStatement::RaiseError(raise) => self.run_raiserror(raise),
             SqlServerStatement::Throw(arguments) => self.run_throw(arguments.as_ref()),
             SqlServerStatement::ExecuteDynamic(dynamic) => self.prepare_dynamic(dynamic),
+            SqlServerStatement::SaveTransaction(name) => self.save_transaction(name),
+            SqlServerStatement::RollbackTo(name) => self.roll_back_to(name),
         }
+    }
+
+    fn save_transaction(&mut self, name: &Name) -> SqlResult<QueryResult> {
+        self.sync_transaction_count();
+        if self.settings.sqlserver.transaction_count == 0 {
+            return Err(no_transaction(
+                628,
+                "Cannot issue SAVE TRANSACTION when there is no active transaction.",
+            ));
+        }
+        self.save_points.push(name.text.clone());
+        Ok(QueryResult::command("SAVE TRANSACTION"))
+    }
+
+    fn roll_back_to(&mut self, name: &Name) -> SqlResult<QueryResult> {
+        self.sync_transaction_count();
+        if self.settings.sqlserver.transaction_count > 0
+            && self.save_points.iter().any(|saved| saved == &name.text)
+        {
+            return Err(
+                crate::parser::sqlserver_not_supported("ROLLBACK TRANSACTION to a save point")
+                    .at(name.position),
+            );
+        }
+        self.sqlserver_rollback()
     }
 
     pub(super) fn run_insert_bulk(

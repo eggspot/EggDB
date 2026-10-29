@@ -1,6 +1,6 @@
 use crate::ast::{
     BinaryOperator, Expr, ExprKind, Insert, InsertSource, InsertValue, MergeStatement, Name,
-    OnDuplicate,
+    OnDuplicate, SelectItem,
 };
 use crate::constraints::PreparedChecks;
 use crate::encoding::{Column, TableDefinition};
@@ -335,6 +335,7 @@ pub(crate) fn merge(
         }
     }
     let mut affected = 0usize;
+    let mut outputs: Vec<OutputRow> = Vec::new();
     if let Some(update) = &merge.update {
         let checks = PreparedChecks::of(&table)?;
         let rule = execute::assignment_rule(crate::constraints::current_dialect());
@@ -366,11 +367,27 @@ pub(crate) fn merge(
         }
         execute::write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
         affected += changes.len();
+        if merge.output.is_some() {
+            for (((_, _, new_row), old_row), &(_, source_index)) in
+                changes.iter().zip(&old_rows).zip(&pairs)
+            {
+                outputs.push(OutputRow {
+                    inserted: Some(new_row.clone()),
+                    deleted: Some(old_row.clone()),
+                    source_index,
+                });
+            }
+        }
         if let Some(condition) = &update.delete_condition {
             let mut deleted = Vec::new();
-            for ((_, new_key, new_row), &(_, source_index)) in changes.into_iter().zip(&pairs) {
+            for (at, ((_, new_key, new_row), &(_, source_index))) in
+                changes.into_iter().zip(&pairs).enumerate()
+            {
                 let row = joined.row(&new_row, &source.rows[source_index]);
                 if joined.holds(Some(condition), &row, "DELETE WHERE")? {
+                    if let Some(output) = outputs.get_mut(at) {
+                        output.inserted = None;
+                    }
                     deleted.push((new_key, new_row));
                 }
             }
@@ -402,6 +419,7 @@ pub(crate) fn merge(
             .at(merge.target.name.position));
         }
         let mut rows = Vec::new();
+        let mut inserted_sources = Vec::new();
         for (source_index, source_row) in source.rows.iter().enumerate() {
             if matched_sources[source_index] {
                 continue;
@@ -410,6 +428,7 @@ pub(crate) fn merge(
             if !joined.holds(insert.condition.as_ref(), &row, "WHERE")? {
                 continue;
             }
+            inserted_sources.push(source_index);
             let mut values = Vec::with_capacity(targets.len());
             for (expr, &index) in insert.values.iter().zip(&targets) {
                 let sql_type = table.columns[index].sql_type;
@@ -441,20 +460,94 @@ pub(crate) fn merge(
                 })
                 .collect();
             let count = rows.len();
-            execute::insert(
+            let stored = execute::insert(
                 writer,
                 tables,
                 &Insert {
                     table: merge.target.clone(),
                     columns: Some(columns),
                     source: InsertSource::Values(rows),
-                    returning: None,
+                    returning: merge.output.as_ref().map(|_| {
+                        vec![SelectItem::Wildcard {
+                            qualifier: None,
+                            position: merge.target.name.position,
+                        }]
+                    }),
                     on_duplicate: OnDuplicate::Fail,
                     rollback_on_conflict: false,
                 },
             )?;
             affected += count;
+            for (inserted, source_index) in stored.rows.into_iter().zip(inserted_sources) {
+                outputs.push(OutputRow {
+                    inserted: Some(inserted),
+                    deleted: None,
+                    source_index,
+                });
+            }
         }
     }
-    Ok(QueryResult::command(format!("MERGE {affected}")))
+    let tag = format!("MERGE {affected}");
+    match &merge.output {
+        Some(items) => {
+            let (columns, rows) =
+                output_rows(items, &table, &source_table, &source_label, &source.rows, outputs)?;
+            Ok(QueryResult::rows(tag, columns, rows))
+        }
+        None => Ok(QueryResult::command(tag)),
+    }
+}
+
+struct OutputRow {
+    inserted: Option<Vec<Value>>,
+    deleted: Option<Vec<Value>>,
+    source_index: usize,
+}
+
+fn output_rows(
+    items: &[SelectItem],
+    table: &TableDefinition,
+    source_table: &TableDefinition,
+    source_label: &str,
+    source_rows: &[Vec<Value>],
+    outputs: Vec<OutputRow>,
+) -> SqlResult<(Vec<crate::session::OutputColumn>, Vec<Vec<Value>>)> {
+    let width = table.columns.len();
+    let sources = Sources {
+        list: vec![
+            Source {
+                table,
+                label: "inserted",
+                offset: 0,
+            },
+            Source {
+                table,
+                label: "deleted",
+                offset: width,
+            },
+            Source {
+                table: source_table,
+                label: source_label,
+                offset: width * 2,
+            },
+        ],
+        merged: Vec::new(),
+        out_of_reach: Vec::new(),
+        star: (0..width * 2 + source_table.columns.len()).collect(),
+    };
+    let mut rows = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        let mut row = Vec::with_capacity(width * 2 + source_table.columns.len());
+        for side in [output.inserted, output.deleted] {
+            match side {
+                Some(values) => row.extend(values),
+                None => row.resize(row.len() + width, Value::Null),
+            }
+        }
+        if let Some(source_row) = source_rows.get(output.source_index) {
+            row.extend_from_slice(source_row);
+        }
+        rows.push(row);
+    }
+    execute::project_rows(items, Scope::Many(&sources), &rows)
 }
