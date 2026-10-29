@@ -91,6 +91,20 @@ expect_exit 0 "$eggdb" stats app.db --format json
 grep -q '"page_size":4096,' last.out || fail "stats reported $(cat last.out)"
 pass "check and stats"
 
+expect_output '{"key":"user:1","value":"Ada"}' "$eggdb" get app.db user:1 --json
+expect_exit 3 "$eggdb" get missing.db user:1 --json
+grep -q '^{"error":{"code":"not_found","category":"not_found","message":"cannot open missing.db: no such file' last.err ||
+  fail "a JSON error read $(cat last.err)"
+expect_exit 3 "$eggdb" get missing.db user:1
+grep -q '^eggdb: cannot open missing.db: no such file' last.err || fail "a text error read $(cat last.err)"
+expect_exit 0 "$eggdb" help --json
+grep -q '^{"version":"' last.out || fail "help --json printed $(cat last.out)"
+grep -q '"name":"kv_scan","command":\["scan"\]' last.out || fail "help --json has no kv_scan: $(cat last.out)"
+expect_exit 0 "$eggdb" sql --create sql-json.db --json -c "CREATE TABLE t (id integer PRIMARY KEY); INSERT INTO t VALUES (7); SELECT id FROM t"
+[ "$(tail -n 1 last.out)" = '{"tag":"SELECT 1","columns":[{"name":"id","type":"integer"}],"rows":[[7]],"row_count":1}' ] ||
+  fail "sql --json printed $(cat last.out)"
+pass "--json, JSON errors, help --json and sql --json"
+
 expect_exit 0 "$eggdb" export app.db app.jsonl
 expect_exit 0 "$eggdb" import --create copy.db app.jsonl
 expect_exit 0 "$eggdb" export copy.db copy.jsonl
