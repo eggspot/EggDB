@@ -31,6 +31,8 @@ struct MapSource {
     largest_value: usize,
     hooks: Rc<Hooks>,
     check_started: bool,
+    times_to_live: BTreeMap<(Option<String>, Vec<u8>), Duration>,
+    expiring_keys: bool,
 }
 
 fn after_prefix(prefix: &[u8]) -> Bound<Vec<u8>> {
@@ -56,6 +58,25 @@ impl MapSource {
         match &self.shown {
             Some(name) => self.collections.entry(name.clone()).or_default(),
             None => &mut self.entries,
+        }
+    }
+
+    fn time_to_live(&self, key: &[u8]) -> Option<Duration> {
+        self.times_to_live
+            .get(&(self.shown.clone(), key.to_vec()))
+            .copied()
+    }
+
+    fn set_time_to_live(&mut self, key: &[u8], time_to_live: Option<Duration>) {
+        let at = (self.shown.clone(), key.to_vec());
+        match time_to_live {
+            Some(time_to_live) => {
+                self.expiring_keys = true;
+                self.times_to_live.insert(at, time_to_live);
+            }
+            None => {
+                self.times_to_live.remove(&at);
+            }
         }
     }
 
@@ -86,6 +107,7 @@ impl Source for MapSource {
             cache_misses: 18,
             log_bytes: 24 << 10,
             write_timeout: Duration::from_secs(5),
+            expiring_keys: self.expiring_keys,
         })
     }
 
@@ -104,6 +126,7 @@ impl Source for MapSource {
         let row = |(key, value): (&Vec<u8>, &Vec<u8>)| KeyRow {
             key: key.clone(),
             value_bytes: value.len() as u64,
+            time_to_live: self.time_to_live(key),
         };
         Ok(match start {
             Start::First => self.matching(prefix).take(limit).map(row).collect(),
@@ -201,12 +224,45 @@ impl Source for MapSource {
             )),
             Change::Put { key, value } => {
                 self.space_mut().insert(key.clone(), value.clone());
+                self.set_time_to_live(key, None);
                 Ok("09:14:04Z".to_owned())
             }
             Change::Delete { key } => match self.space_mut().remove(key) {
-                Some(_) => Ok("09:14:05Z".to_owned()),
+                Some(_) => {
+                    self.set_time_to_live(key, None);
+                    Ok("09:14:05Z".to_owned())
+                }
                 None => Err(SourceError::new(ErrorKind::Other, "no such key")),
             },
+            Change::Expire { key, time_to_live } if self.space().contains_key(key) => {
+                self.set_time_to_live(key, Some(*time_to_live));
+                Ok("09:14:06Z".to_owned())
+            }
+            Change::Persist { key } if self.time_to_live(key).is_some() => {
+                self.set_time_to_live(key, None);
+                Ok("09:14:06Z".to_owned())
+            }
+            Change::Expire { .. } | Change::Persist { .. } => {
+                Err(SourceError::new(ErrorKind::Other, "no such key"))
+            }
+            Change::Increment { key, by } => {
+                let current = self.space().get(key).cloned().unwrap_or_else(|| b"0".to_vec());
+                let counted = std::str::from_utf8(&current)
+                    .ok()
+                    .and_then(|text| text.parse::<i64>().ok())
+                    .and_then(|count| count.checked_add(*by));
+                match counted {
+                    Some(count) => {
+                        self.space_mut()
+                            .insert(key.clone(), count.to_string().into_bytes());
+                        Ok("09:14:07Z".to_owned())
+                    }
+                    None => Err(SourceError::new(
+                        ErrorKind::NotAnInteger,
+                        "the value is not a counter: a counter is a decimal integer",
+                    )),
+                }
+            }
         }
     }
 
@@ -304,6 +360,8 @@ fn fixture() -> MapSource {
         largest_value: 1 << 30,
         hooks: Rc::new(Hooks::default()),
         check_started: false,
+        times_to_live: BTreeMap::new(),
+        expiring_keys: false,
     }
 }
 
@@ -1850,4 +1908,152 @@ fn scenario_39_the_picker_fits_a_60_column_terminal() {
         s.screen()
     };
     assert!(help.contains("Collections C  pick the collection shown"), "{help}");
+}
+
+fn select_user_1(s: &mut Scenario) {
+    s.press(&["Down", "Down", "Down", "Down"]);
+    assert!(s.screen().contains("> user:1 "), "{}", s.screen());
+}
+
+#[test]
+fn scenario_40_a_time_to_live_is_set_shown_in_the_list_and_the_viewer() {
+    let mut s = Scenario::new(80, 24);
+    assert!(!s.row(23).contains("t expire"), "{}", s.row(23));
+    select_user_1(&mut s);
+    s.press(&["t"]);
+    assert!(s.row(1).starts_with(" Expire user:1 in: "), "{}", s.row(1));
+    assert!(s.row(23).contains("Enter continue"), "{}", s.row(23));
+    s.type_str("30s");
+    s.press(&["Enter"]);
+    let screen = s.screen();
+    assert!(screen.contains("┌ Set time to live"), "{screen}");
+    assert!(screen.contains("TTL    never → 30s"), "{screen}");
+    assert_eq!(s.hooks().writes.get(), 0);
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " Committed user:1 (expires in 30s) at 09:14:06Z");
+    let selected = s
+        .screen()
+        .lines()
+        .find(|line| line.starts_with("> user:1 "))
+        .map(str::to_owned)
+        .unwrap_or_default();
+    assert!(selected.contains("30s"), "{selected}");
+    assert!(s.screen().contains("expires in 30s"), "{}", s.screen());
+    assert!(s.row(23).contains("t expire"), "{}", s.row(23));
+    assert_eq!(
+        s.ui.source().times_to_live.get(&(None, b"user:1".to_vec())),
+        Some(&Duration::from_secs(30))
+    );
+    assert_model(&s, &fixture().entries);
+}
+
+#[test]
+fn scenario_41_a_bad_time_keeps_the_prompt_and_esc_changes_nothing() {
+    let mut s = Scenario::new(80, 24);
+    select_user_1(&mut s);
+    s.press(&["t"]);
+    s.type_str("30");
+    s.press(&["Enter"]);
+    assert_eq!(
+        s.row(22),
+        " Not a time: '30'; use 30s, 5m, 1h30m, 7d or 1500ms"
+    );
+    assert!(s.row(1).starts_with(" Expire user:1 in: 30"), "{}", s.row(1));
+    s.press(&["Backspace", "Backspace"]);
+    s.type_str("0s");
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " 0 is not a time to live; d deletes the key");
+    s.press(&["Esc"]);
+    assert!(!s.row(1).contains("Expire"), "{}", s.row(1));
+    assert_eq!(s.hooks().writes.get(), 0);
+    assert!(s.ui.source().times_to_live.is_empty());
+}
+
+#[test]
+fn scenario_42_an_empty_time_clears_the_time_to_live() {
+    let mut s = Scenario::new(80, 24);
+    select_user_1(&mut s);
+    s.press(&["t"]);
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " user:1 has no time to live");
+    assert_eq!(s.hooks().writes.get(), 0);
+    s.press(&["t"]);
+    s.type_str("1h30m");
+    s.press(&["Enter", "Enter"]);
+    assert!(s.screen().contains("expires in 1h30m"), "{}", s.screen());
+    s.press(&["t", "Enter"]);
+    let screen = s.screen();
+    assert!(screen.contains("┌ Clear time to live"), "{screen}");
+    assert!(screen.contains("TTL    1h30m → never"), "{screen}");
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " Committed user:1 (never expires) at 09:14:06Z");
+    assert!(!s.screen().contains("expires in"), "{}", s.screen());
+    assert!(s.ui.source().times_to_live.is_empty());
+}
+
+#[test]
+fn scenario_43_plus_and_minus_change_a_counter() {
+    let mut source = fixture();
+    source.entries.insert(b"hits".to_vec(), b"41".to_vec());
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, source);
+    s.press(&["Down", "Down", "Down"]);
+    assert!(s.screen().contains("> hits "), "{}", s.screen());
+    s.press(&["+"]);
+    assert!(s.row(1).starts_with(" Increment hits by: "), "{}", s.row(1));
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " Committed hits 41 → 42 at 09:14:07Z");
+    s.press(&["-"]);
+    assert!(s.row(1).starts_with(" Decrement hits by: "), "{}", s.row(1));
+    s.type_str("5");
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " Committed hits 42 → 37 at 09:14:07Z");
+    assert_eq!(s.entries().get(b"hits".as_slice()), Some(&b"37".to_vec()));
+    s.press(&["+"]);
+    s.type_str("abc");
+    s.press(&["Enter"]);
+    assert_eq!(s.row(22), " Not a whole number: 'abc'");
+    s.press(&["Esc", "Down", "Down", "+", "Enter"]);
+    assert!(
+        s.row(22).starts_with(" Error (NotAnInteger): "),
+        "{}",
+        s.row(22)
+    );
+    assert!(s.ui.source().entries[b"user:1".as_slice()].starts_with(b"User 1"));
+}
+
+#[test]
+fn scenario_44_read_only_refuses_times_to_live_and_counters() {
+    let mut source = fixture();
+    source.read_only = true;
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, source);
+    for key in ["t", "+", "-"] {
+        s.press(&[key]);
+        assert_eq!(
+            s.row(22),
+            " Opened read-only; start without --read-only to edit",
+            "{key}"
+        );
+    }
+    assert_eq!(s.hooks().writes.get(), 0);
+}
+
+#[test]
+fn scenario_45_a_time_to_live_in_a_collection_names_the_collection() {
+    let mut s = Scenario::with(80, 24, Capabilities::FULL, with_collections());
+    s.press(&["C", "End", "Enter"]);
+    assert!(s.row(1).starts_with(" Keys in users"), "{}", s.row(1));
+    s.press(&["t"]);
+    s.type_str("5m");
+    s.press(&["Enter"]);
+    assert!(s.screen().contains("In     collection users"), "{}", s.screen());
+    s.press(&["Enter"]);
+    assert_eq!(
+        s.ui
+            .source()
+            .times_to_live
+            .get(&(Some("users".to_owned()), b"s:1".to_vec())),
+        Some(&Duration::from_secs(300))
+    );
+    assert_eq!(s.ui.source().times_to_live.len(), 1);
+    assert_eq!(s.entries(), &fixture().entries);
 }

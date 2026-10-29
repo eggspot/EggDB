@@ -79,6 +79,7 @@ fn source_error(error: &eggdb::Error) -> SourceError {
         Engine::CollectionNotFound => ErrorKind::CollectionNotFound,
         Engine::InvalidCollectionName => ErrorKind::InvalidCollectionName,
         Engine::ReservedKey => ErrorKind::ReservedKey,
+        Engine::NotAnInteger => ErrorKind::NotAnInteger,
         _ => ErrorKind::Other,
     };
     SourceError::new(kind, error.to_string())
@@ -170,7 +171,18 @@ fn collect(scan: &mut Scan<'_>, descending: bool, limit: usize) -> eggdb::Result
         rows.push(KeyRow {
             key: key.to_vec(),
             value_bytes,
+            time_to_live: None,
         });
+    }
+    Ok(rows)
+}
+
+fn with_times_to_live(
+    mut rows: Vec<KeyRow>,
+    time_to_live: impl Fn(&[u8]) -> eggdb::Result<Option<Duration>>,
+) -> eggdb::Result<Vec<KeyRow>> {
+    for row in &mut rows {
+        row.time_to_live = time_to_live(&row.key)?;
     }
     Ok(rows)
 }
@@ -191,11 +203,29 @@ fn apply(
             true
         }
         (None, Change::Delete { key }) => transaction.delete(key)?,
+        (None, Change::Expire { key, time_to_live }) => {
+            transaction.set_expiry(key, *time_to_live)?
+        }
+        (None, Change::Persist { key }) => transaction.clear_expiry(key)?,
+        (None, Change::Increment { key, by }) => {
+            transaction.increment(key, *by)?;
+            true
+        }
         (Some(name), Change::Put { key, value }) => {
             transaction.collection(name)?.put(key, value)?;
             true
         }
         (Some(name), Change::Delete { key }) => transaction.collection(name)?.delete(key)?,
+        (Some(name), Change::Expire { key, time_to_live }) => transaction
+            .collection(name)?
+            .set_expiry(key, *time_to_live)?,
+        (Some(name), Change::Persist { key }) => {
+            transaction.collection(name)?.clear_expiry(key)?
+        }
+        (Some(name), Change::Increment { key, by }) => {
+            transaction.collection(name)?.increment(key, *by)?;
+            true
+        }
     };
     if changed {
         transaction.commit().map(Some)
@@ -225,6 +255,7 @@ impl Source for DatabaseSource {
             cache_misses: stats.cache_misses,
             log_bytes: stats.log_bytes_since_checkpoint,
             write_timeout: WRITE_TIMEOUT,
+            expiring_keys: stats.expiring_keys,
         })
     }
 
@@ -239,12 +270,29 @@ impl Source for DatabaseSource {
         };
         let descending = matches!(start, Start::Last | Start::Before(_));
         let collection = self.collection.as_deref();
-        self.db()?
-            .read(|tx| match collection {
-                Some(name) => collect(&mut tx.collection(name)?.scan(bounds), descending, limit),
-                None => collect(&mut tx.scan(bounds), descending, limit),
-            })
-            .map_err(|error| source_error(&error))
+        let db = self.db()?;
+        let expiring = db
+            .stats()
+            .map_err(|error| source_error(&error))?
+            .expiring_keys;
+        db.read(|tx| match collection {
+            Some(name) => {
+                let named = tx.collection(name)?;
+                let rows = collect(&mut named.scan(bounds), descending, limit)?;
+                if !expiring {
+                    return Ok(rows);
+                }
+                with_times_to_live(rows, |key| named.time_to_live(key))
+            }
+            None => {
+                let rows = collect(&mut tx.scan(bounds), descending, limit)?;
+                if !expiring {
+                    return Ok(rows);
+                }
+                with_times_to_live(rows, |key| tx.time_to_live(key))
+            }
+        })
+        .map_err(|error| source_error(&error))
     }
 
     fn value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, SourceError> {

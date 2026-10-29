@@ -139,13 +139,16 @@ pub enum Start<'a> {
     Before(&'a [u8]),
 }
 
-/// One key of the list: the key and its value's size.
+/// One key of the list: the key, its value's size and the time it has left.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRow {
     /// The key.
     pub key: Vec<u8>,
     /// The value's size in bytes.
     pub value_bytes: u64,
+    /// How long the key had left before it expires when it was read; `None` for a key without
+    /// a time to live.
+    pub time_to_live: Option<Duration>,
 }
 
 /// One step of a count.
@@ -172,13 +175,36 @@ pub enum Change {
         /// The key.
         key: Vec<u8>,
     },
+    /// Gives `key` a time to live, replacing any it had.
+    Expire {
+        /// The key.
+        key: Vec<u8>,
+        /// The time from the commit until the key expires.
+        time_to_live: Duration,
+    },
+    /// Removes the time to live of `key`, so it no longer expires.
+    Persist {
+        /// The key.
+        key: Vec<u8>,
+    },
+    /// Adds `by` to the counter stored under `key`; a negative `by` subtracts.
+    Increment {
+        /// The key.
+        key: Vec<u8>,
+        /// The amount to add.
+        by: i64,
+    },
 }
 
 impl Change {
     /// The key the change is to.
     pub fn key(&self) -> &[u8] {
         match self {
-            Self::Put { key, .. } | Self::Delete { key } => key,
+            Self::Put { key, .. }
+            | Self::Delete { key }
+            | Self::Expire { key, .. }
+            | Self::Persist { key }
+            | Self::Increment { key, .. } => key,
         }
     }
 }
@@ -281,6 +307,8 @@ pub enum ErrorKind {
     InvalidCollectionName,
     /// The key starts with the bytes EggDB keeps for collections.
     ReservedKey,
+    /// The value is not a counter, or the step would take it out of a counter's range.
+    NotAnInteger,
     /// Anything else.
     Other,
 }
@@ -309,6 +337,7 @@ impl ErrorKind {
             Self::CollectionNotFound => "CollectionNotFound",
             Self::InvalidCollectionName => "InvalidCollectionName",
             Self::ReservedKey => "ReservedKey",
+            Self::NotAnInteger => "NotAnInteger",
             Self::Other => "Other",
         }
     }
@@ -350,4 +379,6 @@ pub struct Summary {
     pub log_bytes: u64,
     /// How long a write waits for another write transaction to end.
     pub write_timeout: Duration,
+    /// Whether the file has held keys with a time to live, which the key list then shows.
+    pub expiring_keys: bool,
 }

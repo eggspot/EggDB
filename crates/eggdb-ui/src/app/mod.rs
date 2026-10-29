@@ -1,6 +1,7 @@
 mod check;
 mod collections;
 mod edit;
+mod key_prompt;
 mod modal;
 mod query;
 
@@ -11,10 +12,12 @@ use crate::terminal::{Capabilities, Event, KeyCode, KeyEvent, Size, Terminal};
 use crate::text;
 use crate::text_view::{self, Segment};
 use crate::theme::{Role, Symbol, Theme};
+use crate::time_to_live::{format_time_left, format_time_left_short};
 use crate::width::text_width;
 use check::CheckRun;
 use collections::Picker;
 use edit::Edit;
+use key_prompt::{KeyPrompt, PromptKind};
 use modal::Modal;
 use query::Query;
 use std::io;
@@ -139,6 +142,7 @@ pub struct Ui<S> {
     collection: Option<String>,
     collection_names: Vec<String>,
     picker: Option<Picker>,
+    prompt: Option<KeyPrompt>,
 }
 
 impl<S: Source> Ui<S> {
@@ -173,6 +177,7 @@ impl<S: Source> Ui<S> {
             collection: None,
             collection_names: Vec::new(),
             picker: None,
+            prompt: None,
         };
         ui.refresh_collections();
         ui.home();
@@ -667,6 +672,8 @@ impl<S: Source> Ui<S> {
                 }
                 if self.query_open {
                     self.query_paste(&text);
+                } else if self.prompt.is_some() {
+                    self.prompt_paste(&text);
                 } else if self.edit.is_some() {
                     self.edit_paste(&text);
                 } else if let Some(edit) = self.filter_edit.as_mut() {
@@ -679,6 +686,7 @@ impl<S: Source> Ui<S> {
             Event::Key(key) => self.key(key),
         }
         self.follow_editor_cursor();
+        self.follow_prompt_cursor();
     }
 
     fn keep_scrolls_in_range(&mut self, previous_hex_per_row: usize) {
@@ -739,6 +747,10 @@ impl<S: Source> Ui<S> {
             self.edit_key(key);
             return;
         }
+        if self.prompt.is_some() {
+            self.prompt_key(key);
+            return;
+        }
         if self.filter_edit.is_some() {
             self.filter_key(key);
             return;
@@ -755,10 +767,15 @@ impl<S: Source> Ui<S> {
             KeyCode::Tab => self.focus = self.next_pane(true),
             KeyCode::BackTab => self.focus = self.next_pane(false),
             KeyCode::Char('C') => self.open_picker(false),
-            KeyCode::Char('e' | 'a' | 'd') if self.read_only() => self.info(READ_ONLY_TOAST),
+            KeyCode::Char('e' | 'a' | 'd' | 't' | '+' | '-') if self.read_only() => {
+                self.info(READ_ONLY_TOAST);
+            }
             KeyCode::Char('e') => self.start_edit(),
             KeyCode::Char('a') => self.start_add(),
             KeyCode::Char('d') => self.start_delete(),
+            KeyCode::Char('t') => self.start_key_prompt(PromptKind::TimeToLive { left: None }),
+            KeyCode::Char('+') => self.start_key_prompt(PromptKind::Counter { decrement: false }),
+            KeyCode::Char('-') => self.start_key_prompt(PromptKind::Counter { decrement: true }),
             KeyCode::Char('c') => self.start_check(),
             KeyCode::Char('s') => self.open_query(),
             KeyCode::Char('m') => self.show_last_message(),
@@ -774,6 +791,12 @@ impl<S: Source> Ui<S> {
 
     fn read_only(&self) -> bool {
         self.summary.as_ref().is_ok_and(|summary| summary.read_only)
+    }
+
+    fn has_expiring_keys(&self) -> bool {
+        self.summary
+            .as_ref()
+            .is_ok_and(|summary| summary.expiring_keys)
     }
 
     fn ctrl_c(&mut self) {
@@ -1188,7 +1211,7 @@ impl<S: Source> Ui<S> {
     fn draw_list(&self, frame: &mut Frame, col: u16, width: u16) {
         let role = self.title_role(Pane::Keys);
         frame.fill(col, 1, width, self.theme.style(role));
-        if !self.draw_key_entry(frame, col, width) {
+        if !self.draw_key_entry(frame, col, width) && !self.draw_key_prompt(frame, col, width) {
             let position = format!("{} ", self.position());
             let position_width = u16::try_from(text_width(&position)).unwrap_or(width);
             let mut title = self.keys_title(width, position_width);
@@ -1246,13 +1269,11 @@ impl<S: Source> Ui<S> {
             let key_room = width.saturating_sub(2 + 1 + size_cells);
             self.put(frame, col + 2, y, &text::escaped(&row.key), role, key_room);
             let size_role = if selected { Role::Selected } else { Role::Dim };
-            self.put_right(
-                frame,
-                col + width,
-                y,
-                &text::short_size(row.value_bytes),
-                size_role,
-            );
+            let size = match row.time_to_live {
+                Some(left) => format_time_left_short(left),
+                None => text::short_size(row.value_bytes),
+            };
+            self.put_right(frame, col + width, y, &size, size_role);
         }
     }
 
@@ -1330,14 +1351,26 @@ impl<S: Source> Ui<S> {
             width.saturating_sub(position_width + 1),
         );
         self.put_right(frame, col + width, 1, &position, role);
+        let expires = self
+            .rows
+            .iter()
+            .find(|row| row.key == viewer.key)
+            .and_then(|row| row.time_to_live)
+            .map(|left| format!("expires in {} ", format_time_left(left)));
+        let expires_width = expires
+            .as_deref()
+            .map_or(0, |text| u16::try_from(text_width(text) + 1).unwrap_or(width));
         self.put(
             frame,
             col + 1,
             2,
             &text::escaped(&viewer.key),
             Role::Plain,
-            width.saturating_sub(1),
+            width.saturating_sub(1 + expires_width),
         );
+        if let Some(expires) = &expires {
+            self.put_right(frame, col + width, 2, expires, Role::Dim);
+        }
         let rule = self
             .theme
             .symbol(Symbol::HorizontalLine)
@@ -1644,6 +1677,9 @@ impl<S: Source> Ui<S> {
         if let Some(hints) = self.edit_hints() {
             return hints;
         }
+        if let Some(hints) = self.prompt_hints() {
+            return hints;
+        }
         if self.filter_edit.is_some() {
             return vec![
                 Hint::new("Enter", "keep filter"),
@@ -1669,6 +1705,10 @@ impl<S: Source> Ui<S> {
             ];
             if self.has_collections() {
                 hints.insert(6, Hint::new("C", "collection"));
+            }
+            if self.has_expiring_keys() {
+                let expire = Hint::new("t", "expire").available(writable && !self.rows.is_empty());
+                hints.insert(5, expire);
             }
             hints
         } else {
@@ -1819,6 +1859,8 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
     lines.extend([
         "View        v  text > json > hex > auto      w  wrap long lines (text)".to_owned(),
         "Change      e  edit value   a  add key   d  delete key (asks d again)".to_owned(),
+        "Expire      t  time to live: 30s, 5m, 1h30m, 7d, or empty for never".to_owned(),
+        "Counter     +  add to a counter   -  subtract (asks how much, 1 if empty)".to_owned(),
         "Check       c  verify every page and show stats     r  re-read".to_owned(),
         "Messages    m  show the last message in full".to_owned(),
         "Quit        q, or Ctrl-C (asks before discarding an edit)".to_owned(),
@@ -1835,7 +1877,8 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
     ]);
     if ui.read_only() {
         lines.push(
-            "Opened read-only: e, a and d are off; start without --read-only to edit.".to_owned(),
+            "Opened read-only: e, a, d, t, + and - are off; start without --read-only."
+                .to_owned(),
         );
     }
     lines.extend([

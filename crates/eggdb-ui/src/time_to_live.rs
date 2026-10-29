@@ -158,6 +158,33 @@ mod tests {
     }
 
     #[test]
+    fn hostile_text_never_panics_and_every_printed_time_reads_back() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let alphabet = b"0123456789dhmsx .-+\xff";
+        for _ in 0..20_000 {
+            let length = (next() % 12) as usize;
+            let bytes: Vec<u8> = (0..length)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect();
+            let text = String::from_utf8_lossy(&bytes);
+            if let Ok(parsed) = parse_time_to_live(&text) {
+                assert!(parsed > Duration::ZERO, "{text}");
+            }
+            let left = Duration::from_millis(next() % (400 * 86_400_000));
+            let printed = format_time_left(left);
+            let read = parse_time_to_live(&printed).unwrap();
+            assert!(read <= left.max(Duration::from_millis(1)), "{printed}");
+            assert!(left.saturating_sub(read) < Duration::from_secs(1), "{printed}");
+        }
+    }
+
+    #[test]
     fn a_short_remaining_time_is_its_largest_unit() {
         for (left, expected) in [
             (Duration::from_millis(412), "412ms"),

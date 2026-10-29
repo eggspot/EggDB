@@ -111,6 +111,9 @@ pub struct Stats {
     pub cache_misses: u64,
     /// Bytes of write-ahead log since the last checkpoint, which the next open would replay.
     pub log_bytes_since_checkpoint: u64,
+    /// Whether the file has held keys with a time to live: reads then look up the deadline of
+    /// each key they return, and commits remove keys whose time has run out.
+    pub expiring_keys: bool,
 }
 
 /// What [`Database::check`] found in a database whose every page it read passed, and what
@@ -416,6 +419,7 @@ impl Database {
             cache_hits: cache.hits,
             cache_misses: cache.misses,
             log_bytes_since_checkpoint: log.bytes_since_checkpoint,
+            expiring_keys: self.has_expiring_keys(),
         })
     }
 

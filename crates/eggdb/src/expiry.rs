@@ -730,4 +730,28 @@ mod tests {
         let long = parse_counter(&[b'x'; 100]).unwrap_err().to_string();
         assert!(long.contains("(100 bytes)"), "{long}");
     }
+
+    #[test]
+    fn hostile_values_and_records_are_errors_never_panics() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let alphabet = b"0123456789-+ x\x00\xff";
+        for _ in 0..20_000 {
+            let length = (next() % 24) as usize;
+            let value: Vec<u8> = (0..length)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect();
+            if let Ok(count) = parse_counter(&value) {
+                assert_eq!(count.to_string().as_bytes(), value.as_slice());
+            }
+            let record_bytes: Vec<u8> = (0..(next() % 12)).map(|_| next() as u8).collect();
+            let _ = read_record(&record_bytes);
+            let _ = split_by_deadline(&record_bytes);
+        }
+    }
 }
