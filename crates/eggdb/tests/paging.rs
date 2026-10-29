@@ -357,7 +357,11 @@ fn table_list_pages_in_its_order_while_tables_are_added() {
         assert!(seen.contains(&format!("table:m{n:02}")), "m{n:02}");
     }
     assert!(seen.iter().all(|item| !item.starts_with("table:a")), "{seen:?}");
-    assert!(seen.iter().filter(|item| item.starts_with("table:z")).count() == round);
+    assert_eq!(
+        seen.iter().filter(|item| item.starts_with("table:z")).count(),
+        round,
+        "every table added after the cursor is read"
+    );
     assert_eq!(seen.last().map(String::as_str), Some("view:v1"));
 
     let text_page = eggdb(&["table", "list", &path, "--limit", "2"]);

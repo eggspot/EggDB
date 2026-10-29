@@ -276,7 +276,7 @@ mod tests {
             .unwrap();
         let mut rest = Vec::new();
         session
-            .read_stored_rows(&table, Some(&first[1].0), &mut |_, values| {
+            .read_stored_rows(&table, Some(first[1].0.as_slice()), &mut |_, values| {
                 rest.push(values);
                 Ok(true)
             })
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(rest, vec![vec![Value::Integer(5), Value::Text("e".to_owned())]]);
         let mut beyond = 0;
         session
-            .read_stored_rows(&table, Some(&[0xff; 40]), &mut |_, _| {
+            .read_stored_rows(&table, Some(&[0xff; 40][..]), &mut |_, _| {
                 beyond += 1;
                 Ok(true)
             })
