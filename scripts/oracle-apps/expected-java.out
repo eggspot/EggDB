@@ -1,0 +1,32 @@
+== dictionary
+COUNTRIES
+DEPARTMENTS
+EMPLOYEES
+JOBS
+JOB_HISTORY
+LOCATIONS
+REGIONS
+DEPARTMENTS	DEPT_LOC_FK	LOCATIONS
+DEPARTMENTS	DEPT_MGR_FK	EMPLOYEES
+== session
+HR	HR
+banner ok
+== department
+Alexander	James
+Bruce	Miller
+David	Williams
+Valli	Jackson
+Diana	Nguyen
+== join
+Administration	Seattle
+== hire date
+2013-06-17
+== transaction
+inserted 1
+after rollback 5
+inserted 1
+after commit 6
+deleted 1
+after delete 5
+== missing table
+error 42P01

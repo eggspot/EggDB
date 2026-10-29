@@ -465,8 +465,50 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  oracle-apps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-oracle-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Download pgjdbc and pull the postgres:17 image for psql (test clients only, never shipped)
+        run: |
+          mkdir -p "$RUNNER_TEMP/clients"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/clients/postgresql.jar" \
+            https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar
+          docker pull --quiet postgres:17
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Run HR's queries in Oracle's dialect through psql and pgjdbc against eggdb serve
+        env:
+          PSQL: docker run --rm -i --network host -e PGPASSWORD -e PGOPTIONS postgres:17 psql
+          PGJDBC_JAR: ${{ runner.temp }}/clients/postgresql.jar
+        run: scripts/oracle-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/oracle-apps"
+      - name: Keep the outputs, the server log and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: oracle-apps-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/oracle-apps/*.out
+            ${{ runner.temp }}/oracle-apps/serve.err
+            ${{ runner.temp }}/oracle-apps/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps]
+    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
