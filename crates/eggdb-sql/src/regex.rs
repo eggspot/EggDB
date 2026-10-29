@@ -1,9 +1,13 @@
+mod search;
+
 use crate::ast::BinaryOperator;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+
+pub(crate) use search::{Finder, Span};
 
 pub(crate) const MAX_PATTERN_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_INSTRUCTIONS: usize = 100_000;
@@ -13,10 +17,67 @@ pub(crate) const MATCH_STEPS: u64 = 1_000_000_000;
 const MOST_CACHED_PATTERNS: usize = 256;
 const MOST_CACHED_PATTERN_BYTES: usize = 1 << 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum CaseSensitivity {
+    #[default]
     Sensitive,
     Insensitive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) struct Options {
+    pub(crate) case: CaseSensitivity,
+    pub(crate) newline_excluded: bool,
+    pub(crate) line_anchors: bool,
+    pub(crate) expanded: bool,
+    pub(crate) literal: bool,
+}
+
+pub(crate) enum OptionLetter {
+    Applied,
+    Unknown,
+}
+
+impl Options {
+    pub(crate) fn of_case(case: CaseSensitivity) -> Self {
+        Self {
+            case,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn apply(&mut self, letter: char) -> SqlResult<OptionLetter> {
+        match letter {
+            'c' => self.case = CaseSensitivity::Sensitive,
+            'i' => self.case = CaseSensitivity::Insensitive,
+            'm' | 'n' => {
+                self.newline_excluded = true;
+                self.line_anchors = true;
+            }
+            'p' => {
+                self.newline_excluded = true;
+                self.line_anchors = false;
+            }
+            'w' => {
+                self.newline_excluded = false;
+                self.line_anchors = true;
+            }
+            's' => {
+                self.newline_excluded = false;
+                self.line_anchors = false;
+            }
+            't' => self.expanded = false,
+            'x' => self.expanded = true,
+            'q' => self.literal = true,
+            'b' | 'e' => return Err(unsupported("basic and extended flavours (options b and e)")),
+            _ => return Ok(OptionLetter::Unknown),
+        }
+        Ok(OptionLetter::Applied)
+    }
+
+    fn needs_search(self) -> bool {
+        self.newline_excluded || self.line_anchors
+    }
 }
 
 #[derive(Debug)]
@@ -147,6 +208,18 @@ impl CharClass {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Assertion {
+    TextStart,
+    TextEnd,
+    LineStart,
+    LineEnd,
+    WordStart,
+    WordEnd,
+    WordBoundary,
+    NotWordBoundary,
+}
+
 #[derive(Debug)]
 enum Node {
     Empty,
@@ -161,6 +234,19 @@ enum Node {
         node: Box<Node>,
         min: u32,
         max: Option<u32>,
+        greedy: bool,
+        fixed: bool,
+    },
+    Group {
+        index: usize,
+        node: Box<Node>,
+    },
+    BackReference(usize),
+    Assertion(Assertion),
+    Look {
+        behind: bool,
+        negated: bool,
+        node: Box<Node>,
     },
 }
 
@@ -168,24 +254,31 @@ impl Node {
     fn size(&self) -> u64 {
         match self {
             Self::Empty => 0,
-            Self::Literal(_) | Self::Any | Self::Class(_) | Self::Start | Self::End => 1,
+            Self::Literal(_)
+            | Self::Any
+            | Self::Class(_)
+            | Self::Start
+            | Self::End
+            | Self::BackReference(_)
+            | Self::Assertion(_) => 1,
             Self::Concat(nodes) => nodes.iter().map(Node::size).fold(0, u64::saturating_add),
             Self::Alternate(nodes) => nodes
                 .iter()
                 .map(Node::size)
                 .fold(0, u64::saturating_add)
                 .saturating_add(2 * (nodes.len() as u64).saturating_sub(1)),
-            Self::Repeat { node, min, max } => {
+            Self::Repeat { node, min, max, .. } => {
                 let inner = node.size();
                 let required = inner.saturating_mul(u64::from(*min));
                 let optional = match max {
-                    None => inner.saturating_add(2),
+                    None => inner.saturating_add(4),
                     Some(max) => {
                         u64::from(max.saturating_sub(*min)).saturating_mul(inner.saturating_add(1))
                     }
                 };
                 required.saturating_add(optional)
             }
+            Self::Group { node, .. } | Self::Look { node, .. } => node.size().saturating_add(2),
         }
     }
 
@@ -194,7 +287,26 @@ impl Node {
             Self::Start => true,
             Self::Concat(nodes) => nodes.first().is_some_and(Node::anchored),
             Self::Alternate(nodes) => !nodes.is_empty() && nodes.iter().all(Node::anchored),
+            Self::Group { node, .. } => node.anchored(),
             _ => false,
+        }
+    }
+
+    fn prefers_longest(&self) -> Option<bool> {
+        match self {
+            Self::Repeat {
+                node, greedy, fixed, ..
+            } => {
+                if *fixed {
+                    node.prefers_longest()
+                } else {
+                    Some(*greedy)
+                }
+            }
+            Self::Concat(nodes) => nodes.iter().find_map(Node::prefers_longest),
+            Self::Alternate(_) => Some(true),
+            Self::Group { node, .. } => node.prefers_longest(),
+            _ => None,
         }
     }
 }
@@ -217,6 +329,11 @@ pub(crate) struct Regex {
     classes: Vec<CharClass>,
     case: CaseSensitivity,
     anchored: bool,
+    root: Node,
+    options: Options,
+    groups: usize,
+    needs_search: bool,
+    search: OnceCell<search::Program>,
 }
 
 fn invalid(reason: &str) -> SqlError {
@@ -242,9 +359,54 @@ struct PatternParser {
     depth: usize,
     case: CaseSensitivity,
     classes: Vec<CharClass>,
+    options: Options,
+    groups: usize,
+    closed: Vec<bool>,
+    look_depth: usize,
+    needs_search: bool,
 }
 
 impl PatternParser {
+    fn new(body: &str, options: Options) -> Self {
+        Self {
+            chars: body.chars().collect(),
+            at: 0,
+            depth: 0,
+            case: options.case,
+            classes: Vec::new(),
+            options,
+            groups: 0,
+            closed: Vec::new(),
+            look_depth: 0,
+            needs_search: false,
+        }
+    }
+
+    fn skip_layout(&mut self) {
+        if !self.options.expanded {
+            return;
+        }
+        while let Some(character) = self.peek() {
+            if character.is_whitespace() {
+                self.at += 1;
+            } else if character == '#' {
+                while let Some(skipped) = self.peek() {
+                    self.at += 1;
+                    if skipped == '\n' {
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn assertion(&mut self, assertion: Assertion) -> Node {
+        self.needs_search = true;
+        Node::Assertion(assertion)
+    }
+
     fn peek(&self) -> Option<char> {
         self.chars.get(self.at).copied()
     }
@@ -291,7 +453,11 @@ impl PatternParser {
 
     fn branch(&mut self) -> SqlResult<Node> {
         let mut pieces = Vec::new();
-        while let Some(character) = self.peek() {
+        loop {
+            self.skip_layout();
+            let Some(character) = self.peek() else {
+                break;
+            };
             if character == '|' || character == ')' {
                 break;
             }
@@ -317,14 +483,19 @@ impl PatternParser {
             return Err(invalid("quantifier operand invalid"));
         }
         let atom = self.atom()?;
+        self.skip_layout();
         if !self.at_quantifier() {
             return Ok(atom);
         }
-        if matches!(atom, Node::Start | Node::End) {
+        if matches!(
+            atom,
+            Node::Start | Node::End | Node::Assertion(_) | Node::Look { .. }
+        ) {
             return Err(invalid("quantifier operand invalid"));
         }
-        let (min, max) = self.quantifier()?;
-        self.take('?');
+        let (min, max, fixed) = self.quantifier()?;
+        let greedy = !self.take('?');
+        self.skip_layout();
         if self.at_quantifier() {
             return Err(invalid("quantifier operand invalid"));
         }
@@ -332,28 +503,30 @@ impl PatternParser {
             node: Box::new(atom),
             min,
             max,
+            greedy,
+            fixed,
         })
     }
 
-    fn quantifier(&mut self) -> SqlResult<(u32, Option<u32>)> {
+    fn quantifier(&mut self) -> SqlResult<(u32, Option<u32>, bool)> {
         let Some(character) = self.peek() else {
             return Err(invalid("quantifier operand invalid"));
         };
         self.at += 1;
         Ok(match character {
-            '*' => (0, None),
-            '+' => (1, None),
-            '?' => (0, Some(1)),
+            '*' => (0, None, false),
+            '+' => (1, None, false),
+            '?' => (0, Some(1), false),
             _ => {
                 let min = self.bound()?;
-                let max = if self.take(',') {
+                let (max, fixed) = if self.take(',') {
                     if self.peek().is_some_and(|next| next.is_ascii_digit()) {
-                        Some(self.bound()?)
+                        (Some(self.bound()?), false)
                     } else {
-                        None
+                        (None, false)
                     }
                 } else {
-                    Some(min)
+                    (Some(min), true)
                 };
                 if !self.take('}') {
                     return Err(match self.peek() {
@@ -364,7 +537,7 @@ impl PatternParser {
                 if max.is_some_and(|max| max < min) {
                     return Err(invalid("invalid repetition count(s)"));
                 }
-                (min, max)
+                (min, max, fixed)
             }
         })
     }
@@ -397,6 +570,8 @@ impl PatternParser {
         match character {
             '(' => self.group(),
             '.' => Ok(Node::Any),
+            '^' if self.options.line_anchors => Ok(self.assertion(Assertion::LineStart)),
+            '$' if self.options.line_anchors => Ok(self.assertion(Assertion::LineEnd)),
             '^' => Ok(Node::Start),
             '$' => Ok(Node::End),
             '[' => self.bracket(),
@@ -406,9 +581,14 @@ impl PatternParser {
     }
 
     fn group(&mut self) -> SqlResult<Node> {
+        let mut capturing = self.look_depth == 0;
+        let mut look = None;
         if self.peek() == Some('?') {
             match self.peek_at(1) {
-                Some(':') => self.at += 2,
+                Some(':') => {
+                    self.at += 2;
+                    capturing = false;
+                }
                 Some('#') => {
                     while let Some(character) = self.peek() {
                         self.at += 1;
@@ -418,11 +598,16 @@ impl PatternParser {
                     }
                     return Err(invalid("parentheses () not balanced"));
                 }
-                Some('=' | '!' | '<') => {
-                    return Err(unsupported("lookahead and lookbehind constraints"));
+                Some(kind @ ('=' | '!')) => {
+                    self.at += 2;
+                    look = Some((false, kind == '!'));
+                }
+                Some('<') if matches!(self.peek_at(2), Some('=' | '!')) => {
+                    look = Some((true, self.peek_at(2) == Some('!')));
+                    self.at += 3;
                 }
                 Some(letter) if letter.is_ascii_alphabetic() => {
-                    return Err(unsupported("embedded options"));
+                    return Err(invalid("invalid embedded option"));
                 }
                 _ => return Err(invalid("quantifier operand invalid")),
             }
@@ -431,12 +616,63 @@ impl PatternParser {
         if self.depth > MAX_GROUP_NESTING {
             return Err(too_complex());
         }
+        let index = if capturing && look.is_none() {
+            self.groups += 1;
+            self.closed.push(false);
+            Some(self.groups)
+        } else {
+            None
+        };
+        if look.is_some() {
+            self.look_depth += 1;
+            self.needs_search = true;
+        }
         let inner = self.alternation()?;
+        if look.is_some() {
+            self.look_depth -= 1;
+        }
         self.depth -= 1;
         if !self.take(')') {
             return Err(invalid("parentheses () not balanced"));
         }
-        Ok(inner)
+        if let Some(index) = index
+            && let Some(closed) = self.closed.get_mut(index - 1)
+        {
+            *closed = true;
+        }
+        Ok(match (look, index) {
+            (Some((behind, negated)), _) => Node::Look {
+                behind,
+                negated,
+                node: Box::new(inner),
+            },
+            (None, Some(index)) => Node::Group {
+                index,
+                node: Box::new(inner),
+            },
+            (None, None) => inner,
+        })
+    }
+
+    fn back_reference(&mut self, first: char) -> SqlResult<Node> {
+        let mut number = first.to_digit(10).map_or(0, |digit| digit as usize);
+        if let Some(second) = self.peek().and_then(|next| next.to_digit(10)) {
+            let wider = number * 10 + second as usize;
+            if wider <= self.groups {
+                self.at += 1;
+                number = wider;
+            }
+        }
+        let closed = number
+            .checked_sub(1)
+            .and_then(|at| self.closed.get(at))
+            .copied()
+            .unwrap_or(false);
+        if self.look_depth > 0 || !closed {
+            return Err(invalid("invalid backreference number"));
+        }
+        self.needs_search = true;
+        Ok(Node::BackReference(number))
     }
 
     fn escape(&mut self) -> SqlResult<Node> {
@@ -452,8 +688,13 @@ impl PatternParser {
             'W' => self.class(class(NamedClass::Word, true)),
             's' => self.class(class(NamedClass::Space, false)),
             'S' => self.class(class(NamedClass::Space, true)),
-            'm' | 'M' | 'y' | 'Y' | 'A' | 'Z' => Err(unsupported("constraint escapes")),
-            '1'..='9' => Err(unsupported("back references")),
+            'm' => Ok(self.assertion(Assertion::WordStart)),
+            'M' => Ok(self.assertion(Assertion::WordEnd)),
+            'y' => Ok(self.assertion(Assertion::WordBoundary)),
+            'Y' => Ok(self.assertion(Assertion::NotWordBoundary)),
+            'A' => Ok(self.assertion(Assertion::TextStart)),
+            'Z' => Ok(self.assertion(Assertion::TextEnd)),
+            '1'..='9' => self.back_reference(character),
             _ => {
                 let literal = self.escaped_character(character)?;
                 Ok(self.literal(literal))
@@ -736,6 +977,28 @@ fn collating_element(name: &str) -> Option<char> {
         .map(|(_, character)| *character)
 }
 
+fn embedded_options<'p>(body: &'p str, options: &mut Options) -> SqlResult<&'p str> {
+    let Some(rest) = body.strip_prefix("(?") else {
+        return Ok(body);
+    };
+    let letters = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphabetic())
+        .count();
+    if letters == 0 {
+        return Ok(body);
+    }
+    let Some(after) = rest[letters..].strip_prefix(')') else {
+        return Err(invalid("invalid embedded option"));
+    };
+    for letter in rest[..letters].chars() {
+        if let OptionLetter::Unknown = options.apply(letter)? {
+            return Err(invalid("invalid embedded option"));
+        }
+    }
+    Ok(after)
+}
+
 struct Compiler {
     program: Vec<Instruction>,
 }
@@ -800,7 +1063,9 @@ impl Compiler {
                     self.patch(jump, Instruction::Jump(end));
                 }
             }
-            Node::Repeat { node, min, max } => {
+            Node::Group { node, .. } => self.compile(node),
+            Node::BackReference(_) | Node::Assertion(_) | Node::Look { .. } => {}
+            Node::Repeat { node, min, max, .. } => {
                 for _ in 0..*min {
                     self.compile(node);
                 }
@@ -865,47 +1130,83 @@ impl Threads {
 
 impl Regex {
     pub(crate) fn compile(pattern: &str, case: CaseSensitivity) -> SqlResult<Self> {
+        Self::compile_with(pattern, Options::of_case(case))
+    }
+
+    pub(crate) fn compile_with(pattern: &str, mut options: Options) -> SqlResult<Self> {
         if pattern.len() > MAX_PATTERN_BYTES {
             return Err(too_complex());
         }
-        let body = if let Some(rest) = pattern.strip_prefix("***:") {
+        let body = if options.literal {
+            pattern
+        } else if let Some(rest) = pattern.strip_prefix("***:") {
+            embedded_options(rest, &mut options)?
+        } else if let Some(rest) = pattern.strip_prefix("***=") {
+            options.literal = true;
             rest
-        } else if pattern.starts_with("***=") {
-            return Err(unsupported("literal patterns (***=)"));
         } else if pattern.starts_with("***") {
             return Err(invalid("invalid embedded option"));
         } else {
-            pattern
+            embedded_options(pattern, &mut options)?
         };
-        let mut parser = PatternParser {
-            chars: body.chars().collect(),
-            at: 0,
-            depth: 0,
-            case,
-            classes: Vec::new(),
+        let mut parser = PatternParser::new(body, options);
+        let node = if options.literal {
+            let literals: Vec<Node> = parser
+                .chars
+                .clone()
+                .into_iter()
+                .map(|character| parser.literal(character))
+                .collect();
+            parser.at = parser.chars.len();
+            Node::Concat(literals)
+        } else {
+            parser.alternation()?
         };
-        let node = parser.alternation()?;
         if parser.at < parser.chars.len() {
             return Err(invalid("parentheses () not balanced"));
         }
         if node.size() >= MAX_INSTRUCTIONS as u64 {
             return Err(too_complex());
         }
+        let needs_search = parser.needs_search || options.needs_search();
         let anchored = node.anchored();
         let mut compiler = Compiler {
             program: Vec::new(),
         };
-        compiler.compile(&node);
+        if !needs_search {
+            compiler.compile(&node);
+        }
         compiler.emit(Instruction::Match);
         Ok(Self {
             program: compiler.program,
             classes: parser.classes,
-            case,
+            case: options.case,
             anchored,
+            root: node,
+            options,
+            groups: parser.groups,
+            needs_search,
+            search: OnceCell::new(),
         })
     }
 
+    pub(crate) fn groups(&self) -> usize {
+        self.groups
+    }
+
+    fn search_program(&self) -> &search::Program {
+        self.search.get_or_init(|| search::Program::build(self))
+    }
+
+    pub(crate) fn finder<'t>(&self, text: &'t [char]) -> Finder<'_, 't> {
+        Finder::new(self, text)
+    }
+
     pub(crate) fn is_match(&self, text: &str, budget: &mut StepBudget) -> SqlResult<bool> {
+        if self.needs_search {
+            let characters: Vec<char> = text.chars().collect();
+            return self.finder(&characters).any(budget);
+        }
         let size = self.program.len();
         let mut current = Threads::new(size);
         let mut next = Threads::new(size);
@@ -998,18 +1299,9 @@ impl Regex {
 }
 
 struct StatementRegexes {
-    sensitive: HashMap<String, Rc<Regex>>,
-    insensitive: HashMap<String, Rc<Regex>>,
+    compiled: HashMap<Options, HashMap<String, Rc<Regex>>>,
+    count: usize,
     cached_bytes: usize,
-}
-
-impl StatementRegexes {
-    fn compiled(&mut self, case: CaseSensitivity) -> &mut HashMap<String, Rc<Regex>> {
-        match case {
-            CaseSensitivity::Sensitive => &mut self.sensitive,
-            CaseSensitivity::Insensitive => &mut self.insensitive,
-        }
-    }
 }
 
 thread_local! {
@@ -1033,8 +1325,8 @@ impl Drop for EnteredStatement {
 
 pub(crate) fn enter_statement() -> EnteredStatement {
     let fresh = StatementRegexes {
-        sensitive: HashMap::new(),
-        insensitive: HashMap::new(),
+        compiled: HashMap::new(),
+        count: 0,
         cached_bytes: 0,
     };
     let previous = STATEMENT.with(|statement| {
@@ -1046,30 +1338,41 @@ pub(crate) fn enter_statement() -> EnteredStatement {
     EnteredStatement { previous }
 }
 
-fn compiled(pattern: &str, case: CaseSensitivity) -> SqlResult<Rc<Regex>> {
+pub(crate) fn compiled_with(pattern: &str, options: Options) -> SqlResult<Rc<Regex>> {
     let cached = STATEMENT.with(|statement| {
-        statement
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut statement| statement.as_mut()?.compiled(case).get(pattern).cloned())
+        statement.try_borrow_mut().ok().and_then(|mut statement| {
+            statement
+                .as_mut()?
+                .compiled
+                .get(&options)?
+                .get(pattern)
+                .cloned()
+        })
     });
     if let Some(regex) = cached {
         return Ok(regex);
     }
-    let regex = Rc::new(Regex::compile(pattern, case)?);
+    let regex = Rc::new(Regex::compile_with(pattern, options)?);
     STATEMENT.with(|statement| {
         if let Ok(mut statement) = statement.try_borrow_mut()
             && let Some(statement) = statement.as_mut()
-            && statement.sensitive.len() + statement.insensitive.len() < MOST_CACHED_PATTERNS
+            && statement.count < MOST_CACHED_PATTERNS
             && statement.cached_bytes.saturating_add(pattern.len()) <= MOST_CACHED_PATTERN_BYTES
         {
+            statement.count += 1;
             statement.cached_bytes += pattern.len();
             statement
-                .compiled(case)
+                .compiled
+                .entry(options)
+                .or_default()
                 .insert(pattern.to_owned(), Rc::clone(&regex));
         }
     });
     Ok(regex)
+}
+
+fn compiled(pattern: &str, case: CaseSensitivity) -> SqlResult<Rc<Regex>> {
+    compiled_with(pattern, Options::of_case(case))
 }
 
 pub(crate) fn matches(text: &str, pattern: &str, case: CaseSensitivity) -> SqlResult<bool> {
