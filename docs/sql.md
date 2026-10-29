@@ -680,9 +680,11 @@ answered when the batch ends), and SSMS's and Azure Data Studio's catalog querie
   whose whole primary key is grouped, as PostgreSQL allows. A query with an aggregate or
   `HAVING` and no `GROUP BY` returns one row, even over no rows. Groups come out in no promised
   order; use `ORDER BY`.
-- **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max` and
-  `string_agg(text, delimiter)` (also over `bytea`; a NULL delimiter joins with nothing), each
-  with `DISTINCT` or `ALL`. They skip NULLs; `count` of nothing is 0, the others are NULL. Result types are
+- **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`,
+  `string_agg(text, delimiter)` (also over `bytea`; a NULL delimiter joins with nothing),
+  `json_agg`, `jsonb_agg`, `json_object_agg(key, value)` and `jsonb_object_agg(key, value)`, each
+  with `DISTINCT` or `ALL`. They skip NULLs, except the JSON aggregates, which keep them as JSON
+  `null` (a NULL key is `22004`); `count` of nothing is 0, the others are NULL. Result types are
   PostgreSQL's: `count` is `bigint`; `sum` of `smallint` or `integer` is `bigint`, of `bigint`
   or `numeric` is an exact `numeric`, of `real` is `real`, of `double precision` is `double
   precision`; `avg` of an integer or `numeric` is an exact `numeric` (divided at PostgreSQL's
@@ -819,7 +821,18 @@ adding months keeps the day of the month or clamps it to the month's last day (`
 1 mon` is `2024-02-29`), and a result out of range fails with `22008`. `justify_days`,
 `justify_hours`, `justify_interval`, `age(t1, t2)` and `age(t)`, `current_time`, `localtime`, and
 `extract`/`date_part` of an interval (`year` to `microseconds`, `epoch` with 365.25-day years)
-or a time work.
+or a time work. `make_date` (a negative year is BC), `make_time`, `make_timestamp`,
+`make_timestamptz`, `make_interval` (also with PostgreSQL's named arguments, `make_interval(days
+=> 10)`), `date_bin`, `isfinite` and `value AT TIME ZONE zone` (a `timestamp` read in the zone
+becomes a `timestamptz`, a `timestamptz` becomes the zone's local `timestamp`, a `time` or
+`timetz` becomes a `timetz`; the zone is `UTC`, a fixed offset written as POSIX does, or an
+`interval`) work as in PostgreSQL; a named region (`Europe/Rome`) is `22023` until the time zone
+database comes. `to_char` takes PostgreSQL's template patterns for dates, time stamps and
+intervals (`YYYY`, `MM`, `Month`, `Mon`, `DD`, `Day`, `HH24`, `MI`, `SS`, `MS`, `US`, `AM`,
+`IYYY`, `IW`, `J`, `Q`, `RM`, `TZ`, `OF`, `FM`, `TH` and the rest, with quoted text) and numbers
+(`9`, `0`, `.`, `,`, `D`, `G`, `S`, `MI`, `PL`, `SG`, `PR`, `RN`, `TH`, `V`, `EEEE`, `FM`);
+`to_date`, `to_timestamp(text, template)` and `to_number` read text by the same patterns, and
+`to_timestamp(seconds)` reads Unix time.
 
 `bytea` reads the hex format (`'\xDEADBEEF'`, an odd number of digits is `22023`) and the escape
 format (`\\` and `\ooo` octal; another backslash is `22P02`), prints hex and compares byte by
@@ -838,7 +851,18 @@ are removed when it becomes text (`||`, `lower`, `LIKE`, a cast to `text`), so
 `54001`) and keeps it as written; `jsonb` stores the normalized text. `->` (a key or an array
 index, negative from the end), `->>` (the same as text), `#>` and `#>>` (a path such as
 `'{a,0}'`), `@>` and `<@` (containment, `jsonb` only), `json_typeof`/`jsonb_typeof` and
-`json_array_length`/`jsonb_array_length` work as in PostgreSQL. `jsonb` values compare, group
+`json_array_length`/`jsonb_array_length` work as in PostgreSQL. So do `jsonb`'s `?`, `?|`,
+`?&`, `-` (a key, an array index or a `text[]` of keys), `#-` (a path) and `||` (objects merged,
+arrays joined, scalars wrapped); the builders `to_json`/`to_jsonb`, `row_to_json` (of a `FROM`
+item, `row_to_json(t)`, or of `row(...)`), `json_build_object`/`jsonb_build_object` and
+`json_build_array`/`jsonb_build_array`, written with PostgreSQL's spacing (`{"a" : 1}` for
+`json`, normalized for `jsonb`; dates and time stamps in ISO 8601 with a `T`); the aggregates
+`json_agg`/`jsonb_agg` (NULLs kept, a `FROM` item as an object, `json_agg(t)`) and
+`json_object_agg`/`jsonb_object_agg`; `jsonb_set`, `jsonb_insert`, `jsonb_strip_nulls`,
+`json_strip_nulls`, `jsonb_pretty` and `json(b)_extract_path(_text)`; and the set-returning
+`json(b)_each(_text)`, `json(b)_array_elements(_text)` and `json(b)_object_keys` in `FROM`
+(columns `key` and `value`) or alone in a select list (each row then as its record text,
+`(a,1)`). `jsonb` values compare, group
 and index by their normalized text with every number written without trailing zeros, so
 `'{"a": 1.0}'::jsonb = '{"a": 1}'::jsonb` is true and a unique index holds them once, while each
 value keeps the number as written (`1.0`); `json` has no equality, as in PostgreSQL (`42883`),
@@ -872,16 +896,33 @@ hold at most 2^27 elements (`54000`) and counts against the session's value limi
 
 **Expressions**
 - Arithmetic `+ - * / % ^`, unary `-` and `+`, string concatenation `||`.
-- Regular expressions (D128): `text ~ pattern`, `~*` (ignoring case), `!~` and `!~*`, with
+- Regular expressions (D128, D130): `text ~ pattern`, `~*` (ignoring case), `!~` and `!~*`, with
   PostgreSQL's advanced syntax: `.`, bracket expressions (`[a-z]`, `[^0-9]`, `[[:alpha:]]` and the
   other classes, `\d \w \s \D \W \S` inside brackets too, collating elements such as
   `[[.hyphen.]]` and `[[=a=]]` by POSIX's names for the portable characters), `\d \w \s \D \W \S`,
   character escapes (`\n`, `\t`, `\x41`, `\u00e9`), `^`
-  and `$`, groups `(...)` and `(?:...)`, `|`, and `* + ? {m} {m,} {m,n}` with their lazy forms.
-  Matching takes time linear in the text (no backtracking); a malformed pattern is `2201B` with
-  PostgreSQL's reason (`invalid regular expression: parentheses () not balanced`), and one
-  match may take at most 10^9 steps (`54000`); a statement may run any number of matches. Classes and `~*` follow the `C`
-  locale, as text comparison does: only ASCII letters change case.
+  and `$`, groups `(...)` and `(?:...)`, `|`, and `* + ? {m} {m,} {m,n}` with their lazy forms;
+  back references (`(a)\1`), lookahead and lookbehind (`(?=re)`, `(?!re)`, `(?<=re)`,
+  `(?<!re)`), the constraint escapes `\m \M \y \Y \A \Z`, embedded options at the start
+  (`(?i)`, `(?c)`, `(?n)`, `(?m)`, `(?p)`, `(?w)`, `(?s)`, `(?x)`, `(?t)`, `(?q)`) and the
+  `***=` and `***:` directors. A pattern without back references or lookaround is matched in
+  time linear in the text; one with them runs a backtracking search bounded by the same step
+  budget. A malformed pattern is `2201B` with PostgreSQL's reason (`invalid regular expression:
+  parentheses () not balanced`), the basic and extended flavours (options `b` and `e`) are
+  `0A000`, and one match may take at most 10^9 steps (`54000`); a statement may run any number
+  of matches. Classes and `~*` follow the `C` locale, as text comparison does: only ASCII
+  letters change case.
+- The regular expression functions (D130): `regexp_match`, `regexp_matches` (a set-returning
+  function, every match with the `g` flag), `regexp_replace(s, re, replacement [, start [, n]]
+  [, flags])` with `\1`..`\9`, `\&` and `\\` in the replacement, `regexp_split_to_table`,
+  `regexp_split_to_array`, `regexp_like`, `regexp_count`, `regexp_instr` and `regexp_substr`, with
+  PostgreSQL's flags (`g`, `i`, `c`, `n`, `m`, `p`, `w`, `s`, `x`, `t`, `q`); a match starts as
+  far left as it can and is the longest or the shortest there by the pattern's own preference, as
+  PostgreSQL's rules describe (`regexp_match('abcd', 'a|ab')` is `{ab}`). `substring(s FROM re)`
+  gives the first parenthesized part, `substring(s SIMILAR re ESCAPE e)` and `substring(s FROM re
+  FOR e)` the part between the `e"` separators, and `s [NOT] SIMILAR TO re [ESCAPE e]` matches
+  the SQL standard's patterns (`%`, `_`, `|`, `*`, `+`, `?`, `{m,n}`, `()`, brackets), through
+  `similar_to_escape`.
 - `OPERATOR(op)` and `OPERATOR(pg_catalog.op)` for every binary operator, as psql writes them,
   with PostgreSQL's precedence; `expr COLLATE "C"`, `"POSIX"`, `"default"` or `ucs_basic`
   (optionally `pg_catalog.`), which changes nothing since text compares bytewise as in `C` (any
@@ -900,6 +941,15 @@ hold at most 2^27 elements (`54000`) and counts against the session's value limi
   `trim([LEADING | TRAILING | BOTH] [characters] FROM s)` (and `trim(s [, characters])`),
   `ltrim`, `rtrim`, `btrim` and `quote_ident` (quoting what PostgreSQL 16 quotes, by its key word
   list).
+- String functions (item 36): `split_part` (a negative field counts from the end), `concat` and
+  `concat_ws` (skipping NULLs), `replace`, `position(sub IN s)` and `strpos`, `left` and `right`
+  (a negative count drops from the other end), `lpad` and `rpad`, `repeat`, `initcap`,
+  `translate`, `reverse`, `chr` and `ascii`, `md5` (RFC 1321, of text or `bytea`),
+  `starts_with`, `overlay(s PLACING r FROM start [FOR count])`, `substr`, `quote_literal`,
+  `quote_nullable` and `format` with `%s`, `%I`, `%L`, `%%`, argument positions (`%2$s`) and
+  widths (`%-10s`, `%*s`). Every result that can grow (`repeat`, `lpad`, `rpad`, `replace`,
+  `format`, `concat`, `regexp_replace`) checks the session's value limit (D119) before it is
+  built, and one past 1 GiB is `54000` (`requested length too large`).
 - Operator precedence is PostgreSQL's: `-2 ^ 2` is 4, `NOT a = b` is `NOT (a = b)`, and
   `a < b < c` is a syntax error.
 
@@ -1407,16 +1457,8 @@ and an expression whose display EggDB does not work out is shown as stored, wher
 would print its own form.
 
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
-checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
-until they are fixed:
-- The string functions `substr`, `replace`, `concat`, `position(... IN ...)`, `left`, `right`,
-  `repeat` and `reverse` are missing (`42883`, or `42601` for the SQL-standard syntax and for
-  `left`/`right`, which parse as join keywords; roadmap: the rest of PostgreSQL's string
-  functions, item 36).
-- Regular expressions with back references (`(a)\1`) answer `0A000`, as do lookahead and
-  lookbehind, the constraint escapes `\m \M \y \Y \A \Z`, embedded options (`(?i)`) and
-  `***=`: they need backtracking, which EggDB's linear-time matcher leaves out (D128; roadmap
-  item 36).
+checks the PostgreSQL manual's documented behaviour; the two cases it marks as differing are
+`COPY` in the binary format and in an encoding other than UTF-8 (above). The other differences:
 
 - One statement at a time is planned by simple rules without statistics ([Indexes](#indexes)):
   a `WHERE` that fixes every primary-key column with `=` reads one row (in a join, of the first
@@ -1455,9 +1497,23 @@ until they are fixed:
 - `date` and time stamps take ISO 8601 and PostgreSQL's ISO style only: `infinity`, `epoch`,
   `now`, `today`, month names (`Feb 29 2024`) and `MDY`/`DMY` forms (`02/29/2024`) answer
   `22007`, and so do `allballs`, `noon` and the other special `time` inputs. Named time zones
-  act as UTC (above). `now()` is the statement's start time, where PostgreSQL's is the
-  transaction's. `to_char`, `to_date`, `to_timestamp`, `make_date`, `make_interval`,
-  `date_trunc` of an interval and `AT TIME ZONE` are missing (`42883` or a syntax error).
+  act as UTC (above), and `AT TIME ZONE` refuses them (`22023`). `now()` is the statement's
+  start time, where PostgreSQL's is the transaction's. `date_trunc` of an interval is missing.
+  `to_char` writes `TZ` as `UTC` or the offset, `L` as a space and day and month names in
+  English (the `C` locale's); `to_date` and `to_timestamp` ignore the day of the week and `Q`
+  and read `IYYY`, `IW` and `ID` as plain fields; `to_number` keeps the digits, the decimal point
+  and a minus sign and drops the rest of the text, so it is laxer than PostgreSQL with text
+  that does not fit the template.
+- Regular expressions (D130): when a match has more than one way to split into its
+  parenthesized parts, EggDB gives each part what the pattern's priority order gives it (earlier
+  alternatives first, greedy quantifiers longest first), where PostgreSQL applies its
+  hierarchical longest/shortest rule to every part; the whole match is the same. A pattern with
+  back references explores every way it can match, bounded by the step budget, so a hostile one
+  ends with `54000`.
+- The JSON aggregates and `string_agg` take no `ORDER BY` inside the call (`0A000`);
+  `to_json`, `to_jsonb` and `json_build_*` take a whole row only as a `FROM` item's name;
+  `jsonb_path_query` and the rest of SQL/JSON path, `json_populate_record`, `json_to_record`,
+  `json_object(text[])` and `JSON_TABLE` are missing.
 - `interval` (D113): only the `postgres` `IntervalStyle` is printed; PostgreSQL 17's
   `infinity` intervals are not supported, so `interval * 'Infinity'` and a NaN factor fail with
   `22008`; text input longer than 4,096 bytes fails with `22007`. `DISTINCT`, `min` and `max` of
@@ -1468,10 +1524,9 @@ until they are fixed:
   `numeric` and `double precision`) are grouped and made distinct by their value where a `numeric` is exactly a
   `double precision` (`2.5`); a `numeric` such as `0.1` and the double nearest it compare equal
   but group apart. PostgreSQL gives such an expression one type before it runs.
-- `jsonb`'s `?`, `?|`, `?&`, `-`, `||` and `#-` operators, the JSON builder, aggregate, set and
-  path (`jsonb_path_query`) functions and SQL/JSON (`JSON_TABLE`) are missing (item 36). `jsonb`
-  sorts by its normalized text, not by PostgreSQL's jsonb ordering, and a `jsonb` value more than
-  16 times larger than its text once its numbers are written out (`1e999`) fails with `54000`.
+- `jsonb` sorts by its normalized text, not by PostgreSQL's jsonb ordering, and a `jsonb` value
+  more than 16 times larger than its text once its numbers are written out (`1e999`) fails with
+  `54000`.
 - `serial` and identity columns follow the table's auto-increment column: a NULL or `0` given
   to it also takes the next number, `GENERATED ALWAYS` accepts a given value, the number of a
   deleted last row is given again, and the column must be the first of the primary key; a
@@ -1774,13 +1829,12 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   temporal tables are Msg 40517.
 
 ## Next parts (roadmap)
-- The rest of the JSON functions (item 36).
+- SQL/JSON path (`jsonb_path_query`, `@?`, `@@`), `json_populate_record` and `JSON_TABLE`; `ORDER
+  BY` inside aggregate calls.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
 - `LATERAL`, `FULL JOIN ... USING`, correlated subqueries in grouped queries, and the other
   aggregates.
-- The rest of PostgreSQL's string functions (`substr`, `trim`, `replace`, `concat`, `position`,
-  `left`, `right`, ...).
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
   binary `COPY` and query cancellation (M6a).
