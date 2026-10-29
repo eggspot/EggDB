@@ -500,7 +500,21 @@ SELECT @@VERSION
   parameterized batch (`sp_executesql` and the prepared statements of SqlClient and mssql-jdbc,
   item 23b).
 - `ORDER BY ... OFFSET n ROWS [FETCH {FIRST | NEXT} m ROWS ONLY]`, `OUTPUT inserted.*` on
-  `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE`, and `SELECT total = qty * price`.
+  `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE` (columns, expressions and constants
+  such as EF Core's `OUTPUT 1`), `INSERT ... [OUTPUT ...] SELECT ...`, `(VALUES (...), ...) AS
+  alias (columns)` as a table, and `SELECT total = qty * price`.
+- **`MERGE`** (D138): `MERGE [INTO] target [[AS] alias] USING source [[AS] alias [(columns)]] ON
+  condition`, then `WHEN MATCHED [AND condition] THEN UPDATE SET ... | DELETE` and `WHEN NOT
+  MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)] VALUES (...)`, and `OUTPUT` with
+  `inserted.`, `deleted.` and the source's columns (rows of changed rows first, then inserted
+  ones); the tag is `MERGE n`. `WHEN NOT MATCHED BY SOURCE`, a second `WHEN MATCHED`, `$action`,
+  `TOP`, table hints and `OUTPUT ... INTO` are 40517, and a `MERGE` without `WHEN` is Msg 10713.
+- **`OPENJSON(json [, path]) WITH (column type ['path'] [AS JSON], ...) [AS] alias`** in `FROM`
+  (D138): one row per element of a JSON array (an object is one row), each column the value at
+  its path (`$`, `$.key`, `$."key"`, `$[n]`, `lax`; without a path the key named as the column
+  is written) converted to its type, NULL when missing or, without `AS JSON`, when it is an
+  object or array; text that is not an array or object is Msg 13609, a bad path Msg 13607.
+  `OPENJSON` without `WITH`, `strict` paths and `CROSS APPLY` are 40517.
 - **Defaults** are constants (folded to the column's type: `DEFAULT ((0))` on a `bit` column
   is false), `GETDATE()` and its kin, `NEWID()` and `NEWSEQUENTIALID()`.
 - **Views and `CHECK` constraints** (D124): `CREATE VIEW`, `ALTER VIEW` and `CREATE OR ALTER
@@ -662,8 +676,9 @@ What the server does:
 - **Transactions** from `SqlConnection.BeginTransaction`, `Commit` and `Rollback` arrive as
   transaction manager requests, which begin, commit and roll back as `BEGIN TRAN`, `COMMIT` and
   `ROLLBACK` do (a commit or rollback that begins the next transaction too included) and report
-  the transaction descriptor the driver sends back; save points (`SqlTransaction.Save`) and
-  distributed transactions are error 40517. mssql-jdbc's `setAutoCommit(false)`, `commit()` and
+  the transaction descriptor the driver sends back. A save point (`SqlTransaction.Save`, `SAVE
+  TRANSACTION name`) is recorded, and rolling back to it is error 40517 with the transaction kept
+  (D138); distributed transactions are error 40517. mssql-jdbc's `setAutoCommit(false)`, `commit()` and
   `rollback()` send `SET IMPLICIT_TRANSACTIONS ON` and `IF @@TRANCOUNT > 0 COMMIT TRAN` batches,
   which run as above.
 - **Pooled connections**: when SqlClient hands out a pooled connection again it asks for a reset
@@ -967,8 +982,12 @@ through pgjdbc with `-c eggdb.dialect=oracle`, comparing their output with
   row, in one transaction, and the sequences its columns own. A table another table's foreign
   key references, or whose owned sequence another table's default uses, is `2BP01` unless
   `CASCADE`, which drops those foreign keys or defaults (not the tables).
-- `INSERT INTO name [(columns)] VALUES (...), (...) | DEFAULT VALUES [RETURNING items]`, with
-  `DEFAULT` in a values list.
+- `INSERT INTO name [(columns)] VALUES (...), (...) | DEFAULT VALUES | query [RETURNING items]`,
+  with `DEFAULT` in a values list. `INSERT ... SELECT` (and `WITH ... SELECT`, `(SELECT ...)`,
+  set operations, `VALUES` and `ORDER BY`) runs its query to the end first, so it reads the table
+  as it was before the statement, then inserts the rows in the query's order through the path of
+  `INSERT ... VALUES` (conversions, defaults, identity, constraints, `RETURNING`), in every
+  dialect (D138).
 - `VALUES (expr, ...), (expr, ...) [ORDER BY ...] [LIMIT ...] [OFFSET ...]` as a statement, an
   operand of `UNION`, `INTERSECT` and `EXCEPT`, a subquery (`x IN (VALUES (1), (2))`), a `WITH`
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,
@@ -1500,7 +1519,7 @@ qualified names as `app.t`.
 
 Unqualified names follow `search_path`, a session setting (default `"$user", public`): `SET
 search_path [TO | =] app, public`, `RESET search_path`, `SHOW search_path`, `SELECT
-pg_catalog.set_config('search_path', '', false)` (constant arguments only), `current_schema()`
+pg_catalog.set_config('search_path', '', false)` (constants or parameters, not `true` for local), `current_schema()`
 and `current_schemas(bool)` (shown as `{pg_catalog,app,public}`). A name is looked up in each
 schema of the path that exists, in order; `pg_catalog` is searched first for functions
 (`pg_catalog.nextval`, `pg_catalog.set_config` and the other functions that exist). New objects
@@ -1756,6 +1775,49 @@ yet: such apps add `No Reset On Close=true` to their connection string for now. 
 parameters are not supported yet (array results are). `pg_sleep`'s result column is `text`
 where PostgreSQL's is `void`.
 
+## ORMs and migration tools
+
+Three tools that own an app's schema and data run against EggDB unchanged (roadmap item 48,
+D138):
+
+- **SQLAlchemy's ORM** (2.0, through psycopg 3): declarative models with relationships,
+  `MetaData.create_all()` and `drop_all()` (their `has_table` checks), a `Session`'s inserts of
+  several rows at once (`INSERT ... SELECT ... FROM (VALUES ...) ORDER BY ... RETURNING`, the
+  keys matched to the objects by order), lazy and `selectinload` loading, `LIMIT`/`OFFSET` with
+  parameters, updates of changed attributes, bulk `update()`, `rollback()`, a unique violation
+  as `IntegrityError` (`23505`) and cascading deletes.
+- **Flyway** (10, Community, through pgjdbc): `migrate`, `info` and `validate` with its schema
+  history table, its schema-empty and table-exists queries, `set_config('search_path', $1,
+  false)`, `SET ROLE` to the session's own user, and its advisory lock. EggDB has one writer
+  (D86), and Flyway's default runs the migration and the history insert in two connections'
+  transactions at once, which fails with `55P03`; set `flyway.postgresql.transactional.lock=false`
+  (`-Dflyway.postgresql.transactional.lock=false`, `FLYWAY_POSTGRESQL_TRANSACTIONAL_LOCK=false`)
+  so Flyway uses one connection and `pg_try_advisory_lock`, until concurrent writers come
+  (roadmap 4.M3-1).
+- **EF Core 8** (Microsoft.EntityFrameworkCore.SqlServer, over TDS with `Encrypt=false`):
+  `Database.Migrate()` with hand-written or generated migrations (`__EFMigrationsHistory`, each
+  migration in its own transaction), `SaveChanges` batches (`MERGE ... OUTPUT INSERTED.[Id],
+  i._Position` for several inserts, `INSERT ... OUTPUT`, `UPDATE`/`DELETE ... OUTPUT 1`, `SET
+  IMPLICIT_TRANSACTIONS OFF; SET NOCOUNT ON;`), LINQ queries (`OFFSET ... FETCH` in derived
+  tables, joins, `TOP(1)`, `CASE WHEN EXISTS`, `GROUP BY`, `Contains` as `OPENJSON(@p) WITH
+  (...)`), and `SaveChanges` inside `BeginTransaction()` (EF's `SAVE TRANSACTION
+  [__EFSavePoint]`) rolled back whole. EF Core 9's migrations lock with `sp_getapplock` through
+  `EXEC @result = ...`, which waits for stored procedures (roadmap 3.15).
+
+**Advisory locks.** `pg_advisory_lock`, `pg_try_advisory_lock`, `pg_advisory_unlock` and their
+`_shared` forms take one `bigint` or two `integer`s, as do the transaction-level
+`pg_advisory_xact_lock` and `pg_try_advisory_xact_lock` (and `_shared`); `pg_advisory_unlock_all()`
+releases the session's session-level locks. They are held by the session in one table for every
+session over the same database: session-level locks count re-entries and last until unlocked or
+until the session ends, transaction-level locks until the transaction ends (the statement, outside
+one). The functions that wait return an empty `text` where PostgreSQL returns `void`.
+
+CI's `pg-apps` job runs the ORM section of `crates/eggdb/tests/clients/python/app_check.py` and
+`crates/eggdb/tests/clients/java/FlywayCheck.java` (with the migrations in
+`crates/eggdb/tests/clients/java/flyway/`) on PostgreSQL 17 and on EggDB and requires the same
+bytes; the `tds-apps` job runs `crates/eggdb/tests/clients/dotnet/EfCoreAppCheck` and compares it
+with `scripts/tds-apps/expected-efcore-dotnet.out`.
+
 ## Java and Python apps and information_schema
 
 Java apps through pgjdbc, and Python apps through psycopg 3 and SQLAlchemy Core, run against
@@ -1891,6 +1953,14 @@ ui app.db` has a query screen (`s`, run with `F5`). Both print results and error
 `eggdb sql` does ([cli.md](cli.md)).
 
 ## Known differences from PostgreSQL
+ORMs and migration tools (D138): Flyway's default two-connection lock needs two writers at once
+and fails with `55P03` (use `flyway.postgresql.transactional.lock=false`); a deadlock between
+advisory locks waits until one statement is cancelled instead of failing with `40P01`, there is
+no `pg_locks` view, and unlocking a lock the session does not hold returns false without a
+warning; in `INSERT ... SELECT` a text value goes into a non-text column only with a cast (where
+PostgreSQL types an untyped literal of the select list by the target column); `SET ROLE` to a
+role other than the session's user is `0A000`.
+
 Schemas and views (D116): a view is computed in full each time a statement uses it (no
 condition is pushed into it and its tables' indexes are not used through it), so a point lookup
 through a view over a large table reads the whole view; views are read-only (no automatically updatable views, `WITH CHECK
@@ -2295,7 +2365,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   the same `SELECT` assigns (`SELECT @s = @s + name FROM t`) is 40517; `SELECT @s += name FROM t`
   gives SQL Server's result. A table variable's columns take no constraints, defaults or identity
   and `NOT NULL` is not checked. `EXEC` of anything but the catalog procedures, `sp_executesql`
-  and `sp_unprepare`; `SAVE TRANSACTION` and save points over TDS; `XACT_ABORT`,
+  and `sp_unprepare`; rolling back to a save point (`SAVE TRANSACTION` is recorded); `XACT_ABORT`,
   `QUOTED_IDENTIFIER OFF` and `ANSI_PADDING OFF`; three-part names and other databases.
 - A batch that loops forever over TDS cannot be stopped by the client's attention signal while it
   runs (the connection reads its next request only when the batch ends); closing the server

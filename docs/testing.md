@@ -420,6 +420,30 @@ type-loading queries, kept in `crates/eggdb/tests/data/npgsql/load-types.sql`, w
 `pg_catalog/tests.rs` also runs through a session. `implicit_transaction_tests.rs` and
 `cancel.rs` in `eggdb-sql`, and `backend_keys.rs` in `eggdb-pgwire`, test the pieces.
 
+## ORMs and migration tools (D138)
+The ORM section of `crates/eggdb/tests/clients/python/app_check.py` is an unchanged SQLAlchemy 2.0
+ORM app: two declarative models with a one-to-many relationship, `create_all()` and `drop_all()`,
+a session inserting several objects at once, joined, `selectinload` and grouped queries, a page
+with `limit`/`offset`, updates, a bulk `update()`, a flush rolled back, a duplicate key and a
+cascading delete. `crates/eggdb/tests/clients/java/FlywayCheck.java` runs Flyway 10.20.1
+(Community, Apache-2.0) through its Java API with the migrations in
+`crates/eggdb/tests/clients/java/flyway/base` and `later`: `migrate`, `info`, `validate`, a second
+`migrate` with nothing to do, a later pending migration, then the migrated rows and the history
+table, with Flyway's session-level lock (`flyway.postgresql.transactional.lock=false`) and
+Flyway's log on stderr. `scripts/pg-apps/check.sh` runs both against PostgreSQL 17 and EggDB
+(Flyway on a new, empty database on each) and requires the same bytes. CI's `pg-apps` job
+downloads Flyway's jars and their jackson dependencies from Maven Central as test tools, never
+shipped. `crates/eggdb/tests/clients/dotnet/EfCoreAppCheck` is an EF Core 8.0.11 app with two
+hand-written migrations: `Database.Migrate()` twice, a `SaveChanges` of two blogs and six posts
+(EF's `MERGE ... OUTPUT`), LINQ queries (paging, a join, `Count`, `Any`, `Include`, a missing row,
+`GroupBy`, `Contains` over a list through `OPENJSON`), an update and a delete batch (`OUTPUT 1`)
+and a `SaveChanges` inside a transaction that is rolled back. `scripts/tds-apps/check.sh` serves
+it a new database and compares its output with `scripts/tds-apps/expected-efcore-dotnet.out`.
+Below the tools, `crates/eggdb-sql/src/insert_select_tests.rs`, `migration_tool_tests.rs` and
+`advisory_locks.rs` test `INSERT ... SELECT`, Flyway's statements and the lock table, the SQL
+Server suite has cases for `MERGE`, `OPENJSON`, `SAVE TRANSACTION` and `INSERT ... SELECT`, and
+`crates/eggdb-tdswire/tests/rpc.rs` sends a save point and a rollback to it over the socket.
+
 SQL Server's drivers have their own check (item 23b, D132).
 `crates/eggdb/tests/clients/java/TdsAppCheck.java` (mssql-jdbc) and
 `crates/eggdb/tests/clients/dotnet/TdsAppCheck` (Microsoft.Data.SqlClient) run parameterized CRUD
