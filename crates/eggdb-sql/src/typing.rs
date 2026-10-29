@@ -94,7 +94,12 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if let Some(sql_type) = crate::sequences::result_type(name) {
         return Some(sql_type);
     }
+    if let Some(sql_type) = crate::arrays::function_type(name, arguments, scope) {
+        return sql_type;
+    }
     match (name, arguments) {
+        ("btrim" | "ltrim" | "rtrim" | "quote_ident", [_, ..]) => Some(SqlType::Text),
+        ("collate", [argument]) => static_type(argument, scope),
         ("length" | "char_length" | "character_length", [_]) => Some(SqlType::Integer),
         ("lower" | "upper", [_]) => Some(SqlType::Text),
         ("abs", [argument]) => static_type(argument, scope)
@@ -161,15 +166,29 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     }
 }
 
-fn bytes_concatenation(left: &Expr, right: &Expr, scope: Scope<'_>) -> bool {
-    let bytes = |expr: &Expr| static_type(expr, scope) == Some(SqlType::Bytea);
-    (bytes(left) && (bytes(right) || is_untyped_literal(right)))
-        || (bytes(right) && is_untyped_literal(left))
+fn concatenation_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> SqlType {
+    let operand_type = |expr: &Expr| {
+        if is_untyped_literal(expr) {
+            None
+        } else {
+            static_type(expr, scope)
+        }
+    };
+    let (left_type, right_type) = (operand_type(left), operand_type(right));
+    if let Some(array) = crate::arrays::concat_type(left_type, right_type) {
+        return array;
+    }
+    let bytes = |sql_type: Option<SqlType>| sql_type == Some(SqlType::Bytea);
+    let bytes_concatenation = (bytes(left_type)
+        && (bytes(right_type) || is_untyped_literal(right)))
+        || (bytes(right_type) && is_untyped_literal(left));
+    if bytes_concatenation {
+        SqlType::Bytea
+    } else {
+        SqlType::Text
+    }
 }
 
-/// The type an expression's values have, when it is known before any row is read: what a
-/// client is told in a result's column description. `None` when the type depends on the
-/// values, as for a NULL or a string constant of unknown type.
 pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
     match &expr.kind {
         ExprKind::Literal(Literal::Integer(number)) => Some(if i32::try_from(*number).is_ok() {
@@ -211,13 +230,13 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::Less
             | BinaryOperator::LessOrEqual
             | BinaryOperator::Greater
-            | BinaryOperator::GreaterOrEqual => Some(SqlType::Boolean),
-            BinaryOperator::Concat if bytes_concatenation(left, right, scope) => {
-                Some(SqlType::Bytea)
-            }
-            BinaryOperator::Concat
-            | BinaryOperator::JsonFieldText
-            | BinaryOperator::JsonPathText => Some(SqlType::Text),
+            | BinaryOperator::GreaterOrEqual
+            | BinaryOperator::RegexMatch
+            | BinaryOperator::RegexMatchFolded
+            | BinaryOperator::RegexNoMatch
+            | BinaryOperator::RegexNoMatchFolded => Some(SqlType::Boolean),
+            BinaryOperator::Concat => Some(concatenation_type(left, right, scope)),
+            BinaryOperator::JsonFieldText | BinaryOperator::JsonPathText => Some(SqlType::Text),
             BinaryOperator::JsonContains | BinaryOperator::JsonContainedIn => {
                 Some(SqlType::Boolean)
             }

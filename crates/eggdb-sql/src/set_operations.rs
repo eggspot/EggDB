@@ -33,6 +33,11 @@ pub(crate) fn common_type(left: SqlType, right: SqlType) -> Option<SqlType> {
     if left == right {
         return Some(left);
     }
+    if let (SqlType::Array(left), SqlType::Array(right)) = (left, right) {
+        return common_type(left.sql_type(), right.sql_type())
+            .and_then(crate::arrays::ArrayElement::of)
+            .map(SqlType::Array);
+    }
     if left.is_character() && right.is_character() {
         return Some(match (left, right) {
             (SqlType::Bpchar(_), SqlType::Bpchar(_)) => SqlType::Bpchar(None),

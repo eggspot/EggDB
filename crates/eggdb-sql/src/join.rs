@@ -68,6 +68,7 @@ fn type_family(sql_type: SqlType) -> u8 {
         SqlType::Interval { .. } => 11,
         SqlType::Bytea => 12,
         SqlType::Uuid => 13,
+        SqlType::Array(_) => 14,
     }
 }
 
