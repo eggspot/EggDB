@@ -494,13 +494,14 @@ impl CatalogSnapshot {
                 source: entry.source,
             })
             .collect();
-        for relation in CatalogRelation::ALL {
+        for relation in CatalogRelation::every() {
+            let schema = relation.schema();
             relations.push(RelationEntry {
                 oid: relation.oid(),
-                namespace: oids::PG_CATALOG,
-                schema: crate::schemas::CATALOG_SCHEMA.to_owned(),
+                namespace: namespace_of(schema),
+                schema: schema.to_owned(),
                 name: relation.name().to_owned(),
-                internal: relation.name().to_owned(),
+                internal: crate::schemas::qualified(schema, relation.name()),
                 kind: RelationKind::Catalog,
                 source: RelationSource::Catalog(relation),
             });

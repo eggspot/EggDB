@@ -13,13 +13,17 @@ mod tests;
 use crate::arrays::ArrayElement;
 use crate::types::SqlType;
 
+use crate::information_schema::InformationRelation;
+pub(crate) use deparse::{check_text, default_text};
 pub(crate) use functions::{
     argument_types, function, partition_ancestors_rows, partition_ancestors_type, result_type,
 };
+pub(crate) use oids::{builtin_type, format_type, type_modifier};
 pub(crate) use relations::generated_rows;
 pub(crate) use snapshot::{
-    enter_statement, load_for_stored_expressions, load_if_wanted, mentions_catalog,
-    names_non_sequence_relation, text_needs_catalog,
+    CatalogSnapshot, ConstraintSource, RelationEntry, RelationSource, enter_statement,
+    load_for_stored_expressions, load_if_wanted, mentions_catalog, names_non_sequence_relation,
+    text_needs_catalog,
 };
 pub use types::{CatalogType, RegKind, RegValue};
 
@@ -48,20 +52,29 @@ pub(crate) fn catalog_reference(
         return Ok(None);
     }
     if let Some((schema, base)) = name.split_once(crate::schemas::QUALIFIER) {
-        return Ok(if schema == crate::schemas::CATALOG_SCHEMA {
-            CatalogRelation::named(base)
-        } else {
-            None
-        });
+        return Ok(CatalogRelation::named_in(schema, base));
     }
-    let Some(relation) = CatalogRelation::named(name) else {
+    let in_catalog = CatalogRelation::named_in(crate::schemas::CATALOG_SCHEMA, name);
+    let in_information = InformationRelation::named(name);
+    if in_catalog.is_none() && in_information.is_none() {
         return Ok(None);
-    };
+    }
     let path = crate::schemas::effective_path(reader)?;
-    if let Some(catalog_at) = path
-        .iter()
-        .position(|schema| schema == crate::schemas::CATALOG_SCHEMA)
-    {
+    let (relation, schema) = match (in_catalog, in_information) {
+        (Some(relation), _) => (relation, crate::schemas::CATALOG_SCHEMA),
+        (None, Some(relation))
+            if path
+                .iter()
+                .any(|entry| entry == crate::schemas::INFORMATION_SCHEMA) =>
+        {
+            (
+                CatalogRelation::Information(relation),
+                crate::schemas::INFORMATION_SCHEMA,
+            )
+        }
+        _ => return Ok(None),
+    };
+    if let Some(catalog_at) = path.iter().position(|entry| entry == schema) {
         for schema in &path[..catalog_at] {
             let candidate = crate::schemas::qualified(schema, name);
             if reader
@@ -98,7 +111,11 @@ pub(crate) fn copy_query(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let text = format!("SELECT {list} FROM pg_catalog.{}", relation.name());
+    let text = format!(
+        "SELECT {list} FROM {}.{}",
+        relation.schema(),
+        crate::pg_keywords::quote_ident(relation.name())
+    );
     let tokens = crate::lexer::tokenize(&text)?;
     let mut parser =
         crate::parser::Parser::new(&text, &tokens).in_dialect(crate::Dialect::PostgreSql);
@@ -145,6 +162,7 @@ pub(crate) enum CatalogRelation {
     Trigger,
     Rewrite,
     AuthMembers,
+    Information(InformationRelation),
 }
 
 pub(crate) struct CatalogColumn {
@@ -172,7 +190,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const ALL: [Self; 24] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 24] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -225,7 +243,21 @@ impl CatalogRelation {
             Self::Trigger => "pg_trigger",
             Self::Rewrite => "pg_rewrite",
             Self::AuthMembers => "pg_auth_members",
+            Self::Information(relation) => relation.name(),
         }
+    }
+
+    pub(crate) fn schema(self) -> &'static str {
+        match self {
+            Self::Information(_) => crate::schemas::INFORMATION_SCHEMA,
+            _ => crate::schemas::CATALOG_SCHEMA,
+        }
+    }
+
+    pub(crate) fn every() -> impl Iterator<Item = Self> {
+        Self::IN_PG_CATALOG
+            .into_iter()
+            .chain(InformationRelation::ALL.into_iter().map(Self::Information))
     }
 
     pub(crate) fn oid(self) -> u32 {
@@ -254,15 +286,22 @@ impl CatalogRelation {
             Self::Trigger => 2620,
             Self::Rewrite => 2618,
             Self::AuthMembers => 1261,
+            Self::Information(relation) => relation.oid(),
         }
     }
 
     pub(crate) fn is_view(self) -> bool {
-        self == Self::Roles
+        matches!(self, Self::Roles | Self::Information(_))
     }
 
-    pub(crate) fn named(name: &str) -> Option<Self> {
-        Self::ALL
+    pub(crate) fn named_in(schema: &str, name: &str) -> Option<Self> {
+        if schema == crate::schemas::INFORMATION_SCHEMA {
+            return InformationRelation::named(name).map(Self::Information);
+        }
+        if schema != crate::schemas::CATALOG_SCHEMA {
+            return None;
+        }
+        Self::IN_PG_CATALOG
             .into_iter()
             .find(|relation| relation.name() == name)
     }
@@ -297,6 +336,7 @@ impl CatalogRelation {
             Self::PublicationRel => &PUBLICATION_REL_COLUMNS,
             Self::PublicationNamespace => &PUBLICATION_NAMESPACE_COLUMNS,
             Self::Roles => &ROLES_COLUMNS,
+            Self::Information(relation) => relation.columns(),
         }
     }
 }

@@ -15,7 +15,7 @@ use std::sync::{Arc, Weak};
 pub(crate) const QUALIFIER: char = '\0';
 pub(crate) const DEFAULT_SCHEMA: &str = "public";
 pub(crate) const CATALOG_SCHEMA: &str = "pg_catalog";
-const INFORMATION_SCHEMA: &str = "information_schema";
+pub(crate) const INFORMATION_SCHEMA: &str = "information_schema";
 const DROP_BATCH: usize = 256;
 
 pub(crate) fn is_qualified(name: &str) -> bool {

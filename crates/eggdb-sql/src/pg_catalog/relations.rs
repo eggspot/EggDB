@@ -173,6 +173,9 @@ pub(crate) fn build(
         | CatalogRelation::Trigger
         | CatalogRelation::Rewrite
         | CatalogRelation::AuthMembers => Vec::new(),
+        CatalogRelation::Information(relation) => {
+            crate::information_schema::rows(snapshot, relation)
+        }
     })
 }
 

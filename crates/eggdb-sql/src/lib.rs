@@ -36,6 +36,7 @@ mod execute;
 mod explain;
 mod hash_index;
 mod indexes;
+mod information_schema;
 mod interval;
 mod join;
 pub mod json;
