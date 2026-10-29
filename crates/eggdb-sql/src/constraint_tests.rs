@@ -300,6 +300,7 @@ fn sequences_follow_postgresql() {
         last(&mut session, "SELECT nextval('s')"),
         "nextval\n100\nSELECT 1"
     );
+    last(&mut session, "CREATE SEQUENCE \"S\"");
     assert_eq!(
         last(
             &mut session,
@@ -307,6 +308,13 @@ fn sequences_follow_postgresql() {
         ),
         "regclass|regclass\ns|\"S\"\nSELECT 1"
     );
+    assert_eq!(
+        fails(&mut session, "SELECT 'missing'::regclass")
+            .state()
+            .code(),
+        "42P01"
+    );
+    last(&mut session, "DROP SEQUENCE \"S\"");
     last(&mut session, "DROP SEQUENCE s, fresh");
     assert_eq!(
         fails(&mut session, "SELECT nextval('s')").state().code(),

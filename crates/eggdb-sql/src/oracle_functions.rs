@@ -193,6 +193,9 @@ fn number_of(value: &Value) -> SqlResult<Option<Number>> {
         Value::Text(text) | Value::Json(text) | Value::Jsonb(text) | Value::Bpchar(text) => {
             parse_number(text)?
         }
+        Value::Oid(_) | Value::Reg(_) => {
+            Number::Integer(crate::pg_catalog::oid_number(value).unwrap_or(0))
+        }
         Value::Numeric(number) => Number::of_numeric(number.clone()),
         Value::Date(_)
         | Value::Timestamp(_)

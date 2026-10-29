@@ -1,6 +1,7 @@
 use crate::ast::{Expr, ExprKind, Literal};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Concatenated, Evaluator, Scope, and, compare_truth, or, truth_value};
+use crate::pg_catalog::CatalogType;
 use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
 use std::cmp::Ordering;
 
@@ -30,6 +31,18 @@ pub enum ArrayElement {
     Varchar,
     /// `character[]` (`bpchar[]`).
     Bpchar,
+    /// `oid[]`.
+    Oid,
+    /// `name[]`.
+    Name,
+    /// `"char"[]`.
+    InternalChar,
+    /// `aclitem[]`: always NULL in EggDB's catalog.
+    AclItem,
+    /// `int2vector`: `smallint` elements numbered from 0 and written separated by spaces.
+    Int2Vector,
+    /// `oidvector`: `oid` elements numbered from 0 and written separated by spaces.
+    OidVector,
 }
 
 impl ArrayElement {
@@ -46,6 +59,11 @@ impl ArrayElement {
             Self::Text => SqlType::Text,
             Self::Varchar => SqlType::Varchar(None),
             Self::Bpchar => SqlType::Bpchar(None),
+            Self::Oid | Self::OidVector => SqlType::Catalog(CatalogType::Oid),
+            Self::Name => SqlType::Catalog(CatalogType::Name),
+            Self::InternalChar => SqlType::Catalog(CatalogType::InternalChar),
+            Self::AclItem => SqlType::Catalog(CatalogType::AclItem),
+            Self::Int2Vector => SqlType::SmallInt,
         }
     }
 
@@ -61,6 +79,10 @@ impl ArrayElement {
             SqlType::Text => Self::Text,
             SqlType::Varchar(_) => Self::Varchar,
             SqlType::Bpchar(_) => Self::Bpchar,
+            SqlType::Catalog(CatalogType::Oid) => Self::Oid,
+            SqlType::Catalog(CatalogType::Name) => Self::Name,
+            SqlType::Catalog(CatalogType::InternalChar) => Self::InternalChar,
+            SqlType::Catalog(CatalogType::AclItem) => Self::AclItem,
             _ => return None,
         })
     }
@@ -72,16 +94,29 @@ impl ArrayElement {
     pub(crate) fn type_name(self) -> String {
         match self {
             Self::Bpchar => "character[]".to_owned(),
+            Self::Int2Vector => "int2vector".to_owned(),
+            Self::OidVector => "oidvector".to_owned(),
             other => format!("{}[]", other.sql_type().name()),
         }
     }
 
     pub(crate) fn internal_name(self) -> &'static str {
-        self.sql_type().internal_name()
+        match self {
+            Self::Int2Vector => "int2vector",
+            Self::OidVector => "oidvector",
+            other => other.sql_type().internal_name(),
+        }
+    }
+
+    pub(crate) fn is_vector(self) -> bool {
+        matches!(self, Self::Int2Vector | Self::OidVector)
     }
 
     fn is_string(self) -> bool {
-        matches!(self, Self::Text | Self::Varchar)
+        matches!(
+            self,
+            Self::Text | Self::Varchar | Self::Name | Self::InternalChar
+        )
     }
 
     pub(crate) fn comparable(self, other: Self) -> bool {
@@ -185,7 +220,13 @@ impl ArrayBuilder {
 fn element_value(value: Value, element: ArrayElement, conversion: Conversion) -> SqlResult<Value> {
     match (value, element) {
         (Value::Null, _) => Ok(Value::Null),
-        (Value::Text(text), ArrayElement::Text | ArrayElement::Varchar) => Ok(Value::Text(text)),
+        (
+            Value::Text(text),
+            ArrayElement::Text
+            | ArrayElement::Varchar
+            | ArrayElement::Name
+            | ArrayElement::InternalChar,
+        ) => Ok(Value::Text(text)),
         (value, element) => convert(value, element.sql_type(), conversion),
     }
 }
@@ -229,6 +270,14 @@ fn format_items(items: &[Value]) -> String {
 }
 
 pub(crate) fn format_text(array: &ArrayValue) -> String {
+    if array.element.is_vector() {
+        return array
+            .items
+            .iter()
+            .map(|item| item.to_text().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
     let items = format_items(&array.items);
     match array.upper_bound() {
         Some(upper) if array.lower_bound != 1 => format!("[{}:{upper}]={items}", array.lower_bound),
@@ -248,9 +297,25 @@ fn malformed(text: &str, detail: &str) -> SqlError {
     .with_detail(detail)
 }
 
+pub(crate) fn parse_array_text(text: &str, element: ArrayElement) -> SqlResult<ArrayValue> {
+    if !element.is_vector() {
+        return parse_text(text, element);
+    }
+    let mut builder = ArrayBuilder::new(element);
+    for item in text.split(is_array_space).filter(|item| !item.is_empty()) {
+        builder.push(element_from_text(item, element)?)?;
+    }
+    let mut vector = builder.finish();
+    vector.lower_bound = 0;
+    Ok(vector)
+}
+
 fn element_from_text(text: &str, element: ArrayElement) -> SqlResult<Value> {
     match element {
-        ArrayElement::Text | ArrayElement::Varchar => Ok(Value::Text(text.to_owned())),
+        ArrayElement::Text
+        | ArrayElement::Varchar
+        | ArrayElement::Name
+        | ArrayElement::InternalChar => Ok(Value::Text(text.to_owned())),
         ArrayElement::Bpchar => Ok(Value::Bpchar(text.to_owned())),
         other => crate::types::parse_input(text, other.sql_type()),
     }
@@ -396,10 +461,10 @@ pub(crate) fn convert_to(
             Ok(Value::Array(Box::new(converted)))
         }
         Value::Text(text) if conversion == Conversion::Explicit => {
-            parse_text(&text, element).map(|array| Value::Array(Box::new(array)))
+            parse_array_text(&text, element).map(|array| Value::Array(Box::new(array)))
         }
         Value::Bpchar(text) if conversion == Conversion::Explicit => {
-            parse_text(crate::types::without_trailing_spaces(&text), element)
+            parse_array_text(crate::types::without_trailing_spaces(&text), element)
                 .map(|array| Value::Array(Box::new(array)))
         }
         other => Err(SqlError::new(

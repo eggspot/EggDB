@@ -37,6 +37,7 @@ struct StatementSequences {
     before: HashMap<String, (i64, bool)>,
     session: SessionSequences,
     memory: WorkMemory,
+    missing: Option<String>,
 }
 
 const MAX_IDENTIFIER_BYTES: usize = 63;
@@ -56,6 +57,7 @@ pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool) {
             before: HashMap::new(),
             session,
             memory: WorkMemory::new(),
+            missing: None,
         });
     });
 }
@@ -590,13 +592,63 @@ pub(crate) fn check_default_sequences(reader: &dyn KeyValueRead, text: &str) -> 
     for name in default_sequence_names(text) {
         let name = sequence_on_path(reader, name)?;
         if read(reader, &name)?.is_none() {
-            return Err(SqlError::new(
-                SqlState::UNDEFINED_TABLE,
-                format!("relation \"{name}\" does not exist"),
-            ));
+            return Err(missing_or_not_a_sequence(reader, &name)?);
         }
     }
     Ok(())
+}
+
+fn not_a_sequence(name: &str) -> SqlError {
+    SqlError::new(
+        SqlState::WRONG_OBJECT_TYPE,
+        format!("\"{}\" is not a sequence", crate::schemas::base_name(name)),
+    )
+}
+
+fn missing_or_not_a_sequence(reader: &dyn KeyValueRead, name: &str) -> SqlResult<SqlError> {
+    let relation = crate::schemas::resolve_relation(reader, name)?;
+    Ok(
+        if reader.get(&table_key(&relation))?.is_some()
+            || crate::pg_catalog::names_non_sequence_relation(reader, name)
+        {
+            not_a_sequence(name)
+        } else {
+            missing_sequence(name, Dialect::PostgreSql)
+        },
+    )
+}
+
+pub(crate) fn explain_missing(reader: &dyn KeyValueRead, error: SqlError) -> SqlError {
+    let missing = STATEMENT.with(|state| {
+        state
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut state| state.last_mut().and_then(|state| state.missing.take()))
+    });
+    let Some(name) = missing else {
+        return error;
+    };
+    if error.state() != SqlState::UNDEFINED_TABLE
+        || error.message() != format!("relation \"{name}\" does not exist")
+    {
+        return error;
+    }
+    match missing_or_not_a_sequence(reader, &name) {
+        Ok(refined) if refined.state() == SqlState::WRONG_OBJECT_TYPE => refined,
+        _ => error,
+    }
+}
+
+pub(crate) fn name_argument<'e>(function: &str, position: usize, argument: &'e Expr) -> &'e Expr {
+    if position == 0
+        && matches!(function, "nextval" | "currval" | "setval")
+        && let ExprKind::Function { name, arguments } = &argument.kind
+        && name == "regclass_cast"
+        && let [inner] = arguments.as_slice()
+    {
+        return inner;
+    }
+    argument
 }
 
 pub(crate) fn default_sequence_names(text: &str) -> Vec<String> {
@@ -922,6 +974,11 @@ fn loaded<'s>(
     name: &str,
 ) -> SqlResult<&'s mut SequenceDefinition> {
     let dialect = state.dialect;
+    let found = state.loaded.get(name).map(Option::is_some);
+    if found == Some(false) || (found.is_none() && state.all_loaded) {
+        state.missing = Some(name.to_owned());
+        return Err(missing_sequence(name, dialect));
+    }
     match state.loaded.get_mut(name) {
         Some(Some(sequence)) => Ok(sequence),
         Some(None) => Err(missing_sequence(name, dialect)),
@@ -1114,14 +1171,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         }
         ("oracle_nextval", [Value::Text(name)]) => nextval(name),
         ("oracle_currval", [Value::Text(name)]) => currval(name),
-        ("regclass_cast", [Value::Null]) => Ok(Value::Null),
-        ("regclass_cast", [Value::Text(text)]) => {
-            regclass_name(text).map(|name| Value::Text(crate::schemas::quoted_name(&on_path(name))))
+        ("regclass_cast", [value]) => {
+            crate::pg_catalog::reg_value(crate::pg_catalog::RegKind::Class, value.clone())
         }
-        ("regclass_cast", [other]) => Err(SqlError::new(
-            SqlState::CANNOT_COERCE,
-            format!("cannot cast type {} to regclass", other.type_name()),
-        )),
         _ => return None,
     })
 }
@@ -1131,7 +1183,9 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "nextval" | "currval" | "lastval" | "setval" | "oracle_nextval" | "oracle_currval" => {
             Some(SqlType::BigInt)
         }
-        "regclass_cast" => Some(SqlType::Text),
+        "regclass_cast" => Some(SqlType::Catalog(crate::pg_catalog::CatalogType::Reg(
+            crate::pg_catalog::RegKind::Class,
+        ))),
         _ => None,
     }
 }

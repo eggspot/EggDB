@@ -546,6 +546,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         parameter_types.resize(highest_parameter(&tokens).max(declared_types.len()), None);
         let settings = Arc::clone(&self.settings);
         let _path = self.enter_search_path(&settings);
+        let _catalog = crate::pg_catalog::enter_statement(false, &settings);
         let mut parser = Parser::new(text, &tokens)
             .with_context(Parameters::Types(declared_types), &settings)
             .in_dialect(self.dialect);
@@ -996,6 +997,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let _constraints = self.enter_constraints();
             let _nls = self.enter_oracle_nls();
             if let Some(mut rows) = parser.literal_rows() {
+                let _catalog = crate::pg_catalog::enter_statement(false, &settings);
                 resume = parser.resume_point();
                 if self.batch_resume.is_some() {
                     self.batch_resume = Some(resume);
@@ -1039,6 +1041,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 inline,
                 consumed: None,
             };
+            let _catalog = crate::pg_catalog::enter_statement(
+                self.dialect == Dialect::PostgreSql
+                    && statement_tokens.is_some_and(crate::pg_catalog::mentions_catalog),
+                &settings,
+            );
             self.enter_sequences(uses_sequences);
             let result = self.run(&mut statement, &mut io);
             if let (Some(start), Some(consumed)) = (data_start, io.consumed) {
@@ -1245,9 +1252,22 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         io: &mut CopyIo<'_, '_>,
         binding: &Binding<'_>,
     ) -> SqlResult<QueryResult> {
+        if copy.direction == CopyDirection::ToClient
+            && let CopySource::Table { name, columns } = &copy.source
+            && let Some(relation) =
+                self.read(|reader, _| crate::pg_catalog::catalog_reference(reader, &name.text))?
+        {
+            copy.source =
+                CopySource::Query(Box::new(crate::pg_catalog::copy_query(relation, columns)?));
+        }
         match copy.direction {
             CopyDirection::FromClient => self.write("COPY FROM", |writer, tables| {
                 if let CopySource::Table { name, .. } = &mut copy.source {
+                    if let Some(relation) =
+                        crate::pg_catalog::catalog_reference(writer, &name.text)?
+                    {
+                        return Err(crate::pg_catalog::read_only(relation.name()).at(name.position));
+                    }
                     binding.names(writer, tables, std::slice::from_mut(name))?;
                 }
                 crate::copy::copy_from_client(writer, tables, copy, io)
@@ -1633,7 +1653,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     ) -> SqlResult<QueryResult> {
         let body = |writer: &mut dyn KeyValueWrite, tables: &mut TableCache| {
             sequences::load_for_sequence_calls(writer)?;
-            let result = body(writer, tables)?;
+            let result =
+                body(writer, tables).map_err(|error| sequences::explain_missing(writer, error))?;
             sequences::save_changed(writer)?;
             Ok(result)
         };

@@ -70,7 +70,8 @@ What the server does:
 - **What drivers ask at connect**: `server_version` (`16.0 (EggDB 0.2.0)`), `client_encoding`
   and `server_encoding` (`UTF8`), `DateStyle`, `TimeZone`, `integer_datetimes`,
   `standard_conforming_strings` and the other reported parameters; `SET`, `SHOW`, `RESET`,
-  `version()`, `current_user`, `current_database()` and `current_setting()`.
+  `version()`, `current_user`, `current_database()`, `current_setting()` and the `pg_catalog`
+relations psql's `\d` family reads.
 - **`COPY`** (D117): `COPY ... FROM STDIN` takes `CopyData` messages in pieces of any size,
   ending with `CopyDone`; `CopyFail` fails it with `57014`, and `Flush` and `Sync` are ignored
   until it ends, as libpq expects. `COPY ... TO STDOUT` sends one `CopyData` per row, then
@@ -80,8 +81,11 @@ What the server does:
   at most 16 of them still logging in; readers run side by side, writers one at a time (a
   second waits 5 s, then `55P03`: retry once the other session's transaction ends).
 
-Not yet (each fails readably or is ignored harmlessly): TLS, psql's `\d` commands and the
-catalog queries of GUI tools (`pg_catalog`), `COPY` in the binary format, `LISTEN`/`NOTIFY`, cancelling a running
+psql's `\d` family (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du`) reads EggDB's
+catalog: see [The PostgreSQL catalog](#the-postgresql-catalog).
+
+Not yet (each fails readably or is ignored harmlessly): TLS, `\d+`, `\df` and the other psql
+commands beyond the `\d` family, the catalog queries of GUI tools beyond it, `COPY` in the binary format, `LISTEN`/`NOTIFY`, cancelling a running
 query, the implicit transaction around a multi-statement `Query` or an extended-protocol
 pipeline (each statement commits on its own outside `BEGIN`), stored users and roles, and
 non-ASCII passwords.
@@ -965,7 +969,8 @@ maximum, a descending one from -1 down to the type's minimum, `INCREMENT must no
 (y)`. The functions are PostgreSQL's: `nextval('name')`, `currval('name')` (`55000` before this
 session's first `nextval`), `lastval()`, `setval('name', n [, is_called])`, with the name
 resolved as PostgreSQL resolves a `regclass` (lower case unless quoted, `public.` accepted) and
-`'name'::regclass` printing the name; `pg_catalog.nextval(...)` and the other `pg_catalog.`
+`'name'::regclass` a `regclass` naming the relation (`42P01` when there is none, see
+[The PostgreSQL catalog](#the-postgresql-catalog)); `pg_catalog.nextval(...)` and the other `pg_catalog.`
 spellings work. Past its limit a sequence fails with `2200H` (`nextval: reached maximum value of
 sequence "s" (9223372036854775807)`) or, with `CYCLE`, starts again; arithmetic never wraps.
 `nextval` is not undone by a rollback, as in PostgreSQL, and is durable with the commit of any
@@ -1184,6 +1189,87 @@ stdin` data, `--inserts` and `--column-inserts` (with `OVERRIDING SYSTEM VALUE`)
 partitioned tables and other extensions are not created yet: `eggdb restore` lists them in its
 report, and over the protocol they fail with an error that psql prints before going on.
 
+## The PostgreSQL catalog
+
+psql's `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\d name` for tables, views, sequences and
+indexes (with patterns such as `\d cust*` and `\dt shop.*`), `\l` and `\du` work against
+`eggdb serve` as against PostgreSQL (roadmap item 37, D129). CI's `pg-catalog` job restores a
+fixture's `pg_dump` into EggDB, runs psql 17 against it and against PostgreSQL 16 holding the
+same fixture, and requires the same bytes; `scripts/pg-catalog/check.sh` does the same locally.
+
+**Relations.** In the PostgreSQL dialect `pg_catalog.X`, and `X` alone, name the catalog
+relation X (`pg_catalog` is searched first unless `search_path` lists it after another schema):
+`pg_class`, `pg_attribute`, `pg_type`, `pg_namespace`, `pg_index`, `pg_constraint`,
+`pg_attrdef`, `pg_description`, `pg_database`, `pg_roles`, `pg_am`, `pg_collation`,
+`pg_sequence`, `pg_depend` and `pg_tablespace`, and the empty `pg_inherits`, `pg_policy`,
+`pg_statistic_ext`, `pg_publication`, `pg_publication_rel`, `pg_publication_namespace`,
+`pg_trigger`, `pg_rewrite` and `pg_auth_members`, each with PostgreSQL 16's columns and column
+types. A statement that names them builds their rows from the stored tables, views, sequences,
+schemas and comments once, however often it reads them (correlated subqueries included); a
+statement that names none costs nothing; a stored default, `CHECK` constraint or view that uses
+a catalog function or a `reg*` cast reads the catalog when a statement uses it. Equalities in
+`WHERE` between two tables of a comma (or `CROSS JOIN`) list join them by hash as an `ON`
+condition does, so psql's index query stays fast with thousands of tables. They are read-only:
+`INSERT`, `UPDATE`, `DELETE` and `COPY ... FROM` are `42501 permission denied for table
+pg_class`, and `DROP`, `ALTER`, `COMMENT ON` and `CREATE INDEX` are `42501 permission denied:
+"pg_class" is a system catalog`; `COPY pg_class TO` reads them. Other dialects do not see them,
+and `public.pg_class` still names a table of your own.
+
+**What the rows say.** Every index is `btree` and ascending, every unique index is a `UNIQUE`
+constraint, an EggDB auto-increment column (`serial`, an identity column created by EggDB) is
+`generated by default as identity` (`attidentity` `d`), and an identity column restored from a
+dump shows what the restore keeps: a sequence owned by the column and a `nextval(...)` default.
+`pg_database` has one row, the served database (`eggdb serve --database`), and `pg_roles` the
+session's user, with every attribute, and PostgreSQL 16's predefined roles. `CHECK` constraints
+and defaults are shown in PostgreSQL's display form, worked out from the stored text and the
+column types: `CHECK (price >= 0::numeric)`, `CHECK (level::text = ANY (ARRAY['debug'::character
+varying]::text[]))`, `nextval('customers_id_seq'::regclass)`, `'x'::text`. An expression the
+display rules do not cover yet (`CASE`, for one) is shown as it is stored.
+
+**OIDs.** The catalog's own relations, the built-in types, the schemas `pg_catalog` (11),
+`public` (2200) and `information_schema`, the roles (the session's user is 10), the access
+methods, collations and tablespaces have PostgreSQL's OIDs. Every other object's OID is a hash of
+its names (FNV-1a over its kind, its table for an index, constraint or default, and its name,
+folded into 16385 to 4294967295, a collision taking the next free number in a fixed order), so
+it is the same in every statement and after a restart, and changes when the object is renamed.
+
+**Types and functions.** `oid`, `xid`, `name`, `pg_node_tree`, `aclitem` (always NULL),
+`int2vector` and `oidvector` (subscripts from 0, written separated by spaces), and `regclass`,
+`regtype`, `regnamespace`, `regrole` and `regproc` work in expressions and casts but are not
+column types of tables; `"char"` is the type of the catalog's kind columns only, and `"char"`
+written by you is still `char(1)`. A `reg*` cast (`x::regclass`, `CAST(x AS regclass)` or
+`regclass(x)`) takes a name or a number and shows the object's name, qualified with its schema
+only when it is not visible on the search path; OID 0 and `'-'` show as `-`; a type name may
+carry a modifier and `[]` (`'character varying(10)'::regtype` is `character varying`); an
+unknown name is `42P01` (relation), `42704` (type, role) or `3F000` (schema), and an unknown
+number shows as the number. Integers and quoted constants compare with `oid` columns, and
+`nextval('s'::regclass)` (or `CAST('s' AS regclass)`) stays a plain name lookup that never
+builds the catalog; naming a table there is `42809 "t" is not a sequence`. `pg_get_expr` takes
+only the catalog's `pg_node_tree` columns, as PostgreSQL does. The functions:
+`format_type`, `pg_get_userbyid`, `pg_table_is_visible`, `pg_type_is_visible`, `pg_get_expr`,
+`pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef` (the view's stored text),
+`pg_relation_is_publishable`, `pg_partition_ancestors` (no rows: there are no partitions),
+`pg_encoding_to_char`, `obj_description`, `col_description`, and `pg_get_triggerdef`,
+`pg_get_ruledef`, `pg_get_statisticsobjdef_columns` and `shobj_description`, which return NULL.
+
+**Not yet:** `\d+` and `\dt+ \dv+ \ds+ \di+ \dn+` (sizes, storage, a table's access
+method, `public`'s access privileges and description; `pg_table_size` and the rest are
+missing), `\df`, `\dT`, `\dp`, `\dx`, `\dd`, `\db` and `\dC` (they read `pg_proc`,
+`pg_extension`, `pg_opclass`, `pg_tablespace_location` and `pg_cast`, which are not there yet,
+and fail readably), the composite row type of each table, `information_schema` (item 38), a
+view column of a catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` is `0A000`;
+`relname::text` works), and four things the table definition does not store yet (roadmap
+37c): an index's method other than `btree` and a descending order, whether a unique index was
+made by `CREATE UNIQUE INDEX` rather than a constraint, and `GENERATED ALWAYS` identities.
+`\d` of a view shows the view's text as it was written (PostgreSQL shows its own pretty form;
+only `\d+` prints it). `COMMENT ON` a catalog relation or its columns is refused (`42501`, as for
+`DROP` and `ALTER`): nothing would keep the comment. The non-pretty forms of `pg_get_expr` and
+`pg_get_constraintdef` are the pretty form (wrapped in one pair of parentheses for a `CHECK`),
+without PostgreSQL's extra parentheses around nested casts. A `reg*` cast PostgreSQL rejects
+while planning (`'t'::regclass::regtype`) fails here when the cast runs, so not on zero rows or
+a NULL; `numeric` with a negative scale and `interval year(3)` are not taken by `regtype`, and
+`timestamp(7)` gives no warning.
+
 ## How SQL is stored
 
 SQL lives in the database's one ordered key space, under keys that begin with the five bytes
@@ -1294,6 +1380,13 @@ created or truncated in the same transaction); `COPY ... WHERE` is `0A000`; file
 on the server are always `42501`; a `\.` inside a text-format field reads as `.` where
 PostgreSQL may refuse it; `COPY TO` of a table writes rows in primary-key order (PostgreSQL in
 storage order); and some option errors carry other SQLSTATEs or wording than PostgreSQL's.
+
+The catalog (D129): user objects' OIDs are hashes of their names, so they change when an object
+is renamed (PostgreSQL keeps them); the catalog relations are read-only, even for the superuser;
+`pg_class` and `pg_attribute` hold no TOAST tables, composite types or statistics (`reltuples` is
+-1); every index shows as `btree`, ascending, and every unique index as a `UNIQUE` constraint;
+and an expression whose display EggDB does not work out is shown as stored, where PostgreSQL
+would print its own form.
 
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
 checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
@@ -1671,5 +1764,5 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - The rest of PostgreSQL's string functions (`substr`, `trim`, `replace`, `concat`, `position`,
   `left`, `right`, ...).
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
-  TLS, the `pg_catalog` queries of psql's `\d` and GUI tools, binary `COPY` and query
-  cancellation (M6a).
+  TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
+  binary `COPY` and query cancellation (M6a).

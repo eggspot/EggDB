@@ -986,7 +986,10 @@ impl Evaluator<'_> {
 
     fn cast(&self, expr: &Expr, target: SqlType) -> SqlResult<Value> {
         match &expr.kind {
-            ExprKind::Literal(Literal::String(text)) if target.is_character() => {
+            ExprKind::Literal(Literal::String(text))
+                if target.is_character()
+                    && target != SqlType::Catalog(crate::pg_catalog::CatalogType::NodeTree) =>
+            {
                 convert(Value::Text(text.clone()), target, Conversion::Explicit)
             }
             ExprKind::Literal(Literal::String(text)) => match oracle_datetime_of(text, target) {
@@ -1120,11 +1123,16 @@ impl Evaluator<'_> {
             "collate" => return crate::string_functions::collated(self, arguments),
             _ => {}
         }
+        if name == "pg_get_expr" {
+            crate::pg_catalog::check_expression_tree_argument(name, arguments, self.scope)?;
+        }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
-        let declared = declared_argument_types(name);
+        let declared =
+            declared_argument_types(name).or_else(|| crate::pg_catalog::argument_types(name));
         let mut held = crate::memory::RowBytes::default();
         for (position, argument) in arguments.iter().enumerate() {
+            let argument = crate::sequences::name_argument(name, position, argument);
             let value = match declared {
                 Some(types) => self.eval(argument, types.get(position).copied().flatten())?,
                 None => {
@@ -1151,6 +1159,9 @@ impl Evaluator<'_> {
             )
         };
         if let Some(result) = crate::sequences::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::pg_catalog::function(name, &values) {
             return result;
         }
         if let Some(result) = self.datetime_function(name, &values) {

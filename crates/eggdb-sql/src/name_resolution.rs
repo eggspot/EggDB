@@ -1,8 +1,8 @@
 use crate::OutputColumn;
 use crate::ast::{
     AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
-    FromClause, Insert, InsertSource, InsertValue, JoinCondition, MergeStatement, Name,
-    OnDuplicate, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
+    FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, MergeStatement,
+    Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
 };
 use crate::dialect::Dialect;
 use crate::encoding::ViewDefinition;
@@ -171,6 +171,7 @@ impl<'a> Resolver<'a> {
 
     pub(crate) fn names(&mut self, names: &mut [Name]) -> SqlResult<()> {
         for name in names {
+            crate::pg_catalog::refuse_catalog_change(self.reader, name)?;
             name.text = self.resolve_name(&name.text)?;
         }
         Ok(())
@@ -182,6 +183,11 @@ impl<'a> Resolver<'a> {
     }
 
     pub(crate) fn target(&mut self, reference: &mut TableReference) -> SqlResult<()> {
+        if let Some(relation) =
+            crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?
+        {
+            return Err(crate::pg_catalog::read_only(relation.name()).at(reference.name.position));
+        }
         let resolved = self.resolve_name(&reference.name.text)?;
         if is_qualified(&reference.name.text) && reference.alias.is_none() {
             reference.alias = Some(base_name(&resolved).to_owned());
@@ -372,6 +378,15 @@ impl<'a> Resolver<'a> {
             return Ok(());
         }
         if ctes.contains(&reference.name.text) {
+            return Ok(());
+        }
+        if let Some(relation) =
+            crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?
+        {
+            if reference.alias.is_none() {
+                reference.alias = Some(relation.name().to_owned());
+            }
+            reference.generated = Some(Box::new(GeneratedTable::Catalog(relation)));
             return Ok(());
         }
         let written_qualified = is_qualified(&reference.name.text);
@@ -746,6 +761,7 @@ impl Binding<'_> {
         reader: &'r dyn KeyValueRead,
         tables: &'r mut TableCache,
     ) -> SqlResult<Resolver<'r>> {
+        crate::pg_catalog::load_if_wanted(reader)?;
         Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)
     }
 
@@ -906,6 +922,7 @@ impl Binding<'_> {
         alter: &mut AlterTable,
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
+        crate::pg_catalog::refuse_catalog_change(reader, &alter.name)?;
         resolver.name(&mut alter.name)?;
         for action in &mut alter.actions {
             if let AlterAction::AddConstraint(spec) = action
@@ -956,8 +973,12 @@ impl Binding<'_> {
         use crate::ast::CommentTarget;
         let mut resolver = self.resolver(reader, tables)?;
         match &mut comment.target {
-            CommentTarget::Relation { name, .. } => resolver.name(name),
+            CommentTarget::Relation { name, .. } => {
+                crate::pg_catalog::refuse_catalog_change(reader, name)?;
+                resolver.name(name)
+            }
             CommentTarget::Column { table, .. } | CommentTarget::Constraint { table, .. } => {
+                crate::pg_catalog::refuse_catalog_change(reader, table)?;
                 resolver.name(table)
             }
             CommentTarget::Index(_) | CommentTarget::Schema(_) | CommentTarget::Extension(_) => {

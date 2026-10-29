@@ -1,0 +1,3527 @@
+=== query
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
+WHERE c.relkind IN ('r','p','v','m','S','f','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2
+=== types
+name|name|text|name
+=== rows
+public|active_customers|view|eggdb
+public|blobs|table|eggdb
+public|customers|table|eggdb
+public|customers_id_seq|sequence|eggdb
+public|events|table|eggdb
+public|events_id_seq|sequence|eggdb
+public|invoice_number_seq|sequence|eggdb
+public|ledger|table|eggdb
+public|ledger_id_seq|sequence|eggdb
+public|log_lines|table|eggdb
+public|measurements|table|eggdb
+public|order_items|table|eggdb
+public|order_totals|view|eggdb
+public|orders|table|eggdb
+public|orders_id_seq|sequence|eggdb
+public|products|table|eggdb
+public|products_id_seq|sequence|eggdb
+public|texts|table|eggdb
+=== query
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
+WHERE c.relkind IN ('r','p','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2
+=== types
+name|name|text|name
+=== rows
+public|blobs|table|eggdb
+public|customers|table|eggdb
+public|events|table|eggdb
+public|ledger|table|eggdb
+public|log_lines|table|eggdb
+public|measurements|table|eggdb
+public|order_items|table|eggdb
+public|orders|table|eggdb
+public|products|table|eggdb
+public|texts|table|eggdb
+=== query
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner",
+  c2.relname as "Table"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
+     LEFT JOIN pg_catalog.pg_index i ON i.indexrelid = c.oid
+     LEFT JOIN pg_catalog.pg_class c2 ON i.indrelid = c2.oid
+WHERE c.relkind IN ('i','I','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2
+=== types
+name|name|text|name|name
+=== rows
+public|blobs_pkey|index|eggdb|blobs
+public|customers_email_key|index|eggdb|customers
+public|customers_pkey|index|eggdb|customers
+public|events_happened_idx|index|eggdb|events
+public|events_pkey|index|eggdb|events
+public|ledger_account_invoice_idx|index|eggdb|ledger
+public|ledger_pkey|index|eggdb|ledger
+public|log_lines_level_idx|index|eggdb|log_lines
+public|measurements_pkey|index|eggdb|measurements
+public|order_items_pkey|index|eggdb|order_items
+public|orders_customer_idx|index|eggdb|orders
+public|orders_pkey|index|eggdb|orders
+public|orders_placed_idx|index|eggdb|orders
+public|products_pkey|index|eggdb|products
+public|products_sku_key|index|eggdb|products
+public|texts_pkey|index|eggdb|texts
+=== query
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('v','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2
+=== types
+name|name|text|name
+=== rows
+public|active_customers|view|eggdb
+public|order_totals|view|eggdb
+=== query
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('S','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2
+=== types
+name|name|text|name
+=== rows
+public|customers_id_seq|sequence|eggdb
+public|events_id_seq|sequence|eggdb
+public|invoice_number_seq|sequence|eggdb
+public|ledger_id_seq|sequence|eggdb
+public|orders_id_seq|sequence|eggdb
+public|products_id_seq|sequence|eggdb
+=== query
+SELECT n.nspname AS "Name",
+  pg_catalog.pg_get_userbyid(n.nspowner) AS "Owner"
+FROM pg_catalog.pg_namespace n
+WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+ORDER BY 1
+=== types
+name|name
+=== rows
+public|pg_database_owner
+shop|eggdb
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(customers)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.customers}|public|customers
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.customers}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|r|t|f|t|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.customers}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+id|integer|nextval('customers_id_seq'::regclass)|t|||
+name|text||t|||
+email|character varying(120)||f|||
+country|character(2)||f|||
+active|boolean|true|t|||
+created_at|timestamp with time zone||f|||
+note|text||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.customers}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+customers_pkey|t|t|f|t|CREATE UNIQUE INDEX customers_pkey ON customers USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0
+customers_email_key|f|t|f|t|CREATE UNIQUE INDEX customers_email_key ON customers USING btree (email)|UNIQUE (email)|u|f|f|f|0
+=== query
+SELECT true as sametable, conname,
+  pg_catalog.pg_get_constraintdef(r.oid, true) as condef,
+  conrelid::pg_catalog.regclass AS ontable
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{public.customers}' AND r.contype = 'f'
+     AND conparentid = 0
+ORDER BY conname
+=== types
+boolean|name|text|regclass
+=== rows
+=== query
+SELECT conname, conrelid::pg_catalog.regclass AS ontable,
+       pg_catalog.pg_get_constraintdef(oid, true) AS condef
+  FROM pg_catalog.pg_constraint c
+ WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors('{public.customers}')
+                     UNION ALL VALUES ('{public.customers}'::pg_catalog.regclass))
+       AND contype = 'f' AND conparentid = 0
+ORDER BY conname
+=== types
+name|regclass|text
+=== rows
+orders_customer_id_fkey|orders|FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.customers}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.customers}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.customers}' and pg_catalog.pg_relation_is_publishable('{public.customers}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.customers}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.customers}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgenabled, t.tgisinternal,
+  CASE WHEN t.tgparentid != 0 THEN
+    (SELECT u.tgrelid::pg_catalog.regclass
+     FROM pg_catalog.pg_trigger AS u,
+          pg_catalog.pg_partition_ancestors(t.tgrelid) WITH ORDINALITY AS a(relid, depth)
+     WHERE u.tgname = t.tgname AND u.tgrelid = a.relid
+           AND u.tgparentid = 0
+     ORDER BY a.depth LIMIT 1)
+  END AS parent
+FROM pg_catalog.pg_trigger t
+WHERE t.tgrelid = '{public.customers}' AND (NOT t.tgisinternal OR (t.tgisinternal AND t.tgenabled = 'D'))
+ORDER BY 1
+=== types
+name|text|"char"|boolean|regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.customers}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.customers}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(products)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.products}|public|products
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.products}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+1|r|t|f|t|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.products}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+id|integer|nextval('products_id_seq'::regclass)|t|||
+sku|uuid||t|||
+title|character varying(200)||t|||
+price|numeric(12,2)||t|||
+weight|real||f|||
+rating|double precision||f|||
+attrs|jsonb||f|||
+raw|json||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.products}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+products_pkey|t|t|f|t|CREATE UNIQUE INDEX products_pkey ON products USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0
+products_sku_key|f|t|f|t|CREATE UNIQUE INDEX products_sku_key ON products USING btree (sku)|UNIQUE (sku)|u|f|f|f|0
+=== query
+SELECT r.conname, pg_catalog.pg_get_constraintdef(r.oid, true)
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{public.products}' AND r.contype = 'c'
+ORDER BY 1
+=== types
+name|text
+=== rows
+products_price_check|CHECK (price >= 0::numeric)
+=== query
+SELECT true as sametable, conname,
+  pg_catalog.pg_get_constraintdef(r.oid, true) as condef,
+  conrelid::pg_catalog.regclass AS ontable
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{public.products}' AND r.contype = 'f'
+     AND conparentid = 0
+ORDER BY conname
+=== types
+boolean|name|text|regclass
+=== rows
+=== query
+SELECT conname, conrelid::pg_catalog.regclass AS ontable,
+       pg_catalog.pg_get_constraintdef(oid, true) AS condef
+  FROM pg_catalog.pg_constraint c
+ WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors('{public.products}')
+                     UNION ALL VALUES ('{public.products}'::pg_catalog.regclass))
+       AND contype = 'f' AND conparentid = 0
+ORDER BY conname
+=== types
+name|regclass|text
+=== rows
+order_items_product_id_fkey|order_items|FOREIGN KEY (product_id) REFERENCES products(id)
+stock_product_id_fkey|shop.stock|FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.products}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.products}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.products}' and pg_catalog.pg_relation_is_publishable('{public.products}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.products}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.products}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgenabled, t.tgisinternal,
+  CASE WHEN t.tgparentid != 0 THEN
+    (SELECT u.tgrelid::pg_catalog.regclass
+     FROM pg_catalog.pg_trigger AS u,
+          pg_catalog.pg_partition_ancestors(t.tgrelid) WITH ORDINALITY AS a(relid, depth)
+     WHERE u.tgname = t.tgname AND u.tgrelid = a.relid
+           AND u.tgparentid = 0
+     ORDER BY a.depth LIMIT 1)
+  END AS parent
+FROM pg_catalog.pg_trigger t
+WHERE t.tgrelid = '{public.products}' AND (NOT t.tgisinternal OR (t.tgisinternal AND t.tgenabled = 'D'))
+ORDER BY 1
+=== types
+name|text|"char"|boolean|regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.products}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.products}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(orders)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.orders}|public|orders
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.orders}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+1|r|t|f|t|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.orders}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+id|bigint|nextval('orders_id_seq'::regclass)|t|||
+customer_id|integer||t|||
+ordered_on|date||t|||
+ordered_at|timestamp without time zone||f|||
+status|text||t|||
+total|numeric||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.orders}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+orders_pkey|t|t|f|t|CREATE UNIQUE INDEX orders_pkey ON orders USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0
+orders_customer_idx|f|f|f|t|CREATE INDEX orders_customer_idx ON orders USING btree (customer_id)|||||f|0
+orders_placed_idx|f|f|f|t|CREATE INDEX orders_placed_idx ON orders USING btree (ordered_on, status)|||||f|0
+=== query
+SELECT r.conname, pg_catalog.pg_get_constraintdef(r.oid, true)
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{public.orders}' AND r.contype = 'c'
+ORDER BY 1
+=== types
+name|text
+=== rows
+orders_status_check|CHECK (status = ANY (ARRAY['new'::text, 'paid'::text, 'shipped'::text, 'cancelled'::text]))
+=== query
+SELECT true as sametable, conname,
+  pg_catalog.pg_get_constraintdef(r.oid, true) as condef,
+  conrelid::pg_catalog.regclass AS ontable
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{public.orders}' AND r.contype = 'f'
+     AND conparentid = 0
+ORDER BY conname
+=== types
+boolean|name|text|regclass
+=== rows
+t|orders_customer_id_fkey|FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE|orders
+=== query
+SELECT conname, conrelid::pg_catalog.regclass AS ontable,
+       pg_catalog.pg_get_constraintdef(oid, true) AS condef
+  FROM pg_catalog.pg_constraint c
+ WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors('{public.orders}')
+                     UNION ALL VALUES ('{public.orders}'::pg_catalog.regclass))
+       AND contype = 'f' AND conparentid = 0
+ORDER BY conname
+=== types
+name|regclass|text
+=== rows
+order_items_order_id_fkey|order_items|FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.orders}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.orders}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.orders}' and pg_catalog.pg_relation_is_publishable('{public.orders}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.orders}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.orders}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgenabled, t.tgisinternal,
+  CASE WHEN t.tgparentid != 0 THEN
+    (SELECT u.tgrelid::pg_catalog.regclass
+     FROM pg_catalog.pg_trigger AS u,
+          pg_catalog.pg_partition_ancestors(t.tgrelid) WITH ORDINALITY AS a(relid, depth)
+     WHERE u.tgname = t.tgname AND u.tgrelid = a.relid
+           AND u.tgparentid = 0
+     ORDER BY a.depth LIMIT 1)
+  END AS parent
+FROM pg_catalog.pg_trigger t
+WHERE t.tgrelid = '{public.orders}' AND (NOT t.tgisinternal OR (t.tgisinternal AND t.tgenabled = 'D'))
+ORDER BY 1
+=== types
+name|text|"char"|boolean|regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.orders}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.orders}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(order_items)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.order_items}|public|order_items
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.order_items}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+1|r|t|f|t|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.order_items}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+order_id|bigint||t|||
+line|smallint||t|||
+product_id|integer||t|||
+quantity|integer||t|||
+unit_price|numeric(10,2)||t|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.order_items}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+order_items_pkey|t|t|f|t|CREATE UNIQUE INDEX order_items_pkey ON order_items USING btree (order_id, line)|PRIMARY KEY (order_id, line)|p|f|f|f|0
+=== query
+SELECT r.conname, pg_catalog.pg_get_constraintdef(r.oid, true)
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{public.order_items}' AND r.contype = 'c'
+ORDER BY 1
+=== types
+name|text
+=== rows
+order_items_quantity_check|CHECK (quantity > 0)
+=== query
+SELECT true as sametable, conname,
+  pg_catalog.pg_get_constraintdef(r.oid, true) as condef,
+  conrelid::pg_catalog.regclass AS ontable
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{public.order_items}' AND r.contype = 'f'
+     AND conparentid = 0
+ORDER BY conname
+=== types
+boolean|name|text|regclass
+=== rows
+t|order_items_order_id_fkey|FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE|order_items
+t|order_items_product_id_fkey|FOREIGN KEY (product_id) REFERENCES products(id)|order_items
+=== query
+SELECT conname, conrelid::pg_catalog.regclass AS ontable,
+       pg_catalog.pg_get_constraintdef(oid, true) AS condef
+  FROM pg_catalog.pg_constraint c
+ WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors('{public.order_items}')
+                     UNION ALL VALUES ('{public.order_items}'::pg_catalog.regclass))
+       AND contype = 'f' AND conparentid = 0
+ORDER BY conname
+=== types
+name|regclass|text
+=== rows
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.order_items}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.order_items}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.order_items}' and pg_catalog.pg_relation_is_publishable('{public.order_items}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.order_items}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.order_items}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgenabled, t.tgisinternal,
+  CASE WHEN t.tgparentid != 0 THEN
+    (SELECT u.tgrelid::pg_catalog.regclass
+     FROM pg_catalog.pg_trigger AS u,
+          pg_catalog.pg_partition_ancestors(t.tgrelid) WITH ORDINALITY AS a(relid, depth)
+     WHERE u.tgname = t.tgname AND u.tgrelid = a.relid
+           AND u.tgparentid = 0
+     ORDER BY a.depth LIMIT 1)
+  END AS parent
+FROM pg_catalog.pg_trigger t
+WHERE t.tgrelid = '{public.order_items}' AND (NOT t.tgisinternal OR (t.tgisinternal AND t.tgenabled = 'D'))
+ORDER BY 1
+=== types
+name|text|"char"|boolean|regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.order_items}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.order_items}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(blobs)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.blobs}|public|blobs
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.blobs}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|r|t|f|f|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.blobs}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+id|integer||t|||
+payload|bytea||f|||
+digest|bytea||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.blobs}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+blobs_pkey|t|t|f|t|CREATE UNIQUE INDEX blobs_pkey ON blobs USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.blobs}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.blobs}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.blobs}' and pg_catalog.pg_relation_is_publishable('{public.blobs}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.blobs}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.blobs}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.blobs}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.blobs}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(texts)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.texts}|public|texts
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.texts}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|r|t|f|f|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.texts}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+id|integer||t|||
+body|text||f|||
+label|character varying(40)||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.texts}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+texts_pkey|t|t|f|t|CREATE UNIQUE INDEX texts_pkey ON texts USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.texts}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.texts}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.texts}' and pg_catalog.pg_relation_is_publishable('{public.texts}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.texts}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.texts}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.texts}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.texts}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(events)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.events}|public|events
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.events}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|r|t|f|f|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.events}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+id|bigint|nextval('events_id_seq'::regclass)|t|||
+happened|timestamp with time zone||t|||
+duration|interval||f|||
+payload|jsonb||f|||
+tag|text||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.events}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+events_pkey|t|t|f|t|CREATE UNIQUE INDEX events_pkey ON events USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0
+events_happened_idx|f|f|f|t|CREATE INDEX events_happened_idx ON events USING btree (happened)|||||f|0
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.events}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.events}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.events}' and pg_catalog.pg_relation_is_publishable('{public.events}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.events}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.events}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.events}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.events}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(measurements)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.measurements}|public|measurements
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.measurements}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|r|t|f|f|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.measurements}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+sensor|smallint||t|||
+taken|timestamp without time zone||t|||
+value|double precision||f|||
+ok|boolean||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.measurements}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+measurements_pkey|t|t|f|t|CREATE UNIQUE INDEX measurements_pkey ON measurements USING btree (sensor, taken)|PRIMARY KEY (sensor, taken)|p|f|f|f|0
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.measurements}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.measurements}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.measurements}' and pg_catalog.pg_relation_is_publishable('{public.measurements}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.measurements}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.measurements}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.measurements}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.measurements}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(log_lines)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.log_lines}|public|log_lines
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.log_lines}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+1|r|t|f|f|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.log_lines}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+logged_at|timestamp with time zone||t|||
+level|character varying(10)||t|||
+message|text||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.log_lines}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+log_lines_level_idx|f|f|f|t|CREATE INDEX log_lines_level_idx ON log_lines USING btree (level)|||||f|0
+=== query
+SELECT r.conname, pg_catalog.pg_get_constraintdef(r.oid, true)
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{public.log_lines}' AND r.contype = 'c'
+ORDER BY 1
+=== types
+name|text
+=== rows
+log_lines_level_check|CHECK (level::text = ANY (ARRAY['debug'::character varying, 'info'::character varying, 'warn'::character varying, 'error'::character varying]::text[]))
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.log_lines}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.log_lines}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.log_lines}' and pg_catalog.pg_relation_is_publishable('{public.log_lines}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.log_lines}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.log_lines}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.log_lines}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.log_lines}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(ledger)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.ledger}|public|ledger
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.ledger}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|r|t|f|f|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.ledger}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+id|integer|nextval('ledger_id_seq'::regclass)|t|||
+account|bigint||t|||
+amount|numeric(20,6)||t|||
+invoice|integer|nextval('invoice_number_seq'::regclass)|f|||
+memo|text||f|||
+posted|date||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{public.ledger}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+ledger_pkey|t|t|f|t|CREATE UNIQUE INDEX ledger_pkey ON ledger USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0
+ledger_account_invoice_idx|f|f|f|t|CREATE INDEX ledger_account_invoice_idx ON ledger USING btree (account, invoice)|||||f|0
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{public.ledger}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{public.ledger}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{public.ledger}' and pg_catalog.pg_relation_is_publishable('{public.ledger}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{public.ledger}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{public.ledger}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{public.ledger}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{public.ledger}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(warehouses)$' COLLATE pg_catalog.default
+  AND n.nspname OPERATOR(pg_catalog.~) '^(shop)$' COLLATE pg_catalog.default
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{shop.warehouses}|shop|warehouses
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{shop.warehouses}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|r|t|f|t|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{shop.warehouses}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+code|character(4)||t|||
+name|text||t|||
+opens|time without time zone||f|||
+closes|time with time zone||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{shop.warehouses}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+warehouses_pkey|t|t|f|t|CREATE UNIQUE INDEX warehouses_pkey ON shop.warehouses USING btree (code)|PRIMARY KEY (code)|p|f|f|f|0
+warehouses_name_key|f|t|f|t|CREATE UNIQUE INDEX warehouses_name_key ON shop.warehouses USING btree (name)|UNIQUE (name)|u|f|f|f|0
+=== query
+SELECT true as sametable, conname,
+  pg_catalog.pg_get_constraintdef(r.oid, true) as condef,
+  conrelid::pg_catalog.regclass AS ontable
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{shop.warehouses}' AND r.contype = 'f'
+     AND conparentid = 0
+ORDER BY conname
+=== types
+boolean|name|text|regclass
+=== rows
+=== query
+SELECT conname, conrelid::pg_catalog.regclass AS ontable,
+       pg_catalog.pg_get_constraintdef(oid, true) AS condef
+  FROM pg_catalog.pg_constraint c
+ WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors('{shop.warehouses}')
+                     UNION ALL VALUES ('{shop.warehouses}'::pg_catalog.regclass))
+       AND contype = 'f' AND conparentid = 0
+ORDER BY conname
+=== types
+name|regclass|text
+=== rows
+stock_warehouse_fkey|shop.stock|FOREIGN KEY (warehouse) REFERENCES shop.warehouses(code) ON UPDATE CASCADE
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{shop.warehouses}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{shop.warehouses}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{shop.warehouses}' and pg_catalog.pg_relation_is_publishable('{shop.warehouses}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{shop.warehouses}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{shop.warehouses}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgenabled, t.tgisinternal,
+  CASE WHEN t.tgparentid != 0 THEN
+    (SELECT u.tgrelid::pg_catalog.regclass
+     FROM pg_catalog.pg_trigger AS u,
+          pg_catalog.pg_partition_ancestors(t.tgrelid) WITH ORDINALITY AS a(relid, depth)
+     WHERE u.tgname = t.tgname AND u.tgrelid = a.relid
+           AND u.tgparentid = 0
+     ORDER BY a.depth LIMIT 1)
+  END AS parent
+FROM pg_catalog.pg_trigger t
+WHERE t.tgrelid = '{shop.warehouses}' AND (NOT t.tgisinternal OR (t.tgisinternal AND t.tgenabled = 'D'))
+ORDER BY 1
+=== types
+name|text|"char"|boolean|regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{shop.warehouses}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{shop.warehouses}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(stock)$' COLLATE pg_catalog.default
+  AND n.nspname OPERATOR(pg_catalog.~) '^(shop)$' COLLATE pg_catalog.default
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{shop.stock}|shop|stock
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{shop.stock}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|r|t|f|t|f|f|f|f||0||p|d|heap
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{shop.stock}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+warehouse|character(4)||t|||
+product_id|integer||t|||
+on_hand|integer|0|t|||
+updated|timestamp with time zone||f|||
+=== query
+SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{shop.stock}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname
+=== types
+name|boolean|boolean|boolean|boolean|text|text|"char"|boolean|boolean|boolean|oid
+=== rows
+stock_pkey|t|t|f|t|CREATE UNIQUE INDEX stock_pkey ON shop.stock USING btree (warehouse, product_id)|PRIMARY KEY (warehouse, product_id)|p|f|f|f|0
+stock_product_idx|f|f|f|t|CREATE INDEX stock_product_idx ON shop.stock USING btree (product_id)|||||f|0
+=== query
+SELECT true as sametable, conname,
+  pg_catalog.pg_get_constraintdef(r.oid, true) as condef,
+  conrelid::pg_catalog.regclass AS ontable
+FROM pg_catalog.pg_constraint r
+WHERE r.conrelid = '{shop.stock}' AND r.contype = 'f'
+     AND conparentid = 0
+ORDER BY conname
+=== types
+boolean|name|text|regclass
+=== rows
+t|stock_product_id_fkey|FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE|shop.stock
+t|stock_warehouse_fkey|FOREIGN KEY (warehouse) REFERENCES shop.warehouses(code) ON UPDATE CASCADE|shop.stock
+=== query
+SELECT conname, conrelid::pg_catalog.regclass AS ontable,
+       pg_catalog.pg_get_constraintdef(oid, true) AS condef
+  FROM pg_catalog.pg_constraint c
+ WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors('{shop.stock}')
+                     UNION ALL VALUES ('{shop.stock}'::pg_catalog.regclass))
+       AND contype = 'f' AND conparentid = 0
+ORDER BY conname
+=== types
+name|regclass|text
+=== rows
+=== query
+SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{shop.stock}' ORDER BY 1
+=== types
+name|boolean|text|text|text|text
+=== rows
+=== query
+SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname,
+pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,
+  'd' = any(stxkind) AS ndist_enabled,
+  'f' = any(stxkind) AS deps_enabled,
+  'm' = any(stxkind) AS mcv_enabled,
+stxstattarget
+FROM pg_catalog.pg_statistic_ext
+WHERE stxrelid = '{shop.stock}'
+ORDER BY nsp, stxname
+=== types
+oid|regclass|text|name|text|boolean|boolean|boolean|integer
+=== rows
+=== query
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid
+     JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid
+WHERE pc.oid ='{shop.stock}' and pg_catalog.pg_relation_is_publishable('{shop.stock}')
+UNION
+SELECT pubname
+     , pg_get_expr(pr.prqual, c.oid)
+     , (CASE WHEN pr.prattrs IS NOT NULL THEN
+         (SELECT string_agg(attname, ', ')
+           FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s,
+                pg_catalog.pg_attribute
+          WHERE attrelid = pr.prrelid AND attnum = prattrs[s])
+        ELSE NULL END) FROM pg_catalog.pg_publication p
+     JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid
+     JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+WHERE pr.prrelid = '{shop.stock}'
+UNION
+SELECT pubname
+     , NULL
+     , NULL
+FROM pg_catalog.pg_publication p
+WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{shop.stock}')
+ORDER BY 1
+=== types
+name|text|text
+=== rows
+=== query
+SELECT t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgenabled, t.tgisinternal,
+  CASE WHEN t.tgparentid != 0 THEN
+    (SELECT u.tgrelid::pg_catalog.regclass
+     FROM pg_catalog.pg_trigger AS u,
+          pg_catalog.pg_partition_ancestors(t.tgrelid) WITH ORDINALITY AS a(relid, depth)
+     WHERE u.tgname = t.tgname AND u.tgrelid = a.relid
+           AND u.tgparentid = 0
+     ORDER BY a.depth LIMIT 1)
+  END AS parent
+FROM pg_catalog.pg_trigger t
+WHERE t.tgrelid = '{shop.stock}' AND (NOT t.tgisinternal OR (t.tgisinternal AND t.tgenabled = 'D'))
+ORDER BY 1
+=== types
+name|text|"char"|boolean|regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhparent AND i.inhrelid = '{shop.stock}'
+  AND c.relkind != 'p' AND c.relkind != 'I'
+ORDER BY inhseqno
+=== types
+regclass
+=== rows
+=== query
+SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid)
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
+WHERE c.oid = i.inhrelid AND i.inhparent = '{shop.stock}'
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text
+=== types
+regclass|"char"|boolean|text
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(order_totals)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.order_totals}|public|order_totals
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.order_totals}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|v|f|t|f|f|f|f|f||0||p|n|
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.order_totals}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+customer_id|integer||f|||
+name|text||f|||
+orders|bigint||f|||
+total|numeric||f|||
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(active_customers)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.active_customers}|public|active_customers
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.active_customers}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|v|f|t|f|f|f|f|f||0||p|n|
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.active_customers}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+id|integer||f|||
+name|text||f|||
+email|character varying(120)||f|||
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(stock_by_product)$' COLLATE pg_catalog.default
+  AND n.nspname OPERATOR(pg_catalog.~) '^(shop)$' COLLATE pg_catalog.default
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{shop.stock_by_product}|shop|stock_by_product
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{shop.stock_by_product}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|v|f|t|f|f|f|f|f||0||p|n|
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+   FROM pg_catalog.pg_attrdef d
+   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+  a.attnotnull,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+  a.attidentity,
+  a.attgenerated
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{shop.stock_by_product}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|boolean|name|"char"|"char"
+=== rows
+sku|uuid||f|||
+title|character varying(200)||f|||
+warehouse|character(4)||f|||
+on_hand|integer||f|||
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(invoice_number_seq)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.invoice_number_seq}|public|invoice_number_seq
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.invoice_number_seq}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|S|f|f|f|f|f|f|f||0||p|n|
+=== query
+SELECT pg_catalog.format_type(seqtypid, NULL) AS "Type",
+       seqstart AS "Start",
+       seqmin AS "Minimum",
+       seqmax AS "Maximum",
+       seqincrement AS "Increment",
+       CASE WHEN seqcycle THEN 'yes' ELSE 'no' END AS "Cycles?",
+       seqcache AS "Cache"
+FROM pg_catalog.pg_sequence
+WHERE seqrelid = '{public.invoice_number_seq}'
+=== types
+text|bigint|bigint|bigint|bigint|text|bigint
+=== rows
+bigint|1000|1|9223372036854775807|7|no|1
+=== query
+SELECT pg_catalog.quote_ident(nspname) || '.' ||
+   pg_catalog.quote_ident(relname) || '.' ||
+   pg_catalog.quote_ident(attname),
+   d.deptype
+FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid
+INNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+INNER JOIN pg_catalog.pg_attribute a ON (
+ a.attrelid=c.oid AND
+ a.attnum=d.refobjsubid)
+WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.objid='{public.invoice_number_seq}'
+ AND d.deptype IN ('a', 'i')
+=== types
+text|"char"
+=== rows
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(customers_id_seq)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.customers_id_seq}|public|customers_id_seq
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.customers_id_seq}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|S|f|f|f|f|f|f|f||0||p|n|
+=== query
+SELECT pg_catalog.format_type(seqtypid, NULL) AS "Type",
+       seqstart AS "Start",
+       seqmin AS "Minimum",
+       seqmax AS "Maximum",
+       seqincrement AS "Increment",
+       CASE WHEN seqcycle THEN 'yes' ELSE 'no' END AS "Cycles?",
+       seqcache AS "Cache"
+FROM pg_catalog.pg_sequence
+WHERE seqrelid = '{public.customers_id_seq}'
+=== types
+text|bigint|bigint|bigint|bigint|text|bigint
+=== rows
+integer|1|1|2147483647|1|no|1
+=== query
+SELECT pg_catalog.quote_ident(nspname) || '.' ||
+   pg_catalog.quote_ident(relname) || '.' ||
+   pg_catalog.quote_ident(attname),
+   d.deptype
+FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid
+INNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+INNER JOIN pg_catalog.pg_attribute a ON (
+ a.attrelid=c.oid AND
+ a.attnum=d.refobjsubid)
+WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.objid='{public.customers_id_seq}'
+ AND d.deptype IN ('a', 'i')
+=== types
+text|"char"
+=== rows
+public.customers.id|a
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(products_id_seq)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.products_id_seq}|public|products_id_seq
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.products_id_seq}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|S|f|f|f|f|f|f|f||0||p|n|
+=== query
+SELECT pg_catalog.format_type(seqtypid, NULL) AS "Type",
+       seqstart AS "Start",
+       seqmin AS "Minimum",
+       seqmax AS "Maximum",
+       seqincrement AS "Increment",
+       CASE WHEN seqcycle THEN 'yes' ELSE 'no' END AS "Cycles?",
+       seqcache AS "Cache"
+FROM pg_catalog.pg_sequence
+WHERE seqrelid = '{public.products_id_seq}'
+=== types
+text|bigint|bigint|bigint|bigint|text|bigint
+=== rows
+integer|1|1|2147483647|1|no|1
+=== query
+SELECT pg_catalog.quote_ident(nspname) || '.' ||
+   pg_catalog.quote_ident(relname) || '.' ||
+   pg_catalog.quote_ident(attname),
+   d.deptype
+FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid
+INNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+INNER JOIN pg_catalog.pg_attribute a ON (
+ a.attrelid=c.oid AND
+ a.attnum=d.refobjsubid)
+WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.objid='{public.products_id_seq}'
+ AND d.deptype IN ('a', 'i')
+=== types
+text|"char"
+=== rows
+public.products.id|a
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(orders_id_seq)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.orders_id_seq}|public|orders_id_seq
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.orders_id_seq}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|S|f|f|f|f|f|f|f||0||p|n|
+=== query
+SELECT pg_catalog.format_type(seqtypid, NULL) AS "Type",
+       seqstart AS "Start",
+       seqmin AS "Minimum",
+       seqmax AS "Maximum",
+       seqincrement AS "Increment",
+       CASE WHEN seqcycle THEN 'yes' ELSE 'no' END AS "Cycles?",
+       seqcache AS "Cache"
+FROM pg_catalog.pg_sequence
+WHERE seqrelid = '{public.orders_id_seq}'
+=== types
+text|bigint|bigint|bigint|bigint|text|bigint
+=== rows
+bigint|1|1|9223372036854775807|1|no|1
+=== query
+SELECT pg_catalog.quote_ident(nspname) || '.' ||
+   pg_catalog.quote_ident(relname) || '.' ||
+   pg_catalog.quote_ident(attname),
+   d.deptype
+FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid
+INNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+INNER JOIN pg_catalog.pg_attribute a ON (
+ a.attrelid=c.oid AND
+ a.attnum=d.refobjsubid)
+WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.objid='{public.orders_id_seq}'
+ AND d.deptype IN ('a', 'i')
+=== types
+text|"char"
+=== rows
+public.orders.id|a
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(events_id_seq)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.events_id_seq}|public|events_id_seq
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.events_id_seq}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|S|f|f|f|f|f|f|f||0||p|n|
+=== query
+SELECT pg_catalog.format_type(seqtypid, NULL) AS "Type",
+       seqstart AS "Start",
+       seqmin AS "Minimum",
+       seqmax AS "Maximum",
+       seqincrement AS "Increment",
+       CASE WHEN seqcycle THEN 'yes' ELSE 'no' END AS "Cycles?",
+       seqcache AS "Cache"
+FROM pg_catalog.pg_sequence
+WHERE seqrelid = '{public.events_id_seq}'
+=== types
+text|bigint|bigint|bigint|bigint|text|bigint
+=== rows
+bigint|1|1|9223372036854775807|1|no|1
+=== query
+SELECT pg_catalog.quote_ident(nspname) || '.' ||
+   pg_catalog.quote_ident(relname) || '.' ||
+   pg_catalog.quote_ident(attname),
+   d.deptype
+FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid
+INNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+INNER JOIN pg_catalog.pg_attribute a ON (
+ a.attrelid=c.oid AND
+ a.attnum=d.refobjsubid)
+WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.objid='{public.events_id_seq}'
+ AND d.deptype IN ('a', 'i')
+=== types
+text|"char"
+=== rows
+public.events.id|a
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(ledger_id_seq)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.ledger_id_seq}|public|ledger_id_seq
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.ledger_id_seq}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|S|f|f|f|f|f|f|f||0||p|n|
+=== query
+SELECT pg_catalog.format_type(seqtypid, NULL) AS "Type",
+       seqstart AS "Start",
+       seqmin AS "Minimum",
+       seqmax AS "Maximum",
+       seqincrement AS "Increment",
+       CASE WHEN seqcycle THEN 'yes' ELSE 'no' END AS "Cycles?",
+       seqcache AS "Cache"
+FROM pg_catalog.pg_sequence
+WHERE seqrelid = '{public.ledger_id_seq}'
+=== types
+text|bigint|bigint|bigint|bigint|text|bigint
+=== rows
+integer|1|1|2147483647|1|no|1
+=== query
+SELECT pg_catalog.quote_ident(nspname) || '.' ||
+   pg_catalog.quote_ident(relname) || '.' ||
+   pg_catalog.quote_ident(attname),
+   d.deptype
+FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid
+INNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+INNER JOIN pg_catalog.pg_attribute a ON (
+ a.attrelid=c.oid AND
+ a.attnum=d.refobjsubid)
+WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.objid='{public.ledger_id_seq}'
+ AND d.deptype IN ('a', 'i')
+=== types
+text|"char"
+=== rows
+public.ledger.id|a
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(customers_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.customers_pkey}|public|customers_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.customers_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.customers_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.customers_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+id|integer|yes|id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.customers_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|customers|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(customers_email_key)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.customers_email_key}|public|customers_email_key
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.customers_email_key}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.customers_email_key}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.customers_email_key}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+email|character varying(120)|yes|email
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.customers_email_key}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|f|f|t|f|f|f|f|btree|customers|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(products_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.products_pkey}|public|products_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.products_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.products_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.products_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+id|integer|yes|id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.products_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|products|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(products_sku_key)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.products_sku_key}|public|products_sku_key
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.products_sku_key}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.products_sku_key}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.products_sku_key}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+sku|uuid|yes|sku
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.products_sku_key}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|f|f|t|f|f|f|f|btree|products|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(orders_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.orders_pkey}|public|orders_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.orders_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.orders_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.orders_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+id|bigint|yes|id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.orders_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|orders|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(order_items_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.order_items_pkey}|public|order_items_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.order_items_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.order_items_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.order_items_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+order_id|bigint|yes|order_id
+line|smallint|yes|line
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.order_items_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|order_items|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(warehouses_pkey)$' COLLATE pg_catalog.default
+  AND n.nspname OPERATOR(pg_catalog.~) '^(shop)$' COLLATE pg_catalog.default
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{shop.warehouses_pkey}|shop|warehouses_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{shop.warehouses_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{shop.warehouses_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{shop.warehouses_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+code|character(4)|yes|code
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{shop.warehouses_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|warehouses|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(warehouses_name_key)$' COLLATE pg_catalog.default
+  AND n.nspname OPERATOR(pg_catalog.~) '^(shop)$' COLLATE pg_catalog.default
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{shop.warehouses_name_key}|shop|warehouses_name_key
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{shop.warehouses_name_key}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{shop.warehouses_name_key}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{shop.warehouses_name_key}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+name|text|yes|name
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{shop.warehouses_name_key}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|f|f|t|f|f|f|f|btree|warehouses|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(stock_pkey)$' COLLATE pg_catalog.default
+  AND n.nspname OPERATOR(pg_catalog.~) '^(shop)$' COLLATE pg_catalog.default
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{shop.stock_pkey}|shop|stock_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{shop.stock_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{shop.stock_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{shop.stock_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+warehouse|character(4)|yes|warehouse
+product_id|integer|yes|product_id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{shop.stock_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|stock|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(blobs_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.blobs_pkey}|public|blobs_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.blobs_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.blobs_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.blobs_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+id|integer|yes|id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.blobs_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|blobs|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(texts_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.texts_pkey}|public|texts_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.texts_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.texts_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.texts_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+id|integer|yes|id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.texts_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|texts|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(events_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.events_pkey}|public|events_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.events_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.events_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.events_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+id|bigint|yes|id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.events_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|events|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(measurements_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.measurements_pkey}|public|measurements_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.measurements_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.measurements_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.measurements_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+sensor|smallint|yes|sensor
+taken|timestamp without time zone|yes|taken
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.measurements_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|measurements|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(ledger_pkey)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.ledger_pkey}|public|ledger_pkey
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.ledger_pkey}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.ledger_pkey}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.ledger_pkey}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+id|integer|yes|id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.ledger_pkey}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+t|t|f|t|f|f|f|f|btree|ledger|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(orders_customer_idx)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.orders_customer_idx}|public|orders_customer_idx
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.orders_customer_idx}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.orders_customer_idx}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.orders_customer_idx}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+customer_id|integer|yes|customer_id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.orders_customer_idx}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+f|f|f|t|f|f|f|f|btree|orders|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(orders_placed_idx)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.orders_placed_idx}|public|orders_placed_idx
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.orders_placed_idx}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.orders_placed_idx}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.orders_placed_idx}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+ordered_on|date|yes|ordered_on
+status|text|yes|status
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.orders_placed_idx}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+f|f|f|t|f|f|f|f|btree|orders|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(events_happened_idx)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.events_happened_idx}|public|events_happened_idx
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.events_happened_idx}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.events_happened_idx}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.events_happened_idx}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+happened|timestamp with time zone|yes|happened
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.events_happened_idx}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+f|f|f|t|f|f|f|f|btree|events|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(ledger_account_invoice_idx)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.ledger_account_invoice_idx}|public|ledger_account_invoice_idx
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.ledger_account_invoice_idx}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.ledger_account_invoice_idx}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.ledger_account_invoice_idx}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+account|bigint|yes|account
+invoice|integer|yes|invoice
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.ledger_account_invoice_idx}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+f|f|f|t|f|f|f|f|btree|ledger|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(log_lines_level_idx)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.log_lines_level_idx}|public|log_lines_level_idx
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{public.log_lines_level_idx}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{public.log_lines_level_idx}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{public.log_lines_level_idx}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+level|character varying(10)|yes|level
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{public.log_lines_level_idx}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+f|f|f|t|f|f|f|f|btree|log_lines|
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(stock_product_idx)$' COLLATE pg_catalog.default
+  AND n.nspname OPERATOR(pg_catalog.~) '^(shop)$' COLLATE pg_catalog.default
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{shop.stock_product_idx}|shop|stock_product_idx
+=== query
+SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, '', c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname
+FROM pg_catalog.pg_class c
+ LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)
+WHERE c.oid = '{shop.stock_product_idx}'
+=== types
+smallint|"char"|boolean|boolean|boolean|boolean|boolean|boolean|boolean|text|oid|text|"char"|"char"|name
+=== rows
+0|i|f|f|f|f|f|f|f||0||p|n|btree
+=== query
+SELECT a.attname,
+  pg_catalog.format_type(a.atttypid, a.atttypmod),
+  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '{shop.stock_product_idx}') THEN 'yes' ELSE 'no' END AS is_key,
+  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = '{shop.stock_product_idx}' AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+=== types
+name|text|text|text
+=== rows
+product_id|integer|yes|product_id
+=== query
+SELECT i.indisunique, i.indisprimary, i.indisclustered, i.indisvalid,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferrable) AS condeferrable,
+  (NOT i.indimmediate) AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x') AND condeferred) AS condeferred,
+i.indisreplident,
+i.indnullsnotdistinct,
+  a.amname, c2.relname, pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = '{shop.stock_product_idx}' AND c.relam = a.oid
+AND i.indrelid = c2.oid
+=== types
+boolean|boolean|boolean|boolean|boolean|boolean|boolean|boolean|name|name|text
+=== rows
+f|f|f|t|f|f|f|f|btree|stock|
+=== query
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
+WHERE c.relkind IN ('r','p','t','s','')
+  AND n.nspname OPERATOR(pg_catalog.~) '^(shop)$' COLLATE pg_catalog.default
+ORDER BY 1,2
+=== types
+name|name|text|name
+=== rows
+shop|stock|table|eggdb
+shop|warehouses|table|eggdb
+=== query
+SELECT c.oid,
+  n.nspname,
+  c.relname
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^(cust.*)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 2, 3
+=== types
+oid|name|name
+=== rows
+{public.customers}|public|customers
+{public.customers_email_key}|public|customers_email_key
+{public.customers_id_seq}|public|customers_id_seq
+{public.customers_pkey}|public|customers_pkey
+=== query
+SELECT
+  d.datname as "Name",
+  pg_catalog.pg_get_userbyid(d.datdba) as "Owner",
+  pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding",
+  CASE d.datlocprovider WHEN 'b' THEN 'builtin' WHEN 'c' THEN 'libc' WHEN 'i' THEN 'icu' END AS "Locale Provider",
+  d.datcollate as "Collate",
+  d.datctype as "Ctype",
+  d.daticulocale as "Locale",
+  d.daticurules as "ICU Rules",
+  CASE WHEN pg_catalog.array_length(d.datacl, 1) = 0 THEN '(none)' ELSE pg_catalog.array_to_string(d.datacl, E'\n') END AS "Access privileges"
+FROM pg_catalog.pg_database d
+WHERE d.datname OPERATOR(pg_catalog.~) '^(eggdb_catalog)$' COLLATE pg_catalog.default
+ORDER BY 1
+=== types
+name|name|name|text|text|text|text|text|text
+=== rows
+eggdb_catalog|eggdb|UTF8|libc|C|C|||
+=== query
+SELECT r.rolname, r.rolsuper, r.rolinherit,
+  r.rolcreaterole, r.rolcreatedb, r.rolcanlogin,
+  r.rolconnlimit, r.rolvaliduntil
+, r.rolreplication
+, r.rolbypassrls
+FROM pg_catalog.pg_roles r
+WHERE r.rolname OPERATOR(pg_catalog.~) '^(eggdb)$' COLLATE pg_catalog.default
+ORDER BY 1
+=== types
+name|boolean|boolean|boolean|boolean|boolean|integer|timestamp with time zone|boolean|boolean
+=== rows
+eggdb|t|t|t|t|t|-1||t|t

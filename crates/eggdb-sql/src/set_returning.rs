@@ -16,7 +16,7 @@ pub(crate) struct SetReturningFunction {
     rows: fn(&[Value], SqlType, &mut RowSink<'_>) -> SqlResult<()>,
 }
 
-const FUNCTIONS: [SetReturningFunction; 2] = [
+const FUNCTIONS: [SetReturningFunction; 3] = [
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -26,6 +26,11 @@ const FUNCTIONS: [SetReturningFunction; 2] = [
         name: "unnest",
         result_type: unnest_type,
         rows: unnest_rows,
+    },
+    SetReturningFunction {
+        name: "pg_partition_ancestors",
+        result_type: crate::pg_catalog::partition_ancestors_type,
+        rows: crate::pg_catalog::partition_ancestors_rows,
     },
 ];
 
@@ -735,7 +740,7 @@ pub(crate) fn expressions(generated: &GeneratedTable) -> Vec<&Expr> {
     match generated {
         GeneratedTable::Values(list) => list.rows.iter().flatten().collect(),
         GeneratedTable::Function(function) => function.arguments.iter().collect(),
-        GeneratedTable::Expansion(_) => Vec::new(),
+        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => Vec::new(),
     }
 }
 
@@ -743,7 +748,7 @@ pub(crate) fn expressions_mut(generated: &mut GeneratedTable) -> Vec<&mut Expr> 
     match generated {
         GeneratedTable::Values(list) => list.rows.iter_mut().flatten().collect(),
         GeneratedTable::Function(function) => function.arguments.iter_mut().collect(),
-        GeneratedTable::Expansion(_) => Vec::new(),
+        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => Vec::new(),
     }
 }
 
@@ -770,6 +775,6 @@ pub(crate) fn generate_rows(
             .into_iter()
             .try_for_each(store),
         GeneratedTable::Function(function) => bind_function(function, evaluator)?.generate(store),
-        GeneratedTable::Expansion(_) => Ok(()),
+        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => Ok(()),
     }
 }

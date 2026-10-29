@@ -135,6 +135,20 @@ ok: every table and row of the dump is in app.db; 3 objects skipped and 1 conseq
 Skipped objects and consequences do not change the exit code: the verdict line says whether every
 table and row of the dump is in the file, or how many of them are.
 
+### 4. Browse it with psql
+
+`eggdb serve` the restored file and point psql at it: `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`,
+`\d table`, `\l` and `\du` show the restored tables, indexes, constraints, defaults, views and
+sequences as PostgreSQL shows them (`--database` names the database `\l` lists):
+
+```sh
+EGGDB_PASSWORD=choose-one eggdb serve shop.db --database shop
+PGPASSWORD=choose-one psql -h 127.0.0.1 -U eggdb shop -c '\d customers'
+```
+
+Every index shows as `btree`, a unique index as a `UNIQUE` constraint, and `\d+` is not there
+yet; [sql.md](sql.md#the-postgresql-catalog) has the details.
+
 ### Limits
 
 - Functions, procedures and triggers are not run in this release (D110): a database whose rules

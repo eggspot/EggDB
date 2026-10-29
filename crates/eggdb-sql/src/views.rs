@@ -326,6 +326,15 @@ fn view_columns(
                 sql_type.name()
             )));
         }
+        if let Some(sql_type @ crate::types::SqlType::Catalog(_)) = column.sql_type {
+            return Err(SqlError::not_supported(format!(
+                "a view column of type {} is not supported yet",
+                sql_type.name()
+            ))
+            .with_hint(format!(
+                "Cast the column \"{name}\" to a type a table can have, for example ::text or ::bigint."
+            )));
+        }
         let source = if column.name.is_empty() {
             name.clone()
         } else {

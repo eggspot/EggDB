@@ -1666,7 +1666,10 @@ impl<'t> Parser<'t> {
         if !self.postgresql() {
             return self.sql_type().map(|sql_type| (sql_type, false));
         }
-        let sql_type = self.element_type()?;
+        let sql_type = match self.catalog_cast_type() {
+            Some(found) => found,
+            None => self.element_type()?,
+        };
         let array = if self.take_word("array") {
             if self.peek_kind() == &TokenKind::LeftBracket {
                 self.array_dimension()?;
@@ -1680,6 +1683,18 @@ impl<'t> Parser<'t> {
             bracketed
         };
         Ok((sql_type, array))
+    }
+
+    fn catalog_cast_type(&mut self) -> Option<SqlType> {
+        let qualified = self.is_word("pg_catalog") && self.peek_kind_at(1) == &TokenKind::Dot;
+        let at = if qualified { 2 } else { 0 };
+        let found = match self.peek_kind_at(at) {
+            TokenKind::Word(word) => crate::pg_catalog::cast_type_named(word)?,
+            TokenKind::QuotedIdentifier(word) => crate::pg_catalog::cast_type_named(word)?,
+            _ => return None,
+        };
+        self.at += at + 1;
+        Some(found)
     }
 
     fn array_dimension(&mut self) -> SqlResult<()> {
@@ -2839,13 +2854,7 @@ impl<'t> Parser<'t> {
                 }
                 if self.postgresql() && self.is_regclass_type() {
                     let position = expr.position;
-                    expr = Expr {
-                        kind: ExprKind::Function {
-                            name: "regclass_cast".to_owned(),
-                            arguments: vec![expr],
-                        },
-                        position,
-                    };
+                    expr = regclass_cast(expr, position);
                     continue;
                 }
                 let type_position = self.position();
@@ -3121,7 +3130,15 @@ impl<'t> Parser<'t> {
     fn is_regclass_type(&mut self) -> bool {
         let qualified = self.is_word("pg_catalog") && self.peek_kind_at(1) == &TokenKind::Dot;
         let at = if qualified { 2 } else { 0 };
-        if !self.is_word_at(at, "regclass") {
+        let named = match self.peek_kind_at(at) {
+            TokenKind::Word(word) => word == "regclass",
+            TokenKind::QuotedIdentifier(word) => word == "regclass",
+            _ => false,
+        };
+        if !named
+            || matches!(self.peek_kind_at(at + 1), TokenKind::LeftBracket)
+            || self.is_word_at(at + 1, "array")
+        {
             return false;
         }
         self.at += at + 1;
@@ -3272,6 +3289,11 @@ impl<'t> Parser<'t> {
         }
         if self.sqlserver()
             && let Some(expr) = self.sqlserver_function(&name)?
+        {
+            return Ok(expr);
+        }
+        if self.postgresql()
+            && let Some(expr) = self.reg_function_cast(&name)?
         {
             return Ok(expr);
         }
@@ -3443,6 +3465,10 @@ impl<'t> Parser<'t> {
         self.expect(&TokenKind::LeftParen)?;
         let expr = self.expression()?;
         self.expect_word("as")?;
+        if self.postgresql() && self.is_regclass_type() {
+            self.expect(&TokenKind::RightParen)?;
+            return Ok(regclass_cast(expr, position));
+        }
         let sql_type = self.cast_type()?;
         self.expect(&TokenKind::RightParen)?;
         Ok(Expr {
@@ -3452,6 +3478,31 @@ impl<'t> Parser<'t> {
             },
             position,
         })
+    }
+
+    fn reg_function_cast(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
+        let Some(sql_type @ SqlType::Catalog(crate::pg_catalog::CatalogType::Reg(kind))) =
+            crate::pg_catalog::cast_type_named(&name.text)
+        else {
+            return Ok(None);
+        };
+        if self.peek_kind_at(1) == &TokenKind::RightParen {
+            return Ok(None);
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        let expr = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        Ok(Some(if kind == crate::pg_catalog::RegKind::Class {
+            regclass_cast(expr, name.position)
+        } else {
+            Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(expr),
+                    sql_type,
+                },
+                position: name.position,
+            }
+        }))
     }
 
     fn case(&mut self) -> SqlResult<Expr> {
@@ -3495,6 +3546,16 @@ impl<'t> Parser<'t> {
 
     fn binary_operand(&mut self) -> SqlResult<Expr> {
         self.expression_above(Level::Other)
+    }
+}
+
+fn regclass_cast(expr: Expr, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Function {
+            name: "regclass_cast".to_owned(),
+            arguments: vec![expr],
+        },
+        position,
     }
 }
 

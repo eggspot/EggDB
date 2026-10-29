@@ -2,7 +2,8 @@ use crate::ast::{Comment, CommentTarget, Name, RelationKind};
 use crate::dialect::Dialect;
 use crate::encoding::{
     CommentKind, TableDefinition, comment_key, comment_kind_prefix, comments_prefix,
-    decode_comment, encode_comment, prefix_end, schema_comment_key,
+    decode_comment, encode_comment, every_comment_prefix, prefix_end, schema_comment_key,
+    split_comment_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{Relation, TableCache};
@@ -207,6 +208,50 @@ pub(crate) fn column_comments(
                     return Ok(false);
                 }
                 (Err(_), _) => {
+                    failure = Some(crate::encoding::corrupt("comment"));
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+    )?;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(found),
+    }
+}
+
+pub(crate) struct StoredComment {
+    pub(crate) owner: String,
+    pub(crate) kind: CommentKind,
+    pub(crate) part: String,
+    pub(crate) text: String,
+}
+
+pub(crate) fn every_comment(reader: &dyn KeyValueRead) -> SqlResult<Vec<StoredComment>> {
+    let prefix = every_comment_prefix();
+    let mut found = Vec::new();
+    let mut failure = None;
+    let mut memory = crate::memory::WorkMemory::new();
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            memory.charge(key.len() + value.len() + 64)?;
+            let split = key.get(prefix.len()..).and_then(split_comment_key);
+            match (split, decode_comment(value)) {
+                (Some((owner, kind, part)), Ok(text)) => found.push(StoredComment {
+                    owner,
+                    kind,
+                    part,
+                    text,
+                }),
+                (_, Err(error)) => {
+                    failure = Some(error);
+                    return Ok(false);
+                }
+                (None, _) => {
                     failure = Some(crate::encoding::corrupt("comment"));
                     return Ok(false);
                 }

@@ -17,8 +17,13 @@ const ENTRY_OVERHEAD: usize = 64;
 
 thread_local! {
     static NEXT_NUMBER: Cell<u64> = const { Cell::new(0) };
-    static DEFINITIONS: RefCell<HashMap<String, Arc<TableDefinition>>> =
+    static DEFINITIONS: RefCell<HashMap<String, RegisteredDefinition>> =
         RefCell::new(HashMap::new());
+}
+
+struct RegisteredDefinition {
+    definition: Arc<TableDefinition>,
+    needs_catalog: bool,
 }
 
 #[derive(Default)]
@@ -51,7 +56,15 @@ pub(crate) fn is_temp_table(name: &str) -> bool {
 }
 
 pub(crate) fn temp_definition(name: &str) -> Option<Arc<TableDefinition>> {
-    DEFINITIONS.with(|definitions| definitions.try_borrow().ok()?.get(name).cloned())
+    temp_definition_and_catalog_need(name).map(|(definition, _)| definition)
+}
+
+pub(crate) fn temp_definition_and_catalog_need(name: &str) -> Option<(Arc<TableDefinition>, bool)> {
+    DEFINITIONS.with(|definitions| {
+        let definitions = definitions.try_borrow().ok()?;
+        let registered = definitions.get(name)?;
+        Some((Arc::clone(&registered.definition), registered.needs_catalog))
+    })
 }
 
 pub(crate) fn display_name(name: &str) -> &str {
@@ -224,11 +237,15 @@ impl TempTables {
 
     fn register(&mut self, definition: TableDefinition) -> SqlResult<String> {
         let name = definition.name.clone();
+        let entry = RegisteredDefinition {
+            needs_catalog: crate::execute::table_needs_catalog(&definition),
+            definition: Arc::new(definition),
+        };
         let registered = DEFINITIONS.with(|definitions| {
             definitions
                 .try_borrow_mut()
                 .map(|mut definitions| {
-                    definitions.insert(name.clone(), Arc::new(definition));
+                    definitions.insert(name.clone(), entry);
                 })
                 .is_ok()
         });
@@ -292,6 +309,7 @@ impl TempTables {
 fn stored_as(value: Value, sql_type: SqlType) -> SqlResult<Value> {
     match (&value, sql_type) {
         (Value::Text(_), SqlType::Varchar(_) | SqlType::Text) => Ok(value),
+        (Value::Text(_), SqlType::Catalog(kind)) if kind.is_text_like() => Ok(value),
         _ => convert(value, sql_type, Conversion::Explicit),
     }
 }

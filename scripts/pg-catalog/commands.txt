@@ -1,0 +1,51 @@
+\d
+\dt
+\di
+\dv
+\ds
+\dn
+\d customers
+\d products
+\d orders
+\d order_items
+\d blobs
+\d texts
+\d events
+\d measurements
+\d log_lines
+\d ledger
+\d shop.warehouses
+\d shop.stock
+\d order_totals
+\d active_customers
+\d shop.stock_by_product
+\d invoice_number_seq
+\d customers_id_seq
+\d products_id_seq
+\d orders_id_seq
+\d events_id_seq
+\d ledger_id_seq
+\d customers_pkey
+\d customers_email_key
+\d products_pkey
+\d products_sku_key
+\d orders_pkey
+\d order_items_pkey
+\d shop.warehouses_pkey
+\d shop.warehouses_name_key
+\d shop.stock_pkey
+\d blobs_pkey
+\d texts_pkey
+\d events_pkey
+\d measurements_pkey
+\d ledger_pkey
+\d orders_customer_idx
+\d orders_placed_idx
+\d events_happened_idx
+\d ledger_account_invoice_idx
+\d log_lines_level_idx
+\d shop.stock_product_idx
+\dt shop.*
+\d cust*
+\l :database
+\du eggdb

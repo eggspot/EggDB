@@ -73,7 +73,7 @@ fn single_integer(row: &[Value], offsets: &[usize]) -> Option<Option<i64>> {
     match offsets {
         [offset] => match &row[*offset] {
             Value::Null => Some(None),
-            value => value.as_integer().map(Some),
+            value => crate::pg_catalog::oid_number(value).map(Some),
         },
         _ => None,
     }

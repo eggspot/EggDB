@@ -264,8 +264,61 @@ jobs:
           PGUSER: postgres
         run: scripts/pg-restore/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-restore" --rows 50000
 
+  pg-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-pg-catalog-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Start the official postgres:16 container and pull psql 17 (test oracles only, never shipped)
+        run: |
+          docker run -d --name pg --network host -e POSTGRES_USER=eggdb -e POSTGRES_PASSWORD=catalog-oracle \
+            -e POSTGRES_DB=eggdb -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" postgres:16
+          docker pull -q postgres:17
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in $(seq 1 60); do
+            docker exec pg pg_isready -h 127.0.0.1 -U eggdb -q && break
+            sleep 1
+          done
+          docker exec pg pg_isready -h 127.0.0.1 -U eggdb
+      - name: Show the fixture with psql 17 on PostgreSQL 16 and on EggDB and compare the bytes
+        env:
+          PG_CONTAINER: pg
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: eggdb
+          PGPASSWORD: catalog-oracle
+          PSQL: docker run --rm -i --network host -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e PGTZ -e PGCLIENTENCODING postgres:17 psql
+        run: scripts/pg-catalog/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-catalog"
+      - name: Keep the queries psql 17 sent, its outputs and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-catalog-psql17-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/pg-catalog/*.queries.log
+            ${{ runner.temp }}/pg-catalog/*.oids
+            ${{ runner.temp }}/pg-catalog/*.out
+            ${{ runner.temp }}/pg-catalog/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore]
+    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

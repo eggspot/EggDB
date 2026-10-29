@@ -47,6 +47,23 @@ struct CachedTable {
     bytes: Vec<u8>,
     relation: Relation,
     checked_at: Option<u64>,
+    needs_catalog: bool,
+}
+
+fn stored_expressions_need_catalog(relation: &Relation) -> bool {
+    match relation {
+        Relation::Table(table) => table_needs_catalog(table),
+        Relation::View(view) => crate::pg_catalog::text_needs_catalog(&view.query),
+    }
+}
+
+pub(crate) fn table_needs_catalog(table: &TableDefinition) -> bool {
+    table
+        .columns
+        .iter()
+        .filter_map(|column| column.default.as_deref())
+        .chain(table.checks.iter().map(|check| check.expression.as_str()))
+        .any(crate::pg_catalog::text_needs_catalog)
 }
 
 #[derive(Clone)]
@@ -67,15 +84,24 @@ impl TableCache {
         reader: &dyn KeyValueRead,
         name: &str,
     ) -> SqlResult<Option<Relation>> {
+        crate::pg_catalog::load_if_wanted(reader)?;
         if crate::temp_tables::is_temp_table(name) {
-            return Ok(crate::temp_tables::temp_definition(name).map(Relation::Table));
+            let Some((definition, needs_catalog)) =
+                crate::temp_tables::temp_definition_and_catalog_need(name)
+            else {
+                return Ok(None);
+            };
+            if needs_catalog {
+                crate::pg_catalog::load_for_stored_expressions(reader)?;
+            }
+            return Ok(Some(Relation::Table(definition)));
         }
         let version = reader.committed_version();
         if let Some(cached) = self.entries.get(name)
             && version.is_some()
             && cached.checked_at == version
         {
-            return Ok(Some(cached.relation.clone()));
+            return Self::loaded(reader, cached);
         }
         let Some(bytes) = reader.get(&table_key(name))? else {
             return Ok(None);
@@ -84,7 +110,7 @@ impl TableCache {
             && cached.bytes == bytes
         {
             cached.checked_at = version;
-            return Ok(Some(cached.relation.clone()));
+            return Self::loaded(reader, cached);
         }
         let relation = if is_view_record(&bytes) {
             Relation::View(Arc::new(ViewDefinition::decode(name, &bytes)?))
@@ -94,15 +120,22 @@ impl TableCache {
         if self.entries.len() >= CACHED_TABLES {
             self.entries.clear();
         }
-        self.entries.insert(
-            name.to_owned(),
-            CachedTable {
-                bytes,
-                relation: relation.clone(),
-                checked_at: version,
-            },
-        );
-        Ok(Some(relation))
+        let cached = CachedTable {
+            bytes,
+            needs_catalog: stored_expressions_need_catalog(&relation),
+            relation,
+            checked_at: version,
+        };
+        let found = Self::loaded(reader, &cached);
+        self.entries.insert(name.to_owned(), cached);
+        found
+    }
+
+    fn loaded(reader: &dyn KeyValueRead, cached: &CachedTable) -> SqlResult<Option<Relation>> {
+        if cached.needs_catalog {
+            crate::pg_catalog::load_for_stored_expressions(reader)?;
+        }
+        Ok(Some(cached.relation.clone()))
     }
 
     pub(crate) fn table(
@@ -2308,7 +2341,9 @@ fn select_or_explain(
         }
     }
     let joined = match &select.from {
-        Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions)?),
+        Some(from) if !from.joins.is_empty() => {
+            Some(join::resolve(from, &definitions, select.filter.as_ref())?)
+        }
         _ => None,
     };
     let scope = match (&select.from, &joined, &first) {

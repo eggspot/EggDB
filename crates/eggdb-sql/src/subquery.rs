@@ -42,9 +42,12 @@ enum Family {
 
 fn family(value: &Value) -> Option<Family> {
     Some(match value {
-        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Numeric(_) => {
-            Family::Exact
-        }
+        Value::SmallInt(_)
+        | Value::Integer(_)
+        | Value::BigInt(_)
+        | Value::Numeric(_)
+        | Value::Oid(_)
+        | Value::Reg(_) => Family::Exact,
         Value::Real(_) | Value::Double(_) => Family::Float,
         Value::Text(_) | Value::Bpchar(_) => Family::Text,
         Value::Time(_) => Family::Time,
@@ -1339,7 +1342,7 @@ fn prepare_select(
     };
     let from = select.from.clone();
     let joined = match &from {
-        Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions)?),
+        Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions, None)?),
         _ => None,
     };
     let scope = match (&from, &joined, definitions.first()) {
@@ -1670,6 +1673,11 @@ fn prepare_generated(
             })?;
             Filling::Rows(crate::set_returning::expanded(expansion, inner)?)
         }
+        GeneratedTable::Catalog(relation) => Filling::Rows(crate::pg_catalog::generated_rows(
+            env.reader,
+            *relation,
+            env.columns_only,
+        )?),
         GeneratedTable::Values(_) | GeneratedTable::Function(_) => {
             lateral_reference(env, tables, prepared, &generated, siblings)?;
             let mut correlated = false;
@@ -1736,7 +1744,7 @@ fn prepare_generated(
                 GeneratedTable::Values(list) => {
                     Filling::Rows(crate::set_returning::values_rows(list, &evaluator)?)
                 }
-                GeneratedTable::Expansion(_) => {
+                GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => {
                     Filling::Rows(crate::set_returning::GeneratedRows::empty(Vec::new()))
                 }
             }
@@ -1745,7 +1753,7 @@ fn prepare_generated(
     let renamed = match &generated {
         GeneratedTable::Function(function) => function.column_names.clone(),
         GeneratedTable::Values(list) => list.column_names.clone(),
-        GeneratedTable::Expansion(_) => Vec::new(),
+        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) => Vec::new(),
     };
     let (columns, rows, streamed, charge) = match built {
         Filling::Rows(built) => (built.columns, built.rows, None, Some(built.charge)),

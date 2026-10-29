@@ -1852,6 +1852,158 @@ fn every_join_method_agrees_on_random_tables() {
     assert_eq!(grouped, text);
 }
 
+#[test]
+fn where_equalities_join_comma_and_cross_joined_tables_like_on_conditions() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE l (id integer PRIMARY KEY, k integer, v text);
+         CREATE TABLE r (id integer PRIMARY KEY, k integer, w integer);
+         CREATE TABLE h (k integer, w integer)",
+    );
+    let mut random = Seeded(0x2545_F491_4F6C_DD1D);
+    let value = |random: &mut Seeded| {
+        if random.below(5) == 0 {
+            "NULL".to_owned()
+        } else {
+            random.below(10).to_string()
+        }
+    };
+    for id in 0..50 {
+        let k = value(&mut random);
+        last(
+            &mut session,
+            &format!("INSERT INTO l VALUES ({id}, {k}, 'v{id}')"),
+        );
+        let k = value(&mut random);
+        let w = value(&mut random);
+        last(
+            &mut session,
+            &format!("INSERT INTO r VALUES ({id}, {k}, {w}); INSERT INTO h VALUES ({k}, {w})"),
+        );
+    }
+    let same = [
+        [
+            "SELECT l.id, r.w FROM l JOIN r ON r.k = l.k ORDER BY 1, 2",
+            "SELECT l.id, r.w FROM l, r WHERE r.k = l.k ORDER BY 1, 2",
+            "SELECT l.id, r.w FROM l CROSS JOIN r WHERE l.k = r.k ORDER BY 1, 2",
+            "SELECT l.id, r.w FROM l, r WHERE r.k + 0 = l.k ORDER BY 1, 2",
+        ],
+        [
+            "SELECT l.v, r.w FROM l JOIN r ON r.id = l.k WHERE l.id < 30 ORDER BY 1, 2",
+            "SELECT l.v, r.w FROM l, r WHERE r.id = l.k AND l.id < 30 ORDER BY 1, 2",
+            "SELECT l.v, r.w FROM r, l WHERE l.k = r.id AND l.id < 30 ORDER BY 1, 2",
+            "SELECT l.v, r.w FROM l, r WHERE r.id + 0 = l.k AND l.id < 30 ORDER BY 1, 2",
+        ],
+        [
+            "SELECT l.id, r.id, h.w FROM l JOIN r ON r.k = l.k JOIN h ON h.w = r.w AND h.k = l.k ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l, r, h WHERE r.k = l.k AND h.w = r.w AND h.k = l.k ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l, h, r WHERE l.k = h.k AND r.w = h.w AND r.k = l.k ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l, r, h WHERE r.k + 0 = l.k AND h.w + 0 = r.w AND h.k + 0 = l.k ORDER BY 1, 2, 3",
+        ],
+        [
+            "SELECT l.id, r.id, h.w FROM l JOIN r ON r.k = l.k LEFT JOIN h ON h.k = r.w ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l, r LEFT JOIN h ON h.k = r.w WHERE r.k = l.k ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l CROSS JOIN r LEFT JOIN h ON h.k = r.w WHERE l.k = r.k ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l, r LEFT JOIN h ON h.k = r.w WHERE r.k + 0 = l.k ORDER BY 1, 2, 3",
+        ],
+        [
+            "SELECT l.id, h.w FROM l LEFT JOIN r ON r.id = l.id, h WHERE h.k = r.k ORDER BY 1, 2",
+            "SELECT l.id, h.w FROM l LEFT JOIN r ON r.id = l.id, h WHERE h.k + 0 = r.k ORDER BY 1, 2",
+            "SELECT l.id, h.w FROM l LEFT JOIN r ON r.id = l.id JOIN h ON h.k = r.k ORDER BY 1, 2",
+            "SELECT l.id, h.w FROM l LEFT JOIN r ON r.id = l.id CROSS JOIN h WHERE r.k = h.k ORDER BY 1, 2",
+        ],
+        [
+            "SELECT l.id, r.id, h.w FROM l RIGHT JOIN r ON r.id = l.k, h WHERE h.k = r.k ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l RIGHT JOIN r ON r.id = l.k, h WHERE h.k + 0 = r.k ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l RIGHT JOIN r ON r.id = l.k JOIN h ON h.k = r.k ORDER BY 1, 2, 3",
+            "SELECT l.id, r.id, h.w FROM l RIGHT JOIN r ON r.id = l.k CROSS JOIN h WHERE r.k = h.k ORDER BY 1, 2, 3",
+        ],
+        [
+            "SELECT l.id, r.id FROM l, r WHERE l.k = r.k AND l.k IS NULL ORDER BY 1, 2",
+            "SELECT l.id, r.id FROM l, r WHERE l.k + 0 = r.k AND l.k IS NULL ORDER BY 1, 2",
+            "SELECT l.id, r.id FROM l JOIN r ON l.k = r.k WHERE l.k IS NULL ORDER BY 1, 2",
+            "SELECT l.id, r.id FROM l, r WHERE (l.k = r.k) IS NULL AND l.k = r.k ORDER BY 1, 2",
+        ],
+        [
+            "SELECT count(*) FROM l, r WHERE l.k = r.k OR l.id = r.id",
+            "SELECT count(*) FROM l, r WHERE l.k + 0 = r.k OR l.id = r.id + 0",
+            "SELECT count(*) FROM l, r WHERE NOT (l.k <> r.k AND l.id <> r.id)",
+            "SELECT count(*) FROM l, r WHERE (l.k = r.k OR l.id = r.id) AND true",
+        ],
+    ];
+    for queries in same {
+        let expected = last(&mut session, queries[0]);
+        assert!(
+            !expected.ends_with("SELECT 0") || queries[0].contains("IS NULL"),
+            "{expected}"
+        );
+        for sql in &queries[1..] {
+            assert_eq!(last(&mut session, sql), expected, "{sql}");
+        }
+    }
+    let plan = last(
+        &mut session,
+        "EXPLAIN SELECT l.id, h.w FROM l, h WHERE h.k = l.k",
+    );
+    assert!(plan.contains("Hash Join"), "{plan}");
+}
+
+#[test]
+fn where_equalities_between_columns_without_an_equality_operator_fail_before_any_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE t1 (id integer PRIMARY KEY, c0 integer, c1 double precision);
+         CREATE TABLE t3 (id integer PRIMARY KEY, c1 double precision);
+         CREATE TABLE t4 (id integer PRIMARY KEY, c2 char(3));
+         INSERT INTO t1 VALUES (1, 10, 1.5);
+         INSERT INTO t3 VALUES (1, 1.5);
+         INSERT INTO t4 VALUES (20, 'abc')",
+    );
+    for sql in [
+        "SELECT * FROM t1 CROSS JOIN t3, t4 WHERE t3.c1 = t1.c1 AND t3.c1 = t4.c2 AND t4.id = t1.c0 AND t1.id = 1",
+        "SELECT * FROM t1, t4 WHERE t4.id = t1.c0 AND t1.c1 = t4.c2",
+        "SELECT * FROM t1 JOIN t4 ON t4.id = t1.c0 WHERE t1.c1 = t4.c2",
+        "SELECT * FROM t1, t4 WHERE false AND t1.c1 = t4.c2",
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state().code(), "42883", "{sql}");
+        assert_eq!(
+            error.message(),
+            "operator does not exist: double precision = character",
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn where_equalities_next_to_an_on_condition_give_the_same_rows() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE a (id integer PRIMARY KEY, s text);
+         CREATE TABLE b (bid integer PRIMARY KEY, aid integer, s text);
+         INSERT INTO a VALUES (1, 'x'), (2, 'y'), (3, NULL);
+         INSERT INTO b VALUES (10, 1, 'x'), (11, 1, 'z'), (12, 2, 'y'), (13, 3, NULL), (14, 2, 'y')",
+    );
+    let expected = last(
+        &mut session,
+        "SELECT a.id, b.bid FROM a JOIN b ON a.id = b.aid WHERE a.s || '' = b.s ORDER BY 1, 2",
+    );
+    assert!(expected.ends_with("SELECT 3"), "{expected}");
+    for sql in [
+        "SELECT a.id, b.bid FROM a JOIN b ON a.id = b.aid WHERE a.s = b.s ORDER BY 1, 2",
+        "SELECT a.id, b.bid FROM a JOIN b ON b.aid = a.id WHERE b.s = a.s ORDER BY 1, 2",
+        "SELECT a.id, b.bid FROM a, b WHERE a.s = b.s AND a.id = b.aid ORDER BY 1, 2",
+    ] {
+        assert_eq!(last(&mut session, sql), expected, "{sql}");
+    }
+}
+
 fn parameter(declared_type: Option<crate::SqlType>, value: Option<&str>) -> crate::Parameter {
     crate::Parameter {
         declared_type,

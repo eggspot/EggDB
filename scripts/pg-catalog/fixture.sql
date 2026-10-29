@@ -1,0 +1,166 @@
+\set ON_ERROR_STOP on
+SET client_min_messages = warning;
+SET TimeZone = 'UTC';
+
+CREATE SCHEMA shop;
+COMMENT ON SCHEMA shop IS 'warehouses and their stock';
+
+CREATE SEQUENCE public.invoice_number_seq START WITH 1000 INCREMENT BY 7;
+
+CREATE TABLE public.customers (
+    id serial PRIMARY KEY,
+    name text NOT NULL,
+    email varchar(120) UNIQUE,
+    country char(2),
+    active boolean NOT NULL DEFAULT true,
+    created_at timestamptz,
+    note text
+);
+COMMENT ON TABLE public.customers IS 'people who buy';
+COMMENT ON COLUMN public.customers.email IS 'unique when present';
+
+CREATE TABLE public.products (
+    id serial PRIMARY KEY,
+    sku uuid NOT NULL UNIQUE,
+    title varchar(200) NOT NULL,
+    price numeric(12,2) NOT NULL CHECK (price >= 0),
+    weight real,
+    rating double precision,
+    attrs jsonb,
+    raw json
+);
+
+CREATE TABLE public.orders (
+    id bigserial PRIMARY KEY,
+    customer_id integer NOT NULL REFERENCES public.customers (id) ON DELETE CASCADE,
+    ordered_on date NOT NULL,
+    ordered_at timestamp,
+    status text NOT NULL CHECK (status IN ('new', 'paid', 'shipped', 'cancelled')),
+    total numeric
+);
+
+CREATE TABLE public.order_items (
+    order_id bigint NOT NULL REFERENCES public.orders (id) ON DELETE CASCADE,
+    line smallint NOT NULL,
+    product_id integer NOT NULL REFERENCES public.products (id),
+    quantity integer NOT NULL CHECK (quantity > 0),
+    unit_price numeric(10,2) NOT NULL,
+    PRIMARY KEY (order_id, line)
+);
+
+CREATE TABLE shop.warehouses (
+    code char(4) PRIMARY KEY,
+    name text NOT NULL UNIQUE,
+    opens time,
+    closes time with time zone
+);
+COMMENT ON TABLE shop.warehouses IS 'where stock is kept';
+
+CREATE TABLE shop.stock (
+    warehouse char(4) NOT NULL REFERENCES shop.warehouses (code) ON UPDATE CASCADE,
+    product_id integer NOT NULL REFERENCES public.products (id) ON DELETE CASCADE,
+    on_hand integer NOT NULL DEFAULT 0,
+    updated timestamptz,
+    PRIMARY KEY (warehouse, product_id)
+);
+
+CREATE TABLE public.blobs (
+    id integer PRIMARY KEY,
+    payload bytea,
+    digest bytea
+);
+
+CREATE TABLE public.texts (
+    id integer PRIMARY KEY,
+    body text,
+    label varchar(40)
+);
+
+CREATE TABLE public.events (
+    id bigserial PRIMARY KEY,
+    happened timestamptz NOT NULL,
+    duration interval,
+    payload jsonb,
+    tag text
+);
+
+CREATE TABLE public.measurements (
+    sensor smallint NOT NULL,
+    taken timestamp NOT NULL,
+    value double precision,
+    ok boolean,
+    PRIMARY KEY (sensor, taken)
+);
+
+CREATE TABLE public.log_lines (
+    logged_at timestamptz NOT NULL,
+    level varchar(10) NOT NULL CHECK (level IN ('debug', 'info', 'warn', 'error')),
+    message text
+);
+
+CREATE TABLE public.ledger (
+    id serial PRIMARY KEY,
+    account bigint NOT NULL,
+    amount numeric(20,6) NOT NULL,
+    invoice integer DEFAULT nextval('public.invoice_number_seq'),
+    memo text,
+    posted date
+);
+
+INSERT INTO public.customers (name, email, country, active, created_at, note)
+SELECT 'customer ' || i, 'c' || i || '@example.com', 'VN', i % 3 <> 0,
+       timestamptz '2024-01-01 00:00:00+00' + i * interval '3 hours', NULL
+FROM generate_series(1, 20) AS i;
+
+INSERT INTO public.products (sku, title, price, weight, rating)
+SELECT md5('sku' || i)::uuid, 'product ' || i, i * 1.5, i / 8.0, i / 4.0
+FROM generate_series(1, 10) AS i;
+
+INSERT INTO public.orders (customer_id, ordered_on, ordered_at, status, total)
+SELECT 1 + i % 20, date '2024-01-01' + i, timestamp '2024-01-01 08:00:00' + i * interval '41 minutes',
+       (ARRAY['new', 'paid', 'shipped', 'cancelled'])[1 + i % 4], i * 3.25
+FROM generate_series(1, 30) AS i;
+
+INSERT INTO public.order_items (order_id, line, product_id, quantity, unit_price)
+SELECT 1 + i % 30, 1 + i / 30, 1 + i % 10, 1 + i % 9, i * 0.5
+FROM generate_series(1, 40) AS i;
+
+INSERT INTO shop.warehouses (code, name, opens, closes)
+VALUES ('HAN1', 'Hà Nội', '07:30', '18:00+07'),
+       ('SGN1', 'Sài Gòn', '08:00:00.5', '20:30:00+07');
+
+INSERT INTO shop.stock (warehouse, product_id, on_hand, updated)
+SELECT w.code, p.id, p.id * 3, timestamptz '2025-06-01 12:00:00+00'
+FROM shop.warehouses w CROSS JOIN public.products p;
+
+INSERT INTO public.blobs (id, payload, digest) VALUES (1, '\x0102', NULL);
+INSERT INTO public.texts (id, body, label) VALUES (1, 'body', 'label');
+INSERT INTO public.events (happened, duration, tag) VALUES ('2025-01-01 00:00:00+00', '1 day', 'deploy');
+INSERT INTO public.measurements (sensor, taken, value, ok) VALUES (1, '2025-01-01 00:00:00', 1.5, true);
+INSERT INTO public.log_lines (logged_at, level, message) VALUES ('2025-02-01 00:00:00+00', 'info', 'ok');
+INSERT INTO public.ledger (account, amount, memo, posted) VALUES (1000000000000, 1.25, 'entry', '2020-02-29');
+
+CREATE INDEX orders_customer_idx ON public.orders (customer_id);
+CREATE INDEX orders_placed_idx ON public.orders (ordered_on, status);
+CREATE INDEX events_happened_idx ON public.events (happened);
+CREATE INDEX ledger_account_invoice_idx ON public.ledger (account, invoice);
+CREATE INDEX log_lines_level_idx ON public.log_lines (level);
+CREATE INDEX stock_product_idx ON shop.stock (product_id);
+
+CREATE VIEW public.order_totals AS
+SELECT c.id AS customer_id, c.name, count(o.id) AS orders, sum(o.total) AS total
+FROM public.customers c
+JOIN public.orders o ON o.customer_id = c.id
+GROUP BY c.id, c.name;
+
+CREATE VIEW shop.stock_by_product AS
+SELECT p.sku, p.title, s.warehouse, s.on_hand
+FROM shop.stock s
+JOIN public.products p ON p.id = s.product_id
+WHERE s.on_hand > 0;
+
+CREATE VIEW public.active_customers AS
+SELECT id, name, email FROM public.customers WHERE active;
+COMMENT ON VIEW public.active_customers IS 'customers who can order';
+
+SELECT setval('public.invoice_number_seq', 5000, true);
