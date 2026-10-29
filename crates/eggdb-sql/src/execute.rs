@@ -826,7 +826,7 @@ fn value_mentions_subquery(value: &InsertValue) -> bool {
 fn insert_mentions_subquery(insert: &Insert) -> bool {
     let values = match &insert.source {
         InsertSource::Values(rows) => rows.iter().flatten().any(value_mentions_subquery),
-        InsertSource::DefaultValues => false,
+        InsertSource::Query(_) | InsertSource::DefaultValues => false,
     };
     values || returning_mentions_subquery(&insert.returning)
 }
@@ -891,11 +891,52 @@ fn with_subqueries_run<T: Clone>(
     Ok(Some(copy))
 }
 
+fn with_selected_rows(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &Insert,
+    query: &crate::ast::Query,
+) -> SqlResult<Insert> {
+    let selected = self::query(writer, tables, query, false)?;
+    let columns = selected.columns.unwrap_or_default();
+    let rows = selected
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .enumerate()
+                .map(|(at, value)| {
+                    let sql_type = columns
+                        .get(at)
+                        .and_then(|column| column.sql_type)
+                        .or_else(|| value.sql_type());
+                    InsertValue::Expr(Expr {
+                        kind: ExprKind::Constant { value, sql_type },
+                        position: query.position,
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    Ok(Insert {
+        table: insert.table.clone(),
+        columns: insert.columns.clone(),
+        source: InsertSource::Values(rows),
+        returning: insert.returning.clone(),
+        on_duplicate: insert.on_duplicate.clone(),
+        rollback_on_conflict: insert.rollback_on_conflict,
+    })
+}
+
 pub(crate) fn insert(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
+    if let InsertSource::Query(query) = &insert.source {
+        let selected = with_selected_rows(writer, tables, insert, query)?;
+        return self::insert(writer, tables, &selected);
+    }
     let prepared = if insert_mentions_subquery(insert) {
         with_subqueries_run(writer, tables, insert, &insert.table, true, insert_exprs)?
     } else {
@@ -930,7 +971,9 @@ pub(crate) fn insert(
         }
         None if identity_insert => {
             return Err(match insert.source {
-                InsertSource::Values(_) => identity_needs_column_list(&insert.table.name),
+                InsertSource::Values(_) | InsertSource::Query(_) => {
+                    identity_needs_column_list(&insert.table.name)
+                }
                 InsertSource::DefaultValues => identity_value_missing(&insert.table.name),
             });
         }
@@ -942,7 +985,7 @@ pub(crate) fn insert(
     let empty_row: Vec<Vec<InsertValue>> = vec![Vec::new()];
     let rows = match &insert.source {
         InsertSource::Values(rows) => rows,
-        InsertSource::DefaultValues => &empty_row,
+        InsertSource::Query(_) | InsertSource::DefaultValues => &empty_row,
     };
     if let Some(first) = rows.first() {
         if rows.iter().any(|row| row.len() != first.len()) {

@@ -807,6 +807,9 @@ impl Binding<'_> {
         tables: &mut TableCache,
         insert: &mut Insert,
     ) -> SqlResult<()> {
+        if let InsertSource::Query(query) = &mut insert.source {
+            self.query(reader, tables, query)?;
+        }
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut insert.table)?;
         if !self.walk_expressions {

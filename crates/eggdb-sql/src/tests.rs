@@ -590,7 +590,6 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "SELECT * FROM people, LATERAL (SELECT 1) x",
         "SELECT '{{1}}'::int[]",
         "WITH x AS (DELETE FROM people RETURNING id) SELECT * FROM x",
-        "INSERT INTO people SELECT * FROM people",
         "ALTER TABLE people RENAME CONSTRAINT a TO b",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",

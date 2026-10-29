@@ -2154,8 +2154,11 @@ impl<'t> Parser<'t> {
                 }
             }
             InsertSource::Values(rows)
-        } else if self.is_word("select") || self.peek_kind() == &TokenKind::LeftParen {
-            return Err(self.not_supported("INSERT ... SELECT"));
+        } else if self.is_word("select")
+            || self.is_word("with")
+            || self.peek_kind() == &TokenKind::LeftParen
+        {
+            InsertSource::Query(Box::new(self.insert_query()?))
         } else {
             return Err(self.unexpected());
         };

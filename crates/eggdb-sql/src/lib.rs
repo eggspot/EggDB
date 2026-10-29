@@ -111,6 +111,8 @@ mod implicit_transaction_tests;
 #[cfg(test)]
 mod index_tests;
 #[cfg(test)]
+mod insert_select_tests;
+#[cfg(test)]
 mod memory_store;
 #[cfg(test)]
 mod one_statement_tests;

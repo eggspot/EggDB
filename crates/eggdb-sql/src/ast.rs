@@ -789,6 +789,7 @@ pub(crate) struct SubqueryRows {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum InsertSource {
     Values(Vec<Vec<InsertValue>>),
+    Query(Box<Query>),
     DefaultValues,
 }
 

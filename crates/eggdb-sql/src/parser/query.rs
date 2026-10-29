@@ -78,6 +78,11 @@ impl Parser<'_> {
         })
     }
 
+    pub(super) fn insert_query(&mut self) -> SqlResult<Query> {
+        self.count_query()?;
+        self.nested_query()
+    }
+
     pub(super) fn nested_query(&mut self) -> SqlResult<Query> {
         let position = self.position();
         self.query_depth += 1;
