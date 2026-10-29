@@ -877,9 +877,8 @@ DROP TABLE IF EXISTS no_such_table
 ok
 CREATE SEQUENCE emp_seq
 
-ok
+error 21000 30926
 MERGE INTO dept d USING emp e ON (d.deptno = e.deptno) WHEN MATCHED THEN UPDATE SET d.dname = 'X'
-... differs
 
 chapter "Bind Variables", "Lexical Conventions"
 error 42883 904
@@ -1310,3 +1309,740 @@ SELECT * FROM emp_view33
 
 ok
 DROP TABLE emp33
+
+chapter "NUMBER Data Type": "Storage of Scale and Precision"
+ok
+CREATE TABLE scales (n NUMBER, n3 NUMBER(3), n52 NUMBER(5,2), n61 NUMBER(6,1), nm2 NUMBER(6,-2))
+
+ok
+INSERT INTO scales VALUES (123.89, 123.89, 123.89, 123.89, 123.89)
+
+rows
+SELECT n, n3, n52, n61, nm2 FROM scales
+----
+N|N3|N52|N61|NM2
+123.89|124|123.89|123.9|100
+SELECT 1
+
+error 22003 1438
+INSERT INTO scales (n52) VALUES (1234.89)
+
+ok
+CREATE TABLE fractions (a NUMBER(4,5), b NUMBER(2,7), c NUMBER(2,5))
+
+ok
+INSERT INTO fractions VALUES (.01234, .0000012, 1.2e-4)
+
+ok
+INSERT INTO fractions VALUES (.000127, .00000123, 1.2e-5)
+
+rows
+SELECT a, b, c FROM fractions ORDER BY a DESC
+----
+A|B|C
+.01234|.0000012|.00012
+.00013|.0000012|.00001
+SELECT 2
+
+rows
+SELECT 0.1 + 0.2 a, 0.3 / 0.1 b, ROUND(1.005, 2) c, TO_NUMBER('0.1') + 0.2 d, 24000.00 || '' e FROM dual
+----
+A|B|C|D|E
+.3|3|1.01|.3|24000
+SELECT 1
+
+rows
+SELECT 1 / 4 a, MOD(7.5, 2) b, CEIL(-0.5) c, ABS(-0.25) d FROM dual
+----
+A|B|C|D
+.25|1.5|0|.25
+SELECT 1
+
+rows
+SELECT 2 / 3 * 3 a FROM dual
+----
+A
+2
+SELECT 1
+... differs
+
+chapter "TO_NUMBER", "Number Format Models"
+rows
+SELECT TO_NUMBER('100.00', '9G999D99') a, TO_NUMBER('123-', '999MI') b, TO_NUMBER('$1,234.50', '$9,999.99') c FROM dual
+----
+A|B|C
+100|-123|1234.5
+SELECT 1
+
+rows
+SELECT TO_NUMBER('12.5', '99D9', 'NLS_NUMERIC_CHARACTERS = ''.,''') a FROM dual
+----
+A
+12.5
+SELECT 1
+
+error 22P02 1722
+SELECT TO_NUMBER('12345', '999') FROM dual
+
+error 22P02 1722
+SELECT TO_NUMBER('NaN') FROM dual
+
+error 22023 12702
+SELECT TO_NUMBER('12', '99', 'NLS_NUMERIC_CHARACTERS') FROM dual
+
+error 0A000 3001
+SELECT TO_NUMBER('12', '99', 'NLS_NUMERIC_CHARACTERS = '',.''') FROM dual
+
+rows
+SELECT TO_CHAR(1234.567, '9,999.99') a, TO_CHAR(-0.5, '0.9') b, TO_CHAR(12.345, 'FM999.99') c FROM dual
+----
+A|B|C
+ 1,234.57|-0.5|12.35
+SELECT 1
+
+chapter "Datetime Format Models", "TO_DATE", "TO_TIMESTAMP"
+rows
+SELECT TO_CHAR(TO_DATE('January 15, 1989, 11:00 A.M.', 'Month dd, YYYY, HH:MI A.M.', 'NLS_DATE_LANGUAGE = American'), 'MM/DD/YYYY HH24:MI:SS') a FROM dual
+----
+A
+01/15/1989 11:00:00
+SELECT 1
+
+rows
+SELECT TO_CHAR(TO_DATE('17-06-2013', 'dd-MM-yyyy'), 'YYYY-MM-DD') a, TO_CHAR(TO_DATE('17-JUN-03', 'DD-MON-RR'), 'YYYY-MM-DD') b FROM dual
+----
+A|B
+2013-06-17|2003-06-17
+SELECT 1
+
+rows
+SELECT TO_CHAR(TO_DATE('27-OCT-98', 'DD-MON-RR'), 'YYYY') a, TO_CHAR(TO_DATE('27-OCT-17', 'DD-MON-RR'), 'YYYY') b, TO_CHAR(TO_DATE('27-OCT-98', 'DD-MON-YY'), 'YYYY') c FROM dual
+----
+A|B|C
+1998|2017|2098
+SELECT 1
+
+rows
+SELECT TO_CHAR(TO_DATE('0207', 'MM/YY'), 'MM/YY') a FROM dual
+----
+A
+02/07
+SELECT 1
+
+rows
+SELECT TO_CHAR(TO_DATE('15/ JAN /1998', 'DD-MON-YYYY'), 'YYYY-MM-DD') a FROM dual
+----
+A
+1998-01-15
+SELECT 1
+
+error 22007
+SELECT TO_DATE(' 15! JAN % /1998', 'DD-MON-YYYY') FROM dual
+
+error 22007
+SELECT TO_DATE('15/JAN/1998', 'FXDD-MON-YYYY') FROM dual
+
+rows
+SELECT TO_CHAR(TO_DATE('15-JAN-1998', 'FXDD-MON-YYYY'), 'YYYY-MM-DD') a FROM dual
+----
+A
+1998-01-15
+SELECT 1
+
+error 22007
+SELECT TO_DATE('1-JAN-1998', 'FXDD-MON-YYYY') FROM dual
+
+rows
+SELECT TO_CHAR(TO_DATE('01-JAN-1998', 'FXDD-MON-YYYY'), 'YYYY-MM-DD') a, TO_CHAR(TO_DATE('1-JAN-1998', 'FXFMDD-MON-YYYY'), 'YYYY-MM-DD') b FROM dual
+----
+A|B
+1998-01-01|1998-01-01
+SELECT 1
+
+rows
+SELECT TO_CHAR(TO_DATE('15-JANUARY-1998', 'DD-MM-YYYY'), 'YYYY-MM-DD') a, TO_CHAR(TO_DATE('15-January-98', 'DD-MON-RRRR'), 'YYYY-MM-DD') b FROM dual
+----
+A|B
+1998-01-15|1998-01-15
+SELECT 1
+
+rows
+SELECT EXTRACT(DAY FROM TO_DATE('2020', 'YYYY')) a, TO_CHAR(TO_DATE('2020', 'YYYY'), 'HH24:MI:SS') b, TO_CHAR(TO_DATE('15-JAN-2020', 'DD-MON-YYYY HH24:MI'), 'HH24:MI') c FROM dual
+----
+A|B|C
+1|00:00:00|00:00
+SELECT 1
+
+rows
+SELECT TO_CHAR(DATE '1999-12-01', 'Day') a, TO_CHAR(DATE '1999-12-01', 'DAY') b, TO_CHAR(DATE '1999-12-01', 'dy') c, TO_CHAR(DATE '1999-12-01', 'fmMonth DD, YYYY') d FROM dual
+----
+A|B|C|D
+Wednesday|WEDNESDAY|wed|December 1, 1999
+SELECT 1
+
+rows
+SELECT TO_CHAR(DATE '2024-01-01', 'Month"x"') a, TO_CHAR(DATE '2024-01-01', 'fmMonth"x"') b, TO_CHAR(DATE '2024-01-01', 'D DDD J') c FROM dual
+----
+A|B|C
+January  x|Januaryx|2 001 2460311
+SELECT 1
+
+error 22007 1821
+SELECT TO_DATE('10:00:00.5', 'HH24:MI:SS.FF') FROM dual
+
+error 0A000 3001
+SELECT TO_DATE('2451514', 'J') FROM dual
+
+error 22007 1821
+SELECT TO_CHAR(DATE '2024-01-01', 'DS') FROM dual
+
+error 22007 1843
+SELECT TO_DATE('15-XYZ-2020', 'DD-MON-YYYY') FROM dual
+
+error 22008 1847
+SELECT TO_DATE('32-JAN-2020', 'DD-MON-YYYY') FROM dual
+
+error 22008 1839
+SELECT TO_DATE('29-FEB-2023', 'DD-MON-YYYY') FROM dual
+
+error 22007 1861
+SELECT TO_DATE('2020 Q', 'YYYY "X"') FROM dual
+
+error 22007 1830
+SELECT TO_DATE('15-JAN-2020 10', 'DD-MON-YYYY') FROM dual
+
+error 22023 12702
+SELECT TO_DATE('15-JAN-2020', 'DD-MON-YYYY', 'nonsense') FROM dual
+
+error 22023 12705
+SELECT TO_DATE('15-JAN-2020', 'DD-MON-YYYY', 'NLS_DATE_LANGUAGE = German') FROM dual
+
+rows
+SELECT TO_CHAR(TO_TIMESTAMP('17-JUN-03 10.15.30.123456789 PM', 'DD-MON-RR HH.MI.SSXFF AM'), 'YYYY-MM-DD HH24:MI:SS') a FROM dual
+----
+A
+2003-06-17 22:15:30
+SELECT 1
+
+ok
+CREATE TABLE fine (t TIMESTAMP, t3 TIMESTAMP(3))
+
+ok
+INSERT INTO fine VALUES (TO_TIMESTAMP('17-JUN-03 10.15.30.123456789 PM', 'DD-MON-RR HH.MI.SSXFF AM'), TIMESTAMP '2024-02-29 13:45:01.123456')
+
+rows
+SELECT TO_CHAR(t, 'HH24:MI:SS.FF') a, TO_CHAR(t3) b FROM fine
+----
+A|B
+22:15:30.123457|29-FEB-24 01.45.01.123 PM
+SELECT 1
+
+chapter "TO_CHAR (datetime)": Examples 1 and 9, adapted
+ok
+CREATE TABLE date_tab (ts_col TIMESTAMP)
+
+ok
+INSERT INTO date_tab VALUES (TIMESTAMP '1999-12-01 10:00:00')
+
+ok
+INSERT INTO date_tab VALUES (TIMESTAMP '1999-12-02 10:00:00')
+
+rows
+SELECT TO_CHAR(ts_col, 'DD-MON-YYYY HH24:MI:SSxFF') AS ts_date FROM date_tab ORDER BY ts_date
+----
+TS_DATE
+01-DEC-1999 10:00:00.000000
+02-DEC-1999 10:00:00.000000
+SELECT 2
+
+ok
+CREATE TABLE empl_temp (employee_id NUMBER(6), first_name VARCHAR2(20), last_name VARCHAR2(25), email VARCHAR2(25), hire_date DATE DEFAULT SYSDATE, job_id VARCHAR2(10), clob_column CLOB)
+
+ok
+INSERT INTO empl_temp VALUES (111, 'John', 'Doe', 'example.com', '10-JAN-2015', '1001', 'Experienced Employee')
+
+ok
+INSERT INTO empl_temp VALUES (112, 'John', 'Smith', 'example.com', '12-JAN-2015', '1002', 'Junior Employee')
+
+ok
+INSERT INTO empl_temp VALUES (113, 'Johnnie', 'Smith', 'example.com', '12-JAN-2014', '1002', 'Mid-Career Employee')
+
+ok
+INSERT INTO empl_temp VALUES (115, 'Jane', 'Doe', 'example.com', '15-JAN-2015', '1005', 'Executive Employee')
+
+rows
+SELECT TO_CHAR(hire_date) "Default" FROM empl_temp WHERE employee_id IN (111, 112, 115) ORDER BY employee_id
+----
+Default
+10-JAN-15
+12-JAN-15
+15-JAN-15
+SELECT 3
+
+rows
+SELECT clob_column FROM empl_temp WHERE employee_id = 113
+----
+CLOB_COLUMN
+Mid-Career Employee
+SELECT 1
+
+chapter "Datetime Literals", "ALTER SESSION", "Data Type Comparison Rules", "Implicit Data Conversion"
+ok
+ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY MM DD HH24:MI:SS'
+
+rows
+SELECT TO_CHAR(TO_DATE('2001-04-12 12:30:38', 'YYYY-MM-DD HH24:MI:SS')) Today FROM dual
+----
+TODAY
+2001 04 12 12:30:38
+SELECT 1
+
+ok
+ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-DD-MM'
+
+rows
+SELECT TO_CHAR(DATE '2024-02-03', 'DD MON') a, TO_CHAR(CAST('2024-02-03' AS DATE), 'DD MON') b FROM dual
+----
+A|B
+03 FEB|02 MAR
+SELECT 1
+
+ok
+ALTER SESSION SET NLS_TERRITORY = America NLS_LANGUAGE = American NLS_SORT = BINARY NLS_COMP = BINARY
+
+rows
+SELECT TO_CHAR(DATE '2024-02-03') a, DATE '2024-02-03' || '' b FROM dual
+----
+A|B
+03-FEB-24|03-FEB-24
+SELECT 1
+
+error 22007 1861
+SELECT DATE 'now' FROM dual
+
+error 22007 1861
+SELECT DATE '2024-02-03 10:00:00' FROM dual
+
+error 42601 2248
+ALTER SESSION SET NO_SUCH_PARAMETER = 1
+
+error 0A000 3001
+ALTER SESSION SET TIME_ZONE = '-8:00'
+
+error 0A000 3001
+ALTER SESSION SET NLS_SORT = XGERMAN
+
+error 22023 12705
+ALTER SESSION SET NLS_LANGUAGE = GERMAN
+
+error 3F000 1435
+ALTER SESSION SET CURRENT_SCHEMA = nobody
+
+ok
+CREATE TABLE texts (v VARCHAR2(30))
+
+ok
+INSERT INTO texts VALUES (0.5)
+
+ok
+INSERT INTO texts VALUES (DATE '2003-06-17')
+
+rows
+SELECT v FROM texts ORDER BY v
+----
+V
+.5
+17-JUN-03
+SELECT 2
+
+error 22P02 1722
+SELECT COUNT(*) FROM texts WHERE v = 1
+
+ok
+CREATE TABLE codes (c VARCHAR2(5))
+
+ok
+INSERT INTO codes VALUES ('10')
+
+ok
+INSERT INTO codes VALUES ('9')
+
+rows
+SELECT c FROM codes WHERE c > 9
+----
+C
+10
+SELECT 1
+
+rows
+SELECT c + 1 a, '5.5' + 1 b FROM codes WHERE c = '9'
+----
+A|B
+10|6.5
+SELECT 1
+
+ok
+INSERT INTO stamps VALUES ('17-JUN-03')
+
+ok
+INSERT INTO stamps VALUES ('2024-02-29 10:00:00')
+
+ok
+INSERT INTO stamps VALUES ('')
+
+error 22007
+INSERT INTO stamps VALUES ('now')
+
+rows
+SELECT TO_CHAR(d, 'YYYY-MM-DD HH24:MI') a FROM stamps WHERE d = '17-JUN-03' OR d > '01-JAN-24' ORDER BY d
+----
+A
+2003-06-17 00:00
+2024-02-29 10:00
+SELECT 2
+
+rows
+SELECT COUNT(*) FROM stamps WHERE d IS NULL
+----
+COUNT(*)
+1
+SELECT 1
+
+ok
+CREATE TABLE zoned (t TIMESTAMP WITH TIME ZONE)
+
+ok
+INSERT INTO zoned VALUES (TIMESTAMP '1999-12-01 10:00:00 -8:00')
+
+rows
+SELECT TO_CHAR(t, 'DD-MON-YYYY HH24:MI') a FROM zoned
+----
+A
+01-DEC-1999 18:00
+SELECT 1
+
+chapter "Datetime/Interval Arithmetic", "ADD_MONTHS", "LAST_DAY", "TRUNC (date)"
+rows
+SELECT TO_CHAR(DATE '2024-02-28' + 1, 'YYYY-MM-DD') a, TO_CHAR(DATE '2024-03-01' - 1, 'YYYY-MM-DD') b, TO_CHAR(1 + DATE '2024-02-28', 'YYYY-MM-DD') c FROM dual
+----
+A|B|C
+2024-02-29|2024-02-29|2024-02-29
+SELECT 1
+
+rows
+SELECT TO_CHAR(DATE '2024-01-01' + 1/24, 'HH24:MI:SS') a, TO_CHAR(DATE '2024-01-01' + 1/1440, 'HH24:MI:SS') b, TO_CHAR(DATE '2024-01-01' + 1/86400, 'HH24:MI:SS') c FROM dual
+----
+A|B|C
+01:00:00|00:01:00|00:00:01
+SELECT 1
+
+rows
+SELECT TO_CHAR(TIMESTAMP '2024-01-01 10:00:00.75' + 1, 'DD HH24:MI:SS') a FROM dual
+----
+A
+02 10:00:00
+SELECT 1
+
+rows
+SELECT DATE '2024-03-01' - DATE '2024-02-28' a, TO_DATE('2024-01-02 12:00', 'YYYY-MM-DD HH24:MI') - DATE '2024-01-01' b FROM dual
+----
+A|B
+2|1.5
+SELECT 1
+
+rows
+SELECT TO_DATE('08:00', 'HH24:MI') - TO_DATE('00:00', 'HH24:MI') a FROM dual
+----
+A
+.3333333333333333333333333333333333333333
+SELECT 1
+... differs
+
+rows
+SELECT TIMESTAMP '2024-01-02 12:00:00' - TIMESTAMP '2024-01-01 00:00:00' a FROM dual
+----
+A
++000000001 12:00:00.000000000
+SELECT 1
+... differs
+
+error 22008 1841
+SELECT DATE '9999-12-31' + 1 FROM dual
+
+rows
+SELECT TO_CHAR(LAST_DAY(TO_DATE('30-MAY-09'))) "Last", LAST_DAY(TO_DATE('30-MAY-09')) - TO_DATE('30-MAY-09') "Days Left" FROM dual
+----
+Last|Days Left
+31-MAY-09|1
+SELECT 1
+
+rows
+SELECT TO_CHAR(ADD_MONTHS(LAST_DAY(TO_DATE('11-MAY-04')), 5)) a, TO_CHAR(ADD_MONTHS(LAST_DAY(TO_DATE('30-OCT-05')), 5)) b, TO_CHAR(ADD_MONTHS(LAST_DAY(TO_DATE('25-JUN-05')), 5)) c, TO_CHAR(ADD_MONTHS(LAST_DAY(TO_DATE('24-DEC-05')), 5)) d FROM dual
+----
+A|B|C|D
+31-OCT-04|31-MAR-06|30-NOV-05|31-MAY-06
+SELECT 1
+
+rows
+SELECT TO_CHAR(ADD_MONTHS(TO_DATE('07-JUN-02'), 1), 'DD-MON-YYYY') a, TO_CHAR(ADD_MONTHS(DATE '2024-01-31', 1), 'DD-MON-YYYY') b, TO_CHAR(ADD_MONTHS(DATE '2023-02-28', 1), 'DD-MON-YYYY') c FROM dual
+----
+A|B|C
+07-JUL-2002|29-FEB-2024|31-MAR-2023
+SELECT 1
+
+rows
+SELECT TO_CHAR(TRUNC(TO_DATE('27-OCT-92', 'DD-MON-YY'), 'YEAR')) a, TO_CHAR(TRUNC(TO_DATE('2024-05-17 13:45', 'YYYY-MM-DD HH24:MI')), 'YYYY-MM-DD HH24:MI') b, TO_CHAR(TRUNC(TO_DATE('2024-05-17 13:45', 'YYYY-MM-DD HH24:MI'), 'HH'), 'HH24:MI') c FROM dual
+----
+A|B|C
+01-JAN-92|2024-05-17 00:00|13:00
+SELECT 1
+
+chapter "NVL", "NVL2", "DECODE", "MERGE": the rows the examples use
+ok
+CREATE TABLE employees (employee_id NUMBER(6) PRIMARY KEY, last_name VARCHAR2(25) NOT NULL, salary NUMBER(8,2), commission_pct NUMBER(2,2), department_id NUMBER(4))
+
+ok
+INSERT INTO employees VALUES (204, 'Baer', 10000, NULL, 70)
+
+ok
+INSERT INTO employees VALUES (116, 'Baida', 2900, NULL, 30)
+
+ok
+INSERT INTO employees VALUES (167, 'Banda', 6200, .1, 80)
+
+ok
+INSERT INTO employees VALUES (172, 'Bates', 7300, .15, 80)
+
+ok
+INSERT INTO employees VALUES (192, 'Bell', 4000, NULL, 50)
+
+ok
+INSERT INTO employees VALUES (151, 'Bernstein', 9500, .25, 80)
+
+ok
+INSERT INTO employees VALUES (129, 'Bissot', 3300, NULL, 50)
+
+ok
+INSERT INTO employees VALUES (169, 'Bloom', 10000, .2, 80)
+
+ok
+INSERT INTO employees VALUES (185, 'Bull', 4100, NULL, 50)
+
+ok
+INSERT INTO employees VALUES (145, 'Russell', 14000, .4, 80)
+
+ok
+INSERT INTO employees VALUES (153, 'Olsen', 8000, .2, 80)
+
+ok
+INSERT INTO employees VALUES (154, 'Cambrault', 7500, .2, 80)
+
+ok
+INSERT INTO employees VALUES (155, 'Tuvault', 7000, .15, 80)
+
+ok
+INSERT INTO employees VALUES (156, 'King', 10000, .35, 80)
+
+ok
+INSERT INTO employees VALUES (158, 'McEwen', 9000, .35, 80)
+
+ok
+INSERT INTO employees VALUES (159, 'Smith', 8000, .3, 80)
+
+ok
+INSERT INTO employees VALUES (160, 'Doran', 7500, .3, 80)
+
+ok
+INSERT INTO employees VALUES (161, 'Sewall', 7000, .25, 80)
+
+ok
+INSERT INTO employees VALUES (163, 'Greene', 9500, .15, 80)
+
+ok
+INSERT INTO employees VALUES (164, 'Marvins', 7200, .1, 80)
+
+ok
+INSERT INTO employees VALUES (165, 'Lee', 6800, .1, 80)
+
+ok
+INSERT INTO employees VALUES (166, 'Ande', 6400, .1, 80)
+
+ok
+INSERT INTO employees VALUES (171, 'Smith', 7400, .15, 80)
+
+ok
+INSERT INTO employees VALUES (173, 'Kumar', 6100, .1, 80)
+
+ok
+INSERT INTO employees VALUES (179, 'Johnson', 6200, .1, 80)
+
+rows
+SELECT last_name, NVL(TO_CHAR(commission_pct), 'Not Applicable') commission FROM employees WHERE last_name LIKE 'B%' ORDER BY last_name
+----
+LAST_NAME|COMMISSION
+Baer|Not Applicable
+Baida|Not Applicable
+Banda|.1
+Bates|.15
+Bell|Not Applicable
+Bernstein|.25
+Bissot|Not Applicable
+Bloom|.2
+Bull|Not Applicable
+SELECT 9
+
+rows
+SELECT last_name, salary, NVL2(commission_pct, salary + (salary * commission_pct), salary) income FROM employees WHERE last_name LIKE 'B%' ORDER BY last_name
+----
+LAST_NAME|SALARY|INCOME
+Baer|10000|10000
+Baida|2900|2900
+Banda|6200|6820
+Bates|7300|8395
+Bell|4000|4000
+Bernstein|9500|11875
+Bissot|3300|3300
+Bloom|10000|12000
+Bull|4100|4100
+SELECT 9
+
+rows
+SELECT DECODE(department_id, 70, 'Southlake', 30, 'San Francisco', 'Non domestic') "Location" FROM employees WHERE employee_id IN (204, 116, 192) ORDER BY employee_id
+----
+Location
+San Francisco
+Non domestic
+Southlake
+SELECT 3
+
+ok
+CREATE TABLE bonuses (employee_id NUMBER, bonus NUMBER DEFAULT 100)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (153)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (154)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (155)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (156)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (158)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (159)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (160)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (161)
+
+ok
+INSERT INTO bonuses (employee_id) VALUES (163)
+
+rows
+MERGE INTO bonuses D USING (SELECT employee_id, salary, department_id FROM employees WHERE department_id = 80) S ON (D.employee_id = S.employee_id) WHEN MATCHED THEN UPDATE SET D.bonus = D.bonus + S.salary*.01 DELETE WHERE (S.salary > 8000) WHEN NOT MATCHED THEN INSERT (D.employee_id, D.bonus) VALUES (S.employee_id, S.salary*.01) WHERE (S.salary <= 8000)
+----
+MERGE 17
+
+rows
+SELECT employee_id, bonus FROM bonuses ORDER BY employee_id
+----
+EMPLOYEE_ID|BONUS
+153|180
+154|175
+155|170
+159|180
+160|175
+161|170
+164|72
+165|68
+166|64
+167|62
+171|74
+172|73
+173|61
+179|62
+SELECT 14
+
+error 42P10 38104
+MERGE INTO bonuses D USING employees S ON (D.employee_id = S.employee_id) WHEN MATCHED THEN UPDATE SET D.employee_id = 1
+
+error 21000 30926
+MERGE INTO bonuses D USING (SELECT 153 employee_id FROM dual UNION ALL SELECT 153 FROM dual) S ON (D.employee_id = S.employee_id) WHEN MATCHED THEN UPDATE SET D.bonus = 1
+
+error 21000 30926
+MERGE INTO employees D USING (SELECT 153 id FROM dual UNION ALL SELECT 153 FROM dual) S ON (D.employee_id = S.id) WHEN MATCHED THEN UPDATE SET D.salary = 1
+
+error 42702 918
+MERGE INTO bonuses D USING employees S ON (D.employee_id = S.employee_id) WHEN NOT MATCHED THEN INSERT VALUES (employee_id, 1)
+
+ok
+CREATE TABLE merged (id NUMBER PRIMARY KEY, v NUMBER)
+
+rows
+MERGE INTO merged m USING (SELECT 1 id, 10 v FROM dual UNION ALL SELECT 2, 20 FROM dual) s ON (m.id = s.id) WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)
+----
+MERGE 2
+
+rows
+MERGE INTO merged m USING (SELECT 2 id, 25 v FROM dual UNION ALL SELECT 3, 30 FROM dual) s ON (m.id = s.id) WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v) WHEN MATCHED THEN UPDATE SET m.v = s.v
+----
+MERGE 2
+
+rows
+MERGE INTO merged m USING merged s ON (m.id = s.id) WHEN MATCHED THEN UPDATE SET m.v = s.v + 1
+----
+MERGE 3
+
+rows
+SELECT id, v FROM merged ORDER BY id
+----
+ID|V
+1|11
+2|26
+3|31
+SELECT 3
+
+rows
+MERGE INTO merged m USING (SELECT 1 id, 100 v FROM dual UNION ALL SELECT 1, 200 FROM dual) s ON (m.id = s.id) WHEN MATCHED THEN UPDATE SET m.v = s.v WHERE s.v > 150
+----
+MERGE 1
+
+rows
+MERGE INTO merged m USING (SELECT 7 id, 70 v FROM dual UNION ALL SELECT 8, 70 FROM dual) s ON (m.v = s.v) WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)
+----
+MERGE 2
+
+rows
+MERGE INTO merged m USING (SELECT 3 id FROM dual) s ON (m.id = s.id) WHEN MATCHED THEN UPDATE SET m.v = 0 DELETE WHERE m.v = 0 WHEN NOT MATCHED THEN INSERT VALUES (s.id, 99)
+----
+MERGE 1
+
+ok
+CREATE SEQUENCE merge_seq
+
+rows
+MERGE INTO merged m USING (SELECT 50 v FROM dual UNION ALL SELECT 60 FROM dual) s ON (m.v = s.v) WHEN NOT MATCHED THEN INSERT VALUES (merge_seq.NEXTVAL + 100, s.v)
+----
+MERGE 2
+
+rows
+SELECT id, v FROM merged ORDER BY id
+----
+ID|V
+1|200
+2|26
+7|70
+8|70
+101|50
+102|60
+SELECT 6
+
+ok
+COMMIT

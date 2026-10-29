@@ -565,7 +565,7 @@ pub(crate) fn dependent_table(
     }
 }
 
-fn row_key(table: &TableDefinition, row: &[Value]) -> Vec<u8> {
+pub(crate) fn row_key(table: &TableDefinition, row: &[Value]) -> Vec<u8> {
     let mut key = rows_prefix(table.id);
     for &index in &table.primary_key {
         encode_key_value(&mut key, &row[index]);
@@ -678,11 +678,11 @@ fn assign(value: Value, column: &Column) -> SqlResult<Value> {
 
 type Assignment = fn(Value, &Column) -> SqlResult<Value>;
 
-fn assignment_rule(sqlserver: bool) -> Assignment {
-    if sqlserver {
-        crate::sqlserver_conversion::assign
-    } else {
-        assign
+pub(crate) fn assignment_rule(dialect: Dialect) -> Assignment {
+    match dialect {
+        Dialect::SqlServer => crate::sqlserver_conversion::assign,
+        Dialect::Oracle => crate::oracle_conversion::assign,
+        _ => assign,
     }
 }
 
@@ -875,11 +875,12 @@ pub(crate) fn insert(
     }
     let checks = PreparedChecks::of(&table)?;
     let scope = scope_of(&table, &insert.table);
-    let sqlserver = crate::constraints::current_dialect() == crate::dialect::Dialect::SqlServer;
+    let dialect = crate::constraints::current_dialect();
+    let sqlserver = dialect == Dialect::SqlServer;
     let identity = sqlserver.then(|| table.auto_increment_column()).flatten();
     let identity_insert =
         identity.is_some() && constraints::identity_insert_is_on(&insert.table.name.text);
-    let rule = assignment_rule(sqlserver);
+    let rule = assignment_rule(dialect);
     let targets = match &insert.columns {
         Some(names) => {
             let targets = target_columns(&table, names)?;
@@ -2861,7 +2862,7 @@ pub(crate) fn update(
         crate::sequences::load_all(writer)?;
     }
     let checks = PreparedChecks::of(&table)?;
-    let rule = assignment_rule(constraints::current_dialect() == Dialect::SqlServer);
+    let rule = assignment_rule(constraints::current_dialect());
     let referenced = constraints::is_referenced(&table);
     let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
     let scope = scope_of(&table, &update.table);
@@ -2926,36 +2927,64 @@ pub(crate) fn update(
         }
         changes.push((old_key, new_key, new_row));
     }
+    let mut result_rows = Vec::new();
+    write_updated_rows(
+        writer,
+        tables,
+        &table,
+        &changes,
+        &old_rows,
+        &mut |new_row| {
+            if let Some(projection) = &returning {
+                result_rows.push(projection.project(new_row)?);
+            }
+            Ok(())
+        },
+    )?;
+    let tag = format!("UPDATE {}", changes.len());
+    Ok(match returning {
+        Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
+        None => QueryResult::command(tag),
+    })
+}
+
+pub(crate) type RowUpdate = (Vec<u8>, Vec<u8>, Vec<Value>);
+
+pub(crate) fn write_updated_rows(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &Arc<TableDefinition>,
+    changes: &[RowUpdate],
+    old_rows: &[Vec<Value>],
+    on_written: &mut dyn FnMut(&[Value]) -> SqlResult<()>,
+) -> SqlResult<()> {
     for (position, (old_key, new_key, _)) in changes.iter().enumerate() {
         if !table.indexes.is_empty()
             && let Some(old_row) = old_rows.get(position)
         {
-            indexes::delete_entries(writer, &table, old_row, old_key)?;
+            indexes::delete_entries(writer, table, old_row, old_key)?;
         }
         if old_key != new_key {
             writer.delete(old_key)?;
         }
     }
-    let mut result_rows = Vec::new();
-    for (old_key, new_key, new_row) in &changes {
+    for (old_key, new_key, new_row) in changes {
         if old_key != new_key && writer.get(new_key)?.is_some() {
-            return Err(duplicate_key(&table, new_row));
+            return Err(duplicate_key(table, new_row));
         }
         if table.indexes.is_empty() {
             writer.put(new_key, &encode_row(new_row))?;
         } else {
-            put_row_checked(writer, &table, new_row, new_key)?;
+            put_row_checked(writer, table, new_row, new_key)?;
         }
-        if let Some(projection) = &returning {
-            result_rows.push(projection.project(new_row)?);
-        }
+        on_written(new_row)?;
     }
-    if referenced {
+    if constraints::is_referenced(table) {
         let propagated: Vec<RowChange> = changes
             .iter()
-            .zip(&old_rows)
+            .zip(old_rows)
             .map(|((_, _, new_row), old_row)| RowChange {
-                table: Arc::clone(&table),
+                table: Arc::clone(table),
                 old: old_row.clone(),
                 new: Some(new_row.clone()),
             })
@@ -2963,15 +2992,54 @@ pub(crate) fn update(
         constraints::propagate(writer, tables, propagated)?;
     }
     if !table.foreign_keys.is_empty() {
-        for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
-            constraints::check_parents(writer, tables, &table, new_row, Some(old_row))?;
+        for ((_, _, new_row), old_row) in changes.iter().zip(old_rows) {
+            constraints::check_parents(writer, tables, table, new_row, Some(old_row))?;
         }
     }
-    let tag = format!("UPDATE {}", changes.len());
-    Ok(match returning {
-        Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
-        None => QueryResult::command(tag),
-    })
+    Ok(())
+}
+
+pub(crate) fn delete_rows(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    table: &Arc<TableDefinition>,
+    rows: Vec<(Vec<u8>, Vec<Value>)>,
+    on_deleted: &mut dyn FnMut(&[Value]) -> SqlResult<()>,
+) -> SqlResult<usize> {
+    for (key, row) in &rows {
+        if !table.indexes.is_empty() {
+            indexes::delete_entries(writer, table, row, key)?;
+        }
+        writer.delete(key)?;
+        on_deleted(row)?;
+    }
+    let count = rows.len();
+    if constraints::is_referenced(table) {
+        let changes: Vec<RowChange> = rows
+            .into_iter()
+            .map(|(_, row)| RowChange {
+                table: Arc::clone(table),
+                old: row,
+                new: None,
+            })
+            .collect();
+        constraints::propagate(writer, tables, changes)?;
+    }
+    Ok(count)
+}
+
+pub(crate) fn every_row(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+) -> SqlResult<Vec<(Vec<u8>, Vec<Value>)>> {
+    let reference = TableReference::named(
+        Name {
+            text: table.name.clone(),
+            position: 0,
+        },
+        None,
+    );
+    matching_rows(reader, table, scope_of(table, &reference), None)
 }
 
 pub(crate) fn truncate(
@@ -3027,27 +3095,12 @@ pub(crate) fn delete(
     let returning = returning(&delete.returning, scope)?;
     let matched = matching_rows(writer, &table, scope, delete.filter.as_ref())?;
     let mut result_rows = Vec::new();
-    for (key, row) in &matched {
-        if !table.indexes.is_empty() {
-            indexes::delete_entries(writer, &table, row, key)?;
-        }
-        writer.delete(key)?;
+    let count = delete_rows(writer, tables, &table, matched, &mut |row| {
         if let Some(projection) = &returning {
             result_rows.push(projection.project(row)?);
         }
-    }
-    let count = matched.len();
-    if constraints::is_referenced(&table) {
-        let changes: Vec<RowChange> = matched
-            .into_iter()
-            .map(|(_, row)| RowChange {
-                table: Arc::clone(&table),
-                old: row,
-                new: None,
-            })
-            .collect();
-        constraints::propagate(writer, tables, changes)?;
-    }
+        Ok(())
+    })?;
     let tag = format!("DELETE {count}");
     Ok(match returning {
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),

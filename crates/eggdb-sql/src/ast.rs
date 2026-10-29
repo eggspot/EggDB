@@ -72,6 +72,32 @@ pub(crate) enum Statement {
         notice: Option<String>,
     },
     SqlServer(SqlServerStatement),
+    Merge(Box<MergeStatement>),
+    AlterSession(Vec<(String, String)>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergeStatement {
+    pub(crate) target: TableReference,
+    pub(crate) source: Select,
+    pub(crate) source_label: Option<String>,
+    pub(crate) on: Expr,
+    pub(crate) update: Option<MergeUpdate>,
+    pub(crate) insert: Option<MergeInsert>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergeUpdate {
+    pub(crate) assignments: Vec<(Name, Expr)>,
+    pub(crate) condition: Option<Expr>,
+    pub(crate) delete_condition: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergeInsert {
+    pub(crate) columns: Option<Vec<Name>>,
+    pub(crate) values: Vec<Expr>,
+    pub(crate) condition: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

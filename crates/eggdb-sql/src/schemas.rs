@@ -116,6 +116,7 @@ type SharedPath = Arc<[String]>;
 
 struct PathState {
     settings: Option<Arc<Settings>>,
+    dialect: Dialect,
     resolved: Option<SharedPath>,
     relations: Option<SharedPath>,
     known: Option<(u64, SharedPath)>,
@@ -125,6 +126,7 @@ struct PathState {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PathCache {
     settings: Weak<Settings>,
+    dialect: Dialect,
     version: u64,
     path: Option<SharedPath>,
 }
@@ -144,11 +146,17 @@ impl EnteredPath {
             let state = path.as_ref()?;
             let version = state.computed?;
             let settings = state.settings.as_ref()?;
-            Some((Arc::downgrade(settings), version, state.resolved.clone()?))
+            Some((
+                Arc::downgrade(settings),
+                state.dialect,
+                version,
+                state.resolved.clone()?,
+            ))
         });
-        if let Some((settings, version, found)) = computed {
+        if let Some((settings, dialect, version, found)) = computed {
             *cache = PathCache {
                 settings,
+                dialect,
                 version,
                 path: Some(found),
             };
@@ -169,13 +177,18 @@ impl Drop for EnteredPath {
 
 pub(crate) fn enter(settings: &Arc<Settings>, dialect: Dialect, cache: &PathCache) -> EnteredPath {
     let known = match &cache.path {
-        Some(path) if std::ptr::eq(cache.settings.as_ptr(), Arc::as_ptr(settings)) => {
+        Some(path)
+            if cache.dialect == dialect
+                && std::ptr::eq(cache.settings.as_ptr(), Arc::as_ptr(settings)) =>
+        {
             Some((cache.version, Arc::clone(path)))
         }
         _ => None,
     };
     let state = PathState {
-        settings: (dialect == Dialect::PostgreSql).then(|| Arc::clone(settings)),
+        settings: matches!(dialect, Dialect::PostgreSql | Dialect::Oracle)
+            .then(|| Arc::clone(settings)),
+        dialect,
         resolved: None,
         relations: None,
         known,
@@ -249,6 +262,7 @@ fn default_path() -> SharedPath {
 
 fn compute_path(
     reader: &dyn KeyValueRead,
+    dialect: Dialect,
     settings: Option<&Settings>,
     known: Option<&(u64, SharedPath)>,
 ) -> SqlResult<SharedPath> {
@@ -263,7 +277,9 @@ fn compute_path(
     let user = settings.get("session_authorization").unwrap_or_default();
     let mut existing: Vec<String> = Vec::new();
     for entry in path_entries(&settings.get("search_path").unwrap_or_default()) {
-        let name = if entry == "$user" {
+        let name = if entry == "$user" && dialect == Dialect::Oracle {
+            DEFAULT_SCHEMA.to_owned()
+        } else if entry == "$user" {
             user.clone()
         } else {
             entry
@@ -284,10 +300,10 @@ fn shared_path(reader: &dyn KeyValueRead) -> SqlResult<SharedPath> {
         let state = path.as_ref()?;
         Some(match &state.resolved {
             Some(resolved) => Ok(Arc::clone(resolved)),
-            None => Err((state.settings.clone(), state.known.clone())),
+            None => Err((state.settings.clone(), state.dialect, state.known.clone())),
         })
     });
-    let (settings, known) = match pending {
+    let (settings, dialect, known) = match pending {
         None => return Ok(default_path()),
         Some(Ok(resolved)) => return Ok(resolved),
         Some(Err(inputs)) => inputs,
@@ -295,7 +311,7 @@ fn shared_path(reader: &dyn KeyValueRead) -> SqlResult<SharedPath> {
     let resolved = if settings.is_none() {
         default_path()
     } else {
-        compute_path(reader, settings.as_deref(), known.as_ref())?
+        compute_path(reader, dialect, settings.as_deref(), known.as_ref())?
     };
     let relations: SharedPath = if resolved.iter().any(|schema| is_system_schema(schema)) {
         resolved

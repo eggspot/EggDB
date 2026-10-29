@@ -71,7 +71,12 @@ fn context() -> Context {
 }
 
 pub(crate) fn current_dialect() -> Dialect {
-    context().dialect
+    CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .map_or(Dialect::PostgreSql, |context| context.dialect)
+    })
 }
 
 pub(crate) fn identity_insert_is_on(table: &str) -> bool {

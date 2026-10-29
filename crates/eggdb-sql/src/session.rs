@@ -297,6 +297,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     max_row_bytes: usize,
     batch_resume: Option<(usize, usize)>,
     sqlserver_status: crate::sqlserver_functions::SessionStatus,
+    oracle_nls: Arc<crate::oracle_nls::NlsParameters>,
     identity_insert_table: Option<String>,
     statement_start: usize,
 }
@@ -334,6 +335,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             max_row_bytes: usize::MAX,
             batch_resume: None,
             sqlserver_status: crate::sqlserver_functions::SessionStatus::default(),
+            oracle_nls: Arc::new(crate::oracle_nls::NlsParameters::default()),
             identity_insert_table: None,
             statement_start: 0,
         }
@@ -992,6 +994,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             self.statement_start = parser.position();
             let _status = self.enter_sqlserver_status();
             let _constraints = self.enter_constraints();
+            let _nls = self.enter_oracle_nls();
             if let Some(mut rows) = parser.literal_rows() {
                 resume = parser.resume_point();
                 if self.batch_resume.is_some() {
@@ -1070,6 +1073,45 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             },
             self.identity_insert_table.clone(),
         )
+    }
+
+    fn enter_oracle_nls(&self) -> Option<crate::oracle_nls::NlsGuard> {
+        self.oracle()
+            .then(|| crate::oracle_nls::enter(Arc::clone(&self.oracle_nls)))
+    }
+
+    fn alter_session(&mut self, settings: &[(String, String)]) -> SqlResult<QueryResult> {
+        for (name, value) in settings {
+            if name == "current_schema" {
+                if value.starts_with('\'') {
+                    return Err(
+                        SqlError::new(SqlState::SYNTAX_ERROR, "missing or invalid option")
+                            .with_oracle_code(922),
+                    );
+                }
+                let schema = value.clone();
+                let exists =
+                    self.read(|reader, _| crate::schemas::schema_exists(reader, &schema))?;
+                if !exists {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_SCHEMA_NAME,
+                        "user does not exist",
+                    )
+                    .with_oracle_code(1435));
+                }
+                let entry = if schema.chars().all(|character| {
+                    character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+                }) {
+                    schema
+                } else {
+                    format!("\"{}\"", schema.replace('"', "\"\""))
+                };
+                Arc::make_mut(&mut self.settings).set("search_path", Some(&entry))?;
+                continue;
+            }
+            self.oracle_nls = Arc::new(self.oracle_nls.with(name, value)?);
+        }
+        Ok(QueryResult::command("ALTER SESSION"))
     }
 
     fn enter_search_path(&self, settings: &Arc<Settings>) -> crate::schemas::EnteredPath {
@@ -1472,6 +1514,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 binding.delete(writer, tables, delete)?;
                 execute::delete(writer, tables, delete)
             }),
+            Statement::Merge(merge) => self.write("MERGE", |writer, tables| {
+                binding.merge(writer, tables, merge)?;
+                crate::merge::merge(writer, tables, merge)
+            }),
+            Statement::AlterSession(settings) => self.alter_session(settings),
             Statement::Begin { .. }
             | Statement::Commit
             | Statement::Rollback

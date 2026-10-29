@@ -1,6 +1,7 @@
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::numeric::Numeric;
 use crate::sqlite_functions::MAX_TEXT_BYTES;
-use crate::types::Value;
+use crate::types::{SqlType, Value};
 use std::cmp::Ordering;
 
 const MAX_UTF8_CHAR_BYTES: usize = 4;
@@ -15,7 +16,7 @@ fn too_long() -> SqlError {
     .with_oracle_code(1489)
 }
 
-fn within_limit(bytes: usize) -> SqlResult<()> {
+pub(crate) fn within_limit(bytes: usize) -> SqlResult<()> {
     if bytes > MAX_TEXT_BYTES {
         Err(too_long())
     } else {
@@ -51,8 +52,6 @@ fn invalid_format() -> SqlError {
     .with_oracle_code(1481)
 }
 
-/// `number` as Oracle converts a number to text: no trailing zeros, no leading zero before
-/// the decimal point (`.5`), and `Nan`, `Inf` and `-Inf` for the special values.
 pub(crate) fn number_text(number: f64) -> String {
     if number.is_nan() {
         return "Nan".to_owned();
@@ -73,16 +72,27 @@ pub(crate) fn number_text(number: f64) -> String {
     text
 }
 
-fn text_of(value: &Value) -> Option<String> {
+pub(crate) fn text_with_type(value: &Value, declared: Option<SqlType>) -> Option<String> {
     match value {
         Value::Null => None,
         Value::Text(text) => Some(text.clone()),
         Value::Real(number) => Some(number_text(f64::from(*number))),
         Value::Double(number) => Some(number_text(*number)),
+        Value::Numeric(number) => Some(crate::dialect::oracle_numeric_text(number)),
         Value::Boolean(flag) => Some(if *flag { "TRUE" } else { "FALSE" }.to_owned()),
         Value::Bytea(_) => crate::Dialect::Oracle.value_text(value),
+        Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_) => {
+            match crate::oracle_datetime::nls_text(value, declared) {
+                Ok(Some(text)) => Some(text),
+                _ => value.to_text(),
+            }
+        }
         other => other.to_text(),
     }
+}
+
+pub(crate) fn text_of(value: &Value) -> Option<String> {
+    text_with_type(value, None)
 }
 
 fn text_or_null(text: String) -> Value {
@@ -93,8 +103,9 @@ fn text_or_null(text: String) -> Value {
     }
 }
 
-enum Number {
+pub(crate) enum Number {
     Integer(i64),
+    Decimal(Numeric),
     Float(f64),
 }
 
@@ -102,19 +113,51 @@ impl Number {
     fn float(&self) -> f64 {
         match self {
             Self::Integer(number) => *number as f64,
+            Self::Decimal(number) => number.to_f64(),
             Self::Float(number) => *number,
         }
     }
 
-    fn value(self) -> Value {
+    fn exact(&self) -> Option<Numeric> {
+        match self {
+            Self::Integer(number) => Some(Numeric::from_i64(*number)),
+            Self::Decimal(number) => Some(number.clone()),
+            Self::Float(_) => None,
+        }
+    }
+
+    pub(crate) fn value(self) -> Value {
         match self {
             Self::Integer(number) => Value::BigInt(number),
+            Self::Decimal(number) => Value::Numeric(number),
             Self::Float(number) => Value::Double(number),
+        }
+    }
+
+    fn of_numeric(number: Numeric) -> Self {
+        if number.is_nan() {
+            return Self::Float(f64::NAN);
+        }
+        match number.integral_value().map(i64::try_from) {
+            Some(Ok(whole)) => Self::Integer(whole),
+            _ => Self::Decimal(number),
         }
     }
 }
 
-fn parse_number(text: &str) -> SqlResult<Number> {
+fn exact_result(result: SqlResult<Numeric>) -> SqlResult<Value> {
+    result
+        .map(|number| Number::of_numeric(number).value())
+        .map_err(|error| {
+            if error.state() == SqlState::NUMERIC_VALUE_OUT_OF_RANGE {
+                numeric_overflow()
+            } else {
+                error
+            }
+        })
+}
+
+pub(crate) fn parse_number(text: &str) -> SqlResult<Number> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(invalid_number());
@@ -126,9 +169,15 @@ fn parse_number(text: &str) -> SqlResult<Number> {
         .bytes()
         .all(|byte| byte.is_ascii_digit() || b"+-.eE".contains(&byte))
         && trimmed.bytes().any(|byte| byte.is_ascii_digit());
-    match trimmed.parse::<f64>() {
-        Ok(number) if numeric && number.is_finite() => Ok(Number::Float(number)),
-        _ => Err(invalid_number()),
+    if !numeric {
+        return Err(invalid_number());
+    }
+    match Numeric::parse(trimmed) {
+        Ok(number) => Ok(Number::of_numeric(number)),
+        Err(error) if error.state() == SqlState::NUMERIC_VALUE_OUT_OF_RANGE => {
+            Err(numeric_overflow())
+        }
+        Err(_) => Err(invalid_number()),
     }
 }
 
@@ -144,10 +193,7 @@ fn number_of(value: &Value) -> SqlResult<Option<Number>> {
         Value::Text(text) | Value::Json(text) | Value::Jsonb(text) | Value::Bpchar(text) => {
             parse_number(text)?
         }
-        Value::Numeric(number) => match number.integral_value().map(i64::try_from) {
-            Some(Ok(whole)) => Number::Integer(whole),
-            _ => Number::Float(number.to_f64()),
-        },
+        Value::Numeric(number) => Number::of_numeric(number.clone()),
         Value::Date(_)
         | Value::Timestamp(_)
         | Value::TimestampTz(_)
@@ -165,12 +211,17 @@ fn number_of(value: &Value) -> SqlResult<Option<Number>> {
 fn whole_of(value: &Value) -> SqlResult<Option<i64>> {
     Ok(number_of(value)?.map(|number| match number {
         Number::Integer(number) => number,
+        Number::Decimal(number) => number.to_f64().trunc() as i64,
         Number::Float(number) => number.trunc() as i64,
     }))
 }
 
-fn concatenated(values: &[Value]) -> SqlResult<Value> {
-    let parts: Vec<String> = values.iter().filter_map(text_of).collect();
+fn concatenated(values: &[Value], declared: &[Option<SqlType>]) -> SqlResult<Value> {
+    let parts: Vec<String> = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| text_with_type(value, declared.get(index).copied().flatten()))
+        .collect();
     within_limit(parts.iter().map(String::len).sum())?;
     Ok(text_or_null(parts.concat()))
 }
@@ -189,6 +240,12 @@ fn divided(left: &Value, right: &Value) -> SqlResult<Value> {
                 .map(Value::BigInt)
                 .ok_or_else(numeric_overflow);
         }
+    }
+    if let (Some(a), Some(b)) = (left.exact(), right.exact()) {
+        if b.is_zero() {
+            return Err(divisor_is_zero());
+        }
+        return exact_result(a.divide(&b));
     }
     let divisor = right.float();
     if divisor == 0.0 {
@@ -425,6 +482,14 @@ fn scaled(value: &Value, digits: Option<&Value>, rounding: bool) -> SqlResult<Va
         None => 0,
     };
     match number {
+        Number::Decimal(number) => {
+            let moved = if rounding {
+                number.rounded(digits)
+            } else {
+                number.truncated(digits)
+            };
+            exact_result(moved)
+        }
         Number::Integer(number) if digits >= 0 => Ok(Value::BigInt(number)),
         Number::Integer(number) => {
             let Some(unit) = u32::try_from(-digits)
@@ -465,6 +530,17 @@ fn remainder(left: &Value, right: &Value) -> SqlResult<Value> {
     let (Some(left), Some(right)) = (number_of(left)?, number_of(right)?) else {
         return Ok(Value::Null);
     };
+    if let (Some(a), Some(b)) = (left.exact(), right.exact())
+        && matches!(
+            (&left, &right),
+            (Number::Decimal(_), _) | (_, Number::Decimal(_))
+        )
+    {
+        if b.is_zero() {
+            return Ok(left.value());
+        }
+        return exact_result(a.remainder(&b));
+    }
     Ok(match (left, right) {
         (left, Number::Integer(0)) => left.value(),
         (Number::Integer(a), Number::Integer(b)) => Value::BigInt(a.checked_rem(b).unwrap_or(0)),
@@ -477,6 +553,9 @@ fn rounded_toward(value: &Value, up: bool) -> SqlResult<Value> {
     Ok(match number_of(value)? {
         None => Value::Null,
         Some(Number::Integer(number)) => Value::BigInt(number),
+        Some(Number::Decimal(number)) => {
+            return exact_result(if up { number.ceiling() } else { number.floor() });
+        }
         Some(Number::Float(number)) => {
             Value::Double(if up { number.ceil() } else { number.floor() })
         }
@@ -522,6 +601,13 @@ fn square_root(value: &Value) -> SqlResult<Value> {
 fn sign(value: &Value) -> SqlResult<Value> {
     Ok(match number_of(value)? {
         None => Value::Null,
+        Some(Number::Decimal(number)) => {
+            Value::BigInt(match number.compare(&Numeric::from_i64(0)) {
+                Ordering::Greater => 1,
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+            })
+        }
         Some(number) => {
             let number = number.float();
             Value::BigInt(if number > 0.0 {
@@ -541,6 +627,7 @@ fn absolute(value: &Value) -> SqlResult<Value> {
         Some(Number::Integer(number)) => {
             Value::BigInt(number.checked_abs().ok_or_else(numeric_overflow)?)
         }
+        Some(Number::Decimal(number)) => Value::Numeric(number.absolute()),
         Some(Number::Float(number)) => Value::Double(number.abs()),
     })
 }
@@ -570,21 +657,24 @@ fn extreme(values: &[Value], greatest: bool) -> SqlResult<Value> {
             numbers.push(number);
         }
     }
-    let all_integers = numbers
+    let all_exact = numbers
         .iter()
-        .all(|number| matches!(number, Number::Integer(_)));
+        .all(|number| !matches!(number, Number::Float(_)));
     let mut best = 0;
     for (index, number) in numbers.iter().enumerate() {
         let order = match (number, &numbers[best]) {
             (Number::Integer(a), Number::Integer(b)) => a.cmp(b),
-            (a, b) => a.float().total_cmp(&b.float()),
+            (a, b) => match (a.exact(), b.exact()) {
+                (Some(a), Some(b)) => a.compare(&b),
+                _ => a.float().total_cmp(&b.float()),
+            },
         };
         if order == wanted {
             best = index;
         }
     }
     let chosen = numbers.swap_remove(best);
-    Ok(if all_integers {
+    Ok(if all_exact {
         chosen.value()
     } else {
         Value::Double(chosen.float())
@@ -644,10 +734,29 @@ fn model_of(format: &str) -> SqlResult<Model> {
     Ok(model)
 }
 
-fn formatted(number: f64, format: &str) -> SqlResult<String> {
+fn fixed_digits(number: &Number, places: usize) -> SqlResult<(bool, String)> {
+    Ok(match number {
+        Number::Integer(whole) => {
+            let mut text = whole.unsigned_abs().to_string();
+            if places > 0 {
+                text.push('.');
+                text.extend(std::iter::repeat_n('0', places));
+            }
+            (*whole < 0, text)
+        }
+        Number::Decimal(decimal) => {
+            let rounded = decimal.rounded(places as i64)?;
+            let negative = rounded.compare(&Numeric::from_i64(0)) == Ordering::Less;
+            (negative, rounded.absolute().to_string())
+        }
+        Number::Float(float) => (*float < 0.0, format!("{:.*}", places, float.abs())),
+    })
+}
+
+fn formatted(number: &Number, format: &str) -> SqlResult<String> {
     let model = model_of(format)?;
-    let negative = number < 0.0;
-    let digits = format!("{:.*}", model.fraction.len(), number.abs());
+    within_limit(format.len().saturating_mul(2).saturating_add(2))?;
+    let (negative, digits) = fixed_digits(number, model.fraction.len())?;
     let (whole, fraction) = digits.split_once('.').unwrap_or((&digits, ""));
     let slots = model.integer.iter().filter(|slot| **slot != ',').count();
     let whole: Vec<char> = if whole == "0" && !model.fraction.is_empty() {
@@ -710,53 +819,126 @@ fn formatted(number: f64, format: &str) -> SqlResult<String> {
     Ok(text)
 }
 
-fn to_char(values: &[Value]) -> SqlResult<Value> {
-    let format = match values.get(1) {
-        Some(format) => match text_of(format) {
-            Some(format) => Some(format),
-            None => return Ok(Value::Null),
-        },
-        None => None,
-    };
+fn is_datetime(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_)
+    )
+}
+
+fn numeric_parameter(values: &[Value]) -> SqlResult<()> {
+    match values.get(2) {
+        Some(Value::Text(text)) => crate::oracle_nls::check_numeric_parameter(text),
+        _ => Ok(()),
+    }
+}
+
+fn to_char(values: &[Value], declared: Option<SqlType>) -> SqlResult<Value> {
+    if is_datetime(&values[0]) {
+        return crate::oracle_datetime::to_char_datetime(values, declared);
+    }
+    if values.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+    numeric_parameter(values)?;
+    let format = values.get(1).and_then(text_of);
     match (&values[0], format) {
-        (Value::Null, _) => Ok(Value::Null),
         (Value::Text(text), None) => Ok(text_or_null(text.clone())),
         (value, None) => Ok(text_of(value).map_or(Value::Null, text_or_null)),
         (value, Some(format)) => {
             let Some(number) = number_of(value)? else {
                 return Ok(Value::Null);
             };
-            formatted(number.float(), &format).map(text_or_null)
+            formatted(&number, &format).map(text_or_null)
         }
     }
 }
 
+fn number_by_model(text: &str, format: &str) -> SqlResult<Number> {
+    let model = model_of(format)?;
+    let mut rest = text.trim();
+    let mut negative = false;
+    if model.leading_sign {
+        negative = match rest.chars().next() {
+            Some('-') => true,
+            Some('+') => false,
+            _ => return Err(invalid_number()),
+        };
+        rest = &rest[1..];
+    } else if model.trailing_minus {
+        if let Some(body) = rest.strip_suffix('-') {
+            negative = true;
+            rest = body;
+        } else if let Some(body) = rest.strip_suffix('+') {
+            rest = body;
+        }
+    } else if let Some(body) = rest.strip_prefix('-') {
+        negative = true;
+        rest = body;
+    }
+    if model.dollar {
+        rest = rest.strip_prefix('$').unwrap_or(rest);
+    }
+    let (whole, fraction) = match rest.split_once('.') {
+        Some(_) if !model.point => return Err(invalid_number()),
+        Some((whole, fraction)) => (whole, fraction),
+        None => (rest, ""),
+    };
+    let grouped = model.integer.contains(&',');
+    let whole_ok = whole
+        .chars()
+        .all(|character| character.is_ascii_digit() || (grouped && character == ','));
+    let digits: String = whole.chars().filter(char::is_ascii_digit).collect();
+    let slots = model.integer.iter().filter(|slot| **slot != ',').count();
+    if !whole_ok
+        || !fraction.chars().all(|character| character.is_ascii_digit())
+        || digits.len() > slots
+        || fraction.len() > model.fraction.len()
+        || (digits.is_empty() && fraction.is_empty())
+    {
+        return Err(invalid_number());
+    }
+    let sign = if negative { "-" } else { "" };
+    let digits = if digits.is_empty() { "0" } else { &digits };
+    parse_number(&if fraction.is_empty() {
+        format!("{sign}{digits}")
+    } else {
+        format!("{sign}{digits}.{fraction}")
+    })
+}
+
 fn to_number(values: &[Value]) -> SqlResult<Value> {
-    let Some(text) = text_of(&values[0]) else {
+    if values.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+    numeric_parameter(values)?;
+    let source = &values[0];
+    if !matches!(source, Value::Text(_) | Value::Bpchar(_)) {
+        return Ok(number_of(source)?.map_or(Value::Null, Number::value));
+    }
+    let Some(text) = text_of(source) else {
         return Ok(Value::Null);
     };
-    let cleaned = match values.get(1) {
-        Some(format) => {
-            let Some(format) = text_of(format) else {
-                return Ok(Value::Null);
-            };
-            model_of(&format)?;
-            text.replace([',', '$'], "")
-        }
-        None => text,
-    };
-    Ok(parse_number(&cleaned)?.value())
+    match values.get(1).and_then(text_of) {
+        Some(format) => Ok(number_by_model(&text, &format)?.value()),
+        None => Ok(parse_number(&text)?.value()),
+    }
 }
 
 fn row_count(value: &Value) -> SqlResult<Value> {
     Ok(Value::BigInt(match number_of(value)? {
         None => 0,
         Some(Number::Integer(number)) => number.max(0),
+        Some(Number::Decimal(number)) => number.to_f64().max(0.0).trunc() as i64,
         Some(Number::Float(number)) => number.max(0.0).trunc() as i64,
     }))
 }
 
-pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
+fn date_unit(values: &[Value]) -> Option<String> {
+    values.get(1).and_then(text_of)
+}
+
+pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -> SqlResult<Value> {
     let unary_text = |change: fn(&str) -> String| -> SqlResult<Value> {
         let Some(text) = text_of(&values[0]) else {
             return Ok(Value::Null);
@@ -765,7 +947,7 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
         Ok(text_or_null(change(&text)))
     };
     match (name, values) {
-        ("oracle_concat", _) => concatenated(values),
+        ("oracle_concat", _) => concatenated(values, declared),
         ("oracle_divide", [left, right]) => divided(left, right),
         ("oracle_row_count", [value]) => row_count(value),
         ("oracle_length", [value]) => Ok(text_of(value)
@@ -789,6 +971,15 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
         ("oracle_chr", [value]) => character(value),
         ("oracle_ascii", [value]) => Ok(character_code(value)),
         ("oracle_abs", [value]) => absolute(value),
+        ("oracle_round", [value, ..]) if is_datetime(value) => {
+            Err(SqlError::not_supported("ROUND of a date"))
+        }
+        ("oracle_trunc", [value, ..]) if is_datetime(value) => {
+            if values.get(1).is_some_and(Value::is_null) {
+                return Ok(Value::Null);
+            }
+            crate::oracle_datetime::truncated_date(value, date_unit(values).as_deref())
+        }
         ("oracle_round", [value, rest @ ..]) => scaled(value, rest.first(), true),
         ("oracle_trunc", [value, rest @ ..]) => scaled(value, rest.first(), false),
         ("oracle_mod", [left, right]) => remainder(left, right),
@@ -799,8 +990,18 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
         ("oracle_sign", [value]) => sign(value),
         ("oracle_greatest", [_, ..]) => extreme(values, true),
         ("oracle_least", [_, ..]) => extreme(values, false),
-        ("oracle_to_char", [_, ..]) => to_char(values),
+        ("oracle_to_char", [_, ..]) => to_char(values, declared.first().copied().flatten()),
         ("oracle_to_number", [_, ..]) => to_number(values),
+        ("oracle_to_date", [_, ..]) => crate::oracle_datetime::to_date(values),
+        ("oracle_to_timestamp", [_, ..]) => crate::oracle_datetime::to_timestamp(values),
+        ("oracle_add_months", [date, months]) => {
+            crate::oracle_datetime::add_months(date, whole_of(months)?)
+        }
+        ("oracle_last_day", [date]) => crate::oracle_datetime::last_day(date),
+        ("oracle_date_literal", [Value::Text(text)]) => crate::oracle_datetime::date_literal(text),
+        ("oracle_timestamp_literal", [Value::Text(text)]) => {
+            crate::oracle_datetime::timestamp_literal(text)
+        }
         _ => Err(SqlError::new(
             SqlState::UNDEFINED_FUNCTION,
             format!("function {name}() does not exist"),
@@ -810,8 +1011,17 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{call, formatted, number_text};
+    use super::{formatted, number_text, parse_number};
+    use crate::error::SqlResult;
     use crate::types::Value;
+
+    fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
+        super::call(name, values, &[])
+    }
+
+    fn shaped(number: &str, format: &str) -> SqlResult<String> {
+        formatted(&parse_number(number)?, format)
+    }
 
     fn text(value: &str) -> Value {
         Value::Text(value.into())
@@ -827,17 +1037,17 @@ mod tests {
 
     #[test]
     fn number_format_models_place_digits_signs_and_separators() {
-        assert_eq!(formatted(1234.5, "9,999.99").as_deref(), Ok(" 1,234.50"));
-        assert_eq!(formatted(-12.0, "999").as_deref(), Ok(" -12"));
-        assert_eq!(formatted(7.0, "000").as_deref(), Ok(" 007"));
-        assert_eq!(formatted(0.5, "9.99").as_deref(), Ok("  .50"));
-        assert_eq!(formatted(0.0, "999").as_deref(), Ok("   0"));
-        assert_eq!(formatted(1.5, "FM9.99").as_deref(), Ok("1.5"));
-        assert_eq!(formatted(12345.0, "999").as_deref(), Ok("####"));
-        assert_eq!(formatted(12.0, "$99").as_deref(), Ok(" $12"));
-        assert_eq!(formatted(12.0, "S99").as_deref(), Ok("+12"));
-        assert_eq!(formatted(-12.0, "99MI").as_deref(), Ok("12-"));
-        assert!(formatted(1.0, "X9").is_err());
+        assert_eq!(shaped("1234.5", "9,999.99").as_deref(), Ok(" 1,234.50"));
+        assert_eq!(shaped("-12", "999").as_deref(), Ok(" -12"));
+        assert_eq!(shaped("7", "000").as_deref(), Ok(" 007"));
+        assert_eq!(shaped("0.5", "9.99").as_deref(), Ok("  .50"));
+        assert_eq!(shaped("0", "999").as_deref(), Ok("   0"));
+        assert_eq!(shaped("1.5", "FM9.99").as_deref(), Ok("1.5"));
+        assert_eq!(shaped("12345", "999").as_deref(), Ok("####"));
+        assert_eq!(shaped("12", "$99").as_deref(), Ok(" $12"));
+        assert_eq!(shaped("12", "S99").as_deref(), Ok("+12"));
+        assert_eq!(shaped("-12", "99MI").as_deref(), Ok("12-"));
+        assert!(shaped("1", "X9").is_err());
     }
 
     #[test]
@@ -925,5 +1135,150 @@ mod tests {
             call("oracle_round", &[Value::Double(15.5), Value::BigInt(-400)]),
             Ok(Value::Double(0.0))
         );
+    }
+
+    fn decimal(text: &str) -> Value {
+        Value::Numeric(crate::numeric::Numeric::parse(text).expect("decimal"))
+    }
+
+    #[test]
+    fn decimals_stay_exact_through_division_and_the_numeric_functions() {
+        assert_eq!(
+            call("oracle_divide", &[decimal("0.3"), decimal("0.1")]),
+            Ok(Value::BigInt(3))
+        );
+        assert_eq!(
+            call("oracle_round", &[decimal("1.005"), Value::BigInt(2)]),
+            Ok(decimal("1.01"))
+        );
+        assert_eq!(
+            call("oracle_trunc", &[decimal("-2.567"), Value::BigInt(1)]),
+            Ok(decimal("-2.5"))
+        );
+        assert_eq!(call("oracle_ceil", &[decimal("2.1")]), Ok(Value::BigInt(3)));
+        assert_eq!(
+            call("oracle_floor", &[decimal("-2.1")]),
+            Ok(Value::BigInt(-3))
+        );
+        assert_eq!(call("oracle_abs", &[decimal("-0.5")]), Ok(decimal("0.5")));
+        assert_eq!(
+            call("oracle_sign", &[decimal("-0.5")]),
+            Ok(Value::BigInt(-1))
+        );
+        assert_eq!(
+            call("oracle_mod", &[decimal("7.5"), Value::BigInt(2)]),
+            Ok(decimal("1.5"))
+        );
+        assert_eq!(
+            call(
+                "oracle_greatest",
+                &[decimal("0.1"), decimal("0.25"), Value::BigInt(0)]
+            ),
+            Ok(decimal("0.25"))
+        );
+        assert_eq!(
+            call("oracle_concat", &[decimal("24000.00"), Value::Null]),
+            Ok(text("24000"))
+        );
+        assert_eq!(call("oracle_to_char", &[decimal("0.5")]), Ok(text(".5")));
+        assert_eq!(
+            call("oracle_to_char", &[decimal("1234.567"), text("9,999.99")]),
+            Ok(text(" 1,234.57"))
+        );
+        assert_eq!(call("oracle_to_number", &[text("0.1")]), Ok(decimal("0.1")));
+        let code = |values: &[Value]| {
+            call("oracle_to_number", values)
+                .err()
+                .and_then(|error| error.vendor_code())
+        };
+        assert_eq!(code(&[text("NaN")]), Some(1722));
+        assert_eq!(code(&[text("1e5000")]), Some(1426));
+    }
+
+    #[test]
+    fn to_number_reads_by_its_format_model() {
+        let number = |values: &[Value]| call("oracle_to_number", values);
+        assert_eq!(
+            number(&[text("123-"), text("999MI")]),
+            Ok(Value::BigInt(-123))
+        );
+        assert_eq!(
+            number(&[text("$1,234.50"), text("$9,999.99")]),
+            Ok(decimal("1234.50"))
+        );
+        assert_eq!(
+            number(&[text("100.00"), text("9G999D99")]),
+            Ok(Value::BigInt(100))
+        );
+        assert_eq!(number(&[text("+12"), text("S99")]), Ok(Value::BigInt(12)));
+        assert_eq!(
+            number(&[
+                text("12"),
+                text("99"),
+                text("NLS_NUMERIC_CHARACTERS = '.,'")
+            ]),
+            Ok(Value::BigInt(12))
+        );
+        let code = |values: &[Value]| number(values).err().and_then(|error| error.vendor_code());
+        assert_eq!(code(&[text("12345"), text("999")]), Some(1722));
+        assert_eq!(code(&[text("1.234"), text("9.99")]), Some(1722));
+        assert_eq!(code(&[text("1,234"), text("9999")]), Some(1722));
+        assert_eq!(code(&[text("12"), text("99X")]), Some(1481));
+        assert_eq!(
+            code(&[
+                text("12"),
+                text("99"),
+                text("NLS_NUMERIC_CHARACTERS = ',.'")
+            ]),
+            Some(3001)
+        );
+        assert_eq!(
+            code(&[text("12"), text("99"), text("garbage")]),
+            Some(12702)
+        );
+    }
+
+    #[test]
+    fn seeded_random_number_models_never_panic() {
+        let cases: usize = std::env::var("EGGDB_FUZZ_CASES")
+            .ok()
+            .and_then(|cases| cases.parse().ok())
+            .unwrap_or(3000);
+        let mut state: u64 = std::env::var("EGGDB_FUZZ_SEED")
+            .ok()
+            .and_then(|seed| seed.parse().ok())
+            .unwrap_or(0x0042_5eed);
+        let pieces = [
+            "9", "0", ".", "D", ",", "G", "$", "S", "MI", "FM", "X", "-", "1", "e", " ",
+        ];
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let names = [
+            "oracle_to_number",
+            "oracle_to_char",
+            "oracle_round",
+            "oracle_trunc",
+            "oracle_divide",
+            "oracle_mod",
+            "oracle_to_date",
+            "oracle_to_timestamp",
+            "oracle_add_months",
+            "oracle_last_day",
+        ];
+        for _ in 0..cases {
+            let mut first = String::new();
+            let mut second = String::new();
+            for _ in 0..next() % 7 {
+                first.push_str(pieces[next() as usize % pieces.len()]);
+                second.push_str(pieces[next() as usize % pieces.len()]);
+            }
+            let name = names[next() as usize % names.len()];
+            let _ = call(name, &[text(&first), text(&second)]);
+            let _ = call(name, &[text(&first)]);
+        }
     }
 }

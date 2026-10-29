@@ -1,6 +1,7 @@
 mod constraints;
 mod copy;
 mod indexes;
+mod merge;
 mod mysql;
 mod oracle;
 mod postgresql;
@@ -653,7 +654,16 @@ impl<'t> Parser<'t> {
                 .with_oracle_code(942)
                 .at(name.position));
             }
-            return Ok(table);
+            if oracle::is_dictionary_name(&table.text) {
+                return Ok(table);
+            }
+            return Ok(Name {
+                text: crate::schemas::written_qualified(
+                    crate::schemas::DEFAULT_SCHEMA,
+                    &table.text,
+                ),
+                position: table.position,
+            });
         }
         if self.sqlserver() && self.peek_kind() == &TokenKind::Dot {
             self.at += 1;
@@ -2926,7 +2936,7 @@ impl<'t> Parser<'t> {
                     Err(_) => literal(Literal::Decimal((*digits).to_owned())),
                 }
             }
-            TokenKind::Decimal(text) if self.mysql() || self.sqlite() || self.oracle() => {
+            TokenKind::Decimal(text) if self.mysql() || self.sqlite() => {
                 self.at += 1;
                 Ok(Expr {
                     kind: ExprKind::Cast {
@@ -3072,6 +3082,11 @@ impl<'t> Parser<'t> {
                         position: self.position(),
                     };
                     self.at += 1;
+                    if self.oracle()
+                        && matches!(sql_type, SqlType::Timestamp(_) | SqlType::TimestampTz(_))
+                    {
+                        return Ok(oracle::ansi_literal(word == "date", operand, position));
+                    }
                     let sql_type = match sql_type {
                         SqlType::Interval {
                             fields: None,

@@ -95,7 +95,7 @@ dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..
 With `--allow-write` the agent gets `write_sql`: one statement per call, in the dialect it names,
 run in a transaction of its own that commits when the statement succeeds and changes nothing
 when it fails (on Oracle the server commits the statement's block itself). The result says
-`committed` and, for an `INSERT`, `UPDATE` or `DELETE`, `rows_changed`. Each call may change at
+`committed` and, for an `INSERT`, `UPDATE`, `DELETE` or Oracle `MERGE`, `rows_changed`. Each call may change at
 most 256 MiB (the bytes it puts and the keys it deletes); a larger change is rolled back with
 `write_too_large`. A failed statement changes nothing but the sequence values it drew, which
 stay drawn, as in the database itself. Only `write_sql` opens the file read-write: while its
@@ -104,7 +104,10 @@ open the file at all.
 
 **Destructive statements need your confirmation**: `DROP` of anything, `TRUNCATE`, `ALTER TABLE
 ... DROP COLUMN`, `DROP CONSTRAINT` or `DROP PRIMARY KEY`, a column's type change, and a `DELETE`
-or `UPDATE` whose `WHERE` names no column of its table (or that has no `WHERE`). A statement
+or `UPDATE` whose `WHERE` names no column of its table (or that has no `WHERE`), and an Oracle
+`MERGE` that updates or deletes unless a top-level `AND` part of its `ON` equates a target column,
+qualified with the target's name or alias, with an expression that names no target column
+(`ON (t.id = s.id)`). A statement
 that can run other statements (an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`)
 counts as destructive too; EggDB does not run any of them yet. `INSERT` in every form, `CREATE`,
 renames, `ADD COLUMN` and the like run without asking.

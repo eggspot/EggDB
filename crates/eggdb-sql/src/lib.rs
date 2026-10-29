@@ -41,12 +41,16 @@ mod join;
 pub mod json;
 mod lexer;
 mod memory;
+mod merge;
 mod mysql_errors;
 mod mysql_variables;
 mod name_resolution;
 mod numeric;
+mod oracle_conversion;
+mod oracle_datetime;
 mod oracle_errors;
 mod oracle_functions;
+mod oracle_nls;
 mod parser;
 mod pg_keywords;
 mod plan;
@@ -91,6 +95,8 @@ mod index_tests;
 mod memory_store;
 #[cfg(test)]
 mod one_statement_tests;
+#[cfg(test)]
+mod oracle_tests;
 #[cfg(test)]
 mod regex_tests;
 #[cfg(test)]

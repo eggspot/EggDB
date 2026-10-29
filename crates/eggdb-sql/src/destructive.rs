@@ -1,4 +1,6 @@
-use crate::ast::{AlterAction, Expr, ExprKind, Name, Statement, TableReference};
+use crate::ast::{
+    AlterAction, BinaryOperator, Expr, ExprKind, MergeStatement, Name, Statement, TableReference,
+};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult};
 use crate::session::{OneStatementError, Session};
@@ -174,7 +176,20 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::Comment(_)
         | Statement::Copy(_)
         | Statement::Ignored { .. }
+        | Statement::AlterSession(_)
         | Statement::SqlServer(_) => None,
+        Statement::Merge(merge) => merge
+            .update
+            .as_ref()
+            .filter(|_| !on_pins_target_rows(merge))
+            .map(|update| {
+                let kind = if update.delete_condition.is_some() {
+                    DestructiveKind::DeleteWithoutFilter
+                } else {
+                    DestructiveKind::UpdateWithoutFilter
+                };
+                DestructiveStatement::new(kind, vec![shown(&merge.target.name)], false)
+            }),
     }
 }
 
@@ -241,20 +256,56 @@ fn shown(name: &Name) -> String {
     name.text.replace(crate::schemas::QUALIFIER, ".")
 }
 
+fn qualifies_target(qualifier: &str, table: &TableReference) -> bool {
+    table
+        .alias
+        .as_deref()
+        .is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
+        || qualifier.eq_ignore_ascii_case(crate::schemas::base_name(&table.name.text))
+        || qualifier.eq_ignore_ascii_case(&shown(&table.name))
+}
+
 fn filters_rows(filter: Option<&Expr>, table: &TableReference) -> bool {
-    let base = crate::schemas::base_name(&table.name.text);
-    let names_target = |qualifier: Option<&str>| match qualifier {
-        None => true,
-        Some(qualifier) => {
-            table
-                .alias
-                .as_deref()
-                .is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
-                || qualifier.eq_ignore_ascii_case(base)
-                || qualifier.eq_ignore_ascii_case(&shown(&table.name))
-        }
+    let names_target = |qualifier: Option<&str>| {
+        qualifier.is_none_or(|qualifier| qualifies_target(qualifier, table))
     };
     filter.is_some_and(|filter| names_column(filter, &names_target))
+}
+
+fn on_pins_target_rows(merge: &MergeStatement) -> bool {
+    let names_source = |qualifier: &str| {
+        merge.source_label.as_deref().is_some_and(|label| {
+            qualifier.eq_ignore_ascii_case(label)
+                || qualifier.eq_ignore_ascii_case(crate::schemas::base_name(label))
+                || qualifier.eq_ignore_ascii_case(&label.replace(crate::schemas::QUALIFIER, "."))
+        })
+    };
+    let names_target =
+        |qualifier: &str| qualifies_target(qualifier, &merge.target) && !names_source(qualifier);
+    let is_target_column = |expr: &Expr| matches!(&expr.kind, ExprKind::Column { qualifier: Some(qualifier), .. } if names_target(qualifier));
+    let may_name_target = |qualifier: Option<&str>| qualifier.is_none_or(names_target);
+    let free_of_target = |expr: &Expr| !names_column(expr, &may_name_target);
+    let mut conjuncts = Vec::new();
+    top_level_conjuncts(&merge.on, &mut conjuncts);
+    conjuncts.into_iter().any(|conjunct| {
+        matches!(
+            &conjunct.kind,
+            ExprKind::Binary(BinaryOperator::Equal, left, right)
+                if (is_target_column(left) && free_of_target(right))
+                    || (is_target_column(right) && free_of_target(left))
+        )
+    })
+}
+
+fn top_level_conjuncts<'a>(expr: &'a Expr, found: &mut Vec<&'a Expr>) {
+    match &expr.kind {
+        ExprKind::And(parts) => {
+            for part in parts {
+                top_level_conjuncts(part, found);
+            }
+        }
+        _ => found.push(expr),
+    }
 }
 
 fn names_column(expr: &Expr, names_target: &dyn Fn(Option<&str>) -> bool) -> bool {
