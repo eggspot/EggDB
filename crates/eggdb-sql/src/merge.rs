@@ -231,11 +231,6 @@ impl Joined<'_> {
     }
 }
 
-/// Runs `MERGE`: the source is read once, every target row is joined with the source rows
-/// its `ON` condition matches, matched rows are updated (more than one source row for a target
-/// row is ORA-30926) and then deleted where `DELETE WHERE` holds, and source rows that match no
-/// target row are inserted where the insert's `WHERE` holds. The result is `MERGE n`, the rows
-/// updated plus the rows inserted.
 pub(crate) fn merge(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,

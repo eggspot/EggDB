@@ -155,8 +155,6 @@ impl Dialect {
     }
 }
 
-/// `number` as Oracle writes a number: no trailing zeros and no zero before the decimal
-/// point (`.5`, `24000`).
 pub(crate) fn oracle_numeric_text(number: &crate::Numeric) -> String {
     let text = number.to_string();
     if number.is_nan() || !text.contains('.') {

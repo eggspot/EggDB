@@ -41,8 +41,6 @@ const UNSUPPORTED_PARAMETERS: [&str; 30] = [
     "container",
 ];
 
-/// The Oracle NLS session parameters EggDB keeps: the datetime formats. The language,
-/// territory, numeric characters, sort and comparison accept only the values EggDB follows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NlsParameters {
     date_format: String,
@@ -91,7 +89,6 @@ pub(crate) fn invalid_parameter_string() -> SqlError {
     .with_oracle_code(12702)
 }
 
-/// Requires `value` to name American, the one language EggDB has.
 pub(crate) fn require_american(value: &str) -> SqlResult<()> {
     if value.trim().eq_ignore_ascii_case("american") {
         Ok(())
@@ -108,8 +105,6 @@ fn unquoted(value: &str) -> &str {
         .unwrap_or(trimmed)
 }
 
-/// Splits a function's NLS parameter string, `NAME = value`, into the lower-case name and
-/// the value without quotes; anything else is ORA-12702.
 pub(crate) fn parameter_assignment(text: &str) -> SqlResult<(String, String)> {
     let Some((name, value)) = text.split_once('=') else {
         return Err(invalid_parameter_string());
@@ -128,8 +123,6 @@ pub(crate) fn parameter_assignment(text: &str) -> SqlResult<(String, String)> {
     Ok((name.to_ascii_lowercase(), value.to_owned()))
 }
 
-/// Checks a `TO_NUMBER` or `TO_CHAR` NLS parameter string: only
-/// `NLS_NUMERIC_CHARACTERS = '.,'` is accepted.
 pub(crate) fn check_numeric_parameter(text: &str) -> SqlResult<()> {
     let (name, value) = parameter_assignment(text)?;
     match name.as_str() {
@@ -163,11 +156,6 @@ impl NlsParameters {
         &self.timestamp_tz_format
     }
 
-    /// These parameters after `ALTER SESSION SET name = value`. `name` is lower case. Setting
-    /// the territory resets the formats and numeric characters it implies, and setting the
-    /// language resets the date language and sort. Names Oracle does not have are ORA-02248,
-    /// Oracle parameters EggDB does not support ORA-03001, and a language or territory other
-    /// than American/America ORA-12705.
     pub(crate) fn with(&self, name: &str, value: &str) -> SqlResult<Self> {
         let mut next = self.clone();
         let plain = unquoted(value);
@@ -201,7 +189,6 @@ thread_local! {
     static CURRENT: RefCell<Option<Arc<NlsParameters>>> = const { RefCell::new(None) };
 }
 
-/// Restores the NLS parameters that were current before [`enter`] when dropped.
 pub(crate) struct NlsGuard(Option<Arc<NlsParameters>>);
 
 impl Drop for NlsGuard {
@@ -211,14 +198,11 @@ impl Drop for NlsGuard {
     }
 }
 
-/// Makes `parameters` the NLS parameters of the statement that starts, and empties the
-/// per-thread cache of parsed format models.
 pub(crate) fn enter(parameters: Arc<NlsParameters>) -> NlsGuard {
     crate::oracle_datetime::clear_model_cache();
     NlsGuard(CURRENT.with(|current| current.borrow_mut().replace(parameters)))
 }
 
-/// The NLS parameters of the running statement, or Oracle's defaults for territory AMERICA.
 pub(crate) fn current() -> Arc<NlsParameters> {
     CURRENT.with(|current| {
         current

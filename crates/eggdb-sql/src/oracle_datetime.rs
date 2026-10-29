@@ -46,8 +46,6 @@ const NOT_YET: [&str; 19] = [
     "RM", "TS", "TH", "SP", "EE", "E",
 ];
 
-/// What a datetime format model is used for: reading a `DATE`, reading a `TIMESTAMP`, or
-/// writing text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ModelUse {
     DateInput,
@@ -89,7 +87,6 @@ pub(crate) enum DatetimeElement {
     SecondsPastMidnight,
 }
 
-/// A parsed Oracle datetime format model such as `DD-MON-RR HH.MI.SSXFF AM`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DatetimeModel {
     elements: Vec<DatetimeElement>,
@@ -273,9 +270,6 @@ fn field_of(element: &DatetimeElement) -> Option<Field> {
 }
 
 impl DatetimeModel {
-    /// Parses `text` for `use_`: unknown and not yet supported elements are ORA-01821, a
-    /// model over 1,000 bytes ORA-01801, and an element that only writes text ORA-01820 (or
-    /// ORA-03001 for the ones EggDB does not read yet) when the model reads text.
     pub(crate) fn parse(text: &str, use_: ModelUse) -> SqlResult<Self> {
         if text.len() > MAX_MODEL_BYTES {
             return Err(date_error(
@@ -350,8 +344,6 @@ thread_local! {
     static MODELS: RefCell<Vec<(String, ModelUse, Rc<DatetimeModel>)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The parsed model for `text` and `use_`, parsed once per statement: up to eight models are
-/// kept per thread until [`clear_model_cache`] runs at the next statement.
 pub(crate) fn cached_model(text: &str, use_: ModelUse) -> SqlResult<Rc<DatetimeModel>> {
     let found = MODELS.with(|models| {
         models
@@ -418,9 +410,6 @@ fn push_name(out: &mut String, name: &str, spelling: Spelling, pad: bool) {
     }
 }
 
-/// `local` (microseconds of local time) as text by `model`. `precision` is the number of
-/// fractional digits `FF` prints: the source's declared precision, `None` when unknown (six
-/// digits), and `Some(0)` for a `DATE`, where `FF` is ORA-01821.
 pub(crate) fn format_datetime(
     local: i64,
     model: &DatetimeModel,
@@ -810,11 +799,6 @@ fn read_element(
     Ok(())
 }
 
-/// Reads `text` by `model` into microseconds of local time. Left-out fields default to the
-/// first day of `now`'s month and year at midnight; `RR` follows Oracle's century rule on
-/// `now`'s year. Without `FX`, blanks are ignored, punctuation may be left out or replaced by
-/// one other punctuation character, and `MM`, `MON`, `MONTH`, `YY` and `RR` accept their
-/// documented alternatives.
 pub(crate) fn parse_datetime(text: &str, model: &DatetimeModel, now: i64) -> SqlResult<i64> {
     if text.len() > MAX_INPUT_BYTES {
         return Err(input_left_over());
@@ -885,14 +869,11 @@ fn local_now() -> SqlResult<i64> {
     datetime::utc_to_local(datetime::statement_now())
 }
 
-/// Reads `text` as a datetime by the model `format` parsed for `use_`.
 pub(crate) fn read_by_model(text: &str, format: &str, use_: ModelUse) -> SqlResult<i64> {
     let model = cached_model(format, use_)?;
     parse_datetime(text, &model, local_now()?)
 }
 
-/// Strict ISO 8601, `YYYY-MM-DD[( |T)HH24:MI:SS[.F...]]`, the only text read without a
-/// format model; `with_time` false accepts the date alone.
 pub(crate) fn strict_iso(text: &str, with_time: bool) -> Option<i64> {
     let bytes = text.trim().as_bytes();
     let number = |range: std::ops::Range<usize>| -> Option<i64> {
@@ -971,15 +952,12 @@ fn split_offset(text: &str) -> (&str, Option<i32>) {
     (body, Some(seconds))
 }
 
-/// Oracle's ANSI `DATE '...'` literal: strict ISO `YYYY-MM-DD`, never the NLS format.
 pub(crate) fn date_literal(text: &str) -> SqlResult<Value> {
     strict_iso(text, false)
         .map(Value::Timestamp)
         .ok_or_else(literal_mismatch)
 }
 
-/// Oracle's ANSI `TIMESTAMP '...'` literal: strict ISO with an optional offset such as
-/// `-8:00`, which makes it a `TIMESTAMP WITH TIME ZONE`.
 pub(crate) fn timestamp_literal(text: &str) -> SqlResult<Value> {
     let (body, offset) = split_offset(text);
     let local = strict_iso(body, true).ok_or_else(literal_mismatch)?;
@@ -1056,17 +1034,14 @@ fn to_datetime(values: &[Value], use_: ModelUse) -> SqlResult<Value> {
     read_by_model(&text, &format, use_).map(|micros| Value::Timestamp(truncated(micros)))
 }
 
-/// `TO_DATE(char [, fmt [, nlsparam]])`.
 pub(crate) fn to_date(values: &[Value]) -> SqlResult<Value> {
     to_datetime(values, ModelUse::DateInput)
 }
 
-/// `TO_TIMESTAMP(char [, fmt [, nlsparam]])`.
 pub(crate) fn to_timestamp(values: &[Value]) -> SqlResult<Value> {
     to_datetime(values, ModelUse::TimestampInput)
 }
 
-/// The NLS model text that writes a value of `declared` type, and its `FF` precision.
 fn nls_output(declared: Option<SqlType>, value: &Value) -> (String, Option<u8>) {
     let nls = crate::oracle_nls::current();
     match (value, declared) {
@@ -1094,8 +1069,6 @@ fn local_of(value: &Value) -> SqlResult<Option<i64>> {
     }))
 }
 
-/// A datetime value as Oracle writes it without a format: by the NLS format its declared
-/// type selects (`NLS_DATE_FORMAT` when the type is unknown).
 pub(crate) fn nls_text(value: &Value, declared: Option<SqlType>) -> SqlResult<Option<String>> {
     let Some(local) = local_of(value)? else {
         return Ok(None);
@@ -1105,7 +1078,6 @@ pub(crate) fn nls_text(value: &Value, declared: Option<SqlType>) -> SqlResult<Op
     format_datetime(local, &model, precision).map(Some)
 }
 
-/// `TO_CHAR(datetime [, fmt [, nlsparam]])`, with `declared` the argument's declared type.
 pub(crate) fn to_char_datetime(values: &[Value], declared: Option<SqlType>) -> SqlResult<Value> {
     if values.iter().any(Value::is_null) {
         return Ok(Value::Null);
@@ -1138,8 +1110,6 @@ fn date_of(value: &Value) -> SqlResult<Option<i64>> {
     }
 }
 
-/// `ADD_MONTHS(date, n)`: the last day of a month stays the last day of the result's month,
-/// and a day past the result month's end becomes its last day.
 pub(crate) fn add_months(date: &Value, months: Option<i64>) -> SqlResult<Value> {
     let (Some(local), Some(months)) = (date_of(date)?, months) else {
         return Ok(Value::Null);
@@ -1166,7 +1136,6 @@ pub(crate) fn add_months(date: &Value, months: Option<i64>) -> SqlResult<Value> 
     ))
 }
 
-/// `LAST_DAY(date)`: the last day of the date's month, at the same time of day.
 pub(crate) fn last_day(date: &Value) -> SqlResult<Value> {
     let Some(local) = date_of(date)? else {
         return Ok(Value::Null);
@@ -1181,8 +1150,6 @@ pub(crate) fn last_day(date: &Value) -> SqlResult<Value> {
     ))
 }
 
-/// `TRUNC(date [, fmt])` for `fmt` YYYY, YEAR, YYY, YY, Y, MM, MON, MONTH, DD, DDD, J, HH,
-/// HH12, HH24 and MI (DD by default); other units are ORA-01821 until 42b.
 pub(crate) fn truncated_date(date: &Value, unit: Option<&str>) -> SqlResult<Value> {
     let Some(local) = local_of(date)? else {
         return Ok(Value::Null);

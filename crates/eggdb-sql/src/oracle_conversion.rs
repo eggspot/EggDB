@@ -45,15 +45,11 @@ fn typed(local: i64, target: SqlType) -> SqlResult<Value> {
     }
 }
 
-/// Text meeting an Oracle `DATE`, `TIMESTAMP` or `TIMESTAMP WITH TIME ZONE`: read by the NLS
-/// format the target type selects, then as strict ISO 8601. `None` for other targets.
 pub(crate) fn datetime_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
     let models = nls_models(target)?;
     Some(read_local(text, &models).and_then(|local| typed(local, target)))
 }
 
-/// A text literal read for `target` in the Oracle dialect: datetimes through
-/// [`datetime_of`], numbers by `TO_NUMBER`'s rules once the engine's own reading failed.
 pub(crate) fn literal_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
     if let Some(value) = datetime_of(text, target) {
         return Some(value);
@@ -83,9 +79,6 @@ fn text_for_column(value: &Value) -> Option<String> {
     }
 }
 
-/// Assigns `value` to `column` as Oracle converts it: text into a datetime or number column
-/// is read by the NLS format or `TO_NUMBER`'s rules, and numbers and datetimes into a
-/// character column are written as Oracle writes them (`.5`, NLS date text).
 pub(crate) fn assign(value: Value, column: &Column) -> SqlResult<Value> {
     let target = column.sql_type;
     let converted = match &value {
@@ -110,9 +103,6 @@ pub(crate) fn assign(value: Value, column: &Column) -> SqlResult<Value> {
     crate::execute::assign_to(converted, column)
 }
 
-/// The pair `left` and `right` converted as Oracle compares a character value with a number
-/// (as a number) or with a datetime (by the NLS format), or `None` when Oracle has no such
-/// conversion.
 pub(crate) fn converted_for_comparison(
     left: &Value,
     right: &Value,
@@ -213,10 +203,6 @@ fn local_micros(value: &Value) -> Option<SqlResult<i64>> {
     })
 }
 
-/// Oracle's date arithmetic and its text-to-number conversion in `+`, `-`, `*` and `/`:
-/// `date ± n` adds days (after cutting the date to whole seconds, rounding to the second),
-/// `date - date` is the difference in days, and text meets a number as a number. `None` when
-/// Oracle has no such rule for the operand types.
 pub(crate) fn arithmetic(
     operator: crate::ast::BinaryOperator,
     left: &Value,

@@ -52,8 +52,6 @@ fn invalid_format() -> SqlError {
     .with_oracle_code(1481)
 }
 
-/// `number` as Oracle converts a number to text: no trailing zeros, no leading zero before
-/// the decimal point (`.5`), and `Nan`, `Inf` and `-Inf` for the special values.
 pub(crate) fn number_text(number: f64) -> String {
     if number.is_nan() {
         return "Nan".to_owned();
@@ -97,14 +95,10 @@ fn text_of(value: &Value) -> Option<String> {
     text_with_type(value, None)
 }
 
-/// `value` as Oracle converts it to text without a format model: numbers without trailing
-/// zeros (`.5`), datetimes by the session's NLS format, `NULL` as `None`.
 pub(crate) fn plain_text(value: &Value) -> Option<String> {
     text_of(value)
 }
 
-/// `value` as Oracle converts it to text, with datetimes written by the NLS format that
-/// `declared`, the value's declared type, selects.
 pub(crate) fn text_by_declared_type(value: &Value, declared: Option<SqlType>) -> Option<String> {
     text_with_type(value, declared)
 }
@@ -171,8 +165,6 @@ fn exact_result(result: SqlResult<Numeric>) -> SqlResult<Value> {
         })
 }
 
-/// Reads `text` as Oracle reads a number without a format model: an integer, or an exact
-/// decimal (`.5`, `1.2e-4`); anything else is ORA-01722.
 pub(crate) fn parse_number(text: &str) -> SqlResult<Number> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -958,9 +950,6 @@ fn date_unit(values: &[Value]) -> Option<String> {
     values.get(1).and_then(text_of)
 }
 
-/// Runs the Oracle function `name` on `values`. `declared` holds the arguments' declared
-/// types where the evaluator knows them (it may be empty): `TO_CHAR`, `||` and `CONCAT` write
-/// a datetime by the NLS format its declared type selects.
 pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -> SqlResult<Value> {
     let unary_text = |change: fn(&str) -> String| -> SqlResult<Value> {
         let Some(text) = text_of(&values[0]) else {

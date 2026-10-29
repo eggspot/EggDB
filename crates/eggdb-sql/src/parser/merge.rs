@@ -6,13 +6,11 @@ use crate::ast::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 
-/// The options a dialect's `MERGE` has: whether `DELETE WHERE` may follow the update.
 pub(crate) struct MergeRules {
     pub(crate) delete_where: bool,
 }
 
 impl MergeRules {
-    /// Oracle's `MERGE`: the update may end with `DELETE WHERE`.
     pub(crate) fn oracle() -> Self {
         Self { delete_where: true }
     }
@@ -105,9 +103,6 @@ impl Parser<'_> {
         })
     }
 
-    /// `MERGE INTO target [alias] USING {table | (subquery)} [alias] ON (condition)` with a
-    /// `WHEN MATCHED THEN UPDATE` clause, a `WHEN NOT MATCHED THEN INSERT` clause, or both, in
-    /// either order.
     pub(super) fn merge(&mut self, rules: &MergeRules) -> SqlResult<Statement> {
         let position = self.position();
         self.at += 1;
