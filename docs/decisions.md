@@ -148,3 +148,4 @@ its full title with its status.
 - [D121](decisions/D121.md) The built-in MCP server, part 2: `write_sql` under `--allow-write`, destructive statements confirmed by the user through elicitation or `confirm: true`, the watchdog never ending a write that began to commit
 - [D122](decisions/D122.md) SQL Server's TDS protocol and a first Transact-SQL dialect: TDS 7.4 without encryption, SQL logins, names folded to lower case with `dbo` as `public`, SQL Server's batch rules and error numbers (superseded in part by D123)
 - [D123](decisions/D123.md) SQL Server's types, conversions and functions in the Transact-SQL dialect: types mapped onto the engine's, SQL Server's conversion rules and styles, no file-format change
+- [D124](decisions/D124.md) Transact-SQL views and CHECK constraints in the file: SQL Server is dialect code 4 in the view and CHECK records, with no new format version

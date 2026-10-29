@@ -245,7 +245,7 @@ fn dialect_code(dialect: crate::Dialect) -> u8 {
         crate::Dialect::MySql => 1,
         crate::Dialect::Sqlite => 2,
         crate::Dialect::Oracle => 3,
-        crate::Dialect::SqlServer => 0,
+        crate::Dialect::SqlServer => 4,
     }
 }
 
@@ -255,6 +255,7 @@ fn dialect_of(code: u8) -> Option<crate::Dialect> {
         1 => crate::Dialect::MySql,
         2 => crate::Dialect::Sqlite,
         3 => crate::Dialect::Oracle,
+        4 => crate::Dialect::SqlServer,
         _ => return None,
     })
 }

@@ -385,6 +385,19 @@ fn column_of(definition: &ColumnDefinition) -> Column {
 
 #[cold]
 #[inline(never)]
+fn unreadable_in_transact_sql(constraint: &str, to: &Name) -> SqlError {
+    SqlError::not_supported(format!(
+        "renaming a column to \"{}\", which the Transact-SQL check constraint \"{constraint}\" names",
+        to.text
+    ))
+    .with_hint(
+        "Transact-SQL reads every name in lower case, so the constraint could no longer find the column: choose a name in lower case.",
+    )
+    .at(to.position)
+}
+
+#[cold]
+#[inline(never)]
 fn duplicate_column(table: &TableDefinition, name: &Name) -> SqlError {
     SqlError::new(
         SqlState::DUPLICATE_COLUMN,
@@ -821,8 +834,15 @@ fn rename_column(
     }
     table.columns[index].name = to.text.clone();
     for check in &mut table.checks {
-        check.expression =
+        let renamed =
             constraints::renamed_in_text(&check.expression, check.dialect, &from.text, &to.text);
+        if check.dialect == Dialect::SqlServer
+            && renamed != check.expression
+            && to.text.to_lowercase() != to.text
+        {
+            return Err(unreadable_in_transact_sql(&check.name, to));
+        }
+        check.expression = renamed;
     }
     for key in &mut table.foreign_keys {
         if key.parent == table.name {

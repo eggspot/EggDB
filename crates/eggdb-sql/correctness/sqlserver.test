@@ -713,3 +713,141 @@ DROP TABLE Names39
 
 ok
 DROP TABLE T39
+
+chapter "CREATE VIEW (Transact-SQL)"
+ok
+CREATE TABLE [dbo].[Sales40] ([SaleID] INT NOT NULL, [Region] NVARCHAR(20) NOT NULL, [Qty] INT NOT NULL, [SoldOn] DATE NOT NULL, CONSTRAINT [PK_Sales40] PRIMARY KEY ([SaleID]))
+
+ok
+INSERT INTO Sales40 VALUES (1, N'East', 10, '2024-01-15'), (2, N'West', 20, '2024-02-01'), (3, N'East', 5, '2024-02-03')
+
+ok
+CREATE VIEW [dbo].[vRegions40] AS SELECT [Region], COUNT(*) AS [Sales], SUM([Qty]) AS [Units] FROM [dbo].[Sales40] GROUP BY [Region]
+
+rows
+SELECT Region AS region, Sales AS sales, Units AS units FROM vRegions40 ORDER BY Region
+----
+region|sales|units
+East|2|15
+West|1|20
+SELECT 2
+
+ok
+CREATE VIEW dbo.vDays40 (id, sold) WITH SCHEMABINDING AS SELECT SaleID, CONVERT(varchar(10), SoldOn, 23) FROM dbo.Sales40
+
+rows
+SELECT id, sold FROM vDays40 WHERE id = 2
+----
+id|sold
+2|2024-02-01
+SELECT 1
+
+error 42P07 2714
+CREATE VIEW vDays40 AS SELECT SaleID FROM Sales40
+
+error 42601 1033
+CREATE VIEW vSorted40 AS SELECT SaleID FROM Sales40 ORDER BY SaleID
+
+ok
+CREATE VIEW vTop40 AS SELECT TOP (2) SaleID FROM Sales40 ORDER BY Qty DESC
+
+rows
+SELECT SaleID AS id FROM vTop40 ORDER BY SaleID
+----
+id
+1
+2
+SELECT 2
+
+error 0A000 40517
+CREATE VIEW vSecret40 WITH ENCRYPTION AS SELECT SaleID FROM Sales40
+
+error 0A000 40517
+CREATE VIEW vEast40 AS SELECT SaleID FROM Sales40 WHERE Region = N'East' WITH CHECK OPTION
+
+error 42601 111
+SELECT 1 AS one; CREATE VIEW vLate40 AS SELECT 1 AS one
+
+chapter "ALTER VIEW (Transact-SQL)"
+ok
+ALTER VIEW vTop40 AS SELECT TOP (1) SaleID FROM Sales40 ORDER BY SoldOn
+
+rows
+SELECT SaleID AS id FROM vTop40
+----
+id
+1
+SELECT 1
+
+error 42P01 208
+ALTER VIEW vMissing40 AS SELECT SaleID FROM Sales40
+
+ok
+CREATE OR ALTER VIEW vEast40 AS SELECT SaleID, Qty FROM Sales40 WHERE Region = N'East'
+
+ok
+CREATE OR ALTER VIEW vEast40 AS SELECT SaleID FROM Sales40 WHERE Region = N'East' AND Qty > 5
+
+rows
+SELECT * FROM vEast40
+----
+saleid
+1
+SELECT 1
+
+chapter "DROP TABLE (Transact-SQL)", "CREATE VIEW (Transact-SQL)"
+ok
+CREATE VIEW vAll40 AS SELECT * FROM Sales40
+
+ok
+DROP VIEW vDays40, vRegions40, vTop40, vEast40
+
+ok
+DROP TABLE Sales40
+
+error 42P01 208
+SELECT * FROM vAll40
+
+ok
+DROP VIEW vAll40
+
+chapter "CHECK constraints", "ALTER TABLE (Transact-SQL)"
+ok
+CREATE TABLE [dbo].[Orders40] ([OrderID] INT NOT NULL PRIMARY KEY, [Qty] INT NOT NULL CHECK ([Qty] > 0), [Status] TINYINT NULL, CONSTRAINT [CK_Orders40_Status] CHECK ([Status] BETWEEN 0 AND 5))
+
+ok
+INSERT INTO Orders40 VALUES (1, 3, 2), (2, 1, NULL)
+
+error 23514 547
+INSERT INTO Orders40 VALUES (3, 0, 1)
+
+error 23514 547
+INSERT INTO Orders40 VALUES (4, 1, 9)
+
+error 23514 547
+UPDATE Orders40 SET Qty = -1 WHERE OrderID = 1
+
+ok
+ALTER TABLE [dbo].[Orders40] ADD CONSTRAINT [CK_Orders40_Small] CHECK ([Qty] < 100)
+
+error 23514 547
+INSERT INTO Orders40 VALUES (5, 100, 0)
+
+error 23514 547
+ALTER TABLE Orders40 ADD CONSTRAINT CK_Orders40_Big CHECK (Qty > 2)
+
+ok
+ALTER TABLE Orders40 DROP CONSTRAINT CK_Orders40_Small
+
+ok
+INSERT INTO Orders40 VALUES (5, 100, 0)
+
+rows
+SELECT COUNT(*) AS n FROM Orders40
+----
+n
+3
+SELECT 1
+
+ok
+DROP TABLE Orders40

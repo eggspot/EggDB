@@ -410,6 +410,14 @@ SELECT @@VERSION
   `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE`, and `SELECT total = qty * price`.
 - **Defaults** are constants (folded to the column's type: `DEFAULT ((0))` on a `bit` column
   is false), `GETDATE()` and its kin, `NEWID()` and `NEWSEQUENTIALID()`.
+- **Views and `CHECK` constraints** (D124): `CREATE VIEW`, `ALTER VIEW` and `CREATE OR ALTER
+  VIEW`, with a column list and `WITH SCHEMABINDING` or `VIEW_METADATA` (accepted without
+  effect); the view must be the only statement of its batch (error 111), and `ORDER BY` needs
+  `TOP` or `OFFSET` (error 1033). A table can be dropped under a view, which then fails with
+  error 208 until the table is back, as SQL Server's views without `SCHEMABINDING` do. `CHECK`
+  constraints inline, at table level and through `ALTER TABLE ... ADD CONSTRAINT`, violated with
+  error 547 (a subquery in one is error 1046, an aggregate error 175); an unnamed one is called `ck__<table>__<column>`. Both keep their Transact-SQL text
+  in the file and work from every dialect.
 - **Transactions**: each statement commits on its own unless `BEGIN TRAN[SACTION]` opened a
   transaction; `BEGIN TRAN` nests (`@@TRANCOUNT`), the outermost `COMMIT [TRAN | WORK]`
   commits, `ROLLBACK [TRAN | WORK]` rolls everything back, and without a transaction they are
@@ -1106,9 +1114,10 @@ fields as one byte, 0 without, and its fractional digits), 18 (`bytea`), 19 (`uu
 keep their version and bytes; an older release refuses a version 5 table by name. A table with
 `CHECK` or `FOREIGN KEY` constraints, or a primary key named other than `table_pkey`, is written
 in version 6 (D114): the version 5 layout followed by the primary key's name (a flag byte, then
-the name), the checks (count; each its name, the dialect it was written in as one byte and its
-expression text) and the foreign keys (count; each its name, its column numbers, the parent's
-name, the parent's column names, the `ON DELETE` and `ON UPDATE` actions as one byte each and a
+the name), the checks (count; each its name, the dialect it was written in as one byte, `0`
+PostgreSQL, `1` MySQL, `2` SQLite, `3` Oracle or `4` SQL Server (D124), and its expression
+text) and the foreign keys (count; each its name, its column numbers, the parent's name, the
+parent's column names, the `ON DELETE` and `ON UPDATE` actions as one byte each and a
 `DEFERRABLE` flag). A table that another table's foreign key references, or
 that owns a sequence (`OWNED BY`), is written in version 6 too, with a flags byte after the
 primary key's name saying so, so that an older release refuses it by name instead of deleting a
@@ -1117,8 +1126,8 @@ bytes; an older release refuses a version 6 table by name. A table in a schema o
 `public` is stored under its schema's name, a zero byte and its name, and written in version 7
 (D116): the version 6 layout with the constraints part always present; `public` tables keep
 their names, versions and bytes, and an older release refuses a version 7 table by name. A view
-is stored under its name in the same key space as version 8: its dialect, a flag for `*` in its
-select list, its query text, its columns with their types, the schemas of the search path when
+is stored under its name in the same key space as version 8: its dialect (the same codes as a
+check's), a flag for `*` in its select list, its query text, its columns with their types, the schemas of the search path when
 it was created and the relations it names; an older release refuses it by name.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
@@ -1495,10 +1504,15 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   savepoints yet) and ends the batch; one that wrote nothing leaves the transaction open, as in
   SQL Server. An unknown column of an existing table is found when the statement runs, after
   the statements before it in the batch ran (SQL Server finds it when the batch compiles).
-- Views (`CREATE VIEW` and `ALTER VIEW`) and `CHECK` constraints: each keeps its dialect in the
-  file, and a fifth dialect there is a file-format change of its own (D114, D116, D35); views
-  and constraints made in another dialect work from Transact-SQL. A `DEFAULT` is a constant or
-  `GETDATE()` and its kin.
+- A `DEFAULT` is a constant, `GETDATE()` and its kin, `NEWID()` or `NEWSEQUENTIALID()`; other
+  expressions are 40517 (item 40b). `WITH ENCRYPTION` and `WITH CHECK OPTION` on views are 40517,
+  and `SCHEMABINDING` does not stop a table from being changed under the view. Unnamed `CHECK`
+  constraints are named `ck__<table>__<column>`, not with SQL Server's random digits.
+- A view or `CHECK` written in Transact-SQL and used from another dialect (or one written in
+  another dialect and used from Transact-SQL) runs its functions in its own dialect, but its
+  implicit conversions, date parsing and the errors raised inside it follow the dialect of the
+  statement that uses it (D124). A column that a Transact-SQL `CHECK` names cannot be renamed
+  to a name with upper-case letters, since Transact-SQL reads names in lower case.
 - Accepted where SQL Server refuses or differs: `SELECT name IS NULL FROM t` (a boolean result),
   an `UPDATE` of an identity column (SQL Server's 8102), and `ROLLBACK TRAN <name>` ignores the
   name. Divide by zero and arithmetic overflow end the batch, where SQL Server ends only the

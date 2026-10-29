@@ -434,4 +434,131 @@ mod tests {
         assert_eq!(fine.primary_key_constraint_name(), "t_pkey");
         assert!(!damaged(&fine));
     }
+
+    fn checked_table(dialect: crate::Dialect, expression: &str) -> TableDefinition {
+        TableDefinition {
+            id: 7,
+            name: "t".into(),
+            columns: vec![Column {
+                name: "a".into(),
+                sql_type: SqlType::Integer,
+                not_null: false,
+                default: None,
+                auto_increment: false,
+            }],
+            checks: vec![crate::encoding::CheckConstraint {
+                name: "ck_a".into(),
+                dialect,
+                expression: expression.into(),
+            }],
+            ..TableDefinition::default()
+        }
+    }
+
+    fn checked_table_bytes(dialect_byte: u8, expression: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![6, 7, 0, 0, 0, 1, 1, b'a', 2, 0, 0, 0, 0, 0, 0, 1, 4];
+        bytes.extend_from_slice(b"ck_a");
+        bytes.push(dialect_byte);
+        bytes.push(u8::try_from(expression.len()).unwrap());
+        bytes.extend_from_slice(expression);
+        bytes.push(0);
+        bytes
+    }
+
+    fn sqlserver_view() -> ViewDefinition {
+        ViewDefinition {
+            name: "v".into(),
+            dialect: crate::Dialect::SqlServer,
+            query: "SELECT [a] FROM [dbo].[t]".into(),
+            columns: vec![ViewColumn {
+                name: "a".into(),
+                sql_type: Some(SqlType::Integer),
+                source: "a".into(),
+            }],
+            search_path: vec!["public".into()],
+            references: vec!["t".into()],
+            expands_wildcard: false,
+            has_column_list: false,
+        }
+    }
+
+    #[test]
+    fn transact_sql_checks_and_views_carry_dialect_code_4_and_older_codes_keep_their_bytes() {
+        let tsql = checked_table(crate::Dialect::SqlServer, "[a] > (0)");
+        let bytes = tsql.encode();
+        assert_eq!(bytes, checked_table_bytes(4, b"[a] > (0)"));
+        assert_eq!(TableDefinition::decode("t", &bytes).unwrap(), tsql);
+        for (dialect, code) in [
+            (crate::Dialect::PostgreSql, 0),
+            (crate::Dialect::MySql, 1),
+            (crate::Dialect::Sqlite, 2),
+            (crate::Dialect::Oracle, 3),
+        ] {
+            assert_eq!(
+                checked_table(dialect, "a > 0").encode(),
+                checked_table_bytes(code, b"a > 0")
+            );
+        }
+        let mut view = vec![8, 4, 0, 25];
+        view.extend_from_slice(b"SELECT [a] FROM [dbo].[t]");
+        view.extend_from_slice(&[1, 1, b'a', 2, 1, b'a', 1, 6]);
+        view.extend_from_slice(b"public");
+        view.extend_from_slice(&[1, 1, b't']);
+        assert_eq!(sqlserver_view().encode(), view);
+        assert_eq!(
+            ViewDefinition::decode("v", &view).unwrap(),
+            sqlserver_view()
+        );
+        let mut postgresql = sqlserver_view();
+        postgresql.dialect = crate::Dialect::PostgreSql;
+        view[1] = 0;
+        assert_eq!(postgresql.encode(), view);
+    }
+
+    #[test]
+    fn a_dialect_code_this_release_does_not_know_is_damage_as_code_4_was_to_older_builds() {
+        for code in 5..=u8::MAX {
+            let error =
+                TableDefinition::decode("t", &checked_table_bytes(code, b"a > 0")).unwrap_err();
+            assert_eq!(error.state().code(), "XX001", "{code}");
+            let mut view = sqlserver_view().encode();
+            view[1] = code;
+            let error = ViewDefinition::decode("v", &view).unwrap_err();
+            assert_eq!(error.state().code(), "XX001", "{code}");
+        }
+    }
+
+    #[test]
+    fn hostile_transact_sql_check_and_view_records_are_errors_never_panics() {
+        let check = checked_table(crate::Dialect::SqlServer, "[a] > (0)").encode();
+        let view = sqlserver_view().encode();
+        for cut in 0..check.len() {
+            assert!(TableDefinition::decode("t", &check[..cut]).is_err());
+        }
+        for cut in 0..view.len() {
+            assert!(ViewDefinition::decode("v", &view[..cut]).is_err());
+        }
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..20_000 {
+            for original in [&check, &view] {
+                let mut changed = original.clone();
+                for _ in 0..1 + next() % 4 {
+                    let at = usize::try_from(next() % changed.len() as u64).unwrap();
+                    changed[at] = (next() & 0xFF) as u8;
+                }
+                if next() % 8 == 0 {
+                    let at = usize::try_from(next() % changed.len() as u64).unwrap();
+                    changed.truncate(at);
+                }
+                let _ = TableDefinition::decode("t", &changed);
+                let _ = ViewDefinition::decode("v", &changed);
+            }
+        }
+    }
 }

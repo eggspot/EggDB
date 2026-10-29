@@ -2,7 +2,7 @@ use crate::error::SqlError;
 
 const GENERIC_ERROR: u16 = 50000;
 
-const SEVERITIES: [(u16, u8); 62] = [
+const SEVERITIES: [(u16, u8); 67] = [
     (102, 15),
     (103, 15),
     (105, 15),
@@ -10,6 +10,10 @@ const SEVERITIES: [(u16, u8); 62] = [
     (156, 15),
     (195, 15),
     (1038, 15),
+    (111, 15),
+    (1033, 15),
+    (175, 15),
+    (1046, 15),
     (131, 16),
     (192, 16),
     (207, 16),
@@ -40,6 +44,7 @@ const SEVERITIES: [(u16, u8); 62] = [
     (3906, 16),
     (4060, 11),
     (4104, 16),
+    (4413, 16),
     (8110, 16),
     (8115, 16),
     (8120, 16),
@@ -282,6 +287,7 @@ fn conflict(error: &SqlError, text: &str, kind: &str) -> (u16, String) {
     let statement = match first_word(text).as_str() {
         "UPDATE" => "UPDATE",
         "DELETE" => "DELETE",
+        "ALTER" => "ALTER TABLE",
         _ => "INSERT",
     };
     let kind = if statement == "DELETE" && kind == "FOREIGN KEY" {
