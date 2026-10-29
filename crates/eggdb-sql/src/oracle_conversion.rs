@@ -58,7 +58,7 @@ pub(crate) fn literal_of(text: &str, target: SqlType) -> Option<SqlResult<Value>
     if let Some(value) = datetime_of(text, target) {
         return Some(value);
     }
-    if target.is_numeric() && !target.is_float() {
+    if target.is_numeric() {
         return Some(crate::oracle_functions::parse_number(text).map(|number| number.value()));
     }
     None

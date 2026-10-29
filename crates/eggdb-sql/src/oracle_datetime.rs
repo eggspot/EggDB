@@ -522,7 +522,6 @@ struct Fields {
     month: Option<i64>,
     day: Option<i64>,
     hour: Option<i64>,
-    twelve_hour: bool,
     minute: Option<i64>,
     second: Option<i64>,
     nanos: i64,
@@ -744,7 +743,6 @@ fn read_element(
                 1849,
                 "hour must be between 1 and 12",
             )?);
-            fields.twelve_hour = true;
         }
         E::Hour24 => {
             let hour = number(reader, 2)?;
@@ -873,8 +871,6 @@ fn assemble(fields: &Fields, now_year: i64, now_month: i64) -> SqlResult<i64> {
     let mut hour = fields.hour.unwrap_or(0);
     if let Some(afternoon) = fields.afternoon {
         hour = hour % 12 + if afternoon { 12 } else { 0 };
-    } else if fields.twelve_hour && hour == 12 {
-        hour = 12;
     }
     let seconds = datetime::days_from_civil(year, month, day) * 86_400
         + hour * 3600

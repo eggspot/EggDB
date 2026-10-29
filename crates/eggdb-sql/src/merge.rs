@@ -1,5 +1,6 @@
 use crate::ast::{
-    Expr, ExprKind, Insert, InsertSource, InsertValue, MergeStatement, Name, OnDuplicate,
+    BinaryOperator, Expr, ExprKind, Insert, InsertSource, InsertValue, MergeStatement, Name,
+    OnDuplicate,
 };
 use crate::constraints::PreparedChecks;
 use crate::encoding::{Column, TableDefinition};
@@ -9,7 +10,8 @@ use crate::execute::{self, TableCache};
 use crate::memory::WorkMemory;
 use crate::session::QueryResult;
 use crate::store::KeyValueWrite;
-use crate::types::{SqlType, Value};
+use crate::types::{SqlType, Value, equality_key};
+use std::collections::HashMap;
 
 fn unstable_rows() -> SqlError {
     SqlError::new(
@@ -90,6 +92,106 @@ fn target_index(table: &TableDefinition, name: &Name) -> SqlResult<usize> {
     })
 }
 
+fn same_family(a: SqlType, b: SqlType) -> bool {
+    let exact = |sql_type: SqlType| {
+        matches!(
+            sql_type,
+            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Numeric(_)
+        )
+    };
+    (exact(a) && exact(b))
+        || (a.is_float() && b.is_float())
+        || (a.is_character() && b.is_character())
+        || a.without_modifier() == b.without_modifier()
+}
+
+fn equality_columns(
+    on: &Expr,
+    scope: Scope<'_>,
+    target: &TableDefinition,
+    source: &TableDefinition,
+) -> Vec<(usize, usize)> {
+    let width = target.columns.len();
+    let conjuncts: Vec<&Expr> = match &on.kind {
+        ExprKind::And(parts) => parts.iter().collect(),
+        _ => vec![on],
+    };
+    let offset = |expr: &Expr| match &expr.kind {
+        ExprKind::Column { qualifier, name } => {
+            scope.column(qualifier.as_deref(), name, expr.position).ok()
+        }
+        _ => None,
+    };
+    let mut pairs = Vec::new();
+    for conjunct in conjuncts {
+        let ExprKind::Binary(BinaryOperator::Equal, left, right) = &conjunct.kind else {
+            continue;
+        };
+        let (Some(a), Some(b)) = (offset(left), offset(right)) else {
+            continue;
+        };
+        let (on_target, on_source) = match (a < width, b < width) {
+            (true, false) => (a, b - width),
+            (false, true) => (b, a - width),
+            _ => continue,
+        };
+        if same_family(
+            target.columns[on_target].sql_type,
+            source.columns[on_source].sql_type,
+        ) {
+            pairs.push((on_target, on_source));
+        }
+    }
+    pairs
+}
+
+fn key_of(row: &[Value], columns: impl Iterator<Item = usize>) -> Option<Vec<u8>> {
+    let mut key = Vec::new();
+    for column in columns {
+        let value = row.get(column)?;
+        if value.is_null() {
+            return None;
+        }
+        equality_key(&mut key, value);
+    }
+    Some(key)
+}
+
+struct SourceIndex {
+    rows: HashMap<Vec<u8>, Vec<usize>>,
+    none: Vec<usize>,
+}
+
+impl SourceIndex {
+    fn build(
+        equalities: &[(usize, usize)],
+        rows: &[Vec<Value>],
+        memory: &mut WorkMemory,
+    ) -> SqlResult<Option<Self>> {
+        if equalities.is_empty() {
+            return Ok(None);
+        }
+        let mut index: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+        for (position, row) in rows.iter().enumerate() {
+            let Some(key) = key_of(row, equalities.iter().map(|(_, source)| *source)) else {
+                continue;
+            };
+            memory.charge(key.len() + std::mem::size_of::<usize>() * 2)?;
+            index.entry(key).or_default().push(position);
+        }
+        Ok(Some(Self {
+            rows: index,
+            none: Vec::new(),
+        }))
+    }
+
+    fn candidates(&self, equalities: &[(usize, usize)], target_row: &[Value]) -> &[usize] {
+        key_of(target_row, equalities.iter().map(|(target, _)| *target))
+            .and_then(|key| self.rows.get(&key))
+            .map_or(&self.none, Vec::as_slice)
+    }
+}
+
 struct Joined<'a> {
     scope: Scope<'a>,
     target_width: usize,
@@ -156,7 +258,7 @@ pub(crate) fn merge(
         .target
         .alias
         .clone()
-        .unwrap_or_else(|| table.name.clone());
+        .unwrap_or_else(|| crate::schemas::base_name(&table.name).to_owned());
     let source_label = merge.source_label.clone().unwrap_or_default();
     let source_table = source_definition(&source_columns, &source_label);
     let target_width = table.columns.len();
@@ -204,11 +306,19 @@ pub(crate) fn merge(
         }
     }
     let target_rows = execute::every_row(writer, &table)?;
+    let equalities = equality_columns(&merge.on, joined.scope, &table, &source_table);
+    let candidates = SourceIndex::build(&equalities, &source.rows, &mut memory)?;
+    let every_source: Vec<usize> = (0..source.rows.len()).collect();
     let mut matched_sources = vec![false; source.rows.len()];
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (target_index, (_, target_row)) in target_rows.iter().enumerate() {
         let mut chosen = None;
-        for (source_index, source_row) in source.rows.iter().enumerate() {
+        let sources = match &candidates {
+            Some(index) => index.candidates(&equalities, target_row),
+            None => &every_source,
+        };
+        for &source_index in sources {
+            let source_row = &source.rows[source_index];
             let row = joined.row(target_row, source_row);
             if !joined.holds(Some(&merge.on), &row, "ON")? {
                 continue;
