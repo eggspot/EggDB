@@ -27,8 +27,8 @@ pub use sqlite::SQLITE_COMPATIBLE_VERSION;
 pub(crate) use sqlite::is_schema_table;
 
 use crate::ast::{
-    AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, Expr, ExprKind,
-    FromClause, IndexSpec, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind,
+    AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, DiscardTarget, Expr,
+    ExprKind, FromClause, IndexSpec, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind,
     Literal, Name, OnDuplicate, Select, SelectItem, Statement, TableReference, TruthTest,
     UnaryOperator, Update,
 };
@@ -808,6 +808,7 @@ impl<'t> Parser<'t> {
             "revoke" if self.postgresql() => self.grant_or_revoke("REVOKE"),
             "comment" if self.postgresql() || self.oracle() => self.comment(),
             "copy" if self.postgresql() || self.oracle() => self.copy(),
+            "discard" if self.postgresql() => self.discard(),
             "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
             | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
             | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),
@@ -977,6 +978,22 @@ impl<'t> Parser<'t> {
             self.parameter_name()?
         };
         Ok(Statement::Show { name: Some(name) })
+    }
+
+    fn discard(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        let target = if self.take_word("all") {
+            DiscardTarget::All
+        } else if self.take_word("plans") {
+            DiscardTarget::Plans
+        } else if self.take_word("sequences") {
+            DiscardTarget::Sequences
+        } else if self.take_word("temp") || self.take_word("temporary") {
+            DiscardTarget::Temporary
+        } else {
+            return Err(self.unexpected());
+        };
+        Ok(Statement::Discard(target))
     }
 
     fn reset(&mut self) -> SqlResult<Statement> {

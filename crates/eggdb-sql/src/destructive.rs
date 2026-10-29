@@ -177,6 +177,7 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::Copy(_)
         | Statement::Ignored { .. }
         | Statement::AlterSession(_)
+        | Statement::Discard(_)
         | Statement::SqlServer(_) => None,
         Statement::Merge(merge) => merge
             .update

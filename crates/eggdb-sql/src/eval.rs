@@ -1313,6 +1313,11 @@ impl Evaluator<'_> {
             }
             ("lower", [Value::Text(text)]) => Ok(Value::Text(text.to_lowercase())),
             ("upper", [Value::Text(text)]) => Ok(Value::Text(text.to_uppercase())),
+            ("pg_sleep", [Value::Null]) => Ok(Value::Null),
+            ("pg_sleep", [seconds]) => match seconds.as_float() {
+                Some(seconds) => crate::cancel::sleep(seconds).map(|()| Value::Text(String::new())),
+                None => Err(unknown()),
+            },
             _ => Err(unknown()),
         }
     }
@@ -1363,6 +1368,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "lpad" | "rpad" => &[TEXT, INTEGER, TEXT],
         "initcap" | "reverse" | "ascii" | "md5" | "quote_literal" => &[TEXT],
         "chr" => &[INTEGER],
+        "pg_sleep" => &[DOUBLE],
         "overlay" => &[TEXT, TEXT, INTEGER, INTEGER],
         "substr" => &[None, INTEGER, INTEGER],
         "format" => &[TEXT],

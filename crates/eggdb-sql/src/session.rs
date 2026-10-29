@@ -11,7 +11,8 @@ pub(crate) use oracle::create_text as oracle_create_text;
 pub(crate) use sqlite::create_text as sqlite_create_text;
 
 use crate::ast::{
-    CopyDirection, CopySource, CopyStatement, MySqlStatement, SqlServerStatement, Statement,
+    CopyDirection, CopySource, CopyStatement, DiscardTarget, MySqlStatement, SqlServerStatement,
+    Statement,
 };
 use crate::copy::{CopyChannel, CopyIo, NoCopyChannel};
 use crate::destructive::DestructiveStatement;
@@ -264,6 +265,8 @@ fn inline_data_start(text: &str, ranges: &[std::ops::Range<usize>], stop: CopySt
         .map_or(range.end, |next| next.start)
 }
 
+const NO_TRANSACTION_WARNING: &str = "WARNING:  there is no transaction in progress";
+
 fn aborted_block() -> SqlError {
     SqlError::new(
         SqlState::IN_FAILED_SQL_TRANSACTION,
@@ -311,6 +314,10 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     statement_start: usize,
     table_variables: crate::table_variables::TableVariables,
     extra_results: Vec<QueryResult>,
+    cancel: crate::cancel::CancelSignal,
+    implicit_transaction: bool,
+    block_is_implicit: bool,
+    connection_settings: Option<Arc<Settings>>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -352,6 +359,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             statement_start: 0,
             table_variables: crate::table_variables::TableVariables::default(),
             extra_results: Vec::new(),
+            cancel: crate::cancel::CancelSignal::default(),
+            implicit_transaction: false,
+            block_is_implicit: false,
+            connection_settings: None,
         }
     }
 
@@ -570,12 +581,118 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.settings.reported()
     }
 
-    /// Where the session stands toward transactions.
+    /// Where the session stands toward transactions. An implicit transaction
+    /// ([`Session::start_implicit_transaction`]) is not a block: the session stays idle in it.
     pub fn transaction_status(&self) -> TransactionStatus {
+        if self.block_is_implicit {
+            return TransactionStatus::Idle;
+        }
         match self.block {
             Block::None => TransactionStatus::Idle,
             Block::Writing(_) | Block::Reading(_) => TransactionStatus::InBlock,
             Block::Failed => TransactionStatus::Failed,
+        }
+    }
+
+    /// The signal that cancels this session's running statement from another thread, as a
+    /// PostgreSQL `CancelRequest` does: the statement stops at its next row with SQLSTATE
+    /// `57014`, and so does every statement started before [`CancelSignal::clear`] lowers it.
+    ///
+    /// [`CancelSignal::clear`]: crate::CancelSignal::clear
+    pub fn cancel_signal(&self) -> crate::cancel::CancelSignal {
+        self.cancel.clone()
+    }
+
+    /// Starts an implicit transaction, as PostgreSQL runs the statements of one simple `Query`
+    /// message, or of an extended-query pipeline up to its `Sync`: until
+    /// [`Session::commit_implicit_transaction`] or [`Session::roll_back_implicit_transaction`],
+    /// the statements outside a `BEGIN` block share one transaction, opened by the first one
+    /// that writes, instead of committing one by one. A `BEGIN` among them turns it into a
+    /// block that includes what they wrote; a `COMMIT` or `ROLLBACK` ends it with a warning, and
+    /// the statements after it start another. Calling it again while one is started changes
+    /// nothing.
+    pub fn start_implicit_transaction(&mut self) {
+        self.implicit_transaction = true;
+    }
+
+    /// Ends the implicit transaction [`Session::start_implicit_transaction`] started, committing
+    /// what its statements wrote. A block a `BEGIN` opened stays open. Fails when the store
+    /// cannot commit, and then nothing of it is kept.
+    pub fn commit_implicit_transaction(&mut self) -> SqlResult<()> {
+        self.end_implicit_transaction(true)
+    }
+
+    /// Ends the implicit transaction [`Session::start_implicit_transaction`] started, rolling
+    /// back what its statements wrote, as PostgreSQL does when one of them failed. A block a
+    /// `BEGIN` opened stays as it is.
+    pub fn roll_back_implicit_transaction(&mut self) -> SqlResult<()> {
+        self.end_implicit_transaction(false)
+    }
+
+    fn end_implicit_transaction(&mut self, commit: bool) -> SqlResult<()> {
+        self.implicit_transaction = false;
+        if !std::mem::take(&mut self.block_is_implicit) {
+            return Ok(());
+        }
+        let ended = match std::mem::replace(&mut self.block, Block::None) {
+            Block::Writing(writer) if commit => writer.commit().map(|()| {
+                self.pending_sequences.clear();
+                sequences::mark_changes_committed();
+            }),
+            Block::Writing(writer) => writer.rollback(),
+            Block::Reading(_) | Block::Failed | Block::None => Ok(()),
+        };
+        let settled = self.settle_sequences();
+        ended.and(settled)
+    }
+
+    /// Makes the run-time parameters now in force the ones `RESET` and `DISCARD ALL` return
+    /// to, as PostgreSQL returns to the values a client sent when it connected rather than to
+    /// the server's defaults.
+    pub fn remember_connection_settings(&mut self) {
+        self.connection_settings = Some(Arc::clone(&self.settings));
+    }
+
+    fn reset_all_settings(&mut self) {
+        match &self.connection_settings {
+            Some(remembered) => {
+                let mut restored = Settings::clone(remembered);
+                if restored.get(DIALECT_SETTING).is_ok() {
+                    let _ = restored.set(DIALECT_SETTING, Some(self.dialect.name()));
+                }
+                self.settings = Arc::new(restored);
+            }
+            None => Arc::make_mut(&mut self.settings).reset_all(),
+        }
+    }
+
+    fn reset_setting(&mut self, name: &str) -> SqlResult<()> {
+        let remembered = self
+            .connection_settings
+            .as_ref()
+            .and_then(|settings| settings.get(name).ok());
+        Arc::make_mut(&mut self.settings).set(name, remembered.as_deref())
+    }
+
+    fn discard(&mut self, target: DiscardTarget) -> SqlResult<QueryResult> {
+        match target {
+            DiscardTarget::All => {
+                if self.in_block() {
+                    return Err(SqlError::new(
+                        SqlState::ACTIVE_SQL_TRANSACTION,
+                        "DISCARD ALL cannot run inside a transaction block",
+                    ));
+                }
+                self.reset_all_settings();
+                sequences::discard_session_values();
+                Ok(QueryResult::command("DISCARD ALL"))
+            }
+            DiscardTarget::Plans => Ok(QueryResult::command("DISCARD PLANS")),
+            DiscardTarget::Sequences => {
+                sequences::discard_session_values();
+                Ok(QueryResult::command("DISCARD SEQUENCES"))
+            }
+            DiscardTarget::Temporary => Ok(QueryResult::command("DISCARD TEMP")),
         }
     }
 
@@ -810,9 +927,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.read(|reader, _| crate::indexes::check_indexes(reader))
     }
 
-    /// Whether a `BEGIN` block is open, failed or not.
+    /// Whether a `BEGIN` block is open, failed or not. An implicit transaction
+    /// ([`Session::start_implicit_transaction`]) is not one.
     pub fn in_block(&self) -> bool {
-        !matches!(self.block, Block::None)
+        !self.block_is_implicit && !matches!(self.block, Block::None)
     }
 
     /// Runs every statement in `text`, separated by semicolons, in order, and hands each
@@ -1085,6 +1203,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 self.sync_transaction_count();
             }
             let settings = Arc::clone(&self.settings);
+            let _cancel = crate::cancel::enter(&self.cancel);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _regex = crate::regex::enter_statement();
             let _bytes = crate::bytea::enter_dialect(self.dialect);
@@ -1634,13 +1753,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Set { name, value } => Arc::make_mut(&mut self.settings)
                 .set(name, value.as_deref())
                 .map(|()| QueryResult::command("SET")),
-            Statement::Reset { name: Some(name) } => Arc::make_mut(&mut self.settings)
-                .set(name, None)
+            Statement::Reset { name: Some(name) } => self
+                .reset_setting(name)
                 .map(|()| QueryResult::command("RESET")),
             Statement::Reset { name: None } => {
-                Arc::make_mut(&mut self.settings).reset_all();
+                self.reset_all_settings();
                 Ok(QueryResult::command("RESET"))
             }
+            Statement::Discard(target) => self.discard(*target),
             Statement::Show { name } => self.show(name.as_deref()),
             Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
                 binding.create_table(writer, tables, create)?;
@@ -1811,6 +1931,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         };
         let keep_open = !self.autocommit();
         let keeps_ddl_open = self.sqlserver();
+        let implicit = self.implicit_transaction;
         let tables = &mut self.tables;
         match &mut self.block {
             Block::Writing(writer) if self.dialect != Dialect::PostgreSql => {
@@ -1860,6 +1981,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                                 )) =>
                     {
                         self.block = Block::Writing(writer);
+                        self.block_is_implicit = false;
+                        Ok(result)
+                    }
+                    Ok(result) if implicit => {
+                        self.block = Block::Writing(writer);
+                        self.block_is_implicit = true;
                         Ok(result)
                     }
                     Ok(result) => {
@@ -1879,6 +2006,22 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     fn begin(&mut self, read_only: bool) -> SqlResult<QueryResult> {
         if self.mysql() && self.in_block() {
             self.commit()?;
+        }
+        if self.block_is_implicit {
+            match self.block {
+                Block::Writing(_) => {
+                    self.block_is_implicit = false;
+                    if self.dialect == Dialect::PostgreSql {
+                        self.search_path_at_begin = self.settings.get("search_path").ok();
+                    }
+                    return Ok(QueryResult::command("BEGIN"));
+                }
+                Block::Failed => return Err(aborted_block()),
+                Block::Reading(_) | Block::None => {
+                    self.block_is_implicit = false;
+                    self.block = Block::None;
+                }
+            }
         }
         match self.block {
             Block::Failed => Err(aborted_block()),
@@ -1907,6 +2050,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn commit(&mut self) -> SqlResult<QueryResult> {
+        let implicit = std::mem::take(&mut self.block_is_implicit);
         if matches!(self.block, Block::Failed) {
             self.restore_search_path();
         }
@@ -1916,27 +2060,40 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 writer.commit()?;
                 self.pending_sequences.clear();
                 sequences::mark_changes_committed();
-                Ok(QueryResult::command("COMMIT"))
+                let committed = QueryResult::command("COMMIT");
+                Ok(if implicit && self.dialect == Dialect::PostgreSql {
+                    committed.with_notice(NO_TRANSACTION_WARNING.into())
+                } else {
+                    committed
+                })
             }
             Block::Reading(_) => Ok(QueryResult::command("COMMIT")),
             Block::Failed => Ok(QueryResult::command("ROLLBACK")),
             Block::None if self.mysql() || self.oracle() => Ok(QueryResult::command("COMMIT")),
-            Block::None => Ok(QueryResult::command("COMMIT")
-                .with_notice("WARNING:  there is no transaction in progress".into())),
+            Block::None => {
+                Ok(QueryResult::command("COMMIT").with_notice(NO_TRANSACTION_WARNING.into()))
+            }
         }
     }
 
     fn rollback(&mut self) -> SqlResult<QueryResult> {
+        let implicit = std::mem::take(&mut self.block_is_implicit);
         self.restore_search_path();
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 writer.rollback()?;
-                Ok(QueryResult::command("ROLLBACK"))
+                let rolled_back = QueryResult::command("ROLLBACK");
+                Ok(if implicit && self.dialect == Dialect::PostgreSql {
+                    rolled_back.with_notice(NO_TRANSACTION_WARNING.into())
+                } else {
+                    rolled_back
+                })
             }
             Block::Reading(_) | Block::Failed => Ok(QueryResult::command("ROLLBACK")),
             Block::None if self.mysql() || self.oracle() => Ok(QueryResult::command("ROLLBACK")),
-            Block::None => Ok(QueryResult::command("ROLLBACK")
-                .with_notice("WARNING:  there is no transaction in progress".into())),
+            Block::None => {
+                Ok(QueryResult::command("ROLLBACK").with_notice(NO_TRANSACTION_WARNING.into()))
+            }
         }
     }
 }

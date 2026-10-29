@@ -1994,6 +1994,7 @@ fn for_each_matching_row(
     } = &access.path
     {
         return plan::read_ranges(reader, table, *key, ranges, *backward, &mut |key, row| {
+            crate::cancel::check()?;
             if filter_matches(scope, filter, &row)? {
                 visit(key, row)
             } else {
@@ -2007,6 +2008,7 @@ fn for_each_matching_row(
         &prefix_end(&prefix),
         ScanDirection::Forward,
         &mut |key, bytes| {
+            crate::cancel::check()?;
             let row = decode_row(bytes, &table.columns)?;
             if filter_matches(scope, filter, &row)? {
                 return visit(key, row);

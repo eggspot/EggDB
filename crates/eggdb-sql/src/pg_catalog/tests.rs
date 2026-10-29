@@ -844,3 +844,69 @@ fn array_types_name_array_in_as_their_input_function() {
         "42883"
     );
 }
+
+#[test]
+fn npgsql_loads_every_type_with_arrays_found_by_their_receive_function() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    let outputs = match run(
+        &mut session,
+        include_str!("../../../eggdb/tests/data/npgsql/load-types.sql"),
+    ) {
+        Ok(outputs) => outputs,
+        Err(error) => panic!("Npgsql's type-loading queries failed: {error}"),
+    };
+    assert_eq!(outputs.len(), 4, "{outputs:?}");
+    assert!(outputs[0].contains("PostgreSQL 16"), "{}", outputs[0]);
+    let types = rows_of(&outputs[1]);
+    for expected in [
+        "pg_catalog|16|bool|b|f|NULL",
+        "pg_catalog|23|int4|b|f|NULL",
+        "pg_catalog|25|text|b|f|NULL",
+        "pg_catalog|1007|_int4|a|f|23",
+        "pg_catalog|1009|_text|a|f|25",
+    ] {
+        assert!(types.contains(&expected), "{expected} in {types:?}");
+    }
+    let first_array = types
+        .iter()
+        .position(|row| row.split('|').nth(3) == Some("a"))
+        .expect("an array type");
+    assert!(
+        types[first_array..]
+            .iter()
+            .all(|row| row.split('|').nth(3) == Some("a")),
+        "{types:?}"
+    );
+    assert!(rows_of(&outputs[2]).is_empty(), "{}", outputs[2]);
+    assert!(rows_of(&outputs[3]).is_empty(), "{}", outputs[3]);
+}
+
+#[test]
+fn array_types_name_their_receive_function_in_pg_proc() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT t.typname, p.proname, p.pronargs, p.prorettype \
+             FROM pg_type t JOIN pg_proc p ON p.oid = t.typreceive \
+             WHERE t.oid IN (23, 1007) ORDER BY t.oid"
+        )),
+        ["_int4|array_recv|3|2277"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT typoutput::text, typsend::text FROM pg_type WHERE oid = 1009"
+        )),
+        ["array_out|array_send"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT (SELECT count(*) FROM pg_range), (SELECT count(*) FROM pg_proc)"
+        )),
+        ["0|4"]
+    );
+}

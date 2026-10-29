@@ -97,7 +97,7 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
         | "repeat" | "initcap" | "translate" | "reverse" | "chr" | "md5" | "format"
         | "overlay" | "quote_literal" | "quote_nullable" | "regexp_replace" | "regexp_substr"
         | "similar_to_escape" | "similar_substring_pattern" | "to_char" | "jsonb_pretty"
-        | "json_extract_path_text" | "jsonb_extract_path_text" => Some(SqlType::Text),
+        | "json_extract_path_text" | "jsonb_extract_path_text" | "pg_sleep" => Some(SqlType::Text),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => {
             Some(SqlType::Integer)
         }

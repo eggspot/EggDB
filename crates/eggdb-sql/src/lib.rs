@@ -23,6 +23,7 @@ mod alter;
 mod arrays;
 mod ast;
 mod bytea;
+mod cancel;
 mod comments;
 mod constraints;
 mod copy;
@@ -100,6 +101,8 @@ mod correctness;
 #[cfg(test)]
 mod destructive_tests;
 #[cfg(test)]
+mod implicit_transaction_tests;
+#[cfg(test)]
 mod index_tests;
 #[cfg(test)]
 mod memory_store;
@@ -121,6 +124,7 @@ mod subquery_tests;
 mod tests;
 
 pub use arrays::{ArrayElement, ArrayValue};
+pub use cancel::CancelSignal;
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{
     DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,

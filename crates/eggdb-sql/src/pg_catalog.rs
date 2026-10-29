@@ -185,6 +185,8 @@ pub(crate) enum CatalogRelation {
     Settings,
     Opclass,
     Enum,
+    Proc,
+    Range,
     Information(InformationRelation),
     SqlServer(SqlServerRelation),
     Oracle(OracleRelation),
@@ -242,7 +244,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const IN_PG_CATALOG: [Self; 27] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 29] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -270,6 +272,8 @@ impl CatalogRelation {
         Self::Settings,
         Self::Opclass,
         Self::Enum,
+        Self::Proc,
+        Self::Range,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -301,6 +305,8 @@ impl CatalogRelation {
             Self::Settings => "pg_settings",
             Self::Opclass => "pg_opclass",
             Self::Enum => "pg_enum",
+            Self::Proc => "pg_proc",
+            Self::Range => "pg_range",
             Self::Information(relation) => relation.name(),
             Self::SqlServer(relation) => relation.name(),
             Self::Oracle(relation) => relation.name(),
@@ -351,6 +357,8 @@ impl CatalogRelation {
             Self::Settings => 12001,
             Self::Opclass => 2616,
             Self::Enum => 3501,
+            Self::Proc => 1255,
+            Self::Range => 3541,
             Self::Information(relation) => relation.oid(),
             Self::SqlServer(_) | Self::Oracle(_) => 0,
         }
@@ -412,6 +420,8 @@ impl CatalogRelation {
             Self::Settings => &SETTINGS_COLUMNS,
             Self::Opclass => &OPCLASS_COLUMNS,
             Self::Enum => &ENUM_COLUMNS,
+            Self::Proc => &PROC_COLUMNS,
+            Self::Range => &RANGE_COLUMNS,
             Self::Information(relation) => relation.columns(),
             Self::SqlServer(relation) => relation.columns(),
             Self::Oracle(relation) => relation.columns(),
@@ -816,4 +826,47 @@ const ENUM_COLUMNS: [CatalogColumn; 4] = [
     column("enumtypid", OID),
     column("enumsortorder", SqlType::Real),
     column("enumlabel", NAME),
+];
+
+const PROC_COLUMNS: [CatalogColumn; 30] = [
+    column("oid", OID),
+    column("proname", NAME),
+    column("pronamespace", OID),
+    column("proowner", OID),
+    column("prolang", OID),
+    column("procost", SqlType::Real),
+    column("prorows", SqlType::Real),
+    column("provariadic", OID),
+    column("prosupport", REGPROC),
+    column("prokind", CHAR),
+    column("prosecdef", SqlType::Boolean),
+    column("proleakproof", SqlType::Boolean),
+    column("proisstrict", SqlType::Boolean),
+    column("proretset", SqlType::Boolean),
+    column("provolatile", CHAR),
+    column("proparallel", CHAR),
+    column("pronargs", SqlType::SmallInt),
+    column("pronargdefaults", SqlType::SmallInt),
+    column("prorettype", OID),
+    column("proargtypes", OID_VECTOR),
+    column("proallargtypes", OIDS),
+    column("proargmodes", CHARS),
+    column("proargnames", TEXTS),
+    column("proargdefaults", NODE_TREE),
+    column("protrftypes", OIDS),
+    column("prosrc", SqlType::Text),
+    column("probin", SqlType::Text),
+    column("prosqlbody", NODE_TREE),
+    column("proconfig", TEXTS),
+    column("proacl", ACL_ITEMS),
+];
+
+const RANGE_COLUMNS: [CatalogColumn; 7] = [
+    column("rngtypid", OID),
+    column("rngsubtype", OID),
+    column("rngmultitypid", OID),
+    column("rngcollation", OID),
+    column("rngsubopc", OID),
+    column("rngcanonical", REGPROC),
+    column("rngsubdiff", REGPROC),
 ];

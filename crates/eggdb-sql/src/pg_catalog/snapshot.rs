@@ -851,8 +851,8 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
                 .is_none_or(|schema| schema == crate::schemas::CATALOG_SCHEMA);
             let oid = oids::BUILTIN_FUNCTIONS
                 .iter()
-                .find(|(_, function)| known && *function == name)
-                .map(|(oid, _)| *oid)
+                .find(|function| known && function.name == name)
+                .map(|function| function.oid)
                 .ok_or_else(|| missing(SqlState::UNDEFINED_FUNCTION, "function", text))?;
             found(oid)
         }
@@ -936,8 +936,8 @@ pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
             .map(|name| quote_ident(&name)),
         RegKind::Proc => oids::BUILTIN_FUNCTIONS
             .iter()
-            .find(|(found, _)| *found == oid)
-            .map(|(_, name)| (*name).to_owned()),
+            .find(|function| function.oid == oid)
+            .map(|function| function.name.to_owned()),
     };
     RegValue {
         kind,

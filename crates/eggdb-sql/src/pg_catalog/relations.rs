@@ -18,6 +18,7 @@ const PG_CLASS: u32 = 1259;
 const PG_CONSTRAINT: u32 = 2606;
 const PG_NAMESPACE: u32 = 2615;
 const HASH: u32 = 405;
+const INTERNAL_LANGUAGE: u32 = 12;
 
 pub(crate) fn generated_rows(
     reader: &dyn KeyValueRead,
@@ -113,10 +114,14 @@ fn smallints(items: &[usize]) -> Value {
 }
 
 fn regproc_none() -> Value {
+    regproc(0, "-")
+}
+
+fn regproc(function: u32, name: &str) -> Value {
     Value::Reg(Box::new(super::RegValue {
         kind: super::RegKind::Proc,
-        oid: 0,
-        name: "-".to_owned(),
+        oid: function,
+        name: name.to_owned(),
     }))
 }
 
@@ -174,7 +179,9 @@ pub(crate) fn build(
         | CatalogRelation::Rewrite
         | CatalogRelation::AuthMembers
         | CatalogRelation::Opclass
-        | CatalogRelation::Enum => Vec::new(),
+        | CatalogRelation::Enum
+        | CatalogRelation::Range => Vec::new(),
+        CatalogRelation::Proc => proc_rows(),
         CatalogRelation::Settings => setting_rows(snapshot),
         CatalogRelation::Information(relation) => {
             crate::information_schema::rows(snapshot, relation)
@@ -474,16 +481,58 @@ fn type_rows() -> Vec<Vec<Value>> {
                 row = row.set(name, regproc_none());
             }
             if found.category == 'A' && found.element != 0 && !matches!(found.oid, 22 | 30) {
-                row = row.set(
-                    "typinput",
-                    Value::Reg(Box::new(super::RegValue {
-                        kind: super::RegKind::Proc,
-                        oid: oids::ARRAY_IN,
-                        name: "array_in".to_owned(),
-                    })),
-                );
+                for (column, function) in [
+                    ("typinput", oids::ARRAY_IN),
+                    ("typoutput", oids::ARRAY_OUT),
+                    ("typreceive", oids::ARRAY_RECV),
+                    ("typsend", oids::ARRAY_SEND),
+                ] {
+                    let name = oids::BUILTIN_FUNCTIONS
+                        .iter()
+                        .find(|builtin| builtin.oid == function)
+                        .map_or("-", |builtin| builtin.name);
+                    row = row.set(column, regproc(function, name));
+                }
             }
             row.done()
+        })
+        .collect()
+}
+
+fn proc_rows() -> Vec<Vec<Value>> {
+    oids::BUILTIN_FUNCTIONS
+        .iter()
+        .map(|function| {
+            let arguments = function.argument_types.len() as i64;
+            Row::new(CatalogRelation::Proc)
+                .set("oid", oid(function.oid))
+                .set("proname", text(function.name))
+                .set("pronamespace", oid(oids::PG_CATALOG))
+                .set("proowner", oid(oids::SESSION_USER))
+                .set("prolang", oid(INTERNAL_LANGUAGE))
+                .set("procost", Value::Real(1.0))
+                .set("prorows", Value::Real(0.0))
+                .set("provariadic", oid(0))
+                .set("prosupport", regproc_none())
+                .set("prokind", text("f"))
+                .set("prosecdef", flag(false))
+                .set("proleakproof", flag(false))
+                .set("proisstrict", flag(true))
+                .set("proretset", flag(false))
+                .set("provolatile", text("s"))
+                .set("proparallel", text("s"))
+                .set("pronargs", small(arguments))
+                .set("pronargdefaults", small(0))
+                .set("prorettype", oid(function.result_type))
+                .set(
+                    "proargtypes",
+                    vector(
+                        ArrayElement::OidVector,
+                        function.argument_types.iter().map(|&found| oid(found)).collect(),
+                    ),
+                )
+                .set("prosrc", text(function.name))
+                .done()
         })
         .collect()
 }

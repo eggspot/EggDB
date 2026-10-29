@@ -210,6 +210,7 @@ impl WorkMemory {
     }
 
     pub(crate) fn charge(&mut self, bytes: usize) -> SqlResult<()> {
+        crate::cancel::check()?;
         self.used = self.used.saturating_add(bytes);
         let total = self
             .statement

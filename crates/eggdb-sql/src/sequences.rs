@@ -186,6 +186,14 @@ pub(crate) fn mark_changes_committed() {
     });
 }
 
+pub(crate) fn discard_session_values() {
+    STATEMENT.with(|state| {
+        if let Some(state) = state.borrow_mut().last_mut() {
+            state.session = SessionSequences::default();
+        }
+    });
+}
+
 pub(crate) fn forget_loaded() {
     STATEMENT.with(|state| {
         if let Some(state) = state.borrow_mut().last_mut() {

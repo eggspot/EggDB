@@ -74,6 +74,15 @@ pub(crate) enum Statement {
     SqlServer(SqlServerStatement),
     Merge(Box<MergeStatement>),
     AlterSession(Vec<(String, String)>),
+    Discard(DiscardTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiscardTarget {
+    All,
+    Plans,
+    Sequences,
+    Temporary,
 }
 
 #[derive(Debug, Clone, PartialEq)]

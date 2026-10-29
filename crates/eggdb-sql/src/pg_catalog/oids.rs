@@ -39,8 +39,50 @@ pub(crate) const PREDEFINED_ROLES: [(u32, &str); 14] = [
 ];
 
 pub(crate) const ARRAY_IN: u32 = 750;
+pub(crate) const ARRAY_OUT: u32 = 751;
+pub(crate) const ARRAY_RECV: u32 = 2400;
+pub(crate) const ARRAY_SEND: u32 = 2401;
 
-pub(crate) const BUILTIN_FUNCTIONS: [(u32, &str); 1] = [(ARRAY_IN, "array_in")];
+const BYTEA_TYPE: u32 = 17;
+const OID_TYPE: u32 = 26;
+const INT4_TYPE: u32 = 23;
+const ANY_ARRAY_TYPE: u32 = 2277;
+const CSTRING_TYPE: u32 = 2275;
+const INTERNAL_TYPE: u32 = 2281;
+
+pub(crate) struct BuiltinFunction {
+    pub(crate) oid: u32,
+    pub(crate) name: &'static str,
+    pub(crate) result_type: u32,
+    pub(crate) argument_types: &'static [u32],
+}
+
+pub(crate) const BUILTIN_FUNCTIONS: [BuiltinFunction; 4] = [
+    BuiltinFunction {
+        oid: ARRAY_IN,
+        name: "array_in",
+        result_type: ANY_ARRAY_TYPE,
+        argument_types: &[CSTRING_TYPE, OID_TYPE, INT4_TYPE],
+    },
+    BuiltinFunction {
+        oid: ARRAY_OUT,
+        name: "array_out",
+        result_type: CSTRING_TYPE,
+        argument_types: &[ANY_ARRAY_TYPE],
+    },
+    BuiltinFunction {
+        oid: ARRAY_RECV,
+        name: "array_recv",
+        result_type: ANY_ARRAY_TYPE,
+        argument_types: &[INTERNAL_TYPE, OID_TYPE, INT4_TYPE],
+    },
+    BuiltinFunction {
+        oid: ARRAY_SEND,
+        name: "array_send",
+        result_type: BYTEA_TYPE,
+        argument_types: &[ANY_ARRAY_TYPE],
+    },
+];
 
 pub(crate) const SYSTEM_SCHEMAS: [(u32, &str, u32); 4] = [
     (PG_CATALOG, "pg_catalog", SESSION_USER),
