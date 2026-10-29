@@ -12,7 +12,9 @@
 //! - a value [`eggdb_get`] returns and the names [`eggdb_collection_names`] returns are the
 //!   caller's, freed with [`eggdb_free`]; a scan's entries and a SQL statement's results are
 //!   batches the handle owns, read in place until the next call on that handle;
-//! - a panic never crosses into the caller: it becomes `EGGDB_ERR_INTERNAL`.
+//! - no input reaches a panic (D9), and a panic never unwinds into the caller: a build that
+//!   unwinds turns it into `EGGDB_ERR_INTERNAL`, and a release build, which aborts on panic,
+//!   stops the process instead.
 
 mod args;
 mod database;
@@ -32,8 +34,9 @@ pub use scan::{
     eggdb_scan_free, eggdb_scan_next, eggdb_scan_open,
 };
 pub use sql::{
-    EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, EggdbResult, EggdbSql,
-    EggdbValue, eggdb_sql_close, eggdb_sql_execute, eggdb_sql_open,
+    EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, EggdbParameter, EggdbResult,
+    EggdbSql, EggdbValue, eggdb_sql_close, eggdb_sql_execute, eggdb_sql_execute_with_parameters,
+    eggdb_sql_open,
 };
 pub use status::{
     EGGDB_ERR_ALREADY_EXISTS, EGGDB_ERR_CACHE_FULL, EGGDB_ERR_COLLECTION_NOT_FOUND,

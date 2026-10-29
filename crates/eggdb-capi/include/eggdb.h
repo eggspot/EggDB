@@ -101,6 +101,11 @@ typedef struct eggdb_value {
     size_t len;
 } eggdb_value;
 
+typedef struct eggdb_parameter {
+    const uint8_t *text;
+    size_t len;
+} eggdb_parameter;
+
 typedef struct eggdb_result {
     const char *tag;
     size_t column_count;
@@ -167,6 +172,9 @@ void eggdb_scan_free(eggdb_scan *scan);
 int eggdb_sql_open(eggdb_db *db, const char *dialect, eggdb_sql **sql);
 int eggdb_sql_execute(eggdb_sql *sql, const char *text, const eggdb_result **results,
                       size_t *count);
+int eggdb_sql_execute_with_parameters(eggdb_sql *sql, const char *text,
+                                      const eggdb_parameter *parameters, size_t parameter_count,
+                                      const eggdb_result **results, size_t *count);
 int eggdb_sql_close(eggdb_sql *sql);
 
 #ifdef __cplusplus

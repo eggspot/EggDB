@@ -27,6 +27,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "eggdb-capi"
+version = "0.1.0"
+dependencies = [
+ "eggdb",
+]
+
+[[package]]
 name = "eggdb-crypto"
 version = "0.1.0"
 

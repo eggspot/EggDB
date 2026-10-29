@@ -8,13 +8,14 @@ use eggdb_capi::{
     EGGDB_ERR_READ_TRANSACTION, EGGDB_ERR_SQL, EGGDB_INTEGER, EGGDB_NULL, EGGDB_OK,
     EGGDB_OPEN_NO_CREATE, EGGDB_REAL, EGGDB_SCAN_END_INCLUSIVE, EGGDB_SCAN_PREFIX,
     EGGDB_SCAN_REVERSE, EGGDB_TEXT, EggdbBackupReport, EggdbCompactReport, EggdbDb, EggdbEntry,
-    EggdbOptions, EggdbResult, EggdbScan, EggdbSql, EggdbTxn, EggdbValue, eggdb_backup,
+    EggdbOptions, EggdbParameter, EggdbResult, EggdbScan, EggdbSql, EggdbTxn, EggdbValue, eggdb_backup,
     eggdb_begin_read, eggdb_begin_write, eggdb_clear_expiry, eggdb_close,
     eggdb_collection_names, eggdb_commit, eggdb_compact, eggdb_compact_file,
     eggdb_compare_and_set, eggdb_create_collection, eggdb_delete, eggdb_drop_collection,
     eggdb_free, eggdb_get, eggdb_increment, eggdb_last_error, eggdb_last_sqlstate, eggdb_open,
     eggdb_put, eggdb_put_with_expiry, eggdb_rollback, eggdb_scan_free, eggdb_scan_next,
-    eggdb_scan_open, eggdb_set_expiry, eggdb_sql_close, eggdb_sql_execute, eggdb_sql_open,
+    eggdb_scan_open, eggdb_set_expiry, eggdb_sql_close, eggdb_sql_execute,
+    eggdb_sql_execute_with_parameters, eggdb_sql_open,
     eggdb_time_to_live,
 };
 use std::ffi::{CStr, CString, c_char, c_int};
@@ -579,19 +580,56 @@ fn execute(sql: *mut EggdbSql, text: &str) -> (c_int, Vec<EggdbResult>) {
     (status, lent_results.to_vec())
 }
 
+fn execute_with_parameters(
+    sql: *mut EggdbSql,
+    text: &str,
+    values: &[Option<&str>],
+) -> (c_int, Vec<EggdbResult>) {
+    let text = c_text(text);
+    let parameters: Vec<EggdbParameter> = values
+        .iter()
+        .map(|value| EggdbParameter {
+            text: value.map_or(ptr::null(), str::as_ptr),
+            len: value.map_or(0, str::len),
+        })
+        .collect();
+    let mut results: *const EggdbResult = ptr::null();
+    let mut count = 0;
+    // SAFETY: a live session, the statement text, the parameters with their bytes and places
+    // for the results.
+    let status = unsafe {
+        eggdb_sql_execute_with_parameters(
+            sql,
+            text.as_ptr(),
+            parameters.as_ptr(),
+            parameters.len(),
+            &mut results,
+            &mut count,
+        )
+    };
+    if count == 0 {
+        return (status, Vec::new());
+    }
+    // SAFETY: the session lends `count` results until its next call.
+    let lent_results = unsafe { std::slice::from_raw_parts(results, count) };
+    (status, lent_results.to_vec())
+}
+
 #[test]
 fn sql_runs_with_typed_values_in_every_dialect() {
     let file = TempPath::new("sql");
     let db = open_at(&file.path);
-    let sqlite = open_sql(db, "sqlite");
+    let postgres = open_sql(db, "postgresql");
     let (status, results) = execute(
-        sqlite,
-        "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, price REAL, data BLOB); \
-         INSERT INTO items (name, price, data) VALUES ('tea', 2.5, x'0001'), ('cake', NULL, NULL)",
+        postgres,
+        "CREATE TABLE items (id integer PRIMARY KEY, name text, price double precision, data bytea); \
+         INSERT INTO items VALUES (1, 'tea', 2.5, '\\x0001'::bytea), (2, 'cake', NULL, NULL)",
     );
     ok(status);
     assert_eq!(results.len(), 2);
+    assert_eq!(tag(&results[1]), "INSERT 0 2");
 
+    let sqlite = open_sql(db, "sqlite");
     let (status, results) = execute(sqlite, "SELECT id, name, price, data FROM items ORDER BY id");
     ok(status);
     assert_eq!(results.len(), 1);
@@ -617,15 +655,76 @@ fn sql_runs_with_typed_values_in_every_dialect() {
     assert!(last_error().contains("no_such_table"), "{}", last_error());
     assert_eq!(last_sqlstate().len(), 5);
 
-    let postgres = open_sql(db, "postgresql");
     let (status, results) = execute(postgres, "SELECT count(*) AS n FROM items");
     ok(status);
     assert_eq!(tag(&results[0]), "SELECT 1");
+    assert_eq!(column_names(&results[0]), ["n"]);
     assert_eq!(result_cells(&results[0])[0][0].1, 2);
     // SAFETY: live sessions from eggdb_sql_open, each given up once.
     ok(unsafe { eggdb_sql_close(postgres) });
     // SAFETY: as above.
     ok(unsafe { eggdb_sql_close(sqlite) });
+    close(db);
+}
+
+#[test]
+fn parameters_carry_values_without_quoting() {
+    let file = TempPath::new("sql-parameters");
+    let db = open_at(&file.path);
+    let postgres = open_sql(db, "postgresql");
+    ok(execute(postgres, "CREATE TABLE people (id integer PRIMARY KEY, name text)").0);
+    let (status, results) = execute_with_parameters(
+        postgres,
+        "INSERT INTO people VALUES ($1, $2)",
+        &[Some("1"), Some("O'Brien; DROP TABLE people")],
+    );
+    ok(status);
+    assert_eq!(tag(&results[0]), "INSERT 0 1");
+    ok(execute_with_parameters(postgres, "INSERT INTO people VALUES ($1, $2)", &[Some("2"), None]).0);
+
+    let sqlite = open_sql(db, "sqlite");
+    let (status, results) = execute_with_parameters(
+        sqlite,
+        "SELECT id FROM people WHERE name = ?",
+        &[Some("O'Brien; DROP TABLE people")],
+    );
+    ok(status);
+    assert_eq!(result_cells(&results[0])[0][0].1, 1);
+    let (status, results) =
+        execute_with_parameters(postgres, "SELECT name FROM people WHERE id = $1", &[Some("2")]);
+    ok(status);
+    assert_eq!(results[0].row_count, 1);
+    assert_eq!(result_cells(&results[0])[0][0].0, EGGDB_NULL);
+    // SAFETY: live sessions from eggdb_sql_open, each given up once.
+    ok(unsafe { eggdb_sql_close(postgres) });
+    // SAFETY: as above.
+    ok(unsafe { eggdb_sql_close(sqlite) });
+    close(db);
+}
+
+#[test]
+fn a_transaction_block_holds_until_commit_or_rollback() {
+    let file = TempPath::new("sql-block");
+    let db = open_at(&file.path);
+    let sql = open_sql(db, "postgresql");
+    ok(execute(sql, "CREATE TABLE t (n integer)").0);
+    ok(execute(sql, "BEGIN; INSERT INTO t VALUES (1)").0);
+    let (status, results) = execute(sql, "SELECT count(*) FROM t");
+    ok(status);
+    assert_eq!(result_cells(&results[0])[0][0].1, 1);
+    ok(execute(sql, "ROLLBACK").0);
+    let (status, results) = execute(sql, "SELECT count(*) FROM t");
+    ok(status);
+    assert_eq!(result_cells(&results[0])[0][0].1, 0);
+    ok(execute(sql, "BEGIN; INSERT INTO t VALUES (2)").0);
+    // SAFETY: a live session, given up here; its open block is rolled back.
+    ok(unsafe { eggdb_sql_close(sql) });
+    let sql = open_sql(db, "postgresql");
+    let (status, results) = execute(sql, "SELECT count(*) FROM t");
+    ok(status);
+    assert_eq!(result_cells(&results[0])[0][0].1, 0);
+    // SAFETY: a live session, given up here.
+    ok(unsafe { eggdb_sql_close(sql) });
     close(db);
 }
 

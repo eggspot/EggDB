@@ -3,7 +3,7 @@ use crate::database::EggdbDb;
 use crate::status::{Failure, guarded};
 use crate::transaction::shared_database;
 use eggdb::Database;
-use eggdb::sql::{Dialect, OutputColumn, QueryResult, Session, Store, Value};
+use eggdb::sql::{Dialect, OutputColumn, Parameter, QueryResult, Session, SqlResult, Store, Value};
 use std::ffi::{c_char, c_int};
 use std::sync::Arc;
 
@@ -36,6 +36,18 @@ pub struct EggdbValue {
     pub len: usize,
 }
 
+/// One parameter of [`eggdb_sql_execute_with_parameters`] (`eggdb_parameter` in `eggdb.h`):
+/// the value in text form, as the dialect reads a literal of the placeholder's type (`42`,
+/// `2.5`, `2026-10-30`, `\x0001` for PostgreSQL's `bytea`), or SQL's NULL.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct EggdbParameter {
+    /// The value's UTF-8 text, `len` bytes, not NUL-terminated; NULL for SQL's NULL.
+    pub text: *const u8,
+    /// The length of `text` in bytes; 0 with NULL.
+    pub len: usize,
+}
+
 /// The result of one SQL statement (`eggdb_result` in `eggdb.h`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +63,8 @@ pub struct EggdbResult {
     /// The values, row by row: `row_count × column_count` of them.
     pub values: *const EggdbValue,
 }
+
+type SqlSession = Session<'static, Store<'static>>;
 
 #[derive(Debug, Clone, Copy)]
 struct PendingValue {
@@ -211,7 +225,7 @@ impl ResultBatch {
 /// holds the database's one write transaction until `COMMIT` or `ROLLBACK`. One call at a time
 /// may use it, from any thread.
 pub struct EggdbSql {
-    session: Session<'static, Store<'static>>,
+    session: SqlSession,
     results: ResultBatch,
     store: Arc<Store<'static>>,
     database: Arc<Database>,
@@ -277,12 +291,74 @@ pub unsafe extern "C" fn eggdb_sql_open(
     })
 }
 
+impl EggdbSql {
+    fn run(
+        &mut self,
+        run: impl FnOnce(&mut SqlSession, &mut Vec<QueryResult>) -> SqlResult<()>,
+    ) -> Result<(*const EggdbResult, usize), Failure> {
+        self.results.clear();
+        let mut gathered = Vec::new();
+        run(&mut self.session, &mut gathered).map_err(|error| Failure::sql(&error))?;
+        let dialect = self.session.dialect();
+        for result in &gathered {
+            self.results.add(result, dialect);
+        }
+        Ok(self.results.publish())
+    }
+}
+
+unsafe fn parameters(
+    given: *const EggdbParameter,
+    count: usize,
+) -> Result<Vec<Parameter>, Failure> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if given.is_null() {
+        return Err(Failure::invalid_argument(format!(
+            "parameters is NULL but parameter_count is {count}; pass an array of {count} eggdb_parameter, or a count of 0"
+        )));
+    }
+    if count > isize::MAX as usize / std::mem::size_of::<EggdbParameter>() {
+        return Err(Failure::invalid_argument(format!(
+            "parameter_count is {count}, more than any array can hold"
+        )));
+    }
+    // SAFETY: eggdb.h asks for `count` initialized eggdb_parameter at a non-NULL, aligned
+    // `given` that stay unchanged during the call; the array's size fits an isize.
+    let given = unsafe { std::slice::from_raw_parts(given, count) };
+    let mut converted = Vec::with_capacity(count);
+    for (index, parameter) in given.iter().enumerate() {
+        let what = format!("parameter {}", index + 1);
+        // SAFETY: eggdb.h asks for NULL or `len` readable bytes at each parameter's `text`.
+        let bytes = unsafe { args::optional_bytes(parameter.text, parameter.len, &what) }?;
+        let value = match bytes {
+            None => None,
+            Some(bytes) => Some(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| {
+                        Failure::invalid_argument(format!(
+                            "{what} is not UTF-8; parameters are text in UTF-8"
+                        ))
+                    })?
+                    .to_owned(),
+            ),
+        };
+        converted.push(Parameter {
+            declared_type: None,
+            value,
+        });
+    }
+    Ok(converted)
+}
+
 /// Runs every statement in `text` (UTF-8, separated by semicolons) in order and puts their
 /// results in `*results`, one per statement, and their number in `*count`. The results belong
-/// to the session and stay valid until its next `eggdb_sql_execute` or `eggdb_sql_close`. It
-/// stops at the first statement that fails, with `EGGDB_ERR_SQL`, its message from
-/// `eggdb_last_error` and its SQLSTATE from `eggdb_last_sqlstate`; the statements before it keep
-/// their effects, committed outside a block and pending inside one, and no results are given.
+/// to the session and stay valid until its next `eggdb_sql_execute`,
+/// `eggdb_sql_execute_with_parameters` or `eggdb_sql_close`. It stops at the first statement
+/// that fails, with `EGGDB_ERR_SQL`, its message from `eggdb_last_error` and its SQLSTATE from
+/// `eggdb_last_sqlstate`; the statements before it keep their effects, committed outside a
+/// block and pending inside one, and no results are given.
 ///
 /// # Safety
 /// `sql` is a handle from `eggdb_sql_open` used by this call alone, `text` a NUL-terminated
@@ -303,16 +379,50 @@ pub unsafe extern "C" fn eggdb_sql_execute(
         let sql = unsafe { args::handle_mut(sql, "sql") }?;
         // SAFETY: eggdb.h asks for a NUL-terminated statement text.
         let text = unsafe { args::text(text, "text") }?;
-        sql.results.clear();
-        let mut gathered = Vec::new();
-        sql.session
-            .execute(text, &mut |result| gathered.push(result))
-            .map_err(|error| Failure::sql(&error))?;
-        let dialect = sql.session.dialect();
-        for result in &gathered {
-            sql.results.add(result, dialect);
-        }
-        let (published, len) = sql.results.publish();
+        let (published, len) = sql.run(|session, gathered| {
+            session.execute(text, &mut |result| gathered.push(result))
+        })?;
+        // SAFETY: as for the first write to `results`.
+        unsafe { args::write(results, published, "results") }?;
+        // SAFETY: as for the first write to `count`.
+        unsafe { args::write(count, len, "count") }
+    })
+}
+
+/// Runs the statements in `text` as `eggdb_sql_execute` does, with `parameter_count` values for
+/// their placeholders (`$1` in PostgreSQL's and Oracle's dialects, `?` or `?1` in SQLite's and
+/// MySQL's) given as text, so values never need quoting into the SQL. A parameter's type is
+/// the one its place in the statement asks for.
+///
+/// # Safety
+/// As for `eggdb_sql_execute`; `parameters` is NULL with a count of 0 or points to
+/// `parameter_count` `eggdb_parameter`, each NULL or pointing to its `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_sql_execute_with_parameters(
+    sql: *mut EggdbSql,
+    text: *const c_char,
+    parameters: *const EggdbParameter,
+    parameter_count: usize,
+    results: *mut *const EggdbResult,
+    count: *mut usize,
+) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for writable memory for one pointer at `results`.
+        unsafe { args::write(results, std::ptr::null(), "results") }?;
+        // SAFETY: eggdb.h asks for writable memory for one size_t at `count`.
+        unsafe { args::write(count, 0, "count") }?;
+        // SAFETY: eggdb.h asks for a live SQL session handle used by this call alone.
+        let sql = unsafe { args::handle_mut(sql, "sql") }?;
+        // SAFETY: eggdb.h asks for a NUL-terminated statement text.
+        let text = unsafe { args::text(text, "text") }?;
+        // SAFETY: eggdb.h asks for `parameter_count` parameters at `parameters`.
+        let values = unsafe { self::parameters(parameters, parameter_count) }?;
+        let (published, len) = sql.run(|session, gathered| {
+            session.execute_prepared(text, &values, &mut |result| {
+                gathered.push(result);
+                true
+            })
+        })?;
         // SAFETY: as for the first write to `results`.
         unsafe { args::write(results, published, "results") }?;
         // SAFETY: as for the first write to `count`.
@@ -350,10 +460,48 @@ pub unsafe extern "C" fn eggdb_sql_close(sql: *mut EggdbSql) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::{
-        EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, dialect_named,
-        kind_and_number,
+        EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, EggdbParameter,
+        dialect_named, kind_and_number, parameters,
     };
     use eggdb::sql::{Dialect, Value};
+
+    fn parameter(text: Option<&[u8]>) -> EggdbParameter {
+        EggdbParameter {
+            text: text.map_or(std::ptr::null(), <[u8]>::as_ptr),
+            len: text.map_or(0, <[u8]>::len),
+        }
+    }
+
+    #[test]
+    fn parameters_become_text_values_or_null() {
+        let given = [parameter(Some(b"42")), parameter(None), parameter(Some(b""))];
+        // SAFETY: three parameters, each NULL or pointing to its bytes.
+        let converted = unsafe { parameters(given.as_ptr(), given.len()) }
+            .unwrap_or_else(|failure| panic!("{failure:?}"));
+        let values: Vec<Option<&str>> = converted
+            .iter()
+            .map(|parameter| parameter.value.as_deref())
+            .collect();
+        assert_eq!(values, [Some("42"), None, Some("")]);
+        assert!(converted.iter().all(|parameter| parameter.declared_type.is_none()));
+    }
+
+    #[test]
+    fn bad_parameters_are_refused() {
+        // SAFETY: a count of 0 reads nothing.
+        assert!(unsafe { parameters(std::ptr::null(), 0) }.is_ok_and(|none| none.is_empty()));
+        // SAFETY: NULL with a count is refused before anything is read.
+        assert!(unsafe { parameters(std::ptr::null(), 2) }.is_err());
+        let not_utf8 = [parameter(Some(b"\xff"))];
+        // SAFETY: one parameter pointing to its byte.
+        assert!(unsafe { parameters(not_utf8.as_ptr(), 1) }.is_err());
+        let null_with_length = [EggdbParameter {
+            text: std::ptr::null(),
+            len: 3,
+        }];
+        // SAFETY: a NULL text with a length is refused before it is read.
+        assert!(unsafe { parameters(null_with_length.as_ptr(), 1) }.is_err());
+    }
 
     #[test]
     fn values_get_the_kind_their_type_reads_as() {

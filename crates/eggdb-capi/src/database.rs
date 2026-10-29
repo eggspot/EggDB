@@ -117,7 +117,7 @@ impl EggdbDb {
         Err(Failure::new(
             EGGDB_ERR_IN_USE,
             format!(
-                "cannot {doing} {}: {others} transaction(s), scan(s) or SQL session(s) still use it; end them first (eggdb_commit, eggdb_rollback, eggdb_sql_close). The database is still open.",
+                "cannot {doing} {}: {others} transaction(s) or SQL session(s) still use it; end them first (eggdb_commit, eggdb_rollback, eggdb_sql_close). The database is still open.",
                 self.database.path().display()
             ),
         ))
@@ -260,7 +260,7 @@ pub unsafe extern "C" fn eggdb_compact(db: *mut EggdbDb, report: *mut EggdbCompa
         let database = Arc::try_unwrap(handle.database).map_err(|_| {
             Failure::new(
                 EGGDB_ERR_IN_USE,
-                "cannot compact the database: another thread began a transaction or SQL session on it during this call; the database closes when that ends",
+                "cannot compact the database: another thread began a transaction or SQL session on it during this call, which eggdb.h forbids; the handle is freed and the database closes when that transaction or session ends",
             )
         })?;
         let compacted = database.compact()?;
