@@ -216,8 +216,8 @@ known differences (restored, but not as the source had it)
   line 377  FK_OrderLines_Products  not created: existing rows violate it (...)
 ```
 
-Skipped objects (procedures, functions, triggers, synonyms, users and roles, batch logic such as
-SSMS's `IF` blocks) are listed with their line; `USE`, `CREATE DATABASE`, `ALTER DATABASE`,
+Skipped objects (procedures, functions, triggers, synonyms, users and roles, batch logic other
+than existence guards) are listed with their line; `USE`, `CREATE DATABASE`, `ALTER DATABASE`,
 `GRANT`, `PRINT`, extended properties and the like are counted as ignored; sqlcmd's commands are
 listed as client commands.
 
@@ -227,7 +227,9 @@ listed as client commands.
 - **Not run:** procedures, functions, triggers, synonyms and table types; users, logins, roles
   and permissions; rules and bound defaults; Service Broker; full-text, XML, spatial and
   columnstore indexes, and XML schema collections; Transact-SQL batch logic (`IF`, `WHILE`,
-  `DECLARE`, `BEGIN ... END`, including SSMS's *Check for object existence* guards, item 47);
+  `DECLARE`, `BEGIN ... END`) other than SSMS's *Check for object existence* guards, which run
+  (`IF [NOT] EXISTS (...)` or `IF OBJECT_ID(...) IS [NOT] NULL` around one statement, and
+  `EXEC sp_executesql N'CREATE VIEW ...'`, counted as the statement they guard; item 47);
   `MERGE`, `DBCC`, `BULK INSERT` and other statements EggDB does not have, which are skipped and
   listed.
 - **Not kept, and listed as known differences:** computed and `rowversion` columns; `IDENTITY`

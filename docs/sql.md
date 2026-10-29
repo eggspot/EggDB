@@ -495,9 +495,10 @@ SELECT @@VERSION
   `CONVERT`, `ISNULL`, `DATEADD`, `DATEDIFF` (counting boundaries crossed), `CHARINDEX`,
   `LEN`, `NEWID()`, `SCOPE_IDENTITY()`, `UPPER`, `LOWER`, `ABS`, `COALESCE`, `NULLIF` and the
   aggregates, `COUNT` returning `int`. `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`,
-  `@@LANGUAGE`, `@@ROWCOUNT`. Another function is error 195, another `@@` name error 137, and so
-  is an `@variable` unless it is a parameter of a parameterized batch (`sp_executesql` and the
-  prepared statements of SqlClient and mssql-jdbc, item 23b).
+  `@@LANGUAGE`, `@@ROWCOUNT`, `@@ERROR`. Another function is error 195, another `@@` name error
+  137, and so is an `@variable` unless the batch declares it or it is a parameter of a
+  parameterized batch (`sp_executesql` and the prepared statements of SqlClient and mssql-jdbc,
+  item 23b).
 - `ORDER BY ... OFFSET n ROWS [FETCH {FIRST | NEXT} m ROWS ONLY]`, `OUTPUT inserted.*` on
   `INSERT` and `UPDATE` and `OUTPUT deleted.*` on `DELETE`, and `SELECT total = qty * price`.
 - **Defaults** are constants (folded to the column's type: `DEFAULT ((0))` on a `bit` column
@@ -516,10 +517,9 @@ SELECT @@VERSION
   errors 3902 and 3903. DDL is transactional. With `SET IMPLICIT_TRANSACTIONS ON` (what
   mssql-jdbc's `setAutoCommit(false)` sends) the first statement that changes data or the
   schema starts a transaction that lasts until `COMMIT` or `ROLLBACK`.
-- **`IF condition statement [ELSE statement]`** with one statement on each side and a
-  condition that reads no table, such as mssql-jdbc's `IF @@TRANCOUNT > 0 COMMIT TRAN`;
-  `BEGIN ... END` blocks and conditions with subqueries (`IF EXISTS (...)`) come with item 47
-  and are error 40517.
+- **Batch logic**: variables, `IF ... ELSE`, `WHILE`, `BEGIN ... END`, `TRY ... CATCH`,
+  `THROW`, `RAISERROR`, `PRINT` and dynamic SQL; see
+  [Transact-SQL batch logic](#transact-sql-batch-logic).
 - `USE` the served database (another is error 911), and `SET NOCOUNT`, `ANSI_NULLS`,
   `QUOTED_IDENTIFIER`, `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`
   and `ANSI_NULL_DFLT_ON` `ON`, `IMPLICIT_TRANSACTIONS ON` and `OFF`, `TEXTSIZE`, `LANGUAGE
@@ -742,6 +742,83 @@ compares both tables' rows with the file and what the program prints with
 `scripts/tds-apps/expected-bulk-dotnet.out`. `bcp` itself is not run in CI: its license does not
 allow it there.
 
+## Transact-SQL batch logic
+
+A batch (what a client sends at once; what sqlcmd sends between `GO` lines) runs Transact-SQL's
+control-of-flow language (roadmap item 47, D137) in `eggdb sql --dialect sqlserver`, `eggdb
+restore`, MCP and over TDS:
+
+```sql
+DECLARE @i int = 0, @odd int = 0
+WHILE @i < 10
+BEGIN
+    SET @i += 1
+    IF @i % 2 = 0 CONTINUE
+    SET @odd += @i
+END
+BEGIN TRY
+    INSERT INTO bakes (name) VALUES (NULL)
+END TRY
+BEGIN CATCH
+    PRINT N'not inserted: ' + ERROR_MESSAGE()
+END CATCH
+SELECT @odd AS odd_sum
+```
+
+- **The whole batch is compiled first**, as SQL Server does: a syntax error, a variable used
+  before its `DECLARE` (Msg 137) or declared twice (134), `BREAK` or `CONTINUE` outside a loop
+  (135, 136), `RETURN` with a value (178), `THROW;` outside a `CATCH` block (10704) and a `SELECT`
+  mixing assignments with columns (141) run nothing.
+- **Variables**: `DECLARE @name type [= value], ...` with SQL Server's types. A variable exists
+  from its `DECLARE` to the end of the batch, also when that `DECLARE` sits in a branch that does
+  not run, starts NULL (a `DECLARE` without a value in a loop does not reset it), and keeps its
+  type: assigning converts as SQL Server does (`varchar(3)` keeps three characters, `tinyint`
+  checks its range). `SET @v = expression`, `SET @v += expression` (and `-=`, `*=`, `/=`, `%=`),
+  and `SELECT @a = expression, @b = ... [FROM ... WHERE ... ORDER BY ...]`, which takes the last
+  row's values, leaves the variables unchanged when there is no row, and with `+=` accumulates
+  row by row (`SELECT @names += name + N',' FROM t`).
+- **Control of flow**: `IF condition statement [ELSE statement]` with any condition (subqueries,
+  `[NOT] EXISTS (...)`, `OBJECT_ID(...) IS NULL`, `@@ROWCOUNT`), `BEGIN ... END`, `WHILE
+  condition statement` with `BREAK` and `CONTINUE`, and `RETURN`. A condition leaves
+  `@@ROWCOUNT` as the statement before it set it.
+- **Errors**: inside `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` an error moves to the
+  `CATCH` block instead of reaching the client; there `ERROR_NUMBER()`, `ERROR_SEVERITY()`,
+  `ERROR_STATE()`, `ERROR_LINE()`, `ERROR_MESSAGE()` and `ERROR_PROCEDURE()` (NULL) describe it,
+  and they are NULL outside. As in SQL Server, an unknown table or column (Msg 207, 208) in the
+  `TRY` block's own statements is not caught, while one inside dynamic SQL is. `THROW number,
+  message, state` (numbers 50000 to 2147483647, severity 16) ends the batch unless caught, and
+  `THROW;` in a `CATCH` block raises the caught error again. `RAISERROR (message, severity,
+  state [, argument, ...]) [WITH LOG | NOWAIT | SETERROR]` fills `%d %i %u %o %x %X %s` (with
+  flags, width and precision, `*` from the arguments) and sends severity 0-10 as an
+  informational message; 11-18 is error 50000, which ends only its statement; above 18 is Msg
+  2754, and a message number instead of a text is Msg 18054 (there is no `sp_addmessage`).
+  `@@ERROR` is the last statement's error number (0 after one that succeeded) and
+  `XACT_STATE()` is 1 inside a transaction and 0 outside.
+- **`PRINT expression`** sends its text, up to 8,000 characters, as an informational message: a
+  TDS `INFO` token (as `RAISERROR` of severity 10 or less), a notice in `eggdb sql`.
+- **Dynamic SQL**: `EXEC (string [+ string ...])` and `EXEC sp_executesql @statement [,
+  @params [, @p = value [OUTPUT], ...]]` run the text as a batch of its own: it does not see the
+  caller's variables or table variables, binds its parameters by position or name (Msg 8144,
+  8145, 8162, 8178), copies `OUTPUT` parameters back, and nests up to 32 levels (Msg 217).
+  `EXEC sp_executesql N'CREATE VIEW ...'` is how SSMS creates a view inside an existence guard.
+- **Table variables**: `DECLARE @t TABLE (column type [NULL | NOT NULL], ...)`, `INSERT [INTO]
+  @t [(columns)] VALUES (...), ... | SELECT ... | EXEC procedure`, `UPDATE @t SET column =
+  expression, ... [WHERE ...]`, `DELETE [FROM] @t [WHERE ...]` and `SELECT ... FROM @t
+  [alias]`, for the batch.
+- Statements that only assign variables (`DECLARE`, `SET @v`, `SELECT @v = ...`) send no done
+  message or row count of their own; `@@ROWCOUNT` is 1 after `SET @v` and the number of rows
+  after `SELECT @v = ...`.
+- Over TDS, a batch run by `sp_executesql`, `sp_prepexec` or `sp_execute` may assign its
+  parameters (`SET @p = ...`), and its `OUTPUT` parameters return the values it assigned, in
+  their declared types. `EXEC sp_unprepare handle` inside a batch, as mssql-jdbc sends it,
+  releases the connection's prepared statement. A server that stops cancels the batches its
+  connections run.
+
+CI's `tds-apps` job runs `scripts/tds-apps/batch-logic.sql` batch by batch through
+Microsoft.Data.SqlClient, the way sqlcmd sends a script, and compares what it prints (result
+sets, `INFO` messages and errors with their numbers, severities, states and lines) with
+`scripts/tds-apps/expected-logic-dotnet.out`.
+
 ## SQL Server metadata for tools
 
 Metadata tools and drivers browse an EggDB database over TDS as they browse SQL Server (roadmap
@@ -796,9 +873,9 @@ SELECT OBJECT_ID('sales.orders'), SERVERPROPERTY('ProductVersion'), DB_NAME(), S
   `sp_columns_managed`, `sp_indexes_managed` and `sp_indexcolumns_managed`, which SqlClient's
   `GetSchema` calls. Name arguments take SQL Server's `LIKE` patterns where the procedure does
   (`%`, `_`, `[...]`), compared without regard to case. Another procedure is Msg 2812.
-- **Table variables for `INSERT ... EXEC`**: `DECLARE @t TABLE (column type [NULL | NOT NULL],
-  ...)`, `INSERT [INTO] @t [(columns)] EXEC procedure ...` and `SELECT ... FROM @t [alias]` within
-  one batch, as mssql-jdbc's `getColumns` and `getImportedKeys` send them; `COLLATE` in an
+- **Table variables** (item 47 widened them): `DECLARE @t TABLE (column type [NULL | NOT NULL],
+  ...)`, `INSERT [INTO] @t [(columns)] EXEC procedure ...` as mssql-jdbc's `getColumns` and
+  `getImportedKeys` send it, and `SELECT ... FROM @t [alias]` within one batch; `COLLATE` in an
   expression is accepted without effect.
 
 CI's `tds-apps` job restores the sqlpackage fixture
@@ -2187,7 +2264,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - Not yet (item 39b and later): `SUBSTRING`, `LEFT`, `RIGHT`, `REPLACE`, `STUFF`,
   `REPLICATE`, `SPACE`, `REVERSE`, `TRIM`, `LTRIM`, `RTRIM`, `CONCAT`, `DATALENGTH`, `IIF`,
   `CHOOSE`, `DATEPART`, `DATENAME`, `YEAR`, `MONTH`, `DAY`, `EOMONTH`, `TRY_CAST`,
-  `TRY_CONVERT`, `DATEDIFF_BIG`, `ROUND`, `CEILING`, `FLOOR`, `COUNT_BIG`, `@@ERROR`,
+  `TRY_CONVERT`, `DATEDIFF_BIG`, `ROUND`, `CEILING`, `FLOOR`, `COUNT_BIG`,
   `@@IDENTITY`, the other `CONVERT` styles, `SUM` and `AVG` with SQL Server's result types and
   decimal division's scale; `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.`
   in `UPDATE`, `SELECT ... INTO` and `#temporary` tables.
@@ -2211,11 +2288,19 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   an `UPDATE` of an identity column (SQL Server's 8102), and `ROLLBACK TRAN <name>` ignores the
   name. Divide by zero and arithmetic overflow end the batch, where SQL Server ends only the
   statement.
-- `DECLARE` of variables, `IF` with a block or a condition that reads a table, `WHILE`, `BEGIN
-  ... END`, `TRY ... CATCH`, `PRINT`, `EXEC` of anything but the catalog procedures, stored
-  procedures and triggers; table variables filled other than by `INSERT ... EXEC`; `SAVE
-  TRANSACTION` and save points over TDS; `XACT_ABORT`, `QUOTED_IDENTIFIER OFF` and
-  `ANSI_PADDING OFF`; three-part names and other databases.
+- Batch logic (D137): cursors (`DECLARE CURSOR`), `GOTO` and labels, `WAITFOR`, stored
+  procedures, functions and triggers (3.15), `EXEC @status = procedure`, `INSERT ... EXEC` of
+  dynamic SQL, `SET eggdb.dialect` inside a block or dynamic SQL, and a `DECLARE` whose value
+  reads a variable the same `DECLARE` declares are 40517. A `SELECT` whose value reads a variable
+  the same `SELECT` assigns (`SELECT @s = @s + name FROM t`) is 40517; `SELECT @s += name FROM t`
+  gives SQL Server's result. A table variable's columns take no constraints, defaults or identity
+  and `NOT NULL` is not checked. `EXEC` of anything but the catalog procedures, `sp_executesql`
+  and `sp_unprepare`; `SAVE TRANSACTION` and save points over TDS; `XACT_ABORT`,
+  `QUOTED_IDENTIFIER OFF` and `ANSI_PADDING OFF`; three-part names and other databases.
+- A batch that loops forever over TDS cannot be stopped by the client's attention signal while it
+  runs (the connection reads its next request only when the batch ends); closing the server
+  stops it. Errors inside dynamic SQL report the line of the `EXEC` statement, not their line in
+  the dynamic text. `RAISERROR ... WITH LOG` writes no log. `ERROR_PROCEDURE()` is always NULL.
 - The catalog (D133) shows each column as the SQL Server type its engine type is most often
   declared with: `varchar` and `char` columns as `nvarchar` and `nchar`, `tinyint` as `smallint`,
   `money` as `decimal(19,4)`, `smalldatetime` and `datetime2(0)` as `datetime2(0)`, `datetime2(3)`
@@ -2231,8 +2316,8 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   parts) are not answered yet.
 - Under `IMPLICIT_TRANSACTIONS ON`, a `SELECT` starts no transaction (SQL Server's does), so
   `@@TRANCOUNT` stays 0 after reads alone.
-- Over TDS: an output parameter of `sp_executesql` comes back with the value it was sent with,
-  since nothing can assign it before item 47 brings `SET @p = ...`; `sp_prepare` returns no
+- Over TDS: an `OUTPUT` parameter comes back in the type of its declaration, whatever TDS type
+  the client sent it as; `sp_prepare` returns no
   column metadata; a `varchar` parameter under a collation other than Latin1 or UTF-8 is read as
   Windows-1252; a `datetimeoffset` parameter keeps its instant, not its offset.
 - What SSMS and sqlpackage scripts write runs (D125): `SET IDENTITY_INSERT t ON|OFF` (explicit
