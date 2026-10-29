@@ -385,3 +385,22 @@ fn oracle_written_dates_and_views_read_the_same_from_postgresql() {
         vec![vec![text("17-JUN-2013")]]
     );
 }
+
+#[test]
+fn a_source_named_with_its_owner_is_referred_to_by_its_own_name() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    for statement in [
+        "CREATE TABLE t (id NUMBER PRIMARY KEY, v NUMBER)",
+        "CREATE TABLE s (id NUMBER, v NUMBER)",
+        "INSERT INTO t VALUES (1, 0)",
+        "INSERT INTO s VALUES (1, 10)",
+        "MERGE INTO t USING eggdb.s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v = s.v",
+    ] {
+        values(&mut session, statement);
+    }
+    assert_eq!(
+        values(&mut session, "SELECT v FROM t"),
+        vec![vec![number(10)]]
+    );
+}

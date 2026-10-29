@@ -357,14 +357,14 @@ pub(crate) fn merge(
             let new_key = if table.primary_key.is_empty() {
                 old_key.clone()
             } else {
-                execute::primary_key_of(&table, &new_row)
+                execute::row_key(&table, &new_row)
             };
             memory.charge_row(&new_row)?;
             memory.charge_row(old_row)?;
             old_rows.push(old_row.clone());
             changes.push((old_key.clone(), new_key, new_row));
         }
-        execute::write_updated_rows(writer, tables, &table, &changes, &old_rows)?;
+        execute::write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
         affected += changes.len();
         if let Some(condition) = &update.delete_condition {
             let mut deleted = Vec::new();
@@ -374,7 +374,7 @@ pub(crate) fn merge(
                     deleted.push((new_key, new_row));
                 }
             }
-            execute::delete_rows(writer, tables, &table, deleted)?;
+            execute::delete_rows(writer, tables, &table, deleted, &mut |_| Ok(()))?;
         }
     }
     if let Some(insert) = &merge.insert {

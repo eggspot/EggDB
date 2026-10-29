@@ -1232,3 +1232,34 @@ fn a_rolled_back_sequence_never_rewinds_what_another_transaction_saved() {
         "nextval\n502\nSELECT 1"
     );
 }
+
+#[test]
+fn update_returning_is_computed_per_row_before_foreign_keys_are_checked() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE parent (id int PRIMARY KEY);
+         CREATE TABLE child (id int PRIMARY KEY, parent_id int REFERENCES parent);
+         INSERT INTO parent VALUES (1);
+         INSERT INTO child VALUES (1, 1);",
+    );
+    assert_eq!(
+        fails(
+            &mut session,
+            "UPDATE child SET parent_id = 999 RETURNING 1 / 0"
+        )
+        .state()
+        .code(),
+        "22012"
+    );
+    assert_eq!(
+        fails(
+            &mut session,
+            "UPDATE child SET parent_id = 999 RETURNING id"
+        )
+        .state()
+        .code(),
+        "23503"
+    );
+}

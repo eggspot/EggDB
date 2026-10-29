@@ -116,10 +116,12 @@ impl Parser<'_> {
         let target = TableReference::named(name, alias);
         self.expect_word("using")?;
         let source = self.table_reference()?;
-        let source_label = source
-            .alias
-            .clone()
-            .or_else(|| source.derived.is_none().then(|| source.name.text.clone()));
+        let source_label = source.alias.clone().or_else(|| {
+            source
+                .derived
+                .is_none()
+                .then(|| crate::schemas::base_name(&source.name.text).to_owned())
+        });
         self.expect_word("on")?;
         self.expect(&TokenKind::LeftParen)?;
         let on = self.expression()?;
