@@ -563,8 +563,9 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::{
-        COLLECTIONS_END, COLLECTIONS_PREFIX, ENTRY_PREFIX_BYTES, check_collection_name,
-        entries_prefix, is_reserved, name_key, read_record, record,
+        COLLECTIONS_END, COLLECTIONS_PREFIX, ENTRY_PREFIX_BYTES, catalog_key,
+        check_collection_name, entries_prefix, is_reserved, name_key, names_prefix, read_record,
+        record,
     };
     use crate::ErrorKind;
     use crate::scan::keys_after_prefix;
@@ -581,6 +582,20 @@ mod tests {
         assert!(!is_reserved(b"\xffCOL"));
         assert!(!is_reserved(b"\xffSQL\x00"));
         assert_eq!(entries_prefix(1).len(), ENTRY_PREFIX_BYTES);
+    }
+
+    #[test]
+    fn the_key_layout_matches_its_test_vectors() {
+        assert_eq!(catalog_key(), b"\xffCOL\x00\x01");
+        assert_eq!(names_prefix(), b"\xffCOL\x00\x02");
+        assert_eq!(name_key("users"), b"\xffCOL\x00\x02users");
+        assert_eq!(entries_prefix(1), b"\xffCOL\x00\x03\x00\x00\x00\x01");
+        assert_eq!(
+            entries_prefix(0x0102_0304),
+            b"\xffCOL\x00\x03\x01\x02\x03\x04"
+        );
+        assert_eq!(record(1), [1, 0, 0, 0, 1]);
+        assert_eq!(record(0x0102_0304), [1, 1, 2, 3, 4]);
     }
 
     #[test]
