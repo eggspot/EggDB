@@ -154,6 +154,7 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::Bytea => 18,
         SqlType::Uuid => 19,
         SqlType::Bpchar(_) => 20,
+        SqlType::Array(_) => 21,
     }
 }
 
@@ -879,6 +880,10 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
             out.push(PRESENT);
             push_escaped_text(out, crate::types::without_trailing_spaces(text).as_bytes());
         }
+        Value::Array(array) => {
+            out.push(PRESENT);
+            push_escaped_text(out, &crate::arrays::encode_stored(array));
+        }
         Value::Bytea(bytes) => {
             out.push(PRESENT);
             push_escaped_text(out, bytes);
@@ -1024,6 +1029,10 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
                 out.push(20);
                 put_bytes(out, text.as_bytes());
             }
+            Value::Array(array) => {
+                out.push(21);
+                put_bytes(out, &crate::arrays::encode_stored(array));
+            }
         }
     }
 }
@@ -1072,7 +1081,18 @@ pub(crate) fn decode_row_into(
                 Value::Bytea(reader.take(length)?.to_vec())
             }
             20 if wanted => Value::Bpchar(reader.text()?),
-            7 | 13 | 14 | 18 | 20 => {
+            21 if wanted => {
+                let SqlType::Array(element) = column.sql_type else {
+                    return Err(reader.damaged());
+                };
+                let length = reader.count()?;
+                let bytes = reader.take(length)?;
+                match crate::arrays::decode_stored(bytes, element) {
+                    Some(array) => Value::Array(Box::new(array)),
+                    None => return Err(reader.damaged()),
+                }
+            }
+            7 | 13 | 14 | 18 | 20 | 21 => {
                 reader.skip_text()?;
                 Value::Null
             }
@@ -1363,6 +1383,7 @@ impl<'b> Reader<'b> {
             | SqlType::Time(_) => 8,
             SqlType::TimeTz(_) => 12,
             SqlType::Interval { .. } | SqlType::Uuid => 16,
+            SqlType::Array(_) => return Err(self.damaged()),
             SqlType::Numeric(_) => {
                 let rest = self.bytes.get(self.at..).unwrap_or(&[]);
                 Numeric::key_length(rest).ok_or_else(|| self.damaged())?
@@ -1475,6 +1496,7 @@ impl<'b> Reader<'b> {
                 Value::Interval(Interval::from_span(span).ok_or_else(|| self.damaged())?)
             }
             SqlType::Uuid => Value::Uuid(self.array()?),
+            SqlType::Array(_) => return Err(self.damaged()),
             SqlType::Text
             | SqlType::Varchar(_)
             | SqlType::Json

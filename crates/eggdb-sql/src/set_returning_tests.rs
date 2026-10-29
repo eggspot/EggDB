@@ -1,0 +1,174 @@
+use crate::memory::{WORK_MEMORY_LIMIT, WorkMemory, share_statement_memory};
+use crate::memory_store::MemoryStore;
+use crate::tests::render;
+use crate::types::SqlType;
+use crate::{ArrayElement, Session, SqlError};
+
+fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
+    let mut outputs = Vec::new();
+    session.execute(sql, &mut |result| outputs.push(render(&result)))?;
+    Ok(outputs.pop().unwrap_or_default())
+}
+
+fn state(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+    match run(session, sql) {
+        Ok(output) => panic!("{sql} succeeded: {output}"),
+        Err(error) => error.state().code().to_owned(),
+    }
+}
+
+#[test]
+fn rows_a_function_generates_count_against_the_statements_memory() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let _shared = share_statement_memory();
+    let mut held = WorkMemory::new();
+    held.charge(WORK_MEMORY_LIMIT - 100_000).unwrap();
+    for sql in [
+        "SELECT count(*) FROM generate_series(1, 1000000000000)",
+        "SELECT count(*) FROM (SELECT generate_series(1, 1000000000000)) g",
+        "SELECT count(*) FROM unnest(ARRAY(SELECT * FROM generate_series(1, 100000)))",
+    ] {
+        assert_eq!(state(&mut session, sql), "53200", "{sql}");
+    }
+}
+
+#[test]
+fn placements_that_do_not_run_yet_are_0a000() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE t (n integer PRIMARY KEY)").unwrap();
+    run(&mut session, "INSERT INTO t VALUES (1), (2)").unwrap();
+    for sql in [
+        "SELECT * FROM upper('x')",
+        "SELECT * FROM t, generate_series(1, t.n)",
+        "SELECT * FROM t, generate_series(1, n)",
+        "SELECT generate_series(1, 2), unnest(ARRAY[1])",
+        "SELECT generate_series(1, 2) + 1",
+        "SELECT n FROM t ORDER BY generate_series(1, 2)",
+        "SELECT n FROM t GROUP BY generate_series(1, 2)",
+        "SELECT * FROM generate_series(1, unnest(ARRAY[3]))",
+        "SELECT * FROM generate_series(1.5, 3)",
+        "UPDATE t SET n = generate_series(1, 2)",
+        "SELECT string_agg(n::text, ',' ORDER BY n) FROM t",
+        "SELECT (SELECT generate_series(1, t.n)) FROM t",
+    ] {
+        assert_eq!(state(&mut session, sql), "0A000", "{sql}");
+    }
+    assert_eq!(
+        state(&mut session, "SELECT * FROM t, generate_series(1, nosuch)"),
+        "42703"
+    );
+    assert_eq!(
+        state(&mut session, "SELECT * FROM t, (VALUES (t.n)) v"),
+        "42P01"
+    );
+    assert_eq!(state(&mut session, "SELECT * FROM unnest('{1}')"), "42725");
+    assert_eq!(state(&mut session, "SELECT * FROM unnest(1)"), "42883");
+}
+
+#[test]
+fn values_and_functions_in_from_are_described_without_running() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let description = session
+        .describe(
+            "SELECT * FROM generate_series(1, 1000000000000) WITH ORDINALITY AS g(n, i), (VALUES (1, 'a')) v",
+            &[],
+        )
+        .unwrap();
+    let columns: Vec<(String, Option<SqlType>)> = description
+        .columns
+        .unwrap_or_default()
+        .into_iter()
+        .map(|column| (column.name, column.sql_type))
+        .collect();
+    assert_eq!(
+        columns,
+        [
+            ("n".to_owned(), Some(SqlType::BigInt)),
+            ("i".to_owned(), Some(SqlType::BigInt)),
+            ("column1".to_owned(), Some(SqlType::Integer)),
+            ("column2".to_owned(), Some(SqlType::Text)),
+        ]
+    );
+    let description = session
+        .describe("SELECT ARRAY[1, 2] AS a, unnest(ARRAY['x']) AS u", &[])
+        .unwrap();
+    let types: Vec<Option<SqlType>> = description
+        .columns
+        .unwrap_or_default()
+        .into_iter()
+        .map(|column| column.sql_type)
+        .collect();
+    assert_eq!(
+        types,
+        [
+            Some(SqlType::Array(ArrayElement::Integer)),
+            Some(SqlType::Text)
+        ]
+    );
+}
+
+#[test]
+fn a_correlated_function_in_from_runs_for_each_outer_value() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE TABLE t (id integer PRIMARY KEY, n integer)",
+    )
+    .unwrap();
+    let rows: Vec<String> = (1..=300).map(|id| format!("({id}, {})", id % 3)).collect();
+    run(
+        &mut session,
+        &format!("INSERT INTO t VALUES {}", rows.join(", ")),
+    )
+    .unwrap();
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT sum(s) FROM (SELECT (SELECT sum(g) FROM generate_series(1, t.n) g) AS s FROM t) x"
+        )
+        .unwrap(),
+        "sum\n400\nSELECT 1"
+    );
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT count(*) FROM t WHERE EXISTS (SELECT 1 FROM unnest(ARRAY[t.n]) u WHERE u = 2)"
+        )
+        .unwrap(),
+        "count\n100\nSELECT 1"
+    );
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT count(*) FROM t WHERE n = ANY (ARRAY(SELECT u FROM unnest(ARRAY[t.id % 5, 2]) u))"
+        )
+        .unwrap(),
+        "count\n140\nSELECT 1"
+    );
+}
+
+#[test]
+fn generated_rows_feed_aggregates_and_regular_expressions() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT count(*), max(g::bigint * g) FROM generate_series(1, 1000) g"
+        )
+        .unwrap(),
+        "count|max\n1000|1000000\nSELECT 1"
+    );
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT count(*) FROM generate_series(1, 1000) g WHERE g::text ~ '^1[0-9]*0$'"
+        )
+        .unwrap(),
+        "count\n12\nSELECT 1"
+    );
+}

@@ -425,6 +425,7 @@ pub(crate) struct TableReference {
     pub(crate) name: Name,
     pub(crate) alias: Option<String>,
     pub(crate) derived: Option<Box<DerivedTable>>,
+    pub(crate) generated: Option<Box<GeneratedTable>>,
 }
 
 impl TableReference {
@@ -433,8 +434,42 @@ impl TableReference {
             name,
             alias,
             derived: None,
+            generated: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum GeneratedTable {
+    Values(ValuesList),
+    Function(TableFunction),
+    Expansion(Box<SelectListExpansion>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ValuesList {
+    pub(crate) rows: Vec<Vec<Expr>>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableFunction {
+    pub(crate) name: String,
+    pub(crate) arguments: Vec<Expr>,
+    pub(crate) ordinality: bool,
+    pub(crate) column_names: Vec<Name>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SelectListExpansion {
+    pub(crate) query: Query,
+    pub(crate) function: String,
+    pub(crate) arguments: usize,
+    pub(crate) before_columns: Option<usize>,
+    pub(crate) after_columns: Option<usize>,
+    pub(crate) output_name: String,
+    pub(crate) position: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -546,19 +581,20 @@ pub(crate) enum SubqueryTest {
         operator: BinaryOperator,
         all: bool,
     },
+    Array,
 }
 
 impl SubqueryTest {
     pub(crate) fn operand(&self) -> Option<&Expr> {
         match self {
-            Self::Scalar | Self::Exists => None,
+            Self::Scalar | Self::Exists | Self::Array => None,
             Self::In { expr, .. } | Self::Compare { expr, .. } => Some(expr),
         }
     }
 
     pub(crate) fn operand_mut(&mut self) -> Option<&mut Expr> {
         match self {
-            Self::Scalar | Self::Exists => None,
+            Self::Scalar | Self::Exists | Self::Array => None,
             Self::In { expr, .. } | Self::Compare { expr, .. } => Some(expr),
         }
     }
@@ -732,6 +768,10 @@ pub(crate) enum BinaryOperator {
     JsonPathText,
     JsonContains,
     JsonContainedIn,
+    RegexMatch,
+    RegexMatchFolded,
+    RegexNoMatch,
+    RegexNoMatchFolded,
 }
 
 impl BinaryOperator {
@@ -756,6 +796,10 @@ impl BinaryOperator {
             Self::JsonPathText => "#>>",
             Self::JsonContains => "@>",
             Self::JsonContainedIn => "<@",
+            Self::RegexMatch => "~",
+            Self::RegexMatchFolded => "~*",
+            Self::RegexNoMatch => "!~",
+            Self::RegexNoMatchFolded => "!~*",
         }
     }
 }
@@ -767,6 +811,7 @@ pub(crate) enum AggregateFunction {
     Avg,
     Min,
     Max,
+    StringAgg,
 }
 
 impl AggregateFunction {
@@ -788,6 +833,7 @@ impl AggregateFunction {
             Self::Avg => "avg",
             Self::Min => "min",
             Self::Max => "max",
+            Self::StringAgg => "string_agg",
         }
     }
 }

@@ -390,6 +390,18 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
                 _ => ("regclass".to_owned(), false),
             }
         }
+        ExprKind::Function { name, .. } if name == "array_constructor" => ("array".into(), true),
+        ExprKind::Function { name, arguments }
+            if name == "array_subscript" || name == "collate" =>
+        {
+            match arguments.first().map(name_and_whether_it_names_a_value) {
+                Some((name, true)) => (name, true),
+                _ => ("?column?".into(), false),
+            }
+        }
+        ExprKind::Function { name, .. } if name == "array_any" || name == "array_all" => {
+            ("?column?".into(), false)
+        }
         ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
@@ -409,7 +421,12 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         },
         ExprKind::Case { .. } => ("case".into(), false),
         ExprKind::Subquery(subquery) => match crate::subquery::output_column(expr) {
-            Some(column) if !matches!(subquery.test, crate::ast::SubqueryTest::Scalar) => {
+            Some(column)
+                if !matches!(
+                    subquery.test,
+                    crate::ast::SubqueryTest::Scalar | crate::ast::SubqueryTest::Array
+                ) =>
+            {
                 (column.name, false)
             }
             Some(column) => (column.name, true),
@@ -567,6 +584,13 @@ impl Evaluator<'_> {
                 };
                 decimal_constant(text, hint)
             }
+            ExprKind::Cast {
+                expr: inner,
+                sql_type: target @ SqlType::Array(element),
+            } if matches!(&inner.kind, ExprKind::Function { name, .. } if name == "array_constructor") => {
+                crate::arrays::cast_constructor(self, inner, *element)
+                    .unwrap_or_else(|| self.cast(inner, *target))
+            }
             ExprKind::Cast { expr, sql_type } => self.cast(expr, *sql_type),
             ExprKind::Case {
                 operand,
@@ -656,7 +680,7 @@ impl Evaluator<'_> {
         value.sql_type().or_else(|| self.declared_type(expr))
     }
 
-    fn declared_type(&self, expr: &Expr) -> Option<SqlType> {
+    pub(crate) fn declared_type(&self, expr: &Expr) -> Option<SqlType> {
         match &expr.kind {
             ExprKind::Column { qualifier, name } => {
                 let index = self
@@ -729,7 +753,17 @@ impl Evaluator<'_> {
     fn binary(&self, operator: BinaryOperator, left: &Expr, right: &Expr) -> SqlResult<Value> {
         match operator {
             BinaryOperator::Concat => {
-                let (left, right) = self.concatenated(left, right)?;
+                let (left_value, right_value) = self.concatenated(left, right)?;
+                if matches!(left_value, Value::Array(_)) || matches!(right_value, Value::Array(_)) {
+                    return crate::arrays::concatenation(
+                        self,
+                        left,
+                        right,
+                        left_value,
+                        right_value,
+                    );
+                }
+                let (left, right) = (left_value, right_value);
                 if let Some(joined) = bytes_concatenated(&left, &right) {
                     return joined;
                 }
@@ -788,6 +822,14 @@ impl Evaluator<'_> {
                     }
                     _ => Err(no_operator(operator.symbol(), &left, &right)),
                 }
+            }
+            BinaryOperator::RegexMatch
+            | BinaryOperator::RegexMatchFolded
+            | BinaryOperator::RegexNoMatch
+            | BinaryOperator::RegexNoMatchFolded => {
+                let text = self.eval(left, Some(SqlType::Text))?;
+                let pattern = self.eval(right, Some(SqlType::Text))?;
+                crate::regex::operator(operator, &text, &pattern)
             }
             BinaryOperator::JsonField
             | BinaryOperator::JsonFieldText
@@ -1007,8 +1049,13 @@ impl Evaluator<'_> {
     }
 
     fn function(&self, name: &str, arguments: &[Expr]) -> SqlResult<Value> {
-        if name == "oracle_extract" {
-            return self.oracle_extract(arguments);
+        match name {
+            "oracle_extract" => return self.oracle_extract(arguments),
+            "array_constructor" => return crate::arrays::construct(self, arguments, None),
+            "array_any" => return crate::arrays::quantified(self, arguments, false),
+            "array_all" => return crate::arrays::quantified(self, arguments, true),
+            "collate" => return crate::string_functions::collated(self, arguments),
+            _ => {}
         }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
@@ -1027,6 +1074,10 @@ impl Evaluator<'_> {
             values.push(value);
         }
         let unknown = || {
+            if crate::set_returning::named(name).is_some() {
+                return SqlError::not_supported("set-returning functions are not allowed here")
+                    .with_hint("Call it alone as a select-list item of a SELECT, or in FROM.");
+            }
             let types: Vec<String> = values.iter().map(Value::type_name).collect();
             SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,
@@ -1052,6 +1103,12 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::bytea::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::arrays::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::string_functions::function(name, &values) {
             return result;
         }
         match (name, values.as_slice()) {
@@ -1144,6 +1201,13 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
             Some(SqlType::BigInt),
             Some(SqlType::Boolean),
         ],
+        "array_to_string" => &[None, Some(SqlType::Text), Some(SqlType::Text)],
+        "array_length" | "array_upper" | "array_lower" | "array_subscript" => {
+            &[None, Some(SqlType::Integer)]
+        }
+        "array_ndims" | "cardinality" => &[None],
+        "btrim" | "ltrim" | "rtrim" => &[Some(SqlType::Text), Some(SqlType::Text)],
+        "quote_ident" => &[Some(SqlType::Text)],
         _ => return None,
     })
 }

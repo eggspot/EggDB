@@ -54,6 +54,8 @@ impl SqlState {
     pub const INTERVAL_FIELD_OVERFLOW: Self = Self(*b"22015");
     /// `2202E` array_subscript_error.
     pub const ARRAY_SUBSCRIPT_ERROR: Self = Self(*b"2202E");
+    /// `2201B` invalid_regular_expression.
+    pub const INVALID_REGULAR_EXPRESSION: Self = Self(*b"2201B");
     /// `22012` division_by_zero.
     pub const DIVISION_BY_ZERO: Self = Self(*b"22012");
     /// `22019` invalid_escape_character.
@@ -124,6 +126,8 @@ impl SqlState {
     pub const CANNOT_COERCE: Self = Self(*b"42846");
     /// `42883` undefined_function.
     pub const UNDEFINED_FUNCTION: Self = Self(*b"42883");
+    /// `42725` ambiguous_function.
+    pub const AMBIGUOUS_FUNCTION: Self = Self(*b"42725");
     /// `42P01` undefined_table.
     pub const UNDEFINED_TABLE: Self = Self(*b"42P01");
     /// `42P07` duplicate_table.

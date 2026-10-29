@@ -150,3 +150,4 @@ its full title with its status.
 - [D123](decisions/D123.md) SQL Server's types, conversions and functions in the Transact-SQL dialect: types mapped onto the engine's, SQL Server's conversion rules and styles, no file-format change
 - [D124](decisions/D124.md) Transact-SQL views and CHECK constraints in the file: SQL Server is dialect code 4 in the view and CHECK records, with no new format version
 - [D125](decisions/D125.md) Restoring a SQL Server script: SSMS Generate Scripts and sqlpackage scripts through `eggdb restore --dialect sqlserver`, sharing item 35's restore runner
+- [D128](decisions/D128.md) The SQL psql's `\d` family needs: linear-time regular expressions of our own, arrays as values of expressions only, set-returning functions and `VALUES` lists as intermediate tables of the statement

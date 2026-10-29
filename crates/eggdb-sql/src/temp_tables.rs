@@ -197,7 +197,33 @@ impl TempTables {
             .map(|column| column.name.len() + ENTRY_OVERHEAD)
             .sum();
         self.memory.charge(column_bytes + ENTRY_OVERHEAD)?;
-        let prefix = rows_prefix(id);
+        self.fill(&definition, rows)?;
+        let registered = DEFINITIONS.with(|definitions| {
+            definitions
+                .try_borrow_mut()
+                .map(|mut definitions| {
+                    definitions.insert(name.clone(), Arc::new(definition));
+                })
+                .is_ok()
+        });
+        if !registered {
+            return Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "an intermediate result could not be registered",
+            ));
+        }
+        self.registered.push(name.clone());
+        Ok(name)
+    }
+}
+
+impl TempTables {
+    pub(crate) fn fill(
+        &mut self,
+        definition: &TableDefinition,
+        rows: Vec<Vec<Value>>,
+    ) -> SqlResult<()> {
+        let prefix = rows_prefix(definition.id);
         let width = definition.columns.len();
         let mut stored = Vec::with_capacity(rows.len());
         for (number, mut row) in rows.into_iter().enumerate() {
@@ -216,22 +242,7 @@ impl TempTables {
             stored.push((key, bytes));
         }
         self.entries.extend(stored);
-        let registered = DEFINITIONS.with(|definitions| {
-            definitions
-                .try_borrow_mut()
-                .map(|mut definitions| {
-                    definitions.insert(name.clone(), Arc::new(definition));
-                })
-                .is_ok()
-        });
-        if !registered {
-            return Err(SqlError::new(
-                SqlState::INTERNAL_ERROR,
-                "an intermediate result could not be registered",
-            ));
-        }
-        self.registered.push(name.clone());
-        Ok(name)
+        Ok(())
     }
 }
 

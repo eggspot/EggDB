@@ -367,7 +367,8 @@ fn class_of_type(sql_type: SqlType) -> ValueClass {
         | SqlType::Bpchar(_)
         | SqlType::TimeTz(_)
         | SqlType::Interval { .. }
-        | SqlType::Uuid => ValueClass::Text,
+        | SqlType::Uuid
+        | SqlType::Array(_) => ValueClass::Text,
         SqlType::Time(_) => ValueClass::Time,
         SqlType::Bytea => ValueClass::Bytes,
         SqlType::Date => ValueClass::Date,

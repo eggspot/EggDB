@@ -3,6 +3,7 @@ mod copy;
 mod indexes;
 mod mysql;
 mod oracle;
+mod postgresql;
 mod query;
 mod schemas;
 mod sqlite;
@@ -133,7 +134,7 @@ fn is_plain_literal(kind: &TokenKind<'_>) -> bool {
     ) || matches!(kind, TokenKind::Word(word) if word == "null" || word == "true" || word == "false")
 }
 
-const POSTGRESQL_ONLY_FUNCTIONS: [&str; 30] = [
+const POSTGRESQL_ONLY_FUNCTIONS: [&str; 40] = [
     "set_config",
     "current_schemas",
     "nextval",
@@ -164,9 +165,19 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 30] = [
     "jsonb_typeof",
     "json_array_length",
     "jsonb_array_length",
+    "array_to_string",
+    "array_length",
+    "array_upper",
+    "array_lower",
+    "array_ndims",
+    "cardinality",
+    "generate_series",
+    "unnest",
+    "quote_ident",
+    "btrim",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 11] = [
+const INTERNAL_FUNCTIONS: [&str; 17] = [
     "regclass_cast",
     "oracle_nextval",
     "oracle_currval",
@@ -178,6 +189,12 @@ const INTERNAL_FUNCTIONS: [&str; 11] = [
     "mysql_extract",
     "oracle_extract",
     "concat_or_null",
+    "array_constructor",
+    "array_subscript",
+    "array_any",
+    "array_all",
+    "string_agg_arguments",
+    "collate",
 ];
 
 const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
@@ -696,6 +713,7 @@ impl<'t> Parser<'t> {
                 }
                 Ok(Statement::Rollback)
             }
+            "values" if self.postgresql() => self.query_statement(),
             "values" | "table" => Err(self.not_supported("a VALUES or TABLE statement")),
             "set" => self.set(),
             "show" => self.show(),
@@ -1622,7 +1640,75 @@ impl<'t> Parser<'t> {
         Ok(sql_type)
     }
 
+    pub(crate) fn cast_type(&mut self) -> SqlResult<SqlType> {
+        if !self.postgresql() {
+            return self.sql_type();
+        }
+        let position = self.position();
+        let sql_type = self.element_type()?;
+        let array = if self.take_word("array") {
+            if self.peek_kind() == &TokenKind::LeftBracket {
+                self.array_dimension()?;
+            }
+            true
+        } else {
+            let bracketed = self.peek_kind() == &TokenKind::LeftBracket;
+            while self.peek_kind() == &TokenKind::LeftBracket {
+                self.array_dimension()?;
+            }
+            bracketed
+        };
+        if !array {
+            return Ok(sql_type);
+        }
+        crate::arrays::ArrayElement::required(sql_type)
+            .map(SqlType::Array)
+            .map_err(|error| error.at(position))
+    }
+
+    fn array_dimension(&mut self) -> SqlResult<()> {
+        self.expect(&TokenKind::LeftBracket)?;
+        if matches!(self.peek_kind(), TokenKind::Integer(_)) {
+            self.at += 1;
+        }
+        self.expect(&TokenKind::RightBracket)
+    }
+
+    fn type_schema(&mut self) -> SqlResult<()> {
+        let schema = match self.peek_kind() {
+            TokenKind::Word(word) => word.as_ref(),
+            TokenKind::QuotedIdentifier(name) => name.as_str(),
+            _ => return Ok(()),
+        };
+        if self.peek_kind_at(1) != &TokenKind::Dot
+            || !matches!(
+                self.peek_kind_at(2),
+                TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+            )
+        {
+            return Ok(());
+        }
+        if schema == "pg_catalog" {
+            self.at += 2;
+            return Ok(());
+        }
+        let position = self.position();
+        let name = match self.peek_kind_at(2) {
+            TokenKind::Word(word) => word.as_ref().to_owned(),
+            TokenKind::QuotedIdentifier(name) => name.clone(),
+            _ => String::new(),
+        };
+        Err(SqlError::new(
+            SqlState::UNDEFINED_OBJECT,
+            format!("type \"{schema}.{name}\" does not exist"),
+        )
+        .at(position))
+    }
+
     fn element_type(&mut self) -> SqlResult<SqlType> {
+        if self.postgresql() {
+            self.type_schema()?;
+        }
         let token = self.peek();
         let word: &str = match &token.kind {
             TokenKind::Word(word) => word,
@@ -1762,6 +1848,13 @@ impl<'t> Parser<'t> {
             if_exists,
             cascade,
         })
+    }
+
+    fn table_or_function(&mut self) -> SqlResult<TableReference> {
+        if self.postgresql() && self.at_table_function() {
+            return self.table_function();
+        }
+        self.table_reference()
     }
 
     fn table_reference(&mut self) -> SqlResult<TableReference> {
@@ -2121,7 +2214,7 @@ impl<'t> Parser<'t> {
             let group = self.leading_join_group()?;
             (group.first, group.joins)
         } else {
-            (self.table_reference()?, Vec::new())
+            (self.table_or_function()?, Vec::new())
         };
         loop {
             let kind = if self.take(&TokenKind::Comma) {
@@ -2161,7 +2254,7 @@ impl<'t> Parser<'t> {
                 )
                 .at(self.position()));
             }
-            let table = self.table_reference()?;
+            let table = self.table_or_function()?;
             let condition = match kind {
                 JoinKind::Comma | JoinKind::Cross => JoinCondition::Always,
                 JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
@@ -2445,6 +2538,11 @@ impl<'t> Parser<'t> {
         }
         match self.peek_kind() {
             TokenKind::Word(word) => match word.as_ref() {
+                "operator"
+                    if self.postgresql() && self.peek_kind_at(1) == &TokenKind::LeftParen =>
+                {
+                    Some(Level::Other)
+                }
                 "or" => Some(Level::Or),
                 "and" => Some(Level::And),
                 "is" | "isnull" | "notnull" => Some(Level::Is),
@@ -2503,6 +2601,16 @@ impl<'t> Parser<'t> {
             }
             Level::Pattern => self.pattern(left),
             Level::Other => {
+                if self.postgresql() && self.is_word("operator") {
+                    return self.explicit_operator(left);
+                }
+                if self.postgresql()
+                    && let Some(operator) = self.regex_operator()
+                {
+                    self.at += 1;
+                    let right = self.expression_above(Level::Additive)?;
+                    return Ok(Self::binary(left, operator, right));
+                }
                 if self.postgresql()
                     && let Some(operator) = self.json_operator()
                 {
@@ -2724,7 +2832,7 @@ impl<'t> Parser<'t> {
                     };
                     continue;
                 }
-                let sql_type = self.sql_type()?;
+                let sql_type = self.cast_type()?;
                 let position = expr.position;
                 expr = Expr {
                     kind: ExprKind::Cast {
@@ -2733,8 +2841,16 @@ impl<'t> Parser<'t> {
                     },
                     position,
                 };
+            } else if self.peek_kind() == &TokenKind::LeftBracket && self.postgresql() {
+                self.depth += 1;
+                if self.depth > MAX_NESTING {
+                    return Err(too_deep(self.position()));
+                }
+                expr = self.subscript(expr)?;
             } else if self.peek_kind() == &TokenKind::LeftBracket {
                 return Err(self.not_supported("array subscripts"));
+            } else if self.is_word("collate") && self.postgresql() {
+                expr = self.collate(expr)?;
             } else if self.is_word("collate") {
                 return Err(self.not_supported("COLLATE"));
             } else if self.is_word("at") && self.is_word_at(1, "time") {
@@ -2853,6 +2969,13 @@ impl<'t> Parser<'t> {
                 "exists" if self.peek_kind_at(1) == &TokenKind::LeftParen => {
                     self.at += 1;
                     self.subquery_expression(crate::ast::SubqueryTest::Exists, position)
+                }
+                "array"
+                    if self.postgresql()
+                        && (self.peek_kind_at(1) == &TokenKind::LeftParen
+                            || self.peek_kind_at(1) == &TokenKind::LeftBracket) =>
+                {
+                    self.array_constructor()
                 }
                 "array" | "row"
                     if self.peek_kind_at(1) == &TokenKind::LeftParen
@@ -3128,6 +3251,12 @@ impl<'t> Parser<'t> {
         if text == "substring" && self.postgresql() {
             return self.substring(name);
         }
+        if text == "trim" && self.postgresql() {
+            return self.postgresql_trim(name);
+        }
+        if text == "string_agg" && self.postgresql() {
+            return self.string_agg(name);
+        }
         if !self.sqlite()
             && !self.oracle()
             && let Some(expr) = self.session_function(&name)?
@@ -3273,7 +3402,7 @@ impl<'t> Parser<'t> {
         self.expect(&TokenKind::LeftParen)?;
         let expr = self.expression()?;
         self.expect_word("as")?;
-        let sql_type = self.sql_type()?;
+        let sql_type = self.cast_type()?;
         self.expect(&TokenKind::RightParen)?;
         Ok(Expr {
             kind: ExprKind::Cast {

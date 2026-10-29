@@ -257,6 +257,35 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
             SqlType::Varchar(_) => Some(SqlType::Text),
             other => Some(other.without_modifier()),
         },
+        AggregateFunction::StringAgg => match argument {
+            Some(SqlType::Bytea) => Some(SqlType::Bytea),
+            _ => Some(SqlType::Text),
+        },
+    }
+}
+
+fn joined_parts(argument: &Expr) -> Option<(&Expr, &Expr)> {
+    match &argument.kind {
+        ExprKind::Function { name, arguments } if name == "string_agg_arguments" => {
+            match arguments.as_slice() {
+                [value, delimiter] => Some((value, delimiter)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn argument_type(
+    function: AggregateFunction,
+    argument: &Expr,
+    scope: Scope<'_>,
+) -> Option<SqlType> {
+    match (function, joined_parts(argument)) {
+        (AggregateFunction::StringAgg, Some((value, _))) => {
+            static_type(value, scope).or_else(|| crate::typing::static_type(value, scope))
+        }
+        _ => static_type(argument, scope),
     }
 }
 
@@ -283,6 +312,12 @@ fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlRes
         }
         AggregateFunction::Sum | AggregateFunction::Avg if !sql_type.is_numeric() => {
             Err(undefined_aggregate(function, &name()))
+        }
+        AggregateFunction::StringAgg if !sql_type.is_character() && sql_type != SqlType::Bytea => {
+            Err(undefined_aggregate(
+                function,
+                &format!("{}, unknown", name()),
+            ))
         }
         _ => Ok(()),
     }
@@ -414,7 +449,7 @@ impl Analyzer<'_> {
                         ));
                     }
                     check_columns(argument, self.scope)?;
-                    if let Some(sql_type) = static_type(argument, self.scope) {
+                    if let Some(sql_type) = argument_type(*function, argument, self.scope) {
                         check_argument_type(*function, sql_type)
                             .map_err(|error| error.at(expr.position))?;
                     }
@@ -437,7 +472,7 @@ impl Analyzer<'_> {
                 };
                 let argument_type = argument
                     .as_deref()
-                    .and_then(|argument| static_type(argument, self.scope));
+                    .and_then(|argument| argument_type(*function, argument, self.scope));
                 Ok(Expr {
                     kind: ExprKind::Slot {
                         index: self.group_column_slot(GroupColumn::Aggregate(call)),
@@ -609,7 +644,7 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
     }
     for call in &analyzer.calls {
         if let Some(argument) = &call.argument
-            && let Some(sql_type) = static_type(argument, scope)
+            && let Some(sql_type) = argument_type(call.function, argument, scope)
         {
             check_argument_type(call.function, sql_type)
                 .map_err(|error| error.at(call.position))?;
@@ -642,6 +677,7 @@ enum Accumulator {
     Sum(Sum),
     Average { sum: Sum, count: i64 },
     Extreme(Value),
+    Joined(Option<Value>),
 }
 
 struct Group {
@@ -655,7 +691,7 @@ struct Group {
 impl Accumulator {
     fn held_bytes(&self) -> usize {
         match self {
-            Self::Extreme(value) => crate::memory::held_bytes(value),
+            Self::Extreme(value) | Self::Joined(Some(value)) => crate::memory::held_bytes(value),
             _ => 0,
         }
     }
@@ -679,6 +715,62 @@ impl Call {
                 count: 0,
             },
             AggregateFunction::Min | AggregateFunction::Max => Accumulator::Extreme(Value::Null),
+            AggregateFunction::StringAgg => Accumulator::Joined(None),
+        }
+    }
+
+    fn join(&self, accumulator: &mut Accumulator, value: Value, delimiter: Value) -> SqlResult<()> {
+        let Accumulator::Joined(joined) = accumulator else {
+            return Ok(());
+        };
+        let value = match value {
+            Value::Bpchar(mut text) => {
+                text.truncate(crate::types::without_trailing_spaces(&text).len());
+                Value::Text(text)
+            }
+            Value::Text(_) | Value::Bytea(_) => value,
+            other => {
+                return Err(undefined_aggregate(
+                    self.function,
+                    &format!("{}, unknown", other.type_name()),
+                ));
+            }
+        };
+        let Some(current) = joined.as_mut() else {
+            *joined = Some(value);
+            return Ok(());
+        };
+        match (current, value) {
+            (Value::Text(text), Value::Text(next)) => {
+                let separator = delimiter.character_text().unwrap_or_default();
+                crate::memory::check_value_bytes(
+                    text.len()
+                        .saturating_add(separator.len())
+                        .saturating_add(next.len()),
+                )?;
+                text.push_str(separator);
+                text.push_str(&next);
+                Ok(())
+            }
+            (Value::Bytea(bytes), Value::Bytea(next)) => {
+                let separator: &[u8] = match &delimiter {
+                    Value::Bytea(separator) => separator,
+                    _ => &[],
+                };
+                let size = bytes
+                    .len()
+                    .saturating_add(separator.len())
+                    .saturating_add(next.len());
+                crate::bytea::check_size(size)?;
+                crate::memory::check_value_bytes(size)?;
+                bytes.extend_from_slice(separator);
+                bytes.extend_from_slice(&next);
+                Ok(())
+            }
+            (current, next) => Err(undefined_aggregate(
+                self.function,
+                &format!("{}, {}", current.type_name(), next.type_name()),
+            )),
         }
     }
 
@@ -727,6 +819,7 @@ impl Call {
                     *best = value;
                 }
             }
+            Accumulator::Joined(_) => {}
         }
         Ok(())
     }
@@ -828,6 +921,7 @@ impl Call {
                 }
             }
             Accumulator::Extreme(best) => best,
+            Accumulator::Joined(joined) => joined.unwrap_or(Value::Null),
         })
     }
 }
@@ -926,7 +1020,18 @@ impl Grouping {
                     }
                     continue;
                 };
-                let value = evaluator.eval(argument, None)?;
+                let (value, delimiter) = match joined_parts(argument) {
+                    Some((value, delimiter)) if call.function == AggregateFunction::StringAgg => {
+                        let value = evaluator.eval(value, Some(SqlType::Text))?;
+                        let hint = if matches!(value, Value::Bytea(_)) {
+                            SqlType::Bytea
+                        } else {
+                            SqlType::Text
+                        };
+                        (value, Some(evaluator.eval(delimiter, Some(hint))?))
+                    }
+                    _ => (evaluator.eval(argument, None)?, None),
+                };
                 if value.is_null() {
                     continue;
                 }
@@ -940,8 +1045,11 @@ impl Grouping {
                     group.seen[number].insert(distinct_key.clone());
                 }
                 let before = group.accumulators[number].held_bytes();
-                call.add(&mut group.accumulators[number], value)
-                    .map_err(|error| error.at_if_unplaced(call.position))?;
+                match delimiter {
+                    Some(delimiter) => call.join(&mut group.accumulators[number], value, delimiter),
+                    None => call.add(&mut group.accumulators[number], value),
+                }
+                .map_err(|error| error.at_if_unplaced(call.position))?;
                 let grown = group.accumulators[number]
                     .held_bytes()
                     .saturating_sub(before);

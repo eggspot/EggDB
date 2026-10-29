@@ -976,6 +976,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             let settings = Arc::clone(&self.settings);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
+            let _regex = crate::regex::enter_statement();
             let _bytes = crate::bytea::enter_dialect(self.dialect);
             let _values = crate::memory::enter_value_limit(self.max_value_bytes);
             let _rows = crate::memory::enter_row_limit(self.max_row_bytes);

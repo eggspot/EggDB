@@ -370,7 +370,6 @@ SELECT trim('  x  '), ltrim('  x'), rtrim('x  '), btrim('xxaxx', 'x')
 btrim|ltrim|rtrim|btrim
 x|x|x|a
 SELECT 1
-... differs
 
 rows
 SELECT replace('abcabc', 'b', 'X'), concat('a', NULL, 'b', 1)
@@ -1635,7 +1634,6 @@ WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 100) 
 sum
 5050
 SELECT 1
-... differs
 
 rows
 WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 100) SELECT sum(n) FROM t
@@ -2942,11 +2940,19 @@ id
 2
 SELECT 1
 
-error 0A000
+rows
 SELECT 1 = ANY ('{1,2}'::integer[])
+----
+?column?
+t
+SELECT 1
 
-error 0A000
+rows
 SELECT (1 + 1) > ANY (ARRAY[1, 2])
+----
+?column?
+t
+SELECT 1
 
 chapter sql-altertable, "ALTER TABLE": ALTER COLUMN ... ADD GENERATED AS IDENTITY, as pg_dump writes it
 ok
@@ -3025,3 +3031,741 @@ rows
 INSERT INTO unlogged_notes VALUES (1, 'kept')
 ----
 INSERT 0 1
+
+chapter functions-matching, "POSIX Regular Expressions": ~, ~*, !~ and !~*
+rows
+SELECT 'abc' ~ 'b', 'abc' ~* 'B', 'abc' !~ 'b', 'abc' !~* 'B'
+----
+?column?|?column?|?column?|?column?
+t|t|f|f
+SELECT 1
+
+rows
+SELECT 'abc' ~ NULL, NULL ~ 'a', NULL::text !~* NULL
+----
+?column?|?column?|?column?
+NULL|NULL|NULL
+SELECT 1
+
+rows
+SELECT 'abcd' ~ 'a.c', 'abcd' ~ '^a', 'abcd' ~ '(b|x)', 'abcd' ~ '^c'
+----
+?column?|?column?|?column?|?column?
+t|t|t|f
+SELECT 1
+
+rows
+SELECT 'thomas' ~ 't.*ma', 'thomas' ~* 'T.*ma', 'thomas' !~ 't.*max', 'thomas' !~* 'T.*ma'
+----
+?column?|?column?|?column?|?column?
+t|t|t|f
+SELECT 1
+
+rows
+SELECT 'x5' ~ '[[:digit:]]', 'a b' ~ 'a\sb', 'AbC' ~* '^[a-c]+$', 'é' ~* 'É', '_1' ~ '^\w+$'
+----
+?column?|?column?|?column?|?column?|?column?
+t|t|t|f|t
+SELECT 1
+
+rows
+SELECT 'aaa' ~ '^a{2,3}$', 'aaaa' ~ '^a{2,3}$', 'ab' ~ 'a(?:b)', 'a{' ~ 'a{', 'aaa' ~ '^a+?$'
+----
+?column?|?column?|?column?|?column?|?column?
+t|f|t|t|t
+SELECT 1
+
+rows
+SELECT 'abc'::char(5) ~ 'c$', 'abc'::varchar ~ '^a', 'x' ~ ''
+----
+?column?|?column?|?column?
+f|t|t
+SELECT 1
+
+error 2201B
+SELECT 'abc' ~ '('
+
+error 2201B
+SELECT 'abc' ~ 'a{2,1}'
+
+error 2201B
+SELECT 'abc' ~ '[z-a]'
+
+error 2201B
+SELECT 'abc' ~ '*a'
+
+error 2201B
+SELECT 'abc' ~ '[[:foo:]]'
+
+error 42883
+SELECT 1 ~ '1'
+
+rows
+SELECT 'aa' ~ '(a)\1'
+----
+?column?
+t
+SELECT 1
+... differs
+
+rows
+SELECT 'a' || 'b' ~ 'ab', 'ab' ~ 'a' = true, 3 OPERATOR(+) 4 * 2, 1 + 1 OPERATOR(pg_catalog.=) 2
+----
+?column?|?column?|?column?|?column?
+t|t|11|t
+SELECT 1
+
+rows
+SELECT 'abc' OPERATOR(pg_catalog.~) 'b', 'abc' OPERATOR(pg_catalog.!~*) 'B', 'x' OPERATOR(pg_catalog.~) 'x' AND true
+----
+?column?|?column?|?column?
+t|f|t
+SELECT 1
+
+ok
+CREATE TABLE regex_names (id integer PRIMARY KEY, name text, code varchar(10))
+
+ok
+INSERT INTO regex_names VALUES (1, 'alpha', 'A1'), (2, 'beta', 'B2'), (3, 'gamma', NULL), (4, 'Charlie', 'C3')
+
+rows
+SELECT name FROM regex_names WHERE name ~ '^[a-c]' ORDER BY name
+----
+name
+alpha
+beta
+SELECT 2
+
+rows
+SELECT id FROM regex_names WHERE name ~* '^c' OR code ~ '2$' ORDER BY id
+----
+id
+2
+4
+SELECT 2
+
+rows
+SELECT id FROM regex_names WHERE code !~ '[0-9]' ORDER BY id
+----
+id
+SELECT 0
+
+chapter collation, sql-expressions "Collation Expressions": COLLATE
+rows
+SELECT 'a' COLLATE "C", 'a' COLLATE "default" < 'b', 'a' COLLATE "POSIX" = 'a', 'b' COLLATE pg_catalog."C" > 'a'
+----
+?column?|?column?|?column?|?column?
+a|t|t|t
+SELECT 1
+
+rows
+SELECT name COLLATE "C" FROM regex_names WHERE name COLLATE "C" < 'b' ORDER BY 1
+----
+name
+Charlie
+alpha
+SELECT 2
+
+error 42704
+SELECT 'a' COLLATE nosuch
+
+error 42804
+SELECT 1 COLLATE "C"
+
+chapter sql-createtype, datatype: type names qualified with pg_catalog
+rows
+SELECT 1::pg_catalog.int4, 'x'::pg_catalog.text, CAST('2' AS pg_catalog.int8), '{1}'::pg_catalog.int4[]
+----
+int4|text|int8|int4
+1|x|2|{1}
+SELECT 1
+
+error 42704
+SELECT 1::public.int4
+
+chapter arrays, "Arrays": constructors, literals and subscripts
+rows
+SELECT ARRAY[1,2,3], ARRAY['a','b c',NULL,'"q"','back\slash',''], ARRAY[]::int[]
+----
+array|array|array
+{1,2,3}|{a,"b c",NULL,"\"q\"","back\\slash",""}|{}
+SELECT 1
+
+error 42P18
+SELECT ARRAY[]
+
+error 22P02
+SELECT ARRAY[1,'a']
+
+rows
+SELECT ARRAY[1,2.5], ARRAY[true, NULL], ARRAY['x'::varchar(3)], ARRAY[1.5::float8, 'NaN']
+----
+array|array|array|array
+{1,2.5}|{t,NULL}|{x}|{1.5,NaN}
+SELECT 1
+
+rows
+SELECT '{1,2,3}'::int[], '{"a b",c,NULL,"NULL"}'::text[], '{}'::text[], ' { 1 , 2 } '::int[]
+----
+int4|text|text|int4
+{1,2,3}|{"a b",c,NULL,"NULL"}|{}|{1,2}
+SELECT 1
+
+rows
+SELECT '{"a\"b", "c\\d", e\,f}'::text[], '{  "a" , b }'::text[]
+----
+text|text
+{"a\"b","c\\d","e,f"}|{a,b}
+SELECT 1
+
+error 22P02
+SELECT '{1,2'::int[]
+
+error 22P02
+SELECT '1,2'::int[]
+
+error 22P02
+SELECT '{a,b}'::int[]
+
+error 22P02
+SELECT '{"a"b}'::text[]
+
+error 22P02
+SELECT '{,}'::int[]
+
+rows
+SELECT (ARRAY[10,20,30])[2], (ARRAY[10,20,30])[5], (ARRAY[10,20,30])[0], (ARRAY[10,20,30])[NULL]
+----
+array|array|array|array
+20|NULL|NULL|NULL
+SELECT 1
+
+rows
+SELECT x, x[2], x[3] FROM (SELECT ARRAY[5,6] AS x) t
+----
+x|x|x
+{5,6}|6|NULL
+SELECT 1
+
+rows
+SELECT ARRAY(SELECT 1 UNION ALL SELECT 2), ARRAY(SELECT 'a'::text WHERE false)
+----
+array|array
+{1,2}|{}
+SELECT 1
+
+rows
+SELECT ARRAY(SELECT id FROM regex_names WHERE id > 1 ORDER BY id DESC)
+----
+array
+{4,3,2}
+SELECT 1
+
+error 42601
+SELECT ARRAY(SELECT 1, 2)
+
+chapter functions-array, "Array Functions and Operators"
+rows
+SELECT ARRAY[1,2] || ARRAY[3], ARRAY[1,2] || 3, 0 || ARRAY[1,2], NULL::int[] || ARRAY[1], ARRAY[1] || NULL::int[], ARRAY['a'] || 'b'::text
+----
+?column?|?column?|?column?|?column?|?column?|?column?
+{1,2,3}|{1,2,3}|{0,1,2}|{1}|{1}|{a,b}
+SELECT 1
+
+rows
+SELECT ARRAY[1,2] || NULL, ARRAY[1] || NULL::int
+----
+?column?|?column?
+{1,2}|{1,NULL}
+SELECT 1
+
+error 42883
+SELECT ARRAY[1] || ARRAY['a']
+
+rows
+SELECT ARRAY[1,2] = ARRAY[1,2], ARRAY[1,2] < ARRAY[1,3], ARRAY[1,2] < ARRAY[1,2,0], ARRAY[1,NULL] = ARRAY[1,NULL], ARRAY[1] <> ARRAY[2]
+----
+?column?|?column?|?column?|?column?|?column?
+t|t|t|t|t
+SELECT 1
+
+error 42883
+SELECT ARRAY[1] = ARRAY[1::bigint]
+
+rows
+SELECT ARRAY[1,2] IS NULL, NULL::int[] IS NULL, ARRAY[1,2] = '{1,2}'
+----
+?column?|?column?|?column?
+f|t|t
+SELECT 1
+
+rows
+SELECT array_to_string(ARRAY[1,NULL,3], ','), array_to_string(ARRAY[1,NULL,3], ',', '*'), array_length(ARRAY[1,2,3], 1), array_length(ARRAY[1,2,3], 2), array_length('{}'::int[], 1), array_upper(ARRAY[1,2], 1), array_lower(ARRAY[1,2], 1), array_ndims(ARRAY[1,2]), array_ndims('{}'::int[]), cardinality(ARRAY[1,2]), cardinality('{}'::int[])
+----
+array_to_string|array_to_string|array_length|array_length|array_length|array_upper|array_lower|array_ndims|array_ndims|cardinality|cardinality
+1,3|1,*,3|3|NULL|NULL|2|1|1|NULL|2|0
+SELECT 1
+
+rows
+SELECT array_length(NULL::int[], 1), array_to_string(NULL::int[], ','), cardinality(NULL::int[]), array_to_string(ARRAY['a','b'], NULL), array_to_string(ARRAY[true,false], '')
+----
+array_length|array_to_string|cardinality|array_to_string|array_to_string
+NULL|NULL|NULL|NULL|tf
+SELECT 1
+
+rows
+SELECT ARRAY['1','2']::int[], ARRAY[1.5,2.5]::int[], CAST(ARRAY[1] AS text[]), ARRAY[1,2]::text, '{1,2}'::int[]::text
+----
+array|array|array|array|text
+{1,2}|{2,3}|{1}|{1,2}|{1,2}
+SELECT 1
+
+error 42846
+SELECT ARRAY[1,2]::int
+
+chapter functions-comparisons, "Row and Array Comparisons": ANY and ALL over any array
+rows
+SELECT 2 = ANY (ARRAY[1,2]), 3 = ANY ('{1,2}'::int[]), 1 < ALL (ARRAY[2,3]), NULL::int = ANY (ARRAY[1]), 1 = ANY (NULL::int[]), 5 = ANY (ARRAY[1,NULL])
+----
+?column?|?column?|?column?|?column?|?column?|?column?
+t|f|t|NULL|NULL|NULL
+SELECT 1
+
+rows
+SELECT 'x' = ANY (ARRAY['x','y']), 2 <> ALL ('{1,3}'::int[]), 3 > SOME (ARRAY(SELECT 1 UNION ALL SELECT 5)), 1 = ANY ('{}'::int[])
+----
+?column?|?column?|?column?|?column?
+t|t|t|f
+SELECT 1
+
+rows
+SELECT id FROM regex_names WHERE name = ANY ('{alpha,gamma}') ORDER BY id
+----
+id
+1
+3
+SELECT 2
+
+rows
+SELECT id FROM regex_names WHERE id = ANY (ARRAY(SELECT id FROM regex_names WHERE name ~ 'a$')) ORDER BY id
+----
+id
+1
+2
+3
+SELECT 3
+
+error 42809
+SELECT 1 = ANY (5)
+
+chapter functions-srf, queries-table-expressions "Table Functions": generate_series and unnest in FROM
+rows
+SELECT * FROM generate_series(1, 3)
+----
+generate_series
+1
+2
+3
+SELECT 3
+
+rows
+SELECT * FROM generate_series(1, 10, 4) AS g
+----
+g
+1
+5
+9
+SELECT 3
+
+rows
+SELECT g FROM generate_series(5, 1, -2) g
+----
+g
+5
+3
+1
+SELECT 3
+
+rows
+SELECT * FROM generate_series(1, 3) AS g(n)
+----
+n
+1
+2
+3
+SELECT 3
+
+error 22023
+SELECT * FROM generate_series(1, 3, 0)
+
+rows
+SELECT * FROM generate_series(1::bigint, 2)
+----
+generate_series
+1
+2
+SELECT 2
+
+error 42725
+SELECT * FROM generate_series(1::smallint, 2::smallint)
+
+rows
+SELECT * FROM pg_catalog.generate_series(1, 2) WITH ORDINALITY
+----
+generate_series|ordinality
+1|1
+2|2
+SELECT 2
+
+rows
+SELECT * FROM generate_series(10, 12) WITH ORDINALITY AS t(v, n)
+----
+v|n
+10|1
+11|2
+12|3
+SELECT 3
+
+rows
+SELECT * FROM unnest(ARRAY['a','b',NULL])
+----
+unnest
+a
+b
+NULL
+SELECT 3
+
+rows
+SELECT * FROM unnest(ARRAY[1,2]) WITH ORDINALITY u
+----
+u|ordinality
+1|1
+2|2
+SELECT 2
+
+rows
+SELECT u, u.* FROM unnest(ARRAY[1,2]) u
+----
+u|u
+1|1
+2|2
+SELECT 2
+
+rows
+SELECT x[s] FROM (SELECT ARRAY[10,20,30] AS x) t, generate_series(1, 3) s
+----
+x
+10
+20
+30
+SELECT 3
+
+rows
+SELECT * FROM generate_series(1, NULL)
+----
+generate_series
+SELECT 0
+
+rows
+SELECT * FROM unnest(NULL::int[])
+----
+unnest
+SELECT 0
+
+error 42P10
+SELECT * FROM unnest(ARRAY[1]) AS u(a, b)
+
+rows
+SELECT r.name, g FROM regex_names r, generate_series(1, 2) g WHERE r.id = 1 ORDER BY g
+----
+name|g
+alpha|1
+alpha|2
+SELECT 2
+
+chapter functions-srf, xfunc-sql: set-returning functions in the select list
+rows
+SELECT generate_series(1, 3)
+----
+generate_series
+1
+2
+3
+SELECT 3
+
+rows
+SELECT generate_series(1, 3) AS n, 'x'
+----
+n|?column?
+1|x
+2|x
+3|x
+SELECT 3
+
+rows
+SELECT n, generate_series(1, n) FROM (VALUES (1), (2)) v(n) ORDER BY 1, 2
+----
+n|generate_series
+1|1
+2|1
+2|2
+SELECT 3
+
+rows
+SELECT DISTINCT unnest(ARRAY[1,1,2]) ORDER BY 1
+----
+unnest
+1
+2
+SELECT 2
+
+rows
+SELECT unnest(ARRAY[3,1,2]) AS u ORDER BY u LIMIT 2
+----
+u
+1
+2
+SELECT 2
+
+rows
+SELECT generate_series(1, 0)
+----
+generate_series
+SELECT 0
+
+rows
+SELECT id, unnest(ARRAY[name, code]) FROM regex_names WHERE id < 3 ORDER BY 1, 2
+----
+id|unnest
+1|A1
+1|alpha
+2|B2
+2|beta
+SELECT 4
+
+error 0A000
+SELECT 1 WHERE generate_series(1, 2) = 1
+
+error 0A000
+SELECT count(generate_series(1, 2))
+
+chapter functions-srf, queries-table-expressions "Table Functions": arguments from the outer query
+rows
+SELECT n, (SELECT sum(g) FROM generate_series(1, v.n) g) FROM (VALUES (2), (3)) v(n) ORDER BY 1
+----
+n|sum
+2|3
+3|6
+SELECT 2
+
+rows
+SELECT t.n, (SELECT string_agg(a.v::text || ':' || a.i::text, ',') FROM unnest(t.arr) WITH ORDINALITY AS a(v, i)) FROM (VALUES (1, ARRAY[5,6]), (2, ARRAY[7])) t(n, arr) ORDER BY 1
+----
+n|string_agg
+1|5:1,6:2
+2|7:1
+SELECT 2
+
+rows
+SELECT t.id, ARRAY(SELECT t.x[s] FROM generate_series(1, array_upper(t.x, 1)) s ORDER BY s DESC) FROM (VALUES (1, '{3,4}'::int2[])) t(id, x)
+----
+id|array
+1|{4,3}
+SELECT 1
+
+rows
+SELECT id FROM regex_names r WHERE EXISTS (SELECT 1 FROM unnest(ARRAY[2, 3]) u WHERE u = r.id) ORDER BY id
+----
+id
+2
+3
+SELECT 2
+
+chapter queries-values, sql-values: VALUES lists
+rows
+VALUES (1, 'one'), (2, 'two')
+----
+column1|column2
+1|one
+2|two
+SELECT 2
+
+error 42601
+VALUES (1, 'a'), (2)
+
+rows
+VALUES (1), (2.5), (NULL)
+----
+column1
+1
+2.5
+NULL
+SELECT 3
+
+error 22P02
+VALUES (1), ('x')
+
+rows
+VALUES ('1'), (2)
+----
+column1
+1
+2
+SELECT 2
+
+error 42804
+VALUES (1), (true)
+
+rows
+VALUES (3), (1), (2) ORDER BY 1 LIMIT 2 OFFSET 1
+----
+column1
+2
+3
+SELECT 2
+
+rows
+VALUES (1) UNION ALL VALUES (2)
+----
+column1
+1
+2
+SELECT 2
+
+rows
+SELECT 1 UNION ALL VALUES (2) ORDER BY 1 DESC
+----
+?column?
+2
+1
+SELECT 2
+
+rows
+SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS v(n, s) WHERE n > 1
+----
+n|s
+2|b
+SELECT 1
+
+rows
+SELECT * FROM (VALUES (1, 'a')) v(x)
+----
+x|column2
+1|a
+SELECT 1
+
+rows
+SELECT 2 IN (VALUES (1), (2)), 3 IN (VALUES (1), (2))
+----
+?column?|?column?
+t|f
+SELECT 1
+
+rows
+VALUES (1, 2) ORDER BY column2 DESC
+----
+column1|column2
+1|2
+SELECT 1
+
+rows
+WITH w(a) AS (VALUES (7), (8)) SELECT sum(a) FROM w
+----
+sum
+15
+SELECT 1
+
+rows
+SELECT name FROM regex_names WHERE id IN (VALUES (2), (4)) ORDER BY name
+----
+name
+Charlie
+beta
+SELECT 2
+
+chapter functions-aggregate, "Aggregate Functions": string_agg
+rows
+SELECT string_agg(s, ',') FROM (VALUES ('a'), (NULL), ('c')) v(s)
+----
+string_agg
+a,c
+SELECT 1
+
+rows
+SELECT string_agg(s, NULL) FROM (VALUES ('a'), ('b')) v(s)
+----
+string_agg
+ab
+SELECT 1
+
+rows
+SELECT string_agg(s, ',') FROM (VALUES ('a')) v(s) WHERE false
+----
+string_agg
+NULL
+SELECT 1
+
+rows
+SELECT string_agg('\x01'::bytea, '\x02'::bytea) FROM generate_series(1, 2)
+----
+string_agg
+\x010201
+SELECT 1
+
+error 42883
+SELECT string_agg(n, ',') FROM generate_series(1, 2) n
+
+rows
+SELECT string_agg(DISTINCT s, ',') FROM (VALUES ('a'), ('a')) v(s)
+----
+string_agg
+a
+SELECT 1
+
+rows
+SELECT k, string_agg(s, '-') FROM (VALUES (1, 'a'), (1, 'b'), (2, 'c')) v(k, s) GROUP BY k ORDER BY k
+----
+k|string_agg
+1|a-b
+2|c
+SELECT 2
+
+rows
+SELECT string_agg(code, '+') FROM regex_names
+----
+string_agg
+A1+B2+C3
+SELECT 1
+
+chapter functions-string, "String Functions and Operators": trim and quote_ident
+rows
+SELECT trim('  x  '), trim(LEADING FROM '  x  '), trim(TRAILING 'xy' FROM 'xxaxy'), trim(BOTH 'x' FROM 'xax'), trim('x' FROM 'xax'), ltrim('  x'), rtrim('x  '), btrim('xyaxy', 'xy'), ltrim('xxa', 'x'), rtrim('axx', 'x'), trim(FROM ' a ')
+----
+btrim|ltrim|rtrim|btrim|btrim|ltrim|rtrim|btrim|ltrim|rtrim|btrim
+x|x  |xxa|a|a|x|x|a|a|a|a
+SELECT 1
+
+rows
+SELECT trim(NULL), btrim('a', NULL), ltrim(NULL)
+----
+btrim|btrim|ltrim
+NULL|NULL|NULL
+SELECT 1
+
+rows
+SELECT quote_ident('abc'), quote_ident('Abc'), quote_ident('a b'), quote_ident('between'), quote_ident('left'), quote_ident('int'), quote_ident('name'), quote_ident('a"b'), quote_ident(''), quote_ident('_x1'), quote_ident('1x'), quote_ident('select'), quote_ident('text'), quote_ident(NULL)
+----
+quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident|quote_ident
+abc|"Abc"|"a b"|"between"|"left"|"int"|name|"a""b"|""|_x1|"1x"|"select"|text|NULL
+SELECT 1
+
+rows
+SELECT quote_ident(name) FROM regex_names ORDER BY id
+----
+quote_ident
+alpha
+beta
+gamma
+"Charlie"
+SELECT 4
+

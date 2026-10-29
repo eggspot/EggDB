@@ -1,3 +1,4 @@
+use crate::arrays::{ArrayElement, ArrayValue};
 use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::{Interval, IntervalFields};
@@ -60,6 +61,9 @@ pub enum SqlType {
     /// `character(n)` (`char(n)`, `bpchar`): a string padded with spaces to `n` characters,
     /// whose trailing spaces do not count when it is compared; no limit without `n`.
     Bpchar(Option<u32>),
+    /// A one-dimensional array of the element type, such as `integer[]`: a value of
+    /// expressions and intermediate results, not stored in table columns.
+    Array(ArrayElement),
 }
 
 /// The precision and scale of a `numeric(p, s)` column.
@@ -113,6 +117,7 @@ impl SqlType {
             Self::Uuid => "uuid".into(),
             Self::Bpchar(None) => "bpchar".into(),
             Self::Bpchar(Some(length)) => format!("character({length})"),
+            Self::Array(element) => element.type_name(),
         }
     }
 
@@ -138,6 +143,7 @@ impl SqlType {
             Self::Bytea => "bytea",
             Self::Uuid => "uuid",
             Self::Bpchar(_) => "bpchar",
+            Self::Array(element) => element.internal_name(),
         }
     }
 
@@ -253,6 +259,8 @@ pub enum Value {
     Uuid([u8; 16]),
     /// A `character(n)`: its text, padded with spaces to the column's length.
     Bpchar(String),
+    /// A one-dimensional array.
+    Array(Box<ArrayValue>),
 }
 
 impl Value {
@@ -279,6 +287,7 @@ impl Value {
             Self::Bytea(_) => SqlType::Bytea,
             Self::Uuid(_) => SqlType::Uuid,
             Self::Bpchar(_) => SqlType::Bpchar(None),
+            Self::Array(array) => SqlType::Array(array.element),
         })
     }
 
@@ -359,6 +368,7 @@ impl Value {
             Self::Interval(interval) => interval.to_string(),
             Self::Bytea(bytes) => crate::bytea::format_hex(bytes),
             Self::Uuid(bytes) => crate::bytea::format_uuid(bytes),
+            Self::Array(array) => crate::arrays::format_text(array),
         })
     }
 
@@ -562,6 +572,9 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
             Ok(Value::Json(text.to_owned()))
         }
         SqlType::Jsonb => crate::json::normalize(text).map(Value::Jsonb),
+        SqlType::Array(element) => {
+            crate::arrays::parse_text(text, element).map(|array| Value::Array(Box::new(array)))
+        }
     }
 }
 
@@ -745,6 +758,9 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     let Some(source) = value.sql_type() else {
         return Ok(Value::Null);
     };
+    if let SqlType::Array(element) = target {
+        return crate::arrays::convert_to(value, element, conversion);
+    }
     if target.is_character() {
         let text = match value {
             Value::Text(text) => text,
@@ -862,6 +878,9 @@ pub(crate) fn comparable(left: SqlType, right: SqlType) -> bool {
     if left == SqlType::Json || right == SqlType::Json {
         return false;
     }
+    if let (SqlType::Array(left), SqlType::Array(right)) = (left, right) {
+        return left.comparable(right);
+    }
     (left.is_numeric() && right.is_numeric())
         || (left.is_character() && right.is_character())
         || (left.is_datetime() && right.is_datetime())
@@ -922,6 +941,7 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
             },
         ) => time_tz_order(*a, *a_offset).cmp(&time_tz_order(*b, *b_offset)),
         (Value::Interval(a), Value::Interval(b)) => a.compare(*b),
+        (Value::Array(a), Value::Array(b)) => crate::arrays::compare(a, b),
         (Value::Jsonb(a), Value::Jsonb(b)) => crate::json::comparable(a)
             .as_bytes()
             .cmp(crate::json::comparable(b).as_bytes()),
@@ -1035,6 +1055,7 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
             out.extend_from_slice(&(text.len() as u64).to_le_bytes());
             out.extend_from_slice(text.as_bytes());
         }
+        Value::Array(array) => crate::arrays::equality_key_of(out, array),
         Value::Jsonb(text) => {
             let comparable = crate::json::comparable(text);
             out.push(9);

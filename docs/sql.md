@@ -542,10 +542,28 @@ answered when the batch ends), and SSMS's and Azure Data Studio's catalog querie
   `CASCADE`, which drops those foreign keys or defaults (not the tables).
 - `INSERT INTO name [(columns)] VALUES (...), (...) | DEFAULT VALUES [RETURNING items]`, with
   `DEFAULT` in a values list.
+- `VALUES (expr, ...), (expr, ...) [ORDER BY ...] [LIMIT ...] [OFFSET ...]` as a statement, an
+  operand of `UNION`, `INTERSECT` and `EXCEPT`, a subquery (`x IN (VALUES (1), (2))`), a `WITH`
+  query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,
+  `column2`, ... and each takes one type by the `UNION` rules below; rows of different lengths
+  are `42601` (D128).
 - `SELECT [ALL | DISTINCT] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY expr, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
   `ORDER BY` takes an output column's number or alias, or any expression over the tables (with
   `DISTINCT`, only expressions in the select list, else `42P10`); a `SELECT` without `FROM`
   returns one row.
+- **Functions in `FROM`** (D128): `generate_series(start, stop [, step])` over `smallint`,
+  `integer` and `bigint` (a step of 0 is `22023`; `numeric` and time stamps answer `0A000`) and
+  `unnest(array)`, also written `pg_catalog.generate_series` and `pg_catalog.unnest`, with
+  `WITH ORDINALITY` (a `bigint` column `ordinality`) and `[AS] alias [(column, ...)]`; without
+  a column list a one-column function's column takes the alias (`FROM generate_series(1, 3) s`
+  makes `s` a column). The arguments are constants, parameters or, in a correlated subquery,
+  the outer query's columns (the rows are made again for each outer value); naming another item
+  of the same `FROM` (PostgreSQL's implicit `LATERAL`) is `0A000`. One `generate_series` or
+  `unnest` call may also stand alone as an item of a select list, giving a row for each of its
+  values (none when it returns none); a second one, one inside an expression, and one in
+  `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` or an aggregate answer `0A000`, and the `ORDER BY` of
+  such a select takes output columns. The rows a function or `VALUES` list makes count against
+  the statement's 1 GiB, so `generate_series(1, 10^12)` ends with `53200`.
 - **Joins**: `a [INNER] JOIN b ON cond`, `a LEFT [OUTER] JOIN b ON cond`, `a RIGHT [OUTER] JOIN
   b ON cond`, `a FULL [OUTER] JOIN b ON cond`, `JOIN ... USING (columns)`,
   `a CROSS JOIN b` and `FROM a, b`, chained left to right, each table with an optional alias.
@@ -599,8 +617,9 @@ answered when the batch ends), and SSMS's and Azure Data Studio's catalog querie
   whose whole primary key is grouped, as PostgreSQL allows. A query with an aggregate or
   `HAVING` and no `GROUP BY` returns one row, even over no rows. Groups come out in no promised
   order; use `ORDER BY`.
-- **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`, each with `DISTINCT` or
-  `ALL`. They skip NULLs; `count` of nothing is 0, the others are NULL. Result types are
+- **Aggregates**: `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max` and
+  `string_agg(text, delimiter)` (also over `bytea`; a NULL delimiter joins with nothing), each
+  with `DISTINCT` or `ALL`. They skip NULLs; `count` of nothing is 0, the others are NULL. Result types are
   PostgreSQL's: `count` is `bigint`; `sum` of `smallint` or `integer` is `bigint`, of `bigint`
   or `numeric` is an exact `numeric`, of `real` is `real`, of `double precision` is `double
   precision`; `avg` of an integer or `numeric` is an exact `numeric` (divided at PostgreSQL's
@@ -639,8 +658,10 @@ answered when the batch ends), and SSMS's and Azure Data Studio's catalog querie
 - `x = ANY (ARRAY[a, b])`, `x <> ALL (ARRAY[a, b])` and the other comparisons with `ANY`, `SOME`
   or `ALL` over a constant `ARRAY[...]` list, also in parentheses and with a cast such as
   `::text[]` (how `pg_dump` writes the `IN` lists of `CHECK` constraints): `= ANY` is `IN`, `<> ALL`
-  is `NOT IN`, and the others compare with each item in three-valued logic, on a column or a
-  constant (D118).
+  is `NOT IN`, and the others compare with each item in three-valued logic (D118). Any other
+  array works too (`x = ANY ('{1,2}'::int[])`, `x <> ALL (ARRAY(SELECT ...))`, an array value of
+  a derived table): `ANY` over no elements is false, `ALL` true, a NULL array gives NULL, and a
+  value that is not an array is `42809` (D128).
 
 **Types** (one type system for every model, D19)
 
@@ -761,8 +782,39 @@ value keeps the number as written (`1.0`); `json` has no equality, as in Postgre
 and cannot be indexed or be a key (`42704`). Stored `json` and `jsonb` are parsed again when a
 row is read, so a damaged one is `XX001`.
 
+**Arrays** (D128) are values of expressions, of `WITH` queries, derived tables and `VALUES` lists,
+and of results, with one dimension and elements of `smallint`, `integer`, `bigint`, `real`,
+`double precision`, `numeric`, `boolean`, `text`, `varchar` or `character`: `ARRAY[1, 2]`
+(elements of the common type; `ARRAY[]` needs a cast, `42P18`), `ARRAY(SELECT ...)` (one
+column, `42601` otherwise), PostgreSQL's literals (`'{1,2,NULL}'::int[]`, `'{"a b",c}'::text[]`,
+with quotes, backslashes and `NULL`; a malformed one is `22P02` with PostgreSQL's detail), casts
+between array types element by element and to and from text, `a[i]` (NULL outside the array),
+`||` between two arrays or an array and an element (a NULL array counts as empty),
+`= <> < <= > >=` element by element (NULL elements equal each other and sort last; two arrays of
+different element types are `42883`), `IS [NULL]` and the functions `array_to_string(a, sep [,
+null_text])`, `array_length(a, 1)`, `array_upper`, `array_lower`, `array_ndims` and
+`cardinality`. They print as PostgreSQL prints them (`{1,2}`, `{a,"b c",NULL,"\"q\""}`) and travel
+with PostgreSQL's array type OIDs in its text and binary forms. Arrays cannot be stored yet: an
+array column in `CREATE TABLE`, `ALTER TABLE` or a view is `0A000`, and an array given to a text
+column is stored as its text. Multidimensional arrays, slices (`a[1:2]`), bounds in literals
+(`[1:2]={...}`), arrays of other element types and array parameters answer `0A000`. An array may
+hold at most 2^27 elements (`54000`) and counts against the session's value limit.
+
 **Expressions**
 - Arithmetic `+ - * / % ^`, unary `-` and `+`, string concatenation `||`.
+- Regular expressions (D128): `text ~ pattern`, `~*` (ignoring case), `!~` and `!~*`, with
+  PostgreSQL's advanced syntax: `.`, bracket expressions (`[a-z]`, `[^0-9]`, `[[:alpha:]]` and the
+  other classes), `\d \w \s \D \W \S`, character escapes (`\n`, `\t`, `\x41`, `\u00e9`), `^`
+  and `$`, groups `(...)` and `(?:...)`, `|`, and `* + ? {m} {m,} {m,n}` with their lazy forms.
+  Matching takes time linear in the text (no backtracking); a malformed pattern is `2201B` with
+  PostgreSQL's reason (`invalid regular expression: parentheses () not balanced`), and a
+  statement may take at most 10^9 matching steps (`54000`). Classes and `~*` follow the `C`
+  locale, as text comparison does: only ASCII letters change case.
+- `OPERATOR(op)` and `OPERATOR(pg_catalog.op)` for every binary operator, as psql writes them,
+  with PostgreSQL's precedence; `expr COLLATE "C"`, `"POSIX"`, `"default"` or `ucs_basic`
+  (optionally `pg_catalog.`), which changes nothing since text compares bytewise as in `C` (any
+  other collation is `42704`, a non-text operand `42804`); and type names written
+  `pg_catalog.int4` (another schema is `42704`).
 - Comparisons `= <> != < <= > >=`, `BETWEEN`, `IN (list)`, `LIKE` and `ILIKE` with `%`, `_`
   and `\` escapes, `IS [NOT] NULL`, `ISNULL`, `NOTNULL`, `IS [NOT] TRUE | FALSE | UNKNOWN`,
   `IS [NOT] DISTINCT FROM`, each with its `NOT` form.
@@ -772,7 +824,10 @@ row is read, so a damaged one is `XX001`.
 - `CAST(expr AS type)`, `expr::type` and `type 'literal'`.
 - `CASE [operand] WHEN ... THEN ... [ELSE ...] END`.
 - Functions `coalesce`, `nullif`, `abs`, `length` (`char_length`, `character_length`),
-  `octet_length`, `lower`, `upper` and `substring(s FROM start FOR count)` (or with commas).
+  `octet_length`, `lower`, `upper`, `substring(s FROM start FOR count)` (or with commas),
+  `trim([LEADING | TRAILING | BOTH] [characters] FROM s)` (and `trim(s [, characters])`),
+  `ltrim`, `rtrim`, `btrim` and `quote_ident` (quoting what PostgreSQL 16 quotes, by its key word
+  list).
 - Operator precedence is PostgreSQL's: `-2 ^ 2` is 4, `NOT a = b` is `NOT (a = b)`, and
   `a < b < c` is a syntax error.
 
@@ -1193,12 +1248,14 @@ storage order); and some option errors carry other SQLSTATEs or wording than Pos
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
 checks the PostgreSQL manual's documented behaviour; these cases are marked there as differing
 until they are fixed:
-- `VALUES` as a query (`WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL ...)`) answers `0A000`;
-  write `SELECT 1`.
-- The string functions `substr`, `trim`, `ltrim`, `rtrim`, `btrim`, `replace`, `concat`,
-  `position(... IN ...)`, `left`, `right`, `repeat` and `reverse` are missing (`42883`, or
-  `42601` for the SQL-standard syntax and for `left`/`right`, which parse as join keywords;
-  roadmap: the rest of PostgreSQL's string functions, below).
+- The string functions `substr`, `replace`, `concat`, `position(... IN ...)`, `left`, `right`,
+  `repeat` and `reverse` are missing (`42883`, or `42601` for the SQL-standard syntax and for
+  `left`/`right`, which parse as join keywords; roadmap: the rest of PostgreSQL's string
+  functions, item 36).
+- Regular expressions with back references (`(a)\1`) answer `0A000`, as do lookahead and
+  lookbehind, the constraint escapes `\m \M \y \Y \A \Z`, embedded options (`(?i)`) and
+  `***=`: they need backtracking, which EggDB's linear-time matcher leaves out (D128; roadmap
+  item 36).
 
 - One statement at a time is planned by simple rules without statistics ([Indexes](#indexes)):
   a `WHERE` that fixes every primary-key column with `=` reads one row (in a join, of the first
@@ -1286,8 +1343,7 @@ until they are fixed:
   cannot have a correlated subquery (`0A000`). Subqueries nest at most 32 levels and a statement
   holds at most 1,024 `SELECT`s (`54001`). Every `WITH` query runs, even one nothing names, and
   `MATERIALIZED` and `NOT MATERIALIZED` change nothing; data-modifying `WITH` queries, `SEARCH`
-  and `CYCLE`, `ANY`/`ALL` over anything but a constant `ARRAY[...]` (such as `'{1,2}'::int[]`,
-  an array column or a list), row constructors (`(a, b) IN (SELECT ...)`),
+  and `CYCLE`, row constructors (`(a, b) IN (SELECT ...)`),
   `LATERAL`, `FULL JOIN ... USING` and `EXPLAIN` of a query with subqueries answer `0A000`. A
   derived table, a `WITH` query and the operands of a set operation are held in memory, counted
   with the statement's other rows against the 1 GiB limit, and a correlated subquery keeps up
@@ -1295,8 +1351,15 @@ until they are fixed:
   more than 256 items is not used to choose a key range either), so a very long list against
   many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
 - `NATURAL` joins, `DISTINCT ON`,
-  `GROUPING SETS`, `ROLLUP` and `CUBE`, window functions, `FILTER`, ordered aggregates and the
-  other aggregates (`string_agg`, `bool_and`, `array_agg`, ...) fail with `0A000`.
+  `GROUPING SETS`, `ROLLUP` and `CUBE`, window functions, `FILTER`, ordered aggregates
+  (`string_agg(s, ',' ORDER BY s)`) and the other aggregates (`bool_and`, `array_agg`, ...) fail
+  with `0A000`.
+- Arrays and set-returning functions (D128): arrays cannot be stored in a table or a view, have
+  one dimension, and take the element types above; `x[1:2]`, `'[1:2]={1,2}'`, `ARRAY[[1, 2]]`
+  and array parameters answer `0A000`. Only `generate_series` (over integers) and `unnest` run in
+  `FROM`, one per select list, and a function or `VALUES` list in `FROM` cannot name another item
+  of the same `FROM`. `COLLATE` takes only the `C`-like collations. The aggregate `string_agg`
+  takes no `ORDER BY` inside its call; its rows are joined in the order they are read.
   When the output stops being read (`eggdb sql ... | head`), the command stops before the next
   statement.
 - `UPDATE` and `DELETE` collect the rows they change before changing them, in memory.

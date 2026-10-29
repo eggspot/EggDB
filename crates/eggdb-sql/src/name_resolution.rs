@@ -363,6 +363,14 @@ impl<'a> Resolver<'a> {
         if let Some(derived) = &mut reference.derived {
             return self.nested_query(&mut derived.query, ctes, reference.name.position);
         }
+        if let Some(generated) = &mut reference.generated {
+            if self.walk_expressions {
+                for expr in crate::set_returning::expressions_mut(generated) {
+                    self.walk_expr(expr, ctes)?;
+                }
+            }
+            return Ok(());
+        }
         if ctes.contains(&reference.name.text) {
             return Ok(());
         }
@@ -685,6 +693,7 @@ fn select_from(
                     column_names,
                     dialect,
                 })),
+                generated: None,
             },
             joins: Vec::new(),
         }),

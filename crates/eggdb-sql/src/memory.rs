@@ -23,6 +23,7 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
     match value {
         Value::Text(text) | Value::Json(text) | Value::Jsonb(text) => text.len(),
         Value::Bytea(bytes) => bytes.len(),
+        Value::Array(array) => crate::arrays::held_bytes(array),
         _ => 0,
     }
 }

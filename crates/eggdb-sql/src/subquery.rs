@@ -1,6 +1,7 @@
 use crate::ast::{
-    BinaryOperator, CommonTable, Expr, ExprKind, JoinCondition, Literal, Query, Select, SelectItem,
-    SetExpr, Subquery, SubqueryRows, SubqueryState, SubqueryTest, TableReference,
+    BinaryOperator, CommonTable, Expr, ExprKind, GeneratedTable, JoinCondition, Literal, Query,
+    Select, SelectItem, SetExpr, Subquery, SubqueryRows, SubqueryState, SubqueryTest,
+    TableReference,
 };
 use crate::dialect::Dialect;
 use crate::encoding::{TableDefinition, encode_row};
@@ -55,7 +56,7 @@ fn family(value: &Value) -> Option<Family> {
         Value::Date(_) | Value::Timestamp(_) => Family::Local,
         Value::TimestampTz(_) => Family::Zoned,
         Value::Jsonb(_) => Family::Jsonb,
-        Value::Null | Value::Json(_) => return None,
+        Value::Null | Value::Json(_) | Value::Array(_) => return None,
     })
 }
 
@@ -222,6 +223,7 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, subquery: &Subquery) -> SqlRes
             Ok(rows.values.first().cloned().unwrap_or(Value::Null))
         }
         SubqueryTest::Exists => Ok(Value::Boolean(rows.rows > 0)),
+        SubqueryTest::Array => crate::arrays::from_rows(rows.values.clone(), rows.sql_type),
         SubqueryTest::In { expr, negated } => {
             let value = evaluator.eval(expr, rows.sql_type)?;
             truth(rows.member(&value)?.map(|found| found != *negated))
@@ -244,6 +246,13 @@ pub(crate) fn result_type(subquery: &Subquery) -> Option<SqlType> {
             SubqueryState::Correlated { sql_type, .. } => *sql_type,
             SubqueryState::Unprepared => None,
         },
+        SubqueryTest::Array => match &subquery.state {
+            SubqueryState::Rows(rows) => rows.sql_type,
+            SubqueryState::Correlated { sql_type, .. } => *sql_type,
+            SubqueryState::Unprepared => None,
+        }
+        .and_then(crate::arrays::ArrayElement::of)
+        .map(SqlType::Array),
         _ => Some(SqlType::Boolean),
     }
 }
@@ -359,10 +368,13 @@ fn key_query(query: &Query) -> Option<(Query, Vec<usize>)> {
         return None;
     }
     if let Some(from) = &select.from
-        && from
+        && (from
             .joins
             .iter()
             .any(|join| matches!(&join.condition, JoinCondition::On(on) if mentions_outer(on)))
+            || std::iter::once(&from.first)
+                .chain(from.joins.iter().map(|join| &join.table))
+                .any(|table| table.generated.is_some()))
     {
         return None;
     }
@@ -564,9 +576,18 @@ impl<'a> Correlation<'a> {
                 substitute(expr, row);
             }
         });
+        let generated = generated_rows(&mut instance)?;
         let overlay = Overlay::new(self.reader, &found.prepared.temp);
+        let instance_overlay;
+        let reader: &dyn KeyValueRead = match &generated {
+            Some(temp) => {
+                instance_overlay = Overlay::new(&overlay, temp);
+                &instance_overlay
+            }
+            None => &overlay,
+        };
         let env = Env {
-            reader: &overlay,
+            reader,
             names: self.names,
             columns_only: false,
         };
@@ -585,6 +606,47 @@ impl<'a> Correlation<'a> {
             memo.entries.insert(key, Arc::clone(&rows));
         }
         Ok(rows)
+    }
+}
+
+fn generated_rows(query: &mut Query) -> SqlResult<Option<TempTables>> {
+    let mut temp: Option<TempTables> = None;
+    let mut failure = None;
+    for_each_select_mut(query, &mut |select| {
+        let Some(from) = &select.from else {
+            return;
+        };
+        for reference in
+            std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table))
+        {
+            let Some(generated) = &reference.generated else {
+                continue;
+            };
+            if failure.is_some() {
+                return;
+            }
+            let filled = (|| {
+                let definition = crate::temp_tables::temp_definition(&reference.name.text)
+                    .ok_or_else(|| {
+                        internal("a generated table of a correlated subquery is missing")
+                    })?;
+                let evaluator = Evaluator {
+                    scope: Scope::empty(),
+                    row: &[],
+                    correlation: None,
+                };
+                let rows = crate::set_returning::rows_of(generated, &evaluator)?;
+                temp.get_or_insert_with(TempTables::new)
+                    .fill(&definition, rows)
+            })();
+            if let Err(error) = filled {
+                failure = Some(error);
+            }
+        }
+    });
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(temp),
     }
 }
 
@@ -655,9 +717,15 @@ fn select_expressions_mut(select: &mut Select) -> Vec<&mut Expr> {
     exprs.extend(select.limit.iter_mut());
     exprs.extend(select.offset.iter_mut());
     if let Some(from) = &mut select.from {
+        if let Some(generated) = &mut from.first.generated {
+            exprs.extend(crate::set_returning::expressions_mut(generated));
+        }
         for join in &mut from.joins {
             if let JoinCondition::On(expr) = &mut join.condition {
                 exprs.push(expr);
+            }
+            if let Some(generated) = &mut join.table.generated {
+                exprs.extend(crate::set_returning::expressions_mut(generated));
             }
         }
     }
@@ -678,6 +746,11 @@ fn select_expressions(select: &Select) -> Vec<&Expr> {
     exprs.extend(select.limit.iter());
     exprs.extend(select.offset.iter());
     if let Some(from) = &select.from {
+        for table in std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table)) {
+            if let Some(generated) = &table.generated {
+                exprs.extend(crate::set_returning::expressions(generated));
+            }
+        }
         for join in &from.joins {
             if let JoinCondition::On(expr) = &join.condition {
                 exprs.push(expr);
@@ -743,12 +816,13 @@ pub(crate) fn needs_preparation(select: &Select) -> bool {
     let derived = select.from.as_ref().is_some_and(|from| {
         std::iter::once(&from.first)
             .chain(from.joins.iter().map(|join| &join.table))
-            .any(|table| table.derived.is_some())
+            .any(|table| table.derived.is_some() || table.generated.is_some())
     });
     derived
         || select_expressions(select)
             .into_iter()
             .any(mentions_subquery)
+        || crate::set_returning::select_mentions_set_returning(select)
 }
 
 pub(crate) fn prepare_in_place(
@@ -1231,11 +1305,30 @@ fn prepare_select(
     ctes: Option<&CteScope<'_>>,
     prepared: &mut Prepared,
 ) -> SqlResult<bool> {
+    let mut correlated_from = false;
+    if crate::set_returning::select_mentions_set_returning(select) {
+        crate::set_returning::check_placement(select)?;
+        crate::set_returning::expand_select_list(select)?;
+    }
     if let Some(from) = &mut select.from {
+        let labels: Vec<(String, String)> = std::iter::once(&from.first)
+            .chain(from.joins.iter().map(|join| &join.table))
+            .filter(|table| table.derived.is_none() && table.generated.is_none())
+            .map(|table| {
+                (
+                    table
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| table.name.text.clone()),
+                    table.name.text.clone(),
+                )
+            })
+            .collect();
         let references = std::iter::once(&mut from.first)
             .chain(from.joins.iter_mut().map(|join| &mut join.table));
         for reference in references {
-            prepare_reference(env, tables, reference, ctes, prepared)?;
+            correlated_from |=
+                prepare_reference(env, tables, reference, parent, ctes, prepared, &labels)?;
         }
     }
     let overlay = Overlay::new(env.reader, &prepared.temp);
@@ -1311,16 +1404,32 @@ fn prepare_select(
         Ok(())
     })();
     prepared.templates = templates;
-    outcome.map(|()| correlated)
+    outcome.map(|()| correlated || correlated_from)
 }
 
 fn prepare_reference(
     env: &Env<'_>,
     tables: &mut TableCache,
     reference: &mut TableReference,
+    parent: Option<&Outer<'_>>,
     ctes: Option<&CteScope<'_>>,
     prepared: &mut Prepared,
-) -> SqlResult<()> {
+    siblings: &[(String, String)],
+) -> SqlResult<bool> {
+    if let Some(generated) = reference.generated.take() {
+        return prepare_generated(
+            env,
+            tables,
+            reference,
+            *generated,
+            Surroundings {
+                parent,
+                ctes,
+                siblings,
+            },
+            prepared,
+        );
+    }
     if let Some(derived) = reference.derived.take() {
         let result = {
             let overlay = Overlay::new(env.reader, &prepared.temp);
@@ -1340,7 +1449,7 @@ fn prepare_reference(
             result.rows,
         )?;
         reference.name.text = temp;
-        return Ok(());
+        return Ok(false);
     }
     if let Some(temp) = find_cte(ctes, &reference.name.text) {
         if reference.alias.is_none() {
@@ -1348,7 +1457,183 @@ fn prepare_reference(
         }
         reference.name.text = temp.to_owned();
     }
+    Ok(false)
+}
+
+struct Surroundings<'s> {
+    parent: Option<&'s Outer<'s>>,
+    ctes: Option<&'s CteScope<'s>>,
+    siblings: &'s [(String, String)],
+}
+
+fn first_column(expr: &Expr) -> Option<(Option<&str>, &str, usize)> {
+    if let ExprKind::Column { qualifier, name } = &expr.kind {
+        return Some((qualifier.as_deref(), name, expr.position));
+    }
+    children(expr).into_iter().find_map(first_column)
+}
+
+fn lateral_reference(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    prepared: &Prepared,
+    generated: &GeneratedTable,
+    siblings: &[(String, String)],
+) -> SqlResult<()> {
+    for expr in crate::set_returning::expressions(generated) {
+        let Some((qualifier, name, position)) = first_column(expr) else {
+            continue;
+        };
+        let overlay = Overlay::new(env.reader, &prepared.temp);
+        let mut sibling_column = false;
+        for (label, table) in siblings {
+            if let Some(qualifier) = qualifier {
+                sibling_column |= qualifier == label;
+                continue;
+            }
+            if let Ok(definition) = tables.require(
+                &overlay,
+                &crate::ast::Name {
+                    text: table.clone(),
+                    position,
+                },
+            ) {
+                sibling_column |= definition.column_index(name).is_some();
+            }
+        }
+        if sibling_column {
+            return Err(SqlError::not_supported(
+                "a function or VALUES list in FROM that names another FROM item (LATERAL) is not supported yet",
+            )
+            .at(position));
+        }
+    }
     Ok(())
+}
+
+fn prepare_generated(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    reference: &mut TableReference,
+    mut generated: GeneratedTable,
+    surroundings: Surroundings<'_>,
+    prepared: &mut Prepared,
+) -> SqlResult<bool> {
+    let Surroundings {
+        parent,
+        ctes,
+        siblings,
+    } = surroundings;
+    let alias_given = reference.alias.is_some();
+    let label = reference
+        .alias
+        .clone()
+        .unwrap_or_else(|| reference.name.text.clone());
+    let position = reference.name.position;
+    crate::set_returning::refuse_nested_in_from(&generated)?;
+    let mut deferred = false;
+    let built = match &mut generated {
+        GeneratedTable::Expansion(expansion) => {
+            let inner = {
+                let overlay = Overlay::new(env.reader, &prepared.temp);
+                run_query(&env.with_reader(&overlay), tables, &expansion.query, ctes)
+            }
+            .map_err(|error| {
+                if parent.is_some() && is_missing(&error) {
+                    SqlError::not_supported(
+                        "a set-returning function in the select list of a subquery that names the outer query is not supported yet",
+                    )
+                    .at(expansion.position)
+                } else {
+                    error
+                }
+            })?;
+            crate::set_returning::expanded(expansion, inner)?
+        }
+        GeneratedTable::Values(_) | GeneratedTable::Function(_) => {
+            let mut correlated = false;
+            {
+                let overlay = Overlay::new(env.reader, &prepared.temp);
+                let inner_env = env.with_reader(&overlay);
+                let mut templates = Vec::new();
+                for expr in crate::set_returning::expressions_mut(&mut generated) {
+                    rewrite(
+                        &inner_env,
+                        tables,
+                        expr,
+                        Scope::empty(),
+                        parent,
+                        ctes,
+                        &mut templates,
+                        &mut correlated,
+                    )?;
+                }
+                if !templates.is_empty() {
+                    return Err(SqlError::not_supported(
+                        "a subquery that names the outer query inside VALUES or a function in FROM is not supported yet",
+                    )
+                    .at(position));
+                }
+            }
+            lateral_reference(env, tables, prepared, &generated, siblings)?;
+            deferred = correlated;
+            let evaluator = Evaluator {
+                scope: Scope::empty(),
+                row: &[],
+                correlation: None,
+            };
+            match &generated {
+                GeneratedTable::Function(function) if correlated || env.columns_only => {
+                    crate::set_returning::GeneratedRows {
+                        columns: crate::set_returning::table_function_columns(
+                            function,
+                            &label,
+                            alias_given,
+                            Scope::empty(),
+                        )?,
+                        rows: Vec::new(),
+                    }
+                }
+                GeneratedTable::Values(list) if correlated || env.columns_only => {
+                    crate::set_returning::GeneratedRows {
+                        columns: crate::set_returning::values_columns(list, Scope::empty())?,
+                        rows: Vec::new(),
+                    }
+                }
+                GeneratedTable::Function(function) => {
+                    crate::set_returning::table_function(function, &label, alias_given, &evaluator)?
+                }
+                GeneratedTable::Values(list) => {
+                    crate::set_returning::values_rows(list, &evaluator)?
+                }
+                GeneratedTable::Expansion(_) => crate::set_returning::GeneratedRows {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                },
+            }
+        }
+    };
+    let renamed = match &generated {
+        GeneratedTable::Function(function) => function.column_names.clone(),
+        _ => Vec::new(),
+    };
+    let temp = prepared.temp.add(
+        env.names,
+        Intermediate {
+            columns: &built.columns,
+            renamed: &renamed,
+            label: &label,
+            dialect: Dialect::PostgreSql,
+            position,
+        },
+        built.rows,
+    )?;
+    reference.name.text = temp;
+    reference.alias = Some(label);
+    if deferred {
+        reference.generated = Some(Box::new(generated));
+    }
+    Ok(deferred)
 }
 
 fn is_missing(error: &SqlError) -> bool {
@@ -1560,6 +1845,7 @@ pub(crate) fn output_column(expr: &Expr) -> Option<OutputColumn> {
         name: match subquery.test {
             SubqueryTest::Scalar => first_column_name(&subquery.query)?,
             SubqueryTest::Exists => "exists".to_owned(),
+            SubqueryTest::Array => "array".to_owned(),
             _ => return None,
         },
         sql_type: result_type(subquery),

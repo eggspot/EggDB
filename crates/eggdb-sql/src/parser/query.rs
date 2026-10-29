@@ -45,7 +45,13 @@ fn nested_too_deep(position: usize) -> SqlError {
 
 impl Parser<'_> {
     pub(super) fn starts_query(&self) -> bool {
-        self.is_word("select") || self.is_word("with")
+        self.starts_query_at(0)
+    }
+
+    fn starts_query_at(&self, ahead: usize) -> bool {
+        self.is_word_at(ahead, "select")
+            || self.is_word_at(ahead, "with")
+            || (self.postgresql() && self.is_word_at(ahead, "values"))
     }
 
     fn starts_query_in_parentheses(&self) -> bool {
@@ -53,7 +59,7 @@ impl Parser<'_> {
         while self.peek_kind_at(ahead) == &TokenKind::LeftParen {
             ahead += 1;
         }
-        ahead > 0 && (self.is_word_at(ahead, "select") || self.is_word_at(ahead, "with"))
+        ahead > 0 && self.starts_query_at(ahead)
     }
 
     pub(super) fn query_statement(&mut self) -> SqlResult<Statement> {
@@ -310,6 +316,9 @@ impl Parser<'_> {
                 body => SetExpr::Query(Box::new(Query { body, ..query })),
             });
         }
+        if self.postgresql() && self.is_word("values") {
+            return Ok(SetExpr::Select(Box::new(self.values_list()?)));
+        }
         if !self.is_word("select") {
             if self.is_word("values") || self.is_word("table") {
                 return Err(self.not_supported("a VALUES or TABLE statement"));
@@ -490,6 +499,7 @@ impl Parser<'_> {
                 column_names,
                 dialect: self.dialect,
             })),
+            generated: None,
         })
     }
 
@@ -521,8 +531,7 @@ impl Parser<'_> {
     }
 
     pub(super) fn at_subquery(&self) -> bool {
-        self.peek_kind() == &TokenKind::LeftParen
-            && (self.is_word_at(1, "select") || self.is_word_at(1, "with"))
+        self.peek_kind() == &TokenKind::LeftParen && self.starts_query_at(1)
     }
 
     pub(super) fn at_quantified(&self) -> bool {
@@ -538,9 +547,16 @@ impl Parser<'_> {
     ) -> SqlResult<Expr> {
         let all = self.is_word("all");
         self.at += 1;
-        if !(self.is_word_at(1, "select") || self.is_word_at(1, "with")) {
+        if !self.starts_query_at(1) {
+            if self.postgresql() && self.at_array_list() {
+                let (at, depth, queries) = (self.at, self.depth, self.queries);
+                if let Ok(expr) = self.quantified_array(left.clone(), operator, all) {
+                    return Ok(expr);
+                }
+                (self.at, self.depth, self.queries) = (at, depth, queries);
+            }
             if self.postgresql() {
-                return self.quantified_array(left, operator, all);
+                return self.quantified_expression(left, operator, all);
             }
             return Err(self.not_supported("ANY, SOME and ALL over a list or an array"));
         }
