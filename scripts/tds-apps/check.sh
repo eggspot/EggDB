@@ -9,7 +9,9 @@ crates/eggdb/tests/clients/java/TdsAppCheck.java through mssql-jdbc and
 crates/eggdb/tests/clients/dotnet/TdsAppCheck through Microsoft.Data.SqlClient. Each runs
 parameterized CRUD (sp_executesql, sp_prepexec and sp_execute), a committed and a rolled-back
 transaction and a failing query; the .NET program also reuses a pooled connection, which resets
-it. Then restores the sqlpackage fixture crates/eggdb/tests/data/sqlserver/shop-sqlpackage.sql
+it, and runs scripts/tds-apps/batch-logic.sql batch by batch as sqlcmd does (GO separators):
+Transact-SQL batch logic with a loop, TRY/CATCH, THROW, RAISERROR, PRINT and sp_executesql with
+an OUTPUT parameter. Then restores the sqlpackage fixture crates/eggdb/tests/data/sqlserver/shop-sqlpackage.sql
 into a second database and lists it through each driver's metadata calls:
 crates/eggdb/tests/clients/java/TdsMetadataCheck.java (DatabaseMetaData) and the .NET program's
 metadata mode (SqlConnection.GetSchema). Last, loads the committed bcp character-format file
@@ -17,8 +19,9 @@ crates/eggdb/tests/data/sqlserver/bcp/items.dat (bcp ... out -c; bcp itself is n
 its license keeps it out of CI) into a third database twice: with eggdb import --dialect
 sqlserver, and with SqlBulkCopy in the .NET program's bulk mode, which compares both tables'
 rows with the file. Fails unless each program prints exactly scripts/tds-apps/expected-java.out,
-expected-dotnet.out, expected-metadata-java.out, expected-metadata-dotnet.out and
-expected-bulk-dotnet.out, written from Microsoft's documentation of SQL Server's behavior.
+expected-dotnet.out, expected-logic-dotnet.out, expected-metadata-java.out,
+expected-metadata-dotnet.out and expected-bulk-dotnet.out, written from Microsoft's
+documentation of SQL Server's behavior.
 
 MSSQL_JDBC_JAR names the mssql-jdbc jar, JAVA the java launcher (default java) and DOTNET the
 dotnet command (default dotnet), whose SDK restores Microsoft.Data.SqlClient from NuGet."
@@ -80,6 +83,9 @@ serve apps apps
 "$dotnet" run --no-build --project "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" -- \
   "Server=127.0.0.1,$port;Database=apps;User ID=eggdb;Password=$password;Encrypt=false;Connect Timeout=10" \
   > "$work/dotnet.out" 2>&1 || true
+"$dotnet" run --no-build --project "$clients/dotnet/TdsAppCheck" -c Release --artifacts-path "$work/dotnet" -- \
+  "Server=127.0.0.1,$port;Database=apps;User ID=eggdb;Password=$password;Encrypt=false;Connect Timeout=10" logic "$here/batch-logic.sql" \
+  > "$work/logic-dotnet.out" 2>&1 || true
 stop
 
 "$eggdb" restore --dialect sqlserver --create "$work/shop.db" "$fixture" > "$work/restore.out" 2>&1 ||
@@ -105,7 +111,7 @@ stop
 
 : > "$work/output.diff"
 different=""
-for program in java dotnet metadata-java metadata-dotnet bulk-dotnet; do
+for program in java dotnet logic-dotnet metadata-java metadata-dotnet bulk-dotnet; do
   if ! cmp -s "$here/expected-$program.out" "$work/$program.out"; then
     diff -u "$here/expected-$program.out" "$work/$program.out" >> "$work/output.diff" || true
     different="$different $program"
@@ -116,4 +122,4 @@ if [ -n "$different" ]; then
   tail -n 40 "$work/serve.err" >&2
   fail "the$different client programs printed something else on EggDB (whole diff in $work/output.diff)"
 fi
-echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD and transactions, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import on EggDB"
+echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD, transactions and Transact-SQL batch logic, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import on EggDB"

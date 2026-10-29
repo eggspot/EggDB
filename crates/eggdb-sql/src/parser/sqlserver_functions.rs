@@ -216,6 +216,35 @@ impl Parser<'_> {
         Ok(call(function, vec![first, second], name.position))
     }
 
+    fn caught_error_value(&self, function: &str, position: usize) -> Expr {
+        let caught = self.batch.and_then(|batch| batch.caught.as_ref());
+        let (value, sql_type) = match function {
+            "error_message" => (
+                caught.map_or(Value::Null, |error| Value::Text(error.message.clone())),
+                SqlType::Varchar(Some(4000)),
+            ),
+            "error_procedure" => (Value::Null, SqlType::Varchar(Some(128))),
+            number => (
+                caught.map_or(Value::Null, |error| {
+                    Value::Integer(match number {
+                        "error_number" => i32::try_from(error.number).unwrap_or(i32::MAX),
+                        "error_severity" => i32::from(error.severity),
+                        "error_state" => i32::from(error.state),
+                        _ => i32::try_from(error.line).unwrap_or(i32::MAX),
+                    })
+                }),
+                SqlType::Integer,
+            ),
+        };
+        Expr {
+            kind: ExprKind::Constant {
+                value,
+                sql_type: Some(sql_type),
+            },
+            position,
+        }
+    }
+
     pub(super) fn sqlserver_call(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let position = name.position;
         if let Some(function) = crate::sqlserver_catalog::MetadataFunction::named(&name.text) {
@@ -237,6 +266,22 @@ impl Parser<'_> {
             )));
         }
         let expr = match name.text.as_str() {
+            "error_number" | "error_severity" | "error_state" | "error_line" | "error_message"
+            | "error_procedure" => {
+                self.sqlserver_arguments(name, 0..=0)?;
+                self.caught_error_value(&name.text, position)
+            }
+            "xact_state" => {
+                self.sqlserver_arguments(name, 0..=0)?;
+                let open = self.sqlserver_settings(|settings| settings.sqlserver.transaction_count) > 0;
+                Expr {
+                    kind: ExprKind::Constant {
+                        value: Value::SmallInt(i16::from(open)),
+                        sql_type: Some(SqlType::SmallInt),
+                    },
+                    position,
+                }
+            }
             "suser_sname" | "suser_name" | "original_login" => {
                 self.sqlserver_arguments(name, 0..=1)?;
                 let login = self.sqlserver_login();

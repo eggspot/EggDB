@@ -286,8 +286,12 @@ ROLLBACK TRANSACTION
 error 0A000 40517
 SAVE TRANSACTION point
 
-error 0A000 40517
-BEGIN DELETE FROM Products END
+rows
+BEGIN SELECT count(*) AS n FROM Products END
+----
+n
+5
+SELECT 1
 
 ok
 BEGIN TRAN; COMMIT WORK
@@ -1265,3 +1269,277 @@ DROP TABLE Parts40
 
 ok
 DROP TABLE Customers40, Tools40, Plain40
+
+chapter "DECLARE @local_variable (Transact-SQL)", "SET @local_variable (Transact-SQL)", "SELECT @local_variable (Transact-SQL)"
+ok
+CREATE TABLE Bakes47 (id INT PRIMARY KEY, name NVARCHAR(20) NOT NULL, qty INT NOT NULL)
+
+ok
+INSERT INTO Bakes47 VALUES (1, N'rye', 4), (2, N'spelt', 0), (3, N'oat', 7)
+
+rows
+DECLARE @find varchar(30) = 'Man%', @count int;
+SET @count = (SELECT count(*) FROM Bakes47);
+SELECT @find AS find, @count AS bakes
+----
+find|bakes
+Man%|3
+SELECT 1
+
+rows
+DECLARE @name nvarchar(20), @total int = 0;
+SELECT @name = name FROM Bakes47 ORDER BY id;
+SELECT @total += qty FROM Bakes47;
+SELECT @name AS last_name, @total AS total
+----
+last_name|total
+oat|11
+SELECT 1
+
+rows
+DECLARE @short varchar(3) = 'abcdef';
+SET @short += 'x';
+SELECT @short AS short
+----
+short
+abc
+SELECT 1
+
+error 42P02 137
+DECLARE @a int;
+SELECT @b AS b
+
+error 42710 134
+DECLARE @a int, @a int
+
+chapter "IF...ELSE (Transact-SQL)", "BEGIN...END (Transact-SQL)"
+rows
+IF (SELECT count(*) FROM Bakes47 WHERE qty = 0) > 0
+BEGIN
+    SELECT 'some bakes are sold out' AS stock
+END
+ELSE
+    SELECT 'all in stock' AS stock
+----
+stock
+some bakes are sold out
+SELECT 1
+
+rows
+DECLARE @n int = 7;
+IF @n < 5 SELECT 'small' AS size
+ELSE IF @n < 10 SELECT 'medium' AS size
+ELSE SELECT 'large' AS size
+----
+size
+medium
+SELECT 1
+
+rows
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Guard47]') AND type in (N'U'))
+CREATE TABLE [dbo].[Guard47] ([Id] [int] NOT NULL PRIMARY KEY)
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Guard47]') AND type in (N'U'))
+CREATE TABLE [dbo].[Guard47] ([Id] [int] NOT NULL PRIMARY KEY)
+SELECT count(*) AS guarded FROM Guard47
+----
+guarded
+0
+SELECT 1
+
+error 42601 102
+IF 1 = 1
+BEGIN
+    SELECT 1 AS one
+
+chapter "WHILE (Transact-SQL)", "BREAK (Transact-SQL)", "CONTINUE (Transact-SQL)"
+rows
+DECLARE @i int = 0, @odd int = 0;
+WHILE @i < 10
+BEGIN
+    SET @i = @i + 1;
+    IF @i % 2 = 0 CONTINUE;
+    IF @i > 7 BREAK;
+    SET @odd = @odd + @i;
+END;
+SELECT @i AS i, @odd AS odd_sum
+----
+i|odd_sum
+9|16
+SELECT 1
+
+rows
+WHILE (SELECT min(qty) FROM Bakes47) < 2
+    UPDATE Bakes47 SET qty = qty + 1 WHERE qty < 2;
+SELECT name, qty FROM Bakes47 ORDER BY id
+----
+name|qty
+rye|4
+spelt|2
+oat|7
+SELECT 3
+
+error 42601 135
+BREAK
+
+chapter "TRY...CATCH (Transact-SQL)", "ERROR_NUMBER (Transact-SQL)", "ERROR_MESSAGE (Transact-SQL)", "@@ERROR (Transact-SQL)"
+rows
+BEGIN TRY
+    SELECT 1/0 AS impossible;
+END TRY
+BEGIN CATCH
+    SELECT ERROR_NUMBER() AS ErrorNumber, ERROR_SEVERITY() AS ErrorSeverity, ERROR_STATE() AS ErrorState, ERROR_MESSAGE() AS ErrorMessage;
+END CATCH
+----
+errornumber|errorseverity|errorstate|errormessage
+8134|16|1|Divide by zero error encountered.
+SELECT 1
+
+rows
+BEGIN TRY
+    INSERT INTO Bakes47 VALUES (1, N'again', 1);
+    SELECT 'not here' AS reached;
+END TRY
+BEGIN CATCH
+    SELECT ERROR_NUMBER() AS n, @@TRANCOUNT AS trancount;
+END CATCH
+----
+n|trancount
+2627|0
+SELECT 1
+
+rows
+BEGIN TRY
+    INSERT INTO Bakes47 VALUES (2, N'dup', 1);
+END TRY
+BEGIN CATCH
+    SELECT @@ERROR AS error_at_catch;
+END CATCH
+----
+error_at_catch
+2627
+SELECT 1
+
+rows
+SELECT ERROR_NUMBER() AS outside_catch
+----
+outside_catch
+NULL
+SELECT 1
+
+chapter "THROW (Transact-SQL)", "RAISERROR (Transact-SQL)", "PRINT (Transact-SQL)"
+error P0001 50001
+THROW 50001, 'The record does not exist.', 1;
+
+rows
+BEGIN TRY
+    THROW 50002, N'thrown inside', 5;
+END TRY
+BEGIN CATCH
+    SELECT ERROR_NUMBER() AS n, ERROR_STATE() AS s, ERROR_MESSAGE() AS m;
+END CATCH
+----
+n|s|m
+50002|5|thrown inside
+SELECT 1
+
+error P0001 50003
+BEGIN TRY
+    THROW 50003, N'again', 1;
+END TRY
+BEGIN CATCH
+    THROW;
+END CATCH
+
+error 42601 10704
+THROW;
+
+error 22023 35100
+THROW 40000, N'too low', 1;
+
+error P0001 50000
+RAISERROR (N'This is message %s %d.', 16, 1, N'number', 5);
+
+rows
+RAISERROR (N'<<%7.3s>>', 10, 1, N'abcde');
+SELECT 'continued' AS after
+----
+after
+continued
+SELECT 1
+
+rows
+BEGIN TRY
+    RAISERROR (N'Error raised in TRY block.', 16, 1);
+END TRY
+BEGIN CATCH
+    SELECT ERROR_MESSAGE() AS m, ERROR_SEVERITY() AS sev, ERROR_STATE() AS st;
+END CATCH
+----
+m|sev|st
+Error raised in TRY block.|16|1
+SELECT 1
+
+rows
+PRINT N'printed';
+SELECT 'after print' AS x
+----
+x
+after print
+SELECT 1
+
+chapter "@@ROWCOUNT (Transact-SQL)", "RETURN (Transact-SQL)"
+rows
+UPDATE Bakes47 SET qty = qty WHERE qty > 3;
+IF @@ROWCOUNT = 2 SELECT 'two updated' AS r
+----
+r
+two updated
+SELECT 1
+
+rows
+SELECT 'before' AS x;
+RETURN;
+SELECT 'after' AS x
+----
+x
+before
+SELECT 1
+
+chapter "EXECUTE (Transact-SQL)", "sp_executesql (Transact-SQL)"
+rows
+DECLARE @sql nvarchar(200) = N'SELECT name FROM Bakes47 WHERE id = 3';
+EXEC (@sql)
+----
+name
+oat
+SELECT 1
+
+rows
+DECLARE @qty int;
+EXECUTE sp_executesql N'SELECT @q = qty FROM Bakes47 WHERE name = @n', N'@n nvarchar(20), @q int OUTPUT', @n = N'rye', @q = @qty OUTPUT;
+SELECT @qty AS rye_qty
+----
+rye_qty
+4
+SELECT 1
+
+error 42P02 137
+DECLARE @outer int = 1;
+EXEC (N'SELECT @outer AS x')
+
+chapter "table (Transact-SQL)"
+rows
+DECLARE @t TABLE (id int, label nvarchar(10));
+INSERT INTO @t VALUES (1, N'one'), (2, N'two');
+INSERT INTO @t SELECT id + 10, name FROM Bakes47 WHERE id = 1;
+UPDATE @t SET label = N'TWO' WHERE id = 2;
+DELETE FROM @t WHERE id = 1;
+SELECT id, label FROM @t ORDER BY id
+----
+id|label
+2|TWO
+11|rye
+SELECT 2
+
+ok
+DROP TABLE Bakes47, Guard47

@@ -1,7 +1,7 @@
 use crate::auth::TdsCredentials;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::wire::Wire;
-use eggdb_sql::KeyValueStore;
+use eggdb_sql::{CancelSignal, KeyValueStore};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
@@ -117,6 +117,29 @@ pub(crate) struct Shared<'a> {
     pub(crate) unknown_user: TdsCredentials,
     pub(crate) unauthenticated: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
+    pub(crate) running: Mutex<Vec<(u32, CancelSignal)>>,
+}
+
+impl Shared<'_> {
+    pub(crate) fn register(&self, connection_id: u32, signal: CancelSignal) {
+        if let Ok(mut running) = self.running.lock() {
+            running.push((connection_id, signal));
+        }
+    }
+
+    pub(crate) fn unregister(&self, connection_id: u32) {
+        if let Ok(mut running) = self.running.lock() {
+            running.retain(|(id, _)| *id != connection_id);
+        }
+    }
+
+    fn cancel_running(&self) {
+        if let Ok(running) = self.running.lock() {
+            for (_, signal) in running.iter() {
+                signal.cancel();
+            }
+        }
+    }
 }
 
 pub(crate) struct Slot<'c>(&'c AtomicUsize);
@@ -170,6 +193,7 @@ pub fn serve<S: KeyValueStore + Sync>(
         unknown_user: TdsCredentials::matching_nothing(&secret, config.credentials.iterations()),
         unauthenticated: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
+        running: Mutex::new(Vec::new()),
     };
     let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);
@@ -223,6 +247,7 @@ pub fn serve<S: KeyValueStore + Sync>(
                 }
             }
         }
+        shared.cancel_running();
     });
     Ok(shared.ended_by_stop.load(Ordering::Acquire))
 }

@@ -16,10 +16,14 @@ internal static class TdsAppCheck
         {
             return TdsBulkCheck.Run(arguments[0], arguments[2]);
         }
+        if (arguments.Length == 3 && arguments[1] == "logic")
+        {
+            return TdsLogicCheck.Run(arguments[0], arguments[2]);
+        }
         if (arguments.Length != 1)
         {
             Console.Error.WriteLine(
-                "usage: dotnet run --project TdsAppCheck -- <connection string> [metadata | bulk <bcp -c file>]");
+                "usage: dotnet run --project TdsAppCheck -- <connection string> [metadata | bulk <bcp -c file> | logic <script>]");
             return 2;
         }
         var connectionString = arguments[0];

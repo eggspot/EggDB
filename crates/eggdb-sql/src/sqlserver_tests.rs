@@ -1063,7 +1063,8 @@ fn implicit_transactions_keep_changes_open_until_commit_or_rollback() {
         "set implicit_transactions off IF @@TRANCOUNT > 0 COMMIT TRAN INSERT INTO t VALUES (3)",
     )
     .unwrap();
-    assert_eq!(steps[1].outcome.as_ref().unwrap().tag, "IF");
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[1].outcome.as_ref().unwrap().tag, "INSERT 0 1");
     assert!(steps.iter().all(|step| !step.in_transaction));
     assert_eq!(
         values(&mut session, "SELECT id FROM t ORDER BY id"),
@@ -1076,7 +1077,7 @@ fn implicit_transactions_keep_changes_open_until_commit_or_rollback() {
 }
 
 #[test]
-fn if_runs_one_statement_by_a_condition_that_reads_no_table() {
+fn if_and_else_choose_their_statements_by_any_condition() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
     values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
@@ -1089,16 +1090,18 @@ fn if_runs_one_statement_by_a_condition_that_reads_no_table() {
     .unwrap();
     assert_eq!(rows_of(&steps), vec![vec![Value::Integer(3)]]);
     let steps = batch(&mut session, "IF NULL = 1 SELECT 5 AS n SELECT 6 AS n").unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(6)]]);
+    let steps = batch(
+        &mut session,
+        "IF NOT EXISTS (SELECT 1 FROM t) INSERT INTO t VALUES (1) IF EXISTS (SELECT 1 FROM t WHERE id = 1) SELECT 7 AS n",
+    )
+    .unwrap();
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(7)]]);
+    let steps = batch(&mut session, "IF 1 = 1 BEGIN SELECT 8 AS n SELECT 9 AS n END").unwrap();
     assert_eq!(steps.len(), 2);
-    assert_eq!(steps[0].outcome.as_ref().unwrap().tag, "IF");
-    for text in [
-        "IF EXISTS (SELECT 1 FROM t) SELECT 1",
-        "IF id = 1 SELECT 1",
-        "IF 1 = 1 BEGIN SELECT 1 END",
-    ] {
-        let error = batch(&mut session, text).expect_err(text);
-        assert_eq!(error.vendor_code(), Some(40517), "{text}");
-    }
+    let steps = batch(&mut session, "IF id = 1 SELECT 1").unwrap();
+    assert_eq!(codes(&steps), vec![Some(207)]);
 }
 
 #[test]

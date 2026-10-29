@@ -86,6 +86,7 @@ mod subquery;
 mod table_variables;
 mod temp_tables;
 mod temporal;
+mod tsql;
 mod types;
 mod typing;
 mod views;
@@ -93,6 +94,8 @@ mod window;
 
 #[cfg(test)]
 mod arrays_tests;
+#[cfg(test)]
+mod batch_logic_tests;
 #[cfg(test)]
 mod bulk_load_tests;
 #[cfg(test)]
@@ -152,9 +155,9 @@ pub use restore::{
 };
 pub use schema::{ColumnSchema, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted};
 pub use session::{
-    BatchStep, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn, Parameter,
-    ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
-    TransactionStatus,
+    BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
+    Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session,
+    StatementDescription, TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;

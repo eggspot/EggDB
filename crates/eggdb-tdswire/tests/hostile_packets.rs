@@ -79,6 +79,9 @@ fn seeds() -> Vec<Vec<u8>> {
         batch_body("SELECT TOP (2) [a] FROM dbo.t WHERE b = N'x' -- c\nSELECT @@VERSION"),
         batch_body("BEGIN TRAN INSERT INTO t VALUES (1) COMMIT SET NOCOUNT ON USE shop"),
         batch_body("CREATE TABLE [t] ([id] INT IDENTITY(1,1) PRIMARY KEY, n NVARCHAR(max))"),
+        batch_body(
+            "DECLARE @i int = 1 DECLARE @t TABLE (a int) IF @i = 1 BEGIN PRINT N'one' INSERT @t VALUES (@i) END ELSE RAISERROR(N'%s %d', 10, 1, N'x', 2) BEGIN TRY THROW 50001, N'x', 1 END TRY BEGIN CATCH SELECT ERROR_NUMBER() END CATCH EXEC (N'SELECT 1') EXEC sp_executesql N'SELECT @a', N'@a int', 1",
+        ),
         rpc_body(&[
             call_by_id(
                 10,

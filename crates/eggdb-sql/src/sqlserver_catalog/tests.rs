@@ -467,8 +467,8 @@ fn catalog_procedures_run_by_exec_with_arguments_by_position_or_name() {
     );
     assert_eq!(error_code(&mut session, "EXEC sp_nothing"), Some(2812));
     assert_eq!(
-        error_code(&mut session, "EXEC sp_executesql N'SELECT 1'"),
-        Some(40517)
+        rows(&mut session, "EXEC sp_executesql N'SELECT 1 AS one'"),
+        vec![vec![Value::Integer(1)]]
     );
     assert_eq!(
         error_code(&mut session, "EXEC sp_tables @table_owner = 'x', 'y'"),

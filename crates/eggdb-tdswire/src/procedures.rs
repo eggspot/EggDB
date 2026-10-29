@@ -7,10 +7,11 @@ use crate::rpc::{
 use crate::tokens::{
     self, DONE_ERROR, DONE_IN_PROC, DONE_IN_TRANSACTION, DONE_MORE, DONE_PROC, ServerMessage,
 };
+use crate::types::{declared_wire_columns, push_value};
 use crate::wire::WireError;
 use eggdb_sql::{
-    KeyValueStore, NamedParameter, ParameterDeclaration, Session, SqlError, TransactionStatus,
-    Value,
+    KeyValueStore, NamedParameter, OutputColumn, ParameterDeclaration, Session, SqlError, SqlType,
+    TransactionStatus, Value,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -102,7 +103,7 @@ impl CallError {
 
     fn from_sql(error: &SqlError) -> Self {
         Self {
-            number: error.vendor_code().map_or(50_000, u32::from),
+            number: error.sqlserver_number().unwrap_or(50_000),
             severity: error.severity().unwrap_or(16),
             text: error.message().to_owned(),
         }
@@ -233,15 +234,52 @@ fn bound_parameters(
         .collect()
 }
 
-fn returned_values(parameters: &[RpcParameter], first: usize) -> Vec<Vec<u8>> {
+fn output_value(sql_type: SqlType, value: &Value) -> Option<Vec<u8>> {
+    let columns = declared_wire_columns(&[OutputColumn {
+        name: String::new(),
+        sql_type: Some(sql_type),
+    }]);
+    let column = columns.first()?;
+    let mut out = Vec::new();
+    column.kind.push_type_info(&mut out);
+    push_value(&mut out, column, value);
+    Some(out)
+}
+
+fn returned_values(
+    parameters: &[RpcParameter],
+    first: usize,
+    declarations: &[ParameterDeclaration],
+    finals: &[NamedParameter],
+) -> Vec<Vec<u8>> {
+    let mut next_position = 0usize;
     parameters
         .iter()
         .enumerate()
         .skip(first)
         .filter_map(|(ordinal, parameter)| {
+            let declaration = if parameter.name.is_empty() {
+                let index = next_position;
+                next_position += 1;
+                declarations.get(index)
+            } else {
+                declarations
+                    .iter()
+                    .find(|declaration| declaration.name.eq_ignore_ascii_case(&parameter.name))
+            };
             let sent = parameter.sent.as_deref()?;
             let ordinal = u16::try_from(ordinal).ok()?;
-            Some(tokens::return_value(ordinal, &parameter.name, sent))
+            let assigned = declaration.and_then(|declaration| {
+                let found = finals
+                    .iter()
+                    .find(|value| value.name.eq_ignore_ascii_case(&declaration.name))?;
+                output_value(declaration.sql_type, &found.value)
+            });
+            Some(tokens::return_value(
+                ordinal,
+                &parameter.name,
+                assigned.as_deref().unwrap_or(sent),
+            ))
         })
         .collect()
 }
@@ -485,7 +523,12 @@ impl Connection<'_> {
             parameters.get(2..).unwrap_or_default(),
         )?;
         let mut called = self.run_bound(session, &batch, &bound);
-        called.returned = returned_values(parameters, 2);
+        called.returned = returned_values(
+            parameters,
+            2,
+            &batch.declarations,
+            session.parameter_values_after_batch(),
+        );
         Ok(called)
     }
 
@@ -532,7 +575,12 @@ impl Connection<'_> {
             .ok_or_else(|| unknown_handle(handle))?;
         let mut called = self.run_bound(session, &batch, &bound);
         called.returned = vec![returned_handle(parameters.first(), handle)];
-        called.returned.extend(returned_values(parameters, 3));
+        called.returned.extend(returned_values(
+            parameters,
+            3,
+            &batch.declarations,
+            session.parameter_values_after_batch(),
+        ));
         Ok(called)
     }
 
@@ -552,7 +600,12 @@ impl Connection<'_> {
             parameters.get(1..).unwrap_or_default(),
         )?;
         let mut called = self.run_bound(session, &batch, &bound);
-        called.returned = returned_values(parameters, 1);
+        called.returned = returned_values(
+            parameters,
+            1,
+            &batch.declarations,
+            session.parameter_values_after_batch(),
+        );
         Ok(called)
     }
 
@@ -597,6 +650,12 @@ impl Connection<'_> {
             declarations: Vec::new(),
         };
         Ok(self.run_bound(session, &batch, &bound))
+    }
+
+    pub(crate) fn forget_unprepared<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>) {
+        for handle in session.take_unprepare_requests() {
+            self.prepared.unprepare(handle);
+        }
     }
 
     fn unprepare(&mut self, parameters: &[RpcParameter]) -> Result<Called, CallError> {

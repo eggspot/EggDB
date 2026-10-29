@@ -11,6 +11,7 @@ mod sqlite;
 mod sqlserver;
 mod sqlserver_batch;
 mod sqlserver_functions;
+mod sqlserver_logic;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
@@ -265,6 +266,11 @@ pub(crate) struct Parser<'t> {
     pending_top: Option<Expr>,
     view_query_depth: Option<usize>,
     ignored_view_top: bool,
+    batch: Option<&'t crate::tsql::BatchContext>,
+    declared_variables: Vec<crate::tsql::ScalarVariable>,
+    declared_tables: Vec<String>,
+    variables_read: Vec<String>,
+    select_targets: Option<Vec<(crate::ast::AssignmentTarget, Vec<String>)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -378,7 +384,17 @@ impl<'t> Parser<'t> {
             pending_top: None,
             view_query_depth: None,
             ignored_view_top: false,
+            batch: None,
+            declared_variables: Vec::new(),
+            declared_tables: Vec::new(),
+            variables_read: Vec::new(),
+            select_targets: None,
         }
+    }
+
+    pub(crate) fn with_batch_context(mut self, batch: &'t crate::tsql::BatchContext) -> Self {
+        self.batch = Some(batch);
+        self
     }
 
     pub(crate) fn take_setting_changes(&mut self) -> Vec<(String, String)> {
@@ -555,7 +571,10 @@ impl<'t> Parser<'t> {
                 Ok(statement)
             }
             TokenKind::End => Ok(statement),
-            TokenKind::Word(word) if self.sqlserver() && sqlserver::starts_statement(word) => {
+            TokenKind::Word(word)
+                if self.sqlserver()
+                    && (sqlserver::starts_statement(word) || sqlserver::ends_a_block(word)) =>
+            {
                 Ok(statement)
             }
             _ => Err(self.unexpected()),
@@ -2515,6 +2534,12 @@ impl<'t> Parser<'t> {
                 qualifier: Some(qualifier),
                 position,
             });
+        }
+        if self.sqlserver()
+            && self.select_targets.is_some()
+            && self.query_depth == 0
+        {
+            return self.sqlserver_assignment_item();
         }
         if self.sqlserver()
             && let Some(alias) = self.sqlserver_assigned_alias()?

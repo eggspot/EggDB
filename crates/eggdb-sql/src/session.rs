@@ -3,6 +3,7 @@ mod oracle;
 mod restore;
 mod sqlite;
 pub(crate) mod sqlserver;
+mod tsql;
 
 pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration};
 
@@ -173,6 +174,21 @@ pub struct OutputColumn {
     pub sql_type: Option<SqlType>,
 }
 
+/// A message a statement sends its client besides its result, as SQL Server sends the text
+/// of `PRINT` and the messages of `RAISERROR` with a severity of 10 or less: a TDS `INFO`
+/// token, which a client shows without treating it as an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InfoMessage {
+    /// The message number: 0 for `PRINT`, 50000 for a `RAISERROR` message text.
+    pub number: u32,
+    /// The severity, 0 through 10.
+    pub severity: u8,
+    /// The state, 0 through 255.
+    pub state: u8,
+    /// The text.
+    pub text: String,
+}
+
 /// What one statement returned: its command tag (`SELECT 3`, `INSERT 0 1`, `CREATE TABLE`,
 /// ...), its rows when it returns rows, and any notices.
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +213,9 @@ pub struct QueryResult {
     /// The last value this statement gave a SQL Server `IDENTITY` (auto-increment) column,
     /// given or generated, which SQL Server's `SCOPE_IDENTITY()` returns afterwards.
     pub last_identity_value: Option<i64>,
+    /// The informational messages the statement sent, such as Transact-SQL's `PRINT` text; each
+    /// is also among [`QueryResult::notices`].
+    pub info_messages: Vec<InfoMessage>,
 }
 
 impl QueryResult {
@@ -210,6 +229,7 @@ impl QueryResult {
             last_insert_id: None,
             last_insert_rowid: None,
             last_identity_value: None,
+            info_messages: Vec::new(),
         }
     }
 
@@ -223,6 +243,7 @@ impl QueryResult {
             last_insert_id: None,
             last_insert_rowid: None,
             last_identity_value: None,
+            info_messages: Vec::new(),
         }
     }
 
@@ -331,6 +352,14 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     block_is_implicit: bool,
     connection_settings: Option<Arc<Settings>>,
     pending_bulk_load: Option<String>,
+    batch_context: Arc<crate::tsql::BatchContext>,
+    condition_next: bool,
+    condition_holds: Option<bool>,
+    pending_dynamic: Option<crate::tsql::DynamicBatch>,
+    dynamic_depth: u8,
+    unprepare_requests: Vec<i32>,
+    parameter_values: Vec<NamedParameter>,
+    set_error: Option<u32>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -377,6 +406,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             block_is_implicit: false,
             connection_settings: None,
             pending_bulk_load: None,
+            batch_context: Arc::new(crate::tsql::BatchContext::default()),
+            condition_next: false,
+            condition_holds: None,
+            pending_dynamic: None,
+            dynamic_depth: 0,
+            unprepare_requests: Vec::new(),
+            parameter_values: Vec::new(),
+            set_error: None,
         }
     }
 
@@ -1141,6 +1178,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
         self.statement_start = 0;
+        if self.sqlserver() && client.bulk_rows.is_none() {
+            let tokens = tokenize_in(text, self.dialect)?;
+            if crate::tsql::uses_batch_logic(&tokens) {
+                return self.run_logic_text(text, tokens, parameters, on_result);
+            }
+        }
         if !client.script {
             let mut start = 0;
             loop {
@@ -1221,6 +1264,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 self.sync_transaction_count();
             }
             let settings = Arc::clone(&self.settings);
+            let context = Arc::clone(&self.batch_context);
             let _cancel = crate::cancel::enter(&self.cancel);
             let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
             let _regex = crate::regex::enter_statement();
@@ -1230,10 +1274,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let _path = self.enter_search_path(&settings);
             let mut parser = Parser::new(text, tokens)
                 .with_context(parameters, &settings)
+                .with_batch_context(&context)
                 .in_dialect(self.dialect)
                 .resuming_at(resume);
             parser.skip_empty_statements();
             if parser.at_end() {
+                self.condition_next = false;
                 return Ok(Flow::Finished { inline_end });
             }
             self.statement_start = parser.position();
@@ -1261,9 +1307,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 continue;
             }
             let first_token = parser.resume_point().0;
-            let parsed = parser.statement();
+            let parsed = if std::mem::take(&mut self.condition_next) {
+                parser.sqlserver_condition()
+            } else {
+                parser.statement()
+            };
             let setting_changes = parser.take_setting_changes();
             resume = parser.resume_point();
+            drop(parser);
+            drop(context);
             if self.batch_resume.is_some() {
                 self.batch_resume = Some(resume);
             }
@@ -1629,22 +1681,6 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Statement::Begin { .. } => return self.sqlserver_begin(),
                 Statement::Commit => return self.sqlserver_commit(),
                 Statement::Rollback => return self.sqlserver_rollback(),
-                Statement::SqlServer(SqlServerStatement::If {
-                    condition,
-                    then,
-                    otherwise,
-                }) => {
-                    self.read(|reader, _| crate::pg_catalog::load_if_wanted(reader))?;
-                    let chosen = if self.sqlserver_condition_holds(condition)? {
-                        Some(then)
-                    } else {
-                        otherwise.as_mut()
-                    };
-                    return match chosen {
-                        Some(chosen) => self.run(chosen, io),
-                        None => Ok(QueryResult::command("IF")),
-                    };
-                }
                 Statement::SqlServer(SqlServerStatement::InsertBulk(bulk)) => {
                     return self.run_insert_bulk(bulk, io);
                 }

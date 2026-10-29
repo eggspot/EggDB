@@ -1,0 +1,25 @@
+== batch 1
+done
+== batch 2
+done
+== batch 3
+info 0 loop total 12
+i|total
+5|12
+done
+== batch 4
+number|severity
+2627|14
+done
+== batch 5
+info 0 caught 50001
+info 50000 warning only
+done
+== batch 6
+counted
+2
+done
+== batch 7
+error 50000 16 3 1 stopped here 7
+== batch 8
+done

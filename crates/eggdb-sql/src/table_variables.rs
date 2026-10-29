@@ -45,6 +45,16 @@ pub(crate) fn enter(variables: &TableVariables) -> EnteredVariables {
     EnteredVariables { depth }
 }
 
+pub(crate) fn release_entered() {
+    VARIABLES.with(|frames| {
+        if let Ok(mut frames) = frames.try_borrow_mut()
+            && let Some(top) = frames.last_mut()
+        {
+            *top = TableVariables::default();
+        }
+    });
+}
+
 pub(crate) fn undeclared(name: &str) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_TABLE,

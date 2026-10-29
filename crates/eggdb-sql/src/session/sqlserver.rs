@@ -1,15 +1,16 @@
-use super::{Client, OutputColumn, QueryResult, Session};
-use crate::ast::{Expr, Name, ProcedureCall, SqlServerStatement};
+use super::{QueryResult, Session};
+use crate::ast::{Name, ProcedureCall, SqlServerStatement};
 use crate::bulk_load::{BulkRows, InsertBulk};
-use crate::copy::{CopyIo, NoCopyChannel};
+use crate::copy::CopyIo;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope};
 use crate::execute::Relation;
-use crate::lexer::{Token, TokenKind, tokenize_from, tokenize_in};
+use crate::lexer::{Token, tokenize_from, tokenize_in};
 use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
 use crate::store::KeyValueStore;
+use crate::tsql::Program;
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
 
@@ -19,10 +20,6 @@ const RPC_PROCEDURES: [&str; 5] = [
     "sp_prepexec",
     "sp_execute",
     "sp_unprepare",
-];
-
-const STATEMENT_TERMINATING_ERRORS: [u16; 17] = [
-    2627, 2601, 547, 515, 544, 545, 339, 2628, 8152, 3902, 3903, 1088, 8106, 8107, 4917, 1754, 3701,
 ];
 
 /// What one statement of a Transact-SQL batch did, as [`Session::execute_batch`] reports it.
@@ -73,7 +70,8 @@ fn rows_counted(result: &QueryResult) -> i64 {
     let mut words = result.tag.split_whitespace();
     let counted = match words.next() {
         Some("INSERT" | "UPDATE" | "DELETE" | "MERGE") => true,
-        Some("SELECT") => return result.rows.len() as i64,
+        Some("SELECT") if result.columns.is_some() => return result.rows.len() as i64,
+        Some("SELECT" | "SET") => true,
         _ => false,
     };
     if !counted {
@@ -88,15 +86,6 @@ fn rows_counted(result: &QueryResult) -> i64 {
 pub(crate) struct ParsedStatement {
     pub(crate) first_token: usize,
     pub(crate) outcome: SqlResult<(usize, usize)>,
-    pub(crate) chooses_dialect: bool,
-}
-
-fn chooses_dialect(statement: &crate::ast::Statement) -> bool {
-    match statement {
-        crate::ast::Statement::Set { name, .. } => super::is_dialect_setting(name),
-        crate::ast::Statement::Reset { name: Some(name) } => super::is_dialect_setting(name),
-        _ => false,
-    }
 }
 
 pub(crate) fn parse_next_statement(
@@ -126,19 +115,14 @@ fn parse_next_parameterized_statement(
         return None;
     }
     let first_token = parser.resume_point().0;
-    let mut chooses = false;
     let outcome = if parser.literal_rows().is_none() {
-        parser.statement().map(|statement| {
-            chooses = chooses_dialect(&statement);
-            parser.resume_point()
-        })
+        parser.statement().map(|_| parser.resume_point())
     } else {
         Ok(parser.resume_point())
     };
     Some(ParsedStatement {
         first_token,
         outcome,
-        chooses_dialect: chooses,
     })
 }
 
@@ -149,10 +133,16 @@ fn no_transaction(code: u16, message: &str) -> SqlError {
 impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// Runs `text` as a Transact-SQL batch, the way SQL Server runs a batch a client sends: the
     /// whole batch is parsed first, so a syntax error runs nothing and is returned as the
-    /// error; then each statement runs in turn and `on_step` receives what it did. A
-    /// constraint violation and the other statement-terminating errors end only their
-    /// statement, unless they rolled back an open transaction; any other error ends the batch
-    /// after its step. The batch also stops before the next statement once `on_step` returns
+    /// error; then its statements run in the order its batch logic gives (`DECLARE`d
+    /// variables, `IF ... ELSE`, `WHILE` with `BREAK` and `CONTINUE`, `BEGIN ... END`, `BEGIN
+    /// TRY ... END TRY BEGIN CATCH ... END CATCH`, `RETURN`, `THROW`, `RAISERROR`, `PRINT`
+    /// and dynamic SQL with `EXEC (...)` and `sp_executesql`), and `on_step` receives what
+    /// each statement did; `PRINT` text and low-severity `RAISERROR` messages arrive as
+    /// [`QueryResult::info_messages`]. An error inside a `TRY` block moves to its `CATCH`
+    /// block instead of reaching `on_step`. Otherwise a constraint violation, a `RAISERROR`
+    /// and the other statement-terminating errors end only their statement, unless they
+    /// rolled back an open transaction; any other error, and `THROW`, ends the batch after
+    /// its step. The batch also stops before the next statement once `on_step` returns
     /// `false`. Errors carry SQL Server's numbers ([`SqlError::vendor_code`]) and severities
     /// ([`SqlError::severity`]). In the other dialects every statement runs as
     /// [`Session::execute_while`] would run it, and the first error ends the batch.
@@ -167,7 +157,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// Runs `text` as a parameterized Transact-SQL batch, as SQL Server's `sp_executesql`
     /// does: like [`Session::execute_batch`], with each `@name` that is not a declared variable
     /// read as the value of the parameter of that name in `parameters` (converted to its
-    /// declared type). A name with no parameter is error 137. Only the SQL Server dialect reads
+    /// declared type). A name with no parameter is error 137. The batch may assign its
+    /// parameters (`SET @p = ...`); [`Session::parameter_values_after_batch`] gives their
+    /// values when it ended, for `OUTPUT` parameters. Only the SQL Server dialect reads
     /// `@name`s.
     pub fn execute_parameterized_batch(
         &mut self,
@@ -219,7 +211,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.statement_start = 0;
         let tokens =
             tokenize_in(text, self.dialect).map_err(|error| self.in_dialect(text, error))?;
-        self.check_batch_syntax(text, &tokens, Parameters::Named(parameters))
+        self.compile_batch(text, &tokens, Parameters::Named(parameters), false)
+            .map(drop)
             .map_err(|error| self.in_dialect(text, error))
     }
 
@@ -255,6 +248,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.sync_transaction_count();
         self.identity_insert_table = None;
         self.table_variables = crate::table_variables::TableVariables::default();
+        self.batch_context = Arc::new(crate::tsql::BatchContext::default());
+        self.pending_dynamic = None;
+        self.set_error = None;
         self.sqlserver_status = crate::sqlserver_functions::SessionStatus::default();
         self.warnings.clear();
         rolled_back
@@ -271,150 +267,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.pending_bulk_load = None;
         let tokens =
             tokenize_in(text, self.dialect).map_err(|error| self.in_dialect(text, error))?;
-        self.check_batch_syntax(text, &tokens, parameters)
-            .map_err(|error| self.in_dialect(text, error))?;
-        self.batch_resume = Some((0, 0));
-        self.table_variables = crate::table_variables::TableVariables::default();
-        let outcome = self.run_batch_statements(text, &tokens, parameters, bulk_rows, on_step);
-        self.table_variables = crate::table_variables::TableVariables::default();
-        self.batch_resume = None;
-        outcome
+        self.run_compiled_batch(text, tokens, parameters, bulk_rows, on_step)
     }
 
-    fn check_batch_syntax(
-        &mut self,
-        text: &str,
-        tokens: &[crate::lexer::Token<'_>],
-        parameters: Parameters<'_>,
-    ) -> SqlResult<()> {
-        if self.sqlserver() {
-            self.sync_transaction_count();
-        }
-        let settings = Arc::clone(&self.settings);
-        let mut resume = (0, 0);
-        while let Some(parsed) = parse_next_parameterized_statement(
-            text,
-            tokens,
-            &settings,
-            self.dialect,
-            resume,
-            parameters,
-        ) {
-            resume = parsed.outcome?;
-            if parsed.chooses_dialect {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    fn run_batch_statements<'t>(
-        &mut self,
-        text: &'t str,
-        tokens: &[Token<'t>],
-        parameters: Parameters<'_>,
-        mut bulk_rows: Option<&mut dyn BulkRows>,
-        on_step: &mut dyn FnMut(BatchStep) -> bool,
-    ) -> SqlResult<()> {
-        let mut rest_in_new_dialect: Option<Vec<Token<'t>>> = None;
-        loop {
-            let tokens: &[Token<'t>] = rest_in_new_dialect.as_deref().unwrap_or(tokens);
-            let statement_dialect = self.dialect;
-            let (first_token, _) = self.batch_resume.unwrap_or((0, 0));
-            let statement_start = tokens
-                .iter()
-                .skip(first_token)
-                .find(|token| token.kind != TokenKind::Semicolon)
-                .map_or(text.len(), |token| token.start);
-            let was_in_transaction = self.in_block();
-            let mut results = Vec::new();
-            let mut client = Client {
-                channel: &mut NoCopyChannel,
-                script: false,
-                bulk_rows: super::reborrowed_rows(&mut bulk_rows),
-            };
-            let flow = self.run_tokens(
-                text,
-                tokens,
-                parameters,
-                &mut |result| {
-                    results.push(result);
-                    false
-                },
-                &mut client,
-                None,
-            );
-            let in_transaction = self.in_block();
-            match flow {
-                Ok(super::Flow::Finished { .. } | super::Flow::DialectChanged { .. }) => {
-                    return Ok(());
-                }
-                Ok(super::Flow::Stopped) => {
-                    for result in results {
-                        let step = BatchStep {
-                            outcome: Ok(result),
-                            statement_start,
-                            in_transaction,
-                            no_count: self.settings.sqlserver.no_count,
-                            format_only: self.settings.sqlserver.format_only,
-                        };
-                        if !on_step(step) {
-                            return Ok(());
-                        }
-                    }
-                    if self.dialect != statement_dialect {
-                        let (next, _) = self.batch_resume.unwrap_or((0, 0));
-                        let at = tokens.get(next).map_or(text.len(), |token| token.start);
-                        match self.rest_of_batch(text, at, parameters) {
-                            Ok(rest) => {
-                                rest_in_new_dialect = Some(rest);
-                                self.batch_resume = Some((0, 0));
-                            }
-                            Err(error) => {
-                                let step = BatchStep {
-                                    outcome: Err(self.in_dialect(text, error)),
-                                    statement_start: at,
-                                    in_transaction: self.in_block(),
-                                    no_count: self.settings.sqlserver.no_count,
-                                    format_only: self.settings.sqlserver.format_only,
-                                };
-                                on_step(step);
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    let error = self.in_dialect(text, error);
-                    let ends_batch = self.dialect != Dialect::SqlServer
-                        || !error
-                            .vendor_code()
-                            .is_some_and(|code| STATEMENT_TERMINATING_ERRORS.contains(&code))
-                        || (was_in_transaction && !in_transaction);
-                    let step = BatchStep {
-                        outcome: Err(error),
-                        statement_start,
-                        in_transaction,
-                        no_count: self.settings.sqlserver.no_count,
-                        format_only: self.settings.sqlserver.format_only,
-                    };
-                    if !on_step(step) || ends_batch {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    fn rest_of_batch<'t>(
+    pub(super) fn rest_of_batch<'t>(
         &mut self,
         text: &'t str,
         at: usize,
         parameters: Parameters<'_>,
-    ) -> SqlResult<Vec<Token<'t>>> {
+    ) -> SqlResult<(Vec<Token<'t>>, Program)> {
         let tokens = tokenize_from(text, self.dialect, at)?;
-        self.check_batch_syntax(text, &tokens, parameters)?;
-        Ok(tokens)
+        let program = self.compile_batch(text, &tokens, parameters, false)?;
+        Ok((tokens, program))
     }
 
     pub(super) fn enter_sqlserver_status(
@@ -541,10 +405,6 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             SqlServerStatement::IdentityInsert { table, on } => {
                 self.set_identity_insert(table, *on)
             }
-            SqlServerStatement::If { .. } => Err(SqlError::new(
-                SqlState::INTERNAL_ERROR,
-                "an IF statement reached the statement runner",
-            )),
             SqlServerStatement::Execute(call) => {
                 let mut results = self.procedure_results(call)?.into_iter();
                 let first = results
@@ -556,11 +416,31 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             SqlServerStatement::DeclareTable { name, columns } => {
                 self.declare_table_variable(name, columns)
             }
-            SqlServerStatement::InsertExecute {
+            SqlServerStatement::InsertVariable {
                 variable,
                 columns,
-                call,
-            } => self.insert_procedure_results(variable, columns.as_deref(), call),
+                source,
+            } => self.insert_into_variable(variable, columns.as_deref(), source),
+            SqlServerStatement::UpdateVariable {
+                variable,
+                assignments,
+                filter,
+            } => self.update_variable(variable, assignments, filter.as_ref()),
+            SqlServerStatement::DeleteVariable { variable, filter } => {
+                self.delete_from_variable(variable, filter.as_ref())
+            }
+            SqlServerStatement::Declare(declarations) => self.run_declare(declarations),
+            SqlServerStatement::SetVariable { variable, value } => {
+                self.run_set_variable(variable, value)
+            }
+            SqlServerStatement::SelectAssign { targets, query } => {
+                self.run_select_assignment(targets, query)
+            }
+            SqlServerStatement::Condition(condition) => self.run_condition(condition),
+            SqlServerStatement::Print(message) => self.run_print(message),
+            SqlServerStatement::RaiseError(raise) => self.run_raiserror(raise),
+            SqlServerStatement::Throw(arguments) => self.run_throw(arguments.as_ref()),
+            SqlServerStatement::ExecuteDynamic(dynamic) => self.prepare_dynamic(dynamic),
         }
     }
 
@@ -586,8 +466,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
-    fn procedure_results(&mut self, call: &ProcedureCall) -> SqlResult<Vec<QueryResult>> {
+    pub(super) fn procedure_results(
+        &mut self,
+        call: &ProcedureCall,
+    ) -> SqlResult<Vec<QueryResult>> {
         let name = call.procedure.text.as_str();
+        if name == "sp_unprepare" {
+            return self.unprepare_in_batch(call).map(|()| Vec::new());
+        }
         let Some(procedure) = crate::sqlserver_catalog::CatalogProcedure::named(name) else {
             if RPC_PROCEDURES.contains(&name) {
                 return Err(crate::parser::sqlserver_not_supported(&format!(
@@ -626,119 +512,30 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         })
     }
 
-    fn declare_table_variable(
-        &mut self,
-        name: &Name,
-        columns: &[(Name, SqlType)],
-    ) -> SqlResult<QueryResult> {
-        if self.table_variables.contains_key(&name.text) {
-            return Err(SqlError::new(
-                SqlState::DUPLICATE_OBJECT,
-                format!(
-                    "The variable name '{}' has already been declared. Variable names must be unique within a query batch or stored procedure.",
-                    name.text
-                ),
-            )
-            .with_sqlserver_code(134)
-            .at(name.position));
-        }
-        let variable = crate::table_variables::TableVariable {
-            columns: columns
-                .iter()
-                .map(|(column, sql_type)| OutputColumn {
-                    name: column.text.clone(),
-                    sql_type: Some(*sql_type),
-                })
-                .collect(),
-            rows: Vec::new(),
-        };
-        Arc::make_mut(&mut self.table_variables).insert(name.text.clone(), variable);
-        Ok(QueryResult::command("DECLARE"))
-    }
-
-    fn insert_procedure_results(
-        &mut self,
-        variable: &Name,
-        columns: Option<&[Name]>,
-        call: &ProcedureCall,
-    ) -> SqlResult<QueryResult> {
-        let Some(declared) = self.table_variables.get(&variable.text) else {
-            return Err(crate::table_variables::undeclared(&variable.text).at(variable.position));
-        };
-        let targets: Vec<(usize, SqlType)> = match columns {
-            None => declared
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(at, column)| (at, column.sql_type.unwrap_or(SqlType::Text)))
-                .collect(),
-            Some(names) => names
-                .iter()
-                .map(|name| {
-                    declared
-                        .columns
-                        .iter()
-                        .position(|column| column.name == name.text)
-                        .map(|at| {
-                            let sql_type = declared
-                                .columns
-                                .get(at)
-                                .and_then(|column| column.sql_type)
-                                .unwrap_or(SqlType::Text);
-                            (at, sql_type)
-                        })
-                        .ok_or_else(|| {
-                            SqlError::new(
-                                SqlState::UNDEFINED_COLUMN,
-                                format!("Invalid column name '{}'.", name.text),
-                            )
-                            .with_sqlserver_code(207)
-                            .at(name.position)
-                        })
-                })
-                .collect::<SqlResult<_>>()?,
-        };
-        let width = declared.columns.len();
-        let results = self.procedure_results(call)?;
-        let mut appended: Vec<Vec<Value>> = Vec::new();
-        for result in results {
-            let count = result.columns.as_ref().map_or(0, Vec::len);
-            if count != targets.len() {
-                return Err(SqlError::new(
-                    SqlState::SYNTAX_ERROR,
-                    "Column name or number of supplied values does not match table definition.",
-                )
-                .with_sqlserver_code(213)
-                .at(variable.position));
-            }
-            for row in result.rows {
-                let mut full = vec![Value::Null; width];
-                for ((at, sql_type), value) in targets.iter().zip(row) {
-                    let converted = crate::sqlserver_conversion::implicit(value, *sql_type)?;
-                    if let Some(slot) = full.get_mut(*at) {
-                        *slot = converted;
-                    }
-                }
-                appended.push(full);
-            }
-        }
-        let inserted = appended.len();
-        if let Some(target) = Arc::make_mut(&mut self.table_variables).get_mut(&variable.text) {
-            target.rows.extend(appended);
-        }
-        Ok(QueryResult::command(format!("INSERT 0 {inserted}")))
-    }
-
-    pub(super) fn sqlserver_condition_holds(&self, condition: &Expr) -> SqlResult<bool> {
+    fn unprepare_in_batch(&mut self, call: &ProcedureCall) -> SqlResult<()> {
         let evaluator = Evaluator {
             scope: Scope::empty(),
             row: &[],
             correlation: None,
         };
-        Ok(matches!(
-            evaluator.eval(condition, None)?,
-            Value::Boolean(true)
-        ))
+        let handle = match call.arguments.as_slice() {
+            [argument] => match &argument.value {
+                Some(expr) => evaluator.eval(expr, None)?,
+                None => Value::Null,
+            },
+            _ => Value::Null,
+        };
+        let Some(handle) = handle.as_integer().and_then(|handle| i32::try_from(handle).ok())
+        else {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                "Procedure or function sp_unprepare expects one parameter, the prepared statement's handle.",
+            )
+            .with_sqlserver_code(201)
+            .at(call.procedure.position));
+        };
+        self.unprepare_requests.push(handle);
+        Ok(())
     }
 
     fn set_identity_insert(&mut self, table: &Name, on: bool) -> SqlResult<QueryResult> {

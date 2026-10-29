@@ -15,7 +15,7 @@ use crate::tokens::{
 use crate::types::{declared_wire_columns, push_value, wire_columns};
 use crate::wire::{DEFAULT_PACKET_SIZE, Message, POLL_INTERVAL, Packet, Wire, WireError};
 use eggdb_sql::{
-    BatchStep, BulkRows, Dialect, KeyValueStore, NamedParameter, QueryResult,
+    BatchStep, BulkRows, Dialect, InfoMessage, KeyValueStore, NamedParameter, QueryResult,
     SQLSERVER_COMPATIBLE_VERSION, Session, SqlError, SqlResult, SqlState, Value,
 };
 use std::time::{Duration, Instant};
@@ -450,6 +450,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let mut session = Session::with_dialect(store, Dialect::SqlServer);
     session.identify(&user, &config.database);
     session.set_connection_id(connection_id);
+    shared.register(connection_id, session.cancel_signal());
     let mut connection = Connection {
         wire,
         shared,
@@ -459,6 +460,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         acknowledge_reset: false,
     };
     connection.run(&mut session);
+    shared.unregister(connection_id);
     let _ = session.close();
 }
 
@@ -760,10 +762,12 @@ impl Connection<'_> {
         done_token: u8,
     ) -> Ran {
         let database = session.database().to_owned();
-        self.write_steps(text, database, done_token, |on_step| match parameters {
+        let ran = self.write_steps(text, database, done_token, |on_step| match parameters {
             None => session.execute_batch(text, on_step),
             Some(parameters) => session.execute_parameterized_batch(text, parameters, on_step),
-        })
+        });
+        self.forget_unprepared(session);
+        ran
     }
 
     fn write_steps(
@@ -1021,14 +1025,17 @@ impl StepWriter<'_, '_> {
         let line = self
             .lines
             .line_at(self.text, error.position().unwrap_or(statement_start));
-        let number = error.vendor_code().map_or(50_000, u32::from);
+        let number = error.sqlserver_number().unwrap_or(50_000);
         let severity = error.severity().unwrap_or(16);
-        let token = tokens::error(&ServerMessage {
-            number,
-            severity,
-            text: error.message(),
-            line,
-        });
+        let token = tokens::error_in_state(
+            &ServerMessage {
+                number,
+                severity,
+                text: error.message(),
+                line,
+            },
+            error.sqlserver_state().unwrap_or(1),
+        );
         if self.write(&token) {
             self.wrote_error = true;
             *self.pending = Some(PendingDone {
@@ -1044,9 +1051,11 @@ impl StepWriter<'_, '_> {
             return false;
         }
         let committed = matches!(&step.outcome, Ok(result) if result.tag == "COMMIT");
+        let line = self.lines.line_at(self.text, step.statement_start);
         let written = match step.outcome {
             Ok(result) => {
-                self.transaction_change(step.in_transaction, committed)
+                self.messages(&result.info_messages, line)
+                    && self.transaction_change(step.in_transaction, committed)
                     && self.result(&result, step.no_count, step.format_only)
             }
             Err(error) => {
@@ -1060,6 +1069,22 @@ impl StepWriter<'_, '_> {
             pending.status |= DONE_IN_TRANSACTION;
         }
         written
+    }
+
+    fn messages(&mut self, messages: &[InfoMessage], line: u32) -> bool {
+        let mut body = Vec::new();
+        for message in messages {
+            body.extend(tokens::info_in_state(
+                &ServerMessage {
+                    number: message.number,
+                    severity: message.severity,
+                    text: &message.text,
+                    line,
+                },
+                message.state,
+            ));
+        }
+        body.is_empty() || self.write(&body)
     }
 
     fn result(&mut self, result: &QueryResult, no_count: bool, format_only: bool) -> bool {

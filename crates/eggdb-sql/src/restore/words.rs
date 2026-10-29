@@ -97,6 +97,10 @@ impl<'t> Words<'t> {
         self.bytes.get(self.at + offset).copied()
     }
 
+    pub(crate) fn offset(&self) -> usize {
+        self.at
+    }
+
     fn skip_space_and_comments(&mut self) {
         loop {
             match self.peek(0) {

@@ -4,7 +4,10 @@ use super::words::{Token, Words, plain_qualified_name};
 use crate::error::{SqlError, SqlState};
 
 const HEAD_TOKENS: usize = 64;
-const BATCH_LOGIC: &str = "batch logic (IF, WHILE, DECLARE, BEGIN ... END) comes with item 47";
+const BATCH_LOGIC: &str = "batch logic (IF, WHILE, DECLARE, BEGIN ... END) is restored only as existence guards (IF [NOT] EXISTS (...), IF OBJECT_ID(...) IS [NOT] NULL) around one statement";
+const LOGIC_WORDS: [&str; 9] = [
+    "if", "while", "declare", "begin", "goto", "return", "throw", "raiserror", "try",
+];
 const NOT_SUPPORTED_YET: &str = "not supported yet";
 
 const RUNNABLE_SET_OPTIONS: [&str; 14] = [
@@ -134,7 +137,111 @@ fn ignore(kind: &'static str) -> Action {
     Action::Ignore(Ignored::Other(kind))
 }
 
-pub(crate) fn classify_sqlserver(text: &str, _known_parameter: &dyn Fn(&str) -> bool) -> Action {
+fn skip_balanced(words: &mut Words<'_>) -> Option<()> {
+    if !words.next()?.is_symbol(b'(') {
+        return None;
+    }
+    let mut depth = 1usize;
+    while depth > 0 {
+        let token = words.next()?;
+        if token.is_symbol(b'(') {
+            depth += 1;
+        } else if token.is_symbol(b')') {
+            depth -= 1;
+        }
+    }
+    Some(())
+}
+
+fn without_block(body: &str) -> Option<&str> {
+    let mut words = Words::sqlserver(body);
+    if !words.next()?.is_word("begin") {
+        return Some(body);
+    }
+    let after_begin = words.offset();
+    if words
+        .next()
+        .is_some_and(|token| token.is_word("tran") || token.is_word("transaction"))
+    {
+        return None;
+    }
+    let inside = body
+        .get(after_begin..)?
+        .trim_end()
+        .trim_end_matches(';')
+        .trim_end();
+    let cut = inside.len().checked_sub(3)?;
+    let (rest, last) = (inside.get(..cut)?, inside.get(cut..)?);
+    let separated = rest
+        .chars()
+        .last()
+        .is_none_or(|character| !(character.is_alphanumeric() || character == '_'));
+    (last.eq_ignore_ascii_case("end") && separated).then(|| rest.trim())
+}
+
+fn guarded_statement(text: &str) -> Option<&str> {
+    let mut words = Words::sqlserver(text);
+    if !words.next()?.is_word("if") {
+        return None;
+    }
+    let mut token = words.next()?;
+    if token.is_word("not") {
+        token = words.next()?;
+    }
+    if token.is_word("exists") {
+        skip_balanced(&mut words)?;
+    } else if token.is_word("object_id") {
+        skip_balanced(&mut words)?;
+        if !words.next()?.is_word("is") {
+            return None;
+        }
+        let mut token = words.next()?;
+        if token.is_word("not") {
+            token = words.next()?;
+        }
+        if !token.is_word("null") {
+            return None;
+        }
+    } else {
+        return None;
+    }
+    let inner = without_block(text.get(words.offset()..)?.trim())?;
+    let first = Words::sqlserver(inner).next();
+    match first {
+        Some(Token::Word(word)) if !LOGIC_WORDS.contains(&word.as_str()) => Some(inner),
+        _ => None,
+    }
+}
+
+fn guard(text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Action {
+    match guarded_statement(text) {
+        Some(inner) => classify_sqlserver(inner, known_parameter),
+        None => skip_statement(text, BATCH_LOGIC),
+    }
+}
+
+fn executed_text(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let after = lower.find("sp_executesql")? + "sp_executesql".len();
+    let rest = text.get(after..)?;
+    let quote = rest.find('\'')?;
+    let mut statement = String::new();
+    let mut characters = rest.get(quote + 1..)?.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\'' {
+            statement.push(character);
+            continue;
+        }
+        if characters.peek() != Some(&'\'') {
+            return Some(statement);
+        }
+        characters.next();
+        statement.push('\'');
+    }
+    None
+}
+
+pub(crate) fn classify_sqlserver(text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Action {
     let tokens = head(text);
     let Some(first) = word_at(&tokens, 0) else {
         return Action::Run(Effect::Other);
@@ -154,8 +261,10 @@ pub(crate) fn classify_sqlserver(text: &str, _known_parameter: &dyn Fn(&str) -> 
         {
             ignore("BEGIN and COMMIT")
         }
-        "begin" | "if" | "while" | "declare" | "goto" | "return" | "throw" | "raiserror"
-        | "try" => skip_statement(text, BATCH_LOGIC),
+        "if" => guard(text, known_parameter),
+        "begin" | "while" | "declare" | "goto" | "return" | "throw" | "raiserror" | "try" => {
+            skip_statement(text, BATCH_LOGIC)
+        }
         "set" => set(&tokens),
         "create" => create(&tokens, text),
         "alter" => alter(&tokens, text),
@@ -172,7 +281,7 @@ pub(crate) fn classify_sqlserver(text: &str, _known_parameter: &dyn Fn(&str) -> 
         }
         "update" if is(&tokens, 1, "statistics") => ignore("UPDATE STATISTICS"),
         "update" | "delete" | "truncate" | "select" | "with" => Action::Run(Effect::Data),
-        "exec" | "execute" => exec(&tokens, text),
+        "exec" | "execute" => exec(&tokens, text, known_parameter),
         "enable" | "disable" if is(&tokens, 1, "trigger") => ignore("ENABLE and DISABLE TRIGGER"),
         _ => skip_statement(text, NOT_SUPPORTED_YET),
     }
@@ -202,7 +311,7 @@ fn set(tokens: &[Token]) -> Action {
     Action::Run(Effect::Setting)
 }
 
-fn exec(tokens: &[Token], text: &str) -> Action {
+fn exec(tokens: &[Token], text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Action {
     let mut at = 1;
     if matches!(tokens.get(at), Some(Token::Symbol(b'@'))) {
         return skip_statement(text, "procedures come later");
@@ -210,6 +319,17 @@ fn exec(tokens: &[Token], text: &str) -> Action {
     let name = name_at(tokens, &mut at).to_lowercase();
     let procedure = name.rsplit('.').next().unwrap_or(&name);
     match procedure {
+        "sp_executesql" => match executed_text(text) {
+            Some(executed)
+                if Words::sqlserver(&executed).next().is_some_and(|token| {
+                    matches!(&token, Token::Word(word) if !LOGIC_WORDS.contains(&word.as_str())
+                        && word != "exec" && word != "execute")
+                }) =>
+            {
+                classify_sqlserver(&executed, known_parameter)
+            }
+            _ => skip_statement(text, BATCH_LOGIC),
+        },
         "sp_addextendedproperty" | "sp_updateextendedproperty" | "sp_dropextendedproperty" => {
             ignore("extended properties")
         }

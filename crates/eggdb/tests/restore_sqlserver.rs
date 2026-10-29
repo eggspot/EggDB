@@ -163,7 +163,7 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"kind\":\"synonym\",\"name\":\"dbo.Orders\"",
         "\"kind\":\"user or role\",\"name\":\"shopapp\"",
         "\"kind\":\"role membership\"",
-        "comes with item 47",
+        "is restored only as existence guards",
         "\"uses\":\"constraint FK_OrderLines_Products\"",
         "\"object\":\"dbo.Products.Margin\",\"difference\":\"computed column not kept\"",
         "\"object\":\"dbo.Products.Version\",\"difference\":\"rowversion column not kept\"",
@@ -261,7 +261,7 @@ fn the_text_report_lists_the_known_differences_and_client_commands() {
         "(used for $(name))",
         "  :on error ",
         "(eggdb restore's own flags decide)",
-        "comes with item 47",
+        "is restored only as existence guards",
         "ok: every table and row of the script is in ",
     ] {
         assert!(report.contains(part), "{part:?} in\n{report}");

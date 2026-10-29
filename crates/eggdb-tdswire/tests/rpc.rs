@@ -280,6 +280,60 @@ fn output_parameters_come_back_after_the_return_status() {
 }
 
 #[test]
+fn output_parameters_carry_the_values_the_batch_assigns() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    let tokens = client.rpc(&[call_by_id(
+        SP_EXECUTESQL,
+        &[
+            text_parameter(
+                "",
+                Some("SET @out = N'got ' + CAST(@in AS nvarchar(5)) SET @twice = @in * 2"),
+                false,
+            ),
+            text_parameter(
+                "",
+                Some("@in int, @out nvarchar(10) OUTPUT, @twice int OUTPUT"),
+                false,
+            ),
+            int_parameter("@in", Some(21), false),
+            text_parameter("@out", None, true),
+            int_parameter("@twice", None, true),
+        ],
+    )]);
+    assert!(errors(&tokens).is_empty(), "{tokens:?}");
+    assert_eq!(
+        returned(&tokens),
+        vec![
+            (3, "@out".to_owned(), Some("got 21".to_owned())),
+            (4, "@twice".to_owned(), Some("42".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn exec_sp_unprepare_in_a_batch_forgets_the_handle() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    let prepared = client.rpc(&[call_by_id(
+        SP_PREPARE,
+        &[
+            int_parameter("", None, true),
+            text_parameter("", Some(""), false),
+            text_parameter("", Some("SELECT 1 AS one"), false),
+        ],
+    )]);
+    assert!(errors(&prepared).is_empty(), "{prepared:?}");
+    let released = client.batch("EXEC sp_unprepare 1;");
+    assert!(errors(&released).is_empty(), "{released:?}");
+    let executed = client.rpc(&[call_by_id(
+        SP_EXECUTE,
+        &[int_parameter("", Some(1), false)],
+    )]);
+    assert_eq!(errors(&executed)[0].0, 8179);
+}
+
+#[test]
 fn missing_and_unknown_arguments_and_procedures_get_sql_servers_errors() {
     let server = TestServer::start(8);
     let mut client = Client::login(server.address);

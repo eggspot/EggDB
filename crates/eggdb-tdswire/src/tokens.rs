@@ -131,10 +131,10 @@ pub(crate) struct ServerMessage<'m> {
     pub(crate) line: u32,
 }
 
-fn message_token(token: u8, message: &ServerMessage<'_>) -> Vec<u8> {
+fn message_token(token: u8, message: &ServerMessage<'_>, state: u8) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&message.number.to_le_bytes());
-    body.push(1);
+    body.push(state);
     body.push(message.severity);
     push_us_varchar(&mut body, message.text);
     push_b_varchar(&mut body, SERVER_NAME);
@@ -144,11 +144,19 @@ fn message_token(token: u8, message: &ServerMessage<'_>) -> Vec<u8> {
 }
 
 pub(crate) fn error(message: &ServerMessage<'_>) -> Vec<u8> {
-    message_token(ERROR, message)
+    message_token(ERROR, message, 1)
+}
+
+pub(crate) fn error_in_state(message: &ServerMessage<'_>, state: u8) -> Vec<u8> {
+    message_token(ERROR, message, state)
 }
 
 pub(crate) fn info(message: &ServerMessage<'_>) -> Vec<u8> {
-    message_token(INFO, message)
+    message_token(INFO, message, 1)
+}
+
+pub(crate) fn info_in_state(message: &ServerMessage<'_>, state: u8) -> Vec<u8> {
+    message_token(INFO, message, state)
 }
 
 pub(crate) fn login_ack(tds_version: u32, program: &str, version: [u8; 4]) -> Vec<u8> {
@@ -189,7 +197,7 @@ mod tests {
     use super::{
         COLLATION, DONE, DONE_COUNT, DONE_MORE, ENV_COMMIT_TRANSACTION, ServerMessage, done,
         env_change_begin, env_change_end, env_change_reset_acknowledged, env_change_text, error,
-        login_ack, return_status, return_value,
+        error_in_state, info_in_state, login_ack, return_status, return_value,
     };
 
     #[test]
@@ -238,6 +246,27 @@ mod tests {
                 b'D', 0, b'B', 0, 0, 2, 0, 0, 0
             ]
         );
+        let raised = error_in_state(
+            &ServerMessage {
+                number: 51_000,
+                severity: 16,
+                text: "x",
+                line: 1,
+            },
+            7,
+        );
+        assert_eq!(raised[3..9], [0x38, 0xC7, 0, 0, 7, 16]);
+        let printed = info_in_state(
+            &ServerMessage {
+                number: 0,
+                severity: 0,
+                text: "x",
+                line: 1,
+            },
+            1,
+        );
+        assert_eq!(printed[0], 0xAB);
+        assert_eq!(printed[7..9], [1, 0]);
     }
 
     #[test]

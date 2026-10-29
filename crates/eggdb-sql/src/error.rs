@@ -34,6 +34,9 @@ impl SqlState {
     pub const ADMIN_SHUTDOWN: Self = Self(*b"57P01");
     /// `0A000` feature_not_supported: valid SQL that this release does not run yet.
     pub const FEATURE_NOT_SUPPORTED: Self = Self(*b"0A000");
+    /// `P0001` raise_exception: an error a statement raised on purpose, such as Transact-SQL's
+    /// `THROW` and `RAISERROR`.
+    pub const RAISE_EXCEPTION: Self = Self(*b"P0001");
     /// `21000` cardinality_violation.
     pub const CARDINALITY_VIOLATION: Self = Self(*b"21000");
     /// `22001` string_data_right_truncation.
@@ -219,6 +222,15 @@ struct Report {
     vendor: Option<crate::Dialect>,
     table: Option<String>,
     context: Option<String>,
+    raised: Option<Raised>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Raised {
+    number: u32,
+    severity: u8,
+    state: u8,
+    ends_batch: bool,
 }
 
 /// The result of SQL operations.
@@ -238,6 +250,7 @@ impl SqlError {
                 vendor: None,
                 table: None,
                 context: None,
+                raised: None,
             }),
         }
     }
@@ -274,6 +287,34 @@ impl SqlError {
     pub(crate) fn at(mut self, position: usize) -> Self {
         self.report.position = Some(position);
         self
+    }
+
+    pub(crate) fn without_position(mut self) -> Self {
+        self.report.position = None;
+        self
+    }
+
+    pub(crate) fn raised_in_sqlserver(
+        number: u32,
+        severity: u8,
+        state: u8,
+        message: impl Into<String>,
+        ends_batch: bool,
+    ) -> Self {
+        let mut error = Self::new(SqlState::RAISE_EXCEPTION, message);
+        error.report.vendor = Some(crate::Dialect::SqlServer);
+        error.report.vendor_code = u16::try_from(number).ok();
+        error.report.raised = Some(Raised {
+            number,
+            severity,
+            state,
+            ends_batch,
+        });
+        error
+    }
+
+    pub(crate) fn ends_sqlserver_batch(&self) -> Option<bool> {
+        self.report.raised.map(|raised| raised.ends_batch)
     }
 
     pub(crate) fn at_if_unplaced(mut self, position: usize) -> Self {
@@ -344,9 +385,35 @@ impl SqlError {
         if self.report.vendor != Some(crate::Dialect::SqlServer) {
             return None;
         }
+        if let Some(raised) = self.report.raised {
+            return Some(raised.severity);
+        }
         self.report
             .vendor_code
             .map(crate::sqlserver_errors::severity_of)
+    }
+
+    /// The error number SQL Server reports with an error of its numbering, such as `208` or
+    /// the number a `THROW` or `RAISERROR` chose (up to 2147483647), or `None` for an error
+    /// numbered by another dialect.
+    pub fn sqlserver_number(&self) -> Option<u32> {
+        if self.report.vendor != Some(crate::Dialect::SqlServer) {
+            return None;
+        }
+        match self.report.raised {
+            Some(raised) => Some(raised.number),
+            None => self.report.vendor_code.map(u32::from),
+        }
+    }
+
+    /// The state SQL Server reports with an error of its numbering (`State 1` in `Msg 208,
+    /// Level 16, State 1`): the one a `THROW` or `RAISERROR` chose, else 1; `None` for an error
+    /// numbered by another dialect.
+    pub fn sqlserver_state(&self) -> Option<u8> {
+        if self.report.vendor != Some(crate::Dialect::SqlServer) {
+            return None;
+        }
+        Some(self.report.raised.map_or(1, |raised| raised.state))
     }
 
     /// The database's own error number, when the dialect has them: MySQL's `1146` for a
@@ -404,11 +471,12 @@ impl fmt::Display for SqlError {
             return write!(f, "ORA-{code:05}: {}", self.report.message);
         }
         if self.report.vendor == Some(crate::Dialect::SqlServer) {
-            let code = self.report.vendor_code.unwrap_or(0);
-            let severity = crate::sqlserver_errors::severity_of(code);
+            let code = self.sqlserver_number().unwrap_or(0);
+            let severity = self.severity().unwrap_or(16);
+            let state = self.sqlserver_state().unwrap_or(1);
             return write!(
                 f,
-                "Msg {code}, Level {severity}, State 1: {}",
+                "Msg {code}, Level {severity}, State {state}: {}",
                 self.report.message
             );
         }

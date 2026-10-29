@@ -118,23 +118,86 @@ pub(crate) enum SqlServerStatement {
         table: Name,
         on: bool,
     },
-    If {
-        condition: Expr,
-        then: Box<Statement>,
-        otherwise: Option<Box<Statement>>,
-    },
     Execute(ProcedureCall),
     DeclareTable {
         name: Name,
         columns: Vec<(Name, SqlType)>,
     },
-    InsertExecute {
+    InsertVariable {
         variable: Name,
         columns: Option<Vec<Name>>,
-        call: ProcedureCall,
+        source: VariableSource,
+    },
+    UpdateVariable {
+        variable: Name,
+        assignments: Vec<(Name, Expr)>,
+        filter: Option<Expr>,
+    },
+    DeleteVariable {
+        variable: Name,
+        filter: Option<Expr>,
     },
     FormatOnly(bool),
     InsertBulk(crate::bulk_load::InsertBulk),
+    Declare(Vec<VariableDeclaration>),
+    SetVariable {
+        variable: Name,
+        value: Expr,
+    },
+    SelectAssign {
+        targets: Vec<AssignmentTarget>,
+        query: Box<Statement>,
+    },
+    Condition(Expr),
+    Print(Expr),
+    RaiseError(RaiseError),
+    Throw(Option<ThrowArguments>),
+    ExecuteDynamic(DynamicSql),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VariableDeclaration {
+    pub(crate) name: Name,
+    pub(crate) declared: crate::sqlserver_types::SqlServerType,
+    pub(crate) initial: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssignmentTarget {
+    pub(crate) variable: Name,
+    pub(crate) operator: Option<BinaryOperator>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum VariableSource {
+    Values(Vec<Vec<InsertValue>>),
+    Query(Box<Statement>),
+    Execute(ProcedureCall),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RaiseError {
+    pub(crate) message: Expr,
+    pub(crate) severity: Expr,
+    pub(crate) state: Expr,
+    pub(crate) arguments: Vec<Expr>,
+    pub(crate) set_error: bool,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ThrowArguments {
+    pub(crate) number: Expr,
+    pub(crate) message: Expr,
+    pub(crate) state: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DynamicSql {
+    pub(crate) statement: Expr,
+    pub(crate) declarations: Option<Expr>,
+    pub(crate) arguments: Vec<ProcedureArgument>,
+    pub(crate) position: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +210,7 @@ pub(crate) struct ProcedureCall {
 pub(crate) struct ProcedureArgument {
     pub(crate) name: Option<String>,
     pub(crate) value: Option<Expr>,
+    pub(crate) output_variable: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

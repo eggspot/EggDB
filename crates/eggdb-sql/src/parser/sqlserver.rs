@@ -240,15 +240,7 @@ const STATEMENT_WORDS: [&str; 29] = [
     "with",
 ];
 
-const NOT_SUPPORTED_STATEMENTS: [&str; 21] = [
-    "declare",
-    "print",
-    "while",
-    "exec",
-    "execute",
-    "return",
-    "raiserror",
-    "throw",
+const NOT_SUPPORTED_STATEMENTS: [&str; 13] = [
     "goto",
     "waitfor",
     "merge",
@@ -263,6 +255,10 @@ const NOT_SUPPORTED_STATEMENTS: [&str; 21] = [
     "fetch",
     "bulk",
 ];
+
+const BATCH_LOGIC_STATEMENTS: [&str; 5] = ["if", "while", "break", "continue", "return"];
+
+const BLOCK_ENDS: [&str; 4] = ["end", "else", "break", "continue"];
 
 const NOT_TRANSACT_SQL_STATEMENTS: [&str; 20] = [
     "start",
@@ -361,6 +357,14 @@ pub(crate) fn starts_statement(word: &str) -> bool {
     STATEMENT_WORDS.contains(&word)
 }
 
+pub(crate) fn ends_a_block(word: &str) -> bool {
+    BLOCK_ENDS.contains(&word)
+}
+
+pub(super) fn outside_a_batch(what: &str) -> SqlError {
+    not_supported(&format!("{what} outside a Transact-SQL batch"))
+}
+
 pub(crate) fn not_supported(what: &str) -> SqlError {
     SqlError::new(
         SqlState::FEATURE_NOT_SUPPORTED,
@@ -394,7 +398,7 @@ pub(super) fn login_text(name: &'static str, value: String, position: usize) -> 
     }
 }
 
-fn undeclared_variable(name: &str, position: usize) -> SqlError {
+pub(super) fn undeclared_variable(name: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_PARAMETER,
         format!("Must declare the scalar variable \"{name}\"."),
@@ -561,13 +565,20 @@ impl<'t> Parser<'t> {
                 }
             }
             "save" => return Err(not_supported("SAVE TRANSACTION").at(position)),
-            "if" => self.sqlserver_if()?,
+            word if BATCH_LOGIC_STATEMENTS.contains(&word) => {
+                return Err(outside_a_batch(&self.keyword_text()).at(position));
+            }
             "exec" | "execute" => self.sqlserver_execute()?,
-            "declare" => match self.sqlserver_declare()? {
-                Some(statement) => statement,
-                None => return Err(not_supported("DECLARE").at(position)),
-            },
-            "insert" if self.at_insert_into_variable() => self.sqlserver_insert_execute()?,
+            "declare" => self.sqlserver_declare()?,
+            "print" => self.sqlserver_print()?,
+            "raiserror" => self.sqlserver_raiserror()?,
+            "throw" => self.sqlserver_throw()?,
+            "select" if self.select_assigns_variables() => self.sqlserver_select_assignment()?,
+            "insert" if self.at_insert_into_variable() => self.sqlserver_insert_variable()?,
+            "update" if self.at_variable(1) => self.sqlserver_update_variable()?,
+            "delete" if self.at_variable(1) || (self.is_word_at(1, "from") && self.at_variable(2)) => {
+                self.sqlserver_delete_variable()?
+            }
             word if self.first_in_batch()
                 && crate::sqlserver_catalog::CatalogProcedure::named(word).is_some() =>
             {
@@ -607,27 +618,20 @@ impl<'t> Parser<'t> {
         Ok(Some(statement))
     }
 
-    fn sqlserver_if(&mut self) -> SqlResult<Statement> {
-        let position = self.position();
-        self.at += 1;
-        let condition = self.expression()?;
-        if reads_rows(&condition) {
-            return Err(not_supported("IF with a condition that reads a table").at(position));
-        }
-        let then = Box::new(self.statement_body()?);
-        if self.peek_kind() == &TokenKind::Semicolon && self.is_word_at(1, "else") {
-            self.at += 1;
-        }
-        let otherwise = if self.take_word("else") {
-            Some(Box::new(self.statement_body()?))
-        } else {
-            None
+    pub(super) fn variable_reference(&mut self, name: &str, position: usize) -> SqlResult<Expr> {
+        let constant = match self.batch.and_then(|batch| batch.variable(name)) {
+            Some(variable) => Some(variable.constant(position)),
+            None => self
+                .declared_variables
+                .iter()
+                .find(|variable| variable.name == name)
+                .map(|variable| variable.constant(position)),
         };
-        Ok(Statement::SqlServer(SqlServerStatement::If {
-            condition,
-            then,
-            otherwise,
-        }))
+        if let Some(constant) = constant {
+            self.variables_read.push(name.to_owned());
+            return Ok(constant);
+        }
+        self.bound_parameter(name, position)
     }
 
     fn bound_parameter(&self, name: &str, position: usize) -> SqlResult<Expr> {
@@ -723,21 +727,25 @@ impl<'t> Parser<'t> {
             self.optional_transaction_name();
             return Ok(Statement::Begin { read_only: false });
         }
+        if self.is_word("distributed") {
+            return Err(not_supported("BEGIN DISTRIBUTED TRANSACTION").at(position));
+        }
+        if self.is_word("dialog") || self.is_word("conversation") {
+            return Err(not_supported("BEGIN DIALOG CONVERSATION").at(position));
+        }
         let what = if self.is_word("try") {
             "BEGIN TRY"
-        } else if self.is_word("distributed") {
-            "BEGIN DISTRIBUTED TRANSACTION"
         } else {
-            "BEGIN ... END blocks"
+            "BEGIN ... END"
         };
-        Err(not_supported(what).at(position))
+        Err(outside_a_batch(what).at(position))
     }
 
     fn sqlserver_set(&mut self) -> SqlResult<Statement> {
         self.at += 1;
         let position = self.position();
-        if let TokenKind::Variable(name) = self.peek_kind() {
-            return Err(undeclared_variable(name, position));
+        if matches!(self.peek_kind(), TokenKind::Variable(_)) {
+            return self.sqlserver_set_variable();
         }
         if self.take_word("transaction") {
             self.expect_word("isolation")?;
@@ -1420,7 +1428,7 @@ impl<'t> Parser<'t> {
             }
             TokenKind::Variable(name) => {
                 self.at += 1;
-                self.bound_parameter(name, position)?
+                self.variable_reference(name, position)?
             }
             TokenKind::Binary(digits) => {
                 self.at += 1;
@@ -1492,6 +1500,10 @@ impl<'t> Parser<'t> {
             "@@spid" => integer(i64::from(state.connection_id), position),
             "@@servername" => session_text("EggDB".to_owned(), position),
             "@@trancount" => integer(i64::from(state.transaction_count), position),
+            "@@error" => integer(
+                i64::from(self.batch.map_or(0, |batch| batch.last_error)),
+                position,
+            ),
             "@@language" => session_text("us_english".to_owned(), position),
             "@@microsoftversion" => integer(microsoft_version(), position),
             "@@servicename" => session_text("MSSQLSERVER".to_owned(), position),
@@ -1543,17 +1555,6 @@ impl<'t> Parser<'t> {
             return self.name();
         }
         self.qualified_part(&schema)
-    }
-}
-
-fn reads_rows(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Column { .. }
-        | ExprKind::Subquery(_)
-        | ExprKind::Aggregate { .. }
-        | ExprKind::OuterColumn { .. }
-        | ExprKind::Slot { .. } => true,
-        _ => crate::eval::children(expr).into_iter().any(reads_rows),
     }
 }
 

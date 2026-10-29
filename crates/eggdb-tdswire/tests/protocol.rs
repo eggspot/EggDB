@@ -297,7 +297,10 @@ fn transactions_nest_report_their_changes_and_an_error_that_rolls_one_back_ends_
     assert_eq!(errors(&rolled_back).len(), 1, "{rolled_back:?}");
     let count = client.batch("SELECT count(*) FROM t");
     assert_eq!(rows(&count), vec![vec![Some("3".to_owned())]]);
-    assert_eq!(errors(&client.batch("BEGIN SELECT 1 END"))[0].0, 40517);
+    assert_eq!(
+        rows(&client.batch("BEGIN SELECT 1 END")),
+        vec![vec![Some("1".to_owned())]]
+    );
 }
 
 #[test]
