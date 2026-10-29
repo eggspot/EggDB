@@ -367,7 +367,7 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
 fn the_tools_list_carries_the_registry_s_names_and_annotations() {
     let file = key_value_file("parity-tools");
     let _audit = audit_of(file.path());
-    for (options, offered) in [(&[][..], 7), (&["--allow-write"][..], 8)] {
+    for (options, offered) in [(&[][..], 8), (&["--allow-write"][..], 9)] {
         let mut mcp = Mcp::start(file.path(), options);
         let listed = mcp.request("tools/list", "{}");
         let Json::Array(tools) = &at(&listed, &["result", "tools"]).value else {
@@ -580,6 +580,107 @@ fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
     mcp.finish();
 }
 
+fn page_trailer(records: &mut Vec<Node>, limit: usize) -> Option<String> {
+    if records.len() <= limit {
+        return None;
+    }
+    let trailer = records.pop()?;
+    assert_eq!(scalar(at(&trailer, &["truncated"])), "true");
+    Some(scalar(at(&trailer, &["next_cursor"])))
+}
+
+#[test]
+fn row_list_returns_what_row_list_prints_page_by_page() {
+    let file = catalog_file("parity-rows");
+    let path = file.path().to_str().unwrap().to_owned();
+    let _audit = audit_of(file.path());
+    let mut mcp = Mcp::start(file.path(), &[]);
+
+    let mut after: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let arguments = match &after {
+            Some(cursor) => format!(r#"{{"table":"users","limit":2,"after":{cursor:?}}}"#),
+            None => r#"{"table":"users","limit":2}"#.to_owned(),
+        };
+        let answer = mcp.call("row_list", &arguments);
+        let result = structured(&answer, false);
+        let mut args = vec!["row", "list", path.as_str(), "users", "--limit", "2", "--json"];
+        if let Some(cursor) = &after {
+            args.extend(["--after", cursor.as_str()]);
+        }
+        let mut printed = lines(&succeeded(&eggdb(&args)));
+        let trailer = page_trailer(&mut printed, 2);
+        let from_tool: Vec<String> = members_of(result, "items").iter().map(canonical).collect();
+        let from_twin: Vec<String> = printed.iter().map(canonical).collect();
+        assert_eq!(from_tool, from_twin, "page {pages}");
+        assert_eq!(
+            scalar(at(result, &["truncated"])),
+            trailer.is_some().to_string()
+        );
+        let tool_cursor = member(result, "next_cursor").map(scalar);
+        assert_eq!(tool_cursor, trailer, "page {pages}");
+        if trailer.is_some() {
+            assert_eq!(scalar(at(result, &["truncated_by"])), "limit");
+        }
+        assert_eq!(members_of(result, "columns").len(), 3);
+        for removed in envelope("row_list") {
+            if *removed != "truncated_by" {
+                assert!(member(result, removed).is_some(), "row_list has no {removed}");
+            }
+        }
+        pages += 1;
+        match trailer {
+            Some(cursor) => after = Some(cursor),
+            None => break,
+        }
+    }
+    assert_eq!(pages, 2);
+
+    let whole = mcp.call("row_list", r#"{"table":"users"}"#);
+    let whole = structured(&whole, false);
+    let printed = lines(&succeeded(&eggdb(&["row", "list", &path, "users", "--json"])));
+    let from_tool: Vec<String> = members_of(whole, "items").iter().map(canonical).collect();
+    assert_eq!(from_tool, printed.iter().map(canonical).collect::<Vec<_>>());
+    assert_eq!(scalar(at(whole, &["truncated"])), "false");
+    assert!(member(whole, "next_cursor").is_none());
+
+    let empty = mcp.call("row_list", r#"{"table":"orders"}"#);
+    assert!(members_of(structured(&empty, false), "items").is_empty());
+    assert!(succeeded(&eggdb(&["row", "list", &path, "orders", "--json"])).is_empty());
+
+    let first = lines(&succeeded(&eggdb(&["row", "list", &path, "users", "-n", "1", "--json"])));
+    let users_cursor = scalar(at(&first[1], &["next_cursor"]));
+    for (arguments, args) in [
+        (
+            r#"{"table":"sales.totals"}"#.to_owned(),
+            vec!["row", "list", path.as_str(), "sales.totals", "--json"],
+        ),
+        (
+            format!(r#"{{"table":"orders","after":{users_cursor:?}}}"#),
+            vec!["row", "list", path.as_str(), "orders", "--json", "--after", users_cursor.as_str()],
+        ),
+        (
+            r#"{"table":"users","after":"42"}"#.to_owned(),
+            vec!["row", "list", path.as_str(), "users", "--json", "--after", "42"],
+        ),
+    ] {
+        let answer = mcp.call("row_list", &arguments);
+        let tool_error = code_and_category(structured(&answer, true));
+        let twin = eggdb(&args);
+        assert!(twin.stdout.is_empty(), "{arguments}");
+        assert_eq!(code_and_category(&one_error(&twin)), tool_error, "{arguments}");
+    }
+    let missing = mcp.call("row_list", r#"{"table":"nowhere"}"#);
+    let tool_error = code_and_category(structured(&missing, true));
+    let twin = eggdb(&["row", "list", &path, "nowhere", "--json"]);
+    assert_eq!(twin.status.code(), Some(1));
+    let (code, category) = code_and_category(&one_error(&twin));
+    assert_eq!(code, "table_not_found");
+    assert_eq!(category, tool_error.1);
+    mcp.finish();
+}
+
 fn words_of(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -634,7 +735,7 @@ fn every_example_of_a_reading_command_runs_against_a_temporary_file() {
             .unwrap()
     };
     for setup in [
-        &["sql", "--create", "app.db", "-c", "CREATE TABLE users (id integer PRIMARY KEY, name text); INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace'); CREATE TABLE orders (id integer PRIMARY KEY, placed_at timestamp); CREATE SCHEMA sales; CREATE VIEW sales.totals AS SELECT count(*) AS n FROM orders"][..],
+        &["sql", "--create", "app.db", "-c", "CREATE TABLE users (id integer PRIMARY KEY, name text); INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace'); CREATE TABLE orders (id integer PRIMARY KEY, placed_at timestamp); CREATE SCHEMA sales; CREATE VIEW sales.totals AS SELECT count(*) AS n FROM orders; CREATE TABLE sales.orders (id integer PRIMARY KEY)"][..],
         &["put", "app.db", "user:1", "Ada"],
         &["put", "app.db", "0x00ff", "0x01"],
         &["collection", "add", "app.db", "sessions"],

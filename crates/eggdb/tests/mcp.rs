@@ -273,7 +273,7 @@ fn an_agent_reads_but_never_writes_and_every_call_is_audited() {
     let Json::Array(tools) = &get(&listed, &["result", "tools"]).value else {
         panic!("{listed:?}");
     };
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 8);
     let described = mcp.call("describe_table", r#"{"table":"users"}"#);
     let described = ok(&described);
     assert_eq!(text_at(described, &["columns", "2", "name"]), "email");

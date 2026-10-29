@@ -135,6 +135,7 @@ Commands:
   explain <file>                show the plan for one statement given with -c, without running it
   table  list|show|sample <file> [table]
                                 tables and views: list them, show one, sample rows; see eggdb help table
+  row    list <file> <table>    the rows of one table, as stored, a page at a time; see eggdb help row
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
@@ -476,7 +477,7 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, serve, shell, restore, mcp, audit, collection, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);

@@ -122,6 +122,24 @@ expect_exit 0 "$eggdb" version --json
 grep -q '^{"version":"' last.out || fail "version --json printed $(cat last.out)"
 pass "table list, show and sample, explain, sql --read-only and version --json"
 
+expect_exit 0 "$eggdb" sql sql-json.db -c "INSERT INTO t VALUES (8), (9); CREATE TABLE u (id integer PRIMARY KEY)"
+expect_exit 0 "$eggdb" row list sql-json.db t --limit 2 --json
+[ "$(head -n 2 last.out | tr '\n' ' ')" = '{"id":7} {"id":8} ' ] || fail "row list printed $(cat last.out)"
+grep -q '^{"truncated":true,"next_cursor":"r1\.[0-9a-f]*"}$' last.out || fail "row list printed no cursor: $(cat last.out)"
+cursor=$(tail -n 1 last.out | sed 's/.*"next_cursor":"\([^"]*\)".*/\1/')
+expect_output '{"id":9}' "$eggdb" row list sql-json.db t --json --after "$cursor"
+expect_exit 2 "$eggdb" row list sql-json.db t --after 42
+grep -q -- '--after needs the cursor printed at the end of the page before' last.err || fail "a bad cursor said $(cat last.err)"
+expect_exit 0 "$eggdb" table list sql-json.db --limit 1 --json
+expect_output '{"schema":"public","name":"u","kind":"table","columns":1}' "$eggdb" table list sql-json.db --json --after "$(tail -n 1 last.out | sed 's/.*"next_cursor":"\([^"]*\)".*/\1/')"
+printf 'INSERT INTO t VALUES (10);\n' > more-t.sql
+cp sql-json.db before-dry-run.db
+expect_exit 0 "$eggdb" restore sql-json.db more-t.sql --dry-run --json
+grep -q '"created":false,"dry_run":true,' last.out || fail "restore --dry-run reported $(cat last.out)"
+cmp -s sql-json.db before-dry-run.db || fail "restore --dry-run changed the file"
+[ ! -e sql-json.db.restoring ] || fail "restore --dry-run left its copy"
+pass "row list and table list pages, restore --dry-run"
+
 expect_exit 0 "$eggdb" export app.db app.jsonl
 expect_exit 0 "$eggdb" import --create copy.db app.jsonl
 expect_exit 0 "$eggdb" export copy.db copy.jsonl
