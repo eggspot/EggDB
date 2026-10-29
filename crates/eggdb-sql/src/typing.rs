@@ -166,10 +166,27 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     }
 }
 
-fn bytes_concatenation(left: &Expr, right: &Expr, scope: Scope<'_>) -> bool {
-    let bytes = |expr: &Expr| static_type(expr, scope) == Some(SqlType::Bytea);
-    (bytes(left) && (bytes(right) || is_untyped_literal(right)))
-        || (bytes(right) && is_untyped_literal(left))
+fn concatenation_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> SqlType {
+    let operand_type = |expr: &Expr| {
+        if is_untyped_literal(expr) {
+            None
+        } else {
+            static_type(expr, scope)
+        }
+    };
+    let (left_type, right_type) = (operand_type(left), operand_type(right));
+    if let Some(array) = crate::arrays::concat_type(left_type, right_type) {
+        return array;
+    }
+    let bytes = |sql_type: Option<SqlType>| sql_type == Some(SqlType::Bytea);
+    let bytes_concatenation = (bytes(left_type)
+        && (bytes(right_type) || is_untyped_literal(right)))
+        || (bytes(right_type) && is_untyped_literal(left));
+    if bytes_concatenation {
+        SqlType::Bytea
+    } else {
+        SqlType::Text
+    }
 }
 
 pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
@@ -218,15 +235,8 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::RegexMatchFolded
             | BinaryOperator::RegexNoMatch
             | BinaryOperator::RegexNoMatchFolded => Some(SqlType::Boolean),
-            BinaryOperator::Concat if crate::arrays::concat_type(left, right, scope).is_some() => {
-                crate::arrays::concat_type(left, right, scope)
-            }
-            BinaryOperator::Concat if bytes_concatenation(left, right, scope) => {
-                Some(SqlType::Bytea)
-            }
-            BinaryOperator::Concat
-            | BinaryOperator::JsonFieldText
-            | BinaryOperator::JsonPathText => Some(SqlType::Text),
+            BinaryOperator::Concat => Some(concatenation_type(left, right, scope)),
+            BinaryOperator::JsonFieldText | BinaryOperator::JsonPathText => Some(SqlType::Text),
             BinaryOperator::JsonContains | BinaryOperator::JsonContainedIn => {
                 Some(SqlType::Boolean)
             }

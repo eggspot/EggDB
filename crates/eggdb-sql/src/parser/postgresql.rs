@@ -216,12 +216,17 @@ impl Parser<'_> {
         all: bool,
     ) -> SqlResult<Expr> {
         let position = left.position;
+        let left_is_parameter = self.starts_with_parameter(&left);
         self.expect(&TokenKind::LeftParen)?;
         let array = self.expression()?;
         self.expect(&TokenKind::RightParen)?;
-        let (left, array) = match Self::quantified_list(left, operator, all, array) {
-            Ok(listed) => return Ok(listed),
-            Err(operands) => *operands,
+        let (left, array) = if left_is_parameter {
+            (left, array)
+        } else {
+            match Self::quantified_list(left, operator, all, array) {
+                Ok(listed) => return Ok(listed),
+                Err(operands) => *operands,
+            }
         };
         let symbol = Expr {
             kind: ExprKind::Literal(Literal::String(operator.symbol().to_owned())),
@@ -229,6 +234,27 @@ impl Parser<'_> {
         };
         let name = if all { "array_all" } else { "array_any" };
         Ok(function(name, vec![left, array, symbol], position))
+    }
+
+    fn starts_with_parameter(&self, expr: &Expr) -> bool {
+        let parameter_shaped = matches!(
+            expr.kind,
+            ExprKind::Literal(_) | ExprKind::Constant { .. } | ExprKind::Cast { .. }
+        );
+        parameter_shaped
+            && self
+                .tokens
+                .binary_search_by_key(&expr.position, |token| token.start)
+                .ok()
+                .and_then(|index| self.tokens.get(index))
+                .is_some_and(|token| {
+                    matches!(
+                        token.kind,
+                        TokenKind::Parameter(_)
+                            | TokenKind::Placeholder
+                            | TokenKind::NumberedParameter(_)
+                    )
+                })
     }
 
     pub(super) fn at_table_function(&self) -> bool {

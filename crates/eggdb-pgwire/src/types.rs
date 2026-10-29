@@ -252,6 +252,13 @@ pub fn encode_value(
     format: Format,
     offset_seconds: i32,
 ) -> Result<Option<Vec<u8>>, SqlError> {
+    if format == Format::Binary && ARRAY_OIDS.contains(&oid) {
+        return match value {
+            Value::Null => Ok(None),
+            Value::Array(array) => array_binary(array, offset_seconds).map(Some),
+            _ => Err(cannot_send(value, oid)),
+        };
+    }
     let Some(text) = value.to_text_at(offset_seconds) else {
         return Ok(None);
     };
@@ -259,10 +266,6 @@ pub fn encode_value(
         return Ok(Some(text.into_bytes()));
     }
     let bytes = match oid {
-        oid if ARRAY_OIDS.contains(&oid) => match value {
-            Value::Array(array) => array_binary(array, offset_seconds)?,
-            _ => return Err(cannot_send(value, oid)),
-        },
         BOOL_OID => match value {
             Value::Boolean(flag) => vec![u8::from(*flag)],
             _ => return Err(cannot_send(value, oid)),
@@ -760,6 +763,11 @@ mod tests {
             encode_value(&array, INT4_ARRAY_OID, Format::Text, 0).unwrap(),
             Some(b"{7,NULL}".to_vec())
         );
+        assert_eq!(
+            encode_value(&Value::Null, INT4_ARRAY_OID, Format::Binary, 0).unwrap(),
+            None
+        );
+        assert!(encode_value(&Value::Integer(7), INT4_ARRAY_OID, Format::Binary, 0).is_err());
         let empty = Value::Array(Box::new(ArrayValue {
             element: ArrayElement::Text,
             lower_bound: 1,

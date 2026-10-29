@@ -558,8 +558,8 @@ answered when the batch ends), and SSMS's and Azure Data Studio's catalog querie
   a column list a one-column function's column takes the alias (`FROM generate_series(1, 3) s`
   makes `s` a column). The arguments are constants, parameters or, in a correlated subquery,
   the outer query's columns (the rows are made again for each outer value); naming another item
-  of the same `FROM` (PostgreSQL's implicit `LATERAL`), with or without its name and whether it
-  comes before or after the function, is `0A000` ("a function in FROM that names another FROM
+  of the same `FROM` (PostgreSQL's implicit `LATERAL`), with or without its name, whether it
+  comes before or after the function and also from a subquery in its arguments, is `0A000` ("a function in FROM that names another FROM
   item (LATERAL) is not supported yet"). A `VALUES` list in `FROM` may name the outer query's
   columns too and, as in PostgreSQL, does not see the other items of its `FROM`. One `generate_series` or
   `unnest` call may also stand alone as an item of a select list, giving a row for each of its
@@ -791,7 +791,10 @@ and of results, with one dimension and elements of `smallint`, `integer`, `bigin
 (elements of the common type; `ARRAY[]` needs a cast, `42P18`), `ARRAY(SELECT ...)` (one
 column, `42601` otherwise), PostgreSQL's literals (`'{1,2,NULL}'::int[]`, `'{"a b",c}'::text[]`,
 with quotes, backslashes and `NULL`; a malformed one is `22P02` with PostgreSQL's detail), casts
-between array types element by element and to and from text, `a[i]` (NULL outside the array;
+between array types element by element (an element type's length or scale applies to each
+element: `ARRAY['abc']::varchar(1)[]` is `{a}`, `ARRAY[1]::numeric(5,2)[]` is `{1.00}`) and to
+and from text, arrays of different element types in `UNION` and `VALUES` (of the element
+types' common type, so `ARRAY[1]` and `ARRAY[1.5]` meet as `numeric[]`), `a[i]` (NULL outside the array;
 a subscript outside the `integer` range is `22003`), `||` between two arrays or an array and an
 element, of the element types' common type as `UNION` finds it (`ARRAY[1, 2] || 3.5` is
 `{1,2,3.5}`, a `numeric[]`; text types keep the first operand's type; `integer[] || boolean` is
@@ -816,8 +819,8 @@ hold at most 2^27 elements (`54000`) and counts against the session's value limi
   character escapes (`\n`, `\t`, `\x41`, `\u00e9`), `^`
   and `$`, groups `(...)` and `(?:...)`, `|`, and `* + ? {m} {m,} {m,n}` with their lazy forms.
   Matching takes time linear in the text (no backtracking); a malformed pattern is `2201B` with
-  PostgreSQL's reason (`invalid regular expression: parentheses () not balanced`), and a
-  statement may take at most 10^9 matching steps (`54000`). Classes and `~*` follow the `C`
+  PostgreSQL's reason (`invalid regular expression: parentheses () not balanced`), and one
+  match may take at most 10^9 steps (`54000`); a statement may run any number of matches. Classes and `~*` follow the `C`
   locale, as text comparison does: only ASCII letters change case.
 - `OPERATOR(op)` and `OPERATOR(pg_catalog.op)` for every binary operator, as psql writes them,
   with PostgreSQL's precedence; `expr COLLATE "C"`, `"POSIX"`, `"default"` or `ucs_basic`

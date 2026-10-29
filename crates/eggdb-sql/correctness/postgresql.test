@@ -3274,6 +3274,32 @@ SELECT 1
 error 42601
 SELECT ARRAY(SELECT 1, 2)
 
+rows
+SELECT ARRAY['abc']::varchar(1)[] AS a, ARRAY[1,2]::numeric(5,2)[] AS b, '{abc,de}'::char(2)[] AS c, '{1.234}'::numeric(5,2)[] AS d, (ARRAY['abc']::varchar(2)[])[1] AS e
+----
+a|b|c|d|e
+{a}|{1.00,2.00}|{ab,de}|{1.23}|ab
+SELECT 1
+
+error 22003
+SELECT ARRAY[1234.5]::numeric(3,1)[]
+
+rows
+SELECT ARRAY[1] UNION SELECT ARRAY[1.5] ORDER BY 1
+----
+array
+{1}
+{1.5}
+SELECT 2
+
+rows
+VALUES (ARRAY[1]), (ARRAY[1.5])
+----
+column1
+{1}
+{1.5}
+SELECT 2
+
 chapter functions-array, "Array Functions and Operators"
 rows
 SELECT ARRAY[1,2] || ARRAY[3], ARRAY[1,2] || 3, 0 || ARRAY[1,2], NULL::int[] || ARRAY[1], ARRAY[1] || NULL::int[], ARRAY['a'] || 'b'::text
@@ -3615,6 +3641,19 @@ SELECT * FROM generate_series(1,2) g JOIN generate_series(1, g.g) h ON true
 
 error 0A000
 SELECT * FROM generate_series(1,2) g, generate_series(1, g) h
+
+error 0A000
+SELECT * FROM (VALUES (2)) w(x), generate_series(1, (SELECT x)) g
+
+error 0A000
+SELECT * FROM (VALUES (2)) w(x), unnest((SELECT ARRAY[x])) g
+
+rows
+SELECT count(*) FROM (VALUES (5)) w(x), generate_series(1, (SELECT max(x) FROM (VALUES (3)) v(x))) g
+----
+count
+3
+SELECT 1
 
 rows
 SELECT t.n, (SELECT string_agg(a.v::text || ':' || a.i::text, ',') FROM unnest(t.arr) WITH ORDINALITY AS a(v, i)) FROM (VALUES (1, ARRAY[5,6]), (2, ARRAY[7])) t(n, arr) ORDER BY 1

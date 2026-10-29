@@ -1510,6 +1510,59 @@ fn column_references<'e>(expr: &'e Expr, found: &mut Vec<(Option<&'e str>, &'e s
     }
 }
 
+fn subquery_column_references(expr: &Expr, found: &mut Vec<(Option<String>, String, usize)>) {
+    match &expr.kind {
+        ExprKind::Column { qualifier, name } => {
+            found.push((qualifier.clone(), name.clone(), expr.position));
+            return;
+        }
+        ExprKind::Subquery(subquery) => for_each_select(&subquery.query, &mut |select| {
+            for inner in select_expressions(select) {
+                subquery_column_references(inner, found);
+            }
+        }),
+        _ => {}
+    }
+    for child in children(expr) {
+        subquery_column_references(child, found);
+    }
+}
+
+fn names_sibling(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    prepared: &Prepared,
+    siblings: &[Sibling],
+    (qualifier, name, position): (Option<&str>, &str, usize),
+) -> bool {
+    match qualifier {
+        Some(qualifier) => siblings.iter().any(|sibling| sibling.label == qualifier),
+        None => {
+            let overlay = Overlay::new(env.reader, &prepared.temp);
+            siblings.iter().any(|sibling| {
+                sibling.table.as_ref().is_some_and(|table| {
+                    tables
+                        .require(
+                            &overlay,
+                            &crate::ast::Name {
+                                text: table.clone(),
+                                position,
+                            },
+                        )
+                        .is_ok_and(|definition| definition.column_index(name).is_some())
+                })
+            })
+        }
+    }
+}
+
+fn lateral_not_supported(position: usize) -> SqlError {
+    SqlError::not_supported(
+        "a function in FROM that names another FROM item (LATERAL) is not supported yet",
+    )
+    .at(position)
+}
+
 fn lateral_reference(
     env: &Env<'_>,
     tables: &mut TableCache,
@@ -1524,32 +1577,50 @@ fn lateral_reference(
     for expr in crate::set_returning::expressions(generated) {
         column_references(expr, &mut references);
     }
-    let overlay = Overlay::new(env.reader, &prepared.temp);
-    for (qualifier, name, position) in references {
-        let names_sibling = match qualifier {
-            Some(qualifier) => siblings.iter().any(|sibling| sibling.label == qualifier),
-            None => siblings.iter().any(|sibling| {
-                sibling.table.as_ref().is_some_and(|table| {
-                    tables
-                        .require(
-                            &overlay,
-                            &crate::ast::Name {
-                                text: table.clone(),
-                                position,
-                            },
-                        )
-                        .is_ok_and(|definition| definition.column_index(name).is_some())
-                })
-            }),
-        };
-        if names_sibling {
-            return Err(SqlError::not_supported(
-                "a function in FROM that names another FROM item (LATERAL) is not supported yet",
-            )
-            .at(position));
+    for reference in references {
+        if names_sibling(env, tables, prepared, siblings, reference) {
+            return Err(lateral_not_supported(reference.2));
         }
     }
     Ok(())
+}
+
+fn lateral_through_subquery(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    prepared: &Prepared,
+    generated: &GeneratedTable,
+    siblings: &[Sibling],
+    error: SqlError,
+) -> SqlError {
+    let Some(missing_at) = error.position() else {
+        return error;
+    };
+    if siblings.is_empty() || !is_missing(&error) {
+        return error;
+    }
+    if !matches!(generated, GeneratedTable::Function(_)) {
+        return error;
+    }
+    let mut references = Vec::new();
+    for expr in crate::set_returning::expressions(generated) {
+        subquery_column_references(expr, &mut references);
+    }
+    let lateral = references.iter().any(|(qualifier, name, position)| {
+        *position == missing_at
+            && names_sibling(
+                env,
+                tables,
+                prepared,
+                siblings,
+                (qualifier.as_deref(), name, *position),
+            )
+    });
+    if lateral {
+        lateral_not_supported(missing_at)
+    } else {
+        error
+    }
 }
 
 enum Filling {
@@ -1606,17 +1677,25 @@ fn prepare_generated(
                 let overlay = Overlay::new(env.reader, &prepared.temp);
                 let inner_env = env.with_reader(&overlay);
                 let mut templates = Vec::new();
-                for expr in crate::set_returning::expressions_mut(&mut generated) {
-                    rewrite(
-                        &inner_env,
-                        tables,
-                        expr,
-                        Scope::empty(),
-                        parent,
-                        ctes,
-                        &mut templates,
-                        &mut correlated,
-                    )?;
+                let rewritten = crate::set_returning::expressions_mut(&mut generated)
+                    .into_iter()
+                    .try_for_each(|expr| {
+                        rewrite(
+                            &inner_env,
+                            tables,
+                            expr,
+                            Scope::empty(),
+                            parent,
+                            ctes,
+                            &mut templates,
+                            &mut correlated,
+                        )
+                        .map(drop)
+                    });
+                if let Err(error) = rewritten {
+                    return Err(lateral_through_subquery(
+                        env, tables, prepared, &generated, siblings, error,
+                    ));
                 }
                 if !templates.is_empty() {
                     return Err(SqlError::not_supported(

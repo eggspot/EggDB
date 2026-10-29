@@ -9,7 +9,7 @@ pub(crate) const MAX_PATTERN_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_INSTRUCTIONS: usize = 100_000;
 pub(crate) const MAX_REPEAT: u32 = 255;
 pub(crate) const MAX_GROUP_NESTING: usize = 256;
-pub(crate) const STATEMENT_STEPS: u64 = 1_000_000_000;
+pub(crate) const MATCH_STEPS: u64 = 1_000_000_000;
 const MOST_CACHED_PATTERNS: usize = 256;
 const MOST_CACHED_PATTERN_BYTES: usize = 1 << 20;
 
@@ -39,10 +39,10 @@ impl StepBudget {
                 self.left = 0;
                 Err(SqlError::new(
                     SqlState::PROGRAM_LIMIT_EXCEEDED,
-                    "regular expression is too complex for this statement",
+                    "regular expression match is too complex",
                 )
                 .with_hint(format!(
-                    "A statement may take at most {STATEMENT_STEPS} regular expression steps; simplify the pattern or match fewer rows."
+                    "One match may take at most {MATCH_STEPS} regular expression steps; simplify the pattern or match a shorter text."
                 )))
             }
         }
@@ -998,7 +998,6 @@ impl Regex {
 }
 
 struct StatementRegexes {
-    budget: StepBudget,
     sensitive: HashMap<String, Rc<Regex>>,
     insensitive: HashMap<String, Rc<Regex>>,
     cached_bytes: usize,
@@ -1034,7 +1033,6 @@ impl Drop for EnteredStatement {
 
 pub(crate) fn enter_statement() -> EnteredStatement {
     let fresh = StatementRegexes {
-        budget: StepBudget::new(STATEMENT_STEPS),
         sensitive: HashMap::new(),
         insensitive: HashMap::new(),
         cached_bytes: 0,
@@ -1075,27 +1073,16 @@ fn compiled(pattern: &str, case: CaseSensitivity) -> SqlResult<Rc<Regex>> {
 }
 
 pub(crate) fn matches(text: &str, pattern: &str, case: CaseSensitivity) -> SqlResult<bool> {
-    let regex = compiled(pattern, case)?;
-    let taken = STATEMENT.with(|statement| {
-        statement.try_borrow_mut().ok().and_then(|mut statement| {
-            statement
-                .as_mut()
-                .map(|statement| std::mem::replace(&mut statement.budget, StepBudget::new(0)))
-        })
-    });
-    let entered = taken.is_some();
-    let mut budget = taken.unwrap_or_else(|| StepBudget::new(STATEMENT_STEPS));
-    let result = regex.is_match(text, &mut budget);
-    if entered {
-        STATEMENT.with(|statement| {
-            if let Ok(mut statement) = statement.try_borrow_mut()
-                && let Some(statement) = statement.as_mut()
-            {
-                statement.budget = budget;
-            }
-        });
-    }
-    result
+    matches_within(text, pattern, case, MATCH_STEPS)
+}
+
+pub(crate) fn matches_within(
+    text: &str,
+    pattern: &str,
+    case: CaseSensitivity,
+    steps: u64,
+) -> SqlResult<bool> {
+    compiled(pattern, case)?.is_match(text, &mut StepBudget::new(steps))
 }
 
 fn no_operator(symbol: &str, left: &Value, right: &Value) -> SqlError {

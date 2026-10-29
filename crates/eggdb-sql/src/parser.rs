@@ -177,7 +177,7 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 40] = [
     "btrim",
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 17] = [
+const INTERNAL_FUNCTIONS: [&str; 18] = [
     "regclass_cast",
     "oracle_nextval",
     "oracle_currval",
@@ -190,6 +190,7 @@ const INTERNAL_FUNCTIONS: [&str; 17] = [
     "oracle_extract",
     "concat_or_null",
     "array_constructor",
+    "array_element_cast",
     "array_subscript",
     "array_any",
     "array_all",
@@ -2847,6 +2848,7 @@ impl<'t> Parser<'t> {
                     expr = cast;
                     continue;
                 }
+                let element_type = sql_type;
                 let sql_type = if array {
                     SqlType::Array(
                         crate::arrays::ArrayElement::required(sql_type)
@@ -2862,6 +2864,9 @@ impl<'t> Parser<'t> {
                     },
                     position,
                 };
+                if array {
+                    expr = cast_with_element_modifier(expr, element_type);
+                }
             } else if self.peek_kind() == &TokenKind::LeftBracket && self.postgresql() {
                 self.depth += 1;
                 if self.depth > MAX_NESTING {
@@ -3524,6 +3529,33 @@ fn truth(expr: Expr, test: TruthTest, negated: bool) -> ExprKind {
         expr: Box::new(expr),
         test,
         negated,
+    }
+}
+
+fn cast_with_element_modifier(array_cast: Expr, element_type: SqlType) -> Expr {
+    if !matches!(
+        element_type,
+        SqlType::Varchar(Some(_)) | SqlType::Bpchar(Some(_)) | SqlType::Numeric(Some(_))
+    ) {
+        return array_cast;
+    }
+    let position = array_cast.position;
+    let element_target = Expr {
+        kind: ExprKind::Cast {
+            expr: Box::new(Expr {
+                kind: ExprKind::Literal(Literal::Null),
+                position,
+            }),
+            sql_type: element_type,
+        },
+        position,
+    };
+    Expr {
+        kind: ExprKind::Function {
+            name: "array_element_cast".to_owned(),
+            arguments: vec![array_cast, element_target],
+        },
+        position,
     }
 }
 

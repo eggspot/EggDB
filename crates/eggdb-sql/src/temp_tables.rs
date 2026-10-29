@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub(crate) const TEMP_TABLE_MARKER: char = '\u{1}';
 const MOST_TEMP_TABLES: u32 = 1 << 20;
 const ID_SPACE: u64 = 1 << 24;
-const ENTRY_OVERHEAD: usize = 128;
+const ENTRY_OVERHEAD: usize = 64;
 
 thread_local! {
     static NEXT_NUMBER: Cell<u64> = const { Cell::new(0) };

@@ -1,14 +1,14 @@
-use crate::regex::{CaseSensitivity, MAX_REPEAT, Regex, STATEMENT_STEPS, StepBudget};
+use crate::regex::{CaseSensitivity, MATCH_STEPS, MAX_REPEAT, Regex, StepBudget};
 
 fn matches(text: &str, pattern: &str) -> bool {
     Regex::compile(pattern, CaseSensitivity::Sensitive)
-        .and_then(|regex| regex.is_match(text, &mut StepBudget::new(STATEMENT_STEPS)))
+        .and_then(|regex| regex.is_match(text, &mut StepBudget::new(MATCH_STEPS)))
         .unwrap_or_else(|error| panic!("{pattern}: {error}"))
 }
 
 fn matches_folded(text: &str, pattern: &str) -> bool {
     Regex::compile(pattern, CaseSensitivity::Insensitive)
-        .and_then(|regex| regex.is_match(text, &mut StepBudget::new(STATEMENT_STEPS)))
+        .and_then(|regex| regex.is_match(text, &mut StepBudget::new(MATCH_STEPS)))
         .unwrap_or_else(|error| panic!("{pattern}: {error}"))
 }
 
@@ -212,11 +212,40 @@ fn the_step_budget_ends_a_runaway_match() {
         .is_match(&text, &mut StepBudget::new(10_000))
         .expect_err("budget");
     assert_eq!(error.state().code(), "54000");
-    assert_eq!(
-        error.message(),
-        "regular expression is too complex for this statement"
-    );
+    assert_eq!(error.message(), "regular expression match is too complex");
     assert!(error.hint().is_some());
+}
+
+#[test]
+fn each_match_of_a_statement_gets_its_own_step_budget() {
+    let _statement = crate::regex::enter_statement();
+    let text = "abcd".repeat(100);
+    let pattern = "^(a|b|c|d)*$";
+    let one_match_steps = 20_000;
+    for _ in 0..200 {
+        assert_eq!(
+            crate::regex::matches_within(
+                &text,
+                pattern,
+                CaseSensitivity::Sensitive,
+                one_match_steps
+            ),
+            Ok(true)
+        );
+    }
+    let runaway = "abcd".repeat(10_000);
+    let error = crate::regex::matches_within(
+        &runaway,
+        pattern,
+        CaseSensitivity::Sensitive,
+        one_match_steps,
+    )
+    .expect_err("budget");
+    assert_eq!(error.state().code(), "54000");
+    assert_eq!(
+        crate::regex::matches_within(&text, pattern, CaseSensitivity::Sensitive, one_match_steps),
+        Ok(true)
+    );
 }
 
 struct Seeded(u64);

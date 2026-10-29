@@ -1,3 +1,4 @@
+use crate::arrays::ArrayElement;
 use crate::ast::{BinaryOperator, Expr, ExprKind, Literal, TruthTest, UnaryOperator};
 use crate::datetime::{self, DateTimeKind, LocalTime};
 use crate::encoding::TableDefinition;
@@ -399,6 +400,12 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
                 _ => ("?column?".into(), false),
             }
         }
+        ExprKind::Function { name, arguments } if name == "array_element_cast" => {
+            arguments.first().map_or_else(
+                || ("?column?".into(), false),
+                name_and_whether_it_names_a_value,
+            )
+        }
         ExprKind::Function { name, .. } if name == "array_any" || name == "array_all" => {
             ("?column?".into(), false)
         }
@@ -752,42 +759,9 @@ impl Evaluator<'_> {
 
     fn binary(&self, operator: BinaryOperator, left: &Expr, right: &Expr) -> SqlResult<Value> {
         match operator {
-            BinaryOperator::Concat => {
-                let (left_value, right_value) = self.concatenated(left, right)?;
-                let array_operand = matches!(left_value, Value::Array(_))
-                    || matches!(right_value, Value::Array(_))
-                    || ((left_value.is_null() || right_value.is_null())
-                        && crate::arrays::concat_type(left, right, self.scope).is_some());
-                if array_operand {
-                    return crate::arrays::concatenation(
-                        self,
-                        left,
-                        right,
-                        left_value,
-                        right_value,
-                    );
-                }
-                let (left, right) = (left_value, right_value);
-                if let Some(joined) = bytes_concatenated(&left, &right) {
-                    return joined;
-                }
-                let either_text = matches!(left, Value::Text(_)) || matches!(right, Value::Text(_));
-                let either_null = left.is_null() || right.is_null();
-                if !either_text && !either_null {
-                    return Err(no_operator("||", &left, &right));
-                }
-                if let (Value::Text(left), Value::Text(right)) = (&left, &right) {
-                    crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
-                }
-                match (left.to_text(), right.to_text()) {
-                    (Some(mut left), Some(right)) => {
-                        crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
-                        left.push_str(&right);
-                        Ok(Value::Text(left))
-                    }
-                    _ => Ok(Value::Null),
-                }
-            }
+            BinaryOperator::Concat => self
+                .concatenation(left, right)
+                .map(|concatenated| concatenated.value),
             BinaryOperator::Equal
             | BinaryOperator::NotEqual
             | BinaryOperator::Less
@@ -846,23 +820,70 @@ impl Evaluator<'_> {
         }
     }
 
-    fn concatenated(&self, left: &Expr, right: &Expr) -> SqlResult<(Value, Value)> {
-        let bytes_hint = |value: &Value| {
-            if matches!(value, Value::Bytea(_)) {
+    fn concatenation(&self, left: &Expr, right: &Expr) -> SqlResult<Concatenated> {
+        let (left_operand, right_operand) = self.concatenated(left, right)?;
+        let array_operand = left_operand.is_array_typed(left, self.scope)
+            || right_operand.is_array_typed(right, self.scope);
+        if array_operand {
+            return crate::arrays::concatenation(
+                self,
+                (left, left_operand),
+                (right, right_operand),
+            );
+        }
+        let (left, right) = (left_operand.value, right_operand.value);
+        if let Some(joined) = bytes_concatenated(&left, &right) {
+            return joined.map(Concatenated::scalar);
+        }
+        let either_text = matches!(left, Value::Text(_)) || matches!(right, Value::Text(_));
+        let either_null = left.is_null() || right.is_null();
+        if !either_text && !either_null {
+            return Err(no_operator("||", &left, &right));
+        }
+        if let (Value::Text(left), Value::Text(right)) = (&left, &right) {
+            crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
+        }
+        Ok(Concatenated::scalar(
+            match (left.to_text(), right.to_text()) {
+                (Some(mut left), Some(right)) => {
+                    crate::memory::check_value_bytes(left.len().saturating_add(right.len()))?;
+                    left.push_str(&right);
+                    Value::Text(left)
+                }
+                _ => Value::Null,
+            },
+        ))
+    }
+
+    fn concatenation_operand(&self, expr: &Expr, hint: Option<SqlType>) -> SqlResult<Concatenated> {
+        match &expr.kind {
+            ExprKind::Binary(BinaryOperator::Concat, left, right) => self
+                .concatenation(left, right)
+                .map_err(|error| error.at_if_unplaced(expr.position)),
+            _ => self.eval(expr, hint).map(Concatenated::scalar),
+        }
+    }
+
+    fn concatenated(&self, left: &Expr, right: &Expr) -> SqlResult<(Concatenated, Concatenated)> {
+        let bytes_hint = |operand: &Concatenated| {
+            if matches!(operand.value, Value::Bytea(_)) {
                 Some(SqlType::Bytea)
             } else {
                 Some(SqlType::Text)
             }
         };
         let (left, right) = if is_unknown_literal(left) && !is_unknown_literal(right) {
-            let right = self.eval(right, Some(SqlType::Text))?;
-            (self.eval(left, bytes_hint(&right))?, right)
+            let right = self.concatenation_operand(right, Some(SqlType::Text))?;
+            (self.concatenation_operand(left, bytes_hint(&right))?, right)
         } else {
-            let left = self.eval(left, Some(SqlType::Text))?;
-            let right = self.eval(right, bytes_hint(&left))?;
+            let left = self.concatenation_operand(left, Some(SqlType::Text))?;
+            let right = self.concatenation_operand(right, bytes_hint(&left))?;
             (left, right)
         };
-        Ok((as_text_if_character(left), as_text_if_character(right)))
+        Ok((
+            left.with_character_as_text(),
+            right.with_character_as_text(),
+        ))
     }
 
     fn datetime_function(&self, name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
@@ -1056,6 +1077,7 @@ impl Evaluator<'_> {
         match name {
             "oracle_extract" => return self.oracle_extract(arguments),
             "array_constructor" => return crate::arrays::construct(self, arguments, None),
+            "array_element_cast" => return crate::arrays::element_cast(self, arguments),
             "array_any" => return crate::arrays::quantified(self, arguments, false),
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
@@ -1234,6 +1256,43 @@ fn mysql_binary_concat(values: &[Value]) -> SqlResult<Value> {
         joined.extend_from_slice(bytes);
     }
     Ok(Value::Bytea(joined))
+}
+
+pub(crate) struct Concatenated {
+    pub(crate) value: Value,
+    pub(crate) array_element: Option<ArrayElement>,
+}
+
+impl Concatenated {
+    fn scalar(value: Value) -> Self {
+        Self {
+            value,
+            array_element: None,
+        }
+    }
+
+    fn with_character_as_text(self) -> Self {
+        Self {
+            value: as_text_if_character(self.value),
+            ..self
+        }
+    }
+
+    fn is_array_typed(&self, expr: &Expr, scope: Scope<'_>) -> bool {
+        match self.value {
+            Value::Array(_) => true,
+            Value::Null => {
+                self.array_element.is_some()
+                    || (!is_unknown_literal(expr)
+                        && !matches!(expr.kind, ExprKind::Binary(BinaryOperator::Concat, ..))
+                        && matches!(
+                            crate::typing::static_type(expr, scope),
+                            Some(SqlType::Array(_))
+                        ))
+            }
+            _ => false,
+        }
+    }
 }
 
 fn as_text_if_character(value: Value) -> Value {

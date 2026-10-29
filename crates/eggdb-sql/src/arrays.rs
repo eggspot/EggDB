@@ -1,6 +1,6 @@
 use crate::ast::{Expr, ExprKind, Literal};
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::eval::{Evaluator, Scope, and, compare_truth, or, truth_value};
+use crate::eval::{Concatenated, Evaluator, Scope, and, compare_truth, or, truth_value};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
 use std::cmp::Ordering;
 
@@ -772,15 +772,17 @@ enum Operand {
 }
 
 impl Operand {
-    fn of(value: &Value, declared: Option<SqlType>) -> Self {
-        match (value, declared) {
-            (Value::Array(array), _) => Self::Array(array.element),
-            (Value::Null, Some(SqlType::Array(element))) => Self::Array(element),
-            (Value::Null, Some(sql_type)) => Self::Element(sql_type),
-            (Value::Null, None) => Self::Unknown,
-            (value, declared) => value
+    fn of(value: &Value, declared: impl FnOnce() -> Option<SqlType>) -> Self {
+        match value {
+            Value::Array(array) => Self::Array(array.element),
+            Value::Null => match declared() {
+                Some(SqlType::Array(element)) => Self::Array(element),
+                Some(sql_type) => Self::Element(sql_type),
+                None => Self::Unknown,
+            },
+            value => value
                 .sql_type()
-                .or(declared)
+                .or_else(declared)
                 .map_or(Self::Unknown, Self::Element),
         }
     }
@@ -833,25 +835,23 @@ fn concatenated_element(left: Operand, right: Operand) -> Option<Option<ArrayEle
 
 pub(crate) fn concatenation(
     evaluator: &Evaluator<'_>,
-    left: &Expr,
-    right: &Expr,
-    left_value: Value,
-    right_value: Value,
-) -> SqlResult<Value> {
-    let declared = |expr: &Expr| {
-        evaluator
-            .declared_type(expr)
-            .or_else(|| crate::typing::static_type(expr, evaluator.scope))
-    };
-    let operand = |expr: &Expr, value: &Value| {
+    (left, left_concatenated): (&Expr, Concatenated),
+    (right, right_concatenated): (&Expr, Concatenated),
+) -> SqlResult<Concatenated> {
+    let operand = |expr: &Expr, concatenated: &Concatenated| {
         if is_unknown(expr) {
-            Operand::Unknown
-        } else {
-            Operand::of(value, declared(expr))
+            return Operand::Unknown;
         }
+        Operand::of(&concatenated.value, || match concatenated.array_element {
+            Some(element) => Some(SqlType::Array(element)),
+            None => evaluator
+                .declared_type(expr)
+                .or_else(|| crate::typing::static_type(expr, evaluator.scope)),
+        })
     };
-    let left_operand = operand(left, &left_value);
-    let right_operand = operand(right, &right_value);
+    let left_operand = operand(left, &left_concatenated);
+    let right_operand = operand(right, &right_concatenated);
+    let (left_value, right_value) = (left_concatenated.value, right_concatenated.value);
     let array_type = match (left_operand, right_operand) {
         (Operand::Array(element), _) | (_, Operand::Array(element)) => SqlType::Array(element),
         _ => {
@@ -871,11 +871,11 @@ pub(crate) fn concatenation(
     let left_value = reread(left, left_value)?;
     let right_value = reread(right, right_value)?;
     let left_operand = match left_operand {
-        Operand::Unknown => Operand::of(&left_value, None),
+        Operand::Unknown => Operand::of(&left_value, || None),
         known => known,
     };
     let right_operand = match right_operand {
-        Operand::Unknown => Operand::of(&right_value, None),
+        Operand::Unknown => Operand::of(&right_value, || None),
         known => known,
     };
     let Some(Some(element)) = concatenated_element(left_operand, right_operand) else {
@@ -889,6 +889,10 @@ pub(crate) fn concatenation(
         (left_operand, left_value),
         (right_operand, right_value),
     )
+    .map(|value| Concatenated {
+        value,
+        array_element: Some(element),
+    })
 }
 
 fn concatenate(
@@ -937,6 +941,9 @@ pub(crate) fn function_type(
             Some(None) if !arguments.is_empty() => Some(SqlType::Array(ArrayElement::Text)),
             _ => None,
         },
+        "array_element_cast" => arguments
+            .first()
+            .and_then(|array| crate::typing::static_type(array, scope)),
         "array_subscript" => match arguments
             .first()
             .and_then(|array| crate::typing::static_type(array, scope))
@@ -953,15 +960,39 @@ pub(crate) fn function_type(
     })
 }
 
-pub(crate) fn concat_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> Option<SqlType> {
-    let operand = |expr: &Expr| {
-        if is_unknown(expr) {
-            Operand::Unknown
-        } else {
-            Operand::of_type(crate::typing::static_type(expr, scope))
-        }
+pub(crate) fn element_cast(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Value> {
+    let [array, element_target] = arguments else {
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            "function array_element_cast() does not exist",
+        ));
     };
-    let (left, right) = (operand(left), operand(right));
+    let ExprKind::Cast {
+        sql_type: element_type,
+        ..
+    } = element_target.kind
+    else {
+        return evaluator.eval(array, None);
+    };
+    match evaluator.eval(array, None)? {
+        Value::Array(mut array) => {
+            for item in &mut array.items {
+                if !item.is_null() {
+                    *item = convert(
+                        std::mem::replace(item, Value::Null),
+                        element_type,
+                        Conversion::Explicit,
+                    )?;
+                }
+            }
+            Ok(Value::Array(array))
+        }
+        other => Ok(other),
+    }
+}
+
+pub(crate) fn concat_type(left: Option<SqlType>, right: Option<SqlType>) -> Option<SqlType> {
+    let (left, right) = (Operand::of_type(left), Operand::of_type(right));
     let first_array = match (left, right) {
         (Operand::Array(element), _) | (_, Operand::Array(element)) => element,
         _ => return None,

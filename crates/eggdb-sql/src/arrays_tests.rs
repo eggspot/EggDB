@@ -409,3 +409,181 @@ fn subscripts_outside_the_integer_range_are_22003() {
         "a|b\nt|2\nSELECT 1"
     );
 }
+
+#[test]
+fn a_long_concatenation_chain_with_null_operands_is_typed_once_per_node() {
+    for dialect in [crate::Dialect::PostgreSql, crate::Dialect::Sqlite] {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        let columns: Vec<String> = (1..=40).map(|index| format!("c{index}")).collect();
+        let definitions: Vec<String> = columns.iter().map(|name| format!("{name} text")).collect();
+        run(
+            &mut session,
+            &format!(
+                "CREATE TABLE wide (id integer PRIMARY KEY, {})",
+                definitions.join(", ")
+            ),
+        )
+        .unwrap();
+        for id in 1..=20 {
+            let values: Vec<String> = (1..=40)
+                .map(|column| {
+                    if id % 2 == 0 && column == 20 {
+                        "NULL".to_owned()
+                    } else {
+                        format!("'{column}'")
+                    }
+                })
+                .collect();
+            run(
+                &mut session,
+                &format!("INSERT INTO wide VALUES ({id}, {})", values.join(", ")),
+            )
+            .unwrap();
+        }
+        let chain = columns.join(" || ");
+        let started = std::time::Instant::now();
+        let joined = run(
+            &mut session,
+            &format!("SELECT {chain} AS joined FROM wide WHERE id = 1"),
+        )
+        .unwrap();
+        let counted = run(
+            &mut session,
+            &format!("SELECT count(*) AS n FROM wide WHERE ({chain}) IS NULL"),
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "{dialect:?}: {:?}",
+            started.elapsed()
+        );
+        let expected: String = (1..=40).map(|column| column.to_string()).collect();
+        assert_eq!(
+            joined,
+            format!("joined\n{expected}\nSELECT 1"),
+            "{dialect:?}"
+        );
+        assert_eq!(counted, "n\n10\nSELECT 1", "{dialect:?}");
+    }
+}
+
+#[test]
+fn concatenation_results_carry_their_array_type_to_the_enclosing_concatenation() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let numbers: Vec<String> = (1..=40).map(|number| number.to_string()).collect();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        run(
+            &mut session,
+            &format!("SELECT NULL::int[] || {} AS a", numbers.join(" || "))
+        )
+        .unwrap(),
+        format!("a\n{{{}}}\nSELECT 1", numbers.join(","))
+    );
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    let cases = [
+        ("(NULL::int[] || NULL::int[]) || 1", "{1}"),
+        ("1 || (NULL::int[] || NULL::int[])", "{1}"),
+        ("(NULL::text || NULL) || ARRAY['a']", "{NULL,a}"),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(
+            run(&mut session, &format!("SELECT {sql} AS a")).unwrap(),
+            format!("a\n{expected}\nSELECT 1"),
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        state(&mut session, "SELECT ARRAY[1] || (NULL::text || 'a')"),
+        "42883"
+    );
+}
+
+#[test]
+fn array_casts_apply_the_element_types_length_and_scale() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let cases = [
+        ("ARRAY['abc']::varchar(1)[]", "{a}"),
+        ("ARRAY[1,2]::numeric(5,2)[]", "{1.00,2.00}"),
+        ("'{abc,de}'::char(2)[]", "{ab,de}"),
+        ("'{1.234,NULL}'::numeric(5,2)[]", "{1.23,NULL}"),
+        ("(ARRAY['abc']::varchar(2)[])[1]", "ab"),
+        ("NULL::varchar(1)[] IS NULL", "t"),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(
+            run(&mut session, &format!("SELECT {sql} AS a")).unwrap(),
+            format!("a\n{expected}\nSELECT 1"),
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        run(&mut session, "SELECT ARRAY['abc']::varchar(1)[]").unwrap(),
+        "array\n{a}\nSELECT 1"
+    );
+    assert_eq!(
+        state(&mut session, "SELECT ARRAY[1234.5]::numeric(3,1)[]"),
+        "22003"
+    );
+    assert_eq!(
+        state(&mut session, "SELECT array_element_cast(ARRAY[1], 1)"),
+        "42883"
+    );
+}
+
+#[test]
+fn arrays_of_different_element_types_unify_in_union_and_values() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT ARRAY[1] AS a UNION SELECT ARRAY[1.5] ORDER BY 1"
+        )
+        .unwrap(),
+        "a\n{1}\n{1.5}\nSELECT 2"
+    );
+    assert_eq!(
+        run(&mut session, "VALUES (ARRAY[1]), (ARRAY[1.5])").unwrap(),
+        "column1\n{1}\n{1.5}\nSELECT 2"
+    );
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT ARRAY['a'::varchar] AS a UNION ALL SELECT ARRAY['b'::text]"
+        )
+        .unwrap(),
+        "a\n{a}\n{b}\nSELECT 2"
+    );
+    assert_eq!(
+        crate::set_operations::common_type(
+            crate::types::SqlType::Array(ArrayElement::Integer),
+            crate::types::SqlType::Array(ArrayElement::Boolean)
+        ),
+        None
+    );
+}
+
+#[test]
+fn any_with_a_parameter_on_the_left_keeps_the_general_form() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let sql = "SELECT $1 = ANY(ARRAY[1,2]) AS a, $1 <> ALL(ARRAY[3]) AS b";
+    let description = session.describe(sql, &[None]).unwrap();
+    assert_eq!(description.columns.map(|columns| columns.len()), Some(2));
+    let parameter = crate::Parameter {
+        declared_type: None,
+        value: Some("1".to_owned()),
+    };
+    let mut outputs = Vec::new();
+    session
+        .execute_prepared(sql, &[parameter], &mut |result| {
+            outputs.push(render(&result));
+            true
+        })
+        .unwrap();
+    assert_eq!(outputs, vec!["a|b\nt|t\nSELECT 1".to_owned()]);
+}

@@ -240,7 +240,7 @@ fn a_values_list_in_from_names_the_outer_query_and_never_its_siblings() {
 
 #[test]
 fn rows_go_into_the_intermediate_once_and_every_copy_held_is_charged() {
-    let budget = 3600 * 1024;
+    let budget = 2300 * 1024;
     for (sql, fits) in [
         ("SELECT count(*) FROM generate_series(1, 20000)", true),
         (
@@ -259,4 +259,32 @@ fn rows_go_into_the_intermediate_once_and_every_copy_held_is_charged() {
             assert_eq!(state(&mut session, sql), "53200", "{sql}");
         }
     }
+}
+
+#[test]
+fn a_function_in_from_naming_a_sibling_through_a_subquery_is_0a000() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "SELECT * FROM (VALUES (2)) w(x), generate_series(1, (SELECT x)) g",
+        "SELECT * FROM (VALUES (2)) w(x), unnest((SELECT ARRAY[x])) g",
+        "SELECT * FROM (VALUES (2)) w(x), generate_series(1, (SELECT w.x)) g",
+    ] {
+        assert_eq!(state(&mut session, sql), "0A000", "{sql}");
+    }
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT count(*) AS n FROM (VALUES (5)) w(x), generate_series(1, (SELECT max(x) FROM (VALUES (3)) v(x))) g"
+        )
+        .unwrap(),
+        "n\n3\nSELECT 1"
+    );
+    assert_eq!(
+        state(
+            &mut session,
+            "SELECT * FROM (VALUES (2)) w(x), generate_series(1, (SELECT nowhere)) g"
+        ),
+        "42703"
+    );
 }
