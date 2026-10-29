@@ -103,6 +103,26 @@ expect_exit 3 "$eggdb" import copy.db app.jsonl
 expect_exit 0 "$eggdb" import copy.db app.jsonl --on-conflict skip
 pass "export and import round trip"
 
+expect_exit 0 "$eggdb" collection add app.db sessions
+expect_exit 1 "$eggdb" collection add app.db sessions
+expect_exit 0 "$eggdb" put app.db -C sessions s:1 alice
+expect_exit 0 "$eggdb" put --create app.db -C cache c:1 hot
+expect_output alice "$eggdb" get app.db -C sessions s:1
+expect_exit 1 "$eggdb" get app.db -C orders s:1
+grep -q 'try: eggdb collection add app.db orders' last.err || fail "a missing collection said $(cat last.err)"
+expect_output '{"file":"app.db","collections":["cache","sessions"]}' "$eggdb" collection list app.db
+expect_exit 0 "$eggdb" scan app.db --keys-only --format json
+[ "$(wc -l < last.out | tr -d ' ')" = 5 ] || fail "the default key space showed a collection's keys: $(cat last.out)"
+expect_exit 0 "$eggdb" export app.db collections.jsonl
+head -n 1 collections.jsonl | grep -q '"version":2' || fail "an export with collections is not version 2"
+expect_exit 0 "$eggdb" import --create restored.db collections.jsonl
+expect_output alice "$eggdb" get restored.db -C sessions s:1
+expect_exit 0 "$eggdb" collection delete app.db cache
+expect_exit 1 "$eggdb" get app.db -C cache c:1
+expect_exit 0 "$eggdb" check app.db --format json
+grep -q '"leaked_pages":0}' last.out || fail "check after collections found $(cat last.out)"
+pass "collections: add, put, get, list, export, import and delete"
+
 expect_exit 0 "$eggdb" sql --create shop.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL, price double precision)"
 printf '%s\n' "INSERT INTO items VALUES (1, 'egg', 0.25), (2, 'bread', 2.5);" "UPDATE items SET price = price * 2 WHERE id = 1;" > shop.sql
 expect_exit 0 "$eggdb" sql shop.db shop.sql

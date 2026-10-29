@@ -120,6 +120,8 @@ fn usage_line(messages: &mut Output<'_>, command: CommandName) {
 }
 
 #[cfg(test)]
+mod collection_tests;
+#[cfg(test)]
 mod copy_tests;
 #[cfg(test)]
 mod shell_tests;
