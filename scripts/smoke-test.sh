@@ -123,6 +123,32 @@ expect_exit 0 "$eggdb" check app.db --format json
 grep -q '"leaked_pages":0}' last.out || fail "check after collections found $(cat last.out)"
 pass "collections: add, put, get, list, export, import and delete"
 
+expect_exit 0 "$eggdb" put --create expiry.db s:1 alice --ttl 1h
+expect_exit 0 "$eggdb" ttl expiry.db s:1 --format text
+case "$(cat last.out)" in
+  59m5[0-9]s|1h) ;;
+  *) fail "eggdb ttl printed '$(cat last.out)', expected about 1h" ;;
+esac
+expect_exit 0 "$eggdb" persist expiry.db s:1
+expect_output never "$eggdb" ttl expiry.db s:1 --format text
+expect_exit 0 "$eggdb" expire expiry.db s:1 7d
+expect_exit 1 "$eggdb" ttl expiry.db nobody
+expect_exit 2 "$eggdb" expire expiry.db s:1 30
+expect_output 1 "$eggdb" incr expiry.db hits --format text
+expect_output 11 "$eggdb" incr expiry.db hits 10 --format text
+expect_output 9 "$eggdb" decr expiry.db hits 2 --format text
+expect_exit 3 "$eggdb" incr expiry.db s:1
+expect_exit 0 "$eggdb" cas expiry.db lock --if-absent worker-7
+expect_exit 1 "$eggdb" cas expiry.db lock --if-absent worker-8
+grep -q 'holding worker-7' last.err || fail "a refused cas said $(cat last.err)"
+expect_exit 0 "$eggdb" cas expiry.db lock worker-7 --delete
+expect_exit 1 "$eggdb" get expiry.db lock
+expect_exit 0 "$eggdb" collection add expiry.db stats
+expect_output 3 "$eggdb" incr expiry.db -C stats page 3 --format text
+expect_exit 0 "$eggdb" check expiry.db --format json
+grep -q '"leaked_pages":0}' last.out || fail "check after expiring keys found $(cat last.out)"
+pass "expiring keys and counters: put --ttl, ttl, expire, persist, incr, decr and cas"
+
 expect_exit 0 "$eggdb" sql --create shop.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL, price double precision)"
 printf '%s\n' "INSERT INTO items VALUES (1, 'egg', 0.25), (2, 'bread', 2.5);" "UPDATE items SET price = price * 2 WHERE id = 1;" > shop.sql
 expect_exit 0 "$eggdb" sql shop.db shop.sql

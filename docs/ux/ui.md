@@ -728,6 +728,118 @@ A line pair after `Find`:
 - The two help lines and `C collection` in the hints appear only when the database has a
   collection (or one is shown), so a file without collections keeps every golden screen.
 
+## Expiring keys and counters (item 27)
+Roadmap item 27, designed by Claude Fable (D15). A key may have a time to live and a value may be
+a counter (cli.md section 21). The UI shows the time left, sets and clears it, and changes
+counters; compare-and-set stays with the CLI (a form with two values is a script's tool). Nothing
+changes for a file that has never held an expiring key (the header's `EXPIRING_KEYS` bit, D140,
+given to the UI as `Summary::expiring_keys`): the same golden screens and bar, except that `t`,
+`+` and `-` work and the help screen lists them.
+
+### Showing the time left
+- **Key list.** An expiring key's row shows its time left in the size column instead of the
+  size, in the dim style: `29s`, `12m`, `1h`, `7d`, `412ms` (the largest unit alone, rounded
+  down; `>27y` beyond 9999 days). A size has a space before `K`, `M`, `G` or is bare digits; a
+  time ends in a lower-case unit, so the two read apart without colour. Permanent keys keep their
+  size. The row carries `KeyRow::time_to_live: Option<Duration>`, as of the redraw's read.
+- **Viewer.** The key line (the viewer's first row) gets, right-aligned and dim, `expires in
+  1h4m12s` in the full form of cli.md section 21; a long key is cut to leave room for it. The
+  title keeps the size.
+- **Counting down** (design): the time left computed from the deadline on every frame, with a
+  one-second tick while a visible key has under a minute left. See "As built".
+
+### When the shown key expires
+A redraw whose scan no longer returns the selected key (`r`, or any commit) selects the next
+key. `d` or `t` on a key that is gone between frames keeps today's message: the commit fails
+with `… is no longer in app.db; nothing was committed. Press r to re-read`; `+` and `-` count an
+expired key from 0, as `eggdb incr` does.
+
+### Set or clear the time to live (`t`)
+`t` (in the list and the viewer) acts on the selected key. The list's title row becomes
+` Expire user:1 in: █`, the single-line editor taking a time in the CLI's grammar. `Enter`
+checks the text before any transaction: a bad time keeps the editor with the toast `Not a time:
+'30'; use 30s, 5m, 1h30m, 7d or 1500ms`; `0` with `0 is not a time to live; d deletes the key`.
+A good time, or an empty line on an expiring key, opens the confirm modal:
+```
+┌ Set time to live ────────────────────────────────┐
+│ Key    user:1 (6 B)                              │
+│ In     collection sessions                       │
+│ TTL    never → 30s                               │
+│                                                  │
+│ One commit, written to disk before you continue. │
+│                                                  │
+│              Enter commit     Esc back           │
+└──────────────────────────────────────────────────┘
+```
+The `In` line appears only in a collection, as in the other modals. Changing shows `TTL    29s
+→ 5m`; an empty line on an expiring key titles the modal `Clear time to live` with `TTL    29s →
+never`; an empty line on a permanent key only toasts `user:1 has no time to live` and closes the
+editor. `Enter` commits `Change::Expire { key, time_to_live }` or `Change::Persist { key }`
+through `Source::write`, redraws from a fresh read and toasts `Committed user:1 (expires in 30s)
+at 09:14:37Z` or `Committed user:1 (never expires) at 09:14:40Z`. The commit-failure table
+applies unchanged. `--read-only` refuses `t` with the read-only toast.
+
+### Counters (`+`, `-`)
+`+` and `-` (in the list and the viewer) act on the selected key. The list's title row becomes
+` Increment hits by: █` or ` Decrement hits by: █`; `Enter` on a whole number from 0 to
+9223372036854775807, or on an empty line for 1, commits `Change::Increment { key, by }` (`by`
+negative for `-`) at once, with no second modal: the typed amount and `Enter` are the
+confirmation, and the opposite key undoes it (unlike `d`, which has no undo). The toast says
+`Committed hits 41 → 42 at 09:14:37Z`. `abc` keeps the editor with `Not a whole number: 'abc'`.
+A value that is not a whole number, or an overflow, is the engine's error as a toast,
+`Error (NotAnInteger): …` with `Try: e to store a whole number`; nothing is committed. The time
+to live is kept and the row still shows it. `--read-only` refuses both.
+
+### Hints bar and help screen
+In a file with expiring keys the list's bar gains `t expire` after `d delete`; at 80 columns the
+existing drop rule removes the entry before `? help`, so the bar reads
+` ↑↓ move  / filter  e edit  a add  d delete  t expire  s sql  ? help  q quit`. While the `t`
+editor is open the bar reads ` Enter continue  Esc cancel  30s 5m 1h30m 7d times  empty: never`,
+and while the `+`/`-` editor is open ` Enter commit  Esc cancel  empty: 1`. The help screen gains,
+after `Change`, in every file:
+```
+ Expire      t  time to live: 30s, 5m, 1h30m, 7d, or empty for never
+ Counter     +  add to a counter   -  subtract (asks how much, 1 if empty)
+```
+and the read-only line reads `Opened read-only: e, a, d, t, + and - are off; start without
+--read-only.` The `Source` trait gains the three `Change` variants, `KeyRow::time_to_live`,
+`Summary::expiring_keys` and `ErrorKind::NotAnInteger`.
+
+### Scenarios for the tests
+40. A file without expiring keys keeps every golden screen; `t` on `user:1`, `30s`, `Enter`,
+    `Enter`: the modal reads `TTL    never → 30s`, the toast matches, the row shows `30s`, the
+    viewer's key line `expires in 30s`, and the bar now has `t expire`.
+41. `t` with `30`, then `0s`: each toast, the editor kept; `Esc` changes nothing.
+42. `t` and an empty line on a permanent key only toasts; on an expiring key `Clear time to
+    live`, `TTL    1h30m → never`, and after `Enter` the row shows its size again.
+43. `+` on `hits` (`41`): `Enter` gives `Committed hits 41 → 42`; `-` with `5` gives `42 → 37`;
+    `+` with `abc` keeps the editor; `+` on `user:1` (text) shows the `NotAnInteger` toast and the
+    value is unchanged.
+44. `--read-only` refuses `t`, `+` and `-` with the read-only toast and writes nothing.
+45. In a collection the modal carries the `In` line, and only that collection's key gets the
+    time to live.
+
+### Decided by this design
+1. The time left replaces the size in the list only for expiring keys; the viewer's key line
+   shows the full form. No new column, no changed golden screens elsewhere.
+2. `t` for time to live, `+`/`-` for counters; `t expire` joins the bar only with expiring keys,
+   `+`/`-` live in the help.
+3. Setting and clearing go through a confirm modal (`TTL    never → 30s`); a counter step commits
+   on the prompt's `Enter`, since the opposite key undoes it.
+4. Compare-and-set is not in the UI.
+
+### As built (item 27, D140)
+- **No live countdown.** The time left is the one the last read returned; `r`, any commit or a
+  move that re-reads the window refreshes it. The UI reads no clock of its own, so the golden
+  screens stay deterministic, and an expired key leaves the list at the next re-read without an
+  `Expired … at` toast. The one-second tick of the design is left for later.
+- The modal's `TTL` line has no `(until 09:15:07Z)` for the same reason.
+- The `+`/`-` editor starts empty, and an empty line means 1, rather than holding a selected `1`:
+  the one-line editor has no selection.
+- When the counter's old value was not loaded (a value above 64 MiB), the toast reads
+  `Committed hits = 42 at …`.
+- The two help lines are shortened to fit 80 columns.
+
 ## Resize
 The terminal layer delivers a `Resize` event; the UI recomputes the layout and redraws. The
 selected key stays selected and visible (the window is re-read with the selection in the same

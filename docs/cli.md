@@ -41,6 +41,11 @@ eggdb <command> <file> [arguments] [options]
 | `get <file> <key>` | read-only | prints the value, or exits 1 |
 | `del <file> <key>` | for writing | removes the key and commits; exits 1 if it was not there. `delete` is the same command |
 | `scan <file>` | read-only | prints entries in key order (options below) |
+| `ttl <file> <key>` | read-only | prints how long the key still lives, or `never`; exits 1 if it is not there |
+| `expire <file> <key> <time>` | for writing | gives the key a time to live (`30s`, `5m`, `1h30m`, `7d`, `1500ms`); exits 1 if it is not there |
+| `persist <file> <key>` | for writing | removes the key's time to live; exits 1 if it is not there |
+| `incr <file> <key> [<n>]`, `decr …` | for writing | adds `n` (1) to the counter under the key, or subtracts it, and prints the new value |
+| `cas <file> <key> (<expected> \| --if-absent) (<new> \| --delete)` | for writing | replaces the value only while it is `<expected>`; exits 1 when it is not |
 | `check <file>` | read-only | reads every page and reports the file's health |
 | `stats <file>` | read-only | the page size, pages, file size, last commit and log, without reading a page |
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
@@ -70,9 +75,9 @@ once when the file is open anywhere (see "Exit codes"). That includes an AI agen
 `eggdb mcp`, which holds the file read-only for up to its time limit; the busy message says it
 may be one.
 
-**Collections.** `-C <name>` (`--collection <name>`) on `get`, `put`, `del`, `scan`, `export`
-and `import` makes the command work in that collection instead of the default key space (see
-"Collections" below).
+**Collections.** `-C <name>` (`--collection <name>`) on `get`, `put`, `del`, `scan`, `export`,
+`import`, `ttl`, `expire`, `persist`, `incr`, `decr` and `cas` makes the command work in that
+collection instead of the default key space (see "Collections" below).
 
 **Large values.** `put` sizes its page cache to the value, so any value up to 1 GiB works
 without an option. `--cache <bytes>` sets the cache for any command (`--cache 64m`).
@@ -244,6 +249,8 @@ differs from them. The main screen, with a JSON value selected:
 | `e` | edit the selected value | edit this value |
 | `a` | add a key | add a key |
 | `d` | delete the selected key (asks for `d` again) | delete this key |
+| `t` | set or clear the selected key's time to live (asks, then confirms) | same |
+| `+` `-` | add to or subtract from the selected counter (asks how much, 1 if empty) | same |
 | `c` | check every page and show the stats | same |
 | `m` | show the last message in full | same |
 | `r` | re-read the keys, the value and the stats | same |
@@ -573,6 +580,52 @@ eggdb collection delete app.db cache
   ([ux/ui.md](ux/ui.md) "Collections").
 - SQL does not see collections in this release, and `check` and `stats` report the whole file.
 
+## Expiring keys and counters
+
+A key can have a **time to live**: at its deadline reads and scans no longer see it, and later
+commits remove it (D140; [embedded.md](embedded.md) "Expiring keys and counters"). A **counter**
+is a value that is a whole number stored as text, changed atomically. All of these commands take
+`-C <name>`.
+
+```sh
+eggdb put app.db -C sessions s:1 '{"user":1}' --ttl 30m
+eggdb ttl app.db -C sessions s:1          # 29m59s
+eggdb ttl app.db user:1                   # never
+eggdb expire app.db user:1 7d
+eggdb persist app.db user:1
+eggdb incr app.db hits                    # 1
+eggdb incr app.db hits 10                 # 11
+eggdb decr app.db hits 2                  # 9
+eggdb cas app.db lock --if-absent worker-7
+eggdb cas app.db lock worker-7 --delete
+```
+
+- **Times** are counts with a unit, `ms`, `s`, `m`, `h` or `d`, joined from the largest down:
+  `1500ms`, `30s`, `5m`, `1h30m`, `7d`. A bare number, a decimal, a space or a repeated unit is
+  a usage error, and so is 0 (`eggdb del` removes a key now). `ttl` prints times in the same
+  grammar, whole seconds rounded down (`29s`, `1h4m12s`) or milliseconds under one second, so a
+  printed time can be typed back.
+- `put --ttl <time>` stores the value with a time to live; a `put` without `--ttl` makes the key
+  permanent again, and so does `persist`. `expire` replaces the time to live of a key that is
+  there, and exits 1 with `nothing to expire: …` for one that is not.
+- `incr` and `decr` add or subtract `n`, 1 without it, from 0 to 9223372036854775807; to
+  subtract use `decr`, since `-5` is an unknown option. An absent key counts as 0. A value that
+  is not a whole number, or a result outside -9223372036854775808 to 9223372036854775807, exits
+  3 and changes nothing. The time to live is kept.
+- `cas` compares and stores in one transaction. `--if-absent` stands for an `<expected>` of "not
+  there" and `--delete` for a `<new>` of "remove the key". When the value is not the one
+  expected it exits 1 and says what it found: `not swapped: lock is already in app.db (holding
+  worker-7). Nothing changed.` A swap that stores a value makes the key permanent.
+- In a pipe each prints one JSON line: `{"key":"s:1","stored":true,"ttl_ms":1800000,"expires_at":"2026-10-30T09:44:07.123Z"}`
+  for `put --ttl`, `{"key":"s:1","ttl_ms":1799412,"expires_at":"…"}` for `ttl` (both `null` for
+  a permanent key), `{"key":"user:1","expires":true,…}`, `{"key":"user:1","persisted":true}`,
+  `{"key":"hits","value":"11"}`, and `{"key":"lock","swapped":false,"value":"worker-7"}`.
+- `eggdb shell` takes the same commands without `eggdb <command> <file>`, in the collection
+  chosen with `.collection`. `eggdb ui` shows an expiring key's time left in the key list and
+  `expires in …` above its value, `t` sets or clears it, and `+` and `-` change a counter.
+- Keys with a time to live are 14 bytes shorter than other keys (498 bytes in the default key
+  space with 4 KiB pages). `export` writes the keys that are live, without their deadlines.
+
 ## `eggdb sql`
 
 `eggdb sql` runs SQL statements on the file: from `-c "<sql>"`, from a script file, or from
@@ -691,7 +744,8 @@ app=> .quit
 ```
 
 **What a line is.** A line that starts with `.` is a shell command. A line whose first word is
-`put`, `get`, `del`, `scan`, `check` or `stats` (lower case) is that key-value command, with the
+`put`, `get`, `del`, `scan`, `ttl`, `expire`, `persist`, `incr`, `decr`, `cas`, `check` or `stats`
+(lower case) is that key-value command, with the
 arguments and options it takes on the command line, split like a shell splits them (`"..."` and
 `'...'` hold spaces); `@-` is refused, since stdin is the shell's own. Anything else is SQL,
 which continues over lines until a `;` outside quotes, comments and `$$` bodies. `delete` starts

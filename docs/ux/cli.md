@@ -1586,3 +1586,177 @@ per-collection key count in `list` and `stats`, `-C` on `check`, and collections
   their JSON summaries always, 0 for a file without collections.
 - `import -C` checks every key against the collection it loads into, so the same key in two
   collections of a version 2 export follows `--on-conflict` when they are flattened into one.
+
+## 21. Expiring keys and counters (item 27)
+
+A key in the default key space or in a collection may carry a **time to live**: at its deadline it
+is gone for every read and scan and is removed by later writes. The value under a key may be a
+**counter**: a whole number stored as text, changed atomically. And a value may be replaced
+**only while it is what you expect** (compare-and-set). Designed by Claude Fable (D15). The
+grammar of section 1, the byte arguments of section 3, the formats, exit codes and message shape
+of sections 4, 7 and 10 and `-C` of section 20 stay; this section adds one option and six
+commands, all taking `-C <name>` exactly as `get`, `put` and `del` do.
+
+### Times
+A **time** is a count with a unit, `ms`, `s`, `m`, `h` or `d`, and units join from the largest
+down, each at most once: `1500ms`, `30s`, `5m`, `2h`, `7d`, `1h30m`, `1d12h`. No spaces, no
+decimals, no bare number (`30` could be seconds or milliseconds, so it is refused), no weeks,
+months or years (a month has no fixed length). The grammar is also the **output** grammar, so a
+printed time can be typed back: `eggdb expire app.db b "$(eggdb ttl app.db a)"` copies a deadline.
+
+Printing a remaining time: under one second `412ms`; otherwise whole seconds rounded **down**
+(so a key shown with `1s` lives at least a second), split into `d`, `h`, `m`, `s` with zero parts
+left out: `29s`, `1h4m12s`, `7d`, `2d5s`. A bad time is a usage error (exit 2):
+`--ttl needs a time such as 30s, 5m, 1h30m, 7d or 1500ms, not '30'` (`expire needs …` for the
+command). **Zero is refused** (exit 2) although the engine accepts it, because the one meaning
+of "a time to live of 0" is "delete now", and that command exists:
+`--ttl 0 would remove the key as soon as it is stored; leave --ttl out, or give a time above 0`,
+and for `expire`: `a time to live of 0 would remove s:1 now; use eggdb del`.
+
+### The commands
+| Command | Opens the file | Does |
+|---------|----------------|------|
+| `put <file> <key> [<value>] --ttl <time>` | writing | stores the value and a deadline; a `put` without `--ttl` makes the key permanent again |
+| `ttl <file> <key>` | read-only | prints the time left, or `never`; exits 1 when the key is not there (an expired key is not there) |
+| `expire <file> <key> <time>` | writing | gives an existing key a deadline, replacing any earlier one; exit 1 when the key is not there |
+| `persist <file> <key>` | writing | removes the deadline; exit 0 on a key that was already permanent (what was asked holds), exit 1 when it is not there |
+| `incr <file> <key> [<n>]`, `decr <file> <key> [<n>]` | writing | adds `n` (1 without it) to the counter, or subtracts, and prints the new value; an absent key counts as 0 and is made; the deadline is kept |
+| `cas <file> <key> (<expected> \| --if-absent) (<new> \| --delete)` | writing | stores `<new>` only while the value is `<expected>`; exit 1 when it is not, nothing changed |
+
+`n` is a whole number from 0 to 9223372036854775807 (0 reads the counter and makes it as `0` if
+missing); `-5` is an option to the grammar, so subtracting is `decr`, which the usage error for
+`incr hits -5` says (`unknown option '-5' for eggdb incr; to subtract, use eggdb decr`).
+
+`cas` compares and stores in **one transaction**, so nothing slips in between, and when it does
+not swap it reads the value found in that same transaction for its message. `--if-absent` stands
+in for `<expected>` (store only when the key is not there: a lock, a first write), `--delete`
+for `<new>` (remove only while the value is `<expected>`); each removes one positional, so
+`cas app.db lock --if-absent worker-7` has key and new value, `cas app.db lock worker-7 --delete`
+key and expected. Both flags together is a usage error: `--if-absent with --delete would change
+nothing: an absent key cannot be deleted`. A swap that stores a value makes the key permanent, as
+`put` does.
+
+**`text`** (a terminal); writes print nothing, as `put` and `del` do:
+```
+$ eggdb put app.db -C sessions s:1 '{"user":1}' --ttl 30m
+$ eggdb ttl app.db -C sessions s:1
+29m59s
+$ eggdb ttl app.db user:1
+never
+$ eggdb expire app.db user:1 7d
+$ eggdb persist app.db user:1
+$ eggdb incr app.db hits
+1
+$ eggdb incr app.db hits 10
+11
+$ eggdb decr app.db hits 2
+9
+$ eggdb cas app.db lock --if-absent worker-7
+$ eggdb cas app.db lock --if-absent worker-8
+eggdb: not swapped: lock is already in app.db (holding worker-7). Nothing changed.
+$ echo $?
+1
+```
+
+**`json`** (a pipe), one object per command, fields stable; `ttl_ms` is a plain integer of
+milliseconds and `expires_at` a UTC time with milliseconds, both `null` for a permanent key:
+```
+{"key":"s:1","stored":true,"ttl_ms":1800000,"expires_at":"2026-10-30T09:44:07.123Z"}   put --ttl
+{"key":"s:1","ttl_ms":1799412,"expires_at":"2026-10-30T09:44:07.123Z"}                 ttl
+{"key":"user:1","ttl_ms":null,"expires_at":null}                                       ttl, permanent
+{"key":"user:1","expires":true,"ttl_ms":604800000,"expires_at":"2026-11-06T09:14:08.001Z"}  expire
+{"key":"user:9","expires":false}                                                       expire, exit 1
+{"key":"user:1","persisted":true}                                                      persist; false, exit 1
+{"key":"hits","value":"11"}                                                            incr, decr
+{"key":"lock","swapped":true}                                                          cas
+{"key":"lock","swapped":false,"value":"worker-7"}                                      cas, exit 1
+{"key":"lock","swapped":false}                                                         cas, key absent, exit 1
+```
+`put` without `--ttl` prints exactly what it printed before. `ttl` of an absent key prints
+nothing, exit 1, as `get` does; `expire` and `persist` print their `false` object, as `del` does.
+`incr` prints what `get --format json` would print next (the value is text in the file, so it is
+a JSON string here too; `tonumber` in jq). `cas` not swapped carries the value found (`value_hex`
+when it is not text), absent when the key is absent. `hex` and `raw` are usage errors for these
+six, as for `check` (section 13, item 4): `get -F raw` already prints a counter's bytes.
+
+### Messages (stderr, section 7's shape) and exit codes
+| Case | Exit | String |
+|------|------|--------|
+| `ttl`, key absent or expired | 1 | `key not found: {key}` |
+| `expire`, key absent | 1 | `nothing to expire: {key} is not in {file}` |
+| `persist`, key absent | 1 | `nothing to persist: {key} is not in {file}` |
+| `cas`, value differs | 1 | `not swapped: {key} in {file} holds {found}, not {expected}. Nothing changed.` |
+| `cas --if-absent`, key present | 1 | `not swapped: {key} is already in {file} (holding {found}). Nothing changed.` |
+| `cas`, key absent | 1 | `not swapped: {key} is not in {file}. Nothing changed.` |
+| not a counter | 3 | ``cannot increment {key} in {file}: its value is not a whole number ({value}). Counters are whole numbers from -9223372036854775808 to 9223372036854775807, stored as text; start one with `eggdb put {file} {key} 0` `` + `  try: eggdb put {file} {key} 0` |
+| overflow | 3 | `cannot increment {key} in {file}: {value} + {n} is outside -9223372036854775808 to 9223372036854775807. Nothing changed.` |
+| bad `n` | 2 | `incr needs a whole number from 0 to 9223372036854775807, not '{n}'` |
+| bad time, zero time | 2 | the lines under Times |
+| missing collection | 1 | section 20's table, with `cannot read … from` for `ttl`, `cannot change … in` for the rest |
+
+`decr` says `decrement` and `-`. Values in messages follow section 4's `text` rules and are cut
+at 64 bytes with ` … ({n} bytes)`. Exit 1 for a failed `cas` follows `del` of a missing key and
+`collection add` of an existing one: "the state you named is not there, nothing was done" is 1
+everywhere; `NotAnInteger` (a new `ErrorKind`) and overflow are 3, a data error like "too large".
+
+### Help text
+The command list of section 9 gains, after `scan` and before `check`:
+```
+  ttl    <file> <key>           print how long a key still lives (exit 1 if it is not there)
+  expire <file> <key> <time>    give a key a time to live: 30s, 5m, 1h30m, 7d, 1500ms
+  persist <file> <key>          remove a key's time to live, so it stays until deleted
+  incr   <file> <key> [n]       add n (1) to a counter and print the new value
+  decr   <file> <key> [n]       subtract n (1) from a counter and print the new value
+  cas    <file> <key> <expected> <new>
+                                replace a value only while it is <expected>; see eggdb help cas
+```
+`put`'s usage line becomes `eggdb put <file> <key> [<value>] [--ttl <time>] [--create] [-C <name>]`
+and its options gain `--ttl <time>` ("the key expires after this time: 30s, 5m, 1h30m, 7d,
+1500ms; a later put without --ttl makes the key permanent again"), with the example
+`eggdb put app.db -C sessions s:1 '{"user":1}' --ttl 30m`. Each of the six commands has a help
+body in help.rs's voice (usage, one paragraph, options, examples) with the `-C` line of `get`.
+The `unknown command` line of section 10 lists the six new names after `scan`.
+
+### The shell
+`ttl`, `expire`, `persist`, `incr`, `decr` and `cas` join `put`, `get`, `del`, `scan`, `check`
+and `stats` as key-value words: recognised in lower case at the start of a statement, one line,
+split like a shell, the chosen `.collection` applied and `-C` on the line overriding it, printing
+what the CLI prints in `text` (`29s`, `never`, `11`, nothing for a write) with `--format` per
+line. No SQL statement of any dialect EggDB speaks starts with one of the six (`cas` is not
+`case`), so the no-prefix rule holds. `put` takes `--ttl`. Completion offers keys after each of
+them. `.help` replaces its `put` line and gains five, under the key-value commands:
+```
+  put <key> <value> [--ttl t]  store a value (text, 0x.. hex, @file, =text); --ttl 30s expires it
+  ttl <key>                    how long a key still lives: 29s, 1h4m12s, never
+  expire <key> <time>          give a key a time to live (30s, 5m, 1h30m, 7d, 1500ms)
+  persist <key>                remove a key's time to live
+  incr <key> [n]               add n (1) to a counter and print the new value; decr subtracts
+  cas <key> <expected> <new>   replace a value only while it is <expected>; --if-absent, --delete
+```
+
+### Decided by this design
+1. One time grammar, `1500ms 30s 5m 2h 7d 1h30m`, for input and output, so a printed time can be
+   typed back; bare numbers, weeks and months are refused.
+2. Zero is a usage error on the CLI (`eggdb del` is the command for "now"), although the engine
+   takes it.
+3. `ttl` prints `never` for a permanent key (it answers "when does it expire?" and cannot be read
+   as a time); in JSON `ttl_ms` and `expires_at` are `null`.
+4. A `cas` that did not swap is exit 1 with `not swapped: … Nothing changed.` and the value found,
+   read in the same transaction; `--if-absent` and `--delete` stand in for a positional.
+5. `incr` and `decr` print what `get` would print next (the value as text, a JSON string);
+   `NotAnInteger` and overflow are exit 3.
+6. Writes print nothing in `text` and a boolean named after the verb in JSON (`expires`,
+   `persisted`, `swapped`); `ttl` follows `get`.
+
+Not in this release, for the roadmap: `cas --ttl` (the lock idiom "store with expiry only if
+absent" needs it in one commit), remaining times in `scan` and `expires_at` in `export`/`import`
+(a restore without them loses deadlines), `expire` and counters over MCP and SQL.
+
+### As built (D140)
+- `persist` of a key that is already permanent prints `{"key":…,"persisted":true}` and exits 0.
+- The "not a counter" message's `try:` command carries `-C <name>` when the counter is in a
+  collection.
+- A time too long for a deadline is not an error: the engine keeps the latest deadline it can
+  store (about 584,000 years from 1970), so such a key never expires in practice.
+- `expires_at` is the command's clock plus the time left, so it can differ from the engine's
+  deadline by the time the command took.

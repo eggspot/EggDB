@@ -217,6 +217,60 @@ fn main() -> eggdb::Result<()> {
 - A read transaction keeps its snapshot: a collection dropped or changed after it began is still
   there, as it was, for it.
 
+## Expiring keys and counters
+A key, in the default key space or in a collection, can have a **time to live** (D140):
+`tx.put_with_expiry(key, value, ttl)` stores it with one, `tx.set_expiry(key, ttl)` gives one to
+a key that is there (and returns whether it was), `tx.clear_expiry(key)` removes it, and
+`tx.time_to_live(key)` says how long the key has left (`None`: no time to live, or no key). At
+its deadline the key is gone for every read: `get`, `get_with` and scans leave it out, and the
+write methods treat it as absent. Every commit removes up to 32 keys whose time has run out, and
+`db.remove_expired()` removes all of them at once; reads never need that to be correct.
+
+A **counter** is a value that is a decimal integer stored as text, such as `42` or `-7`, from
+`i64::MIN` to `i64::MAX`. `tx.increment(key, by)` adds `by` (subtracts a negative one) and
+returns the new count; an absent key counts as 0. A value that is not a counter, or a sum outside
+the range, fails with `ErrorKind::NotAnInteger` and changes nothing. **Compare-and-set**,
+`tx.compare_and_set(key, expected, new)`, stores `new` (or removes the key, for `None`) only when
+the value is `expected` (`None`: the key is absent), and returns whether it did.
+
+```rust,no_run
+use eggdb::Database;
+use std::time::Duration;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    db.put_with_expiry("session:1", "alice", Duration::from_secs(30 * 60))?;
+    println!("{:?} left", db.time_to_live("session:1")?);
+    let visits = db.increment("visits", 1)?;
+    println!("{visits} visits");
+    if db.compare_and_set("lock", None, Some(b"worker-7".as_slice()))? {
+        println!("the lock is ours");
+        db.compare_and_set("lock", Some(b"worker-7".as_slice()), None)?;
+    }
+    db.create_collection("stats")?;
+    db.collection("stats").increment("page:home", 1)?;
+    Ok(())
+}
+```
+
+- **Atomic.** Each of these runs in the one write transaction, so increments from any number
+  of threads never lose a count, and nothing changes between a compare and its set.
+- **What a put does to the time to live.** `put` and a `compare_and_set` that stores a value
+  replace the value and remove the time to live, as Redis's `SET` does; `increment` keeps it;
+  `put_if_absent` stores over an expired key. A time to live of zero removes the key.
+- **Time** is the database's clock, read when a transaction begins, and never earlier than the
+  last commit's stamp, so a wall clock set back cannot bring an expired key back. A read
+  transaction keeps its time: a key that expires while it lives stays readable in it.
+  `Options::clock` sets the clock; a `SimClock` makes time move only when a test moves it.
+- **Keys with a time to live are 14 bytes shorter** than other keys (498 bytes in the default
+  key space with 4 KiB pages, 488 in a collection): the deadline is kept in a key of its own.
+- **Cost.** A file that never held a key with a time to live reads and writes exactly as
+  before. Once one has, each read also looks up the key's deadline, and each write that
+  replaces or deletes a key looks it up too.
+- **Older releases** read such a file but do not write it: the first time to live sets the
+  file's read-only-compatible `EXPIRING_KEYS` feature flag (format.md).
+- Exports carry the keys that are live when they are made, without their deadlines.
+
 ## SQL
 `eggdb::sql` runs SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, all on
 the same tables ([sql.md](sql.md)). `db.sql_store()` gives the database as a SQL store, and
@@ -352,6 +406,7 @@ for AI models; `error.kind()` is an `ErrorKind` to match on:
 | `NeedsReopen` | a write or sync failed; open the database again to recover |
 | `CollectionNotFound`, `InvalidCollectionName` | no collection of that name, or a name no collection can have |
 | `ReservedKey` | a key of the default key space that starts with the bytes kept for collections |
+| `NotAnInteger` | `increment` on a value that is not a counter, or a sum outside `i64`'s range |
 | `DatabaseFull`, `OutOfMemory`, `InvalidOption`, `Other` | the rest |
 
 `ErrorKind` may gain kinds in later releases, so a `match` needs a wildcard arm. An

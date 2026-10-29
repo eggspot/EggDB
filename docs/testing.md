@@ -174,6 +174,22 @@ paths, the wait for an answer and the commits that must never be reported failed
 `crates/eggdb/tests/mcp.rs` drives the built binary as a child process, checking that every line
 on its stdout is a JSON-RPC message.
 
+## Expiring keys and counters (D140)
+`crates/eggdb/tests/expiry.rs` runs the API on a `SimClock` (`Options::clock`): a key expires
+exactly at its deadline, one microsecond after it is still readable, across a crash (a drop
+without `close`) and a reopen, in the default key space and in a collection, in `get`, `get_with`
+and scans both ways; a wall clock set back after a commit never brings an expired key back; a
+read transaction keeps its time; a read-only open hides expired keys without removing them;
+eight threads increment the same counters and the counts come out exact; compare-and-set swaps
+only the value it expects; and the 14-byte key limit holds. `check` counts every key the tree
+holds, deadline records included, so the tests also see what the commit sweep and
+`remove_expired` removed. Seeded fuzzers feed 20,000 hostile inputs each to the time grammar
+(`eggdb-ui`'s `time_to_live.rs`, where every printed time must read back) and to the counter and
+deadline record readers (`expiry.rs`); the key layout is pinned by test vectors, and
+`sample_files.rs` checks that a v0.2.0 file takes expiring keys and then carries the
+`EXPIRING_KEYS` bit. The CLI, the shell and the UI scenarios 40 to 45 are in
+`cli/expiry_tests.rs` and `eggdb-ui/tests/screens.rs`, and the smoke test runs every new command.
+
 ## Files from released versions (D96)
 `crates/eggdb/tests/data` holds files written by released versions, which every later version
 must keep reading (D20). From their release's tag on they are never regenerated or edited, and a

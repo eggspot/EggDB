@@ -118,9 +118,13 @@ There are three 64-bit sets, with ext4's rules for a bit a release doesn't know:
 - **read-only compatible:** the file may be opened for reading, never for writing.
 - **incompatible:** the file is refused.
 
-Version 1 defines no bits. Anything a later release adds that an older release would get wrong
-sets a bit in the right set, so an older release never misreads a newer file. That includes new
-page types, key schemes other than 0, compression and encryption.
+Anything a later release adds that an older release would get wrong sets a bit in the right
+set, so an older release never misreads a newer file. That includes new page types, key schemes
+other than 0, compression and encryption. The bits defined so far:
+
+| Set | Bit | Name | Set by |
+|-----|----:|------|--------|
+| read-only compatible | 0 | `EXPIRING_KEYS` | the first commit that gives a key a time to live (D140). A release without expiring keys would show expired keys and could write a key without removing its deadline, so it may only read the file. The bit stays set. |
 
 ## Pages
 Every page except the header slots starts with a 16-byte header:
@@ -419,9 +423,16 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   | prefix, `0x01` | the catalog: a version byte (1) and the next collection number (4 bytes, big-endian) |
   | prefix, `0x02`, name (UTF-8) | the collection: a version byte (1) and its number (4 bytes, big-endian) |
   | prefix, `0x03`, number (4 bytes, big-endian), key | the value stored under `key` in that collection |
+  | prefix, `0x04`, stored key | the deadline of a key with a time to live (D140): a version byte (1) and the deadline in microseconds since the Unix epoch (8 bytes, big-endian) |
+  | prefix, `0x05`, deadline (8 bytes, big-endian), stored key | empty: the index of keys by deadline, which commits sweep in order |
 
   Numbers start at 1 and are never reused, so a key of a dropped collection can never be read
-  as a key of a later one. A record with a version above 1 is refused as written by a newer
+  as a key of a later one. The *stored key* of `0x04` and `0x05` is the key as the tree holds it:
+  a default key space key as it is, a collection's key with its `0x03` prefix and number. A key
+  is expired once the transaction's time, the clock or the last commit's stamp, whichever is
+  later, has reached its deadline; the two records and the key are written and removed
+  together. A deadline record with a version above 1 is refused as written by a newer release;
+  any other that is not nine bytes is damage. A record with a version above 1 is refused as written by a newer
   release; any other record that is not five bytes is damage. Files without collections hold
   none of these keys, so the layout needs no feature flag: a v0.2.0 file opens unchanged and
   takes collections, and a release before collections reads such a file and shows these keys as
