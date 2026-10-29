@@ -100,12 +100,13 @@ fn a_missing_collection_is_not_found_and_names_the_command_that_adds_it() {
     let directory = TempDirectory::new("collections-missing");
     let file = directory.file("app.db");
     ok(&["create", &file]);
+    let f = file.as_str();
     for (args, context) in [
-        (vec!["get", &file, "-C", "orders", "k"], "cannot read k from"),
-        (vec!["del", &file, "-C", "orders", "k"], "cannot delete k from"),
-        (vec!["scan", &file, "-C", "orders"], "cannot scan"),
-        (vec!["export", &file, "-C", "orders"], "cannot export"),
-        (vec!["put", &file, "-C", "orders", "k", "v"], "cannot store k in"),
+        (vec!["get", f, "-C", "orders", "k"], "cannot read k from"),
+        (vec!["del", f, "-C", "orders", "k"], "cannot delete k from"),
+        (vec!["scan", f, "-C", "orders"], "cannot scan"),
+        (vec!["export", f, "-C", "orders"], "cannot export"),
+        (vec!["put", f, "-C", "orders", "k", "v"], "cannot store k in"),
     ] {
         let ran = run(&args);
         assert_eq!(ran.exit, 1, "{args:?}: {}", stderr(&ran));
