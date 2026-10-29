@@ -3088,27 +3088,12 @@ pub(crate) fn delete(
     let returning = returning(&delete.returning, scope)?;
     let matched = matching_rows(writer, &table, scope, delete.filter.as_ref())?;
     let mut result_rows = Vec::new();
-    for (key, row) in &matched {
-        if !table.indexes.is_empty() {
-            indexes::delete_entries(writer, &table, row, key)?;
-        }
-        writer.delete(key)?;
-        if let Some(projection) = &returning {
+    if let Some(projection) = &returning {
+        for (_, row) in &matched {
             result_rows.push(projection.project(row)?);
         }
     }
-    let count = matched.len();
-    if constraints::is_referenced(&table) {
-        let changes: Vec<RowChange> = matched
-            .into_iter()
-            .map(|(_, row)| RowChange {
-                table: Arc::clone(&table),
-                old: row,
-                new: None,
-            })
-            .collect();
-        constraints::propagate(writer, tables, changes)?;
-    }
+    let count = delete_rows(writer, tables, &table, matched)?;
     let tag = format!("DELETE {count}");
     Ok(match returning {
         Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),

@@ -845,7 +845,21 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         self.select(reader, tables, &mut merge.source)?;
         let mut resolver = self.resolver(reader, tables)?;
-        resolver.target(&mut merge.target)
+        resolver.target(&mut merge.target)?;
+        if !self.walk_expressions {
+            return Ok(());
+        }
+        let mut exprs: Vec<&mut Expr> = vec![&mut merge.on];
+        if let Some(update) = &mut merge.update {
+            exprs.extend(update.assignments.iter_mut().map(|(_, expr)| expr));
+            exprs.extend(update.condition.iter_mut());
+            exprs.extend(update.delete_condition.iter_mut());
+        }
+        if let Some(insert) = &mut merge.insert {
+            exprs.extend(insert.values.iter_mut());
+            exprs.extend(insert.condition.iter_mut());
+        }
+        resolver.expressions(exprs)
     }
 
     pub(crate) fn delete(

@@ -72,7 +72,7 @@ pub(crate) fn number_text(number: f64) -> String {
     text
 }
 
-fn text_with_type(value: &Value, declared: Option<SqlType>) -> Option<String> {
+pub(crate) fn text_with_type(value: &Value, declared: Option<SqlType>) -> Option<String> {
     match value {
         Value::Null => None,
         Value::Text(text) => Some(text.clone()),
@@ -91,16 +91,8 @@ fn text_with_type(value: &Value, declared: Option<SqlType>) -> Option<String> {
     }
 }
 
-fn text_of(value: &Value) -> Option<String> {
+pub(crate) fn text_of(value: &Value) -> Option<String> {
     text_with_type(value, None)
-}
-
-pub(crate) fn plain_text(value: &Value) -> Option<String> {
-    text_of(value)
-}
-
-pub(crate) fn text_by_declared_type(value: &Value, declared: Option<SqlType>) -> Option<String> {
-    text_with_type(value, declared)
 }
 
 fn text_or_null(text: String) -> Value {
@@ -942,10 +934,6 @@ fn row_count(value: &Value) -> SqlResult<Value> {
     }))
 }
 
-fn months_of(value: &Value) -> SqlResult<Option<i64>> {
-    whole_of(value)
-}
-
 fn date_unit(values: &[Value]) -> Option<String> {
     values.get(1).and_then(text_of)
 }
@@ -1007,7 +995,7 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
         ("oracle_to_date", [_, ..]) => crate::oracle_datetime::to_date(values),
         ("oracle_to_timestamp", [_, ..]) => crate::oracle_datetime::to_timestamp(values),
         ("oracle_add_months", [date, months]) => {
-            crate::oracle_datetime::add_months(date, months_of(months)?)
+            crate::oracle_datetime::add_months(date, whole_of(months)?)
         }
         ("oracle_last_day", [date]) => crate::oracle_datetime::last_day(date),
         ("oracle_date_literal", [Value::Text(text)]) => crate::oracle_datetime::date_literal(text),

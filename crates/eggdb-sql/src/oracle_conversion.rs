@@ -22,8 +22,8 @@ fn nls_models(target: SqlType) -> Option<Vec<(String, ModelUse)>> {
 
 fn read_local(text: &str, models: &[(String, ModelUse)]) -> SqlResult<i64> {
     let mut first_error = None;
-    for (format, use_) in models {
-        match oracle_datetime::read_by_model(text, format, *use_) {
+    for (format, purpose) in models {
+        match oracle_datetime::read_by_model(text, format, *purpose) {
             Ok(local) => return Ok(local),
             Err(error) => {
                 first_error.get_or_insert(error);
@@ -68,13 +68,13 @@ fn text_for_column(value: &Value) -> Option<String> {
             } else {
                 SqlType::Timestamp(Some(6))
             };
-            crate::oracle_functions::text_by_declared_type(value, Some(declared))
+            crate::oracle_functions::text_with_type(value, Some(declared))
         }
         Value::TimestampTz(_)
         | Value::Date(_)
         | Value::Numeric(_)
         | Value::Double(_)
-        | Value::Real(_) => crate::oracle_functions::plain_text(value),
+        | Value::Real(_) => crate::oracle_functions::text_of(value),
         _ => None,
     }
 }
@@ -245,9 +245,7 @@ pub(crate) fn arithmetic(
         (Some(left), Some(right)) => Some(left.and_then(|left| right.map(|right| (left, right)))),
         _ => None,
     }
-    .map(|pair| {
-        pair.and_then(|(left, right)| crate::eval::binary_arithmetic(operator, &left, &right))
-    })
+    .map(|pair| pair.and_then(|(left, right)| crate::eval::arithmetic(operator, &left, &right)))
 }
 
 #[cfg(test)]

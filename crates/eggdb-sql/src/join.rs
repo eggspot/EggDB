@@ -52,7 +52,7 @@ fn columns_of(source: &Source<'_>) -> impl Iterator<Item = usize> {
     source.offset..source.offset + source.table.columns.len()
 }
 
-fn type_family(sql_type: SqlType) -> u8 {
+pub(crate) fn type_family(sql_type: SqlType) -> u8 {
     match sql_type {
         SqlType::SmallInt | SqlType::Integer | SqlType::BigInt => 0,
         SqlType::Real | SqlType::Double => 1,

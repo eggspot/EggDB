@@ -1782,15 +1782,11 @@ fn division_by_zero() -> SqlError {
     SqlError::new(SqlState::DIVISION_BY_ZERO, "division by zero")
 }
 
-pub(crate) fn binary_arithmetic(
+pub(crate) fn arithmetic(
     operator: BinaryOperator,
     left: &Value,
     right: &Value,
 ) -> SqlResult<Value> {
-    arithmetic(operator, left, right)
-}
-
-fn arithmetic(operator: BinaryOperator, left: &Value, right: &Value) -> SqlResult<Value> {
     if operator == BinaryOperator::Subtract
         && matches!(left, Value::Timestamp(_) | Value::TimestampTz(_))
         && matches!(right, Value::Timestamp(_) | Value::TimestampTz(_))

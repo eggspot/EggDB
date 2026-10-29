@@ -208,6 +208,38 @@ fn merge_is_destructive_when_on_does_not_restrict_the_rows_it_updates_or_deletes
         &mut session,
         "MERGE INTO accounts t USING (SELECT 1 id FROM dual) accounts ON (accounts.id = 1) WHEN MATCHED THEN UPDATE SET t.balance = 0"
     ));
+    for always_true in [
+        "t.id = t.id",
+        "t.id IS NOT NULL",
+        "t.id = s.id OR 1 = 1",
+        "t.id = id",
+    ] {
+        assert!(
+            classify(
+                &mut session,
+                &format!(
+                    "MERGE INTO t USING s ON ({always_true}) WHEN MATCHED THEN UPDATE SET t.v = s.v"
+                )
+            ),
+            "{always_true}"
+        );
+    }
+    for pinned in [
+        "t.id = s.id AND t.v > 0",
+        "s.id = t.id",
+        "t.id = 5",
+        "(t.id = s.id AND t.k = s.k)",
+    ] {
+        assert!(
+            !classify(
+                &mut session,
+                &format!(
+                    "MERGE INTO t USING s ON ({pinned}) WHEN MATCHED THEN UPDATE SET t.v = s.v"
+                )
+            ),
+            "{pinned}"
+        );
+    }
 }
 
 #[test]
@@ -298,5 +330,58 @@ fn the_session_users_own_tables_stay_its_own_after_current_schema() {
     assert_eq!(
         failure(&mut session, "ALTER SESSION SET CURRENT_SCHEMA = 'hr'").vendor_code(),
         Some(922)
+    );
+}
+
+#[test]
+fn a_schema_named_like_the_session_user_does_not_hide_its_own_tables_in_oracle() {
+    let store = MemoryStore::default();
+    let mut setup = Session::new(&store);
+    for statement in [
+        "CREATE SCHEMA eggdb",
+        "CREATE TABLE eggdb.t (a integer)",
+        "INSERT INTO eggdb.t VALUES (2)",
+        "CREATE TABLE public.t (a integer)",
+        "INSERT INTO public.t VALUES (1)",
+    ] {
+        values(&mut setup, statement);
+    }
+    assert_eq!(
+        values(&mut setup, "SELECT a FROM t"),
+        vec![vec![Value::Integer(2)]]
+    );
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    assert_eq!(
+        values(&mut session, "SELECT a FROM t"),
+        vec![vec![Value::Integer(1)]]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT a FROM eggdb.t"),
+        vec![vec![Value::Integer(1)]]
+    );
+}
+
+#[test]
+fn oracle_written_dates_and_views_read_the_same_from_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    for statement in [
+        "ALTER SESSION SET NLS_DATE_FORMAT = 'DD/MM/YYYY'",
+        "CREATE TABLE hires (id NUMBER(4) PRIMARY KEY, hired DATE)",
+        "INSERT INTO hires VALUES (1, '17/06/2013')",
+        "CREATE VIEW hires_shown AS SELECT id, TO_CHAR(hired, 'DD-MON-YYYY') AS shown FROM hires",
+        "COMMIT",
+    ] {
+        values(&mut session, statement);
+    }
+    let june = days_from_civil(2013, 6, 17) * MICROS_PER_DAY;
+    let mut postgresql = Session::new(&store);
+    assert_eq!(
+        values(&mut postgresql, "SELECT hired FROM hires"),
+        vec![vec![Value::Timestamp(june)]]
+    );
+    assert_eq!(
+        values(&mut postgresql, "SELECT shown FROM hires_shown"),
+        vec![vec![text("17-JUN-2013")]]
     );
 }

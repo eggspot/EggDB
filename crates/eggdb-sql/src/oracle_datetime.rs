@@ -270,7 +270,7 @@ fn field_of(element: &DatetimeElement) -> Option<Field> {
 }
 
 impl DatetimeModel {
-    pub(crate) fn parse(text: &str, use_: ModelUse) -> SqlResult<Self> {
+    pub(crate) fn parse(text: &str, purpose: ModelUse) -> SqlResult<Self> {
         if text.len() > MAX_MODEL_BYTES {
             return Err(date_error(
                 1801,
@@ -285,7 +285,7 @@ impl DatetimeModel {
         while at < chars.len() {
             let (element, length) = match element_at(&chars[at..], &upper[at..])? {
                 Scanned::Element(element, length) => (element, length),
-                Scanned::ToCharOnly if use_ == ModelUse::Output => {
+                Scanned::ToCharOnly if purpose == ModelUse::Output => {
                     return Err(not_recognized());
                 }
                 Scanned::ToCharOnly => {
@@ -296,7 +296,7 @@ impl DatetimeModel {
                 }
             };
             at += length;
-            if use_ != ModelUse::Output {
+            if purpose != ModelUse::Output {
                 if let Some(name) = input_only_refusal(&element) {
                     return Err(date_error(
                         3001,
@@ -305,7 +305,7 @@ impl DatetimeModel {
                         ),
                     ));
                 }
-                if use_ == ModelUse::DateInput
+                if purpose == ModelUse::DateInput
                     && matches!(element, DatetimeElement::FractionalSeconds(_))
                 {
                     return Err(not_recognized());
@@ -344,24 +344,24 @@ thread_local! {
     static MODELS: RefCell<Vec<(String, ModelUse, Rc<DatetimeModel>)>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(crate) fn cached_model(text: &str, use_: ModelUse) -> SqlResult<Rc<DatetimeModel>> {
+pub(crate) fn cached_model(text: &str, purpose: ModelUse) -> SqlResult<Rc<DatetimeModel>> {
     let found = MODELS.with(|models| {
         models
             .borrow()
             .iter()
-            .find(|(cached, cached_use, _)| *cached_use == use_ && cached == text)
+            .find(|(cached, cached_purpose, _)| *cached_purpose == purpose && cached == text)
             .map(|(_, _, model)| Rc::clone(model))
     });
     if let Some(model) = found {
         return Ok(model);
     }
-    let model = Rc::new(DatetimeModel::parse(text, use_)?);
+    let model = Rc::new(DatetimeModel::parse(text, purpose)?);
     MODELS.with(|models| {
         let mut models = models.borrow_mut();
         if models.len() >= CACHED_MODELS {
             models.remove(0);
         }
-        models.push((text.to_owned(), use_, Rc::clone(&model)));
+        models.push((text.to_owned(), purpose, Rc::clone(&model)));
     });
     Ok(model)
 }
@@ -869,8 +869,8 @@ fn local_now() -> SqlResult<i64> {
     datetime::utc_to_local(datetime::statement_now())
 }
 
-pub(crate) fn read_by_model(text: &str, format: &str, use_: ModelUse) -> SqlResult<i64> {
-    let model = cached_model(format, use_)?;
+pub(crate) fn read_by_model(text: &str, format: &str, purpose: ModelUse) -> SqlResult<i64> {
+    let model = cached_model(format, purpose)?;
     parse_datetime(text, &model, local_now()?)
 }
 
@@ -992,13 +992,13 @@ fn source_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
         Value::Text(text) | Value::Bpchar(text) => Some(text.clone()),
-        other => crate::oracle_functions::plain_text(other),
+        other => crate::oracle_functions::text_of(other),
     }
 }
 
-fn to_datetime(values: &[Value], use_: ModelUse) -> SqlResult<Value> {
+fn to_datetime(values: &[Value], purpose: ModelUse) -> SqlResult<Value> {
     let truncated = |micros: i64| {
-        if use_ == ModelUse::DateInput {
+        if purpose == ModelUse::DateInput {
             micros - micros.rem_euclid(MICROS_PER_SECOND)
         } else {
             micros
@@ -1024,14 +1024,14 @@ fn to_datetime(values: &[Value], use_: ModelUse) -> SqlResult<Value> {
         Some(format) => format,
         None => {
             let nls = crate::oracle_nls::current();
-            if use_ == ModelUse::DateInput {
+            if purpose == ModelUse::DateInput {
                 nls.date_format().to_owned()
             } else {
                 nls.timestamp_format().to_owned()
             }
         }
     };
-    read_by_model(&text, &format, use_).map(|micros| Value::Timestamp(truncated(micros)))
+    read_by_model(&text, &format, purpose).map(|micros| Value::Timestamp(truncated(micros)))
 }
 
 pub(crate) fn to_date(values: &[Value]) -> SqlResult<Value> {
@@ -1472,13 +1472,13 @@ mod tests {
             let micros = (next() % 3_700_000) as i64 * MICROS_PER_DAY
                 + (next() % MICROS_PER_DAY as u64) as i64
                 - 719_162 * MICROS_PER_DAY;
-            for use_ in [
+            for purpose in [
                 ModelUse::DateInput,
                 ModelUse::TimestampInput,
                 ModelUse::Output,
             ] {
-                if let Ok(parsed) = DatetimeModel::parse(&model, use_) {
-                    if use_ == ModelUse::Output {
+                if let Ok(parsed) = DatetimeModel::parse(&model, purpose) {
+                    if purpose == ModelUse::Output {
                         if let Ok(text) = format_datetime(micros, &parsed, None) {
                             assert!(text.len() <= parsed.output_bound(), "{model}");
                         }

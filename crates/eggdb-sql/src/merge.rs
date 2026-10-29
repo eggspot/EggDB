@@ -99,17 +99,14 @@ fn same_family(a: SqlType, b: SqlType) -> bool {
             SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Numeric(_)
         )
     };
-    (exact(a) && exact(b))
-        || (a.is_float() && b.is_float())
-        || (a.is_character() && b.is_character())
-        || a.without_modifier() == b.without_modifier()
+    (exact(a) && exact(b)) || crate::join::type_family(a) == crate::join::type_family(b)
 }
 
 fn equality_columns(
     on: &Expr,
     scope: Scope<'_>,
     target: &TableDefinition,
-    source: &TableDefinition,
+    source_types: &[Option<SqlType>],
 ) -> Vec<(usize, usize)> {
     let width = target.columns.len();
     let conjuncts: Vec<&Expr> = match &on.kind {
@@ -135,10 +132,9 @@ fn equality_columns(
             (false, true) => (b, a - width),
             _ => continue,
         };
-        if same_family(
-            target.columns[on_target].sql_type,
-            source.columns[on_source].sql_type,
-        ) {
+        if source_types[on_source]
+            .is_some_and(|source_type| same_family(target.columns[on_target].sql_type, source_type))
+        {
             pairs.push((on_target, on_source));
         }
     }
@@ -159,7 +155,6 @@ fn key_of(row: &[Value], columns: impl Iterator<Item = usize>) -> Option<Vec<u8>
 
 struct SourceIndex {
     rows: HashMap<Vec<u8>, Vec<usize>>,
-    none: Vec<usize>,
 }
 
 impl SourceIndex {
@@ -179,16 +174,13 @@ impl SourceIndex {
             memory.charge(key.len() + std::mem::size_of::<usize>() * 2)?;
             index.entry(key).or_default().push(position);
         }
-        Ok(Some(Self {
-            rows: index,
-            none: Vec::new(),
-        }))
+        Ok(Some(Self { rows: index }))
     }
 
     fn candidates(&self, equalities: &[(usize, usize)], target_row: &[Value]) -> &[usize] {
         key_of(target_row, equalities.iter().map(|(target, _)| *target))
             .and_then(|key| self.rows.get(&key))
-            .map_or(&self.none, Vec::as_slice)
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -301,7 +293,14 @@ pub(crate) fn merge(
         }
     }
     let target_rows = execute::every_row(writer, &table)?;
-    let equalities = equality_columns(&merge.on, joined.scope, &table, &source_table);
+    for (key, row) in &target_rows {
+        memory.charge(WorkMemory::row_bytes(row) + key.len())?;
+    }
+    let source_types: Vec<Option<SqlType>> = source_columns
+        .iter()
+        .map(|column| column.sql_type)
+        .collect();
+    let equalities = equality_columns(&merge.on, joined.scope, &table, &source_types);
     let candidates = SourceIndex::build(&equalities, &source.rows, &mut memory)?;
     let every_source: Vec<usize> = (0..source.rows.len()).collect();
     let mut matched_sources = vec![false; source.rows.len()];
@@ -361,6 +360,7 @@ pub(crate) fn merge(
                 execute::primary_key_of(&table, &new_row)
             };
             memory.charge_row(&new_row)?;
+            memory.charge_row(old_row)?;
             old_rows.push(old_row.clone());
             changes.push((old_key.clone(), new_key, new_row));
         }
@@ -413,16 +413,24 @@ pub(crate) fn merge(
             let mut values = Vec::with_capacity(targets.len());
             for (expr, &index) in insert.values.iter().zip(&targets) {
                 let sql_type = table.columns[index].sql_type;
-                let value = joined.value(expr, &row, Some(sql_type))?;
-                values.push(InsertValue::Expr(Expr {
-                    kind: ExprKind::Constant {
-                        sql_type: value.sql_type(),
-                        value,
-                    },
-                    position: expr.position,
-                }));
+                values.push(joined.value(expr, &row, Some(sql_type))?);
             }
-            rows.push(values);
+            memory.charge_row(&values)?;
+            rows.push(
+                values
+                    .into_iter()
+                    .zip(&insert.values)
+                    .map(|(value, expr)| {
+                        InsertValue::Expr(Expr {
+                            kind: ExprKind::Constant {
+                                sql_type: value.sql_type(),
+                                value,
+                            },
+                            position: expr.position,
+                        })
+                    })
+                    .collect(),
+            );
         }
         if !rows.is_empty() {
             let columns = targets
