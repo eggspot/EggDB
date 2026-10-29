@@ -428,15 +428,16 @@ impl<'t> Parser<'t> {
 
     fn schema_table(&self, schema: Name, table: Name) -> SqlResult<Name> {
         if self.oracle() {
-            if crate::lexer::swap_uniform_case(&schema.text) != self.oracle_user() {
-                return Err(SqlError::new(
-                    SqlState::UNDEFINED_TABLE,
-                    "table or view does not exist",
-                )
-                .with_oracle_code(942)
-                .at(schema.position));
-            }
-            return Ok(table);
+            let own = crate::lexer::swap_uniform_case(&schema.text) == self.oracle_user();
+            let schema_name = if own {
+                crate::schemas::DEFAULT_SCHEMA
+            } else {
+                schema.text.as_str()
+            };
+            return Ok(Name {
+                text: written_qualified(schema_name, &table.text),
+                position: schema.position,
+            });
         }
         if self.mysql() {
             self.check_database(&schema)?;

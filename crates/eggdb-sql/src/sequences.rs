@@ -1169,8 +1169,8 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("setval", [argument, value, called]) => {
             argument_name(argument).and_then(|name| setval(&name, value, called))
         }
-        ("oracle_nextval", [Value::Text(name)]) => nextval(name),
-        ("oracle_currval", [Value::Text(name)]) => currval(name),
+        ("oracle_nextval", [Value::Text(name)]) => nextval(&on_path(name.clone())),
+        ("oracle_currval", [Value::Text(name)]) => currval(&on_path(name.clone())),
         ("regclass_cast", [value]) => {
             crate::pg_catalog::reg_value(crate::pg_catalog::RegKind::Class, value.clone())
         }

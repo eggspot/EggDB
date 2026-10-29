@@ -93,6 +93,10 @@ impl Session<'_> {
                 &mut copy,
             )
         };
+        let outcome = match outcome {
+            Ok(()) if !session.autocommit() => session.execute("COMMIT", &mut |_| {}),
+            outcome => outcome,
+        };
         let closed = session.close();
         let exit = match outcome.and(closed.map(|_| ())) {
             Ok(()) => Exit::Done,
