@@ -5,7 +5,7 @@ const COLUMNS: &str = "i integer, s smallint, b bigint, n numeric(10,2), r real,
     d double precision, t text, v varchar(10), c char(3), dt date, ts timestamp, tm time, \
     iv interval, u uuid, f boolean, g boolean";
 
-const CHECKS: [(&str, &str, &str, &str); 77] = [
+const CHECKS: [(&str, &str, &str, &str); 79] = [
     ("c01", "i > 0", "(i > 0)", "i > 0"),
     (
         "c02",
@@ -343,9 +343,21 @@ const CHECKS: [(&str, &str, &str, &str); 77] = [
     ),
     ("d31", "t = v", "(t = (v)::text)", "t = v::text"),
     ("d32", "t LIKE 'a%'", "(t LIKE 'a%')", "t ~~ 'a%'::text"),
+    (
+        "d33",
+        "t <> 'pg_class'::regclass::text",
+        "(t <> ('pg_class'::regclass)::text)",
+        "t <> 'pg_class'::regclass::text",
+    ),
+    (
+        "d34",
+        "b <> CAST('pg_catalog.pg_class' AS regclass)::oid::bigint",
+        "(b <> (('pg_class'::regclass)::oid)::bigint)",
+        "b <> 'pg_class'::regclass::oid::bigint",
+    ),
 ];
 
-const DEFAULTS: [(&str, &str, &str, &str); 14] = [
+const DEFAULTS: [(&str, &str, &str, &str); 17] = [
     ("i integer", "0", "0", "0"),
     ("s smallint", "-3", "'-3'::integer", "'-3'::integer"),
     ("b bigint", "5", "5", "5"),
@@ -375,6 +387,24 @@ const DEFAULTS: [(&str, &str, &str, &str); 14] = [
         "'1 day'::interval",
     ),
     ("f boolean", "false", "false", "false"),
+    (
+        "rt text",
+        "'pg_class'::regclass::text",
+        "('pg_class'::regclass)::text",
+        "'pg_class'::regclass::text",
+    ),
+    (
+        "ro bigint",
+        "CAST('pg_class' AS regclass)::oid::bigint",
+        "(('pg_class'::regclass)::oid)::bigint",
+        "'pg_class'::regclass::oid::bigint",
+    ),
+    (
+        "rc text",
+        "regclass('pg_catalog.pg_class')::text || 'x'",
+        "(('pg_class'::regclass)::text || 'x'::text)",
+        "'pg_class'::regclass::text || 'x'::text",
+    ),
 ];
 
 fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<Vec<Value>>, SqlError> {

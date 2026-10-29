@@ -126,7 +126,7 @@ impl Node {
         match self {
             Self::Atom(text) => text.clone(),
             Self::Cast { operand, type_name } => {
-                if operand.is_complex() {
+                if operand.is_complex() && !matches!(**operand, Self::Cast { .. }) {
                     format!("({})::{type_name}", operand.print())
                 } else {
                     format!("{}::{type_name}", operand.print())
@@ -213,7 +213,7 @@ impl Node {
     fn needs_operand_parens(&self) -> bool {
         match self {
             Self::Atom(_) => false,
-            Self::Cast { operand, .. } => operand.is_complex(),
+            Self::Cast { operand, .. } => operand.needs_operand_parens(),
             _ => true,
         }
     }
@@ -826,6 +826,11 @@ impl Deparser<'_> {
                 SqlType::BigInt,
             ));
         }
+        if name == "regclass_cast"
+            && let [argument] = arguments
+        {
+            return self.regclass(argument);
+        }
         let text_arguments = TEXT_FUNCTIONS.contains(&name);
         let mut shown = Vec::with_capacity(arguments.len());
         let mut first_type = None;
@@ -861,27 +866,41 @@ impl Deparser<'_> {
     }
 
     fn sequence_argument(&self, expr: &Expr) -> Option<String> {
-        let ExprKind::Function { name, arguments } = &expr.kind else {
-            return match &expr.kind {
-                ExprKind::Literal(Literal::String(text)) => {
-                    Some(format!("'{}'::text", text.replace('\'', "''")))
-                }
-                _ => None,
-            };
-        };
-        if name != "regclass_cast" {
-            return None;
+        match &expr.kind {
+            ExprKind::Literal(Literal::String(text)) => {
+                Some(format!("'{}'::text", text.replace('\'', "''")))
+            }
+            ExprKind::Function { name, arguments } if name == "regclass_cast" => {
+                let [argument] = arguments.as_slice() else {
+                    return None;
+                };
+                let ExprKind::Literal(Literal::String(text)) = &argument.kind else {
+                    return None;
+                };
+                Some(self.regclass_constant(text))
+            }
+            _ => None,
         }
-        let [argument] = arguments.as_slice() else {
-            return None;
+    }
+
+    fn regclass(&self, argument: &Expr) -> Option<Piece> {
+        let regclass = SqlType::Catalog(super::CatalogType::Reg(super::RegKind::Class));
+        let node = match &argument.kind {
+            ExprKind::Literal(Literal::String(text)) => Node::Atom(self.regclass_constant(text)),
+            ExprKind::Literal(_) => return None,
+            _ => Node::Cast {
+                operand: Box::new(self.piece(argument)?.coerce(SqlType::Text)),
+                type_name: type_name(regclass),
+            },
         };
-        let ExprKind::Literal(Literal::String(text)) = &argument.kind else {
-            return None;
-        };
+        Some(Piece::Typed(node, regclass))
+    }
+
+    fn regclass_constant(&self, text: &str) -> String {
         let shown = super::types::split_qualified(text)
             .ok()
             .and_then(|(schema, name)| self.snapshot.find_relation(schema.as_deref(), &name))
-            .map_or_else(|| text.clone(), |at| self.snapshot.display_name(at));
-        Some(format!("'{}'::regclass", shown.replace('\'', "''")))
+            .map_or_else(|| text.to_owned(), |at| self.snapshot.display_name(at));
+        format!("'{}'::regclass", shown.replace('\'', "''"))
     }
 }

@@ -93,8 +93,8 @@ fn no_equality(left: SqlType, right: SqlType, position: usize) -> SqlError {
         SqlState::UNDEFINED_FUNCTION,
         format!(
             "operator does not exist: {} = {}",
-            left.name(),
-            right.name()
+            crate::pg_catalog::operator_operand_type_name(left),
+            crate::pg_catalog::operator_operand_type_name(right)
         ),
     )
     .with_hint(
@@ -262,7 +262,7 @@ pub(crate) fn resolve<'a>(
         shapes,
     };
     if let Some(filter) = filter {
-        joined.add_where_keys(filter);
+        joined.add_where_keys(filter)?;
     }
     Ok(joined)
 }
@@ -279,9 +279,11 @@ impl JoinedFrom<'_> {
             .map_or(0, |index| index + 1)
     }
 
-    fn add_where_keys(&mut self, filter: &Expr) {
+    fn add_where_keys(&mut self, filter: &Expr) -> SqlResult<()> {
         let lowest = self.first_filtered_level();
         let mut found: Vec<(usize, usize, usize)> = Vec::new();
+        let converts_by_precedence =
+            crate::constraints::current_dialect() == crate::Dialect::SqlServer;
         {
             let scope = Scope::Many(&self.sources);
             let list = &self.sources.list;
@@ -298,6 +300,13 @@ impl JoinedFrom<'_> {
                 let (Some(a), Some(b)) = (offset(left), offset(right)) else {
                     continue;
                 };
+                if let (Some(left_type), Some(right_type)) =
+                    (scope.column_type(a), scope.column_type(b))
+                    && !converts_by_precedence
+                    && !comparable(left_type, right_type)
+                {
+                    return Err(no_equality(left_type, right_type, conjunct.position));
+                }
                 let (Some(source_a), Some(source_b)) = (source_at(list, a), source_at(list, b))
                 else {
                     continue;
@@ -325,6 +334,7 @@ impl JoinedFrom<'_> {
                 shape.where_keys.push((outer, inner));
             }
         }
+        Ok(())
     }
 }
 
@@ -389,7 +399,7 @@ impl JoinedFrom<'_> {
         self.shapes
             .iter()
             .map(|shape| {
-                let pairs = equality_pairs(shape, &self.sources);
+                let pairs = equality_pairs(shape, &self.sources).pairs;
                 let table = shape.source.table;
                 let offset = shape.source.offset;
                 if primary_key_lefts(table, offset, &pairs).is_some() {
@@ -490,7 +500,49 @@ pub(crate) struct JoinedRows<'a> {
     filters: Vec<Vec<Expr>>,
 }
 
-fn equality_pairs(shape: &StepShape<'_>, all: &Sources<'_>) -> Vec<(usize, usize)> {
+struct KeyPairs {
+    pairs: Vec<(usize, usize)>,
+    hashed: usize,
+}
+
+impl KeyPairs {
+    fn hash_keys(&self) -> &[(usize, usize)] {
+        self.pairs.get(..self.hashed).unwrap_or(&self.pairs)
+    }
+}
+
+fn equality_pairs(shape: &StepShape<'_>, all: &Sources<'_>) -> KeyPairs {
+    with_where_keys(condition_pairs(shape, all), &shape.where_keys, |pair| {
+        integer_pair(all, pair)
+    })
+}
+
+fn with_where_keys(
+    mut pairs: Vec<(usize, usize)>,
+    where_keys: &[(usize, usize)],
+    is_integer: impl Fn((usize, usize)) -> bool,
+) -> KeyPairs {
+    let lone_integer_condition = matches!(pairs.as_slice(), [only] if is_integer(*only));
+    for &pair in where_keys {
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    let hashed = if lone_integer_condition {
+        1
+    } else {
+        pairs.len()
+    };
+    KeyPairs { pairs, hashed }
+}
+
+fn integer_pair(all: &Sources<'_>, (outer, inner): (usize, usize)) -> bool {
+    let scope = Scope::Many(all);
+    let integer = |offset: usize| scope.column_type(offset).is_some_and(has_integer_keys);
+    integer(outer) && integer(inner)
+}
+
+fn condition_pairs(shape: &StepShape<'_>, all: &Sources<'_>) -> Vec<(usize, usize)> {
     let scope = Scope::Many(&shape.visible);
     let same_family = |outer: usize, inner: usize| same_family(all, outer, inner);
     let mut pairs: Vec<(usize, usize)> = shape
@@ -499,11 +551,6 @@ fn equality_pairs(shape: &StepShape<'_>, all: &Sources<'_>) -> Vec<(usize, usize
         .copied()
         .filter(|&(outer, inner)| same_family(outer, inner))
         .collect();
-    for &pair in &shape.where_keys {
-        if !pairs.contains(&pair) {
-            pairs.push(pair);
-        }
-    }
     let Some(on) = shape.on else {
         return pairs;
     };
@@ -635,9 +682,7 @@ fn build_hash(
         keep,
         limit,
     } = plan;
-    let scope = Scope::Many(all);
-    let integer = |offset: usize| scope.column_type(offset).is_some_and(has_integer_keys);
-    let integer_keys = matches!(pairs, [(outer, inner)] if integer(*outer) && integer(*inner));
+    let integer_keys = matches!(pairs, [only] if integer_pair(all, *only));
     let offset = shape.source.offset;
     let build: Vec<usize> = pairs.iter().map(|&(_, inner)| inner - offset).collect();
     let version = reader.committed_version();
@@ -735,7 +780,9 @@ impl<'a> JoinedRows<'a> {
             let offset = shape.source.offset;
             let mut step_needed = std::mem::take(&mut needed[index + 1]);
             let scope = Scope::Many(&shape.visible);
-            let pairs = equality_pairs(shape, &joined.sources);
+            let key_pairs = equality_pairs(shape, &joined.sources);
+            let pairs = key_pairs.pairs.as_slice();
+            let hash_keys = key_pairs.hash_keys();
             let own = offset..offset + table.columns.len();
             let keep: Vec<Expr> = if matches!(
                 shape.kind,
@@ -749,9 +796,9 @@ impl<'a> JoinedRows<'a> {
             } else {
                 Vec::new()
             };
-            let lookup = primary_key_lefts(table, offset, &pairs);
+            let lookup = primary_key_lefts(table, offset, pairs);
             let index_lookup = if lookup.is_none() {
-                index_lefts(table, offset, &pairs)
+                index_lefts(table, offset, pairs)
             } else {
                 None
             };
@@ -762,7 +809,7 @@ impl<'a> JoinedRows<'a> {
             let mut using = shape.using.as_slice();
             let preserves_right = matches!(shape.kind, JoinKind::Right | JoinKind::Full);
             let access = if preserves_right {
-                preserved_rows(reader, table, &step_needed, &pairs, offset, memory)?
+                preserved_rows(reader, table, &step_needed, pairs, offset, memory)?
             } else if let Some(lefts) = lookup {
                 let exact: Vec<(usize, usize)> = table
                     .primary_key
@@ -824,7 +871,7 @@ impl<'a> JoinedRows<'a> {
                         shape,
                         &joined.sources,
                         HashBuild {
-                            pairs: &pairs,
+                            pairs: hash_keys,
                             needed: &step_needed,
                             keep: &keep,
                             limit: Some(LOOKUP_HASH_LIMIT),
@@ -840,7 +887,7 @@ impl<'a> JoinedRows<'a> {
                 }
                 match bounded {
                     Some(index) => Access::Hash {
-                        probe: pairs.iter().map(|&(outer, _)| outer).collect(),
+                        probe: hash_keys.iter().map(|&(outer, _)| outer).collect(),
                         index,
                     },
                     None => Access::IndexLookup { position, lefts },
@@ -851,7 +898,7 @@ impl<'a> JoinedRows<'a> {
                     shape,
                     &joined.sources,
                     HashBuild {
-                        pairs: &pairs,
+                        pairs: hash_keys,
                         needed: &step_needed,
                         keep: &keep,
                         limit: None,
@@ -865,7 +912,7 @@ impl<'a> JoinedRows<'a> {
                 }
                 let index = built;
                 Access::Hash {
-                    probe: pairs.iter().map(|&(outer, _)| outer).collect(),
+                    probe: hash_keys.iter().map(|&(outer, _)| outer).collect(),
                     index,
                 }
             } else {
@@ -1311,5 +1358,35 @@ impl JoinedFrom<'_> {
             levels[level.max(lowest)].push(conjunct.clone());
         }
         levels
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_where_keys;
+
+    #[test]
+    fn a_single_integer_condition_pair_keeps_the_integer_hash_without_where_keys() {
+        let integer = |pair: (usize, usize)| pair == (0, 3);
+        let keys = |conditions: Vec<(usize, usize)>, where_keys: &[(usize, usize)]| {
+            let found = with_where_keys(conditions, where_keys, integer);
+            (found.pairs.clone(), found.hash_keys().to_vec())
+        };
+        assert_eq!(
+            keys(vec![(0, 3)], &[(1, 4)]),
+            (vec![(0, 3), (1, 4)], vec![(0, 3)])
+        );
+        assert_eq!(
+            keys(vec![(1, 4)], &[(0, 3)]),
+            (vec![(1, 4), (0, 3)], vec![(1, 4), (0, 3)])
+        );
+        assert_eq!(
+            keys(vec![(0, 3), (1, 4)], &[(2, 5), (1, 4)]),
+            (vec![(0, 3), (1, 4), (2, 5)], vec![(0, 3), (1, 4), (2, 5)])
+        );
+        assert_eq!(
+            keys(Vec::new(), &[(1, 4), (0, 3)]),
+            (vec![(1, 4), (0, 3)], vec![(1, 4), (0, 3)])
+        );
     }
 }

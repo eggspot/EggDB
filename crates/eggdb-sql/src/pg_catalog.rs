@@ -19,7 +19,7 @@ pub(crate) use functions::{
 pub(crate) use relations::generated_rows;
 pub(crate) use snapshot::{
     enter_statement, load_for_stored_expressions, load_if_wanted, mentions_catalog,
-    text_needs_catalog,
+    names_non_sequence_relation, text_needs_catalog,
 };
 pub use types::{CatalogType, RegKind, RegValue};
 
@@ -28,6 +28,13 @@ pub use types::{CatalogType, RegKind, RegValue};
 pub fn type_oid(sql_type: SqlType) -> u32 {
     oids::type_oid(sql_type)
 }
+pub(crate) fn operator_operand_type_name(sql_type: SqlType) -> String {
+    match sql_type {
+        SqlType::Bpchar(_) => "character".to_owned(),
+        other => oids::format_type(oids::type_oid(other), Some(-1)),
+    }
+}
+
 pub(crate) use types::{
     cast_type_named, check_expression_tree_argument, convert, convert_from, oid_number,
     parse_input, read_only, reg_value, system_catalog,

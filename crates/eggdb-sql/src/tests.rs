@@ -1950,6 +1950,60 @@ fn where_equalities_join_comma_and_cross_joined_tables_like_on_conditions() {
     assert!(plan.contains("Hash Join"), "{plan}");
 }
 
+#[test]
+fn where_equalities_between_columns_without_an_equality_operator_fail_before_any_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE t1 (id integer PRIMARY KEY, c0 integer, c1 double precision);
+         CREATE TABLE t3 (id integer PRIMARY KEY, c1 double precision);
+         CREATE TABLE t4 (id integer PRIMARY KEY, c2 char(3));
+         INSERT INTO t1 VALUES (1, 10, 1.5);
+         INSERT INTO t3 VALUES (1, 1.5);
+         INSERT INTO t4 VALUES (20, 'abc')",
+    );
+    for sql in [
+        "SELECT * FROM t1 CROSS JOIN t3, t4 WHERE t3.c1 = t1.c1 AND t3.c1 = t4.c2 AND t4.id = t1.c0 AND t1.id = 1",
+        "SELECT * FROM t1, t4 WHERE t4.id = t1.c0 AND t1.c1 = t4.c2",
+        "SELECT * FROM t1 JOIN t4 ON t4.id = t1.c0 WHERE t1.c1 = t4.c2",
+        "SELECT * FROM t1, t4 WHERE false AND t1.c1 = t4.c2",
+    ] {
+        let error = fails(&mut session, sql);
+        assert_eq!(error.state().code(), "42883", "{sql}");
+        assert_eq!(
+            error.message(),
+            "operator does not exist: double precision = character",
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn where_equalities_next_to_an_on_condition_give_the_same_rows() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE a (id integer PRIMARY KEY, s text);
+         CREATE TABLE b (bid integer PRIMARY KEY, aid integer, s text);
+         INSERT INTO a VALUES (1, 'x'), (2, 'y'), (3, NULL);
+         INSERT INTO b VALUES (10, 1, 'x'), (11, 1, 'z'), (12, 2, 'y'), (13, 3, NULL), (14, 2, 'y')",
+    );
+    let expected = last(
+        &mut session,
+        "SELECT a.id, b.bid FROM a JOIN b ON a.id = b.aid WHERE a.s || '' = b.s ORDER BY 1, 2",
+    );
+    assert!(expected.ends_with("SELECT 3"), "{expected}");
+    for sql in [
+        "SELECT a.id, b.bid FROM a JOIN b ON a.id = b.aid WHERE a.s = b.s ORDER BY 1, 2",
+        "SELECT a.id, b.bid FROM a JOIN b ON b.aid = a.id WHERE b.s = a.s ORDER BY 1, 2",
+        "SELECT a.id, b.bid FROM a, b WHERE a.s = b.s AND a.id = b.aid ORDER BY 1, 2",
+    ] {
+        assert_eq!(last(&mut session, sql), expected, "{sql}");
+    }
+}
+
 fn parameter(declared_type: Option<crate::SqlType>, value: Option<&str>) -> crate::Parameter {
     crate::Parameter {
         declared_type,

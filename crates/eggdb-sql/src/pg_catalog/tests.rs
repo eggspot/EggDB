@@ -488,6 +488,18 @@ fn reg_inputs_outputs_and_errors_follow_postgresql_16() {
             "character varying|character varying[]|numeric|timestamp with time zone|time without time zone|real|double precision|interval|character varying|character|integer|integer[]"
         ]
     );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT 'double precision[3]'::regtype, 'int4[3]'::regtype, 'int4 [ 3 ] [ ]'::regtype, \
+             'varchar(10)[3]'::regtype, 'numeric(5,6)'::regtype, '02353'::regclass, \
+             '00000000000000000000000000000002353'::regclass, '027'::regtype, '010'::oid, \
+             '0x1F'::oid, '-2147483648'::oid, 'customers'::regclass::regclass"
+        )),
+        [
+            "double precision[]|integer[]|integer[]|character varying[]|numeric|pg_class|pg_class|integer|8|31|2147483648|customers"
+        ]
+    );
     for (sql, state, message) in [
         (
             "SELECT 'a.b.c.d'::regclass",
@@ -544,6 +556,136 @@ fn reg_inputs_outputs_and_errors_follow_postgresql_16() {
             "SELECT nextval('nosuch'::regclass)",
             "42P01",
             "relation \"nosuch\" does not exist",
+        ),
+        (
+            "SELECT nextval('customers_pkey')",
+            "42809",
+            "\"customers_pkey\" is not a sequence",
+        ),
+        (
+            "SELECT nextval('pg_class')",
+            "42809",
+            "\"pg_class\" is not a sequence",
+        ),
+        (
+            "SELECT setval('pg_catalog.pg_class', 1)",
+            "42809",
+            "\"pg_class\" is not a sequence",
+        ),
+        (
+            "SELECT 'pg_class'::regclass::regtype",
+            "42846",
+            "cannot cast type regclass to regtype",
+        ),
+        (
+            "SELECT 'integer'::regtype::regclass",
+            "42846",
+            "cannot cast type regtype to regclass",
+        ),
+        (
+            "SELECT 'numeric(1,2,3)'::regtype",
+            "22023",
+            "invalid NUMERIC type modifier",
+        ),
+        (
+            "SELECT 'numeric(0)'::regtype",
+            "22023",
+            "NUMERIC precision 0 must be between 1 and 1000",
+        ),
+        (
+            "SELECT 'numeric(5,1001)'::regtype",
+            "22023",
+            "NUMERIC scale 1001 must be between -1000 and 1000",
+        ),
+        (
+            "SELECT 'numeric(99999999999)'::regtype",
+            "22003",
+            "value \"99999999999\" is out of range for type integer",
+        ),
+        (
+            "SELECT 'varchar(0)'::regtype",
+            "22023",
+            "length for type varchar must be at least 1",
+        ),
+        (
+            "SELECT 'character(0)'::regtype",
+            "22023",
+            "length for type char must be at least 1",
+        ),
+        (
+            "SELECT 'varchar(10485761)'::regtype",
+            "22023",
+            "length for type varchar cannot exceed 10485760",
+        ),
+        (
+            "SELECT 'varchar(1,2)'::regtype",
+            "42601",
+            "syntax error at or near \",\"",
+        ),
+        (
+            "SELECT 'float(54)'::regtype",
+            "22023",
+            "precision for type float must be less than 54 bits",
+        ),
+        (
+            "SELECT 'float(0)'::regtype",
+            "22023",
+            "precision for type float must be at least 1 bit",
+        ),
+        (
+            "SELECT 'int4[]['::regtype",
+            "42601",
+            "syntax error at end of input",
+        ),
+        (
+            "SELECT 'int4[]x'::regtype",
+            "42601",
+            "syntax error at or near \"x\"",
+        ),
+        (
+            "SELECT 'int4[-1]'::regtype",
+            "42601",
+            "syntax error at or near \"-\"",
+        ),
+        (
+            "SELECT ' 23 '::regtype",
+            "42601",
+            "syntax error at or near \"23\"",
+        ),
+        (
+            "SELECT '23x'::regtype",
+            "42601",
+            "trailing junk after numeric literal at or near \"23x\"",
+        ),
+        (
+            "SELECT '00000000000000000000001259'::regclass",
+            "22P02",
+            "invalid input syntax for type oid: \"00000000000000000000001259\"",
+        ),
+        (
+            "SELECT ' 1259 '::regclass",
+            "42P01",
+            "relation \"1259\" does not exist",
+        ),
+        (
+            "SELECT '-1'::regclass",
+            "42P01",
+            "relation \"-1\" does not exist",
+        ),
+        (
+            "SELECT '08'::oid",
+            "22P02",
+            "invalid input syntax for type oid: \"08\"",
+        ),
+        (
+            "SELECT '0x'::oid",
+            "22P02",
+            "invalid input syntax for type oid: \"0x\"",
+        ),
+        (
+            "SELECT '040000000000'::oid",
+            "22003",
+            "value \"040000000000\" is out of range for type oid",
         ),
         (
             "SELECT pg_get_expr('abc', 1259)",

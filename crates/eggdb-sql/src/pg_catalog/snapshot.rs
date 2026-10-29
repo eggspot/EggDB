@@ -783,8 +783,21 @@ fn missing(state: SqlState, what: &str, text: &str) -> SqlError {
 }
 
 fn is_number(text: &str) -> bool {
-    let trimmed = text.trim();
-    !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit())
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+pub(crate) fn names_non_sequence_relation(reader: &dyn KeyValueRead, name: &str) -> bool {
+    let Ok(snapshot) = snapshot_for(reader) else {
+        return false;
+    };
+    let found = if crate::schemas::is_qualified(name) {
+        snapshot.find_internal(name)
+    } else {
+        snapshot.find_relation(None, name)
+    };
+    found
+        .and_then(|at| snapshot.relations.get(at))
+        .is_some_and(|entry| entry.kind != RelationKind::Sequence)
 }
 
 pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {

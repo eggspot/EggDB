@@ -57,7 +57,7 @@ fn stored_expressions_need_catalog(relation: &Relation) -> bool {
     }
 }
 
-fn table_needs_catalog(table: &TableDefinition) -> bool {
+pub(crate) fn table_needs_catalog(table: &TableDefinition) -> bool {
     table
         .columns
         .iter()
@@ -86,11 +86,15 @@ impl TableCache {
     ) -> SqlResult<Option<Relation>> {
         crate::pg_catalog::load_if_wanted(reader)?;
         if crate::temp_tables::is_temp_table(name) {
-            let found = crate::temp_tables::temp_definition(name);
-            if found.as_deref().is_some_and(table_needs_catalog) {
+            let Some((definition, needs_catalog)) =
+                crate::temp_tables::temp_definition_and_catalog_need(name)
+            else {
+                return Ok(None);
+            };
+            if needs_catalog {
                 crate::pg_catalog::load_for_stored_expressions(reader)?;
             }
-            return Ok(found.map(Relation::Table));
+            return Ok(Some(Relation::Table(definition)));
         }
         let version = reader.committed_version();
         if let Some(cached) = self.entries.get(name)

@@ -144,8 +144,21 @@ fn invalid_input(text: &str, sql_type: &str) -> SqlError {
 
 pub(crate) fn parse_identifier(text: &str, sql_type: &str) -> SqlResult<u32> {
     let trimmed = text.trim_matches(|c: char| c.is_ascii_whitespace());
-    let digits = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+    let (negative, unsigned) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let (radix, digits) = match unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+    {
+        Some(hexadecimal) => (16, hexadecimal),
+        None => match unsigned.strip_prefix('0') {
+            Some(octal) if !octal.is_empty() => (8, octal),
+            _ => (10, unsigned),
+        },
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
         return Err(invalid_input(text, sql_type));
     }
     let out_of_range = || {
@@ -154,8 +167,12 @@ pub(crate) fn parse_identifier(text: &str, sql_type: &str) -> SqlResult<u32> {
             format!("value \"{text}\" is out of range for type {sql_type}"),
         )
     };
-    let number: i64 = trimmed.parse().map_err(|_| out_of_range())?;
-    identifier_of(number).ok_or_else(out_of_range)
+    let magnitude = u64::from_str_radix(digits, radix)
+        .ok()
+        .filter(|magnitude| *magnitude <= u64::from(u32::MAX))
+        .ok_or_else(out_of_range)?;
+    let number = i64::try_from(magnitude).map_err(|_| out_of_range())?;
+    identifier_of(if negative { -number } else { number }).ok_or_else(out_of_range)
 }
 
 fn identifier_of(number: i64) -> Option<u32> {
@@ -258,6 +275,14 @@ pub(crate) fn reg_value(kind: RegKind, value: Value) -> SqlResult<Value> {
         Value::Null => Ok(Value::Null),
         Value::Text(text) | Value::Bpchar(text) => parse_input(&text, CatalogType::Reg(kind)),
         Value::Reg(reg) if reg.kind == kind => Ok(Value::Reg(reg)),
+        Value::Reg(reg) => Err(SqlError::new(
+            SqlState::CANNOT_COERCE,
+            format!(
+                "cannot cast type {} to {}",
+                reg.kind.type_name(),
+                kind.type_name()
+            ),
+        )),
         other => match oid_number(&other).and_then(identifier_of) {
             Some(oid) => Ok(boxed(super::snapshot::reg_from_oid(kind, oid))),
             None if other.as_integer().is_some() => Err(SqlError::new(
@@ -482,10 +507,152 @@ fn modifiers_are_numbers(inside: &str) -> SqlResult<()> {
     Ok(())
 }
 
+fn starts_with_number(name: &str) -> SqlResult<()> {
+    if !name.starts_with(|c: char| c.is_ascii_digit()) {
+        return Ok(());
+    }
+    let token = name
+        .split(|c: char| c.is_whitespace() || matches!(c, '(' | '['))
+        .next()
+        .unwrap_or_default();
+    if token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(syntax_error_near(token));
+    }
+    Err(SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        format!("trailing junk after numeric literal at or near \"{token}\""),
+    ))
+}
+
+fn first_token(text: &str) -> &str {
+    let text = text.trim_start();
+    let word_end = text
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(text.len());
+    if word_end > 0 {
+        return text.get(..word_end).unwrap_or(text);
+    }
+    text.chars()
+        .next()
+        .and_then(|first| text.get(..first.len_utf8()))
+        .unwrap_or_default()
+}
+
+fn without_array_bounds(name: &str) -> SqlResult<(&str, bool)> {
+    let Some((element, bounds)) = name.split_once('[') else {
+        return Ok((name, false));
+    };
+    let mut rest = bounds;
+    loop {
+        let Some((inside, after)) = rest.split_once(']') else {
+            return Err(syntax_error_near(""));
+        };
+        let inside = inside.trim();
+        if !inside.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(syntax_error_near(first_token(inside)));
+        }
+        let after = after.trim_start();
+        if after.is_empty() {
+            return Ok((element.trim_end(), true));
+        }
+        match after.strip_prefix('[') {
+            Some(next) => rest = next,
+            None => return Err(syntax_error_near(first_token(after))),
+        }
+    }
+}
+
+fn type_modifiers(inside: &str) -> SqlResult<Vec<i64>> {
+    modifiers_are_numbers(inside)?;
+    inside
+        .split(',')
+        .map(|argument| {
+            let argument = argument.trim();
+            argument
+                .parse::<i64>()
+                .ok()
+                .filter(|value| i32::try_from(*value).is_ok())
+                .ok_or_else(|| {
+                    SqlError::new(
+                        SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+                        format!("value \"{argument}\" is out of range for type integer"),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn invalid_modifier(message: String) -> SqlError {
+    SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message)
+}
+
+fn one_modifier(modifiers: &[i64]) -> SqlResult<i64> {
+    match modifiers {
+        [only] => Ok(*only),
+        _ => Err(syntax_error_near(",")),
+    }
+}
+
+fn float_oid(modifiers: &[i64]) -> SqlResult<u32> {
+    match one_modifier(modifiers)? {
+        bits if bits < 1 => Err(invalid_modifier(
+            "precision for type float must be at least 1 bit".to_owned(),
+        )),
+        bits if bits <= 24 => Ok(700),
+        bits if bits <= 53 => Ok(701),
+        _ => Err(invalid_modifier(
+            "precision for type float must be less than 54 bits".to_owned(),
+        )),
+    }
+}
+
+const MOST_CHARACTER_LENGTH: i64 = 10_485_760;
+
+fn check_modifiers(oid: u32, modifiers: &[i64]) -> SqlResult<()> {
+    match oid {
+        1700 => {
+            let (precision, scale) = match modifiers {
+                [precision] => (*precision, 0),
+                [precision, scale] => (*precision, *scale),
+                _ => {
+                    return Err(invalid_modifier("invalid NUMERIC type modifier".to_owned()));
+                }
+            };
+            if !(1..=1000).contains(&precision) {
+                return Err(invalid_modifier(format!(
+                    "NUMERIC precision {precision} must be between 1 and 1000"
+                )));
+            }
+            if !(-1000..=1000).contains(&scale) {
+                return Err(invalid_modifier(format!(
+                    "NUMERIC scale {scale} must be between -1000 and 1000"
+                )));
+            }
+            Ok(())
+        }
+        1042 | 1043 => {
+            let length = one_modifier(modifiers)?;
+            let shown = if oid == 1042 { "char" } else { "varchar" };
+            if length < 1 {
+                return Err(invalid_modifier(format!(
+                    "length for type {shown} must be at least 1"
+                )));
+            }
+            if length > MOST_CHARACTER_LENGTH {
+                return Err(invalid_modifier(format!(
+                    "length for type {shown} cannot exceed {MOST_CHARACTER_LENGTH}"
+                )));
+            }
+            Ok(())
+        }
+        _ => one_modifier(modifiers).map(|_| ()),
+    }
+}
+
 pub(crate) fn regtype_oid(text: &str) -> SqlResult<u32> {
     let written = text.trim();
     let lowered;
-    let mut name = if written.contains('"') {
+    let name = if written.contains('"') {
         written
     } else {
         lowered = written
@@ -498,40 +665,38 @@ pub(crate) fn regtype_oid(text: &str) -> SqlResult<u32> {
     if let Some(found) = super::oids::builtin_type_named(name) {
         return Ok(found.oid);
     }
-    let mut array = false;
-    while let Some(element) = name.strip_suffix("[]") {
-        name = element.trim_end();
-        array = true;
-    }
+    starts_with_number(name)?;
+    let (name, array) = without_array_bounds(name)?;
     let (base, modified) = match name.split_once('(') {
         Some((base, after)) => {
             let Some((inside, rest)) = after.split_once(')') else {
                 return Err(syntax_error_near(""));
             };
-            modifiers_are_numbers(inside)?;
+            let modifiers = type_modifiers(inside)?;
             let base = base.trim_end();
             let rest = rest.trim();
             if base == "float" {
-                let precision: u32 = inside.trim().parse().unwrap_or(u32::MAX);
-                let oid = if precision <= 24 { 700 } else { 701 };
-                return element_or_array(oid, array, base);
+                return element_or_array(float_oid(&modifiers)?, array, base);
             }
             let full = if rest.is_empty() {
                 base.to_owned()
             } else {
                 format!("{base} {rest}")
             };
-            (full, Some(base))
+            (full, Some((base, modifiers)))
         }
         None => (name.to_owned(), None),
     };
-    let shown = modified.unwrap_or(&base);
+    let shown = modified.as_ref().map_or(base.as_str(), |(base, _)| base);
     let oid = plain_type_oid(&base)?.ok_or_else(|| missing_type(shown))?;
-    if modified.is_some() && !MODIFIABLE_TYPES.contains(&oid) {
-        return Err(SqlError::new(
-            SqlState::SYNTAX_ERROR,
-            format!("type modifier is not allowed for type \"{shown}\""),
-        ));
+    if let Some((_, modifiers)) = &modified {
+        if !MODIFIABLE_TYPES.contains(&oid) {
+            return Err(SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                format!("type modifier is not allowed for type \"{shown}\""),
+            ));
+        }
+        check_modifiers(oid, modifiers)?;
     }
     element_or_array(oid, array, shown)
 }

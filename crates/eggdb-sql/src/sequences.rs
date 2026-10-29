@@ -607,11 +607,15 @@ fn not_a_sequence(name: &str) -> SqlError {
 
 fn missing_or_not_a_sequence(reader: &dyn KeyValueRead, name: &str) -> SqlResult<SqlError> {
     let relation = crate::schemas::resolve_relation(reader, name)?;
-    Ok(if reader.get(&table_key(&relation))?.is_some() {
-        not_a_sequence(name)
-    } else {
-        missing_sequence(name, Dialect::PostgreSql)
-    })
+    Ok(
+        if reader.get(&table_key(&relation))?.is_some()
+            || crate::pg_catalog::names_non_sequence_relation(reader, name)
+        {
+            not_a_sequence(name)
+        } else {
+            missing_sequence(name, Dialect::PostgreSql)
+        },
+    )
 }
 
 pub(crate) fn explain_missing(reader: &dyn KeyValueRead, error: SqlError) -> SqlError {

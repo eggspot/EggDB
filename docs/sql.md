@@ -1262,7 +1262,13 @@ view column of a catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` i
 37c): an index's method other than `btree` and a descending order, whether a unique index was
 made by `CREATE UNIQUE INDEX` rather than a constraint, and `GENERATED ALWAYS` identities.
 `\d` of a view shows the view's text as it was written (PostgreSQL shows its own pretty form;
-only `\d+` prints it).
+only `\d+` prints it). `COMMENT ON` a catalog relation or its columns is refused (`42501`, as for
+`DROP` and `ALTER`): nothing would keep the comment. The non-pretty forms of `pg_get_expr` and
+`pg_get_constraintdef` are the pretty form (wrapped in one pair of parentheses for a `CHECK`),
+without PostgreSQL's extra parentheses around nested casts. A `reg*` cast PostgreSQL rejects
+while planning (`'t'::regclass::regtype`) fails here when the cast runs, so not on zero rows or
+a NULL; `numeric` with a negative scale and `interval year(3)` are not taken by `regtype`, and
+`timestamp(7)` gives no warning.
 
 ## How SQL is stored
 
