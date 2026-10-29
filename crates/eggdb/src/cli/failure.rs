@@ -31,9 +31,6 @@ pub(crate) enum Failure {
         message: String,
         command: Option<CommandName>,
     },
-    Unavailable {
-        message: String,
-    },
     Database {
         message: String,
         try_command: Option<String>,
@@ -63,7 +60,7 @@ impl Failure {
 
     pub(crate) fn exit(&self) -> Exit {
         match self {
-            Self::Usage { .. } | Self::Unavailable { .. } => Exit::Usage,
+            Self::Usage { .. } => Exit::Usage,
             Self::Database { exit, .. } => *exit,
             Self::OutputClosed => Exit::Done,
             Self::OutputFailed { .. } => Exit::DatabaseError,

@@ -126,6 +126,8 @@ Commands:
                                 replace a value only while it is <expected>; see eggdb help cas
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
+  backup <file> <copy>          write a consistent copy of the file while readers keep working
+  compact <file>                rewrite the file without free or leaked pages, in place
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, or a CSV file into a table with --csv
@@ -191,7 +193,8 @@ fn help_text_matches_the_design() {
         assert_eq!(stdout(&output), SCAN_HELP, "{args:?}");
     }
     for command in [
-        "create", "put", "get", "del", "delete", "check", "stats", "ui", "export", "import",
+        "create", "put", "get", "del", "delete", "check", "stats", "backup", "compact", "ui",
+        "export", "import",
     ] {
         let output = dir.eggdb(&["help", command]);
         assert_exit(&output, 0);
@@ -478,14 +481,12 @@ fn every_exit_code_and_its_message() {
         stderr(&option),
         "eggdb: unknown option '--reverse' for eggdb get\n  usage: eggdb get <file> <key> [-C <name>]\n  try: eggdb help get\n"
     );
-    for reserved in ["backup", "compact"] {
-        let output = dir.eggdb(&[reserved, "app.db"]);
-        assert_exit(&output, 2);
-        assert_eq!(
-            stderr(&output),
-            format!("eggdb: eggdb {reserved} is not in this release yet; see docs/roadmap.md\n")
-        );
-    }
+    let backup = dir.eggdb(&["backup", "app.db"]);
+    assert_exit(&backup, 2);
+    assert_eq!(
+        stderr(&backup),
+        "eggdb: eggdb backup needs the path of the copy\n  usage: eggdb backup <file> <copy>\n  try: eggdb help backup\n"
+    );
     let format = dir.eggdb(&["scan", "app.db", "--format", "yaml"]);
     assert_exit(&format, 2);
     assert!(

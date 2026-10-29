@@ -21,6 +21,8 @@ Commands:
                                 replace a value only while it is <expected>; see eggdb help cas
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
+  backup <file> <copy>          write a consistent copy of the file while readers keep working
+  compact <file>                rewrite the file without free or leaked pages, in place
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, or a CSV file into a table with --csv
@@ -62,6 +64,8 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         }
         CommandName::Check => "eggdb check <file>",
         CommandName::Stats => "eggdb stats <file>",
+        CommandName::Backup => "eggdb backup <file> <copy>",
+        CommandName::Compact => "eggdb compact <file>",
         CommandName::Ui => "eggdb ui <file> [--read-only] [--mono] [--ascii] [--cache <bytes>]",
         CommandName::Export => "eggdb export <file> [<out> | -] [-C <name>]",
         CommandName::Import => {
@@ -112,6 +116,8 @@ fn command_body(command: CommandName) -> &'static str {
         CommandName::Scan => SCAN,
         CommandName::Check => CHECK,
         CommandName::Stats => STATS,
+        CommandName::Backup => BACKUP,
+        CommandName::Compact => COMPACT,
         CommandName::Ui => UI,
         CommandName::Export => EXPORT,
         CommandName::Import => IMPORT,
@@ -322,6 +328,37 @@ written since the last checkpoint. It reads no page, so it is instant on a file 
 Examples:
   eggdb stats app.db
   eggdb stats app.db --format json
+";
+
+const BACKUP: &str = "\
+Writes a copy of the file's last commit to <copy>, a new file, while other readers keep working.
+The copy is rebuilt entry by entry, so it holds no free or leaked pages and may be smaller than
+the file; every collection, SQL table and time to live is kept. It is built as <copy>.backing-up
+and renamed to <copy> only once it is complete, synced and its entries counted again, so a crash
+or a full disk never leaves a partial copy. <copy> must not exist: eggdb backup never replaces a
+file. The command opens the file read-only, so a program that has it open for writing makes it
+busy (exit 5); to copy a file while a program writes to it, use backup <copy> inside eggdb shell,
+or Database::backup_to in the program. In a pipe the report is one JSON line.
+
+Examples:
+  eggdb backup app.db app.bak
+  eggdb backup app.db \"backups/app-$(date +%F).db\"
+  eggdb backup app.db app.bak --format json
+";
+
+const COMPACT: &str = "\
+Rewrites the file without its free and leaked pages and swaps the result in. The new file is
+built entry by entry as <file>.compacting, synced, its entries counted again, and then renamed
+over the file in one step, so a crash at any moment leaves either the old file or the new one,
+never a mix. Programs reading the file keep working throughout and see the new file when they
+next open it; a program that has it open for writing makes the command busy (exit 5), and so does
+eggdb shell, which holds the file: quit it first. A file with no free or leaked pages is rewritten
+all the same, which packs its pages. eggdb check says how many pages a compact would reclaim. In a
+pipe the report is one JSON line.
+
+Examples:
+  eggdb compact app.db
+  eggdb check app.db && eggdb compact app.db --format json
 ";
 
 const UI: &str = "\

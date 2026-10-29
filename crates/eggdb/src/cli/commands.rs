@@ -12,7 +12,9 @@ use std::io::Read;
 use std::ops::Bound;
 
 mod audit;
+mod backup;
 mod collection;
+mod compact;
 mod copy_io;
 mod csv_import;
 mod expiry;
@@ -139,6 +141,8 @@ fn execute_on(
         CommandName::Scan => session.scan(),
         CommandName::Check => session.check(),
         CommandName::Stats => session.stats(),
+        CommandName::Backup => session.backup(),
+        CommandName::Compact => session.compact(),
         CommandName::Ui => session.ui(),
         CommandName::Export => session.export(),
         CommandName::Import => session.import(),

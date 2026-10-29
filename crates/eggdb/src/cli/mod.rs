@@ -79,7 +79,7 @@ pub(crate) fn report(
                 None => "eggdb help".to_owned(),
             })
         }
-        Failure::Unavailable { message } | Failure::OutputFailed { message } => {
+        Failure::OutputFailed { message } => {
             error_line(&mut messages, message);
             None
         }

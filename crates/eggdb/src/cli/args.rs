@@ -6,7 +6,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const RESERVED_COMMANDS: [&str; 2] = ["backup", "compact"];
 const SMALLEST_PAGE_SIZE: usize = 4096;
 const LARGEST_PAGE_SIZE: usize = 65536;
 const MOST_TIME_LIMIT_SECONDS: u64 = 300;
@@ -20,6 +19,8 @@ pub(crate) enum CommandName {
     Scan,
     Check,
     Stats,
+    Backup,
+    Compact,
     Ui,
     Export,
     Import,
@@ -55,6 +56,8 @@ impl CommandName {
             b"scan" => Self::Scan,
             b"check" => Self::Check,
             b"stats" => Self::Stats,
+            b"backup" => Self::Backup,
+            b"compact" => Self::Compact,
             b"ui" => Self::Ui,
             b"export" => Self::Export,
             b"import" => Self::Import,
@@ -84,6 +87,8 @@ impl CommandName {
             Self::Scan => "scan",
             Self::Check => "check",
             Self::Stats => "stats",
+            Self::Backup => "backup",
+            Self::Compact => "compact",
             Self::Ui => "ui",
             Self::Export => "export",
             Self::Import => "import",
@@ -402,6 +407,7 @@ pub(crate) struct Request {
     pub(crate) ttl: Option<Duration>,
     pub(crate) step: Option<u64>,
     pub(crate) swap: SwapOptions,
+    pub(crate) copy: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -538,7 +544,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     }
     let Some(first) = first else {
         return Err(Failure::usage(
-            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
+            "no command given. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
             None,
         ));
     };
@@ -637,7 +643,6 @@ fn parse_help(arguments: &[&OsStr]) -> Result<Invocation, Failure> {
             match CommandName::from_name(name) {
                 Some(command) => Ok(Invocation::Help(Some(command))),
                 None if name == b"help" || name == b"version" => Ok(Invocation::Help(None)),
-                None if is_reserved(name) => Err(unavailable(name)),
                 None => Err(unknown_command(name)),
             }
         }
@@ -677,6 +682,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         ttl: None,
         step: None,
         swap: SwapOptions::default(),
+        copy: None,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -871,6 +877,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Scan
         | CommandName::Check
         | CommandName::Stats
+        | CommandName::Compact
         | CommandName::Ui
         | CommandName::Serve
         | CommandName::Shell
@@ -883,6 +890,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         CommandName::Get | CommandName::Del | CommandName::Ttl | CommandName::Persist => (2, 2),
         CommandName::Put | CommandName::Incr | CommandName::Decr => (2, 3),
         CommandName::Expire => (3, 3),
+        CommandName::Backup => (2, 2),
         CommandName::Cas => (swap_arguments, swap_arguments),
     };
     if arguments.len() < least {
@@ -918,6 +926,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     .to_owned(),
             ));
         }
+        return Ok(request);
+    }
+    if command == CommandName::Backup {
+        if arguments[1].as_encoded_bytes() == b"-" {
+            return Err(usage(
+                "backup writes a file it can sync and verify, and stdout is not one. Give a path."
+                    .to_owned(),
+            ));
+        }
+        request.copy = Some(PathBuf::from(arguments[1]));
+        return Ok(request);
+    }
+    if command == CommandName::Compact {
         return Ok(request);
     }
     if matches!(command, CommandName::Export | CommandName::Import) {
@@ -1212,6 +1233,8 @@ fn missing_arguments(command: CommandName, given: usize) -> String {
             | CommandName::Decr,
             _,
         ) => "a key",
+        (CommandName::Backup, 0) => "a file and the path of the copy",
+        (CommandName::Backup, _) => "the path of the copy",
         (CommandName::Expire, 0) => "a file, a key and a time such as 30s",
         (CommandName::Expire, 1) => "a key and a time such as 30s",
         (CommandName::Expire, _) => "a time such as 30s, 5m, 1h30m, 7d or 1500ms",
@@ -1245,28 +1268,10 @@ fn shown(argument: &OsStr) -> String {
     render::text(argument.as_encoded_bytes())
 }
 
-fn is_reserved(name: &[u8]) -> bool {
-    RESERVED_COMMANDS
-        .iter()
-        .any(|reserved| reserved.as_bytes() == name)
-}
-
-fn unavailable(name: &[u8]) -> Failure {
-    Failure::Unavailable {
-        message: format!(
-            "eggdb {} is not in this release yet; see docs/roadmap.md",
-            render::text(name)
-        ),
-    }
-}
-
 fn unknown_command(name: &[u8]) -> Failure {
-    if is_reserved(name) {
-        return unavailable(name);
-    }
     Failure::usage(
         format!(
-            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
+            "unknown command '{}'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version.",
             render::text(name)
         ),
         None,
@@ -1424,7 +1429,7 @@ mod tests {
 
     fn usage_message(words: &str) -> String {
         match parse_words(words) {
-            Err(Failure::Usage { message, .. } | Failure::Unavailable { message }) => message,
+            Err(Failure::Usage { message, .. }) => message,
             other => panic!("{words}: {other:?}"),
         }
     }
@@ -1568,7 +1573,7 @@ mod tests {
     fn usage_errors_use_the_designed_wording() {
         assert_eq!(
             usage_message("frobnicate a"),
-            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("get a k --prefix x"),
@@ -1611,7 +1616,7 @@ mod tests {
     fn help_for_an_unknown_command_is_the_unknown_command_error() {
         assert_eq!(
             usage_message("frob --help"),
-            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command 'frob'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             parse_words("ui -h"),
@@ -1624,7 +1629,7 @@ mod tests {
     fn control_characters_in_quoted_arguments_are_shown_as_hex() {
         assert_eq!(
             usage_message("fr\u{1b}[31mob"),
-            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
+            "unknown command '0x66721b5b33316d6f62'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, serve, shell, restore, mcp, audit, collection, help, version."
         );
         assert_eq!(
             usage_message("scan a -F j\u{7}"),
@@ -1633,17 +1638,31 @@ mod tests {
     }
 
     #[test]
-    fn reserved_commands_point_to_the_roadmap() {
-        for name in ["backup", "compact"] {
-            assert_eq!(
-                usage_message(&format!("{name} app.db")),
-                format!("eggdb {name} is not in this release yet; see docs/roadmap.md")
-            );
-            assert_eq!(
-                usage_message(&format!("help {name}")),
-                format!("eggdb {name} is not in this release yet; see docs/roadmap.md")
-            );
-        }
+    fn backup_takes_a_file_and_the_path_of_its_copy_and_compact_a_file() {
+        let backup = request("backup app.db app.bak");
+        assert_eq!(backup.command, CommandName::Backup);
+        assert_eq!(backup.file, PathBuf::from("app.db"));
+        assert_eq!(backup.copy, Some(PathBuf::from("app.bak")));
+        let compact = request("compact app.db --format json");
+        assert_eq!(compact.command, CommandName::Compact);
+        assert_eq!(compact.file, PathBuf::from("app.db"));
+        assert_eq!(compact.format, Some(Format::Json));
+        assert_eq!(
+            usage_message("backup app.db"),
+            "eggdb backup needs the path of the copy"
+        );
+        assert_eq!(
+            usage_message("backup app.db -"),
+            "backup writes a file it can sync and verify, and stdout is not one. Give a path."
+        );
+        assert_eq!(
+            usage_message("compact app.db extra"),
+            "too many arguments for eggdb compact: 'extra'"
+        );
+        assert_eq!(
+            usage_message("backup app.db app.bak -F hex"),
+            "--format hex is for get and scan; eggdb backup prints text or json"
+        );
     }
 
     #[test]

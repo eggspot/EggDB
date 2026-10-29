@@ -1,6 +1,7 @@
 use super::output::{Output, Style};
 use super::render::{self, JsonObject, TimeStyle};
-use eggdb::{CheckReport, CommitStamp, Stats};
+use eggdb::{BackupReport, CheckReport, CommitStamp, CompactReport, Stats};
+use std::time::Duration;
 
 const LABEL_WIDTH: usize = 16;
 const DAMAGE_LABEL_WIDTH: usize = 18;
@@ -204,6 +205,139 @@ pub(crate) fn stats_json(file: &str, stats: &Stats) -> String {
         .line()
 }
 
+pub(crate) struct Copied<'a> {
+    pub(crate) file: &'a str,
+    pub(crate) copy: &'a str,
+    pub(crate) page_size: usize,
+    pub(crate) elapsed: Duration,
+}
+
+pub(crate) fn backup_text(out: &mut Output<'_>, copied: &Copied<'_>, report: &BackupReport) {
+    out.text("backed up ");
+    out.text(copied.file);
+    out.text(" to ");
+    out.text(copied.copy);
+    out.text(" as of commit ");
+    commit(out, report.stamp);
+    out.text("\n");
+    label(out, "entries", &render::count(report.entries), Style::Bold);
+    let copy = format!(
+        "{}, {} of {}",
+        render::size(report.file_bytes),
+        render::pages(report.page_count),
+        render::page_size(copied.page_size)
+    );
+    label(out, "copy", &copy, Style::Bold);
+    label(out, "time", &elapsed(copied.elapsed), Style::Bold);
+    let counted = match report.entries {
+        1 => "its 1 entry was counted again after writing and syncing.".to_owned(),
+        n => format!(
+            "its {} entries were counted again after writing and syncing.",
+            render::count(n)
+        ),
+    };
+    verdict_ok(out, &format!("{} is complete: {counted}", copied.copy));
+}
+
+pub(crate) fn backup_json(copied: &Copied<'_>, report: &BackupReport) -> String {
+    let (stamp, time) = stamp_fields(report.stamp);
+    JsonObject::new()
+        .boolean("ok", true)
+        .string("file", copied.file)
+        .string("copy", copied.copy)
+        .optional_string("commit_stamp", stamp.as_deref())
+        .optional_string("commit_time", time.as_deref())
+        .number("entries", report.entries)
+        .number("page_size", copied.page_size as u64)
+        .number("copy_pages", report.page_count)
+        .number("copy_bytes", report.file_bytes)
+        .number("elapsed_ms", elapsed_ms(copied.elapsed))
+        .line()
+}
+
+pub(crate) fn compact_text(out: &mut Output<'_>, compacted: &Copied<'_>, report: &CompactReport) {
+    out.text("compacted ");
+    out.text(compacted.file);
+    out.text(" as of commit ");
+    commit(out, report.stamp);
+    out.text("\n");
+    label(out, "entries", &render::count(report.entries), Style::Bold);
+    let before = format!(
+        "{}, {} of {}",
+        render::size(report.bytes_before),
+        render::pages(report.pages_before),
+        render::page_size(compacted.page_size)
+    );
+    label(out, "before", &before, Style::Bold);
+    let after = format!(
+        "{}, {}",
+        render::size(report.bytes_after),
+        render::pages(report.pages_after)
+    );
+    label(out, "after", &after, Style::Bold);
+    let reclaimed = pages_reclaimed(report);
+    let detail = format!(
+        "{} ({} free, {} leaked)",
+        render::pages(reclaimed),
+        render::count(report.free_pages_before),
+        render::count(report.leaked_pages_before)
+    );
+    label(out, "reclaimed", &detail, Style::Bold);
+    label(out, "time", &elapsed(compacted.elapsed), Style::Bold);
+    let verdict = if reclaimed == 0 {
+        format!(
+            "{} had no free or leaked pages; it was rewritten and swapped in whole all the same.",
+            compacted.file
+        )
+    } else {
+        format!(
+            "{} was rewritten without free or leaked pages and swapped in whole; {} reclaimed.",
+            compacted.file,
+            render::pages(reclaimed)
+        )
+    };
+    verdict_ok(out, &verdict);
+}
+
+pub(crate) fn compact_json(compacted: &Copied<'_>, report: &CompactReport) -> String {
+    let (stamp, time) = stamp_fields(report.stamp);
+    JsonObject::new()
+        .boolean("ok", true)
+        .string("file", compacted.file)
+        .optional_string("commit_stamp", stamp.as_deref())
+        .optional_string("commit_time", time.as_deref())
+        .number("entries", report.entries)
+        .number("page_size", compacted.page_size as u64)
+        .number("pages_before", report.pages_before)
+        .number("file_bytes_before", report.bytes_before)
+        .number("pages_after", report.pages_after)
+        .number("file_bytes_after", report.bytes_after)
+        .number("free_pages_before", report.free_pages_before)
+        .number("leaked_pages_before", report.leaked_pages_before)
+        .number("pages_reclaimed", pages_reclaimed(report))
+        .number("elapsed_ms", elapsed_ms(compacted.elapsed))
+        .line()
+}
+
+fn pages_reclaimed(report: &CompactReport) -> u64 {
+    report
+        .free_pages_before
+        .saturating_add(report.leaked_pages_before)
+}
+
+fn elapsed(time: Duration) -> String {
+    let millis = elapsed_ms(time);
+    if millis < 1000 {
+        format!("{millis} ms")
+    } else {
+        format!("{}.{} s", millis / 1000, millis % 1000 / 100)
+    }
+}
+
+fn elapsed_ms(time: Duration) -> u64 {
+    u64::try_from(time.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn checked_line(out: &mut Output<'_>, file: &str, stamp: Option<CommitStamp>) {
     out.text("checked ");
     out.text(file);
@@ -282,7 +416,17 @@ pub(crate) fn page_named_in(problem: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::page_named_in;
+    use super::{elapsed, page_named_in};
+    use std::time::Duration;
+
+    #[test]
+    fn times_under_a_second_are_milliseconds_and_longer_ones_tenths_of_seconds() {
+        assert_eq!(elapsed(Duration::from_micros(412_900)), "412 ms");
+        assert_eq!(elapsed(Duration::from_millis(999)), "999 ms");
+        assert_eq!(elapsed(Duration::from_millis(1000)), "1.0 s");
+        assert_eq!(elapsed(Duration::from_millis(2_349)), "2.3 s");
+        assert_eq!(elapsed(Duration::from_secs(75)), "75.0 s");
+    }
 
     #[test]
     fn the_damaged_page_is_found_in_the_message() {

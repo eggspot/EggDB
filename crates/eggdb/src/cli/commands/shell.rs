@@ -5,6 +5,7 @@ use super::sql::{error_lines, exit_for, result_text};
 use super::{Access, execute_on, session_for, uses_color};
 use crate::cli::args::{self, CommandName, Invocation, Request, ResultMode};
 use super::collection::collections_count;
+use super::compact::shell_holds_the_file;
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use crate::cli::{Console, Terminal, help, report};
@@ -21,9 +22,9 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const KEY_VALUE_COMMANDS: [&str; 12] = [
-    "put", "get", "del", "scan", "check", "stats", "ttl", "expire", "persist", "incr", "decr",
-    "cas",
+const KEY_VALUE_COMMANDS: [&str; 13] = [
+    "put", "get", "del", "scan", "check", "stats", "backup", "ttl", "expire", "persist", "incr",
+    "decr", "cas",
 ];
 const META_COMMANDS: [&str; 8] = [
     ".help",
@@ -440,6 +441,14 @@ impl<'s> Shell<'s> {
                 return self.backslash_copy(console, arguments);
             }
             let first = trimmed.split_whitespace().next().unwrap_or_default();
+            if first == "compact" {
+                let exit = report(
+                    &shell_holds_the_file(&self.file),
+                    console,
+                    self.request.color,
+                );
+                return Step::Continue(exit);
+            }
             if KEY_VALUE_COMMANDS.contains(&first) {
                 return self.key_value(console, trimmed);
             }
@@ -840,6 +849,7 @@ impl<'s> Shell<'s> {
   cas <key> <expected> <new>   replace a value only while it is <expected>; --if-absent, --delete
   check                        read every page and report the file's health
   stats                        size, pages, last commit and log
+  backup <copy>                write a consistent copy of {file} to a new file, while open here
   -C <name> on a key command   work in that collection for this line
 SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
   (docs/sql.md); BEGIN spans prompts:
@@ -877,8 +887,19 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
                 Exit::Usage,
             );
         }
-        let positional = words.iter().skip(1).filter(|word| !word.starts_with('-'));
-        if words[0] == "put" && positional.count() < 2 {
+        let positional = words
+            .iter()
+            .skip(1)
+            .filter(|word| !word.starts_with('-'))
+            .count();
+        if words[0] == "backup" && positional != 1 {
+            return self.fail(
+                console,
+                "backup takes one argument, the file to write (T-SQL's BACKUP DATABASE is not a statement EggDB runs)",
+                Exit::Usage,
+            );
+        }
+        if words[0] == "put" && positional < 2 {
             return self.fail(
                 console,
                 "put needs a key and a value here; stdin is the shell's own, so give the value or @file",
