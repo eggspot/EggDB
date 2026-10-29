@@ -1,17 +1,45 @@
 use super::copy_io::{StreamCopy, bulk_cache};
 use super::sql::{exit_for, print_error};
 use super::{Access, Session};
-use crate::cli::args::{CommandName, ExportFile, Format};
+use crate::cli::args::{CommandName, CsvOptions, ExportFile, Format};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject};
 use eggdb::sql::Store as DatabaseStore;
-use eggdb_sql::QueryResult;
+use eggdb_sql::{
+    BcpCharacterReader, BcpTerminators, Dialect, KeyValueStore, QueryResult, SqlResult,
+};
 use std::cell::Cell;
 use std::fs::File;
 use std::io::Read;
 
 fn sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
+}
+
+fn loaded_rows(result: &QueryResult) -> u64 {
+    result
+        .tag
+        .rsplit(' ')
+        .next()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
+
+fn load_bcp<S: KeyValueStore>(
+    session: &mut eggdb_sql::Session<'_, S>,
+    statement: &str,
+    input: &mut dyn Read,
+    terminators: BcpTerminators,
+    options: &CsvOptions,
+) -> SqlResult<u64> {
+    session.execute(statement, &mut |_| {})?;
+    let mut reader = BcpCharacterReader::new(input, terminators).skipping(u64::from(options.header));
+    let mut loaded: SqlResult<u64> = Ok(0);
+    session.execute_bulk_load(&mut reader, &mut |step| {
+        loaded = step.outcome.as_ref().map(loaded_rows).map_err(Clone::clone);
+        true
+    })?;
+    loaded
 }
 
 fn is_one_name(text: &str) -> bool {
@@ -34,7 +62,7 @@ impl Session<'_> {
     pub(super) fn import_csv(&mut self, source: ExportFile) -> Result<Exit, Failure> {
         let usage = |message: String| Failure::usage(message, Some(CommandName::Import));
         let options = self.request.csv.clone();
-        let table = options.table.unwrap_or_default();
+        let table = options.table.clone().unwrap_or_default();
         if !is_one_name(&table) {
             return Err(usage(format!(
                 "--table takes one table name as SQL writes it, such as users or app.\"Users\", not '{table}'"
@@ -56,6 +84,18 @@ impl Session<'_> {
             }
             ExportFile::Standard => (None, 0, "stdin".to_owned()),
         };
+        let bcp = self.request.dialect == Dialect::SqlServer;
+        let terminators = if bcp {
+            Some(
+                BcpTerminators::written(
+                    options.delimiter.as_deref(),
+                    options.row_terminator.as_deref(),
+                )
+                .map_err(|error| usage(error.message().to_owned()))?,
+            )
+        } else {
+            None
+        };
         let mut copy_options = vec!["FORMAT csv".to_owned()];
         if options.header {
             copy_options.push("HEADER".to_owned());
@@ -66,7 +106,16 @@ impl Session<'_> {
         if let Some(null) = &options.null {
             copy_options.push(format!("NULL {}", sql_string(null)));
         }
-        let sql = format!("COPY {table} FROM STDIN ({})", copy_options.join(", "));
+        let sql = if bcp {
+            let keep_nulls = if options.keep_nulls {
+                " WITH (KEEP_NULLS)"
+            } else {
+                ""
+            };
+            format!("INSERT BULK {table}{keep_nulls}")
+        } else {
+            format!("COPY {table} FROM STDIN ({})", copy_options.join(", "))
+        };
         let db = self.open(Access::Write { create: false }, Some(bulk_cache(size)))?;
         let store = DatabaseStore(&db);
         let mut session = eggdb_sql::Session::with_dialect(&store, self.request.dialect);
@@ -77,21 +126,27 @@ impl Session<'_> {
                 Some(file) => file,
                 None => &mut *self.stdin,
             };
-            let mut copy = StreamCopy {
-                input: Some(input),
-                output: None,
-                copied_out: &copied_out,
-            };
-            session.execute_with_copy(
-                &sql,
-                &mut |result: QueryResult| {
-                    if let Some(count) = result.tag.strip_prefix("COPY ") {
-                        rows = count.parse().unwrap_or(0);
-                    }
-                    true
-                },
-                &mut copy,
-            )
+            if let Some(terminators) = terminators {
+                load_bcp(&mut session, &sql, input, terminators, &options).map(|count| {
+                    rows = count;
+                })
+            } else {
+                let mut copy = StreamCopy {
+                    input: Some(input),
+                    output: None,
+                    copied_out: &copied_out,
+                };
+                session.execute_with_copy(
+                    &sql,
+                    &mut |result: QueryResult| {
+                        if let Some(count) = result.tag.strip_prefix("COPY ") {
+                            rows = count.parse().unwrap_or(0);
+                        }
+                        true
+                    },
+                    &mut copy,
+                )
+            }
         };
         let outcome = match outcome {
             Ok(()) if !session.autocommit() => session.execute("COMMIT", &mut |_| {}),

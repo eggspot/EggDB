@@ -54,7 +54,7 @@ pub(crate) fn usage_line(command: CommandName) -> &'static str {
         CommandName::Ui => "eggdb ui <file> [--read-only] [--mono] [--ascii] [--cache <bytes>]",
         CommandName::Export => "eggdb export <file> [<out> | -]",
         CommandName::Import => {
-            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle]"
+            "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls]"
         }
         CommandName::Sql => {
             "eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--create]"
@@ -247,7 +247,21 @@ cache grows with the file, since the whole load must fit in it; --cache sets it.
       --null <text>              the text that stands for NULL, unquoted; empty by default
       --dialect <name>           postgresql (default) or oracle: the table name as Oracle
                                  writes it, Oracle's NLS date formats, and empty fields as NULL
-                                 (SQLcl UNLOAD and SET MARKUP CSV ON output)
+                                 (SQLcl UNLOAD and SET MARKUP CSV ON output); or sqlserver:
+                                 a bcp character-format file (bcp ... out -c) loaded as bcp in
+                                 loads it, below
+
+With --dialect sqlserver, the file is in bcp's character format: every field but the last
+ends with the field terminator, the last with the row terminator, with no quoting. An empty
+field is NULL (its column's default without --keep-nulls), a field of one NUL byte is an empty
+string, values convert as SQL Server's INSERT converts text, and the text is UTF-8 (bcp -C
+65001). Without a column list the file has a field for every column, identity values kept.
+
+      --delimiter <text>         the field terminator, bcp's -t: a tab by default; \\t, \\n,
+                                 \\r, \\0 and \\\\ are bcp's escapes
+      --row-terminator <text>    the row terminator, bcp's -r: a newline (or \\r\\n) by default
+      --header                   skip the first row, as bcp's -F 2
+      --keep-nulls               keep empty fields NULL rather than the column's default, bcp's -k
 
 Examples:
   eggdb import --create copy.db backup.jsonl
@@ -256,6 +270,7 @@ Examples:
   eggdb import app.db backup.jsonl --dry-run
   eggdb import app.db --csv people.csv --table people --header
   eggdb import --dialect oracle hr.db --csv EMPLOYEES_DATA_TABLE.csv --table hr.employees --header
+  eggdb import --dialect sqlserver shop.db --csv items.dat --table dbo.items
 ";
 
 const SQL: &str = "\

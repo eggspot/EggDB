@@ -197,3 +197,103 @@ fn import_csv_loads_a_file_or_stdin_into_a_table_in_one_transaction() {
     assert_eq!(missing.exit, 3);
     assert!(text(&missing.stderr).contains("relation \"nobody\" does not exist"));
 }
+
+#[test]
+fn import_with_the_sql_server_dialect_loads_bcp_character_files() {
+    let directory = TempDirectory::new("bcp-import");
+    let file = directory.file("shop.db");
+    ok(
+        &[
+            "sql",
+            "--create",
+            "--dialect",
+            "sqlserver",
+            &file,
+            "-c",
+            "CREATE TABLE dbo.items (id INT PRIMARY KEY, name NVARCHAR(40), price DECIMAL(10,2) DEFAULT 1.00)",
+        ],
+        "",
+    );
+    let data = directory.file("items.dat");
+    std::fs::write(&data, "1\tbread\t12.50\r\n2\t\t\n3\t\0\t0.35\r\n").unwrap();
+    assert_eq!(
+        ok(
+            &[
+                "import",
+                "--dialect",
+                "sqlserver",
+                &file,
+                "--csv",
+                &data,
+                "--table",
+                "dbo.items",
+                "-F",
+                "text",
+            ],
+            ""
+        ),
+        format!("imported 3 rows from {data} into dbo.items in {file}\n")
+    );
+    let defaulted = ok(
+        &[
+            "sql",
+            "--dialect",
+            "sqlserver",
+            &file,
+            "-c",
+            "SELECT count(*) AS n FROM dbo.items WHERE price = 1.00 AND name IS NULL",
+        ],
+        "",
+    );
+    assert!(
+        defaulted.lines().any(|line| line.trim() == "1"),
+        "{defaulted}"
+    );
+    let pipes = directory.file("more.dat");
+    std::fs::write(&pipes, "id|name|price;4|tart|;").unwrap();
+    assert_eq!(
+        ok(
+            &[
+                "import",
+                "--dialect",
+                "sqlserver",
+                &file,
+                "--csv",
+                &pipes,
+                "--table",
+                "dbo.items",
+                "--delimiter",
+                "|",
+                "--row-terminator",
+                ";",
+                "--header",
+                "--keep-nulls",
+                "-F",
+                "json",
+            ],
+            ""
+        ),
+        format!(
+            "{{\"file\":\"{}\",\"from\":\"{}\",\"table\":\"dbo.items\",\"rows\":1}}\n",
+            file.replace('\\', "\\\\"),
+            pipes.replace('\\', "\\\\")
+        )
+    );
+    let failed = run(
+        &[
+            "import",
+            "--dialect",
+            "sqlserver",
+            &file,
+            "--csv",
+            "-",
+            "--table",
+            "dbo.items",
+        ],
+        "5\tx\t1\n1\tagain\t2\n",
+    );
+    assert_eq!(failed.exit, 3, "{}", text(&failed.stderr));
+    let errors = text(&failed.stderr);
+    assert!(errors.contains("2627"), "{errors}");
+    assert!(errors.contains("Nothing was imported"), "{errors}");
+}

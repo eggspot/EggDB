@@ -115,7 +115,9 @@ impl CommandName {
             | OptionName::Table
             | OptionName::Header
             | OptionName::Delimiter
-            | OptionName::Null => self == Self::Import,
+            | OptionName::Null
+            | OptionName::RowTerminator
+            | OptionName::KeepNulls => self == Self::Import,
             OptionName::Limit => matches!(self, Self::Scan | Self::Audit),
             OptionName::TimeLimit | OptionName::AllowWrite => self == Self::Mcp,
             OptionName::Prefix
@@ -212,6 +214,8 @@ enum OptionName {
     Header,
     Delimiter,
     Null,
+    RowTerminator,
+    KeepNulls,
     Report,
     TimeLimit,
     AllowWrite,
@@ -256,6 +260,8 @@ impl OptionName {
             b"header" => Self::Header,
             b"delimiter" => Self::Delimiter,
             b"null" => Self::Null,
+            b"row-terminator" => Self::RowTerminator,
+            b"keep-nulls" => Self::KeepNulls,
             b"report" => Self::Report,
             b"time-limit" => Self::TimeLimit,
             b"allow-write" => Self::AllowWrite,
@@ -292,6 +298,7 @@ impl OptionName {
                 | Self::DryRun
                 | Self::KeepGoing
                 | Self::Header
+                | Self::KeepNulls
                 | Self::AllowWrite
                 | Self::LogBatches
         )
@@ -349,6 +356,8 @@ pub(crate) struct CsvOptions {
     pub(crate) header: bool,
     pub(crate) delimiter: Option<String>,
     pub(crate) null: Option<String>,
+    pub(crate) row_terminator: Option<String>,
+    pub(crate) keep_nulls: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -725,7 +734,11 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Header => request.csv.header = true,
-            OptionName::Table | OptionName::Delimiter | OptionName::Null => {
+            OptionName::KeepNulls => request.csv.keep_nulls = true,
+            OptionName::Table
+            | OptionName::Delimiter
+            | OptionName::Null
+            | OptionName::RowTerminator => {
                 let text = value
                     .to_str()
                     .ok_or_else(|| usage(format!("{} must be UTF-8 text", option.spelled)))?
@@ -733,6 +746,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 match option.name {
                     OptionName::Table => request.csv.table = Some(text),
                     OptionName::Delimiter => request.csv.delimiter = Some(text),
+                    OptionName::RowTerminator => request.csv.row_terminator = Some(text),
                     _ => request.csv.null = Some(text),
                 }
             }
@@ -830,6 +844,8 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
             (csv.header, "--header"),
             (csv.delimiter.is_some(), "--delimiter"),
             (csv.null.is_some(), "--null"),
+            (csv.row_terminator.is_some(), "--row-terminator"),
+            (csv.keep_nulls, "--keep-nulls"),
         ];
         if let Some((_, option)) = given.iter().find(|(given, _)| *given) {
             return Err(format!("{option} goes with --csv <file>"));
@@ -850,6 +866,19 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     if request.create {
         return Err(
             "--csv loads into a table that exists; a new file has none, so create it first with eggdb sql --create"
+                .to_owned(),
+        );
+    }
+    let bcp = request.dialect == eggdb_sql::Dialect::SqlServer;
+    if bcp && csv.null.is_some() {
+        return Err(
+            "--null is not for --dialect sqlserver: bcp character files mark NULL with an empty field"
+                .to_owned(),
+        );
+    }
+    if !bcp && (csv.row_terminator.is_some() || csv.keep_nulls) {
+        return Err(
+            "--row-terminator and --keep-nulls are for bcp character files, with --dialect sqlserver"
                 .to_owned(),
         );
     }
@@ -888,8 +917,9 @@ fn check_import_dialect(value: &OsStr) -> Result<eggdb_sql::Dialect, String> {
     match value.to_str().unwrap_or_default() {
         "postgresql" => Ok(eggdb_sql::Dialect::PostgreSql),
         "oracle" => Ok(eggdb_sql::Dialect::Oracle),
+        "sqlserver" | "mssql" | "tsql" => Ok(eggdb_sql::Dialect::SqlServer),
         _ => Err(format!(
-            "--dialect for import --csv must be postgresql or oracle, not '{}'",
+            "--dialect for import --csv must be postgresql, oracle or sqlserver, not '{}'",
             shown(value)
         )),
     }
@@ -1151,7 +1181,23 @@ mod tests {
                 header: true,
                 delimiter: Some(";".into()),
                 null: Some("NA".into()),
+                row_terminator: None,
+                keep_nulls: false,
             }
+        );
+        let bcp = request(
+            "import --dialect sqlserver app.db --csv items.dat --table dbo.items --delimiter , --row-terminator \\r\\n --keep-nulls",
+        );
+        assert_eq!(bcp.dialect, eggdb_sql::Dialect::SqlServer);
+        assert_eq!(bcp.csv.row_terminator.as_deref(), Some("\\r\\n"));
+        assert!(bcp.csv.keep_nulls);
+        assert!(
+            usage_message("import --dialect sqlserver app.db --csv d.dat --table t --null NA")
+                .contains("--null")
+        );
+        assert!(
+            usage_message("import app.db --csv d.csv --table t --keep-nulls")
+                .contains("--dialect sqlserver")
         );
         assert_eq!(
             request("import app.db --csv - --table t").csv.source,
