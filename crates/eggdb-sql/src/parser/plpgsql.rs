@@ -547,6 +547,7 @@ impl<'t> Compiler<'t, '_> {
                 arguments.push(CursorArgument {
                     name,
                     variable_type,
+                    default: None,
                 });
                 if !self.take(&TokenKind::Comma) {
                     break;
@@ -744,7 +745,11 @@ impl<'t> Compiler<'t, '_> {
         let strict = self.take_word("strict");
         let targets = self.target_list()?;
         self.check_targets(&targets)?;
-        Ok(IntoTargets { strict, targets })
+        Ok(IntoTargets {
+            strict,
+            bulk: false,
+            targets,
+        })
     }
 
     fn assignment_ahead(&self) -> bool {
@@ -1627,6 +1632,7 @@ impl<'t> Compiler<'t, '_> {
             cursor,
             direction,
             into,
+            limit: None,
         })
     }
 

@@ -843,6 +843,12 @@ impl<'r> Run<'r> {
             VariableType::RefCursor => Slot::Cursor(None),
             VariableType::Row(name) => Slot::Row(self.relation_columns(name)?),
             VariableType::TypeOf(parts) => self.copied_slot(parts)?,
+            VariableType::Named(parts) => {
+                return Err(SqlError::not_supported(format!(
+                    "the PL/SQL type {} outside PL/SQL",
+                    parts.join(".")
+                )));
+            }
         })
     }
 
@@ -904,6 +910,14 @@ impl<'r> Run<'r> {
                 Slot::Cursor(Some(Box::new(cursor.clone()))),
                 Value::Null,
             ),
+            DeclarationKind::Exception { .. }
+            | DeclarationKind::Subprogram(_)
+            | DeclarationKind::Type(_) => {
+                return Err(SqlError::not_supported(format!(
+                    "the PL/SQL declaration of \"{}\" outside PL/SQL",
+                    declaration.name
+                )));
+            }
         };
         variable.label = block.label.clone();
         self.frame.variables.push(variable);
@@ -1053,7 +1067,15 @@ impl<'r> Run<'r> {
                 cursor,
                 direction,
                 into,
+                ..
             } => self.fetch(cursor, direction, into),
+            StepKind::RaiseException(_)
+            | StepKind::ApplicationError { .. }
+            | StepKind::Forall(_)
+            | StepKind::CollectionMethod { .. } => Err(SqlError::not_supported(format!(
+                "{} outside PL/SQL",
+                kind.name()
+            ))),
             StepKind::Move { cursor, direction } => self.move_cursor(cursor, direction),
             StepKind::Close(cursor) => {
                 let at = self.open_cursor(cursor)?;

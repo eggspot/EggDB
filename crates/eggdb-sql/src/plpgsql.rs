@@ -21,7 +21,7 @@ pub(crate) use writes::ReadOnlyWrite;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::tokenize_in;
-use crate::routines::{ReturnType, RoutineDefinition, RoutineReturns};
+use crate::routines::{ReturnType, RoutineDefinition, RoutineLanguage, RoutineReturns};
 use crate::schemas::base_name;
 use crate::types::SqlType;
 
@@ -69,6 +69,41 @@ pub(crate) enum DeclarationKind {
     Variable(VariableDeclaration),
     Alias(AliasTarget),
     Cursor(CursorDeclaration),
+    Exception { code: Option<u16> },
+    Subprogram(Box<Subprogram>),
+    Type(TypeDeclaration),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Subprogram {
+    pub(crate) definition: RoutineDefinition,
+    pub(crate) program: Option<Program>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TypeDeclaration {
+    Record(Vec<RecordField>),
+    Table {
+        element: VariableType,
+        index: Option<VariableType>,
+    },
+    Varray {
+        limit: u32,
+        element: VariableType,
+    },
+    RefCursor,
+    Subtype {
+        base: VariableType,
+        not_null: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecordField {
+    pub(crate) name: String,
+    pub(crate) variable_type: VariableType,
+    pub(crate) not_null: bool,
+    pub(crate) default: Option<Fragment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +132,7 @@ pub(crate) struct CursorDeclaration {
 pub(crate) struct CursorArgument {
     pub(crate) name: String,
     pub(crate) variable_type: VariableType,
+    pub(crate) default: Option<Fragment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +142,7 @@ pub(crate) enum VariableType {
     RefCursor,
     Row(String),
     TypeOf(Vec<String>),
+    Named(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +161,7 @@ pub(crate) enum TargetPart {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IntoTargets {
     pub(crate) strict: bool,
+    pub(crate) bulk: bool,
     pub(crate) targets: Vec<Target>,
 }
 
@@ -174,6 +212,18 @@ pub(crate) enum StepKind {
     ReturnQuery(QuerySource),
     Raise(Raise),
     Reraise,
+    RaiseException(RaisedException),
+    ApplicationError {
+        number: Fragment,
+        message: Fragment,
+        keep: Option<Fragment>,
+    },
+    Forall(Forall),
+    CollectionMethod {
+        target: Target,
+        method: CollectionMethod,
+        arguments: Vec<Fragment>,
+    },
     Assert {
         condition: Fragment,
         message: Option<Fragment>,
@@ -187,6 +237,7 @@ pub(crate) enum StepKind {
         cursor: String,
         direction: FetchDirection,
         into: IntoTargets,
+        limit: Option<Fragment>,
     },
     Move {
         cursor: String,
@@ -220,7 +271,10 @@ impl StepKind {
             Self::Return(_) => "RETURN",
             Self::ReturnNext(_) => "RETURN NEXT",
             Self::ReturnQuery(_) => "RETURN QUERY",
-            Self::Raise(_) | Self::Reraise => "RAISE",
+            Self::Raise(_) | Self::Reraise | Self::RaiseException(_) => "RAISE",
+            Self::ApplicationError { .. } => "RAISE_APPLICATION_ERROR",
+            Self::Forall(_) => "FORALL",
+            Self::CollectionMethod { method, .. } => method.name(),
             Self::Assert { .. } => "ASSERT",
             Self::Open { .. } => "OPEN",
             Self::Fetch { .. } => "FETCH",
@@ -231,6 +285,56 @@ impl StepKind {
             Self::Null => "NULL",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RaisedException {
+    Oracle(u16),
+    Declared(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollectionMethod {
+    Extend,
+    Delete,
+    Trim,
+}
+
+impl CollectionMethod {
+    pub(crate) fn of_word(word: &str) -> Option<Self> {
+        Some(match word {
+            "extend" => Self::Extend,
+            "delete" => Self::Delete,
+            "trim" => Self::Trim,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Extend => "EXTEND",
+            Self::Delete => "DELETE",
+            Self::Trim => "TRIM",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Forall {
+    pub(crate) variable: String,
+    pub(crate) bounds: ForallBounds,
+    pub(crate) save_exceptions: bool,
+    pub(crate) statement: Box<Step>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ForallBounds {
+    Range { lower: Fragment, upper: Fragment },
+    Indices {
+        collection: Target,
+        between: Option<(Fragment, Fragment)>,
+    },
+    Values(Target),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -490,16 +594,19 @@ pub(crate) struct Handler {
     pub(crate) steps: Vec<Step>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExceptionCondition {
     Others,
     State(SqlState),
+    Oracle(u16),
+    Declared(String),
 }
 
 impl ExceptionCondition {
-    pub(crate) fn catches(self, state: SqlState) -> bool {
+    pub(crate) fn catches(&self, state: SqlState) -> bool {
         match self {
             Self::Others => state != SqlState::QUERY_CANCELED && state != SqlState::ASSERT_FAILURE,
+            Self::Oracle(_) | Self::Declared(_) => false,
             Self::State(caught) => {
                 let caught = caught.code();
                 let found = state.code();
@@ -511,6 +618,15 @@ impl ExceptionCondition {
             }
         }
     }
+
+    pub(crate) fn catches_oracle(&self, code: Option<u16>, declared: Option<&str>) -> bool {
+        match self {
+            Self::Others => true,
+            Self::Oracle(caught) => code == Some(*caught),
+            Self::Declared(identity) => declared == Some(identity.as_str()),
+            Self::State(_) => false,
+        }
+    }
 }
 
 impl Handler {
@@ -518,6 +634,12 @@ impl Handler {
         self.conditions
             .iter()
             .any(|condition| condition.catches(state))
+    }
+
+    pub(crate) fn catches_oracle(&self, code: Option<u16>, declared: Option<&str>) -> bool {
+        self.conditions
+            .iter()
+            .any(|condition| condition.catches_oracle(code, declared))
     }
 }
 
@@ -555,6 +677,9 @@ pub(crate) fn compile(definition: &RoutineDefinition) -> SqlResult<Program> {
 }
 
 pub(crate) fn compile_for_run(definition: &RoutineDefinition) -> SqlResult<Program> {
+    if definition.language == RoutineLanguage::PlSql {
+        return crate::plsql::compile(definition);
+    }
     compile(definition).map_err(|error| compilation_error(definition, None, error))
 }
 
@@ -711,6 +836,31 @@ fn step_expressions<'p>(kind: &'p StepKind, found: &mut Vec<&'p Fragment>) {
             found.extend(&raise.arguments);
             found.extend(raise.options.iter().map(|option| &option.value));
         }
+        StepKind::ApplicationError {
+            number,
+            message,
+            keep,
+        } => {
+            found.push(number);
+            found.push(message);
+            found.extend(keep);
+        }
+        StepKind::Forall(forall) => {
+            if let ForallBounds::Range { lower, upper } = &forall.bounds {
+                found.push(lower);
+                found.push(upper);
+            }
+            if let ForallBounds::Indices {
+                between: Some((lower, upper)),
+                ..
+            } = &forall.bounds
+            {
+                found.push(lower);
+                found.push(upper);
+            }
+            step_expressions(&forall.statement.kind, found);
+        }
+        StepKind::CollectionMethod { arguments, .. } => found.extend(arguments),
         StepKind::Assert { condition, message } => {
             found.push(condition);
             found.extend(message);
@@ -721,6 +871,7 @@ fn step_expressions<'p>(kind: &'p StepKind, found: &mut Vec<&'p Fragment>) {
         | StepKind::GetDiagnostics { .. }
         | StepKind::ReturnQuery(_)
         | StepKind::Reraise
+        | StepKind::RaiseException(_)
         | StepKind::Open { .. }
         | StepKind::Fetch { .. }
         | StepKind::Move { .. }
