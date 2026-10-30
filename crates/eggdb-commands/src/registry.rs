@@ -109,7 +109,7 @@ pub const ERROR_CODES: &[ErrorCode] = &[
     code(
         "table_not_found",
         Category::NotFound,
-        "table show or table sample named no table or view",
+        "table show, table sample or mcp --tables named no table or view",
     ),
     code(
         "collection_not_found",
@@ -190,6 +190,11 @@ pub const ERROR_CODES: &[ErrorCode] = &[
         "read_only",
         Category::ReadOnly,
         "the statement needs to write, and the server or the tool only reads",
+    ),
+    code(
+        "limited_to_tables",
+        Category::NeedsGrant,
+        "the server was started with --tables, which leaves out the key-value store",
     ),
     code(
         "write_too_large",
@@ -406,6 +411,19 @@ const OPENING_ERRORS: [CommandError; 9] = [
 ];
 
 const READING_ERRORS: &[CommandError] = &OPENING_ERRORS;
+
+const MCP_ERRORS: &[CommandError] = &[
+    OPENING_ERRORS[0],
+    OPENING_ERRORS[1],
+    OPENING_ERRORS[2],
+    OPENING_ERRORS[3],
+    OPENING_ERRORS[4],
+    OPENING_ERRORS[5],
+    OPENING_ERRORS[6],
+    OPENING_ERRORS[7],
+    OPENING_ERRORS[8],
+    command_error("table_not_found", 1),
+];
 
 const KEY_SPACE_ERRORS: &[CommandError] = &[
     OPENING_ERRORS[0],
@@ -805,7 +823,7 @@ pub const TOOLS: &[ToolDefinition] = &[
             ),
         ],
         max_effect: Effect::Read,
-        grant: Grant::Nothing,
+        grant: Grant::KeyValueStore,
         idempotent: true,
         open_world: false,
         confirm: None,
@@ -874,7 +892,7 @@ pub const TOOLS: &[ToolDefinition] = &[
             },
         ],
         max_effect: Effect::Read,
-        grant: Grant::Nothing,
+        grant: Grant::KeyValueStore,
         idempotent: true,
         open_world: false,
         confirm: None,

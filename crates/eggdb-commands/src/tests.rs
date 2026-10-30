@@ -1,6 +1,6 @@
 use crate::{
     Annotations, ArgumentTarget, COMMANDS, COMMON_OPTIONS, CORE_VERBS, Category, CommandDefinition,
-    ConfirmCheck, ERROR_CODES, Effect, Grant, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES, TOOLS,
+    ConfirmCheck, ERROR_CODES, Effect, Grant, Grants, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES, TOOLS,
     category_of, command, tool,
 };
 
@@ -234,9 +234,48 @@ fn every_tool_s_annotations_follow_from_its_fields() {
         if tool.max_effect != Effect::Read {
             assert_ne!(tool.grant, Grant::Nothing, "{} writes without a grant", tool.name);
         }
-        assert!(tool.offered(true), "{}", tool.name);
-        assert_eq!(tool.offered(false), tool.grant == Grant::Nothing, "{}", tool.name);
+        let every = Grants {
+            allow_write: true,
+            key_value_store: true,
+        };
+        let read_only = Grants {
+            allow_write: false,
+            ..every
+        };
+        let limited_to_tables = Grants {
+            key_value_store: false,
+            ..read_only
+        };
+        assert!(tool.offered(every), "{}", tool.name);
+        assert_eq!(
+            tool.offered(read_only),
+            tool.grant != Grant::AllowWrite,
+            "{}",
+            tool.name
+        );
+        assert_eq!(
+            tool.offered(limited_to_tables),
+            tool.grant == Grant::Nothing,
+            "{}",
+            tool.name
+        );
     }
+}
+
+#[test]
+fn a_server_limited_to_tables_withdraws_exactly_the_key_value_tools() {
+    let withdrawn: Vec<&str> = TOOLS
+        .iter()
+        .filter(|tool| tool.grant == Grant::KeyValueStore)
+        .map(|tool| tool.name)
+        .collect();
+    assert_eq!(withdrawn, vec!["kv_get", "kv_scan"]);
+    assert_eq!(Grant::KeyValueStore.name(), Some("key_value_store"));
+    let refusal = ERROR_CODES
+        .iter()
+        .find(|known| known.code == "limited_to_tables")
+        .map(|known| known.category);
+    assert_eq!(refusal, Some(Category::NeedsGrant));
 }
 
 #[test]

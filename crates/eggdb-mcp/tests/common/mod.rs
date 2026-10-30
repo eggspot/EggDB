@@ -238,6 +238,8 @@ pub fn config(audit: &TempAudit) -> ServerConfig {
         time_limit: Duration::from_secs(5),
         audit: AuditLog::new(audit.path.clone()),
         allow_write: false,
+        tables: None,
+        call_gap: Duration::ZERO,
         exit_process: None,
     }
 }
@@ -349,6 +351,13 @@ pub fn canonical(node: &Node) -> String {
 pub fn writing_config(audit: &TempAudit) -> ServerConfig {
     ServerConfig {
         allow_write: true,
+        ..config(audit)
+    }
+}
+
+pub fn tables_config(audit: &TempAudit, names: &[&str]) -> ServerConfig {
+    ServerConfig {
+        tables: Some(eggdb_sql::VisibleTables::new(names.iter().copied())),
         ..config(audit)
     }
 }

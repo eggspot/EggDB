@@ -13,6 +13,11 @@
 //!   read-write for its one statement. A destructive statement runs only once the user
 //!   confirmed it, through the client (`elicitation/create`) when the client can ask, and
 //!   otherwise through the agent's `confirm: true`.
+//! - With [`ServerConfig::tables`] a read-only server shows only the listed tables and views:
+//!   every other table, view and sequence reads as missing under the SQL engine, in every
+//!   dialect and catalog, and `kv_get` and `kv_scan` are withdrawn (D156).
+//! - [`ServerConfig::call_gap`] spaces the calls that open the file, so the user's own
+//!   programs get it between an agent's calls.
 //! - Every call has limits: one SQL statement, at most a number of rows and 1 MiB of result,
 //!   256 MiB of change, and a time limit, past which reads fail and, a second later, a watchdog
 //!   ends the process, never once a commit has started.

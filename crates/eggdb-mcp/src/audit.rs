@@ -166,6 +166,8 @@ pub(crate) struct ServerStarted<'a> {
     pub(crate) database: &'a str,
     pub(crate) time_limit: Duration,
     pub(crate) allow_write: bool,
+    pub(crate) tables: Option<Vec<String>>,
+    pub(crate) call_gap: Duration,
 }
 
 pub(crate) fn server_started_record(started: &ServerStarted<'_>) -> String {
@@ -186,7 +188,16 @@ pub(crate) fn server_started_record(started: &ServerStarted<'_>) -> String {
         .key("allow_write")
         .boolean(started.allow_write)
         .key("time_limit_ms")
-        .unsigned(duration_ms(started.time_limit))
+        .unsigned(duration_ms(started.time_limit));
+    if let Some(tables) = &started.tables {
+        out.key("tables").begin_array();
+        for name in tables {
+            out.string(name);
+        }
+        out.end_array();
+    }
+    out.key("call_gap_ms")
+        .unsigned(duration_ms(started.call_gap))
         .end_object();
     out.finish()
 }
@@ -366,6 +377,12 @@ pub struct AuditEntry {
     pub warning: Option<String>,
     /// Whether the server let agents write (`--allow-write`), for a server start.
     pub allow_write: bool,
+    /// The only tables and views the server showed its agent (`--tables`), for a server
+    /// start; `None` when it showed every table.
+    pub tables: Option<Vec<String>>,
+    /// The pause after each call before the next opened the file (`--call-gap`), for a
+    /// server start that recorded it.
+    pub call_gap_ms: Option<u64>,
     /// For a call-started record: no call with its id follows, so the server stopped during
     /// the call and its outcome is unknown.
     pub outcome_unknown: bool,
@@ -606,6 +623,21 @@ fn text_of(members: &[(String, Node)], name: &str) -> Option<String> {
     }
 }
 
+fn texts_of(members: &[(String, Node)], name: &str) -> Option<Vec<String>> {
+    match member(members, name) {
+        Some(Json::Array(items)) => Some(
+            items
+                .iter()
+                .filter_map(|item| match &item.value {
+                    Json::String(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 fn number_of(members: &[(String, Node)], name: &str) -> Option<u64> {
     match member(members, name) {
         Some(Json::Number(text)) => text.parse().ok(),
@@ -663,6 +695,8 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
         },
         warning: text_of(&members, "warning"),
         allow_write: matches!(member(&members, "allow_write"), Some(Json::Boolean(true))),
+        tables: texts_of(&members, "tables"),
+        call_gap_ms: number_of(&members, "call_gap_ms"),
         outcome_unknown: false,
     };
     Some((ascii.finish(), entry))

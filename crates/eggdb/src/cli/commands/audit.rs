@@ -101,8 +101,26 @@ impl Session<'_> {
         let time = shown_time(&entry.time);
         match entry.event {
             AuditEvent::ServerStarted => {
+                let tables = match entry.tables.as_deref() {
+                    None => String::new(),
+                    Some([only]) => format!(", 1 table ({})", printable(only)),
+                    Some(names) => format!(
+                        ", {} tables ({})",
+                        names.len(),
+                        names
+                            .iter()
+                            .map(|name| printable(name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                let gap = match entry.call_gap_ms {
+                    None => String::new(),
+                    Some(0) => ", call gap off".to_owned(),
+                    Some(milliseconds) => format!(", call gap {milliseconds} ms"),
+                };
                 let sentence = format!(
-                    "{time}  server started: eggdb {}, pid {}, {}, time limit {} s",
+                    "{time}  server started: eggdb {}, pid {}, {}{tables}, time limit {} s{gap}",
                     printable(entry.version.as_deref().unwrap_or("?")),
                     entry.pid.unwrap_or(0),
                     if entry.allow_write {

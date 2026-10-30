@@ -451,6 +451,8 @@ pub enum Grant {
     Nothing,
     /// `eggdb mcp --allow-write`.
     AllowWrite,
+    /// The key-value store, which every server grants unless it was started with `--tables`.
+    KeyValueStore,
 }
 
 impl Grant {
@@ -459,8 +461,18 @@ impl Grant {
         match self {
             Self::Nothing => None,
             Self::AllowWrite => Some("allow_write"),
+            Self::KeyValueStore => Some("key_value_store"),
         }
     }
+}
+
+/// What one `eggdb mcp` server grants its agent, from the options it was started with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grants {
+    /// Started with `--allow-write`.
+    pub allow_write: bool,
+    /// Started without `--tables`, so the agent reaches the key-value store.
+    pub key_value_store: bool,
 }
 
 /// The JSON type of a tool's argument, as its input schema declares it.
@@ -639,12 +651,14 @@ impl ToolDefinition {
         }
     }
 
-    /// Whether a server offers the tool: a tool that needs `--allow-write` is offered only by a
-    /// server started with it.
-    pub const fn offered(&self, allow_write: bool) -> bool {
+    /// Whether a server that grants `grants` offers the tool: a tool that needs `--allow-write`
+    /// is offered only by a server started with it, and one that reads the key-value store only
+    /// by a server started without `--tables`.
+    pub const fn offered(&self, grants: Grants) -> bool {
         match self.grant {
             Grant::Nothing => true,
-            Grant::AllowWrite => allow_write,
+            Grant::AllowWrite => grants.allow_write,
+            Grant::KeyValueStore => grants.key_value_store,
         }
     }
 

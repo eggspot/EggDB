@@ -4,14 +4,15 @@ use crate::results::{self, NOTICE};
 use crate::server::{DatabaseOpener, OpenRefusal};
 use crate::watchdog::Watchdog;
 use eggdb_commands::{
-    ArgumentType, Category, CursorList, CursorRefusal, TOOLS, ToolDefinition, decode_cursor,
-    encode_cursor,
+    ArgumentType, Category, CursorList, CursorRefusal, Grants, TOOLS, ToolDefinition,
+    decode_cursor, encode_cursor,
 };
 use eggdb_sql::json::{Json, Node};
 use eggdb_sql::{
     DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead, KeyValueStore,
     OneStatementError, OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX, Relation,
-    RelationKind, ScanDirection, Session, SqlError, SqlState, Value, destructive_statement,
+    RelationKind, ScanDirection, Session, SqlError, SqlState, Value, VisibleTables,
+    destructive_statement,
 };
 use std::time::{Duration, Instant};
 
@@ -125,12 +126,12 @@ fn input_schema(definition: &ToolDefinition, out: &mut JsonOut) {
     out.key("additionalProperties").boolean(false).end_object();
 }
 
-pub(crate) fn tools_list(allow_write: bool) -> String {
+pub(crate) fn tools_list(grants: Grants) -> String {
     let mut out = JsonOut::new();
     out.begin_object().key("tools").begin_array();
     for tool in Tool::ALL {
         let definition = tool.definition();
-        if !definition.offered(allow_write) {
+        if !definition.offered(grants) {
             continue;
         }
         let annotations = definition.annotations();
@@ -140,7 +141,7 @@ pub(crate) fn tools_list(allow_write: bool) -> String {
             .key("title")
             .string(definition.title)
             .key("description")
-            .string(definition.description_for(allow_write))
+            .string(definition.description_for(grants.allow_write))
             .key("inputSchema");
         input_schema(definition, &mut out);
         out.key("annotations")
@@ -399,6 +400,7 @@ pub(crate) struct Call<'a, O: DatabaseOpener> {
     pub(crate) deadline: Instant,
     pub(crate) time_limit: Duration,
     pub(crate) allow_write: bool,
+    pub(crate) tables: Option<&'a VisibleTables>,
     pub(crate) watchdog: Option<&'a Watchdog>,
 }
 
@@ -470,7 +472,7 @@ impl<O: DatabaseOpener> Call<'_, O> {
     ) -> Result<T, ToolError> {
         let store = self.open(Access::ReadOnly)?;
         let limits = CallLimits::new(self.deadline);
-        let result = run(&CallStore::new(&store, &limits), &limits);
+        let result = run(&CallStore::new(&store, &limits, self.tables), &limits);
         let closed = self.opener.close(store);
         match (result, closed) {
             (Ok(_), Err(refusal)) => Err(self.open_refused(refusal)),
@@ -570,6 +572,14 @@ fn with_sequences_kept(mut error: ToolError) -> ToolError {
     error
 }
 
+fn limited_to_tables() -> ToolError {
+    ToolError::new(
+        "limited_to_tables",
+        "This server serves only the tables the user listed (--tables), so the key-value store is not available. Nothing was read.",
+    )
+    .with_fix("Read the listed tables with list_tables and run_sql, or ask the user to restart eggdb mcp without --tables.")
+}
+
 fn writes_not_allowed() -> ToolError {
     ToolError::new(
         "read_only",
@@ -628,6 +638,7 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::WriteSql => Err(writes_not_allowed()),
         Tool::ExplainQuery => explain_query(arguments, call),
         Tool::SampleRows => sample_rows(arguments, call),
+        Tool::KvGet | Tool::KvScan if call.tables.is_some() => Err(limited_to_tables()),
         Tool::KvGet => kv_get(arguments, call),
         Tool::KvScan => kv_scan(arguments, call),
         Tool::RowList => row_list(arguments, call),
@@ -1426,9 +1437,19 @@ fn kv_scan<O: DatabaseOpener>(
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOLS, Tool, ToolError, after_prefix, damaged, from_hex, to_hex, tools_list};
+    use super::{
+        TOOLS, Tool, ToolError, after_prefix, damaged, from_hex, limited_to_tables, to_hex,
+        tools_list,
+    };
     use crate::server::instructions;
-    use eggdb_commands::Category;
+    use eggdb_commands::{Category, Grants};
+
+    fn served(allow_write: bool) -> Grants {
+        Grants {
+            allow_write,
+            key_value_store: true,
+        }
+    }
 
     mod shipped {
         use super::super::{
@@ -1730,7 +1751,7 @@ mod tests {
             let Some(shipped_tools) = shipped.strip_suffix("]}") else {
                 panic!("{shipped}");
             };
-            let listed = tools_list(allow_write);
+            let listed = tools_list(served(allow_write));
             assert!(listed.starts_with(shipped_tools), "allow_write {allow_write}");
             assert!(
                 listed[shipped_tools.len()..].starts_with(",{\"name\":\"row_list\","),
@@ -1794,7 +1815,7 @@ mod tests {
     #[test]
     fn the_instructions_teach_the_effects_the_grant_and_every_category() {
         for allow_write in [false, true] {
-            let text = instructions(allow_write);
+            let text = instructions(allow_write, false);
             assert!(text.is_ascii() && !text.contains('\n'), "{text}");
             assert!(text.len() < 1000, "{} characters", text.len());
             for category in Category::ALL {
@@ -1809,10 +1830,44 @@ mod tests {
                 assert!(text.contains(tool) && Tool::named(tool).is_some(), "{tool}");
             }
         }
-        assert!(instructions(false).contains("read-only"));
-        assert!(instructions(false).contains("code read_only"));
-        assert!(instructions(true).contains("(--allow-write)"));
-        assert!(instructions(true).contains("Never send confirm: true without asking your user."));
+        assert!(instructions(false, false).contains("read-only"));
+        assert!(instructions(false, false).contains("code read_only"));
+        assert!(instructions(true, false).contains("(--allow-write)"));
+        assert!(
+            instructions(true, false).contains("Never send confirm: true without asking your user.")
+        );
+    }
+
+    #[test]
+    fn a_server_limited_to_tables_says_so_and_drops_the_key_value_tools() {
+        let shipped = instructions(false, false);
+        let limited = instructions(false, true);
+        assert!(limited.is_ascii() && !limited.contains('\n'), "{limited}");
+        assert!(
+            limited.contains(" The user limited this session to some tables (--tables): list_tables shows exactly those, any other table does not exist here and a query naming one fails as missing; kv_get and kv_scan are not offered. To reach more, ask the user to widen --tables. Start with list_tables"),
+            "{limited}"
+        );
+        assert!(shipped.contains("oracle); kv_get and kv_scan read keys. A write"));
+        assert!(limited.contains("oracle). A write"));
+        assert!(!shipped.contains("--tables"));
+        for category in Category::ALL {
+            assert!(limited.contains(category.name()), "{}", category.name());
+        }
+        let listed = tools_list(Grants {
+            allow_write: false,
+            key_value_store: false,
+        });
+        assert!(eggdb_sql::json::parse_document(&listed).is_ok());
+        assert!(!listed.contains("\"kv_get\""), "{listed}");
+        assert!(!listed.contains("\"kv_scan\""), "{listed}");
+        for tool in ["list_tables", "describe_table", "run_sql", "row_list"] {
+            assert!(listed.contains(&format!("\"name\":\"{tool}\"")), "{tool}");
+        }
+        let refusal = limited_to_tables().structured();
+        assert!(
+            refusal.contains("\"code\":\"limited_to_tables\",\"category\":\"needs_grant\""),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -1821,14 +1876,14 @@ mod tests {
             assert_eq!(Tool::named(tool.name()), Some(tool));
         }
         assert_eq!(Tool::named("drop_table"), None);
-        let listed = tools_list(false);
+        let listed = tools_list(served(false));
         assert!(listed.is_ascii());
         assert!(eggdb_sql::json::parse_document(&listed).is_ok());
-        assert_eq!(listed, tools_list(false));
+        assert_eq!(listed, tools_list(served(false)));
         assert!(listed.contains("\"readOnlyHint\":true"));
         assert!(!listed.contains("\"readOnlyHint\":false"));
         assert!(!listed.contains("write_sql"));
-        let writing = tools_list(true);
+        let writing = tools_list(served(true));
         assert!(eggdb_sql::json::parse_document(&writing).is_ok());
         assert_eq!(writing.matches("\"readOnlyHint\":false").count(), 1);
         assert_eq!(writing.matches("\"destructiveHint\":true").count(), 1);

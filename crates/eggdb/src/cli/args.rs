@@ -10,6 +10,7 @@ use std::time::Duration;
 const SMALLEST_PAGE_SIZE: usize = 4096;
 const LARGEST_PAGE_SIZE: usize = 65536;
 const MOST_TIME_LIMIT_SECONDS: u64 = 300;
+const MOST_CALL_GAP_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandName {
@@ -245,7 +246,10 @@ impl CommandName {
             ),
             OptionName::Ttl => self == Self::Put,
             OptionName::IfAbsent | OptionName::Delete => self == Self::Cas,
-            OptionName::TimeLimit | OptionName::AllowWrite => self == Self::Mcp,
+            OptionName::TimeLimit
+            | OptionName::AllowWrite
+            | OptionName::Tables
+            | OptionName::CallGap => self == Self::Mcp,
             OptionName::Prefix
             | OptionName::From
             | OptionName::To
@@ -346,6 +350,8 @@ enum OptionName {
     Report,
     TimeLimit,
     AllowWrite,
+    Tables,
+    CallGap,
     Define,
     Collection,
     Ttl,
@@ -399,6 +405,8 @@ impl OptionName {
             b"report" => Self::Report,
             b"time-limit" => Self::TimeLimit,
             b"allow-write" => Self::AllowWrite,
+            b"tables" => Self::Tables,
+            b"call-gap" => Self::CallGap,
             b"define" => Self::Define,
             b"collection" => Self::Collection,
             b"ttl" => Self::Ttl,
@@ -485,6 +493,8 @@ pub(crate) struct Request {
     pub(crate) restore: RestoreOptions,
     pub(crate) time_limit: Option<u64>,
     pub(crate) allow_write: bool,
+    pub(crate) tables: Vec<String>,
+    pub(crate) call_gap_ms: Option<u64>,
     pub(crate) collection: Option<String>,
     pub(crate) collection_action: Option<CollectionAction>,
     pub(crate) table_action: Option<TableAction>,
@@ -846,6 +856,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         restore: RestoreOptions::default(),
         time_limit: None,
         allow_write: false,
+        tables: Vec::new(),
+        call_gap_ms: None,
         collection: None,
         collection_action: None,
         table_action: None,
@@ -1020,6 +1032,26 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                         })?,
                 );
             }
+            OptionName::Tables => {
+                for name in parse_table_names(&option.spelled, value).map_err(usage)? {
+                    if !request.tables.contains(&name) {
+                        request.tables.push(name);
+                    }
+                }
+            }
+            OptionName::CallGap => {
+                request.call_gap_ms = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|milliseconds| *milliseconds <= MOST_CALL_GAP_MS)
+                        .ok_or_else(|| {
+                            usage(format!(
+                                "{} must be a whole number of milliseconds from 0 to {MOST_CALL_GAP_MS}, not '{}'",
+                                option.spelled,
+                                shown(value)
+                            ))
+                        })?,
+                );
+            }
             OptionName::Collection => {
                 request.collection =
                     Some(parse_collection_name(Some(option.spelled.as_str()), value).map_err(usage)?);
@@ -1038,6 +1070,12 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if request.scan.prefix.is_some() && (request.scan.from.is_some() || request.scan.to.is_some()) {
         return Err(usage(
             "--prefix cannot be combined with --from or --to".to_owned(),
+        ));
+    }
+    if request.allow_write && !request.tables.is_empty() {
+        return Err(usage(
+            "--tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table"
+                .to_owned(),
         ));
     }
     let arguments = &tokens.positionals[1..];
@@ -1749,6 +1787,31 @@ fn parse_limit(option: &str, value: &OsStr) -> Result<u64, String> {
         .ok_or_else(|| format!("{option} needs a whole number, not '{}'", shown(value)))
 }
 
+fn parse_table_names(spelled: &str, value: &OsStr) -> Result<Vec<String>, String> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| format!("{spelled} must be UTF-8 text"))?;
+    if text.trim().is_empty() {
+        return Err(format!(
+            "{spelled} needs at least one name, such as {spelled} users,orders"
+        ));
+    }
+    let mut names = Vec::new();
+    for name in text.split(',').map(str::trim) {
+        if name.is_empty() {
+            return Err(format!("{spelled} has an empty name in '{text}'"));
+        }
+        let parts: Vec<&str> = name.split('.').collect();
+        if parts.len() > 2 || parts.iter().any(|part| part.is_empty()) {
+            return Err(format!(
+                "{spelled} takes name or schema.name, not '{name}'"
+            ));
+        }
+        names.push(name.to_owned());
+    }
+    Ok(names)
+}
+
 fn parse_whole_number(digits: &[u8]) -> Option<u64> {
     if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return None;
@@ -1789,6 +1852,55 @@ mod tests {
 
     fn bytes(text: &str) -> Option<ByteArgument> {
         Some(ByteArgument::Bytes(text.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn mcp_takes_repeated_table_lists_and_a_call_gap() {
+        let limited = request(
+            "mcp app.db --tables users,orders --tables archive.orders,users --call-gap 250",
+        );
+        assert_eq!(limited.command, CommandName::Mcp);
+        assert_eq!(limited.tables, vec!["users", "orders", "archive.orders"]);
+        assert_eq!(limited.call_gap_ms, Some(250));
+        assert!(!limited.allow_write);
+        let plain = request("mcp app.db");
+        assert!(plain.tables.is_empty());
+        assert_eq!(plain.call_gap_ms, None);
+        assert_eq!(request("mcp app.db --call-gap 0").call_gap_ms, Some(0));
+        assert_eq!(request("mcp app.db --call-gap 10000").call_gap_ms, Some(10_000));
+    }
+
+    #[test]
+    fn mcp_refuses_tables_with_writes_and_malformed_names_and_gaps() {
+        assert_eq!(
+            usage_message("mcp app.db --allow-write --tables users"),
+            "--tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables users,,orders"),
+            "--tables has an empty name in 'users,,orders'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables a.b.c"),
+            "--tables takes name or schema.name, not 'a.b.c'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables .orders"),
+            "--tables takes name or schema.name, not '.orders'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables ,"),
+            "--tables has an empty name in ','"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --call-gap 20s"),
+            "--call-gap must be a whole number of milliseconds from 0 to 10000, not '20s'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --call-gap 10001"),
+            "--call-gap must be a whole number of milliseconds from 0 to 10000, not '10001'"
+        );
+        assert!(usage_message("get app.db k --tables users").contains("--tables"));
     }
 
     #[test]

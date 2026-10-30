@@ -321,7 +321,7 @@ pub(super) const MCP: CommandDefinition = CommandDefinition {
     synopsis: "<file>",
     summary: "serve the file to an AI agent over MCP; read-only unless --allow-write",
     description: "Serves the file to an AI agent's client over the Model Context Protocol on stdin and stdout, read-only unless --allow-write, every call recorded in an audit file. stdout carries the protocol only.",
-    usage: "eggdb mcp <file> [--allow-write] [--time-limit <seconds>]",
+    usage: "eggdb mcp <file> [--allow-write] [--tables <names>]... [--time-limit <seconds>] [--call-gap <ms>]",
     help: "\
 Serves the file to an AI agent over the Model Context Protocol (MCP) on stdin and stdout. The
 agent's client (Claude Code, for one) starts eggdb mcp itself and talks JSON-RPC to it, so there
@@ -338,6 +338,16 @@ beside it; while a call runs, a program that wants to write the file is refused,
 another program has the file open for writing a call fails and the agent is told to try again.
 A write_sql call holds the file alone while its statement runs (the time limit bounds it),
 commits and closes the file, and never while you are asked.
+With --tables only the tables and views named exist for the agent, in every dialect and catalog:
+every other table, view and sequence, and the keys outside SQL (kv_get and kv_scan are not
+offered), are not there, and a query that names one fails as it would for a missing table. Names
+are comma-separated, name or schema.name (public. and dbo. mean the default schema), matched
+exactly as stored; repeat --tables to add more. A sequence comes with the table that owns it, or
+is named itself. Every name must be a table, view or sequence of the file when the server starts,
+or it does not start. --tables goes with a read-only server in this release, not with
+--allow-write. After each call the server waits --call-gap milliseconds before the next call
+opens the file, so your own programs, which are refused while a call holds the file, get their
+turn between an agent's calls; 0 turns the gap off.
 Every call is appended to <file>.mcp-audit.jsonl next to the file (readable by its owner only),
 which eggdb audit shows; if that file cannot be written the server does not start. A statement
 still running a second past its time limit cannot be stopped, so the server records it and exits
@@ -346,11 +356,16 @@ server with exit 0.
 stdout carries the protocol only; every message goes to stderr.
 
       --allow-write            add write_sql: one statement per call that may change the file
+      --tables <names>         only these tables and views exist for the agent: comma-separated,
+                               name or schema.name; repeat it for more (read-only servers only)
       --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
+      --call-gap <ms>          the pause after each call before the next, so other programs can write;
+                               milliseconds, 0 to 10000 (default 100)
 
 Examples:
   claude mcp add mydb -- eggdb mcp app.db
   claude mcp add mydb -- eggdb mcp app.db --allow-write
+  claude mcp add mydb -- eggdb mcp app.db --tables users,orders
   claude mcp add mydb -- eggdb mcp app.db --time-limit 30
   eggdb audit app.db
 ",
@@ -360,6 +375,14 @@ Examples:
             "add write_sql: one statement per call that may change the file",
         ),
         OptionDefinition {
+            repeatable: true,
+            ..valued(
+                "tables",
+                "names",
+                "only these tables and views exist for the agent, comma-separated, name or schema.name; repeat it for more",
+            )
+        },
+        OptionDefinition {
             default: Some("5"),
             ..valued(
                 "time-limit",
@@ -367,14 +390,23 @@ Examples:
                 "the longest one call may run, 1 to 300",
             )
         },
+        OptionDefinition {
+            default: Some("100"),
+            ..valued(
+                "call-gap",
+                "ms",
+                "the pause after each call before the next, in milliseconds, 0 to 10000",
+            )
+        },
     ],
     operands: &[FILE],
     outputs: &[],
     max_effect: Effect::Destroy,
-    errors: READING_ERRORS,
+    errors: MCP_ERRORS,
     examples: &[
         "claude mcp add mydb -- eggdb mcp app.db",
         "claude mcp add mydb -- eggdb mcp app.db --allow-write",
+        "claude mcp add mydb -- eggdb mcp app.db --tables users,orders",
         "claude mcp add mydb -- eggdb mcp app.db --time-limit 30",
     ],
     surfaces: "none: a server for an AI agent's client; eggdb audit shows what agents did",
