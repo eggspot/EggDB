@@ -57,12 +57,12 @@ const SCRIPT_ROUTE: &str = "Restore it into a SQL Server you run, script it from
 
 const ORACLE_ROUTE: &str = "Write its DDL with impdp ... SQLFILE= and its rows with SQLcl's UNLOAD, then restore the DDL and import the CSV (docs/migrate.md#oracle).";
 
-struct FileIncludes {
+pub(super) struct FileIncludes {
     scripts: RefCell<Vec<Option<PathBuf>>>,
 }
 
 impl FileIncludes {
-    fn new(main: Option<PathBuf>) -> Self {
+    pub(super) fn new(main: Option<PathBuf>) -> Self {
         Self {
             scripts: RefCell::new(vec![main]),
         }
@@ -102,7 +102,7 @@ impl IncludeOpener for FileIncludes {
             .map_err(|error| failure(error.to_string()))?;
         if !metadata.is_file() {
             return Err(failure(
-                "it is not a regular file (eggdb restore includes only script files)".to_owned(),
+                "it is not a regular file (EggDB includes only script files)".to_owned(),
             ));
         }
         let mut scripts = self.scripts.borrow_mut();

@@ -563,6 +563,127 @@ fn the_oracle_dialect_reads_oracle_and_reports_ora_errors() {
 }
 
 #[test]
+fn oracle_scripts_run_their_sqlplus_commands() {
+    let file = TempPath::new("sql-sqlplus");
+    let inner = TempPath::new("sql-sqlplus-inner");
+    let main = TempPath::new("sql-sqlplus-main");
+    std::fs::write(
+        inner.path(),
+        "INSERT INTO emp VALUES (2, 'Grace', &dept);\n",
+    )
+    .unwrap();
+    let inner_name = inner
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let script = format!(
+        "SET PAGESIZE 100\nSET FEEDBACK OFF\nCOLUMN name FORMAT A20\nPROMPT Loading department &dept\nCREATE TABLE emp (id NUMBER(6) PRIMARY KEY, name VARCHAR2(20), dept NUMBER(4));\nINSERT INTO emp VALUES (1, 'Ada', &dept);\n/\n@@{inner_name}\nSPOOL emp.log\nHOST echo never\nSELECT COUNT(*) AS n FROM emp WHERE dept = &&dept;\nSPOOL OFF\nEXIT\nINSERT INTO emp VALUES (9, 'Never', 1);\n"
+    );
+    std::fs::write(main.path(), script).unwrap();
+    let main_path = main.path().to_string_lossy().into_owned();
+    let output = eggdb_sql(
+        file.path(),
+        &[
+            "--create",
+            "--dialect",
+            "oracle",
+            main_path.as_str(),
+            "--define",
+            "dept=50",
+        ],
+        b"",
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stdout).starts_with("Loading department 50\n"),
+        "{}",
+        text(&output.stdout)
+    );
+    assert_eq!(
+        text(&output.stderr),
+        "NOTICE:  line 9: SPOOL emp.log never writes a file; redirect stdout instead (eggdb sql ... > emp.log)\n\
+         NOTICE:  line 10: HOST never runs a program; eggdb sql runs the SQL only\n\
+         NOTICE:  4 SQL*Plus commands had no effect: SET 2, COLUMN 1, / after ; 1 (eggdb sql runs the SQL only)\n"
+    );
+    let db = Database::open(file.path()).unwrap();
+    let mut rows = Vec::new();
+    {
+        let store = db.sql_store();
+        let mut session = store.session(eggdb::sql::Dialect::Oracle);
+        session
+            .execute("SELECT id, dept FROM emp ORDER BY id", &mut |result| {
+                for row in &result.rows {
+                    let cells: Vec<String> = row
+                        .iter()
+                        .map(|value| value.to_text().unwrap_or_default())
+                        .collect();
+                    rows.push(cells.join("|"));
+                }
+            })
+            .unwrap();
+        session.close().unwrap();
+    }
+    db.close().unwrap();
+    assert_eq!(rows, vec!["1|50", "2|50"]);
+
+    let json = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle", "--json"],
+        b"PROMPT hello\nSET PAGESIZE 10\nSELECT 1 AS one FROM dual;\n",
+    );
+    assert_eq!(json.status.code(), Some(0), "{}", text(&json.stderr));
+    let printed = text(&json.stdout);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(lines.first(), Some(&r#"{"prompt":"hello"}"#), "{printed}");
+    assert!(lines[1].starts_with(r#"{"tag":"SELECT 1""#), "{printed}");
+    assert_eq!(
+        lines.last(),
+        Some(&r#"{"notices":["1 SQL*Plus command had no effect: SET 1 (eggdb sql runs the SQL only)"]}"#),
+        "{printed}"
+    );
+    assert_eq!(text(&json.stderr), "");
+
+    for (script, expected) in [
+        (&b"SELECT &missing FROM dual;\n"[..], "substitution variable &missing has no value"),
+        (&b"SET SQLTERMINATOR !\n"[..], "which EggDB does not support"),
+        (&b"BEGIN\n  NULL;\nEND;\n/\n"[..], "ORA-03001"),
+        (&b"CONNECT nobody/secret\n"[..], "ORA-01435"),
+    ] {
+        let failed = eggdb_sql(file.path(), &["--dialect", "oracle"], script);
+        assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
+        assert!(
+            text(&failed.stderr).contains(expected),
+            "{}",
+            text(&failed.stderr)
+        );
+        assert!(!text(&failed.stderr).contains("secret"));
+    }
+    let unknown = eggdb_sql(file.path(), &["--dialect", "oracle"], b"FROB 1\n.\n");
+    assert_eq!(unknown.status.code(), Some(0), "{}", text(&unknown.stderr));
+    assert_eq!(
+        text(&unknown.stderr),
+        "NOTICE:  line 1: FROB is not SQL or a SQL*Plus command EggDB knows; the line was not run\n"
+    );
+    let plain = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle", "-c", "SELECT 'Ada & Co' AS name FROM dual"],
+        b"",
+    );
+    assert_eq!(plain.status.code(), Some(0), "{}", text(&plain.stderr));
+    assert!(text(&plain.stdout).contains("Ada & Co"));
+    for args in [
+        &["--dialect", "oracle", "--define", "x=1", "-c", "SELECT 1 FROM dual"][..],
+        &["--define", "x=1", "-c", "SELECT 1"][..],
+    ] {
+        let refused = eggdb_sql(file.path(), args, b"");
+        assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+        assert!(text(&refused.stderr).contains("--define"));
+    }
+}
+
+#[test]
 fn the_sqlserver_dialect_reads_transact_sql_and_reports_sql_server_errors() {
     let file = TempPath::new("sql-sqlserver");
     let created = eggdb_sql(

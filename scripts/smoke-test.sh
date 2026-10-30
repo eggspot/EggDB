@@ -307,6 +307,10 @@ expect_output '1|17-JUN-2013' sh -c "\"$eggdb\" sql --dialect oracle shop.db -c 
 expect_output '2|29-FEB-2024' sh -c "\"$eggdb\" sql --dialect oracle shop.db -c \"SELECT id, TO_CHAR(hired, 'DD-MON-YYYY') d FROM hires ORDER BY id\" | sed -n 4p | tr -d ' '"
 pass "sql --dialect oracle: ALTER SESSION, TO_DATE with a format model, MERGE and TO_CHAR of a date"
 
+expect_output 'rows 2' sh -c "printf 'SET PAGESIZE 50\\nDEFINE n = 2\\nPROMPT rows &n\\nSELECT COUNT(*) AS n FROM hires WHERE id <= &n;\\n' | \"$eggdb\" sql --dialect oracle shop.db | sed -n 1p"
+grep -q '1 SQL\*Plus command had no effect: SET 1' last.err || fail "eggdb sql --dialect oracle SQL*Plus notice said $(cat last.err)"
+pass "sql --dialect oracle: a SQL*Plus script with DEFINE, PROMPT and a counted SET"
+
 expect_exit 2 env -u EGGDB_PASSWORD "$eggdb" serve shop.db
 grep -q 'serve needs a password' last.err || fail "eggdb serve without a password said $(cat last.err)"
 expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 0.0.0.0:5432

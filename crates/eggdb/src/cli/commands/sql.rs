@@ -1,4 +1,5 @@
 use super::copy_io::{StreamCopy, script_cache};
+use super::restore::FileIncludes;
 use super::{Access, Session};
 use crate::cli::args::{CommandName, Format, ResultMode, SqlSource};
 use crate::cli::failure::{Exit, Failure};
@@ -7,7 +8,8 @@ use crate::cli::render::{JsonObject, json_string};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_commands::Category;
 use eggdb_sql::{
-    CopyChannel, Dialect, QueryResult, SqlError, SqlState, TransactionStatus, Value,
+    CopyChannel, Dialect, IncludeOpener, QueryResult, SqlError, SqlPlusCommand, SqlPlusScript,
+    SqlPlusStep, SqlState, TransactionStatus, Value,
 };
 use std::cell::{Cell, RefCell};
 use std::io::Read;
@@ -28,12 +30,17 @@ impl Session<'_> {
         let store = DatabaseStore(&db);
         let dialect = self.request.dialect;
         let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
-        let mut printed = Ok(());
+        let printed = RefCell::new(Ok(()));
         let mut failed_batch: Option<String> = None;
         let copied_out = Cell::new(false);
+        let includes = FileIncludes::new(match &self.request.sql {
+            Some(SqlSource::Script(path)) => Some(path.clone()),
+            _ => None,
+        });
+        let defines = self.request.restore.defines.clone();
         let outcome = {
             let out = RefCell::new(&mut self.out);
-            let messages = &mut self.messages;
+            let messages = RefCell::new(&mut self.messages);
             let input: Option<&mut dyn Read> = if script { None } else { Some(&mut *self.stdin) };
             let mut copy = StreamCopy {
                 input,
@@ -42,6 +49,7 @@ impl Session<'_> {
             };
             let mut on_result = |result: QueryResult| {
                 if !json {
+                    let mut messages = messages.borrow_mut();
                     for notice in &result.notices {
                         messages.text(notice);
                         messages.text("\n");
@@ -61,8 +69,10 @@ impl Session<'_> {
                         print_result(&mut out, &result, dialect);
                     }
                 }
-                printed = out.line_done();
-                printed.is_ok()
+                let done = out.line_done();
+                let more = done.is_ok();
+                *printed.borrow_mut() = done;
+                more
             };
             if dialect == Dialect::SqlServer {
                 run_sqlserver_batches(
@@ -73,6 +83,47 @@ impl Session<'_> {
                     &mut copy,
                     &mut failed_batch,
                 )
+            } else if dialect == Dialect::Oracle && script {
+                let mut on_event = |event: ScriptEvent| {
+                    let done = if json {
+                        let mut out = out.borrow_mut();
+                        out.text(&event_json(&event));
+                        out.line_done()
+                    } else {
+                        match event {
+                            ScriptEvent::Prompt(text) => {
+                                let mut out = out.borrow_mut();
+                                out.text(&text);
+                                out.text("\n");
+                                out.line_done()
+                            }
+                            ScriptEvent::Notice(notice) => {
+                                let mut messages = messages.borrow_mut();
+                                messages.styled(Style::Bold, "NOTICE:");
+                                messages.text("  ");
+                                messages.text(&notice);
+                                messages.text("\n");
+                                Ok(())
+                            }
+                        }
+                    };
+                    if done.is_err() {
+                        *printed.borrow_mut() = done;
+                    }
+                };
+                let mut input = text.as_bytes();
+                let opener: &dyn IncludeOpener = &includes;
+                match SqlPlusScript::new(&mut input, Some(opener), &defines) {
+                    Ok(mut steps) => run_sqlplus_script(
+                        &mut session,
+                        &mut steps,
+                        &mut on_result,
+                        &mut on_event,
+                        &mut copy,
+                        &mut failed_batch,
+                    ),
+                    Err(error) => Err(error),
+                }
             } else if script {
                 session.execute_script(&text, &mut on_result, &mut copy)
             } else {
@@ -98,7 +149,7 @@ impl Session<'_> {
             Err(error) => report_error(&mut self.messages, &error, &text, json),
         }
         self.close(db)?;
-        printed?;
+        printed.into_inner()?;
         Ok(exit)
     }
 
@@ -165,6 +216,204 @@ fn run_sqlserver_batches(
             }
             if stopped.get() {
                 return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+enum ScriptEvent {
+    Prompt(String),
+    Notice(String),
+}
+
+fn event_json(event: &ScriptEvent) -> String {
+    match event {
+        ScriptEvent::Prompt(text) => JsonObject::new().string("prompt", text).line(),
+        ScriptEvent::Notice(notice) => JsonObject::new()
+            .raw("notices", &format!("[{}]", json_string(notice)))
+            .line(),
+    }
+}
+
+const MOST_COUNTED_KINDS_SHOWN: usize = 8;
+
+#[derive(Default)]
+struct CommandsWithoutEffect {
+    total: u64,
+    kinds: Vec<(String, u64)>,
+}
+
+impl CommandsWithoutEffect {
+    fn add(&mut self, kind: String) {
+        self.total += 1;
+        match self.kinds.iter_mut().find(|(known, _)| *known == kind) {
+            Some((_, count)) => *count += 1,
+            None => self.kinds.push((kind, 1)),
+        }
+    }
+
+    fn notice(&self) -> Option<String> {
+        if self.total == 0 {
+            return None;
+        }
+        let mut list: Vec<String> = self
+            .kinds
+            .iter()
+            .take(MOST_COUNTED_KINDS_SHOWN)
+            .map(|(kind, count)| format!("{kind} {count}"))
+            .collect();
+        let more = self.kinds.len().saturating_sub(MOST_COUNTED_KINDS_SHOWN);
+        if more > 0 {
+            list.push(format!(
+                "… and {more} more {}",
+                if more == 1 { "kind" } else { "kinds" }
+            ));
+        }
+        let commands = if self.total == 1 {
+            "command"
+        } else {
+            "commands"
+        };
+        Some(format!(
+            "{} SQL*Plus {commands} had no effect: {} (eggdb sql runs the SQL only)",
+            self.total,
+            list.join(", ")
+        ))
+    }
+}
+
+fn command_notice(command: &SqlPlusCommand) -> Option<String> {
+    let place = &command.place;
+    match command.name.as_str() {
+        "host" => Some(format!(
+            "{place}: {} never runs a program; eggdb sql runs the SQL only",
+            command.shown
+        )),
+        "spool" => {
+            let file = command.argument.split_whitespace().next()?;
+            if file.eq_ignore_ascii_case("off") {
+                return None;
+            }
+            Some(format!(
+                "{place}: SPOOL {file} never writes a file; redirect stdout instead (eggdb sql ... > {file})"
+            ))
+        }
+        "whenever" => {
+            let mut words = command.argument.split_whitespace();
+            let condition = words.next()?;
+            let action = words.next()?;
+            let continues = condition.eq_ignore_ascii_case("sqlerror")
+                && action.eq_ignore_ascii_case("continue");
+            continues.then(|| {
+                format!(
+                    "{place}: WHENEVER SQLERROR CONTINUE has no effect: eggdb sql stops at the first error (eggdb restore --keep-going runs on)"
+                )
+            })
+        }
+        "." => Some(format!("{place}: the statement before . was not run")),
+        "unterminated" => Some(format!(
+            "the text from {place} was not run: no ; or / ends it"
+        )),
+        "unknown" => Some(format!(
+            "{place}: {} is not SQL or a SQL*Plus command EggDB knows; the line was not run",
+            command.shown
+        )),
+        _ => None,
+    }
+}
+
+fn counted_kind(command: &SqlPlusCommand) -> Option<String> {
+    match command.name.as_str() {
+        "define" | "undefine" | "set define" | "accept" | "include" | "whenever" | "spool"
+        | "host" | "." | "unterminated" | "unknown" => None,
+        "/" => Some("/ after ;".to_owned()),
+        _ => Some(
+            command
+                .shown
+                .split_whitespace()
+                .next()
+                .unwrap_or(&command.shown)
+                .to_owned(),
+        ),
+    }
+}
+
+fn run_sqlplus_script(
+    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
+    script: &mut SqlPlusScript<'_>,
+    on_result: &mut dyn FnMut(QueryResult) -> bool,
+    on_event: &mut dyn FnMut(ScriptEvent),
+    copy: &mut dyn CopyChannel,
+    failed_statement: &mut Option<String>,
+) -> Result<(), SqlError> {
+    let mut without_effect = CommandsWithoutEffect::default();
+    let outcome = run_sqlplus_steps(
+        session,
+        script,
+        on_result,
+        on_event,
+        copy,
+        failed_statement,
+        &mut without_effect,
+    );
+    if let Some(notice) = without_effect.notice() {
+        on_event(ScriptEvent::Notice(notice));
+    }
+    outcome
+}
+
+fn run_sqlplus_steps(
+    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
+    script: &mut SqlPlusScript<'_>,
+    on_result: &mut dyn FnMut(QueryResult) -> bool,
+    on_event: &mut dyn FnMut(ScriptEvent),
+    copy: &mut dyn CopyChannel,
+    failed_statement: &mut Option<String>,
+    without_effect: &mut CommandsWithoutEffect,
+) -> Result<(), SqlError> {
+    let stopped = Cell::new(false);
+    let mut forward = |result: QueryResult| {
+        let more = on_result(result);
+        if !more {
+            stopped.set(true);
+        }
+        more
+    };
+    while let Some(step) = script.next_step()? {
+        match step {
+            SqlPlusStep::Statement { text, .. } => {
+                if let Err(error) = session.execute_with_copy(&text, &mut forward, copy) {
+                    *failed_statement = Some(text);
+                    return Err(error);
+                }
+                if stopped.get() {
+                    return Ok(());
+                }
+            }
+            SqlPlusStep::Prompt(text) => on_event(ScriptEvent::Prompt(text)),
+            SqlPlusStep::Connect { statement } => session.execute(&statement, &mut |_| {})?,
+            SqlPlusStep::Exit {
+                rollback,
+                status,
+                place,
+            } => {
+                if let Some(status) = status {
+                    on_event(ScriptEvent::Notice(format!(
+                        "{place}: EXIT {status}: the exit code stays 0; eggdb sql's exit codes mean what eggdb help sql says"
+                    )));
+                }
+                if rollback {
+                    session.execute("ROLLBACK", &mut |_| {})?;
+                }
+                return Ok(());
+            }
+            SqlPlusStep::Command(command) => {
+                if let Some(notice) = command_notice(&command) {
+                    on_event(ScriptEvent::Notice(notice));
+                } else if let Some(kind) = counted_kind(&command) {
+                    without_effect.add(kind);
+                }
             }
         }
     }

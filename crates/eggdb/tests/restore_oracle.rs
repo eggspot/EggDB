@@ -813,3 +813,62 @@ fn a_disabled_foreign_key_over_orphan_rows_is_listed_not_failed() {
         "{report}"
     );
 }
+
+#[test]
+fn identities_column_disabled_constraints_and_a_named_using_index_restore() {
+    let directory = TempDirectory::new("identity");
+    let target = directory.join("shop.db");
+    let output = restore(
+        None,
+        &target,
+        &fixture("shop-identity-sqldeveloper.sql"),
+        &["--create"],
+    );
+    let report = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{}", everything(&output));
+    for part in [
+        "\"ok\":true",
+        "\"tables\":2",
+        "\"rows\":4",
+        "\"indexes\":1",
+        "\"object\":\"shop.tickets.tickets_code_ck\",\"difference\":\"disabled in the source: not created here, so not enforced\"",
+    ] {
+        assert!(report.contains(part), "{part:?} in\n{report}");
+    }
+    assert!(!report.contains("identity not kept"), "{report}");
+    let db = Database::open(&target).unwrap();
+    let shop = |sql: &str| {
+        query(
+            &db,
+            Dialect::Oracle,
+            &format!("ALTER SESSION SET CURRENT_SCHEMA = SHOP; {sql}"),
+        )
+    };
+    assert_eq!(
+        shop("SELECT generation_type FROM all_tab_identity_cols WHERE table_name = 'TICKETS'"),
+        "ALWAYS\n"
+    );
+    assert_eq!(
+        shop("SELECT COUNT(*) FROM all_indexes WHERE table_name = 'ORDERS'"),
+        "0\n"
+    );
+    assert_eq!(
+        oracle_error(
+            &db,
+            "ALTER SESSION SET CURRENT_SCHEMA = SHOP; INSERT INTO tickets (ticket_id, code) VALUES (99, 'X')"
+        ),
+        Some(32795)
+    );
+    assert_eq!(
+        oracle_error(
+            &db,
+            "ALTER SESSION SET CURRENT_SCHEMA = SHOP; INSERT INTO tickets (code, order_id) VALUES ('C3', 3)"
+        ),
+        Some(2291)
+    );
+    assert_eq!(
+        shop("INSERT INTO tickets (code, order_id) VALUES ('C3', 2); SELECT MAX(ticket_id) FROM tickets"),
+        "41\n"
+    );
+    db.close().unwrap();
+}

@@ -212,7 +212,7 @@ impl CommandName {
                 self,
                 Self::Sql | Self::Shell | Self::Restore | Self::Import | Self::Explain
             ),
-            OptionName::Define => self == Self::Restore,
+            OptionName::Define => matches!(self, Self::Restore | Self::Sql),
             OptionName::KeepGoing => matches!(self, Self::Shell | Self::Restore),
             OptionName::Report => self == Self::Restore,
             OptionName::Mode => self == Self::Shell,
@@ -1114,15 +1114,23 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             (None, Some(_)) => {}
             (None, None) => request.sql = Some(SqlSource::Stdin),
         }
+        if !request.restore.defines.is_empty() {
+            if request.dialect != eggdb_sql::Dialect::Oracle {
+                return Err(usage(DEFINE_NEEDS_ORACLE.to_owned()));
+            }
+            if matches!(request.sql, Some(SqlSource::Command(_))) {
+                return Err(usage(
+                    "--define goes with a script: -c runs its SQL as written, with no substitution"
+                        .to_owned(),
+                ));
+            }
+        }
         return Ok(request);
     }
     if command == CommandName::Restore {
         request.restore.dump = arguments.get(1).map(|argument| export_file(argument));
         if !request.restore.defines.is_empty() && request.dialect != eggdb_sql::Dialect::Oracle {
-            return Err(usage(
-                "--define sets SQL*Plus substitution variables, so it goes with --dialect oracle"
-                    .to_owned(),
-            ));
+            return Err(usage(DEFINE_NEEDS_ORACLE.to_owned()));
         }
         return Ok(request);
     }
@@ -1517,6 +1525,9 @@ fn check_import_dialect(value: &OsStr) -> Result<eggdb_sql::Dialect, String> {
 }
 
 const MAX_DEFINE_VALUE_BYTES: usize = 240;
+
+const DEFINE_NEEDS_ORACLE: &str =
+    "--define sets SQL*Plus substitution variables, so it goes with --dialect oracle";
 
 fn parse_define(spelled: &str, value: &OsStr) -> Result<(String, String), String> {
     let text = value
