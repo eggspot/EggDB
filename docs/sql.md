@@ -494,9 +494,15 @@ SELECT @@VERSION
   `0x4E61`). Reading text, milliseconds may follow a colon (`13:05:09:120`) and six digits read
   as `yymmdd`. `TRY_CAST` and `TRY_CONVERT` return NULL where the conversion fails, and keep
   error 529 for the conversions the chart forbids.
-- **`IDENTITY` and `IDENTITY(1,1)`** number an integer column that is the first column of the
-  primary key, inline or as a table-level `CONSTRAINT ... PRIMARY KEY`. An `INSERT` without a
-  column list leaves it out, and an explicit value is error 544, as with `IDENTITY_INSERT OFF`.
+- **`IDENTITY` and `IDENTITY(seed, increment)`** number an integer column that is the first
+  column of the primary key, inline or as a table-level `CONSTRAINT ... PRIMARY KEY`: the first
+  row gets the seed and each next one the largest number so far plus the increment (the
+  smallest so far for a negative increment), so `IDENTITY(1000, 10)` gives 1000, 1010, 1020 and,
+  after an explicit 1055 under `IDENTITY_INSERT`, 1065 (D147). The seed and increment are kept
+  in the table's definition, shown by `sys.identity_columns` and `sp_help`, and must be whole
+  numbers in the column type's range, the increment other than 0 (error 50000 otherwise). An
+  `INSERT` without a column list leaves the column out, and an explicit value is error 544, as
+  with `IDENTITY_INSERT OFF`.
 - `GETDATE()` and `CURRENT_TIMESTAMP` (milliseconds), `SYSDATETIME()`, `GETUTCDATE()`,
   `SYSUTCDATETIME()`, `SYSDATETIMEOFFSET()` (the session's time zone is UTC), `CAST`,
   `CONVERT`, `TRY_CAST`, `TRY_CONVERT`, `ISNULL`, `DATEADD`, `DATEDIFF` and `DATEDIFF_BIG`
@@ -538,8 +544,16 @@ SELECT @@VERSION
   is written) converted to its type, NULL when missing or, without `AS JSON`, when it is an
   object or array; text that is not an array or object is Msg 13609, a bad path Msg 13607.
   `OPENJSON` without `WITH`, `strict` paths and `CROSS APPLY` are 40517.
-- **Defaults** are constants (folded to the column's type: `DEFAULT ((0))` on a `bit` column
-  is false), `GETDATE()` and its kin, `NEWID()` and `NEWSEQUENTIALID()`.
+- **Defaults** may be any Transact-SQL expression without column references, subqueries or
+  variables, inline or through `ALTER TABLE ... ADD [CONSTRAINT name] DEFAULT ... FOR column`
+  (D147). Constants are folded to the column's type (`DEFAULT ((0))` on a `bit` column is false)
+  and `GETDATE()` and its kin, `NEWID()` and `NEWSEQUENTIALID()` are kept as PostgreSQL's
+  equivalents, so every dialect reads them as before; any other expression, such as
+  `DEFAULT (dateadd(day,(30),getdate()))`, is kept as written, without its outer parentheses, and
+  runs as Transact-SQL, with SQL Server's assignment to the column, whichever dialect inserts
+  the row. `sys.default_constraints` and `INFORMATION_SCHEMA.COLUMNS` show it in parentheses as
+  SQL Server does; PostgreSQL's catalogs show it as written; `.schema`'s PostgreSQL `CREATE
+  TABLE` leaves it out.
 - **Views and `CHECK` constraints** (D124): `CREATE VIEW`, `ALTER VIEW` and `CREATE OR ALTER
   VIEW`, with a column list and `WITH SCHEMABINDING` or `VIEW_METADATA` (accepted without
   effect); the view must be the only statement of its batch (error 111), and `ORDER BY` needs
@@ -1967,8 +1981,15 @@ its identity columns (count; each its column number and `1` for `ALWAYS` or `2` 
 DEFAULT`, in column order) and, for each index in order, its method (`0` `btree`, `1` `hash`), a
 byte `1` when it is a unique index without a constraint (`0` otherwise), and two 32-bit
 little-endian masks of its columns by key position, `DESC` and `NULLS FIRST`. An auto-increment
-column `BY DEFAULT` needs no entry. Every other table keeps its version and bytes, and an older
-release refuses a version 9 table by name.
+column `BY DEFAULT` needs no entry. A table with a Transact-SQL `DEFAULT` kept as written or an
+`IDENTITY(seed, increment)` other than (1, 1) is written in version 9 too (D147), with two more
+tags in its columns' default byte, which older versions do not allow: `3`, a default written in
+another dialect (its dialect code as a check's, never `0`, then its text, never blank), and `4`,
+an auto-increment column with its seed and increment as two 64-bit little-endian signed numbers
+(never an increment of 0, never (1, 1), at most one per table); the tags `0` no default, `1` a
+PostgreSQL default and `2` an auto-increment column counting from 1 by 1 keep their meaning.
+Every other table keeps its version and bytes, and an older release refuses a version 9 table by
+name.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
@@ -2407,15 +2428,17 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   constant. The `float` style 3 is error 40517.
 - Not yet: `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.` in `UPDATE`,
   `SELECT ... INTO` and `#temporary` tables.
-- An `IDENTITY` seed or increment other than (1,1), and an identity column that is not the
-  first column of the primary key; the next number is one more than the largest in the table,
-  so a deleted largest value is used again.
+- An identity column that is not the first column of the primary key. The next identity number
+  follows the largest one in the table (the smallest for a negative increment), so a deleted
+  largest value is used again and an emptied table starts again at its seed, where SQL Server
+  keeps a counter.
 - A statement that fails after it wrote rows rolls back the whole transaction (no statement
   savepoints yet) and ends the batch; one that wrote nothing leaves the transaction open, as in
   SQL Server. An unknown column of an existing table is found when the statement runs, after
   the statements before it in the batch ran (SQL Server finds it when the batch compiles).
-- A `DEFAULT` is a constant, `GETDATE()` and its kin, `NEWID()` or `NEWSEQUENTIALID()`; other
-  expressions are 40517 (item 40b). `WITH ENCRYPTION` and `WITH CHECK OPTION` on views are 40517,
+- A `DEFAULT` that names a column or holds a subquery is `0A000` (SQL Server's 128 and 1046
+  not yet), and a Transact-SQL default's implicit conversions inside the expression follow the
+  dialect of the inserting statement, as a view's and a `CHECK`'s do (D124). `WITH ENCRYPTION` and `WITH CHECK OPTION` on views are 40517,
   and `SCHEMABINDING` does not stop a table from being changed under the view. Unnamed `CHECK`
   constraints are named `ck__<table>__<column>`, not with SQL Server's random digits.
 - A view or `CHECK` written in Transact-SQL and used from another dialect (or one written in

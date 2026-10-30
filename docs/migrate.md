@@ -211,7 +211,6 @@ but not as SQL Server had it. For each, the script line, the object and the diff
 ```
 known differences (restored, but not as the source had it)
   line 88   sales.Orders.PlacedAt   values are stored in UTC; their offsets are lost
-  line 102  dbo.Coupons.Id          IDENTITY(1000, 10) restored as IDENTITY(1, 1); new values continue after the highest stored one
   line 140  dbo.Products.Margin     computed column not kept
   line 377  FK_OrderLines_Products  not created: existing rows violate it (...)
 ```
@@ -232,9 +231,11 @@ listed as client commands.
   `EXEC sp_executesql N'CREATE VIEW ...'`, counted as the statement they guard; item 47);
   `MERGE`, `DBCC`, `BULK INSERT` and other statements EggDB does not have, which are skipped and
   listed.
-- **Not kept, and listed as known differences:** computed and `rowversion` columns; `IDENTITY`
-  seeds and increments other than (1, 1); `DEFAULT` expressions other than constants,
-  `GETDATE()` and `NEWID()`; `INCLUDE` columns, a non-unique index's filter and `DESC`;
+- **Kept as SQL Server had them:** `IDENTITY(seed, increment)` with any seed and increment, and
+  any `DEFAULT` expression, kept as written and run as Transact-SQL (D147).
+- **Not kept, and listed as known differences:** computed and `rowversion` columns; a `DEFAULT`
+  EggDB cannot keep (one that names a column or holds a subquery, which SQL Server refuses too);
+  `INCLUDE` columns, a non-unique index's filter and `DESC`;
   `datetimeoffset` offsets (values are kept in UTC); non-binary collations (text compares by code
   point); constraints disabled with `NOCHECK CONSTRAINT` (enforced here); constraints the restored
   rows violate (not created); an index whose name another table's index already has (EggDB's

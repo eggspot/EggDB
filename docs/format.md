@@ -629,7 +629,9 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   (D114, D116). They are part of the format from v0.2.0 on: after it, a new dialect code or
   default tag in them needs a new record version (D124). The newest table-definition version is
   9, written only for tables with an index method other than `btree`, a column order other than
-  `ASC`, a unique index that is not a constraint or a recorded identity column (D146).
+  `ASC`, a unique index that is not a constraint or a recorded identity column (D146), a
+  Transact-SQL `DEFAULT` kept as written or an `IDENTITY` seed and increment other than (1, 1)
+  (D147).
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.

@@ -1259,16 +1259,14 @@ dialect-neutral (item 43 lists Oracle's the same way): one entry per object, wit
 line, the object in the dialect's own naming and the difference in one clause. It sits after
 `consequences` and before `error`/`errors`, so the report reads "left out, failed because of
 that, kept differently, failed, ignored". Its summary line in the facts block is
-`differences    7` (between `consequences` and `ignored`, for this dialect only); the header is
+`differences    5` (between `consequences` and `ignored`, for this dialect only); the header is
 `known differences (restored, but not as the source had it)`. Differences do not change the
 verdict's label.
 ```
-  differences     7
+  differences     5
 known differences (restored, but not as the source had it)
   line 88   sales.Orders.PlacedAt   values are stored in UTC; their offsets are lost
-  line 102  dbo.Coupons.Id          IDENTITY(1000, 10) restored as IDENTITY(1, 1); new values continue after the highest stored one
   line 140  dbo.Products.Margin     computed column not kept
-  line 141  sales.Orders.Created    default not kept: (dateadd(day,(30),getdate()))
   line 377  FK_orphan               not created: existing rows violate it (rows the source kept under a disabled constraint, or a collation, padding or LIKE difference)
   line 380  sales.Orders            a constraint disabled in the source (NOCHECK CONSTRAINT) is enforced here
   line 402  index IX_Orders_Open    INCLUDE columns, the filter (a full index here) not kept
@@ -1276,7 +1274,7 @@ known differences (restored, but not as the source had it)
 Entries come in script order, cut and padded like `skipped`; at most 10,000 are listed, then
 `  … and 2,310 more differences (the report keeps the first 10,000)`. The `ok` verdict names
 them: `ok: every table and row of the script is in shop.db; 3 objects skipped, 1 consequence and
-7 known differences, listed above.` For this dialect the verdicts say `script` where section 16
+5 known differences, listed above.` For this dialect the verdicts say `script` where section 16
 says `dump`.
 
 ### Client commands under `ignored`
