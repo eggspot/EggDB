@@ -8,8 +8,6 @@ use crate::session::QueryResult;
 use crate::settings::Settings;
 use crate::store::KeyValueWrite;
 
-const DIALECT: Dialect = Dialect::PostgreSql;
-
 pub(crate) fn processed_rows(result: &QueryResult) -> u64 {
     if result.columns.is_some() {
         return result.rows.len() as u64;
@@ -31,9 +29,10 @@ pub(crate) fn run_sql(
     tables: &mut TableCache,
     settings: &Settings,
     statement: Statement,
+    dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     let scope = crate::triggers::enter_nested_statement();
-    let result = run_statement(writer, tables, settings, statement)?;
+    let result = run_statement(writer, tables, settings, statement, dialect)?;
     crate::triggers::finish_nested_statement(writer, tables, settings, scope)?;
     Ok(result)
 }
@@ -43,6 +42,7 @@ fn run_statement(
     tables: &mut TableCache,
     settings: &Settings,
     statement: Statement,
+    dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     crate::cancel::check()?;
     let binding = Binding {
@@ -93,7 +93,7 @@ fn run_statement(
         }
         Statement::CreateTable(mut create) => {
             binding.create_table(&*writer, tables, &mut create)?;
-            execute::create_table(writer, tables, &create, DIALECT)
+            execute::create_table(writer, tables, &create, dialect)
         }
         Statement::DropTable {
             mut names,
@@ -101,25 +101,25 @@ fn run_statement(
             cascade,
         } => {
             binding.names(&*writer, tables, &mut names)?;
-            execute::drop_tables(writer, tables, &names, if_exists, cascade, DIALECT)
+            execute::drop_tables(writer, tables, &names, if_exists, cascade, dialect)
         }
         Statement::CreateIndex(mut create) => {
             binding.names(&*writer, tables, std::slice::from_mut(&mut create.table))?;
-            crate::indexes::create_index(writer, tables, &create, DIALECT)
+            crate::indexes::create_index(writer, tables, &create, dialect)
         }
         Statement::DropIndex(mut drop) => {
             if let Some(table) = &mut drop.table {
                 binding.names(&*writer, tables, std::slice::from_mut(table))?;
             }
-            crate::indexes::drop_index(writer, tables, &drop, DIALECT)
+            crate::indexes::drop_index(writer, tables, &drop, dialect)
         }
         Statement::AlterTable(mut alter) => {
             binding.alter_table(&*writer, tables, &mut alter)?;
-            crate::alter::alter_table(writer, tables, &alter, DIALECT)
+            crate::alter::alter_table(writer, tables, &alter, dialect)
         }
         Statement::CreateSequence(mut create) => {
             create.name.text = crate::schemas::creation_name(&*writer, &create.name)?;
-            crate::sequences::create_sequence(writer, tables, &create, DIALECT)
+            crate::sequences::create_sequence(writer, tables, &create, dialect)
         }
         Statement::DropSequence {
             mut names,
@@ -127,7 +127,7 @@ fn run_statement(
             cascade,
         } => {
             binding.names(&*writer, tables, &mut names)?;
-            crate::sequences::drop_sequences(writer, tables, &names, if_exists, cascade, DIALECT)
+            crate::sequences::drop_sequences(writer, tables, &names, if_exists, cascade, dialect)
         }
         Statement::CreateTrigger(mut create) => {
             binding.names(&*writer, tables, std::slice::from_mut(&mut create.table))?;
@@ -137,7 +137,7 @@ fn run_statement(
             if let Some(table) = &mut drop.table {
                 binding.names(&*writer, tables, std::slice::from_mut(table))?;
             }
-            crate::triggers::drop_triggers(writer, tables, &drop, DIALECT)
+            crate::triggers::drop_triggers(writer, tables, &drop, dialect)
         }
         Statement::CreateRoutine(create) => {
             let check = routines::BodyCheck::of_setting(
@@ -145,7 +145,7 @@ fn run_statement(
             );
             routines::create_routine(writer, tables, &create, check)
         }
-        Statement::DropRoutine(drop) => routines::drop_routines(writer, tables, &drop, DIALECT),
+        Statement::DropRoutine(drop) => routines::drop_routines(writer, tables, &drop, dialect),
         Statement::Ignored { tag, notice } => {
             let result = QueryResult::command(tag);
             Ok(match notice {

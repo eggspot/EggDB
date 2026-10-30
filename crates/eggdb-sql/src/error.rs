@@ -275,6 +275,7 @@ struct Report {
     table: Option<String>,
     context: Option<String>,
     raised: Option<Raised>,
+    declared_exception: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +304,7 @@ impl SqlError {
                 table: None,
                 context: None,
                 raised: None,
+                declared_exception: None,
             }),
         }
     }
@@ -344,6 +346,15 @@ impl SqlError {
     pub(crate) fn without_position(mut self) -> Self {
         self.report.position = None;
         self
+    }
+
+    pub(crate) fn with_declared_exception(mut self, identity: impl Into<String>) -> Self {
+        self.report.declared_exception = Some(identity.into());
+        self
+    }
+
+    pub(crate) fn declared_exception(&self) -> Option<&str> {
+        self.report.declared_exception.as_deref()
     }
 
     pub(crate) fn raised_in_sqlserver(

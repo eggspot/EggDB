@@ -6,6 +6,8 @@ mod compile_tests;
 #[cfg(test)]
 mod ddl_tests;
 #[cfg(test)]
+mod run_tests;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use exceptions::{

@@ -1782,6 +1782,13 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 return Ok(Some(expr));
             }
+            TokenKind::NumberedParameter(number) => {
+                let Some(expr) = frame.numbered_expr(*number, position) else {
+                    return Ok(None);
+                };
+                self.at += 1;
+                return Ok(Some(expr));
+            }
             TokenKind::Word(word) => word.as_ref(),
             TokenKind::QuotedIdentifier(name) => name.as_str(),
             _ => return Ok(None),

@@ -180,7 +180,11 @@ impl RoutineFrame {
     }
 
     pub(crate) fn positional_expr(&self, digits: &str, position: usize) -> Option<Expr> {
-        let index = self.positional_index(parameter_number(digits)?)?;
+        self.numbered_expr(parameter_number(digits)?, position)
+    }
+
+    pub(crate) fn numbered_expr(&self, number: usize, position: usize) -> Option<Expr> {
+        let index = self.positional_index(number)?;
         let variable = &self.variables[index];
         Some(constant(variable.value.clone(), variable.sql_type(), position))
     }

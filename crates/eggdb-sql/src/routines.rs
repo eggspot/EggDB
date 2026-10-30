@@ -332,6 +332,9 @@ pub(crate) fn compiled_program(
     tables: &mut TableCache,
     definition: &Arc<RoutineDefinition>,
 ) -> SqlResult<Arc<crate::plpgsql::Program>> {
+    if let Some(program) = crate::plpgsql::local_program(definition) {
+        return Ok(program);
+    }
     let programs = &mut tables.routines.programs;
     if let Some((_, program)) = programs
         .iter()
@@ -372,6 +375,9 @@ pub(crate) fn resolve(
     tables: &mut TableCache,
     name: &str,
 ) -> SqlResult<Option<Arc<NamedRoutines>>> {
+    if let Some(local) = crate::plpgsql::local_routines(name) {
+        return Ok(Some(local));
+    }
     let plain = normalized(name);
     if is_qualified(plain) || plain.len() != name.len() {
         return of_name(reader, tables, plain);

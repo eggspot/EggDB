@@ -1,3 +1,9 @@
+mod plsql;
+
+pub(crate) use plsql::{local_program, local_routines, take_transaction_end};
+
+use plsql::TransactionEnd;
+
 use super::frame::{
     FrameVariable, RoutineFrame, Slot, is_composite_type, missing_field, record_of, row_record,
     unassigned_record,
@@ -111,11 +117,7 @@ pub(crate) fn invoke(
     let label = match definition.language {
         RoutineLanguage::PlPgSql => format!("PL/pgSQL function {}", definition.signature()),
         RoutineLanguage::Sql => format!("SQL function \"{}\"", base_name(&definition.name)),
-        RoutineLanguage::PlSql => format!(
-            "PL/SQL {} {}",
-            definition.kind.noun(),
-            display(&definition.name)
-        ),
+        RoutineLanguage::PlSql => format!("\"{}\"", crate::plsql::shown_object(&definition.name)),
         RoutineLanguage::Tsql => {
             return crate::tsql::invoke_function(
                 writer,
@@ -127,6 +129,9 @@ pub(crate) fn invoke(
         }
     };
     let mut run = Run::new(writer, tables, settings, &definition, label);
+    if run.oracle {
+        run.attach_local(&definition);
+    }
     let arguments = run.complete_arguments(call.arguments)?;
     if definition.strict && arguments.iter().any(|argument| *argument == Value::Null) {
         return Ok(if definition.returns.is_set() {
@@ -136,6 +141,9 @@ pub(crate) fn invoke(
         });
     }
     run.bind_parameters(arguments);
+    if run.oracle {
+        run.bind_declared_parameters()?;
+    }
     match definition.language {
         RoutineLanguage::Sql | RoutineLanguage::Tsql => run.sql_body(),
         RoutineLanguage::PlPgSql | RoutineLanguage::PlSql => {
@@ -202,6 +210,7 @@ pub(crate) fn run_anonymous_block(
     let definition = crate::plsql::anonymous_block_definition(&block.code);
     let label = crate::plsql::ANONYMOUS_BLOCK_NAME.to_owned();
     let mut run = Run::new(writer, tables, settings, &definition, label);
+    run.unit = Some(plsql::UnitLines::of_anonymous_block(&block.code, block.position));
     run.bind_parameters(Vec::new());
     run.program(&block.program).map(drop)
 }
@@ -236,11 +245,16 @@ fn column_names(result: &QueryResult) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn parsed(text: &str, settings: &Settings, frame: &RoutineFrame) -> SqlResult<Statement> {
-    let tokens = tokenize_in(text, Dialect::PostgreSql)?;
+fn parsed(
+    text: &str,
+    settings: &Settings,
+    frame: &RoutineFrame,
+    dialect: Dialect,
+) -> SqlResult<Statement> {
+    let tokens = tokenize_in(text, dialect)?;
     let mut parser = Parser::new(text, &tokens)
         .with_context(Parameters::Absent, settings)
-        .in_dialect(Dialect::PostgreSql)
+        .in_dialect(dialect)
         .with_routine_frame(frame);
     let statement = parser.statement()?;
     if !parser.at_end() {
@@ -308,6 +322,7 @@ fn non_composite(kind: &str) -> SqlError {
 
 fn coerce(slot: &Slot, value: Value) -> SqlResult<Value> {
     match slot {
+        Slot::Typed(SqlType::Dynamic) => Ok(value),
         Slot::Typed(sql_type) => convert(value, *sql_type, Conversion::Assignment),
         Slot::Untyped => Ok(value),
         Slot::Cursor(_) => Ok(match value {
@@ -329,7 +344,10 @@ fn coerce(slot: &Slot, value: Value) -> SqlResult<Value> {
             let mut fields = Vec::with_capacity(columns.len());
             for (at, (_, sql_type)) in columns.iter().enumerate() {
                 let field = record.fields.get(at).cloned().unwrap_or(Value::Null);
-                fields.push(convert(field, *sql_type, Conversion::Assignment)?);
+                fields.push(match sql_type {
+                    SqlType::Dynamic => field,
+                    sql_type => convert(field, *sql_type, Conversion::Assignment)?,
+                });
             }
             Ok(row_record(columns, fields))
         }
@@ -362,6 +380,9 @@ struct Run<'r> {
     cursors: Vec<OpenCursor>,
     portals: usize,
     print_strict_params: bool,
+    oracle: bool,
+    unit: Option<Arc<plsql::UnitLines>>,
+    plsql: plsql::PlsqlState,
 }
 
 impl<'r> Run<'r> {
@@ -391,6 +412,9 @@ impl<'r> Run<'r> {
             cursors: Vec::new(),
             portals: 0,
             print_strict_params: false,
+            oracle: definition.dialect == Dialect::Oracle,
+            unit: None,
+            plsql: plsql::PlsqlState::default(),
         }
     }
 
@@ -431,7 +455,11 @@ impl<'r> Run<'r> {
                     }
                 },
             };
-            values.push(convert(value, parameter.sql_type, Conversion::Assignment)?);
+            values.push(match parameter.sql_type {
+                SqlType::Dynamic => value,
+                sql_type => convert(value, sql_type, Conversion::Assignment)
+                    .map_err(|error| self.assignment_error(error))?,
+            });
         }
         Ok(values)
     }
@@ -456,7 +484,10 @@ impl<'r> Run<'r> {
 
     fn bind_parameters(&mut self, arguments: Vec<Value>) {
         let definition = self.definition;
-        let procedural = definition.language == RoutineLanguage::PlPgSql;
+        let procedural = matches!(
+            definition.language,
+            RoutineLanguage::PlPgSql | RoutineLanguage::PlSql
+        );
         let label = Some(base_name(&definition.name).to_owned());
         let mut inputs = arguments.into_iter();
         for (at, parameter) in definition.parameters.iter().enumerate() {
@@ -502,7 +533,9 @@ impl<'r> Run<'r> {
                 }
             }
         }
-        if procedural {
+        if self.oracle {
+            self.declare_oracle_builtins();
+        } else if procedural {
             let mut found =
                 FrameVariable::new("found", Slot::Typed(SqlType::Boolean), Value::Boolean(false));
             found.label = label;
@@ -545,11 +578,22 @@ impl<'r> Run<'r> {
     }
 
     fn program(&mut self, program: &Program) -> SqlResult<Returned> {
+        if self.oracle {
+            self.begin_plsql();
+            let outcome = self.program_steps(program);
+            self.share_frame();
+            self.end_plsql();
+            return outcome;
+        }
         if program.variable_conflict == VariableConflict::UseColumn {
             return Err(SqlError::not_supported("#variable_conflict use_column").with_hint(
                 "EggDB resolves a name that is both a PL/pgSQL variable and a column to the variable.",
             ));
         }
+        self.program_steps(program)
+    }
+
+    fn program_steps(&mut self, program: &Program) -> SqlResult<Returned> {
         self.print_strict_params = program.print_strict_params;
         match self.block(&program.block) {
             Ok(_) => self.finish().map_err(|error| self.located(error)),
@@ -558,6 +602,9 @@ impl<'r> Run<'r> {
     }
 
     fn located(&mut self, error: SqlError) -> SqlError {
+        if self.oracle {
+            return self.located_oracle(error);
+        }
         let error = error.without_position();
         let line = match self.failure.take() {
             Some((position, statement)) => format!(
@@ -710,21 +757,37 @@ impl<'r> Run<'r> {
         }
     }
 
+    fn dialect(&self) -> Dialect {
+        if self.oracle {
+            Dialect::Oracle
+        } else {
+            Dialect::PostgreSql
+        }
+    }
+
     fn execute(&mut self, statement: Statement) -> SqlResult<QueryResult> {
-        let mut result = self.with_writer(|writer, tables, settings| {
-            run_sql(writer, tables, settings, statement)
-        })?;
+        let dialect = self.dialect();
+        let mark = self.statement_mark();
+        self.share_frame();
+        let outcome = self.with_writer(|writer, tables, settings| {
+            run_sql(writer, tables, settings, statement, dialect)
+        });
+        self.adopt_frame();
+        self.end_statement(mark, outcome.is_ok())?;
+        let mut result = outcome?;
         push_statement_notices(std::mem::take(&mut result.notices));
         Ok(result)
     }
 
     fn call_step(&mut self, text: &str) -> SqlResult<Flow> {
-        let Statement::Call(call) = parsed(text, self.settings, &self.frame)? else {
+        let dialect = self.dialect();
+        let Statement::Call(call) = parsed(text, self.settings, &self.frame, dialect)? else {
             self.query_text(text)?;
             return Ok(Flow::Next);
         };
-        let written = parsed(text, self.settings, &RoutineFrame::default()).ok();
-        let (mut result, sources) = self.with_writer(|writer, tables, settings| {
+        let written = parsed(text, self.settings, &RoutineFrame::default(), dialect).ok();
+        self.share_frame();
+        let outcome = self.with_writer(|writer, tables, settings| {
             let binding = crate::name_resolution::Binding {
                 settings,
                 walk_expressions: true,
@@ -734,7 +797,9 @@ impl<'r> Run<'r> {
                 binding.condition(&*writer, tables, argument)?;
             }
             crate::routines::call_procedure_outputs(writer, tables, settings, &call)
-        })?;
+        });
+        self.adopt_frame();
+        let (mut result, sources) = outcome?;
         push_statement_notices(std::mem::take(&mut result.notices));
         let (Some(Statement::Call(written)), Some(row)) = (written, result.rows.pop()) else {
             return Ok(Flow::Next);
@@ -751,12 +816,16 @@ impl<'r> Run<'r> {
     }
 
     fn query_text(&mut self, text: &str) -> SqlResult<QueryResult> {
-        let statement = parsed(text, self.settings, &self.frame)?;
+        let statement = parsed(text, self.settings, &self.frame, self.dialect())?;
         self.execute(statement)
     }
 
     fn text_value(&mut self, text: &str) -> SqlResult<Value> {
-        let query = format!("SELECT {text}");
+        let query = if self.oracle {
+            format!("SELECT {text} FROM dual")
+        } else {
+            format!("SELECT {text}")
+        };
         let result = self.query_text(&query)?;
         single_value(result, &query)
     }
@@ -857,6 +926,7 @@ impl<'r> Run<'r> {
             VariableType::RefCursor => Slot::Cursor(None),
             VariableType::Row(name) => Slot::Row(self.relation_columns(name)?),
             VariableType::TypeOf(parts) => self.copied_slot(parts)?,
+            VariableType::Named(parts) if self.oracle => self.named_slot(parts)?,
             VariableType::Named(parts) => {
                 return Err(SqlError::not_supported(format!(
                     "the PL/SQL type {} outside PL/SQL",
@@ -891,12 +961,15 @@ impl<'r> Run<'r> {
                         format!("collations are not supported by type {}", sql_type.name()),
                     ));
                 }
-                let value = match &declared.default {
-                    Some(default) => {
+                let value = match (&declared.default, &declared.variable_type) {
+                    (Some(default), _) => {
                         let value = self.value(default)?;
-                        coerce(&slot, value)?
+                        coerce(&slot, value).map_err(|error| self.assignment_error(error))?
                     }
-                    None => Value::Null,
+                    (None, VariableType::Named(parts)) if self.oracle => {
+                        self.record_defaults(parts)?.unwrap_or(Value::Null)
+                    }
+                    (None, _) => Value::Null,
                 };
                 if declared.not_null && value == Value::Null {
                     return Err(null_into_not_null(&declaration.name));
@@ -924,6 +997,14 @@ impl<'r> Run<'r> {
                 Slot::Cursor(Some(Box::new(cursor.clone()))),
                 Value::Null,
             ),
+            DeclarationKind::Exception { .. } if self.oracle => return Ok(()),
+            DeclarationKind::Subprogram(subprogram) if self.oracle => {
+                return self.declare_subprogram(&declaration.name, subprogram);
+            }
+            DeclarationKind::Type(declared) if self.oracle => {
+                self.declare_type(&declaration.name, declared);
+                return Ok(());
+            }
             DeclarationKind::Exception { .. }
             | DeclarationKind::Subprogram(_)
             | DeclarationKind::Type(_) => {
@@ -940,6 +1021,7 @@ impl<'r> Run<'r> {
 
     fn block(&mut self, block: &Block) -> SqlResult<Flow> {
         let scope = self.frame.variables.len();
+        let local_scope = self.oracle.then(|| self.local_scope());
         let outcome = self.declare(block).and_then(|()| {
             if block.handlers.is_empty() {
                 self.steps(&block.steps)
@@ -948,6 +1030,9 @@ impl<'r> Run<'r> {
             }
         });
         self.frame.variables.truncate(scope);
+        if let Some(local_scope) = local_scope {
+            self.leave_local_scope(local_scope);
+        }
         match outcome? {
             Flow::Exit(Some(label)) if block.label.as_deref() == Some(label.as_str()) => {
                 Ok(Flow::Next)
@@ -957,6 +1042,9 @@ impl<'r> Run<'r> {
     }
 
     fn guarded(&mut self, block: &Block) -> SqlResult<Flow> {
+        if self.oracle {
+            return self.guarded_oracle(block);
+        }
         let mark = self.undo.begin();
         let cursors = self.cursors.len();
         let error = match self.steps(&block.steps) {
@@ -982,6 +1070,19 @@ impl<'r> Run<'r> {
 
     fn handle(&mut self, handler: &Handler, error: SqlError) -> SqlResult<Flow> {
         let scope = self.frame.variables.len();
+        if self.oracle {
+            self.push_error_variables(&error);
+        } else {
+            self.push_condition_variables(&error);
+        }
+        self.handling.push(error);
+        let outcome = self.steps(&handler.steps);
+        self.handling.pop();
+        self.frame.variables.truncate(scope);
+        outcome
+    }
+
+    fn push_condition_variables(&mut self, error: &SqlError) {
         self.frame.variables.push(FrameVariable::new(
             "sqlstate",
             Slot::Typed(SqlType::Text),
@@ -992,11 +1093,6 @@ impl<'r> Run<'r> {
             Slot::Typed(SqlType::Text),
             Value::Text(error.message().to_owned()),
         ));
-        self.handling.push(error);
-        let outcome = self.steps(&handler.steps);
-        self.handling.pop();
-        self.frame.variables.truncate(scope);
-        outcome
     }
 
     fn steps(&mut self, steps: &[Step]) -> SqlResult<Flow> {
@@ -1083,6 +1179,12 @@ impl<'r> Run<'r> {
                 into,
                 ..
             } => self.fetch(cursor, direction, into),
+            StepKind::RaiseException(raised) if self.oracle => self.raise_exception(raised),
+            StepKind::ApplicationError {
+                number,
+                message,
+                keep,
+            } if self.oracle => self.application_error(number, message, keep.as_ref()),
             StepKind::RaiseException(_)
             | StepKind::ApplicationError { .. }
             | StepKind::Forall(_)
@@ -1095,6 +1197,10 @@ impl<'r> Run<'r> {
                 let at = self.open_cursor(cursor)?;
                 self.cursors.remove(at);
                 Ok(Flow::Next)
+            }
+            StepKind::Commit { .. } if self.oracle => self.transaction_end(TransactionEnd::Commit),
+            StepKind::Rollback { .. } if self.oracle => {
+                self.transaction_end(TransactionEnd::Rollback)
             }
             StepKind::Commit { chain } => Err(self.transaction_command("COMMIT", *chain)),
             StepKind::Rollback { chain } => Err(self.transaction_command("ROLLBACK", *chain)),
@@ -1222,7 +1328,7 @@ impl<'r> Run<'r> {
     fn store(&mut self, index: usize, value: Value) -> SqlResult<()> {
         self.writable(index)?;
         let variable = &self.frame.variables[index];
-        let value = coerce(&variable.slot, value)?;
+        let value = coerce(&variable.slot, value).map_err(|error| self.assignment_error(error))?;
         if variable.not_null && value == Value::Null {
             return Err(null_into_not_null(&variable.name));
         }
@@ -1415,6 +1521,13 @@ impl<'r> Run<'r> {
             } => self.range_loop(found, variable, *reverse, (lower, upper), step.as_ref()),
             LoopKind::Query { targets, source } => {
                 let (names, rows) = self.source_rows(source)?;
+                if self.oracle
+                    && let [target] = targets.as_slice()
+                {
+                    let mut record = FrameVariable::new(target.name.clone(), Slot::Record, Value::Null);
+                    record.label = found.label.clone();
+                    self.frame.variables.push(record);
+                }
                 self.rows_loop(found, targets, &names, rows)
             }
             LoopKind::Cursor {
@@ -1591,7 +1704,7 @@ impl<'r> Run<'r> {
                 .push(FrameVariable::new(format!("${}", at + 1), Slot::Untyped, value));
             frame.positional.push(at);
         }
-        let statement = parsed(&text, self.settings, &frame)?;
+        let statement = parsed(&text, self.settings, &frame, self.dialect())?;
         self.execute(statement)
     }
 
@@ -1616,6 +1729,7 @@ impl<'r> Run<'r> {
         if let Some(fragment) = value {
             let value = self.value(fragment)?;
             let value = match &self.definition.returns {
+                _ if self.oracle => self.oracle_return(value)?,
                 RoutineReturns::One(ReturnType::Type(sql_type)) => {
                     convert(value, *sql_type, Conversion::Assignment)?
                 }
