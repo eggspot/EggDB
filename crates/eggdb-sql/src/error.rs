@@ -81,6 +81,9 @@ impl SqlState {
     pub const INVALID_TEXT_REPRESENTATION: Self = Self(*b"22P02");
     /// `22P04` bad_copy_file_format: `COPY` data that does not follow its format.
     pub const BAD_COPY_FILE_FORMAT: Self = Self(*b"22P04");
+    /// `22P05` untranslatable_character: a character with no equivalent in the other
+    /// encoding of a conversion.
+    pub const UNTRANSLATABLE_CHARACTER: Self = Self(*b"22P05");
     /// `23502` not_null_violation.
     pub const NOT_NULL_VIOLATION: Self = Self(*b"23502");
     /// `23505` unique_violation.

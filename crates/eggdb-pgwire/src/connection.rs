@@ -11,8 +11,8 @@ use crate::types::{
 };
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_sql::{
-    CancelSignal, CopyChannel, CopyStart, KeyValueStore, OutputColumn, Parameter, QueryResult,
-    Session, SqlError, SqlResult, SqlState, SqlType, TransactionStatus,
+    CancelSignal, CopyChannel, CopyFormat, CopyStart, KeyValueStore, OutputColumn, Parameter,
+    QueryResult, Session, SqlError, SqlResult, SqlState, SqlType, TransactionStatus,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -187,12 +187,19 @@ impl WireCopy<'_, '_, '_> {
     }
 }
 
+fn copy_format(start: &CopyStart) -> Format {
+    match start.format {
+        CopyFormat::Binary => Format::Binary,
+        CopyFormat::Text | CopyFormat::Csv => Format::Text,
+    }
+}
+
 impl CopyChannel for WireCopy<'_, '_, '_> {
     fn start_copy_in(&mut self, start: &CopyStart) -> SqlResult<()> {
         let flushed = {
             let mut wire = self.wire.borrow_mut();
             wire.outbox
-                .copy_in_response(start.columns)
+                .copy_in_response(start.columns, copy_format(start))
                 .map_err(too_large)?;
             wire.flush()
         };
@@ -240,7 +247,7 @@ impl CopyChannel for WireCopy<'_, '_, '_> {
         self.wire
             .borrow_mut()
             .outbox
-            .copy_out_response(start.columns)
+            .copy_out_response(start.columns, copy_format(start))
             .map_err(too_large)
     }
 

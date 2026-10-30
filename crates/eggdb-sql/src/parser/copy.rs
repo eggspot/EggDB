@@ -1,10 +1,15 @@
 use super::Parser;
 use crate::ast::{CopyDirection, CopySource, CopyStatement, Name, Statement};
-use crate::copy::{CopyColumns, CopyFormat, CopyHeader, CopyOptions, Layout};
+use crate::copy::{
+    CopyColumns, CopyEncoding, CopyFormat, CopyHeader, CopyLogVerbosity, CopyOnError, CopyOptions,
+    EncodingName, Layout,
+};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 
 const TEXT_DELIMITERS_REFUSED: &[u8] = b"\\.abcdefghijklmnopqrstuvwxyz0123456789";
+const SUPPORTED_ENCODINGS_HINT: &str =
+    "EggDB's COPY reads and writes UTF8, LATIN1, LATIN9, WIN1252 and UTF16 (UTF16LE, UTF16BE).";
 const SERVER_FILE_HINT: &str =
     "Anyone can COPY to stdout or from stdin. psql's \\copy command also works for anyone.";
 
@@ -46,6 +51,7 @@ fn option_key(name: &str) -> Option<&'static str> {
         "force_null" => "force_null",
         "encoding" => "encoding",
         "on_error" => "on_error",
+        "log_verbosity" => "log_verbosity",
         _ => return None,
     })
 }
@@ -95,15 +101,6 @@ fn columns(key: &str, argument: Argument) -> SqlResult<CopyColumns> {
     }
 }
 
-fn is_utf8_name(name: &str) -> bool {
-    let normalized: String = name
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|character| character.to_ascii_lowercase())
-        .collect();
-    matches!(normalized.as_str(), "utf8" | "unicode")
-}
-
 impl OptionsBuilder {
     fn set(&mut self, name: &str, argument: Argument, position: usize) -> SqlResult<()> {
         let Some(key) = option_key(name) else {
@@ -126,12 +123,7 @@ impl OptionsBuilder {
                 options.format = match format.to_ascii_lowercase().as_str() {
                     "text" => CopyFormat::Text,
                     "csv" => CopyFormat::Csv,
-                    "binary" => {
-                        return Err(SqlError::not_supported(
-                            "COPY in the binary format is not supported yet; use FORMAT text or FORMAT csv",
-                        )
-                        .at(position));
-                    }
+                    "binary" => CopyFormat::Binary,
                     _ => {
                         return Err(invalid_value(format!(
                             "COPY format \"{format}\" not recognized"
@@ -165,36 +157,80 @@ impl OptionsBuilder {
             "force_null" => options.force_null = columns(key, argument)?,
             "encoding" => {
                 let encoding = text(key, argument)?;
-                if !is_utf8_name(&encoding) {
-                    return Err(unsupported(format!(
-                        "COPY with ENCODING \"{encoding}\" is not supported: EggDB's COPY reads and writes UTF8"
-                    ))
-                    .at(position));
-                }
-            }
-            _ => {
-                let action = text(key, argument)?;
-                match action.to_ascii_lowercase().as_str() {
-                    "stop" => self.on_error = true,
-                    "ignore" => {
-                        return Err(SqlError::not_supported(
-                            "COPY with ON_ERROR ignore is not supported yet",
+                options.encoding = match CopyEncoding::named(&encoding) {
+                    EncodingName::Supported(encoding) => encoding,
+                    EncodingName::NotSupported => {
+                        return Err(unsupported(format!(
+                            "COPY with ENCODING \"{encoding}\" is not supported yet"
+                        ))
+                        .with_hint(SUPPORTED_ENCODINGS_HINT)
+                        .at(position));
+                    }
+                    EncodingName::Unknown => {
+                        return Err(invalid_value(
+                            "argument to option \"encoding\" must be a valid encoding name",
                         )
                         .at(position));
                     }
+                };
+            }
+            "log_verbosity" => {
+                let verbosity = text(key, argument)?;
+                options.log_verbosity = match verbosity.to_ascii_lowercase().as_str() {
+                    "default" => CopyLogVerbosity::Default,
+                    "verbose" => CopyLogVerbosity::Verbose,
+                    "silent" => CopyLogVerbosity::Silent,
+                    _ => {
+                        return Err(invalid_value(format!(
+                            "COPY LOG_VERBOSITY \"{verbosity}\" not recognized"
+                        ))
+                        .at(position));
+                    }
+                };
+            }
+            _ => {
+                let action = text(key, argument)?;
+                self.on_error = true;
+                options.on_error = match action.to_ascii_lowercase().as_str() {
+                    "stop" => CopyOnError::Stop,
+                    "ignore" => CopyOnError::Ignore,
                     _ => {
                         return Err(invalid_value(format!(
                             "COPY ON_ERROR \"{action}\" not recognized"
                         ))
                         .at(position));
                     }
-                }
+                };
             }
         }
         Ok(())
     }
 
+    fn check_binary(&self) -> SqlResult<()> {
+        let options = &self.options;
+        if options.format != CopyFormat::Binary {
+            return Ok(());
+        }
+        let text_only = [
+            (options.delimiter.is_some(), "DELIMITER"),
+            (options.null.is_some(), "NULL"),
+            (options.default.is_some(), "DEFAULT"),
+            (options.header != CopyHeader::Absent, "HEADER"),
+        ];
+        if let Some((_, option)) = text_only.iter().find(|(given, _)| *given) {
+            return Err(SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                format!("cannot specify {option} in BINARY mode"),
+            ));
+        }
+        if options.on_error == CopyOnError::Ignore {
+            return Err(unsupported("only ON_ERROR STOP is allowed in BINARY mode"));
+        }
+        Ok(())
+    }
+
     fn check_modes(&self, direction: CopyDirection) -> SqlResult<()> {
+        self.check_binary()?;
         let options = &self.options;
         if options.format != CopyFormat::Csv {
             let csv_only = [
@@ -315,9 +351,8 @@ impl OptionsBuilder {
 impl Parser<'_> {
     pub(super) fn copy(&mut self) -> SqlResult<Statement> {
         self.at += 1;
-        if self.is_word("binary") {
-            return Err(self.not_supported("COPY BINARY"));
-        }
+        let binary_position = self.position();
+        let binary = self.take_word("binary");
         let source = if self.peek_kind() == &TokenKind::LeftParen {
             self.at += 1;
             let query = self.nested_query()?;
@@ -342,20 +377,30 @@ impl Parser<'_> {
         self.at += 1;
         self.copy_target(direction)?;
         let mut builder = OptionsBuilder::default();
+        if binary {
+            builder.set("format", Argument::Text("binary".into()), binary_position)?;
+        }
         let _ = self.take_word("with");
         if self.peek_kind() == &TokenKind::LeftParen {
             self.copy_option_list(&mut builder)?;
         } else {
             self.legacy_copy_options(&mut builder)?;
         }
-        if direction == CopyDirection::FromClient && self.is_word("where") {
-            return Err(self.not_supported("COPY FROM ... WHERE"));
-        }
+        let condition = if self.is_word("where") {
+            if direction == CopyDirection::ToClient {
+                return Err(unsupported("WHERE clause not allowed with COPY TO").at(self.position()));
+            }
+            self.at += 1;
+            Some(self.expression()?)
+        } else {
+            None
+        };
         let options = builder.finish(direction)?;
         Ok(Statement::Copy(Box::new(CopyStatement {
             source,
             direction,
             options,
+            condition,
         })))
     }
 

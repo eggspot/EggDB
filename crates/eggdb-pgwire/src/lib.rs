@@ -21,7 +21,8 @@
 //!   in its `BackendKeyData` stops the statement that connection is running, with `57014`.
 //! - The copy sub-protocol: `COPY ... FROM STDIN` (`CopyInResponse`, then the client's
 //!   `CopyData`, `CopyDone` or `CopyFail`) and `COPY ... TO STDOUT` (`CopyOutResponse`, one
-//!   `CopyData` per row, `CopyDone`), in the text and CSV formats, which psql's `\copy` uses.
+//!   `CopyData` per row, `CopyDone`), in the text and CSV formats, which psql's `\copy` uses,
+//!   and in the binary format with binary format codes, which drivers' binary copy uses.
 //!
 //! The guide is "Connecting with psql" in `docs/sql.md` in the repository.
 

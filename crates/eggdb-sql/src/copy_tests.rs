@@ -667,8 +667,13 @@ fn options_are_checked_as_postgresql_checks_them() {
         "CREATE TABLE t (a integer, b text); CREATE VIEW v AS SELECT a FROM t",
     );
     let cases = [
-        ("COPY t FROM STDIN (FORMAT binary)", "0A000"),
-        ("COPY BINARY t FROM STDIN", "0A000"),
+        ("COPY t FROM STDIN (FORMAT binary)", "22P04"),
+        ("COPY BINARY t FROM STDIN", "22P04"),
+        ("COPY BINARY t FROM STDIN (FORMAT csv)", "42601"),
+        ("COPY t FROM STDIN (FORMAT binary, DELIMITER ',')", "42601"),
+        ("COPY t FROM STDIN (FORMAT binary, NULL 'x')", "42601"),
+        ("COPY t TO STDOUT (FORMAT binary, HEADER)", "42601"),
+        ("COPY t FROM STDIN (FORMAT binary, ON_ERROR ignore)", "0A000"),
         ("COPY t FROM STDIN (FORMAT xml)", "22023"),
         ("COPY t FROM STDIN (DELIMITER '::')", "0A000"),
         ("COPY t FROM STDIN (DELIMITER E'\\n')", "22023"),
@@ -683,8 +688,11 @@ fn options_are_checked_as_postgresql_checks_them() {
         ("COPY t FROM STDIN (HEADER maybe)", "22023"),
         ("COPY t FROM STDIN (FORMAT csv, FORMAT text)", "42601"),
         ("COPY t FROM STDIN (SPEED fast)", "42601"),
-        ("COPY t FROM STDIN (ENCODING 'LATIN1')", "0A000"),
-        ("COPY t FROM STDIN (ON_ERROR ignore)", "0A000"),
+        ("COPY t FROM STDIN (ENCODING 'EUC_JP')", "0A000"),
+        ("COPY t FROM STDIN (ENCODING 'klingon')", "22023"),
+        ("COPY t FROM STDIN (ON_ERROR skip)", "22023"),
+        ("COPY t FROM STDIN (LOG_VERBOSITY loud)", "22023"),
+        ("COPY t TO STDOUT (ON_ERROR ignore)", "0A000"),
         (
             "COPY t FROM STDIN (FORMAT csv, FORCE_NOT_NULL (zzz))",
             "42P10",
@@ -699,7 +707,12 @@ fn options_are_checked_as_postgresql_checks_them() {
         ("COPY t TO '/tmp/x'", "42501"),
         ("COPY t FROM PROGRAM 'cat /etc/passwd'", "42501"),
         ("COPY t TO PROGRAM 'sh'", "42501"),
-        ("COPY t FROM STDIN WHERE a > 1", "0A000"),
+        ("COPY t TO STDOUT WHERE a > 1", "0A000"),
+        ("COPY t FROM STDIN WHERE zzz > 1", "42703"),
+        ("COPY t FROM STDIN WHERE count(*) > 1", "42803"),
+        ("COPY t FROM STDIN WHERE row_number() OVER () > 1", "42P20"),
+        ("COPY t FROM STDIN WHERE a IN (SELECT 1)", "0A000"),
+        ("COPY t FROM STDIN WHERE a + 1", "42804"),
         ("COPY t FROM", "42601"),
     ];
     for (sql, code) in cases {
@@ -711,6 +724,9 @@ fn options_are_checked_as_postgresql_checks_them() {
         "COPY t FROM STDIN WITH DELIMITER AS ',' NULL AS 'NA' CSV HEADER QUOTE AS '\"' ESCAPE '\\' FORCE NOT NULL b",
         "COPY public.t (b, a) FROM stdout",
         "COPY t FROM STDIN WITH",
+        "COPY t FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY verbose, ENCODING 'latin1')",
+        "COPY t FROM STDIN (ENCODING 'UTF-16LE', LOG_VERBOSITY silent)",
+        "COPY t FROM STDIN WHERE a > 1",
     ] {
         assert!(copy_in(&mut session, sql, "").is_ok(), "{sql}");
     }
@@ -1097,6 +1113,12 @@ fn hostile_copy_statements_and_data_never_panic() {
         "WHERE",
         "FREEZE",
         "ON_ERROR",
+        "ignore",
+        "LOG_VERBOSITY",
+        "verbose",
+        "'latin1'",
+        "'utf16'",
+        "a > 1",
     ];
     fuzz(&mut session, &fragments);
     let mut rng = Rng(0xabad_1dea);
@@ -1148,4 +1170,460 @@ fn copy_reads_a_catalog_relation_and_never_writes_one() {
             "permission denied for table pg_namespace"
         )
     );
+}
+
+fn copy_in_bytes(
+    session: &mut Session<'_, MemoryStore>,
+    sql: &str,
+    data: &[u8],
+    chunk: usize,
+) -> SqlResult<QueryResult> {
+    let mut client = Client::sending(data, chunk);
+    let mut last = None;
+    session.execute_with_copy(
+        sql,
+        &mut |result: QueryResult| {
+            last = Some(result);
+            true
+        },
+        &mut client,
+    )?;
+    Ok(last.unwrap_or_else(|| QueryResult::command("")))
+}
+
+fn copy_out_bytes(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlResult<Vec<u8>> {
+    let mut client = Client::default();
+    session.execute_with_copy(sql, &mut |_| true, &mut client)?;
+    assert!(client.finished_out, "{sql}");
+    Ok(client.output)
+}
+
+fn binary_file(rows: &[&[Option<&[u8]>]]) -> Vec<u8> {
+    let mut out = b"PGCOPY\n\xff\r\n\0".to_vec();
+    out.extend_from_slice(&[0; 8]);
+    for row in rows {
+        out.extend_from_slice(&(row.len() as i16).to_be_bytes());
+        for field in *row {
+            match field {
+                None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(bytes) => {
+                    out.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                    out.extend_from_slice(bytes);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn with_trailer(mut file: Vec<u8>) -> Vec<u8> {
+    file.extend_from_slice(&(-1i16).to_be_bytes());
+    file
+}
+
+#[test]
+fn copy_to_stdout_in_the_binary_format_writes_postgresqls_file_layout() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(
+        &mut session,
+        "CREATE TABLE pair (a integer PRIMARY KEY, b text); INSERT INTO pair VALUES (1, 'x'), (2, NULL)",
+    );
+    let one = 1i32.to_be_bytes();
+    let two = 2i32.to_be_bytes();
+    let expected = with_trailer(binary_file(&[
+        &[Some(&one[..]), Some(b"x")],
+        &[Some(&two[..]), None],
+    ]));
+    assert_eq!(
+        copy_out_bytes(&mut session, "COPY pair TO STDOUT (FORMAT binary)").unwrap(),
+        expected
+    );
+    assert_eq!(
+        copy_out_bytes(&mut session, "COPY BINARY pair TO STDOUT").unwrap(),
+        expected
+    );
+    assert_eq!(
+        copy_out_bytes(
+            &mut session,
+            "COPY (SELECT a, b FROM pair ORDER BY a) TO STDOUT WITH (FORMAT binary)"
+        )
+        .unwrap(),
+        expected
+    );
+    let mut client = Client::default();
+    session
+        .execute_with_copy("COPY pair (b) TO STDOUT (FORMAT binary)", &mut |_| true, &mut client)
+        .unwrap();
+    assert_eq!(
+        client.started_out,
+        Some(CopyStart {
+            format: CopyFormat::Binary,
+            columns: 1
+        })
+    );
+    rows(&mut session, "DELETE FROM pair");
+    assert_eq!(
+        copy_out_bytes(&mut session, "COPY pair TO STDOUT (FORMAT binary)").unwrap(),
+        with_trailer(binary_file(&[]))
+    );
+}
+
+#[test]
+fn binary_copy_round_trips_every_type_through_any_pieces() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    typed_table(&mut session);
+    rows(
+        &mut session,
+        "INSERT INTO typed VALUES \
+         (1, 'ada', 1.5, '2024-01-02 03:04:05', true, '\\x00ff', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '{\"b\": 1}'), \
+         (2, 'bob', NULL, NULL, false, '\\x', NULL, '[]'), \
+         (3, 'é 😀', -1234.5, '1999-12-31 23:59:59.999999', NULL, NULL, NULL, NULL)",
+    );
+    let file = copy_out_bytes(&mut session, "COPY typed TO STDOUT (FORMAT binary)").unwrap();
+    let before = rows(&mut session, "SELECT * FROM typed ORDER BY id");
+    for chunk in [1, 3, 64, 1 << 20] {
+        rows(&mut session, "DELETE FROM typed");
+        let loaded =
+            copy_in_bytes(&mut session, "COPY typed FROM STDIN (FORMAT binary)", &file, chunk)
+                .unwrap();
+        assert_eq!(loaded.tag, "COPY 3", "{chunk}");
+        assert_eq!(rows(&mut session, "SELECT * FROM typed ORDER BY id"), before);
+    }
+    rows(
+        &mut session,
+        "CREATE TABLE listed (id integer PRIMARY KEY, tags text[], nums integer[]); \
+         INSERT INTO listed VALUES (1, ARRAY['a', 'b c', NULL], ARRAY[1, 2]), (2, '{}', NULL)",
+    );
+    let file = copy_out_bytes(&mut session, "COPY listed TO STDOUT (FORMAT binary)").unwrap();
+    let before = rows(&mut session, "SELECT * FROM listed ORDER BY id");
+    rows(&mut session, "DELETE FROM listed");
+    assert_eq!(
+        copy_in_bytes(&mut session, "COPY listed FROM STDIN (FORMAT binary)", &file, 5)
+            .unwrap()
+            .tag,
+        "COPY 2"
+    );
+    assert_eq!(rows(&mut session, "SELECT * FROM listed ORDER BY id"), before);
+}
+
+#[test]
+fn binary_data_that_breaks_the_format_fails_with_postgresqls_messages() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(
+        &mut session,
+        "CREATE TABLE pair (a integer PRIMARY KEY, b text)",
+    );
+    let one = 1i32.to_be_bytes();
+    let good = binary_file(&[&[Some(&one[..]), Some(b"x")]]);
+    let mut oids = good.clone();
+    oids[12] = 1;
+    let mut critical = good.clone();
+    critical[11] = 0x80;
+    let mut after_trailer = with_trailer(good.clone());
+    after_trailer.push(0);
+    let cases: [(Vec<u8>, &str, &str, &str); 8] = [
+        (
+            b"PGCOPY\n".to_vec(),
+            "22P04",
+            "COPY file signature not recognized",
+            "COPY pair, line 0",
+        ),
+        (
+            oids,
+            "22P04",
+            "invalid COPY file header (WITH OIDS)",
+            "COPY pair, line 0",
+        ),
+        (
+            critical,
+            "22P04",
+            "unrecognized critical flags in COPY file header",
+            "COPY pair, line 0",
+        ),
+        (
+            binary_file(&[&[Some(&one[..])]]),
+            "22P04",
+            "row field count is 1, expected 2",
+            "COPY pair, line 1",
+        ),
+        (
+            good[..good.len() - 1].to_vec(),
+            "22P04",
+            "unexpected EOF in COPY data",
+            "COPY pair, line 1",
+        ),
+        (
+            after_trailer,
+            "22P04",
+            "received copy data after EOF marker",
+            "COPY pair, line 2",
+        ),
+        (
+            binary_file(&[&[Some(&[0, 1][..]), Some(b"x")]]),
+            "22P03",
+            "incorrect binary data format",
+            "COPY pair, line 1, column a",
+        ),
+        (
+            binary_file(&[&[Some(&one[..]), Some(b"\xff")]]),
+            "22021",
+            "invalid byte sequence for encoding \"UTF8\"",
+            "COPY pair, line 1, column b",
+        ),
+    ];
+    for (data, code, message, context) in cases {
+        let error =
+            copy_in_bytes(&mut session, "COPY pair FROM STDIN (FORMAT binary)", &data, 3)
+                .unwrap_err();
+        assert_eq!(error.state().code(), code, "{message}: {error}");
+        assert_eq!(error.message(), message);
+        assert_eq!(error.context(), Some(context), "{message}");
+    }
+    assert_eq!(rows(&mut session, "SELECT count(*) FROM pair"), "count\n0\nSELECT 1");
+    let mut extended = b"PGCOPY\n\xff\r\n\0".to_vec();
+    extended.extend_from_slice(&0u32.to_be_bytes());
+    extended.extend_from_slice(&3u32.to_be_bytes());
+    extended.extend_from_slice(b"ext");
+    extended.extend_from_slice(&good[19..]);
+    assert_eq!(
+        copy_in_bytes(&mut session, "COPY pair FROM STDIN (FORMAT binary)", &extended, 2)
+            .unwrap()
+            .tag,
+        "COPY 1"
+    );
+    let failed = script(
+        &mut session,
+        "COPY pair FROM STDIN (FORMAT binary);\n\\.\nSELECT 1;",
+    )
+    .unwrap_err();
+    assert_eq!(failed.state().code(), "0A000");
+    rows(
+        &mut session,
+        "CREATE TABLE spans (id integer PRIMARY KEY, span int4range)",
+    );
+    assert_eq!(
+        failure(copy_out(&mut session, "COPY spans TO STDOUT (FORMAT binary)"))
+            .state()
+            .code(),
+        "0A000"
+    );
+}
+
+#[test]
+fn random_binary_data_never_panics_and_loads_nothing_when_it_fails() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(
+        &mut session,
+        "CREATE TABLE t (id integer PRIMARY KEY, name text, at date, n numeric, tags text[])",
+    );
+    let mut rng = Rng(0x00b1_4a27);
+    let header = binary_file(&[]);
+    for round in 0..3_000 {
+        let length = rng.below(80);
+        let mut data: Vec<u8> = if round % 2 == 0 { header.clone() } else { Vec::new() };
+        data.extend((0..length).map(|_| match rng.below(4) {
+            0 => 0,
+            1 => 0xff,
+            2 => 5,
+            _ => rng.below(256) as u8,
+        }));
+        let mut client = Client::sending(&data, 1 + rng.below(9));
+        let _ = session.execute_with_copy(
+            "COPY t FROM STDIN (FORMAT binary)",
+            &mut |_| true,
+            &mut client,
+        );
+    }
+    assert!(copy_out(&mut session, "COPY t TO STDOUT").is_ok());
+}
+
+fn notices_of(result: &QueryResult) -> Vec<&str> {
+    result.notices.iter().map(String::as_str).collect()
+}
+
+#[test]
+fn on_error_ignore_skips_rows_whose_values_do_not_convert_and_says_so() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(
+        &mut session,
+        "CREATE TABLE kept (a integer PRIMARY KEY, b varchar(3))",
+    );
+    let data = b"1\tok\nx\tbad\n3\ttoolong\n4\tfine\n";
+    let verbose = copy_in_bytes(
+        &mut session,
+        "COPY kept FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY verbose)",
+        data,
+        4,
+    )
+    .unwrap();
+    assert_eq!(verbose.tag, "COPY 2");
+    assert_eq!(
+        notices_of(&verbose),
+        [
+            "NOTICE:  skipping row due to data type incompatibility at line 2 for column \"a\": \"x\"",
+            "NOTICE:  skipping row due to data type incompatibility at line 3 for column \"b\": \"toolong\"",
+            "NOTICE:  2 rows were skipped due to data type incompatibility",
+        ]
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT * FROM kept ORDER BY a"),
+        "a|b\n1|ok\n4|fine\nSELECT 2"
+    );
+    rows(&mut session, "DELETE FROM kept");
+    let plain = copy_in_bytes(
+        &mut session,
+        "COPY kept FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+        b"1,a\n2,b\nz,c\n",
+        3,
+    )
+    .unwrap();
+    assert_eq!(plain.tag, "COPY 2");
+    assert_eq!(
+        notices_of(&plain),
+        ["NOTICE:  1 row was skipped due to data type incompatibility"]
+    );
+    rows(&mut session, "DELETE FROM kept");
+    let silent = copy_in_bytes(
+        &mut session,
+        "COPY kept FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY silent)",
+        b"q\tx\n",
+        3,
+    )
+    .unwrap();
+    assert_eq!(silent.tag, "COPY 0");
+    assert!(silent.notices.is_empty());
+    for (data, code) in [
+        (&b"5\ta\textra\n"[..], "22P04"),
+        (&b"5\ta\n5\tb\n"[..], "23505"),
+        (&b"\\N\ta\n"[..], "23502"),
+        (&b"6\t\xff\n"[..], "22021"),
+    ] {
+        let error = copy_in_bytes(
+            &mut session,
+            "COPY kept FROM STDIN (ON_ERROR ignore)",
+            data,
+            2,
+        )
+        .unwrap_err();
+        assert_eq!(error.state().code(), code);
+    }
+    assert_eq!(rows(&mut session, "SELECT count(*) FROM kept"), "count\n0\nSELECT 1");
+}
+
+#[test]
+fn copy_from_where_loads_only_the_rows_its_condition_keeps() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(
+        &mut session,
+        "CREATE TABLE picked (id integer PRIMARY KEY, n integer, label text DEFAULT 'd')",
+    );
+    let loaded = copy_in(
+        &mut session,
+        "COPY picked (id, n) FROM STDIN WHERE n > 1 AND label = 'd'",
+        "1\t1\n2\t5\n3\t\\N\n4\t7\n",
+    )
+    .unwrap();
+    assert_eq!(loaded, "COPY 2");
+    assert_eq!(
+        rows(&mut session, "SELECT * FROM picked ORDER BY id"),
+        "id|n|label\n2|5|d\n4|7|d\nSELECT 2"
+    );
+    assert_eq!(
+        copy_in(
+            &mut session,
+            "COPY picked FROM STDIN (FORMAT csv, HEADER) WHERE picked.id % 2 = 1",
+            "id,n,label\n5,1,a\n6,1,b\n7,1,c\n",
+        )
+        .unwrap(),
+        "COPY 2"
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT id FROM picked WHERE id > 4 ORDER BY id"),
+        "id\n5\n7\nSELECT 2"
+    );
+    let shown = script(
+        &mut session,
+        "COPY picked FROM STDIN WHERE label <> 'skip';\n8\t1\tskip\n9\t1\tkeep\n\\.\nSELECT count(*) FROM picked WHERE id > 7;",
+    )
+    .unwrap();
+    assert_eq!(shown, ["COPY 1", "count\n1\nSELECT 1"]);
+}
+
+#[test]
+fn encodings_other_than_utf8_are_converted_in_and_out() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    rows(&mut session, "CREATE TABLE words (id integer PRIMARY KEY, w text)");
+    assert_eq!(
+        copy_in_bytes(
+            &mut session,
+            "COPY words FROM STDIN (ENCODING 'LATIN1')",
+            b"1\tcaf\xe9\n",
+            1,
+        )
+        .unwrap()
+        .tag,
+        "COPY 1"
+    );
+    assert_eq!(
+        copy_in_bytes(
+            &mut session,
+            "COPY words FROM STDIN (FORMAT csv, ENCODING 'WIN1252')",
+            b"2,\x93quoted\x94 \x80\n",
+            2,
+        )
+        .unwrap()
+        .tag,
+        "COPY 1"
+    );
+    let utf16: Vec<u8> = [0xFEFFu16]
+        .into_iter()
+        .chain("3\tnaïve 😀\n".encode_utf16())
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(
+        copy_in_bytes(&mut session, "COPY words FROM STDIN (ENCODING 'UTF16')", &utf16, 3)
+            .unwrap()
+            .tag,
+        "COPY 1"
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT * FROM words ORDER BY id"),
+        "id|w\n1|café\n2|\u{201c}quoted\u{201d} €\n3|naïve 😀\nSELECT 3"
+    );
+    assert_eq!(
+        copy_out_bytes(
+            &mut session,
+            "COPY (SELECT w FROM words WHERE id < 3 ORDER BY id) TO STDOUT (ENCODING 'WIN1252')"
+        )
+        .unwrap(),
+        b"caf\xe9\n\x93quoted\x94 \x80\n"
+    );
+    let untranslatable = copy_out_bytes(&mut session, "COPY words TO STDOUT (ENCODING 'LATIN1')")
+        .unwrap_err();
+    assert_eq!(untranslatable.state().code(), "22P05");
+    assert_eq!(
+        failure(copy_in_bytes(
+            &mut session,
+            "COPY words FROM STDIN (ENCODING 'WIN1252')",
+            b"9\t\x81\n",
+            1,
+        )
+        .map(|result| result.tag))
+        .state()
+        .code(),
+        "22P05"
+    );
+    let shown = script(
+        &mut session,
+        "COPY words FROM STDIN (ENCODING 'LATIN1');\n10\tdéjà\n\\.\nSELECT w FROM words WHERE id = 10;",
+    )
+    .unwrap();
+    assert_eq!(shown, ["COPY 1", "w\ndéjà\nSELECT 1"]);
 }

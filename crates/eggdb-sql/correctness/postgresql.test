@@ -2616,11 +2616,40 @@ COPY country_names TO STDOUT
 
 ok
 COPY country TO STDOUT (FORMAT binary)
-... differs
 
-ok
+rows
 COPY country TO STDOUT (ENCODING 'LATIN1')
-... differs
+----
+AF	AFGHANISTAN
+AL	ALBANIA
+DZ	ALGERIA
+ZM	ZAMBIA
+ZW	ZIMBABWE
+COPY 5
+
+rows
+COPY country FROM STDIN WHERE country_code <> 'XX';
+XX	NOWHERE
+FR	FRANCE
+\.
+----
+COPY 1
+
+rows
+COPY country FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY verbose);
+DE	GERMANY
+DEUTSCHLAND	GERMANY
+\.
+----
+COPY 1
+
+rows
+SELECT country_code FROM country WHERE country_code IN ('DE', 'FR', 'XX') ORDER BY 1
+----
+country_code
+DE
+FR
+SELECT 2
 
 chapter sql-copy, "COPY": Text Format
 ok

@@ -343,6 +343,7 @@ pub(crate) struct CopyStatement {
     pub(crate) source: CopySource,
     pub(crate) direction: CopyDirection,
     pub(crate) options: crate::copy::CopyOptions,
+    pub(crate) condition: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

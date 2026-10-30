@@ -1813,6 +1813,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     }
                     binding.names(writer, tables, std::slice::from_mut(name))?;
                 }
+                if let Some(condition) = &mut copy.condition {
+                    binding.condition(writer, tables, condition)?;
+                }
                 crate::copy::copy_from_client(writer, tables, copy, io)
             }),
             CopyDirection::ToClient => {

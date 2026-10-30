@@ -825,6 +825,16 @@ impl Binding<'_> {
         self.resolver(reader, tables)?.target(reference)
     }
 
+    pub(crate) fn condition(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        condition: &mut Expr,
+    ) -> SqlResult<()> {
+        self.resolver(reader, tables)?
+            .expressions(std::iter::once(condition))
+    }
+
     pub(crate) fn insert(
         &self,
         reader: &dyn KeyValueRead,
