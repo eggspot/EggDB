@@ -27,6 +27,7 @@ pub(crate) use sqlserver::{
     is_reserved as is_sqlserver_reserved, kept_default as sqlserver_kept_default,
     not_supported as sqlserver_not_supported,
     parameter_declarations as sqlserver_parameter_declarations,
+    procedure_routine_name as sqlserver_procedure_routine_name,
     starts_statement as sqlserver_starts_statement,
 };
 

@@ -18,11 +18,15 @@ use crate::table_variables::{TableVariable, TableVariables};
 use crate::triggers::{DELETED_TABLE, INSERTED_TABLE, StatementTriggerCall, TriggerAction};
 use crate::tsql::{
     BatchContext, CaughtError, Declaration, DynamicBatch, Instruction, MAX_DYNAMIC_NESTING,
-    Program, ProgramEnd, ScalarVariable,
+    ProcedureRun, Program, ProgramEnd, ScalarVariable,
 };
 use crate::types::{SqlType, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+mod procedures;
+#[cfg(test)]
+mod procedures_tests;
 
 const MAX_PRINT_CHARACTERS: usize = 8000;
 const NAME_RESOLUTION_ERRORS: [u16; 2] = [207, 208];
@@ -35,12 +39,12 @@ pub(super) struct BatchScope {
     tables: TableVariables,
 }
 
-#[derive(Clone, Copy)]
 struct OuterStatement {
     batch_resume: Option<(usize, usize)>,
     condition_next: bool,
     condition_holds: Option<bool>,
     pending_dynamic: Option<DynamicBatch>,
+    pending_procedure: Option<ProcedureRun>,
     set_error: Option<u32>,
     statement_start: usize,
     statement_walks_expressions: bool,
@@ -63,6 +67,11 @@ enum DynamicEnd {
     Done,
     Stopped,
     Failed(SqlError),
+}
+
+enum NestedRun {
+    Dynamic(DynamicBatch),
+    Procedure(ProcedureRun),
 }
 
 fn undeclared(name: &str) -> SqlError {
@@ -432,6 +441,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             self.condition_next = test.is_some();
             self.condition_holds = None;
             self.pending_dynamic = None;
+            self.pending_procedure = None;
             self.set_error = None;
             let mut results = Vec::new();
             let mut client = Client {
@@ -468,7 +478,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     }
                     let raised = self.set_error.take().unwrap_or(0);
                     self.set_last_error(raised);
-                    match self.pending_dynamic.take() {
+                    match self.take_nested_run() {
                         None => {
                             for result in results {
                                 if assigns_only(&result) {
@@ -489,10 +499,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                             at_instruction += 1;
                             continue;
                         }
-                        Some(dynamic) => {
+                        Some(nested) => {
                             let in_try = code.program.try_around(at_instruction).is_some()
                                 || level == Level::Nested { in_try: true };
-                            match self.run_dynamic(dynamic, statement_start, in_try, on_step)? {
+                            let end = match nested {
+                                NestedRun::Dynamic(dynamic) => {
+                                    self.run_dynamic(dynamic, statement_start, in_try, on_step)?
+                                }
+                                NestedRun::Procedure(procedure) => self.run_procedure(
+                                    procedure,
+                                    statement_start,
+                                    in_try,
+                                    on_step,
+                                )?,
+                            };
+                            match end {
                                 DynamicEnd::Done => {
                                     at_instruction += 1;
                                     continue;
@@ -586,6 +607,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         };
         let scope = self.enter_batch_scope(&program, parameters);
         self.dynamic_depth += 1;
+        Arc::make_mut(&mut self.batch_context).nest_level = self.dynamic_depth;
         let mut forward = |mut step: BatchStep| {
             step.statement_start = statement_start;
             step.outcome = match step.outcome {
@@ -625,12 +647,20 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         })
     }
 
+    fn take_nested_run(&mut self) -> Option<NestedRun> {
+        if let Some(procedure) = self.pending_procedure.take() {
+            return Some(NestedRun::Procedure(procedure));
+        }
+        self.pending_dynamic.take().map(NestedRun::Dynamic)
+    }
+
     fn leave_statement_for_trigger(&mut self) -> OuterStatement {
         OuterStatement {
             batch_resume: self.batch_resume.take(),
             condition_next: std::mem::take(&mut self.condition_next),
             condition_holds: self.condition_holds.take(),
             pending_dynamic: self.pending_dynamic.take(),
+            pending_procedure: self.pending_procedure.take(),
             set_error: self.set_error.take(),
             statement_start: self.statement_start,
             statement_walks_expressions: self.statement_walks_expressions,
@@ -643,6 +673,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.condition_next = outer.condition_next;
         self.condition_holds = outer.condition_holds;
         self.pending_dynamic = outer.pending_dynamic;
+        self.pending_procedure = outer.pending_procedure;
         self.set_error = outer.set_error;
         self.statement_start = outer.statement_start;
         self.statement_walks_expressions = outer.statement_walks_expressions;
@@ -1143,6 +1174,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             VariableSource::Execute(call) => {
                 let mut rows = Vec::new();
                 for result in self.procedure_results(call)? {
+                    if result.columns.is_none() {
+                        self.extra_results.push(result);
+                        continue;
+                    }
                     if result.columns.as_ref().map_or(0, Vec::len) != targets.len() {
                         return Err(columns_mismatch(variable.position));
                     }

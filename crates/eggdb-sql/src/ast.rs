@@ -423,7 +423,9 @@ pub(crate) struct DynamicSql {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProcedureCall {
     pub(crate) procedure: Name,
+    pub(crate) routine: String,
     pub(crate) arguments: Vec<ProcedureArgument>,
+    pub(crate) status_variable: Option<Name>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

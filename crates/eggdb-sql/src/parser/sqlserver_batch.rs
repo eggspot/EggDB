@@ -101,14 +101,24 @@ impl Parser<'_> {
         })
     }
 
-    fn procedure_name(&mut self) -> SqlResult<Name> {
+    pub(super) fn procedure_name(&mut self) -> SqlResult<(Name, String)> {
         while self.take(&TokenKind::Dot) {}
+        let mut schema: Option<String> = None;
         let mut name = self.name_part()?;
         while self.take(&TokenKind::Dot) {
-            while self.take(&TokenKind::Dot) {}
-            name = self.name_part()?;
+            let mut skipped_schema = false;
+            while self.take(&TokenKind::Dot) {
+                skipped_schema = true;
+            }
+            let next = self.name_part()?;
+            schema = (!skipped_schema).then(|| std::mem::take(&mut name.text));
+            name = next;
         }
-        Ok(name)
+        let routine = match schema.as_deref() {
+            None | Some("dbo") => name.text.clone(),
+            Some(schema) => crate::schemas::written_qualified(schema, &name.text),
+        };
+        Ok((name, routine))
     }
 
     pub(super) fn sqlserver_execute(&mut self) -> SqlResult<Statement> {
@@ -155,17 +165,26 @@ impl Parser<'_> {
         if self.peek_kind() == &TokenKind::LeftParen {
             return Err(not_supported("EXEC of a character string (dynamic SQL)").at(position));
         }
-        if matches!(self.peek_kind(), TokenKind::Variable(_))
+        let status_variable = if self.at_variable(0)
             && matches!(self.peek_kind_at(1), TokenKind::Operator("="))
         {
-            return Err(not_supported("EXEC with a return status variable").at(position));
+            let variable = self.variable_name()?;
+            self.at += 1;
+            Some(variable)
+        } else {
+            None
+        };
+        if self.peek_kind() == &TokenKind::LeftParen {
+            return Err(not_supported("EXEC of a character string (dynamic SQL)").at(position));
         }
-        let procedure = self.procedure_name()?;
+        let (procedure, routine) = self.procedure_name()?;
         let mut arguments: Vec<ProcedureArgument> = Vec::new();
         if self.at_procedure_end() {
             return Ok(ProcedureCall {
                 procedure,
+                routine,
                 arguments,
+                status_variable,
             });
         }
         loop {
@@ -215,7 +234,9 @@ impl Parser<'_> {
         }
         Ok(ProcedureCall {
             procedure,
+            routine,
             arguments,
+            status_variable,
         })
     }
 

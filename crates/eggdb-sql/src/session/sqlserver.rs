@@ -54,6 +54,18 @@ pub struct NamedParameter {
     pub value: Value,
 }
 
+/// A Transact-SQL stored procedure of the database, as a client calls it by name over RPC
+/// ([`Session::stored_procedure`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredProcedure {
+    /// The procedure's name as `[schema].[name]`, quoted so that it reads back as exactly this
+    /// procedure after `EXEC`, whatever characters the name holds.
+    pub quoted_name: String,
+    /// Its parameters in the order declared: each name with its `@` in lower case, the engine
+    /// type its declared type is kept as, and whether it is `OUTPUT`.
+    pub parameters: Vec<ParameterDeclaration>,
+}
+
 /// One declaration of a parameterized batch's parameter list, such as `@p1 nvarchar(40)
 /// OUTPUT` in `sp_executesql`'s `@params` ([`Session::parse_parameter_declarations`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +98,16 @@ fn rows_counted(result: &QueryResult) -> i64 {
 pub(crate) struct ParsedStatement {
     pub(crate) first_token: usize,
     pub(crate) outcome: SqlResult<(usize, usize)>,
+}
+
+pub(super) fn is_system_procedure(name: &str) -> bool {
+    name == "sp_unprepare"
+        || RPC_PROCEDURES.contains(&name)
+        || crate::sqlserver_catalog::CatalogProcedure::named(name).is_some()
+}
+
+fn bracketed(part: &str) -> String {
+    format!("[{}]", part.replace(']', "]]"))
 }
 
 pub(crate) fn parse_next_statement(
@@ -244,6 +266,46 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             .map_err(|error| self.in_dialect(text, error))
     }
 
+    /// Finds the Transact-SQL stored procedure that `name` names, written as a client writes it
+    /// in an RPC call (`p`, `dbo.p`, `[sales].[Get Orders]`, with or without a database
+    /// before it), so a server can run it with `EXEC`. `None` when no procedure has that name,
+    /// including when `name` is not a name at all or names a function.
+    pub fn stored_procedure(&mut self, name: &str) -> SqlResult<Option<StoredProcedure>> {
+        let Ok(routine) = crate::parser::sqlserver_procedure_routine_name(name) else {
+            return Ok(None);
+        };
+        let Some(definition) = self.tsql_routine(&routine)? else {
+            return Ok(None);
+        };
+        if definition.kind != crate::routines::RoutineKind::Procedure {
+            return Ok(None);
+        }
+        let schema = match crate::schemas::schema_of(&definition.name) {
+            crate::schemas::DEFAULT_SCHEMA => crate::sqlserver_catalog::DBO,
+            other => other,
+        };
+        let quoted_name = format!(
+            "{}.{}",
+            bracketed(schema),
+            bracketed(crate::schemas::base_name(&definition.name))
+        );
+        let parameters = definition
+            .parameters
+            .iter()
+            .filter_map(|parameter| {
+                Some(ParameterDeclaration {
+                    name: parameter.name.clone()?,
+                    sql_type: parameter.sql_type,
+                    output: parameter.mode.is_output(),
+                })
+            })
+            .collect();
+        Ok(Some(StoredProcedure {
+            quoted_name,
+            parameters,
+        }))
+    }
+
     /// Resets the session as SQL Server resets a connection a pool hands out again: an open
     /// transaction rolls back unless `keep_transaction`, and the `SET` options (`eggdb.dialect`
     /// among them), `IDENTITY_INSERT`, `@@ROWCOUNT` and `SCOPE_IDENTITY()` return to their
@@ -266,6 +328,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.table_variables = crate::table_variables::TableVariables::default();
         self.batch_context = Arc::new(crate::tsql::BatchContext::default());
         self.pending_dynamic = None;
+        self.pending_procedure = None;
         self.set_error = None;
         self.sqlserver_status = crate::sqlserver_functions::SessionStatus::default();
         self.warnings.clear();
@@ -460,14 +523,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             SqlServerStatement::IdentityInsert { table, on } => {
                 self.set_identity_insert(table, *on)
             }
-            SqlServerStatement::Execute(call) => {
-                let mut results = self.procedure_results(call)?.into_iter();
-                let first = results
-                    .next()
-                    .unwrap_or_else(|| QueryResult::command("EXECUTE"));
-                self.extra_results.extend(results);
-                Ok(first)
-            }
+            SqlServerStatement::Execute(call) => self.run_execute(call),
             SqlServerStatement::DeclareTable { name, columns } => {
                 self.declare_table_variable(name, columns)
             }
@@ -563,6 +619,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     "EXEC {name} in a batch"
                 ))
                 .at(call.procedure.position));
+            }
+            if let Some(procedure) = self.user_procedure_run(call)? {
+                return self.procedure_result_sets(procedure);
             }
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,

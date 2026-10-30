@@ -1841,7 +1841,11 @@ impl<'t> Parser<'t> {
             "@@servicename" => session_text("MSSQLSERVER".to_owned(), position),
             "@@max_precision" => integer(38, position),
             "@@datefirst" => integer(7, position),
-            "@@langid" | "@@nestlevel" | "@@procid" => integer(0, position),
+            "@@nestlevel" => integer(
+                i64::from(self.batch.map_or(0, |batch| batch.nest_level)),
+                position,
+            ),
+            "@@langid" | "@@procid" => integer(0, position),
             "@@lock_timeout" => integer(-1, position),
             "@@textsize" => integer(i64::from(i32::MAX), position),
             "@@max_connections" => integer(32_767, position),
@@ -1901,6 +1905,16 @@ pub(crate) fn parameter_declarations(text: &str) -> SqlResult<Vec<ParameterDecla
     let tokens = tokenize_in(text, Dialect::SqlServer)?;
     let mut parser = Parser::new(text, &tokens).in_dialect(Dialect::SqlServer);
     parser.parameter_declaration_list()
+}
+
+pub(crate) fn procedure_routine_name(text: &str) -> SqlResult<String> {
+    let tokens = tokenize_in(text, Dialect::SqlServer)?;
+    let mut parser = Parser::new(text, &tokens).in_dialect(Dialect::SqlServer);
+    let (_, routine) = parser.procedure_name()?;
+    if !parser.at_end() {
+        return Err(parser.unexpected());
+    }
+    Ok(routine)
 }
 
 fn accepted_set() -> Statement {

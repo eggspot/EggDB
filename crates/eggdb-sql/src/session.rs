@@ -6,7 +6,7 @@ pub(crate) mod sqlserver;
 mod triggers;
 mod tsql;
 
-pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration};
+pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration, StoredProcedure};
 
 pub(crate) use oracle::create_text as oracle_create_text;
 
@@ -365,6 +365,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     condition_next: bool,
     condition_holds: Option<bool>,
     pending_dynamic: Option<crate::tsql::DynamicBatch>,
+    pending_procedure: Option<crate::tsql::ProcedureRun>,
     dynamic_depth: u8,
     returned_value: Option<Value>,
     unprepare_requests: Vec<i32>,
@@ -428,6 +429,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             condition_next: false,
             condition_holds: None,
             pending_dynamic: None,
+            pending_procedure: None,
             dynamic_depth: 0,
             returned_value: None,
             unprepare_requests: Vec::new(),

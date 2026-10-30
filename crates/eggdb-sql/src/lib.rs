@@ -206,7 +206,7 @@ pub use schema::{
 pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
     Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session,
-    StatementDescription, TransactionStatus,
+    StatementDescription, StoredProcedure, TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;

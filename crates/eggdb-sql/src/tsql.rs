@@ -8,7 +8,7 @@ pub(crate) use control::{
     uses_batch_logic,
 };
 pub(crate) use errors::{CaughtError, line_of, nesting_too_deep, raised_message, thrown};
-pub(crate) use routines::{TsqlReturns, TsqlRoutine};
+pub(crate) use routines::{ProcedureRun, TsqlReturns, TsqlRoutine};
 pub(crate) use variables::{BatchContext, DynamicBatch, ScalarVariable};
 
 #[cfg(test)]

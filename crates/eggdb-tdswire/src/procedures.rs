@@ -11,7 +11,7 @@ use crate::types::{declared_wire_columns, push_value};
 use crate::wire::WireError;
 use eggdb_sql::{
     KeyValueStore, NamedParameter, OutputColumn, ParameterDeclaration, Session, SqlError, SqlType,
-    TransactionStatus, Value,
+    StoredProcedure, TransactionStatus, Value,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ const NOT_A_PARAMETER: u32 = 8145;
 const NOT_DECLARED_OUTPUT: u32 = 8162;
 const PARAMETER_NOT_SUPPLIED: u32 = 8178;
 const UNKNOWN_HANDLE: u32 = 8179;
+const STATUS_PARAMETER: &str = "@eggdb_rpc_return_status";
 const INTN: u8 = 0x26;
 
 pub(crate) struct PreparedBatch {
@@ -112,6 +113,7 @@ impl CallError {
 
 #[derive(Default)]
 struct Called {
+    status: i32,
     returned: Vec<Vec<u8>>,
     wrote_error: bool,
     failed_write: bool,
@@ -304,6 +306,74 @@ fn catalog_procedure_name(procedure: &Procedure) -> Option<String> {
     eggdb_sql::is_catalog_procedure(&bare).then_some(bare)
 }
 
+fn unknown_procedure(procedure: &Procedure) -> CallError {
+    CallError::new(
+        UNKNOWN_PROCEDURE,
+        format!("Could not find stored procedure '{}'.", procedure.shown()),
+    )
+}
+
+fn stored_procedure_call(
+    procedure: &StoredProcedure,
+    shown: &str,
+    parameters: &[RpcParameter],
+) -> Result<(String, Vec<NamedParameter>), CallError> {
+    let mut text = format!("EXEC {STATUS_PARAMETER} = {}", procedure.quoted_name);
+    let mut bound = vec![NamedParameter {
+        name: STATUS_PARAMETER.to_owned(),
+        declared_type: Some(SqlType::Integer),
+        value: Value::Null,
+    }];
+    let mut next_position = 0usize;
+    for (index, parameter) in parameters.iter().enumerate() {
+        let declaration = if parameter.name.is_empty() {
+            let declaration = procedure.parameters.get(next_position).ok_or_else(|| {
+                CallError::new(
+                    TOO_MANY_ARGUMENTS,
+                    format!(
+                        "Procedure or function {} has too many arguments specified.",
+                        printable(shown)
+                    ),
+                )
+            })?;
+            next_position += 1;
+            declaration
+        } else {
+            procedure
+                .parameters
+                .iter()
+                .find(|declaration| declaration.name.eq_ignore_ascii_case(&parameter.name))
+                .ok_or_else(|| {
+                    CallError::new(
+                        NOT_A_PARAMETER,
+                        format!(
+                            "{} is not a parameter for procedure {}.",
+                            printable(&parameter.name),
+                            printable(shown)
+                        ),
+                    )
+                })?
+        };
+        text.push_str(if index == 0 { " " } else { ", " });
+        text.push_str(&declaration.name);
+        text.push_str(" = ");
+        if parameter.uses_default {
+            text.push_str("DEFAULT");
+            continue;
+        }
+        text.push_str(&declaration.name);
+        if parameter.output {
+            text.push_str(" OUTPUT");
+        }
+        bound.push(NamedParameter {
+            name: declaration.name.clone(),
+            declared_type: Some(declaration.sql_type),
+            value: parameter.value.clone(),
+        });
+    }
+    Ok((text, bound))
+}
+
 fn is_parameter_name(name: &str) -> bool {
     name.strip_prefix('@').is_some_and(|rest| {
         !rest.is_empty()
@@ -407,13 +477,7 @@ impl Connection<'_> {
             Some(SystemProcedure::Unprepare) => self.unprepare(parameters),
             None => match catalog_procedure_name(&call.procedure) {
                 Some(name) => self.catalog_procedure(session, &name, parameters),
-                None => Err(CallError::new(
-                    UNKNOWN_PROCEDURE,
-                    format!(
-                        "Could not find stored procedure '{}'.",
-                        call.procedure.shown()
-                    ),
-                )),
+                None => self.stored_procedure(session, &call.procedure, parameters),
             },
         };
         let in_transaction = if session.transaction_status() == TransactionStatus::Idle {
@@ -443,7 +507,7 @@ impl Connection<'_> {
         if called.failed_write {
             return false;
         }
-        let mut tokens_out = tokens::return_status(0);
+        let mut tokens_out = tokens::return_status(called.status);
         for returned in &called.returned {
             tokens_out.extend_from_slice(returned);
         }
@@ -470,6 +534,7 @@ impl Connection<'_> {
             failed_write = self.wire.write(&token).is_err();
         }
         Called {
+            status: 0,
             returned: Vec::new(),
             wrote_error: ran.wrote_error,
             failed_write,
@@ -652,6 +717,39 @@ impl Connection<'_> {
         Ok(self.run_bound(session, &batch, &bound))
     }
 
+    fn stored_procedure<S: KeyValueStore>(
+        &mut self,
+        session: &mut Session<'_, S>,
+        procedure: &Procedure,
+        parameters: &[RpcParameter],
+    ) -> Result<Called, CallError> {
+        let Procedure::Name(name) = procedure else {
+            return Err(unknown_procedure(procedure));
+        };
+        let Some(found) = session
+            .stored_procedure(name)
+            .map_err(|error| CallError::from_sql(&error))?
+        else {
+            return Err(unknown_procedure(procedure));
+        };
+        let (text, bound) = stored_procedure_call(&found, &procedure.shown(), parameters)?;
+        let batch = PreparedBatch {
+            text,
+            declarations_text: String::new(),
+            declarations: Vec::new(),
+        };
+        let mut called = self.run_bound(session, &batch, &bound);
+        let finals = session.parameter_values_after_batch();
+        called.status = finals
+            .iter()
+            .find(|value| value.name == STATUS_PARAMETER)
+            .and_then(|value| value.value.as_integer())
+            .and_then(|status| i32::try_from(status).ok())
+            .unwrap_or(0);
+        called.returned = returned_values(parameters, 0, &found.parameters, finals);
+        Ok(called)
+    }
+
     pub(crate) fn forget_unprepared<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>) {
         for handle in session.take_unprepare_requests() {
             self.prepared.unprepare(handle);
@@ -670,10 +768,11 @@ impl Connection<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PreparedBatch, PreparedBatches, bound_parameters, catalog_procedure_name, is_parameter_name,
+        PreparedBatch, PreparedBatches, STATUS_PARAMETER, bound_parameters, catalog_procedure_name,
+        is_parameter_name, stored_procedure_call,
     };
     use crate::rpc::{Procedure, RpcParameter, SystemProcedure};
-    use eggdb_sql::{ParameterDeclaration, SqlType, Value};
+    use eggdb_sql::{ParameterDeclaration, SqlType, StoredProcedure, Value};
 
     fn batch() -> PreparedBatch {
         PreparedBatch {
@@ -814,5 +913,72 @@ mod tests {
         assert!(!is_parameter_name("@"));
         assert!(!is_parameter_name("@a = 1; DROP TABLE t; --"));
         assert!(!is_parameter_name("@a'"));
+    }
+
+    fn orders_procedure() -> StoredProcedure {
+        StoredProcedure {
+            quoted_name: "[dbo].[get orders]".into(),
+            parameters: vec![
+                ParameterDeclaration {
+                    name: "@customer".into(),
+                    sql_type: SqlType::Integer,
+                    output: false,
+                },
+                ParameterDeclaration {
+                    name: "@total".into(),
+                    sql_type: SqlType::BigInt,
+                    output: true,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn stored_procedure_calls_become_an_exec_with_named_arguments_and_a_status() {
+        let mut total = argument("@TOTAL", true, Value::Null);
+        total.sent = Some(vec![0x26, 8, 0]);
+        let (text, bound) = stored_procedure_call(
+            &orders_procedure(),
+            "dbo.[get orders]",
+            &[argument("", false, Value::Integer(7)), total],
+        )
+        .ok()
+        .unwrap_or_default();
+        assert_eq!(
+            text,
+            format!(
+                "EXEC {STATUS_PARAMETER} = [dbo].[get orders] @customer = @customer, @total = @total OUTPUT"
+            )
+        );
+        let names: Vec<&str> = bound.iter().map(|parameter| parameter.name.as_str()).collect();
+        assert_eq!(names, [STATUS_PARAMETER, "@customer", "@total"]);
+        assert_eq!(bound[1].declared_type, Some(SqlType::Integer));
+        assert_eq!(bound[2].declared_type, Some(SqlType::BigInt));
+    }
+
+    #[test]
+    fn stored_procedure_calls_take_defaults_and_refuse_unknown_or_extra_arguments() {
+        let mut defaulted = argument("@customer", false, Value::Null);
+        defaulted.uses_default = true;
+        let (text, _) = stored_procedure_call(&orders_procedure(), "p", &[defaulted])
+            .ok()
+            .unwrap_or_default();
+        assert!(text.ends_with("@customer = DEFAULT"), "{text}");
+        let unknown = stored_procedure_call(
+            &orders_procedure(),
+            "p",
+            &[argument("@x; DROP TABLE t", false, Value::Integer(1))],
+        );
+        assert_eq!(unknown.err().map(|error| error.number), Some(8145));
+        let extra = stored_procedure_call(
+            &orders_procedure(),
+            "p",
+            &[
+                argument("", false, Value::Integer(1)),
+                argument("", false, Value::Integer(2)),
+                argument("", false, Value::Integer(3)),
+            ],
+        );
+        assert_eq!(extra.err().map(|error| error.number), Some(8144));
     }
 }
