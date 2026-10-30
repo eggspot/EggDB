@@ -391,8 +391,10 @@ pub(crate) fn spans_of(
                     resume = (parsed.first_token + 1, next.1);
                 }
                 let end_line = lines.line_at(end);
+                let statement_text = text.get(start..end).unwrap_or("");
+                aliases.learn(statement_text);
                 statements.push(ScriptStatement::plain(
-                    text[start..end].to_owned(),
+                    statement_text.to_owned(),
                     statement_line,
                     end_line,
                 ));
