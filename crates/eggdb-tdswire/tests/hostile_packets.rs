@@ -254,6 +254,13 @@ fn hostile_arguments_to_sql_servers_functions_get_errors_and_the_server_keeps_se
         "SELECT CHARINDEX(N'b', N'a\u{1F600}b', -5) AS i".to_owned(),
         "SELECT CAST(1e308 AS real) AS r".to_owned(),
         "SELECT CAST('12/31/9999 23:59:59.997' AS datetime) + 1 AS d".to_owned(),
+        "SELECT REPLICATE(CAST(N'ab' AS nvarchar(max)), 2147483647) AS r".to_owned(),
+        "SELECT SUBSTRING(N'abc', -2147483648, 2147483647) AS s, STUFF(N'abc', 0, -1, N'x') AS t".to_owned(),
+        "SELECT FORMAT(1.5, 'E99') AS e, FORMAT(SYSDATETIME(), 'fffffffff') AS f, FORMAT(1, '\\') AS g".to_owned(),
+        "SELECT ROUND(1.5, -2147483648) AS r, EOMONTH(GETDATE(), 2147483647) AS e".to_owned(),
+        "SELECT DATEDIFF_BIG(nanosecond, '0001-01-01', '9999-12-31') AS d".to_owned(),
+        "SELECT value FROM STRING_SPLIT(N'a,b', N',,')".to_owned(),
+        "SELECT 1.0 / 0 AS z, TRY_CONVERT(int, N'\u{1F600}') AS t".to_owned(),
         long_date,
         wide_binary,
     ];

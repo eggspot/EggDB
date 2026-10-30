@@ -1132,3 +1132,127 @@ fn a_connection_reset_rolls_back_and_restores_the_options_of_a_new_login() {
         vec![vec![Value::Integer(2)]]
     );
 }
+
+fn column_types(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Option<crate::SqlType>> {
+    let mut last = None;
+    session
+        .execute(text, &mut |result: QueryResult| last = result.columns)
+        .unwrap_or_else(|error| panic!("{text}: {error}"));
+    last.unwrap_or_default()
+        .into_iter()
+        .map(|column| column.sql_type)
+        .collect()
+}
+
+fn decimal(precision: u16, scale: i16) -> Option<crate::SqlType> {
+    Some(crate::SqlType::Numeric(Some(crate::NumericModifier {
+        precision,
+        scale,
+    })))
+}
+
+#[test]
+fn sums_averages_and_quotients_take_sql_servers_result_types() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE s (id INT PRIMARY KEY, qty INT NOT NULL, price DECIMAL(10,2) NOT NULL, big BIGINT NOT NULL)",
+    );
+    values(
+        &mut session,
+        "INSERT INTO s VALUES (1, 2147483647, 1.50, 1), (2, 1, 2.25, 2)",
+    );
+    assert_eq!(
+        column_types(
+            &mut session,
+            "SELECT SUM(price) AS a, AVG(price) AS b, SUM(big) AS c, AVG(qty) AS d, COUNT_BIG(*) AS e FROM s"
+        ),
+        vec![
+            decimal(38, 2),
+            decimal(38, 6),
+            Some(crate::SqlType::BigInt),
+            Some(crate::SqlType::Integer),
+            Some(crate::SqlType::BigInt),
+        ]
+    );
+    assert_eq!(
+        column_types(&mut session, "SELECT price / 3 AS q FROM s"),
+        vec![decimal(21, 13)]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT price / 3 AS q FROM s WHERE id = 2"),
+        vec![vec![Value::Numeric(
+            crate::Numeric::parse("0.7500000000000").unwrap()
+        )]]
+    );
+    let error = session
+        .execute("SELECT SUM(qty) AS total FROM s", &mut |_| {})
+        .expect_err("an int overflow");
+    assert_eq!(error.vendor_code(), Some(8115));
+    let mut postgresql = Session::new(&store);
+    assert_eq!(
+        values(&mut postgresql, "SELECT sum(qty) AS total FROM s"),
+        vec![vec![Value::BigInt(2_147_483_648)]]
+    );
+}
+
+#[test]
+fn at_at_identity_follows_the_last_identity_value() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE i (id INT IDENTITY(1,1) PRIMARY KEY, note NVARCHAR(10))",
+    );
+    values(&mut session, "INSERT INTO i (note) VALUES (N'a'), (N'b')");
+    assert_eq!(
+        values(&mut session, "SELECT @@IDENTITY AS last_id"),
+        vec![vec![Value::Numeric(crate::Numeric::parse("2").unwrap())]]
+    );
+}
+
+#[test]
+fn string_split_and_string_agg_go_both_ways_through_a_variable() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let steps = batch(
+        &mut session,
+        "DECLARE @list NVARCHAR(100) = N'c,a,b' SELECT STRING_AGG(value, '+') WITHIN GROUP (ORDER BY value) AS joined FROM STRING_SPLIT(@list, ',')",
+    )
+    .unwrap();
+    assert_eq!(rows_of(&steps), vec![vec![Value::Text("a+b+c".into())]]);
+}
+
+#[test]
+fn hostile_arguments_to_the_common_functions_return_errors_or_values_and_never_panic() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let long = "9".repeat(5_000);
+    let texts = [
+        "SELECT REPLICATE(CAST('ab' AS varchar(max)), 2147483647) AS r".to_owned(),
+        "SELECT SPACE(2147483647) AS s".to_owned(),
+        "SELECT SUBSTRING('abc', -2147483648, 2147483647) AS s".to_owned(),
+        "SELECT STUFF('abc', 2147483647, 2147483647, 'x') AS s".to_owned(),
+        "SELECT LEFT('abc', 9223372036854775807) AS s".to_owned(),
+        "SELECT ROUND(1.5, -2147483648) AS r, ROUND(1e308, 2147483647) AS f".to_owned(),
+        "SELECT CEILING(CAST(1e308 AS float)) AS c".to_owned(),
+        "SELECT EOMONTH('2020-01-01', 2147483647) AS e".to_owned(),
+        "SELECT DATEDIFF_BIG(nanosecond, '0001-01-01', '9999-12-31') AS d".to_owned(),
+        "SELECT CHOOSE(2147483647, 'a') AS c".to_owned(),
+        format!("SELECT FORMAT(1, '{long}') AS f"),
+        "SELECT FORMAT(1, 'N99') AS f, FORMAT(1.5, 'E99') AS e, FORMAT(CAST('2020-01-01' AS date), 'fffffffff') AS d".to_owned(),
+        "SELECT FORMAT(-9223372036854775808, 'X') AS x, FORMAT(1, '\\') AS slash, FORMAT(1, ';;;') AS sections".to_owned(),
+        "SELECT CONCAT_WS(NULL, NULL, NULL) AS c, DATALENGTH(REPLICATE('a', 9000)) AS d".to_owned(),
+        "SELECT TRY_CONVERT(varbinary(10), 'zz', 2) AS b, CONVERT(varchar(10), CAST(1e308 AS float), 2) AS f".to_owned(),
+        "SELECT value FROM STRING_SPLIT(REPLICATE(',', 8000), ',')".to_owned(),
+        "SELECT DATENAME(tzoffset, SYSDATETIMEOFFSET()) AS z, DATEPART(nanosecond, '9999-12-31 23:59:59.9999999') AS n".to_owned(),
+    ];
+    for text in &texts {
+        let _ = session.execute(text, &mut |_| {});
+    }
+    assert_eq!(
+        values(&mut session, "SELECT 1 AS n"),
+        vec![vec![Value::Integer(1)]]
+    );
+}

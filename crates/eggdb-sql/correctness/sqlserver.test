@@ -1665,3 +1665,308 @@ SELECT * FROM OPENJSON(N'7') WITH (a int '$') AS o
 
 ok
 DROP TABLE Blogs48
+
+chapter "SUBSTRING (Transact-SQL)", "LEFT (Transact-SQL)", "RIGHT (Transact-SQL)", "REVERSE (Transact-SQL)"
+rows
+SELECT SUBSTRING('abcdef', 2, 3) AS x, SUBSTRING('abcdef', 0, 3) AS early, LEFT('abcdefg', 2) AS l, RIGHT('abcdefg', 2) AS r, REVERSE('abc') AS rev
+----
+x|early|l|r|rev
+bcd|ab|ab|fg|cba
+SELECT 1
+
+rows
+SELECT SUBSTRING(0x0102030405, 2, 2) AS b, LEFT(NULL, 2) AS n
+----
+b|n
+0x0203|NULL
+SELECT 1
+
+error 22011 537
+SELECT SUBSTRING('abc', 1, -1) AS x
+
+error 22011 536
+SELECT RIGHT('abc', -1) AS x
+
+chapter "REPLACE (Transact-SQL)", "STUFF (Transact-SQL)", "REPLICATE (Transact-SQL)", "SPACE (Transact-SQL)"
+rows
+SELECT REPLACE('abcdefghicde', 'cde', 'xxx') AS r, STUFF('abcdef', 2, 3, 'ijklmn') AS s, REPLICATE('0', 4) + '12' AS padded, 'a' + SPACE(2) + 'b' AS spaced
+----
+r|s|padded|spaced
+abxxxfghixxx|aijklmnef|000012|a  b
+SELECT 1
+
+rows
+SELECT LEN(REPLICATE('ab', 5000)) AS short, LEN(REPLICATE(CAST('ab' AS varchar(max)), 5000)) AS long, STUFF('abc', 5, 1, 'x') AS outside, REPLICATE('a', -1) AS negative
+----
+short|long|outside|negative
+8000|10000|NULL|NULL
+SELECT 1
+
+chapter "TRIM (Transact-SQL)", "LTRIM (Transact-SQL)", "RTRIM (Transact-SQL)"
+rows
+SELECT TRIM('     test    ') AS t, TRIM('.,! ' FROM '     #     test    .') AS chars, LTRIM('  a  ') + '#' AS l, '#' + RTRIM('  a  ') AS r
+----
+t|chars|l|r
+test|#     test|a  #|#  a
+SELECT 1
+
+chapter "CONCAT (Transact-SQL)", "CONCAT_WS (Transact-SQL)", "DATALENGTH (Transact-SQL)"
+rows
+SELECT CONCAT('Happy ', 'Birthday ', 11, '/', '25') AS result, CONCAT('a', NULL, 'b') AS skipped
+----
+result|skipped
+Happy Birthday 11/25|ab
+SELECT 1
+
+rows
+SELECT CONCAT_WS(',', '1 Microsoft Way', NULL, NULL, 'Redmond', 'WA', 98052) AS address
+----
+address
+1 Microsoft Way,Redmond,WA,98052
+SELECT 1
+
+error 42883 189
+SELECT CONCAT('a') AS x
+
+rows
+SELECT DATALENGTH('abc') AS a, DATALENGTH(N'abc') AS n, DATALENGTH(CAST(1 AS int)) AS i, DATALENGTH(0x0102) AS b, DATALENGTH(NULL) AS nothing
+----
+a|n|i|b|nothing
+3|6|4|2|NULL
+SELECT 1
+
+rows
+SELECT ASCII('A') AS a, CHAR(66) AS b, UNICODE(N'é') AS u, NCHAR(233) AS n
+----
+a|b|u|n
+65|B|233|é
+SELECT 1
+
+chapter "IIF (Transact-SQL)", "CHOOSE (Transact-SQL)"
+rows
+SELECT IIF(45 > 40, 'TRUE', 'FALSE') AS result, IIF(NULL > 1, 'yes', 'no') AS unknown
+----
+result|unknown
+TRUE|no
+SELECT 1
+
+rows
+SELECT CHOOSE(3, 'Manager', 'Director', 'Developer', 'Tester') AS result, CHOOSE(5, 'a', 'b') AS outside, CHOOSE(2.9, 'a', 'b') AS truncated
+----
+result|outside|truncated
+Developer|NULL|b
+SELECT 1
+
+chapter "DATEPART (Transact-SQL)", "DATENAME (Transact-SQL)", "YEAR (Transact-SQL)", "MONTH (Transact-SQL)", "DAY (Transact-SQL)"
+rows
+SELECT DATEPART(year, '2007-10-30 12:15:32.1234567 +05:10') AS y, DATEPART(quarter, '2007-10-30 12:15:32.1234567 +05:10') AS q, DATEPART(dayofyear, '2007-10-30 12:15:32.1234567 +05:10') AS dy, DATEPART(week, '2007-10-30 12:15:32.1234567 +05:10') AS wk, DATEPART(weekday, '2007-10-30 12:15:32.1234567 +05:10') AS dw, DATEPART(hour, '2007-10-30 12:15:32.1234567 +05:10') AS hh, DATEPART(millisecond, '2007-10-30 12:15:32.1234567 +05:10') AS ms, DATEPART(microsecond, '2007-10-30 12:15:32.1234567 +05:10') AS mcs, DATEPART(iso_week, '2007-10-30') AS isowk
+----
+y|q|dy|wk|dw|hh|ms|mcs|isowk
+2007|4|303|44|3|12|123|123456|44
+SELECT 1
+
+rows
+SELECT DATENAME(month, '2007-10-30') AS m, DATENAME(weekday, '2007-10-30') AS w, DATENAME(day, '2007-10-30') AS d
+----
+m|w|d
+October|Tuesday|30
+SELECT 1
+
+rows
+SELECT YEAR('2010-04-30T01:01:01.1234567-07:00') AS y, MONTH('2007-04-30T01:01:01.1234567 -07:00') AS m, DAY('2015-04-30 01:01:01.1234567') AS d
+----
+y|m|d
+2010|4|30
+SELECT 1
+
+error 22023 155
+SELECT DATEPART(fortnight, '2007-10-30') AS x
+
+error 22023 155
+SELECT DATEADD(iso_week, 1, '2007-10-30') AS x
+
+error 22023 9810
+SELECT DATEPART(hour, CAST('2007-10-30' AS date)) AS x
+
+chapter "EOMONTH (Transact-SQL)", "DATEDIFF_BIG (Transact-SQL)"
+rows
+SELECT EOMONTH('12/1/2011') AS result, EOMONTH('12/1/2011', 1) AS next_month, EOMONTH('12/1/2011', -1) AS last_month, EOMONTH('2024-02-10') AS leap
+----
+result|next_month|last_month|leap
+2011-12-31|2012-01-31|2011-11-30|2024-02-29
+SELECT 1
+
+error 22008 517
+SELECT EOMONTH('9999-12-01', 1) AS x
+
+rows
+SELECT DATEDIFF_BIG(millisecond, '0001-01-01', '9999-12-31') AS ms
+----
+ms
+315537811200000
+SELECT 1
+
+chapter "TRY_CAST (Transact-SQL)", "TRY_CONVERT (Transact-SQL)"
+rows
+SELECT TRY_CAST('test' AS float) AS f, TRY_CONVERT(int, 'abc') AS a, TRY_CONVERT(int, '12') AS b, TRY_CONVERT(date, '2020-02-30') AS d, TRY_CAST('2020-07-04' AS date) AS ok
+----
+f|a|b|d|ok
+NULL|NULL|12|NULL|2020-07-04
+SELECT 1
+
+error 42846 529
+SELECT TRY_CONVERT(int, CAST('2020-01-01' AS date)) AS n
+
+chapter "CAST and CONVERT (Transact-SQL)"
+rows
+SELECT CONVERT(varchar(30), CAST('2020-07-04 13:05:09' AS datetime), 100) AS s100, CONVERT(varchar(11), CAST('2020-07-04' AS date), 106) AS s106, CONVERT(varchar(12), CAST('2020-07-04' AS date), 107) AS s107, CONVERT(varchar(10), CAST('2020-07-04' AS date), 104) AS s104, CONVERT(varchar(10), CAST('2020-07-04' AS date), 1) AS s1
+----
+s100|s106|s107|s104|s1
+Jul  4 2020  1:05PM|04 Jul 2020|Jul 04, 2020|04.07.2020|07/04/20
+SELECT 1
+
+rows
+SELECT CONVERT(varchar(8), CAST('2020-07-04 13:05:09' AS datetime), 108) AS s108, CONVERT(varchar(30), CAST('2020-07-04 13:05:09.12' AS datetime), 113) AS s113, CONVERT(varchar(12), CAST('2020-07-04 13:05:09.12' AS datetime), 114) AS s114
+----
+s108|s113|s114
+13:05:09|04 Jul 2020 13:05:09:120|13:05:09:120
+SELECT 1
+
+rows
+SELECT CONVERT(datetime, '04 Jul 2020 13:05:09:120', 113) AS e, CONVERT(date, '200704', 12) AS d
+----
+e|d
+2020-07-04 13:05:09.120|2020-07-04
+SELECT 1
+
+rows
+SELECT CONVERT(varchar(10), 0x4E616D65, 1) AS one, CONVERT(varchar(10), 0x4E616D65, 2) AS two, CONVERT(varchar(10), 0x4E616D65, 0) AS zero, CONVERT(varbinary(4), '0x4E616D65', 1) AS back
+----
+one|two|zero|back
+0x4E616D65|4E616D65|Name|0x4E616D65
+SELECT 1
+
+rows
+SELECT CAST(CAST(1234567 AS float) AS varchar(20)) AS g, CONVERT(varchar(20), CAST(1234.5678 AS float), 1) AS s1, CONVERT(varchar(20), CAST(4235.98 AS money), 1) AS m
+----
+g|s1|m
+1.23457e+006|1.2345678e+003|4,235.98
+SELECT 1
+
+error 0A000 40517
+SELECT CONVERT(varchar(30), CAST('2020-07-04' AS date), 130) AS hijri
+
+chapter "FORMAT (Transact-SQL)"
+rows
+SELECT FORMAT(CAST('2020-07-04' AS date), 'd', 'en-US') AS us, FORMAT(CAST('2020-07-04' AS date), 'D', 'en-US') AS long_date, FORMAT(CAST('2020-07-04' AS date), 'yyyy-MM-dd') AS custom
+----
+us|long_date|custom
+7/4/2020|Saturday, July 4, 2020|2020-07-04
+SELECT 1
+
+rows
+SELECT FORMAT(123456789, '###-##-####') AS custom, FORMAT(1234.5, 'N', 'en-US') AS n, FORMAT(1234.5, 'C', 'en-US') AS c, FORMAT(42, 'D5') AS d
+----
+custom|n|c|d
+123-45-6789|1,234.50|$1,234.50|00042
+SELECT 1
+
+rows
+SELECT FORMAT(CAST('07:35' AS time), N'hh\:mm') AS escaped, FORMAT(CAST('07:35' AS time), N'hh:mm') AS unescaped
+----
+escaped|unescaped
+07:35|NULL
+SELECT 1
+
+error 42804 8116
+SELECT FORMAT('abc', 'N') AS x
+
+chapter "ROUND (Transact-SQL)", "CEILING (Transact-SQL)", "FLOOR (Transact-SQL)"
+rows
+SELECT ROUND(123.9994, 3) AS a, ROUND(123.9995, 3) AS b, ROUND(150.75, 0) AS r, ROUND(150.75, 0, 1) AS t, ROUND(748, -2) AS i
+----
+a|b|r|t|i
+123.9990|124.0000|151.00|150.00|700
+SELECT 1
+
+error 22003 8115
+SELECT ROUND(748.58, -3) AS r
+
+rows
+SELECT CEILING(123.45) AS a, CEILING(-123.45) AS b, CEILING(0.0) AS c, FLOOR(123.45) AS d, FLOOR(-123.45) AS e
+----
+a|b|c|d|e
+124|-123|0|123|-124
+SELECT 1
+
+chapter "SUM (Transact-SQL)", "AVG (Transact-SQL)", "COUNT_BIG (Transact-SQL)", "/ (Divide) (Transact-SQL)", "Precision, scale, and length (Transact-SQL)"
+ok
+CREATE TABLE T39b (id INT PRIMARY KEY, name NVARCHAR(20) NULL, qty INT NOT NULL, price DECIMAL(10,2) NOT NULL)
+
+ok
+INSERT INTO T39b VALUES (1, N'Tea', 1, 2.50), (2, N'Bread', 2, 3.25), (3, NULL, 2, 1.00)
+
+rows
+SELECT SUM(qty) AS s, AVG(qty) AS a, SUM(price) AS total, AVG(price) AS average, COUNT_BIG(*) AS n FROM T39b
+----
+s|a|total|average|n
+5|1|6.75|2.250000|3
+SELECT 1
+
+rows
+SELECT qty, SUM(price) AS total FROM T39b GROUP BY qty ORDER BY qty
+----
+qty|total
+1|2.50
+2|4.25
+SELECT 2
+
+rows
+SELECT 2 / 3.0 AS q, 10.0 / 4 AS r, 7 / 2 AS i
+----
+q|r|i
+0.666666|2.500000000000|3
+SELECT 1
+
+error 22012 8134
+SELECT 1.0 / 0 AS z
+
+chapter "STRING_AGG (Transact-SQL)", "STRING_SPLIT (Transact-SQL)"
+rows
+SELECT STRING_AGG(name, ', ') WITHIN GROUP (ORDER BY name) AS names, STRING_AGG(qty, '-') WITHIN GROUP (ORDER BY id) AS quantities FROM T39b
+----
+names|quantities
+Bread, Tea|1-2-2
+SELECT 1
+
+rows
+SELECT value FROM STRING_SPLIT('Lorem ipsum dolor', ' ')
+----
+value
+Lorem
+ipsum
+dolor
+SELECT 3
+
+rows
+SELECT * FROM STRING_SPLIT('Austin,Texas,Seattle,Washington,Denver,Colorado', ',', 1) WHERE ordinal % 2 = 0
+----
+value|ordinal
+Texas|2
+Washington|4
+Colorado|6
+SELECT 3
+
+rows
+SELECT id FROM T39b WHERE name IN (SELECT value FROM STRING_SPLIT('Tea,Bread', ',')) ORDER BY id
+----
+id
+1
+2
+SELECT 2
+
+error 22023 214
+SELECT value FROM STRING_SPLIT('a', '--')
+
+ok
+DROP TABLE T39b
