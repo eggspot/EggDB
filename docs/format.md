@@ -627,7 +627,9 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
 - The SQL layer's records are values in the trees, and table definitions and views are
   versioned by their own first byte; their layouts are in [sql.md](sql.md) "How SQL is stored"
   (D114, D116). They are part of the format from v0.2.0 on: after it, a new dialect code or
-  default tag in them needs a new record version (D124).
+  default tag in them needs a new record version (D124). The newest table-definition version is
+  9, written only for tables with an index method other than `btree`, a column order other than
+  `ASC`, a unique index that is not a constraint or a recorded identity column (D146).
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.
