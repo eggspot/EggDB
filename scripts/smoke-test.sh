@@ -564,6 +564,20 @@ expect_exit 0 "$eggdb" sql shell.db -c 'select count(*) from t'
 tr -d '\r' < last.out | grep -qx ' *3' || fail "after write_sql, t holds $(cat last.out)"
 pass "mcp --allow-write: write_sql commits, and a destructive statement waits for confirmation"
 
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"kv_get","arguments":{"key":"a"}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"select count(*) from t"}}}' > mcp-tables.in
+expect_exit 0 "$eggdb" mcp shell.db --tables t --call-gap 0 < mcp-tables.in
+[ "$(wc -l < last.out | tr -d ' ')" = 4 ] || fail "eggdb mcp --tables answered $(cat last.out)"
+sed -n 2p last.out | grep -q '"name":"kv_get"' && fail "eggdb mcp --tables offered kv_get: $(sed -n 2p last.out)"
+sed -n 3p last.out | grep -q 'limited_to_tables' || fail "eggdb mcp --tables's kv_get answered $(sed -n 3p last.out)"
+sed -n 4p last.out | grep -q '"isError":false' || fail "eggdb mcp --tables's run_sql answered $(sed -n 4p last.out)"
+expect_exit 1 "$eggdb" mcp shell.db --tables no_such_table < /dev/null
+grep -q "no table, view or sequence" last.err || fail "eggdb mcp --tables no_such_table said $(cat last.err)"
+pass "mcp --tables: only the listed tables, the key-value tools withdrawn, unknown names refused at start"
+
 expect_exit 0 "$eggdb" ui --help
 grep -q '^Usage: eggdb ui <file>' last.out || fail "eggdb ui --help printed $(cat last.out)"
 expect_exit 2 "$eggdb" ui app.db < /dev/null
