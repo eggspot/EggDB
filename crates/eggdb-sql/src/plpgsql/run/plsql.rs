@@ -1,9 +1,13 @@
+mod packages;
+
+use packages::AttachedPackage;
+
 use super::super::frame::{FrameVariable, Slot, row_record};
 use super::super::raise::{display_value, with_context_line};
 use super::super::collections::CollectionShape;
 use super::super::{
-    Block, Fragment, Handler, Program, RaisedException, Subprogram, TypeDeclaration, VariableType,
-    line_of,
+    Block, ExceptionCondition, Fragment, Handler, Program, RaisedException, Subprogram,
+    TypeDeclaration, VariableType, line_of,
 };
 use super::{Flow, Run, coerce};
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -51,6 +55,14 @@ impl UnitLines {
         })
     }
 
+    pub(super) fn of_package(name: &str, text: &Arc<str>) -> Arc<Self> {
+        Arc::new(Self {
+            label: format!("\"{}\"", shown_object(name)),
+            text: Arc::clone(text),
+            base: 0,
+        })
+    }
+
     pub(super) fn of_anonymous_block(code: &str, base: usize) -> Arc<Self> {
         Arc::new(Self {
             label: ANONYMOUS_BLOCK_NAME.to_owned(),
@@ -85,6 +97,7 @@ struct LocalRoutine {
     unit: Arc<UnitLines>,
     types: Vec<(String, TypeDeclaration)>,
     constructors: Vec<(String, CollectionShape)>,
+    packages: Vec<AttachedPackage>,
 }
 
 enum Entry {
@@ -111,6 +124,8 @@ pub(super) struct PlsqlState {
     entries_mark: usize,
     frames_mark: usize,
     pub(super) guards: usize,
+    packages: Vec<AttachedPackage>,
+    package_scope: bool,
 }
 
 pub(crate) fn local_routines(name: &str) -> Option<Arc<NamedRoutines>> {
@@ -271,6 +286,15 @@ impl Run<'_> {
                 self.plsql.entries_mark = locals.entries.len();
             }
         });
+        if self.plsql.mirror.is_none() {
+            let package = self
+                .definition
+                .plsql
+                .as_ref()
+                .and_then(|plsql| plsql.package.clone());
+            crate::plsql::enter_package_scope(package);
+            self.plsql.package_scope = true;
+        }
     }
 
     pub(super) fn end_plsql(&mut self) {
@@ -280,6 +304,9 @@ impl Run<'_> {
             locals.frames.truncate(self.plsql.frames_mark);
         });
         self.plsql.shared_frame = None;
+        if std::mem::take(&mut self.plsql.package_scope) {
+            crate::plsql::leave_package_scope();
+        }
     }
 
     pub(super) fn attach_local(&mut self, definition: &Arc<RoutineDefinition>) {
@@ -298,12 +325,13 @@ impl Run<'_> {
                         Arc::clone(&routine.unit),
                         routine.types.clone(),
                         routine.constructors.clone(),
+                        routine.packages.clone(),
                     ))
                 }
                 _ => None,
             })
         });
-        if let Some((frame, variables, unit, types, constructors)) = attached {
+        if let Some((frame, variables, unit, types, constructors, packages)) = attached {
             self.plsql.mirror = Some((frame, variables.len()));
             self.frame.variables = variables;
             self.unit = Some(unit);
@@ -311,19 +339,30 @@ impl Run<'_> {
             if !constructors.is_empty() {
                 self.plsql_frame_mut().constructors = constructors;
             }
+            self.plsql.packages = packages;
+            self.adopt_packages();
         }
     }
 
-    pub(super) fn share_frame(&self) {
+    pub(super) fn share_frame(&mut self) {
+        self.share_locals();
+        self.share_packages();
+    }
+
+    fn share_locals(&self) {
         if self.plsql.shared_frame.is_none() && self.plsql.mirror.is_none() {
             return;
         }
+        let packaged = self.package_ranges();
         LOCALS.with(|locals| {
             let mut locals = locals.borrow_mut();
             if let Some((frame, count)) = self.plsql.mirror
                 && let Some(shared) = locals.frames.get_mut(frame)
             {
                 for (at, variable) in self.frame.variables.iter().take(count).enumerate() {
+                    if packaged.iter().any(|range| range.contains(&at)) {
+                        continue;
+                    }
                     if let Some(slot) = shared.get_mut(at) {
                         slot.value = variable.value.clone();
                     }
@@ -338,9 +377,15 @@ impl Run<'_> {
     }
 
     pub(super) fn adopt_frame(&mut self) {
+        self.adopt_packages();
+        self.adopt_locals();
+    }
+
+    fn adopt_locals(&mut self) {
         if self.plsql.shared_frame.is_none() && self.plsql.mirror.is_none() {
             return;
         }
+        let packaged = self.package_ranges();
         LOCALS.with(|locals| {
             let locals = locals.borrow();
             let source = self
@@ -354,7 +399,17 @@ impl Run<'_> {
             let Some(shared) = locals.frames.get(frame) else {
                 return;
             };
-            for (variable, adopted) in self.frame.variables.iter_mut().zip(shared).take(count) {
+            for (at, (variable, adopted)) in self
+                .frame
+                .variables
+                .iter_mut()
+                .zip(shared)
+                .take(count)
+                .enumerate()
+            {
+                if packaged.iter().any(|range| range.contains(&at)) {
+                    continue;
+                }
                 if variable.name == adopted.name {
                     variable.value = adopted.value.clone();
                 }
@@ -380,6 +435,7 @@ impl Run<'_> {
             .as_ref()
             .map(|frame| frame.constructors.clone())
             .unwrap_or_default();
+        let packages = self.inherited_packages();
         let frame = LOCALS.with(|locals| {
             let mut locals = locals.borrow_mut();
             if locals.entries.len() >= MAX_LOCAL_ROUTINES {
@@ -401,6 +457,7 @@ impl Run<'_> {
                 unit,
                 types,
                 constructors,
+                packages,
             }));
             Ok(frame)
         })?;
@@ -442,14 +499,19 @@ impl Run<'_> {
     }
 
     fn declared_type_named(&self, parts: &[String]) -> Option<TypeDeclaration> {
-        let [name] = parts else {
-            return None;
+        let named = |known: &str| match parts {
+            [name] => known == name,
+            [package, name] => known
+                .strip_prefix(package.as_str())
+                .and_then(|rest| rest.strip_prefix('.'))
+                == Some(name.as_str()),
+            _ => false,
         };
         self.plsql
             .types
             .iter()
             .rev()
-            .find(|(known, _)| known == name)
+            .find(|(known, _)| named(known))
             .map(|(_, declared)| declared.clone())
     }
 
@@ -631,7 +693,7 @@ impl Run<'_> {
         else {
             return Err(error);
         };
-        self.cursors.truncate(cursors);
+        self.close_cursors_from(cursors);
         self.failure = None;
         self.handle(handler, error)
     }
@@ -645,6 +707,11 @@ impl Run<'_> {
             _ => None,
         };
         handler.catches_oracle(code, error.declared_exception())
+            || (code.is_some()
+                && handler.conditions.iter().any(|condition| {
+                    matches!(condition, ExceptionCondition::Declared(identity)
+                        if self.package_exception_code(identity) == code)
+                }))
     }
 
     pub(super) fn push_error_variables(&mut self, error: &SqlError) {
@@ -672,11 +739,12 @@ impl Run<'_> {
     pub(super) fn raise_exception(&mut self, raised: &RaisedException) -> SqlResult<Flow> {
         Err(match raised {
             RaisedException::Oracle(code) => raised_oracle(*code),
-            RaisedException::Declared(identity) => {
-                SqlError::new(SqlState::RAISE_EXCEPTION, UNHANDLED_USER_EXCEPTION)
+            RaisedException::Declared(identity) => match self.package_exception_code(identity) {
+                Some(code) => raised_oracle(code),
+                None => SqlError::new(SqlState::RAISE_EXCEPTION, UNHANDLED_USER_EXCEPTION)
                     .with_oracle_code(USER_EXCEPTION_CODE)
-                    .with_declared_exception(identity.clone())
-            }
+                    .with_declared_exception(identity.clone()),
+            },
         })
     }
 

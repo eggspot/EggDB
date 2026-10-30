@@ -138,6 +138,7 @@ pub(crate) fn create_package(
         (package, "CREATE PACKAGE")
     };
     save_package(writer, &name, Some(&package))?;
+    super::with_session(|session| session.discard_package(&name));
     Ok(QueryResult::command(tag))
 }
 
@@ -167,6 +168,7 @@ pub(crate) fn drop_package(
     } else {
         save_package(writer, &name, None)?;
     }
+    super::with_session(|session| session.discard_package(&name));
     Ok(QueryResult::command(tag))
 }
 

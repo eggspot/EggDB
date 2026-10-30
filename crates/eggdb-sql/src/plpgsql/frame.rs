@@ -25,6 +25,7 @@ pub(crate) struct FrameVariable {
     pub(crate) constant: bool,
     pub(crate) not_null: bool,
     pub(crate) alias: Option<usize>,
+    pub(crate) qualified_only: bool,
 }
 
 impl FrameVariable {
@@ -37,6 +38,7 @@ impl FrameVariable {
             constant: false,
             not_null: false,
             alias: None,
+            qualified_only: false,
         }
     }
 
@@ -152,10 +154,15 @@ impl RoutineFrame {
     }
 
     pub(crate) fn index_of(&self, name: &str) -> Option<usize> {
-        self.variables
+        if let Some(index) = self
+            .variables
             .iter()
-            .rposition(|variable| variable.name == name)
-            .map(|index| self.resolved(index))
+            .rposition(|variable| variable.name == name && !variable.qualified_only)
+        {
+            return Some(self.resolved(index));
+        }
+        let (qualifier, rest) = name.rsplit_once('.')?;
+        self.labelled_index(qualifier, rest)
     }
 
     pub(crate) fn labelled_index(&self, label: &str, name: &str) -> Option<usize> {

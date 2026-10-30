@@ -129,31 +129,21 @@ pub(crate) fn invoke(
         }
     };
     let mut run = Run::new(writer, tables, settings, &definition, label);
+    let program = match definition.language {
+        RoutineLanguage::PlPgSql | RoutineLanguage::PlSql => {
+            Some(crate::routines::compiled_program(run.tables, &definition)?)
+        }
+        RoutineLanguage::Sql | RoutineLanguage::Tsql => None,
+    };
     if run.oracle {
         run.attach_local(&definition);
-    }
-    let arguments = run.complete_arguments(call.arguments)?;
-    if definition.strict && arguments.iter().any(|argument| *argument == Value::Null) {
-        return Ok(if definition.returns.is_set() {
-            Returned::Set(Vec::new())
-        } else {
-            Returned::Value(Value::Null)
-        });
-    }
-    run.bind_parameters(arguments);
-    if run.oracle {
-        run.bind_declared_parameters()?;
-    }
-    match definition.language {
-        RoutineLanguage::Sql | RoutineLanguage::Tsql => run.sql_body(),
-        RoutineLanguage::PlPgSql | RoutineLanguage::PlSql => {
-            let program = crate::routines::compiled_program(run.tables, &definition)?;
-            if let Some(trigger) = call.trigger {
-                run.bind_trigger(trigger);
-            }
-            run.program(&program)
+        if let Some(program) = &program {
+            run.attach_packages(program)?;
         }
     }
+    let outcome = run.invoked(call.arguments, call.trigger, program.as_deref());
+    run.share_packages();
+    outcome
 }
 
 pub(crate) fn invoke_read_only(
@@ -211,8 +201,11 @@ pub(crate) fn run_anonymous_block(
     let label = crate::plsql::ANONYMOUS_BLOCK_NAME.to_owned();
     let mut run = Run::new(writer, tables, settings, &definition, label);
     run.unit = Some(plsql::UnitLines::of_anonymous_block(&block.code, block.position));
+    run.attach_packages(&block.program)?;
     run.bind_parameters(Vec::new());
-    run.program(&block.program).map(drop)
+    let outcome = run.program(&block.program).map(drop);
+    run.share_packages();
+    outcome
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,7 +222,8 @@ enum Shape {
     Record,
 }
 
-struct OpenCursor {
+#[derive(Debug)]
+pub(crate) struct OpenCursor {
     name: String,
     names: Vec<String>,
     rows: Vec<Vec<Value>>,
@@ -418,6 +412,34 @@ impl<'r> Run<'r> {
             unit: None,
             plsql: plsql::PlsqlState::default(),
         }
+    }
+
+    fn invoked(
+        &mut self,
+        arguments: Vec<Value>,
+        trigger: Option<TriggerCall>,
+        program: Option<&Program>,
+    ) -> SqlResult<Returned> {
+        let definition = self.definition;
+        let arguments = self.complete_arguments(arguments)?;
+        if definition.strict && arguments.iter().any(|argument| *argument == Value::Null) {
+            return Ok(if definition.returns.is_set() {
+                Returned::Set(Vec::new())
+            } else {
+                Returned::Value(Value::Null)
+            });
+        }
+        self.bind_parameters(arguments);
+        if self.oracle {
+            self.bind_declared_parameters()?;
+        }
+        let Some(program) = program else {
+            return self.sql_body();
+        };
+        if let Some(trigger) = trigger {
+            self.bind_trigger(trigger);
+        }
+        self.program(program)
     }
 
     fn complete_arguments(&mut self, arguments: Vec<Value>) -> SqlResult<Vec<Value>> {
@@ -908,6 +930,14 @@ impl<'r> Run<'r> {
         {
             return Ok(Slot::Typed(*sql_type));
         }
+        if let [package, name] = parts
+            && let Some(index) = self.frame.labelled_index(package, name)
+        {
+            return Ok(match &self.frame.variables[index].slot {
+                Slot::Cursor(_) => Slot::Cursor(None),
+                slot => slot.clone(),
+            });
+        }
         let (relation, column) = match parts {
             [table, column] => (table.clone(), column),
             [schema, table, column] => (crate::schemas::qualified(schema, table), column),
@@ -1364,16 +1394,24 @@ impl<'r> Run<'r> {
         Ok(())
     }
 
-    fn assign(&mut self, target: &Target, value: Value) -> SqlResult<()> {
-        let Some(index) = self.frame.target_index(&target.name) else {
-            return Err(unknown_variable(&target.name));
-        };
-        if !target.path.is_empty()
-            && matches!(self.frame.variables[index].slot, Slot::Collection(_))
-        {
-            return self.assign_collection(index, &target.path, value);
+    fn assigned_variable<'a>(&self, target: &'a Target) -> SqlResult<(usize, &'a [TargetPart])> {
+        if let Some(index) = self.frame.target_index(&target.name) {
+            return Ok((index, target.path.as_slice()));
         }
-        match target.path.as_slice() {
+        if let Some((TargetPart::Field(field), rest)) = target.path.split_first()
+            && let Some(index) = self.frame.labelled_index(&target.name, field)
+        {
+            return Ok((index, rest));
+        }
+        Err(unknown_variable(&target.name))
+    }
+
+    fn assign(&mut self, target: &Target, value: Value) -> SqlResult<()> {
+        let (index, path) = self.assigned_variable(target)?;
+        if !path.is_empty() && matches!(self.frame.variables[index].slot, Slot::Collection(_)) {
+            return self.assign_collection(index, path, value);
+        }
+        match path {
             [] => self.store(index, value),
             [TargetPart::Field(field)] => self.assign_field(index, field, value),
             [TargetPart::Index(subscript)] => {

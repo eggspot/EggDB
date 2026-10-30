@@ -15,10 +15,10 @@ mod tests;
 
 pub(crate) use collections::{CollectionShape, bulk_exceptions_shape, bulk_rowcount_shape};
 pub(crate) use conditions::{condition_name, condition_states};
-pub(crate) use frame::RoutineFrame;
+pub(crate) use frame::{FrameVariable, RoutineFrame};
 pub(crate) use raise::take_raised_notices;
 pub(crate) use run::{
-    Call, Returned, TransactionEnd, TriggerCall, invoke, invoke_read_only, local_program,
+    Call, OpenCursor, Returned, TransactionEnd, TriggerCall, invoke, invoke_read_only, local_program,
     local_routines, run_anonymous_block, run_inline, take_transaction_end,
 };
 pub(crate) use writes::ReadOnlyWrite;
@@ -51,6 +51,7 @@ pub(crate) struct Program {
     pub(crate) variable_conflict: VariableConflict,
     pub(crate) print_strict_params: bool,
     pub(crate) block: Block,
+    pub(crate) package_candidates: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

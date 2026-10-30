@@ -62,6 +62,7 @@ pub(crate) struct PlsqlFrame {
     pub(crate) constructors: Vec<(String, CollectionShape)>,
     pub(crate) bulk_rowcounts: Option<Value>,
     pub(crate) bulk_exceptions: Option<Value>,
+    pub(crate) package_functions: Vec<(String, String)>,
 }
 
 pub(crate) fn oracle_failure(state: SqlState, code: u16) -> SqlError {
@@ -504,6 +505,15 @@ impl RoutineFrame {
             .rev()
             .find(|(known, _)| known == name)
             .map(|(_, shape)| shape)
+    }
+
+    pub(crate) fn package_function(&self, written: &str) -> Option<&str> {
+        self.plsql_frame()?
+            .package_functions
+            .iter()
+            .rev()
+            .find(|(known, _)| known == written)
+            .map(|(_, call)| call.as_str())
     }
 
     pub(crate) fn cursor_attribute(&self, name: &str, attribute: &str) -> Option<SqlResult<Value>> {

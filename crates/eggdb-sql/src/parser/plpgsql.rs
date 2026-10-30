@@ -291,6 +291,7 @@ impl<'t> Compiler<'t, '_> {
             variable_conflict,
             print_strict_params,
             block,
+            package_candidates: Vec::new(),
         })
     }
 

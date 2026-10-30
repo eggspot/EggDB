@@ -1,4 +1,7 @@
-use crate::error::{SqlError, SqlState};
+use super::CompiledPackage;
+use crate::error::{SqlError, SqlResult, SqlState};
+use crate::plpgsql::{FrameVariable, OpenCursor};
+use crate::types::Value;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -8,12 +11,101 @@ pub(crate) const UNLIMITED_OUTPUT_BUFFER_BYTES: usize = 1 << 20;
 const MIN_OUTPUT_BUFFER_BYTES: usize = 2_000;
 const MAX_OUTPUT_LINE_BYTES: usize = 32_767;
 const PACKAGE_ERROR_CODE: u16 = 20_000;
+const MAX_PACKAGE_INSTANCES: usize = 1_000;
 
 pub(crate) type SharedPlsqlSession = Arc<Mutex<PlsqlSession>>;
 
 #[derive(Debug, Default)]
 pub(crate) struct PlsqlSession {
     pub(crate) output: ServerOutput,
+    packages: Vec<PackageInstance>,
+    generations: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct PackageInstance {
+    compiled: Arc<CompiledPackage>,
+    generation: u64,
+    public: usize,
+    pub(crate) variables: Vec<FrameVariable>,
+    pub(crate) cursors: Vec<OpenCursor>,
+}
+
+pub(crate) struct PackageShells {
+    pub(crate) generation: u64,
+    pub(crate) variables: Vec<FrameVariable>,
+    pub(crate) public: usize,
+}
+
+pub(crate) fn variable_shell(variable: &FrameVariable) -> FrameVariable {
+    let mut shell = FrameVariable::new(variable.name.clone(), variable.slot.clone(), Value::Null);
+    shell.constant = variable.constant;
+    shell.not_null = variable.not_null;
+    shell
+}
+
+fn too_many_packages() -> SqlError {
+    SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        "too many PL/SQL packages are in use in this session",
+    )
+    .with_hint(format!(
+        "EggDB keeps the state of at most {MAX_PACKAGE_INSTANCES} packages per session."
+    ))
+}
+
+impl PlsqlSession {
+    pub(crate) fn package_shells(&mut self, compiled: &Arc<CompiledPackage>) -> Option<PackageShells> {
+        let at = self
+            .packages
+            .iter()
+            .position(|instance| instance.compiled.name == compiled.name)?;
+        if !Arc::ptr_eq(&self.packages[at].compiled, compiled) {
+            if self.packages[at].compiled.stored != compiled.stored {
+                self.packages.remove(at);
+                return None;
+            }
+            self.packages[at].compiled = Arc::clone(compiled);
+        }
+        let instance = &self.packages[at];
+        Some(PackageShells {
+            generation: instance.generation,
+            variables: instance.variables.iter().map(variable_shell).collect(),
+            public: instance.public,
+        })
+    }
+
+    pub(crate) fn install_package(
+        &mut self,
+        compiled: Arc<CompiledPackage>,
+        variables: Vec<FrameVariable>,
+        public: usize,
+    ) -> SqlResult<u64> {
+        self.discard_package(&compiled.name);
+        if self.packages.len() >= MAX_PACKAGE_INSTANCES {
+            return Err(too_many_packages());
+        }
+        self.generations += 1;
+        self.packages.push(PackageInstance {
+            compiled,
+            generation: self.generations,
+            public,
+            variables,
+            cursors: Vec::new(),
+        });
+        Ok(self.generations)
+    }
+
+    pub(crate) fn discard_package(&mut self, name: &str) {
+        self.packages
+            .retain(|instance| instance.compiled.name != name);
+    }
+
+    pub(crate) fn instance_mut(&mut self, name: &str, generation: u64) -> Option<&mut PackageInstance> {
+        self.packages
+            .iter_mut()
+            .find(|instance| instance.generation == generation && instance.compiled.name == name)
+    }
 }
 
 #[derive(Debug, Default)]

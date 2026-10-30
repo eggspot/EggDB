@@ -1,3 +1,4 @@
+mod compiled_packages;
 mod exceptions;
 mod packages;
 mod session_state;
@@ -13,10 +14,17 @@ mod ddl_tests;
 #[cfg(test)]
 mod output_tests;
 #[cfg(test)]
+mod package_tests;
+#[cfg(test)]
 mod run_tests;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use compiled_packages::{
+    CompiledPackage, PackageCache, compiled_package, current_package_routines,
+    enter_package_scope, leave_package_scope, member_program, package_member_routines,
+    resolve_compiled_package,
+};
 pub(crate) use exceptions::{
     APPLICATION_ERROR_HIGHEST, APPLICATION_ERROR_LOWEST, NORMAL_COMPLETION, NO_DATA_FOUND_CODE,
     PredefinedException, USER_EXCEPTION_CODE, USER_EXCEPTION_MESSAGE, application_error_code,
@@ -27,13 +35,14 @@ pub(crate) use packages::{
     stored_package,
 };
 pub(crate) use session_state::{
-    DEFAULT_OUTPUT_BUFFER_BYTES, ServerOutput, SharedPlsqlSession, enter_session, with_session,
+    DEFAULT_OUTPUT_BUFFER_BYTES, ServerOutput, SharedPlsqlSession, enter_session, variable_shell,
+    with_session,
 };
 
 use crate::ast::Name;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::lexer::{swap_uniform_case, tokenize_in};
+use crate::lexer::{Token, TokenKind, swap_uniform_case, tokenize_in};
 use crate::plpgsql::{Block, Program, is_trigger_function};
 use crate::routines::{
     RoutineDefinition, RoutineKind, RoutineLanguage, RoutineParameter, RoutineReturns, Volatility,
@@ -44,6 +53,8 @@ use crate::types::SqlType;
 pub(crate) const COMPILATION_ERROR_CODE: u16 = 6550;
 pub(crate) const ANONYMOUS_BLOCK_NAME: &str = "anonymous block";
 pub(crate) const REF_CURSOR_TYPE: &str = "sys_refcursor";
+const MAX_PACKAGE_CANDIDATES: usize = 256;
+const NOT_PACKAGES: [&str; 3] = ["dbms_output", "standard", "sys"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DeclaredType {
@@ -206,8 +217,36 @@ pub(crate) fn compile(definition: &RoutineDefinition) -> SqlResult<Program> {
     let tokens =
         tokenize_in(body, Dialect::Oracle).map_err(|error| compilation_error(body, error))?;
     let trigger = is_trigger_function(definition).then(TriggerRecords::default);
-    crate::parser::plsql_program(body, &tokens, definition, trigger.as_ref())
-        .map_err(|error| compilation_error(body, error))
+    let mut program = crate::parser::plsql_program(body, &tokens, definition, trigger.as_ref())
+        .map_err(|error| compilation_error(body, error))?;
+    program.package_candidates = package_candidates(&tokens);
+    Ok(program)
+}
+
+pub(crate) fn package_candidates(tokens: &[Token<'_>]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for (at, window) in tokens.windows(3).enumerate() {
+        let [first, dot, second] = window else {
+            continue;
+        };
+        let TokenKind::Word(word) = &first.kind else {
+            continue;
+        };
+        let follows_dot = at > 0 && tokens[at - 1].kind == TokenKind::Dot;
+        if dot.kind != TokenKind::Dot
+            || !matches!(second.kind, TokenKind::Word(_))
+            || follows_dot
+            || NOT_PACKAGES.contains(&&**word)
+            || found.iter().any(|known| known.as_str() == &**word)
+        {
+            continue;
+        }
+        if found.len() >= MAX_PACKAGE_CANDIDATES {
+            break;
+        }
+        found.push(word.to_string());
+    }
+    found
 }
 
 pub(crate) fn compile_package(text: &str, spec: Option<&Block>) -> SqlResult<PlsqlPackage> {

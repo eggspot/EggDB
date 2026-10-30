@@ -257,6 +257,7 @@ pub(crate) struct RoutineCache {
     entries: HashMap<String, CachedRoutines>,
     programs: Vec<(Arc<RoutineDefinition>, Arc<crate::plpgsql::Program>)>,
     tsql_programs: Vec<(Arc<RoutineDefinition>, Arc<crate::tsql::Program>)>,
+    pub(crate) packages: crate::plsql::PackageCache,
 }
 
 struct CachedRoutines {
@@ -335,6 +336,9 @@ pub(crate) fn compiled_program(
     if let Some(program) = crate::plpgsql::local_program(definition) {
         return Ok(program);
     }
+    if let Some(program) = crate::plsql::member_program(tables, definition) {
+        return Ok(program);
+    }
     let programs = &mut tables.routines.programs;
     if let Some((_, program)) = programs
         .iter()
@@ -378,9 +382,15 @@ pub(crate) fn resolve(
     if let Some(local) = crate::plpgsql::local_routines(name) {
         return Ok(Some(local));
     }
+    if let Some(members) = crate::plsql::current_package_routines(reader, tables, name)? {
+        return Ok(Some(members));
+    }
     let plain = normalized(name);
     if is_qualified(plain) || plain.len() != name.len() {
-        return of_name(reader, tables, plain);
+        if let Some(found) = of_name(reader, tables, plain)? {
+            return Ok(Some(found));
+        }
+        return crate::plsql::package_member_routines(reader, tables, plain);
     }
     for schema in crate::schemas::relation_path(reader)? {
         if let Some(found) = of_name(reader, tables, &qualified(&schema, name))? {

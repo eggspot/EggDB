@@ -3835,6 +3835,17 @@ impl<'t> Parser<'t> {
                     position: first.position,
                 });
             }
+            if self.oracle() && self.peek_kind() == &TokenKind::LeftParen {
+                let qualifier = if swap_uniform_case(&first.text) == self.oracle_user() {
+                    self.oracle_user_schema()
+                } else {
+                    first.text
+                };
+                return self.function(Name {
+                    text: crate::schemas::written_qualified(&qualifier, &column.text),
+                    position: first.position,
+                });
+            }
             if self.peek_kind() == &TokenKind::Dot || self.peek_kind() == &TokenKind::LeftParen {
                 return Err(self.not_supported("names with more than two parts"));
             }

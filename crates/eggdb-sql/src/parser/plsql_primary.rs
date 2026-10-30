@@ -8,6 +8,10 @@ use crate::types::{Conversion, SqlType, Value, convert};
 
 const METHODS_WITH_ARGUMENT: [&str; 3] = ["next", "prior", "exists"];
 
+fn parameterless_call(call: &str, position: usize) -> Expr {
+    crate::routines::marked_call(call.to_owned(), Vec::new(), Vec::new(), position)
+}
+
 fn constant(value: Value, position: usize) -> Expr {
     Expr {
         kind: ExprKind::Constant {
@@ -40,6 +44,19 @@ impl<'t> Parser<'t> {
         if matches!(self.peek_kind_at(1), TokenKind::Operator("%")) {
             return self.attribute_primary(frame, word, position);
         }
+        if self.peek_kind_at(1) == &TokenKind::Dot
+            && let TokenKind::Word(second) = self.peek_kind_at(2)
+            && let Some(expr) = self.dotted_primary(frame, word, second.as_ref(), position)?
+        {
+            return Ok(Some(expr));
+        }
+        if !matches!(self.peek_kind_at(1), TokenKind::LeftParen | TokenKind::Dot)
+            && frame.index_of(word).is_none()
+            && let Some(call) = frame.package_function(word)
+        {
+            self.at += 1;
+            return Ok(Some(parameterless_call(call, position)));
+        }
         if let Some((shape, value)) = frame.collection(word) {
             if !matches!(self.peek_kind_at(1), TokenKind::LeftParen | TokenKind::Dot) {
                 return Ok(None);
@@ -67,6 +84,49 @@ impl<'t> Parser<'t> {
             return Ok(None);
         };
         self.at += 2;
+        self.constructed(shape, position).map(Some)
+    }
+
+    fn dotted_primary(
+        &mut self,
+        frame: &'t RoutineFrame,
+        qualifier: &str,
+        name: &str,
+        position: usize,
+    ) -> SqlResult<Option<Expr>> {
+        let dotted = format!("{qualifier}.{name}");
+        if frame.labelled_index(qualifier, name).is_some() {
+            if matches!(self.peek_kind_at(3), TokenKind::Operator("%"))
+                && let TokenKind::Word(attribute) = self.peek_kind_at(4)
+                && let Some(value) = frame.cursor_attribute(&dotted, attribute)
+            {
+                let value = value.map_err(|error| error.at(position))?;
+                self.at += 5;
+                return Ok(Some(constant(value, position)));
+            }
+            if let Some((shape, value)) = frame.collection(&dotted)
+                && matches!(self.peek_kind_at(3), TokenKind::LeftParen | TokenKind::Dot)
+            {
+                self.at += 3;
+                return self.collection_rest(shape, value, position).map(Some);
+            }
+            return Ok(None);
+        }
+        if self.peek_kind_at(3) == &TokenKind::LeftParen {
+            let Some(shape) = frame.constructor(&dotted) else {
+                return Ok(None);
+            };
+            self.at += 4;
+            return self.constructed(shape, position).map(Some);
+        }
+        let Some(call) = frame.package_function(&dotted) else {
+            return Ok(None);
+        };
+        self.at += 3;
+        Ok(Some(parameterless_call(call, position)))
+    }
+
+    fn constructed(&mut self, shape: &CollectionShape, position: usize) -> SqlResult<Expr> {
         let mut elements = Vec::new();
         if !self.take(&TokenKind::RightParen) {
             loop {
@@ -80,7 +140,7 @@ impl<'t> Parser<'t> {
         let value = shape
             .construct(elements)
             .map_err(|error| error.at(position))?;
-        Ok(Some(constant(value, position)))
+        Ok(constant(value, position))
     }
 
     fn attribute_primary(

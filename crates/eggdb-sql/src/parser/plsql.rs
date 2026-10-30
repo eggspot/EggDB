@@ -308,6 +308,7 @@ fn program_of(block: Block) -> Program {
         variable_conflict: VariableConflict::UseColumn,
         print_strict_params: false,
         block,
+        package_candidates: Vec::new(),
     }
 }
 
@@ -381,8 +382,12 @@ impl<'t> Parser<'t> {
 
     pub(crate) fn plsql_anonymous_block(&mut self) -> SqlResult<(Program, String)> {
         let start = self.position();
+        let first = self.at;
         let program = Compiler::new(self, None, false).anonymous_block();
-        let program = program.map_err(|error| self.plsql_compilation_error(start, error))?;
+        let mut program =
+            program.map_err(|error| self.plsql_compilation_error(start, error))?;
+        program.package_candidates =
+            crate::plsql::package_candidates(self.tokens.get(first..self.at).unwrap_or_default());
         Ok((program, self.slice(start, self.previous_end())))
     }
 }
