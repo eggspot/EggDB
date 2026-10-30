@@ -144,6 +144,20 @@ impl<'a> Resolver<'a> {
         if crate::temp_tables::is_temp_table(name) {
             return Ok(None);
         }
+        if self.view_paths.is_empty() && crate::temporary::active() {
+            let temporary = crate::temporary::internal_name(name);
+            if self
+                .reader
+                .get(&crate::encoding::table_key(&temporary))?
+                .is_some()
+                || self
+                    .reader
+                    .get(&crate::encoding::sequence_key(&temporary))?
+                    .is_some()
+            {
+                return Ok(Some(temporary));
+            }
+        }
         let path: &[String] = self.view_paths.last().unwrap_or(&self.base_path);
         if schemas::is_default_path(path) {
             return Ok(None);
@@ -189,7 +203,9 @@ impl<'a> Resolver<'a> {
             return Err(crate::pg_catalog::read_only(relation.name()).at(reference.name.position));
         }
         let resolved = self.resolve_name(&reference.name.text)?;
-        if is_qualified(&reference.name.text) && reference.alias.is_none() {
+        if (is_qualified(&reference.name.text) || crate::temporary::is_temporary_name(&resolved))
+            && reference.alias.is_none()
+        {
             reference.alias = Some(base_name(&resolved).to_owned());
         }
         reference.name.text = resolved;
@@ -393,7 +409,9 @@ impl<'a> Resolver<'a> {
         if let Some(resolved) = self.resolved_name(&reference.name.text)? {
             reference.name.text = resolved;
         }
-        if written_qualified && reference.alias.is_none() {
+        if (written_qualified || crate::temporary::is_temporary_name(&reference.name.text))
+            && reference.alias.is_none()
+        {
             reference.alias = Some(base_name(&reference.name.text).to_owned());
         }
         let relation = self.tables.relation(self.reader, &reference.name.text)?;
@@ -910,7 +928,25 @@ impl Binding<'_> {
         tables: &mut TableCache,
         create: &mut CreateTable,
     ) -> SqlResult<()> {
-        create.name.text = schemas::creation_name(reader, &create.name)?;
+        let temporary = create.temporary.is_some()
+            || crate::temporary::is_sqlserver_temporary(&create.name.text);
+        if temporary {
+            if is_qualified(&create.name.text)
+                && !crate::temporary::is_temporary_name(&create.name.text)
+            {
+                return Err(SqlError::new(
+                    SqlState::INVALID_TABLE_DEFINITION,
+                    "cannot create temporary relation in non-temporary schema",
+                )
+                .at(create.name.position));
+            }
+            create.name.text = crate::temporary::internal_name(base_name(&create.name.text));
+        } else {
+            create.name.text = schemas::creation_name(reader, &create.name)?;
+        }
+        if crate::temporary::is_temporary_name(&create.name.text) && create.temporary.is_none() {
+            create.temporary = Some(crate::ast::OnCommit::PreserveRows);
+        }
         let mut resolver = self.resolver(reader, tables)?;
         for spec in create
             .columns

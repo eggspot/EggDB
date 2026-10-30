@@ -7,8 +7,8 @@ use crate::error::SqlResult;
 use crate::types::SqlType;
 
 const SCHEMA_SPACE: u8 = 0x07;
-const DEPENDENCY_SPACE: u8 = 0x08;
-const COMMENT_SPACE: u8 = 0x09;
+pub(super) const DEPENDENCY_SPACE: u8 = 0x08;
+pub(super) const COMMENT_SPACE: u8 = 0x09;
 const RECORD_VERSION: u8 = 1;
 const NO_TYPE: u8 = 0;
 const WILDCARD_FLAG: u8 = 1;

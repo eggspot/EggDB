@@ -96,6 +96,7 @@ mod subquery;
 mod table_variables;
 mod temp_tables;
 mod temporal;
+mod temporary;
 mod tsql;
 mod types;
 mod typing;
@@ -145,7 +146,13 @@ mod subquery_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod lateral_tests;
+#[cfg(test)]
+mod view_change_tests;
+#[cfg(test)]
 mod window_tests;
+#[cfg(test)]
+mod with_statement_tests;
 
 pub use arrays::{ArrayElement, ArrayValue};
 pub use bulk_load::{BcpCharacterReader, BcpTerminators, BulkRows};

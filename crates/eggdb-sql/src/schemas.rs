@@ -228,7 +228,7 @@ fn split_list(setting: &str) -> Vec<&str> {
 }
 
 pub(crate) fn schema_exists(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
-    if name == DEFAULT_SCHEMA {
+    if name == DEFAULT_SCHEMA || name == crate::temporary::SCHEMA {
         return Ok(true);
     }
     if name.is_empty() || name.contains(QUALIFIER) {

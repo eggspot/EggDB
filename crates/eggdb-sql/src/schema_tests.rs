@@ -350,7 +350,7 @@ fn schema_names_are_postgresql_only() {
     assert!(run(&mut mysql, "SELECT current_schemas(true)").is_err());
     assert!(run(&mut mysql, "SELECT set_config('a.b', 'c', false)").is_err());
     let mut sqlite = Session::with_dialect(&store, Dialect::Sqlite);
-    assert_eq!(code(&mut sqlite, "SELECT * FROM temp.t"), "0A000");
+    assert_eq!(code(&mut sqlite, "SELECT * FROM temp.t"), "42P01");
     assert!(run(&mut sqlite, "CREATE SCHEMA s").is_err());
 }
 
@@ -433,10 +433,8 @@ fn sqlite_views_follow_sqlite() {
         fails(&mut session, "SELECT * FROM v").message(),
         "no such table: v"
     );
-    assert_eq!(
-        code(&mut session, "CREATE VIEW temp.w AS SELECT 1"),
-        "0A000"
-    );
+    assert_eq!(last(&mut session, "CREATE VIEW temp.w AS SELECT 1 AS one"), "CREATE VIEW");
+    assert_eq!(last(&mut session, "SELECT one FROM w"), "one\n1\nSELECT 1");
 }
 
 #[test]

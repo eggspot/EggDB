@@ -224,7 +224,6 @@ impl<'t> Parser<'t> {
         let text = self.text.get(first..last).unwrap_or("").to_owned();
         let mut check_option = None;
         if self.is_word("with") {
-            let position = self.position();
             self.at += 1;
             if self.oracle() && self.take_word("read") {
                 self.expect_word("only")?;
@@ -240,12 +239,6 @@ impl<'t> Parser<'t> {
                 }
                 if self.oracle() && self.take_word("constraint") {
                     self.name()?;
-                }
-                if temporary {
-                    return Err(SqlError::not_supported(
-                        "WITH CHECK OPTION on a temporary view is not supported yet",
-                    )
-                    .at(position));
                 }
                 check_option = Some(if local {
                     crate::encoding::CheckOption::Local

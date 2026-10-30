@@ -60,14 +60,6 @@ impl<'t> Lexer<'t> {
             b'"' => self.delimited_sqlserver_identifier(b'"'),
             b'[' => self.delimited_sqlserver_identifier(b']'),
             b'@' => self.sqlserver_variable(),
-            b'#' => {
-                let start = self.at;
-                let _ = self.sqlserver_word();
-                Err(SqlError::not_supported(
-                    "temporary tables (#name) are not supported in this version of EggDB",
-                )
-                .at(start))
-            }
             _ if is_sqlserver_identifier_start(byte) => self.sqlserver_word(),
             _ => {
                 let rest = &self.text[self.at..];

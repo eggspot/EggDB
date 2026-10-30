@@ -369,6 +369,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     set_error: Option<u32>,
     save_points: Vec<String>,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
+    temporary: crate::temporary::TemporaryObjects,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -428,6 +429,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             advisory_locks: crate::advisory_locks::AdvisoryLocks::new(
                 std::ptr::from_ref(store).addr(),
             ),
+            temporary: crate::temporary::TemporaryObjects::default(),
         }
     }
 
@@ -703,11 +705,22 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             return Ok(());
         }
         let ended = match std::mem::replace(&mut self.block, Block::None) {
-            Block::Writing(writer) if commit => writer.commit().map(|()| {
-                self.pending_sequences.clear();
-                sequences::mark_changes_committed();
-            }),
-            Block::Writing(writer) => writer.rollback(),
+            Block::Writing(writer) if commit => match writer.commit() {
+                Ok(()) => {
+                    self.temporary.commit();
+                    self.pending_sequences.clear();
+                    sequences::mark_changes_committed();
+                    Ok(())
+                }
+                Err(error) => {
+                    self.temporary.rollback();
+                    Err(error)
+                }
+            },
+            Block::Writing(writer) => {
+                self.temporary.rollback();
+                writer.rollback()
+            }
             Block::Reading(_) | Block::Failed | Block::None => Ok(()),
         };
         let settled = self.settle_sequences();
@@ -753,6 +766,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 }
                 self.reset_all_settings();
                 sequences::discard_session_values();
+                self.temporary.discard();
+                self.temporary.commit();
                 Ok(QueryResult::command("DISCARD ALL"))
             }
             DiscardTarget::Plans => Ok(QueryResult::command("DISCARD PLANS")),
@@ -760,7 +775,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 sequences::discard_session_values();
                 Ok(QueryResult::command("DISCARD SEQUENCES"))
             }
-            DiscardTarget::Temporary => Ok(QueryResult::command("DISCARD TEMP")),
+            DiscardTarget::Temporary => {
+                self.temporary.discard();
+                if !self.in_block() {
+                    self.temporary.commit();
+                }
+                Ok(QueryResult::command("DISCARD TEMP"))
+            }
         }
     }
 
@@ -1492,8 +1513,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         Ok(QueryResult::command("ALTER SESSION"))
     }
 
-    fn enter_search_path(&self, settings: &Arc<Settings>) -> crate::schemas::EnteredPath {
-        crate::schemas::enter(settings, self.dialect, &self.search_path_cache)
+    fn enter_search_path(
+        &self,
+        settings: &Arc<Settings>,
+    ) -> (crate::schemas::EnteredPath, crate::temporary::Entered) {
+        (
+            crate::schemas::enter(settings, self.dialect, &self.search_path_cache),
+            crate::temporary::enter(self.temporary.has_objects()),
+        )
     }
 
     fn apply_setting_changes(
@@ -1550,9 +1577,26 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 ),
             )
         })?;
-        match sequences::reapply(&mut writer, &pending) {
-            Ok(()) => writer.commit(),
+        let reapplied = sequences::reapply(
+            &mut crate::temporary::TemporaryWrite {
+                inner: &mut writer,
+                objects: &mut self.temporary,
+            },
+            &pending,
+        );
+        match reapplied {
+            Ok(()) => match writer.commit() {
+                Ok(()) => {
+                    self.temporary.commit();
+                    Ok(())
+                }
+                Err(error) => {
+                    self.temporary.rollback();
+                    Err(error)
+                }
+            },
             Err(error) => {
+                self.temporary.rollback();
                 let _ = writer.rollback();
                 Err(error)
             }
@@ -1605,7 +1649,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     pub fn close(mut self) -> SqlResult<bool> {
         let was_open = self.in_block();
         match std::mem::replace(&mut self.block, Block::None) {
-            Block::Writing(writer) => writer.rollback()?,
+            Block::Writing(writer) => {
+                self.temporary.rollback();
+                writer.rollback()?;
+            }
             Block::Reading(_) | Block::Failed | Block::None => {}
         }
         self.settle_sequences()?;
@@ -1615,6 +1662,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     fn fail_block(&mut self) {
         if let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None) {
             let _ = writer.rollback();
+            self.temporary.rollback();
             self.block = Block::Failed;
         } else if let Block::Reading(_) = self.block {
             self.block = Block::Failed;
@@ -1961,6 +2009,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 && insert.rollback_on_conflict
                 && let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None)
             {
+                self.temporary.rollback();
                 writer.rollback()?;
             }
         }
@@ -2045,12 +2094,31 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         body: impl FnOnce(&dyn crate::store::KeyValueRead, &mut TableCache) -> SqlResult<T>,
     ) -> SqlResult<T> {
         let tables = &mut self.tables;
+        let objects = &self.temporary;
         match &self.block {
-            Block::Writing(writer) => body(writer, tables),
-            Block::Reading(reader) => body(reader, tables),
+            Block::Writing(writer) => body(
+                &crate::temporary::TemporaryRead {
+                    inner: writer,
+                    objects,
+                },
+                tables,
+            ),
+            Block::Reading(reader) => body(
+                &crate::temporary::TemporaryRead {
+                    inner: reader,
+                    objects,
+                },
+                tables,
+            ),
             Block::None | Block::Failed => {
                 let reader = self.store.begin_read()?;
-                body(&reader, tables)
+                body(
+                    &crate::temporary::TemporaryRead {
+                        inner: &reader,
+                        objects,
+                    },
+                    tables,
+                )
             }
         }
     }
@@ -2072,10 +2140,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let keeps_ddl_open = self.sqlserver();
         let implicit = self.implicit_transaction;
         let tables = &mut self.tables;
+        let objects = &mut self.temporary;
         match &mut self.block {
             Block::Writing(writer) if self.dialect != Dialect::PostgreSql => {
-                let mut tracked = TrackedWrite {
+                let mut routed = crate::temporary::TemporaryWrite {
                     inner: writer,
+                    objects,
+                };
+                let mut tracked = TrackedWrite {
+                    inner: &mut routed,
                     wrote: false,
                 };
                 let result = body(&mut tracked, tables);
@@ -2085,10 +2158,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     && let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None)
                 {
                     let _ = writer.rollback();
+                    self.temporary.rollback();
                 }
                 result
             }
-            Block::Writing(writer) => body(writer, tables),
+            Block::Writing(writer) => body(
+                &mut crate::temporary::TemporaryWrite {
+                    inner: writer,
+                    objects,
+                },
+                tables,
+            ),
             Block::Reading(_) => Err(SqlError::new(
                 SqlState::READ_ONLY_SQL_TRANSACTION,
                 format!("cannot execute {command} in a read-only transaction"),
@@ -2098,7 +2178,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     .store
                     .begin_write()
                     .map_err(|error| read_only_refusal(error, command))?;
-                match body(&mut writer, tables) {
+                let outcome = body(
+                    &mut crate::temporary::TemporaryWrite {
+                        inner: &mut writer,
+                        objects,
+                    },
+                    tables,
+                );
+                match outcome {
                     Ok(result)
                         if keep_open
                             && (keeps_ddl_open
@@ -2132,12 +2219,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         Ok(result)
                     }
                     Ok(result) => {
-                        writer.commit()?;
+                        if let Err(error) = writer.commit() {
+                            self.temporary.rollback();
+                            return Err(error);
+                        }
+                        self.temporary.commit();
                         sequences::mark_changes_committed();
                         Ok(result)
                     }
                     Err(error) => {
                         let _ = writer.rollback();
+                        self.temporary.rollback();
                         Err(error)
                     }
                 }
@@ -2201,7 +2293,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.search_path_at_begin = None;
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
-                writer.commit()?;
+                if let Err(error) = writer.commit() {
+                    self.temporary.rollback();
+                    return Err(error);
+                }
+                self.temporary.commit();
                 self.pending_sequences.clear();
                 sequences::mark_changes_committed();
                 let committed = QueryResult::command("COMMIT");
@@ -2227,6 +2323,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.restore_search_path();
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
+                self.temporary.rollback();
                 writer.rollback()?;
                 let rolled_back = QueryResult::command("ROLLBACK");
                 Ok(if implicit && self.dialect == Dialect::PostgreSql {

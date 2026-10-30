@@ -702,10 +702,10 @@ impl<'t> Parser<'t> {
             self.at += 1;
             let table = self.name()?;
             if name.text == "temp" {
-                return Err(SqlError::not_supported(
-                    "the temp schema is not supported yet: EggDB has no temporary tables",
-                )
-                .at(name.position));
+                return Ok(Name {
+                    text: crate::temporary::internal_name(&table.text),
+                    position: name.position,
+                });
             }
             if name.text != "main" {
                 return Err(SqlError::new(
@@ -1351,6 +1351,23 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("unlogged") && self.is_word_at(1, "table") {
             self.at += 1;
         }
+        if self.postgresql()
+            && (self.is_word("local") || self.is_word("global"))
+            && (self.is_word_at(1, "temp") || self.is_word_at(1, "temporary"))
+        {
+            self.at += 1;
+        }
+        let mut temporary = None;
+        if (self.postgresql() || self.sqlite() || self.mysql())
+            && (self.is_word("temp") || self.is_word("temporary"))
+            && self.is_word_at(1, "table")
+        {
+            self.at += 1;
+            temporary = Some(crate::ast::OnCommit::PreserveRows);
+        }
+        if self.oracle() && self.is_word("global") && self.is_word_at(1, "temporary") {
+            return Err(self.not_supported("CREATE GLOBAL TEMPORARY TABLE"));
+        }
         if self.is_word("temp") || self.is_word("temporary") || self.is_word("unlogged") {
             return Err(self.not_supported("CREATE TEMPORARY or UNLOGGED TABLE"));
         }
@@ -1481,11 +1498,37 @@ impl<'t> Parser<'t> {
         if self.oracle() {
             self.skip_physical_properties()?;
         }
+        if self.postgresql() && self.is_word("on") && self.is_word_at(1, "commit") {
+            let position = self.position();
+            self.at += 2;
+            let action = if self.take_word("preserve") {
+                self.expect_word("rows")?;
+                crate::ast::OnCommit::PreserveRows
+            } else if self.take_word("delete") {
+                self.expect_word("rows")?;
+                crate::ast::OnCommit::DeleteRows
+            } else {
+                self.expect_word("drop")?;
+                crate::ast::OnCommit::Drop
+            };
+            if temporary.is_none() {
+                return Err(SqlError::new(
+                    SqlState::INVALID_TABLE_DEFINITION,
+                    "ON COMMIT can only be used on temporary tables",
+                )
+                .at(position));
+            }
+            temporary = Some(action);
+        }
+        if self.sqlserver() && crate::temporary::is_sqlserver_temporary(&name.text) {
+            temporary = Some(crate::ast::OnCommit::PreserveRows);
+        }
         if self.is_word("partition") || self.is_word("inherits") || self.is_word("with") {
             return Err(self.not_supported("table options"));
         }
         Ok(Statement::CreateTable(CreateTable {
             name,
+            temporary,
             if_not_exists,
             columns,
             primary_key,
@@ -2092,6 +2135,11 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("sequence") {
             return self.drop_sequence();
         }
+        let only_temporary =
+            self.mysql() && self.is_word("temporary") && self.is_word_at(1, "table");
+        if only_temporary {
+            self.at += 1;
+        }
         if !self.take_word("table") {
             return match self.peek_kind() {
                 TokenKind::Word(word) => {
@@ -2109,6 +2157,11 @@ impl<'t> Parser<'t> {
         let mut names = vec![self.table_name()?];
         while self.take(&TokenKind::Comma) {
             names.push(self.table_name()?);
+        }
+        if only_temporary {
+            for name in &mut names {
+                name.text = crate::temporary::internal_name(&name.text);
+            }
         }
         let cascade = !self.sqlite() && self.take_word("cascade");
         if !cascade {

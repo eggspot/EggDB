@@ -281,16 +281,22 @@ pub(crate) fn create_table(
         )
         .at(create.name.position));
     }
-    let next_id = match writer.get(&meta_key())? {
-        Some(bytes) => decode_meta(&bytes)?,
-        None => 1,
+    let temporary = crate::temporary::is_temporary_name(&create.name.text);
+    let (next_id, following) = if temporary {
+        (crate::temporary::next_id(writer)?, None)
+    } else {
+        let next_id = match writer.get(&meta_key())? {
+            Some(bytes) => decode_meta(&bytes)?,
+            None => 1,
+        };
+        let following = next_id.checked_add(1).ok_or_else(|| {
+            SqlError::new(
+                SqlState::PROGRAM_LIMIT_EXCEEDED,
+                "the database has used every table identifier",
+            )
+        })?;
+        (next_id, Some(following))
     };
-    let following = next_id.checked_add(1).ok_or_else(|| {
-        SqlError::new(
-            SqlState::PROGRAM_LIMIT_EXCEEDED,
-            "the database has used every table identifier",
-        )
-    })?;
     let mut table = TableDefinition {
         id: next_id,
         name: create.name.text.clone(),
@@ -351,10 +357,32 @@ pub(crate) fn create_table(
         }
     }
     for (spec, key) in foreign_keys {
+        if temporary != crate::temporary::is_temporary_name(&key.parent.text) {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                if temporary {
+                    "constraints on temporary tables may reference only temporary tables"
+                } else {
+                    "constraints on permanent tables may reference only permanent tables"
+                },
+            )
+            .at(spec.position));
+        }
         constraints::define_foreign_key(writer, tables, &mut table, spec, key, dialect)?;
     }
     table.referenced = !constraints::referencing_tables(writer, &table.name)?.is_empty();
-    writer.put(&meta_key(), &encode_meta(following))?;
+    if let Some(following) = following {
+        writer.put(&meta_key(), &encode_meta(following))?;
+    }
+    if temporary {
+        crate::temporary::record_action(
+            writer,
+            &table.name,
+            create
+                .temporary
+                .unwrap_or(crate::ast::OnCommit::PreserveRows),
+        )?;
+    }
     crate::comments::forget_owner(writer, &table.name)?;
     crate::comments::store_created(writer, &table.name, create)?;
     writer.put(&table_key(&table.name), &table.encode())?;

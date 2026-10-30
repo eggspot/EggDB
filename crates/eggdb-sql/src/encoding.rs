@@ -102,6 +102,65 @@ pub(crate) fn index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
     key
 }
 
+const TEMPORARY_ACTION_SPACE: u8 = 0x0F;
+
+pub(crate) fn temporary_action_key(name: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(TEMPORARY_ACTION_SPACE);
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+pub(crate) fn temporary_actions_prefix() -> Vec<u8> {
+    temporary_action_key("")
+}
+
+fn split_length_prefixed(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut length = 0u64;
+    for (at, byte) in bytes.iter().enumerate().take(10) {
+        length |= u64::from(byte & 0x7F) << (7 * at);
+        if byte & 0x80 == 0 {
+            let start = at + 1;
+            let end = start.checked_add(usize::try_from(length).ok()?)?;
+            return Some((bytes.get(start..end)?, bytes.get(end..)?));
+        }
+    }
+    None
+}
+
+fn names_temporary_object(name: &[u8]) -> bool {
+    std::str::from_utf8(name).is_ok_and(crate::temporary::is_temporary_name)
+}
+
+fn has_temporary_id(rest: &[u8]) -> bool {
+    rest.get(..4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .is_some_and(|bytes| crate::temporary::is_temporary_id(u32::from_be_bytes(bytes)))
+}
+
+pub(crate) fn is_temporary_key(key: &[u8]) -> bool {
+    let Some(rest) = key.strip_prefix(NAMESPACE) else {
+        return false;
+    };
+    let Some((&space, rest)) = rest.split_first() else {
+        return false;
+    };
+    match space {
+        TABLE_SPACE | SEQUENCE_SPACE => names_temporary_object(rest),
+        ROW_SPACE | INDEX_SPACE => has_temporary_id(rest),
+        TEMPORARY_ACTION_SPACE => true,
+        REFERENCE_SPACE | catalog::DEPENDENCY_SPACE => {
+            split_length_prefixed(rest).is_some_and(|(owner, tail)| {
+                names_temporary_object(owner) || names_temporary_object(tail)
+            })
+        }
+        catalog::COMMENT_SPACE => {
+            split_length_prefixed(rest).is_some_and(|(owner, _)| names_temporary_object(owner))
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn prefix_end(prefix: &[u8]) -> Vec<u8> {
     let mut end = prefix.to_vec();
     while let Some(last) = end.pop() {

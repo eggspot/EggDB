@@ -565,9 +565,17 @@ pub(crate) struct Name {
     pub(crate) position: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnCommit {
+    PreserveRows,
+    DeleteRows,
+    Drop,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateTable {
     pub(crate) name: Name,
+    pub(crate) temporary: Option<OnCommit>,
     pub(crate) if_not_exists: bool,
     pub(crate) columns: Vec<ColumnDefinition>,
     pub(crate) primary_key: Option<(Vec<Name>, usize)>,

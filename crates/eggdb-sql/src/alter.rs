@@ -167,6 +167,13 @@ fn apply(
             Ok(None)
         }
         AlterAction::SetSchema(schema) => {
+            if crate::temporary::is_temporary_name(name) || schema.text == crate::temporary::SCHEMA
+            {
+                return Err(SqlError::not_supported(
+                    "cannot move objects into or out of temporary schemas",
+                )
+                .at(schema.position));
+            }
             if !crate::schemas::schema_exists(writer, &schema.text)? {
                 return Err(
                     crate::schemas::missing_schema(&schema.text, dialect).at(schema.position)
@@ -304,7 +311,11 @@ fn rebuild(
     map: &mut RowMap<'_>,
     duplicate_name: Option<String>,
 ) -> SqlResult<TableDefinition> {
-    new.id = next_table_id(writer)?;
+    new.id = if crate::temporary::is_temporary_name(&new.name) {
+        crate::temporary::next_id(writer)?
+    } else {
+        next_table_id(writer)?
+    };
     if has_rows(writer, &new)? {
         return Err(crate::encoding::corrupt("table numbering"));
     }
