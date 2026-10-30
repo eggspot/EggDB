@@ -159,7 +159,6 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"tables_skipped\":0",
         "\"rows_skipped\":0",
         "\"kind\":\"procedure\",\"name\":\"dbo.TopCustomers\"",
-        "\"kind\":\"function\",\"name\":\"dbo.OrderItems\"",
         "\"kind\":\"synonym\",\"name\":\"dbo.Orders\"",
         "\"kind\":\"user or role\",\"name\":\"shopapp\"",
         "\"kind\":\"role membership\"",
@@ -196,6 +195,14 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
             "SELECT name, is_disabled FROM sys.triggers WHERE parent_id = OBJECT_ID('sales.Orders')"
         ),
         "trOrders|0\n"
+    );
+    assert!(!report.contains("\"name\":\"dbo.OrderItems\""), "{report}");
+    assert_eq!(
+        tsql(
+            &db,
+            "SELECT dbo.OrderItems(1), dbo.OrderItems(3), dbo.OrderItems(42), OBJECT_ID('dbo.TopCustomers')"
+        ),
+        "3|2|NULL|NULL\n"
     );
     assert_eq!(
         tsql(

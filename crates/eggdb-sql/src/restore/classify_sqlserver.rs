@@ -316,7 +316,7 @@ fn set(tokens: &[Token]) -> Action {
 fn exec(tokens: &[Token], text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Action {
     let mut at = 1;
     if matches!(tokens.get(at), Some(Token::Symbol(b'@'))) {
-        return skip_statement(text, "procedures come later");
+        return skip_statement(text, BATCH_LOGIC);
     }
     let name = name_at(tokens, &mut at).to_lowercase();
     let procedure = name.rsplit('.').next().unwrap_or(&name);
@@ -351,8 +351,18 @@ fn exec(tokens: &[Token], text: &str, known_parameter: &dyn Fn(&str) -> bool) ->
             String::new(),
             "rules and bound defaults come later",
         ),
-        _ => skip_statement(text, "procedures come later"),
+        system if system.starts_with("sp_") || system.starts_with("xp_") => {
+            skip_statement(text, NOT_SUPPORTED_YET)
+        }
+        _ => Action::Run(Effect::Data),
     }
+}
+
+fn routine(kind: &'static str, tokens: &[Token], mut at: usize) -> Action {
+    Action::Run(Effect::Routine {
+        kind,
+        name: name_at(tokens, &mut at),
+    })
 }
 
 fn trigger(tokens: &[Token], at: usize) -> Action {
@@ -394,12 +404,8 @@ fn create(tokens: &[Token], text: &str) -> Action {
                 "XML, spatial, columnstore and full-text indexes come later",
             )
         }
-        "procedure" | "proc" => skip(
-            "procedure",
-            name_at(tokens, &mut at),
-            "procedures come later",
-        ),
-        "function" => skip("function", name_at(tokens, &mut at), "functions come later"),
+        "procedure" | "proc" => routine("procedure", tokens, at),
+        "function" => routine("function", tokens, at),
         "trigger" => trigger(tokens, at),
         "synonym" => skip("synonym", name_at(tokens, &mut at), "synonyms come later"),
         "type" if alias_type_definition(text).is_some() => ignore("alias types"),
@@ -526,12 +532,8 @@ fn alter(tokens: &[Token], text: &str) -> Action {
         "index" => ignore("ALTER INDEX"),
         "sequence" => Action::Run(Effect::OtherDdl),
         "authorization" => ignore("ALTER AUTHORIZATION"),
-        "procedure" | "proc" => skip(
-            "procedure",
-            name_at(tokens, &mut at),
-            "procedures come later",
-        ),
-        "function" => skip("function", name_at(tokens, &mut at), "functions come later"),
+        "procedure" | "proc" => routine("procedure", tokens, at),
+        "function" => routine("function", tokens, at),
         "trigger" => trigger(tokens, at),
         "role" | "user" | "login" | "application" => skip(
             "role membership",

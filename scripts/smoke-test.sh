@@ -267,12 +267,12 @@ pass "restore: a pg_dump sample with its report and its running trigger function
 
 expect_exit 0 "$eggdb" restore --dialect sqlserver --create ssms.db "$samples/ssms-sample.sql" --format text
 grep -q '^ok: every table and row of the script is in ssms.db; ' last.out || fail "the SQL Server restore said $(cat last.out)"
-grep -q 'procedure dbo.RyeCount' last.out || fail "the SQL Server restore did not list the skipped procedure: $(cat last.out)"
+if grep -q 'procedure dbo.RyeCount' last.out; then fail "the SQL Server restore skipped the procedure: $(cat last.out)"; fi
 expect_output "$(printf '4\t3\t2')" "$eggdb" sql ssms.db -c "COPY (SELECT count(*), count(DISTINCT l.kind), count(DISTINCT b.id) FROM loaves l JOIN bakers b ON b.id = l.bakerid) TO STDOUT"
 printf 'TAPE\000\000\003\000' > shop.bak
 expect_exit 2 "$eggdb" restore --dialect sqlserver --create shop.db shop.bak
 grep -q 'a SQL Server backup (it starts with TAPE)' last.err || fail "a SQL Server backup said $(cat last.err)"
-pass "restore: an SSMS Generate Scripts sample (UTF-16) with its report, and a SQL Server backup routed"
+pass "restore: an SSMS Generate Scripts sample (UTF-16) with its stored procedure and its report, and a SQL Server backup routed"
 
 expect_exit 0 "$eggdb" sql --create --dialect sqlserver bcp.db "$samples/sqlserver/bcp/items.sql"
 expect_exit 0 "$eggdb" import --dialect sqlserver bcp.db --csv "$samples/sqlserver/bcp/items.dat" --table dbo.items_imported
@@ -493,13 +493,15 @@ SELECT CONVERT(varchar(10), [at], 103) + '|' + CONVERT(varchar(36), [guid]) + '|
     run_sqlcmd pg-secret -h -1 -W -N disable -i "$samples/ssms-sample.sql" > sqlcmd.out 2> sqlcmd.err || true
     run_sqlcmd pg-secret -b -h -1 -W -Q "SELECT COUNT(*) FROM dbo.Loaves WHERE Kind = N'rye'" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd after the SSMS sample failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
     grep -qx '2' sqlcmd.out || fail "sqlcmd -i of the SSMS sample left $(cat sqlcmd.out) server: $(cat serve.err)"
+    run_sqlcmd pg-secret -b -h -1 -W -Q "EXEC dbo.RyeCount" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd's EXEC of the sample's procedure failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
+    grep -qx '2' sqlcmd.out || fail "sqlcmd's EXEC dbo.RyeCount printed $(cat sqlcmd.out) server: $(cat serve.err)"
     printf '%s\n' "DECLARE @i int = 0, @total int = 0" "WHILE @i < 5" "BEGIN" "    SET @i += 1" "    IF @i = 3 CONTINUE" "    SET @total += @i" "END" "PRINT N'loop total ' + CAST(@total AS nvarchar(10))" "BEGIN TRY" "    SELECT 1 / 0" "END TRY" "BEGIN CATCH" "    SELECT ERROR_NUMBER()" "END CATCH" "GO" > logic.sql
     run_sqlcmd pg-secret -b -h -1 -W -N disable -i logic.sql > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd's batch logic failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
     grep -q 'loop total 12' sqlcmd.out sqlcmd.err || fail "sqlcmd's batch logic printed $(cat sqlcmd.out sqlcmd.err)"
     grep -qx '8134' sqlcmd.out || fail "sqlcmd's TRY ... CATCH printed $(cat sqlcmd.out sqlcmd.err)"
     run_sqlcmd wrong -b -Q "SELECT 1" > sqlcmd.out 2>&1 && fail "sqlcmd connected with a wrong password"
     grep -q "Login failed for user 'eggdb'" sqlcmd.out || fail "a wrong sqlcmd password said $(cat sqlcmd.out)"
-    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches, SQL Server types, an -i script with GO, the UTF-16 SSMS sample and batch logic with a loop, PRINT and TRY ... CATCH; errors and a wrong password are refused"
+    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches, SQL Server types, an -i script with GO, the UTF-16 SSMS sample with its stored procedure and batch logic with a loop, PRINT and TRY ... CATCH; errors and a wrong password are refused"
   else
     echo "skip sqlcmd: EGGDB_SMOKE_SQLCMD names no go-sqlcmd binary (CI's Linux job downloads one; a sqlcmd on PATH is never used)"
   fi

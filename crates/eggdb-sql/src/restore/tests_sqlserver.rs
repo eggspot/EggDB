@@ -10,6 +10,7 @@ use crate::dialect::Dialect;
 use crate::memory_store::MemoryStore;
 use crate::session::Session;
 use crate::tests::render;
+use crate::types::Value;
 use std::io::{BufRead, BufReader, Read};
 
 fn utf16(text: &str) -> Vec<u8> {
@@ -357,12 +358,32 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
         ),
         Action::Run(Effect::Comment)
     );
-    for (text, kind) in [
-        ("CREATE PROC [dbo].[p] AS SELECT 1", "procedure"),
+    for (text, kind, name) in [
+        ("CREATE PROC [dbo].[p] AS SELECT 1", "procedure", "dbo.p"),
+        ("ALTER PROCEDURE p @a int AS SELECT @a", "procedure", "p"),
         (
             "CREATE OR ALTER FUNCTION f() RETURNS int AS BEGIN RETURN 1 END",
             "function",
+            "f",
         ),
+        (
+            "ALTER FUNCTION [sales].[f] () RETURNS TABLE AS RETURN (SELECT 1 AS a)",
+            "function",
+            "sales.f",
+        ),
+    ] {
+        assert_eq!(
+            run(text),
+            Some(Effect::Routine {
+                kind,
+                name: name.to_owned()
+            }),
+            "{text}"
+        );
+    }
+    assert_eq!(run("EXEC dbo.Something 1"), Some(Effect::Data));
+    assert_eq!(run("EXECUTE [sales].[Refresh] @all = 1"), Some(Effect::Data));
+    for (text, kind) in [
         ("CREATE SYNONYM [dbo].[s] FOR [x].[y]", "synonym"),
         ("CREATE TYPE [dbo].[t] AS TABLE (a int)", "type"),
         ("CREATE TYPE [dbo].[t] EXTERNAL NAME [a].[b]", "type"),
@@ -377,7 +398,8 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
             "statement",
         ),
         ("DECLARE @a int", "statement"),
-        ("EXEC dbo.Something 1", "statement"),
+        ("EXEC sp_who2", "statement"),
+        ("EXEC @status = dbo.Something 1", "statement"),
     ] {
         match classify_sqlserver(text, &known) {
             Action::Skip(skip) => assert_eq!(skip.kind, kind, "{text}"),
@@ -666,7 +688,7 @@ fn transact_sql_scripts_split_into_batches_at_go_without_running_sqlcmd_commands
 #[test]
 fn an_ssms_shaped_script_restores_with_its_report() {
     let store = MemoryStore::default();
-    let script = "USE [master]\r\nGO\r\nCREATE DATABASE [Shop]\r\nGO\r\nUSE [Shop]\r\nGO\r\nCREATE SCHEMA [sales]\r\nGO\r\nSET ANSI_NULLS ON\r\nGO\r\nCREATE TABLE [sales].[Orders](\r\n\t[Id] [int] IDENTITY(10,5) NOT NULL,\r\n\t[At] [datetimeoffset](7) NOT NULL,\r\n\t[Total] [money] NOT NULL,\r\n\t[Twice]  AS ([Total]*(2)),\r\n CONSTRAINT [PK_Orders] PRIMARY KEY CLUSTERED \r\n(\r\n\t[Id] ASC\r\n)WITH (PAD_INDEX = OFF) ON [PRIMARY]\r\n) ON [PRIMARY]\r\nGO\r\nCREATE TABLE [dbo].[Docs]([Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY, [Body] [xml] NULL)\r\nGO\r\nSET IDENTITY_INSERT [sales].[Orders] ON \r\n\r\nINSERT [sales].[Orders] ([Id], [At], [Total]) VALUES (0, CAST(N'2024-01-01T10:00:00+02:00' AS DateTimeOffset), 1.5000)\r\nINSERT [sales].[Orders] ([Id], [At], [Total]) VALUES (10, CAST(N'2024-01-02T10:00:00+00:00' AS DateTimeOffset), 2.0000)\r\nSET IDENTITY_INSERT [sales].[Orders] OFF\r\nGO\r\nSET IDENTITY_INSERT [dbo].[Docs] ON\r\nINSERT [dbo].[Docs] ([Id], [Body]) VALUES (1, N'<a/>')\r\nSET IDENTITY_INSERT [dbo].[Docs] OFF\r\nGO\r\nCREATE PROCEDURE [dbo].[P] AS SELECT * INTO #t FROM [sales].[Orders]\r\nGO\r\nGRANT EXECUTE ON [dbo].[P] TO [public]\r\nGO\r\n";
+    let script = "USE [master]\r\nGO\r\nCREATE DATABASE [Shop]\r\nGO\r\nUSE [Shop]\r\nGO\r\nCREATE SCHEMA [sales]\r\nGO\r\nSET ANSI_NULLS ON\r\nGO\r\nCREATE TABLE [sales].[Orders](\r\n\t[Id] [int] IDENTITY(10,5) NOT NULL,\r\n\t[At] [datetimeoffset](7) NOT NULL,\r\n\t[Total] [money] NOT NULL,\r\n\t[Twice]  AS ([Total]*(2)),\r\n CONSTRAINT [PK_Orders] PRIMARY KEY CLUSTERED \r\n(\r\n\t[Id] ASC\r\n)WITH (PAD_INDEX = OFF) ON [PRIMARY]\r\n) ON [PRIMARY]\r\nGO\r\nCREATE TABLE [dbo].[Docs]([Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY, [Body] [xml] NULL)\r\nGO\r\nSET IDENTITY_INSERT [sales].[Orders] ON \r\n\r\nINSERT [sales].[Orders] ([Id], [At], [Total]) VALUES (0, CAST(N'2024-01-01T10:00:00+02:00' AS DateTimeOffset), 1.5000)\r\nINSERT [sales].[Orders] ([Id], [At], [Total]) VALUES (10, CAST(N'2024-01-02T10:00:00+00:00' AS DateTimeOffset), 2.0000)\r\nSET IDENTITY_INSERT [sales].[Orders] OFF\r\nGO\r\nSET IDENTITY_INSERT [dbo].[Docs] ON\r\nINSERT [dbo].[Docs] ([Id], [Body]) VALUES (1, N'<a/>')\r\nSET IDENTITY_INSERT [dbo].[Docs] OFF\r\nGO\r\nCREATE PROCEDURE [dbo].[P] @Least [money] = 0 AS SELECT [Id] FROM [sales].[Orders] WHERE [Total] >= @Least ORDER BY [Id]\r\nGO\r\nCREATE FUNCTION [dbo].[Twice] (@Value [money]) RETURNS [money] AS\r\nBEGIN\r\n\tRETURN @Value * 2\r\nEND\r\nGO\r\nGRANT EXECUTE ON [dbo].[P] TO [public]\r\nGO\r\nCREATE PROCEDURE [dbo].[Q] AS EXTERNAL NAME [a].[b].[c]\r\nGO\r\n";
     let report = restore(&store, &utf16(script), false);
     assert_eq!(report.error, None);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -677,7 +699,7 @@ fn an_ssms_shaped_script_restores_with_its_report() {
         .iter()
         .map(|object| (object.kind.as_str(), object.name.as_str()))
         .collect();
-    assert_eq!(skipped, [("procedure", "dbo.P")]);
+    assert_eq!(skipped, [("procedure", "dbo.Q")]);
     let differences: Vec<(u64, &str)> = report
         .differences
         .iter()
@@ -711,6 +733,28 @@ fn an_ssms_shaped_script_restores_with_its_report() {
     assert_eq!(
         query(&store, "SELECT id FROM sales.orders ORDER BY id"),
         "id\n0\n10\n15\nSELECT 3"
+    );
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let mut found = Vec::new();
+    session
+        .execute_batch(
+            "EXEC dbo.P @Least = 2; SELECT CAST(dbo.Twice(1.25) * 4 AS int) AS ten",
+            &mut |step| {
+                if let Ok(result) = step.outcome {
+                    found.extend(result.rows);
+                }
+                true
+            },
+        )
+        .unwrap();
+    assert_eq!(session.close(), Ok(false));
+    assert_eq!(
+        found,
+        vec![
+            vec![Value::Integer(10)],
+            vec![Value::Integer(15)],
+            vec![Value::Integer(10)],
+        ]
     );
 }
 
@@ -902,14 +946,12 @@ fn the_ssms_sample_runs_batch_by_batch_as_sqlcmd_sends_it() {
             refused.push((batch.line, error.vendor_code()));
         }
     }
-    assert_eq!(refused.len(), 1, "{refused:?}");
-    assert_eq!(refused[0].0, 50);
+    assert_eq!(refused, Vec::new());
     let mut rows = Vec::new();
     session
-        .execute(
-            "SELECT COUNT(*) FROM dbo.Loaves WHERE Kind = N'rye'",
-            &mut |result| rows.push(render(&result)),
-        )
+        .execute("EXEC dbo.RyeCount", &mut |result| {
+            rows.push(render(&result))
+        })
         .unwrap();
     assert_eq!(session.close(), Ok(false));
     assert!(rows[0].contains("\n2\n"), "{rows:?}");
