@@ -599,3 +599,104 @@ EXEC sp_executesql @s, N'@s nvarchar(200)', @s";
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(failures, vec![Some(217)]);
 }
+
+fn shown(rows: &[Vec<Value>]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| value.to_text().unwrap_or_else(|| "NULL".to_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn xact_abort_on_rolls_back_the_transaction_and_ends_the_batch_at_a_run_time_error() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    batch(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let insert_twice = "BEGIN TRAN\nINSERT INTO t VALUES (1)\nINSERT INTO t VALUES (1)\nINSERT INTO t VALUES (2)\nCOMMIT";
+    let aborted = batch(&mut session, &format!("SET XACT_ABORT ON\n{insert_twice}"));
+    assert_eq!(errors(&aborted), vec![Some(2627)]);
+    assert!(!session.in_block());
+    assert_eq!(
+        shown(&last_rows(&batch(
+            &mut session,
+            "SELECT COUNT(*) AS n, @@TRANCOUNT AS open FROM t"
+        ))),
+        vec![vec!["0".to_owned(), "0".to_owned()]]
+    );
+    let continued = batch(&mut session, &format!("SET XACT_ABORT OFF\n{insert_twice}"));
+    assert_eq!(errors(&continued), vec![Some(2627)]);
+    assert_eq!(
+        shown(&last_rows(&batch(&mut session, "SELECT COUNT(*) AS n FROM t"))),
+        vec![vec!["2".to_owned()]]
+    );
+    let raised = batch(
+        &mut session,
+        "SET XACT_ABORT ON\nBEGIN TRAN\nINSERT INTO t VALUES (30)\nRAISERROR('only a message', 16, 1)\nINSERT INTO t VALUES (31)\nCOMMIT",
+    );
+    assert_eq!(errors(&raised), vec![Some(50000)]);
+    assert_eq!(
+        shown(&last_rows(&batch(
+            &mut session,
+            "SELECT COUNT(*) AS n FROM t WHERE id >= 30"
+        ))),
+        vec![vec!["2".to_owned()]]
+    );
+    session.execute("BEGIN TRANSACTION", &mut |_| {}).unwrap();
+    session.execute("INSERT INTO t VALUES (40)", &mut |_| {}).unwrap();
+    let error = session
+        .execute("INSERT INTO t VALUES (40)", &mut |_| {})
+        .unwrap_err();
+    assert_eq!(error.vendor_code(), Some(2627));
+    assert!(!session.in_block());
+    assert_eq!(
+        shown(&last_rows(&batch(
+            &mut session,
+            "SELECT COUNT(*) AS n FROM t WHERE id = 40"
+        ))),
+        vec![vec!["0".to_owned()]]
+    );
+}
+
+#[test]
+fn xact_abort_on_inside_try_leaves_an_uncommittable_transaction_for_the_catch_block() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    batch(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let caught = batch(
+        &mut session,
+        "SET XACT_ABORT ON\nBEGIN TRY\n  BEGIN TRAN\n  INSERT INTO t VALUES (10)\n  INSERT INTO t VALUES (10)\n  COMMIT\nEND TRY\nBEGIN CATCH\n  SELECT XACT_STATE() AS state, @@TRANCOUNT AS open\n  ROLLBACK\nEND CATCH",
+    );
+    assert!(errors(&caught).is_empty(), "{caught:?}");
+    assert_eq!(
+        shown(&last_rows(&caught)),
+        vec![vec!["-1".to_owned(), "1".to_owned()]]
+    );
+    assert!(!session.in_block());
+    let doomed = batch(
+        &mut session,
+        "BEGIN TRY\n  BEGIN TRAN\n  INSERT INTO t VALUES (20)\n  SELECT 1 / 0 AS x\nEND TRY\nBEGIN CATCH\n  INSERT INTO t VALUES (21)\nEND CATCH",
+    );
+    assert_eq!(errors(&doomed), vec![Some(3930)]);
+    assert!(!session.in_block());
+    let commit = batch(
+        &mut session,
+        "BEGIN TRY\n  BEGIN TRAN\n  INSERT INTO t VALUES (22)\n  INSERT INTO t VALUES (22)\nEND TRY\nBEGIN CATCH\n  COMMIT\nEND CATCH",
+    );
+    assert_eq!(errors(&commit), vec![Some(3930)]);
+    let unhandled = batch(
+        &mut session,
+        "BEGIN TRY\n  BEGIN TRAN\n  INSERT INTO t VALUES (23)\n  INSERT INTO t VALUES (23)\nEND TRY\nBEGIN CATCH\n  SELECT 1 AS handled\nEND CATCH",
+    );
+    assert_eq!(errors(&unhandled), vec![Some(3998)]);
+    assert!(!session.in_block());
+    assert_eq!(
+        shown(&last_rows(&batch(
+            &mut session,
+            "SELECT COUNT(*) AS n, XACT_STATE() AS state FROM t"
+        ))),
+        vec![vec!["0".to_owned(), "0".to_owned()]]
+    );
+}

@@ -1,7 +1,8 @@
 //! `eggdb restore --dialect sqlserver` as a real process: an SSMS Generate Scripts fixture
 //! (UTF-16LE, CRLF) and a sqlpackage script restore and match results written by hand from the
 //! scripts' data and Microsoft's documented semantics; the report lists what was skipped, ignored
-//! and kept differently; other encodings, stdin, volume, errors, routes and sqlcmd commands.
+//! and kept differently; other encodings, stdin, volume, errors, routes and sqlcmd commands;
+//! the follow-ups: alias types, identity shapes, sequences, descriptions and large batches.
 
 use eggdb::Database;
 use eggdb::sql::{Dialect, Value};
@@ -149,14 +150,14 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"dialect\":\"sqlserver\"",
         "\"scripts\":[",
         "\"schemas\":1",
-        "\"tables\":6",
-        "\"rows\":19",
+        "\"tables\":7",
+        "\"rows\":21",
         "\"views\":2",
         "\"indexes\":2",
         "\"constraints\":9",
-        "\"tables_skipped\":1",
-        "\"rows_skipped\":2",
-        "\"kind\":\"table\",\"name\":\"dbo.Docs\"",
+        "\"comments\":2",
+        "\"tables_skipped\":0",
+        "\"rows_skipped\":0",
         "\"kind\":\"procedure\",\"name\":\"dbo.TopCustomers\"",
         "\"kind\":\"function\",\"name\":\"dbo.OrderItems\"",
         "\"kind\":\"trigger\",\"name\":\"sales.trOrders\"",
@@ -165,6 +166,7 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"kind\":\"role membership\"",
         "is restored only as existence guards",
         "\"uses\":\"constraint FK_OrderLines_Products\"",
+        "\"object\":\"dbo.Docs.Body\",\"difference\":\"xml column kept as nvarchar(max)",
         "\"object\":\"dbo.Products.Margin\",\"difference\":\"computed column not kept\"",
         "\"object\":\"dbo.Products.Version\",\"difference\":\"rowversion column not kept\"",
         "\"object\":\"sales.Orders.PlacedAt\",\"difference\":\"values are stored in UTC; their offsets are lost\"",
@@ -174,7 +176,6 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"grant\":1",
         "{\"kind\":\"USE\",\"statements\":3}",
         "{\"kind\":\"ALTER DATABASE\",\"statements\":6}",
-        "{\"kind\":\"extended properties\",\"statements\":2}",
         "{\"kind\":\"ENABLE and DISABLE TRIGGER\",\"statements\":1}",
         "\"errors\":[]",
     ] {
@@ -184,6 +185,13 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
     for (query, rows) in expected_results() {
         assert_eq!(tsql(&db, &query), rows, "{query}");
     }
+    assert_eq!(
+        tsql(
+            &db,
+            "SELECT minor_id, CAST(value AS nvarchar(40)) FROM sys.extended_properties WHERE major_id = OBJECT_ID('sales.Orders')"
+        ),
+        "0|One row per order\n"
+    );
     assert_eq!(
         tsql(
             &db,
@@ -297,15 +305,20 @@ fn the_text_report_lists_the_known_differences_and_client_commands() {
 }
 
 #[test]
-fn utf8_lf_and_stdin_variants_restore_the_same_rows() {
+fn utf8_lf_utf16_big_endian_and_stdin_variants_restore_the_same_rows() {
     let script = utf16_fixture_as_utf8("shop-ssms.sql");
     let lf = script.replace("\r\n", "\n");
     let mut with_mark = b"\xEF\xBB\xBF".to_vec();
     with_mark.extend_from_slice(script.as_bytes());
+    let mut big_endian = b"\xFE\xFF".to_vec();
+    for unit in script.encode_utf16() {
+        big_endian.extend_from_slice(&unit.to_be_bytes());
+    }
     for (name, bytes) in [
         ("utf8", script.as_bytes().to_vec()),
         ("utf8-bom", with_mark),
         ("lf", lf.into_bytes()),
+        ("utf16-big-endian", big_endian),
     ] {
         let directory = TempDirectory::new(name);
         let path = directory.join("shop.sql");
@@ -318,7 +331,7 @@ fn utf8_lf_and_stdin_variants_restore_the_same_rows() {
             "{name}: {}",
             text(&output.stderr)
         );
-        assert!(text(&output.stdout).contains("\"rows\":19"), "{name}");
+        assert!(text(&output.stdout).contains("\"rows\":21"), "{name}");
         let target = directory.join("stdin.db");
         let output = restore_json(&target, &"-", &bytes);
         assert_eq!(
@@ -327,7 +340,7 @@ fn utf8_lf_and_stdin_variants_restore_the_same_rows() {
             "{name} stdin: {}",
             text(&output.stderr)
         );
-        assert!(text(&output.stdout).contains("\"rows\":19"), "{name} stdin");
+        assert!(text(&output.stdout).contains("\"rows\":21"), "{name} stdin");
     }
 }
 
@@ -605,4 +618,68 @@ fn sqlcmd_commands_are_listed_and_include_and_shell_commands_never_run() {
         "{}",
         text(&output.stderr)
     );
+}
+
+#[test]
+fn alias_types_identity_shapes_sequences_and_large_batches_restore_from_a_big_endian_script() {
+    let directory = TempDirectory::new("follow-ups");
+    let note = "n".repeat(3 << 20);
+    let script = format!(
+        "CREATE TYPE [dbo].[Phone] FROM [nvarchar](20) NOT NULL\r\nGO\r\n\
+         CREATE SEQUENCE [dbo].[Tickets] \r\n AS [int]\r\n START WITH 100\r\n INCREMENT BY 1\r\n MINVALUE -2147483648\r\n MAXVALUE 2147483647\r\n CACHE \r\nGO\r\n\
+         CREATE TABLE [dbo].[Calls]([Id] [int] IDENTITY(1,1) NOT NULL, [Caller] [dbo].[Phone] NULL, [Ticket] [int] NULL, [Note] [nvarchar](max) NULL, [Raw] [xml] NULL) ON [PRIMARY]\r\nGO\r\n\
+         ALTER TABLE [dbo].[Calls] ADD  CONSTRAINT [DF_Calls_Ticket]  DEFAULT (NEXT VALUE FOR [dbo].[Tickets]) FOR [Ticket]\r\nGO\r\n\
+         SET XACT_ABORT ON\r\nGO\r\n\
+         SET IDENTITY_INSERT [dbo].[Calls] ON \r\n\r\n\
+         INSERT [dbo].[Calls] ([Id], [Caller], [Ticket], [Raw]) VALUES (1, N'555-0100', 100, N'<call/>')\r\n\
+         INSERT [dbo].[Calls] ([Id], [Caller], [Ticket], [Raw]) VALUES (2, N'555-0101', 101, NULL)\r\n\
+         SET IDENTITY_INSERT [dbo].[Calls] OFF\r\nGO\r\n\
+         UPDATE [dbo].[Calls] SET [Note] = N'{note}' WHERE [Id] = 1; UPDATE [dbo].[Calls] SET [Note] = N'{note}' WHERE [Id] = 2;\r\nGO\r\n\
+         EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Calls taken' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'Calls'\r\nGO\r\n"
+    );
+    let mut bytes = b"\xFE\xFF".to_vec();
+    for unit in script.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_be_bytes());
+    }
+    let path = directory.join("calls.sql");
+    std::fs::write(&path, bytes).unwrap();
+    let target = directory.join("calls.db");
+    let output = restore_json(&target, &path, b"");
+    let report = text(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}\n{report}",
+        text(&output.stderr)
+    );
+    for part in [
+        "\"tables\":1",
+        "\"rows\":2",
+        "\"sequences\":1",
+        "\"comments\":1",
+        "{\"kind\":\"alias types\",\"statements\":1}",
+        "{\"kind\":\"SET IDENTITY_INSERT of a table whose IDENTITY was not kept\",\"statements\":2}",
+        "\"object\":\"type dbo.Phone\",\"difference\":\"an alias type: its columns are created as [nvarchar](20) NOT NULL\"",
+        "\"object\":\"dbo.Calls.Raw\",\"difference\":\"xml column kept as nvarchar(max)",
+        "\"object\":\"dbo.Calls.Id\",\"difference\":\"IDENTITY not kept: EggDB needs an identity column to be the first column of the table's primary key",
+        "\"errors\":[]",
+    ] {
+        assert!(report.contains(part), "{part:?} in\n{report}");
+    }
+    let db = Database::open(&target).unwrap();
+    assert_eq!(
+        tsql(
+            &db,
+            "SELECT Id, Caller, Ticket, LEN(Note), Raw FROM dbo.Calls ORDER BY Id"
+        ),
+        format!("1|555-0100|100|{0}|<call/>\n2|555-0101|101|{0}|NULL\n", 3 << 20)
+    );
+    assert_eq!(
+        tsql(
+            &db,
+            "INSERT dbo.Calls (Id, Caller) VALUES (3, N'555-0102'); SELECT Ticket FROM dbo.Calls WHERE Id = 3"
+        ),
+        "100\n"
+    );
+    db.close().unwrap();
 }

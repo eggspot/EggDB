@@ -52,6 +52,7 @@ pub(crate) struct ScriptReader<'r> {
     cut_points: Vec<usize>,
     takes_rest: Option<bool>,
     segmented: bool,
+    cuts_large_batches: bool,
     variables: HashMap<String, String>,
     replacing_variables: bool,
     ended: bool,
@@ -60,6 +61,13 @@ pub(crate) struct ScriptReader<'r> {
 impl<'r> ScriptReader<'r> {
     pub(crate) fn new(input: &'r mut dyn BufRead) -> Self {
         Self::over(DecodedLines::new(input))
+    }
+
+    pub(crate) fn whole_batches(input: &'r mut dyn BufRead) -> Self {
+        Self {
+            cuts_large_batches: false,
+            ..Self::over(DecodedLines::new(input))
+        }
     }
 
     pub(crate) fn over(lines: DecodedLines<'r>) -> Self {
@@ -74,6 +82,7 @@ impl<'r> ScriptReader<'r> {
             cut_points: Vec::new(),
             takes_rest: None,
             segmented: false,
+            cuts_large_batches: true,
             variables: HashMap::new(),
             replacing_variables: false,
             ended: false,
@@ -167,7 +176,11 @@ impl<'r> ScriptReader<'r> {
     }
 
     fn note_cut_point(&mut self, line: &str) -> Option<BatchItem> {
-        if self.lex != Lex::Normal || self.depth != 0 || !starts_data_statement(line) {
+        if !self.cuts_large_batches
+            || self.lex != Lex::Normal
+            || self.depth != 0
+            || !starts_data_statement(line)
+        {
             return None;
         }
         if self.batch.trim().is_empty() {
@@ -420,12 +433,18 @@ fn is_variable_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_' || character == '-'
 }
 
-fn starts_data_statement(line: &str) -> bool {
+pub(crate) fn starts_data_statement(line: &str) -> bool {
     let mut words = line
         .trim_start()
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'));
     match words.next() {
-        Some(word) if word.eq_ignore_ascii_case("insert") => true,
+        Some(word)
+            if word.eq_ignore_ascii_case("insert")
+                || word.eq_ignore_ascii_case("update")
+                || word.eq_ignore_ascii_case("delete") =>
+        {
+            true
+        }
         Some(word) if word.eq_ignore_ascii_case("set") => words
             .find(|word| !word.is_empty())
             .is_some_and(|word| word.eq_ignore_ascii_case("identity_insert")),

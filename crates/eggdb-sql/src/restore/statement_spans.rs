@@ -2,9 +2,9 @@ use super::classify::{Action, Effect};
 use super::classify_sqlserver::{
     classify_sqlserver, refused_as_not_supported, takes_rest_of_batch,
 };
-use super::column_rewrite::without_unsupported_columns;
+use super::column_rewrite::{AliasTypes, rewritten_table};
 use super::script::{ClientCommand, ScriptItem, ScriptSource, ScriptStatement};
-use super::script_reader::{Batch, BatchItem, ScriptReader};
+use super::script_reader::{Batch, BatchItem, ScriptReader, starts_data_statement};
 use super::words::Words;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -23,6 +23,7 @@ pub(crate) struct SqlServerScript<'r> {
     next: usize,
     repeats_left: u64,
     settings: Settings,
+    alias_types: AliasTypes,
 }
 
 impl<'r> SqlServerScript<'r> {
@@ -33,6 +34,7 @@ impl<'r> SqlServerScript<'r> {
             next: 0,
             repeats_left: 0,
             settings: Settings::default(),
+            alias_types: AliasTypes::default(),
         }
     }
 
@@ -80,7 +82,7 @@ impl ScriptSource for SqlServerScript<'_> {
                     }));
                 }
                 BatchItem::Batch(batch) => {
-                    self.batch = statements_of(&batch, &self.settings);
+                    self.batch = statements_of(&batch, &self.settings, &mut self.alias_types);
                     self.next = 0;
                     self.repeats_left = batch.repeat;
                 }
@@ -105,7 +107,11 @@ impl ScriptSource for SqlServerScript<'_> {
     }
 }
 
-pub(crate) fn statements_of(batch: &Batch, settings: &Settings) -> Vec<ScriptStatement> {
+pub(crate) fn statements_of(
+    batch: &Batch,
+    settings: &Settings,
+    aliases: &mut AliasTypes,
+) -> Vec<ScriptStatement> {
     if takes_rest_of_batch(&batch.text) {
         let text = batch.text.trim_end().to_owned();
         return vec![ScriptStatement::plain(text, batch.line, batch.end_line)];
@@ -113,12 +119,14 @@ pub(crate) fn statements_of(batch: &Batch, settings: &Settings) -> Vec<ScriptSta
     let mut statements = Vec::new();
     let mut lines = LineCounter::new(&batch.text, batch.line);
     for piece in pieces_of(batch) {
-        let text = &batch.text[piece.clone()];
+        let Some(text) = batch.text.get(piece.clone()) else {
+            continue;
+        };
         let line = lines.line_at(piece.start);
         if text.len() > SPAN_BYTES {
-            statements.push(large_piece(text, line));
+            statements.extend(large_piece(text, line, settings, aliases));
         } else {
-            statements.extend(spans_of(text, line, settings));
+            statements.extend(spans_of(text, line, settings, aliases));
         }
     }
     statements
@@ -140,24 +148,187 @@ fn pieces_of(batch: &Batch) -> Vec<Range<usize>> {
     pieces
 }
 
-fn large_piece(text: &str, line: u64) -> ScriptStatement {
-    let starts_with_insert = Words::sqlserver(text)
+fn large_piece(
+    text: &str,
+    line: u64,
+    settings: &Settings,
+    aliases: &mut AliasTypes,
+) -> Vec<ScriptStatement> {
+    let mut statements = Vec::new();
+    let mut lines = LineCounter::new(text, line);
+    for group in statement_groups(text) {
+        let Some(part) = text.get(group.clone()) else {
+            continue;
+        };
+        let part_line = lines.line_at(group.start);
+        if part.len() <= SPAN_BYTES {
+            statements.extend(spans_of(part, part_line, settings, aliases));
+        } else {
+            statements.push(one_large_statement(part, part_line));
+        }
+    }
+    statements
+}
+
+fn one_large_statement(text: &str, line: u64) -> ScriptStatement {
+    let data = Words::sqlserver(text)
         .next()
-        .is_some_and(|token| token.is_word("insert"));
+        .is_some_and(|token| token.is_word("insert") || token.is_word("update") || token.is_word("delete"));
     let mut statement = ScriptStatement::plain(text.trim_end().to_owned(), line, line);
-    if !starts_with_insert {
+    if !data {
         statement.refused = Some(
             SqlError::new(
                 SqlState::PROGRAM_LIMIT_EXCEEDED,
                 format!(
-                    "the batch at line {line} holds more than {} MiB of statements other than one INSERT",
+                    "the statement at line {line} is longer than {} MiB and is not an INSERT, UPDATE or DELETE",
                     SPAN_BYTES >> 20
                 ),
             )
-            .with_hint("Add GO between its statements, as SSMS does."),
+            .with_hint("End the statements before it with ; or add GO between them, as SSMS does."),
         );
     }
     statement
+}
+
+fn statement_groups(text: &str) -> Vec<Range<usize>> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    let mut last = 0;
+    for boundary in statement_boundaries(text)
+        .into_iter()
+        .chain(std::iter::once(text.len()))
+    {
+        if boundary - start > SPAN_BYTES && last > start {
+            groups.push(start..last);
+            start = last;
+        }
+        last = boundary;
+    }
+    if start < text.len() {
+        groups.push(start..text.len());
+    }
+    groups
+        .into_iter()
+        .filter_map(|group| {
+            let blank = text
+                .get(group.clone())?
+                .bytes()
+                .take_while(u8::is_ascii_whitespace)
+                .count();
+            let start = group.start + blank;
+            (start < group.end).then_some(start..group.end)
+        })
+        .collect()
+}
+
+pub(crate) fn statement_boundaries(text: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut boundaries = Vec::new();
+    let mut at = 0;
+    let mut depth = 0u32;
+    let mut blocks = 0u32;
+    let mut line_start = false;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        let next = bytes.get(at + 1).copied();
+        if line_start {
+            line_start = false;
+            if depth == 0
+                && blocks == 0
+                && at > 0
+                && starts_data_statement(text.get(at..).unwrap_or(""))
+                && boundaries
+                    .last()
+                    .is_none_or(|&last| !text.get(last..at).unwrap_or("").trim().is_empty())
+            {
+                boundaries.push(at);
+            }
+        }
+        match byte {
+            b'\n' => line_start = true,
+            b';' if depth == 0 && blocks == 0 => boundaries.push(at + 1),
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            b'\'' | b'[' | b'"' => {
+                let close = if byte == b'[' { b']' } else { byte };
+                at += 1;
+                while at < bytes.len() {
+                    if bytes[at] == close {
+                        if bytes.get(at + 1) == Some(&close) {
+                            at += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    at += 1;
+                }
+            }
+            b'-' if next == Some(b'-') => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            b'/' if next == Some(b'*') => {
+                let mut nested = 1u32;
+                at += 2;
+                while at < bytes.len() && nested > 0 {
+                    if bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'*') {
+                        nested += 1;
+                        at += 1;
+                    } else if bytes[at] == b'*' && bytes.get(at + 1) == Some(&b'/') {
+                        nested -= 1;
+                        at += 1;
+                    }
+                    at += 1;
+                }
+                continue;
+            }
+            _ if is_block_word_start(bytes, at) => {
+                let end = word_end(bytes, at);
+                let word = text.get(at..end).unwrap_or("");
+                if word.eq_ignore_ascii_case("case")
+                    || (word.eq_ignore_ascii_case("begin") && !begins_a_transaction(text, end))
+                {
+                    blocks = blocks.saturating_add(1);
+                } else if word.eq_ignore_ascii_case("end") {
+                    blocks = blocks.saturating_sub(1);
+                }
+                at = end;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    boundaries
+}
+
+fn is_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'@' | b'#' | b'$') || byte >= 0x80
+}
+
+fn is_block_word_start(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at).is_some_and(|&byte| is_name_byte(byte))
+        && at.checked_sub(1).is_none_or(|before| !is_name_byte(bytes[before]))
+}
+
+fn word_end(bytes: &[u8], mut at: usize) -> usize {
+    while bytes.get(at).is_some_and(|&byte| is_name_byte(byte)) {
+        at += 1;
+    }
+    at
+}
+
+fn begins_a_transaction(text: &str, after: usize) -> bool {
+    let rest = text.get(after..).unwrap_or("").trim_start();
+    let end = rest
+        .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .unwrap_or(rest.len());
+    let word = rest.get(..end).unwrap_or("");
+    ["tran", "transaction", "distributed", "dialog", "conversation"]
+        .iter()
+        .any(|known| word.eq_ignore_ascii_case(known))
 }
 
 struct LineCounter<'t> {
@@ -188,7 +359,12 @@ impl<'t> LineCounter<'t> {
     }
 }
 
-pub(crate) fn spans_of(text: &str, line: u64, settings: &Settings) -> Vec<ScriptStatement> {
+pub(crate) fn spans_of(
+    text: &str,
+    line: u64,
+    settings: &Settings,
+    aliases: &mut AliasTypes,
+) -> Vec<ScriptStatement> {
     let tokens = match tokenize_in(text, Dialect::SqlServer) {
         Ok(tokens) => tokens,
         Err(error) => return vec![by_leading_words(text, line, error)],
@@ -236,6 +412,7 @@ pub(crate) fn spans_of(text: &str, line: u64, settings: &Settings) -> Vec<Script
                     statement_line,
                     end_line,
                     settings,
+                    aliases,
                 ) {
                     Ok(statement) => statements.push(statement),
                     Err(error) => {
@@ -278,20 +455,23 @@ fn refused_statement(
     line: u64,
     end_line: u64,
     settings: &Settings,
+    aliases: &mut AliasTypes,
 ) -> SqlResult<ScriptStatement> {
     let mut statement = ScriptStatement::plain(text.trim_end().to_owned(), line, end_line);
+    aliases.learn(text);
     let effect = match classify_sqlserver(text, &|_| false) {
         Action::Run(effect) => effect,
         Action::Skip(_) | Action::Ignore(_) => return Ok(statement),
     };
     let mut error = error;
     if let Effect::Table { .. } = effect
-        && let Some((rewritten, notes)) = without_unsupported_columns(text)
+        && let Some(rewrite) = rewritten_table(text, aliases)
     {
-        match parses_alone(&rewritten, settings) {
+        match parses_alone(&rewrite.text, settings) {
             Ok(()) => {
-                statement.text = rewritten;
-                statement.differences = notes;
+                statement.text = rewrite.text;
+                statement.differences = rewrite.notes;
+                statement.identity_not_kept = rewrite.identity_not_kept;
                 return Ok(statement);
             }
             Err(again) => error = again,

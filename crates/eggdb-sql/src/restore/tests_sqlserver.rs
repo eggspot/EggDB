@@ -1,11 +1,11 @@
 use super::classify::{Action, Effect, Ignored};
 use super::classify_sqlserver::{classify_sqlserver, sqlserver_table_key, takes_rest_of_batch};
-use super::column_rewrite::without_unsupported_columns;
+use super::column_rewrite::{AliasTypes, rewritten_table};
 use super::script::{ScriptItem, ScriptSource};
 use super::script_reader::{BatchItem, ScriptReader};
 use super::script_text::DecodedLines;
-use super::statement_spans::{SqlServerScript, unparsed_statement_end};
-use super::{RestoreOptions, RestoreReport, restore_dump};
+use super::statement_spans::{SqlServerScript, statement_boundaries, unparsed_statement_end};
+use super::{RestoreOptions, RestoreReport, restore_dump, sqlserver_batches};
 use crate::dialect::Dialect;
 use crate::memory_store::MemoryStore;
 use crate::session::Session;
@@ -16,6 +16,14 @@ fn utf16(text: &str) -> Vec<u8> {
     let mut bytes = b"\xFF\xFE".to_vec();
     for unit in text.encode_utf16() {
         bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+fn utf16_big_endian(text: &str) -> Vec<u8> {
+    let mut bytes = b"\xFE\xFF".to_vec();
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_be_bytes());
     }
     bytes
 }
@@ -108,7 +116,7 @@ fn go_ends_a_batch_only_alone_on_its_line_outside_strings_and_comments() {
 }
 
 #[test]
-fn utf16_scripts_decode_with_surrogates_across_reads_and_keep_their_crlf() {
+fn utf16_scripts_of_either_byte_order_decode_with_surrogates_across_reads_and_keep_their_crlf() {
     let text = "INSERT t VALUES (N'a\r\nb 🎉 ế')\r\nGO\r\n";
     let bytes = utf16(text);
     let mut one_byte_at_a_time = BufReader::with_capacity(1, &bytes[..]);
@@ -132,7 +140,16 @@ fn utf16_scripts_decode_with_surrogates_across_reads_and_keep_their_crlf() {
     let mut odd = utf16("SELECT 1");
     odd.push(b'A');
     assert!(statements_of(&odd).is_err());
-    assert!(statements_of(b"\xFE\xFF\0S\0E").is_err());
+    assert_eq!(
+        statements_of(&utf16_big_endian(text)).unwrap(),
+        [("INSERT t VALUES (N'a\r\nb 🎉 ế')".to_owned(), 1)]
+    );
+    let mut odd_big_endian = utf16_big_endian("SELECT 1");
+    odd_big_endian.push(b'A');
+    assert!(statements_of(&odd_big_endian).is_err());
+    let mut lone_big_endian = utf16_big_endian("SELECT 1");
+    lone_big_endian.extend_from_slice(&0xDC00u16.to_be_bytes());
+    assert!(statements_of(&lone_big_endian).is_err());
     let mut bad_utf8 = b"SELECT 'a".to_vec();
     bad_utf8.push(0xFF);
     bad_utf8.extend_from_slice(b"'\n");
@@ -282,7 +299,7 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
             "NOCHECK CONSTRAINT",
         ),
         (
-            "EXEC sys.sp_addextendedproperty @name=N'MS_Description'",
+            "EXEC sys.sp_addextendedproperty @name=N'Caption', @value=N'x'",
             "extended properties",
         ),
         (
@@ -307,7 +324,29 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
     );
     assert_eq!(
         classify_sqlserver("SET XACT_ABORT ON", &known),
-        Action::Ignore(Ignored::Set("XACT_ABORT".to_owned()))
+        Action::Run(Effect::Setting)
+    );
+    assert_eq!(
+        classify_sqlserver("SET NOEXEC ON", &known),
+        Action::Ignore(Ignored::Set("NOEXEC".to_owned()))
+    );
+    assert_eq!(
+        classify_sqlserver(
+            "CREATE SEQUENCE [dbo].[Numbers] AS [bigint] START WITH 1",
+            &known
+        ),
+        Action::Run(Effect::Sequence("dbo.Numbers".to_owned()))
+    );
+    assert_eq!(
+        classify_sqlserver("CREATE TYPE [dbo].[Phone] FROM [nvarchar](20) NOT NULL", &known),
+        Action::Ignore(Ignored::Other("alias types"))
+    );
+    assert_eq!(
+        classify_sqlserver(
+            "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'x', @level0type=N'SCHEMA', @level0name=N'dbo'",
+            &known
+        ),
+        Action::Run(Effect::Comment)
     );
     for (text, kind) in [
         ("CREATE PROC [dbo].[p] AS SELECT 1", "procedure"),
@@ -317,6 +356,7 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
         ),
         ("CREATE SYNONYM [dbo].[s] FOR [x].[y]", "synonym"),
         ("CREATE TYPE [dbo].[t] AS TABLE (a int)", "type"),
+        ("CREATE TYPE [dbo].[t] EXTERNAL NAME [a].[b]", "type"),
         ("CREATE PRIMARY XML INDEX [x] ON [t] ([c])", "index"),
         (
             "CREATE ASYMMETRIC KEY k WITH ALGORITHM = RSA_2048",
@@ -346,12 +386,14 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
 #[test]
 fn computed_and_rowversion_columns_are_cut_and_identity_seeds_kept() {
     let text = "CREATE TABLE [dbo].[P](\n\t[Id] [int] IDENTITY(5, -2) NOT NULL,\n\t[a] [money] NULL,\n\t[b]  AS ([a]*(2)) PERSISTED,\n\t[v] [timestamp] NOT NULL,\n\t[Identity_X] [int] NULL,\n CONSTRAINT [PK_P] PRIMARY KEY CLUSTERED ([Id] ASC)\n) ON [PRIMARY]";
-    let (rewritten, notes) = without_unsupported_columns(text).unwrap();
+    let no_aliases = AliasTypes::default();
+    let rewrite = rewritten_table(text, &no_aliases).unwrap();
     assert_eq!(
-        rewritten,
+        rewrite.text,
         "CREATE TABLE [dbo].[P](\n\t[Id] [int] IDENTITY(5, -2) NOT NULL,\n\t[a] [money] NULL,\n\t[Identity_X] [int] NULL,\n CONSTRAINT [PK_P] PRIMARY KEY CLUSTERED ([Id] ASC)\n) ON [PRIMARY]"
     );
-    let shown: Vec<String> = notes
+    let shown: Vec<String> = rewrite
+        .notes
         .iter()
         .map(|note| format!("{}: {}", note.object, note.difference))
         .collect();
@@ -362,26 +404,271 @@ fn computed_and_rowversion_columns_are_cut_and_identity_seeds_kept() {
             "dbo.P.v: rowversion column not kept",
         ]
     );
-    assert!(without_unsupported_columns("CREATE TABLE t (a int IDENTITY(1,1))").is_none());
-    assert!(without_unsupported_columns("CREATE TABLE t (a AS (1))").is_none());
-    assert!(without_unsupported_columns("INSERT t VALUES (1)").is_none());
+    assert!(!rewrite.identity_not_kept);
+    assert!(rewritten_table("CREATE TABLE t (a int IDENTITY(1,1))", &no_aliases).is_none());
+    assert!(rewritten_table("CREATE TABLE t (a AS (1))", &no_aliases).is_none());
+    assert!(rewritten_table("INSERT t VALUES (1)", &no_aliases).is_none());
+}
+
+#[test]
+fn xml_alias_and_numeric_identity_columns_are_rewritten_to_types_eggdb_has() {
+    let mut aliases = AliasTypes::default();
+    aliases.learn("CREATE TYPE [dbo].[Phone] FROM [nvarchar](20) NOT NULL");
+    aliases.learn("CREATE TYPE [Doc] FROM [xml] NULL");
+    aliases.learn("CREATE TYPE [dbo].[Rows] AS TABLE ([a] [int])");
+    let text = "CREATE TABLE [dbo].[T](\n\t[Id] [numeric](12, 0) IDENTITY(1,1) NOT NULL,\n\t[Big] [decimal](24, 0) NULL,\n\t[Body] [xml] NULL,\n\t[Home] [dbo].[Phone] NULL,\n\t[Work] [Phone],\n\t[Note] [dbo].[Doc] NULL,\n PRIMARY KEY ([Id])\n)";
+    let rewrite = rewritten_table(text, &aliases).unwrap();
+    assert_eq!(
+        rewrite.text,
+        "CREATE TABLE [dbo].[T](\n\t[Id] bigint IDENTITY(1,1) NOT NULL,\n\t[Big] [decimal](24, 0) NULL,\n\t[Body] nvarchar(max) NULL,\n\t[Home] [nvarchar](20) NULL,\n\t[Work] [nvarchar](20) NOT NULL,\n\t[Note] nvarchar(max) NULL,\n PRIMARY KEY ([Id])\n)"
+    );
+    let objects: Vec<&str> = rewrite.notes.iter().map(|note| note.object.as_str()).collect();
+    assert_eq!(objects, ["dbo.T.Id", "dbo.T.Body", "dbo.T.Note"]);
+    assert!(!rewrite.identity_not_kept);
+    let wide = rewritten_table(
+        "CREATE TABLE [w]([Id] [numeric](20, 0) IDENTITY (1, 1) NOT NULL PRIMARY KEY)",
+        &aliases,
+    )
+    .unwrap();
+    assert_eq!(
+        wide.text,
+        "CREATE TABLE [w]([Id] [numeric](20, 0)  NOT NULL PRIMARY KEY)"
+    );
+    assert!(wide.identity_not_kept);
+}
+
+#[test]
+fn large_batches_split_at_semicolons_and_data_lines_outside_blocks() {
+    let text = "UPDATE t SET a = 1;\nUPDATE t\nSET b = ';\nDELETE'\nIF 1 = 1 BEGIN UPDATE t SET c = CASE WHEN 1 = 1 THEN 1 END; END;\nBEGIN TRAN;\nINSERT t VALUES (1) /* ;\nDELETE */\nDELETE FROM t";
+    let at = |needle: &str| text.find(needle).unwrap();
+    assert_eq!(
+        statement_boundaries(text),
+        [
+            at(";\nUPDATE t\n") + 1,
+            at(";\nBEGIN TRAN") + 1,
+            at("BEGIN TRAN;") + "BEGIN TRAN;".len(),
+            at("DELETE FROM t"),
+        ]
+    );
+}
+
+#[test]
+fn a_batch_over_4_mib_without_go_restores_statement_by_statement() {
+    let store = MemoryStore::default();
+    let mut script = String::from(
+        "CREATE TABLE [dbo].[T]([Id] [int] NOT NULL PRIMARY KEY, [Note] [nvarchar](max) NULL)\nGO\nINSERT [dbo].[T] ([Id]) VALUES (1), (2), (3)\nGO\n",
+    );
+    let note = "x".repeat(5 << 19);
+    for id in 1..=3 {
+        script.push_str(&format!(
+            "UPDATE [dbo].[T] SET [Note] = N'{note}' WHERE [Id] = {id}; "
+        ));
+    }
+    script.push_str("\nGO\n");
+    let report = restore(&store, script.as_bytes(), false);
+    assert_eq!(report.error, None);
+    assert_eq!(
+        query(&store, "SELECT id, length(note) AS n FROM t ORDER BY id"),
+        format!("id|n\n1|{0}\n2|{0}\n3|{0}\nSELECT 3", 5 << 19)
+    );
+    let one_large = format!("SELECT N'{}'\nGO\n", "y".repeat(5 << 20));
+    let refused = restore(&MemoryStore::default(), one_large.as_bytes(), false);
+    let error = refused.error.expect("a statement over 4 MiB that is not data");
+    assert!(
+        error.error.message().contains("is not an INSERT, UPDATE or DELETE"),
+        "{}",
+        error.error
+    );
+}
+
+#[test]
+fn identity_shapes_eggdb_refuses_restore_without_the_property_and_their_identity_insert_is_ignored()
+{
+    let store = MemoryStore::default();
+    let script = b"CREATE TABLE [dbo].[Log]([Id] [int] IDENTITY(1,1) NOT NULL, [Msg] [nvarchar](20) NULL)\nGO\nCREATE TABLE [dbo].[Pair]([K] [int] NOT NULL, [Id] [int] IDENTITY(1,1) NOT NULL, CONSTRAINT [PK_Pair] PRIMARY KEY CLUSTERED ([K] ASC))\nGO\nCREATE TABLE [dbo].[Big]([Id] [numeric](10, 0) IDENTITY(1,1) NOT NULL PRIMARY KEY, [V] [int] NULL)\nGO\nCREATE TABLE [dbo].[Wide]([Id] [numeric](20, 0) IDENTITY(1,1) NOT NULL PRIMARY KEY)\nGO\nSET IDENTITY_INSERT [dbo].[Log] ON\nINSERT [dbo].[Log] ([Id], [Msg]) VALUES (7, N'a')\nSET IDENTITY_INSERT [dbo].[Log] OFF\nGO\nSET IDENTITY_INSERT [dbo].[Pair] ON\nINSERT [dbo].[Pair] ([K], [Id]) VALUES (1, 9)\nSET IDENTITY_INSERT [dbo].[Pair] OFF\nGO\nSET IDENTITY_INSERT [dbo].[Big] ON\nINSERT [dbo].[Big] ([Id], [V]) VALUES (40, 1)\nSET IDENTITY_INSERT [dbo].[Big] OFF\nGO\nSET IDENTITY_INSERT [dbo].[Wide] ON\nINSERT [dbo].[Wide] ([Id]) VALUES (12345678901234567890)\nSET IDENTITY_INSERT [dbo].[Wide] OFF\nGO\n";
+    let report = restore(&store, script, false);
+    assert_eq!(report.error, None, "{report:?}");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!((report.tables, report.rows, report.tables_skipped), (4, 4, 0));
+    let differences: Vec<(&str, &str)> = report
+        .differences
+        .iter()
+        .map(|difference| (difference.object.as_str(), difference.difference.as_str()))
+        .collect();
+    assert_eq!(differences.len(), 4, "{differences:?}");
+    assert!(differences[0].0 == "dbo.Log.Id" && differences[0].1.starts_with("IDENTITY not kept"));
+    assert!(differences[1].0 == "dbo.Pair.Id" && differences[1].1.starts_with("IDENTITY not kept"));
+    assert_eq!(
+        differences[2],
+        ("dbo.Big.Id", "IDENTITY of numeric(10, 0) kept as a bigint column")
+    );
+    assert!(differences[3].0 == "dbo.Wide.Id" && differences[3].1.starts_with("IDENTITY not kept"));
+    assert!(
+        report.ignored.other.contains(&(
+            "SET IDENTITY_INSERT of a table whose IDENTITY was not kept".to_owned(),
+            6
+        )),
+        "{:?}",
+        report.ignored.other
+    );
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    session
+        .execute("INSERT [dbo].[Big] ([V]) VALUES (2)", &mut |_| {})
+        .unwrap();
+    assert_eq!(session.close(), Ok(false));
+    assert_eq!(
+        query(&store, "SELECT id, v FROM big ORDER BY id"),
+        "id|v\n40|1\n41|2\nSELECT 2"
+    );
+    assert_eq!(
+        query(&store, "SELECT id, msg FROM log"),
+        "id|msg\n7|a\nSELECT 1"
+    );
+}
+
+#[test]
+fn alias_types_restore_as_their_base_types_with_their_nullability() {
+    let store = MemoryStore::default();
+    let script = b"CREATE TYPE [dbo].[Phone] FROM [nvarchar](20) NOT NULL\nGO\nCREATE TYPE [dbo].[Flag] FROM [bit] NULL\nGO\nCREATE TABLE [dbo].[People]([Id] [int] NOT NULL PRIMARY KEY, [Home] [dbo].[Phone] NULL, [Work] [dbo].[Phone], [Active] [Flag] NULL)\nGO\nINSERT [dbo].[People] ([Id], [Home], [Work], [Active]) VALUES (1, NULL, N'555', 1)\nGO\n";
+    let report = restore(&store, script, false);
+    assert_eq!(report.error, None, "{report:?}");
+    assert_eq!((report.tables, report.rows), (1, 1));
+    assert!(
+        report
+            .ignored
+            .other
+            .contains(&("alias types".to_owned(), 2)),
+        "{:?}",
+        report.ignored.other
+    );
+    let differences: Vec<(u64, &str, &str)> = report
+        .differences
+        .iter()
+        .map(|difference| {
+            (
+                difference.line,
+                difference.object.as_str(),
+                difference.difference.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        differences,
+        [
+            (
+                1,
+                "type dbo.Phone",
+                "an alias type: its columns are created as [nvarchar](20) NOT NULL"
+            ),
+            (3, "type dbo.Flag", "an alias type: its columns are created as [bit]"),
+        ]
+    );
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let refused = session
+        .execute(
+            "INSERT [dbo].[People] ([Id], [Home]) VALUES (2, N'1')",
+            &mut |_| {},
+        )
+        .unwrap_err();
+    assert_eq!(refused.vendor_code(), Some(515), "{refused}");
+    assert_eq!(session.close(), Ok(false));
+    assert_eq!(
+        query(&store, "SELECT work, active FROM people"),
+        "work|active\n555|t\nSELECT 1"
+    );
+}
+
+#[test]
+fn sequences_restore_and_number_new_rows_through_their_default() {
+    let store = MemoryStore::default();
+    let script = b"CREATE SEQUENCE [dbo].[OrderNumbers] \r\n AS [bigint]\r\n START WITH 1000\r\n INCREMENT BY 10\r\n MINVALUE -9223372036854775808\r\n MAXVALUE 9223372036854775807\r\n CACHE \r\nGO\r\nCREATE TABLE [dbo].[Orders]([Id] [bigint] NOT NULL PRIMARY KEY, [Note] [nvarchar](10) NULL)\r\nGO\r\nALTER TABLE [dbo].[Orders] ADD  CONSTRAINT [DF_Orders_Id]  DEFAULT (NEXT VALUE FOR [dbo].[OrderNumbers]) FOR [Id]\r\nGO\r\n";
+    let report = restore(&store, script, false);
+    assert_eq!(report.error, None, "{report:?}");
+    assert_eq!((report.sequences, report.tables), (1, 1));
+    assert!(report.differences.is_empty(), "{:?}", report.differences);
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let mut ids = Vec::new();
+    session
+        .execute(
+            "INSERT [dbo].[Orders] ([Note]) VALUES (N'a'); INSERT [dbo].[Orders] ([Note]) VALUES (N'b'); SELECT NEXT VALUE FOR [dbo].[OrderNumbers] AS n",
+            &mut |result| {
+                for row in &result.rows {
+                    ids.push(row[0].to_text().unwrap_or_default());
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(ids, ["1020"]);
+    assert_eq!(session.close(), Ok(false));
+    assert_eq!(
+        query(&store, "SELECT id, note FROM orders ORDER BY id"),
+        "id|note\n1000|a\n1010|b\nSELECT 2"
+    );
+}
+
+#[test]
+fn descriptions_become_comments_and_char_builds_line_breaks() {
+    let store = MemoryStore::default();
+    let script = b"CREATE TABLE [dbo].[People]([Id] [int] NOT NULL PRIMARY KEY, [Name] [nvarchar](40) NULL)\nGO\nINSERT [dbo].[People] ([Id], [Name]) VALUES (1, N'line one' + CHAR(13) + CHAR(10) + N'line two')\nGO\nEXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Our people' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'People'\nGO\nEXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Full name' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'People', @level2type=N'COLUMN',@level2name=N'Name'\nGO\nEXEC sys.sp_addextendedproperty @name=N'Caption', @value=N'People' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'People'\nGO\n";
+    let report = restore(&store, script, false);
+    assert_eq!(report.error, None, "{report:?}");
+    assert_eq!(report.comments, 2);
+    assert!(
+        report
+            .ignored
+            .other
+            .contains(&("extended properties".to_owned(), 1))
+    );
+    assert_eq!(
+        query(
+            &store,
+            "SELECT obj_description('people'::regclass, 'pg_class') AS t, col_description('people'::regclass, 2) AS c"
+        ),
+        "t|c\nOur people|Full name\nSELECT 1"
+    );
+    assert_eq!(
+        query(&store, "SELECT name = E'line one\\r\\nline two' AS kept FROM people"),
+        "kept\nt\nSELECT 1"
+    );
+}
+
+#[test]
+fn transact_sql_scripts_split_into_batches_at_go_without_running_sqlcmd_commands() {
+    let batches = sqlserver_batches("SELECT 1\nGO\n\nSELECT 'a\nGO\nb'\ngo 3\nSELECT 2").unwrap();
+    let shown: Vec<(&str, u64, u64)> = batches
+        .iter()
+        .map(|batch| (batch.text.as_str(), batch.line, batch.repeat))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("SELECT 1\n", 1, 1),
+            ("SELECT 'a\nGO\nb'\n", 4, 3),
+            ("SELECT 2", 8, 1),
+        ]
+    );
+    let big = format!("SELECT 1\n{}GO\n", "INSERT t VALUES (1)\n".repeat(80_000));
+    assert_eq!(sqlserver_batches(&big).unwrap().len(), 1);
+    let error = sqlserver_batches("SELECT 1\nGO\n:setvar a 1\nSELECT '$(a)'\n").unwrap_err();
+    assert!(error.message().contains(":setvar is a sqlcmd command"), "{error}");
+    assert!(sqlserver_batches("").unwrap().is_empty());
 }
 
 #[test]
 fn an_ssms_shaped_script_restores_with_its_report() {
     let store = MemoryStore::default();
-    let script = "USE [master]\r\nGO\r\nCREATE DATABASE [Shop]\r\nGO\r\nUSE [Shop]\r\nGO\r\nCREATE SCHEMA [sales]\r\nGO\r\nSET ANSI_NULLS ON\r\nGO\r\nCREATE TABLE [sales].[Orders](\r\n\t[Id] [int] IDENTITY(10,5) NOT NULL,\r\n\t[At] [datetimeoffset](7) NOT NULL,\r\n\t[Total] [money] NOT NULL,\r\n\t[Twice]  AS ([Total]*(2)),\r\n CONSTRAINT [PK_Orders] PRIMARY KEY CLUSTERED \r\n(\r\n\t[Id] ASC\r\n)WITH (PAD_INDEX = OFF) ON [PRIMARY]\r\n) ON [PRIMARY]\r\nGO\r\nCREATE TABLE [dbo].[Docs]([Id] [int] NOT NULL PRIMARY KEY, [Body] [xml] NULL)\r\nGO\r\nSET IDENTITY_INSERT [sales].[Orders] ON \r\n\r\nINSERT [sales].[Orders] ([Id], [At], [Total]) VALUES (0, CAST(N'2024-01-01T10:00:00+02:00' AS DateTimeOffset), 1.5000)\r\nINSERT [sales].[Orders] ([Id], [At], [Total]) VALUES (10, CAST(N'2024-01-02T10:00:00+00:00' AS DateTimeOffset), 2.0000)\r\nSET IDENTITY_INSERT [sales].[Orders] OFF\r\nGO\r\nSET IDENTITY_INSERT [dbo].[Docs] ON\r\nINSERT [dbo].[Docs] ([Id], [Body]) VALUES (1, N'<a/>')\r\nSET IDENTITY_INSERT [dbo].[Docs] OFF\r\nGO\r\nCREATE PROCEDURE [dbo].[P] AS SELECT * INTO #t FROM [sales].[Orders]\r\nGO\r\nGRANT EXECUTE ON [dbo].[P] TO [public]\r\nGO\r\n";
+    let script = "USE [master]\r\nGO\r\nCREATE DATABASE [Shop]\r\nGO\r\nUSE [Shop]\r\nGO\r\nCREATE SCHEMA [sales]\r\nGO\r\nSET ANSI_NULLS ON\r\nGO\r\nCREATE TABLE [sales].[Orders](\r\n\t[Id] [int] IDENTITY(10,5) NOT NULL,\r\n\t[At] [datetimeoffset](7) NOT NULL,\r\n\t[Total] [money] NOT NULL,\r\n\t[Twice]  AS ([Total]*(2)),\r\n CONSTRAINT [PK_Orders] PRIMARY KEY CLUSTERED \r\n(\r\n\t[Id] ASC\r\n)WITH (PAD_INDEX = OFF) ON [PRIMARY]\r\n) ON [PRIMARY]\r\nGO\r\nCREATE TABLE [dbo].[Docs]([Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY, [Body] [xml] NULL)\r\nGO\r\nSET IDENTITY_INSERT [sales].[Orders] ON \r\n\r\nINSERT [sales].[Orders] ([Id], [At], [Total]) VALUES (0, CAST(N'2024-01-01T10:00:00+02:00' AS DateTimeOffset), 1.5000)\r\nINSERT [sales].[Orders] ([Id], [At], [Total]) VALUES (10, CAST(N'2024-01-02T10:00:00+00:00' AS DateTimeOffset), 2.0000)\r\nSET IDENTITY_INSERT [sales].[Orders] OFF\r\nGO\r\nSET IDENTITY_INSERT [dbo].[Docs] ON\r\nINSERT [dbo].[Docs] ([Id], [Body]) VALUES (1, N'<a/>')\r\nSET IDENTITY_INSERT [dbo].[Docs] OFF\r\nGO\r\nCREATE PROCEDURE [dbo].[P] AS SELECT * INTO #t FROM [sales].[Orders]\r\nGO\r\nGRANT EXECUTE ON [dbo].[P] TO [public]\r\nGO\r\n";
     let report = restore(&store, &utf16(script), false);
     assert_eq!(report.error, None);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
-    assert_eq!((report.schemas, report.tables, report.rows), (1, 1, 2));
-    assert_eq!((report.tables_skipped, report.rows_skipped), (1, 1));
+    assert_eq!((report.schemas, report.tables, report.rows), (1, 2, 3));
+    assert_eq!((report.tables_skipped, report.rows_skipped), (0, 0));
     let skipped: Vec<(&str, &str)> = report
         .skipped
         .iter()
         .map(|object| (object.kind.as_str(), object.name.as_str()))
         .collect();
-    assert_eq!(skipped, [("table", "dbo.Docs"), ("procedure", "dbo.P")]);
+    assert_eq!(skipped, [("procedure", "dbo.P")]);
     let differences: Vec<(u64, &str)> = report
         .differences
         .iter()
@@ -389,7 +676,15 @@ fn an_ssms_shaped_script_restores_with_its_report() {
         .collect();
     assert_eq!(
         differences,
-        [(11, "sales.Orders.Twice"), (11, "sales.Orders.At")]
+        [
+            (11, "sales.Orders.Twice"),
+            (11, "sales.Orders.At"),
+            (22, "dbo.Docs.Body")
+        ]
+    );
+    assert_eq!(
+        query(&store, "SELECT id, body FROM docs"),
+        "id|body\n1|<a/>\nSELECT 1"
     );
     assert_eq!(report.ignored.grant, 1);
     assert_eq!(
@@ -498,7 +793,7 @@ impl Read for Trickle<'_> {
 
 #[test]
 fn hostile_scripts_end_in_items_or_an_error_and_never_panic() {
-    const FRAGMENTS: [&str; 32] = [
+    const FRAGMENTS: [&str; 39] = [
         "GO\n",
         "go 2\n",
         "GO /* x\n",
@@ -531,6 +826,13 @@ fn hostile_scripts_end_in_items_or_an_error_and_never_panic() {
         "\0",
         "IF 1=1 ",
         ";",
+        "CREATE TYPE [p] FROM [xml] NOT NULL\n",
+        "CREATE TABLE [t]([a] [p], [b] [numeric](30, 0) IDENTITY, [c] [xml](CONTENT x))",
+        "UPDATE [t] SET a = 1",
+        "BEGIN ",
+        " END",
+        "NEXT VALUE FOR [s]",
+        "SET XACT_ABORT ON\n",
     ];
     let mut random = Random(0x5eed_4040);
     for case in 0..3000 {

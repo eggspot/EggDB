@@ -8,6 +8,7 @@ use crate::pg_catalog::{
     CatalogColumn, CatalogSnapshot, ConstraintSource, RelationSource, index_columns,
     index_is_unique, index_sort_options,
 };
+use crate::encoding::CommentKind;
 use crate::types::{SqlType, Value};
 
 const SYSNAME: SqlType = SqlType::Varchar(Some(128));
@@ -639,11 +640,53 @@ pub(super) fn rows(snapshot: &CatalogSnapshot, view: SystemView) -> Vec<Vec<Valu
         SystemView::Sequences => sequence_rows(snapshot, objects),
         SystemView::Databases => vec![database_row(snapshot)],
         SystemView::SqlModules => sql_module_rows(snapshot, objects),
-        SystemView::Procedures
-        | SystemView::Parameters
-        | SystemView::Triggers
-        | SystemView::ExtendedProperties => Vec::new(),
+        SystemView::ExtendedProperties => extended_property_rows(snapshot, objects),
+        SystemView::Procedures | SystemView::Parameters | SystemView::Triggers => Vec::new(),
     }
+}
+
+fn extended_property_rows(
+    snapshot: &CatalogSnapshot,
+    objects: &SqlServerObjects,
+) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for comment in &snapshot.comments {
+        let place = match comment.kind {
+            CommentKind::Schema => objects
+                .schemas
+                .iter()
+                .find(|schema| schema.internal.as_deref() == Some(comment.part.as_str()))
+                .map(|schema| (3, "SCHEMA", schema.schema_id, 0)),
+            CommentKind::Relation => snapshot
+                .find_internal(&comment.owner)
+                .and_then(|at| objects.of_relation(at))
+                .map(|object| (1, "OBJECT_OR_COLUMN", object.object_id, 0)),
+            CommentKind::Column => snapshot.find_internal(&comment.owner).and_then(|at| {
+                let object = objects.of_relation(at)?;
+                let entry = snapshot.relations.get(at)?;
+                let position = relation_columns(entry)
+                    .iter()
+                    .position(|facts| facts.name == comment.part)?;
+                let column_id = i32::try_from(position + 1).ok()?;
+                Some((1, "OBJECT_OR_COLUMN", object.object_id, column_id))
+            }),
+            CommentKind::Index | CommentKind::Constraint => None,
+        };
+        let Some((class, class_desc, major_id, minor_id)) = place else {
+            continue;
+        };
+        rows.push(
+            CatalogRow::new(EXTENDED_PROPERTY_COLUMNS)
+                .set("class", small(class))
+                .set("class_desc", text(class_desc))
+                .set("major_id", Value::Integer(major_id))
+                .set("minor_id", Value::Integer(minor_id))
+                .set("name", text("MS_Description"))
+                .set("value", text(&comment.text))
+                .done(),
+        );
+    }
+    rows
 }
 
 fn with_flags(mut row: CatalogRow, names: &[&str], value: bool) -> CatalogRow {

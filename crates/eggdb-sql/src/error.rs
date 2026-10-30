@@ -107,6 +107,8 @@ impl SqlState {
     pub const NO_ACTIVE_SQL_TRANSACTION: Self = Self(*b"25P01");
     /// `25P02` in_failed_sql_transaction.
     pub const IN_FAILED_SQL_TRANSACTION: Self = Self(*b"25P02");
+    /// `40000` transaction_rollback.
+    pub const TRANSACTION_ROLLBACK: Self = Self(*b"40000");
     /// `42601` syntax_error.
     pub const SYNTAX_ERROR: Self = Self(*b"42601");
     /// `42622` name_too_long.

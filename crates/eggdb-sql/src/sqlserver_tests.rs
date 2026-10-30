@@ -154,7 +154,7 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
         "ALTER VIEW nowhere AS SELECT 1 AS one",
         "SELECT 1 AS one; CREATE VIEW v AS SELECT 1 AS one",
         "SELECT id FROM t GROUP BY name",
-        "SET XACT_ABORT ON",
+        "SET NOEXEC ON",
         "COMMIT",
         "USE elsewhere",
         "SELECT (SELECT id FROM t UNION ALL SELECT id FROM t) AS x",
@@ -1406,4 +1406,128 @@ fn hostile_arguments_to_the_common_functions_return_errors_or_values_and_never_p
         values(&mut session, "SELECT 1 AS n"),
         vec![vec![Value::Integer(1)]]
     );
+}
+
+fn texts(rows: Vec<Vec<Value>>) -> Vec<Vec<String>> {
+    rows.into_iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| value.to_text().unwrap_or_else(|| "NULL".to_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn sequences_number_with_sql_server_defaults_cycles_and_next_value_for() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    session
+        .execute(
+            "CREATE SEQUENCE dbo.counter AS int START WITH 5 INCREMENT BY 5 MINVALUE 5 MAXVALUE 15 CYCLE NO CACHE",
+            &mut |_| {},
+        )
+        .unwrap();
+    let mut drawn = Vec::new();
+    for _ in 0..4 {
+        drawn.extend(texts(values(
+            &mut session,
+            "SELECT NEXT VALUE FOR dbo.counter AS n",
+        )));
+    }
+    assert_eq!(drawn, vec![vec!["5"], vec!["10"], vec!["15"], vec!["5"]]);
+    session
+        .execute(
+            "CREATE SEQUENCE [tiny] AS [tinyint]; CREATE SEQUENCE big; CREATE SEQUENCE down AS smallint INCREMENT BY -1",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        texts(values(
+            &mut session,
+            "SELECT NEXT VALUE FOR tiny AS t, NEXT VALUE FOR big AS b, NEXT VALUE FOR down AS d"
+        )),
+        vec![vec![
+            "0".to_owned(),
+            i64::MIN.to_string(),
+            i16::MAX.to_string()
+        ]]
+    );
+    session
+        .execute("ALTER SEQUENCE tiny RESTART WITH 7", &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        texts(values(&mut session, "SELECT NEXT VALUE FOR tiny AS t")),
+        vec![vec!["7"]]
+    );
+    session
+        .execute(
+            "CREATE TABLE o (id BIGINT PRIMARY KEY DEFAULT (NEXT VALUE FOR big), n INT); INSERT INTO o (n) VALUES (1)",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        texts(values(&mut session, "SELECT id FROM o")),
+        vec![vec![(i64::MIN + 1).to_string()]]
+    );
+    let refused = session
+        .execute("CREATE SEQUENCE wide AS decimal(20, 0)", &mut |_| {})
+        .unwrap_err();
+    assert_eq!(refused.vendor_code(), Some(11702));
+    session
+        .execute("DROP SEQUENCE IF EXISTS dbo.counter", &mut |_| {})
+        .unwrap();
+    assert!(
+        session
+            .execute("SELECT NEXT VALUE FOR dbo.counter AS n", &mut |_| {})
+            .is_err()
+    );
+    assert_eq!(session.close(), Ok(false));
+}
+
+#[test]
+fn ms_description_extended_properties_are_comments_shown_in_sys_extended_properties() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    session
+        .execute(
+            "CREATE TABLE people (id INT PRIMARY KEY, name NVARCHAR(20)); \
+             EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Our people', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'People'; \
+             EXEC sp_addextendedproperty N'MS_Description', N'Full name', N'SCHEMA', N'dbo', N'TABLE', N'People', N'COLUMN', N'Name'",
+            &mut |_| {},
+        )
+        .unwrap();
+    let listed = "SELECT minor_id, CAST(value AS nvarchar(50)) AS v FROM sys.extended_properties ORDER BY minor_id";
+    assert_eq!(
+        texts(values(&mut session, listed)),
+        vec![vec!["0", "Our people"], vec!["2", "Full name"]]
+    );
+    session
+        .execute(
+            "EXEC sp_updateextendedproperty @name=N'MS_Description', @value=N'Name of the person', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'People', @level2type=N'COLUMN', @level2name=N'Name'; \
+             EXEC sp_dropextendedproperty @name=N'MS_Description', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'People'",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        texts(values(&mut session, listed)),
+        vec![vec!["2", "Name of the person"]]
+    );
+    for text in [
+        "EXEC sp_addextendedproperty @name=N'Caption', @value=N'x', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'People'",
+        "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x'",
+        "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x', @level0type=N'USER', @level0name=N'dbo'",
+        "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'PROCEDURE', @level1name=N'p'",
+    ] {
+        let error = session.execute(text, &mut |_| {}).unwrap_err();
+        assert_eq!(error.vendor_code(), Some(40517), "{text}: {error}");
+    }
+    let unknown = session
+        .execute(
+            "EXEC sp_addextendedproperty @name=N'MS_Description', @nothing=N'x'",
+            &mut |_| {},
+        )
+        .unwrap_err();
+    assert_eq!(unknown.vendor_code(), Some(8145));
+    assert_eq!(session.close(), Ok(false));
 }

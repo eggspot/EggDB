@@ -6,7 +6,9 @@ use crate::cli::output::{Output, Style};
 use crate::cli::render::{JsonObject, json_string};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_commands::Category;
-use eggdb_sql::{Dialect, QueryResult, SqlError, SqlState, TransactionStatus, Value};
+use eggdb_sql::{
+    CopyChannel, Dialect, QueryResult, SqlError, SqlState, TransactionStatus, Value,
+};
 use std::cell::{Cell, RefCell};
 use std::io::Read;
 
@@ -27,6 +29,7 @@ impl Session<'_> {
         let dialect = self.request.dialect;
         let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
         let mut printed = Ok(());
+        let mut failed_batch: Option<String> = None;
         let copied_out = Cell::new(false);
         let outcome = {
             let out = RefCell::new(&mut self.out);
@@ -61,7 +64,16 @@ impl Session<'_> {
                 printed = out.line_done();
                 printed.is_ok()
             };
-            if script {
+            if dialect == Dialect::SqlServer {
+                run_sqlserver_batches(
+                    &mut session,
+                    &text,
+                    script,
+                    &mut on_result,
+                    &mut copy,
+                    &mut failed_batch,
+                )
+            } else if script {
                 session.execute_script(&text, &mut on_result, &mut copy)
             } else {
                 session.execute_with_copy(&text, &mut on_result, &mut copy)
@@ -70,7 +82,8 @@ impl Session<'_> {
         let exit = match outcome {
             Ok(()) => Exit::Done,
             Err(error) => {
-                report_error(&mut self.messages, &error, &text, json);
+                let shown = failed_batch.as_deref().unwrap_or(&text);
+                report_error(&mut self.messages, &error, shown, json);
                 exit_for(&error)
             }
         };
@@ -120,6 +133,42 @@ impl Session<'_> {
             ))
         })
     }
+}
+
+fn run_sqlserver_batches(
+    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
+    text: &str,
+    script: bool,
+    on_result: &mut dyn FnMut(QueryResult) -> bool,
+    copy: &mut dyn CopyChannel,
+    failed_batch: &mut Option<String>,
+) -> Result<(), SqlError> {
+    let batches = eggdb_sql::sqlserver_batches(text)?;
+    let stopped = Cell::new(false);
+    let mut forward = |result: QueryResult| {
+        let more = on_result(result);
+        if !more {
+            stopped.set(true);
+        }
+        more
+    };
+    for batch in &batches {
+        for _ in 0..batch.repeat {
+            let outcome = if script {
+                session.execute_script(&batch.text, &mut forward, copy)
+            } else {
+                session.execute_with_copy(&batch.text, &mut forward, copy)
+            };
+            if let Err(error) = outcome {
+                *failed_batch = Some(batch.text.clone());
+                return Err(error);
+            }
+            if stopped.get() {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn commit_on_exit(

@@ -290,6 +290,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Err(error) => break Err(error),
             }
         };
+        let outcome = outcome.and_then(|()| self.end_uncommittable_transaction(text, on_step));
         let finished = self.leave_batch_scope(scope);
         if let Parameters::Named(given) = parameters {
             self.parameter_values = given
@@ -315,6 +316,20 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
         self.batch_resume = None;
         outcome
+    }
+
+    fn end_uncommittable_transaction(
+        &mut self,
+        text: &str,
+        on_step: &mut dyn FnMut(BatchStep) -> bool,
+    ) -> SqlResult<()> {
+        if !(self.sqlserver() && self.settings.sqlserver.uncommittable && self.in_block()) {
+            return Ok(());
+        }
+        self.abandon_transaction()?;
+        let error = super::sqlserver::uncommittable_at_batch_end();
+        on_step(self.batch_step(Err(error), text.len()));
+        Ok(())
     }
 
     pub(super) fn run_logic_text<'t>(
@@ -479,11 +494,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Err(error) => (self.in_dialect(code.text, error), false),
             };
             self.set_last_error(failure.sqlserver_number().unwrap_or(50_000));
+            let xact_abort = self.xact_abort_applies(&failure);
             if self.sqlserver()
                 && (lower_level || !resolves_names(&failure))
                 && let Some(index) = code.program.try_around(at_instruction)
                 && let Some(block) = code.program.tries.get(index)
             {
+                if xact_abort && self.in_block() && !self.settings.sqlserver.uncommittable {
+                    Arc::make_mut(&mut self.settings).sqlserver.uncommittable = true;
+                }
                 let line = crate::tsql::line_of(
                     code.text,
                     failure.position().unwrap_or(statement_start),
@@ -496,13 +515,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             let ends_batch = self.dialect != Dialect::SqlServer
                 || ends_sqlserver_batch(&failure)
-                || (was_in_transaction && !in_transaction);
+                || (was_in_transaction && !in_transaction)
+                || xact_abort;
             match level {
                 Level::Nested { in_try: true } => return Ok(ProgramEnd::Escaped(failure)),
                 Level::Nested { in_try: false } if ends_batch => {
                     return Ok(ProgramEnd::Escaped(failure));
                 }
                 _ => {}
+            }
+            if xact_abort && self.in_block() {
+                self.abandon_transaction()?;
             }
             if !on_step(self.batch_step(Err(failure), statement_start)) || ends_batch {
                 return Ok(ProgramEnd::Stopped);

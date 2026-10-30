@@ -25,6 +25,7 @@ pub(crate) struct ScriptStatement {
     pub(crate) refused: Option<SqlError>,
     pub(crate) unresolved: Option<SqlError>,
     pub(crate) differences: Vec<DifferenceNote>,
+    pub(crate) identity_not_kept: bool,
 }
 
 impl ScriptStatement {
@@ -38,6 +39,7 @@ impl ScriptStatement {
             refused: None,
             unresolved: None,
             differences: Vec::new(),
+            identity_not_kept: false,
         }
     }
 }

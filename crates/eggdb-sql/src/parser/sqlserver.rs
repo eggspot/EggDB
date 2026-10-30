@@ -1,7 +1,8 @@
 use super::{Parameters, Parser};
 use crate::ast::{
-    ColumnDefinition, Expr, ExprKind, Literal, Name, Query, SetExpr, SqlServerStatement, Statement,
-    TableReference,
+    AlterSequence, ColumnDefinition, Comment, CommentTarget, CreateSequence, Expr, ExprKind,
+    Literal, Name, ProcedureCall, Query, RelationKind, SequenceOptions, SetExpr,
+    SqlServerStatement, Statement, TableReference,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -296,7 +297,20 @@ const ON_ONLY_OPTIONS: [&str; 7] = [
     "ansi_null_dflt_on",
 ];
 
-const NOT_SUPPORTED_OPTIONS: [&str; 4] = ["xact_abort", "rowcount", "parseonly", "noexec"];
+const NOT_SUPPORTED_OPTIONS: [&str; 3] = ["rowcount", "parseonly", "noexec"];
+
+const EXTENDED_PROPERTY_PARAMETERS: [&str; 8] = [
+    "@name",
+    "@value",
+    "@level0type",
+    "@level0name",
+    "@level1type",
+    "@level1name",
+    "@level2type",
+    "@level2name",
+];
+
+const DESCRIPTION_PROPERTY: &str = "ms_description";
 
 const SWITCHED_INDEX_OPTIONS: [&str; 8] = [
     "pad_index",
@@ -699,6 +713,18 @@ impl<'t> Parser<'t> {
             {
                 self.sqlserver_view()?
             }
+            "create" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.sqlserver_create_sequence()?
+            }
+            "alter" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.sqlserver_alter_sequence()?
+            }
+            "drop" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.drop_sequence()?
+            }
             "use" => {
                 self.at += 1;
                 let name = self.name()?;
@@ -922,6 +948,10 @@ impl<'t> Parser<'t> {
             "fmtonly" => {
                 let on = self.on_or_off()?;
                 Ok(Statement::SqlServer(SqlServerStatement::FormatOnly(on)))
+            }
+            "xact_abort" => {
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(SqlServerStatement::XactAbort(on)))
             }
             "numeric_roundabort" => {
                 if self.on_or_off()? {
@@ -1316,6 +1346,123 @@ impl<'t> Parser<'t> {
             .and_then(|value| i64::try_from(value).ok()))
     }
 
+    fn sqlserver_create_sequence(&mut self) -> SqlResult<Statement> {
+        self.expect_word("sequence")?;
+        let name = self.table_name()?;
+        let (mut options, range) = self.sqlserver_sequence_options(true)?;
+        let (low, high) = range.unwrap_or((i64::MIN, i64::MAX));
+        let min = match options.min {
+            Some(Some(min)) => min,
+            _ => low,
+        };
+        let max = match options.max {
+            Some(Some(max)) => max,
+            _ => high,
+        };
+        options.min = Some(Some(min));
+        options.max = Some(Some(max));
+        if options.start.is_none() {
+            let descending = options.increment.is_some_and(|increment| increment < 0);
+            options.start = Some(if descending { max } else { min });
+        }
+        Ok(Statement::CreateSequence(CreateSequence {
+            name,
+            if_not_exists: false,
+            options,
+        }))
+    }
+
+    fn sqlserver_alter_sequence(&mut self) -> SqlResult<Statement> {
+        self.expect_word("sequence")?;
+        let name = self.table_name()?;
+        let (options, _) = self.sqlserver_sequence_options(false)?;
+        Ok(Statement::AlterSequence(AlterSequence {
+            name,
+            if_exists: false,
+            options,
+            rename: None,
+        }))
+    }
+
+    fn sqlserver_sequence_options(
+        &mut self,
+        creating: bool,
+    ) -> SqlResult<(SequenceOptions, Option<(i64, i64)>)> {
+        let mut options = SequenceOptions::default();
+        let mut range = None;
+        loop {
+            let position = self.position();
+            if creating && self.take_word("as") {
+                let declared = self.sqlserver_declared_type(false)?;
+                let Some((sql_type, low, high)) = sequence_type(declared) else {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_PARAMETER_VALUE,
+                        "Sequence objects can only be of type tinyint, smallint, int, bigint, or decimal and numeric with a scale of 0 and a precision of 18 or less in this version of EggDB.",
+                    )
+                    .with_sqlserver_code(11702)
+                    .at(position));
+                };
+                options.sql_type = Some((sql_type, position));
+                range = Some((low, high));
+            } else if self.take_word("start") {
+                self.expect_word("with")?;
+                options.start = Some(self.sequence_constant()?);
+            } else if !creating && self.take_word("restart") {
+                options.restart = Some(if self.take_word("with") {
+                    Some(self.sequence_constant()?)
+                } else {
+                    None
+                });
+            } else if self.take_word("increment") {
+                self.expect_word("by")?;
+                options.increment = Some(self.sequence_constant()?);
+            } else if self.take_word("minvalue") {
+                options.min = Some(self.optional_sequence_constant()?);
+            } else if self.take_word("maxvalue") {
+                options.max = Some(self.optional_sequence_constant()?);
+            } else if self.is_word("no") && self.is_word_at(1, "minvalue") {
+                self.at += 2;
+                options.min = Some(None);
+            } else if self.is_word("no") && self.is_word_at(1, "maxvalue") {
+                self.at += 2;
+                options.max = Some(None);
+            } else if self.is_word("no") && self.is_word_at(1, "cycle") {
+                self.at += 2;
+                options.cycle = Some(false);
+            } else if self.is_word("no") && self.is_word_at(1, "cache") {
+                self.at += 2;
+            } else if self.take_word("cycle") {
+                options.cycle = Some(true);
+            } else if self.take_word("cache") {
+                if matches!(self.peek_kind(), TokenKind::Integer(_)) {
+                    self.at += 1;
+                }
+            } else {
+                return Ok((options, range));
+            }
+        }
+    }
+
+    fn optional_sequence_constant(&mut self) -> SqlResult<Option<i64>> {
+        let signed = self.is_operator("-") || self.is_operator("+");
+        if signed || matches!(self.peek_kind(), TokenKind::Integer(_)) {
+            return self.sequence_constant().map(Some);
+        }
+        Ok(None)
+    }
+
+    fn sequence_constant(&mut self) -> SqlResult<i64> {
+        let position = self.position();
+        self.identity_argument()?.ok_or_else(|| {
+            SqlError::new(
+                SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+                "The sequence option value is out of the range of bigint.",
+            )
+            .with_sqlserver_code(GENERIC_ERROR)
+            .at(position)
+        })
+    }
+
     pub(super) fn sqlserver_top(&mut self) -> SqlResult<Option<Expr>> {
         self.at += 1;
         let position = self.position();
@@ -1599,6 +1746,25 @@ impl<'t> Parser<'t> {
                         None => return Err(unknown_function(&name.text, position)),
                     }
                 }
+                "next" if self.is_word_at(1, "value") && self.is_word_at(2, "for") => {
+                    self.at += 3;
+                    let sequence = self.table_name()?;
+                    if self.is_word("over") {
+                        return Err(
+                            not_supported("NEXT VALUE FOR ... OVER (ORDER BY ...)").at(self.position())
+                        );
+                    }
+                    Expr {
+                        kind: ExprKind::Function {
+                            name: "oracle_nextval".to_owned(),
+                            arguments: vec![Expr {
+                                kind: ExprKind::Literal(Literal::String(sequence.text)),
+                                position: sequence.position,
+                            }],
+                        },
+                        position,
+                    }
+                }
                 "current_timestamp" => {
                     self.at += 1;
                     clock(3, position)
@@ -1778,4 +1944,192 @@ mod tests {
             );
         }
     }
+}
+
+fn sequence_type(declared: SqlServerType) -> Option<(SqlType, i64, i64)> {
+    Some(match declared {
+        SqlServerType::TinyInt => (SqlType::SmallInt, 0, i64::from(u8::MAX)),
+        SqlServerType::SmallInt => (
+            SqlType::SmallInt,
+            i64::from(i16::MIN),
+            i64::from(i16::MAX),
+        ),
+        SqlServerType::Int => (
+            SqlType::Integer,
+            i64::from(i32::MIN),
+            i64::from(i32::MAX),
+        ),
+        SqlServerType::BigInt => (SqlType::BigInt, i64::MIN, i64::MAX),
+        SqlServerType::Decimal {
+            precision,
+            scale: 0,
+        } if u32::from(precision) <= 18 => {
+            let largest = 10i64.pow(u32::from(precision)) - 1;
+            (SqlType::BigInt, -largest, largest)
+        }
+        _ => return None,
+    })
+}
+
+pub(super) fn extended_property_comment(
+    call: ProcedureCall,
+    position: usize,
+) -> SqlResult<Statement> {
+    let dropping = call.procedure.text == "sp_dropextendedproperty";
+    let procedure = call.procedure.text.clone();
+    let mut values: [Option<String>; 8] = Default::default();
+    for (index, argument) in call.arguments.iter().enumerate() {
+        let slot = match &argument.name {
+            Some(name) => EXTENDED_PROPERTY_PARAMETERS
+                .iter()
+                .position(|known| known.eq_ignore_ascii_case(name))
+                .filter(|&slot| !(dropping && slot == 1)),
+            None if dropping => Some(if index == 0 { 0 } else { index + 1 }),
+            None => Some(index),
+        };
+        let Some(slot) = slot.filter(|&slot| slot < EXTENDED_PROPERTY_PARAMETERS.len()) else {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_PARAMETER,
+                format!(
+                    "{} is not a parameter for procedure {procedure}.",
+                    argument.name.as_deref().unwrap_or("A parameter")
+                ),
+            )
+            .with_sqlserver_code(8145)
+            .at(position));
+        };
+        values[slot] = match &argument.value {
+            Some(expr) => property_text(expr)?,
+            None => None,
+        };
+    }
+    let [name, value, level0_type, level0_name, level1_type, level1_name, level2_type, level2_name] =
+        values;
+    if !name
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(DESCRIPTION_PROPERTY))
+    {
+        return Err(not_supported("Extended properties other than MS_Description").at(position));
+    }
+    let named = |text: Option<String>, what: &str| -> SqlResult<Name> {
+        let Some(text) = text.filter(|text| !text.is_empty()) else {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!("An invalid parameter or option was specified for procedure '{procedure}': {what} is missing."),
+            )
+            .with_sqlserver_code(15600)
+            .at(position));
+        };
+        let folded = text.to_lowercase();
+        if folded.contains(crate::schemas::QUALIFIER) {
+            return Err(SqlError::new(
+                SqlState::INVALID_NAME,
+                format!("invalid name \"{}\"", folded.escape_default()),
+            )
+            .at(position));
+        }
+        Ok(Name {
+            text: folded,
+            position,
+        })
+    };
+    let level0_type = level0_type.map(|kind| kind.to_ascii_lowercase());
+    match level0_type.as_deref() {
+        Some("schema") => {}
+        None => {
+            return Err(not_supported("An extended property of the database").at(position));
+        }
+        Some(other) => {
+            return Err(
+                not_supported(&format!("An extended property on a {}", other.to_ascii_uppercase()))
+                    .at(position),
+            );
+        }
+    }
+    let schema = named(level0_name, "@level0name")?;
+    let schema_text = if schema.text == "dbo" {
+        crate::schemas::DEFAULT_SCHEMA.to_owned()
+    } else {
+        schema.text.clone()
+    };
+    let level1_type = level1_type.map(|kind| kind.to_ascii_lowercase());
+    let kind = match level1_type.as_deref() {
+        None => {
+            return Ok(described(
+                CommentTarget::Schema(Name {
+                    text: schema_text,
+                    position,
+                }),
+                value,
+                dropping,
+            ));
+        }
+        Some("table") => RelationKind::Table,
+        Some("view") => RelationKind::View,
+        Some(other) => {
+            return Err(
+                not_supported(&format!("An extended property on a {}", other.to_ascii_uppercase()))
+                    .at(position),
+            );
+        }
+    };
+    let object = named(level1_name, "@level1name")?;
+    let relation = Name {
+        text: if schema.text == "dbo" {
+            object.text
+        } else {
+            crate::schemas::written_qualified(&schema.text, &object.text)
+        },
+        position,
+    };
+    let level2_type = level2_type.map(|kind| kind.to_ascii_lowercase());
+    let target = match level2_type.as_deref() {
+        None => CommentTarget::Relation {
+            kind,
+            name: relation,
+        },
+        Some("column") => CommentTarget::Column {
+            table: relation,
+            column: named(level2_name, "@level2name")?,
+        },
+        Some("constraint") => CommentTarget::Constraint {
+            table: relation,
+            name: named(level2_name, "@level2name")?,
+        },
+        Some("index") => {
+            let index = named(level2_name, "@level2name")?;
+            CommentTarget::Index(Name {
+                text: if schema.text == "dbo" {
+                    index.text
+                } else {
+                    crate::schemas::written_qualified(&schema.text, &index.text)
+                },
+                position,
+            })
+        }
+        Some(other) => {
+            return Err(
+                not_supported(&format!("An extended property on a {}", other.to_ascii_uppercase()))
+                    .at(position),
+            );
+        }
+    };
+    Ok(described(target, value, dropping))
+}
+
+fn described(target: CommentTarget, value: Option<String>, dropping: bool) -> Statement {
+    Statement::Comment(Comment {
+        target,
+        text: if dropping { None } else { value },
+    })
+}
+
+fn property_text(expr: &Expr) -> SqlResult<Option<String>> {
+    let evaluator = Evaluator {
+        scope: Scope::empty(),
+        row: &[],
+        correlation: None,
+    };
+    let value = evaluator.eval(expr, None)?;
+    Ok(if value.is_null() { None } else { value.to_text() })
 }

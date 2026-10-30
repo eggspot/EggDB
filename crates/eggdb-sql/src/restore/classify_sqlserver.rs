@@ -1,4 +1,5 @@
 use super::classify::{Action, Effect, Ignored, Skip};
+use super::column_rewrite::alias_type_definition;
 use super::script::DifferenceNote;
 use super::words::{Token, Words, plain_qualified_name};
 use crate::error::{SqlError, SqlState};
@@ -10,7 +11,7 @@ const LOGIC_WORDS: [&str; 9] = [
 ];
 const NOT_SUPPORTED_YET: &str = "not supported yet";
 
-const RUNNABLE_SET_OPTIONS: [&str; 14] = [
+const RUNNABLE_SET_OPTIONS: [&str; 15] = [
     "ansi_nulls",
     "quoted_identifier",
     "ansi_padding",
@@ -25,6 +26,7 @@ const RUNNABLE_SET_OPTIONS: [&str; 14] = [
     "language",
     "lock_timeout",
     "transaction",
+    "xact_abort",
 ];
 
 const ON_ONLY_OPTIONS: [&str; 7] = [
@@ -330,6 +332,11 @@ fn exec(tokens: &[Token], text: &str, known_parameter: &dyn Fn(&str) -> bool) ->
             }
             _ => skip_statement(text, BATCH_LOGIC),
         },
+        "sp_addextendedproperty" | "sp_updateextendedproperty" | "sp_dropextendedproperty"
+            if text.to_ascii_lowercase().contains("ms_description") =>
+        {
+            Action::Run(Effect::Comment)
+        }
         "sp_addextendedproperty" | "sp_updateextendedproperty" | "sp_dropextendedproperty" => {
             ignore("extended properties")
         }
@@ -384,12 +391,13 @@ fn create(tokens: &[Token], text: &str) -> Action {
         "function" => skip("function", name_at(tokens, &mut at), "functions come later"),
         "trigger" => skip("trigger", name_at(tokens, &mut at), "triggers come later"),
         "synonym" => skip("synonym", name_at(tokens, &mut at), "synonyms come later"),
+        "type" if alias_type_definition(text).is_some() => ignore("alias types"),
         "type" => skip(
             "type",
             name_at(tokens, &mut at),
-            "user-defined types come later",
+            "user-defined table types come later",
         ),
-        "sequence" => skip("sequence", name_at(tokens, &mut at), "sequences come later"),
+        "sequence" => Action::Run(Effect::Sequence(name_at(tokens, &mut at))),
         "user" | "login" | "role" | "application" => skip(
             if kind == "login" {
                 "login"
@@ -505,6 +513,7 @@ fn alter(tokens: &[Token], text: &str) -> Action {
         "view" => Action::Run(Effect::View(name_at(tokens, &mut at))),
         "database" => ignore("ALTER DATABASE"),
         "index" => ignore("ALTER INDEX"),
+        "sequence" => Action::Run(Effect::OtherDdl),
         "authorization" => ignore("ALTER AUTHORIZATION"),
         "procedure" | "proc" => skip(
             "procedure",
@@ -619,6 +628,7 @@ pub(crate) fn sqlserver_differences(text: &str) -> Vec<DifferenceNote> {
     let tokens = head(text);
     match (word_at(&tokens, 0), word_at(&tokens, 1)) {
         (Some("create"), Some("table")) => table_differences(text),
+        (Some("create"), Some("type")) => alias_type_differences(text),
         (Some("create"), Some("unique" | "clustered" | "nonclustered" | "index")) => {
             index_differences(text)
         }
@@ -715,6 +725,20 @@ fn table_differences(text: &str) -> Vec<DifferenceNote> {
         ));
     }
     notes
+}
+
+fn alias_type_differences(text: &str) -> Vec<DifferenceNote> {
+    let Some((name, alias)) = alias_type_definition(text) else {
+        return Vec::new();
+    };
+    let nullability = if alias.not_null { " NOT NULL" } else { "" };
+    vec![DifferenceNote::new(
+        format!("type {name}"),
+        format!(
+            "an alias type: its columns are created as {}{nullability}",
+            alias.base
+        ),
+    )]
 }
 
 fn index_differences(text: &str) -> Vec<DifferenceNote> {

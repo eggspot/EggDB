@@ -324,7 +324,9 @@ fn use_set_nocount_and_unsupported_requests_answer_as_sql_server_does() {
         errors(&client.batch("SET ANSI_NULLS ON\nSET QUOTED_IDENTIFIER ON")).len(),
         0
     );
-    assert_eq!(errors(&client.batch("SET XACT_ABORT ON"))[0].0, 40517);
+    assert_eq!(errors(&client.batch("SET XACT_ABORT ON")).len(), 0);
+    assert_eq!(errors(&client.batch("SET XACT_ABORT OFF")).len(), 0);
+    assert_eq!(errors(&client.batch("SET NOEXEC ON"))[0].0, 40517);
     assert_eq!(errors(&client.batch("SET FOO ON"))[0].0, 195);
     assert_eq!(
         rows(&client.batch("SELECT 'a' + 'b'")),

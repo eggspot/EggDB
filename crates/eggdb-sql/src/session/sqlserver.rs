@@ -130,6 +130,22 @@ fn no_transaction(code: u16, message: &str) -> SqlError {
     SqlError::new(SqlState::NO_ACTIVE_SQL_TRANSACTION, message).with_sqlserver_code(code)
 }
 
+pub(super) fn uncommittable_transaction() -> SqlError {
+    SqlError::new(
+        SqlState::IN_FAILED_SQL_TRANSACTION,
+        "The current transaction cannot be committed and cannot support operations that write to the log file. Roll back the transaction.",
+    )
+    .with_sqlserver_code(3930)
+}
+
+pub(super) fn uncommittable_at_batch_end() -> SqlError {
+    SqlError::new(
+        SqlState::TRANSACTION_ROLLBACK,
+        "Uncommittable transaction is detected at the end of the batch. The transaction is rolled back.",
+    )
+    .with_sqlserver_code(3998)
+}
+
 impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// Runs `text` as a Transact-SQL batch, the way SQL Server runs a batch a client sends: the
     /// whole batch is parsed first, so a syntax error runs nothing and is returned as the
@@ -307,6 +323,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             (true, 0) => 1,
             (true, count) => count,
         };
+        if !open && self.settings.sqlserver.uncommittable {
+            Arc::make_mut(&mut self.settings).sqlserver.uncommittable = false;
+        }
         if wanted != count {
             Arc::make_mut(&mut self.settings)
                 .sqlserver
@@ -332,6 +351,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
 
     pub(super) fn sqlserver_commit(&mut self) -> SqlResult<QueryResult> {
         self.sync_transaction_count();
+        if self.settings.sqlserver.uncommittable {
+            return Err(uncommittable_transaction());
+        }
         match self.settings.sqlserver.transaction_count {
             0 => Err(no_transaction(
                 3902,
@@ -357,9 +379,38 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 "The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.",
             ));
         }
-        self.set_transaction_count(0);
-        self.rollback()?;
+        self.abandon_transaction()?;
         Ok(QueryResult::command("ROLLBACK"))
+    }
+
+    pub(super) fn abandon_transaction(&mut self) -> SqlResult<()> {
+        self.set_transaction_count(0);
+        if self.settings.sqlserver.uncommittable {
+            Arc::make_mut(&mut self.settings).sqlserver.uncommittable = false;
+        }
+        self.rollback()?;
+        Ok(())
+    }
+
+    pub(super) fn xact_abort_applies(&self, error: &SqlError) -> bool {
+        self.sqlserver()
+            && self.settings.sqlserver.xact_abort
+            && error.ends_sqlserver_batch() != Some(false)
+            && error.state() != SqlState::SYNTAX_ERROR
+    }
+
+    pub(super) fn abort_transaction_after(&mut self, error: &SqlError) -> SqlResult<()> {
+        if self.xact_abort_applies(error) && self.in_block() {
+            self.abandon_transaction()?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn refuse_writes_when_uncommittable(&self) -> SqlResult<()> {
+        if self.sqlserver() && self.settings.sqlserver.uncommittable && self.in_block() {
+            return Err(uncommittable_transaction());
+        }
+        Ok(())
     }
 
     pub(super) fn run_sqlserver(
@@ -396,6 +447,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             SqlServerStatement::FormatOnly(on) => {
                 Arc::make_mut(&mut self.settings).sqlserver.format_only = *on;
+                Ok(QueryResult::command("SET"))
+            }
+            SqlServerStatement::XactAbort(on) => {
+                Arc::make_mut(&mut self.settings).sqlserver.xact_abort = *on;
                 Ok(QueryResult::command("SET"))
             }
             SqlServerStatement::InsertBulk(_) => Err(SqlError::new(

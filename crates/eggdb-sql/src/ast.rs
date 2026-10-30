@@ -139,6 +139,7 @@ pub(crate) enum SqlServerStatement {
         filter: Option<Expr>,
     },
     FormatOnly(bool),
+    XactAbort(bool),
     InsertBulk(crate::bulk_load::InsertBulk),
     Declare(Vec<VariableDeclaration>),
     SetVariable {

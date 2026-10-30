@@ -135,6 +135,12 @@ impl Parser<'_> {
         if call.procedure.text == "sp_executesql" {
             return dynamic_sql(call, position);
         }
+        if matches!(
+            call.procedure.text.as_str(),
+            "sp_addextendedproperty" | "sp_updateextendedproperty" | "sp_dropextendedproperty"
+        ) {
+            return super::sqlserver::extended_property_comment(call, position);
+        }
         Ok(Statement::SqlServer(SqlServerStatement::Execute(call)))
     }
 

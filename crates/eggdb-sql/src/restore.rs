@@ -31,6 +31,53 @@ pub const MAX_LISTED: usize = 10_000;
 const MAX_REMEMBERED_NAMES: usize = 100_000;
 const SHOWN_STATEMENT_CHARS: usize = 48;
 const PROGRESS_EVERY_LINES: u64 = 4096;
+const IDENTITY_INSERT_WITHOUT_IDENTITY: &str = "SET IDENTITY_INSERT of a table whose IDENTITY was not kept";
+
+/// A batch of a Transact-SQL script: its text up to the `GO` line that ends it, as sqlcmd
+/// sends it to SQL Server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlServerBatch {
+    /// The batch's text, without its `GO` line.
+    pub text: String,
+    /// The line of the script where the batch starts, counting from 1.
+    pub line: u64,
+    /// How many times the batch runs: the count of `GO n`, otherwise 1.
+    pub repeat: u64,
+}
+
+/// Splits a Transact-SQL script into the batches its `GO` lines end, as sqlcmd and SSMS do:
+/// `GO` alone on its line (any case, indented, with an optional count and a `--` or closed
+/// `/* */` comment), outside strings, names and comments. A script without `GO` is one batch,
+/// and blank batches are left out. Lines that start a sqlcmd command (`:setvar`, `:r`, `!!`
+/// and the rest) are refused, since the batches are run as SQL: such a script restores with
+/// [`restore_dump`].
+pub fn sqlserver_batches(script: &str) -> SqlResult<Vec<SqlServerBatch>> {
+    let mut input = script.as_bytes();
+    let mut reader = script_reader::ScriptReader::whole_batches(&mut input);
+    let mut batches = Vec::new();
+    loop {
+        match reader.next_item()? {
+            script_reader::BatchItem::End => return Ok(batches),
+            script_reader::BatchItem::Batch(batch) => batches.push(SqlServerBatch {
+                text: batch.text,
+                line: batch.line,
+                repeat: batch.repeat,
+            }),
+            script_reader::BatchItem::Command(command) => {
+                return Err(SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    format!(
+                        "line {}: {} is a sqlcmd command, which eggdb sql does not run",
+                        command.line, command.shown
+                    ),
+                )
+                .with_hint(
+                    "Restore the script with eggdb restore --dialect sqlserver, or run it with sqlcmd -i against eggdb serve.",
+                ));
+            }
+        }
+    }
+}
 
 /// How [`restore_dump`] runs.
 #[derive(Clone, Copy, Default)]
@@ -298,7 +345,7 @@ impl RestoreReport {
 ///   noted and ignored (one database per file), `\restrict` and `\unrestrict` must carry the
 ///   same key, and no other meta-command is ever run.
 /// - **SQL Server**: a Transact-SQL script as SSMS Generate Scripts or `sqlpackage
-///   /Action:Script` writes it, in UTF-8 or UTF-16LE with its byte-order mark, in batches ended
+///   /Action:Script` writes it, in UTF-8, or UTF-16 with its byte-order mark, in batches ended
 ///   by `GO`. sqlcmd's `:setvar` defines the `$(name)` variables it replaces once the script has
 ///   used a sqlcmd command; `:r`, `!!` and the other sqlcmd commands are listed and never run.
 ///   What EggDB keeps differently from SQL Server is listed as a known difference.
@@ -394,6 +441,7 @@ struct RestoreRules {
     client_command_reason: fn(&str) -> &'static str,
     differences: fn(&str) -> Vec<DifferenceNote>,
     not_supported: fn(&SqlError) -> bool,
+    rewrite_refused_table: fn(&str, &SqlError) -> Option<column_rewrite::TableRewrite>,
     psql_meta_commands: bool,
     index_names_per_table: bool,
     default_schema: &'static str,
@@ -410,6 +458,7 @@ impl RestoreRules {
             client_command_reason: psql_command_reason,
             differences: |_| Vec::new(),
             not_supported: |error| error.state() == SqlState::FEATURE_NOT_SUPPORTED,
+            rewrite_refused_table: |_, _| None,
             psql_meta_commands: true,
             index_names_per_table: false,
             default_schema: "public",
@@ -426,6 +475,7 @@ impl RestoreRules {
             client_command_reason: classify_sqlserver::sqlcmd_command_reason,
             differences: classify_sqlserver::sqlserver_differences,
             not_supported: classify_sqlserver::refused_as_not_supported,
+            rewrite_refused_table: column_rewrite::without_refused_identity,
             psql_meta_commands: false,
             index_names_per_table: true,
             default_schema: "public",
@@ -442,6 +492,7 @@ impl RestoreRules {
             client_command_reason: classify_oracle::sqlplus_command_reason,
             differences: classify_oracle::oracle_differences,
             not_supported: classify_oracle::refused_as_not_supported,
+            rewrite_refused_table: |_, _| None,
             psql_meta_commands: false,
             index_names_per_table: false,
             default_schema: "public",
@@ -485,6 +536,7 @@ struct Restore<'a, 's, S: KeyValueStore> {
     table_rows: HashMap<String, usize>,
     set_names: HashSet<String>,
     skipped_sequences: HashSet<String>,
+    identity_not_kept: HashSet<String>,
     default_schema: String,
     ensured_schemas: HashSet<String>,
     disabled: BTreeMap<(String, String), DisabledConstraint>,
@@ -511,6 +563,7 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             table_rows: HashMap::new(),
             set_names: HashSet::new(),
             skipped_sequences: HashSet::new(),
+            identity_not_kept: HashSet::new(),
             default_schema: rules.default_schema.to_owned(),
             ensured_schemas: HashSet::new(),
             disabled: BTreeMap::new(),
@@ -688,6 +741,12 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                         error,
                         statements_before: self.report.statements.saturating_sub(1),
                     });
+                }
+                if let Effect::IdentityInsert(table) = &effect
+                    && self.identity_not_kept.contains(&self.table_key(table))
+                {
+                    self.ignore(Ignored::Other(IDENTITY_INSERT_WITHOUT_IDENTITY));
+                    return Flow::Continue;
                 }
                 if let Some(table) = effect.data_target()
                     && let Some(key) = self.skipped_table_key(table)
@@ -1306,6 +1365,13 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                 if counted {
                     self.count(effect, loaded);
                 }
+                if statement.identity_not_kept
+                    && let Effect::Table { name, .. } = effect
+                    && self.identity_not_kept.len() < MAX_REMEMBERED_NAMES
+                {
+                    let key = self.table_key(name);
+                    self.identity_not_kept.insert(key);
+                }
                 self.note_differences(&statement);
                 Flow::Continue
             }
@@ -1379,6 +1445,15 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
     }
 
     fn failed(&mut self, statement: &ScriptStatement, effect: &Effect, error: SqlError) -> Flow {
+        if let Effect::Table { .. } = effect
+            && let Some(rewrite) = (self.rules.rewrite_refused_table)(&statement.text, &error)
+        {
+            let mut retried = statement.clone();
+            retried.text = rewrite.text;
+            retried.differences.extend(rewrite.notes);
+            retried.identity_not_kept |= rewrite.identity_not_kept;
+            return self.execute(retried, effect, true);
+        }
         let state = error.state();
         let code = state.code();
         let missing_object = matches!(code, "42704" | "42883" | "42P01" | "3F000");

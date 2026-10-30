@@ -52,11 +52,17 @@ fn walks_expressions(tokens: &[Token<'_>]) -> bool {
 }
 
 fn mentions_sequence_functions(tokens: &[Token<'_>]) -> bool {
-    tokens.iter().any(|token| {
-        matches!(&token.kind, TokenKind::Word(word)
-            if ["nextval", "setval", "currval", "lastval"]
-                .iter()
-                .any(|name| word.eq_ignore_ascii_case(name)))
+    tokens.iter().enumerate().any(|(at, token)| {
+        let TokenKind::Word(word) = &token.kind else {
+            return false;
+        };
+        ["nextval", "setval", "currval", "lastval"]
+            .iter()
+            .any(|name| word.eq_ignore_ascii_case(name))
+            || (word.eq_ignore_ascii_case("next")
+                && tokens.get(at + 1).is_some_and(|next| {
+                    matches!(&next.kind, TokenKind::Word(value) if value.eq_ignore_ascii_case("value"))
+                }))
     })
 }
 
@@ -1033,8 +1039,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             script: false,
             bulk_rows: None,
         };
-        self.run_text(text, Parameters::Absent, on_result, &mut client)
-            .map_err(|error| self.in_dialect(text, error))
+        let outcome = self.run_text(text, Parameters::Absent, on_result, &mut client);
+        outcome.map_err(|error| self.failed_text(text, error))
     }
 
     /// Runs `text` as a script, as `psql -f` runs a file: like
@@ -1053,8 +1059,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             script: true,
             bulk_rows: None,
         };
-        self.run_text(text, Parameters::Absent, on_result, &mut client)
-            .map_err(|error| self.in_dialect(text, error))
+        let outcome = self.run_text(text, Parameters::Absent, on_result, &mut client);
+        outcome.map_err(|error| self.failed_text(text, error))
+    }
+
+    fn failed_text(&mut self, text: &str, error: SqlError) -> SqlError {
+        let error = self.in_dialect(text, error);
+        match self.abort_transaction_after(&error) {
+            Ok(()) => error,
+            Err(rollback) => rollback,
+        }
     }
 
     /// Runs `text` when it holds exactly one statement, as one call of an AI agent does. The
@@ -2029,6 +2043,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         command: &str,
         body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
+        self.refuse_writes_when_uncommittable()?;
         let body = |writer: &mut dyn KeyValueWrite, tables: &mut TableCache| {
             sequences::load_for_sequence_calls(writer)?;
             let result =

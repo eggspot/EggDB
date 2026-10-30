@@ -514,10 +514,19 @@ impl Parser<'_> {
             }
             "xact_state" => {
                 self.sqlserver_arguments(name, 0..=0)?;
-                let open = self.sqlserver_settings(|settings| settings.sqlserver.transaction_count) > 0;
+                let state = self.sqlserver_settings(|settings| {
+                    match (
+                        settings.sqlserver.transaction_count > 0,
+                        settings.sqlserver.uncommittable,
+                    ) {
+                        (false, _) => 0,
+                        (true, false) => 1,
+                        (true, true) => -1,
+                    }
+                });
                 Expr {
                     kind: ExprKind::Constant {
-                        value: Value::SmallInt(i16::from(open)),
+                        value: Value::SmallInt(state),
                         sql_type: Some(SqlType::SmallInt),
                     },
                     position,

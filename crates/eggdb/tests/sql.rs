@@ -593,3 +593,56 @@ fn the_sqlserver_dialect_reads_transact_sql_and_reports_sql_server_errors() {
         "Msg 208, Level 16, State 1: Invalid object name 'missing'.\n"
     );
 }
+
+#[test]
+fn transact_sql_scripts_run_batch_by_batch_at_their_go_lines() {
+    let file = TempPath::new("sql-sqlserver-go");
+    let script = "CREATE TABLE [dbo].[Items] ([ID] INT IDENTITY(1,1) PRIMARY KEY, [Name] NVARCHAR(20))\r\nGO\r\nINSERT INTO items (name) VALUES (N'egg')\r\nGO 3\r\nCREATE VIEW [dbo].[Counted] AS SELECT COUNT(*) AS [N] FROM items\r\ngo\r\nSELECT [N] FROM [dbo].[Counted]\r\n";
+    let output = eggdb_sql(
+        file.path(),
+        &["--create", "--dialect", "sqlserver"],
+        script.as_bytes(),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let db = Database::open(file.path()).unwrap();
+    let store = db.sql_store();
+    let mut session = store.session(eggdb::sql::Dialect::SqlServer);
+    let mut counted = String::new();
+    session
+        .execute("SELECT N FROM dbo.Counted", &mut |result| {
+            if let Some(value) = result.rows.first().and_then(|row| row.first()) {
+                counted = value.to_text().unwrap_or_default();
+            }
+        })
+        .unwrap();
+    session.close().unwrap();
+    db.close().unwrap();
+    assert_eq!(counted, "3");
+    let stopped = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlserver"],
+        b"SELECT 1 AS one\nGO\nSELECT * FROM [Missing]\nGO\nCREATE TABLE [Never] ([ID] INT PRIMARY KEY)\n",
+    );
+    assert_eq!(stopped.status.code(), Some(3));
+    assert_eq!(
+        text(&stopped.stderr),
+        "Msg 208, Level 16, State 1: Invalid object name 'missing'.\n"
+    );
+    let never = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlserver", "-c", "SELECT * FROM [Never]"],
+        b"",
+    );
+    assert_eq!(never.status.code(), Some(3));
+    let sqlcmd = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlserver"],
+        b":setvar Name egg\nSELECT N'$(Name)'\nGO\n",
+    );
+    assert_eq!(sqlcmd.status.code(), Some(3));
+    assert!(
+        text(&sqlcmd.stderr).contains(":setvar is a sqlcmd command"),
+        "{}",
+        text(&sqlcmd.stderr)
+    );
+}

@@ -208,6 +208,15 @@ pub(crate) fn mentions_sequence_call(text: &str) -> bool {
     ["nextval", "currval", "setval", "lastval"]
         .iter()
         .any(|name| lower.contains(name))
+        || mentions_next_value_for(&lower)
+}
+
+fn mentions_next_value_for(lower: &str) -> bool {
+    lower.match_indices("next").any(|(at, word)| {
+        lower
+            .get(at + word.len()..)
+            .is_some_and(|rest| rest.trim_start().starts_with("value"))
+    })
 }
 
 pub(crate) fn mentions_nextval(table: &TableDefinition) -> bool {
