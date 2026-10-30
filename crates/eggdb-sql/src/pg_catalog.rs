@@ -21,7 +21,7 @@ pub(crate) use functions::{
     argument_types, function, partition_ancestors_rows, partition_ancestors_type, result_type,
 };
 pub(crate) use oids::{OidRequest, Space as OidSpace, assign as assign_oids};
-pub(crate) use oids::{builtin_type, format_type, type_modifier};
+pub(crate) use oids::{builtin_type, builtin_type_named, format_type, type_modifier};
 pub(crate) use relations::generated_rows;
 pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{

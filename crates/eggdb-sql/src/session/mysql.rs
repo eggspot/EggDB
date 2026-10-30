@@ -59,7 +59,8 @@ pub(crate) fn mysql_type_name(sql_type: SqlType) -> String {
         | SqlType::Interval { .. }
         | SqlType::Uuid
         | SqlType::Array(_)
-        | SqlType::Catalog(_) => "text".into(),
+        | SqlType::Catalog(_)
+        | SqlType::Defined(_) => "text".into(),
     }
 }
 

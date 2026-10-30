@@ -354,6 +354,18 @@ fn next_index_id(table: &TableDefinition) -> SqlResult<u32> {
 }
 
 pub(crate) fn check_orderable(sql_type: SqlType, position: usize) -> SqlResult<()> {
+    let unordered = match sql_type {
+        SqlType::Array(_) => true,
+        SqlType::Defined(defined) => defined.kind != crate::types::DefinedKind::Enum,
+        _ => false,
+    };
+    if unordered {
+        return Err(SqlError::not_supported(format!(
+            "a key or an index on a column of type {} is not supported yet",
+            sql_type.name()
+        ))
+        .at(position));
+    }
     if sql_type == SqlType::Json {
         return Err(SqlError::new(
             SqlState::UNDEFINED_OBJECT,

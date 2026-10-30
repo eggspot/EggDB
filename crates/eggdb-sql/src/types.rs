@@ -68,6 +68,89 @@ pub enum SqlType {
     /// A type of PostgreSQL's system catalog, such as `oid`, `name` or `regclass`: a value of
     /// expressions and of the catalog's rows, not stored in table columns.
     Catalog(CatalogType),
+    /// A type known by its definition: an enum, a composite type, a range type or a domain.
+    Defined(DefinedType),
+}
+
+/// A type known by its definition in the catalog rather than by the engine's storage alone:
+/// an enum, a composite (row) type, a range type or a domain, either built in (`int4range`,
+/// `record`) or created with `CREATE TYPE` or `CREATE DOMAIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefinedType {
+    /// What kind of type it is.
+    pub kind: DefinedKind,
+    /// Its PostgreSQL type OID: PostgreSQL's own for a built-in type, the one given when the
+    /// type was created otherwise.
+    pub oid: u32,
+}
+
+/// The kinds of [`DefinedType`], as PostgreSQL's `pg_type.typtype` names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DefinedKind {
+    /// An enum: one of a list of labels, ordered as they were listed.
+    Enum,
+    /// A composite type: a row of named fields, or `record` for a row of any fields.
+    Composite,
+    /// A range of values of a subtype, such as `int4range`.
+    Range,
+    /// A domain: a base type with `NOT NULL`, `CHECK` constraints and a default of its own.
+    Domain,
+}
+
+impl DefinedType {
+    /// The type `record`: a row of any fields.
+    pub const RECORD: Self = Self {
+        kind: DefinedKind::Composite,
+        oid: crate::records::RECORD_OID,
+    };
+
+    pub(crate) fn enumerated(oid: u32) -> SqlType {
+        SqlType::Defined(Self {
+            kind: DefinedKind::Enum,
+            oid,
+        })
+    }
+
+    pub(crate) fn range(oid: u32) -> SqlType {
+        SqlType::Defined(Self {
+            kind: DefinedKind::Range,
+            oid,
+        })
+    }
+}
+
+/// A value of a [`DefinedType`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefinedValue {
+    /// A label of an enum.
+    Enum(crate::enums::EnumValue),
+    /// A row of a composite type or a `record`.
+    Record(crate::records::RecordValue),
+    /// A range.
+    Range(crate::ranges::RangeValue),
+}
+
+impl DefinedValue {
+    /// The value's type.
+    pub fn sql_type(&self) -> SqlType {
+        match self {
+            Self::Enum(value) => DefinedType::enumerated(value.type_oid),
+            Self::Record(record) => SqlType::Defined(DefinedType {
+                kind: DefinedKind::Composite,
+                oid: record.type_oid,
+            }),
+            Self::Range(range) => DefinedType::range(range.type_oid),
+        }
+    }
+
+    /// The value as PostgreSQL prints it in text form.
+    pub fn to_text(&self) -> String {
+        match self {
+            Self::Enum(value) => value.label.clone(),
+            Self::Record(record) => crate::records::format_text(record),
+            Self::Range(range) => crate::ranges::format_text(range),
+        }
+    }
 }
 
 /// The precision and scale of a `numeric(p, s)` column.
@@ -123,6 +206,7 @@ impl SqlType {
             Self::Bpchar(Some(length)) => format!("character({length})"),
             Self::Array(element) => element.type_name(),
             Self::Catalog(kind) => kind.name().to_owned(),
+            Self::Defined(defined) => crate::user_types::type_name(defined),
         }
     }
 
@@ -150,6 +234,19 @@ impl SqlType {
             Self::Bpchar(_) => "bpchar",
             Self::Array(element) => element.internal_name(),
             Self::Catalog(kind) => kind.internal_name(),
+            Self::Defined(defined) => match defined.kind {
+                DefinedKind::Enum => "anyenum",
+                DefinedKind::Composite => "record",
+                DefinedKind::Range => "anyrange",
+                DefinedKind::Domain => "domain",
+            },
+        }
+    }
+
+    pub(crate) fn defined(self) -> Option<DefinedType> {
+        match self {
+            Self::Defined(defined) => Some(defined),
+            _ => None,
         }
     }
 
@@ -272,6 +369,8 @@ pub enum Value {
     Oid(u32),
     /// A `reg*` value: an object identifier shown as the object's name.
     Reg(Box<RegValue>),
+    /// A value of an enum, a composite type or a range type.
+    Defined(Box<DefinedValue>),
 }
 
 impl Value {
@@ -301,6 +400,7 @@ impl Value {
             Self::Array(array) => SqlType::Array(array.element),
             Self::Oid(_) => SqlType::Catalog(CatalogType::Oid),
             Self::Reg(reg) => SqlType::Catalog(CatalogType::Reg(reg.kind)),
+            Self::Defined(defined) => defined.sql_type(),
         })
     }
 
@@ -384,6 +484,7 @@ impl Value {
             Self::Array(array) => crate::arrays::format_text(array),
             Self::Oid(oid) => oid.to_string(),
             Self::Reg(reg) => reg.name.clone(),
+            Self::Defined(defined) => defined.to_text(),
         })
     }
 
@@ -590,6 +691,7 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
         SqlType::Array(element) => crate::arrays::parse_array_text(text, element)
             .map(|array| Value::Array(Box::new(array))),
         SqlType::Catalog(kind) => crate::pg_catalog::parse_input(text, kind),
+        SqlType::Defined(defined) => crate::user_types::parse_input(text, defined),
     }
 }
 
@@ -779,6 +881,9 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     if let SqlType::Catalog(kind) = target {
         return crate::pg_catalog::convert(value, kind, conversion);
     }
+    if let SqlType::Defined(defined) = target {
+        return crate::user_types::convert(value, defined, conversion);
+    }
     if target.is_character() {
         let text = match value {
             Value::Text(text) => text,
@@ -901,6 +1006,12 @@ pub(crate) fn comparable(left: SqlType, right: SqlType) -> bool {
     }
     if let (SqlType::Array(left), SqlType::Array(right)) = (left, right) {
         return left.comparable(right);
+    }
+    if let SqlType::Defined(defined) = left {
+        return crate::user_types::comparable(defined, right);
+    }
+    if let SqlType::Defined(defined) = right {
+        return crate::user_types::comparable(defined, left);
     }
     let identifier =
         |sql_type: SqlType| matches!(sql_type, SqlType::Catalog(kind) if kind.is_identifier());
@@ -1038,6 +1149,7 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
         ) => time_tz_order(*a, *a_offset).cmp(&time_tz_order(*b, *b_offset)),
         (Value::Interval(a), Value::Interval(b)) => a.compare(*b),
         (Value::Array(a), Value::Array(b)) => crate::arrays::compare(a, b),
+        (Value::Defined(a), Value::Defined(b)) => compare_defined(a, b),
         (Value::Jsonb(a), Value::Jsonb(b)) => crate::json::comparable(a)
             .as_bytes()
             .cmp(crate::json::comparable(b).as_bytes()),
@@ -1066,8 +1178,38 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
     }
 }
 
+fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
+    match (left, right) {
+        (DefinedValue::Enum(a), DefinedValue::Enum(b)) => compare_floats(a.sort_order, b.sort_order),
+        (DefinedValue::Record(a), DefinedValue::Record(b)) => crate::records::compare(a, b),
+        (DefinedValue::Range(a), DefinedValue::Range(b)) => crate::ranges::compare(a, b),
+        (DefinedValue::Enum(_), _) => Ordering::Less,
+        (_, DefinedValue::Enum(_)) => Ordering::Greater,
+        (DefinedValue::Record(_), _) => Ordering::Less,
+        (_, DefinedValue::Record(_)) => Ordering::Greater,
+    }
+}
+
 pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
     match value {
+        Value::Defined(defined) => match defined.as_ref() {
+            DefinedValue::Enum(label) => {
+                out.push(15);
+                out.extend_from_slice(&label.type_oid.to_le_bytes());
+                out.extend_from_slice(&label.sort_order.to_bits().to_le_bytes());
+            }
+            DefinedValue::Record(record) => {
+                out.push(16);
+                out.extend_from_slice(&(record.fields.len() as u64).to_le_bytes());
+                for field in &record.fields {
+                    equality_key(out, field);
+                }
+            }
+            DefinedValue::Range(range) => {
+                out.push(17);
+                crate::ranges::equality_key_of(out, range);
+            }
+        },
         Value::Null => out.push(0),
         Value::Boolean(flag) => {
             out.push(1);

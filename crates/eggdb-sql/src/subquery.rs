@@ -59,7 +59,7 @@ fn family(value: &Value) -> Option<Family> {
         Value::Date(_) | Value::Timestamp(_) => Family::Local,
         Value::TimestampTz(_) => Family::Zoned,
         Value::Jsonb(_) => Family::Jsonb,
-        Value::Null | Value::Json(_) | Value::Array(_) => return None,
+        Value::Null | Value::Json(_) | Value::Array(_) | Value::Defined(_) => return None,
     })
 }
 

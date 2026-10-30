@@ -1441,6 +1441,8 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                 self.add_rows(table, loaded);
             }
             Effect::SequenceCall(_)
+            | Effect::Type(_)
+            | Effect::Domain(_)
             | Effect::IdentityInsert(_)
             | Effect::SetDefault { .. }
             | Effect::Setting

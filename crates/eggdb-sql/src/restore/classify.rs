@@ -43,6 +43,8 @@ pub(crate) enum Effect {
     View(String),
     Sequence(String),
     Index(String),
+    Type(String),
+    Domain(String),
     AlterTable {
         constraints: u64,
         identity_sequences: Vec<String>,
@@ -93,6 +95,8 @@ impl Effect {
                 | Self::View(_)
                 | Self::Sequence(_)
                 | Self::Index(_)
+                | Self::Type(_)
+                | Self::Domain(_)
                 | Self::AlterTable { .. }
                 | Self::AddConstraint { .. }
                 | Self::SetDefault { .. }
@@ -109,6 +113,8 @@ impl Effect {
             Self::View(name) => Some(("view", name)),
             Self::Sequence(name) => Some(("sequence", name)),
             Self::Index(name) if !name.is_empty() => Some(("index", name)),
+            Self::Type(name) => Some(("type", name)),
+            Self::Domain(name) => Some(("domain", name)),
             _ => None,
         }
     }
@@ -146,13 +152,49 @@ pub(crate) fn classify(text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Ac
             }
             data_statement(words, Effect::Insert)
         }
-        "drop" | "refresh" | "cluster" | "reindex" => Action::Run(Effect::OtherDdl),
+        "drop" => drop_statement(&words.take(6).collect::<Vec<_>>()),
+        "refresh" | "cluster" | "reindex" => Action::Run(Effect::OtherDdl),
+        "update" => {
+            if updates_catalog(words) {
+                Action::Ignore(Ignored::Other("changes to pg_catalog.pg_database"))
+            } else {
+                Action::Run(Effect::Data)
+            }
+        }
         "select" => match sequence_call(text) {
             Some(sequence) => Action::Run(Effect::SequenceCall(sequence)),
             None => Action::Run(Effect::Data),
         },
-        "update" | "delete" | "truncate" | "with" | "values" => Action::Run(Effect::Data),
+        "delete" | "truncate" | "with" | "values" => Action::Run(Effect::Data),
         _ => Action::Run(Effect::Other),
+    }
+}
+
+fn updates_catalog(words: Words<'_>) -> bool {
+    let head: Vec<Token> = words.take(3).collect();
+    head.first().is_some_and(|token| token.is_word("pg_catalog"))
+        && head.get(1).is_some_and(|token| token.is_symbol(b'.'))
+        && head.get(2).is_some_and(|token| token.is_word("pg_database"))
+}
+
+fn drop_statement(tokens: &[Token]) -> Action {
+    let mut at = 1;
+    if tokens.get(at).is_some_and(|token| token.is_word("if")) {
+        at += 2;
+    }
+    let named = |word: &str| tokens.get(at).is_some_and(|token| token.is_word(word));
+    match tokens.first() {
+        Some(kind) if kind.is_word("schema") && named("public") => {
+            Action::Ignore(Ignored::Other("DROP SCHEMA public"))
+        }
+        Some(kind) if kind.is_word("extension") && named("plpgsql") => {
+            Action::Ignore(Ignored::Other("DROP EXTENSION plpgsql"))
+        }
+        Some(kind) if kind.is_word("database") => Action::Ignore(Ignored::Other("DROP DATABASE")),
+        Some(kind) if kind.is_word("role") || kind.is_word("user") || kind.is_word("group") => {
+            Action::Ignore(Ignored::Other("DROP ROLE"))
+        }
+        _ => Action::Run(Effect::Drop),
     }
 }
 
@@ -399,12 +441,8 @@ fn create(tokens: &[Token]) -> Action {
                 "materialized views come later",
             )
         }
-        "type" => skip(
-            "type",
-            name_at(tokens, &mut at),
-            "user-defined types come later",
-        ),
-        "domain" => skip("domain", name_at(tokens, &mut at), "domains come later"),
+        "type" => Action::Run(Effect::Type(name_at(tokens, &mut at))),
+        "domain" => Action::Run(Effect::Domain(name_at(tokens, &mut at))),
         "publication" | "subscription" => skip(
             if kind == "publication" {
                 "publication"
@@ -657,6 +695,12 @@ fn action_kind(action: &[Token]) -> AlterKind {
     AlterKind::Change
 }
 
+fn drops(action: &[Token]) -> bool {
+    starts_with_words(action, &["drop"])
+        || (action.first().is_some_and(|token| token.is_word("alter"))
+            && starts_with_words(after_column(action), &["drop"]))
+}
+
 fn identity_sequence(action: &[Token]) -> Option<String> {
     let rest = after_column(action);
     if !starts_with_words(rest, &["add", "generated"]) {
@@ -716,6 +760,9 @@ fn alter_table(tokens: &[Token]) -> Action {
     }
     if !kinds.is_empty() && kinds.iter().all(|kind| *kind == AlterKind::Trigger) {
         return Action::Ignore(Ignored::Other("ENABLE and DISABLE TRIGGER"));
+    }
+    if is_table && !actions.is_empty() && actions.iter().all(|action| drops(action)) {
+        return Action::Run(Effect::Drop);
     }
     if !is_table {
         return Action::Run(Effect::OtherDdl);

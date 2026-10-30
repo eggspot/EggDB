@@ -12,8 +12,8 @@ pub(crate) use oracle::create_text as oracle_create_text;
 pub(crate) use sqlite::create_text as sqlite_create_text;
 
 use crate::ast::{
-    CopyDirection, CopySource, CopyStatement, DiscardTarget, MySqlStatement, SqlServerStatement,
-    Statement,
+    CopyDirection, CopySource, CopyStatement, DiscardTarget, MySqlStatement, Name,
+    SqlServerStatement, Statement,
 };
 use crate::bulk_load::BulkRows;
 use crate::copy::{CopyChannel, CopyIo, NoCopyChannel};
@@ -370,6 +370,8 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     save_points: Vec<String>,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
     temporary: crate::temporary::TemporaryObjects,
+    deferred: crate::deferred_checks::DeferredState,
+    pending_user_types: Option<Arc<crate::user_types::Registry>>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -430,6 +432,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 std::ptr::from_ref(store).addr(),
             ),
             temporary: crate::temporary::TemporaryObjects::default(),
+            deferred: crate::deferred_checks::DeferredState::default(),
+            pending_user_types: None,
         }
     }
 
@@ -798,24 +802,40 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn prepare_in_dialect(
-        &self,
+        &mut self,
         text: &str,
         declared_types: &[Option<SqlType>],
     ) -> SqlResult<PreparedStatement> {
         let tokens = tokenize_in(text, self.dialect)?;
-        let mut parser = Parser::new(text, &tokens)
-            .with_context(Parameters::Types(declared_types), &self.settings)
-            .in_dialect(self.dialect);
-        parser.skip_empty_statements();
-        if parser.at_end() {
-            return Ok(PreparedStatement {
-                parameter_count: declared_types.len(),
-                is_empty: true,
-            });
-        }
-        if parser.literal_rows().is_none() {
-            parser.statement()?;
-        }
+        let settings = Arc::clone(&self.settings);
+        let _path = self.enter_search_path(&settings);
+        let _types = crate::user_types::enter(None);
+        let mut retried = false;
+        let mut parser = loop {
+            let mut parser = Parser::new(text, &tokens)
+                .with_context(Parameters::Types(declared_types), &settings)
+                .in_dialect(self.dialect);
+            parser.skip_empty_statements();
+            if parser.at_end() {
+                return Ok(PreparedStatement {
+                    parameter_count: declared_types.len(),
+                    is_empty: true,
+                });
+            }
+            crate::user_types::take_wanted();
+            if parser.literal_rows().is_none()
+                && let Err(error) = parser.statement()
+            {
+                if !retried && crate::user_types::take_wanted() {
+                    retried = true;
+                    let registry = self.read(|reader, _| crate::user_types::load(reader))?;
+                    crate::user_types::install(registry);
+                    continue;
+                }
+                return Err(error);
+            }
+            break parser;
+        };
         parser.skip_empty_statements();
         if !parser.at_end() {
             return Err(SqlError::syntax(
@@ -854,19 +874,34 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let _catalog = crate::pg_catalog::enter_statement(false, &settings);
         let _constraints = self.enter_constraints();
         let _nls = self.enter_oracle_nls();
-        let mut parser = Parser::new(text, &tokens)
-            .with_context(Parameters::Types(declared_types), &settings)
-            .in_dialect(self.dialect);
-        parser.skip_empty_statements();
-        if parser.at_end() {
-            return Ok(StatementDescription {
-                parameter_types,
-                columns: None,
-            });
-        }
-        let statement = match parser.literal_rows() {
-            Some(_) => None,
-            None => Some(parser.statement()?),
+        let _types = crate::user_types::enter(None);
+        let mut retried = false;
+        let statement = loop {
+            let mut parser = Parser::new(text, &tokens)
+                .with_context(Parameters::Types(declared_types), &settings)
+                .in_dialect(self.dialect);
+            parser.skip_empty_statements();
+            if parser.at_end() {
+                return Ok(StatementDescription {
+                    parameter_types,
+                    columns: None,
+                });
+            }
+            crate::user_types::take_wanted();
+            let parsed = match parser.literal_rows() {
+                Some(_) => Ok(None),
+                None => parser.statement().map(Some),
+            };
+            drop(parser);
+            match parsed {
+                Ok(statement) => break statement,
+                Err(_) if !retried && crate::user_types::take_wanted() => {
+                    retried = true;
+                    let registry = self.read(|reader, _| crate::user_types::load(reader))?;
+                    crate::user_types::install(registry);
+                }
+                Err(error) => return Err(error),
+            }
         };
         let Some(statement) = statement else {
             return Ok(StatementDescription {
@@ -1312,6 +1347,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let inline = data_start.and_then(|start| text.as_bytes().get(start..));
         let mut inline_end = None;
         let mut resume = self.batch_resume.unwrap_or((0, 0));
+        let mut types_loaded = false;
         loop {
             let statement_dialect = self.dialect;
             if self.sqlserver() {
@@ -1330,6 +1366,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let _values = crate::memory::enter_value_limit(self.max_value_bytes);
             let _rows = crate::memory::enter_row_limit(self.max_row_bytes);
             let _path = self.enter_search_path(&settings);
+            let _types = crate::user_types::enter(self.pending_user_types.take());
             let mut parser = Parser::new(text, tokens)
                 .with_context(parameters, &settings)
                 .with_batch_context(&context)
@@ -1354,7 +1391,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     self.batch_resume = Some(resume);
                 }
                 self.enter_sequences(false);
+                crate::deferred_checks::enter(&self.deferred.modes);
                 let result = self.insert_literal_rows(&mut rows);
+                let result = self.keep_deferred(result);
                 self.leave_sequences();
                 let settled = self.settle_sequences();
                 let result = self.after_statement(result?, false);
@@ -1365,6 +1404,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 continue;
             }
             let first_token = parser.resume_point().0;
+            let statement_point = parser.resume_point();
+            crate::user_types::take_wanted();
             let parsed = if std::mem::take(&mut self.condition_next) {
                 parser.sqlserver_condition()
             } else {
@@ -1374,6 +1415,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             resume = parser.resume_point();
             drop(parser);
             drop(context);
+            if parsed.is_err() && crate::user_types::take_wanted() && !types_loaded {
+                types_loaded = true;
+                resume = statement_point;
+                match self.read(|reader, _| crate::user_types::load(reader)) {
+                    Ok(registry) => {
+                        self.pending_user_types = Some(registry);
+                        continue;
+                    }
+                    Err(error) => {
+                        self.fail_block_in_postgresql();
+                        return Err(error);
+                    }
+                }
+            }
+            types_loaded = false;
             if self.batch_resume.is_some() {
                 self.batch_resume = Some(resume);
             }
@@ -1412,7 +1468,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let _catalog = crate::pg_catalog::enter_statement(wants_catalog, &settings);
             self.enter_sequences(uses_sequences);
             self.extra_results.clear();
+            crate::deferred_checks::enter(&self.deferred.modes);
             let result = self.run(&mut statement, &mut io);
+            let result = self.keep_deferred(result);
             if let (Some(start), Some(consumed)) = (data_start, io.consumed) {
                 inline_end = Some(start + consumed);
             }
@@ -1445,6 +1503,67 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 return Ok(Flow::DialectChanged { at });
             }
         }
+    }
+
+    fn keep_deferred(&mut self, result: SqlResult<QueryResult>) -> SqlResult<QueryResult> {
+        let pending = crate::deferred_checks::leave();
+        let result = result?;
+        if matches!(self.block, Block::Writing(_)) {
+            self.deferred.add(pending)?;
+        }
+        Ok(result)
+    }
+
+    fn set_constraints(
+        &mut self,
+        names: Option<&[Name]>,
+        deferred: bool,
+    ) -> SqlResult<QueryResult> {
+        let shown: Option<Vec<String>> =
+            names.map(|names| names.iter().map(|name| crate::schemas::base_name(&name.text).to_owned()).collect());
+        if let Some(names) = names {
+            for name in names {
+                let base = crate::schemas::base_name(&name.text).to_owned();
+                let found = self.read(|reader, _| crate::constraints::deferrable_constraint(reader, &base))?;
+                match found {
+                    None => {
+                        return Err(SqlError::new(
+                            SqlState::UNDEFINED_OBJECT,
+                            format!("constraint \"{base}\" does not exist"),
+                        )
+                        .at(name.position));
+                    }
+                    Some(false) => {
+                        return Err(SqlError::new(
+                            SqlState::WRONG_OBJECT_TYPE,
+                            format!("constraint \"{base}\" is not deferrable"),
+                        )
+                        .at(name.position));
+                    }
+                    Some(true) => {}
+                }
+            }
+        }
+        let result = QueryResult::command("SET CONSTRAINTS");
+        if !matches!(self.block, Block::Writing(_) | Block::Reading(_)) {
+            return Ok(result.with_notice(
+                "WARNING:  SET CONSTRAINTS can only be used in transaction blocks".to_owned(),
+            ));
+        }
+        self.deferred.modes.set(shown.as_deref(), deferred);
+        if !deferred {
+            let pending = self.deferred.take_for(shown.as_deref());
+            if !pending.is_empty() {
+                let checked = self.read(|reader, tables| {
+                    crate::constraints::check_pending(reader, tables, &pending)
+                });
+                if let Err(error) = checked {
+                    self.deferred.add(pending)?;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(result)
     }
 
     fn enter_constraints(&self) -> crate::constraints::ContextGuard {
@@ -1993,6 +2112,32 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 crate::merge::merge(writer, tables, merge)
             }),
             Statement::AlterSession(settings) => self.alter_session(settings),
+            Statement::CreateType(create) => self.write("CREATE TYPE", |writer, _| {
+                crate::user_types::create_type(writer, create)
+            }),
+            Statement::CreateDomain(create) => self.write("CREATE DOMAIN", |writer, _| {
+                crate::user_types::create_domain(writer, create)
+            }),
+            Statement::DropType {
+                names,
+                if_exists,
+                cascade,
+                domain,
+            } => {
+                let tag = if *domain { "DROP DOMAIN" } else { "DROP TYPE" };
+                self.write(tag, |writer, tables| {
+                    crate::user_types::drop_types(writer, tables, names, *if_exists, *cascade, *domain)
+                })
+            }
+            Statement::AlterType(alter) => self.write("ALTER TYPE", |writer, _| {
+                crate::user_types::alter_type(writer, alter)
+            }),
+            Statement::AlterDomain(alter) => self.write("ALTER DOMAIN", |writer, _| {
+                crate::user_types::alter_domain(writer, alter)
+            }),
+            Statement::SetConstraints { names, deferred } => {
+                self.set_constraints(names.as_deref(), *deferred)
+            }
             Statement::Begin { .. }
             | Statement::Commit
             | Statement::Rollback
@@ -2093,6 +2238,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &mut self,
         body: impl FnOnce(&dyn crate::store::KeyValueRead, &mut TableCache) -> SqlResult<T>,
     ) -> SqlResult<T> {
+        let _types = crate::user_types::enter_if_absent();
         let tables = &mut self.tables;
         let objects = &self.temporary;
         match &self.block {
@@ -2129,6 +2275,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
     ) -> SqlResult<QueryResult> {
         self.refuse_writes_when_uncommittable()?;
+        let _types = crate::user_types::enter_if_absent();
         let body = |writer: &mut dyn KeyValueWrite, tables: &mut TableCache| {
             sequences::load_for_sequence_calls(writer)?;
             let result =
@@ -2219,6 +2366,22 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         Ok(result)
                     }
                     Ok(result) => {
+                        let pending = crate::deferred_checks::take_statement_pending();
+                        if !pending.is_empty() {
+                            let checked = crate::constraints::check_pending(
+                                &crate::temporary::TemporaryRead {
+                                    inner: &writer,
+                                    objects: &*objects,
+                                },
+                                tables,
+                                &pending,
+                            );
+                            if let Err(error) = checked {
+                                let _ = writer.rollback();
+                                self.temporary.rollback();
+                                return Err(error);
+                            }
+                        }
                         if let Err(error) = writer.commit() {
                             self.temporary.rollback();
                             return Err(error);
@@ -2291,8 +2454,25 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             self.restore_search_path();
         }
         self.search_path_at_begin = None;
+        let pending = std::mem::take(&mut self.deferred.pending);
+        self.deferred.clear();
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
+                if !pending.is_empty() {
+                    let checked = crate::constraints::check_pending(
+                        &crate::temporary::TemporaryRead {
+                            inner: &writer,
+                            objects: &self.temporary,
+                        },
+                        &mut self.tables,
+                        &pending,
+                    );
+                    if let Err(error) = checked {
+                        let _ = writer.rollback();
+                        self.temporary.rollback();
+                        return Err(error);
+                    }
+                }
                 if let Err(error) = writer.commit() {
                     self.temporary.rollback();
                     return Err(error);
@@ -2317,6 +2497,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn rollback(&mut self) -> SqlResult<QueryResult> {
+        self.deferred.clear();
         self.save_points.clear();
         self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);

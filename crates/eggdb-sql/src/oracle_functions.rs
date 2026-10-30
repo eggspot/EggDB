@@ -198,7 +198,8 @@ fn number_of(value: &Value) -> SqlResult<Option<Number>> {
         | Value::Interval(_)
         | Value::Bytea(_)
         | Value::Uuid(_)
-        | Value::Array(_) => {
+        | Value::Array(_)
+        | Value::Defined(_) => {
             return Err(invalid_number());
         }
     }))

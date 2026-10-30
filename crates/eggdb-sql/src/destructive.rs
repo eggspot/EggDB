@@ -67,6 +67,9 @@ pub enum DestructiveKind {
     DropSequence,
     /// `DROP SCHEMA`.
     DropSchema,
+    /// `DROP TYPE ... CASCADE` or `DROP DOMAIN ... CASCADE`, which drops the columns of that
+    /// type.
+    DropType,
     /// `ALTER TABLE ... DROP COLUMN`.
     DropColumn,
     /// `ALTER TABLE ... DROP CONSTRAINT`.
@@ -92,6 +95,7 @@ impl DestructiveKind {
             Self::DropIndex => "DROP INDEX",
             Self::DropSequence => "DROP SEQUENCE",
             Self::DropSchema => "DROP SCHEMA",
+            Self::DropType => "DROP TYPE ... CASCADE",
             Self::DropColumn => "ALTER TABLE ... DROP COLUMN",
             Self::DropConstraint => "ALTER TABLE ... DROP of a constraint, key or index",
             Self::DropPrimaryKey => "ALTER TABLE ... DROP PRIMARY KEY",
@@ -129,6 +133,11 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
             dropped(DestructiveKind::DropSchema, names, *cascade)
         }
         Statement::DropIndex(drop) => dropped(DestructiveKind::DropIndex, &drop.names, false),
+        Statement::DropType {
+            names,
+            cascade: true,
+            ..
+        } => dropped(DestructiveKind::DropType, names, true),
         Statement::Truncate(table) => Some(DestructiveStatement::new(
             DestructiveKind::Truncate,
             vec![shown(&table.name)],
@@ -178,6 +187,12 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::Ignored { .. }
         | Statement::AlterSession(_)
         | Statement::Discard(_)
+        | Statement::CreateType(_)
+        | Statement::CreateDomain(_)
+        | Statement::DropType { cascade: false, .. }
+        | Statement::AlterType(_)
+        | Statement::AlterDomain(_)
+        | Statement::SetConstraints { .. }
         | Statement::SqlServer(_) => None,
         Statement::With(with) => crate::with_statement::classify(with),
         Statement::Merge(merge) => merge
@@ -241,6 +256,10 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::AddIdentity { .. }
             | AlterAction::AddDefault { .. }
             | AlterAction::EnableConstraint(_)
+            | AlterAction::ValidateConstraint(_)
+            | AlterAction::RenameConstraint { .. }
+            | AlterAction::AlterIdentity { .. }
+            | AlterAction::DropIdentity { .. }
             | AlterAction::Accepted => continue,
         };
         match &mut found {

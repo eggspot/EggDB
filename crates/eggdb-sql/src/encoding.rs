@@ -3,11 +3,13 @@ use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
-use crate::types::{NumericModifier, SqlType, Value};
+use crate::types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 
 mod catalog;
+mod defined;
 
 pub(crate) use catalog::*;
+pub(crate) use defined::*;
 
 pub(crate) const NAMESPACE: &[u8] = &[0xFF, b'S', b'Q', b'L', 0x00];
 const META_SPACE: u8 = 0x01;
@@ -23,7 +25,12 @@ const CONSTRAINTS_FORMAT_VERSION: u8 = 6;
 const SCHEMA_FORMAT_VERSION: u8 = 7;
 pub(crate) const VIEW_FORMAT_VERSION: u8 = 8;
 const IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION: u8 = 9;
-const NEWEST_TABLE_FORMAT_VERSION: u8 = IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
+const DEFINED_TYPES_FORMAT_VERSION: u8 = 10;
+const NEWEST_TABLE_FORMAT_VERSION: u8 = DEFINED_TYPES_FORMAT_VERSION;
+const CONSTRAINT_NOT_VALIDATED: u8 = 1;
+const CONSTRAINT_INITIALLY_DEFERRED: u8 = 2;
+const FIRST_USER_TYPE_OID: u32 = 16_384;
+const MAX_NESTING: usize = 32;
 const UNIQUE_INDEX_WITHOUT_CONSTRAINT: u8 = 1;
 const SEQUENCE_SPACE: u8 = 0x05;
 const REFERENCE_SPACE: u8 = 0x06;
@@ -220,7 +227,12 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::Bpchar(_) => 20,
         SqlType::Array(_) => 21,
         SqlType::Catalog(_) => 22,
+        SqlType::Defined(_) => 23,
     }
+}
+
+fn is_version_10_type(sql_type: SqlType) -> bool {
+    matches!(sql_type, SqlType::Array(_) | SqlType::Defined(_))
 }
 
 fn is_version_4_type(sql_type: SqlType) -> bool {
@@ -252,6 +264,11 @@ fn put_type(out: &mut Vec<u8>, sql_type: SqlType) {
             out.push(precision.unwrap_or(NO_PRECISION));
         }
         SqlType::Bpchar(length) => out.extend_from_slice(&length.unwrap_or(0).to_le_bytes()),
+        SqlType::Array(element) => out.push(element.code()),
+        SqlType::Defined(defined) => {
+            out.push(defined_kind_code(defined.kind));
+            out.extend_from_slice(&defined.oid.to_le_bytes());
+        }
         _ => {}
     }
 }
@@ -466,6 +483,32 @@ pub(crate) struct ForeignKey {
     pub(crate) deferrable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColumnDomain {
+    pub(crate) column: usize,
+    pub(crate) oid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConstraintStatus {
+    pub(crate) name: String,
+    pub(crate) validated: bool,
+    pub(crate) initially_deferred: bool,
+}
+
+impl ConstraintStatus {
+    fn flags(&self) -> u8 {
+        let mut flags = 0;
+        if !self.validated {
+            flags |= CONSTRAINT_NOT_VALIDATED;
+        }
+        if self.initially_deferred {
+            flags |= CONSTRAINT_INITIALLY_DEFERRED;
+        }
+        flags
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct TableDefinition {
     pub(crate) id: u32,
@@ -481,6 +524,8 @@ pub(crate) struct TableDefinition {
     pub(crate) identities: Vec<IdentityColumn>,
     pub(crate) identity_seed: Option<IdentitySeed>,
     pub(crate) default_dialects: Vec<DefaultDialect>,
+    pub(crate) domains: Vec<ColumnDomain>,
+    pub(crate) constraint_statuses: Vec<ConstraintStatus>,
 }
 
 fn dialect_code(dialect: crate::Dialect) -> u8 {
@@ -566,6 +611,136 @@ impl TableDefinition {
     fn has_default_in_another_dialect(&self) -> bool {
         (0..self.columns.len())
             .any(|column| self.stored_default_dialect(column) != crate::Dialect::PostgreSql)
+    }
+
+    pub(crate) fn domain_of(&self, column: usize) -> Option<u32> {
+        self.domains
+            .iter()
+            .find(|entry| entry.column == column)
+            .map(|entry| entry.oid)
+    }
+
+    pub(crate) fn set_domain(&mut self, column: usize, oid: Option<u32>) {
+        self.domains.retain(|entry| entry.column != column);
+        if let Some(oid) = oid {
+            self.domains.push(ColumnDomain { column, oid });
+            self.domains.sort_by_key(|entry| entry.column);
+        }
+    }
+
+    pub(crate) fn domains_without_column(&self, removed: usize) -> Vec<ColumnDomain> {
+        self.domains
+            .iter()
+            .filter(|entry| entry.column != removed)
+            .map(|entry| ColumnDomain {
+                column: if entry.column > removed {
+                    entry.column - 1
+                } else {
+                    entry.column
+                },
+                oid: entry.oid,
+            })
+            .collect()
+    }
+
+    pub(crate) fn is_validated(&self, constraint: &str) -> bool {
+        self.constraint_statuses
+            .iter()
+            .find(|status| status.name == constraint)
+            .is_none_or(|status| status.validated)
+    }
+
+    pub(crate) fn is_initially_deferred(&self, constraint: &str) -> bool {
+        self.constraint_statuses
+            .iter()
+            .find(|status| status.name == constraint)
+            .is_some_and(|status| status.initially_deferred)
+    }
+
+    pub(crate) fn set_status(&mut self, constraint: &str, validated: bool, initially_deferred: bool) {
+        self.constraint_statuses
+            .retain(|status| status.name != constraint);
+        if !validated || initially_deferred {
+            self.constraint_statuses.push(ConstraintStatus {
+                name: constraint.to_owned(),
+                validated,
+                initially_deferred,
+            });
+            self.constraint_statuses
+                .sort_by(|left, right| left.name.cmp(&right.name));
+        }
+    }
+
+    pub(crate) fn rename_status(&mut self, from: &str, to: &str) {
+        if let Some(status) = self
+            .constraint_statuses
+            .iter_mut()
+            .find(|status| status.name == from)
+        {
+            status.name = to.to_owned();
+        }
+        self.constraint_statuses
+            .sort_by(|left, right| left.name.cmp(&right.name));
+    }
+
+    pub(crate) fn forget_missing_statuses(&mut self) {
+        let checks = &self.checks;
+        let keys = &self.foreign_keys;
+        self.constraint_statuses.retain(|status| {
+            checks.iter().any(|check| check.name == status.name)
+                || keys.iter().any(|key| key.name == status.name)
+        });
+    }
+
+    fn needs_defined_version(&self) -> bool {
+        !self.domains.is_empty()
+            || !self.constraint_statuses.is_empty()
+            || self
+                .columns
+                .iter()
+                .any(|column| is_version_10_type(column.sql_type))
+    }
+
+    fn encode_defined(&self, out: &mut Vec<u8>) {
+        put_varint(out, self.domains.len() as u64);
+        for entry in &self.domains {
+            put_varint(out, entry.column as u64);
+            out.extend_from_slice(&entry.oid.to_le_bytes());
+        }
+        put_varint(out, self.constraint_statuses.len() as u64);
+        for status in &self.constraint_statuses {
+            put_bytes(out, status.name.as_bytes());
+            out.push(status.flags());
+        }
+    }
+
+    fn defined_parts_fit(&self) -> bool {
+        let domains_fit = self.domains.iter().enumerate().all(|(at, entry)| {
+            entry.column < self.columns.len()
+                && entry.oid >= FIRST_USER_TYPE_OID
+                && at
+                    .checked_sub(1)
+                    .and_then(|previous| self.domains.get(previous))
+                    .is_none_or(|previous| previous.column < entry.column)
+                && self.columns[entry.column].sql_type.defined().is_none_or(|defined| {
+                    defined.kind != DefinedKind::Domain
+                })
+        });
+        let statuses_fit = self.constraint_statuses.iter().enumerate().all(|(at, status)| {
+            let key = self.foreign_keys.iter().find(|key| key.name == status.name);
+            let names_constraint =
+                key.is_some() || self.checks.iter().any(|check| check.name == status.name);
+            let deferral_fits =
+                !status.initially_deferred || key.is_some_and(|key| key.deferrable);
+            names_constraint
+                && deferral_fits
+                && status.flags() != 0
+                && at
+                    .checked_sub(1)
+                    .and_then(|previous| self.constraint_statuses.get(previous))
+                    .is_none_or(|previous| previous.name < status.name)
+        });
+        domains_fit && statuses_fit
     }
 
     pub(crate) fn index_named(&self, name: &str) -> Option<&IndexDefinition> {
@@ -683,7 +858,9 @@ impl TableDefinition {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self.needs_options_version() {
+        let version = if self.needs_defined_version() {
+            DEFINED_TYPES_FORMAT_VERSION
+        } else if self.needs_options_version() {
             IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
         } else if crate::schemas::is_qualified(&self.name) {
             SCHEMA_FORMAT_VERSION
@@ -756,8 +933,11 @@ impl TableDefinition {
         if version >= CONSTRAINTS_FORMAT_VERSION {
             self.encode_constraints(&mut out);
         }
-        if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
+        if version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
             self.encode_options(&mut out);
+        }
+        if version == DEFINED_TYPES_FORMAT_VERSION {
+            self.encode_defined(&mut out);
         }
         out
     }
@@ -803,14 +983,15 @@ impl TableDefinition {
         let qualified = crate::schemas::is_qualified(name);
         let name_fits_version = match version {
             SCHEMA_FORMAT_VERSION => qualified,
-            IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION => true,
+            IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION | DEFINED_TYPES_FORMAT_VERSION => true,
             _ => !qualified,
         };
         if !name_fits_version || !crate::schemas::is_well_formed(name) {
             return Err(reader.damaged());
         }
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
-        let options_allowed = version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
+        let options_allowed = version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
+        let defined_allowed = version == DEFINED_TYPES_FORMAT_VERSION;
         let mut identity_seed = None;
         let mut default_dialects = Vec::new();
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
@@ -826,7 +1007,15 @@ impl TableDefinition {
             if name.contains(crate::schemas::QUALIFIER) {
                 return Err(reader.damaged());
             }
-            let sql_type = reader.sql_type(new_types_allowed, more_types_allowed)?;
+            let sql_type =
+                reader.sql_type(new_types_allowed, more_types_allowed, defined_allowed)?;
+            if sql_type
+                .defined()
+                .is_some_and(|defined| defined.kind == DefinedKind::Domain)
+                || matches!(sql_type, SqlType::Array(element) if !element.is_storable())
+            {
+                return Err(reader.damaged());
+            }
             let not_null = match reader.byte()? {
                 0 => false,
                 1 => true,
@@ -892,9 +1081,8 @@ impl TableDefinition {
             | MORE_TYPES_FORMAT_VERSION
             | CONSTRAINTS_FORMAT_VERSION
             | SCHEMA_FORMAT_VERSION
-            | IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION => {
-                decode_indexes(&mut reader, columns.len(), true)?
-            }
+            | IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
+            | DEFINED_TYPES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
@@ -902,10 +1090,15 @@ impl TableDefinition {
         } else {
             None
         };
-        let identities = if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
+        let identities = if version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
             decode_options(&mut reader, columns.len(), &mut indexes)?
         } else {
             Vec::new()
+        };
+        let (domains, constraint_statuses) = if version == DEFINED_TYPES_FORMAT_VERSION {
+            decode_defined(&mut reader)?
+        } else {
+            (Vec::new(), Vec::new())
         };
         reader.finish()?;
         let newest_type_needed = if more_types_allowed {
@@ -963,17 +1156,60 @@ impl TableDefinition {
             identities,
             identity_seed,
             default_dialects,
+            domains,
+            constraint_statuses,
         };
         if version == CONSTRAINTS_FORMAT_VERSION && !table.has_constraints() {
             return Err(reader.damaged());
         }
-        if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
-            && (table.stored_identities() != table.identities || !table.needs_options_version())
+        if version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
+            && table.stored_identities() != table.identities
+        {
+            return Err(reader.damaged());
+        }
+        if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION && !table.needs_options_version() {
+            return Err(reader.damaged());
+        }
+        if version == DEFINED_TYPES_FORMAT_VERSION
+            && (!table.needs_defined_version() || !table.defined_parts_fit())
         {
             return Err(reader.damaged());
         }
         Ok(table)
     }
+}
+
+type DefinedParts = (Vec<ColumnDomain>, Vec<ConstraintStatus>);
+
+fn decode_defined(reader: &mut Reader<'_>) -> SqlResult<DefinedParts> {
+    let count = reader.count()?;
+    if count > MAX_COLUMNS {
+        return Err(reader.damaged());
+    }
+    let mut domains = Vec::with_capacity(count);
+    for _ in 0..count {
+        let column = usize::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+        let oid = reader.u32()?;
+        domains.push(ColumnDomain { column, oid });
+    }
+    let count = reader.count()?;
+    if count > 2 * MAX_CONSTRAINTS {
+        return Err(reader.damaged());
+    }
+    let mut statuses = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = reader.plain_name()?;
+        let flags = reader.byte()?;
+        if flags & !(CONSTRAINT_NOT_VALIDATED | CONSTRAINT_INITIALLY_DEFERRED) != 0 {
+            return Err(reader.damaged());
+        }
+        statuses.push(ConstraintStatus {
+            name,
+            validated: flags & CONSTRAINT_NOT_VALIDATED == 0,
+            initially_deferred: flags & CONSTRAINT_INITIALLY_DEFERRED != 0,
+        });
+    }
+    Ok((domains, statuses))
 }
 
 fn decode_options(
@@ -1434,6 +1670,15 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
             let number = crate::pg_catalog::oid_number(value).unwrap_or(0);
             out.extend_from_slice(&((number as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
         }
+        Value::Defined(defined) => {
+            out.push(PRESENT);
+            match defined.as_ref() {
+                DefinedValue::Enum(label) => {
+                    out.extend_from_slice(&ordered_double(label.sort_order));
+                }
+                other => push_escaped_text(out, other.to_text().as_bytes()),
+            }
+        }
     }
 }
 
@@ -1457,7 +1702,129 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
     out.push(FORMAT_VERSION);
     put_varint(out, values.len() as u64);
     for value in values {
+        encode_row_value(out, value);
+    }
+}
+
+const ENUM_TAG: u8 = 24;
+const RECORD_TAG: u8 = 25;
+const RANGE_TAG: u8 = 26;
+const RANGE_EMPTY: u8 = 1;
+const RANGE_LOWER: u8 = 2;
+const RANGE_LOWER_INCLUSIVE: u8 = 4;
+const RANGE_UPPER: u8 = 8;
+const RANGE_UPPER_INCLUSIVE: u8 = 16;
+
+fn put_record(out: &mut Vec<u8>, record: &crate::records::RecordValue) {
+    put_varint(out, record.fields.len() as u64);
+    if record.names.is_empty() {
+        out.push(0);
+    } else {
+        out.push(1);
+        for name in &record.names {
+            put_bytes(out, name.as_bytes());
+        }
+    }
+    for field in &record.fields {
+        put_nested(out, field);
+    }
+}
+
+fn put_range(out: &mut Vec<u8>, range: &crate::ranges::RangeValue) {
+    use crate::ranges::RangeBound;
+    let Some(bounds) = &range.bounds else {
+        out.push(RANGE_EMPTY);
+        return;
+    };
+    let mut flags = 0;
+    for (bound, present, inclusive) in [
+        (&bounds.lower, RANGE_LOWER, RANGE_LOWER_INCLUSIVE),
+        (&bounds.upper, RANGE_UPPER, RANGE_UPPER_INCLUSIVE),
+    ] {
+        match bound {
+            RangeBound::Unbounded => {}
+            RangeBound::Inclusive(_) => flags |= present | inclusive,
+            RangeBound::Exclusive(_) => flags |= present,
+        }
+    }
+    out.push(flags);
+    for bound in [&bounds.lower, &bounds.upper] {
+        if let RangeBound::Inclusive(value) | RangeBound::Exclusive(value) = bound {
+            put_nested(out, value);
+        }
+    }
+}
+
+fn put_nested(out: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Array(array) => {
+            out.push(21);
+            out.push(array.element.code());
+            put_bytes(out, &crate::arrays::encode_stored(array));
+        }
+        Value::Defined(defined) => match defined.as_ref() {
+            DefinedValue::Enum(label) => {
+                out.push(ENUM_TAG);
+                out.extend_from_slice(&label.type_oid.to_le_bytes());
+                out.extend_from_slice(&label.sort_order.to_bits().to_le_bytes());
+            }
+            DefinedValue::Record(record) => {
+                out.push(RECORD_TAG);
+                out.extend_from_slice(&record.type_oid.to_le_bytes());
+                put_record(out, record);
+            }
+            DefinedValue::Range(range) => {
+                out.push(RANGE_TAG);
+                out.extend_from_slice(&range.type_oid.to_le_bytes());
+                put_range(out, range);
+            }
+        },
+        other => encode_row_value(out, other),
+    }
+}
+
+fn ordered_double(number: f64) -> [u8; 8] {
+    let canonical = if number.is_nan() {
+        f64::NAN
+    } else if number == 0.0 {
+        0.0
+    } else {
+        number
+    };
+    let bits = canonical.to_bits();
+    let ordered = if bits >> 63 == 1 {
+        !bits
+    } else {
+        bits | 1 << 63
+    };
+    ordered.to_be_bytes()
+}
+
+fn double_of_ordered(ordered: u64) -> f64 {
+    let bits = if ordered >> 63 == 1 {
+        ordered & !(1 << 63)
+    } else {
+        !ordered
+    };
+    f64::from_bits(bits)
+}
+
+fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
         match value {
+            Value::Defined(defined) => match defined.as_ref() {
+                DefinedValue::Enum(label) => {
+                    out.push(ENUM_TAG);
+                    out.extend_from_slice(&label.sort_order.to_bits().to_le_bytes());
+                }
+                DefinedValue::Record(record) => {
+                    out.push(RECORD_TAG);
+                    put_record(out, record);
+                }
+                DefinedValue::Range(range) => {
+                    out.push(RANGE_TAG);
+                    put_range(out, range);
+                }
+            },
             Value::Null => out.push(0),
             Value::SmallInt(number) => {
                 out.push(1);
@@ -1556,7 +1923,6 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
                 put_bytes(out, reg.name.as_bytes());
             }
         }
-    }
 }
 
 const OID_TAG: u8 = 22;
@@ -1635,6 +2001,31 @@ pub(crate) fn decode_row_into(
                 reader.skip_text()?;
                 Value::Null
             }
+            ENUM_TAG => {
+                let SqlType::Defined(defined) = column.sql_type else {
+                    return Err(reader.damaged());
+                };
+                let sort_order = reader.sort_order()?;
+                if wanted {
+                    crate::enums::decoded(defined.oid, sort_order)?
+                } else {
+                    Value::Null
+                }
+            }
+            RECORD_TAG => {
+                let SqlType::Defined(defined) = column.sql_type else {
+                    return Err(reader.damaged());
+                };
+                let record = reader.record_body(defined.oid, 0)?;
+                if wanted { record } else { Value::Null }
+            }
+            RANGE_TAG => {
+                let SqlType::Defined(defined) = column.sql_type else {
+                    return Err(reader.damaged());
+                };
+                let range = reader.range_body(defined.oid, 0)?;
+                if wanted { range } else { Value::Null }
+            }
             9 => Value::Numeric(reader.numeric()?),
             15 => {
                 let micros = i64::from_le_bytes(reader.array()?);
@@ -1699,6 +2090,18 @@ pub(crate) fn decode_row_into(
 
 fn value_tag(sql_type: SqlType) -> u8 {
     match sql_type {
+        SqlType::Defined(DefinedType {
+            kind: DefinedKind::Enum,
+            ..
+        }) => ENUM_TAG,
+        SqlType::Defined(DefinedType {
+            kind: DefinedKind::Composite,
+            ..
+        }) => RECORD_TAG,
+        SqlType::Defined(DefinedType {
+            kind: DefinedKind::Range,
+            ..
+        }) => RANGE_TAG,
         SqlType::Varchar(_) => type_tag(SqlType::Text),
         SqlType::Catalog(
             crate::pg_catalog::CatalogType::Oid | crate::pg_catalog::CatalogType::Xid,
@@ -1825,6 +2228,7 @@ impl<'b> Reader<'b> {
         &mut self,
         new_types_allowed: bool,
         more_types_allowed: bool,
+        defined_allowed: bool,
     ) -> SqlResult<SqlType> {
         Ok(match self.byte()? {
             1 => SqlType::SmallInt,
@@ -1854,6 +2258,19 @@ impl<'b> Reader<'b> {
                 length if length <= MAX_CHARACTER_LENGTH => SqlType::Bpchar(Some(length)),
                 _ => return Err(self.damaged()),
             },
+            21 if defined_allowed => SqlType::Array(
+                crate::arrays::ArrayElement::of_code(self.byte()?).ok_or_else(|| self.damaged())?,
+            ),
+            23 if defined_allowed => {
+                let kind = defined_kind_of(self.byte()?).ok_or_else(|| self.damaged())?;
+                let oid = self.u32()?;
+                let builtin = oid == crate::records::RECORD_OID
+                    || (kind == DefinedKind::Range && crate::ranges::builtin(oid).is_some());
+                if oid < FIRST_USER_TYPE_OID && !builtin {
+                    return Err(self.damaged());
+                }
+                SqlType::Defined(DefinedType { kind, oid })
+            }
             _ => return Err(self.damaged()),
         })
     }
@@ -1936,7 +2353,13 @@ impl<'b> Reader<'b> {
             | SqlType::Time(_) => 8,
             SqlType::TimeTz(_) => 12,
             SqlType::Interval { .. } | SqlType::Uuid => 16,
-            SqlType::Array(_) | SqlType::Catalog(_) => return Err(self.damaged()),
+            SqlType::Defined(DefinedType {
+                kind: DefinedKind::Enum,
+                ..
+            }) => 8,
+            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => {
+                return Err(self.damaged());
+            }
             SqlType::Numeric(_) => {
                 let rest = self.bytes.get(self.at..).unwrap_or(&[]);
                 Numeric::key_length(rest).ok_or_else(|| self.damaged())?
@@ -2049,7 +2472,19 @@ impl<'b> Reader<'b> {
                 Value::Interval(Interval::from_span(span).ok_or_else(|| self.damaged())?)
             }
             SqlType::Uuid => Value::Uuid(self.array()?),
-            SqlType::Array(_) | SqlType::Catalog(_) => return Err(self.damaged()),
+            SqlType::Defined(DefinedType {
+                kind: DefinedKind::Enum,
+                oid,
+            }) => {
+                let sort_order = double_of_ordered(u64::from_be_bytes(self.array()?));
+                if !sort_order.is_finite() {
+                    return Err(self.damaged());
+                }
+                crate::enums::decoded(oid, sort_order)?
+            }
+            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => {
+                return Err(self.damaged());
+            }
             SqlType::Text
             | SqlType::Varchar(_)
             | SqlType::Json
@@ -2078,6 +2513,186 @@ impl<'b> Reader<'b> {
                     _ => Value::Text(text),
                 }
             }
+        })
+    }
+
+    fn sort_order(&mut self) -> SqlResult<f64> {
+        let sort_order = f64::from_bits(u64::from_le_bytes(self.array()?));
+        if sort_order.is_finite() {
+            Ok(sort_order)
+        } else {
+            Err(self.damaged())
+        }
+    }
+
+    fn record_body(&mut self, type_oid: u32, depth: usize) -> SqlResult<Value> {
+        let count = self.count()?;
+        if count > MAX_COLUMNS || depth > MAX_NESTING {
+            return Err(self.damaged());
+        }
+        let names = match self.byte()? {
+            0 => Vec::new(),
+            1 => {
+                let mut names = Vec::with_capacity(count);
+                for _ in 0..count {
+                    names.push(self.text()?);
+                }
+                names
+            }
+            _ => return Err(self.damaged()),
+        };
+        if names.is_empty() == (type_oid == crate::records::RECORD_OID) && count > 0 {
+            return Err(self.damaged());
+        }
+        let mut fields = Vec::with_capacity(count);
+        for _ in 0..count {
+            fields.push(self.nested_value(depth + 1)?);
+        }
+        Ok(crate::records::record_value(type_oid, fields, names))
+    }
+
+    fn range_body(&mut self, type_oid: u32, depth: usize) -> SqlResult<Value> {
+        use crate::ranges::{RangeBound, RangeBounds, RangeValue};
+        if depth > MAX_NESTING {
+            return Err(self.damaged());
+        }
+        let flags = self.byte()?;
+        let known = RANGE_EMPTY | RANGE_LOWER | RANGE_LOWER_INCLUSIVE | RANGE_UPPER | RANGE_UPPER_INCLUSIVE;
+        if flags & !known != 0
+            || (flags & RANGE_EMPTY != 0 && flags != RANGE_EMPTY)
+            || (flags & RANGE_LOWER_INCLUSIVE != 0 && flags & RANGE_LOWER == 0)
+            || (flags & RANGE_UPPER_INCLUSIVE != 0 && flags & RANGE_UPPER == 0)
+        {
+            return Err(self.damaged());
+        }
+        let bounds = if flags & RANGE_EMPTY != 0 {
+            None
+        } else {
+            let mut bound = |present: u8, inclusive: u8| -> SqlResult<RangeBound> {
+                if flags & present == 0 {
+                    return Ok(RangeBound::Unbounded);
+                }
+                let value = self.nested_value(depth + 1)?;
+                if value.is_null() {
+                    return Err(self.damaged());
+                }
+                Ok(if flags & inclusive != 0 {
+                    RangeBound::Inclusive(value)
+                } else {
+                    RangeBound::Exclusive(value)
+                })
+            };
+            let lower = bound(RANGE_LOWER, RANGE_LOWER_INCLUSIVE)?;
+            let upper = bound(RANGE_UPPER, RANGE_UPPER_INCLUSIVE)?;
+            Some(RangeBounds { lower, upper })
+        };
+        Ok(Value::Defined(Box::new(DefinedValue::Range(RangeValue {
+            type_oid,
+            bounds,
+        }))))
+    }
+
+    fn nested_value(&mut self, depth: usize) -> SqlResult<Value> {
+        if depth > MAX_NESTING {
+            return Err(self.damaged());
+        }
+        let tag = self.byte()?;
+        Ok(match tag {
+            0 => Value::Null,
+            1 => Value::SmallInt(i16::from_le_bytes(self.array()?)),
+            2 => Value::Integer(i32::from_le_bytes(self.array()?)),
+            3 => Value::BigInt(i64::from_le_bytes(self.array()?)),
+            4 => Value::Real(f32::from_bits(u32::from_le_bytes(self.array()?))),
+            5 => Value::Double(f64::from_bits(u64::from_le_bytes(self.array()?))),
+            6 => match self.byte()? {
+                0 => Value::Boolean(false),
+                1 => Value::Boolean(true),
+                _ => return Err(self.damaged()),
+            },
+            7 => Value::Text(self.text()?),
+            9 => Value::Numeric(self.numeric()?),
+            10 => {
+                let days = i32::from_le_bytes(self.array()?);
+                if !datetime::valid_date(days) {
+                    return Err(self.damaged());
+                }
+                Value::Date(days)
+            }
+            11 | 12 => {
+                let micros = i64::from_le_bytes(self.array()?);
+                if !datetime::valid_timestamp(micros) {
+                    return Err(self.damaged());
+                }
+                if tag == 11 {
+                    Value::Timestamp(micros)
+                } else {
+                    Value::TimestampTz(micros)
+                }
+            }
+            13 => Value::Json(self.json(false)?),
+            14 => Value::Jsonb(self.json(true)?),
+            15 => {
+                let micros = i64::from_le_bytes(self.array()?);
+                if !datetime::valid_time(micros) {
+                    return Err(self.damaged());
+                }
+                Value::Time(micros)
+            }
+            16 => {
+                let micros = i64::from_le_bytes(self.array()?);
+                let offset_seconds = i32::from_le_bytes(self.array()?);
+                if !datetime::valid_time(micros) || !datetime::valid_offset(offset_seconds) {
+                    return Err(self.damaged());
+                }
+                Value::TimeTz {
+                    micros,
+                    offset_seconds,
+                }
+            }
+            17 => Value::Interval(Interval {
+                months: i32::from_le_bytes(self.array()?),
+                days: i32::from_le_bytes(self.array()?),
+                micros: i64::from_le_bytes(self.array()?),
+            }),
+            18 => {
+                let length = self.count()?;
+                Value::Bytea(self.take(length)?.to_vec())
+            }
+            19 => Value::Uuid(self.array()?),
+            20 => Value::Bpchar(self.text()?),
+            21 => {
+                let element = crate::arrays::ArrayElement::of_code(self.byte()?)
+                    .ok_or_else(|| self.damaged())?;
+                let length = self.count()?;
+                let bytes = self.take(length)?;
+                match crate::arrays::decode_stored(bytes, element) {
+                    Some(array) => Value::Array(Box::new(array)),
+                    None => return Err(self.damaged()),
+                }
+            }
+            OID_TAG => Value::Oid(u32::from_le_bytes(self.array()?)),
+            REG_TAG => {
+                let kind = *REG_KINDS
+                    .get(usize::from(self.byte()?))
+                    .ok_or_else(|| self.damaged())?;
+                let oid = u32::from_le_bytes(self.array()?);
+                let name = self.text()?;
+                Value::Reg(Box::new(crate::pg_catalog::RegValue { kind, oid, name }))
+            }
+            ENUM_TAG => {
+                let oid = self.u32()?;
+                let sort_order = self.sort_order()?;
+                crate::enums::decoded(oid, sort_order)?
+            }
+            RECORD_TAG => {
+                let oid = self.u32()?;
+                self.record_body(oid, depth)?
+            }
+            RANGE_TAG => {
+                let oid = self.u32()?;
+                self.range_body(oid, depth)?
+            }
+            _ => return Err(self.damaged()),
         })
     }
 

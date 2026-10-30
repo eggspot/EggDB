@@ -352,7 +352,9 @@ fn view_columns(
                 format!("invalid view column name \"{}\"", name.escape_default()),
             ));
         }
-        if let Some(sql_type @ crate::types::SqlType::Array(_)) = column.sql_type {
+        if let Some(sql_type @ crate::types::SqlType::Array(element)) = column.sql_type
+            && !element.is_storable()
+        {
             return Err(SqlError::not_supported(format!(
                 "a view column of type {} is not supported yet",
                 sql_type.name()

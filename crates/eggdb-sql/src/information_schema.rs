@@ -500,6 +500,7 @@ struct ColumnFacts<'a> {
     not_null: bool,
     default: Option<String>,
     identity: Option<IdentityFacts>,
+    domain: Option<u32>,
 }
 
 struct IdentityFacts {
@@ -581,6 +582,7 @@ fn relation_columns<'a>(
                     .filter(|_| table.identity_of(position).is_none())
                     .map(|_| default_text(snapshot, at, position)),
                 identity: identity_facts(snapshot, table, position),
+                domain: table.domain_of(position),
             })
             .collect(),
         RelationSource::View(view) => view
@@ -592,6 +594,7 @@ fn relation_columns<'a>(
                 not_null: false,
                 default: None,
                 identity: None,
+                domain: None,
             })
             .collect(),
         RelationSource::Catalog(relation) => relation
@@ -603,6 +606,7 @@ fn relation_columns<'a>(
                 not_null: false,
                 default: None,
                 identity: None,
+                domain: None,
             })
             .collect(),
         RelationSource::Sequence(_) | RelationSource::Index { .. } => Vec::new(),
@@ -806,6 +810,33 @@ fn column_row(
             .set("udt_catalog", identifier(&snapshot.database))
             .set("udt_schema", identifier(crate::schemas::CATALOG_SCHEMA))
             .set("udt_name", identifier(udt_name));
+    } else if let Some(defined) = column.sql_type.defined()
+        && let Some(found) = snapshot.user_types.of_oid(defined.oid)
+    {
+        row = row
+            .set("udt_catalog", identifier(&snapshot.database))
+            .set(
+                "udt_schema",
+                identifier(crate::schemas::schema_of(&found.name)),
+            )
+            .set(
+                "udt_name",
+                identifier(crate::schemas::base_name(&found.name)),
+            );
+    }
+    if let Some(domain) = column.domain
+        && let Some(found) = snapshot.user_types.of_oid(domain)
+    {
+        row = row
+            .set("domain_catalog", identifier(&snapshot.database))
+            .set(
+                "domain_schema",
+                identifier(crate::schemas::schema_of(&found.name)),
+            )
+            .set(
+                "domain_name",
+                identifier(crate::schemas::base_name(&found.name)),
+            );
     }
     if let Some(identity) = &column.identity {
         let generation = match identity.generation {

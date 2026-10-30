@@ -79,6 +79,12 @@ pub(crate) fn type_family(sql_type: SqlType) -> u8 {
         SqlType::Catalog(kind) if kind.is_identifier() => 16,
         SqlType::Catalog(kind) if kind.is_text_like() => 2,
         SqlType::Catalog(_) => 15,
+        SqlType::Defined(defined) => match defined.kind {
+            crate::types::DefinedKind::Enum => 17,
+            crate::types::DefinedKind::Composite => 18,
+            crate::types::DefinedKind::Range => 19,
+            crate::types::DefinedKind::Domain => 20,
+        },
     }
 }
 

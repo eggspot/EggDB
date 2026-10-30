@@ -158,9 +158,52 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
     })
 }
 
+fn defined_function_type(
+    name: &str,
+    arguments: &[Expr],
+    scope: Scope<'_>,
+) -> Option<Option<SqlType>> {
+    let first = || {
+        arguments
+            .first()
+            .and_then(|argument| static_type(argument, scope))
+    };
+    match name {
+        crate::records::ROW_FUNCTION | crate::records::EXPAND_ARRAY_FUNCTION => {
+            return Some(Some(SqlType::Defined(crate::types::DefinedType::RECORD)));
+        }
+        crate::records::FIELD_FUNCTION => {
+            let Some(ExprKind::Literal(Literal::String(field))) =
+                arguments.get(1).map(|field| &field.kind)
+            else {
+                return Some(None);
+            };
+            let record = arguments.first()?;
+            if let ExprKind::Function {
+                name,
+                arguments: inner,
+            } = &record.kind
+                && name == crate::records::EXPAND_ARRAY_FUNCTION
+            {
+                let array = inner.first().and_then(|array| static_type(array, scope));
+                return Some(crate::records::expanded_field_type(array, field));
+            }
+            return Some(crate::records::field_type(static_type(record, scope), field));
+        }
+        _ => {}
+    }
+    if crate::enums::FUNCTIONS.contains(&name) {
+        return Some(crate::enums::result_type(name, first()));
+    }
+    crate::ranges::function_type(name, first())
+}
+
 fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<SqlType> {
     if let Some(sql_type) = crate::sequences::result_type(name) {
         return Some(sql_type);
+    }
+    if let Some(sql_type) = defined_function_type(name, arguments, scope) {
+        return sql_type;
     }
     if let Some(sql_type) = added_function_type(name, arguments, scope) {
         return sql_type;
@@ -318,7 +361,7 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
         | ExprKind::Constant { sql_type, .. }
         | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
         ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
-        ExprKind::Cast { sql_type, .. } => Some(*sql_type),
+        ExprKind::Cast { sql_type, .. } => Some(crate::user_types::storable_base(*sql_type)),
         ExprKind::SessionValue { .. } => Some(SqlType::Text),
         ExprKind::Unary(UnaryOperator::Not, _)
         | ExprKind::And(_)

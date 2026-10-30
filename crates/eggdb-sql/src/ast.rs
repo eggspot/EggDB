@@ -76,6 +76,100 @@ pub(crate) enum Statement {
     AlterSession(Vec<(String, String)>),
     Discard(DiscardTarget),
     With(Box<WithStatement>),
+    CreateType(Box<CreateType>),
+    CreateDomain(Box<CreateDomain>),
+    DropType {
+        names: Vec<Name>,
+        if_exists: bool,
+        cascade: bool,
+        domain: bool,
+    },
+    AlterType(Box<AlterType>),
+    AlterDomain(Box<AlterDomain>),
+    SetConstraints {
+        names: Option<Vec<Name>>,
+        deferred: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateType {
+    pub(crate) name: Name,
+    pub(crate) body: TypeSpec,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TypeSpec {
+    Enum(Vec<String>),
+    Composite(Vec<(Name, SqlType)>),
+    Range { subtype: SqlType, position: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DomainConstraintSpec {
+    pub(crate) name: Option<Name>,
+    pub(crate) expr: Expr,
+    pub(crate) text: String,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateDomain {
+    pub(crate) name: Name,
+    pub(crate) base: SqlType,
+    pub(crate) default: Option<(Expr, String)>,
+    pub(crate) not_null: bool,
+    pub(crate) checks: Vec<DomainConstraintSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterType {
+    pub(crate) name: Name,
+    pub(crate) action: AlterTypeAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterTypeAction {
+    AddValue {
+        label: String,
+        if_not_exists: bool,
+        neighbor: Option<(String, bool)>,
+    },
+    RenameValue {
+        from: String,
+        to: String,
+    },
+    RenameTo(Name),
+    SetSchema(Name),
+    Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterDomain {
+    pub(crate) name: Name,
+    pub(crate) action: AlterDomainAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterDomainAction {
+    SetDefault(Option<(Expr, String)>),
+    SetNotNull(bool),
+    AddCheck {
+        spec: DomainConstraintSpec,
+        not_valid: bool,
+    },
+    DropConstraint {
+        name: Name,
+        if_exists: bool,
+    },
+    ValidateConstraint(Name),
+    RenameConstraint {
+        from: Name,
+        to: Name,
+    },
+    RenameTo(Name),
+    SetSchema(Name),
+    Accepted,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -382,6 +476,7 @@ pub(crate) struct ForeignKeySpec {
     pub(crate) on_delete: ReferentialAction,
     pub(crate) on_update: ReferentialAction,
     pub(crate) deferrable: bool,
+    pub(crate) initially_deferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -399,6 +494,7 @@ pub(crate) struct ConstraintSpec {
     pub(crate) position: usize,
     pub(crate) column: Option<Name>,
     pub(crate) using_index: Option<Name>,
+    pub(crate) not_valid: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -462,6 +558,20 @@ pub(crate) enum AlterAction {
         position: usize,
     },
     EnableConstraint(Name),
+    ValidateConstraint(Name),
+    RenameConstraint {
+        from: Name,
+        to: Name,
+    },
+    AlterIdentity {
+        column: Name,
+        generation: Option<crate::encoding::IdentityGeneration>,
+        options: SequenceOptions,
+    },
+    DropIdentity {
+        column: Name,
+        if_exists: bool,
+    },
     Accepted,
 }
 
@@ -668,6 +778,7 @@ pub(crate) enum ExpandedItem {
         arguments: usize,
         output_name: String,
         position: usize,
+        field: Option<String>,
     },
     Window {
         spec: crate::window::WindowSpec,

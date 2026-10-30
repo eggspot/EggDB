@@ -30,9 +30,11 @@ mod comments;
 mod constraints;
 mod copy;
 mod datetime;
+mod deferred_checks;
 mod destructive;
 mod dialect;
 mod encoding;
+mod enums;
 mod error;
 mod eval;
 mod execute;
@@ -69,6 +71,8 @@ mod pg_format;
 mod pg_keywords;
 mod plan;
 mod random;
+mod ranges;
+mod records;
 mod regex;
 mod regexp_functions;
 mod relations;
@@ -101,6 +105,7 @@ mod tsql;
 mod types;
 mod typing;
 mod updatable_views;
+mod user_types;
 mod views;
 mod window;
 mod with_statement;
@@ -194,7 +199,10 @@ pub use sqlserver_catalog::is_catalog_procedure;
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, StoreFailure,
 };
-pub use types::{NumericModifier, SqlType, Value};
+pub use enums::EnumValue;
+pub use ranges::{RangeBound, RangeBounds, RangeValue};
+pub use records::RecordValue;
+pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 
 /// The first bytes of every key that SQL keeps in a database: the catalog and every table's
 /// rows. Other keys of the same database never start with them unless written there on

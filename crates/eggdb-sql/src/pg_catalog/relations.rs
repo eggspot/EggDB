@@ -160,7 +160,7 @@ pub(crate) fn build(
     Ok(match relation {
         CatalogRelation::Class => class_rows(snapshot),
         CatalogRelation::Attribute => attribute_rows(snapshot),
-        CatalogRelation::Type => type_rows(),
+        CatalogRelation::Type => type_rows(snapshot),
         CatalogRelation::Namespace => namespace_rows(snapshot),
         CatalogRelation::Index => index_rows(snapshot),
         CatalogRelation::Constraint => constraint_rows(snapshot),
@@ -182,9 +182,9 @@ pub(crate) fn build(
         | CatalogRelation::Trigger
         | CatalogRelation::Rewrite
         | CatalogRelation::AuthMembers
-        | CatalogRelation::Opclass
-        | CatalogRelation::Enum
-        | CatalogRelation::Range => Vec::new(),
+        | CatalogRelation::Opclass => Vec::new(),
+        CatalogRelation::Enum => enum_rows(snapshot),
+        CatalogRelation::Range => range_rows(snapshot),
         CatalogRelation::Proc => proc_rows(),
         CatalogRelation::Settings => setting_rows(snapshot),
         CatalogRelation::Information(relation) => {
@@ -402,7 +402,12 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         relation,
                         name: &column.name,
                         number: at + 1,
-                        sql_type: column.sql_type,
+                        sql_type: table.domain_of(at).map_or(column.sql_type, |domain| {
+                            SqlType::Defined(crate::types::DefinedType {
+                                kind: crate::types::DefinedKind::Domain,
+                                oid: domain,
+                            })
+                        }),
                         not_null: column.not_null || table.primary_key.contains(&at),
                         has_default: column.default.is_some() && table.identity_of(at).is_none(),
                         identity: identity_code(table.identity_of(at)),
@@ -488,7 +493,149 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
-fn type_rows() -> Vec<Vec<Value>> {
+fn user_type_row(snapshot: &CatalogSnapshot, found: &crate::user_types::UserType) -> Vec<Value> {
+    use crate::user_types::TypeBody;
+    let namespace = snapshot
+        .schema_named(crate::schemas::schema_of(&found.name))
+        .map_or(oids::PUBLIC, |schema| schema.oid);
+    let base = match &found.body {
+        TypeBody::Domain(domain) => Some(domain.base),
+        _ => None,
+    };
+    let base_facts = base.map(facts);
+    let (kind, category, length, by_value, align, storage) = match &found.body {
+        TypeBody::Enum(_) => ('e', 'E', 4, true, 'i', 'p'),
+        TypeBody::Composite(_) => ('c', 'C', -1, false, 'd', 'x'),
+        TypeBody::Range { .. } => ('r', 'R', -1, false, 'd', 'x'),
+        TypeBody::Domain(_) => {
+            let builtin = base_facts
+                .as_ref()
+                .and_then(|facts| oids::builtin_type(facts.oid));
+            (
+                'd',
+                builtin.map_or('U', |builtin| builtin.category),
+                base_facts.as_ref().map_or(-1, |facts| facts.length),
+                base_facts.as_ref().is_some_and(|facts| facts.by_value),
+                base_facts.as_ref().map_or('i', |facts| facts.align),
+                base_facts.as_ref().map_or('x', |facts| facts.storage),
+            )
+        }
+    };
+    let mut row = Row::new(CatalogRelation::Type)
+        .set("oid", oid(found.oid))
+        .set("typname", text(crate::schemas::base_name(&found.name)))
+        .set("typnamespace", oid(namespace))
+        .set("typowner", oid(oids::SESSION_USER))
+        .set("typlen", small(i64::from(length)))
+        .set("typbyval", flag(by_value))
+        .set("typtype", Value::Text(kind.to_string()))
+        .set("typcategory", Value::Text(category.to_string()))
+        .set("typispreferred", flag(false))
+        .set("typisdefined", flag(true))
+        .set("typdelim", text(","))
+        .set("typrelid", oid(0))
+        .set("typelem", oid(0))
+        .set("typarray", oid(0))
+        .set("typalign", Value::Text(align.to_string()))
+        .set("typstorage", Value::Text(storage.to_string()))
+        .set(
+            "typnotnull",
+            flag(found.domain().is_some_and(|domain| domain.not_null)),
+        )
+        .set(
+            "typbasetype",
+            oid(base_facts.as_ref().map_or(0, |facts| facts.oid)),
+        )
+        .set(
+            "typtypmod",
+            int(i64::from(base_facts.as_ref().map_or(-1, |facts| facts.modifier))),
+        )
+        .set("typndims", int(0))
+        .set(
+            "typcollation",
+            oid(base_facts.as_ref().map_or(0, |facts| facts.collation)),
+        );
+    if let Some(default) = found.domain().and_then(|domain| domain.default.as_deref()) {
+        row = row.set("typdefault", text(default));
+    }
+    for name in [
+        "typsubscript",
+        "typinput",
+        "typoutput",
+        "typreceive",
+        "typsend",
+        "typmodin",
+        "typmodout",
+        "typanalyze",
+    ] {
+        row = row.set(name, regproc_none());
+    }
+    row.done()
+}
+
+fn enum_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut requests = Vec::new();
+    let mut labels = Vec::new();
+    for found in snapshot.user_types.types() {
+        for label in found.labels() {
+            requests.push(oids::OidRequest {
+                kind: b'e',
+                owner: found.name.clone(),
+                name: label.label.clone(),
+            });
+            labels.push((found.oid, label));
+        }
+    }
+    let label_oids = oids::assign(oids::Space::Constraint, &requests);
+    labels
+        .into_iter()
+        .zip(label_oids)
+        .map(|((type_oid, label), label_oid)| {
+            Row::new(CatalogRelation::Enum)
+                .set("oid", oid(label_oid))
+                .set("enumtypid", oid(type_oid))
+                .set("enumsortorder", Value::Real(label.sort_order as f32))
+                .set("enumlabel", text(&label.label))
+                .done()
+        })
+        .collect()
+}
+
+fn range_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .user_types
+        .types()
+        .iter()
+        .filter_map(|found| match &found.body {
+            crate::user_types::TypeBody::Range { subtype } => Some(
+                Row::new(CatalogRelation::Range)
+                    .set("rngtypid", oid(found.oid))
+                    .set("rngsubtype", oid(oids::type_oid(*subtype)))
+                    .set("rngmultitypid", oid(0))
+                    .set("rngcollation", oid(0))
+                    .set("rngsubopc", oid(0))
+                    .set("rngcanonical", regproc_none())
+                    .set("rngsubdiff", regproc_none())
+                    .done(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn type_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = builtin_type_rows();
+    rows.extend(
+        snapshot
+            .user_types
+            .types()
+            .iter()
+            .map(|found| user_type_row(snapshot, found)),
+    );
+    rows
+}
+
+fn builtin_type_rows() -> Vec<Vec<Value>> {
     oids::BUILTIN_TYPES
         .iter()
         .map(|found| {
@@ -748,6 +895,9 @@ fn constraint_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             .set("conislocal", flag(true))
             .set("coninhcount", small(0))
             .set("connoinherit", flag(true));
+        row = row
+            .set("condeferred", flag(table.is_initially_deferred(&constraint.name)))
+            .set("convalidated", flag(table.is_validated(&constraint.name)));
         match constraint.source {
             ConstraintSource::Primary => {
                 row = row.set("conkey", smallints(&table.primary_key));

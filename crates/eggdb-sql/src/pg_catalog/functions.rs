@@ -136,8 +136,10 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             }
             .to_owned(),
         )),
-        ("pg_type_is_visible", [_]) => Ok(match first.and_then(oids::builtin_type) {
-            Some(_) => Value::Boolean(true),
+        ("pg_type_is_visible", [_]) => Ok(match first {
+            Some(type_oid) if oids::builtin_type(type_oid).is_some() => Value::Boolean(true),
+            Some(type_oid) => crate::user_types::is_visible(type_oid)
+                .map_or(Value::Null, Value::Boolean),
             None => Value::Null,
         }),
         ("pg_get_expr", [tree, ..]) => Ok(match tree {
@@ -352,8 +354,17 @@ pub(crate) fn constraint_definition(
             if key.deferrable {
                 shown.push_str(" DEFERRABLE");
             }
+            if table.is_initially_deferred(&key.name) {
+                shown.push_str(" INITIALLY DEFERRED");
+            }
             shown
         }
+    })
+    .map(|mut shown| {
+        if !table.is_validated(&constraint.name) {
+            shown.push_str(" NOT VALID");
+        }
+        shown
     })
 }
 

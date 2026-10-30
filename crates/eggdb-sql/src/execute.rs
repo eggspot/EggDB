@@ -50,6 +50,38 @@ struct CachedTable {
     relation: Relation,
     checked_at: Option<u64>,
     needs_catalog: bool,
+    needs_user_types: bool,
+}
+
+fn stored_expressions_need_user_types(relation: &Relation) -> bool {
+    match relation {
+        Relation::Table(table) => crate::user_types::table_needs_registry(table),
+        Relation::View(_) => true,
+    }
+}
+
+pub(crate) fn column_storage(sql_type: SqlType, position: usize) -> SqlResult<(SqlType, Option<u32>)> {
+    match sql_type {
+        SqlType::Defined(defined) if defined.kind == crate::types::DefinedKind::Domain => {
+            let base = crate::user_types::domain_base(defined.oid).ok_or_else(|| {
+                SqlError::new(
+                    SqlState::UNDEFINED_OBJECT,
+                    format!("type with OID {} does not exist", defined.oid),
+                )
+                .at(position)
+            })?;
+            Ok((base, Some(defined.oid)))
+        }
+        SqlType::Defined(defined) if defined.oid == crate::records::RECORD_OID => Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "column cannot be of type record",
+        )
+        .at(position)),
+        SqlType::Array(element) if !element.is_storable() => {
+            Err(crate::arrays::unsupported_element(element.sql_type()).at(position))
+        }
+        other => Ok((other, None)),
+    }
 }
 
 fn stored_expressions_need_catalog(relation: &Relation) -> bool {
@@ -125,6 +157,7 @@ impl TableCache {
         let cached = CachedTable {
             bytes,
             needs_catalog: stored_expressions_need_catalog(&relation),
+            needs_user_types: stored_expressions_need_user_types(&relation),
             relation,
             checked_at: version,
         };
@@ -136,6 +169,9 @@ impl TableCache {
     fn loaded(reader: &dyn KeyValueRead, cached: &CachedTable) -> SqlResult<Option<Relation>> {
         if cached.needs_catalog {
             crate::pg_catalog::load_for_stored_expressions(reader)?;
+        }
+        if cached.needs_user_types {
+            crate::user_types::ensure_loaded(reader)?;
         }
         Ok(Some(cached.relation.clone()))
     }
@@ -203,6 +239,7 @@ pub(crate) fn create_table(
     }
     constraints::check_identifier(&create.name)?;
     let mut columns: Vec<Column> = Vec::new();
+    let mut domains: Vec<crate::encoding::ColumnDomain> = Vec::new();
     let mut primary_key = Vec::new();
     let mut primary_key_position = None;
     for (index, definition) in create.columns.iter().enumerate() {
@@ -234,9 +271,16 @@ pub(crate) fn create_table(
             primary_key_position = Some(definition.name.position);
             primary_key.push(index);
         }
+        let (sql_type, domain) = column_storage(definition.sql_type, definition.name.position)?;
+        if let Some(domain) = domain {
+            domains.push(crate::encoding::ColumnDomain {
+                column: index,
+                oid: domain,
+            });
+        }
         columns.push(Column {
             name: definition.name.text.clone(),
-            sql_type: definition.sql_type,
+            sql_type,
             not_null: definition.not_null,
             default: definition.default.as_ref().map(|(_, text)| text.clone()),
             auto_increment: definition.auto_increment,
@@ -297,11 +341,26 @@ pub(crate) fn create_table(
         })?;
         (next_id, Some(following))
     };
+    if crate::user_types::load(writer)?
+        .named(crate::schemas::normalized(&create.name.text))
+        .is_some()
+    {
+        return Err(SqlError::new(
+            SqlState::DUPLICATE_OBJECT,
+            format!(
+                "type \"{}\" already exists",
+                crate::schemas::base_name(&create.name.text)
+            ),
+        )
+        .with_hint("A relation has an associated type of the same name, so you must use a name that doesn't conflict with any existing type.")
+        .at(create.name.position));
+    }
     let mut table = TableDefinition {
         id: next_id,
         name: create.name.text.clone(),
         columns,
         primary_key,
+        domains,
         ..TableDefinition::default()
     };
     for (index, definition) in create.columns.iter().enumerate() {
@@ -720,11 +779,25 @@ fn evaluated_default(expr: Option<&Expr>, column: &Column, dialect: Dialect) -> 
     }
 }
 
+fn with_domain_default(table: &TableDefinition, index: usize, column: &Column) -> Option<Column> {
+    if column.default.is_some() || column.auto_increment {
+        return None;
+    }
+    let domain = table.domain_of(index)?;
+    let default = crate::user_types::domain_default(domain)?;
+    Some(Column {
+        default: Some(default),
+        ..column.clone()
+    })
+}
+
 fn default_value(table: &TableDefinition, index: usize) -> SqlResult<Value> {
     let Some(column) = table.columns.get(index) else {
         return Ok(Value::Null);
     };
     let dialect = table.default_dialect(index);
+    let domain_default = with_domain_default(table, index, column);
+    let column = domain_default.as_ref().unwrap_or(column);
     evaluated_default(
         default_expression(column, dialect)?.as_ref(),
         column,
@@ -746,8 +819,14 @@ impl ColumnDefaults {
             expressions: table
                 .columns
                 .iter()
+                .enumerate()
                 .zip(&dialects)
-                .map(|(column, &dialect)| default_expression(column, dialect))
+                .map(|((index, column), &dialect)| {
+                    match with_domain_default(table, index, column) {
+                        Some(defaulted) => default_expression(&defaulted, dialect),
+                        None => default_expression(column, dialect),
+                    }
+                })
                 .collect::<SqlResult<_>>()?,
             dialects,
         })

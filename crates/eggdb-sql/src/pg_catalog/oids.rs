@@ -1144,6 +1144,7 @@ pub(crate) fn type_oid(sql_type: SqlType) -> u32 {
         SqlType::Bpchar(_) => 1042,
         SqlType::Catalog(kind) => catalog_type_oid(kind),
         SqlType::Array(element) => array_type_oid(element),
+        SqlType::Defined(defined) => defined.oid,
     }
 }
 
@@ -1270,7 +1271,7 @@ fn modified_type(oid: u32, modifier: i32) -> Option<SqlType> {
 
 pub(crate) fn format_type(oid: u32, modifier: Option<i32>) -> String {
     let Some(found) = builtin_type(oid) else {
-        return "???".to_owned();
+        return crate::user_types::formatted_type(oid).unwrap_or_else(|| "???".to_owned());
     };
     if oid == 1042 && modifier == Some(-1) {
         return "bpchar".to_owned();

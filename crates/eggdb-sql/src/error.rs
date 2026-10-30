@@ -49,6 +49,8 @@ impl SqlState {
     pub const INVALID_DATETIME_FORMAT: Self = Self(*b"22007");
     /// `22008` datetime_field_overflow: a date or time stamp outside its type's range.
     pub const DATETIME_FIELD_OVERFLOW: Self = Self(*b"22008");
+    /// `22000` data_exception, such as a range whose lower bound is above its upper bound.
+    pub const DATA_EXCEPTION: Self = Self(*b"22000");
     /// `22023` invalid_parameter_value.
     pub const INVALID_PARAMETER_VALUE: Self = Self(*b"22023");
     /// `22011` substring_error.

@@ -334,6 +334,7 @@ pub(crate) struct CatalogSnapshot {
     index_entries: HashMap<(usize, IndexSource), usize>,
     rows: RefCell<HashMap<CatalogRelation, Rc<Vec<Vec<Value>>>>>,
     sqlserver: OnceCell<crate::sqlserver_catalog::SqlServerObjects>,
+    pub(crate) user_types: Arc<crate::user_types::Registry>,
 }
 
 fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
@@ -384,6 +385,8 @@ impl CatalogSnapshot {
         #[cfg(test)]
         LOADS.with(|loads| loads.set(loads.get() + 1));
         let path = crate::schemas::relation_path(reader)?;
+        crate::user_types::ensure_loaded(reader)?;
+        let user_types = crate::user_types::every_type(reader)?;
         let mut schema_names: Vec<String> = user_schema_names(reader)?;
         schema_names.sort();
         let schema_oids = oids::assign(
@@ -545,6 +548,7 @@ impl CatalogSnapshot {
             index_entries: HashMap::new(),
             rows: RefCell::new(HashMap::new()),
             sqlserver: OnceCell::new(),
+            user_types,
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();

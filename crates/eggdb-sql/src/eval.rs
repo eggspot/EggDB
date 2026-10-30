@@ -421,6 +421,22 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Function { name, arguments } if name == crate::window::WINDOW_CALL => {
             (crate::window::function_name(arguments), true)
         }
+        ExprKind::Function { name, arguments } if name == crate::records::FIELD_FUNCTION => {
+            match arguments.get(1).map(|field| &field.kind) {
+                Some(ExprKind::Literal(Literal::String(field))) => (field.clone(), true),
+                _ => ("?column?".into(), false),
+            }
+        }
+        ExprKind::Function { name, .. } if name == crate::records::ROW_FUNCTION => {
+            ("row".into(), true)
+        }
+        ExprKind::Function { name, .. }
+            if crate::ranges::OPERATORS
+                .iter()
+                .any(|(_, internal)| *internal == name.as_str()) =>
+        {
+            ("?column?".into(), false)
+        }
         ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
@@ -438,7 +454,14 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Aggregate { function, .. } => (function.name().to_owned(), true),
         ExprKind::Cast { expr, sql_type } => match name_and_whether_it_names_a_value(expr) {
             (name, true) => (name, true),
-            (_, false) => (sql_type.internal_name().to_owned(), false),
+            (_, false) => match sql_type {
+                SqlType::Defined(defined) => (
+                    crate::user_types::base_type_name(defined.oid)
+                        .unwrap_or_else(|| sql_type.internal_name().to_owned()),
+                    false,
+                ),
+                _ => (sql_type.internal_name().to_owned(), false),
+            },
         },
         ExprKind::Case { .. } => ("case".into(), false),
         ExprKind::Subquery(subquery) => match crate::subquery::output_column(expr) {
@@ -728,7 +751,7 @@ impl Evaluator<'_> {
             | ExprKind::Constant { sql_type, .. }
             | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
             ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
-            ExprKind::Cast { sql_type, .. } => Some(*sql_type),
+            ExprKind::Cast { sql_type, .. } => Some(crate::user_types::storable_base(*sql_type)),
             ExprKind::SqlServerFunction {
                 function:
                     crate::sqlserver_functions::Function::Convert { target, .. }
@@ -882,6 +905,13 @@ impl Evaluator<'_> {
             }
             BinaryOperator::JsonContains | BinaryOperator::JsonContainedIn => {
                 let (left, right) = self.pair(left, right)?;
+                if let Some(result) = crate::ranges::containment(
+                    operator == BinaryOperator::JsonContains,
+                    &left,
+                    &right,
+                ) {
+                    return result;
+                }
                 let (container, contained) = if operator == BinaryOperator::JsonContains {
                     (&left, &right)
                 } else {
@@ -1247,8 +1277,35 @@ impl Evaluator<'_> {
         Ok(values)
     }
 
+    fn field_selection(&self, arguments: &[Expr]) -> SqlResult<Value> {
+        let [record, field] = arguments else {
+            return Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "a field selection lost its field",
+            ));
+        };
+        let ExprKind::Literal(Literal::String(field)) = &field.kind else {
+            return Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "a field selection lost its field",
+            ));
+        };
+        let value = self.eval(record, None)?;
+        crate::records::field(&value, field)
+    }
+
     fn function(&self, name: &str, arguments: &[Expr]) -> SqlResult<Value> {
+        if let Some(range) = crate::ranges::builtin_named(name) {
+            return crate::ranges::construct(self, range.oid, arguments);
+        }
         match name {
+            crate::records::ROW_FUNCTION => {
+                return crate::records::construct(self.arguments(arguments)?);
+            }
+            crate::records::FIELD_FUNCTION => return self.field_selection(arguments),
+            "enum_first" | "enum_last" | "enum_range" => {
+                return crate::enums::function(self, name, arguments);
+            }
             "oracle_extract" => return self.oracle_extract(arguments),
             "array_constructor" => return crate::arrays::construct(self, arguments, None),
             "array_element_cast" => return crate::arrays::element_cast(self, arguments),
@@ -1311,6 +1368,12 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::pg_catalog::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::ranges::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::ranges::operator(name, &values) {
             return result;
         }
         if let Some(result) = self.datetime_function(name, &values) {
@@ -1422,7 +1485,10 @@ impl Evaluator<'_> {
                 Some(seconds) => crate::cancel::sleep(seconds).map(|()| Value::Text(String::new())),
                 None => Err(unknown()),
             },
-            _ => Err(unknown()),
+            _ => match crate::ranges::constructor(name) {
+                Some(oid) => crate::ranges::construct_from_values(oid, &values),
+                None => Err(unknown()),
+            },
         }
     }
 }
@@ -2023,6 +2089,11 @@ pub(crate) fn arithmetic(
     left: &Value,
     right: &Value,
 ) -> SqlResult<Value> {
+    if matches!(left, Value::Defined(_))
+        && let Some(result) = crate::ranges::arithmetic(operator, left, right)
+    {
+        return result;
+    }
     if crate::constraints::current_dialect() == crate::Dialect::Oracle
         && (matches!(left, Value::Interval(_)) || matches!(right, Value::Interval(_)))
         && let Some(result) = crate::oracle_intervals::arithmetic(operator, left, right)

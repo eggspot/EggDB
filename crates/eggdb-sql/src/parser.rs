@@ -12,6 +12,7 @@ mod sqlserver;
 mod sqlserver_batch;
 mod sqlserver_functions;
 mod sqlserver_logic;
+mod types;
 mod windows;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
@@ -822,6 +823,14 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.alter_view()
             }
+            "alter" if self.postgresql() && self.is_word_at(1, "type") => {
+                self.at += 1;
+                self.alter_type()
+            }
+            "alter" if self.postgresql() && self.is_word_at(1, "domain") => {
+                self.at += 1;
+                self.alter_domain()
+            }
             "alter"
                 if self.postgresql()
                     && self.is_word_at(1, "default")
@@ -895,6 +904,9 @@ impl<'t> Parser<'t> {
         }
         if self.is_word("role") {
             return self.set_role();
+        }
+        if self.postgresql() && self.is_word("constraints") {
+            return self.set_constraints();
         }
         if self.is_word("authorization") || self.is_word("constraints") {
             return Err(self.not_supported(&format!(
@@ -1348,6 +1360,12 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("sequence") {
             return self.create_sequence();
         }
+        if self.postgresql() && self.is_word("type") {
+            return self.create_type();
+        }
+        if self.postgresql() && self.is_word("domain") {
+            return self.create_domain();
+        }
         if self.postgresql() && self.is_word("unlogged") && self.is_word_at(1, "table") {
             self.at += 1;
         }
@@ -1748,9 +1766,8 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("generated columns"));
         }
         self.expect_word("identity")?;
-        if self.peek_kind() == &TokenKind::LeftParen {
-            return Err(self.not_supported("identity options"));
-        }
+        let options_position = self.position();
+        let options = self.identity_options()?;
         if !matches!(
             column.sql_type,
             SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
@@ -1764,6 +1781,8 @@ impl<'t> Parser<'t> {
             )
             .at(position));
         }
+        column.identity_seed = constraints::postgresql_identity_seed(&options, column.sql_type)
+            .map_err(|error| error.at(options_position))?;
         column.auto_increment = true;
         column.generated_always = always;
         column.not_null = true;
@@ -1927,11 +1946,28 @@ impl<'t> Parser<'t> {
         if self.sqlserver() {
             return self.sqlserver_type();
         }
+        let position = self.position();
         let sql_type = self.element_type()?;
         if self.peek_kind() == &TokenKind::LeftBracket || self.is_word("array") {
-            return Err(self.not_supported("array types"));
+            return self.array_column_type(sql_type, position);
         }
         Ok(sql_type)
+    }
+
+    fn array_column_type(&mut self, element: SqlType, position: usize) -> SqlResult<SqlType> {
+        if self.take_word("array") {
+            if self.peek_kind() == &TokenKind::LeftBracket {
+                self.array_dimension()?;
+            }
+        } else {
+            while self.peek_kind() == &TokenKind::LeftBracket {
+                self.array_dimension()?;
+            }
+        }
+        match crate::arrays::ArrayElement::of(element) {
+            Some(found) if found.is_storable() => Ok(SqlType::Array(found)),
+            _ => Err(crate::arrays::unsupported_element(element).at(position)),
+        }
     }
 
     pub(crate) fn cast_type(&mut self) -> SqlResult<SqlType> {
@@ -2019,8 +2055,27 @@ impl<'t> Parser<'t> {
         .at(position))
     }
 
+    fn qualified_user_type(&mut self) -> Option<SqlResult<SqlType>> {
+        let part = |kind: &TokenKind<'_>| match kind {
+            TokenKind::Word(word) => Some(word.as_ref().to_owned()),
+            TokenKind::QuotedIdentifier(name) => Some(name.clone()),
+            _ => None,
+        };
+        let schema = part(self.peek_kind())?;
+        if schema == "pg_catalog" || self.peek_kind_at(1) != &TokenKind::Dot {
+            return None;
+        }
+        let name = part(self.peek_kind_at(2))?;
+        let position = self.position();
+        self.at += 3;
+        Some(crate::user_types::resolve_type(Some(&schema), &name, position))
+    }
+
     fn element_type(&mut self) -> SqlResult<SqlType> {
         if self.postgresql() {
+            if let Some(found) = self.qualified_user_type() {
+                return found;
+            }
             self.type_schema()?;
         }
         let token = self.peek();
@@ -2076,6 +2131,9 @@ impl<'t> Parser<'t> {
                     SqlError::not_supported(format!("type {word} is not supported yet"))
                         .at(token.start),
                 );
+            }
+            _ if self.postgresql() => {
+                return crate::user_types::resolve_type(None, word, token.start);
             }
             _ => {
                 return Err(SqlError::new(
@@ -2134,6 +2192,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("sequence") {
             return self.drop_sequence();
+        }
+        if self.postgresql() && (self.is_word("type") || self.is_word("domain")) {
+            return self.drop_type();
         }
         let only_temporary =
             self.mysql() && self.is_word("temporary") && self.is_word_at(1, "table");
@@ -3031,6 +3092,23 @@ impl<'t> Parser<'t> {
                     let right = self.expression_above(Level::Additive)?;
                     return Ok(Self::binary(left, operator, right));
                 }
+                if self.postgresql()
+                    && let TokenKind::Operator(symbol) = self.peek_kind()
+                    && let Some((_, function)) = crate::ranges::OPERATORS
+                        .iter()
+                        .find(|(written, _)| written == symbol)
+                {
+                    self.at += 1;
+                    let right = self.expression_above(Level::Additive)?;
+                    let position = left.position;
+                    return Ok(Expr {
+                        kind: ExprKind::Function {
+                            name: (*function).to_owned(),
+                            arguments: vec![left, right],
+                        },
+                        position,
+                    });
+                }
                 if !self.take_operator("||") {
                     let TokenKind::Operator(symbol) = self.peek_kind() else {
                         return Err(self.unexpected());
@@ -3411,14 +3489,33 @@ impl<'t> Parser<'t> {
                 }
                 let mut expr = self.expression()?;
                 if self.peek_kind() == &TokenKind::Comma {
-                    return Err(self.not_supported("row constructors"));
+                    if !self.postgresql() {
+                        return Err(self.not_supported("row constructors"));
+                    }
+                    let mut fields = vec![expr];
+                    while self.take(&TokenKind::Comma) {
+                        fields.push(self.expression()?);
+                    }
+                    self.expect(&TokenKind::RightParen)?;
+                    let row = Expr {
+                        kind: ExprKind::Function {
+                            name: crate::records::ROW_FUNCTION.to_owned(),
+                            arguments: fields,
+                        },
+                        position,
+                    };
+                    return self.field_selections(row);
                 }
                 self.expect(&TokenKind::RightParen)?;
                 expr.position = position;
-                Ok(Expr {
+                let expr = Expr {
                     kind: expr.kind,
                     position,
-                })
+                };
+                if self.postgresql() {
+                    return self.field_selections(expr);
+                }
+                Ok(expr)
             }
             TokenKind::QuotedIdentifier(_) => self.column_or_function(),
             TokenKind::Word(word) => match word.as_ref() {
@@ -3446,6 +3543,26 @@ impl<'t> Parser<'t> {
                             || self.peek_kind_at(1) == &TokenKind::LeftBracket) =>
                 {
                     self.array_constructor()
+                }
+                "row" if self.postgresql() && self.peek_kind_at(1) == &TokenKind::LeftParen => {
+                    self.at += 2;
+                    let mut fields = Vec::new();
+                    if !self.take(&TokenKind::RightParen) {
+                        loop {
+                            fields.push(self.expression()?);
+                            if !self.take(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::RightParen)?;
+                    }
+                    Ok(Expr {
+                        kind: ExprKind::Function {
+                            name: crate::records::ROW_FUNCTION.to_owned(),
+                            arguments: fields,
+                        },
+                        position,
+                    })
                 }
                 "array" | "row"
                     if self.peek_kind_at(1) == &TokenKind::LeftParen
@@ -3552,6 +3669,35 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn field_selections(&mut self, mut expr: Expr) -> SqlResult<Expr> {
+        while self.peek_kind() == &TokenKind::Dot {
+            self.at += 1;
+            if self.is_operator("*") {
+                return Err(self.not_supported("(expression).* outside FROM"));
+            }
+            let field = self.name()?;
+            self.depth += 1;
+            if self.depth > MAX_NESTING {
+                return Err(too_deep(field.position));
+            }
+            let position = expr.position;
+            expr = Expr {
+                kind: ExprKind::Function {
+                    name: crate::records::FIELD_FUNCTION.to_owned(),
+                    arguments: vec![
+                        expr,
+                        Expr {
+                            kind: ExprKind::Literal(Literal::String(field.text)),
+                            position: field.position,
+                        },
+                    ],
+                },
+                position,
+            };
+        }
+        Ok(expr)
+    }
+
     fn is_regclass_type(&mut self) -> bool {
         let qualified = self.is_word("pg_catalog") && self.peek_kind_at(1) == &TokenKind::Dot;
         let at = if qualified { 2 } else { 0 };
@@ -3605,6 +3751,16 @@ impl<'t> Parser<'t> {
                 },
                 position: first.position,
             });
+        }
+        if self.postgresql()
+            && first.text == crate::schemas::INFORMATION_SCHEMA
+            && self.peek_kind() == &TokenKind::Dot
+            && self.is_word_at(1, crate::records::EXPAND_ARRAY_FUNCTION)
+            && self.peek_kind_at(2) == &TokenKind::LeftParen
+        {
+            self.at += 1;
+            let name = self.name()?;
+            return self.function(name);
         }
         if self.take(&TokenKind::Dot) {
             if self.is_operator("*") {

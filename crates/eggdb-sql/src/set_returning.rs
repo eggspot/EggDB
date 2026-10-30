@@ -9,7 +9,7 @@ use crate::memory::{RowBytes, WorkMemory};
 use crate::session::{OutputColumn, QueryResult};
 use crate::types::{Conversion, SqlType, Value, convert};
 
-type RowSink<'s> = dyn FnMut(Value) -> SqlResult<()> + 's;
+pub(crate) type RowSink<'s> = dyn FnMut(Value) -> SqlResult<()> + 's;
 
 pub(crate) struct SetReturningFunction {
     pub(crate) name: &'static str,
@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 18] = [
+const FUNCTIONS: [SetReturningFunction; 19] = [
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -97,6 +97,12 @@ const FUNCTIONS: [SetReturningFunction; 18] = [
         name: STRING_SPLIT_FUNCTION,
         result_type: string_split_type,
         rows: string_split_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: crate::records::EXPAND_ARRAY_FUNCTION,
+        result_type: crate::records::expanded_array_type,
+        rows: crate::records::expanded_array_rows,
         fields: false,
     },
 ];
@@ -449,6 +455,21 @@ fn is_top_level_call(expr: &Expr) -> bool {
     matches!(&expr.kind, ExprKind::Function { name, .. } if named(name).is_some())
 }
 
+fn selected_call(expr: &Expr) -> Option<(&Expr, Option<&str>)> {
+    if is_top_level_call(expr) {
+        return Some((expr, None));
+    }
+    if let ExprKind::Function { name, arguments } = &expr.kind
+        && name == crate::records::FIELD_FUNCTION
+        && let [call, field] = arguments.as_slice()
+        && is_top_level_call(call)
+        && let ExprKind::Literal(Literal::String(field)) = &field.kind
+    {
+        return Some((call, Some(field)));
+    }
+    None
+}
+
 fn refuse_in(expr: &Expr, clause: &str) -> SqlResult<()> {
     match first_set_returning(expr) {
         Some(found) => Err(SqlError::new(
@@ -566,9 +587,9 @@ pub(crate) fn check_placement(select: &Select) -> SqlResult<()> {
         let SelectItem::Expr { expr, .. } = item else {
             continue;
         };
-        if is_top_level_call(expr) {
+        if let Some((call, _)) = selected_call(expr) {
             calls += 1;
-            for argument in children(expr) {
+            for argument in children(call) {
                 refuse_nested(argument)?;
                 refuse_window(argument, "inside an argument of a set-returning function")?;
             }
@@ -621,7 +642,7 @@ pub(crate) fn check_placement(select: &Select) -> SqlResult<()> {
 
 fn computed_item(item: &SelectItem) -> Option<usize> {
     match item {
-        SelectItem::Expr { expr, .. } if is_top_level_call(expr) => Some(expr.position),
+        SelectItem::Expr { expr, .. } if selected_call(expr).is_some() => Some(expr.position),
         SelectItem::Expr { expr, .. } => crate::window::first_call(expr).map(|call| call.position),
         SelectItem::Wildcard { .. } => None,
     }
@@ -773,19 +794,32 @@ impl ExpansionBuilder {
 
     fn add(&mut self, item: SelectItem) -> SqlResult<()> {
         match item {
-            SelectItem::Expr { expr, alias } if is_top_level_call(&expr) => {
+            SelectItem::Expr { expr, alias } if selected_call(&expr).is_some() => {
                 self.close_run();
                 let at = expr.position;
-                let ExprKind::Function { name, arguments } = expr.kind else {
+                let field = selected_call(&expr).and_then(|(_, field)| field.map(str::to_owned));
+                let call = match (expr.kind, &field) {
+                    (ExprKind::Function { mut arguments, .. }, Some(_)) if !arguments.is_empty() => {
+                        arguments.swap_remove(0)
+                    }
+                    (kind, _) => Expr {
+                        kind,
+                        position: at,
+                    },
+                };
+                let ExprKind::Function { name, arguments } = call.kind else {
                     return Ok(());
                 };
-                let output_name = alias.unwrap_or_else(|| name.clone());
+                let output_name = alias
+                    .or_else(|| field.clone())
+                    .unwrap_or_else(|| name.clone());
                 self.name_output(&output_name);
                 self.items.push(ExpandedItem::SetReturning {
                     function: name,
                     arguments: arguments.len(),
                     output_name,
                     position: at,
+                    field,
                 });
                 self.inner_items
                     .extend(arguments.into_iter().map(|argument| SelectItem::Expr {
@@ -1329,7 +1363,7 @@ fn item_spans(items: &[ExpandedItem], total: usize) -> Vec<std::ops::Range<usize
 
 enum PreparedItem {
     Columns,
-    SetReturning(ResolvedFunction),
+    SetReturning(ResolvedFunction, Option<String>),
     Window(crate::window::WindowResult),
     Computed {
         expr: Expr,
@@ -1363,7 +1397,10 @@ fn prepare_item(
     Ok(match item {
         ExpandedItem::Columns(_) => PreparedItem::Columns,
         ExpandedItem::SetReturning {
-            function, position, ..
+            function,
+            position,
+            field,
+            ..
         } => {
             let found = named(function).ok_or_else(|| {
                 SqlError::not_supported(format!(
@@ -1376,12 +1413,15 @@ fn prepare_item(
             } else {
                 None
             };
-            PreparedItem::SetReturning(ResolvedFunction {
-                found,
-                declared,
-                sql_type,
-                position: *position,
-            })
+            PreparedItem::SetReturning(
+                ResolvedFunction {
+                    found,
+                    declared,
+                    sql_type,
+                    position: *position,
+                },
+                field.clone(),
+            )
         }
         ExpandedItem::Window { spec, .. } => PreparedItem::Window(crate::window::evaluate(
             spec,
@@ -1491,7 +1531,7 @@ pub(crate) fn expanded(
     }
     let sets_rows = prepared
         .iter()
-        .any(|item| matches!(item, PreparedItem::SetReturning(_)));
+        .any(|item| matches!(item, PreparedItem::SetReturning(..)));
     let mut collector = RowCollector::new();
     for (row_at, row) in inner.rows.iter().enumerate() {
         let mut pending = WorkMemory::new();
@@ -1505,8 +1545,14 @@ pub(crate) fn expanded(
                     fixed.push(values.to_vec());
                     produced.push(None);
                 }
-                PreparedItem::SetReturning(function) => {
-                    let generated = function.values(values, &mut pending)?;
+                PreparedItem::SetReturning(function, field) => {
+                    let mut generated = function.values(values, &mut pending)?;
+                    if let Some(field) = field {
+                        for value in &mut generated {
+                            let record = std::mem::replace(value, Value::Null);
+                            *value = crate::records::field(&record, field)?;
+                        }
+                    }
                     longest = longest.max(generated.len());
                     fixed.push(Vec::new());
                     produced.push(Some(generated));
@@ -1565,12 +1611,18 @@ pub(crate) fn expanded(
             (ExpandedItem::SetReturning { output_name, .. }, prepared) => {
                 columns.push(OutputColumn {
                     name: output_name.clone(),
-                    sql_type: Some(match prepared {
-                        PreparedItem::SetReturning(function) => {
-                            function.sql_type.unwrap_or(SqlType::Integer)
+                    sql_type: match prepared {
+                        PreparedItem::SetReturning(function, Some(field)) => {
+                            crate::records::expanded_field_type(
+                                function.declared.first().copied().flatten(),
+                                field,
+                            )
                         }
-                        _ => SqlType::Integer,
-                    }),
+                        PreparedItem::SetReturning(function, None) => {
+                            Some(function.sql_type.unwrap_or(SqlType::Integer))
+                        }
+                        _ => Some(SqlType::Integer),
+                    },
                 });
             }
             (ExpandedItem::Window { output_name, .. }, prepared) => columns.push(OutputColumn {
