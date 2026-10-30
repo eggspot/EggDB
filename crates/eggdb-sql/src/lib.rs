@@ -160,7 +160,9 @@ pub use restore::{
     KnownDifference, MAX_LISTED, RestoreError, RestoreOptions, RestoreProgress, RestoreReport,
     SkippedObject, TableRows, restore_dump,
 };
-pub use schema::{ColumnSchema, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted};
+pub use schema::{
+    ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,
+};
 pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
     Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session,

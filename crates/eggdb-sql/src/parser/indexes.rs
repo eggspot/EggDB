@@ -1,7 +1,31 @@
 use super::Parser;
 use crate::ast::{CreateIndex, DropIndex, Explain, ExplainStyle, IndexSpec, Name, Statement};
-use crate::error::SqlResult;
+use crate::encoding::{IndexMethod, SortOptions};
+use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
+
+pub(super) struct IndexColumns {
+    pub(super) names: Vec<Name>,
+    pub(super) sort_options: SortOptions,
+    order_written: bool,
+    nulls_order_written: bool,
+}
+
+impl IndexColumns {
+    fn hash_refusal(&self, unique: bool) -> Option<&'static str> {
+        if unique {
+            Some("unique indexes")
+        } else if self.names.len() > 1 {
+            Some("multicolumn indexes")
+        } else if self.order_written {
+            Some("ASC/DESC options")
+        } else if self.nulls_order_written {
+            Some("NULLS FIRST/LAST options")
+        } else {
+            None
+        }
+    }
+}
 
 impl Parser<'_> {
     pub(super) fn at_index_definition(&self) -> bool {
@@ -47,12 +71,22 @@ impl Parser<'_> {
             self.take_word("only");
         }
         let table = self.table_name()?;
-        if postgresql {
-            self.index_method()?;
+        let method = if postgresql {
+            self.index_method()?
+        } else {
+            IndexMethod::BTree
+        };
+        let columns = self.ordered_index_column_list(unique)?;
+        if method == IndexMethod::Hash
+            && let Some(refused) = columns.hash_refusal(unique)
+        {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                format!("access method \"hash\" does not support {refused}"),
+            ));
         }
-        let columns = self.index_column_list(unique)?;
         if self.sqlserver() {
-            self.sqlserver_index_tail(unique, &columns)?;
+            self.sqlserver_index_tail(unique, &columns.names)?;
         } else if self.oracle() {
             self.skip_physical_properties()?;
         } else {
@@ -66,8 +100,10 @@ impl Parser<'_> {
             index: IndexSpec {
                 name,
                 unique,
-                columns,
+                columns: columns.names,
                 position,
+                method,
+                sort_options: columns.sort_options,
             },
             table,
             if_not_exists,
@@ -95,15 +131,15 @@ impl Parser<'_> {
         })
     }
 
-    fn index_method(&mut self) -> SqlResult<()> {
+    fn index_method(&mut self) -> SqlResult<IndexMethod> {
         if !self.take_word("using") {
-            return Ok(());
+            return Ok(IndexMethod::BTree);
         }
         let method = self.label()?.to_ascii_lowercase();
-        if method != "btree" && method != "hash" {
-            return Err(self.not_supported(&format!("index method {method}")));
+        match IndexMethod::named(&method) {
+            Some(known) => Ok(known),
+            None => Err(self.not_supported(&format!("index method {method}"))),
         }
-        Ok(())
     }
 
     fn index_tail(&mut self) -> SqlResult<()> {
@@ -144,8 +180,15 @@ impl Parser<'_> {
     }
 
     pub(super) fn index_column_list(&mut self, unique: bool) -> SqlResult<Vec<Name>> {
+        Ok(self.ordered_index_column_list(unique)?.names)
+    }
+
+    pub(super) fn ordered_index_column_list(&mut self, unique: bool) -> SqlResult<IndexColumns> {
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
+        let mut sort_options = SortOptions::default();
+        let mut order_written = false;
+        let mut nulls_order_written = false;
         loop {
             if self.peek_kind() == &TokenKind::LeftParen {
                 return Err(self.not_supported("indexes on expressions"));
@@ -177,13 +220,22 @@ impl Parser<'_> {
                     return Err(self.not_supported("index columns with a collation"));
                 }
             }
-            let _ = self.take_word("asc") || self.take_word("desc");
-            if postgresql && self.take_word("nulls") && !self.take_word("first") {
-                self.expect_word("last")?;
+            let descending = self.take_word("desc");
+            if descending || self.take_word("asc") {
+                order_written = true;
             }
+            let mut nulls_first = descending;
+            if postgresql && self.take_word("nulls") {
+                nulls_order_written = true;
+                nulls_first = self.take_word("first");
+                if !nulls_first {
+                    self.expect_word("last")?;
+                }
+            }
+            sort_options = sort_options.with_column(columns.len(), descending, nulls_first);
             if columns.iter().any(|known: &Name| known.text == column.text) {
-                return Err(crate::error::SqlError::new(
-                    crate::error::SqlState::DUPLICATE_COLUMN,
+                return Err(SqlError::new(
+                    SqlState::DUPLICATE_COLUMN,
                     format!(
                         "column \"{}\" appears twice in index definition",
                         column.text
@@ -193,8 +245,8 @@ impl Parser<'_> {
             }
             columns.push(column);
             if columns.len() > crate::encoding::MAX_INDEX_COLUMNS {
-                return Err(crate::error::SqlError::new(
-                    crate::error::SqlState::TOO_MANY_COLUMNS,
+                return Err(SqlError::new(
+                    SqlState::TOO_MANY_COLUMNS,
                     format!(
                         "cannot use more than {} columns in an index",
                         crate::encoding::MAX_INDEX_COLUMNS
@@ -206,7 +258,12 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(columns)
+        Ok(IndexColumns {
+            names: columns,
+            sort_options,
+            order_written,
+            nulls_order_written,
+        })
     }
 
     pub(super) fn drop_index(&mut self) -> SqlResult<Statement> {

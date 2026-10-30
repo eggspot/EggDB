@@ -1,5 +1,5 @@
 use super::oids;
-use super::relations::{index_columns, index_is_unique};
+use super::relations::{index_columns, index_is_unique, index_method, index_sort_options};
 use super::snapshot::{self, CatalogSnapshot, ConstraintSource, RelationSource};
 use super::types::oid_number;
 use super::{CatalogRelation, CatalogType, RegKind, deparse};
@@ -379,14 +379,35 @@ pub(crate) fn index_definition(
     } else {
         snapshot.qualified_name(*table)
     };
+    let sort_options = index_sort_options(owner, *index);
+    let keys: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(position, at)| {
+            let column = owner.columns.get(*at)?;
+            let descending = sort_options.is_descending(position);
+            let nulls_first = sort_options.has_nulls_first(position);
+            let order = match (descending, nulls_first) {
+                (false, false) | (true, true) => "",
+                (false, true) => " NULLS FIRST",
+                (true, false) => " NULLS LAST",
+            };
+            Some(format!(
+                "{}{}{order}",
+                quote_ident(&column.name),
+                if descending { " DESC" } else { "" }
+            ))
+        })
+        .collect();
     Some(format!(
-        "CREATE {}INDEX {} ON {table_name} USING btree ({})",
+        "CREATE {}INDEX {} ON {table_name} USING {} ({})",
         if index_is_unique(owner, *index) {
             "UNIQUE "
         } else {
             ""
         },
         quote_ident(&entry.name),
-        column_list(owner, columns)
+        index_method(owner, *index).name(),
+        keys.join(", ")
     ))
 }

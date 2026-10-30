@@ -687,13 +687,15 @@ impl<'t> Parser<'t> {
             None
         };
         self.index_options()?;
-        let columns = self.index_column_list(false)?;
+        let columns = self.ordered_index_column_list(false)?;
         self.index_options()?;
         Ok(Some(IndexSpec {
             name,
             unique: false,
-            columns,
+            columns: columns.names,
             position,
+            method: crate::encoding::IndexMethod::BTree,
+            sort_options: columns.sort_options,
         }))
     }
 

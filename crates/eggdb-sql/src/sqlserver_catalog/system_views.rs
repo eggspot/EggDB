@@ -6,7 +6,7 @@ use super::{
 };
 use crate::pg_catalog::{
     CatalogColumn, CatalogSnapshot, ConstraintSource, RelationSource, index_columns,
-    index_is_unique,
+    index_is_unique, index_sort_options,
 };
 use crate::types::{SqlType, Value};
 
@@ -961,6 +961,7 @@ fn index_column_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> 
             let Some(source) = index.source else {
                 continue;
             };
+            let sort_options = index_sort_options(table, source);
             for (ordinal, column) in index_columns(table, source).iter().enumerate() {
                 rows.push(
                     CatalogRow::new(INDEX_COLUMN_COLUMNS)
@@ -970,7 +971,10 @@ fn index_column_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> 
                         .set("column_id", int(*column as i64 + 1))
                         .set("key_ordinal", small(ordinal as i64 + 1))
                         .set("partition_ordinal", small(0))
-                        .set("is_descending_key", bit(false))
+                        .set(
+                            "is_descending_key",
+                            bit(sort_options.is_descending(ordinal)),
+                        )
                         .set("is_included_column", bit(false))
                         .set("column_store_order_ordinal", small(0))
                         .done(),

@@ -475,6 +475,7 @@ pub(crate) fn merge(
                     }),
                     on_duplicate: OnDuplicate::Fail,
                     rollback_on_conflict: false,
+                    overriding: None,
                 },
             )?;
             affected += count;

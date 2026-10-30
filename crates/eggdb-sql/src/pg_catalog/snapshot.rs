@@ -600,7 +600,7 @@ impl CatalogSnapshot {
                 );
             }
             for (position, index) in table.indexes.iter().enumerate() {
-                if index.unique {
+                if index.unique && index.backs_unique_constraint {
                     add(
                         b'u',
                         index.name.clone(),
@@ -626,7 +626,7 @@ impl CatalogSnapshot {
                 );
             }
             for (column_at, column) in table.columns.iter().enumerate() {
-                if column.default.is_some() {
+                if column.default.is_some() && table.identity_of(column_at).is_none() {
                     defaults.push((
                         OidRequest {
                             kind: b'd',

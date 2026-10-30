@@ -29,6 +29,31 @@ pub struct IndexSchema {
     pub unique: bool,
     /// The names of its columns, in key order.
     pub columns: Vec<String>,
+    /// Its access method as PostgreSQL names it: `btree`, or `hash` for `USING hash`.
+    pub method: String,
+    /// How each of its columns sorts, in key order.
+    pub orders: Vec<IndexColumnOrder>,
+}
+
+/// How one column of an [`IndexSchema`] sorts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IndexColumnOrder {
+    /// Whether it sorts from the largest value to the smallest (`DESC`).
+    pub descending: bool,
+    /// Whether NULLs sort before every value (`NULLS FIRST`, the default with `DESC`).
+    pub nulls_first: bool,
+}
+
+impl IndexColumnOrder {
+    fn written_in(self, dialect: crate::Dialect) -> &'static str {
+        let postgresql = dialect == crate::Dialect::PostgreSql;
+        match (self.descending, self.nulls_first) {
+            (false, true) if postgresql => " NULLS FIRST",
+            (true, false) if postgresql => " DESC NULLS LAST",
+            (true, _) => " DESC",
+            (false, _) => "",
+        }
+    }
 }
 
 impl IndexSchema {
@@ -39,14 +64,32 @@ impl IndexSchema {
             crate::Dialect::Oracle => crate::lexer::swap_uniform_case(text),
             _ => quoted(text),
         };
-        let columns: Vec<String> = self.columns.iter().map(|column| name(column)).collect();
+        let columns: Vec<String> = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(position, column)| {
+                let order = self
+                    .orders
+                    .get(position)
+                    .copied()
+                    .unwrap_or_default()
+                    .written_in(dialect);
+                format!("{}{order}", name(column))
+            })
+            .collect();
         let on = match dialect {
             crate::Dialect::Oracle => crate::lexer::swap_uniform_case(table),
             crate::Dialect::MySql => name(table),
             _ => quoted(table),
         };
+        let method = if dialect == crate::Dialect::PostgreSql && self.method != "btree" {
+            format!(" USING {}", self.method)
+        } else {
+            String::new()
+        };
         format!(
-            "CREATE {}INDEX {} ON {on} ({});",
+            "CREATE {}INDEX {} ON {on}{method} ({});",
             if self.unique { "UNIQUE " } else { "" },
             name(&self.name),
             columns.join(", ")
@@ -305,6 +348,13 @@ fn schema_of(definition: &TableDefinition) -> TableSchema {
                     .iter()
                     .filter_map(|&column| definition.columns.get(column))
                     .map(|column| column.name.clone())
+                    .collect(),
+                method: index.method.name().to_owned(),
+                orders: (0..index.columns.len())
+                    .map(|position| IndexColumnOrder {
+                        descending: index.sort_options.is_descending(position),
+                        nulls_first: index.sort_options.has_nulls_first(position),
+                    })
                     .collect(),
             })
             .collect(),

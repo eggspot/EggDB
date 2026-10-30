@@ -204,7 +204,7 @@ pub(crate) struct Column {
     pub(crate) auto_increment: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct IndexDefinition {
     pub(crate) id: u32,
     pub(crate) name: String,
@@ -441,6 +441,12 @@ impl TableDefinition {
         identity_generation(found, stored)
     }
 
+    pub(crate) fn has_stored_identity(&self, column: usize) -> bool {
+        self.stored_identities()
+            .iter()
+            .any(|identity| identity.column == column)
+    }
+
     pub(crate) fn is_generated_always(&self, column: usize) -> bool {
         self.identity_of(column) == Some(IdentityGeneration::Always)
     }
@@ -573,6 +579,9 @@ impl TableDefinition {
         if version >= CONSTRAINTS_FORMAT_VERSION {
             self.encode_constraints(&mut out);
         }
+        if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
+            self.encode_options(&mut out);
+        }
         out
     }
 
@@ -610,13 +619,17 @@ impl TableDefinition {
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "table definition");
-        let version = reader.version_up_to(VIEW_FORMAT_VERSION)?;
+        let version = reader.version_up_to(NEWEST_TABLE_FORMAT_VERSION)?;
         if version == VIEW_FORMAT_VERSION {
             return Err(crate::views::not_a_table(name));
         }
-        if (version == SCHEMA_FORMAT_VERSION) != crate::schemas::is_qualified(name)
-            || !crate::schemas::is_well_formed(name)
-        {
+        let qualified = crate::schemas::is_qualified(name);
+        let name_fits_version = match version {
+            SCHEMA_FORMAT_VERSION => qualified,
+            IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION => true,
+            _ => !qualified,
+        };
+        if !name_fits_version || !crate::schemas::is_well_formed(name) {
             return Err(reader.damaged());
         }
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
@@ -665,18 +678,26 @@ impl TableDefinition {
             }
             primary_key.push(index);
         }
-        let indexes = match version {
+        let mut indexes = match version {
             INDEXES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), false)?,
             TYPES_FORMAT_VERSION
             | MORE_TYPES_FORMAT_VERSION
             | CONSTRAINTS_FORMAT_VERSION
-            | SCHEMA_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            | SCHEMA_FORMAT_VERSION
+            | IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION => {
+                decode_indexes(&mut reader, columns.len(), true)?
+            }
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
             Some(decode_constraints(&mut reader, &columns, &indexes)?)
         } else {
             None
+        };
+        let identities = if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
+            decode_options(&mut reader, columns.len(), &mut indexes)?
+        } else {
+            Vec::new()
         };
         reader.finish()?;
         let newest_type_needed = if more_types_allowed {
@@ -731,12 +752,67 @@ impl TableDefinition {
             foreign_keys,
             referenced,
             owns_sequence,
+            identities,
         };
         if version == CONSTRAINTS_FORMAT_VERSION && !table.has_constraints() {
             return Err(reader.damaged());
         }
+        if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
+            && (table.stored_identities() != table.identities || !table.needs_options_version())
+        {
+            return Err(reader.damaged());
+        }
         Ok(table)
     }
+}
+
+fn decode_options(
+    reader: &mut Reader<'_>,
+    column_count: usize,
+    indexes: &mut [IndexDefinition],
+) -> SqlResult<Vec<IdentityColumn>> {
+    let count = reader.count()?;
+    if count > column_count {
+        return Err(reader.damaged());
+    }
+    let mut identities: Vec<IdentityColumn> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let column = usize::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+        let generation =
+            IdentityGeneration::of_code(reader.byte()?).ok_or_else(|| reader.damaged())?;
+        if column >= column_count
+            || identities
+                .last()
+                .is_some_and(|previous| previous.column >= column)
+        {
+            return Err(reader.damaged());
+        }
+        identities.push(IdentityColumn { column, generation });
+    }
+    for index in indexes.iter_mut() {
+        let method = IndexMethod::of_code(reader.byte()?).ok_or_else(|| reader.damaged())?;
+        let without_constraint = match reader.byte()? {
+            0 => false,
+            UNIQUE_INDEX_WITHOUT_CONSTRAINT => true,
+            _ => return Err(reader.damaged()),
+        };
+        let sort_options = SortOptions {
+            descending: u32::from_le_bytes(reader.array()?),
+            nulls_first: u32::from_le_bytes(reader.array()?),
+        };
+        let hash_misused = method == IndexMethod::Hash
+            && (index.unique || index.columns.len() != 1 || !sort_options.is_default());
+        if (without_constraint && !index.unique)
+            || !sort_options.fits(index.columns.len())
+            || hash_misused
+        {
+            return Err(reader.damaged());
+        }
+        index.method = method;
+        index.sort_options = sort_options;
+        index.backs_unique_constraint = index.unique && !without_constraint;
+    }
+    Ok(identities)
 }
 
 #[derive(Default)]
@@ -1006,6 +1082,8 @@ fn decode_indexes(
             name,
             unique,
             columns,
+            backs_unique_constraint: unique,
+            ..IndexDefinition::default()
         });
     }
     Ok(indexes)
@@ -1805,8 +1883,9 @@ impl<'b> Reader<'b> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexDefinition, MAX_CHARACTER_LENGTH, TableDefinition, decode_key_values, decode_row,
-        encode_key_value, encode_row, prefix_end, skip_key_values,
+        IdentityGeneration, IndexDefinition, IndexMethod, MAX_CHARACTER_LENGTH, SortOptions,
+        TableDefinition, decode_key_values, decode_row, encode_key_value, encode_row, prefix_end,
+        skip_key_values,
     };
     use crate::encoding::Column;
     use crate::interval::{Interval, IntervalFields};
@@ -2043,10 +2122,10 @@ mod tests {
     #[test]
     fn a_newer_table_definition_version_is_refused_by_name() {
         let mut newer = with_indexes([true, false]).encode();
-        newer[0] = 9;
+        newer[0] = 10;
         let error = TableDefinition::decode("t", &newer).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
-        assert!(error.message().contains("format version 9"), "{error}");
+        assert!(error.message().contains("format version 10"), "{error}");
     }
 
     fn with_indexes(auto: [bool; 2]) -> TableDefinition {
@@ -2057,12 +2136,15 @@ mod tests {
                 name: "t_name_idx".into(),
                 unique: false,
                 columns: vec![1],
+                ..IndexDefinition::default()
             },
             IndexDefinition {
                 id: 2,
                 name: "both".into(),
                 unique: true,
                 columns: vec![1, 0],
+                backs_unique_constraint: true,
+                ..IndexDefinition::default()
             },
         ];
         table
@@ -2237,6 +2319,7 @@ mod tests {
                     name: "typed_day".into(),
                     unique: false,
                     columns: vec![3, 1],
+                    ..IndexDefinition::default()
                 }]
             } else {
                 Vec::new()
@@ -2454,6 +2537,7 @@ mod tests {
                 name: "more_span".into(),
                 unique: false,
                 columns: vec![3, 6],
+                ..IndexDefinition::default()
             }],
             ..TableDefinition::default()
         }
@@ -2894,6 +2978,163 @@ mod tests {
             let at = (random.next() as usize) % changed.len();
             changed[at] = random.next() as u8;
             let _ = super::SequenceDefinition::decode(&changed);
+        }
+    }
+
+    fn with_options() -> TableDefinition {
+        let mut table = with_indexes([true, false]);
+        table.set_identity(0, Some(IdentityGeneration::Always));
+        table.indexes[0].method = IndexMethod::Hash;
+        table.indexes[1].backs_unique_constraint = false;
+        table.indexes[1].sort_options = SortOptions::default()
+            .with_column(0, true, true)
+            .with_column(1, false, true);
+        table
+    }
+
+    #[test]
+    fn identities_and_index_options_are_version_9_and_round_trip() {
+        let table = with_options();
+        let encoded = table.encode();
+        assert_eq!(encoded[0], 9);
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(table.clone()));
+        for cut in 0..encoded.len() {
+            assert!(damaged(&encoded[..cut]), "cut at {cut}");
+        }
+        let decoded = TableDefinition::decode("t", &encoded).unwrap();
+        assert!(decoded.is_generated_always(0));
+        assert_eq!(decoded.identity_of(1), None);
+        assert!(decoded.indexes[1].sort_options.is_descending(0));
+        assert!(decoded.indexes[1].sort_options.has_nulls_first(1));
+        assert!(!decoded.indexes[1].sort_options.is_descending(1));
+        let mut qualified = table;
+        qualified.name = "app\0t".into();
+        let encoded = qualified.encode();
+        assert_eq!(encoded[0], 9);
+        assert_eq!(TableDefinition::decode("app\0t", &encoded), Ok(qualified));
+    }
+
+    #[test]
+    fn version_9_pins_its_options_after_the_constraints() {
+        let plain = with_indexes([true, false]).encode();
+        assert_eq!(plain[0], 3);
+        let encoded = with_options().encode();
+        assert_eq!(encoded[1..plain.len()], plain[1..]);
+        assert_eq!(
+            encoded[plain.len()..],
+            [
+                0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 3, 0, 0, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_without_identities_or_index_options_keeps_its_older_version() {
+        assert_eq!(with_indexes([true, false]).encode()[0], 3);
+        let mut by_default = with_indexes([true, false]);
+        by_default.set_identity(0, Some(IdentityGeneration::ByDefault));
+        assert_eq!(by_default.encode()[0], 3);
+        let mut without_default = two_columns([false, false], vec![0]);
+        without_default.set_identity(0, Some(IdentityGeneration::Always));
+        let encoded = without_default.encode();
+        assert_eq!(encoded[0], 1);
+        assert_eq!(without_default.identity_of(0), None);
+        assert!(
+            TableDefinition::decode("t", &encoded)
+                .unwrap()
+                .identities
+                .is_empty()
+        );
+        let mut restored = two_columns([false, false], vec![0]);
+        restored.set_identity(1, Some(IdentityGeneration::ByDefault));
+        let encoded = restored.encode();
+        assert_eq!(encoded[0], 9);
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(restored.clone()));
+        assert_eq!(
+            restored.identity_of(1),
+            Some(IdentityGeneration::ByDefault)
+        );
+        restored.columns[1].default = None;
+        assert_eq!(restored.identity_of(1), None);
+        assert_eq!(restored.encode()[0], 1);
+    }
+
+    #[test]
+    fn damaged_version_9_options_are_errors() {
+        let good = with_options().encode();
+        let tail = with_indexes([true, false]).encode().len() + 4;
+        let changed = |at: usize, byte: u8| {
+            let mut bytes = good.clone();
+            bytes[at] = byte;
+            bytes
+        };
+        for (at, byte) in [
+            (tail, 4),
+            (tail + 1, 2),
+            (tail + 2, 0),
+            (tail + 2, 2),
+            (tail + 2, 3),
+            (tail + 3, 2),
+            (tail + 4, 1),
+            (tail + 4, 2),
+            (tail + 5, 1),
+            (tail + 9, 1),
+            (tail + 13, 1),
+            (tail + 14, 2),
+            (tail + 15, 4),
+            (tail + 19, 4),
+        ] {
+            assert!(damaged(&changed(at, byte)), "byte {at} set to {byte}");
+        }
+        let still_needed = changed(tail + 3, 0);
+        let decoded = TableDefinition::decode("t", &still_needed).unwrap();
+        assert_eq!(decoded.indexes[0].method, IndexMethod::BTree);
+        let plain = with_indexes([false, false]).encode();
+        let mut nothing_needed = plain.clone();
+        nothing_needed[0] = 9;
+        nothing_needed.extend_from_slice(&[0, 0, 0, 0, 0]);
+        nothing_needed.extend_from_slice(&[0; 20]);
+        assert!(damaged(&nothing_needed));
+        let mut two_identities = with_options();
+        two_identities.columns[1].default = Some("'x'".into());
+        two_identities.set_identity(1, Some(IdentityGeneration::ByDefault));
+        let encoded = two_identities.encode();
+        assert_eq!(
+            TableDefinition::decode("t", &encoded),
+            Ok(two_identities.clone())
+        );
+        let identities_at = tail;
+        assert_eq!(encoded[identities_at..identities_at + 5], [2, 0, 1, 1, 2]);
+        let mut unsorted = encoded.clone();
+        unsorted[identities_at + 1] = 1;
+        unsorted[identities_at + 3] = 0;
+        assert!(damaged(&unsorted));
+        let mut repeated = encoded;
+        repeated[identities_at + 3] = 0;
+        assert!(damaged(&repeated));
+    }
+
+    #[test]
+    fn hostile_version_9_definitions_are_errors_never_panics() {
+        let mut random = Seeded(0x0009_0B71_0A5E_D00D);
+        let good = with_options().encode();
+        for _ in 0..20_000 {
+            let mut bytes = good.clone();
+            let flips = 1 + random.next() % 4;
+            for _ in 0..flips {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            if random.next().is_multiple_of(3) {
+                let keep = (random.next() as usize) % bytes.len();
+                bytes.truncate(keep);
+            }
+            if let Ok(table) = TableDefinition::decode("t", &bytes) {
+                for index in &table.indexes {
+                    assert!(index.sort_options.fits(index.columns.len()));
+                    assert!(!index.backs_unique_constraint || index.unique);
+                }
+            }
         }
     }
 }

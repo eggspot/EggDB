@@ -119,6 +119,8 @@ impl SqlState {
     pub const UNDEFINED_COLUMN: Self = Self(*b"42703");
     /// `42704` undefined_object.
     pub const UNDEFINED_OBJECT: Self = Self(*b"42704");
+    /// `428C9` generated_always: a value given for a `GENERATED ALWAYS` identity column.
+    pub const GENERATED_ALWAYS: Self = Self(*b"428C9");
     /// `42712` duplicate_alias.
     pub const DUPLICATE_ALIAS: Self = Self(*b"42712");
     /// `42803` grouping_error.

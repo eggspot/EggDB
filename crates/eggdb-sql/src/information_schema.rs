@@ -1,4 +1,4 @@
-use crate::encoding::{TableDefinition, integer_type_range};
+use crate::encoding::{IdentityGeneration, TableDefinition, integer_type_range};
 use crate::lexer::TokenKind;
 use crate::pg_catalog::{
     CatalogColumn, CatalogSnapshot, CatalogType, ConstraintSource, RelationEntry, RelationSource,
@@ -499,7 +499,57 @@ struct ColumnFacts<'a> {
     sql_type: SqlType,
     not_null: bool,
     default: Option<String>,
-    identity: bool,
+    identity: Option<IdentityFacts>,
+}
+
+struct IdentityFacts {
+    generation: IdentityGeneration,
+    start: i64,
+    increment: i64,
+    maximum: i64,
+    minimum: i64,
+    cycle: bool,
+}
+
+fn identity_facts(
+    snapshot: &CatalogSnapshot,
+    table: &TableDefinition,
+    position: usize,
+) -> Option<IdentityFacts> {
+    let generation = table.identity_of(position)?;
+    let column = table.columns.get(position)?;
+    let sequence = snapshot
+        .relations
+        .iter()
+        .find_map(|entry| match &entry.source {
+            RelationSource::Sequence(sequence)
+                if sequence
+                    .owned_by
+                    .as_ref()
+                    .is_some_and(|(owner, owned)| *owner == table.name && *owned == column.name) =>
+            {
+                Some(sequence)
+            }
+            _ => None,
+        });
+    Some(match sequence {
+        Some(sequence) => IdentityFacts {
+            generation,
+            start: sequence.start,
+            increment: sequence.increment,
+            maximum: sequence.max,
+            minimum: sequence.min,
+            cycle: sequence.cycle,
+        },
+        None => IdentityFacts {
+            generation,
+            start: 1,
+            increment: 1,
+            maximum: integer_type_range(column.sql_type).map_or(i64::MAX, |(_, high)| high),
+            minimum: 1,
+            cycle: false,
+        },
+    })
 }
 
 fn relation_columns<'a>(
@@ -519,8 +569,9 @@ fn relation_columns<'a>(
                 default: column
                     .default
                     .as_ref()
+                    .filter(|_| table.identity_of(position).is_none())
                     .map(|_| default_text(snapshot, at, position)),
-                identity: column.auto_increment,
+                identity: identity_facts(snapshot, table, position),
             })
             .collect(),
         RelationSource::View(view) => view
@@ -531,7 +582,7 @@ fn relation_columns<'a>(
                 sql_type: column.sql_type.unwrap_or(SqlType::Text),
                 not_null: false,
                 default: None,
-                identity: false,
+                identity: None,
             })
             .collect(),
         RelationSource::Catalog(relation) => relation
@@ -542,7 +593,7 @@ fn relation_columns<'a>(
                 sql_type: column.sql_type,
                 not_null: false,
                 default: None,
-                identity: false,
+                identity: None,
             })
             .collect(),
         RelationSource::Sequence(_) | RelationSource::Index { .. } => Vec::new(),
@@ -734,8 +785,11 @@ fn column_row(
         )
         .set("dtd_identifier", identifier(&number.to_string()))
         .set("is_self_referencing", yes_or_no(false))
-        .set("is_identity", yes_or_no(column.identity))
-        .set("identity_cycle", yes_or_no(false))
+        .set("is_identity", yes_or_no(column.identity.is_some()))
+        .set(
+            "identity_cycle",
+            yes_or_no(column.identity.as_ref().is_some_and(|identity| identity.cycle)),
+        )
         .set("is_generated", character_data("NEVER"))
         .set("is_updatable", yes_or_no(!view));
     if let Some(udt_name) = described.udt_name {
@@ -744,14 +798,26 @@ fn column_row(
             .set("udt_schema", identifier(crate::schemas::CATALOG_SCHEMA))
             .set("udt_name", identifier(udt_name));
     }
-    if column.identity {
-        let maximum = integer_type_range(column.sql_type).map_or(i64::MAX, |(_, high)| high);
+    if let Some(identity) = &column.identity {
+        let generation = match identity.generation {
+            IdentityGeneration::Always => "ALWAYS",
+            IdentityGeneration::ByDefault => "BY DEFAULT",
+        };
         row = row
-            .set("identity_generation", character_data("BY DEFAULT"))
-            .set("identity_start", character_data("1"))
-            .set("identity_increment", character_data("1"))
-            .set("identity_maximum", character_data(&maximum.to_string()))
-            .set("identity_minimum", character_data("1"));
+            .set("identity_generation", character_data(generation))
+            .set("identity_start", character_data(&identity.start.to_string()))
+            .set(
+                "identity_increment",
+                character_data(&identity.increment.to_string()),
+            )
+            .set(
+                "identity_maximum",
+                character_data(&identity.maximum.to_string()),
+            )
+            .set(
+                "identity_minimum",
+                character_data(&identity.minimum.to_string()),
+            );
     }
     row.done()
 }

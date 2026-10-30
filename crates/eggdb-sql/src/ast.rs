@@ -420,6 +420,7 @@ pub(crate) enum AlterAction {
     SetSchema(Name),
     AddIdentity {
         column: Name,
+        generation: crate::encoding::IdentityGeneration,
         sequence: Option<Name>,
         options: SequenceOptions,
     },
@@ -438,6 +439,8 @@ pub(crate) struct IndexSpec {
     pub(crate) unique: bool,
     pub(crate) columns: Vec<Name>,
     pub(crate) position: usize,
+    pub(crate) method: crate::encoding::IndexMethod,
+    pub(crate) sort_options: crate::encoding::SortOptions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -550,6 +553,7 @@ pub(crate) struct ColumnDefinition {
     pub(crate) primary_key: bool,
     pub(crate) default: Option<(Expr, String)>,
     pub(crate) auto_increment: bool,
+    pub(crate) generated_always: bool,
     pub(crate) unique: Option<Option<Name>>,
     pub(crate) constraints: Vec<ConstraintSpec>,
     pub(crate) comment: Option<String>,
@@ -810,6 +814,13 @@ pub(crate) struct Insert {
     pub(crate) returning: Option<Vec<SelectItem>>,
     pub(crate) on_duplicate: OnDuplicate,
     pub(crate) rollback_on_conflict: bool,
+    pub(crate) overriding: Option<Overriding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Overriding {
+    SystemValue,
+    UserValue,
 }
 
 #[derive(Debug, Clone, PartialEq)]

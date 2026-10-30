@@ -30,10 +30,11 @@ pub(crate) use sqlite::is_schema_table;
 use crate::ast::{
     AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, DiscardTarget, Expr,
     ExprKind, FromClause, IndexSpec, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind,
-    Literal, Name, OnDuplicate, Select, SelectItem, Statement, TableReference, TruthTest,
-    UnaryOperator, Update,
+    Literal, Name, OnDuplicate, Overriding, Select, SelectItem, Statement, TableReference,
+    TruthTest, UnaryOperator, Update,
 };
 use crate::dialect::Dialect;
+use crate::encoding::{IndexMethod, SortOptions};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::IntervalFields;
 use crate::lexer::{Token, TokenKind, swap_uniform_case};
@@ -1523,10 +1524,16 @@ impl<'t> Parser<'t> {
         if self.is_word("nulls") {
             return Err(self.not_supported("UNIQUE NULLS [NOT] DISTINCT"));
         }
-        let columns = if self.sqlserver() {
-            self.sqlserver_key_columns()?
+        let (columns, sort_options) = if self.sqlserver() {
+            (self.sqlserver_key_columns()?, SortOptions::default())
         } else {
-            self.index_column_list(true)?
+            let listed = self.ordered_index_column_list(true)?;
+            let sort_options = if self.mysql() {
+                listed.sort_options
+            } else {
+                SortOptions::default()
+            };
+            (listed.names, sort_options)
         };
         if self.sqlite() {
             self.sqlite_conflict_clause()?;
@@ -1536,6 +1543,8 @@ impl<'t> Parser<'t> {
             unique: true,
             columns,
             position,
+            method: IndexMethod::BTree,
+            sort_options,
         })
     }
 
@@ -1566,6 +1575,7 @@ impl<'t> Parser<'t> {
             primary_key: false,
             default: None,
             auto_increment: serial.is_some(),
+            generated_always: false,
             unique: None,
             constraints: Vec::new(),
             comment: None,
@@ -1678,7 +1688,8 @@ impl<'t> Parser<'t> {
     fn postgresql_identity(&mut self, column: &mut ColumnDefinition) -> SqlResult<()> {
         let position = self.position();
         self.at += 1;
-        if !self.take_word("always") {
+        let always = self.take_word("always");
+        if !always {
             self.expect_word("by")?;
             self.expect_word("default")?;
         }
@@ -1704,6 +1715,7 @@ impl<'t> Parser<'t> {
             .at(position));
         }
         column.auto_increment = true;
+        column.generated_always = always;
         column.not_null = true;
         Ok(())
     }
@@ -2194,15 +2206,21 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
-        if self.is_word("overriding") {
+        let overriding = if self.take_word("overriding") {
             if !self.postgresql() {
                 return Err(self.not_supported("OVERRIDING"));
             }
-            if !(self.is_word_at(1, "system") && self.is_word_at(2, "value")) {
-                return Err(self.not_supported("OVERRIDING USER VALUE"));
-            }
-            self.at += 3;
-        }
+            let overriding = if self.take_word("system") {
+                Overriding::SystemValue
+            } else {
+                self.expect_word("user")?;
+                Overriding::UserValue
+            };
+            self.expect_word("value")?;
+            Some(overriding)
+        } else {
+            None
+        };
         let source = if self.take_word("default") {
             self.expect_word("values")?;
             InsertSource::DefaultValues
@@ -2255,6 +2273,7 @@ impl<'t> Parser<'t> {
             returning,
             on_duplicate,
             rollback_on_conflict,
+            overriding,
         }))
     }
 

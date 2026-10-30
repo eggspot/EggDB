@@ -413,6 +413,9 @@ pub(crate) fn define_index(
         name,
         unique: spec.unique,
         columns,
+        method: spec.method,
+        sort_options: spec.sort_options,
+        backs_unique_constraint: spec.unique && (constraint || dialect == Dialect::MySql),
     });
     Ok(table.indexes.len() - 1)
 }

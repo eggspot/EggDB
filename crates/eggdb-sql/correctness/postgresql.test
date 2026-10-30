@@ -3016,8 +3016,12 @@ nextval
 2
 SELECT 1
 
-error 0A000
-INSERT INTO ident_plain OVERRIDING USER VALUE VALUES (5)
+rows
+INSERT INTO ident_plain OVERRIDING USER VALUE VALUES (5) RETURNING n
+----
+n
+3
+INSERT 0 1
 
 chapter sql-createtable, "CREATE TABLE": UNLOGGED
 ok
@@ -4277,3 +4281,146 @@ SELECT * FROM tables
 
 error 42501
 DELETE FROM information_schema.columns
+
+chapter sql-createindex, "CREATE INDEX": access methods, sort order, unique indexes that are not constraints and GENERATED ALWAYS identities
+ok
+CREATE TABLE idx37c (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, code text NOT NULL, priority integer, opened timestamptz, closed timestamptz)
+
+ok
+CREATE UNIQUE INDEX idx37c_code_idx ON idx37c (code)
+
+ok
+CREATE INDEX idx37c_opened_idx ON idx37c (opened DESC)
+
+ok
+CREATE INDEX idx37c_priority_idx ON idx37c USING btree (priority NULLS FIRST, closed DESC NULLS LAST)
+
+ok
+CREATE INDEX idx37c_code_hash ON idx37c USING hash (code)
+
+error 0A000
+CREATE UNIQUE INDEX idx37c_bad ON idx37c USING hash (code)
+
+error 0A000
+CREATE INDEX idx37c_bad ON idx37c USING hash (code, priority)
+
+error 0A000
+CREATE INDEX idx37c_bad ON idx37c USING hash (code DESC)
+
+error 0A000
+CREATE INDEX idx37c_bad ON idx37c USING hash (code ASC)
+
+error 0A000
+CREATE INDEX idx37c_bad ON idx37c USING hash (code NULLS FIRST)
+
+rows
+SELECT pg_get_indexdef(indexrelid), indoption FROM pg_index WHERE indrelid = 'idx37c'::regclass ORDER BY 1
+----
+pg_get_indexdef|indoption
+CREATE INDEX idx37c_code_hash ON public.idx37c USING hash (code)|0
+CREATE INDEX idx37c_opened_idx ON public.idx37c USING btree (opened DESC)|3
+CREATE INDEX idx37c_priority_idx ON public.idx37c USING btree (priority NULLS FIRST, closed DESC NULLS LAST)|2 1
+CREATE UNIQUE INDEX idx37c_code_idx ON public.idx37c USING btree (code)|0
+CREATE UNIQUE INDEX idx37c_pkey ON public.idx37c USING btree (id)|0
+SELECT 5
+
+rows
+SELECT conname, contype FROM pg_constraint WHERE conrelid = 'idx37c'::regclass ORDER BY 1
+----
+conname|contype
+idx37c_pkey|p
+SELECT 1
+
+rows
+SELECT attname, attidentity, atthasdef FROM pg_attribute WHERE attrelid = 'idx37c'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname|attidentity|atthasdef
+id|a|f
+code||f
+priority||f
+opened||f
+closed||f
+SELECT 5
+
+rows
+INSERT INTO idx37c (code) VALUES ('a') RETURNING id
+----
+id
+1
+INSERT 0 1
+
+error 428C9
+INSERT INTO idx37c (id, code) VALUES (5, 'x')
+
+error 428C9
+INSERT INTO idx37c SELECT 6, 'y'
+
+rows
+INSERT INTO idx37c (id, code) OVERRIDING USER VALUE VALUES (77, 'u') RETURNING id
+----
+id
+2
+INSERT 0 1
+
+rows
+INSERT INTO idx37c (id, code) OVERRIDING SYSTEM VALUE VALUES (5, 'x') RETURNING id
+----
+id
+5
+INSERT 0 1
+
+error 23505
+INSERT INTO idx37c (code) VALUES ('a')
+
+error 428C9
+UPDATE idx37c SET id = 9 WHERE code = 'a'
+
+ok
+UPDATE idx37c SET id = DEFAULT WHERE code = 'none'
+
+error 42704
+ALTER TABLE idx37c DROP CONSTRAINT idx37c_code_idx
+
+error 42601
+ALTER TABLE idx37c ALTER COLUMN id DROP DEFAULT
+
+ok
+CREATE TABLE idx37c_restored (id integer NOT NULL, label text)
+
+ok
+ALTER TABLE idx37c_restored ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.idx37c_restored_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1)
+
+error 428C9
+INSERT INTO idx37c_restored VALUES (1, 'refused')
+
+error 42601
+ALTER TABLE idx37c_restored ALTER COLUMN id SET DEFAULT 5
+
+rows
+SELECT attidentity, atthasdef FROM pg_attribute WHERE attrelid = 'idx37c_restored'::regclass AND attname = 'id'
+----
+attidentity|atthasdef
+a|f
+SELECT 1
+
+rows
+SELECT count(*) FROM pg_attrdef WHERE adrelid = 'idx37c_restored'::regclass
+----
+count
+0
+SELECT 1
+
+rows
+SELECT deptype FROM pg_depend WHERE objid = 'idx37c_restored_id_seq'::regclass AND refobjsubid = 1
+----
+deptype
+i
+SELECT 1
+
+rows
+SELECT column_name, column_default, is_identity, identity_generation FROM information_schema.columns WHERE table_name = 'idx37c_restored' ORDER BY ordinal_position
+----
+column_name|column_default|is_identity|identity_generation
+id|NULL|YES|ALWAYS
+label|NULL|NO|NULL
+SELECT 2

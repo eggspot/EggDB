@@ -6,8 +6,9 @@ use crate::constraints::{self, PreparedChecks};
 use crate::dialect::Dialect;
 use crate::encoding::CommentKind;
 use crate::encoding::{
-    Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, encode_meta, encode_row,
-    meta_key, prefix_end, reference_key, rows_prefix, table_key,
+    Column, IdentityGeneration, IndexMethod, MAX_COLUMNS, SortOptions, TableDefinition,
+    decode_meta, decode_row, encode_meta, encode_row, meta_key, prefix_end, reference_key,
+    rows_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
@@ -206,15 +207,19 @@ fn apply(
         }
         AlterAction::AddIdentity {
             column,
+            generation,
             sequence,
             options,
         } => add_identity(
             writer,
             tables,
             name,
-            column,
-            sequence.as_ref(),
-            options,
+            IdentityRequest {
+                column,
+                generation: *generation,
+                sequence: sequence.as_ref(),
+                options,
+            },
             dialect,
         )
         .map(|()| None),
@@ -787,6 +792,7 @@ fn drop_column(
             column.auto_increment = false;
         }
     }
+    new.identities = table.identities_without_column(index);
     new.indexes = table
         .indexes
         .iter()
@@ -1043,6 +1049,20 @@ fn set_default(
 ) -> SqlResult<()> {
     let mut table = current(writer, tables, name)?;
     let index = column_index(&table, column, dialect)?;
+    if dialect == Dialect::PostgreSql && table.has_stored_identity(index) {
+        let error = SqlError::new(
+            SqlState::SYNTAX_ERROR,
+            format!(
+                "column \"{}\" of relation \"{}\" is an identity column",
+                column.text,
+                crate::schemas::base_name(name)
+            ),
+        );
+        return Err(match default {
+            Some(_) => error,
+            None => error.with_hint("Use ALTER TABLE ... ALTER COLUMN ... DROP IDENTITY instead."),
+        });
+    }
     if let Some((expr, text)) = default {
         execute::check_default_expr(expr)?;
         crate::sequences::check_default_sequences(writer, text)?;
@@ -1050,6 +1070,7 @@ fn set_default(
     let target = &mut table.columns[index];
     target.default = default.map(|(_, text)| text.clone());
     target.auto_increment = false;
+    table.set_identity(index, None);
     save(writer, &table)
 }
 
@@ -1091,15 +1112,26 @@ fn add_default(
     )
 }
 
+struct IdentityRequest<'a> {
+    column: &'a Name,
+    generation: IdentityGeneration,
+    sequence: Option<&'a Name>,
+    options: &'a SequenceOptions,
+}
+
 fn add_identity(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     name: &str,
-    column: &Name,
-    sequence: Option<&Name>,
-    options: &SequenceOptions,
+    request: IdentityRequest<'_>,
     dialect: Dialect,
 ) -> SqlResult<()> {
+    let IdentityRequest {
+        column,
+        generation,
+        sequence,
+        options,
+    } = request;
     let table = current(writer, tables, name)?;
     let index = column_index(&table, column, dialect)?;
     let target = &table.columns[index];
@@ -1120,7 +1152,7 @@ fn add_identity(
         let shown = crate::schemas::display(name);
         return Err(SqlError::new(
             SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
-            if target.auto_increment {
+            if table.identity_of(index).is_some() {
                 format!(
                     "column \"{}\" of relation \"{shown}\" is already an identity column",
                     column.text
@@ -1186,6 +1218,7 @@ fn add_identity(
     let target = &mut table.columns[index];
     target.default = Some(default);
     target.auto_increment = false;
+    table.set_identity(index, Some(generation));
     save(writer, &table)
 }
 
@@ -1458,6 +1491,7 @@ fn redefine(
     if !target.auto_increment {
         target.default = column.default.as_ref().map(|(_, text)| text.clone());
     }
+    table.set_identity(index, None);
     save(writer, &table)?;
     if column.unique.is_some() {
         add_constraint(
@@ -1551,6 +1585,8 @@ fn add_constraint(
                     unique: true,
                     columns: columns.clone(),
                     position: spec.position,
+                    method: IndexMethod::BTree,
+                    sort_options: SortOptions::default(),
                 },
                 table: Name {
                     text: table.name.clone(),
@@ -1643,6 +1679,18 @@ fn take_over_index(
         )
         .with_oracle_code(955)
         .at(given.position)),
+        ConstraintKind::Unique(_) if same_columns && !index.backs_unique_constraint => {
+            let mut table = table;
+            if let Some(found) = table
+                .indexes
+                .iter_mut()
+                .find(|found| found.name == index.name)
+            {
+                found.backs_unique_constraint = true;
+            }
+            save(writer, &table)?;
+            Ok(true)
+        }
         ConstraintKind::Unique(_) => Ok(same_columns),
         ConstraintKind::PrimaryKey(_) if same_columns => {
             let drop = crate::ast::DropIndex {
@@ -1735,7 +1783,10 @@ fn drop_constraint(
     if let Some(index) = table
         .indexes
         .iter()
-        .find(|index| index.name == constraint.text)
+        .find(|index| {
+            index.name == constraint.text
+                && (dialect != Dialect::PostgreSql || index.backs_unique_constraint)
+        })
         .cloned()
     {
         let columns: Vec<String> = index

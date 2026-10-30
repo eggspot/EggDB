@@ -453,6 +453,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     primary_key: false,
                     default: None,
                     auto_increment: false,
+                    generated_always: false,
                     unique: None,
                     constraints: Vec::new(),
                     comment: None,
@@ -512,6 +513,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 returning: None,
                 on_duplicate: OnDuplicate::Fail,
                 rollback_on_conflict: false,
+                overriding: None,
             };
             execute::insert(&mut scratch, &mut cache, &insert)?;
         }

@@ -5,7 +5,9 @@ use super::snapshot::{
 use super::{CatalogRelation, deparse};
 use crate::arrays::{ArrayElement, ArrayValue};
 use crate::ast::ReferentialAction;
-use crate::encoding::{CommentKind, TableDefinition};
+use crate::encoding::{
+    CommentKind, IdentityGeneration, IndexMethod, SortOptions, TableDefinition,
+};
 use crate::error::SqlResult;
 use crate::memory::WorkMemory;
 use crate::session::OutputColumn;
@@ -18,6 +20,8 @@ const PG_CLASS: u32 = 1259;
 const PG_CONSTRAINT: u32 = 2606;
 const PG_NAMESPACE: u32 = 2615;
 const HASH: u32 = 405;
+const INDOPTION_DESC: i64 = 1;
+const INDOPTION_NULLS_FIRST: i64 = 2;
 const INTERNAL_LANGUAGE: u32 = 12;
 
 pub(crate) fn generated_rows(
@@ -217,6 +221,41 @@ pub(crate) fn index_is_unique(table: &TableDefinition, index: IndexSource) -> bo
     }
 }
 
+pub(crate) fn index_method(table: &TableDefinition, index: IndexSource) -> IndexMethod {
+    match index {
+        IndexSource::Primary => IndexMethod::BTree,
+        IndexSource::Secondary(at) => table
+            .indexes
+            .get(at)
+            .map_or(IndexMethod::BTree, |found| found.method),
+    }
+}
+
+pub(crate) fn index_sort_options(table: &TableDefinition, index: IndexSource) -> SortOptions {
+    match index {
+        IndexSource::Primary => SortOptions::default(),
+        IndexSource::Secondary(at) => table
+            .indexes
+            .get(at)
+            .map_or(SortOptions::default(), |found| found.sort_options),
+    }
+}
+
+fn access_method_oid(method: IndexMethod) -> u32 {
+    match method {
+        IndexMethod::BTree => oids::BTREE,
+        IndexMethod::Hash => HASH,
+    }
+}
+
+fn identity_code(generation: Option<IdentityGeneration>) -> &'static str {
+    match generation {
+        Some(IdentityGeneration::Always) => "a",
+        Some(IdentityGeneration::ByDefault) => "d",
+        None => "",
+    }
+}
+
 fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let referenced = referenced_tables(snapshot);
     let mut rows = Vec::with_capacity(snapshot.relations.len());
@@ -254,12 +293,14 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 pages = 1;
             }
             RelationSource::Index { table, index } => {
-                natts = snapshot
+                let owner = snapshot
                     .relations
                     .get(*table)
-                    .and_then(|owner| owner.table())
-                    .map_or(0, |owner| index_columns(owner, *index).len());
-                am = oids::BTREE;
+                    .and_then(|owner| owner.table());
+                natts = owner.map_or(0, |owner| index_columns(owner, *index).len());
+                am = access_method_oid(
+                    owner.map_or(IndexMethod::BTree, |owner| index_method(owner, *index)),
+                );
                 tuples = 0.0;
                 pages = 1;
             }
@@ -363,8 +404,8 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         number: at + 1,
                         sql_type: column.sql_type,
                         not_null: column.not_null || table.primary_key.contains(&at),
-                        has_default: column.default.is_some(),
-                        identity: if column.auto_increment { "d" } else { "" },
+                        has_default: column.default.is_some() && table.identity_of(at).is_none(),
+                        identity: identity_code(table.identity_of(at)),
                     }));
                 }
             }
@@ -409,6 +450,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 else {
                     continue;
                 };
+                let hashed = index_method(owner, *index) == IndexMethod::Hash;
                 for (at, column_at) in index_columns(owner, *index).iter().enumerate() {
                     let Some(column) = owner.columns.get(*column_at) else {
                         continue;
@@ -417,7 +459,11 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         relation,
                         name: &column.name,
                         number: at + 1,
-                        sql_type: column.sql_type,
+                        sql_type: if hashed {
+                            SqlType::Integer
+                        } else {
+                            column.sql_type
+                        },
                         not_null: false,
                         has_default: false,
                         identity: "",
@@ -572,6 +618,7 @@ fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         };
         let columns = index_columns(owner, *index);
         let count = columns.len() as i64;
+        let sort_options = index_sort_options(owner, *index);
         rows.push(
             Row::new(CatalogRelation::Index)
                 .set("indexrelid", oid(entry.oid))
@@ -614,7 +661,18 @@ fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     "indoption",
                     vector(
                         ArrayElement::Int2Vector,
-                        columns.iter().map(|_| small(0)).collect(),
+                        (0..columns.len())
+                            .map(|position| {
+                                let mut option = 0;
+                                if sort_options.is_descending(position) {
+                                    option |= INDOPTION_DESC;
+                                }
+                                if sort_options.has_nulls_first(position) {
+                                    option |= INDOPTION_NULLS_FIRST;
+                                }
+                                small(option)
+                            })
+                            .collect(),
                     ),
                 )
                 .done(),
@@ -955,7 +1013,14 @@ fn depend_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             let (table, column) = sequence.owned_by.as_ref()?;
             let owner_at = snapshot.table_named(table)?;
             let owner = snapshot.relations.get(owner_at)?;
-            let number = owner.table()?.column_index(column)? + 1;
+            let owner_table = owner.table()?;
+            let position = owner_table.column_index(column)?;
+            let number = position + 1;
+            let dependency = if owner_table.identity_of(position).is_some() {
+                "i"
+            } else {
+                "a"
+            };
             Some(
                 Row::new(CatalogRelation::Depend)
                     .set("classid", oid(PG_CLASS))
@@ -964,7 +1029,7 @@ fn depend_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .set("refclassid", oid(PG_CLASS))
                     .set("refobjid", oid(owner.oid))
                     .set("refobjsubid", int(number as i64))
-                    .set("deptype", text("a"))
+                    .set("deptype", text(dependency))
                     .done(),
             )
         })

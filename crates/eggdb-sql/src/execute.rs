@@ -1,12 +1,14 @@
 use crate::aggregate::{self, shape_of};
 use crate::ast::{
     BinaryOperator, ConstraintKind, CreateTable, Delete, Expr, ExprKind, Insert, InsertSource,
-    InsertValue, Name, OnDuplicate, OrderItem, Select, SelectItem, TableReference, Update,
+    InsertValue, Name, OnDuplicate, OrderItem, Overriding, Select, SelectItem, TableReference,
+    Update,
 };
 use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
 use crate::encoding::{
-    Column, MAX_COLUMNS, TableDefinition, ViewDefinition, decode_meta, decode_row, decode_row_into,
+    Column, IdentityGeneration, MAX_COLUMNS, TableDefinition, ViewDefinition, decode_meta,
+    decode_row, decode_row_into,
     encode_key_value, encode_meta, encode_row, encode_row_into, is_view_record, meta_key,
     prefix_end, rows_prefix, table_key,
 };
@@ -296,6 +298,11 @@ pub(crate) fn create_table(
         primary_key,
         ..TableDefinition::default()
     };
+    for (index, definition) in create.columns.iter().enumerate() {
+        if definition.generated_always && definition.auto_increment {
+            table.set_identity(index, Some(IdentityGeneration::Always));
+        }
+    }
     let specs = unique_columns(create).chain(create.indexes.iter().cloned());
     let mut others = None;
     for spec in specs {
@@ -357,6 +364,8 @@ fn unique_columns(create: &CreateTable) -> impl Iterator<Item = crate::ast::Inde
             unique: true,
             columns: vec![column.name.clone()],
             position: column.name.position,
+            method: crate::encoding::IndexMethod::BTree,
+            sort_options: crate::encoding::SortOptions::default(),
         })
     })
 }
@@ -925,6 +934,7 @@ fn with_selected_rows(
         returning: insert.returning.clone(),
         on_duplicate: insert.on_duplicate.clone(),
         rollback_on_conflict: insert.rollback_on_conflict,
+        overriding: insert.overriding,
     })
 }
 
@@ -1015,6 +1025,12 @@ pub(crate) fn insert(
             }
         }
     }
+    check_generated_always(&table, &targets, rows, insert.overriding)?;
+    let given_ignored: Vec<bool> = (0..table.columns.len())
+        .map(|index| {
+            insert.overriding == Some(Overriding::UserValue) && table.identity_of(index).is_some()
+        })
+        .collect();
     let constants = Evaluator {
         scope: Scope::empty(),
         row: &[],
@@ -1039,7 +1055,8 @@ pub(crate) fn insert(
             let given = targets
                 .iter()
                 .position(|&target| target == index)
-                .and_then(|slot| values.get(slot));
+                .and_then(|slot| values.get(slot))
+                .filter(|_| !given_ignored[index]);
             row.push(match given {
                 Some(value) => assigned_value(&constants, value, column, rule)?,
                 None => default_value(column)?,
@@ -1108,6 +1125,58 @@ pub(crate) fn insert(
     result.last_insert_rowid = last_rowid;
     result.last_identity_value = last_identity;
     Ok(result)
+}
+
+fn check_generated_always(
+    table: &TableDefinition,
+    targets: &[usize],
+    rows: &[Vec<InsertValue>],
+    overriding: Option<Overriding>,
+) -> SqlResult<()> {
+    if overriding.is_some() {
+        return Ok(());
+    }
+    for (slot, &target) in targets.iter().enumerate() {
+        let given = rows
+            .iter()
+            .any(|values| matches!(values.get(slot), Some(InsertValue::Expr(_))));
+        if given && table.is_generated_always(target) {
+            return Err(generated_always_given(table, target));
+        }
+    }
+    Ok(())
+}
+
+fn generated_always_given(table: &TableDefinition, column: usize) -> SqlError {
+    let name = &table.columns[column].name;
+    SqlError::new(
+        SqlState::GENERATED_ALWAYS,
+        format!("cannot insert a non-DEFAULT value into column \"{name}\""),
+    )
+    .with_detail(generated_always_detail(name))
+    .with_hint("Use OVERRIDING SYSTEM VALUE to override.")
+}
+
+fn generated_always_detail(name: &str) -> String {
+    format!("Column \"{name}\" is an identity column defined as GENERATED ALWAYS.")
+}
+
+fn check_updated_to_default(
+    table: &TableDefinition,
+    targets: &[usize],
+    assignments: &[(Name, InsertValue)],
+) -> SqlResult<()> {
+    for (&target, (_, value)) in targets.iter().zip(assignments) {
+        if matches!(value, InsertValue::Expr(_)) && table.is_generated_always(target) {
+            let name = &table.columns[target].name;
+            return Err(SqlError::new(
+                SqlState::GENERATED_ALWAYS,
+                format!("column \"{name}\" can only be updated to DEFAULT"),
+            )
+            .with_detail(generated_always_detail(name)));
+        }
+    }
+    Ok(())
 }
 
 fn identity_column_error(code: u16, message: String, table: &Name) -> SqlError {
@@ -1599,6 +1668,9 @@ pub(crate) fn insert_literals(
             "INSERT has more expressions than target columns",
             insert.table.name.position,
         ));
+    }
+    if let Some(column) = (0..insert.width).find(|&column| table.is_generated_always(column)) {
+        return Err(generated_always_given(&table, column));
     }
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
@@ -2997,6 +3069,7 @@ pub(crate) fn update(
             check_columns(expr, scope)?;
         }
     }
+    check_updated_to_default(&table, &targets, &update.assignments)?;
     if let Some(filter) = &update.filter {
         reject_aggregates(filter, "WHERE")?;
         check_columns(filter, scope)?;

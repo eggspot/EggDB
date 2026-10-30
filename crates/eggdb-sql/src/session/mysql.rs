@@ -89,7 +89,22 @@ fn create_statement(table: &TableSchema) -> String {
         lines.push(format!("  PRIMARY KEY ({})", key.join(",")));
     }
     for index in &table.indexes {
-        let columns: Vec<String> = index.columns.iter().map(|name| backticked(name)).collect();
+        let columns: Vec<String> = index
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(position, name)| {
+                let descending = index
+                    .orders
+                    .get(position)
+                    .is_some_and(|order| order.descending);
+                format!(
+                    "{}{}",
+                    backticked(name),
+                    if descending { " DESC" } else { "" }
+                )
+            })
+            .collect();
         lines.push(format!(
             "  {}KEY {} ({})",
             if index.unique { "UNIQUE " } else { "" },
@@ -487,16 +502,25 @@ fn index_columns() -> Vec<OutputColumn> {
 }
 
 fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
-    let primary = (!table.primary_key.is_empty()).then_some(("PRIMARY", true, &table.primary_key));
-    let keys = primary.into_iter().chain(
-        table
-            .indexes
-            .iter()
-            .map(|index| (index.name.as_str(), index.unique, &index.columns)),
-    );
+    let primary_orders: &[crate::schema::IndexColumnOrder] = &[];
+    let primary = (!table.primary_key.is_empty()).then_some((
+        "PRIMARY",
+        true,
+        &table.primary_key,
+        primary_orders,
+    ));
+    let keys = primary.into_iter().chain(table.indexes.iter().map(|index| {
+        (
+            index.name.as_str(),
+            index.unique,
+            &index.columns,
+            index.orders.as_slice(),
+        )
+    }));
     let mut rows = Vec::new();
-    for (name, unique, columns) in keys {
+    for (name, unique, columns, orders) in keys {
         for (position, column) in columns.iter().enumerate() {
+            let descending = orders.get(position).is_some_and(|order| order.descending);
             let nullable = table
                 .columns
                 .iter()
@@ -509,7 +533,7 @@ fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
                 text(name),
                 Value::BigInt(position as i64 + 1),
                 text(column),
-                text("A"),
+                text(if descending { "D" } else { "A" }),
                 Value::Null,
                 Value::Null,
                 Value::Null,

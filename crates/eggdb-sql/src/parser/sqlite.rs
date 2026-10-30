@@ -457,6 +457,7 @@ impl<'t> Parser<'t> {
             primary_key: false,
             default: None,
             auto_increment: false,
+            generated_always: false,
             unique: None,
             constraints: Vec::new(),
             comment: None,

@@ -457,6 +457,7 @@ mod tests {
             name: "app\0t_a_idx".into(),
             unique: false,
             columns: vec![0],
+            ..crate::encoding::IndexDefinition::default()
         }];
         assert!(damaged(&index));
         let mut key = schema_table();

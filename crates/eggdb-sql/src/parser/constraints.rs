@@ -3,6 +3,7 @@ use crate::ast::{
     AlterAction, AlterSequence, AlterTable, ColumnDefinition, ConstraintKind, ConstraintSpec,
     CreateSequence, ForeignKeySpec, Name, ReferentialAction, SequenceOptions, Statement,
 };
+use crate::encoding::IdentityGeneration;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 
@@ -977,10 +978,13 @@ impl Parser<'_> {
     }
 
     fn add_identity_action(&mut self, column: Name) -> SqlResult<AlterAction> {
-        if !self.take_word("always") {
+        let generation = if self.take_word("always") {
+            IdentityGeneration::Always
+        } else {
             self.expect_word("by")?;
             self.expect_word("default")?;
-        }
+            IdentityGeneration::ByDefault
+        };
         self.expect_word("as")?;
         if self.peek_kind() == &TokenKind::LeftParen {
             return Err(self.not_supported("generated columns"));
@@ -1004,6 +1008,7 @@ impl Parser<'_> {
         }
         Ok(AlterAction::AddIdentity {
             column,
+            generation,
             sequence,
             options,
         })

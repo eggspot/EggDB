@@ -1051,7 +1051,14 @@ fn index_column_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
                             "char_length",
                             number(character_length(column.sql_type).unwrap_or(0)),
                         )
-                        .set("descend", text("ASC"))
+                        .set(
+                            "descend",
+                            text(if index.sort_options.is_descending(position) {
+                                "DESC"
+                            } else {
+                                "ASC"
+                            }),
+                        )
                         .done(),
                 );
             }

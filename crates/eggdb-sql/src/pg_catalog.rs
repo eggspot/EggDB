@@ -23,7 +23,7 @@ pub(crate) use functions::{
 pub(crate) use oids::{OidRequest, Space as OidSpace, assign as assign_oids};
 pub(crate) use oids::{builtin_type, format_type, type_modifier};
 pub(crate) use relations::generated_rows;
-pub(crate) use relations::{index_columns, index_is_unique};
+pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{
     CatalogSnapshot, ConstraintSource, IndexSource, RelationEntry, RelationKind, RelationSource,
     current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
