@@ -987,8 +987,9 @@ SELECT OBJECT_ID('sales.orders'), SERVERPROPERTY('ProductVersion'), DB_NAME(), S
   `sys.foreign_key_columns`, `sys.key_constraints`, `sys.default_constraints`,
   `sys.check_constraints`, `sys.identity_columns`, `sys.sequences`, `sys.databases` and
   `sys.sql_modules` with SQL Server 2022's columns, and `sys.extended_properties` with the
-  `MS_Description` of schemas, tables, views and columns; `sys.procedures`, `sys.parameters` and
-  `sys.triggers` are empty. They are built for each statement that
+  `MS_Description` of schemas, tables, views and columns, `sys.triggers` with every trigger (also
+  in `sys.objects` as type `TR` and in `sys.sql_modules` with its text); `sys.procedures` and
+  `sys.parameters` are empty. They are built for each statement that
   names them from the stored tables, views and sequences, read-only, and reached only with their
   schema (`sys.tables`, not `tables`).
 - **`INFORMATION_SCHEMA`**: `SCHEMATA`, `TABLES`, `COLUMNS`, `VIEWS`, `VIEW_TABLE_USAGE`,
@@ -1784,6 +1785,46 @@ name` and `DROP PRIMARY KEY`.
 thousand rows at a time within the statement's transaction; `ADD COLUMN` with a default rewrites
 the rows in place; the other actions change only the definition (D114).
 
+## Triggers
+
+Triggers run in the dialect they were written in, on the same tables every dialect sees (D157).
+A trigger's changes are part of the statement that fired it: they commit with it, roll back with
+it, and a statement that fails in a trigger leaves nothing behind.
+
+- **SQLite:** `CREATE TRIGGER [IF NOT EXISTS] name [BEFORE | AFTER | INSTEAD OF] INSERT | DELETE |
+  UPDATE [OF columns] ON table [FOR EACH ROW] [WHEN condition] BEGIN ... END`, with `NEW.column`
+  and `OLD.column`, `RAISE(IGNORE)` (skips the row), `RAISE(ABORT | FAIL | ROLLBACK, message)`,
+  and `INSTEAD OF` triggers that make a view writable. Triggers do not fire themselves again
+  (SQLite's `recursive_triggers` is off).
+- **MySQL:** `CREATE TRIGGER [IF NOT EXISTS] name BEFORE | AFTER INSERT | UPDATE | DELETE ON
+  table FOR EACH ROW [FOLLOWS | PRECEDES other] body`, where the body is one statement or a
+  `BEGIN ... END` block with `DECLARE`, `SET` (also `SET NEW.column = ...` in a `BEFORE`
+  trigger), `IF ... ELSEIF ... ELSE ... END IF`, `WHILE ... DO ... END WHILE` and
+  `SIGNAL SQLSTATE ... SET MESSAGE_TEXT = ...`. `INSERT ... ON DUPLICATE KEY UPDATE` fires the
+  `UPDATE` triggers for the rows it updates, and `REPLACE` the `INSERT` triggers. A trigger
+  that changes the table its statement is changing is error 1442, as in MySQL. `SHOW TRIGGERS
+  [LIKE 'table']` and `SHOW CREATE TRIGGER` list them.
+- **SQL Server:** `CREATE [OR ALTER] TRIGGER name ON table | view {FOR | AFTER | INSTEAD OF}
+  {INSERT, UPDATE, DELETE} AS batch`, `ALTER TRIGGER`, `DROP TRIGGER [IF EXISTS]`,
+  `ENABLE | DISABLE TRIGGER {name | ALL} ON table` and `ALTER TABLE ... {ENABLE | DISABLE}
+  TRIGGER`. The body is a Transact-SQL batch on the batch interpreter (D137) with the `inserted`
+  and `deleted` tables and `UPDATE(column)`; triggers fire once per statement, after it, and an
+  `INSTEAD OF` trigger replaces the statement. `CREATE TRIGGER` must start its batch (error 111).
+  `sys.triggers` lists them.
+- **PostgreSQL:** `CREATE [OR REPLACE] TRIGGER name {BEFORE | AFTER | INSTEAD OF} event [OR
+  ...] ON table [REFERENCING {OLD | NEW} TABLE AS name] [FOR EACH {ROW | STATEMENT}] [WHEN
+  (condition)] EXECUTE {FUNCTION | PROCEDURE} name(arguments)`, `DROP TRIGGER [IF EXISTS] name ON
+  table` and `ALTER TABLE ... {ENABLE | DISABLE} TRIGGER`. A trigger function is a PL/pgSQL
+  function (`RETURNS trigger`; PostgreSQL has no `LANGUAGE sql` trigger functions), which
+  arrives with 3.14: until then `CREATE TRIGGER` reports the function as missing (`42883`).
+  `pg_trigger`, `pg_get_triggerdef` and `information_schema.triggers` list triggers of every
+  dialect.
+
+Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash. Dropping
+a table or view drops its triggers, and renaming one keeps them. Not yet: temporary and
+constraint triggers, SQL Server DDL and logon triggers, Oracle triggers (3.16), and triggers on
+`TRUNCATE` (PostgreSQL only, with 3.14's trigger functions).
+
 ## Schemas, views and comments
 
 **Schemas** (D116), in the PostgreSQL dialect: `CREATE SCHEMA [IF NOT EXISTS] name
@@ -2009,8 +2050,9 @@ relation X (`pg_catalog` is searched first unless `search_path` lists it after a
 `pg_class`, `pg_attribute`, `pg_type`, `pg_namespace`, `pg_index`, `pg_constraint`,
 `pg_attrdef`, `pg_description`, `pg_database`, `pg_roles`, `pg_am`, `pg_collation`,
 `pg_sequence`, `pg_depend`, `pg_tablespace`, `pg_settings` (the session's settings, one row
-each) and `pg_timezone_names` (every region of the time zone database, D153), and the empty `pg_inherits`, `pg_policy`, `pg_statistic_ext`, `pg_publication`,
-`pg_publication_rel`, `pg_publication_namespace`, `pg_trigger`, `pg_rewrite`,
+each), `pg_timezone_names` (every region of the time zone database, D153) and `pg_trigger`
+(every trigger, of any dialect, with `tgtype`, `tgenabled`, `tgattr` and `tgargs`), and the empty `pg_inherits`, `pg_policy`, `pg_statistic_ext`, `pg_publication`,
+`pg_publication_rel`, `pg_publication_namespace`, `pg_rewrite`,
 `pg_auth_members`, `pg_opclass`, `pg_enum` and `pg_range`, and `pg_proc` with the array
 functions `array_in`, `array_out`, `array_recv` and `array_send` (D135), each with PostgreSQL
 16's columns and column types. `information_schema`'s views are catalog relations too: see
@@ -2070,8 +2112,9 @@ only the catalog's `pg_node_tree` columns, as PostgreSQL does. The functions:
 `pg_relation_is_publishable`, `pg_partition_ancestors` (no rows: there are no partitions),
 `pg_encoding_to_char`, `obj_description`, `col_description`, `pg_get_serial_sequence` (the
 sequence a `serial` column owns, schema-qualified, or NULL), `to_regclass` and `to_regtype`
-(NULL for a name that does not exist), `generate_subscripts`, and `pg_get_triggerdef`,
-`pg_get_ruledef`, `pg_get_statisticsobjdef_columns` and `shobj_description`, which return NULL.
+(NULL for a name that does not exist), `generate_subscripts`, `pg_get_triggerdef` (the
+trigger's `CREATE TRIGGER` as written), and `pg_get_ruledef`, `pg_get_statisticsobjdef_columns`
+and `shobj_description`, which return NULL.
 `regproc` takes and shows the name of the built-in functions EggDB names: `array_in`,
 `array_out`, `array_recv` and `array_send`, the `typinput`, `typoutput`, `typreceive` and
 `typsend` of every array type in `pg_type`; another name is `42883`.
@@ -2305,6 +2348,17 @@ NULL` flag byte, an optional default text (`0`, or `1` and the text), and its ch
 its name, its expression text over `VALUE`, and a byte `1` when validated). Every statement that
 names a type loads them once, and a damaged record is an error naming it, never a panic.
 
+A table's or view's triggers are one record under the catalog prefix, `0x0B` and the table's
+internal name: record version `1`, the count of triggers (1 to 1024), then each trigger in firing
+order: its name, its dialect code, its timing (`1` BEFORE, `2` AFTER, `3` INSTEAD OF), its events
+(bits: `1` INSERT, `2` UPDATE, `4` DELETE, `8` TRUNCATE), its level (`1` row, `2` statement), a
+flag byte (`1` enabled, `2` has a condition, `4` an old transition table, `8` a new one), its
+`UPDATE OF` columns (count; each a name), the condition text and transition table names its flags
+announce, its action (`1` SQLite or MySQL statements, `2` a Transact-SQL batch, `3` a function
+name and its arguments) and the whole `CREATE TRIGGER` text. A record whose trigger does not fit
+its dialect (a Transact-SQL row trigger, say) is damaged, and a damaged record is an error naming
+it, never a panic.
+
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
 point is IEEE 754 with the sign handled so negatives sort first (`-0` stored as `0`, every NaN as
@@ -2361,7 +2415,8 @@ condition on its plain columns is pushed into it (D155), so a lookup through a v
 table's primary key and indexes, but a view with grouping, aggregates, `DISTINCT`, a limit, a
 window or a computed column used by the condition, or one on the NULL side of an outer join, is
 still computed in full before the condition filters it; a view that is not automatically
-updatable has no `INSTEAD OF` triggers or rules to make it so, there are no materialized or
+updatable has no rules to make it so (its `INSTEAD OF` triggers run PL/pgSQL functions, 3.14),
+there are no materialized or
 recursive views, renaming a table
 or view that a view uses is `0A000` (PostgreSQL follows the rename), a view resolves its names
 with the search path it was created with when it is used, where PostgreSQL binds them once, a
@@ -2617,8 +2672,9 @@ And more, not in the suite yet:
   creating one makes no index on the child's columns (InnoDB makes one).
 
 ## Known differences from SQLite
-Views are read-only (SQLite's are too, without `INSTEAD OF` triggers), `CREATE TEMP VIEW` and
-the `temp` schema are `0A000`, and `sqlite_schema` does not list views yet.
+Views are read-only unless an `INSTEAD OF` trigger makes them writable, as in SQLite,
+`CREATE TEMP VIEW`, `CREATE TEMP TRIGGER` and the `temp` schema are `0A000`, and
+`sqlite_schema` does not list views yet (it lists tables, indexes and triggers).
 
 The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 234 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
@@ -2658,7 +2714,7 @@ And more, not in the suite yet:
 - `PRAGMA user_version`, `foreign_keys`, `journal_mode` and `synchronous` are per session, not
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
-  generated columns, views, triggers, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
+  generated columns, views, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
   `group_concat` and `total`, the JSON and math functions, `GLOB` character
   classes and bare columns in aggregate queries.
 
@@ -2796,7 +2852,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   name. Divide by zero and arithmetic overflow end the batch, where SQL Server ends only the
   statement.
 - Batch logic (D137): cursors (`DECLARE CURSOR`), `GOTO` and labels, `WAITFOR`, stored
-  procedures, functions and triggers (3.15), `EXEC @status = procedure`, `INSERT ... EXEC` of
+  procedures and functions (3.15), DDL triggers, `EXEC @status = procedure`, `INSERT ... EXEC` of
   dynamic SQL, `SET eggdb.dialect` inside a block or dynamic SQL, and a `DECLARE` whose value
   reads a variable the same `DECLARE` declares are 40517. A `SELECT` whose value reads a variable
   the same `SELECT` assigns (`SELECT @s = @s + name FROM t`) is 40517; `SELECT @s += name FROM t`

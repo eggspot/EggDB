@@ -634,7 +634,9 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   (D147). Version 10 (D152) is written only for tables with an array, enum, composite or range
   column, a column of a domain, a `NOT VALID` constraint or an `INITIALLY DEFERRED` foreign key;
   user-defined types are records of their own (catalog prefix, `0x0A`, the type's name), with
-  record version 1. Both are described in [sql.md](sql.md) "How SQL is stored".
+  record version 1. Both are described in [sql.md](sql.md) "How SQL is stored". Triggers are
+  one record per table or view (catalog prefix, `0x0B`, the table's internal name) holding all
+  its triggers in firing order, with record version 1 (D157).
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.

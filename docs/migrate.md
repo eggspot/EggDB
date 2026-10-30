@@ -220,7 +220,8 @@ known differences (restored, but not as the source had it)
   line 377  FK_OrderLines_Products  not created: existing rows violate it (...)
 ```
 
-Skipped objects (procedures, functions, triggers, synonyms, users and roles, batch logic other
+Triggers are created and enabled or disabled as the script says (DDL triggers `ON DATABASE` are
+skipped). Skipped objects (procedures, functions, synonyms, users and roles, batch logic other
 than existence guards) are listed with their line; `USE`, `CREATE DATABASE`, `ALTER DATABASE`,
 `GRANT`, `PRINT`, alias types, extended properties other than `MS_Description` and the like are
 counted as ignored; sqlcmd's commands are listed as client commands. Sequences are counted with
@@ -229,7 +230,7 @@ the other objects created, and `MS_Description` properties with the comments.
 ### Limits
 
 - **Never read:** `.bak`, `.trn`, BACPAC, DACPAC, `.mdf`, `.ndf`, `.ldf` (above).
-- **Not run:** procedures, functions, triggers, synonyms and table types; users, logins, roles
+- **Not run:** procedures, functions, DDL triggers, synonyms and table types; users, logins, roles
   and permissions; rules and bound defaults; Service Broker; full-text, XML, spatial and
   columnstore indexes, and XML schema collections; Transact-SQL batch logic (`IF`, `WHILE`,
   `DECLARE`, `BEGIN ... END`) other than SSMS's *Check for object existence* guards, which run

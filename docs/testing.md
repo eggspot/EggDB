@@ -297,6 +297,16 @@ bound, stops a runaway recursion and a doubling one by their limits, keeps `MINU
 `ANY`, `INTERSECT ALL` and parenthesised operands in their dialects, and fuzzes 20,000
 statements built from subquery, `WITH`, set-operation and join fragments in each dialect.
 
+## Triggers (D157)
+`crates/eggdb-sql/src/triggers/tests.rs` runs each dialect's trigger examples (SQLite's `WHEN`,
+`UPDATE OF`, `RAISE`, `INSTEAD OF` views; MySQL's `SET NEW`, compound bodies, `SIGNAL`,
+`PRECEDES` and upserts; SQL Server's `inserted`/`deleted`, `UPDATE(col)`, `INSTEAD OF` and
+`DISABLE TRIGGER`), the catalogs that list them, the trigger record cut at every length and with
+every byte flipped (an error, never a panic), and 20,000 statements built from trigger fragments
+in each dialect. `a_killed_process_keeps_a_triggers_changes_with_its_statement` in
+`crates/eggdb/tests/sql.rs` kills `eggdb sql` while it inserts into a table whose trigger writes a
+log and checks that the table and the log always hold the same rows.
+
 ## Typed values: numbers, dates and JSON (D111)
 The exact decimal is checked against a schoolbook decimal reference written in its tests (400
 random pairs of up to 80 digits through `+ - * / %`) and against `i128` (3,000 pairs, with their
