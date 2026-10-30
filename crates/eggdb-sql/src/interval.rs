@@ -553,6 +553,37 @@ fn iso_8601(text: &str) -> Result<Totals, Failure> {
 }
 
 impl Interval {
+    /// PostgreSQL 17's `infinity` interval, later than every finite one.
+    pub const INFINITY: Self = Self {
+        months: i32::MAX,
+        days: i32::MAX,
+        micros: i64::MAX,
+    };
+
+    /// PostgreSQL 17's `-infinity` interval, earlier than every finite one.
+    pub const NEG_INFINITY: Self = Self {
+        months: i32::MIN,
+        days: i32::MIN,
+        micros: i64::MIN,
+    };
+
+    /// Whether the interval is neither `infinity` nor `-infinity`.
+    pub fn is_finite(self) -> bool {
+        self != Self::INFINITY && self != Self::NEG_INFINITY
+    }
+
+    fn finite_or_out_of_range(self) -> SqlResult<Self> {
+        if self.is_finite() {
+            Ok(self)
+        } else {
+            Err(out_of_range())
+        }
+    }
+
+    fn sign(self) -> Ordering {
+        self.span().cmp(&0)
+    }
+
     /// The interval's length in microseconds with a month counted as 30 days, the measure
     /// PostgreSQL compares and hashes intervals by.
     pub fn span(self) -> i128 {
@@ -583,6 +614,9 @@ impl Interval {
             return Err(syntax(text.get(..64).unwrap_or("")));
         }
         let trimmed = text.trim();
+        if let Some(infinite) = infinite_named(trimmed) {
+            return Ok(infinite);
+        }
         let iso = trimmed
             .strip_prefix(['P', 'p'])
             .is_some_and(|rest| !rest.is_empty());
@@ -596,6 +630,9 @@ impl Interval {
             Err(Failure::Syntax) => return Err(syntax(text)),
             Err(Failure::Range) => return Err(field_overflow(text)),
         };
+        if !interval.is_finite() {
+            return Err(field_overflow(text));
+        }
         Ok(interval)
     }
 
@@ -604,6 +641,9 @@ impl Interval {
         fields: Option<IntervalFields>,
         precision: Option<u8>,
     ) -> SqlResult<Self> {
+        if !self.is_finite() {
+            return Ok(self);
+        }
         let mut result = self;
         let truncate_time = |micros: i64, unit: i64| micros / unit * unit;
         match fields {
@@ -641,7 +681,13 @@ impl Interval {
     }
 
     pub(crate) fn checked_add(self, other: Self) -> SqlResult<Self> {
-        Ok(Self {
+        match (self.is_finite(), other.is_finite()) {
+            (true, true) => {}
+            (false, false) if self != other => return Err(out_of_range()),
+            (false, _) => return Ok(self),
+            (true, false) => return Ok(other),
+        }
+        Self {
             months: self
                 .months
                 .checked_add(other.months)
@@ -651,19 +697,33 @@ impl Interval {
                 .micros
                 .checked_add(other.micros)
                 .ok_or_else(out_of_range)?,
-        })
+        }
+        .finite_or_out_of_range()
     }
 
     pub(crate) fn negated(self) -> SqlResult<Self> {
-        Ok(Self {
+        if self == Self::INFINITY {
+            return Ok(Self::NEG_INFINITY);
+        }
+        if self == Self::NEG_INFINITY {
+            return Ok(Self::INFINITY);
+        }
+        Self {
             months: self.months.checked_neg().ok_or_else(out_of_range)?,
             days: self.days.checked_neg().ok_or_else(out_of_range)?,
             micros: self.micros.checked_neg().ok_or_else(out_of_range)?,
-        })
+        }
+        .finite_or_out_of_range()
     }
 
     pub(crate) fn checked_sub(self, other: Self) -> SqlResult<Self> {
-        Ok(Self {
+        match (self.is_finite(), other.is_finite()) {
+            (true, true) => {}
+            (false, false) if self == other => return Err(out_of_range()),
+            (false, _) => return Ok(self),
+            (true, false) => return other.negated(),
+        }
+        Self {
             months: self
                 .months
                 .checked_sub(other.months)
@@ -673,21 +733,58 @@ impl Interval {
                 .micros
                 .checked_sub(other.micros)
                 .ok_or_else(out_of_range)?,
-        })
+        }
+        .finite_or_out_of_range()
     }
 
     pub(crate) fn multiply(self, factor: f64) -> SqlResult<Self> {
+        if factor.is_nan() {
+            return Err(out_of_range());
+        }
+        if !self.is_finite() {
+            return match factor.partial_cmp(&0.0) {
+                Some(Ordering::Greater) => Ok(self),
+                Some(Ordering::Less) => self.negated(),
+                _ => Err(out_of_range()),
+            };
+        }
+        if factor.is_infinite() {
+            let positive = factor > 0.0;
+            return match self.sign() {
+                Ordering::Equal => Err(out_of_range()),
+                Ordering::Greater if positive => Ok(Self::INFINITY),
+                Ordering::Less if !positive => Ok(Self::INFINITY),
+                _ => Ok(Self::NEG_INFINITY),
+            };
+        }
         self.scaled(|value| value * factor)
+            .and_then(Self::finite_or_out_of_range)
     }
 
     pub(crate) fn divide(self, divisor: f64) -> SqlResult<Self> {
+        if divisor.is_nan() {
+            return Err(out_of_range());
+        }
         if divisor == 0.0 {
             return Err(SqlError::new(
                 SqlState::DIVISION_BY_ZERO,
                 "division by zero",
             ));
         }
+        if !self.is_finite() {
+            return if divisor.is_infinite() {
+                Err(out_of_range())
+            } else if divisor < 0.0 {
+                self.negated()
+            } else {
+                Ok(self)
+            };
+        }
+        if divisor.is_infinite() {
+            return Ok(Self::default());
+        }
         self.scaled(|value| value / divisor)
+            .and_then(Self::finite_or_out_of_range)
     }
 
     fn scaled(self, apply: impl Fn(f64) -> f64) -> SqlResult<Self> {
@@ -724,6 +821,9 @@ impl Interval {
     }
 
     pub(crate) fn justify_days(self) -> SqlResult<Self> {
+        if !self.is_finite() {
+            return Ok(self);
+        }
         let whole_months = self.days / DAYS_PER_MONTH as i32;
         let mut months = self
             .months
@@ -745,6 +845,9 @@ impl Interval {
     }
 
     pub(crate) fn justify_hours(self) -> SqlResult<Self> {
+        if !self.is_finite() {
+            return Ok(self);
+        }
         let whole_days = self.micros / MICROS_PER_DAY;
         let mut micros = self.micros - whole_days * MICROS_PER_DAY;
         let mut days = self
@@ -766,6 +869,9 @@ impl Interval {
     }
 
     pub(crate) fn justify_interval(self) -> SqlResult<Self> {
+        if !self.is_finite() {
+            return Ok(self);
+        }
         let per_month = DAYS_PER_MONTH as i32;
         let mut months = self.months;
         let mut days = self.days;
@@ -802,6 +908,39 @@ impl Interval {
             days,
             micros,
         })
+    }
+
+    pub(crate) fn infinite_extract(self, name: &str) -> SqlResult<Option<f64>> {
+        let field = datetime::Field::named(name).ok_or_else(|| {
+            SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!("unit \"{name}\" not recognized for type interval"),
+            )
+        })?;
+        let infinite = if self.sign() == Ordering::Less {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        match field {
+            datetime::Field::Epoch
+            | datetime::Field::Hour
+            | datetime::Field::Day
+            | datetime::Field::Year
+            | datetime::Field::Decade
+            | datetime::Field::Century
+            | datetime::Field::Millennium => Ok(Some(infinite)),
+            datetime::Field::Microseconds
+            | datetime::Field::Milliseconds
+            | datetime::Field::Second
+            | datetime::Field::Minute
+            | datetime::Field::Month
+            | datetime::Field::Quarter => Ok(None),
+            _ => Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                format!("unit \"{name}\" not supported for type interval"),
+            )),
+        }
     }
 
     pub(crate) fn extract(self, name: &str) -> SqlResult<Numeric> {
@@ -857,8 +996,24 @@ fn round_to_micro(value: f64) -> f64 {
     (value * 1_000_000.0).round_ties_even() / 1_000_000.0
 }
 
+fn infinite_named(text: &str) -> Option<Interval> {
+    if text.eq_ignore_ascii_case("infinity") || text.eq_ignore_ascii_case("+infinity") {
+        Some(Interval::INFINITY)
+    } else if text.eq_ignore_ascii_case("-infinity") {
+        Some(Interval::NEG_INFINITY)
+    } else {
+        None
+    }
+}
+
 impl fmt::Display for Interval {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == Self::INFINITY {
+            return out.write_str("infinity");
+        }
+        if *self == Self::NEG_INFINITY {
+            return out.write_str("-infinity");
+        }
         let years = i64::from(self.months / 12);
         let months = i64::from(self.months % 12);
         let mut written = false;
@@ -907,6 +1062,9 @@ impl fmt::Display for Interval {
 }
 
 pub(crate) fn add_to_timestamp(local: i64, interval: Interval) -> SqlResult<i64> {
+    if !interval.is_finite() {
+        return Err(datetime::timestamp_out_of_range());
+    }
     let mut micros = i128::from(local);
     if interval.months != 0 {
         let day = local.div_euclid(MICROS_PER_DAY);
@@ -1012,6 +1170,7 @@ pub(crate) fn age(first: i64, second: i64) -> SqlResult<Interval> {
 mod tests {
     use super::{Interval, IntervalFields, add_to_timestamp, age, between_timestamps};
     use crate::datetime::{days_from_civil, parse_timestamp};
+    use std::cmp::Ordering;
 
     fn interval(text: &str) -> Interval {
         Interval::parse(text, None).unwrap_or_else(|error| panic!("{text}: {error}"))
@@ -1163,7 +1322,10 @@ mod tests {
             "1 day 12:00:00"
         );
         assert!(interval("1 day").multiply(f64::NAN).is_err());
-        assert!(interval("1 day").multiply(f64::INFINITY).is_err());
+        assert_eq!(
+            interval("1 day").multiply(f64::INFINITY).ok(),
+            Some(Interval::INFINITY)
+        );
         assert!(interval("1 day").multiply(1e300).is_err());
         assert!(interval("1 day").divide(0.0).is_err());
         assert!(interval("1 day").divide(1e-300).is_err());
@@ -1317,6 +1479,48 @@ mod tests {
             let text = a.to_string();
             assert_eq!(Interval::parse(&text, None).unwrap(), a, "{text}");
         }
+    }
+
+    #[test]
+    fn infinite_intervals_read_print_compare_and_compute_as_postgresql_17_does() {
+        assert_eq!(interval("infinity"), Interval::INFINITY);
+        assert_eq!(interval(" +Infinity "), Interval::INFINITY);
+        assert_eq!(interval("-infinity"), Interval::NEG_INFINITY);
+        assert_eq!(shown("infinity"), "infinity");
+        assert_eq!(shown("-infinity"), "-infinity");
+        assert!(!Interval::INFINITY.is_finite());
+        assert!(interval("1 day").is_finite());
+        let huge = Interval {
+            months: i32::MAX,
+            days: i32::MAX,
+            micros: i64::MAX - 1,
+        };
+        assert_eq!(Interval::INFINITY.compare(huge), Ordering::Greater);
+        assert_eq!(Interval::NEG_INFINITY.compare(interval("-178000000 years")), Ordering::Less);
+        let day = interval("1 day");
+        assert_eq!(Interval::INFINITY.checked_add(day).ok(), Some(Interval::INFINITY));
+        assert_eq!(day.checked_sub(Interval::INFINITY).ok(), Some(Interval::NEG_INFINITY));
+        assert!(Interval::INFINITY.checked_add(Interval::NEG_INFINITY).is_err());
+        assert!(Interval::INFINITY.checked_sub(Interval::INFINITY).is_err());
+        assert_eq!(
+            Interval::INFINITY.checked_sub(Interval::NEG_INFINITY).ok(),
+            Some(Interval::INFINITY)
+        );
+        assert_eq!(Interval::INFINITY.negated().ok(), Some(Interval::NEG_INFINITY));
+        assert_eq!(Interval::INFINITY.multiply(-2.0).ok(), Some(Interval::NEG_INFINITY));
+        assert!(Interval::INFINITY.multiply(0.0).is_err());
+        assert!(Interval::default().multiply(f64::INFINITY).is_err());
+        assert_eq!(day.multiply(f64::NEG_INFINITY).ok(), Some(Interval::NEG_INFINITY));
+        assert_eq!(Interval::INFINITY.divide(4.0).ok(), Some(Interval::INFINITY));
+        assert!(Interval::INFINITY.divide(f64::INFINITY).is_err());
+        assert_eq!(day.divide(f64::INFINITY).ok(), Some(Interval::default()));
+        assert_eq!(Interval::INFINITY.justify_interval().ok(), Some(Interval::INFINITY));
+        assert_eq!(
+            Interval::INFINITY.with_modifier(Some(IntervalFields::Year), Some(0)).ok(),
+            Some(Interval::INFINITY)
+        );
+        assert!(add_to_timestamp(0, Interval::INFINITY).is_err());
+        assert!(Interval::parse("2147483647 mons 2147483647 days 2562047788:00:54.775807", None).is_err());
     }
 
     #[test]

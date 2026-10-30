@@ -19,6 +19,10 @@ fn shifted(value: &Value, by: Interval) -> Option<SqlResult<Value>> {
             .and_then(|micros| interval::add_to_timestamp(micros, by))
             .map(Value::Timestamp),
         Value::TimestampTz(micros) => shifted_instant(*micros, by).map(Value::TimestampTz),
+        Value::Time(_) | Value::TimeTz { .. } if !by.is_finite() => Err(SqlError::new(
+            SqlState::DATETIME_FIELD_OVERFLOW,
+            "cannot add infinite interval to time",
+        )),
         Value::Time(micros) => Ok(Value::Time(datetime::wrap_time(
             i128::from(*micros) + i128::from(by.micros),
         ))),
@@ -470,6 +474,19 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         }),
         ("localtime", []) => {
             local_now().map(|local| Value::Time(datetime::time_of_timestamp(local)))
+        }
+        ("extract" | "date_part", [Value::Text(field), Value::Interval(interval)])
+            if !interval.is_finite() =>
+        {
+            match interval.infinite_extract(field) {
+                Err(error) => Err(error),
+                Ok(None) => Ok(Value::Null),
+                Ok(Some(infinite)) if name == "date_part" => Ok(Value::Double(infinite)),
+                Ok(Some(_)) => Err(SqlError::new(
+                    SqlState::FEATURE_NOT_SUPPORTED,
+                    "numeric does not hold infinity yet; date_part gives it as double precision",
+                )),
+            }
         }
         ("extract" | "date_part", [Value::Text(field), value]) => {
             let extracted = match value {

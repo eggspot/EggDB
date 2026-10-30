@@ -4500,3 +4500,41 @@ SELECT name, abbrev, utc_offset, is_dst FROM pg_timezone_names WHERE name = 'Asi
 name|abbrev|utc_offset|is_dst
 Asia/Kolkata|IST|05:30:00|f
 SELECT 1
+
+chapter datatype-datetime, "Interval Input" and "Interval Output": PostgreSQL 17's infinity and -infinity
+rows
+SELECT interval 'infinity', '-infinity'::interval, isfinite(interval 'infinity'), interval 'infinity' > interval '1000000 years', - interval 'infinity'
+----
+interval|interval|isfinite|?column?|?column?
+infinity|-infinity|f|t|-infinity
+SELECT 1
+
+rows
+SELECT interval '1 day' * 'infinity'::float8, interval 'infinity' / 2, interval 'infinity' + interval '1 day', date_part('epoch', interval '-infinity'), extract(month from interval 'infinity')
+----
+?column?|?column?|?column?|date_part|extract
+infinity|infinity|infinity|-Infinity|NULL
+SELECT 1
+
+error 22008
+SELECT interval 'infinity' - interval 'infinity'
+
+error 22008
+SELECT interval '0' * 'infinity'::float8
+
+ok
+CREATE TABLE spans31 (id integer PRIMARY KEY, span interval)
+
+rows
+INSERT INTO spans31 VALUES (1, 'infinity'), (2, '-infinity'), (3, '1 day')
+----
+INSERT 0 3
+
+rows
+SELECT id, span FROM spans31 ORDER BY span
+----
+id|span
+2|-infinity
+3|1 day
+1|infinity
+SELECT 3

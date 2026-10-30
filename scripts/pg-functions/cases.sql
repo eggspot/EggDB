@@ -82,3 +82,6 @@ SET TimeZone = 'UTC';
 SELECT TIMESTAMP '2026-07-01 12:00:00' AT TIME ZONE 'America/New_York', '2026-07-01 12:00:00+00'::timestamptz AT TIME ZONE 'Asia/Kolkata', '2026-01-15 12:00:00+00'::timestamptz AT TIME ZONE 'Australia/Sydney';
 SELECT '2026-07-01 12:00:00 Europe/Paris'::timestamptz, make_timestamptz(2026, 1, 1, 12, 0, 0, 'Europe/Paris'), timezone('Asia/Kathmandu', '2026-07-01 00:00:00+00'::timestamptz);
 SELECT name, abbrev, utc_offset, is_dst FROM pg_timezone_names WHERE name = 'Asia/Kolkata';
+SELECT interval 'infinity', '-infinity'::interval, isfinite(interval 'infinity'), interval 'infinity' > interval '1000000 years', - interval 'infinity';
+SELECT interval '1 day' * 'infinity'::float8, interval 'infinity' / 2, interval 'infinity' + interval '1 day', date_part('epoch', interval '-infinity'), extract(month from interval 'infinity');
+SELECT interval 'infinity' - interval 'infinity';
