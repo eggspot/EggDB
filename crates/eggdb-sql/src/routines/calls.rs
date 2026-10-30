@@ -724,9 +724,18 @@ fn choose(
             }
         }
     }
+    let plsql = routines
+        .iter()
+        .any(|routine| routine.language == RoutineLanguage::PlSql);
     let Some((_, definition, slots)) = best else {
+        if plsql {
+            return Err(super::oracle::wrong_arguments(kind, name, routines));
+        }
         return Err(no_routine(kind, name, names, &values, routines));
     };
+    if tied && plsql {
+        return Err(super::oracle::too_many_matches(name));
+    }
     if tied {
         return Err(SqlError::new(
             SqlState::AMBIGUOUS_FUNCTION,
@@ -813,6 +822,9 @@ fn matched(
 }
 
 fn fit(value: &Value, target: SqlType) -> Option<usize> {
+    if target == SqlType::Dynamic {
+        return Some(1);
+    }
     match value.sql_type() {
         None => Some(1),
         Some(source) if source.without_modifier() == target.without_modifier() => Some(3),
@@ -852,6 +864,7 @@ fn input_arguments(
 fn default_dialect(definition: &RoutineDefinition) -> Dialect {
     match definition.dialect {
         Dialect::SqlServer => Dialect::SqlServer,
+        Dialect::Oracle => Dialect::Oracle,
         _ => Dialect::PostgreSql,
     }
 }
@@ -862,7 +875,10 @@ pub(crate) fn default_value(
     text: &str,
     dialect: Dialect,
 ) -> SqlResult<Value> {
-    let query = format!("SELECT {text}");
+    let query = match dialect {
+        Dialect::Oracle => format!("SELECT {text} FROM dual"),
+        _ => format!("SELECT {text}"),
+    };
     let tokens = tokenize_in(&query, dialect)?;
     let Statement::Select(select) = Parser::new(&query, &tokens)
         .in_dialect(dialect)

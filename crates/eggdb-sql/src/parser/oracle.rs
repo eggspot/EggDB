@@ -1094,6 +1094,35 @@ impl<'t> Parser<'t> {
         Ok(arguments)
     }
 
+    fn oracle_routine_call(&mut self, name: &Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut names: Vec<Option<String>> = Vec::new();
+        let mut arguments = Vec::new();
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                let parameter = self.named_argument_name()?;
+                if parameter.is_none() && names.iter().any(Option::is_some) {
+                    return Err(SqlError::syntax(
+                        "positional argument cannot follow named argument",
+                        self.position(),
+                    ));
+                }
+                names.push(parameter.map(|parameter| parameter.text));
+                arguments.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(crate::routines::marked_call(
+            name.text.clone(),
+            names,
+            arguments,
+            name.position,
+        ))
+    }
+
     fn oracle_trim(&mut self, name: &Name) -> SqlResult<Expr> {
         self.expect(&TokenKind::LeftParen)?;
         let (left, right) = if self.take_word("leading") {
@@ -1188,7 +1217,10 @@ impl<'t> Parser<'t> {
             "numtoyminterval" => ("oracle_numtoyminterval", 2, 2),
             "to_dsinterval" => ("oracle_to_dsinterval", 1, 1),
             "to_yminterval" => ("oracle_to_yminterval", 1, 1),
-            _ => return Err(invalid_identifier(&name.text, position)),
+            _ if crate::window::WindowFunction::named(&name.text).is_some() => {
+                return Err(invalid_identifier(&name.text, position));
+            }
+            _ => return self.oracle_routine_call(name).map(Some),
         };
         let arguments = self.oracle_arguments()?;
         if arguments.len() < least {

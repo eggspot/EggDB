@@ -4,7 +4,7 @@ use crate::error::{SqlError, SqlResult};
 use crate::execute::{self, TableCache};
 use crate::name_resolution::Binding;
 use crate::routines::{self, Prefetch};
-use crate::session::QueryResult;
+use crate::session::{PLSQL_BLOCK_TAG, QueryResult};
 use crate::settings::Settings;
 use crate::store::KeyValueWrite;
 
@@ -146,6 +146,16 @@ fn run_statement(
             routines::create_routine(writer, tables, &create, check)
         }
         Statement::DropRoutine(drop) => routines::drop_routines(writer, tables, &drop, dialect),
+        Statement::AlterRoutine(alter) if dialect == Dialect::Oracle => {
+            routines::alter_routine(writer, tables, &alter, dialect)
+        }
+        Statement::PlsqlBlock(block) => {
+            crate::plpgsql::run_anonymous_block(writer, tables, settings, &block)?;
+            Ok(QueryResult::command(PLSQL_BLOCK_TAG))
+        }
+        Statement::CreatePackage(create) => crate::plsql::create_package(writer, tables, &create),
+        Statement::DropPackage(drop) => crate::plsql::drop_package(writer, &drop),
+        Statement::AlterPackage(alter) => crate::plsql::alter_package(&*writer, &alter),
         Statement::Ignored { tag, notice } => {
             let result = QueryResult::command(tag);
             Ok(match notice {

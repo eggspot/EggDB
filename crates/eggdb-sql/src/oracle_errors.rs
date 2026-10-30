@@ -108,6 +108,9 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
                 .map_or(String::new(), |(function, _)| function.to_ascii_uppercase());
             Some((904, format!("\"{function}\": invalid identifier")))
         }
+        "42883" if message.starts_with("procedure ") => {
+            Some((6576, "not a valid function or procedure name".to_owned()))
+        }
         "42702" => Some((918, "column ambiguously defined".to_owned())),
         "42701" => Some((957, "duplicate column name".to_owned())),
         "42P16" if message.starts_with("multiple primary keys") => {

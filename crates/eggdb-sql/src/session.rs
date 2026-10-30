@@ -27,6 +27,7 @@ use crate::mysql_errors::{self, Warning};
 use crate::name_resolution::Binding;
 use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
 use crate::plan_cache::CachedStatement;
+use crate::plpgsql::TransactionEnd;
 use crate::sequences::{self, SequenceAdvance, SessionSequences};
 use crate::settings::{DIALECT_SETTING, Settings};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
@@ -307,7 +308,7 @@ fn inline_data_start(text: &str, ranges: &[std::ops::Range<usize>], stop: CopySt
 }
 
 const NO_TRANSACTION_WARNING: &str = "WARNING:  there is no transaction in progress";
-const PLSQL_BLOCK_TAG: &str = "PL/SQL BLOCK";
+pub(crate) const PLSQL_BLOCK_TAG: &str = "PL/SQL BLOCK";
 
 fn aborted_block() -> SqlError {
     SqlError::new(
@@ -2268,7 +2269,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::AlterRoutine(alter) => self.write("ALTER FUNCTION", |writer, tables| {
                 crate::routines::alter_routine(writer, tables, alter, dialect)
             }),
-            Statement::Call(call) => self.write("CALL", |writer, tables| {
+            Statement::Call(call) => self.write_plsql("CALL", |writer, tables| {
                 for argument in &mut call.arguments {
                     binding.condition(&*writer, tables, argument)?;
                 }
@@ -2277,7 +2278,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Do(block) => self.write("DO", |writer, tables| {
                 crate::routines::run_do(writer, tables, &settings, &block.code)
             }),
-            Statement::PlsqlBlock(block) => self.write(PLSQL_BLOCK_TAG, |writer, tables| {
+            Statement::PlsqlBlock(block) => self.write_plsql(PLSQL_BLOCK_TAG, |writer, tables| {
                 crate::plpgsql::run_anonymous_block(writer, tables, &settings, block)?;
                 Ok(QueryResult::command(PLSQL_BLOCK_TAG))
             }),
@@ -2461,6 +2462,43 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 )
             }
         }
+    }
+
+    fn write_plsql(
+        &mut self,
+        command: &str,
+        body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache) -> SqlResult<QueryResult>,
+    ) -> SqlResult<QueryResult> {
+        if !self.oracle() {
+            return self.write(command, body);
+        }
+        let _ = crate::plpgsql::take_transaction_end();
+        let mut ended = None;
+        let mut rolled_back = None;
+        let outcome = self.write(command, |writer, tables| {
+            let outcome = body(writer, tables);
+            ended = crate::plpgsql::take_transaction_end();
+            let result = outcome?;
+            if ended == Some(TransactionEnd::Rollback) {
+                rolled_back = Some(result);
+                return Err(SqlError::new(
+                    SqlState::TRANSACTION_ROLLBACK,
+                    "the PL/SQL unit rolled back its transaction",
+                ));
+            }
+            Ok(result)
+        });
+        if let Some(result) = rolled_back {
+            if matches!(self.block, Block::Writing(_)) {
+                self.rollback()?;
+            }
+            return Ok(result);
+        }
+        let result = outcome?;
+        if ended == Some(TransactionEnd::Commit) && matches!(self.block, Block::Writing(_)) {
+            self.commit()?;
+        }
+        Ok(result)
     }
 
     fn write(

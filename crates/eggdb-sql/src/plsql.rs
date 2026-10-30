@@ -2,6 +2,8 @@ mod exceptions;
 mod packages;
 
 #[cfg(test)]
+mod call_tests;
+#[cfg(test)]
 mod collection_tests;
 #[cfg(test)]
 mod compile_tests;

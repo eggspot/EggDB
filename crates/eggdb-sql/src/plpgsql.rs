@@ -18,8 +18,8 @@ pub(crate) use conditions::{condition_name, condition_states};
 pub(crate) use frame::RoutineFrame;
 pub(crate) use raise::take_raised_notices;
 pub(crate) use run::{
-    Call, Returned, TriggerCall, invoke, invoke_read_only, local_program, local_routines,
-    run_anonymous_block, run_inline, take_transaction_end,
+    Call, Returned, TransactionEnd, TriggerCall, invoke, invoke_read_only, local_program,
+    local_routines, run_anonymous_block, run_inline, take_transaction_end,
 };
 pub(crate) use writes::ReadOnlyWrite;
 

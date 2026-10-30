@@ -1,11 +1,17 @@
 use super::{RoutineDefinition, RoutineKind, compiled_program, resolve, save, stored};
 use crate::ast::{AlterRoutine, CreateRoutine, DropRoutine};
 use crate::dialect::Dialect;
-use crate::error::SqlResult;
+use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
+use crate::lexer::swap_uniform_case;
 use crate::plsql::{name_in_use, object_missing};
+use crate::schemas::base_name;
 use crate::session::QueryResult;
 use crate::store::{KeyValueRead, KeyValueWrite};
+use std::sync::Arc;
+
+const CALL_ERROR_CODE: u16 = 6553;
+const NOT_CALLABLE_CODE: u16 = 6576;
 
 pub(super) fn create_routine(
     writer: &mut dyn KeyValueWrite,
@@ -75,4 +81,37 @@ pub(super) fn alter_routine(
     };
     compiled_program(tables, &routine)?;
     Ok(QueryResult::command(format!("ALTER {}", kind.keyword())))
+}
+
+pub(super) fn wrong_arguments(
+    kind: RoutineKind,
+    name: &str,
+    routines: &[Arc<RoutineDefinition>],
+) -> SqlError {
+    let shown = swap_uniform_case(base_name(name));
+    let same_kind = routines.iter().any(|routine| routine.kind == kind);
+    match (same_kind, kind) {
+        (true, _) => call_error(format!(
+            "PLS-306: wrong number or types of arguments in call to '{shown}'"
+        )),
+        (false, RoutineKind::Function) => {
+            call_error(format!("PLS-221: '{shown}' is not a procedure or is undefined"))
+        }
+        (false, RoutineKind::Procedure) => SqlError::new(
+            SqlState::WRONG_OBJECT_TYPE,
+            "not a valid function or procedure name",
+        )
+        .with_oracle_code(NOT_CALLABLE_CODE),
+    }
+}
+
+pub(super) fn too_many_matches(name: &str) -> SqlError {
+    call_error(format!(
+        "PLS-307: too many declarations of '{}' match this call",
+        swap_uniform_case(base_name(name))
+    ))
+}
+
+fn call_error(message: String) -> SqlError {
+    SqlError::new(SqlState::UNDEFINED_FUNCTION, message).with_oracle_code(CALL_ERROR_CODE)
 }
