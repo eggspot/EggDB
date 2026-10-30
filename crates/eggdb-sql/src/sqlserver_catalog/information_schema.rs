@@ -1,3 +1,6 @@
+use super::routines::{
+    module_definition, parameter_facts, routine_definition, scalar_return_type,
+};
 use super::{
     CatalogRow, ObjectKind, ObjectSource, SqlServerColumnType, SqlServerObject, SqlServerObjects,
     column, default_definition, foreign_key_facts, int, optional_int, optional_small,
@@ -294,7 +297,8 @@ pub(super) fn rows(snapshot: &CatalogSnapshot, view: SqlServerInformation) -> Ve
             constraint_table_usage_rows(snapshot, objects)
         }
         SqlServerInformation::CheckConstraints => check_constraints_rows(snapshot, objects),
-        SqlServerInformation::Routines | SqlServerInformation::Parameters => Vec::new(),
+        SqlServerInformation::Routines => routines_rows(snapshot, catalog, objects),
+        SqlServerInformation::Parameters => parameters_rows(snapshot, catalog, objects),
     }
 }
 
@@ -873,4 +877,98 @@ fn check_constraints_rows(
             )
         })
         .collect()
+}
+
+const ROUTINE_DEFINITION_LENGTH: usize = 4000;
+
+fn routines_rows(
+    snapshot: &CatalogSnapshot,
+    catalog: &str,
+    objects: &SqlServerObjects,
+) -> Vec<Vec<Value>> {
+    objects
+        .routines()
+        .map(|object| {
+            let (routine_type, data_type) = match object.kind {
+                ObjectKind::Procedure => ("PROCEDURE", None),
+                ObjectKind::InlineTableFunction | ObjectKind::TableFunction => {
+                    ("FUNCTION", Some("TABLE"))
+                }
+                _ => (
+                    "FUNCTION",
+                    routine_definition(snapshot, object)
+                        .and_then(scalar_return_type)
+                        .map(|returned| returned.name.name()),
+                ),
+            };
+            let definition: Option<String> = module_definition(snapshot, objects, object)
+                .map(|text| text.chars().take(ROUTINE_DEFINITION_LENGTH).collect());
+            let row = located(
+                CatalogRow::new(ROUTINES_COLUMNS),
+                "specific",
+                catalog,
+                objects,
+                object,
+            );
+            located(row, "routine", catalog, objects, object)
+                .set("routine_type", text(routine_type))
+                .set("data_type", data_type.map_or(Value::Null, text))
+                .set("routine_body", text("SQL"))
+                .set("routine_definition", definition.map_or(Value::Null, Value::Text))
+                .set("created", super::UNKNOWN_DATE)
+                .set("last_altered", super::UNKNOWN_DATE)
+                .done()
+        })
+        .collect()
+}
+
+fn parameters_rows(
+    snapshot: &CatalogSnapshot,
+    catalog: &str,
+    objects: &SqlServerObjects,
+) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for object in objects.routines() {
+        let Some(definition) = routine_definition(snapshot, object) else {
+            continue;
+        };
+        let parameter_row = |ordinal: i64,
+                             mode: &str,
+                             is_result: bool,
+                             name: &str,
+                             column_type: SqlServerColumnType| {
+            located(
+                CatalogRow::new(PARAMETERS_COLUMNS),
+                "specific",
+                catalog,
+                objects,
+                object,
+            )
+            .set("ordinal_position", int(ordinal))
+            .set("parameter_mode", text(mode))
+            .set("is_result", text(if is_result { "YES" } else { "NO" }))
+            .set("as_locator", text("NO"))
+            .set("parameter_name", text(name))
+            .set("data_type", text(column_type.name.name()))
+            .set(
+                "character_maximum_length",
+                optional_int(column_type.character_length()),
+            )
+            .set(
+                "numeric_precision",
+                optional_small(column_type.numeric_precision()),
+            )
+            .set("numeric_scale", optional_int(column_type.numeric_scale()))
+            .done()
+        };
+        if let Some(returned) = scalar_return_type(definition) {
+            rows.push(parameter_row(0, "OUT", true, "", returned));
+        }
+        for (position, facts) in parameter_facts(definition).into_iter().enumerate() {
+            let mode = if facts.output { "INOUT" } else { "IN" };
+            let ordinal = i64::try_from(position).map_or(i64::MAX, |at| at + 1);
+            rows.push(parameter_row(ordinal, mode, false, facts.name, facts.column_type));
+        }
+    }
+    rows
 }

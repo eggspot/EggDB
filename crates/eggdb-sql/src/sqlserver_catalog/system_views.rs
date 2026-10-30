@@ -1,7 +1,8 @@
+use super::routines::{module_definition, parameter_facts, routine_definition, scalar_return_type};
 use super::types::{SYSTEM_TYPES, SqlServerTypeName};
 use super::{
     COLLATION, CatalogRow, DATABASE_ID, DBO_PRINCIPAL_ID, ObjectKind, ObjectSource,
-    SqlServerObject, SqlServerObjects, UNKNOWN_DATE, bit, column, foreign_key_facts, index_id_of,
+    SqlServerColumnType, SqlServerObject, SqlServerObjects, UNKNOWN_DATE, bit, column, foreign_key_facts, index_id_of,
     int, optional_int, referential_action, relation_columns, small, text,
 };
 use crate::pg_catalog::{
@@ -643,7 +644,8 @@ pub(super) fn rows(snapshot: &CatalogSnapshot, view: SystemView) -> Vec<Vec<Valu
         SystemView::SqlModules => sql_module_rows(snapshot, objects),
         SystemView::ExtendedProperties => extended_property_rows(snapshot, objects),
         SystemView::Triggers => trigger_rows(snapshot, objects),
-        SystemView::Procedures | SystemView::Parameters => Vec::new(),
+        SystemView::Procedures => procedure_rows(objects),
+        SystemView::Parameters => parameter_rows(snapshot, objects),
     }
 }
 
@@ -1339,62 +1341,20 @@ fn trigger_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<V
         .collect()
 }
 
-fn trigger_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec<Value>> {
-    of_kind(objects, ObjectKind::Trigger)
-        .filter_map(|object| {
-            let ObjectSource::Trigger(at) = object.source else {
-                return None;
-            };
-            let definition = &snapshot.triggers.get(at)?.definition;
-            let row = CatalogRow::new(SQL_MODULE_COLUMNS)
-                .set("object_id", Value::Integer(object.object_id))
-                .set("definition", text(&definition.text))
-                .set("uses_ansi_nulls", bit(true))
-                .set("uses_quoted_identifier", bit(true));
-            Some(
-                with_flags(
-                    row,
-                    &[
-                        "is_schema_bound",
-                        "uses_database_collation",
-                        "is_recompiled",
-                        "null_on_null_input",
-                        "uses_native_compilation",
-                        "inline_type",
-                        "is_inlineable",
-                    ],
-                    false,
-                )
-                .done(),
-            )
-        })
-        .collect()
-}
-
 fn sql_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec<Value>> {
-    let mut rows = view_module_rows(snapshot, objects);
-    rows.extend(trigger_module_rows(snapshot, objects));
-    rows
-}
-
-fn view_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec<Value>> {
-    of_kind(objects, ObjectKind::View)
+    objects
+        .objects
+        .iter()
         .filter_map(|object| {
-            let RelationSource::View(view) = &snapshot.relations.get(object.relation)?.source
-            else {
-                return None;
-            };
-            let definition = format!(
-                "CREATE VIEW [{}].[{}] AS {}",
-                objects.schema_name(object.schema_id),
-                object.name,
-                view.query
-            );
+            let definition = module_definition(snapshot, objects, object)?;
+            let null_on_null_input =
+                routine_definition(snapshot, object).is_some_and(|routine| routine.strict);
             let row = CatalogRow::new(SQL_MODULE_COLUMNS)
                 .set("object_id", Value::Integer(object.object_id))
                 .set("definition", text(&definition))
                 .set("uses_ansi_nulls", bit(true))
-                .set("uses_quoted_identifier", bit(true));
+                .set("uses_quoted_identifier", bit(true))
+                .set("null_on_null_input", bit(null_on_null_input));
             Some(
                 with_flags(
                     row,
@@ -1402,7 +1362,6 @@ fn view_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> V
                         "is_schema_bound",
                         "uses_database_collation",
                         "is_recompiled",
-                        "null_on_null_input",
                         "uses_native_compilation",
                         "inline_type",
                         "is_inlineable",
@@ -1413,4 +1372,77 @@ fn view_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> V
             )
         })
         .collect()
+}
+
+fn procedure_rows(objects: &SqlServerObjects) -> Vec<Vec<Value>> {
+    of_kind(objects, ObjectKind::Procedure)
+        .map(|object| {
+            with_flags(
+                object_row(PROCEDURE_COLUMNS, object),
+                &[
+                    "is_auto_executed",
+                    "is_execution_replicated",
+                    "is_repl_serializable_only",
+                    "skips_repl_constraints",
+                ],
+                false,
+            )
+            .done()
+        })
+        .collect()
+}
+
+fn parameter_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for object in objects.routines() {
+        let Some(definition) = routine_definition(snapshot, object) else {
+            continue;
+        };
+        if let Some(returned) = scalar_return_type(definition) {
+            rows.push(parameter_row(object, 0, "", returned, true));
+        }
+        for (position, facts) in parameter_facts(definition).into_iter().enumerate() {
+            let parameter_id = i64::try_from(position).map_or(i64::MAX, |at| at + 1);
+            rows.push(parameter_row(
+                object,
+                parameter_id,
+                facts.name,
+                facts.column_type,
+                facts.output,
+            ));
+        }
+    }
+    rows
+}
+
+fn parameter_row(
+    object: &SqlServerObject,
+    parameter_id: i64,
+    name: &str,
+    column_type: SqlServerColumnType,
+    output: bool,
+) -> Vec<Value> {
+    let row = CatalogRow::new(PARAMETER_COLUMNS)
+        .set("object_id", Value::Integer(object.object_id))
+        .set("name", text(name))
+        .set("parameter_id", int(parameter_id))
+        .set("system_type_id", small(column_type.system_type_id()))
+        .set("user_type_id", int(column_type.system_type_id()))
+        .set("max_length", small(column_type.max_length()))
+        .set("precision", small(column_type.precision))
+        .set("scale", small(column_type.scale))
+        .set("is_output", bit(output))
+        .set("xml_collection_id", int(0))
+        .set("is_nullable", bit(true));
+    with_flags(
+        row,
+        &[
+            "is_cursor_ref",
+            "has_default_value",
+            "is_xml_document",
+            "is_readonly",
+        ],
+        false,
+    )
+    .done()
 }

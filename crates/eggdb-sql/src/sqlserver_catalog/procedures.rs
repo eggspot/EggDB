@@ -10,6 +10,8 @@ use crate::session::{OutputColumn, QueryResult};
 use crate::types::{SqlType, Value};
 use std::cmp::Ordering;
 
+mod modules;
+
 const SYSNAME: SqlType = SqlType::Varchar(Some(128));
 const SMALLINT: SqlType = SqlType::SmallInt;
 const TINYINT: SqlType = SqlType::SmallInt;
@@ -48,10 +50,13 @@ pub(crate) enum CatalogProcedure {
     IndexesManaged,
     IndexColumnsManaged,
     TableCollations100,
+    HelpText,
+    ProcedureParams100Managed,
+    ProcedureParamsRowset,
 }
 
 impl CatalogProcedure {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 24] = [
         Self::Tables,
         Self::Columns,
         Self::Columns100,
@@ -73,6 +78,9 @@ impl CatalogProcedure {
         Self::IndexesManaged,
         Self::IndexColumnsManaged,
         Self::TableCollations100,
+        Self::HelpText,
+        Self::ProcedureParams100Managed,
+        Self::ProcedureParamsRowset,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -98,6 +106,9 @@ impl CatalogProcedure {
             Self::IndexesManaged => "sp_indexes_managed",
             Self::IndexColumnsManaged => "sp_indexcolumns_managed",
             Self::TableCollations100 => "sp_tablecollations_100",
+            Self::HelpText => "sp_helptext",
+            Self::ProcedureParams100Managed => "sp_procedure_params_100_managed",
+            Self::ProcedureParamsRowset => "sp_procedure_params_rowset",
         }
     }
 
@@ -176,6 +187,13 @@ impl CatalogProcedure {
                 &["@catalog", "@owner", "@table", "@constraintname", "@column"]
             }
             Self::TableCollations100 => &["@object"],
+            Self::HelpText => &["@objname", "@columnname"],
+            Self::ProcedureParams100Managed | Self::ProcedureParamsRowset => &[
+                "@procedure_name",
+                "@group_number",
+                "@procedure_schema",
+                "@parameter_name",
+            ],
         }
     }
 
@@ -188,7 +206,10 @@ impl CatalogProcedure {
             | Self::Statistics100
             | Self::SpecialColumns
             | Self::SpecialColumns100
-            | Self::HelpIndex => 1,
+            | Self::HelpIndex
+            | Self::HelpText
+            | Self::ProcedureParams100Managed
+            | Self::ProcedureParamsRowset => 1,
             _ => 0,
         }
     }
@@ -526,10 +547,21 @@ pub(crate) fn run_procedure(
         CatalogProcedure::DataTypeInfo | CatalogProcedure::DataTypeInfo100 => {
             vec![data_type_info(&arguments)]
         }
-        CatalogProcedure::StoredProcedures => vec![result(STORED_PROCEDURE_COLUMNS, Vec::new())],
+        CatalogProcedure::StoredProcedures => vec![modules::stored_procedures(&scope, &arguments)],
         CatalogProcedure::ProcedureColumns | CatalogProcedure::ProcedureColumns100 => {
-            vec![result(PROCEDURE_COLUMN_COLUMNS, Vec::new())]
+            vec![modules::procedure_columns(&scope, &arguments)]
         }
+        CatalogProcedure::HelpText => vec![modules::help_text(&scope, &arguments)?],
+        CatalogProcedure::ProcedureParams100Managed => vec![modules::procedure_parameters(
+            &scope,
+            &arguments,
+            modules::ParameterTypeCodes::SqlDbType,
+        )],
+        CatalogProcedure::ProcedureParamsRowset => vec![modules::procedure_parameters(
+            &scope,
+            &arguments,
+            modules::ParameterTypeCodes::OleDb,
+        )],
         CatalogProcedure::Help => help(&scope, &arguments)?,
         CatalogProcedure::HelpIndex => vec![help_index(&scope, &arguments)?],
         CatalogProcedure::Databases => vec![result(
@@ -1328,6 +1360,10 @@ fn object_type_description(kind: ObjectKind) -> &'static str {
         ObjectKind::Check => "check cns",
         ObjectKind::Default => "default (maybe cns)",
         ObjectKind::Trigger => "trigger",
+        ObjectKind::Procedure => "stored procedure",
+        ObjectKind::ScalarFunction => "scalar function",
+        ObjectKind::InlineTableFunction => "inline function",
+        ObjectKind::TableFunction => "table function",
     }
 }
 
@@ -1365,6 +1401,10 @@ fn help(scope: &Scope<'_>, arguments: &Arguments) -> SqlResult<Vec<QueryResult>>
             UNKNOWN_DATE,
         ]],
     )];
+    if object.kind.is_routine() {
+        results.extend(modules::help_parameters(scope, object));
+        return Ok(results);
+    }
     if !matches!(object.kind, ObjectKind::Table | ObjectKind::View) {
         return Ok(results);
     }
@@ -1632,7 +1672,7 @@ fn constraint_rows(scope: &Scope<'_>, object: &SqlServerObject) -> Vec<Vec<Value
                     }
                 }
             }
-            ObjectSource::Relation | ObjectSource::Trigger(_) => {}
+            ObjectSource::Relation | ObjectSource::Trigger(_) | ObjectSource::Routine(_) => {}
         }
     }
     rows

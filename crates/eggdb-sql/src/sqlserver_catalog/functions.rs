@@ -44,6 +44,7 @@ pub(crate) enum MetadataFunction {
     ObjectId,
     ObjectName,
     ObjectSchemaName,
+    ObjectDefinition,
     SchemaName,
     SchemaId,
     TypeName,
@@ -59,7 +60,7 @@ pub(crate) enum MetadataFunction {
 }
 
 impl MetadataFunction {
-    pub(crate) const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::ServerProperty,
         Self::DatabasePropertyEx,
         Self::DbName,
@@ -67,6 +68,7 @@ impl MetadataFunction {
         Self::ObjectId,
         Self::ObjectName,
         Self::ObjectSchemaName,
+        Self::ObjectDefinition,
         Self::SchemaName,
         Self::SchemaId,
         Self::TypeName,
@@ -90,6 +92,7 @@ impl MetadataFunction {
             Self::ObjectId => "object_id",
             Self::ObjectName => "object_name",
             Self::ObjectSchemaName => "object_schema_name",
+            Self::ObjectDefinition => "object_definition",
             Self::SchemaName => "schema_name",
             Self::SchemaId => "schema_id",
             Self::TypeName => "type_name",
@@ -118,6 +121,7 @@ impl MetadataFunction {
             | Self::TypeName
             | Self::TypeId
             | Self::ObjectSchemaName
+            | Self::ObjectDefinition
             | Self::HasDatabaseAccess => 1..=1,
             Self::ObjectId | Self::ObjectName | Self::IsServerRoleMember => 1..=2,
             Self::IsMember => 1..=1,
@@ -143,6 +147,7 @@ impl MetadataFunction {
             Self::ObjectId
                 | Self::ObjectName
                 | Self::ObjectSchemaName
+                | Self::ObjectDefinition
                 | Self::SchemaName
                 | Self::SchemaId
                 | Self::ColumnProperty
@@ -161,6 +166,7 @@ impl MetadataFunction {
             | Self::SchemaName
             | Self::TypeName
             | Self::ColName => SqlType::Varchar(Some(128)),
+            Self::ObjectDefinition => SqlType::Text,
             Self::DbId | Self::ColLength => SqlType::SmallInt,
             Self::ObjectId
             | Self::SchemaId
@@ -385,6 +391,9 @@ fn catalog_call(
         MetadataFunction::ObjectSchemaName => object(0).map_or(Value::Null, |found| {
             Value::Text(objects.schema_name(found.schema_id).to_owned())
         }),
+        MetadataFunction::ObjectDefinition => object(0)
+            .and_then(|found| super::routines::module_definition(snapshot, objects, found))
+            .map_or(Value::Null, Value::Text),
         MetadataFunction::SchemaName => match arguments.first() {
             None => Value::Text(DBO.to_owned()),
             Some(id) => id
@@ -564,12 +573,23 @@ fn object_property(
         "ischeckcnst" => flag(kind == ObjectKind::Check),
         "isdefaultcnst" => flag(kind == ObjectKind::Default),
         "isuniquecnst" => flag(kind == ObjectKind::Unique),
-        "issystemtable" | "ismsshipped" | "isprocedure" | "isscalarfunction"
-        | "istablefunction" | "isinlinefunction" | "istrigger" | "isreplproc"
-        | "isextendedproc" | "isencrypted" => flag(false),
-        "isquotedidenton" | "isansinullson" | "execisquotedidenton" | "execisansinullson" => {
-            flag(matches!(kind, ObjectKind::Table | ObjectKind::View))
+        "isprocedure" => flag(kind == ObjectKind::Procedure),
+        "isscalarfunction" => flag(kind == ObjectKind::ScalarFunction),
+        "istablefunction" => flag(matches!(
+            kind,
+            ObjectKind::InlineTableFunction | ObjectKind::TableFunction
+        )),
+        "isinlinefunction" => flag(kind == ObjectKind::InlineTableFunction),
+        "istrigger" => flag(kind == ObjectKind::Trigger),
+        "isexecuted" => flag(kind.is_routine() || kind == ObjectKind::Trigger || kind == ObjectKind::View),
+        "isdeterministic" if kind.is_function() => flag(false),
+        "issystemtable" | "ismsshipped" | "isreplproc" | "isextendedproc" | "isencrypted" => {
+            flag(false)
         }
+        "isquotedidenton" | "isansinullson" | "execisquotedidenton" | "execisansinullson" => flag(
+            matches!(kind, ObjectKind::Table | ObjectKind::View | ObjectKind::Trigger)
+                || kind.is_routine(),
+        ),
         "ownerid" => Value::Integer(super::DBO_PRINCIPAL_ID),
         "schemaid" => Value::Integer(object.schema_id),
         "isindexed" | "tablehasindex" => {

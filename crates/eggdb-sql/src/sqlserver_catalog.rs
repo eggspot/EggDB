@@ -1,6 +1,7 @@
 mod functions;
 mod information_schema;
 mod procedures;
+mod routines;
 mod system_views;
 mod types;
 
@@ -35,6 +36,7 @@ pub(crate) const GUEST_SCHEMA_ID: i32 = 2;
 pub(crate) const INFORMATION_SCHEMA_ID: i32 = 3;
 pub(crate) const SYS_SCHEMA_ID: i32 = 4;
 const FIRST_USER_SCHEMA_ID: i32 = 5;
+const NO_RELATION: usize = usize::MAX;
 pub(crate) const DATABASE_ID: i32 = 5;
 pub(crate) const DBO_PRINCIPAL_ID: i32 = 1;
 pub(crate) const COLLATION: &str = "Latin1_General_100_BIN2";
@@ -127,6 +129,10 @@ pub(crate) enum ObjectKind {
     Check,
     Default,
     Trigger,
+    Procedure,
+    ScalarFunction,
+    InlineTableFunction,
+    TableFunction,
 }
 
 impl ObjectKind {
@@ -141,6 +147,10 @@ impl ObjectKind {
             Self::Check => "C ",
             Self::Default => "D ",
             Self::Trigger => "TR",
+            Self::Procedure => "P ",
+            Self::ScalarFunction => "FN",
+            Self::InlineTableFunction => "IF",
+            Self::TableFunction => "TF",
         }
     }
 
@@ -155,6 +165,10 @@ impl ObjectKind {
             Self::Check => "CHECK_CONSTRAINT",
             Self::Default => "DEFAULT_CONSTRAINT",
             Self::Trigger => "SQL_TRIGGER",
+            Self::Procedure => "SQL_STORED_PROCEDURE",
+            Self::ScalarFunction => "SQL_SCALAR_FUNCTION",
+            Self::InlineTableFunction => "SQL_INLINE_TABLE_VALUED_FUNCTION",
+            Self::TableFunction => "SQL_TABLE_VALUED_FUNCTION",
         }
     }
 
@@ -169,6 +183,10 @@ impl ObjectKind {
             Self::Check => b'C',
             Self::Default => b'D',
             Self::Trigger => b'T',
+            Self::Procedure
+            | Self::ScalarFunction
+            | Self::InlineTableFunction
+            | Self::TableFunction => b'R',
         }
     }
 
@@ -177,6 +195,26 @@ impl ObjectKind {
             self,
             Self::PrimaryKey | Self::Unique | Self::ForeignKey | Self::Check | Self::Default
         )
+    }
+
+    pub(crate) fn is_routine(self) -> bool {
+        matches!(
+            self,
+            Self::Procedure | Self::ScalarFunction | Self::InlineTableFunction | Self::TableFunction
+        )
+    }
+
+    pub(crate) fn is_function(self) -> bool {
+        self.is_routine() && self != Self::Procedure
+    }
+
+    pub(crate) fn of_routine(returns: &crate::tsql::TsqlReturns) -> Self {
+        match returns {
+            crate::tsql::TsqlReturns::Status => Self::Procedure,
+            crate::tsql::TsqlReturns::Scalar(_) => Self::ScalarFunction,
+            crate::tsql::TsqlReturns::InlineTable => Self::InlineTableFunction,
+            crate::tsql::TsqlReturns::Table { .. } => Self::TableFunction,
+        }
     }
 
     pub(crate) fn of_constraint(source: ConstraintSource) -> Self {
@@ -195,6 +233,7 @@ pub(crate) enum ObjectSource {
     Constraint(usize),
     Default(usize),
     Trigger(usize),
+    Routine(usize),
 }
 
 pub(crate) struct SqlServerSchema {
@@ -402,6 +441,28 @@ impl SqlServerObjects {
                 source: ObjectSource::Trigger(at),
             });
         }
+        for (at, routine) in snapshot.routines.iter().enumerate() {
+            let Some(tsql) = routine.definition.tsql.as_deref() else {
+                continue;
+            };
+            let Some(schema_id) = schema_id_of(&routine.schema) else {
+                continue;
+            };
+            let kind = ObjectKind::of_routine(&tsql.returns);
+            pending.push(PendingObject {
+                request: OidRequest {
+                    kind: kind.request_kind(),
+                    owner: routine.schema.clone(),
+                    name: routine.name.clone(),
+                },
+                name: routine.name.clone(),
+                schema_id,
+                parent: None,
+                kind,
+                relation: NO_RELATION,
+                source: ObjectSource::Routine(at),
+            });
+        }
         let requests: Vec<OidRequest> = pending
             .iter()
             .map(|object| OidRequest {
@@ -447,7 +508,9 @@ impl SqlServerObjects {
                 ObjectSource::Relation => {
                     built.by_relation.insert(object.relation, at);
                 }
-                ObjectSource::Constraint(_) | ObjectSource::Trigger(_) => {}
+                ObjectSource::Constraint(_)
+                | ObjectSource::Trigger(_)
+                | ObjectSource::Routine(_) => {}
                 ObjectSource::Default(column) => {
                     built.by_default.insert((object.relation, column), at);
                 }
@@ -500,6 +563,10 @@ impl SqlServerObjects {
                     object.schema_id == schema_id && object.name.eq_ignore_ascii_case(name)
                 })
             })
+    }
+
+    pub(crate) fn routines(&self) -> impl Iterator<Item = &SqlServerObject> {
+        self.objects.iter().filter(|object| object.kind.is_routine())
     }
 
     pub(crate) fn relations(&self) -> impl Iterator<Item = &SqlServerObject> {

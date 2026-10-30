@@ -1,3 +1,4 @@
+use crate::sqlserver_types::{Length, SqlServerType};
 use crate::types::SqlType;
 
 const MAX_NVARCHAR_LENGTH: u32 = 4000;
@@ -339,10 +340,77 @@ impl SqlServerColumnType {
         }
     }
 
+    /// The catalog form of a type as it was declared (a routine parameter or return type),
+    /// keeping the exact SQL Server type, length, precision and scale.
+    pub(crate) fn declared(declared: SqlServerType) -> Self {
+        let plain = |name: SqlServerTypeName| {
+            let system = name.system();
+            Self {
+                name,
+                length: None,
+                precision: system.precision,
+                scale: system.scale,
+            }
+        };
+        let sized = |name: SqlServerTypeName, length: Length| Self {
+            name,
+            length: match length {
+                Length::Given(length) => Some(length),
+                Length::Max => None,
+            },
+            precision: 0,
+            scale: 0,
+        };
+        let timed = |name: SqlServerTypeName, base: i64, scale: u8| {
+            let scale = i64::from(scale);
+            Self {
+                name,
+                length: None,
+                precision: with_fraction(base, scale),
+                scale,
+            }
+        };
+        match declared {
+            SqlServerType::TinyInt => plain(SqlServerTypeName::TinyInt),
+            SqlServerType::SmallInt => plain(SqlServerTypeName::SmallInt),
+            SqlServerType::Int => plain(SqlServerTypeName::Int),
+            SqlServerType::BigInt => plain(SqlServerTypeName::BigInt),
+            SqlServerType::Bit => plain(SqlServerTypeName::Bit),
+            SqlServerType::Decimal { precision, scale } => Self {
+                name: SqlServerTypeName::Decimal,
+                length: None,
+                precision: i64::from(precision),
+                scale: i64::from(scale),
+            },
+            SqlServerType::Money => plain(SqlServerTypeName::Money),
+            SqlServerType::SmallMoney => plain(SqlServerTypeName::SmallMoney),
+            SqlServerType::Float => plain(SqlServerTypeName::Float),
+            SqlServerType::Real => plain(SqlServerTypeName::Real),
+            SqlServerType::Date => plain(SqlServerTypeName::Date),
+            SqlServerType::Time { scale } => timed(SqlServerTypeName::Time, 8, scale),
+            SqlServerType::DateTime => plain(SqlServerTypeName::DateTime),
+            SqlServerType::SmallDateTime => plain(SqlServerTypeName::SmallDateTime),
+            SqlServerType::DateTime2 { scale } => timed(SqlServerTypeName::DateTime2, 19, scale),
+            SqlServerType::DateTimeOffset { scale } => {
+                timed(SqlServerTypeName::DateTimeOffset, 26, scale)
+            }
+            SqlServerType::Char(length) => sized(SqlServerTypeName::Char, length),
+            SqlServerType::VarChar(length) => sized(SqlServerTypeName::VarChar, length),
+            SqlServerType::NChar(length) => sized(SqlServerTypeName::NChar, length),
+            SqlServerType::NVarChar(length) => sized(SqlServerTypeName::NVarChar, length),
+            SqlServerType::Text => plain(SqlServerTypeName::Text),
+            SqlServerType::NText => plain(SqlServerTypeName::NText),
+            SqlServerType::Binary(length) => sized(SqlServerTypeName::Binary, length),
+            SqlServerType::VarBinary(length) => sized(SqlServerTypeName::VarBinary, length),
+            SqlServerType::Image => plain(SqlServerTypeName::Image),
+            SqlServerType::UniqueIdentifier => plain(SqlServerTypeName::UniqueIdentifier),
+        }
+    }
+
     pub(crate) fn is_max(self) -> bool {
         matches!(
             self.name,
-            SqlServerTypeName::NVarChar | SqlServerTypeName::VarBinary
+            SqlServerTypeName::NVarChar | SqlServerTypeName::VarChar | SqlServerTypeName::VarBinary
         ) && self.length.is_none()
     }
 
@@ -355,7 +423,10 @@ impl SqlServerColumnType {
             SqlServerTypeName::NVarChar | SqlServerTypeName::NChar => self
                 .length
                 .map_or(-1, |length| i64::from(length).saturating_mul(2)),
-            SqlServerTypeName::VarBinary => self.length.map_or(-1, i64::from),
+            SqlServerTypeName::VarBinary
+            | SqlServerTypeName::VarChar
+            | SqlServerTypeName::Char
+            | SqlServerTypeName::Binary => self.length.map_or(-1, i64::from),
             SqlServerTypeName::Decimal | SqlServerTypeName::Numeric => {
                 decimal_bytes(self.precision)
             }
@@ -379,7 +450,10 @@ impl SqlServerColumnType {
                 self.length
                     .map_or(-1, |length| i64::from(length).saturating_mul(2)),
             ),
-            SqlServerTypeName::VarBinary => Some(self.length.map_or(-1, i64::from)),
+            SqlServerTypeName::VarBinary
+            | SqlServerTypeName::VarChar
+            | SqlServerTypeName::Char
+            | SqlServerTypeName::Binary => Some(self.length.map_or(-1, i64::from)),
             _ => None,
         }
     }
@@ -418,7 +492,10 @@ impl SqlServerColumnType {
             SqlServerTypeName::NVarChar | SqlServerTypeName::NChar => {
                 self.length.map_or(0, i64::from)
             }
-            SqlServerTypeName::VarBinary => self.length.map_or(0, i64::from),
+            SqlServerTypeName::VarBinary
+            | SqlServerTypeName::VarChar
+            | SqlServerTypeName::Char
+            | SqlServerTypeName::Binary => self.length.map_or(0, i64::from),
             SqlServerTypeName::Real => 7,
             SqlServerTypeName::Float => 15,
             SqlServerTypeName::UniqueIdentifier => 36,
@@ -431,7 +508,10 @@ impl SqlServerColumnType {
             SqlServerTypeName::NVarChar | SqlServerTypeName::NChar => self
                 .length
                 .map_or(0, |length| i64::from(length).saturating_mul(2)),
-            SqlServerTypeName::VarBinary => self.length.map_or(0, i64::from),
+            SqlServerTypeName::VarBinary
+            | SqlServerTypeName::VarChar
+            | SqlServerTypeName::Char
+            | SqlServerTypeName::Binary => self.length.map_or(0, i64::from),
             SqlServerTypeName::Decimal | SqlServerTypeName::Numeric => self.precision + 2,
             SqlServerTypeName::Money => 21,
             SqlServerTypeName::DateTime => 16,
@@ -467,7 +547,10 @@ impl SqlServerColumnType {
         match self.name {
             SqlServerTypeName::NVarChar
             | SqlServerTypeName::NChar
-            | SqlServerTypeName::VarBinary => Some(self.odbc_length()),
+            | SqlServerTypeName::VarBinary
+            | SqlServerTypeName::VarChar
+            | SqlServerTypeName::Char
+            | SqlServerTypeName::Binary => Some(self.odbc_length()),
             _ => None,
         }
     }

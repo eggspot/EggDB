@@ -630,7 +630,7 @@ fn catalog_relations_are_read_only_and_reserved_to_their_schemas() {
 #[test]
 fn hostile_catalog_queries_and_procedure_calls_return_errors_and_never_panic() {
     let store = MemoryStore::default();
-    let mut session = shop(&store);
+    let mut session = shop_with_routines(&store);
     let fragments = [
         "EXEC",
         "EXECUTE",
@@ -669,6 +669,13 @@ fn hostile_catalog_queries_and_procedure_calls_return_errors_and_never_panic() {
         "COLUMNPROPERTY",
         "OBJECTPROPERTY",
         "SERVERPROPERTY",
+        "OBJECT_DEFINITION",
+        "sp_helptext",
+        "sp_stored_procedures",
+        "sp_sproc_columns",
+        "sp_procedure_params_100_managed",
+        "sys.parameters",
+        "sys.sql_modules",
         "'dbo.customers'",
         "'[a].[b].[c].[d].[e]'",
         "'[unclosed'",
@@ -691,4 +698,259 @@ fn hostile_catalog_queries_and_procedure_calls_return_errors_and_never_panic() {
         "ON",
     ];
     crate::tests::fuzz(&mut session, &fragments);
+}
+
+const ROUTINES: [&str; 4] = [
+    "CREATE PROCEDURE dbo.GetCustomer @Id INT, @Name NVARCHAR(100) = N'none' OUTPUT\nAS\nSELECT @Name = [Name] FROM dbo.Customers WHERE [Id] = @Id",
+    "CREATE FUNCTION dbo.Twice (@Value DECIMAL(10, 2)) RETURNS DECIMAL(12, 2) WITH RETURNS NULL ON NULL INPUT AS BEGIN RETURN @Value * 2 END",
+    "CREATE FUNCTION sales.ForCustomer (@CustomerId INT) RETURNS TABLE AS RETURN (SELECT [Id], [Total] FROM sales.Orders WHERE [CustomerId] = @CustomerId)",
+    "CREATE FUNCTION dbo.Totals () RETURNS @Result TABLE ([Total] DECIMAL(10, 2)) AS BEGIN INSERT INTO @Result SELECT [Total] FROM sales.Orders RETURN END",
+];
+
+fn shop_with_routines(store: &MemoryStore) -> Session<'_, MemoryStore> {
+    let mut session = shop(store);
+    for routine in ROUTINES {
+        results(&mut session, routine);
+    }
+    session
+}
+
+#[test]
+fn sys_views_list_procedures_functions_and_their_parameters() {
+    let store = MemoryStore::default();
+    let mut session = shop_with_routines(&store);
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT o.name, o.type_desc FROM sys.objects o WHERE o.type_desc LIKE '%PROCEDURE' OR o.type_desc LIKE '%FUNCTION' ORDER BY o.name"
+        ),
+        vec![
+            vec![text("forcustomer"), text("SQL_INLINE_TABLE_VALUED_FUNCTION")],
+            vec![text("getcustomer"), text("SQL_STORED_PROCEDURE")],
+            vec![text("totals"), text("SQL_TABLE_VALUED_FUNCTION")],
+            vec![text("twice"), text("SQL_SCALAR_FUNCTION")],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT p.name, s.name FROM sys.procedures p JOIN sys.schemas s ON s.schema_id = p.schema_id"
+        ),
+        vec![vec![text("getcustomer"), text("dbo")]]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT p.name, p.parameter_id, p.system_type_id, p.max_length, p.precision, p.scale, p.is_output FROM sys.parameters p WHERE p.object_id = OBJECT_ID('dbo.GetCustomer') ORDER BY p.parameter_id"
+        ),
+        vec![
+            vec![
+                text("@id"),
+                Value::Integer(1),
+                Value::SmallInt(56),
+                Value::SmallInt(4),
+                Value::SmallInt(10),
+                Value::SmallInt(0),
+                Value::Boolean(false),
+            ],
+            vec![
+                text("@name"),
+                Value::Integer(2),
+                Value::SmallInt(231),
+                Value::SmallInt(200),
+                Value::SmallInt(0),
+                Value::SmallInt(0),
+                Value::Boolean(true),
+            ],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT p.name, p.parameter_id, p.system_type_id, p.precision, p.scale, p.is_output FROM sys.parameters p WHERE p.object_id = OBJECT_ID('dbo.Twice') ORDER BY p.parameter_id"
+        ),
+        vec![
+            vec![
+                text(""),
+                Value::Integer(0),
+                Value::SmallInt(106),
+                Value::SmallInt(12),
+                Value::SmallInt(2),
+                Value::Boolean(true),
+            ],
+            vec![
+                text("@value"),
+                Value::Integer(1),
+                Value::SmallInt(106),
+                Value::SmallInt(10),
+                Value::SmallInt(2),
+                Value::Boolean(false),
+            ],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT m.null_on_null_input, CASE WHEN m.definition LIKE '%RETURN @Value * 2%' THEN 1 ELSE 0 END FROM sys.sql_modules m WHERE m.object_id = OBJECT_ID('dbo.Twice')"
+        ),
+        vec![vec![Value::Boolean(true), Value::Integer(1)]]
+    );
+}
+
+#[test]
+fn metadata_functions_answer_for_procedures_and_functions() {
+    let store = MemoryStore::default();
+    let mut session = shop_with_routines(&store);
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT OBJECT_NAME(OBJECT_ID('dbo.GetCustomer', 'P')), OBJECT_ID('dbo.GetCustomer', 'FN'), OBJECTPROPERTY(OBJECT_ID('dbo.GetCustomer'), 'IsProcedure'), OBJECTPROPERTY(OBJECT_ID('dbo.Twice'), 'IsScalarFunction'), OBJECTPROPERTY(OBJECT_ID('sales.ForCustomer'), 'IsInlineFunction'), OBJECTPROPERTY(OBJECT_ID('dbo.Totals'), 'IsTableFunction'), OBJECTPROPERTY(OBJECT_ID('dbo.Customers'), 'IsProcedure')"
+        ),
+        vec![vec![
+            text("getcustomer"),
+            Value::Null,
+            Value::Integer(1),
+            Value::Integer(1),
+            Value::Integer(1),
+            Value::Integer(1),
+            Value::Integer(0),
+        ]]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT OBJECT_DEFINITION(OBJECT_ID('sales.ForCustomer')), OBJECT_DEFINITION(OBJECT_ID('dbo.Customers')), OBJECT_DEFINITION(NULL)"
+        ),
+        vec![vec![text(ROUTINES[2]), Value::Null, Value::Null]]
+    );
+}
+
+#[test]
+fn information_schema_lists_routines_and_parameters() {
+    let store = MemoryStore::default();
+    let mut session = shop_with_routines(&store);
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT routine_schema, routine_name, routine_type, data_type FROM INFORMATION_SCHEMA.ROUTINES ORDER BY routine_name"
+        ),
+        vec![
+            vec![text("sales"), text("forcustomer"), text("FUNCTION"), text("TABLE")],
+            vec![text("dbo"), text("getcustomer"), text("PROCEDURE"), Value::Null],
+            vec![text("dbo"), text("totals"), text("FUNCTION"), text("TABLE")],
+            vec![text("dbo"), text("twice"), text("FUNCTION"), text("decimal")],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT ordinal_position, parameter_mode, is_result, parameter_name, data_type, character_maximum_length FROM INFORMATION_SCHEMA.PARAMETERS WHERE specific_name = 'getcustomer' ORDER BY ordinal_position"
+        ),
+        vec![
+            vec![
+                Value::Integer(1),
+                text("IN"),
+                text("NO"),
+                text("@id"),
+                text("int"),
+                Value::Null,
+            ],
+            vec![
+                Value::Integer(2),
+                text("INOUT"),
+                text("NO"),
+                text("@name"),
+                text("nvarchar"),
+                Value::Integer(100),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn catalog_procedures_describe_procedures_and_functions() {
+    let store = MemoryStore::default();
+    let mut session = shop_with_routines(&store);
+    assert_eq!(
+        rows(&mut session, "EXEC sp_stored_procedures @sp_owner = N'dbo'")
+            .into_iter()
+            .map(|row| (row[2].clone(), row[7].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (text("getcustomer;1"), Value::SmallInt(2)),
+            (text("totals;0"), Value::SmallInt(3)),
+            (text("twice;0"), Value::SmallInt(3)),
+        ]
+    );
+    assert_eq!(
+        rows(&mut session, "EXEC sp_sproc_columns N'getcustomer'")
+            .into_iter()
+            .map(|row| (row[3].clone(), row[4].clone(), row[6].clone(), row[17].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (text("@RETURN_VALUE"), Value::SmallInt(5), text("int"), Value::Integer(0)),
+            (text("@id"), Value::SmallInt(1), text("int"), Value::Integer(1)),
+            (text("@name"), Value::SmallInt(2), text("nvarchar"), Value::Integer(2)),
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "EXEC sp_procedure_params_100_managed @procedure_name = N'getcustomer', @procedure_schema = N'dbo'"
+        )
+        .into_iter()
+        .map(|row| (row[3].clone(), row[5].clone(), row[9].clone(), row[10].clone()))
+        .collect::<Vec<_>>(),
+        vec![
+            (text("@RETURN_VALUE"), Value::SmallInt(4), Value::SmallInt(8), Value::Null),
+            (text("@id"), Value::SmallInt(1), Value::SmallInt(8), Value::Null),
+            (text("@name"), Value::SmallInt(2), Value::SmallInt(12), Value::Integer(100)),
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "EXEC sp_procedure_params_rowset N'twice'"
+        )
+        .into_iter()
+        .map(|row| (row[2].clone(), row[3].clone(), row[9].clone()))
+        .collect::<Vec<_>>(),
+        vec![
+            (text("twice;0"), text("@RETURN_VALUE"), Value::SmallInt(131)),
+            (text("twice;0"), text("@value"), Value::SmallInt(131)),
+        ]
+    );
+    let help_text = rows(&mut session, "EXEC sp_helptext 'dbo.GetCustomer'");
+    assert_eq!(
+        help_text,
+        vec![
+            vec![text(
+                "CREATE PROCEDURE dbo.GetCustomer @Id INT, @Name NVARCHAR(100) = N'none' OUTPUT\n"
+            )],
+            vec![text("AS\n")],
+            vec![text(
+                "SELECT @Name = [Name] FROM dbo.Customers WHERE [Id] = @Id"
+            )],
+        ]
+    );
+    assert_eq!(
+        error_code(&mut session, "EXEC sp_helptext 'dbo.Customers'"),
+        Some(15197)
+    );
+    let help = results(&mut session, "EXEC sp_help 'dbo.GetCustomer'");
+    assert_eq!(
+        help[0].rows[0][..3],
+        [text("getcustomer"), text("dbo"), text("stored procedure")]
+    );
+    assert_eq!(
+        help[1]
+            .rows
+            .iter()
+            .map(|row| (row[0].clone(), row[1].clone(), row[2].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (text("@id"), text("int"), Value::SmallInt(4)),
+            (text("@name"), text("nvarchar"), Value::SmallInt(200)),
+        ]
+    );
 }
