@@ -910,7 +910,7 @@ SELECT @odd AS odd_sum
 
 - **The whole batch is compiled first**, as SQL Server does: a syntax error, a variable used
   before its `DECLARE` (Msg 137) or declared twice (134), `BREAK` or `CONTINUE` outside a loop
-  (135, 136), `RETURN` with a value (178), `THROW;` outside a `CATCH` block (10704) and a `SELECT`
+  (135, 136), `RETURN` with a value outside a procedure or function (178), `THROW;` outside a `CATCH` block (10704) and a `SELECT`
   mixing assignments with columns (141) run nothing.
 - **Variables**: `DECLARE @name type [= value], ...` with SQL Server's types. A variable exists
   from its `DECLARE` to the end of the batch, also when that `DECLARE` sits in a branch that does
@@ -963,6 +963,86 @@ Microsoft.Data.SqlClient, the way sqlcmd sends a script, and compares what it pr
 sets, `INFO` messages and errors with their numbers, severities, states and lines) with
 `scripts/tds-apps/expected-logic-dotnet.out`.
 
+## Transact-SQL procedures and functions
+
+In the SQL Server dialect (roadmap 3.15, D159), users create stored procedures and user-defined
+functions in Transact-SQL and call them from batches, over RPC and from other routines and
+triggers:
+
+```sql
+CREATE PROCEDURE dbo.stock_of @name nvarchar(20), @qty int OUTPUT
+AS
+    SET NOCOUNT ON;
+    SELECT @qty = qty FROM items WHERE name = @name;
+    IF @qty IS NULL RETURN 1;
+    SELECT id, name FROM items WHERE name = @name;
+    RETURN 0
+GO
+DECLARE @q int, @rc int
+EXEC @rc = dbo.stock_of N'oat', @q OUTPUT
+SELECT @rc AS status, @q AS qty
+GO
+CREATE FUNCTION dbo.doubled (@n int) RETURNS int AS BEGIN RETURN @n * 2 END
+GO
+CREATE FUNCTION dbo.in_stock (@min int) RETURNS TABLE
+AS RETURN (SELECT id, name FROM items WHERE qty >= @min)
+GO
+SELECT name, dbo.doubled(qty) AS doubled FROM items
+SELECT id, name FROM dbo.in_stock(5)
+```
+
+- **Statements**: `CREATE [OR ALTER] {PROCEDURE | PROC} name [@parameter type [= default]
+  [OUT | OUTPUT] [READONLY], ...] [WITH option, ...] [FOR REPLICATION] AS body` and `CREATE [OR
+  ALTER] FUNCTION name ([@parameter type [= default], ...]) RETURNS type [WITH option, ...] [AS]
+  BEGIN ... RETURN expression END` (scalar), `RETURNS TABLE [AS] RETURN [(] query [)]` (inline
+  table-valued) and `RETURNS @variable TABLE (column type, ...) [AS] BEGIN ... RETURN END`
+  (multi-statement table-valued); `ALTER PROCEDURE` and `ALTER FUNCTION` (Msg 208 when it does
+  not exist, 2010 for the other kind), and `DROP {PROCEDURE | PROC | FUNCTION} [IF EXISTS] name,
+  ...` (Msg 3701, 3705). `CREATE` must start its batch (Msg 111); a procedure's body runs to the
+  end of the batch. `WITH RETURNS NULL ON NULL INPUT` skips a scalar function's body for a NULL
+  argument; `EXECUTE AS`, `RECOMPILE`, `ENCRYPTION`, `SCHEMABINDING` and `CALLED ON NULL INPUT`
+  are accepted and change nothing. Procedures, functions, tables and views share one name space
+  per schema (Msg 2714), and a name has one routine: Transact-SQL has no overloads.
+- **Bodies are compiled at `CREATE`** with the batch compiler, so the errors a batch reports
+  before it runs (syntax, undeclared variables, Msg 137) refuse the `CREATE`. A function body
+  that would change the database or talk to the client is refused as SQL Server refuses it:
+  `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `PRINT`, `RAISERROR`, `THROW`, dynamic SQL and `SET`
+  options are Msg 443, a `SELECT` that returns rows is Msg 444, and `EXEC` of a procedure is Msg
+  557; table variables the function declares, and its return table, may change.
+- **`EXEC [@status =] name [value | @variable [OUTPUT] | DEFAULT], ... | @parameter = ...`**
+  binds arguments by position and then by name, fills defaults, converts each value to the
+  parameter's declared type, and reports SQL Server's errors (Msg 201 missing, 8144 too many,
+  8145 unknown name, 8143 given twice, 8162 `OUTPUT` for an input parameter, 2812 unknown
+  procedure, 2809 a function run with `EXEC`). The procedure runs inside the caller's batch: its
+  result sets, `PRINT` and `RAISERROR` messages and row counts reach the client in order, its
+  errors reach the caller's `TRY ... CATCH`, `OUTPUT` parameters are copied back, and `RETURN n`
+  sets the status (0 without a value). Its `SET NOCOUNT`, `XACT_ABORT` and `IMPLICIT_TRANSACTIONS`
+  return to the caller's values, a procedure that changes `@@TRANCOUNT` ends with Msg 266, and
+  `@@NESTLEVEL` counts the levels. `INSERT INTO table | @variable EXEC procedure ...` keeps its
+  rows, and a trigger body may `EXEC` a procedure.
+- **Functions** are called with their schema in expressions (`dbo.doubled(qty)`, once per row
+  where the row matters) and table-valued ones as a `FROM` item (`FROM dbo.in_stock(5) [AS] x`).
+  An argument may be `DEFAULT`; the count must match (Msg 313, 8144), and a procedure called as
+  a function is Msg 4121. Functions read the database as their statement sees it.
+- **Over TDS**, an RPC request naming a procedure (`CommandType.StoredProcedure` in SqlClient,
+  `{call ...}` and `CallableStatement` in mssql-jdbc) runs it with its parameters by name or
+  position, sends `RETURNSTATUS` with the status and `RETURNVALUE` tokens with the `OUTPUT`
+  parameters, and `SqlCommandBuilder.DeriveParameters` lists the parameters through
+  `sp_procedure_params_100_managed`.
+- **Catalogs**: procedures and functions are in `sys.objects` (types `P`, `FN`, `IF`, `TF`),
+  `sys.procedures`, `sys.parameters`, `sys.sql_modules`, `INFORMATION_SCHEMA.ROUTINES` and
+  `PARAMETERS`, `OBJECT_ID`, `OBJECT_DEFINITION`, `OBJECTPROPERTY` and `sp_helptext`, and in
+  `sp_stored_procedures`, `sp_sproc_columns` and `sp_help`. `ALTER` keeps the text as a `CREATE`
+  statement, as SQL Server shows it.
+- **Limits**: procedures and functions nest at most 32 levels (Msg 217), with the dynamic SQL
+  they run counted in.
+
+Not yet: a table-valued function after the first `FROM` item (joins and `CROSS APPLY`), a
+procedure called by its name alone as the first statement of a batch (write `EXEC`), `EXEC
+@result = dbo.scalar_function`, `@@PROCID` (0) and `ERROR_PROCEDURE()` (NULL), numbered and
+temporary (`#name`) procedures, CLR routines (`AS EXTERNAL NAME`), `SELECT INTO` in a body, and
+`COMMIT` or `ROLLBACK` of the caller's transaction inside a function.
+
 ## SQL Server metadata for tools
 
 Metadata tools and drivers browse an EggDB database over TDS as they browse SQL Server (roadmap
@@ -988,15 +1068,16 @@ SELECT OBJECT_ID('sales.orders'), SERVERPROPERTY('ProductVersion'), DB_NAME(), S
   `sys.check_constraints`, `sys.identity_columns`, `sys.sequences`, `sys.databases` and
   `sys.sql_modules` with SQL Server 2022's columns, and `sys.extended_properties` with the
   `MS_Description` of schemas, tables, views and columns, `sys.triggers` with every trigger (also
-  in `sys.objects` as type `TR` and in `sys.sql_modules` with its text); `sys.procedures` and
-  `sys.parameters` are empty. They are built for each statement that
+  in `sys.objects` as type `TR` and in `sys.sql_modules` with its text), and `sys.procedures` and
+  `sys.parameters` with every Transact-SQL procedure and function (also in `sys.objects` as
+  types `P`, `FN`, `IF` and `TF`). They are built for each statement that
   names them from the stored tables, views and sequences, read-only, and reached only with their
   schema (`sys.tables`, not `tables`).
 - **`INFORMATION_SCHEMA`**: `SCHEMATA`, `TABLES`, `COLUMNS`, `VIEWS`, `VIEW_TABLE_USAGE`,
   `SEQUENCES`, `TABLE_CONSTRAINTS`, `KEY_COLUMN_USAGE`, `REFERENTIAL_CONSTRAINTS`,
   `CONSTRAINT_COLUMN_USAGE`, `CONSTRAINT_TABLE_USAGE` and `CHECK_CONSTRAINTS` with SQL Server's
-  columns and values (schema `dbo`, `nvarchar`, `BASE TABLE`); `ROUTINES` and `PARAMETERS` are
-  empty.
+  columns and values (schema `dbo`, `nvarchar`, `BASE TABLE`), and `ROUTINES` and `PARAMETERS`
+  with the Transact-SQL procedures and functions.
 - **Ids**: a table, view, sequence or constraint has an `object_id` made from a hash of its
   kind, table and name, the same in every statement and after a restart; it changes when the
   object is renamed. `dbo` is schema 1, `sys` 4, other schemas count from 5 in name order; the
@@ -2246,7 +2327,7 @@ D138):
   tables, joins, `TOP(1)`, `CASE WHEN EXISTS`, `GROUP BY`, `Contains` as `OPENJSON(@p) WITH
   (...)`), and `SaveChanges` inside `BeginTransaction()` (EF's `SAVE TRANSACTION
   [__EFSavePoint]`) rolled back whole. EF Core 9's migrations lock with `sp_getapplock` through
-  `EXEC @result = ...`, which waits for stored procedures (roadmap 3.15).
+  `EXEC @result = sp_getapplock ...`, which is not there yet.
 
 **Advisory locks.** `pg_advisory_lock`, `pg_try_advisory_lock`, `pg_advisory_unlock` and their
 `_shared` forms take one `bigint` or two `integer`s, as do the transaction-level
@@ -2883,6 +2964,9 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   cultures `en-US` and invariant (`''`); another culture is error 40517. `DATEPART(nanosecond,
   ...)` counts microseconds times 1,000. `STRING_SPLIT`'s `enable_ordinal` is an integer
   constant. The `float` style 3 is error 40517.
+- A user function's result without an alias (`SELECT dbo.f(1)`) is named after the function
+  (`f`), where SQL Server leaves the column without a name. Functions run as `STABLE` ones: a
+  function a statement calls sees the database as that statement started.
 - Not yet: `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.` in `UPDATE`,
   `SELECT ... INTO` and global `##temporary` tables (`##name` is the session's own table, like
   `#name`).
@@ -2908,9 +2992,8 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   an `UPDATE` of an identity column (SQL Server's 8102), and `ROLLBACK TRAN <name>` ignores the
   name. Divide by zero and arithmetic overflow end the batch, where SQL Server ends only the
   statement.
-- Batch logic (D137): cursors (`DECLARE CURSOR`), `GOTO` and labels, `WAITFOR`, stored
-  procedures and functions (3.15), DDL triggers, `EXEC @status = procedure`, `INSERT ... EXEC` of
-  dynamic SQL, `SET eggdb.dialect` inside a block or dynamic SQL, and a `DECLARE` whose value
+- Batch logic (D137): cursors (`DECLARE CURSOR`), `GOTO` and labels, `WAITFOR`, DDL
+  triggers, `INSERT ... EXEC` of dynamic SQL, `SET eggdb.dialect` inside a block or dynamic SQL, and a `DECLARE` whose value
   reads a variable the same `DECLARE` declares are 40517. A `SELECT` whose value reads a variable
   the same `SELECT` assigns (`SELECT @s = @s + name FROM t`) is 40517; `SELECT @s += name FROM t`
   gives SQL Server's result. A table variable's columns take no constraints, defaults or identity
