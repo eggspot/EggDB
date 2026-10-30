@@ -1,6 +1,7 @@
 use crate::datetime::{self, MICROS_PER_DAY, MICROS_PER_SECOND};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::oracle_numerals;
+use crate::time_zones::TimeZone;
 use crate::types::{SqlType, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1006,6 +1007,7 @@ struct Fields {
     zone_hour: Option<(bool, i64)>,
     zone_minute: Option<i64>,
     zone: Option<i32>,
+    region: Option<TimeZone>,
 }
 
 struct Reader<'a> {
@@ -1110,7 +1112,9 @@ impl Reader<'_> {
         let start = self.at;
         while self
             .peek()
-            .is_some_and(|character| character.is_alphanumeric() || matches!(character, '/' | '_'))
+            .is_some_and(|character| {
+                character.is_alphanumeric() || matches!(character, '/' | '_' | '-' | '+')
+            })
         {
             self.at += 1;
         }
@@ -1252,7 +1256,10 @@ fn read_zone_region(reader: &mut Reader<'_>, fields: &mut Fields) -> SqlResult<(
         return Ok(());
     }
     let name = reader.zone_name();
-    fields.zone = Some(named_zone(&name)?);
+    match zone_named(&name)? {
+        zone if zone.region_name().is_some() => fields.region = Some(zone),
+        zone => fields.zone = zone.fixed_offset(),
+    }
     Ok(())
 }
 
@@ -1273,13 +1280,24 @@ fn offset_of(negative: bool, hours: i64, minutes: i64) -> SqlResult<i32> {
     Ok(if negative { -seconds } else { seconds })
 }
 
-fn named_zone(name: &str) -> SqlResult<i32> {
-    let upper = name.trim().to_ascii_uppercase();
-    if UTC_NAMES.contains(&upper.as_str()) {
-        Ok(0)
-    } else {
-        Err(zone_region_not_found())
+fn named_zone(name: &str) -> SqlResult<TimeZone> {
+    let trimmed = name.trim();
+    if UTC_NAMES.contains(&trimmed.to_ascii_uppercase().as_str()) {
+        return Ok(TimeZone::UTC);
     }
+    TimeZone::region(trimmed).ok_or_else(zone_region_not_found)
+}
+
+pub(crate) fn zone_named(text: &str) -> SqlResult<TimeZone> {
+    let trimmed = text.trim();
+    if trimmed
+        .chars()
+        .next()
+        .is_some_and(|character| matches!(character, '+' | '-') || character.is_ascii_digit())
+    {
+        return TimeZone::fixed(zone_offset(trimmed)?).ok_or_else(not_a_zone);
+    }
+    named_zone(trimmed)
 }
 
 pub(crate) fn zone_offset(text: &str) -> SqlResult<i32> {
@@ -1304,7 +1322,8 @@ pub(crate) fn zone_offset(text: &str) -> SqlResult<i32> {
         };
         return offset_of(negative, number(hours)?, number(minutes)?);
     }
-    named_zone(trimmed)
+    let zone = named_zone(trimmed)?;
+    Ok(zone.offset_at(datetime::statement_now()))
 }
 
 fn read_element(
@@ -1658,9 +1677,12 @@ fn assemble_time(fields: &Fields) -> SqlResult<(i64, i64, i64)> {
     Ok((from_hour, from_minute, from_second))
 }
 
-fn assemble_zone(fields: &Fields) -> SqlResult<Option<i32>> {
+fn assemble_zone(fields: &Fields, local: i64) -> SqlResult<Option<i32>> {
     if let Some(zone) = fields.zone {
         return Ok(Some(zone));
+    }
+    if let Some(region) = fields.region {
+        return Ok(Some(region.offset_of_local(local)));
     }
     match (fields.zone_hour, fields.zone_minute) {
         (Some((negative, hours)), minutes) => {
@@ -1687,7 +1709,8 @@ fn assemble(fields: &Fields, now_year: i64, now_month: i64) -> SqlResult<(i64, O
     let seconds = days * 86_400 + hour * 3600 + minute * 60 + second;
     let micros = i128::from(seconds) * i128::from(MICROS_PER_SECOND)
         + i128::from((fields.nanos + NANOS_PER_MICRO / 2) / NANOS_PER_MICRO);
-    Ok((datetime::checked_timestamp(micros)?, assemble_zone(fields)?))
+    let local = datetime::checked_timestamp(micros)?;
+    Ok((local, assemble_zone(fields, local)?))
 }
 
 fn local_now() -> SqlResult<i64> {
@@ -1937,7 +1960,10 @@ pub(crate) fn local_of(value: &Value) -> SqlResult<Option<i64>> {
 }
 
 fn offset_of_value(value: &Value) -> Option<i32> {
-    matches!(value, Value::TimestampTz(_)).then(datetime::session_offset)
+    match value {
+        Value::TimestampTz(micros) => Some(datetime::session_offset_at(*micros)),
+        _ => None,
+    }
 }
 
 pub(crate) fn nls_text(value: &Value, declared: Option<SqlType>) -> SqlResult<Option<String>> {
@@ -2286,6 +2312,14 @@ mod tests {
         );
         assert_eq!(
             read_zone("1999-12-01 10:00 US/Pacific", "YYYY-MM-DD HH24:MI TZR"),
+            Ok((at(1999, 12, 1, 10, 0, 0), Some(-8 * 3600)))
+        );
+        assert_eq!(
+            read_zone("1999-07-01 10:00 US/Pacific", "YYYY-MM-DD HH24:MI TZR"),
+            Ok((at(1999, 7, 1, 10, 0, 0), Some(-7 * 3600)))
+        );
+        assert_eq!(
+            read_zone("1999-12-01 10:00 Mars/Olympus", "YYYY-MM-DD HH24:MI TZR"),
             Err(1882)
         );
         assert_eq!(read_zone("+16", "TZH"), Err(1874));

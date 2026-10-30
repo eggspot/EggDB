@@ -183,6 +183,7 @@ pub(crate) enum CatalogRelation {
     Rewrite,
     AuthMembers,
     Settings,
+    TimezoneNames,
     Opclass,
     Enum,
     Proc,
@@ -244,7 +245,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const IN_PG_CATALOG: [Self; 29] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 30] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -270,6 +271,7 @@ impl CatalogRelation {
         Self::Rewrite,
         Self::AuthMembers,
         Self::Settings,
+        Self::TimezoneNames,
         Self::Opclass,
         Self::Enum,
         Self::Proc,
@@ -303,6 +305,7 @@ impl CatalogRelation {
             Self::Rewrite => "pg_rewrite",
             Self::AuthMembers => "pg_auth_members",
             Self::Settings => "pg_settings",
+            Self::TimezoneNames => "pg_timezone_names",
             Self::Opclass => "pg_opclass",
             Self::Enum => "pg_enum",
             Self::Proc => "pg_proc",
@@ -355,6 +358,7 @@ impl CatalogRelation {
             Self::Rewrite => 2618,
             Self::AuthMembers => 1261,
             Self::Settings => 12001,
+            Self::TimezoneNames => 12002,
             Self::Opclass => 2616,
             Self::Enum => 3501,
             Self::Proc => 1255,
@@ -369,6 +373,7 @@ impl CatalogRelation {
             self,
             Self::Roles
                 | Self::Settings
+                | Self::TimezoneNames
                 | Self::Information(_)
                 | Self::SqlServer(_)
                 | Self::Oracle(_)
@@ -418,6 +423,7 @@ impl CatalogRelation {
             Self::PublicationNamespace => &PUBLICATION_NAMESPACE_COLUMNS,
             Self::Roles => &ROLES_COLUMNS,
             Self::Settings => &SETTINGS_COLUMNS,
+            Self::TimezoneNames => &TIMEZONE_NAMES_COLUMNS,
             Self::Opclass => &OPCLASS_COLUMNS,
             Self::Enum => &ENUM_COLUMNS,
             Self::Proc => &PROC_COLUMNS,
@@ -787,6 +793,19 @@ const ROLES_COLUMNS: [CatalogColumn; 13] = [
     column("rolbypassrls", SqlType::Boolean),
     column("rolconfig", TEXTS),
     column("oid", OID),
+];
+
+const TIMEZONE_NAMES_COLUMNS: [CatalogColumn; 4] = [
+    column("name", SqlType::Text),
+    column("abbrev", SqlType::Text),
+    column(
+        "utc_offset",
+        SqlType::Interval {
+            fields: None,
+            precision: None,
+        },
+    ),
+    column("is_dst", SqlType::Boolean),
 ];
 
 const SETTINGS_COLUMNS: [CatalogColumn; 17] = [

@@ -3,8 +3,9 @@ use crate::error::SqlResult;
 use crate::numeric::Numeric;
 use crate::oracle_datetime::{
     DAYS, date_of, local_of, not_a_day_of_the_week, not_recognized, year_in_range,
-    year_out_of_range, zone_offset, zone_text,
+    year_out_of_range, zone_named, zone_text,
 };
+use crate::time_zones::TimeZone;
 use crate::types::Value;
 
 const MICROS_PER_HOUR: i64 = 3600 * MICROS_PER_SECOND;
@@ -255,7 +256,8 @@ pub(crate) fn from_time_zone(stamp: &Value, zone: &Value) -> SqlResult<Value> {
     else {
         return Ok(Value::Null);
     };
-    crate::oracle_datetime::utc_of(local, Some(zone_offset(&zone)?)).map(Value::TimestampTz)
+    let zone = zone_named(&zone)?;
+    datetime::checked_timestamp(zone.utc_of_local(local)).map(Value::TimestampTz)
 }
 
 pub(crate) fn utc_of_stamp(stamp: &Value) -> SqlResult<Value> {
@@ -273,22 +275,27 @@ pub(crate) fn zone_offset_text(zone: &Value) -> SqlResult<Value> {
     let Some(zone) = crate::oracle_functions::text_of(zone) else {
         return Ok(Value::Null);
     };
-    Ok(Value::Text(zone_text(zone_offset(&zone)?)))
+    let zone = zone_named(&zone)?;
+    Ok(Value::Text(zone_text(zone.offset_at(datetime::statement_now()))))
 }
 
-pub(crate) fn session_time_zone(value: &str) -> SqlResult<i32> {
+pub(crate) fn session_time_zone(value: &str) -> SqlResult<TimeZone> {
     let trimmed = value.trim();
     let unquoted = trimmed
         .strip_prefix('\'')
         .and_then(|rest| rest.strip_suffix('\''))
         .unwrap_or(trimmed);
     if unquoted.eq_ignore_ascii_case("local") || unquoted.eq_ignore_ascii_case("dbtimezone") {
-        return Ok(0);
+        return Ok(TimeZone::UTC);
     }
-    zone_offset(unquoted)
+    zone_named(unquoted)
 }
 
-pub(crate) fn time_zone_setting(offset: i32) -> String {
+pub(crate) fn time_zone_setting(zone: TimeZone) -> String {
+    if let Some(name) = zone.region_name() {
+        return name.to_owned();
+    }
+    let offset = zone.fixed_offset().unwrap_or(0);
     if offset == 0 {
         return "UTC".to_owned();
     }
@@ -304,6 +311,7 @@ mod tests {
         truncated_date,
     };
     use crate::datetime::{MICROS_PER_DAY, MICROS_PER_SECOND, days_from_civil};
+    use crate::time_zones::TimeZone;
     use crate::types::Value;
 
     fn at(year: i64, month: i64, day: i64, hour: i64, minute: i64) -> Value {
@@ -411,9 +419,13 @@ mod tests {
 
     #[test]
     fn session_time_zones_become_settings_the_clock_reads() {
-        assert_eq!(session_time_zone("'-08:00'").ok(), Some(-8 * 3600));
-        assert_eq!(session_time_zone("local").ok(), Some(0));
-        assert_eq!(session_time_zone("'UTC'").ok(), Some(0));
+        let offset = |text: &str| session_time_zone(text).ok().and_then(TimeZone::fixed_offset);
+        assert_eq!(offset("'-08:00'"), Some(-8 * 3600));
+        assert_eq!(offset("local"), Some(0));
+        assert_eq!(offset("'UTC'"), Some(0));
+        let paris = session_time_zone("'Europe/Paris'").ok();
+        assert_eq!(paris.and_then(TimeZone::region_name), Some("Europe/Paris"));
+        assert_eq!(paris.map(time_zone_setting).as_deref(), Some("Europe/Paris"));
         assert_eq!(
             session_time_zone("'Mars/Olympus'")
                 .err()
@@ -421,8 +433,9 @@ mod tests {
             Some(1882)
         );
         for offset in [-8 * 3600, 5 * 3600 + 1800, 0] {
+            let zone = TimeZone::fixed(offset).unwrap_or_default();
             assert_eq!(
-                crate::datetime::time_zone_offset(&time_zone_setting(offset)),
+                crate::datetime::time_zone_offset(&time_zone_setting(zone)),
                 Some(offset)
             );
         }

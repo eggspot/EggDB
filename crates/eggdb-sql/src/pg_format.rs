@@ -245,6 +245,7 @@ struct Moment {
     micros: i64,
     days: Option<i64>,
     offset: Option<i32>,
+    abbreviation: Option<String>,
 }
 
 impl Moment {
@@ -262,6 +263,7 @@ impl Moment {
             micros: of_day % MICROS_PER_SECOND,
             days: Some(days),
             offset,
+            abbreviation: None,
         }
     }
 
@@ -277,6 +279,7 @@ impl Moment {
             micros: micros % MICROS_PER_SECOND,
             days: None,
             offset: None,
+            abbreviation: None,
         }
     }
 
@@ -389,11 +392,13 @@ fn padded_name(name: String, fill: bool) -> String {
     }
 }
 
-fn zone_text(offset: Option<i32>, lower: bool) -> String {
-    let Some(offset) = offset else {
+fn zone_text(moment: &Moment, lower: bool) -> String {
+    let Some(offset) = moment.offset else {
         return String::new();
     };
-    let text = if offset == 0 {
+    let text = if let Some(abbreviation) = &moment.abbreviation {
+        abbreviation.clone()
+    } else if offset == 0 {
         "UTC".to_owned()
     } else {
         datetime::format_offset(offset)
@@ -545,7 +550,7 @@ fn field_text(moment: &Moment, field: Field, fill: bool) -> (String, Option<i64>
             let offset = moment.offset.unwrap_or(0);
             number(i64::from(offset.unsigned_abs() / 60 % 60), 2)
         }
-        Field::ZoneName { lower } => (zone_text(moment.offset, lower), None),
+        Field::ZoneName { lower } => (zone_text(moment, lower), None),
         Field::Offset => (
             moment.offset.map(datetime::format_offset).unwrap_or_default(),
             None,
@@ -1057,11 +1062,11 @@ pub(crate) fn to_char(values: &[Value]) -> Option<SqlResult<Value>> {
         ),
         Value::Timestamp(micros) => format_moment(&Moment::of_local(*micros, None), template),
         Value::TimestampTz(micros) => {
-            let offset = datetime::session_offset();
-            format_moment(
-                &Moment::of_local(datetime::to_local(*micros, offset), Some(offset)),
-                template,
-            )
+            let zone = datetime::session_zone();
+            let offset = zone.offset_at(*micros);
+            let mut moment = Moment::of_local(datetime::to_local(*micros, offset), Some(offset));
+            moment.abbreviation = zone.abbreviation_at(*micros);
+            format_moment(&moment, template)
         }
         Value::Interval(interval) => format_moment(&Moment::of_interval(*interval), template),
         Value::SmallInt(_)
@@ -1109,6 +1114,7 @@ struct Parts {
     offset: Option<i64>,
     zone_minutes: Option<i64>,
     zone_negative: bool,
+    region: Option<crate::time_zones::TimeZone>,
 }
 
 struct Reader<'a> {
@@ -1351,6 +1357,12 @@ fn read_field(
                 .take_while(|character| !character.is_whitespace())
                 .collect();
             reader.at += zone.chars().count();
+            if datetime::time_zone_offset(&zone).is_none() {
+                if let Some(region) = crate::time_zones::TimeZone::region(&zone) {
+                    parts.region = Some(region);
+                    return Ok(());
+                }
+            }
             let east = datetime::time_zone_offset(&zone)
                 .map(i64::from)
                 .ok_or_else(|| {
@@ -1498,7 +1510,9 @@ fn assembled(parts: &Parts, text: &str) -> SqlResult<(i64, Option<i64>)> {
         let total = seconds + minutes;
         if parts.zone_negative { -total } else { total }
     });
-    let offset = offset.or(parts.zone_minutes.map(|minutes| minutes * 60));
+    let offset = offset
+        .or(parts.zone_minutes.map(|minutes| minutes * 60))
+        .or_else(|| parts.region.map(|zone| i64::from(zone.offset_of_local(local))));
     Ok((local, offset))
 }
 
@@ -1541,12 +1555,11 @@ pub(crate) fn to_timestamp(values: &[Value]) -> Option<SqlResult<Value>> {
             Some(
                 fill_parts(text, template)
                     .and_then(|parts| assembled(&parts, text))
-                    .and_then(|(local, offset)| {
-                        let offset =
-                            offset.unwrap_or_else(|| i64::from(datetime::session_offset()));
-                        datetime::checked_timestamp(
+                    .and_then(|(local, offset)| match offset {
+                        Some(offset) => datetime::checked_timestamp(
                             i128::from(local) - i128::from(offset) * i128::from(MICROS_PER_SECOND),
-                        )
+                        ),
+                        None => datetime::local_to_utc(local),
                     })
                     .map(Value::TimestampTz),
             )

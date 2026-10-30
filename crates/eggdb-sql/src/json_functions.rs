@@ -115,7 +115,7 @@ pub(crate) fn to_json_text(value: &Value) -> SqlResult<String> {
         Value::Date(days) => quoted(&datetime::format_date(*days)),
         Value::Timestamp(micros) => quoted(&iso_local(*micros)),
         Value::TimestampTz(micros) => {
-            let offset = datetime::session_offset();
+            let offset = datetime::session_offset_at(*micros);
             quoted(&format!(
                 "{}{}",
                 iso_local(datetime::to_local(*micros, offset)),

@@ -1021,19 +1021,20 @@ impl<'t> Parser<'t> {
                 "interval" => return self.oracle_interval_literal(position),
                 "sessiontimezone" | "dbtimezone" => {
                     self.at += 1;
-                    let (name, offset) = if word.as_ref() == "sessiontimezone" {
-                        (
-                            "sessiontimezone",
-                            self.oracle_settings(|settings| settings.time_zone_offset),
-                        )
+                    let (name, value) = if word.as_ref() == "sessiontimezone" {
+                        let zone = self.oracle_settings(|settings| settings.time_zone);
+                        let shown = match zone.region_name() {
+                            Some(region) => region.to_owned(),
+                            None => crate::oracle_datetime::zone_text(
+                                zone.fixed_offset().unwrap_or(0),
+                            ),
+                        };
+                        ("sessiontimezone", shown)
                     } else {
-                        ("dbtimezone", 0)
+                        ("dbtimezone", crate::oracle_datetime::zone_text(0))
                     };
                     Expr {
-                        kind: ExprKind::SessionValue {
-                            name,
-                            value: crate::oracle_datetime::zone_text(offset),
-                        },
+                        kind: ExprKind::SessionValue { name, value },
                         position,
                     }
                 }

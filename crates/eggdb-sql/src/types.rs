@@ -441,13 +441,11 @@ impl Value {
         }
     }
 
-    /// The value as [`Value::to_text`] prints it, with a `timestamp with time zone` shown at
-    /// `offset_seconds` east of UTC instead of the running statement's time zone.
-    pub fn to_text_at(&self, offset_seconds: i32) -> Option<String> {
+    /// The value as [`Value::to_text`] prints it, with a `timestamp with time zone` shown in
+    /// `zone` instead of the running statement's time zone.
+    pub fn to_text_in(&self, zone: crate::time_zones::TimeZone) -> Option<String> {
         match self {
-            Self::TimestampTz(micros) => {
-                Some(datetime::format_timestamptz_at(*micros, offset_seconds))
-            }
+            Self::TimestampTz(micros) => Some(datetime::format_timestamptz_in(*micros, zone)),
             other => other.to_text(),
         }
     }
@@ -740,12 +738,12 @@ fn convert_time(value: &Value, target: SqlType) -> Option<SqlResult<Value>> {
         }),
         (SqlType::TimeTz(precision), Value::Time(micros)) => Ok(Value::TimeTz {
             micros: time_value(*micros, precision),
-            offset_seconds: datetime::session_offset(),
+            offset_seconds: datetime::session_offset_now(),
         }),
         (SqlType::TimeTz(precision), Value::TimestampTz(micros)) => {
             local_time(*micros).map(|local| Value::TimeTz {
                 micros: time_value(local, precision),
-                offset_seconds: datetime::session_offset(),
+                offset_seconds: datetime::session_offset_at(*micros),
             })
         }
         (SqlType::Interval { fields, precision }, Value::Interval(interval)) => interval
@@ -1046,7 +1044,10 @@ fn instant(value: &Value, zoned: bool) -> i128 {
         _ => 0,
     };
     if zoned {
-        local - i128::from(datetime::session_offset()) * i128::from(datetime::MICROS_PER_SECOND)
+        let clamped = i64::try_from(local).unwrap_or_default();
+        local
+            - i128::from(datetime::session_zone().offset_of_local(clamped))
+                * i128::from(datetime::MICROS_PER_SECOND)
     } else {
         local
     }

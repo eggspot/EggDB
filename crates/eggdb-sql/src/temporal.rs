@@ -2,6 +2,7 @@ use crate::ast::BinaryOperator;
 use crate::datetime::{self, MICROS_PER_DAY, MICROS_PER_SECOND};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::{self, Interval};
+use crate::time_zones::TimeZone;
 use crate::types::{SqlType, Value};
 
 pub(crate) fn is_time_or_interval(sql_type: SqlType) -> bool {
@@ -17,10 +18,7 @@ fn shifted(value: &Value, by: Interval) -> Option<SqlResult<Value>> {
         Value::Date(days) => datetime::date_to_timestamp(*days)
             .and_then(|micros| interval::add_to_timestamp(micros, by))
             .map(Value::Timestamp),
-        Value::TimestampTz(micros) => datetime::utc_to_local(*micros)
-            .and_then(|local| interval::add_to_timestamp(local, by))
-            .and_then(datetime::local_to_utc)
-            .map(Value::TimestampTz),
+        Value::TimestampTz(micros) => shifted_instant(*micros, by).map(Value::TimestampTz),
         Value::Time(micros) => Ok(Value::Time(datetime::wrap_time(
             i128::from(*micros) + i128::from(by.micros),
         ))),
@@ -33,6 +31,25 @@ fn shifted(value: &Value, by: Interval) -> Option<SqlResult<Value>> {
         }),
         _ => return None,
     })
+}
+
+pub(crate) fn shifted_instant(utc: i64, by: Interval) -> SqlResult<i64> {
+    if !by.is_finite() {
+        return Err(datetime::timestamp_out_of_range());
+    }
+    let moved = if by.months == 0 && by.days == 0 {
+        utc
+    } else {
+        let calendar = Interval {
+            months: by.months,
+            days: by.days,
+            micros: 0,
+        };
+        datetime::utc_to_local(utc)
+            .and_then(|local| interval::add_to_timestamp(local, calendar))
+            .and_then(datetime::local_to_utc)?
+    };
+    datetime::checked_timestamp(i128::from(moved) + i128::from(by.micros))
 }
 
 fn instant(value: &Value, zoned: bool) -> Option<SqlResult<i64>> {
@@ -228,7 +245,7 @@ fn made_local(values: &[Value]) -> Option<SqlResult<i64>> {
     }))
 }
 
-fn zone_offset(zone: &Value) -> SqlResult<i32> {
+fn zone_named(zone: &Value) -> SqlResult<TimeZone> {
     match zone {
         Value::Interval(interval) => {
             if interval.months != 0 || interval.days != 0 {
@@ -239,7 +256,7 @@ fn zone_offset(zone: &Value) -> SqlResult<i32> {
             }
             i32::try_from(interval.micros / MICROS_PER_SECOND)
                 .ok()
-                .filter(|offset| datetime::valid_offset(*offset))
+                .and_then(TimeZone::fixed)
                 .ok_or_else(|| {
                     SqlError::new(
                         SqlState::INVALID_PARAMETER_VALUE,
@@ -249,7 +266,7 @@ fn zone_offset(zone: &Value) -> SqlResult<i32> {
         }
         other => {
             let name = other.character_text().unwrap_or_default();
-            datetime::time_zone_offset(name).ok_or_else(|| {
+            TimeZone::named(name).ok_or_else(|| {
                 SqlError::new(
                     SqlState::INVALID_PARAMETER_VALUE,
                     format!("time zone \"{name}\" not recognized"),
@@ -260,40 +277,40 @@ fn zone_offset(zone: &Value) -> SqlResult<i32> {
 }
 
 fn at_time_zone(zone: &Value, value: &Value) -> Option<SqlResult<Value>> {
-    let offset = match zone_offset(zone) {
-        Ok(offset) => offset,
+    let zone = match zone_named(zone) {
+        Ok(zone) => zone,
         Err(error) => return Some(Err(error)),
     };
-    let east = i128::from(offset) * i128::from(MICROS_PER_SECOND);
+    let in_zone = |utc: i64| datetime::checked_timestamp(zone.local_of_utc(utc));
+    let offset_now = zone.offset_at(datetime::statement_now());
     let wrapped = |micros: i64, from_offset: i32| {
         datetime::wrap_time(
-            i128::from(micros) - i128::from(from_offset) * i128::from(MICROS_PER_SECOND) + east,
+            i128::from(micros)
+                + i128::from(offset_now - from_offset) * i128::from(MICROS_PER_SECOND),
         )
     };
     Some(match value {
         Value::Timestamp(local) => {
-            datetime::checked_timestamp(i128::from(*local) - east).map(Value::TimestampTz)
+            datetime::checked_timestamp(zone.utc_of_local(*local)).map(Value::TimestampTz)
         }
-        Value::TimestampTz(utc) => {
-            datetime::checked_timestamp(i128::from(*utc) + east).map(Value::Timestamp)
-        }
+        Value::TimestampTz(utc) => in_zone(*utc).map(Value::Timestamp),
         Value::Date(days) => datetime::date_to_timestamp(*days)
             .and_then(datetime::local_to_utc)
-            .and_then(|utc| datetime::checked_timestamp(i128::from(utc) + east))
+            .and_then(in_zone)
             .map(Value::Timestamp),
         Value::Text(text) => datetime::parse_timestamp(text, true)
-            .and_then(|utc| datetime::checked_timestamp(i128::from(utc) + east))
+            .and_then(in_zone)
             .map(Value::Timestamp),
         Value::TimeTz {
             micros,
             offset_seconds,
         } => Ok(Value::TimeTz {
             micros: wrapped(*micros, *offset_seconds),
-            offset_seconds: offset,
+            offset_seconds: offset_now,
         }),
         Value::Time(micros) => Ok(Value::TimeTz {
-            micros: wrapped(*micros, datetime::session_offset()),
-            offset_seconds: offset,
+            micros: wrapped(*micros, datetime::session_offset_now()),
+            offset_seconds: offset_now,
         }),
         _ => return None,
     })
@@ -401,11 +418,8 @@ fn constructed(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         ("make_timestamptz", [_, _, _, _, _, _, zone]) => {
             let local = made_local(values)?;
             local.and_then(|local| {
-                let offset = zone_offset(zone)?;
-                datetime::checked_timestamp(
-                    i128::from(local) - i128::from(offset) * i128::from(MICROS_PER_SECOND),
-                )
-                .map(Value::TimestampTz)
+                let zone = zone_named(zone)?;
+                datetime::checked_timestamp(zone.utc_of_local(local)).map(Value::TimestampTz)
             })
         }
         ("make_interval", _) if values.len() <= 7 => made_interval(values)?,
@@ -415,7 +429,7 @@ fn constructed(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         ("isfinite", [Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_)]) => {
             Ok(Value::Boolean(true))
         }
-        ("isfinite", [Value::Interval(_)]) => Ok(Value::Boolean(true)),
+        ("isfinite", [Value::Interval(interval)]) => Ok(Value::Boolean(interval.is_finite())),
         ("timezone", [zone, value]) => at_time_zone(zone, value)?,
         _ => return None,
     })
@@ -452,7 +466,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         }
         ("current_time", []) => local_now().map(|local| Value::TimeTz {
             micros: datetime::time_of_timestamp(local),
-            offset_seconds: datetime::session_offset(),
+            offset_seconds: datetime::session_offset_now(),
         }),
         ("localtime", []) => {
             local_now().map(|local| Value::Time(datetime::time_of_timestamp(local)))

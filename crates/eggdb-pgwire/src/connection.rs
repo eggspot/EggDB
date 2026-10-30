@@ -1324,7 +1324,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         limit: usize,
     ) -> Result<(), (SqlError, Option<String>)> {
         let mut sent = 0usize;
-        let offset = self.session.time_zone_offset_seconds();
+        let zone = self.session.time_zone();
         while sent < limit {
             let Some(row) = pending.rows.next() else {
                 break;
@@ -1332,7 +1332,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             let mut values = Vec::with_capacity(row.len());
             for (value, column) in row.iter().zip(&pending.columns) {
                 values.push(
-                    encode_value(value, column.type_oid, column.format, offset)
+                    encode_value(value, column.type_oid, column.format, zone)
                         .map_err(|error| (error, None))?,
                 );
             }

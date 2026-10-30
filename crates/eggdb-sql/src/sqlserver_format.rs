@@ -710,7 +710,7 @@ impl Moment {
                 Self {
                     days: local.div_euclid(MICROS_PER_DAY),
                     of_day: local.rem_euclid(MICROS_PER_DAY),
-                    offset_seconds: Some(datetime::session_offset()),
+                    offset_seconds: Some(datetime::session_offset_at(*micros)),
                 }
             }
             _ => return Ok(None),
@@ -822,7 +822,7 @@ fn date_text(moment: &Moment, pattern: &str) -> Option<String> {
                 width => format!("{year:0width$}"),
             }),
             'z' => out.push_str(&offset_text(
-                moment.offset_seconds.unwrap_or_else(datetime::session_offset),
+                moment.offset_seconds.unwrap_or_else(datetime::session_offset_now),
                 run,
             )),
             ':' => {

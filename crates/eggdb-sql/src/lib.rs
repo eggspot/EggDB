@@ -101,6 +101,7 @@ mod table_variables;
 mod temp_tables;
 mod temporal;
 mod temporary;
+mod time_zones;
 mod tsql;
 mod types;
 mod typing;
@@ -204,6 +205,7 @@ pub use store::{
 pub use enums::EnumValue;
 pub use ranges::{RangeBound, RangeBounds, RangeValue};
 pub use records::RecordValue;
+pub use time_zones::TimeZone;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 
 /// The first bytes of every key that SQL keeps in a database: the catalog and every table's

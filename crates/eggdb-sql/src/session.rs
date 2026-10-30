@@ -634,10 +634,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         Arc::make_mut(&mut self.settings).set(name, Some(value))
     }
 
-    /// How far east of UTC the session's `TimeZone` is, in seconds: what a `timestamp with
-    /// time zone` is shown in. A zone EggDB cannot resolve yet (a named region) counts as UTC.
-    pub fn time_zone_offset_seconds(&self) -> i32 {
-        self.settings.time_zone_offset
+    /// The session's `TimeZone`: what a `timestamp with time zone` is shown in, a fixed
+    /// offset or a region of the time zone database.
+    pub fn time_zone(&self) -> crate::time_zones::TimeZone {
+        self.settings.time_zone
     }
 
     /// The value of the run-time parameter `name`, as `SHOW name` gives it.
@@ -1223,7 +1223,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         tokens: &[Token<'_>],
     ) -> SqlResult<Result<Option<DestructiveStatement>, OneStatementRefusal>> {
         let settings = Arc::clone(&self.settings);
-        let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
+        let _clock = crate::datetime::enter_statement(settings.time_zone);
         let _bytes = crate::bytea::enter_dialect(self.dialect);
         let _path = self.enter_search_path(&settings);
         let mut parser = Parser::new(text, tokens)
@@ -1361,7 +1361,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 &self.advisory_locks,
                 !matches!(self.block, Block::None) || self.implicit_transaction,
             );
-            let _clock = crate::datetime::enter_statement(settings.time_zone_offset);
+            let _clock = crate::datetime::enter_statement(settings.time_zone);
             let _regex = crate::regex::enter_statement();
             let _bytes = crate::bytea::enter_dialect(self.dialect);
             let _values = crate::memory::enter_value_limit(self.max_value_bytes);
@@ -1621,10 +1621,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 continue;
             }
             if name == "time_zone" {
-                let offset = crate::oracle_date_functions::session_time_zone(value)?;
+                let zone = crate::oracle_date_functions::session_time_zone(value)?;
                 Arc::make_mut(&mut self.settings).set(
                     "TimeZone",
-                    Some(&crate::oracle_date_functions::time_zone_setting(offset)),
+                    Some(&crate::oracle_date_functions::time_zone_setting(zone)),
                 )?;
                 continue;
             }

@@ -513,7 +513,10 @@ fn local_date(value: &Value, part: DatePart, function: &str) -> SqlResult<Option
         return Err(part_not_supported(part, function, type_name));
     }
     let (local, offset_seconds) = match argument {
-        DateArgument::Utc(micros) => (datetime::utc_to_local(micros)?, Some(datetime::session_offset())),
+        DateArgument::Utc(micros) => (
+            datetime::utc_to_local(micros)?,
+            Some(datetime::session_offset_at(micros)),
+        ),
         other => (other.micros(), None),
     };
     Ok(Some(LocalDate {

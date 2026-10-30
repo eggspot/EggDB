@@ -187,6 +187,7 @@ pub(crate) fn build(
         CatalogRelation::Range => range_rows(snapshot),
         CatalogRelation::Proc => proc_rows(),
         CatalogRelation::Settings => setting_rows(snapshot),
+        CatalogRelation::TimezoneNames => time_zone_name_rows(),
         CatalogRelation::Information(relation) => {
             crate::information_schema::rows(snapshot, relation)
         }
@@ -1200,6 +1201,32 @@ fn tablespace_rows() -> Vec<Vec<Value>> {
             .done()
     })
     .collect()
+}
+
+fn time_zone_name_rows() -> Vec<Vec<Value>> {
+    let now = crate::datetime::statement_now();
+    crate::time_zones::region_names()
+        .into_iter()
+        .filter_map(|name| {
+            let zone = crate::time_zones::TimeZone::region(name)?;
+            let offset = zone.offset_at(now);
+            Some(
+                Row::new(CatalogRelation::TimezoneNames)
+                    .set("name", text(name))
+                    .set("abbrev", text(&zone.abbreviation_at(now).unwrap_or_default()))
+                    .set(
+                        "utc_offset",
+                        Value::Interval(crate::interval::Interval {
+                            months: 0,
+                            days: 0,
+                            micros: i64::from(offset) * crate::datetime::MICROS_PER_SECOND,
+                        }),
+                    )
+                    .set("is_dst", flag(zone.is_dst_at(now)))
+                    .done(),
+            )
+        })
+        .collect()
 }
 
 fn setting_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {

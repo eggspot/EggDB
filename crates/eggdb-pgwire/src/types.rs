@@ -2,7 +2,7 @@
 
 use crate::messages::{ColumnDescription, Format};
 use eggdb_sql::{
-    ArrayElement, ArrayValue, Interval, OutputColumn, SqlError, SqlState, SqlType, Value,
+    ArrayElement, ArrayValue, Interval, OutputColumn, SqlError, SqlState, SqlType, TimeZone, Value,
 };
 
 /// `bool`.
@@ -247,21 +247,21 @@ fn cannot_send(value: &Value, oid: u32) -> SqlError {
 }
 
 /// The bytes of `value` in a `DataRow`, for a column described with `oid` in `format`, with a
-/// `timestamp with time zone` shown `offset_seconds` east of UTC; `None` for NULL.
+/// `timestamp with time zone` shown in `zone`; `None` for NULL.
 pub fn encode_value(
     value: &Value,
     oid: u32,
     format: Format,
-    offset_seconds: i32,
+    zone: TimeZone,
 ) -> Result<Option<Vec<u8>>, SqlError> {
     if format == Format::Binary && ARRAY_OIDS.contains(&oid) {
         return match value {
             Value::Null => Ok(None),
-            Value::Array(array) => array_binary(array, offset_seconds).map(Some),
+            Value::Array(array) => array_binary(array, zone).map(Some),
             _ => Err(cannot_send(value, oid)),
         };
     }
-    let Some(text) = value.to_text_at(offset_seconds) else {
+    let Some(text) = value.to_text_in(zone) else {
         return Ok(None);
     };
     if format == Format::Text {
@@ -360,7 +360,7 @@ pub fn encode_value(
     Ok(Some(bytes))
 }
 
-fn array_binary(array: &ArrayValue, offset_seconds: i32) -> Result<Vec<u8>, SqlError> {
+fn array_binary(array: &ArrayValue, zone: TimeZone) -> Result<Vec<u8>, SqlError> {
     let element_oid = oid_of(array.element.sql_type());
     let too_long = || {
         cannot_send(
@@ -379,7 +379,7 @@ fn array_binary(array: &ArrayValue, offset_seconds: i32) -> Result<Vec<u8>, SqlE
         out.extend_from_slice(&array.lower_bound.to_be_bytes());
     }
     for item in &array.items {
-        match encode_value(item, element_oid, Format::Binary, offset_seconds)? {
+        match encode_value(item, element_oid, Format::Binary, zone)? {
             None => out.extend_from_slice(&(-1i32).to_be_bytes()),
             Some(bytes) => {
                 let size = i32::try_from(bytes.len()).map_err(|_| too_long())?;
@@ -682,7 +682,7 @@ pub fn decode_parameter(
             ));
         }
     };
-    Ok(value.to_text_at(0).unwrap_or_default())
+    Ok(value.to_text_in(TimeZone::UTC).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -763,18 +763,18 @@ mod tests {
             expected.extend_from_slice(&word.to_be_bytes());
         }
         assert_eq!(
-            encode_value(&array, INT4_ARRAY_OID, Format::Binary, 0).unwrap(),
+            encode_value(&array, INT4_ARRAY_OID, Format::Binary, TimeZone::UTC).unwrap(),
             Some(expected)
         );
         assert_eq!(
-            encode_value(&array, INT4_ARRAY_OID, Format::Text, 0).unwrap(),
+            encode_value(&array, INT4_ARRAY_OID, Format::Text, TimeZone::UTC).unwrap(),
             Some(b"{7,NULL}".to_vec())
         );
         assert_eq!(
-            encode_value(&Value::Null, INT4_ARRAY_OID, Format::Binary, 0).unwrap(),
+            encode_value(&Value::Null, INT4_ARRAY_OID, Format::Binary, TimeZone::UTC).unwrap(),
             None
         );
-        assert!(encode_value(&Value::Integer(7), INT4_ARRAY_OID, Format::Binary, 0).is_err());
+        assert!(encode_value(&Value::Integer(7), INT4_ARRAY_OID, Format::Binary, TimeZone::UTC).is_err());
         let empty = Value::Array(Box::new(ArrayValue {
             element: ArrayElement::Text,
             lower_bound: 1,
@@ -785,7 +785,7 @@ mod tests {
             expected.extend_from_slice(&word.to_be_bytes());
         }
         assert_eq!(
-            encode_value(&empty, TEXT_ARRAY_OID, Format::Binary, 0).unwrap(),
+            encode_value(&empty, TEXT_ARRAY_OID, Format::Binary, TimeZone::UTC).unwrap(),
             Some(expected)
         );
         let texts = Value::Array(Box::new(ArrayValue {
@@ -799,7 +799,7 @@ mod tests {
         }
         expected.extend_from_slice(b"ab");
         assert_eq!(
-            encode_value(&texts, VARCHAR_ARRAY_OID, Format::Binary, 0).unwrap(),
+            encode_value(&texts, VARCHAR_ARRAY_OID, Format::Binary, TimeZone::UTC).unwrap(),
             Some(expected)
         );
         let pairs = [
@@ -830,34 +830,34 @@ mod tests {
     #[test]
     fn values_encode_in_text_and_binary() {
         assert_eq!(
-            encode_value(&Value::Null, INT4_OID, Format::Binary, 0).unwrap(),
+            encode_value(&Value::Null, INT4_OID, Format::Binary, TimeZone::UTC).unwrap(),
             None
         );
         assert_eq!(
-            encode_value(&Value::Integer(7), INT4_OID, Format::Binary, 0).unwrap(),
+            encode_value(&Value::Integer(7), INT4_OID, Format::Binary, TimeZone::UTC).unwrap(),
             Some(7i32.to_be_bytes().to_vec())
         );
         assert_eq!(
-            encode_value(&Value::Integer(7), INT8_OID, Format::Binary, 0).unwrap(),
+            encode_value(&Value::Integer(7), INT8_OID, Format::Binary, TimeZone::UTC).unwrap(),
             Some(7i64.to_be_bytes().to_vec())
         );
         assert_eq!(
-            encode_value(&Value::Boolean(true), BOOL_OID, Format::Text, 0).unwrap(),
+            encode_value(&Value::Boolean(true), BOOL_OID, Format::Text, TimeZone::UTC).unwrap(),
             Some(b"t".to_vec())
         );
         assert_eq!(
-            encode_value(&Value::Double(2.5), FLOAT8_OID, Format::Binary, 0).unwrap(),
+            encode_value(&Value::Double(2.5), FLOAT8_OID, Format::Binary, TimeZone::UTC).unwrap(),
             Some(2.5f64.to_bits().to_be_bytes().to_vec())
         );
         assert_eq!(
-            encode_value(&Value::BigInt(1 << 40), INT4_OID, Format::Binary, 0)
+            encode_value(&Value::BigInt(1 << 40), INT4_OID, Format::Binary, TimeZone::UTC)
                 .unwrap_err()
                 .state()
                 .code(),
             "XX000"
         );
         assert_eq!(
-            encode_value(&Value::Integer(3), TEXT_OID, Format::Binary, 0).unwrap(),
+            encode_value(&Value::Integer(3), TEXT_OID, Format::Binary, TimeZone::UTC).unwrap(),
             Some(b"3".to_vec())
         );
     }
@@ -888,11 +888,11 @@ mod tests {
             (Value::Bpchar("ab  ".into()), BPCHAR_OID),
         ];
         for (value, oid) in values {
-            let bytes = encode_value(&value, oid, Format::Binary, 0)
+            let bytes = encode_value(&value, oid, Format::Binary, TimeZone::UTC)
                 .unwrap()
                 .unwrap();
             let text = decode_parameter(&bytes, oid, Format::Binary, 1).unwrap();
-            assert_eq!(Some(text), value.to_text_at(0), "{value:?}");
+            assert_eq!(Some(text), value.to_text_in(TimeZone::UTC), "{value:?}");
             assert_eq!(oid_of(value.sql_type().unwrap()), oid);
             assert_eq!(
                 sql_type_of(oid).map(SqlType::name),
@@ -934,7 +934,7 @@ mod tests {
         for (text, words) in cases {
             let expected: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
             assert_eq!(
-                encode_value(&numeric(text), NUMERIC_OID, Format::Binary, 0).unwrap(),
+                encode_value(&numeric(text), NUMERIC_OID, Format::Binary, TimeZone::UTC).unwrap(),
                 Some(expected.clone()),
                 "{text}"
             );
@@ -971,7 +971,7 @@ mod tests {
             "2024-02-29"
         );
         assert_eq!(
-            encode_value(&Value::Date(days), DATE_OID, Format::Binary, 0).unwrap(),
+            encode_value(&Value::Date(days), DATE_OID, Format::Binary, TimeZone::UTC).unwrap(),
             Some(days.to_be_bytes().to_vec())
         );
         let micros = 762_529_501_123_456i64;
@@ -988,7 +988,7 @@ mod tests {
                 &Value::TimestampTz(micros),
                 TIMESTAMPTZ_OID,
                 Format::Text,
-                3600
+                TimeZone::fixed(3600).unwrap()
             )
             .unwrap(),
             Some(b"2024-02-29 14:45:01.123456+01".to_vec())
@@ -998,7 +998,7 @@ mod tests {
                 &Value::Jsonb("{\"a\": 1}".into()),
                 JSONB_OID,
                 Format::Binary,
-                0
+                TimeZone::UTC
             )
             .unwrap(),
             Some(b"\x01{\"a\": 1}".to_vec())

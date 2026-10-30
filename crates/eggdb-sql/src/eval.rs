@@ -1787,7 +1787,7 @@ fn local_instant(value: &Value) -> SqlResult<Option<(DateTimeKind, LocalTime, i3
         Value::TimestampTz(micros) => (
             DateTimeKind::TimestampTz,
             LocalTime::of_micros(datetime::utc_to_local(*micros)?),
-            datetime::session_offset(),
+            datetime::session_offset_at(*micros),
         ),
         _ => return Ok(None),
     }))

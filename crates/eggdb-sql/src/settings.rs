@@ -299,6 +299,16 @@ fn known(name: &str) -> Option<&'static Known> {
         .find(|known| known.name.eq_ignore_ascii_case(name))
 }
 
+fn setting_zone(value: &str) -> Option<crate::time_zones::TimeZone> {
+    match value.trim().parse::<f64>() {
+        Ok(hours) if hours.is_finite() && hours.abs() < 16.0 => {
+            crate::time_zones::TimeZone::fixed((hours * 3600.0).round() as i32)
+        }
+        Ok(_) => None,
+        Err(_) => crate::time_zones::TimeZone::named(value),
+    }
+}
+
 fn is_custom(name: &str) -> bool {
     name.contains('.') && !name.starts_with('.') && !name.ends_with('.')
 }
@@ -315,7 +325,7 @@ pub(crate) struct Settings {
     values: BTreeMap<&'static str, String>,
     custom: BTreeMap<String, String>,
     pub(crate) database: String,
-    pub(crate) time_zone_offset: i32,
+    pub(crate) time_zone: crate::time_zones::TimeZone,
     pub(crate) mysql: crate::mysql_variables::MySqlVariables,
     pub(crate) sqlite: SqliteState,
     pub(crate) sqlserver: SqlServerState,
@@ -367,7 +377,7 @@ impl Default for Settings {
                 .collect(),
             custom: BTreeMap::new(),
             database: "eggdb".to_owned(),
-            time_zone_offset: 0,
+            time_zone: crate::time_zones::TimeZone::UTC,
             mysql: crate::mysql_variables::MySqlVariables::default(),
             sqlite: SqliteState::default(),
             sqlserver: SqlServerState::default(),
@@ -439,9 +449,18 @@ impl Settings {
                 }
             },
         };
-        if known.name == "TimeZone" {
-            self.time_zone_offset = crate::datetime::time_zone_offset(&value).unwrap_or(0);
-        }
+        let value = if known.name == "TimeZone" {
+            let zone = setting_zone(&value).ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    format!("invalid value for parameter \"TimeZone\": \"{value}\""),
+                )
+            })?;
+            self.time_zone = zone;
+            zone.region_name().map_or(value, str::to_owned)
+        } else {
+            value
+        };
         self.values.insert(known.name, value);
         Ok(())
     }
@@ -458,7 +477,7 @@ impl Settings {
             }
         }
         self.custom.clear();
-        self.time_zone_offset = 0;
+        self.time_zone = crate::time_zones::TimeZone::UTC;
         self.set_session_user(&user);
     }
 

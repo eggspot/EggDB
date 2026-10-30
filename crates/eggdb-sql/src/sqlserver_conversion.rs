@@ -806,7 +806,7 @@ fn temporal_text(
             datetime::utc_to_local(*micros)?,
             true,
             true,
-            Some(datetime::session_offset()),
+            Some(datetime::session_offset_at(*micros)),
         ),
         _ => return Ok(None),
     };
