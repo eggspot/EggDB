@@ -406,8 +406,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             statement_walks_expressions: true,
             search_path_cache: crate::schemas::PathCache::default(),
             search_path_at_begin: None,
-            max_value_bytes: usize::MAX,
-            max_row_bytes: usize::MAX,
+            max_value_bytes: crate::memory::MAX_VALUE_BYTES,
+            max_row_bytes: crate::memory::MAX_ROW_BYTES,
             batch_resume: None,
             sqlserver_status: crate::sqlserver_functions::SessionStatus::default(),
             oracle_nls: Arc::new(crate::oracle_nls::NlsParameters::default()),
@@ -442,19 +442,19 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
 
     /// Sets the largest text or binary value a statement of this session may build, such as
     /// the result of `||`, `CONCAT`, `LPAD` or `REPLACE`, checked before the value is built;
-    /// a larger one fails with SQLSTATE `54000`. Unlimited by default, so only the engine's own
-    /// limits apply; a server that runs untrusted statements sets it low.
+    /// a larger one fails with SQLSTATE `54000`. [`crate::MAX_VALUE_BYTES`] (1 GiB) by default
+    /// and at most; a server that runs untrusted statements sets it low.
     pub fn set_max_value_bytes(&mut self, bytes: usize) {
-        self.max_value_bytes = bytes;
+        self.max_value_bytes = bytes.min(crate::memory::MAX_VALUE_BYTES);
     }
 
     /// Sets the largest row a statement of this session may build from its select list and
     /// sort keys, counted value by value as the row is built, so a select list that copies one
     /// large value into many columns stops before it allocates them all; a larger row fails
-    /// with SQLSTATE `54000`. Unlimited by default; a server that runs untrusted statements
-    /// sets it low.
+    /// with SQLSTATE `54000`. [`crate::MAX_ROW_BYTES`] (2 GiB) by default and at most; a
+    /// server that runs untrusted statements sets it low.
     pub fn set_max_row_bytes(&mut self, bytes: usize) {
-        self.max_row_bytes = bytes;
+        self.max_row_bytes = bytes.min(crate::memory::MAX_ROW_BYTES);
     }
 
     /// The dialect this session reads: the one it was opened in, or the one a client chose

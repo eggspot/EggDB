@@ -168,6 +168,44 @@ pub(crate) fn is_temporary_key(key: &[u8]) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyOwner<'k> {
+    Everyone,
+    Relation(&'k [u8]),
+    Table(u32),
+    Relations(&'k [u8], &'k [u8]),
+    CommentOn(&'k [u8]),
+    Unreadable,
+}
+
+pub(crate) fn key_owner(key: &[u8]) -> KeyOwner<'_> {
+    if is_temporary_key(key) {
+        return KeyOwner::Everyone;
+    }
+    let Some(rest) = key.strip_prefix(NAMESPACE) else {
+        return KeyOwner::Everyone;
+    };
+    let Some((&space, rest)) = rest.split_first() else {
+        return KeyOwner::Everyone;
+    };
+    match space {
+        TABLE_SPACE | SEQUENCE_SPACE => KeyOwner::Relation(rest),
+        ROW_SPACE | INDEX_SPACE => rest
+            .get(..4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map_or(KeyOwner::Unreadable, |bytes| {
+                KeyOwner::Table(u32::from_be_bytes(bytes))
+            }),
+        REFERENCE_SPACE | catalog::DEPENDENCY_SPACE => split_length_prefixed(rest)
+            .map_or(KeyOwner::Unreadable, |(first, second)| {
+                KeyOwner::Relations(first, second)
+            }),
+        catalog::COMMENT_SPACE => split_length_prefixed(rest)
+            .map_or(KeyOwner::Unreadable, |(owner, _)| KeyOwner::CommentOn(owner)),
+        _ => KeyOwner::Everyone,
+    }
+}
+
 pub(crate) fn prefix_end(prefix: &[u8]) -> Vec<u8> {
     let mut end = prefix.to_vec();
     while let Some(last) = end.pop() {

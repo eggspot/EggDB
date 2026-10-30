@@ -111,6 +111,7 @@ mod typing;
 mod updatable_views;
 mod user_types;
 mod views;
+mod visible_tables;
 mod window;
 mod with_statement;
 
@@ -163,6 +164,8 @@ mod lateral_tests;
 #[cfg(test)]
 mod view_change_tests;
 #[cfg(test)]
+mod visible_tables_tests;
+#[cfg(test)]
 mod window_tests;
 #[cfg(test)]
 mod with_statement_tests;
@@ -213,6 +216,8 @@ pub use ranges::{RangeBound, RangeBounds, RangeValue};
 pub use records::RecordValue;
 pub use time_zones::TimeZone;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
+pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES};
+pub use visible_tables::{UnknownTableName, VisibleRead, VisibleTables};
 
 /// The first bytes of every key that SQL keeps in a database: the catalog and every table's
 /// rows. Other keys of the same database never start with them unless written there on
