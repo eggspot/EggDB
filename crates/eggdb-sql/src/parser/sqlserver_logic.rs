@@ -146,14 +146,19 @@ impl Parser<'_> {
                     return Ok(false);
                 }
                 "return" => {
+                    let at = self.resume_point();
                     self.at += 1;
                     if !self.at_statement_end() {
-                        return Err(SqlError::new(
-                            SqlState::SYNTAX_ERROR,
-                            "A RETURN statement with a return value cannot be used in this context.",
-                        )
-                        .with_sqlserver_code(178)
-                        .at(position));
+                        if !self.returns_values {
+                            return Err(SqlError::new(
+                                SqlState::SYNTAX_ERROR,
+                                "A RETURN statement with a return value cannot be used in this context.",
+                            )
+                            .with_sqlserver_code(178)
+                            .at(position));
+                        }
+                        self.expression()?;
+                        builder.push(Instruction::Run { at });
                     }
                     builder.push(Instruction::Return);
                     self.take(&TokenKind::Semicolon);

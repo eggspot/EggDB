@@ -117,6 +117,7 @@ pub(crate) struct DoBlock {
 pub(crate) struct CreateRoutine {
     pub(crate) name: Name,
     pub(crate) replace: bool,
+    pub(crate) must_exist: bool,
     pub(crate) definition: crate::routines::RoutineDefinition,
     pub(crate) body_position: Option<usize>,
 }
@@ -371,6 +372,7 @@ pub(crate) enum SqlServerStatement {
     ExecuteDynamic(DynamicSql),
     SaveTransaction(Name),
     RollbackTo(Name),
+    Return(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

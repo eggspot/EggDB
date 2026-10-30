@@ -498,6 +498,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             SqlServerStatement::ExecuteDynamic(dynamic) => self.prepare_dynamic(dynamic),
             SqlServerStatement::SaveTransaction(name) => self.save_transaction(name),
             SqlServerStatement::RollbackTo(name) => self.roll_back_to(name),
+            SqlServerStatement::Return(value) => self.run_return(value),
         }
     }
 

@@ -24,7 +24,7 @@ fn unknown_bulk_option(shown: &str, position: usize) -> SqlError {
     .at(position)
 }
 
-fn already_declared(name: &str, position: usize) -> SqlError {
+pub(super) fn already_declared(name: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::DUPLICATE_OBJECT,
         format!(
@@ -333,6 +333,15 @@ impl Parser<'_> {
 
     fn declare_table(&mut self, name: Name) -> SqlResult<Statement> {
         self.check_new_variable(&name)?;
+        let columns = self.table_variable_columns(&name.text)?;
+        self.declared_tables.push(name.text.clone());
+        Ok(Statement::SqlServer(SqlServerStatement::DeclareTable {
+            name,
+            columns,
+        }))
+    }
+
+    pub(super) fn table_variable_columns(&mut self, table: &str) -> SqlResult<Vec<(Name, SqlType)>> {
         self.expect(&TokenKind::LeftParen)?;
         let mut columns: Vec<(Name, SqlType)> = Vec::new();
         loop {
@@ -345,7 +354,7 @@ impl Parser<'_> {
                     SqlState::DUPLICATE_COLUMN,
                     format!(
                         "Column names in each table must be unique. Column name '{}' in table '{}' is specified more than once.",
-                        column.text, name.text
+                        column.text, table
                     ),
                 )
                 .with_sqlserver_code(2705)
@@ -369,11 +378,7 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        self.declared_tables.push(name.text.clone());
-        Ok(Statement::SqlServer(SqlServerStatement::DeclareTable {
-            name,
-            columns,
-        }))
+        Ok(columns)
     }
 
     pub(super) fn at_insert_into_variable(&self) -> bool {

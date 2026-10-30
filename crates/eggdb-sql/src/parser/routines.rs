@@ -210,10 +210,12 @@ impl<'t> Parser<'t> {
             settings: attributes.settings,
             body,
             text: self.slice(start, self.previous_end()),
+            tsql: None,
         };
         Ok(Statement::CreateRoutine(Box::new(CreateRoutine {
             name,
             replace,
+            must_exist: false,
             definition,
             body_position: attributes.body_position,
         })))
@@ -295,6 +297,7 @@ impl<'t> Parser<'t> {
             mode,
             sql_type,
             default,
+            declared: None,
         })
     }
 

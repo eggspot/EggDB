@@ -688,6 +688,13 @@ impl<'t> Parser<'t> {
                     None => return Err(self.unexpected()),
                 }
             }
+            "return" => {
+                self.at += 1;
+                if self.at_statement_end() {
+                    return Err(outside_a_batch("RETURN").at(position));
+                }
+                Statement::SqlServer(SqlServerStatement::Return(self.expression()?))
+            }
             word if BATCH_LOGIC_STATEMENTS.contains(&word) => {
                 return Err(outside_a_batch(&self.keyword_text()).at(position));
             }
@@ -713,6 +720,7 @@ impl<'t> Parser<'t> {
             {
                 self.sqlserver_view()?
             }
+            "create" | "alter" | "drop" if self.at_sqlserver_routine() => self.sqlserver_routine()?,
             "create" if self.is_word_at(1, "sequence") => {
                 self.at += 1;
                 self.sqlserver_create_sequence()?

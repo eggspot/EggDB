@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod calls;
+mod sqlserver;
 
 pub(crate) use calls::{
     Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_outputs, called_name, evaluate, marked_call,
@@ -56,6 +57,7 @@ impl RoutineKind {
 pub(crate) enum RoutineLanguage {
     Sql,
     PlPgSql,
+    Tsql,
 }
 
 impl RoutineLanguage {
@@ -63,6 +65,7 @@ impl RoutineLanguage {
         match self {
             Self::Sql => "sql",
             Self::PlPgSql => "plpgsql",
+            Self::Tsql => "tsql",
         }
     }
 }
@@ -100,6 +103,7 @@ pub(crate) struct RoutineParameter {
     pub(crate) mode: ParameterMode,
     pub(crate) sql_type: SqlType,
     pub(crate) default: Option<String>,
+    pub(crate) declared: Option<crate::sqlserver_types::SqlServerType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,6 +168,7 @@ pub(crate) struct RoutineDefinition {
     pub(crate) settings: Vec<(String, String)>,
     pub(crate) body: String,
     pub(crate) text: String,
+    pub(crate) tsql: Option<Box<crate::tsql::TsqlRoutine>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -508,6 +513,7 @@ fn check_body(definition: &RoutineDefinition, body_position: Option<usize>) -> S
     match definition.language {
         RoutineLanguage::Sql => tokenize_in(&definition.body, definition.dialect).map(drop),
         RoutineLanguage::PlPgSql => crate::plpgsql::check(definition, body_position),
+        RoutineLanguage::Tsql => Ok(()),
     }
 }
 
@@ -547,6 +553,9 @@ pub(crate) fn create_routine(
             format!("a routine's definition is at most {MAX_ROUTINE_TEXT} bytes"),
         )
         .at(create.name.position));
+    }
+    if definition.dialect == Dialect::SqlServer {
+        return sqlserver::create_routine(writer, tables, create, definition);
     }
     check_returns(&*writer, tables, &definition)?;
     if body_check == BodyCheck::Checked {
@@ -672,6 +681,9 @@ pub(crate) fn drop_routines(
     drop: &DropRoutine,
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
+    if dialect == Dialect::SqlServer {
+        return sqlserver::drop_routines(writer, tables, drop);
+    }
     let keyword = drop.kind.map_or("ROUTINE", RoutineKind::keyword);
     let mut result = QueryResult::command(format!("DROP {keyword}"));
     for target in &drop.targets {
@@ -797,5 +809,7 @@ pub(crate) fn alter_routine(
 
 #[cfg(test)]
 mod calls_tests;
+#[cfg(test)]
+mod sqlserver_tests;
 #[cfg(test)]
 mod tests;

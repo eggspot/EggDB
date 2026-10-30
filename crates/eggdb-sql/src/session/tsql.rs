@@ -93,7 +93,7 @@ fn ends_sqlserver_batch(error: &SqlError) -> bool {
 fn assigns_only(result: &QueryResult) -> bool {
     result.columns.is_none()
         && result.info_messages.is_empty()
-        && (matches!(result.tag.as_str(), "DECLARE" | "SET 1")
+        && (matches!(result.tag.as_str(), "DECLARE" | "SET 1" | "RETURN")
             || result.tag.starts_with("SELECT "))
 }
 
@@ -851,6 +851,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
         }
         Ok(QueryResult::command(format!("SELECT {assigned}")))
+    }
+
+    pub(super) fn run_return(&mut self, value: &Expr) -> SqlResult<QueryResult> {
+        self.returned_value = Some(self.evaluate(value)?);
+        Ok(QueryResult::command("RETURN"))
     }
 
     pub(super) fn run_condition(&mut self, condition: &Expr) -> SqlResult<QueryResult> {

@@ -14,6 +14,7 @@ mod sqlserver;
 mod sqlserver_batch;
 mod sqlserver_functions;
 mod sqlserver_logic;
+mod sqlserver_routines;
 mod triggers;
 mod types;
 mod windows;
@@ -285,6 +286,7 @@ pub(crate) struct Parser<'t> {
     select_windows: Option<Vec<(String, crate::window::WindowDefinition)>>,
     trigger_frame: Option<&'t crate::triggers::TriggerFrame>,
     routine_frame: Option<&'t crate::plpgsql::RoutineFrame>,
+    returns_values: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -406,7 +408,13 @@ impl<'t> Parser<'t> {
             select_windows: None,
             trigger_frame: None,
             routine_frame: None,
+            returns_values: false,
         }
+    }
+
+    pub(crate) fn returning_values(mut self) -> Self {
+        self.returns_values = true;
+        self
     }
 
     pub(crate) fn with_batch_context(mut self, batch: &'t crate::tsql::BatchContext) -> Self {
