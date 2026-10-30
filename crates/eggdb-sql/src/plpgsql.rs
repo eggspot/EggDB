@@ -1,9 +1,19 @@
 mod conditions;
+mod frame;
+mod raise;
+mod run;
+mod statements;
+mod writes;
 
+#[cfg(test)]
+mod run_tests;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use conditions::{condition_name, condition_states};
+pub(crate) use frame::RoutineFrame;
+pub(crate) use raise::take_raised_notices;
+pub(crate) use run::{Call, Returned, TriggerCall, invoke, invoke_read_only, run_inline};
 
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -539,6 +549,10 @@ pub(crate) fn is_trigger_function(definition: &RoutineDefinition) -> bool {
 pub(crate) fn compile(definition: &RoutineDefinition) -> SqlResult<Program> {
     let tokens = tokenize_in(&definition.body, Dialect::PostgreSql)?;
     crate::parser::plpgsql_program(&definition.body, &tokens, definition)
+}
+
+pub(crate) fn compile_for_run(definition: &RoutineDefinition) -> SqlResult<Program> {
+    compile(definition).map_err(|error| compilation_error(definition, None, error))
 }
 
 pub(crate) fn line_of(body: &str, position: usize) -> usize {

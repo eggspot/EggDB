@@ -1756,3 +1756,54 @@ fn check_constant(variable: &Variable, whole: bool, position: usize) -> SqlResul
     }
     Ok(())
 }
+
+impl<'t> Parser<'t> {
+    pub(crate) fn with_routine_frame(mut self, frame: &'t crate::plpgsql::RoutineFrame) -> Self {
+        self.routine_frame = Some(frame);
+        self
+    }
+
+    pub(super) fn routine_primary(&mut self) -> SqlResult<Option<crate::ast::Expr>> {
+        let Some(frame) = self.routine_frame else {
+            return Ok(None);
+        };
+        let position = self.position();
+        let word = match self.peek_kind() {
+            TokenKind::Parameter(digits) => {
+                let Some(expr) = frame.positional_expr(digits, position) else {
+                    return Ok(None);
+                };
+                self.at += 1;
+                return Ok(Some(expr));
+            }
+            TokenKind::Word(word) => word.as_ref(),
+            TokenKind::QuotedIdentifier(name) => name.as_str(),
+            _ => return Ok(None),
+        };
+        match self.peek_kind_at(1) {
+            TokenKind::LeftParen => Ok(None),
+            TokenKind::Dot => {
+                let field = match self.peek_kind_at(2) {
+                    TokenKind::Word(field) => field.as_ref(),
+                    TokenKind::QuotedIdentifier(field) => field.as_str(),
+                    _ => return Ok(None),
+                };
+                if self.peek_kind_at(3) == &TokenKind::LeftParen {
+                    return Ok(None);
+                }
+                let Some(expr) = frame.qualified_expr(word, field, position)? else {
+                    return Ok(None);
+                };
+                self.at += 3;
+                Ok(Some(expr))
+            }
+            _ => {
+                let Some(expr) = frame.variable_expr(word, position) else {
+                    return Ok(None);
+                };
+                self.at += 1;
+                Ok(Some(expr))
+            }
+        }
+    }
+}

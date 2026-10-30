@@ -58,6 +58,8 @@ impl SqlState {
     pub const STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER: Self = Self(*b"0Z002");
     /// `21000` cardinality_violation.
     pub const CARDINALITY_VIOLATION: Self = Self(*b"21000");
+    /// `2D000` invalid_transaction_termination, such as `COMMIT` inside a function.
+    pub const INVALID_TRANSACTION_TERMINATION: Self = Self(*b"2D000");
     /// `22001` string_data_right_truncation.
     pub const STRING_DATA_RIGHT_TRUNCATION: Self = Self(*b"22001");
     /// `22021` character_not_in_repertoire: bytes that are not valid UTF-8.

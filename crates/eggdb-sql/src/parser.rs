@@ -283,6 +283,7 @@ pub(crate) struct Parser<'t> {
     select_targets: Option<Vec<(crate::ast::AssignmentTarget, Vec<String>)>>,
     select_windows: Option<Vec<(String, crate::window::WindowDefinition)>>,
     trigger_frame: Option<&'t crate::triggers::TriggerFrame>,
+    routine_frame: Option<&'t crate::plpgsql::RoutineFrame>,
 }
 
 #[derive(Clone, Copy)]
@@ -403,6 +404,7 @@ impl<'t> Parser<'t> {
             select_targets: None,
             select_windows: None,
             trigger_frame: None,
+            routine_frame: None,
         }
     }
 
@@ -3430,6 +3432,9 @@ impl<'t> Parser<'t> {
     }
 
     fn primary(&mut self) -> SqlResult<Expr> {
+        if let Some(expr) = self.routine_primary()? {
+            return Ok(expr);
+        }
         if let Some(expr) = self.trigger_primary()? {
             return Ok(expr);
         }

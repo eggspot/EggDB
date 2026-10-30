@@ -20,6 +20,7 @@ pub(crate) const MAX_ROUTINE_TEXT: usize = 1 << 20;
 pub(crate) const MAX_OVERLOADS: usize = 256;
 pub(crate) const MAX_PARAMETERS: usize = 100;
 const CACHED_NAMES: usize = 512;
+const CACHED_PROGRAMS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RoutineKind {
@@ -231,6 +232,7 @@ pub(crate) struct NamedRoutines {
 #[derive(Default)]
 pub(crate) struct RoutineCache {
     entries: HashMap<String, CachedRoutines>,
+    programs: Vec<(Arc<RoutineDefinition>, Arc<crate::plpgsql::Program>)>,
 }
 
 struct CachedRoutines {
@@ -300,6 +302,25 @@ pub(crate) fn of_name(
         },
     );
     Ok(routines)
+}
+
+pub(crate) fn compiled_program(
+    tables: &mut TableCache,
+    definition: &Arc<RoutineDefinition>,
+) -> SqlResult<Arc<crate::plpgsql::Program>> {
+    let programs = &mut tables.routines.programs;
+    if let Some((_, program)) = programs
+        .iter()
+        .find(|(known, _)| Arc::ptr_eq(known, definition))
+    {
+        return Ok(Arc::clone(program));
+    }
+    let program = Arc::new(crate::plpgsql::compile_for_run(definition)?);
+    if programs.len() >= CACHED_PROGRAMS {
+        programs.clear();
+    }
+    programs.push((Arc::clone(definition), Arc::clone(&program)));
+    Ok(program)
 }
 
 pub(crate) fn resolve(
