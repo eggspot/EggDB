@@ -485,17 +485,40 @@ SELECT @@VERSION
   (`1 + '1'` is 2, `'a' + 1` is error 245, `'1' + '1'` is `11`), a fraction stored into an
   integer is truncated (`10.6` stores 10), dates are read as SQL Server reads them (ISO 8601,
   `yyyymmdd`, `mm/dd/yyyy`, month names, two-digit years 00-49 as 20xx), and conversions SQL
-  Server's chart forbids are errors 529 (explicit) and 206 (implicit). `CONVERT` takes the
-  styles 0, 23, 101, 103, 112, 120, 121 and 126.
+  Server's chart forbids are errors 529 (explicit) and 206 (implicit). `CONVERT` writes and
+  reads every date and time style of the reference (0 to 14, 20 to 25, 100 to 114, 120, 121,
+  126 and 127; the Hijri styles 130 and 131 and the styles 140 and 141 are error 40517), the `float` styles 0 to 2 (a
+  `float` turned into text without a style shows at most six digits, `1.23457e+006`, as SQL
+  Server does), the `money` styles 0, 1 (`4,235.98`), 2 and 126, and the binary styles 0 to 2
+  both ways (`CONVERT(varchar, 0x4E61, 1)` is `0x4E61`, `CONVERT(varbinary, '4E61', 2)` is
+  `0x4E61`). Reading text, milliseconds may follow a colon (`13:05:09:120`) and six digits read
+  as `yymmdd`. `TRY_CAST` and `TRY_CONVERT` return NULL where the conversion fails, and keep
+  error 529 for the conversions the chart forbids.
 - **`IDENTITY` and `IDENTITY(1,1)`** number an integer column that is the first column of the
   primary key, inline or as a table-level `CONSTRAINT ... PRIMARY KEY`. An `INSERT` without a
   column list leaves it out, and an explicit value is error 544, as with `IDENTITY_INSERT OFF`.
 - `GETDATE()` and `CURRENT_TIMESTAMP` (milliseconds), `SYSDATETIME()`, `GETUTCDATE()`,
   `SYSUTCDATETIME()`, `SYSDATETIMEOFFSET()` (the session's time zone is UTC), `CAST`,
-  `CONVERT`, `ISNULL`, `DATEADD`, `DATEDIFF` (counting boundaries crossed), `CHARINDEX`,
-  `LEN`, `NEWID()`, `SCOPE_IDENTITY()`, `UPPER`, `LOWER`, `ABS`, `COALESCE`, `NULLIF` and the
-  aggregates, `COUNT` returning `int`. `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`,
-  `@@LANGUAGE`, `@@ROWCOUNT`, `@@ERROR`. Another function is error 195, another `@@` name error
+  `CONVERT`, `TRY_CAST`, `TRY_CONVERT`, `ISNULL`, `DATEADD`, `DATEDIFF` and `DATEDIFF_BIG`
+  (counting boundaries crossed), `DATEPART` and `DATENAME` (every part, `ISO_WEEK` and
+  `TZOFFSET` included, weeks starting on Sunday), `YEAR`, `MONTH`, `DAY`, `EOMONTH`,
+  `CHARINDEX`, `LEN`, `SUBSTRING` (characters, or bytes of a binary value), `LEFT`, `RIGHT`,
+  `REPLACE`, `STUFF`, `REPLICATE` and `SPACE` (cut at 8,000 bytes, as SQL Server cuts them,
+  unless the value is `varchar(max)` or `nvarchar(max)`), `REVERSE`, `TRIM` (with `characters
+  FROM` and `LEADING`, `TRAILING` or `BOTH`), `LTRIM`, `RTRIM`, `CONCAT` and `CONCAT_WS`
+  (skipping NULLs), `DATALENGTH`, `ASCII`, `CHAR`, `UNICODE`, `NCHAR`, `IIF`, `CHOOSE`,
+  `FORMAT` (.NET's standard and custom number, date and time formats, `time` as a time span
+  whose separators are escaped, cultures `en-US` and invariant), `ROUND` (keeping the type and
+  scale, with truncation as its third argument), `CEILING`, `FLOOR`, `NEWID()`,
+  `SCOPE_IDENTITY()`, `UPPER`, `LOWER`, `ABS`, `COALESCE`, `NULLIF` and the aggregates:
+  `COUNT` returning `int` and `COUNT_BIG` `bigint`, `SUM` and `AVG` with SQL Server's result
+  types (`int` for `tinyint`, `smallint` and `int`, `bigint`, `decimal(38, s)` and for `AVG`
+  `decimal(38, max(s, 6))`, `float`; error 8115 past the type), `STRING_AGG` with `WITHIN GROUP
+  (ORDER BY ...)`. `STRING_SPLIT(text, separator [, enable_ordinal])` is a table with a `value`
+  column (and `ordinal`), and a one-character separator (error 214 otherwise). Dividing
+  decimals gives SQL Server's precision and scale (`2 / 3.0` is `0.666666`, `10.0 / 4` is
+  `2.500000000000`). `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`, `@@LANGUAGE`,
+  `@@ROWCOUNT`, `@@IDENTITY`, `@@ERROR`. Another function is error 195, another `@@` name error
   137, and so is an `@variable` unless the batch declares it or it is a parameter of a
   parameterized batch (`sp_executesql` and the prepared statements of SqlClient and mssql-jdbc,
   item 23b).
@@ -2372,13 +2395,18 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   even without `CHECK_CONSTRAINTS` (SQL Server skips them and marks them untrusted).
 - `DATEDIFF(nanosecond, ...)` counts microseconds times 1,000; `CONVERT` to `varbinary` of a
   string takes its UTF-8 bytes.
-- Not yet (item 39b and later): `SUBSTRING`, `LEFT`, `RIGHT`, `REPLACE`, `STUFF`,
-  `REPLICATE`, `SPACE`, `REVERSE`, `TRIM`, `LTRIM`, `RTRIM`, `CONCAT`, `DATALENGTH`, `IIF`,
-  `CHOOSE`, `DATEPART`, `DATENAME`, `YEAR`, `MONTH`, `DAY`, `EOMONTH`, `TRY_CAST`,
-  `TRY_CONVERT`, `DATEDIFF_BIG`, `ROUND`, `CEILING`, `FLOOR`, `COUNT_BIG`,
-  `@@IDENTITY`, the other `CONVERT` styles, `SUM` and `AVG` with SQL Server's result types and
-  decimal division's scale; `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.`
-  in `UPDATE`, `SELECT ... INTO` and `#temporary` tables.
+- Because a column keeps its engine type, `DATALENGTH` of an `nvarchar` column counts its
+  UTF-8 bytes (an `N'...'` constant counts two bytes per UTF-16 unit), and whether a value is
+  `varchar(max)` for the 8,000-byte cut of `REPLICATE`, `REPLACE` and `STUFF` is judged by
+  its engine type (a `varchar(n)` column and a constant are cut, `varchar(max)` and `text` are
+  not). `STRING_AGG` has no 8,000-byte limit. The `money` styles of `CONVERT` apply to every
+  number kept with four decimal places, as `money` is kept.
+- Dividing decimals and `AVG` of a decimal truncate to the result's scale. `FORMAT` knows the
+  cultures `en-US` and invariant (`''`); another culture is error 40517. `DATEPART(nanosecond,
+  ...)` counts microseconds times 1,000. `STRING_SPLIT`'s `enable_ordinal` is an integer
+  constant. The `float` style 3 is error 40517.
+- Not yet: `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.` in `UPDATE`,
+  `SELECT ... INTO` and `#temporary` tables.
 - An `IDENTITY` seed or increment other than (1,1), and an identity column that is not the
   first column of the primary key; the next number is one more than the largest in the table,
   so a deleted largest value is used again.
