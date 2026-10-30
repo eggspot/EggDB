@@ -2,6 +2,8 @@ pub(crate) const NO_DATA_FOUND_CODE: u16 = 1403;
 pub(crate) const USER_EXCEPTION_CODE: u16 = 6510;
 pub(crate) const APPLICATION_ERROR_LOWEST: i64 = -20999;
 pub(crate) const APPLICATION_ERROR_HIGHEST: i64 = -20000;
+pub(crate) const NORMAL_COMPLETION: &str = "ORA-0000: normal, successful completion";
+pub(crate) const USER_EXCEPTION_MESSAGE: &str = "User-Defined Exception";
 const NO_DATA_FOUND_SQLCODE: i32 = 100;
 const USER_EXCEPTION_SQLCODE: i32 = 1;
 
@@ -104,4 +106,26 @@ pub(crate) fn application_error_code(number: i64) -> Option<u16> {
         return None;
     }
     number.checked_neg().and_then(|code| u16::try_from(code).ok())
+}
+
+pub(crate) fn sqlerrm_of(sqlcode: i64) -> String {
+    match sqlcode {
+        0 => NORMAL_COMPLETION.to_owned(),
+        1 => USER_EXCEPTION_MESSAGE.to_owned(),
+        100 => format!("ORA-{NO_DATA_FOUND_CODE:05}: no data found"),
+        positive if positive > 0 => format!("-{positive}: non-ORACLE exception "),
+        negative => {
+            let Some(code) = negative.checked_neg().and_then(|code| u16::try_from(code).ok())
+            else {
+                return format!("ORA{negative}: Message {} not found;  product=RDBMS; facility=ORA", negative.unsigned_abs());
+            };
+            match predefined_by_code(code) {
+                Some(predefined) => format!("ORA-{code:05}: {}", predefined.message),
+                None if application_error_code(negative).is_some() => format!("ORA-{code:05}: "),
+                None => format!(
+                    "ORA-{code:05}: Message {code} not found;  product=RDBMS; facility=ORA"
+                ),
+            }
+        }
+    }
 }

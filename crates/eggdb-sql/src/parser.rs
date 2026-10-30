@@ -6,6 +6,7 @@ mod mysql;
 mod oracle;
 mod plpgsql;
 mod plsql;
+mod plsql_primary;
 mod plsql_routines;
 mod postgresql;
 mod query;

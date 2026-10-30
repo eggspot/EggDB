@@ -1,3 +1,4 @@
+mod collections;
 mod plsql;
 
 pub(crate) use plsql::{local_program, local_routines, take_transaction_end};
@@ -235,6 +236,7 @@ struct OpenCursor {
     rows: Vec<Vec<Value>>,
     position: usize,
     scroll: Option<bool>,
+    found: Option<bool>,
 }
 
 fn column_names(result: &QueryResult) -> Vec<String> {
@@ -325,6 +327,7 @@ fn coerce(slot: &Slot, value: Value) -> SqlResult<Value> {
         Slot::Typed(SqlType::Dynamic) => Ok(value),
         Slot::Typed(sql_type) => convert(value, *sql_type, Conversion::Assignment),
         Slot::Untyped => Ok(value),
+        Slot::Collection(shape) => collections::coerce_collection(shape, value),
         Slot::Cursor(_) => Ok(match value {
             Value::Null => Value::Null,
             other => Value::Text(display_value(&other)),
@@ -781,6 +784,7 @@ impl<'r> Run<'r> {
 
     fn call_step(&mut self, text: &str) -> SqlResult<Flow> {
         let dialect = self.dialect();
+        self.refresh_cursor_attributes();
         let Statement::Call(call) = parsed(text, self.settings, &self.frame, dialect)? else {
             self.query_text(text)?;
             return Ok(Flow::Next);
@@ -816,6 +820,7 @@ impl<'r> Run<'r> {
     }
 
     fn query_text(&mut self, text: &str) -> SqlResult<QueryResult> {
+        self.refresh_cursor_attributes();
         let statement = parsed(text, self.settings, &self.frame, self.dialect())?;
         self.execute(statement)
     }
@@ -971,6 +976,10 @@ impl<'r> Run<'r> {
                     }
                     (None, _) => Value::Null,
                 };
+                let value = match (&slot, value) {
+                    (Slot::Collection(shape), Value::Null) => shape.initial_value(),
+                    (_, value) => value,
+                };
                 if declared.not_null && value == Value::Null {
                     return Err(null_into_not_null(&declaration.name));
                 }
@@ -1002,8 +1011,7 @@ impl<'r> Run<'r> {
                 return self.declare_subprogram(&declaration.name, subprogram);
             }
             DeclarationKind::Type(declared) if self.oracle => {
-                self.declare_type(&declaration.name, declared);
-                return Ok(());
+                return self.declare_type(&declaration.name, declared);
             }
             DeclarationKind::Exception { .. }
             | DeclarationKind::Subprogram(_)
@@ -1175,10 +1183,22 @@ impl<'r> Run<'r> {
             } => self.open(cursor, *scroll, source),
             StepKind::Fetch {
                 cursor,
+                into,
+                limit,
+                ..
+            } if self.oracle && into.bulk => self.fetch_bulk(cursor, into, limit.as_ref()),
+            StepKind::Fetch {
+                cursor,
                 direction,
                 into,
                 ..
             } => self.fetch(cursor, direction, into),
+            StepKind::Forall(forall) if self.oracle => self.forall(forall),
+            StepKind::CollectionMethod {
+                target,
+                method,
+                arguments,
+            } if self.oracle => self.collection_method(target, *method, arguments),
             StepKind::RaiseException(raised) if self.oracle => self.raise_exception(raised),
             StepKind::ApplicationError {
                 number,
@@ -1239,6 +1259,7 @@ impl<'r> Run<'r> {
     fn sql(&mut self, statement: &Fragment, into: Option<&IntoTargets>) -> SqlResult<Flow> {
         let result = self.query_text(&statement.text)?;
         self.set_found(processed_rows(&result));
+        self.note_implicit_rows(processed_rows(&result));
         match into {
             Some(into) => self.store_into(into, result)?,
             None if result.columns.is_some() => {
@@ -1273,6 +1294,9 @@ impl<'r> Run<'r> {
 
     fn store_into(&mut self, into: &IntoTargets, result: QueryResult) -> SqlResult<()> {
         let names = column_names(&result);
+        if into.bulk {
+            return self.store_bulk(&into.targets, &names, result.rows);
+        }
         let selected = result.tag.starts_with("SELECT");
         let mut rows = result.rows.into_iter();
         let first = rows.next();
@@ -1340,6 +1364,11 @@ impl<'r> Run<'r> {
         let Some(index) = self.frame.target_index(&target.name) else {
             return Err(unknown_variable(&target.name));
         };
+        if !target.path.is_empty()
+            && matches!(self.frame.variables[index].slot, Slot::Collection(_))
+        {
+            return self.assign_collection(index, &target.path, value);
+        }
         match target.path.as_slice() {
             [] => self.store(index, value),
             [TargetPart::Field(field)] => self.assign_field(index, field, value),
@@ -1711,6 +1740,7 @@ impl<'r> Run<'r> {
     fn execute_dynamic(&mut self, dynamic: &DynamicSql) -> SqlResult<Flow> {
         let result = self.dynamic(&dynamic.command, &dynamic.using)?;
         self.row_count = processed_rows(&result);
+        self.note_implicit_rows(self.row_count);
         if let Some(into) = &dynamic.into {
             self.store_into(into, result)?;
         }
@@ -1935,6 +1965,7 @@ impl<'r> Run<'r> {
             rows,
             position: 0,
             scroll,
+            found: None,
         });
         self.frame.variables[index].value = Value::Text(portal);
         Ok(Flow::Next)
@@ -2048,6 +2079,7 @@ impl<'r> Run<'r> {
             .cloned();
         let names = cursor.names.clone();
         let found = row.is_some();
+        cursor.found = Some(found);
         self.assign_row(&into.targets, row, &names)?;
         self.set_found(u64::from(found));
         Ok(Flow::Next)

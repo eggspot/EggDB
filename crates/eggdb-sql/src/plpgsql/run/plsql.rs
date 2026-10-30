@@ -1,5 +1,6 @@
 use super::super::frame::{FrameVariable, Slot, row_record};
 use super::super::raise::{display_value, with_context_line};
+use super::super::collections::CollectionShape;
 use super::super::{
     Block, Fragment, Handler, Program, RaisedException, Subprogram, TypeDeclaration, VariableType,
     line_of,
@@ -7,7 +8,8 @@ use super::super::{
 use super::{Flow, Run, coerce};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::plsql::{
-    ANONYMOUS_BLOCK_NAME, DeclaredType, NO_DATA_FOUND_CODE, USER_EXCEPTION_CODE,
+    ANONYMOUS_BLOCK_NAME, DeclaredType, NORMAL_COMPLETION, NO_DATA_FOUND_CODE, USER_EXCEPTION_CODE,
+    USER_EXCEPTION_MESSAGE,
     application_error_code, predefined_by_code, shown_object, sqlcode_of,
 };
 use crate::routines::{NamedRoutines, RoutineDefinition, RoutineKind};
@@ -15,8 +17,6 @@ use crate::types::{SqlType, Value};
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
-const NORMAL_COMPLETION: &str = "ORA-0000: normal, successful completion";
-const USER_EXCEPTION_MESSAGE: &str = "User-Defined Exception";
 const UNHANDLED_USER_EXCEPTION: &str = "PL/SQL: unhandled user-defined exception";
 const UNMAPPED_ERROR_CODE: u16 = 600;
 const TOO_MANY_ROWS_CODE: u16 = 1422;
@@ -83,6 +83,8 @@ struct LocalRoutine {
     frame: usize,
     visible: usize,
     unit: Arc<UnitLines>,
+    types: Vec<(String, TypeDeclaration)>,
+    constructors: Vec<(String, CollectionShape)>,
 }
 
 enum Entry {
@@ -108,7 +110,7 @@ pub(super) struct PlsqlState {
     mirror: Option<(usize, usize)>,
     entries_mark: usize,
     frames_mark: usize,
-    guards: usize,
+    pub(super) guards: usize,
 }
 
 pub(crate) fn local_routines(name: &str) -> Option<Arc<NamedRoutines>> {
@@ -290,15 +292,25 @@ impl Run<'_> {
                         .get(routine.frame)
                         .map(|frame| frame[..routine.visible.min(frame.len())].to_vec())
                         .unwrap_or_default();
-                    Some((routine.frame, variables, Arc::clone(&routine.unit)))
+                    Some((
+                        routine.frame,
+                        variables,
+                        Arc::clone(&routine.unit),
+                        routine.types.clone(),
+                        routine.constructors.clone(),
+                    ))
                 }
                 _ => None,
             })
         });
-        if let Some((frame, variables, unit)) = attached {
+        if let Some((frame, variables, unit, types, constructors)) = attached {
             self.plsql.mirror = Some((frame, variables.len()));
             self.frame.variables = variables;
             self.unit = Some(unit);
+            self.plsql.types = types;
+            if !constructors.is_empty() {
+                self.plsql_frame_mut().constructors = constructors;
+            }
         }
     }
 
@@ -361,6 +373,13 @@ impl Run<'_> {
         let mut definition = subprogram.definition.clone();
         definition.name = name.to_owned();
         let visible = self.frame.variables.len();
+        let types = self.plsql.types.clone();
+        let constructors = self
+            .frame
+            .plsql
+            .as_ref()
+            .map(|frame| frame.constructors.clone())
+            .unwrap_or_default();
         let frame = LOCALS.with(|locals| {
             let mut locals = locals.borrow_mut();
             if locals.entries.len() >= MAX_LOCAL_ROUTINES {
@@ -380,6 +399,8 @@ impl Run<'_> {
                 frame,
                 visible,
                 unit,
+                types,
+                constructors,
             }));
             Ok(frame)
         })?;
@@ -387,13 +408,21 @@ impl Run<'_> {
         Ok(())
     }
 
-    pub(super) fn local_scope(&self) -> (usize, usize) {
+    pub(super) fn local_scope(&self) -> (usize, usize, usize) {
         let entries = LOCALS.with(|locals| locals.borrow().entries.len());
-        (self.plsql.types.len(), entries)
+        let constructors = self
+            .frame
+            .plsql
+            .as_ref()
+            .map_or(0, |frame| frame.constructors.len());
+        (self.plsql.types.len(), entries, constructors)
     }
 
-    pub(super) fn leave_local_scope(&mut self, (types, entries): (usize, usize)) {
+    pub(super) fn leave_local_scope(&mut self, (types, entries, constructors): (usize, usize, usize)) {
         self.plsql.types.truncate(types);
+        if let Some(frame) = self.frame.plsql.as_mut() {
+            frame.constructors.truncate(constructors);
+        }
         LOCALS.with(|locals| {
             let mut locals = locals.borrow_mut();
             if locals.entries.len() > entries {
@@ -402,8 +431,14 @@ impl Run<'_> {
         });
     }
 
-    pub(super) fn declare_type(&mut self, name: &str, declared: &TypeDeclaration) {
+    pub(super) fn declare_type(&mut self, name: &str, declared: &TypeDeclaration) -> SqlResult<()> {
         self.plsql.types.push((name.to_owned(), declared.clone()));
+        if let Some(shape) = self.collection_shape(declared)? {
+            self.plsql_frame_mut()
+                .constructors
+                .push((name.to_owned(), *shape));
+        }
+        Ok(())
     }
 
     fn declared_type_named(&self, parts: &[String]) -> Option<TypeDeclaration> {
@@ -422,7 +457,7 @@ impl Run<'_> {
         Ok(match self.slot_of(variable_type)? {
             Slot::Typed(sql_type) => sql_type,
             Slot::Cursor(_) => SqlType::Text,
-            Slot::Untyped | Slot::Record | Slot::Row(_) => SqlType::Dynamic,
+            Slot::Untyped | Slot::Record | Slot::Row(_) | Slot::Collection(_) => SqlType::Dynamic,
         })
     }
 
@@ -444,10 +479,10 @@ impl Run<'_> {
             TypeDeclaration::Subtype { base, .. } => self.slot_of(&base),
             TypeDeclaration::RefCursor => Ok(Slot::Cursor(None)),
             TypeDeclaration::Table { .. } | TypeDeclaration::Varray { .. } => {
-                Err(SqlError::not_supported(format!(
-                    "the PL/SQL collection type {}",
-                    parts.join(".")
-                )))
+                match self.collection_shape(&declared)? {
+                    Some(shape) => Ok(Slot::Collection(shape)),
+                    None => Ok(Slot::Untyped),
+                }
             }
         }
     }

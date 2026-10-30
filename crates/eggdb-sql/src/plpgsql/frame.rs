@@ -1,4 +1,5 @@
 use super::CursorDeclaration;
+use super::collections::{CollectionShape, PlsqlFrame};
 use crate::ast::{Expr, ExprKind};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::parser::parameter_number;
@@ -12,6 +13,7 @@ pub(crate) enum Slot {
     Record,
     Row(Vec<(String, SqlType)>),
     Cursor(Option<Box<CursorDeclaration>>),
+    Collection(Box<CollectionShape>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,7 +45,7 @@ impl FrameVariable {
             Slot::Record | Slot::Row(_) => true,
             Slot::Typed(sql_type) => is_composite_type(*sql_type),
             Slot::Untyped => record_of(&self.value).is_some(),
-            Slot::Cursor(_) => false,
+            Slot::Cursor(_) | Slot::Collection(_) => false,
         }
     }
 
@@ -51,7 +53,9 @@ impl FrameVariable {
         match &self.slot {
             Slot::Typed(sql_type) => Some(*sql_type),
             Slot::Cursor(_) => Some(SqlType::Text),
-            Slot::Untyped | Slot::Record | Slot::Row(_) => self.value.sql_type(),
+            Slot::Untyped | Slot::Record | Slot::Row(_) | Slot::Collection(_) => {
+                self.value.sql_type()
+            }
         }
     }
 
@@ -136,6 +140,7 @@ fn constant(value: Value, sql_type: Option<SqlType>, position: usize) -> Expr {
 pub(crate) struct RoutineFrame {
     pub(crate) variables: Vec<FrameVariable>,
     pub(crate) positional: Vec<usize>,
+    pub(crate) plsql: Option<Box<PlsqlFrame>>,
 }
 
 impl RoutineFrame {

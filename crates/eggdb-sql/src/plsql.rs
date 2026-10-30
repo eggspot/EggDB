@@ -2,6 +2,8 @@ mod exceptions;
 mod packages;
 
 #[cfg(test)]
+mod collection_tests;
+#[cfg(test)]
 mod compile_tests;
 #[cfg(test)]
 mod ddl_tests;
@@ -11,8 +13,9 @@ mod run_tests;
 mod tests;
 
 pub(crate) use exceptions::{
-    APPLICATION_ERROR_HIGHEST, APPLICATION_ERROR_LOWEST, NO_DATA_FOUND_CODE, PredefinedException,
-    USER_EXCEPTION_CODE, application_error_code, predefined_by_code, predefined_by_name, sqlcode_of,
+    APPLICATION_ERROR_HIGHEST, APPLICATION_ERROR_LOWEST, NORMAL_COMPLETION, NO_DATA_FOUND_CODE,
+    PredefinedException, USER_EXCEPTION_CODE, USER_EXCEPTION_MESSAGE, application_error_code,
+    predefined_by_code, predefined_by_name, sqlcode_of, sqlerrm_of,
 };
 pub(crate) use packages::{
     StoredPackage, alter_package, create_package, drop_package, parse_package, resolve_package,

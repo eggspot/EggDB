@@ -1773,6 +1773,11 @@ impl<'t> Parser<'t> {
         let Some(frame) = self.routine_frame else {
             return Ok(None);
         };
+        if self.oracle()
+            && let Some(expr) = self.plsql_primary(frame)?
+        {
+            return Ok(Some(expr));
+        }
         let position = self.position();
         let word = match self.peek_kind() {
             TokenKind::Parameter(digits) => {
