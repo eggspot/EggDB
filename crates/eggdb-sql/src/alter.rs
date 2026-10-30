@@ -183,14 +183,33 @@ fn apply(
             *name = target.text;
             Ok(None)
         }
-        AlterAction::SetDefault { column, default } => {
-            set_default(writer, tables, name, column, default.as_ref(), dialect).map(|()| None)
-        }
+        AlterAction::SetDefault { column, default } => set_default(
+            writer,
+            tables,
+            name,
+            column,
+            default.as_ref().map(|default| (default, Dialect::PostgreSql)),
+            dialect,
+        )
+        .map(|()| None),
         AlterAction::AddDefault {
             column,
             default,
+            source,
             position,
-        } => add_default(writer, tables, name, column, default, *position, dialect).map(|()| None),
+        } => add_default(
+            writer,
+            tables,
+            name,
+            column,
+            WrittenDefault {
+                expr: default,
+                source,
+                position: *position,
+            },
+            dialect,
+        )
+        .map(|()| None),
         AlterAction::EnableConstraint(constraint) => {
             if current(writer, tables, name)?.constraint_name_taken(&constraint.text) {
                 return Ok(None);
@@ -470,6 +489,8 @@ fn add_column(
     let column = column_of(definition);
     let old_columns = table.columns.clone();
     table.columns.push(column.clone());
+    let added = table.columns.len() - 1;
+    table.set_default_dialect(added, definition.default_dialect);
     let fills = column.default.is_some() && has_rows(writer, &table)?;
     if column.not_null && !fills && has_rows(writer, &table)? {
         return Err(SqlError::new(
@@ -490,7 +511,7 @@ fn add_column(
             crate::sequences::load_all(writer)?;
         }
         let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
-            let value = execute::default_of(&column)?;
+            let value = execute::default_of(&table, added)?;
             if value.is_null() && column.not_null {
                 return Err(SqlError::new(
                     SqlState::NOT_NULL_VIOLATION,
@@ -793,6 +814,10 @@ fn drop_column(
         }
     }
     new.identities = table.identities_without_column(index);
+    new.default_dialects = table.default_dialects_without_column(index);
+    if new.auto_increment_column().is_none() {
+        new.identity_seed = None;
+    }
     new.indexes = table
         .indexes
         .iter()
@@ -1044,7 +1069,7 @@ fn set_default(
     tables: &mut TableCache,
     name: &str,
     column: &Name,
-    default: Option<&(crate::ast::Expr, String)>,
+    default: Option<(&(crate::ast::Expr, String), Dialect)>,
     dialect: Dialect,
 ) -> SqlResult<()> {
     let mut table = current(writer, tables, name)?;
@@ -1063,15 +1088,28 @@ fn set_default(
             None => error.with_hint("Use ALTER TABLE ... ALTER COLUMN ... DROP IDENTITY instead."),
         });
     }
-    if let Some((expr, text)) = default {
+    if let Some(((expr, text), _)) = default {
         execute::check_default_expr(expr)?;
         crate::sequences::check_default_sequences(writer, text)?;
     }
     let target = &mut table.columns[index];
-    target.default = default.map(|(_, text)| text.clone());
-    target.auto_increment = false;
+    target.default = default.map(|((_, text), _)| text.clone());
+    if target.auto_increment {
+        target.auto_increment = false;
+        table.identity_seed = None;
+    }
+    table.set_default_dialect(
+        index,
+        default.map_or(Dialect::PostgreSql, |(_, written_in)| written_in),
+    );
     table.set_identity(index, None);
     save(writer, &table)
+}
+
+struct WrittenDefault<'a> {
+    expr: &'a crate::ast::Expr,
+    source: &'a str,
+    position: usize,
 }
 
 fn add_default(
@@ -1079,8 +1117,7 @@ fn add_default(
     tables: &mut TableCache,
     name: &str,
     column: &Name,
-    default: &crate::ast::Expr,
-    position: usize,
+    default: WrittenDefault<'_>,
     dialect: Dialect,
 ) -> SqlResult<()> {
     let table = current(writer, tables, name)?;
@@ -1097,17 +1134,15 @@ fn add_default(
         .with_sqlserver_code(1754)
         .at(column.position));
     }
-    let source =
-        crate::parser::sqlserver_default_source(default, target.sql_type).ok_or_else(|| {
-            crate::parser::sqlserver_not_supported("A DEFAULT other than a constant or GETDATE()")
-                .at(position)
-        })?;
+    let (source, written_in) =
+        crate::parser::sqlserver_kept_default(default.expr, default.source, target.sql_type)
+            .map_err(|error| error.at(default.position))?;
     set_default(
         writer,
         tables,
         name,
         column,
-        Some(&(default.clone(), source)),
+        Some((&(default.expr.clone(), source), written_in)),
         dialect,
     )
 }
@@ -1218,6 +1253,7 @@ fn add_identity(
     let target = &mut table.columns[index];
     target.default = Some(default);
     target.auto_increment = false;
+    table.set_default_dialect(index, Dialect::PostgreSql);
     table.set_identity(index, Some(generation));
     save(writer, &table)
 }
@@ -1490,6 +1526,7 @@ fn redefine(
     target.not_null = column.not_null || in_key;
     if !target.auto_increment {
         target.default = column.default.as_ref().map(|(_, text)| text.clone());
+        table.set_default_dialect(index, column.default_dialect);
     }
     table.set_identity(index, None);
     save(writer, &table)?;

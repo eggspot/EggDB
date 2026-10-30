@@ -6,7 +6,7 @@ use crate::ast::{
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope};
-use crate::lexer::{TokenKind, tokenize_in};
+use crate::lexer::{Token, TokenKind, tokenize_in};
 use crate::session::sqlserver::ParameterDeclaration;
 use crate::settings::Settings;
 use crate::sqlserver_functions::Function;
@@ -500,7 +500,7 @@ fn folded_default(expr: &Expr, column_type: SqlType) -> Option<String> {
     postgresql_literal(&value)
 }
 
-pub(crate) fn default_source(expr: &Expr, column_type: SqlType) -> Option<String> {
+fn default_source(expr: &Expr, column_type: SqlType) -> Option<String> {
     match &expr.kind {
         ExprKind::Cast {
             expr: clock,
@@ -521,6 +521,103 @@ pub(crate) fn default_source(expr: &Expr, column_type: SqlType) -> Option<String
         _ if is_constant(expr) => folded_default(expr, column_type),
         _ => None,
     }
+}
+
+pub(crate) fn kept_default(
+    expr: &Expr,
+    written: &str,
+    column_type: SqlType,
+) -> SqlResult<(String, Dialect)> {
+    if let Some(folded) = default_source(expr, column_type) {
+        return Ok((folded, Dialect::PostgreSql));
+    }
+    let kept = without_outer_parentheses(written);
+    if !reads_alone_as_expression(kept) {
+        return Err(not_supported(
+            "A DEFAULT expression that cannot be read again on its own",
+        ));
+    }
+    Ok((kept.to_owned(), Dialect::SqlServer))
+}
+
+fn without_outer_parentheses(written: &str) -> &str {
+    let trimmed = written.trim();
+    let Ok(tokens) = tokenize_in(trimmed, Dialect::SqlServer) else {
+        return trimmed;
+    };
+    let meaningful: Vec<&Token<'_>> = tokens
+        .iter()
+        .filter(|token| token.kind != TokenKind::End)
+        .collect();
+    let partners = closing_partners(&meaningful);
+    let (mut first, mut last) = (0, meaningful.len());
+    while last - first >= 3
+        && meaningful[first].kind == TokenKind::LeftParen
+        && partners[first] == Some(last - 1)
+    {
+        first += 1;
+        last -= 1;
+    }
+    if first == 0 {
+        return trimmed;
+    }
+    trimmed
+        .get(meaningful[first - 1].end..meaningful[last].start)
+        .map_or(trimmed, str::trim)
+}
+
+fn closing_partners(tokens: &[&Token<'_>]) -> Vec<Option<usize>> {
+    let mut partners = vec![None; tokens.len()];
+    let mut open = Vec::new();
+    for (at, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LeftParen => open.push(at),
+            TokenKind::RightParen => {
+                if let Some(opened) = open.pop() {
+                    partners[opened] = Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    partners
+}
+
+fn reads_alone_as_expression(text: &str) -> bool {
+    let Ok(tokens) = tokenize_in(text, Dialect::SqlServer) else {
+        return false;
+    };
+    let names_a_local_variable = tokens.iter().any(
+        |token| matches!(&token.kind, TokenKind::Variable(name) if !name.starts_with("@@")),
+    );
+    if names_a_local_variable {
+        return false;
+    }
+    let mut parser = Parser::new(text, &tokens).in_dialect(Dialect::SqlServer);
+    parser.expression().is_ok() && parser.at_end()
+}
+
+const GENERIC_ERROR: u16 = 50000;
+
+#[cold]
+#[inline(never)]
+fn invalid_identity_argument(
+    column: &str,
+    column_type: SqlType,
+    rule: &str,
+    position: usize,
+) -> SqlError {
+    let type_name = match column_type {
+        SqlType::SmallInt => "smallint",
+        SqlType::Integer => "int",
+        _ => "bigint",
+    };
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        format!("The IDENTITY {rule} of column '{column}' must be a whole number within the range of {type_name}."),
+    )
+    .with_sqlserver_code(GENERIC_ERROR)
+    .at(position)
 }
 
 impl<'t> Parser<'t> {
@@ -1171,29 +1268,52 @@ impl<'t> Parser<'t> {
     pub(super) fn sqlserver_identity(&mut self, column: &mut ColumnDefinition) -> SqlResult<()> {
         let position = self.position();
         self.at += 1;
-        if self.take(&TokenKind::LeftParen) {
-            let seed = self.signed_type_argument()?;
+        let arguments = if self.take(&TokenKind::LeftParen) {
+            let seed = self.identity_argument()?;
             self.expect(&TokenKind::Comma)?;
-            let increment = self.signed_type_argument()?;
+            let increment = self.identity_argument()?;
             self.expect(&TokenKind::RightParen)?;
-            if seed != 1 || increment != 1 {
-                return Err(
-                    not_supported("an IDENTITY seed or increment other than (1, 1)").at(position),
-                );
-            }
-        }
-        if !matches!(
-            column.sql_type,
-            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
-        ) {
+            Some((seed, increment))
+        } else {
+            None
+        };
+        let Some((lowest, highest)) = crate::encoding::integer_type_range(column.sql_type) else {
             return Err(
                 not_supported("IDENTITY on a column that is not int, bigint or smallint")
                     .at(position),
             );
+        };
+        if let Some((seed, increment)) = arguments {
+            let fits = |value: Option<i64>| value.filter(|value| (lowest..=highest).contains(value));
+            let invalid = |rule: &str| {
+                invalid_identity_argument(&column.name.text, column.sql_type, rule, position)
+            };
+            let seed = fits(seed).ok_or_else(|| invalid("seed"))?;
+            let increment = fits(increment)
+                .filter(|&increment| increment != 0)
+                .ok_or_else(|| invalid("increment, other than zero,"))?;
+            let given = crate::encoding::IdentitySeed { seed, increment };
+            column.identity_seed =
+                (given != crate::encoding::IdentitySeed::ONE_BY_ONE).then_some(given);
         }
         column.auto_increment = true;
         column.not_null = true;
         Ok(())
+    }
+
+    fn identity_argument(&mut self) -> SqlResult<Option<i64>> {
+        let negative = self.take_operator("-");
+        if !negative {
+            self.take_operator("+");
+        }
+        let TokenKind::Integer(digits) = self.peek_kind() else {
+            return Err(self.unexpected());
+        };
+        let magnitude = digits.parse::<i128>().ok();
+        self.at += 1;
+        Ok(magnitude
+            .map(|magnitude| if negative { -magnitude } else { magnitude })
+            .and_then(|value| i64::try_from(value).ok()))
     }
 
     pub(super) fn sqlserver_top(&mut self) -> SqlResult<Option<Expr>> {

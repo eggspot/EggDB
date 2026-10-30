@@ -551,11 +551,14 @@ impl Parser<'_> {
         self.expect_word("default")?;
         let start = self.position();
         let default = self.binary_operand()?;
+        let end = self.tokens[self.at.saturating_sub(1)].end;
+        let source = self.text.get(start..end).unwrap_or("").to_owned();
         self.expect_word("for")?;
         let column = self.name()?;
         actions.push(AlterAction::AddDefault {
             column,
             default,
+            source,
             position: start,
         });
         Ok(())

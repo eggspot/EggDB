@@ -1071,7 +1071,7 @@ id|qty|bin
 4|1|A1
 SELECT 2
 
-error 0A000 40517
+ok
 ALTER TABLE Stock40 ADD DEFAULT (abs(-5)) FOR PartID
 
 ok
@@ -1970,3 +1970,87 @@ SELECT value FROM STRING_SPLIT('a', '--')
 
 ok
 DROP TABLE T39b
+
+chapter "CREATE TABLE (Transact-SQL) IDENTITY (Property)", "Specify default values for columns"
+ok
+CREATE TABLE [dbo].[Coupons40b] ([Id] INT IDENTITY(1000, 10) NOT NULL, [Code] VARCHAR(20) NOT NULL, [Created] DATETIME2(7) NOT NULL CONSTRAINT [DF_Coupons40b_Created] DEFAULT (dateadd(day,(30),getdate())), [Year] INT NULL DEFAULT (datepart(year,getdate())), [Tag] VARCHAR(20) NULL DEFAULT (CONCAT('c-', 2024)), CONSTRAINT [PK_Coupons40b] PRIMARY KEY CLUSTERED ([Id] ASC))
+
+ok
+INSERT INTO Coupons40b (Code) VALUES ('A'), ('B')
+
+rows
+SELECT Id AS id, Code AS code, Tag AS tag, CASE WHEN [Year] = YEAR(GETDATE()) THEN 1 ELSE 0 END AS this_year, CASE WHEN DATEDIFF(day, GETDATE(), Created) BETWEEN 29 AND 30 THEN 1 ELSE 0 END AS in_30_days FROM Coupons40b ORDER BY Id
+----
+id|code|tag|this_year|in_30_days
+1000|A|c-2024|1|1
+1010|B|c-2024|1|1
+SELECT 2
+
+ok
+SET IDENTITY_INSERT Coupons40b ON
+
+ok
+INSERT INTO Coupons40b (Id, Code, Tag) VALUES (1055, 'C', 'x')
+
+ok
+SET IDENTITY_INSERT Coupons40b OFF
+
+ok
+INSERT INTO Coupons40b (Code) VALUES ('D')
+
+ok
+UPDATE Coupons40b SET Tag = DEFAULT WHERE Code = 'C'
+
+rows
+SELECT Id AS id, Tag AS tag FROM Coupons40b WHERE Code IN ('C', 'D') ORDER BY Id
+----
+id|tag
+1055|c-2024
+1065|c-2024
+SELECT 2
+
+rows
+SELECT COLUMN_NAME AS col, COLUMN_DEFAULT AS def FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'coupons40b' AND COLUMN_DEFAULT IS NOT NULL ORDER BY ORDINAL_POSITION
+----
+col|def
+created|(dateadd(day,(30),getdate()))
+year|(datepart(year,getdate()))
+tag|(CONCAT('c-', 2024))
+SELECT 3
+
+ok
+CREATE TABLE Down40b (Id SMALLINT IDENTITY(-1, -5) PRIMARY KEY, Note NVARCHAR(10) NULL)
+
+ok
+INSERT INTO Down40b (Note) VALUES (N'a'), (N'b'), (N'c')
+
+rows
+SELECT Id AS id, Note AS note FROM Down40b ORDER BY Id DESC
+----
+id|note
+-1|a
+-6|b
+-11|c
+SELECT 3
+
+rows
+SELECT CAST(seed_value AS int) AS seed, CAST(increment_value AS int) AS step FROM sys.identity_columns WHERE object_id = OBJECT_ID('Down40b')
+----
+seed|step
+-1|-5
+SELECT 1
+
+error 22023
+CREATE TABLE Bad40b (Id INT IDENTITY(1, 0) PRIMARY KEY)
+
+error 22023
+CREATE TABLE Bad40b (Id SMALLINT IDENTITY(40000, 1) PRIMARY KEY)
+
+error 0A000
+CREATE TABLE Bad40b (Id INT PRIMARY KEY, n INT DEFAULT ((SELECT 1)))
+
+error 0A000
+CREATE TABLE Bad40b (Id INT PRIMARY KEY, n INT, m INT DEFAULT (n + 1))
+
+ok
+DROP TABLE Coupons40b, Down40b

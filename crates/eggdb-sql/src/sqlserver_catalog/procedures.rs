@@ -1407,8 +1407,10 @@ fn help(scope: &Scope<'_>, arguments: &Arguments) -> SqlResult<Vec<QueryResult>>
         |column| {
             vec![
                 text(column.name),
-                Value::Numeric(crate::numeric::Numeric::from_i64(1)),
-                Value::Numeric(crate::numeric::Numeric::from_i64(1)),
+                Value::Numeric(crate::numeric::Numeric::from_i64(column.identity_seed.seed)),
+                Value::Numeric(crate::numeric::Numeric::from_i64(
+                    column.identity_seed.increment,
+                )),
                 int(0),
             ]
         },

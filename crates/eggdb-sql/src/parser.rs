@@ -17,7 +17,7 @@ pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
-    default_source as sqlserver_default_source, is_reserved as is_sqlserver_reserved,
+    is_reserved as is_sqlserver_reserved, kept_default as sqlserver_kept_default,
     not_supported as sqlserver_not_supported,
     parameter_declarations as sqlserver_parameter_declarations,
     starts_statement as sqlserver_starts_statement,
@@ -1574,7 +1574,9 @@ impl<'t> Parser<'t> {
             not_null: serial.is_some(),
             primary_key: false,
             default: None,
+            default_dialect: Dialect::PostgreSql,
             auto_increment: serial.is_some(),
+            identity_seed: None,
             generated_always: false,
             unique: None,
             constraints: Vec::new(),
@@ -1626,15 +1628,15 @@ impl<'t> Parser<'t> {
                 let start = self.position();
                 let expr = self.binary_operand()?;
                 let end = self.tokens[self.at.saturating_sub(1)].end;
-                let source = if self.sqlserver() {
-                    sqlserver::default_source(&expr, column.sql_type).ok_or_else(|| {
-                        sqlserver::not_supported("A DEFAULT other than a constant or GETDATE()")
-                            .at(start)
-                    })?
+                let written = self.text.get(start..end).unwrap_or("");
+                let (source, dialect) = if self.sqlserver() {
+                    sqlserver::kept_default(&expr, written, column.sql_type)
+                        .map_err(|error| error.at(start))?
                 } else {
-                    self.text.get(start..end).unwrap_or("").to_owned()
+                    (written.to_owned(), Dialect::PostgreSql)
                 };
                 column.default = Some((expr, source));
+                column.default_dialect = dialect;
             } else if self.oracle() && self.is_word("generated") {
                 self.oracle_identity(&mut column)?;
             } else if self.sqlserver() && self.is_word("identity") {

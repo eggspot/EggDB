@@ -822,8 +822,8 @@ fn column_rows(
             );
             if identity_only {
                 row = row
-                    .set("seed_value", Value::BigInt(1))
-                    .set("increment_value", Value::BigInt(1))
+                    .set("seed_value", Value::BigInt(facts.identity_seed.seed))
+                    .set("increment_value", Value::BigInt(facts.identity_seed.increment))
                     .set("is_not_for_replication", bit(false));
             }
             rows.push(row.done());

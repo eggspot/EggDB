@@ -7,7 +7,7 @@ use crate::ast::{
 use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
 use crate::encoding::{
-    Column, IdentityGeneration, MAX_COLUMNS, TableDefinition, ViewDefinition, decode_meta,
+    Column, IdentityGeneration, IdentitySeed, MAX_COLUMNS, TableDefinition, ViewDefinition, decode_meta,
     decode_row, decode_row_into,
     encode_key_value, encode_meta, encode_row, encode_row_into, is_view_record, meta_key,
     prefix_end, rows_prefix, table_key,
@@ -19,7 +19,7 @@ use crate::eval::{
 };
 use crate::indexes;
 use crate::join::{self, JoinedRows, RowCountHints};
-use crate::lexer::tokenize;
+use crate::lexer::tokenize_in;
 use crate::memory::WorkMemory;
 use crate::mysql_errors::Warning;
 use crate::parser::{LiteralRows, LiteralToken, Parser};
@@ -301,6 +301,11 @@ pub(crate) fn create_table(
     for (index, definition) in create.columns.iter().enumerate() {
         if definition.generated_always && definition.auto_increment {
             table.set_identity(index, Some(IdentityGeneration::Always));
+        }
+        if definition.auto_increment {
+            table.identity_seed = definition.identity_seed;
+        } else if definition.default.is_some() {
+            table.set_default_dialect(index, definition.default_dialect);
         }
     }
     let specs = unique_columns(create).chain(create.indexes.iter().cloned());
@@ -646,20 +651,30 @@ fn row_identifiers_used(table: &TableDefinition) -> SqlError {
     )
 }
 
-fn default_expression(column: &Column) -> SqlResult<Option<Expr>> {
+fn default_expression(column: &Column, dialect: Dialect) -> SqlResult<Option<Expr>> {
     let Some(text) = &column.default else {
         return Ok(None);
     };
-    let tokens = tokenize(text)?;
-    let mut parser = Parser::new(text, &tokens);
-    let expr = parser.expression()?;
+    let tokens = if dialect == Dialect::PostgreSql {
+        tokenize_in(text, dialect)?
+    } else {
+        tokenize_in(text, dialect).map_err(|_| crate::encoding::corrupt("column default"))?
+    };
+    let mut parser = Parser::new(text, &tokens).in_dialect(dialect);
+    let expr = if dialect == Dialect::PostgreSql {
+        parser.expression()?
+    } else {
+        parser
+            .expression()
+            .map_err(|_| crate::encoding::corrupt("column default"))?
+    };
     if !parser.at_end() {
         return Err(crate::encoding::corrupt("column default"));
     }
     Ok(Some(expr))
 }
 
-fn evaluated_default(expr: Option<&Expr>, column: &Column) -> SqlResult<Value> {
+fn evaluated_default(expr: Option<&Expr>, column: &Column, dialect: Dialect) -> SqlResult<Value> {
     let Some(expr) = expr else {
         return Ok(Value::Null);
     };
@@ -671,30 +686,54 @@ fn evaluated_default(expr: Option<&Expr>, column: &Column) -> SqlResult<Value> {
     let value = evaluator
         .eval(expr, Some(column.sql_type))
         .map_err(|error| SqlError::new(error.state(), error.message().to_owned()))?;
-    assign(value, column)
+    match dialect {
+        Dialect::PostgreSql => assign(value, column),
+        written_in => assignment_rule(written_in)(value, column),
+    }
 }
 
-fn default_value(column: &Column) -> SqlResult<Value> {
-    evaluated_default(default_expression(column)?.as_ref(), column)
+fn default_value(table: &TableDefinition, index: usize) -> SqlResult<Value> {
+    let Some(column) = table.columns.get(index) else {
+        return Ok(Value::Null);
+    };
+    let dialect = table.default_dialect(index);
+    evaluated_default(
+        default_expression(column, dialect)?.as_ref(),
+        column,
+        dialect,
+    )
 }
 
 pub(crate) struct ColumnDefaults {
     expressions: Vec<Option<Expr>>,
+    dialects: Vec<Dialect>,
 }
 
 impl ColumnDefaults {
     pub(crate) fn of(table: &TableDefinition) -> SqlResult<Self> {
+        let dialects: Vec<Dialect> = (0..table.columns.len())
+            .map(|index| table.default_dialect(index))
+            .collect();
         Ok(Self {
             expressions: table
                 .columns
                 .iter()
-                .map(default_expression)
+                .zip(&dialects)
+                .map(|(column, &dialect)| default_expression(column, dialect))
                 .collect::<SqlResult<_>>()?,
+            dialects,
         })
     }
 
     pub(crate) fn value(&self, index: usize, column: &Column) -> SqlResult<Value> {
-        evaluated_default(self.expressions.get(index).and_then(Option::as_ref), column)
+        evaluated_default(
+            self.expressions.get(index).and_then(Option::as_ref),
+            column,
+            self.dialects
+                .get(index)
+                .copied()
+                .unwrap_or(Dialect::PostgreSql),
+        )
     }
 }
 
@@ -731,11 +770,13 @@ pub(crate) fn assignment_rule(dialect: Dialect) -> Assignment {
 fn assigned_value(
     evaluator: &Evaluator<'_>,
     value: &InsertValue,
-    column: &Column,
+    table: &TableDefinition,
+    index: usize,
     rule: Assignment,
 ) -> SqlResult<Value> {
+    let column = &table.columns[index];
     match value {
-        InsertValue::Default => default_value(column),
+        InsertValue::Default => default_value(table, index),
         InsertValue::Expr(expr) => {
             let evaluated = evaluator.eval(expr, Some(column.sql_type))?;
             rule(evaluated, column).map_err(|error| error.at_if_unplaced(expr.position))
@@ -1051,15 +1092,15 @@ pub(crate) fn insert(
     let mut warnings = Vec::new();
     for values in rows {
         let mut row = Vec::with_capacity(table.columns.len());
-        for (index, column) in table.columns.iter().enumerate() {
+        for index in 0..table.columns.len() {
             let given = targets
                 .iter()
                 .position(|&target| target == index)
                 .and_then(|slot| values.get(slot))
                 .filter(|_| !given_ignored[index]);
             row.push(match given {
-                Some(value) => assigned_value(&constants, value, column, rule)?,
-                None => default_value(column)?,
+                Some(value) => assigned_value(&constants, value, &table, index, rule)?,
+                None => default_value(&table, index)?,
             });
         }
         match stored.try_insert(writer, &mut row)? {
@@ -1366,6 +1407,7 @@ pub(crate) struct StoredRows<'a> {
     encoded: Vec<u8>,
     next_row_id: NextRowId,
     auto_increment: Option<usize>,
+    identity_seed: IdentitySeed,
     identity_insert: bool,
     next_auto_value: Option<i64>,
     first_generated: Option<u64>,
@@ -1401,6 +1443,7 @@ impl<'a> StoredRows<'a> {
             encoded: Vec::new(),
             next_row_id: NextRowId::Unknown,
             auto_increment: table.auto_increment_column(),
+            identity_seed: table.identity_seed(),
             identity_insert: false,
             next_auto_value: None,
             first_generated: None,
@@ -1411,27 +1454,27 @@ impl<'a> StoredRows<'a> {
         }
     }
 
-    fn highest_auto_value(&self, reader: &dyn KeyValueRead, index: usize) -> SqlResult<i64> {
+    fn furthest_auto_value(
+        &self,
+        reader: &dyn KeyValueRead,
+        index: usize,
+    ) -> SqlResult<Option<i64>> {
         let prefix = rows_prefix(self.table.id);
+        let direction = if self.identity_seed.scans_backward() {
+            ScanDirection::Backward
+        } else {
+            ScanDirection::Forward
+        };
         let mut last = None;
-        reader.scan(
-            &prefix,
-            &prefix_end(&prefix),
-            ScanDirection::Backward,
-            &mut |_, value| {
-                last = Some(value.to_vec());
-                Ok(false)
-            },
-        )?;
+        reader.scan(&prefix, &prefix_end(&prefix), direction, &mut |_, value| {
+            last = Some(value.to_vec());
+            Ok(false)
+        })?;
         let Some(bytes) = last else {
-            return Ok(0);
+            return Ok(None);
         };
         let row = decode_row(&bytes, &self.table.columns)?;
-        Ok(row
-            .get(index)
-            .and_then(Value::as_integer)
-            .unwrap_or(0)
-            .max(0))
+        Ok(row.get(index).and_then(Value::as_integer))
     }
 
     fn fill_auto_increment(
@@ -1451,11 +1494,11 @@ impl<'a> StoredRows<'a> {
             )
             .with_sqlserver_code(339));
         }
+        let seed = self.identity_seed;
         let next = match self.next_auto_value {
             Some(next) => next,
-            None => self
-                .highest_auto_value(reader, index)?
-                .checked_add(1)
+            None => seed
+                .next_after(self.furthest_auto_value(reader, index)?)
                 .ok_or_else(|| auto_increment_exhausted(column))?,
         };
         let kept = match given {
@@ -1463,13 +1506,18 @@ impl<'a> StoredRows<'a> {
             other => other.is_some(),
         };
         match given {
-            Some(value) if kept && value >= next => self.next_auto_value = value.checked_add(1),
-            Some(_) if kept => self.next_auto_value = Some(next),
+            Some(value) if kept => {
+                self.next_auto_value = match seed.next_after(Some(value)) {
+                    Some(after) if seed.is_beyond(after, next) => Some(after),
+                    Some(_) => Some(next),
+                    None => None,
+                };
+            }
             _ => {
                 row[index] = convert(Value::BigInt(next), column.sql_type, Conversion::Assignment)
                     .map_err(|_| auto_increment_exhausted(column))?;
                 self.first_generated.get_or_insert(next as u64);
-                self.next_auto_value = next.checked_add(1);
+                self.next_auto_value = next.checked_add(seed.increment);
             }
         }
         Ok(())
@@ -1688,7 +1736,7 @@ pub(crate) fn insert_literals(
         for (index, column) in table.columns.iter().enumerate() {
             row.push(match literals.get(index) {
                 Some((position, literal)) => literal_value(literal, column, *position)?,
-                None => default_value(column)?,
+                None => default_value(&table, index)?,
             });
         }
         stored.insert(writer, &mut row)?;
@@ -2091,8 +2139,8 @@ pub(crate) fn assign_to(value: Value, column: &Column) -> SqlResult<Value> {
     assign(value, column)
 }
 
-pub(crate) fn default_of(column: &Column) -> SqlResult<Value> {
-    default_value(column)
+pub(crate) fn default_of(table: &TableDefinition, index: usize) -> SqlResult<Value> {
+    default_value(table, index)
 }
 
 pub(crate) fn check_not_null_of(table: &TableDefinition, row: &[Value]) -> SqlResult<()> {
@@ -3086,7 +3134,7 @@ pub(crate) fn update(
         };
         let mut new_row = old_row.clone();
         for ((_, value), &index) in update.assignments.iter().zip(&targets) {
-            new_row[index] = assigned_value(&evaluator, value, &table.columns[index], rule)?;
+            new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
         }
         check_not_null(&table, &new_row)?;
         if !checks.is_empty() {

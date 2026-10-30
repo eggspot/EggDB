@@ -167,10 +167,8 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"uses\":\"constraint FK_OrderLines_Products\"",
         "\"object\":\"dbo.Products.Margin\",\"difference\":\"computed column not kept\"",
         "\"object\":\"dbo.Products.Version\",\"difference\":\"rowversion column not kept\"",
-        "\"object\":\"dbo.Coupons.Id\",\"difference\":\"IDENTITY(1000, 10) restored as IDENTITY(1, 1)",
         "\"object\":\"sales.Orders.PlacedAt\",\"difference\":\"values are stored in UTC; their offsets are lost\"",
         "\"object\":\"index IX_Orders_Open\",\"difference\":\"INCLUDE columns, the filter (a full index here) not kept\"",
-        "\"object\":\"sales.Orders.Created\",\"difference\":\"default not kept: (dateadd(day,(30),getdate()))\"",
         "\"object\":\"FK_OrderLines_Products\",\"difference\":\"not created: existing rows violate it",
         "\"object\":\"sales.Orders\",\"difference\":\"a constraint disabled in the source (NOCHECK CONSTRAINT) is enforced here\"",
         "\"grant\":1",
@@ -198,7 +196,28 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
             &db,
             "INSERT dbo.Coupons (Code) VALUES (N'NEW'); SELECT MAX(Id) FROM dbo.Coupons"
         ),
-        "1011\n"
+        "1020\n"
+    );
+    assert_eq!(
+        tsql(
+            &db,
+            "INSERT sales.Orders (CustomerId, PlacedAt, Status) VALUES (1, SYSDATETIMEOFFSET(), 1); SELECT Id FROM sales.Orders WHERE Created > DATEADD(day, 29, GETDATE()) AND Created <= DATEADD(day, 30, GETDATE())"
+        ),
+        "4\n"
+    );
+    assert_eq!(
+        tsql(
+            &db,
+            "SELECT seed_value, increment_value FROM sys.identity_columns WHERE object_id = OBJECT_ID('dbo.Coupons')"
+        ),
+        "1000|10\n"
+    );
+    assert_eq!(
+        tsql(
+            &db,
+            "SELECT definition FROM sys.default_constraints WHERE parent_object_id = OBJECT_ID('sales.Orders')"
+        ),
+        "(dateadd(day,(30),getdate()))\n"
     );
     assert_eq!(
         tsql(

@@ -726,7 +726,7 @@ fn apply_action(
                                 &child.columns[column],
                             )?,
                             (ReferentialAction::SetDefault, _) => {
-                                execute::default_of(&child.columns[column])?
+                                execute::default_of(child, column)?
                             }
                             _ => Value::Null,
                         };

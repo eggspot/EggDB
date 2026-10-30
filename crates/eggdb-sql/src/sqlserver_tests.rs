@@ -138,7 +138,7 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
         "INSERT INTO t (id, name) VALUES (2, NULL)",
         "INSERT INTO c VALUES (0)",
         "ALTER TABLE c ADD CONSTRAINT c_small CHECK (id > 5)",
-        "CREATE TABLE d (id INT PRIMARY KEY, at DATETIME2 DEFAULT SYSDATETIME() + 1)",
+        "CREATE TABLE d (id INT IDENTITY(1, 0) PRIMARY KEY)",
         "INSERT INTO t (id, name) VALUES (3, N'long')",
         "SELECT 1 / 0 AS x",
         "SELECT CAST(N'x' AS INT) AS x",
@@ -418,13 +418,115 @@ fn defaults_fold_constants_to_the_columns_type() {
     assert_eq!(rows[0][2], Value::Text(String::new()));
     assert!(matches!(rows[0][3], Value::Uuid(_)));
     assert!(matches!(rows[0][4], Value::TimestampTz(_)));
-    let error = session
-        .execute(
-            "CREATE TABLE g (id INT PRIMARY KEY, due DATETIME DEFAULT (dateadd(day,(30),getdate())))",
-            &mut |_| {},
-        )
-        .expect_err("a non-constant default");
-    assert_eq!(error.vendor_code(), Some(40517));
+}
+
+#[test]
+fn any_transact_sql_default_is_kept_as_written_and_runs_in_transact_sql() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE g (id INT PRIMARY KEY, due DATETIME DEFAULT (dateadd(day,(30),getdate())), code NVARCHAR(10) DEFAULT (CONCAT(N'x', DATEPART(year, CAST('20240115' AS date)))), n INT DEFAULT (abs(-2) * 3))",
+    );
+    values(&mut session, "INSERT INTO g (id) VALUES (1)");
+    let rows = values(
+        &mut session,
+        "SELECT DATEDIFF(day, GETDATE(), due) AS days, code, n FROM g",
+    );
+    assert!(matches!(rows[0][0], Value::Integer(29 | 30)), "{rows:?}");
+    assert_eq!(rows[0][1], Value::Text("x2024".into()));
+    assert_eq!(rows[0][2], Value::Integer(6));
+    values(&mut session, "ALTER TABLE g ADD z INT NULL");
+    values(
+        &mut session,
+        "ALTER TABLE g ADD CONSTRAINT df_g_z DEFAULT (len(N'four')) FOR z",
+    );
+    values(&mut session, "INSERT INTO g (id) VALUES (2)");
+    let rows = values(&mut session, "SELECT z FROM g WHERE id = 2");
+    assert_eq!(rows[0][0], Value::Integer(4));
+    let mut postgresql = Session::new(&store);
+    postgresql
+        .execute("INSERT INTO g (id) VALUES (3)", &mut |_| {})
+        .unwrap();
+    let rows = values(&mut postgresql, "SELECT n, z FROM g WHERE id = 3");
+    assert_eq!(rows[0], [Value::Integer(6), Value::Integer(4)]);
+    let shown = values(
+        &mut postgresql,
+        "SELECT column_default FROM information_schema.columns WHERE table_name = 'g' AND column_name = 'due'",
+    );
+    assert_eq!(
+        shown[0][0].to_text().as_deref(),
+        Some("dateadd(day,(30),getdate())")
+    );
+    for refused in [
+        "CREATE TABLE h (id INT PRIMARY KEY, n INT DEFAULT ((SELECT 1)))",
+        "CREATE TABLE h (id INT PRIMARY KEY, a INT, n INT DEFAULT (a + 1))",
+    ] {
+        let error = session
+            .execute(refused, &mut |_| {})
+            .expect_err(refused);
+        assert_eq!(error.state().code(), "0A000", "{refused}: {error}");
+    }
+}
+
+#[test]
+fn identity_seeds_and_increments_number_new_rows_from_the_stored_definition() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE up (id INT IDENTITY(100, 7) PRIMARY KEY, note NVARCHAR(5))",
+    );
+    values(
+        &mut session,
+        "CREATE TABLE down (id BIGINT IDENTITY(0, -2) PRIMARY KEY, note NVARCHAR(5))",
+    );
+    values(
+        &mut session,
+        "INSERT INTO up (note) VALUES (N'a'), (N'b')\nINSERT INTO down (note) VALUES (N'a'), (N'b'), (N'c')",
+    );
+    let rows = values(&mut session, "SELECT id FROM up ORDER BY id");
+    assert_eq!(rows, [[Value::Integer(100)], [Value::Integer(107)]]);
+    let rows = values(&mut session, "SELECT id FROM down ORDER BY id DESC");
+    assert_eq!(
+        rows,
+        [[Value::BigInt(0)], [Value::BigInt(-2)], [Value::BigInt(-4)]]
+    );
+    let rows = values(&mut session, "SELECT SCOPE_IDENTITY() AS last");
+    assert_eq!(rows[0][0].to_text().as_deref(), Some("-4"));
+    values(&mut session, "DELETE FROM up WHERE id = 107");
+    let mut later = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut later, "INSERT INTO up (note) VALUES (N'c')");
+    let rows = values(&mut later, "SELECT id FROM up ORDER BY id");
+    assert_eq!(rows, [[Value::Integer(100)], [Value::Integer(107)]]);
+    let rows = values(
+        &mut later,
+        "SELECT CAST(seed_value AS int) AS seed, CAST(increment_value AS int) AS step FROM sys.identity_columns WHERE object_id = OBJECT_ID('up')",
+    );
+    assert_eq!(rows, [[Value::Integer(100), Value::Integer(7)]]);
+    for (refused, why) in [
+        (
+            "CREATE TABLE z1 (id INT IDENTITY(1, 0) PRIMARY KEY)",
+            "The IDENTITY increment, other than zero, of column 'id' must be a whole number within the range of int.",
+        ),
+        (
+            "CREATE TABLE z2 (id SMALLINT IDENTITY(40000, 1) PRIMARY KEY)",
+            "The IDENTITY seed of column 'id' must be a whole number within the range of smallint.",
+        ),
+        (
+            "CREATE TABLE z3 (id INT IDENTITY(1, 9999999999) PRIMARY KEY)",
+            "The IDENTITY increment, other than zero, of column 'id' must be a whole number within the range of int.",
+        ),
+        (
+            "CREATE TABLE z4 (id BIGINT IDENTITY(99999999999999999999, 1) PRIMARY KEY)",
+            "The IDENTITY seed of column 'id' must be a whole number within the range of bigint.",
+        ),
+    ] {
+        let error = later.execute(refused, &mut |_| {}).expect_err(refused);
+        assert_eq!(error.state().code(), "22023", "{refused}: {error}");
+        assert_eq!(error.vendor_code(), Some(50000), "{refused}");
+        assert_eq!(error.message(), why, "{refused}");
+    }
 }
 
 #[test]
@@ -866,6 +968,45 @@ fn stored_transact_sql_texts_keep_their_meaning() {
 }
 
 #[test]
+fn stored_transact_sql_defaults_keep_their_text_and_meaning() {
+    const DEFAULTS: [(&str, &str, &str, &str); 6] = [
+        ("INT", "(abs(-2)*(3))", "abs(-2)*(3)", "6"),
+        ("NVARCHAR(10)", "(CONCAT(N'a',N'b'))", "CONCAT(N'a',N'b')", "ab"),
+        (
+            "INT",
+            "(datepart(year,CONVERT([date],'20240115',(112))))",
+            "datepart(year,CONVERT([date],'20240115',(112)))",
+            "2024",
+        ),
+        ("INT", "(isnull(NULL,(7)))", "isnull(NULL,(7))", "7"),
+        ("INT", "((len(N'four')+(1)))", "len(N'four')+(1)", "5"),
+        (
+            "NVARCHAR(10)",
+            "(CONVERT([nvarchar](10),dateadd(day,(1),CONVERT([date],'20240131',(112))),(23)))",
+            "CONVERT([nvarchar](10),dateadd(day,(1),CONVERT([date],'20240131',(112))),(23))",
+            "2024-02-01",
+        ),
+    ];
+    for (index, (column_type, written, kept, value)) in DEFAULTS.iter().enumerate() {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+        values(
+            &mut session,
+            &format!(
+                "CREATE TABLE [dbo].[Defaults] ([ID] INT PRIMARY KEY, [V] {column_type} NULL CONSTRAINT [DF_Defaults_{index}] DEFAULT {written})"
+            ),
+        );
+        let table = crate::encoding::TableDefinition::decode("defaults", &stored(&store, "defaults"))
+            .unwrap();
+        assert_eq!(table.columns[1].default.as_deref(), Some(*kept), "{written}");
+        assert_eq!(table.default_dialect(1), Dialect::SqlServer, "{written}");
+        values(&mut session, "INSERT INTO Defaults (ID) VALUES (1)");
+        let rows = values(&mut session, "SELECT V FROM Defaults");
+        assert_eq!(rows[0][0].to_text().as_deref(), Some(*value), "{written}");
+    }
+}
+
+#[test]
 fn hostile_views_and_checks_in_transact_sql_return_errors_and_never_panic() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
@@ -883,6 +1024,16 @@ fn hostile_views_and_checks_in_transact_sql_return_errors_and_never_panic() {
         "ALTER TABLE t ADD CONSTRAINT c3 CHECK ((SELECT 1) = 1)".to_owned(),
         "ALTER TABLE t ADD CONSTRAINT c4 CHECK (COUNT(*) > 0)".to_owned(),
         "CREATE VIEW v6 WITH AS SELECT 1 AS one".to_owned(),
+        format!("CREATE TABLE d1 (id INT PRIMARY KEY, n INT DEFAULT (abs({deep})))"),
+        format!("ALTER TABLE t ADD DEFAULT (abs({deep})) FOR n"),
+        "CREATE TABLE d2 (id INT PRIMARY KEY, n INT DEFAULT (@local + 1))".to_owned(),
+        "CREATE TABLE d3 (id INT PRIMARY KEY, n INT DEFAULT ((1, 2)))".to_owned(),
+        format!(
+            "CREATE TABLE d4 (id INT IDENTITY(1, {}) PRIMARY KEY)",
+            "9".repeat(400)
+        ),
+        "CREATE TABLE d5 (id INT IDENTITY(-, 1) PRIMARY KEY)".to_owned(),
+        "CREATE TABLE d6 (id INT IDENTITY(1) PRIMARY KEY)".to_owned(),
     ] {
         let error = session.execute(&text, &mut |_| {}).expect_err("refused");
         assert!(error.vendor_code().is_some(), "{error}");

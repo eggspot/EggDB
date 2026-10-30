@@ -344,12 +344,12 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
 }
 
 #[test]
-fn computed_and_rowversion_columns_are_cut_and_identity_seeds_reset() {
+fn computed_and_rowversion_columns_are_cut_and_identity_seeds_kept() {
     let text = "CREATE TABLE [dbo].[P](\n\t[Id] [int] IDENTITY(5, -2) NOT NULL,\n\t[a] [money] NULL,\n\t[b]  AS ([a]*(2)) PERSISTED,\n\t[v] [timestamp] NOT NULL,\n\t[Identity_X] [int] NULL,\n CONSTRAINT [PK_P] PRIMARY KEY CLUSTERED ([Id] ASC)\n) ON [PRIMARY]";
     let (rewritten, notes) = without_unsupported_columns(text).unwrap();
     assert_eq!(
         rewritten,
-        "CREATE TABLE [dbo].[P](\n\t[Id] [int] IDENTITY(1, 1) NOT NULL,\n\t[a] [money] NULL,\n\t[Identity_X] [int] NULL,\n CONSTRAINT [PK_P] PRIMARY KEY CLUSTERED ([Id] ASC)\n) ON [PRIMARY]"
+        "CREATE TABLE [dbo].[P](\n\t[Id] [int] IDENTITY(5, -2) NOT NULL,\n\t[a] [money] NULL,\n\t[Identity_X] [int] NULL,\n CONSTRAINT [PK_P] PRIMARY KEY CLUSTERED ([Id] ASC)\n) ON [PRIMARY]"
     );
     let shown: Vec<String> = notes
         .iter()
@@ -358,7 +358,6 @@ fn computed_and_rowversion_columns_are_cut_and_identity_seeds_reset() {
     assert_eq!(
         shown,
         [
-            "dbo.P.Id: IDENTITY(5, -2) restored as IDENTITY(1, 1); new values continue after the highest stored one",
             "dbo.P.b: computed column not kept",
             "dbo.P.v: rowversion column not kept",
         ]
@@ -390,16 +389,24 @@ fn an_ssms_shaped_script_restores_with_its_report() {
         .collect();
     assert_eq!(
         differences,
-        [
-            (11, "sales.Orders.Id"),
-            (11, "sales.Orders.Twice"),
-            (11, "sales.Orders.At"),
-        ]
+        [(11, "sales.Orders.Twice"), (11, "sales.Orders.At")]
     );
     assert_eq!(report.ignored.grant, 1);
     assert_eq!(
         query(&store, "SELECT id, total FROM sales.orders ORDER BY id"),
         "id|total\n0|1.5000\n10|2.0000\nSELECT 2"
+    );
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    session
+        .execute(
+            "INSERT [sales].[Orders] ([At], [Total]) VALUES (CAST(N'2024-01-03T10:00:00+00:00' AS DateTimeOffset), 3.0000)",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(session.close(), Ok(false));
+    assert_eq!(
+        query(&store, "SELECT id FROM sales.orders ORDER BY id"),
+        "id\n0\n10\n15\nSELECT 3"
     );
 }
 
@@ -420,7 +427,7 @@ fn a_constraint_existing_rows_violate_is_reported_and_its_check_is_a_consequence
             )
         })
         .collect();
-    assert_eq!(differences.len(), 2, "{differences:?}");
+    assert_eq!(differences.len(), 1, "{differences:?}");
     assert_eq!(differences[0].0, 7);
     assert_eq!(differences[0].1, "FK_B_A");
     assert!(
@@ -428,7 +435,15 @@ fn a_constraint_existing_rows_violate_is_reported_and_its_check_is_a_consequence
             .2
             .starts_with("not created: existing rows violate it")
     );
-    assert_eq!(differences[1].1, "dbo.B.A");
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    session
+        .execute("INSERT [dbo].[B] ([Id]) VALUES (2)", &mut |_| {})
+        .unwrap();
+    assert_eq!(session.close(), Ok(false));
+    assert_eq!(
+        query(&store, "SELECT a FROM b WHERE id = 2"),
+        "a\n2\nSELECT 1"
+    );
     assert_eq!(report.consequences.len(), 1);
     assert_eq!(report.consequences[0].line, 10);
     assert_eq!(report.consequences[0].uses, "constraint FK_B_A");

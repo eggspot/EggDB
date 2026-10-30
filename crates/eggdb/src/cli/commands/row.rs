@@ -214,6 +214,7 @@ mod tests {
             sql_type,
             not_null: false,
             default: None,
+            default_dialect: eggdb_sql::Dialect::PostgreSql,
             auto_increment: false,
             comment: None,
         };

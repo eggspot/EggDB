@@ -590,6 +590,7 @@ pub(crate) struct ColumnInfo<'a> {
     pub(crate) column_type: SqlServerColumnType,
     pub(crate) nullable: bool,
     pub(crate) identity: bool,
+    pub(crate) identity_seed: crate::encoding::IdentitySeed,
     pub(crate) has_default: bool,
 }
 
@@ -604,6 +605,7 @@ pub(crate) fn relation_columns(entry: &RelationEntry) -> Vec<ColumnInfo<'_>> {
                 column_type: SqlServerColumnType::of(column.sql_type),
                 nullable: !(column.not_null || table.primary_key.contains(&position)),
                 identity: column.auto_increment,
+                identity_seed: table.identity_seed(),
                 has_default: column.default.is_some(),
             })
             .collect(),
@@ -617,6 +619,7 @@ pub(crate) fn relation_columns(entry: &RelationEntry) -> Vec<ColumnInfo<'_>> {
                 ),
                 nullable: true,
                 identity: false,
+                identity_seed: crate::encoding::IdentitySeed::ONE_BY_ONE,
                 has_default: false,
             })
             .collect(),

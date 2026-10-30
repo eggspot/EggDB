@@ -541,14 +541,23 @@ fn identity_facts(
             minimum: sequence.min,
             cycle: sequence.cycle,
         },
-        None => IdentityFacts {
-            generation,
-            start: 1,
-            increment: 1,
-            maximum: integer_type_range(column.sql_type).map_or(i64::MAX, |(_, high)| high),
-            minimum: 1,
-            cycle: false,
-        },
+        None => {
+            let seed = table.identity_seed();
+            let (low, high) = integer_type_range(column.sql_type).unwrap_or((i64::MIN, i64::MAX));
+            let (minimum, maximum) = if seed.increment > 0 {
+                (seed.seed.min(1), high)
+            } else {
+                (low, seed.seed.max(-1))
+            };
+            IdentityFacts {
+                generation,
+                start: seed.seed,
+                increment: seed.increment,
+                maximum,
+                minimum,
+                cycle: false,
+            }
+        }
     })
 }
 

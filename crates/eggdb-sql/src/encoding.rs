@@ -31,6 +31,8 @@ const NO_PRECISION: u8 = 0xFF;
 const DEFAULT_ABSENT: u8 = 0;
 const DEFAULT_EXPRESSION: u8 = 1;
 const DEFAULT_AUTO_INCREMENT: u8 = 2;
+const DEFAULT_EXPRESSION_IN_DIALECT: u8 = 3;
+const DEFAULT_IDENTITY_SEED: u8 = 4;
 pub(crate) const PRESENT: u8 = 0x01;
 pub(crate) const NULL_IN_KEY: u8 = 0x02;
 pub(crate) const MAX_COLUMNS: usize = 1600;
@@ -331,6 +333,50 @@ pub(crate) struct IdentityColumn {
     pub(crate) generation: IdentityGeneration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IdentitySeed {
+    pub(crate) seed: i64,
+    pub(crate) increment: i64,
+}
+
+impl IdentitySeed {
+    pub(crate) const ONE_BY_ONE: Self = Self {
+        seed: 1,
+        increment: 1,
+    };
+
+    pub(crate) fn scans_backward(self) -> bool {
+        self.increment > 0
+    }
+
+    pub(crate) fn next_after(self, last: Option<i64>) -> Option<i64> {
+        let Some(last) = last else {
+            return Some(self.seed);
+        };
+        let before_seed = self.seed.saturating_sub(self.increment);
+        let from = if self.increment > 0 {
+            last.max(before_seed)
+        } else {
+            last.min(before_seed)
+        };
+        from.checked_add(self.increment)
+    }
+
+    pub(crate) fn is_beyond(self, candidate: i64, next: i64) -> bool {
+        if self.increment > 0 {
+            candidate > next
+        } else {
+            candidate < next
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DefaultDialect {
+    pub(crate) column: usize,
+    pub(crate) dialect: crate::Dialect,
+}
+
 fn identity_generation(
     column: &Column,
     stored: Option<IdentityGeneration>,
@@ -374,6 +420,8 @@ pub(crate) struct TableDefinition {
     pub(crate) referenced: bool,
     pub(crate) owns_sequence: bool,
     pub(crate) identities: Vec<IdentityColumn>,
+    pub(crate) identity_seed: Option<IdentitySeed>,
+    pub(crate) default_dialects: Vec<DefaultDialect>,
 }
 
 fn dialect_code(dialect: crate::Dialect) -> u8 {
@@ -404,6 +452,61 @@ impl TableDefinition {
 
     pub(crate) fn auto_increment_column(&self) -> Option<usize> {
         self.columns.iter().position(|column| column.auto_increment)
+    }
+
+    pub(crate) fn identity_seed(&self) -> IdentitySeed {
+        self.stored_identity_seed()
+            .unwrap_or(IdentitySeed::ONE_BY_ONE)
+    }
+
+    fn stored_identity_seed(&self) -> Option<IdentitySeed> {
+        self.identity_seed.filter(|seed| {
+            *seed != IdentitySeed::ONE_BY_ONE && self.auto_increment_column().is_some()
+        })
+    }
+
+    pub(crate) fn default_dialect(&self, column: usize) -> crate::Dialect {
+        self.default_dialects
+            .iter()
+            .find(|entry| entry.column == column)
+            .map_or(crate::Dialect::PostgreSql, |entry| entry.dialect)
+    }
+
+    pub(crate) fn set_default_dialect(&mut self, column: usize, dialect: crate::Dialect) {
+        self.default_dialects.retain(|entry| entry.column != column);
+        if dialect != crate::Dialect::PostgreSql {
+            self.default_dialects.push(DefaultDialect { column, dialect });
+            self.default_dialects.sort_by_key(|entry| entry.column);
+        }
+    }
+
+    pub(crate) fn default_dialects_without_column(&self, removed: usize) -> Vec<DefaultDialect> {
+        self.default_dialects
+            .iter()
+            .filter(|entry| entry.column != removed)
+            .map(|entry| DefaultDialect {
+                column: if entry.column > removed {
+                    entry.column - 1
+                } else {
+                    entry.column
+                },
+                dialect: entry.dialect,
+            })
+            .collect()
+    }
+
+    fn stored_default_dialect(&self, column: usize) -> crate::Dialect {
+        match self.columns.get(column) {
+            Some(found) if found.default.is_some() && !found.auto_increment => {
+                self.default_dialect(column)
+            }
+            _ => crate::Dialect::PostgreSql,
+        }
+    }
+
+    fn has_default_in_another_dialect(&self) -> bool {
+        (0..self.columns.len())
+            .any(|column| self.stored_default_dialect(column) != crate::Dialect::PostgreSql)
     }
 
     pub(crate) fn index_named(&self, name: &str) -> Option<&IndexDefinition> {
@@ -493,6 +596,8 @@ impl TableDefinition {
 
     fn needs_options_version(&self) -> bool {
         !self.stored_identities().is_empty()
+            || self.stored_identity_seed().is_some()
+            || self.has_default_in_another_dialect()
             || self
                 .indexes
                 .iter()
@@ -547,17 +652,30 @@ impl TableDefinition {
         let mut out = vec![version];
         out.extend_from_slice(&self.id.to_le_bytes());
         put_varint(&mut out, self.columns.len() as u64);
-        for column in &self.columns {
+        let seed = self.stored_identity_seed();
+        for (at, column) in self.columns.iter().enumerate() {
             put_bytes(&mut out, column.name.as_bytes());
             put_type(&mut out, column.sql_type);
             out.push(u8::from(column.not_null));
-            match &column.default {
-                _ if column.auto_increment => out.push(DEFAULT_AUTO_INCREMENT),
-                Some(text) => {
-                    out.push(DEFAULT_EXPRESSION);
-                    put_bytes(&mut out, text.as_bytes());
+            match (&column.default, seed) {
+                (_, Some(seed)) if column.auto_increment => {
+                    out.push(DEFAULT_IDENTITY_SEED);
+                    out.extend_from_slice(&seed.seed.to_le_bytes());
+                    out.extend_from_slice(&seed.increment.to_le_bytes());
                 }
-                None => out.push(DEFAULT_ABSENT),
+                _ if column.auto_increment => out.push(DEFAULT_AUTO_INCREMENT),
+                (Some(text), _) => match self.stored_default_dialect(at) {
+                    crate::Dialect::PostgreSql => {
+                        out.push(DEFAULT_EXPRESSION);
+                        put_bytes(&mut out, text.as_bytes());
+                    }
+                    dialect => {
+                        out.push(DEFAULT_EXPRESSION_IN_DIALECT);
+                        out.push(dialect_code(dialect));
+                        put_bytes(&mut out, text.as_bytes());
+                    }
+                },
+                (None, _) => out.push(DEFAULT_ABSENT),
             }
         }
         put_varint(&mut out, self.primary_key.len() as u64);
@@ -633,6 +751,9 @@ impl TableDefinition {
             return Err(reader.damaged());
         }
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
+        let options_allowed = version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
+        let mut identity_seed = None;
+        let mut default_dialects = Vec::new();
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
         let more_types_allowed = version >= MORE_TYPES_FORMAT_VERSION;
         let id = reader.u32()?;
@@ -656,6 +777,34 @@ impl TableDefinition {
                 DEFAULT_ABSENT => (None, false),
                 DEFAULT_EXPRESSION => (Some(reader.text()?), false),
                 DEFAULT_AUTO_INCREMENT if auto_allowed => (None, true),
+                DEFAULT_EXPRESSION_IN_DIALECT if options_allowed => {
+                    let dialect = dialect_of(reader.byte()?)
+                        .filter(|dialect| *dialect != crate::Dialect::PostgreSql)
+                        .ok_or_else(|| reader.damaged())?;
+                    let text = reader.text()?;
+                    if text.trim().is_empty() {
+                        return Err(reader.damaged());
+                    }
+                    default_dialects.push(DefaultDialect {
+                        column: columns.len(),
+                        dialect,
+                    });
+                    (Some(text), false)
+                }
+                DEFAULT_IDENTITY_SEED if options_allowed => {
+                    let seed = IdentitySeed {
+                        seed: i64::from_le_bytes(reader.array()?),
+                        increment: i64::from_le_bytes(reader.array()?),
+                    };
+                    if seed.increment == 0
+                        || seed == IdentitySeed::ONE_BY_ONE
+                        || identity_seed.is_some()
+                    {
+                        return Err(reader.damaged());
+                    }
+                    identity_seed = Some(seed);
+                    (None, true)
+                }
                 _ => return Err(reader.damaged()),
             };
             if columns.iter().any(|column: &Column| column.name == name) {
@@ -753,6 +902,8 @@ impl TableDefinition {
             referenced,
             owns_sequence,
             identities,
+            identity_seed,
+            default_dialects,
         };
         if version == CONSTRAINTS_FORMAT_VERSION && !table.has_constraints() {
             return Err(reader.damaged());
@@ -1883,9 +2034,9 @@ impl<'b> Reader<'b> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IdentityGeneration, IndexDefinition, IndexMethod, MAX_CHARACTER_LENGTH, SortOptions,
-        TableDefinition, decode_key_values, decode_row, encode_key_value, encode_row, prefix_end,
-        skip_key_values,
+        IdentityGeneration, IdentitySeed, IndexDefinition, IndexMethod, MAX_CHARACTER_LENGTH,
+        SortOptions, TableDefinition, decode_key_values, decode_row, encode_key_value, encode_row,
+        prefix_end, skip_key_values,
     };
     use crate::encoding::Column;
     use crate::interval::{Interval, IntervalFields};
@@ -3136,5 +3287,173 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn with_transact_sql_defaults() -> TableDefinition {
+        let mut table = two_columns([true, false], vec![0]);
+        table.identity_seed = Some(IdentitySeed {
+            seed: 1000,
+            increment: 10,
+        });
+        table.columns[1].default = Some("getdate()".into());
+        table.set_default_dialect(1, crate::Dialect::SqlServer);
+        table
+    }
+
+    #[test]
+    fn transact_sql_defaults_and_identity_seeds_are_version_9_with_pinned_bytes() {
+        let table = with_transact_sql_defaults();
+        let encoded = table.encode();
+        let mut expected = vec![9, 7, 0, 0, 0, 2, 2, b'i', b'd', 3, 1, 4];
+        expected.extend_from_slice(&1000i64.to_le_bytes());
+        expected.extend_from_slice(&10i64.to_le_bytes());
+        expected.extend_from_slice(&[4, b'n', b'a', b'm', b'e', 8, 20, 0, 0, 0, 0, 3, 4, 9]);
+        expected.extend_from_slice(b"getdate()");
+        expected.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(encoded, expected);
+        let decoded = TableDefinition::decode("t", &encoded).unwrap();
+        assert_eq!(decoded, table);
+        assert_eq!(decoded.default_dialect(1), crate::Dialect::SqlServer);
+        assert_eq!(decoded.default_dialect(0), crate::Dialect::PostgreSql);
+        assert_eq!(
+            decoded.identity_seed(),
+            IdentitySeed {
+                seed: 1000,
+                increment: 10
+            }
+        );
+        for cut in 0..encoded.len() {
+            assert!(damaged(&encoded[..cut]), "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn a_seed_of_one_by_one_and_a_postgresql_default_keep_the_older_version() {
+        let mut table = with_transact_sql_defaults();
+        table.identity_seed = Some(IdentitySeed::ONE_BY_ONE);
+        table.set_default_dialect(1, crate::Dialect::PostgreSql);
+        let encoded = table.encode();
+        assert_eq!(encoded[0], 2);
+        let decoded = TableDefinition::decode("t", &encoded).unwrap();
+        assert_eq!(decoded.identity_seed, None);
+        assert!(decoded.default_dialects.is_empty());
+        let mut only_seed = with_transact_sql_defaults();
+        only_seed.set_default_dialect(1, crate::Dialect::PostgreSql);
+        assert_eq!(only_seed.encode()[0], 9);
+        assert_eq!(
+            TableDefinition::decode("t", &only_seed.encode()),
+            Ok(only_seed)
+        );
+        let mut only_default = with_transact_sql_defaults();
+        only_default.identity_seed = None;
+        assert_eq!(only_default.encode()[0], 9);
+        assert_eq!(
+            TableDefinition::decode("t", &only_default.encode()),
+            Ok(only_default)
+        );
+        let mut seed_without_identity = with_transact_sql_defaults();
+        seed_without_identity.columns[0].auto_increment = false;
+        seed_without_identity.set_default_dialect(1, crate::Dialect::PostgreSql);
+        assert_eq!(seed_without_identity.encode()[0], 1);
+        assert_eq!(seed_without_identity.identity_seed(), IdentitySeed::ONE_BY_ONE);
+    }
+
+    #[test]
+    fn damaged_default_tags_and_identity_seeds_are_errors() {
+        let good = with_transact_sql_defaults().encode();
+        let seed_at = 12;
+        let increment_at = seed_at + 8;
+        let dialect_at = increment_at + 8 + 12;
+        assert_eq!(good[dialect_at], 4);
+        let changed = |at: usize, byte: u8| {
+            let mut bytes = good.clone();
+            bytes[at] = byte;
+            bytes
+        };
+        for byte in [0, 5, 9, 0xFF] {
+            assert!(damaged(&changed(dialect_at, byte)), "dialect {byte}");
+        }
+        assert!(damaged(&changed(dialect_at - 1, 5)));
+        assert!(damaged(&changed(seed_at - 1, 5)));
+        let mut zero_increment = good.clone();
+        zero_increment[increment_at] = 0;
+        assert!(damaged(&zero_increment));
+        let mut one_by_one = good.clone();
+        one_by_one[seed_at..seed_at + 8].copy_from_slice(&1i64.to_le_bytes());
+        one_by_one[increment_at..increment_at + 8].copy_from_slice(&1i64.to_le_bytes());
+        assert!(damaged(&one_by_one));
+        let mut blank = with_transact_sql_defaults();
+        blank.columns[1].default = Some("  ".into());
+        assert!(damaged(&blank.encode()));
+        let mut older = two_columns([true, false], vec![0]).encode();
+        assert_eq!(older[0], 2);
+        let tag_at = 11;
+        assert_eq!(older[tag_at], 2);
+        older[tag_at] = 4;
+        older.splice(tag_at + 1..tag_at + 1, [5u8; 16]);
+        assert!(damaged(&older));
+        let mut older_default = two_columns([false, false], vec![0]).encode();
+        let default_at = older_default.len() - 7;
+        assert_eq!(older_default[default_at], 1);
+        older_default[default_at] = 3;
+        older_default.insert(default_at + 1, 4);
+        assert!(damaged(&older_default));
+    }
+
+    #[test]
+    fn hostile_transact_sql_defaults_and_seeds_are_errors_never_panics() {
+        let mut random = Seeded(0x0040_B5EE_D0FF_05E7);
+        let good = with_transact_sql_defaults().encode();
+        for _ in 0..20_000 {
+            let mut bytes = good.clone();
+            let flips = 1 + random.next() % 4;
+            for _ in 0..flips {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            if random.next().is_multiple_of(3) {
+                let keep = (random.next() as usize) % bytes.len();
+                bytes.truncate(keep);
+            }
+            if let Ok(table) = TableDefinition::decode("t", &bytes) {
+                assert_ne!(table.identity_seed().increment, 0);
+                for entry in &table.default_dialects {
+                    assert_ne!(entry.dialect, crate::Dialect::PostgreSql);
+                    assert!(table.columns[entry.column].default.is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identity_seeds_count_from_the_seed_by_the_increment() {
+        let up = IdentitySeed {
+            seed: 1000,
+            increment: 10,
+        };
+        assert_eq!(up.next_after(None), Some(1000));
+        assert_eq!(up.next_after(Some(1010)), Some(1020));
+        assert_eq!(up.next_after(Some(5)), Some(1000));
+        assert!(up.scans_backward());
+        assert!(up.is_beyond(1030, 1020));
+        assert!(!up.is_beyond(1015, 1020));
+        let down = IdentitySeed {
+            seed: -1,
+            increment: -1,
+        };
+        assert_eq!(down.next_after(None), Some(-1));
+        assert_eq!(down.next_after(Some(-7)), Some(-8));
+        assert_eq!(down.next_after(Some(3)), Some(-1));
+        assert!(!down.scans_backward());
+        assert!(down.is_beyond(-9, -8));
+        assert_eq!(IdentitySeed::ONE_BY_ONE.next_after(Some(-5)), Some(1));
+        assert_eq!(IdentitySeed::ONE_BY_ONE.next_after(Some(0)), Some(1));
+        assert_eq!(IdentitySeed::ONE_BY_ONE.next_after(Some(i64::MAX)), None);
+        let from_minimum = IdentitySeed {
+            seed: i64::MIN,
+            increment: 1,
+        };
+        assert_eq!(from_minimum.next_after(None), Some(i64::MIN));
+        assert_eq!(from_minimum.next_after(Some(i64::MIN)), Some(i64::MIN + 1));
     }
 }

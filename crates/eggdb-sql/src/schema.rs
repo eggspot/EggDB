@@ -148,8 +148,12 @@ pub struct ColumnSchema {
     pub sql_type: SqlType,
     /// Whether it refuses NULL.
     pub not_null: bool,
-    /// The text of its `DEFAULT` expression, when it has one.
+    /// The text of its `DEFAULT` expression, when it has one, written in
+    /// [`default_dialect`](Self::default_dialect).
     pub default: Option<String>,
+    /// The dialect the `DEFAULT` text is written in: PostgreSQL's, or Transact-SQL's for a
+    /// SQL Server default kept as written.
+    pub default_dialect: crate::Dialect,
     /// Whether MySQL's `AUTO_INCREMENT` numbers its rows.
     pub auto_increment: bool,
     /// The column's comment, from `COMMENT ON COLUMN` or MySQL's `COMMENT` column option.
@@ -230,14 +234,17 @@ impl TableSchema {
         out
     }
 
-    /// The `CREATE TABLE` statement that makes this table, ended by `;`.
+    /// The `CREATE TABLE` statement that makes this table, ended by `;`. A `DEFAULT` written in
+    /// another dialect than PostgreSQL's is left out.
     pub fn create_statement(&self) -> String {
         let mut parts: Vec<String> = self
             .columns
             .iter()
             .map(|column| {
                 let mut part = format!("{} {}", quoted(&column.name), column.sql_type.name());
-                if let Some(default) = &column.default {
+                if let Some(default) = &column.default
+                    && column.default_dialect == crate::Dialect::PostgreSql
+                {
                     part.push_str(&format!(" DEFAULT {default}"));
                 }
                 if column.not_null && !self.primary_key.contains(&column.name) {
@@ -322,11 +329,13 @@ fn schema_of(definition: &TableDefinition) -> TableSchema {
         columns: definition
             .columns
             .iter()
-            .map(|column| ColumnSchema {
+            .enumerate()
+            .map(|(position, column)| ColumnSchema {
                 name: column.name.clone(),
                 sql_type: column.sql_type,
                 not_null: column.not_null,
                 default: column.default.clone(),
+                default_dialect: definition.default_dialect(position),
                 auto_increment: column.auto_increment,
                 comment: None,
             })
