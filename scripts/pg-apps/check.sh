@@ -11,7 +11,9 @@ crates/eggdb/tests/clients/python/app_check.py through psycopg 3 and SQLAlchemy 
 MetaData.reflect() and an ORM app: create_all, a session's inserts, queries, updates, a rollback
 and cascading deletes) and crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck through Npgsql (type
 loading, CRUD over pooled connections, transactions, a batch, a batch that fails half way and a
-cancelled query). Then runs crates/eggdb/tests/clients/java/FlywayCheck.java through Flyway's
+cancelled query) and scripts/pg-apps/binary-copy.sql through psql (a table copied out and back in
+with \copy in the binary format, and the binary bytes themselves through od). Then runs
+crates/eggdb/tests/clients/java/FlywayCheck.java through Flyway's
 Java API (migrate, info, validate and a later pending migration from
 crates/eggdb/tests/clients/java/flyway/) against a new, empty database on each server, with
 Flyway's session-level advisory lock (flyway.postgresql.transactional.lock=false). Fails unless
@@ -121,12 +123,20 @@ run_dotnet() {
     "Host=$PGHOST;Port=$port;Username=$user;Password=$password;Database=$database;Timeout=10;Command Timeout=60" 2>&1
 }
 
+run_psql() {
+  local port=$1 user=$2 password=$3
+  PGPORT=$port PGUSER=$user PGPASSWORD=$password PGDATABASE=$database \
+    pg psql -X -q -v ON_ERROR_STOP=1 -f - < "$here/binary-copy.sql" 2>&1
+}
+
 run_java "$pg_port" "$PGUSER" "$pg_password" > "$work/postgres.java.out" || true
 run_java "$eggdb_port" eggdb "$eggdb_password" > "$work/eggdb.java.out" || true
 run_python "$pg_port" "$PGUSER" "$pg_password" > "$work/postgres.python.out" || true
 run_python "$eggdb_port" eggdb "$eggdb_password" > "$work/eggdb.python.out" || true
 run_dotnet "$pg_port" "$PGUSER" "$pg_password" > "$work/postgres.dotnet.out" || true
 run_dotnet "$eggdb_port" eggdb "$eggdb_password" > "$work/eggdb.dotnet.out" || true
+run_psql "$pg_port" "$PGUSER" "$pg_password" > "$work/postgres.psql.out" || true
+run_psql "$eggdb_port" eggdb "$eggdb_password" > "$work/eggdb.psql.out" || true
 stop
 
 run_flyway() {
@@ -145,7 +155,7 @@ stop
 
 : > "$work/output.diff"
 different=""
-for program in java python dotnet flyway; do
+for program in java python dotnet psql flyway; do
   if ! cmp -s "$work/postgres.$program.out" "$work/eggdb.$program.out"; then
     diff -u "$work/postgres.$program.out" "$work/eggdb.$program.out" >> "$work/output.diff" || true
     different="$different $program"
@@ -155,4 +165,4 @@ if [ -n "$different" ]; then
   head -n 120 "$work/output.diff" >&2
   fail "the$different client programs printed different bytes on EggDB (whole diff in $work/output.diff)"
 fi
-echo "pg-apps check passed: pgjdbc, psycopg 3, SQLAlchemy Core and its ORM, Npgsql and Flyway print the same bytes on PostgreSQL $version and EggDB"
+echo "pg-apps check passed: pgjdbc, psycopg 3, SQLAlchemy Core and its ORM, Npgsql, psql's binary \\copy and Flyway print the same bytes on PostgreSQL $version and EggDB"

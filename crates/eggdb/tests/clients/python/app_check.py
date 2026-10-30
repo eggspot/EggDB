@@ -76,6 +76,74 @@ def psycopg_crud(conninfo):
         connection.commit()
 
 
+COPY_TYPES = ["int4", "text", "numeric", "timestamptz", "bytea", "text[]", "int4"]
+
+
+def copied_bytes(cursor, statement):
+    with cursor.copy(statement) as copy:
+        return b"".join(bytes(piece) for piece in copy)
+
+
+def copy_rows(connection):
+    with connection.cursor() as cursor:
+        with cursor.copy("COPY app_copies FROM STDIN (FORMAT BINARY)") as copy:
+            copy.set_types(COPY_TYPES)
+            copy.write_row(
+                (
+                    1,
+                    "a",
+                    decimal.Decimal("1.50"),
+                    datetime.datetime(2026, 10, 1, 8, 30, tzinfo=datetime.timezone.utc),
+                    b"\x00\xff",
+                    ["x", "y z", None],
+                    3,
+                )
+            )
+            copy.write_row((2, "café €", None, None, None, [], None))
+        line("binary in", cursor.rowcount)
+        with cursor.copy("COPY (SELECT * FROM app_copies ORDER BY id) TO STDOUT (FORMAT BINARY)") as copy:
+            copy.set_types(COPY_TYPES)
+            for row in copy.rows():
+                line("binary out", *row)
+        line("binary bytes", copied_bytes(cursor, "COPY (SELECT id, name, tags FROM app_copies ORDER BY id) TO STDOUT (FORMAT BINARY)").hex())
+        with cursor.copy(
+            "COPY app_copies (id, name, quantity) FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY verbose)"
+        ) as copy:
+            copy.write("3\tc\t7\n4\td\tlots\n5\te\t9\n")
+        line("ignored", cursor.rowcount)
+        with cursor.copy("COPY app_copies (id, name) FROM STDIN WHERE id % 2 = 0") as copy:
+            copy.write("6\tf\n7\tg\n8\th\n")
+        line("where", cursor.rowcount)
+        with cursor.copy("COPY app_copies (id, name) FROM STDIN (ENCODING 'LATIN1')") as copy:
+            copy.write(b"9\tna\xefve\n")
+        line("latin1", cursor.rowcount)
+        line(
+            "win1252",
+            copied_bytes(
+                cursor,
+                "COPY (SELECT name FROM app_copies WHERE id IN (2, 9) ORDER BY id) TO STDOUT (ENCODING 'WIN1252')",
+            ).hex(),
+        )
+        for row in connection.execute("SELECT id, name, quantity FROM app_copies ORDER BY id"):
+            line(*row)
+
+
+def psycopg_copy(conninfo):
+    with psycopg.connect(conninfo, autocommit=True) as connection:
+        connection.add_notice_handler(
+            lambda notice: line("notice", notice.severity, notice.message_primary)
+        )
+        connection.execute("DROP TABLE IF EXISTS app_copies")
+        connection.execute(
+            "CREATE TABLE app_copies (id integer PRIMARY KEY, name text, price numeric(8,2), "
+            "seen timestamptz, raw bytea, tags text[], quantity integer)"
+        )
+        try:
+            copy_rows(connection)
+        finally:
+            connection.execute("DROP TABLE app_copies")
+
+
 def reflected_default(column):
     default = column.server_default
     return None if default is None else str(default.arg)
@@ -309,6 +377,7 @@ def main():
         sys.exit(2)
     conninfo, url = sys.argv[1], sys.argv[2]
     section("psycopg crud", psycopg_crud, conninfo)
+    section("psycopg copy", psycopg_copy, conninfo)
     section("sqlalchemy reflection", sqlalchemy_reflect, url)
     sqlalchemy_orm(url)
 

@@ -82,6 +82,58 @@ fn copy_to_stdout_sends_one_copy_data_per_row() {
     assert_eq!(tags(&both), "TDCHdcCTDCZ");
 }
 
+fn binary_rows(rows: &[(i32, Option<&str>)]) -> Vec<u8> {
+    let mut out = b"PGCOPY\n\xff\r\n\0".to_vec();
+    out.extend_from_slice(&[0; 8]);
+    for (id, name) in rows {
+        out.extend_from_slice(&2i16.to_be_bytes());
+        out.extend_from_slice(&4i32.to_be_bytes());
+        out.extend_from_slice(&id.to_be_bytes());
+        match name {
+            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+            Some(name) => {
+                out.extend_from_slice(&(name.len() as i32).to_be_bytes());
+                out.extend_from_slice(name.as_bytes());
+            }
+        }
+    }
+    out.extend_from_slice(&(-1i16).to_be_bytes());
+    out
+}
+
+#[test]
+fn the_binary_format_flows_both_ways_with_binary_format_codes() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    ready_table(&mut client);
+    let file = binary_rows(&[(1, Some("ada")), (2, None)]);
+    let response = start_copy_in(&mut client, "COPY people FROM STDIN (FORMAT binary)");
+    assert_eq!(response.tag, b'G');
+    assert_eq!(response.body, [1, 0, 2, 0, 1, 0, 1]);
+    let (first, rest) = file.split_at(13);
+    client.send(b'd', first);
+    client.send(b'd', rest);
+    client.send(b'c', b"");
+    let done = client.read_until_ready();
+    assert_eq!(tags(&done), "CZ");
+    assert_eq!(done[0].text(), "COPY 2");
+    let messages = client.query("COPY people TO STDOUT (FORMAT binary)");
+    assert_eq!(tags(&messages), "HdddcCZ");
+    assert_eq!(messages[0].body, [1, 0, 2, 0, 1, 0, 1]);
+    let sent: Vec<u8> = messages
+        .iter()
+        .filter(|message| message.tag == b'd')
+        .flat_map(|message| message.body.clone())
+        .collect();
+    assert_eq!(sent, file);
+    start_copy_in(&mut client, "COPY people FROM STDIN (FORMAT binary)");
+    client.send(b'd', b"PGCOPY");
+    client.send(b'c', b"");
+    let failed = client.read_until_ready();
+    assert_eq!(failed[0].code(), "22P04");
+    assert_eq!(count(&mut client), "2");
+}
+
 #[test]
 fn copy_fail_and_bad_data_roll_the_whole_copy_back_and_later_data_is_ignored() {
     let server = TestServer::start(8);
