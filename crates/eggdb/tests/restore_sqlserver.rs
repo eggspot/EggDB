@@ -160,7 +160,6 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"rows_skipped\":0",
         "\"kind\":\"procedure\",\"name\":\"dbo.TopCustomers\"",
         "\"kind\":\"function\",\"name\":\"dbo.OrderItems\"",
-        "\"kind\":\"trigger\",\"name\":\"sales.trOrders\"",
         "\"kind\":\"synonym\",\"name\":\"dbo.Orders\"",
         "\"kind\":\"user or role\",\"name\":\"shopapp\"",
         "\"kind\":\"role membership\"",
@@ -176,7 +175,6 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"grant\":1",
         "{\"kind\":\"USE\",\"statements\":3}",
         "{\"kind\":\"ALTER DATABASE\",\"statements\":6}",
-        "{\"kind\":\"ENABLE and DISABLE TRIGGER\",\"statements\":1}",
         "\"errors\":[]",
     ] {
         assert!(report.contains(part), "{part:?} in\n{report}");
@@ -191,6 +189,13 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
             "SELECT minor_id, CAST(value AS nvarchar(40)) FROM sys.extended_properties WHERE major_id = OBJECT_ID('sales.Orders')"
         ),
         "0|One row per order\n"
+    );
+    assert_eq!(
+        tsql(
+            &db,
+            "SELECT name, is_disabled FROM sys.triggers WHERE parent_id = OBJECT_ID('sales.Orders')"
+        ),
+        "trOrders|0\n"
     );
     assert_eq!(
         tsql(

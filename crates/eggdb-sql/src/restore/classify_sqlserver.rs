@@ -284,7 +284,7 @@ pub(crate) fn classify_sqlserver(text: &str, known_parameter: &dyn Fn(&str) -> b
         "update" if is(&tokens, 1, "statistics") => ignore("UPDATE STATISTICS"),
         "update" | "delete" | "truncate" | "select" | "with" => Action::Run(Effect::Data),
         "exec" | "execute" => exec(&tokens, text, known_parameter),
-        "enable" | "disable" if is(&tokens, 1, "trigger") => ignore("ENABLE and DISABLE TRIGGER"),
+        "enable" | "disable" if is(&tokens, 1, "trigger") => Action::Run(Effect::OtherDdl),
         _ => skip_statement(text, NOT_SUPPORTED_YET),
     }
 }
@@ -355,6 +355,17 @@ fn exec(tokens: &[Token], text: &str, known_parameter: &dyn Fn(&str) -> bool) ->
     }
 }
 
+fn trigger(tokens: &[Token], at: usize) -> Action {
+    let mut name_end = at;
+    let name = name_at(tokens, &mut name_end);
+    if is(tokens, name_end, "on")
+        && matches!(word_at(tokens, name_end + 1), Some("database" | "all"))
+    {
+        return skip("DDL trigger", name, "DDL triggers come later");
+    }
+    Action::Run(Effect::OtherDdl)
+}
+
 fn create(tokens: &[Token], text: &str) -> Action {
     let (mut at, kind) = kind_after_create(tokens);
     let Some(kind) = kind else {
@@ -389,7 +400,7 @@ fn create(tokens: &[Token], text: &str) -> Action {
             "procedures come later",
         ),
         "function" => skip("function", name_at(tokens, &mut at), "functions come later"),
-        "trigger" => skip("trigger", name_at(tokens, &mut at), "triggers come later"),
+        "trigger" => trigger(tokens, at),
         "synonym" => skip("synonym", name_at(tokens, &mut at), "synonyms come later"),
         "type" if alias_type_definition(text).is_some() => ignore("alias types"),
         "type" => skip(
@@ -521,7 +532,7 @@ fn alter(tokens: &[Token], text: &str) -> Action {
             "procedures come later",
         ),
         "function" => skip("function", name_at(tokens, &mut at), "functions come later"),
-        "trigger" => skip("trigger", name_at(tokens, &mut at), "triggers come later"),
+        "trigger" => trigger(tokens, at),
         "role" | "user" | "login" | "application" => skip(
             "role membership",
             name_at(tokens, &mut at),
@@ -544,7 +555,7 @@ fn alter_table(tokens: &[Token], mut at: usize, text: &str) -> Action {
         Some("nocheck") if is(tokens, at + 1, "constraint") => ignore("NOCHECK CONSTRAINT"),
         Some("check") if is(tokens, at + 1, "constraint") => Action::Run(Effect::OtherDdl),
         Some("enable" | "disable") if is(tokens, at + 1, "trigger") => {
-            ignore("ENABLE and DISABLE TRIGGER")
+            Action::Run(Effect::OtherDdl)
         }
         Some("set")
             if tokens

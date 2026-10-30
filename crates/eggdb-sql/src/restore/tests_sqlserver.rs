@@ -263,6 +263,19 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
         run("INSERT [dbo].[Orders] ([a]) VALUES (1)"),
         Some(Effect::Insert("dbo.Orders".to_owned()))
     );
+    for trigger in [
+        "CREATE TRIGGER [dbo].[tr] ON [dbo].[T] AFTER INSERT AS SELECT 1",
+        "CREATE OR ALTER TRIGGER tr ON T INSTEAD OF DELETE AS SELECT 1",
+        "ALTER TRIGGER [dbo].[tr] ON [dbo].[T] AFTER UPDATE AS SELECT 1",
+        "ALTER TABLE [a] ENABLE TRIGGER [t]",
+        "DISABLE TRIGGER [t] ON [a]",
+    ] {
+        assert_eq!(run(trigger), Some(Effect::OtherDdl), "{trigger}");
+    }
+    assert!(matches!(
+        classify_sqlserver("CREATE TRIGGER audit ON DATABASE FOR CREATE_TABLE AS SELECT 1", &known),
+        Action::Skip(_)
+    ));
     assert_eq!(
         run("insert into sales.Lines values (1)"),
         Some(Effect::Insert("sales.lines".to_owned()))
@@ -301,10 +314,6 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
         (
             "EXEC sys.sp_addextendedproperty @name=N'Caption', @value=N'x'",
             "extended properties",
-        ),
-        (
-            "ALTER TABLE [a] ENABLE TRIGGER [t]",
-            "ENABLE and DISABLE TRIGGER",
         ),
         ("BEGIN TRANSACTION", "BEGIN and COMMIT"),
         (
