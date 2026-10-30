@@ -158,12 +158,13 @@ that declares the code; `-` marks a code only MCP gives.
 | `invalid_request` | `usage` | - | the request was not a well-formed call (audit only) |
 | `not_initialized` | `usage` | - | a call came before `initialize` (audit only) |
 | `not_found` | `not_found` | 3 | the database file does not exist; MCP also: no such table or view |
-| `table_not_found` | `not_found` | 1 | CLI: `table show` or `table sample` named no table or view; `fix_command` is `eggdb table list <file>` |
+| `table_not_found` | `not_found` | 1 | CLI: `table show` or `table sample` named no table or view, or `mcp --tables` a name the file has no table, view or sequence for; `fix_command` is `eggdb table list <file>` |
 | `not_a_table` | `refused` | 3 | `row list` or `row_list` named a view, which has no stored order to page through; `fix_command` is `eggdb table sample <file> <table>` |
 | `collection_not_found` | `not_found` | 1 | `-C <name>` names no collection; `fix_command` is `eggdb collection add <file> <name>` |
 | `already_exists` | `exists` | 3 | `export`, `create` or `backup` to a file that is there, or a staging file left by `backup` or `compact`, or the scratch copy (`<file>.restoring`, `<file>.importing`) a dry run of `restore` or `import --csv` would write |
 | `database_busy` | `busy` | 5 | another program holds the file |
 | `read_only` | `read_only` | 3 | MCP: a write without `--allow-write`, or sent to `run_sql`. CLI: a statement refused with SQLSTATE 25006, as `sql --read-only` refuses writes |
+| `limited_to_tables` | `needs_grant` | - | MCP: `kv_get` or `kv_scan` on a server started with `--tables`, which leaves out the key-value store |
 | `needs_confirmation` | `needs_confirmation` | - | a destructive `write_sql` without `confirm: true` on a client that cannot ask |
 | `declined_by_user` | `declined` | - | the user said no |
 | `cancelled` | `declined` | - | the client cancelled the call while the user was asked |

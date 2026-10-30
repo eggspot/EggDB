@@ -3587,3 +3587,12 @@ here, `--time-limit 30` when given), so what was tried by hand can be pasted int
    names EggDB where its own ceiling was, so neither message lies about whose limit it is.
 10. Left out, said plainly: `--tables` with `--allow-write` (a usage error, not a half-working
     mode), names with commas, and column-level limits.
+
+### As built
+- The start-up refusal of unknown names uses the code `table_not_found` (exit 1, category
+  `not_found`), not `not_found`: the registry gives one code one exit across commands, and
+  `not_found` is the missing file at exit 3. The message, the exit and the `try:` line are as
+  designed.
+- The gap is waited for by every `tools/call` and `resources/read` that reaches a tool, including
+  one refused before the file opens (such as `limited_to_tables`); `ping`, `initialize` and
+  `tools/list` never wait.

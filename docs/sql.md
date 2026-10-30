@@ -1556,7 +1556,9 @@ hold at most 2^27 elements (`54000`) and counts against the session's value limi
   `quote_nullable` and `format` with `%s`, `%I`, `%L`, `%%`, argument positions (`%2$s`) and
   widths (`%-10s`, `%*s`). Every result that can grow (`repeat`, `lpad`, `rpad`, `replace`,
   `format`, `concat`, `regexp_replace`) checks the session's value limit (D119) before it is
-  built, and one past 1 GiB is `54000` (`requested length too large`).
+  built, and one past 1 GiB is `54000` (`requested length too large`). Every session has
+  EggDB's own limits of 1 GiB for one value a statement builds and 2 GiB for one row (D156); a
+  session may set lower ones (MCP calls: 16 MiB and 64 MiB) but never higher ones.
 - Operator precedence is PostgreSQL's: `-2 ^ 2` is 4, `NOT a = b` is `NOT (a = b)`, and
   `a < b < c` is a syntax error.
 

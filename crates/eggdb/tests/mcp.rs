@@ -797,3 +797,188 @@ fn an_agent_writes_with_allow_write_and_destructive_statements_wait_for_the_user
         .count();
     assert_eq!(started, 6, "{}", stdout(&json));
 }
+
+fn run_sql(mcp: &mut Mcp, dialect: &str, sql: &str) -> Node {
+    mcp.call(
+        "run_sql",
+        &format!(r#"{{"sql":{sql:?},"dialect":"{dialect}"}}"#),
+    )
+}
+
+fn first_value(mcp: &mut Mcp, dialect: &str, sql: &str) -> String {
+    let answer = run_sql(mcp, dialect, sql);
+    text_at(ok(&answer), &["rows", "0", "0"])
+}
+
+#[test]
+fn an_agent_limited_to_tables_sees_only_them_in_every_dialect_and_catalog() {
+    let (file, _audit) = sample("mcp-tables", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let setup = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "CREATE TABLE secrets (id integer PRIMARY KEY, code text); \
+         INSERT INTO secrets VALUES (1, 'swordfish'); \
+         CREATE VIEW users_and_secrets AS SELECT u.name, s.code FROM users u JOIN secrets s ON s.id = u.id; \
+         CREATE VIEW user_names AS SELECT name FROM users",
+    ]);
+    assert!(setup.status.success(), "{}", stderr(&setup));
+    let mut mcp = Mcp::start(
+        file.path(),
+        &[
+            "--tables",
+            "users,user_names",
+            "--tables",
+            "public.users_and_secrets",
+            "--call-gap",
+            "0",
+        ],
+    );
+    mcp.initialize();
+    let listed = mcp.request("tools/list", "{}");
+    let tools = canonical(get(&listed, &["result", "tools"]));
+    assert!(!tools.contains("kv_get") && !tools.contains("kv_scan"), "{tools}");
+    let tables = mcp.call("list_tables", "{}");
+    let shown = canonical(ok(&tables));
+    assert!(shown.contains("\"users\"") && shown.contains("\"user_names\""), "{shown}");
+    assert!(!shown.contains("\"secrets\""), "{shown}");
+    for (dialect, sql) in [
+        ("postgresql", "SELECT code FROM secrets"),
+        ("postgresql", "SELECT code FROM public.secrets"),
+        ("postgresql", "SELECT * FROM users_and_secrets"),
+        ("postgresql", "SELECT * FROM users WHERE id IN (SELECT id FROM secrets)"),
+        ("mysql", "SELECT code FROM secrets"),
+        ("sqlite", "SELECT code FROM secrets"),
+        ("sqlserver", "SELECT code FROM dbo.secrets"),
+        ("oracle", "SELECT code FROM secrets"),
+    ] {
+        let answer = run_sql(&mut mcp, dialect, sql);
+        assert_eq!(error_code(&answer), "sql_error", "{dialect}: {sql}");
+        assert!(!canonical(&answer).contains("swordfish"), "{dialect}: {sql}");
+    }
+    let hidden = mcp.call("describe_table", r#"{"table":"secrets"}"#);
+    let missing = mcp.call("describe_table", r#"{"table":"no_such_table"}"#);
+    assert_eq!(error_code(&hidden), error_code(&missing));
+    assert_eq!(
+        first_value(&mut mcp, "postgresql", "SELECT count(*) FROM users"),
+        "3"
+    );
+    for (dialect, hidden_sql, shown_sql) in [
+        (
+            "postgresql",
+            "SELECT count(*) FROM pg_catalog.pg_class WHERE relname = 'secrets'",
+            "SELECT count(*) FROM pg_catalog.pg_class WHERE relname = 'users'",
+        ),
+        (
+            "postgresql",
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'secrets'",
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'users'",
+        ),
+        (
+            "postgresql",
+            "SELECT count(*) FROM information_schema.columns WHERE column_name = 'code' AND table_name = 'secrets'",
+            "SELECT count(*) FROM information_schema.columns WHERE column_name = 'email'",
+        ),
+        (
+            "sqlserver",
+            "SELECT count(*) FROM sys.tables WHERE name = 'secrets'",
+            "SELECT count(*) FROM sys.tables WHERE name = 'users'",
+        ),
+        (
+            "sqlserver",
+            "SELECT count(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'secrets'",
+            "SELECT count(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'users'",
+        ),
+        (
+            "oracle",
+            "SELECT count(*) FROM all_tables WHERE table_name = 'SECRETS'",
+            "SELECT count(*) FROM all_tables WHERE table_name = 'USERS'",
+        ),
+    ] {
+        assert_eq!(first_value(&mut mcp, dialect, hidden_sql), "0", "{hidden_sql}");
+        assert_eq!(first_value(&mut mcp, dialect, shown_sql), "1", "{shown_sql}");
+    }
+    let refused = mcp.call("kv_get", r#"{"key":"greeting"}"#);
+    assert_eq!(error_code(&refused), "limited_to_tables");
+    assert!(!canonical(&refused).contains("hello"));
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(
+        messages.contains("read-only, tables users, user_names, users_and_secrets; audit"),
+        "{messages}"
+    );
+    assert!(messages.contains("; call gap off"), "{messages}");
+    let listing = eggdb(&["audit", &path, "--format", "text", "--color", "never"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let text = stdout(&listing);
+    assert!(
+        text.contains("read-only, 3 tables (users, user_names, users_and_secrets), time limit 5 s, call gap off"),
+        "{text}"
+    );
+    assert!(text.contains("limited_to_tables"), "{text}");
+}
+
+#[test]
+fn startup_refuses_unknown_tables_tables_with_writes_and_a_bad_call_gap() {
+    let (file, _audit) = sample("mcp-tables-refused", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let unknown = eggdb(&["mcp", &path, "--tables", "users,ordres,USERS"]);
+    assert_eq!(unknown.status.code(), Some(1), "{}", stderr(&unknown));
+    let message = stderr(&unknown);
+    assert!(
+        message.contains("--tables names 'ordres' and 'USERS' (stored as 'users'): no table, view or sequence in"),
+        "{message}"
+    );
+    assert!(
+        message.contains("has these names. Names match as stored; fix them, or create the tables first."),
+        "{message}"
+    );
+    assert!(message.contains("eggdb table list"), "{message}");
+    let one = eggdb(&["mcp", &path, "--tables", "ordres"]);
+    assert_eq!(one.status.code(), Some(1));
+    assert!(
+        stderr(&one).contains("has that name. Names match as stored; fix it, or create the table first."),
+        "{}",
+        stderr(&one)
+    );
+    let writing = eggdb(&["mcp", &path, "--allow-write", "--tables", "users"]);
+    assert_eq!(writing.status.code(), Some(2));
+    assert!(
+        stderr(&writing).contains("--tables goes with a read-only server in this release"),
+        "{}",
+        stderr(&writing)
+    );
+    let gap = eggdb(&["mcp", &path, "--call-gap", "20s"]);
+    assert_eq!(gap.status.code(), Some(2));
+    assert!(
+        stderr(&gap).contains(
+            "--call-gap must be a whole number of milliseconds from 0 to 10000, not '20s'"
+        ),
+        "{}",
+        stderr(&gap)
+    );
+    assert!(!audit_path(file.path()).exists());
+}
+
+#[test]
+fn calls_wait_for_the_gap_and_the_user_s_writer_works_between_them() {
+    let (file, _audit) = sample("mcp-gap", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let mut mcp = Mcp::start(file.path(), &["--call-gap", "300"]);
+    mcp.initialize();
+    let started = std::time::Instant::now();
+    for _ in 0..3 {
+        ok(&mcp.call("list_tables", "{}"));
+    }
+    assert!(
+        started.elapsed() >= Duration::from_millis(600),
+        "{:?}",
+        started.elapsed()
+    );
+    let put = eggdb(&["put", &path, "between", "calls"]);
+    assert!(put.status.success(), "{}", stderr(&put));
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(messages.contains("; call gap 300 ms"), "{messages}");
+}

@@ -1154,6 +1154,7 @@ stdout (D11, D119, D121); [mcp.md](mcp.md) is the guide. The agent's client star
 ```sh
 claude mcp add mydb -- eggdb mcp /path/to/app.db
 claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
+claude mcp add mydb -- eggdb mcp /path/to/app.db --tables users,orders
 claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
 ```
 
@@ -1167,9 +1168,19 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   `DELETE` or `UPDATE` whose `WHERE` names no column of its table) run only after the user
   confirms them: through the client's question when it can ask, otherwise through the agent's
   `confirm: true`. `run_sql` stays read-only.
+- **`--tables <names>`** shows the agent only those tables and views (comma-separated, `name` or
+  `schema.name`, `public.` and `dbo.` for the default schema, matched exactly as stored; repeat
+  it to add more). Every other table, view and sequence is missing for the agent's SQL in every
+  dialect and catalog, a listed view that reads an unlisted table fails as missing, and
+  `kv_get` and `kv_scan` are withdrawn (`limited_to_tables` if called). A sequence comes with the
+  table that owns it. Every name must exist when the server starts (exit 1, `table_not_found`,
+  with the stored name when only the case differs). Read-only servers only: with
+  `--allow-write` it is a usage error (D156).
+- **`--call-gap <ms>`** (default 100, 0 to 10000, 0 for none): after each call the next one that
+  opens the file waits that long, so your own writers get the file between an agent's calls.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,
-  `sqlite` or `oracle`), `explain_query`, `sample_rows`, `kv_get`, `kv_scan`, and the resource
-  `eggdb://schema`.
+  `sqlite` or `oracle`), `explain_query`, `sample_rows`, `kv_get`, `kv_scan` (not under
+  `--tables`), and the resource `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.
 - stdout carries only protocol messages; one line on stderr says what is served (a short

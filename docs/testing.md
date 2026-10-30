@@ -170,9 +170,12 @@ and a client that can be asked, sends 400 destructive `write_sql` calls and answ
 question with mutated, cut, stray or garbled answers, cancels and pings: every line out must be
 JSON and the statement must never run. `crates/eggdb-mcp/tests/server.rs` drives every tool and
 rule over an in-memory store, `crates/eggdb-mcp/tests/writes.rs` the writes, both confirmation
-paths, the wait for an answer and the commits that must never be reported failed, and
+paths, the wait for an answer and the commits that must never be reported failed,
+`crates/eggdb-mcp/tests/tables.rs` a server limited with `--tables` (D156: hidden tables missing
+in every tool, dialect and catalog, the key-value tools refused, the gap between calls), and
 `crates/eggdb/tests/mcp.rs` drives the built binary as a child process, checking that every line
-on its stdout is a JSON-RPC message.
+on its stdout is a JSON-RPC message, `--tables` included. `crates/eggdb-sql/src/visible_tables_tests.rs`
+checks the filter itself: every SQL key read through it, no hidden name, row or comment found.
 
 ## Expiring keys and counters (D140)
 `crates/eggdb/tests/expiry.rs` runs the API on a `SimClock` (`Options::clock`): a key expires
