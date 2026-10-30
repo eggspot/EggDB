@@ -20,6 +20,40 @@ counted
 2
 done
 == batch 7
-error 50000 16 3 1 stopped here 7
+done
 == batch 8
+id|name
+3|oat
+status|qty
+0|7
+done
+== batch 9
+done
+== batch 10
+name|doubled
+rye|8
+spelt|0
+done
+== batch 11
+done
+== batch 12
+id|name
+3|oat
+done
+== batch 13
+done
+== batch 14
+error 50000 16 3 1 stopped here 7
+== batch 15
+done
+== batch 16
+done
+== batch 17
+done
+== procedure dbo.logic_split
+half 3 status 1
+parameter @RETURN_VALUE ReturnValue Int
+parameter @total Input Int
+parameter @half InputOutput Int
+half 2 status 0
 done

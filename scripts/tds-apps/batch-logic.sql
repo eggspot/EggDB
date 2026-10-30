@@ -31,7 +31,33 @@ DECLARE @count int
 EXEC sp_executesql N'SELECT @c = COUNT(*) FROM logic_items WHERE qty > @min', N'@min int, @c int OUTPUT', @min = 1, @c = @count OUTPUT
 SELECT @count AS counted
 GO
+CREATE PROCEDURE dbo.logic_stock @name nvarchar(20), @qty int OUTPUT
+AS
+SET NOCOUNT ON
+SELECT @qty = qty FROM logic_items WHERE name = @name
+IF @qty IS NULL RETURN 1
+SELECT id, name FROM logic_items WHERE name = @name
+RETURN 0
+GO
+DECLARE @q int, @rc int
+EXEC @rc = dbo.logic_stock N'oat', @q OUTPUT
+SELECT @rc AS status, @q AS qty
+GO
+CREATE FUNCTION dbo.logic_double (@n int) RETURNS int AS BEGIN RETURN @n * 2 END
+GO
+SELECT name, dbo.logic_double(qty) AS doubled FROM logic_items WHERE id < 3 ORDER BY id
+GO
+CREATE FUNCTION dbo.logic_in_stock (@min int) RETURNS TABLE AS RETURN (SELECT id, name FROM logic_items WHERE qty >= @min)
+GO
+SELECT id, name FROM dbo.logic_in_stock(5)
+GO
+CREATE PROCEDURE dbo.logic_split @total int, @half int OUTPUT AS SET @half = @total / 2 RETURN @total % 2
+GO
 RAISERROR(N'stopped here %d', 16, 3, 7)
 GO
 DROP TABLE logic_items
+GO
+DROP FUNCTION dbo.logic_double, dbo.logic_in_stock
+GO
+DROP PROCEDURE dbo.logic_stock
 GO

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Globalization;
 using System.IO;
 using Microsoft.Data.SqlClient;
@@ -28,15 +29,66 @@ internal static class TdsLogicCheck
             }
             catch (SqlException failure)
             {
-                foreach (SqlError error in failure.Errors)
-                {
-                    Console.WriteLine(
-                        "error " + Number(error.Number) + " " + Number(error.Class) + " "
-                        + Number(error.State) + " " + Number(error.LineNumber) + " " + error.Message);
-                }
+                PrintErrors(failure);
             }
         }
+        Console.WriteLine("== procedure dbo.logic_split");
+        try
+        {
+            CallSplit(connection);
+            Console.WriteLine("done");
+        }
+        catch (SqlException failure)
+        {
+            PrintErrors(failure);
+        }
+        catch (InvalidOperationException failure)
+        {
+            Console.WriteLine("error " + failure.Message);
+        }
         return 0;
+    }
+
+    private static void PrintErrors(SqlException failure)
+    {
+        foreach (SqlError error in failure.Errors)
+        {
+            Console.WriteLine(
+                "error " + Number(error.Number) + " " + Number(error.Class) + " "
+                + Number(error.State) + " " + Number(error.LineNumber) + " " + error.Message);
+        }
+    }
+
+    private static void CallSplit(SqlConnection connection)
+    {
+        using (var command = new SqlCommand("dbo.logic_split", connection))
+        {
+            command.CommandType = CommandType.StoredProcedure;
+            command.Parameters.Add(new SqlParameter("@total", SqlDbType.Int) { Value = 7 });
+            var half = command.Parameters.Add(
+                new SqlParameter("@half", SqlDbType.Int) { Direction = ParameterDirection.Output });
+            var status = command.Parameters.Add(
+                new SqlParameter("@status", SqlDbType.Int) { Direction = ParameterDirection.ReturnValue });
+            command.ExecuteNonQuery();
+            Console.WriteLine("half " + Shown(half.Value) + " status " + Shown(status.Value));
+        }
+        using (var derived = new SqlCommand("dbo.logic_split", connection))
+        {
+            derived.CommandType = CommandType.StoredProcedure;
+            SqlCommandBuilder.DeriveParameters(derived);
+            foreach (SqlParameter parameter in derived.Parameters)
+            {
+                Console.WriteLine(
+                    "parameter " + parameter.ParameterName + " " + parameter.Direction + " " + parameter.SqlDbType);
+            }
+            derived.Parameters["@total"].Value = 4;
+            derived.ExecuteNonQuery();
+            Console.WriteLine(
+                "half " + Shown(derived.Parameters["@half"].Value)
+                + " status " + Shown(derived.Parameters["@RETURN_VALUE"].Value));
+        }
+        using var dropping = new SqlCommand("DROP PROCEDURE dbo.logic_split", connection);
+        dropping.ExecuteNonQuery();
     }
 
     private static string Number(int number) => number.ToString(CultureInfo.InvariantCulture);

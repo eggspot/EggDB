@@ -504,3 +504,47 @@ fn implicit_transactions_as_mssql_jdbc_drives_them() {
         vec![vec![Some("21".to_owned())]]
     );
 }
+
+#[test]
+fn a_user_procedure_called_by_name_returns_its_rows_status_and_output_parameters() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    let created = client.batch(
+        "CREATE PROCEDURE dbo.split @total int, @half int OUTPUT AS \
+         SELECT @total AS total; SET @half = @total / 2; RETURN @total % 2",
+    );
+    assert!(errors(&created).is_empty(), "{created:?}");
+    let named = client.rpc(&[call_by_name(
+        "dbo.split",
+        &[
+            int_parameter("@total", Some(7), false),
+            int_parameter("@half", None, true),
+        ],
+    )]);
+    assert!(errors(&named).is_empty(), "{named:?}");
+    assert_eq!(rows(&named), vec![vec![Some("7".to_owned())]]);
+    assert!(named.contains(&Token::ReturnStatus(1)), "{named:?}");
+    assert_eq!(
+        returned(&named),
+        vec![(1, "@half".to_owned(), Some("3".to_owned()))]
+    );
+    let positional = client.rpc(&[call_by_name(
+        "[dbo].[split]",
+        &[int_parameter("", Some(4), false), int_parameter("", Some(0), true)],
+    )]);
+    assert!(errors(&positional).is_empty(), "{positional:?}");
+    assert!(positional.contains(&Token::ReturnStatus(0)), "{positional:?}");
+    assert_eq!(
+        returned(&positional),
+        vec![(1, String::new(), Some("2".to_owned()))]
+    );
+    let missing = client.rpc(&[call_by_name(
+        "split",
+        &[int_parameter("@half", None, true)],
+    )]);
+    assert_eq!(errors(&missing)[0].0, 201, "{missing:?}");
+    assert_eq!(
+        rows(&client.batch("DECLARE @h int; EXEC dbo.split 9, @h OUTPUT; SELECT @h")),
+        vec![vec![Some("9".to_owned())], vec![Some("4".to_owned())]]
+    );
+}

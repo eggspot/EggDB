@@ -11,7 +11,9 @@ parameterized CRUD (sp_executesql, sp_prepexec and sp_execute), a committed and 
 transaction and a failing query; the .NET program also reuses a pooled connection, which resets
 it, and runs scripts/tds-apps/batch-logic.sql batch by batch as sqlcmd does (GO separators):
 Transact-SQL batch logic with a loop, TRY/CATCH, THROW, RAISERROR, PRINT and sp_executesql with
-an OUTPUT parameter. Then restores the sqlpackage fixture crates/eggdb/tests/data/sqlserver/shop-sqlpackage.sql
+an OUTPUT parameter, a stored procedure run with EXEC @status = ... OUTPUT, a scalar and an inline
+table-valued function, and then calls a stored procedure as CommandType.StoredProcedure with an
+output parameter and a return value, also after SqlCommandBuilder.DeriveParameters. Then restores the sqlpackage fixture crates/eggdb/tests/data/sqlserver/shop-sqlpackage.sql
 into a second database and lists it through each driver's metadata calls:
 crates/eggdb/tests/clients/java/TdsMetadataCheck.java (DatabaseMetaData) and the .NET program's
 metadata mode (SqlConnection.GetSchema). Last, loads the committed bcp character-format file
@@ -136,4 +138,4 @@ if [ -n "$different" ]; then
   tail -n 40 "$work/serve.err" >&2
   fail "the$different client programs printed something else on EggDB (whole diff in $work/output.diff)"
 fi
-echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD, transactions and Transact-SQL batch logic, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import, and an EF Core app migrates, saves and queries on EggDB"
+echo "tds-apps check passed: mssql-jdbc and Microsoft.Data.SqlClient run parameterized CRUD, transactions, Transact-SQL batch logic and stored procedures with output parameters, list the restored fixture's metadata and load a bcp file with SqlBulkCopy and eggdb import, and an EF Core app migrates, saves and queries on EggDB"

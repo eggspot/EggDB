@@ -24,4 +24,6 @@ pub(crate) use variables::{BatchContext, DynamicBatch, ScalarVariable};
 #[cfg(test)]
 mod functions_tests;
 #[cfg(test)]
+mod reference_tests;
+#[cfg(test)]
 mod tests;

@@ -2060,3 +2060,277 @@ CREATE TABLE Bad40b (Id INT PRIMARY KEY, n INT, m INT DEFAULT (n + 1))
 
 ok
 DROP TABLE Coupons40b, Down40b
+
+chapter "CREATE PROCEDURE (Transact-SQL)", "EXECUTE (Transact-SQL)", "RETURN (Transact-SQL)"
+ok
+CREATE TABLE Staff315 (Id INT PRIMARY KEY, FirstName NVARCHAR(50) NOT NULL, LastName NVARCHAR(50) NOT NULL, Department NVARCHAR(50) NOT NULL, SalesYTD DECIMAL(12,2) NULL)
+
+ok
+INSERT INTO Staff315 VALUES (1, N'Pilar', N'Ackerman', N'Shipping', NULL), (2, N'Michael', N'Blythe', N'Sales', 3763178.18), (3, N'Linda', N'Mitchell', N'Sales', 4251368.55), (4, N'Ken', N'Dobney', N'Production', NULL)
+
+ok
+CREATE PROCEDURE dbo.uspGetEmployees315
+    @LastName nvarchar(50),
+    @FirstName nvarchar(50)
+AS
+    SET NOCOUNT ON;
+    SELECT FirstName AS first_name, LastName AS last_name, Department AS department
+    FROM Staff315
+    WHERE FirstName = @FirstName AND LastName = @LastName;
+
+rows
+EXECUTE dbo.uspGetEmployees315 N'Ackerman', N'Pilar'
+----
+first_name|last_name|department
+Pilar|Ackerman|Shipping
+SELECT 1
+
+rows
+EXEC dbo.uspGetEmployees315 @FirstName = N'Pilar', @LastName = N'Ackerman'
+----
+first_name|last_name|department
+Pilar|Ackerman|Shipping
+SELECT 1
+
+error 42P02 201
+EXECUTE dbo.uspGetEmployees315 N'Ackerman'
+
+error 42710 2714
+CREATE PROCEDURE dbo.uspGetEmployees315 AS SELECT 1 AS one
+
+ok
+CREATE PROCEDURE dbo.uspGetEmployees2_315
+    @LastName nvarchar(50) = N'D%',
+    @FirstName nvarchar(50) = N'%'
+AS
+    SET NOCOUNT ON;
+    SELECT FirstName AS first_name, LastName AS last_name, Department AS department
+    FROM Staff315
+    WHERE FirstName LIKE @FirstName AND LastName LIKE @LastName
+    ORDER BY Id;
+
+rows
+EXECUTE dbo.uspGetEmployees2_315
+----
+first_name|last_name|department
+Ken|Dobney|Production
+SELECT 1
+
+rows
+EXECUTE dbo.uspGetEmployees2_315 N'M%'
+----
+first_name|last_name|department
+Linda|Mitchell|Sales
+SELECT 1
+
+rows
+EXECUTE dbo.uspGetEmployees2_315 N'%', N'%a%'
+----
+first_name|last_name|department
+Pilar|Ackerman|Shipping
+Michael|Blythe|Sales
+Linda|Mitchell|Sales
+SELECT 3
+
+ok
+CREATE PROCEDURE dbo.usp_GetSalesYTD315
+    @SalesPerson nvarchar(50) = NULL,
+    @SalesYTD decimal(12,2) = NULL OUTPUT
+AS
+    IF @SalesPerson IS NULL
+    BEGIN
+        PRINT 'ERROR: You must specify a last name for the sales person.'
+        RETURN(1)
+    END
+    ELSE
+    BEGIN
+        IF (SELECT COUNT(*) FROM Staff315 WHERE LastName = @SalesPerson) = 0
+            RETURN(2)
+    END
+    SELECT @SalesYTD = SalesYTD FROM Staff315 WHERE LastName = @SalesPerson;
+    IF @@ERROR <> 0
+    BEGIN
+        RETURN(3)
+    END
+    ELSE
+    BEGIN
+        IF @SalesYTD IS NULL
+            RETURN(4)
+        ELSE
+            RETURN(0)
+    END
+
+rows
+DECLARE @SalesYTDForSalesPerson decimal(12,2), @ret_code int;
+EXECUTE @ret_code = dbo.usp_GetSalesYTD315 N'Blythe', @SalesYTD = @SalesYTDForSalesPerson OUTPUT;
+SELECT @ret_code AS ret_code, @SalesYTDForSalesPerson AS sales_ytd
+----
+ret_code|sales_ytd
+0|3763178.18
+SELECT 1
+
+rows
+DECLARE @no_name int, @missing_person int, @no_sales int;
+EXECUTE @no_name = dbo.usp_GetSalesYTD315;
+EXECUTE @missing_person = dbo.usp_GetSalesYTD315 N'Nobody';
+EXECUTE @no_sales = dbo.usp_GetSalesYTD315 N'Dobney';
+SELECT @no_name AS no_name, @missing_person AS missing_person, @no_sales AS no_sales
+----
+no_name|missing_person|no_sales
+1|2|4
+SELECT 1
+
+ok
+CREATE TABLE Products315 (Id INT PRIMARY KEY, Name NVARCHAR(50) NOT NULL, Category NVARCHAR(50) NOT NULL, ListPrice DECIMAL(10,2) NOT NULL)
+
+ok
+INSERT INTO Products315 VALUES (1, N'Road-750', N'Road Bikes', 539.99), (2, N'Mountain-500', N'Mountain Bikes', 564.99), (3, N'Touring-3000', N'Touring Bikes', 742.35), (4, N'Helmet', N'Helmets', 34.99)
+
+ok
+CREATE PROCEDURE dbo.uspGetList315 @Product varchar(40)
+    , @MaxPrice decimal(10,2)
+    , @ComparePrice decimal(10,2) OUTPUT
+    , @ListPrice decimal(10,2) OUT
+AS
+    SET NOCOUNT ON;
+    SELECT Name AS product, ListPrice AS list_price
+    FROM Products315
+    WHERE Category LIKE @Product AND ListPrice < @MaxPrice
+    ORDER BY Id;
+    SET @ListPrice = (SELECT MAX(ListPrice) FROM Products315 WHERE Category LIKE @Product AND ListPrice < @MaxPrice);
+    SET @ComparePrice = @MaxPrice;
+
+rows
+DECLARE @ComparePrice decimal(10,2), @Cost decimal(10,2);
+EXECUTE dbo.uspGetList315 '%Bikes%', 700, @ComparePrice OUT, @Cost OUTPUT
+IF @Cost <= @ComparePrice
+    SELECT 'These products can be purchased for less than $' + RTRIM(CAST(@ComparePrice AS varchar(20))) + '.' AS message
+ELSE
+    SELECT 'The prices for all products in this category exceed $' + RTRIM(CAST(@ComparePrice AS varchar(20))) + '.' AS message
+----
+message
+These products can be purchased for less than $700.00.
+SELECT 1
+
+ok
+ALTER PROCEDURE dbo.uspGetEmployees315 @LastName nvarchar(50), @FirstName nvarchar(50) AS SET NOCOUNT ON; SELECT Department AS department FROM Staff315 WHERE FirstName = @FirstName AND LastName = @LastName;
+
+rows
+EXEC dbo.uspGetEmployees315 @LastName = N'Mitchell', @FirstName = N'Linda'
+----
+department
+Sales
+SELECT 1
+
+error 42883 2812
+EXECUTE dbo.uspNothing315
+
+error 42883 3701
+DROP PROCEDURE dbo.uspNothing315
+
+ok
+DROP PROCEDURE IF EXISTS dbo.uspNothing315
+
+chapter "CREATE FUNCTION (Transact-SQL)"
+ok
+CREATE TABLE Inventory315 (ProductID INT NOT NULL, LocationID INT NOT NULL, Quantity INT NOT NULL, PRIMARY KEY (ProductID, LocationID))
+
+ok
+INSERT INTO Inventory315 VALUES (1, 6, 10), (1, 7, 5), (2, 6, 3), (3, 7, 8)
+
+ok
+CREATE FUNCTION dbo.ufnGetInventoryStock315(@ProductID int)
+RETURNS int
+AS
+BEGIN
+    DECLARE @ret int;
+    SELECT @ret = SUM(p.Quantity)
+    FROM Inventory315 p
+    WHERE p.ProductID = @ProductID
+        AND p.LocationID = '6';
+    IF (@ret IS NULL)
+        SET @ret = 0;
+    RETURN @ret;
+END;
+
+rows
+SELECT Name AS name, dbo.ufnGetInventoryStock315(Id) AS current_supply FROM Products315 ORDER BY Id
+----
+name|current_supply
+Road-750|10
+Mountain-500|3
+Touring-3000|0
+Helmet|0
+SELECT 4
+
+error 42P02 313
+SELECT dbo.ufnGetInventoryStock315()
+
+error 54000 8144
+SELECT dbo.ufnGetInventoryStock315(1, 2)
+
+ok
+CREATE FUNCTION dbo.ufn_StockByCategory315 (@category nvarchar(50))
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT P.Id AS product_id, P.Name AS name, SUM(I.Quantity) AS total
+    FROM Products315 AS P
+    JOIN Inventory315 AS I ON I.ProductID = P.Id
+    WHERE P.Category LIKE @category
+    GROUP BY P.Id, P.Name
+)
+
+rows
+SELECT product_id, name, total FROM dbo.ufn_StockByCategory315 (N'%Bikes') ORDER BY product_id
+----
+product_id|name|total
+1|Road-750|15
+2|Mountain-500|3
+3|Touring-3000|8
+SELECT 3
+
+ok
+CREATE FUNCTION dbo.ufn_Restock315 (@below int)
+RETURNS @restock TABLE (product_id int PRIMARY KEY NOT NULL, name nvarchar(50) NOT NULL, on_hand int NOT NULL)
+AS
+BEGIN
+    INSERT INTO @restock
+    SELECT P.Id, P.Name, COALESCE(SUM(I.Quantity), 0)
+    FROM Products315 AS P
+    LEFT JOIN Inventory315 AS I ON I.ProductID = P.Id
+    GROUP BY P.Id, P.Name;
+    DELETE FROM @restock WHERE on_hand >= @below;
+    RETURN
+END
+
+rows
+SELECT product_id, name, on_hand FROM dbo.ufn_Restock315(5) ORDER BY product_id
+----
+product_id|name|on_hand
+2|Mountain-500|3
+4|Helmet|0
+SELECT 2
+
+error 42P13 443
+CREATE FUNCTION dbo.ufnBad315 () RETURNS int AS BEGIN INSERT INTO Inventory315 VALUES (9, 9, 9); RETURN 1 END
+
+rows
+SELECT type_desc, COUNT(*) AS objects FROM sys.objects WHERE name LIKE '%315' AND type_desc LIKE 'SQL%' GROUP BY type_desc ORDER BY type_desc
+----
+type_desc|objects
+SQL_INLINE_TABLE_VALUED_FUNCTION|1
+SQL_SCALAR_FUNCTION|1
+SQL_STORED_PROCEDURE|4
+SQL_TABLE_VALUED_FUNCTION|1
+SELECT 4
+
+ok
+DROP FUNCTION dbo.ufnGetInventoryStock315, dbo.ufn_StockByCategory315, dbo.ufn_Restock315
+
+ok
+DROP PROCEDURE dbo.uspGetEmployees315, dbo.uspGetEmployees2_315, dbo.usp_GetSalesYTD315, dbo.uspGetList315
+
+ok
+DROP TABLE Staff315, Products315, Inventory315

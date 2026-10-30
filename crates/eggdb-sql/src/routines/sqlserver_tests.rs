@@ -151,3 +151,124 @@ fn altered_procedures_keep_a_create_statement_as_their_text() {
     assert_eq!(routines.len(), 1);
     assert_eq!(routines[0].routines[0].text, "CREATE PROCEDURE p AS SELECT 2");
 }
+
+#[test]
+fn hostile_transact_sql_routines_return_errors_and_never_panic() {
+    let store = MemoryStore::new();
+    let mut session = session(&store);
+    succeeds(&mut session, "CREATE TABLE t (id int PRIMARY KEY, n int)");
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE dbo.p @a int = 1, @b int OUTPUT AS SET @b = @a RETURN @a",
+    );
+    succeeds(
+        &mut session,
+        "CREATE FUNCTION dbo.f (@a int) RETURNS int AS BEGIN RETURN @a + 1 END",
+    );
+    let deep = format!("{}1{}", "(".repeat(20_000), ")".repeat(20_000));
+    let many_parameters = (0..3_000)
+        .map(|index| format!("@p{index} int"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let many_arguments = vec!["1"; 3_000].join(", ");
+    let texts = [
+        format!("CREATE PROCEDURE dbo.deep AS SELECT {deep} AS x"),
+        format!("CREATE FUNCTION dbo.deep () RETURNS int AS BEGIN RETURN {deep} END"),
+        format!("CREATE PROCEDURE dbo.wide {many_parameters} AS SELECT 1 AS one"),
+        format!("SELECT dbo.f({many_arguments})"),
+        format!("DECLARE @b int; EXEC dbo.p {many_arguments}"),
+        "CREATE PROCEDURE".to_owned(),
+        "CREATE PROCEDURE dbo.q".to_owned(),
+        "CREATE PROCEDURE dbo.q @".to_owned(),
+        "CREATE PROCEDURE dbo.q @a AS SELECT 1".to_owned(),
+        "CREATE PROCEDURE dbo.q @a int = AS SELECT 1".to_owned(),
+        "CREATE PROCEDURE dbo.q (@a int AS SELECT 1".to_owned(),
+        "CREATE FUNCTION dbo.g () RETURNS".to_owned(),
+        "CREATE FUNCTION dbo.g () RETURNS int AS BEGIN SELECT 1 END".to_owned(),
+        "CREATE FUNCTION dbo.g () RETURNS int AS BEGIN END".to_owned(),
+        "CREATE FUNCTION dbo.g () RETURNS TABLE AS RETURN".to_owned(),
+        "CREATE FUNCTION dbo.g () RETURNS TABLE AS RETURN (".to_owned(),
+        "CREATE FUNCTION dbo.g () RETURNS @t TABLE AS BEGIN RETURN END".to_owned(),
+        "CREATE FUNCTION dbo.g () RETURNS @t TABLE (a int) AS BEGIN RETURN 1 END".to_owned(),
+        "CREATE FUNCTION dbo.g (@a int OUTPUT) RETURNS int AS BEGIN RETURN 1 END".to_owned(),
+        "ALTER PROCEDURE dbo.missing AS SELECT 1".to_owned(),
+        "ALTER FUNCTION dbo.p () RETURNS int AS BEGIN RETURN 1 END".to_owned(),
+        "DROP PROCEDURE".to_owned(),
+        "DROP FUNCTION dbo.p".to_owned(),
+        "DROP PROCEDURE dbo.f".to_owned(),
+        "EXEC dbo.f 1".to_owned(),
+        "EXEC dbo.p @a =".to_owned(),
+        "EXEC dbo.p @b = 1 OUTPUT".to_owned(),
+        "DECLARE @r int; EXEC @r = dbo.missing".to_owned(),
+        "SELECT dbo.p(1)".to_owned(),
+        "SELECT * FROM dbo.f(1)".to_owned(),
+        "SELECT dbo.f(DEFAULT, DEFAULT)".to_owned(),
+        "SELECT dbo.f('not a number')".to_owned(),
+        "SELECT dbo.f(2147483647)".to_owned(),
+    ];
+    for text in &texts {
+        let _ = session.execute_batch(text, &mut |_| true);
+        let _ = session.execute(text, &mut |_| {});
+    }
+    let fragments = [
+        "CREATE",
+        "ALTER",
+        "OR ALTER",
+        "DROP",
+        "PROCEDURE",
+        "PROC",
+        "FUNCTION",
+        "IF EXISTS",
+        "dbo.p",
+        "dbo.f",
+        "dbo.f(1)",
+        "dbo.f(",
+        "dbo.r",
+        "@a",
+        "@b",
+        "int",
+        "nvarchar(10)",
+        "= 1",
+        "= DEFAULT",
+        "OUTPUT",
+        "OUT",
+        "READONLY",
+        "RETURNS",
+        "TABLE",
+        "@t TABLE (a int)",
+        "AS",
+        "BEGIN",
+        "END",
+        "RETURN",
+        "RETURN (SELECT 1 AS a)",
+        "WITH RETURNS NULL ON NULL INPUT",
+        "WITH EXECUTE AS CALLER",
+        "WITH RECOMPILE",
+        "FOR REPLICATION",
+        "EXEC",
+        "EXECUTE",
+        "@r =",
+        "SELECT",
+        "FROM",
+        "t",
+        ",",
+        "(",
+        ")",
+        ";",
+        "SET",
+        "DECLARE @r int;",
+    ];
+    crate::tests::fuzz(&mut session, &fragments);
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE dbo.p_after @a int, @b int OUTPUT AS SET @b = @a",
+    );
+    succeeds(
+        &mut session,
+        "CREATE FUNCTION dbo.f_after (@a int) RETURNS int AS BEGIN RETURN @a + 1 END",
+    );
+    succeeds(
+        &mut session,
+        "DECLARE @b int; EXEC dbo.p_after 5, @b OUTPUT; SELECT dbo.f_after(@b) AS six",
+    );
+}
