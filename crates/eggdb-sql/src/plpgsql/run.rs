@@ -1,4 +1,5 @@
 mod collections;
+mod dbms_output;
 mod plsql;
 
 pub(crate) use plsql::{TransactionEnd, local_program, local_routines, take_transaction_end};
@@ -781,6 +782,11 @@ impl<'r> Run<'r> {
     }
 
     fn call_step(&mut self, text: &str) -> SqlResult<Flow> {
+        if self.oracle
+            && let Some(flow) = self.dbms_output_call(text)?
+        {
+            return Ok(flow);
+        }
         let dialect = self.dialect();
         self.refresh_cursor_attributes();
         let Statement::Call(call) = parsed(text, self.settings, &self.frame, dialect)? else {

@@ -353,6 +353,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     batch_resume: Option<(usize, usize)>,
     sqlserver_status: crate::sqlserver_functions::SessionStatus,
     oracle_nls: Arc<crate::oracle_nls::NlsParameters>,
+    plsql: crate::plsql::SharedPlsqlSession,
     identity_insert_table: Option<String>,
     keeps_identity_values: bool,
     statement_start: usize,
@@ -417,6 +418,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             batch_resume: None,
             sqlserver_status: crate::sqlserver_functions::SessionStatus::default(),
             oracle_nls: Arc::new(crate::oracle_nls::NlsParameters::default()),
+            plsql: crate::plsql::SharedPlsqlSession::default(),
             identity_insert_table: None,
             keeps_identity_values: false,
             statement_start: 0,
@@ -650,6 +652,35 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// offset or a region of the time zone database.
     pub fn time_zone(&self) -> crate::time_zones::TimeZone {
         self.settings.time_zone
+    }
+
+    /// Turns on the server output that PL/SQL writes with `DBMS_OUTPUT.PUT_LINE`, as SQL*Plus
+    /// `SET SERVEROUTPUT ON [SIZE n]` does: lines are kept, up to `buffer_bytes` (`None` for
+    /// as much as EggDB allows, 1 MiB) until [`Session::take_server_output`] takes them.
+    /// Until then a block's `DBMS_OUTPUT` calls are ignored, as in an Oracle session whose
+    /// client never enabled it.
+    pub fn enable_server_output(&mut self, buffer_bytes: Option<usize>) {
+        if let Ok(mut state) = self.plsql.lock() {
+            state.output.enable(buffer_bytes);
+        }
+    }
+
+    /// Turns the server output off again and drops the lines not yet taken, as SQL*Plus
+    /// `SET SERVEROUTPUT OFF` does.
+    pub fn disable_server_output(&mut self) {
+        if let Ok(mut state) = self.plsql.lock() {
+            state.output.disable();
+        }
+    }
+
+    /// The complete lines PL/SQL wrote with `DBMS_OUTPUT` since the last call, oldest first,
+    /// which a client prints after each statement as SQL*Plus does. A line still being built
+    /// with `DBMS_OUTPUT.PUT` stays until it ends.
+    pub fn take_server_output(&mut self) -> Vec<String> {
+        self.plsql
+            .lock()
+            .map(|mut state| state.output.take_lines())
+            .unwrap_or_default()
     }
 
     /// The value of the run-time parameter `name`, as `SHOW name` gives it.
@@ -1399,6 +1430,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 .then(|| crate::table_variables::enter(&self.table_variables));
             let _constraints = self.enter_constraints();
             let _nls = self.enter_oracle_nls();
+            let _plsql = self.oracle().then(|| crate::plsql::enter_session(&self.plsql));
             if let Some(mut rows) = parser.literal_rows() {
                 let _catalog = crate::pg_catalog::enter_statement(false, &settings);
                 resume = parser.resume_point();

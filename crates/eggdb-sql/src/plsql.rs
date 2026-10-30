@@ -1,5 +1,6 @@
 mod exceptions;
 mod packages;
+mod session_state;
 
 #[cfg(test)]
 mod call_tests;
@@ -9,6 +10,8 @@ mod collection_tests;
 mod compile_tests;
 #[cfg(test)]
 mod ddl_tests;
+#[cfg(test)]
+mod output_tests;
 #[cfg(test)]
 mod run_tests;
 #[cfg(test)]
@@ -22,6 +25,9 @@ pub(crate) use exceptions::{
 pub(crate) use packages::{
     StoredPackage, alter_package, create_package, drop_package, parse_package, resolve_package,
     stored_package,
+};
+pub(crate) use session_state::{
+    DEFAULT_OUTPUT_BUFFER_BYTES, ServerOutput, SharedPlsqlSession, enter_session, with_session,
 };
 
 use crate::ast::Name;
