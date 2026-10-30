@@ -809,7 +809,6 @@ fn view_options_and_replacement_follow_sql_servers_rules() {
     );
     for (text, code) in [
         ("CREATE VIEW w WITH ENCRYPTION AS SELECT id FROM t", 40517),
-        ("CREATE VIEW w AS SELECT id FROM t WITH CHECK OPTION", 40517),
         ("CREATE OR REPLACE VIEW w AS SELECT id FROM t", 102),
         ("ALTER OR ALTER VIEW v AS SELECT id FROM t", 156),
         ("CREATE VIEW v AS SELECT id FROM t", 2714),

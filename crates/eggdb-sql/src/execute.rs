@@ -1021,6 +1021,9 @@ pub(crate) fn insert(
     tables: &mut TableCache,
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
+    if crate::updatable_views::is_view(writer, tables, &insert.table)? {
+        return crate::updatable_views::insert(writer, tables, insert);
+    }
     if let InsertSource::Query(query) = &insert.source {
         let selected = with_selected_rows(writer, tables, insert, query)?;
         return self::insert(writer, tables, &selected);
@@ -2490,6 +2493,9 @@ pub(crate) fn returning_columns(
     table: &TableReference,
     items: &Option<Vec<SelectItem>>,
 ) -> SqlResult<Option<Vec<OutputColumn>>> {
+    if crate::updatable_views::is_view(reader, tables, table)? {
+        return crate::updatable_views::returning_columns(reader, tables, table, items);
+    }
     let definition = tables.require(reader, &table.name)?;
     let scope = scope_of(&definition, table);
     Ok(returning(items, scope)?.map(|projection| projection.columns))
@@ -3233,6 +3239,9 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
+    if crate::updatable_views::is_view(writer, tables, &update.table)? {
+        return crate::updatable_views::update(writer, tables, update);
+    }
     let (prepared, subqueries) = if update_mentions_subquery(update) {
         let (prepared, subqueries) =
             with_subqueries_run(writer, tables, update, &update.table, false, update_exprs)?;
@@ -3471,6 +3480,9 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
+    if crate::updatable_views::is_view(writer, tables, &delete.table)? {
+        return crate::updatable_views::delete(writer, tables, delete);
+    }
     let (prepared, subqueries) = if delete.filter.iter().any(crate::subquery::mentions_subquery)
         || returning_mentions_subquery(&delete.returning)
     {

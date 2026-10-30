@@ -34,7 +34,7 @@ fn not_a_view(name: &str) -> SqlError {
 
 pub(crate) fn not_updatable(name: &str, verb: &str) -> SqlError {
     SqlError::not_supported(format!("cannot {verb} view \"{}\"", display(name)))
-        .with_hint("Views are read-only in this release: change the view's tables directly.")
+        .with_hint("INSERT, UPDATE and DELETE change a view; change the view's table directly for this statement.")
 }
 
 fn duplicate_relation(name: &Name, internal: &str, dialect: Dialect) -> SqlError {

@@ -99,6 +99,7 @@ mod temporal;
 mod tsql;
 mod types;
 mod typing;
+mod updatable_views;
 mod views;
 mod window;
 mod with_statement;
