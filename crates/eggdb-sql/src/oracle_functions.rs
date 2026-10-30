@@ -24,7 +24,7 @@ pub(crate) fn within_limit(bytes: usize) -> SqlResult<()> {
     }
 }
 
-fn invalid_number() -> SqlError {
+pub(crate) fn invalid_number() -> SqlError {
     SqlError::new(SqlState::INVALID_TEXT_REPRESENTATION, "invalid number").with_oracle_code(1722)
 }
 
@@ -42,14 +42,6 @@ fn divisor_is_zero() -> SqlError {
 
 fn numeric_overflow() -> SqlError {
     SqlError::new(SqlState::NUMERIC_VALUE_OUT_OF_RANGE, "numeric overflow").with_oracle_code(1426)
-}
-
-fn invalid_format() -> SqlError {
-    SqlError::new(
-        SqlState::INVALID_TEXT_REPRESENTATION,
-        "invalid number format model",
-    )
-    .with_oracle_code(1481)
 }
 
 pub(crate) fn number_text(number: f64) -> String {
@@ -81,6 +73,7 @@ pub(crate) fn text_with_type(value: &Value, declared: Option<SqlType>) -> Option
         Value::Numeric(number) => Some(crate::dialect::oracle_numeric_text(number)),
         Value::Boolean(flag) => Some(if *flag { "TRUE" } else { "FALSE" }.to_owned()),
         Value::Bytea(_) => crate::Dialect::Oracle.value_text(value),
+        Value::Interval(interval) => Some(crate::oracle_intervals::typed_text(*interval, declared)),
         Value::Timestamp(_) | Value::TimestampTz(_) | Value::Date(_) => {
             match crate::oracle_datetime::nls_text(value, declared) {
                 Ok(Some(text)) => Some(text),
@@ -110,7 +103,7 @@ pub(crate) enum Number {
 }
 
 impl Number {
-    fn float(&self) -> f64 {
+    pub(crate) fn float(&self) -> f64 {
         match self {
             Self::Integer(number) => *number as f64,
             Self::Decimal(number) => number.to_f64(),
@@ -118,7 +111,7 @@ impl Number {
         }
     }
 
-    fn exact(&self) -> Option<Numeric> {
+    pub(crate) fn exact(&self) -> Option<Numeric> {
         match self {
             Self::Integer(number) => Some(Numeric::from_i64(*number)),
             Self::Decimal(number) => Some(number.clone()),
@@ -145,7 +138,7 @@ impl Number {
     }
 }
 
-fn exact_result(result: SqlResult<Numeric>) -> SqlResult<Value> {
+pub(crate) fn exact_result(result: SqlResult<Numeric>) -> SqlResult<Value> {
     result
         .map(|number| Number::of_numeric(number).value())
         .map_err(|error| {
@@ -209,6 +202,15 @@ fn number_of(value: &Value) -> SqlResult<Option<Number>> {
             return Err(invalid_number());
         }
     }))
+}
+
+pub(crate) fn decimal_of(value: &Value) -> SqlResult<Option<Numeric>> {
+    Ok(match number_of(value)? {
+        None => None,
+        Some(Number::Float(float)) if !float.is_finite() => return Err(invalid_number()),
+        Some(Number::Float(float)) => Some(Numeric::from_f64(float, 17)?),
+        Some(number) => number.exact(),
+    })
 }
 
 fn whole_of(value: &Value) -> SqlResult<Option<i64>> {
@@ -684,144 +686,6 @@ fn extreme(values: &[Value], greatest: bool) -> SqlResult<Value> {
     })
 }
 
-struct Model {
-    fill_mode: bool,
-    dollar: bool,
-    leading_sign: bool,
-    trailing_minus: bool,
-    integer: Vec<char>,
-    fraction: Vec<char>,
-    point: bool,
-    width: usize,
-}
-
-fn model_of(format: &str) -> SqlResult<Model> {
-    let upper = format.to_ascii_uppercase();
-    let mut rest = upper.as_str();
-    let mut model = Model {
-        fill_mode: false,
-        dollar: false,
-        leading_sign: false,
-        trailing_minus: false,
-        integer: Vec::new(),
-        fraction: Vec::new(),
-        point: false,
-        width: format.len(),
-    };
-    if let Some(after) = rest.strip_prefix("FM") {
-        model.fill_mode = true;
-        model.width -= 2;
-        rest = after;
-    }
-    if let Some(after) = rest.strip_prefix('S') {
-        model.leading_sign = true;
-        rest = after;
-    }
-    if let Some(after) = rest.strip_suffix("MI") {
-        model.trailing_minus = true;
-        rest = after;
-    }
-    for element in rest.chars() {
-        match element {
-            '$' if !model.dollar => model.dollar = true,
-            '9' | '0' if model.point => model.fraction.push(element),
-            '9' | '0' => model.integer.push(element),
-            ',' | 'G' if !model.point => model.integer.push(','),
-            '.' | 'D' if !model.point => model.point = true,
-            _ => return Err(invalid_format()),
-        }
-    }
-    if model.integer.is_empty() && model.fraction.is_empty() {
-        return Err(invalid_format());
-    }
-    Ok(model)
-}
-
-fn fixed_digits(number: &Number, places: usize) -> SqlResult<(bool, String)> {
-    Ok(match number {
-        Number::Integer(whole) => {
-            let mut text = whole.unsigned_abs().to_string();
-            if places > 0 {
-                text.push('.');
-                text.extend(std::iter::repeat_n('0', places));
-            }
-            (*whole < 0, text)
-        }
-        Number::Decimal(decimal) => {
-            let rounded = decimal.rounded(places as i64)?;
-            let negative = rounded.compare(&Numeric::from_i64(0)) == Ordering::Less;
-            (negative, rounded.absolute().to_string())
-        }
-        Number::Float(float) => (*float < 0.0, format!("{:.*}", places, float.abs())),
-    })
-}
-
-fn formatted(number: &Number, format: &str) -> SqlResult<String> {
-    let model = model_of(format)?;
-    within_limit(format.len().saturating_mul(2).saturating_add(2))?;
-    let (negative, digits) = fixed_digits(number, model.fraction.len())?;
-    let (whole, fraction) = digits.split_once('.').unwrap_or((&digits, ""));
-    let slots = model.integer.iter().filter(|slot| **slot != ',').count();
-    let whole: Vec<char> = if whole == "0" && !model.fraction.is_empty() {
-        Vec::new()
-    } else {
-        whole.chars().collect()
-    };
-    if whole.len() > slots {
-        return Ok("#".repeat(model.width + 1));
-    }
-    let first_zero = model.integer.iter().position(|slot| *slot == '0');
-    let blanks = slots - whole.len();
-    let mut body = Vec::with_capacity(model.integer.len());
-    let mut digit_slot = 0;
-    let mut printing = false;
-    for (index, slot) in model.integer.iter().enumerate() {
-        if *slot == ',' {
-            body.push(if printing { ',' } else { ' ' });
-            continue;
-        }
-        if digit_slot >= blanks {
-            body.push(whole[digit_slot - blanks]);
-            printing = true;
-        } else if first_zero.is_some_and(|zero| index >= zero) {
-            body.push('0');
-            printing = true;
-        } else {
-            body.push(' ');
-        }
-        digit_slot += 1;
-    }
-    let mut text: String = body.iter().collect();
-    let first_printed = text.find(|c: char| c != ' ').unwrap_or(text.len());
-    let mut prefix = String::new();
-    if model.leading_sign {
-        prefix.push(if negative { '-' } else { '+' });
-    } else if !model.trailing_minus {
-        prefix.push(if negative { '-' } else { ' ' });
-    }
-    if model.dollar {
-        prefix.push('$');
-    }
-    text.insert_str(first_printed, &prefix);
-    if model.point {
-        text.push('.');
-        text.push_str(fraction);
-    }
-    if model.trailing_minus {
-        text.push(if negative { '-' } else { ' ' });
-    }
-    if model.fill_mode {
-        let mut trimmed = text.trim().to_owned();
-        if model.fraction.iter().all(|slot| *slot == '9') && model.point {
-            while trimmed.ends_with('0') {
-                trimmed.pop();
-            }
-        }
-        return Ok(trimmed);
-    }
-    Ok(text)
-}
-
 fn is_datetime(value: &Value) -> bool {
     matches!(
         value,
@@ -840,6 +704,11 @@ fn to_char(values: &[Value], declared: Option<SqlType>) -> SqlResult<Value> {
     if is_datetime(&values[0]) {
         return crate::oracle_datetime::to_char_datetime(values, declared);
     }
+    if let Value::Interval(interval) = &values[0] {
+        return Ok(Value::Text(crate::oracle_intervals::typed_text(
+            *interval, declared,
+        )));
+    }
     if values.iter().any(Value::is_null) {
         return Ok(Value::Null);
     }
@@ -852,62 +721,9 @@ fn to_char(values: &[Value], declared: Option<SqlType>) -> SqlResult<Value> {
             let Some(number) = number_of(value)? else {
                 return Ok(Value::Null);
             };
-            formatted(&number, &format).map(text_or_null)
+            crate::oracle_number_model::formatted(&number, &format).map(text_or_null)
         }
     }
-}
-
-fn number_by_model(text: &str, format: &str) -> SqlResult<Number> {
-    let model = model_of(format)?;
-    let mut rest = text.trim();
-    let mut negative = false;
-    if model.leading_sign {
-        negative = match rest.chars().next() {
-            Some('-') => true,
-            Some('+') => false,
-            _ => return Err(invalid_number()),
-        };
-        rest = &rest[1..];
-    } else if model.trailing_minus {
-        if let Some(body) = rest.strip_suffix('-') {
-            negative = true;
-            rest = body;
-        } else if let Some(body) = rest.strip_suffix('+') {
-            rest = body;
-        }
-    } else if let Some(body) = rest.strip_prefix('-') {
-        negative = true;
-        rest = body;
-    }
-    if model.dollar {
-        rest = rest.strip_prefix('$').unwrap_or(rest);
-    }
-    let (whole, fraction) = match rest.split_once('.') {
-        Some(_) if !model.point => return Err(invalid_number()),
-        Some((whole, fraction)) => (whole, fraction),
-        None => (rest, ""),
-    };
-    let grouped = model.integer.contains(&',');
-    let whole_ok = whole
-        .chars()
-        .all(|character| character.is_ascii_digit() || (grouped && character == ','));
-    let digits: String = whole.chars().filter(char::is_ascii_digit).collect();
-    let slots = model.integer.iter().filter(|slot| **slot != ',').count();
-    if !whole_ok
-        || !fraction.chars().all(|character| character.is_ascii_digit())
-        || digits.len() > slots
-        || fraction.len() > model.fraction.len()
-        || (digits.is_empty() && fraction.is_empty())
-    {
-        return Err(invalid_number());
-    }
-    let sign = if negative { "-" } else { "" };
-    let digits = if digits.is_empty() { "0" } else { &digits };
-    parse_number(&if fraction.is_empty() {
-        format!("{sign}{digits}")
-    } else {
-        format!("{sign}{digits}.{fraction}")
-    })
 }
 
 fn to_number(values: &[Value]) -> SqlResult<Value> {
@@ -923,7 +739,7 @@ fn to_number(values: &[Value]) -> SqlResult<Value> {
         return Ok(Value::Null);
     };
     match values.get(1).and_then(text_of) {
-        Some(format) => Ok(number_by_model(&text, &format)?.value()),
+        Some(format) => Ok(crate::oracle_number_model::number_by_model(&text, &format)?.value()),
         None => Ok(parse_number(&text)?.value()),
     }
 }
@@ -974,14 +790,16 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
         ("oracle_chr", [value]) => character(value),
         ("oracle_ascii", [value]) => Ok(character_code(value)),
         ("oracle_abs", [value]) => absolute(value),
-        ("oracle_round", [value, ..]) if is_datetime(value) => {
-            Err(SqlError::not_supported("ROUND of a date"))
-        }
-        ("oracle_trunc", [value, ..]) if is_datetime(value) => {
+        ("oracle_round" | "oracle_trunc", [value, ..]) if is_datetime(value) => {
             if values.get(1).is_some_and(Value::is_null) {
                 return Ok(Value::Null);
             }
-            crate::oracle_datetime::truncated_date(value, date_unit(values).as_deref())
+            let unit = date_unit(values);
+            if name == "oracle_round" {
+                crate::oracle_date_functions::rounded_date(value, unit.as_deref())
+            } else {
+                crate::oracle_date_functions::truncated_date(value, unit.as_deref())
+            }
         }
         ("oracle_round", [value, rest @ ..]) => scaled(value, rest.first(), true),
         ("oracle_trunc", [value, rest @ ..]) => scaled(value, rest.first(), false),
@@ -1001,6 +819,34 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
             crate::oracle_datetime::add_months(date, whole_of(months)?)
         }
         ("oracle_last_day", [date]) => crate::oracle_datetime::last_day(date),
+        ("oracle_months_between", [later, earlier]) => {
+            crate::oracle_date_functions::months_between(later, earlier)
+        }
+        ("oracle_next_day", [date, day]) => crate::oracle_date_functions::next_day(date, day),
+        ("oracle_to_timestamp_tz", [_, ..]) => crate::oracle_datetime::to_timestamp_tz(values),
+        ("oracle_from_tz", [stamp, zone]) => {
+            crate::oracle_date_functions::from_time_zone(stamp, zone)
+        }
+        ("oracle_sys_extract_utc", [stamp]) => crate::oracle_date_functions::utc_of_stamp(stamp),
+        ("oracle_tz_offset", [zone]) => crate::oracle_date_functions::zone_offset_text(zone),
+        ("oracle_numtodsinterval", [amount, unit]) => {
+            crate::oracle_intervals::number_to_day_to_second(amount, unit)
+        }
+        ("oracle_numtoyminterval", [amount, unit]) => {
+            crate::oracle_intervals::number_to_year_to_month(amount, unit)
+        }
+        ("oracle_to_dsinterval", [text]) => crate::oracle_intervals::text_to_interval(
+            text,
+            crate::oracle_intervals::IntervalKind::DayToSecond,
+        ),
+        ("oracle_to_yminterval", [text]) => crate::oracle_intervals::text_to_interval(
+            text,
+            crate::oracle_intervals::IntervalKind::YearToMonth,
+        ),
+        ("oracle_listagg", [parts, rest @ ..]) => crate::oracle_listagg::joined(parts, rest),
+        ("oracle_fetch_percent" | "oracle_fetch_with_ties" | "oracle_fetch_percent_with_ties", [count]) => {
+            Ok(count.clone())
+        }
         ("oracle_date_literal", [Value::Text(text)]) => crate::oracle_datetime::date_literal(text),
         ("oracle_timestamp_literal", [Value::Text(text)]) => {
             crate::oracle_datetime::timestamp_literal(text)
@@ -1014,16 +860,12 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
 
 #[cfg(test)]
 mod tests {
-    use super::{formatted, number_text, parse_number};
+    use super::number_text;
     use crate::error::SqlResult;
     use crate::types::Value;
 
     fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
         super::call(name, values, &[])
-    }
-
-    fn shaped(number: &str, format: &str) -> SqlResult<String> {
-        formatted(&parse_number(number)?, format)
     }
 
     fn text(value: &str) -> Value {
@@ -1036,21 +878,6 @@ mod tests {
         assert_eq!(number_text(-0.25), "-.25");
         assert_eq!(number_text(3.0), "3");
         assert_eq!(number_text(1234.5), "1234.5");
-    }
-
-    #[test]
-    fn number_format_models_place_digits_signs_and_separators() {
-        assert_eq!(shaped("1234.5", "9,999.99").as_deref(), Ok(" 1,234.50"));
-        assert_eq!(shaped("-12", "999").as_deref(), Ok(" -12"));
-        assert_eq!(shaped("7", "000").as_deref(), Ok(" 007"));
-        assert_eq!(shaped("0.5", "9.99").as_deref(), Ok("  .50"));
-        assert_eq!(shaped("0", "999").as_deref(), Ok("   0"));
-        assert_eq!(shaped("1.5", "FM9.99").as_deref(), Ok("1.5"));
-        assert_eq!(shaped("12345", "999").as_deref(), Ok("####"));
-        assert_eq!(shaped("12", "$99").as_deref(), Ok(" $12"));
-        assert_eq!(shaped("12", "S99").as_deref(), Ok("+12"));
-        assert_eq!(shaped("-12", "99MI").as_deref(), Ok("12-"));
-        assert!(shaped("1", "X9").is_err());
     }
 
     #[test]
@@ -1271,6 +1098,15 @@ mod tests {
             "oracle_to_timestamp",
             "oracle_add_months",
             "oracle_last_day",
+            "oracle_months_between",
+            "oracle_next_day",
+            "oracle_to_timestamp_tz",
+            "oracle_from_tz",
+            "oracle_tz_offset",
+            "oracle_numtodsinterval",
+            "oracle_numtoyminterval",
+            "oracle_to_dsinterval",
+            "oracle_to_yminterval",
         ];
         for _ in 0..cases {
             let mut first = String::new();

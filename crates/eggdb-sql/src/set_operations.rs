@@ -2,7 +2,7 @@ use crate::ast::{Expr, ExprKind, Literal, OrderItem, SetOperation, SetOperator};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::compare_truth;
-use crate::execute::{order_rows, row_count};
+use crate::execute::{compare_sort_keys, order_rows, row_count, row_limit, rows_within_limit};
 use crate::memory::WorkMemory;
 use crate::session::{OutputColumn, QueryResult};
 use crate::types::{Conversion, SqlType, Value, convert, equality_key};
@@ -419,17 +419,27 @@ pub(crate) fn order_and_limit(
         order_rows(&mut result.rows, order_by, &keys);
     }
     let skip = row_count(offset, "OFFSET")?.unwrap_or(0);
-    let take = row_count(limit, "LIMIT")?;
+    let limit = row_limit(limit)?;
     let skip = usize::try_from(skip).unwrap_or(usize::MAX);
-    let take = take.map_or(usize::MAX, |take| {
-        usize::try_from(take).unwrap_or(usize::MAX)
-    });
+    let take = limit.rows_to_take(result.rows.len());
     if skip > 0 || take < result.rows.len() {
-        result.rows = std::mem::take(&mut result.rows)
-            .into_iter()
-            .skip(skip)
-            .take(take)
-            .collect();
+        let keyed = std::mem::take(&mut result.rows).into_iter().map(|row| {
+            let picked: Vec<Value> = keys
+                .iter()
+                .map(|&index| row.get(index).cloned().unwrap_or(Value::Null))
+                .collect();
+            (picked, row)
+        });
+        let tied = |left: &Vec<Value>, right: &Vec<Value>| {
+            compare_sort_keys(order_by, left, right) == std::cmp::Ordering::Equal
+        };
+        let ties: Option<&dyn Fn(&Vec<Value>, &Vec<Value>) -> bool> =
+            if limit.with_ties && !keys.is_empty() {
+                Some(&tied)
+            } else {
+                None
+            };
+        result.rows = rows_within_limit(keyed, skip, take, ties);
     }
     result.tag = format!("SELECT {}", result.rows.len());
     Ok(result)

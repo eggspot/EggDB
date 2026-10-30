@@ -1,13 +1,16 @@
 use super::Parser;
 use crate::ast::{
-    BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal, Name, OrderItem, SelectItem,
-    Statement, TableReference, UnaryOperator,
+    AggregateFunction, BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal, Name, OrderItem,
+    SelectItem, Statement, TableReference, UnaryOperator,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children;
 use crate::lexer::{TokenKind, swap_uniform_case};
+use crate::oracle_intervals::{
+    DEFAULT_LEADING_PRECISION, IntervalField, MAX_PRECISION, Qualifier,
+};
 use crate::settings::Settings;
-use crate::types::SqlType;
+use crate::types::{SqlType, Value};
 
 /// The Oracle Database release whose documented behaviour EggDB's Oracle dialect follows.
 pub const ORACLE_COMPATIBLE_VERSION: &str = "23ai";
@@ -604,17 +607,27 @@ impl<'t> Parser<'t> {
         } else {
             self.expression()?
         };
-        if self.is_word("percent") {
-            return Err(self.not_supported("FETCH ... PERCENT"));
-        }
+        let percent = self.take_word("percent");
         if !self.take_word("rows") {
             self.expect_word("row")?;
         }
-        if self.is_word("with") {
-            return Err(self.not_supported("FETCH ... WITH TIES"));
-        }
-        self.expect_word("only")?;
-        Ok(not_below_zero(count))
+        let with_ties = if self.take_word("with") {
+            self.expect_word("ties")?;
+            true
+        } else {
+            self.expect_word("only")?;
+            false
+        };
+        Ok(match (percent, with_ties) {
+            (false, false) => not_below_zero(count),
+            (false, true) => {
+                oracle_function("oracle_fetch_with_ties", vec![not_below_zero(count)], position)
+            }
+            (true, false) => oracle_function("oracle_fetch_percent", vec![count], position),
+            (true, true) => {
+                oracle_function("oracle_fetch_percent_with_ties", vec![count], position)
+            }
+        })
     }
 
     pub(super) fn oracle_type(&mut self) -> SqlResult<SqlType> {
@@ -664,7 +677,8 @@ impl<'t> Parser<'t> {
             "date" => SqlType::Timestamp(Some(0)),
             "timestamp" => self.oracle_timestamp(start)?,
             "json" => SqlType::Jsonb,
-            "interval" | "long" | "bfile" | "rowid" | "urowid" | "xmltype" | "vector"
+            "interval" => self.oracle_interval_type(start)?,
+            "long" | "bfile" | "rowid" | "urowid" | "xmltype" | "vector"
             | "sdo_geometry" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
@@ -756,6 +770,164 @@ impl<'t> Parser<'t> {
         Ok(SqlType::Timestamp(Some(precision)))
     }
 
+    fn oracle_interval_precision(&mut self, position: usize) -> SqlResult<u8> {
+        let digits = self.oracle_type_argument()?;
+        u8::try_from(digits)
+            .ok()
+            .filter(|digits| *digits <= MAX_PRECISION)
+            .ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_TABLE_DEFINITION,
+                    "datetime/interval precision is out of range",
+                )
+                .with_oracle_code(30088)
+                .at(position)
+            })
+    }
+
+    fn oracle_interval_field(&mut self) -> SqlResult<IntervalField> {
+        let TokenKind::Word(word) = self.peek_kind() else {
+            return Err(self.unexpected());
+        };
+        let Some(field) = IntervalField::named(word.as_ref()) else {
+            return Err(self.unexpected());
+        };
+        self.at += 1;
+        Ok(field)
+    }
+
+    pub(super) fn oracle_interval_qualifier(&mut self, position: usize) -> SqlResult<Qualifier> {
+        let leading = self.oracle_interval_field()?;
+        let mut qualifier = Qualifier {
+            leading,
+            trailing: leading,
+            leading_precision: DEFAULT_LEADING_PRECISION,
+            fraction_digits: crate::oracle_intervals::DEFAULT_FRACTION_DIGITS,
+        };
+        if self.take(&TokenKind::LeftParen) {
+            qualifier.leading_precision = self.oracle_interval_precision(position)?;
+            if leading == IntervalField::Second && self.take(&TokenKind::Comma) {
+                qualifier.fraction_digits = self.oracle_interval_precision(position)?;
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        if self.take_word("to") {
+            qualifier.trailing = self.oracle_interval_field()?;
+            if qualifier.trailing == IntervalField::Second && self.take(&TokenKind::LeftParen) {
+                qualifier.fraction_digits = self.oracle_interval_precision(position)?;
+                self.expect(&TokenKind::RightParen)?;
+            }
+        }
+        if !qualifier.is_valid() {
+            return Err(SqlError::syntax("missing keyword", self.position()).with_oracle_code(905));
+        }
+        if qualifier.trailing != IntervalField::Second {
+            qualifier.fraction_digits = 0;
+        }
+        Ok(qualifier)
+    }
+
+    fn oracle_interval_type(&mut self, position: usize) -> SqlResult<SqlType> {
+        let qualifier = self.oracle_interval_qualifier(position)?;
+        match (qualifier.leading, qualifier.trailing) {
+            (IntervalField::Year, IntervalField::Month)
+            | (IntervalField::Day, IntervalField::Second) => Ok(qualifier.sql_type()),
+            _ => Err(SqlError::syntax("missing keyword", position).with_oracle_code(905)),
+        }
+    }
+
+    fn oracle_interval_literal(&mut self, position: usize) -> SqlResult<Option<Expr>> {
+        let text = match self.peek_kind_at(1) {
+            TokenKind::String(text) => text.as_ref().to_owned(),
+            _ => return Ok(None),
+        };
+        self.at += 2;
+        let qualifier = self.oracle_interval_qualifier(position)?;
+        let value = crate::oracle_intervals::parse_literal(&text, qualifier)
+            .map_err(|error| error.at(position))?;
+        Ok(Some(Expr {
+            kind: ExprKind::Constant {
+                value: Value::Interval(value),
+                sql_type: Some(qualifier.sql_type()),
+            },
+            position,
+        }))
+    }
+
+    fn oracle_listagg(&mut self, name: &Name) -> SqlResult<Expr> {
+        let position = name.position;
+        self.expect(&TokenKind::LeftParen)?;
+        let distinct = self.take_word("distinct");
+        if !distinct {
+            self.take_word("all");
+        }
+        let measure = self.expression()?;
+        let delimiter = if self.take(&TokenKind::Comma) {
+            self.expression()?
+        } else {
+            literal(Literal::Null, position)
+        };
+        let mut truncate = false;
+        let mut indicator = crate::oracle_listagg::DEFAULT_TRUNCATION_INDICATOR.to_owned();
+        let mut with_count = true;
+        if self.take_word("on") {
+            self.expect_word("overflow")?;
+            if self.take_word("truncate") {
+                truncate = true;
+                if let TokenKind::String(text) = self.peek_kind() {
+                    indicator = text.as_ref().to_owned();
+                    self.at += 1;
+                }
+                if self.take_word("with") {
+                    self.expect_word("count")?;
+                } else if self.take_word("without") {
+                    self.expect_word("count")?;
+                    with_count = false;
+                }
+            } else {
+                self.expect_word("error")?;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let mut order = Vec::new();
+        if self.take_word("within") {
+            self.expect_word("group")?;
+            self.expect(&TokenKind::LeftParen)?;
+            self.expect_word("order")?;
+            self.expect_word("by")?;
+            order = self.order_items()?;
+            self.expect(&TokenKind::RightParen)?;
+        }
+        if self.is_word("over") {
+            return Err(self.not_supported("LISTAGG as an analytic function (OVER)"));
+        }
+        let text = oracle_function("oracle_concat", vec![measure], position);
+        let argument = if order.is_empty() {
+            text
+        } else {
+            crate::aggregate::ordered_arguments(text, order)
+        };
+        let parts = Expr {
+            kind: ExprKind::Aggregate {
+                function: AggregateFunction::ArrayAgg,
+                argument: Some(Box::new(argument)),
+                distinct,
+            },
+            position,
+        };
+        Ok(oracle_function(
+            "oracle_listagg",
+            vec![
+                parts,
+                delimiter,
+                literal(Literal::Boolean(truncate), position),
+                literal(Literal::String(indicator), position),
+                literal(Literal::Boolean(with_count), position),
+            ],
+            position,
+        ))
+    }
+
     fn oracle_number(&mut self) -> SqlResult<SqlType> {
         if !self.take(&TokenKind::LeftParen) {
             return Ok(SqlType::Numeric(None));
@@ -833,6 +1005,25 @@ impl<'t> Parser<'t> {
                 return self.parameter(&number.to_string(), position).map(Some);
             }
             TokenKind::Word(word) => match word.as_ref() {
+                "interval" => return self.oracle_interval_literal(position),
+                "sessiontimezone" | "dbtimezone" => {
+                    self.at += 1;
+                    let (name, offset) = if word.as_ref() == "sessiontimezone" {
+                        (
+                            "sessiontimezone",
+                            self.oracle_settings(|settings| settings.time_zone_offset),
+                        )
+                    } else {
+                        ("dbtimezone", 0)
+                    };
+                    Expr {
+                        kind: ExprKind::SessionValue {
+                            name,
+                            value: crate::oracle_datetime::zone_text(offset),
+                        },
+                        position,
+                    }
+                }
                 "rownum" => {
                     self.at += 1;
                     Expr {
@@ -935,6 +1126,9 @@ impl<'t> Parser<'t> {
         if name.text == "sys_context" {
             return self.sys_context(name).map(Some);
         }
+        if name.text == "listagg" {
+            return self.oracle_listagg(name).map(Some);
+        }
         if crate::ast::AggregateFunction::named(&name.text).is_some() {
             return Ok(None);
         }
@@ -975,14 +1169,16 @@ impl<'t> Parser<'t> {
             "to_timestamp" => ("oracle_to_timestamp", 1, 3),
             "add_months" => ("oracle_add_months", 2, 2),
             "last_day" => ("oracle_last_day", 1, 1),
-            "months_between" | "next_day" | "to_timestamp_tz" | "numtodsinterval"
-            | "numtoyminterval" => {
-                return Err(self.not_supported(&format!(
-                    "{}() in the Oracle dialect",
-                    name.text.to_ascii_uppercase()
-                )));
-            }
-            "listagg" => return Err(self.not_supported("LISTAGG")),
+            "months_between" => ("oracle_months_between", 2, 2),
+            "next_day" => ("oracle_next_day", 2, 2),
+            "to_timestamp_tz" => ("oracle_to_timestamp_tz", 1, 3),
+            "from_tz" => ("oracle_from_tz", 2, 2),
+            "sys_extract_utc" => ("oracle_sys_extract_utc", 1, 1),
+            "tz_offset" => ("oracle_tz_offset", 1, 1),
+            "numtodsinterval" => ("oracle_numtodsinterval", 2, 2),
+            "numtoyminterval" => ("oracle_numtoyminterval", 2, 2),
+            "to_dsinterval" => ("oracle_to_dsinterval", 1, 1),
+            "to_yminterval" => ("oracle_to_yminterval", 1, 1),
             _ => return Err(invalid_identifier(&name.text, position)),
         };
         let arguments = self.oracle_arguments()?;

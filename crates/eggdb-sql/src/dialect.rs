@@ -76,7 +76,8 @@ impl Dialect {
 
     /// `value`, of a column whose type is `sql_type`, as this dialect's clients print it: as
     /// [`Dialect::value_text`], except that SQL Server's dates and times show the fractional
-    /// digits of their type's scale (`2020-01-01 10:00:00.000` for a `datetime`).
+    /// digits of their type's scale (`2020-01-01 10:00:00.000` for a `datetime`) and Oracle's
+    /// intervals show their type's form and fractional digits (`+01 02:00:00.000000`).
     pub fn value_text_typed(
         self,
         value: &crate::Value,
@@ -95,6 +96,9 @@ impl Dialect {
                 Self::SqlServer,
                 crate::Value::Timestamp(_) | crate::Value::TimestampTz(_) | crate::Value::Time(_),
             ) if scale.is_some() => crate::sqlserver_conversion::display_text(value, scale),
+            (Self::Oracle, crate::Value::Interval(interval)) => {
+                Some(crate::oracle_intervals::typed_text(*interval, sql_type))
+            }
             _ => self.value_text(value),
         }
     }
@@ -104,7 +108,8 @@ impl Dialect {
     /// digits and a decimal point (`2.0`), Oracle's `TRUE` and `FALSE` and its numbers without a
     /// leading zero (`.5`), a `bytea` as MySQL's and SQL Server's clients show it (`0x6162`), as
     /// Oracle's (`6162`) or as SQLite's (its bytes as text), SQL Server's `uniqueidentifier` in
-    /// upper case and its `datetimeoffset` with its offset, and `None` for NULL.
+    /// upper case and its `datetimeoffset` with its offset, Oracle's intervals as `+01-02` or
+    /// `+01 02:00:00.000000`, and `None` for NULL.
     pub fn value_text(self, value: &crate::Value) -> Option<String> {
         match (self, value) {
             (Self::MySql | Self::Sqlite | Self::SqlServer, crate::Value::Boolean(flag)) => {
@@ -126,6 +131,9 @@ impl Dialect {
                 Some(crate::oracle_functions::number_text(*number))
             }
             (Self::Oracle, crate::Value::Numeric(number)) => Some(oracle_numeric_text(number)),
+            (Self::Oracle, crate::Value::Interval(interval)) => {
+                Some(crate::oracle_intervals::typed_text(*interval, None))
+            }
             (Self::Sqlite, crate::Value::Numeric(number)) => Some(match number.integral_value() {
                 Some(whole) => whole.to_string(),
                 None => crate::sqlite_functions::real_text(number.to_f64())?,

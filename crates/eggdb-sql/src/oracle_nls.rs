@@ -5,11 +5,10 @@ use std::sync::Arc;
 
 const AMERICA_DATE_FORMAT: &str = "DD-MON-RR";
 const AMERICA_TIMESTAMP_FORMAT: &str = "DD-MON-RR HH.MI.SSXFF AM";
-const AMERICA_TIMESTAMP_TZ_FORMAT: &str = "DD-MON-RR HH.MI.SSXFF AM";
+const AMERICA_TIMESTAMP_TZ_FORMAT: &str = "DD-MON-RR HH.MI.SSXFF AM TZR";
 const AMERICA_NUMERIC_CHARACTERS: &str = ".,";
 
-const UNSUPPORTED_PARAMETERS: [&str; 30] = [
-    "time_zone",
+const UNSUPPORTED_PARAMETERS: [&str; 29] = [
     "nls_length_semantics",
     "edition",
     "events",
@@ -238,7 +237,7 @@ mod tests {
     fn unknown_unsupported_and_foreign_settings_take_their_own_errors() {
         let nls = NlsParameters::default();
         assert_eq!(code(nls.with("no_such_parameter", "1")), Some(2248));
-        assert_eq!(code(nls.with("time_zone", "'-8:00'")), Some(3001));
+        assert_eq!(code(nls.with("nls_length_semantics", "CHAR")), Some(3001));
         assert_eq!(
             code(nls.with("events", "'10046 trace name context forever'")),
             Some(3001)

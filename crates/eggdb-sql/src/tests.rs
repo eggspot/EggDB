@@ -3327,7 +3327,7 @@ fn item_31_types_and_functions_stay_in_their_dialects() {
         (crate::Dialect::Oracle, "SELECT bytea 'x' FROM dual"),
         (
             crate::Dialect::Oracle,
-            "CREATE TABLE i (x INTERVAL DAY TO SECOND)",
+            "CREATE TABLE i (x INTERVAL HOUR TO SECOND)",
         ),
         (crate::Dialect::PostgreSql, "CREATE TABLE r (x raw(4))"),
     ];

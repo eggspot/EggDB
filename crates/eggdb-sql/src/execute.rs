@@ -2275,6 +2275,114 @@ pub(crate) fn row_count(expr: Option<&Expr>, clause: &str) -> SqlResult<Option<u
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RowLimit {
+    pub(crate) count: Option<u64>,
+    pub(crate) percent: Option<f64>,
+    pub(crate) with_ties: bool,
+}
+
+impl RowLimit {
+    pub(crate) fn is_limited(self) -> bool {
+        self.count.is_some() || self.percent.is_some()
+    }
+
+    pub(crate) fn rows_to_take(self, total: usize) -> usize {
+        match (self.percent, self.count) {
+            (Some(percent), _) => percent_of(total, percent),
+            (None, Some(count)) => usize::try_from(count).unwrap_or(usize::MAX),
+            (None, None) => usize::MAX,
+        }
+    }
+}
+
+fn percent_of(total: usize, percent: f64) -> usize {
+    if percent.is_nan() || percent <= 0.0 {
+        return 0;
+    }
+    let wanted = (total as f64 * percent.min(100.0) / 100.0).ceil();
+    if wanted >= total as f64 {
+        total
+    } else {
+        wanted as usize
+    }
+}
+
+fn fetch_percent(expr: &Expr) -> SqlResult<f64> {
+    let constants = Evaluator {
+        scope: Scope::empty(),
+        row: &[],
+        correlation: None,
+    };
+    reject_aggregates(expr, "FETCH")?;
+    let value = constants.eval(expr, None)?;
+    Ok(crate::oracle_functions::decimal_of(&value)?.map_or(0.0, |percent| percent.to_f64()))
+}
+
+pub(crate) fn row_limit(expr: Option<&Expr>) -> SqlResult<RowLimit> {
+    let unlimited = RowLimit {
+        count: None,
+        percent: None,
+        with_ties: false,
+    };
+    let Some(expr) = expr else {
+        return Ok(unlimited);
+    };
+    if let ExprKind::OracleFunction { name, arguments } = &expr.kind
+        && let [count] = arguments.as_slice()
+    {
+        match *name {
+            "oracle_fetch_with_ties" => {
+                return Ok(RowLimit {
+                    count: row_count(Some(count), "LIMIT")?,
+                    with_ties: true,
+                    ..unlimited
+                });
+            }
+            "oracle_fetch_percent" | "oracle_fetch_percent_with_ties" => {
+                return Ok(RowLimit {
+                    count: None,
+                    percent: Some(fetch_percent(count)?),
+                    with_ties: *name == "oracle_fetch_percent_with_ties",
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(RowLimit {
+        count: row_count(Some(expr), "LIMIT")?,
+        ..unlimited
+    })
+}
+
+pub(crate) fn rows_within_limit<K>(
+    rows: impl Iterator<Item = (K, Vec<Value>)>,
+    skip: usize,
+    take: usize,
+    ties: Option<&dyn Fn(&K, &K) -> bool>,
+) -> Vec<Vec<Value>> {
+    let mut output = Vec::new();
+    let mut last: Option<K> = None;
+    for (keys, row) in rows.skip(skip) {
+        if output.len() < take {
+            output.push(row);
+            if ties.is_some() {
+                last = Some(keys);
+            }
+            continue;
+        }
+        let tied = match (ties, &last) {
+            (Some(tied), Some(last)) => tied(last, &keys),
+            _ => false,
+        };
+        if !tied {
+            break;
+        }
+        output.push(row);
+    }
+    output
+}
+
 enum SortKey<'a> {
     Output(usize),
     Expr(&'a Expr),
@@ -2581,10 +2689,10 @@ fn select_or_explain(
             Vec::new(),
         ));
     }
-    let limit = row_count(select.limit.as_ref(), "LIMIT")?;
+    let limit = row_limit(select.limit.as_ref())?;
     let offset = row_count(select.offset.as_ref(), "OFFSET")?.unwrap_or(0);
     if let Some(out) = explain {
-        out.limited = limit.is_some();
+        out.limited = limit.is_limited();
         out.filtered = select.filter.is_some();
         out.sorted = !sort_keys.is_empty();
         if let Some(joined) = &joined {
@@ -2630,9 +2738,7 @@ fn select_or_explain(
     }
     let window = Window {
         skip: usize::try_from(offset).unwrap_or(usize::MAX),
-        take: limit.map_or(usize::MAX, |limit| {
-            usize::try_from(limit).unwrap_or(usize::MAX)
-        }),
+        limit,
         distinct: select.distinct,
     };
     let mut memory = WorkMemory::new();
@@ -2710,7 +2816,7 @@ fn select_or_explain(
             correlation,
         };
     }
-    let output = if sort_keys.is_empty() || ordered {
+    let output = if sort_keys.is_empty() || (ordered && !limit.with_ties) {
         unsorted_rows(&mut source, &projection, window, &mut memory)?
     } else {
         sorted_rows(
@@ -2778,8 +2884,18 @@ pub(crate) fn first_rows(
 #[derive(Clone, Copy)]
 struct Window {
     skip: usize,
-    take: usize,
+    limit: RowLimit,
     distinct: bool,
+}
+
+impl Window {
+    fn streamed_take(self) -> usize {
+        if self.limit.percent.is_some() {
+            usize::MAX
+        } else {
+            self.limit.rows_to_take(0)
+        }
+    }
 }
 
 enum RowSource<'a> {
@@ -2922,7 +3038,8 @@ fn unsorted_rows(
     memory: &mut WorkMemory,
 ) -> SqlResult<Vec<Vec<Value>>> {
     let mut output = Vec::new();
-    if window.take == 0 && source.has_rows_to_read() {
+    let take = window.streamed_take();
+    if take == 0 && source.has_rows_to_read() {
         return Ok(output);
     }
     let mut skipped = 0;
@@ -2938,12 +3055,15 @@ fn unsorted_rows(
             skipped += 1;
             return Ok(true);
         }
-        if output.len() < window.take {
+        if output.len() < take {
             memory.charge_row(&projected)?;
             output.push(projected);
         }
-        Ok(output.len() < window.take)
+        Ok(output.len() < take)
     })?;
+    if window.limit.percent.is_some() {
+        output.truncate(window.limit.rows_to_take(skipped + output.len()));
+    }
     Ok(output)
 }
 
@@ -2991,12 +3111,16 @@ fn sorted_rows(
     })?;
     check_sortable(order_by, &rows)?;
     rows.sort_by(|(left, _), (right, _)| compare_sort_keys(order_by, left, right));
-    Ok(rows
-        .into_iter()
-        .skip(window.skip)
-        .take(window.take)
-        .map(|(_, row)| row)
-        .collect())
+    let take = window.limit.rows_to_take(rows.len());
+    let tied = |left: &Vec<Value>, right: &Vec<Value>| {
+        compare_sort_keys(order_by, left, right) == Ordering::Equal
+    };
+    let ties: Option<&dyn Fn(&Vec<Value>, &Vec<Value>) -> bool> = if window.limit.with_ties {
+        Some(&tied)
+    } else {
+        None
+    };
+    Ok(rows_within_limit(rows.into_iter(), window.skip, take, ties))
 }
 
 pub(crate) fn order_rows(rows: &mut Vec<Vec<Value>>, order_by: &[OrderItem], keys: &[usize]) {
@@ -3014,7 +3138,11 @@ pub(crate) fn order_rows(rows: &mut Vec<Vec<Value>>, order_by: &[OrderItem], key
     *rows = keyed.into_iter().map(|(_, row)| row).collect();
 }
 
-fn compare_sort_keys(order_by: &[OrderItem], left: &[Value], right: &[Value]) -> Ordering {
+pub(crate) fn compare_sort_keys(
+    order_by: &[OrderItem],
+    left: &[Value],
+    right: &[Value],
+) -> Ordering {
     for (index, item) in order_by.iter().enumerate() {
         let nulls_first = item.nulls_first.unwrap_or(item.descending);
         let ordering = match (&left[index], &right[index]) {

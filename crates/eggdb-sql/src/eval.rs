@@ -640,9 +640,10 @@ impl Evaluator<'_> {
                 let values = self.arguments(arguments)?;
                 let declared: Vec<Option<SqlType>> =
                     if matches!(*name, "oracle_concat" | "oracle_to_char")
-                        && values
-                            .iter()
-                            .any(|value| value.sql_type().is_some_and(SqlType::is_datetime))
+                        && values.iter().any(|value| {
+                            value.sql_type().is_some_and(SqlType::is_datetime)
+                                || matches!(value, Value::Interval(_))
+                        })
                     {
                         arguments
                             .iter()
@@ -731,6 +732,19 @@ impl Evaluator<'_> {
         }
     }
 
+    fn oracle_timestamp_operands(&self, left: &Expr, right: &Expr) -> bool {
+        let fractional = |expr: &Expr| {
+            matches!(
+                self.oracle_declared_type(expr),
+                Some(SqlType::TimestampTz(_) | SqlType::Timestamp(None))
+            ) || matches!(
+                self.oracle_declared_type(expr),
+                Some(SqlType::Timestamp(Some(precision))) if precision > 0
+            )
+        };
+        fractional(left) || fractional(right)
+    }
+
     fn oracle_declared_type(&self, expr: &Expr) -> Option<SqlType> {
         match &expr.kind {
             ExprKind::Function { name, .. } => match name.as_str() {
@@ -801,6 +815,13 @@ impl Evaluator<'_> {
                     return crate::json_functions::subtract(&left_value, &right_value);
                 }
                 let right_value = self.eval(right, left_type)?;
+                if crate::constraints::current_dialect() == crate::Dialect::Oracle
+                    && self.oracle_timestamp_operands(left, right)
+                    && let Some(difference) =
+                        crate::oracle_intervals::timestamp_difference(&left_value, &right_value)
+                {
+                    return difference;
+                }
                 arithmetic(operator, &left_value, &right_value)
             }
             BinaryOperator::JsonHasKey
@@ -1177,6 +1198,14 @@ impl Evaluator<'_> {
             Some(SqlType::Timestamp(Some(0)))
         ) || matches!(&source.kind, ExprKind::Function { name, .. } if name == "mysql_now");
         let value = self.eval(source, None)?;
+        if let Value::Interval(interval) = &value {
+            let kind = self
+                .oracle_declared_type(source)
+                .and_then(crate::oracle_intervals::kind_of_type);
+            return crate::oracle_intervals::extract(field, *interval, kind)
+                .map(Value::Numeric)
+                .ok_or_else(invalid_extract_field);
+        }
         let Some((kind, local, offset)) = local_instant(&value)? else {
             return if value.is_null() {
                 Ok(Value::Null)
@@ -1596,6 +1625,11 @@ pub(crate) fn literal_value(literal: &Literal, hint: Option<SqlType>) -> SqlResu
 }
 
 fn read_by_dialect(sql_type: SqlType) -> Option<crate::Dialect> {
+    if matches!(sql_type, SqlType::Interval { .. })
+        && crate::constraints::current_dialect() == crate::Dialect::Oracle
+    {
+        return Some(crate::Dialect::Oracle);
+    }
     if !matches!(
         sql_type,
         SqlType::Date
@@ -1615,7 +1649,8 @@ fn read_by_dialect(sql_type: SqlType) -> Option<crate::Dialect> {
 }
 
 fn oracle_datetime_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
-    if !target.is_datetime() || crate::constraints::current_dialect() != crate::Dialect::Oracle {
+    let readable = target.is_datetime() || matches!(target, SqlType::Interval { .. });
+    if !readable || crate::constraints::current_dialect() != crate::Dialect::Oracle {
         return None;
     }
     crate::oracle_conversion::datetime_of(text, target)
@@ -1977,6 +2012,12 @@ pub(crate) fn arithmetic(
     left: &Value,
     right: &Value,
 ) -> SqlResult<Value> {
+    if crate::constraints::current_dialect() == crate::Dialect::Oracle
+        && (matches!(left, Value::Interval(_)) || matches!(right, Value::Interval(_)))
+        && let Some(result) = crate::oracle_intervals::arithmetic(operator, left, right)
+    {
+        return result;
+    }
     if operator == BinaryOperator::Subtract
         && matches!(left, Value::Timestamp(_) | Value::TimestampTz(_))
         && matches!(right, Value::Timestamp(_) | Value::TimestampTz(_))

@@ -1,7 +1,9 @@
 use crate::datetime::{self, MICROS_PER_DAY};
 use crate::encoding::Column;
 use crate::error::SqlResult;
+use crate::interval::IntervalFields;
 use crate::oracle_datetime::{self, ModelUse};
+use crate::oracle_intervals::IntervalKind;
 use crate::types::{SqlType, Value};
 
 fn nls_models(target: SqlType) -> Option<Vec<(String, ModelUse)>> {
@@ -14,40 +16,52 @@ fn nls_models(target: SqlType) -> Option<Vec<(String, ModelUse)>> {
         SqlType::Timestamp(_) => vec![timestamp],
         SqlType::TimestampTz(_) => vec![(
             nls.timestamp_tz_format().to_owned(),
-            ModelUse::TimestampInput,
+            ModelUse::ZonedInput,
         )],
         _ => return None,
     })
 }
 
-fn read_local(text: &str, models: &[(String, ModelUse)]) -> SqlResult<i64> {
+fn read_local(text: &str, models: &[(String, ModelUse)]) -> SqlResult<(i64, Option<i32>)> {
     let mut first_error = None;
     for (format, purpose) in models {
-        match oracle_datetime::read_by_model(text, format, *purpose) {
-            Ok(local) => return Ok(local),
+        match oracle_datetime::read_zoned(text, format, *purpose) {
+            Ok(read) => return Ok(read),
             Err(error) => {
                 first_error.get_or_insert(error);
             }
         }
     }
     match (oracle_datetime::strict_iso(text, true), first_error) {
-        (Some(local), _) => Ok(local),
+        (Some(local), _) => Ok((local, None)),
         (None, Some(error)) => Err(error),
         (None, None) => Err(oracle_datetime::not_recognized()),
     }
 }
 
-fn typed(local: i64, target: SqlType) -> SqlResult<Value> {
+fn typed(local: i64, zone: Option<i32>, target: SqlType) -> SqlResult<Value> {
     match target {
         SqlType::Date => Ok(Value::Date(datetime::timestamp_to_date(local))),
-        SqlType::TimestampTz(_) => datetime::local_to_utc(local).map(Value::TimestampTz),
+        SqlType::TimestampTz(_) => oracle_datetime::utc_of(local, zone).map(Value::TimestampTz),
         _ => Ok(Value::Timestamp(local)),
     }
 }
 
 pub(crate) fn datetime_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
+    if let SqlType::Interval { fields, .. } = target {
+        let kind = match fields {
+            Some(IntervalFields::Year | IntervalFields::Month | IntervalFields::YearToMonth) => {
+                IntervalKind::YearToMonth
+            }
+            _ => IntervalKind::DayToSecond,
+        };
+        return Some(
+            crate::oracle_intervals::parse_text(text, kind)
+                .and_then(|interval| crate::oracle_intervals::conformed(interval, target)),
+        );
+    }
     let models = nls_models(target)?;
-    Some(read_local(text, &models).and_then(|local| typed(local, target)))
+    Some(read_local(text, &models).and_then(|(local, zone)| typed(local, zone, target)))
 }
 
 pub(crate) fn literal_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
@@ -112,6 +126,14 @@ pub(crate) fn converted_for_comparison(
             Value::Timestamp(_) => SqlType::Timestamp(None),
             Value::TimestampTz(_) => SqlType::TimestampTz(Some(6)),
             Value::Date(_) => SqlType::Date,
+            Value::Interval(interval) => SqlType::Interval {
+                fields: Some(if interval.months != 0 {
+                    IntervalFields::YearToMonth
+                } else {
+                    IntervalFields::DayToSecond
+                }),
+                precision: None,
+            },
             other if other.sql_type().is_some_and(SqlType::is_numeric) => {
                 return Some(
                     crate::oracle_functions::parse_number(text).map(|number| number.value()),
@@ -178,7 +200,7 @@ fn plus_days(stamp: i64, micros: i64) -> SqlResult<Value> {
     let moved = i128::from(whole_seconds(stamp)) + i128::from(micros);
     let moved = i64::try_from(moved).map_err(|_| oracle_datetime::year_out_of_range())?;
     let (year, _, _) = datetime::civil_from_days(moved.div_euclid(MICROS_PER_DAY));
-    if !(1..=9999).contains(&year) {
+    if !oracle_datetime::year_in_range(year) {
         return Err(oracle_datetime::year_out_of_range());
     }
     Ok(Value::Timestamp(moved))
@@ -209,6 +231,12 @@ pub(crate) fn arithmetic(
     right: &Value,
 ) -> Option<SqlResult<Value>> {
     use crate::ast::BinaryOperator as Op;
+    if let Some(result) = crate::oracle_intervals::arithmetic(operator, left, right) {
+        return Some(result);
+    }
+    if matches!(left, Value::Interval(_)) || matches!(right, Value::Interval(_)) {
+        return None;
+    }
     match (operator, local_micros(left), local_micros(right)) {
         (Op::Subtract, Some(left), Some(right)) => {
             return Some(left.and_then(|left| {

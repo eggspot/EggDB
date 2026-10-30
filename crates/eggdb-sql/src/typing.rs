@@ -46,6 +46,20 @@ fn arithmetic_type(
         }
         _ => (static_type(left, scope)?, static_type(right, scope)?),
     };
+    if operator == BinaryOperator::Subtract
+        && left_type.is_datetime()
+        && right_type.is_datetime()
+        && crate::constraints::current_dialect() == crate::Dialect::Oracle
+    {
+        let date_like =
+            |sql_type: SqlType| matches!(sql_type, SqlType::Timestamp(Some(0)) | SqlType::Date);
+        return Some(if date_like(left_type) && date_like(right_type) {
+            SqlType::Numeric(None)
+        } else {
+            crate::oracle_intervals::IntervalKind::DayToSecond
+                .sql_type(crate::oracle_intervals::DEFAULT_FRACTION_DIGITS)
+        });
+    }
     if crate::temporal::is_time_or_interval(left_type)
         || crate::temporal::is_time_or_interval(right_type)
         || (operator == BinaryOperator::Subtract
@@ -260,7 +274,19 @@ fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
         "oracle_to_date" | "oracle_date_literal" | "oracle_add_months" | "oracle_last_day" => {
             Some(SqlType::Timestamp(Some(0)))
         }
-        "oracle_to_timestamp" => Some(SqlType::Timestamp(Some(6))),
+        "oracle_to_timestamp" | "oracle_sys_extract_utc" => Some(SqlType::Timestamp(Some(6))),
+        "oracle_next_day" => Some(SqlType::Timestamp(Some(0))),
+        "oracle_to_timestamp_tz" | "oracle_from_tz" => Some(SqlType::TimestampTz(Some(6))),
+        "oracle_months_between" => Some(SqlType::Numeric(None)),
+        "oracle_tz_offset" | "oracle_listagg" => Some(SqlType::Text),
+        "oracle_numtodsinterval" | "oracle_to_dsinterval" => Some(
+            crate::oracle_intervals::IntervalKind::DayToSecond
+                .sql_type(crate::oracle_intervals::DEFAULT_FRACTION_DIGITS),
+        ),
+        "oracle_numtoyminterval" | "oracle_to_yminterval" => Some(
+            crate::oracle_intervals::IntervalKind::YearToMonth
+                .sql_type(crate::oracle_intervals::DEFAULT_FRACTION_DIGITS),
+        ),
         "oracle_timestamp_literal" => match arguments.first().map(|argument| &argument.kind) {
             Some(ExprKind::Literal(Literal::String(text)))
                 if crate::oracle_datetime::literal_has_offset(text) =>

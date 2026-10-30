@@ -552,7 +552,26 @@ pub(crate) fn type_text(sql_type: SqlType) -> String {
         {
             format!("{}({precision})", oracle_type_name(sql_type))
         }
+        (SqlType::Interval { .. }, _) => interval_type_text(sql_type),
         _ => oracle_type_name(sql_type).to_owned(),
+    }
+}
+
+fn interval_type_text(sql_type: SqlType) -> String {
+    match crate::oracle_intervals::kind_of_type(sql_type) {
+        Some(crate::oracle_intervals::IntervalKind::YearToMonth) => {
+            "INTERVAL YEAR(2) TO MONTH".to_owned()
+        }
+        _ => {
+            let digits = match sql_type {
+                SqlType::Interval {
+                    precision: Some(precision),
+                    ..
+                } => precision,
+                _ => crate::oracle_intervals::DEFAULT_FRACTION_DIGITS,
+            };
+            format!("INTERVAL DAY(2) TO SECOND({digits})")
+        }
     }
 }
 
@@ -563,6 +582,7 @@ fn data_type(sql_type: SqlType) -> String {
         SqlType::TimestampTz(precision) => {
             format!("TIMESTAMP({}) WITH TIME ZONE", precision.unwrap_or(6))
         }
+        SqlType::Interval { .. } => interval_type_text(sql_type),
         other => oracle_type_name(other).to_owned(),
     }
 }

@@ -1473,6 +1473,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Arc::make_mut(&mut self.settings).set("search_path", Some(&entry))?;
                 continue;
             }
+            if name == "time_zone" {
+                let offset = crate::oracle_date_functions::session_time_zone(value)?;
+                Arc::make_mut(&mut self.settings).set(
+                    "TimeZone",
+                    Some(&crate::oracle_date_functions::time_zone_setting(offset)),
+                )?;
+                continue;
+            }
             self.oracle_nls = Arc::new(self.oracle_nls.with(name, value)?);
         }
         Ok(QueryResult::command("ALTER SESSION"))
