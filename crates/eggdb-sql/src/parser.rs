@@ -3045,6 +3045,9 @@ impl<'t> Parser<'t> {
         {
             return Some(level);
         }
+        if self.oracle() && self.is_operator("%") {
+            return None;
+        }
         match self.peek_kind() {
             TokenKind::Word(word) => match word.as_ref() {
                 "operator"

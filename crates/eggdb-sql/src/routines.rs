@@ -61,6 +61,7 @@ pub(crate) enum RoutineLanguage {
     Sql,
     PlPgSql,
     Tsql,
+    PlSql,
 }
 
 impl RoutineLanguage {
@@ -69,6 +70,7 @@ impl RoutineLanguage {
             Self::Sql => "sql",
             Self::PlPgSql => "plpgsql",
             Self::Tsql => "tsql",
+            Self::PlSql => "plsql",
         }
     }
 }
@@ -172,6 +174,7 @@ pub(crate) struct RoutineDefinition {
     pub(crate) body: String,
     pub(crate) text: String,
     pub(crate) tsql: Option<Box<crate::tsql::TsqlRoutine>>,
+    pub(crate) plsql: Option<Box<crate::plsql::PlsqlRoutine>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,7 +218,10 @@ impl RoutineDefinition {
     }
 
     pub(crate) fn identity(&self) -> String {
-        identity_of(&self.input_types())
+        match &self.plsql {
+            Some(plsql) => plsql.identity(&self.parameters),
+            None => identity_of(&self.input_types()),
+        }
     }
 
     pub(crate) fn signature(&self) -> String {
@@ -537,7 +543,7 @@ fn check_body(definition: &RoutineDefinition, body_position: Option<usize>) -> S
     match definition.language {
         RoutineLanguage::Sql => tokenize_in(&definition.body, definition.dialect).map(drop),
         RoutineLanguage::PlPgSql => crate::plpgsql::check(definition, body_position),
-        RoutineLanguage::Tsql => Ok(()),
+        RoutineLanguage::Tsql | RoutineLanguage::PlSql => Ok(()),
     }
 }
 

@@ -2,8 +2,8 @@ use super::{Lexer, MAX_IDENTIFIER_BYTES, TokenKind, unterminated};
 use crate::error::{SqlError, SqlResult, SqlState};
 use std::borrow::Cow;
 
-const ORACLE_OPERATORS: [&str; 15] = [
-    "||", "<=", ">=", "<>", "!=", "^=", "~=", "=>", "=", "<", ">", "+", "-", "*", "/",
+const ORACLE_OPERATORS: [&str; 16] = [
+    "||", "<=", ">=", "<>", "!=", "^=", "~=", "=>", "=", "<", ">", "+", "-", "*", "/", "%",
 ];
 
 pub(crate) const MAX_ORACLE_BIND_VARIABLES: usize = 65535;
@@ -33,7 +33,11 @@ fn identifier_too_long(start: usize) -> SqlError {
 impl<'t> Lexer<'t> {
     pub(super) fn next_oracle_kind(&mut self, byte: u8) -> SqlResult<TokenKind<'t>> {
         match byte {
-            b'.' if self.peek(1).is_some_and(|next| next.is_ascii_digit()) => self.number(),
+            b'.' if self.peek(1).is_some_and(|next| next.is_ascii_digit())
+                && !self.follows_dot() =>
+            {
+                self.number()
+            }
             b'.' => {
                 self.at += 1;
                 Ok(TokenKind::Dot)
@@ -88,6 +92,10 @@ impl<'t> Lexer<'t> {
                 ))
             }
         }
+    }
+
+    fn follows_dot(&self) -> bool {
+        self.at > 0 && self.text.as_bytes().get(self.at - 1) == Some(&b'.')
     }
 
     fn oracle_word(&mut self) -> SqlResult<TokenKind<'t>> {
@@ -183,6 +191,53 @@ impl<'t> Lexer<'t> {
 #[cfg(test)]
 mod tests {
     use super::swap_uniform_case;
+    use crate::dialect::Dialect;
+    use crate::lexer::{TokenKind, tokenize_in};
+
+    fn oracle_kinds(text: &str) -> Vec<TokenKind<'_>> {
+        tokenize_in(text, Dialect::Oracle)
+            .expect("tokenizes")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect()
+    }
+
+    #[test]
+    fn a_range_of_integers_keeps_both_dots_apart_from_the_bounds() {
+        assert_eq!(
+            oracle_kinds("1..10"),
+            vec![
+                TokenKind::Integer("1"),
+                TokenKind::Dot,
+                TokenKind::Dot,
+                TokenKind::Integer("10"),
+                TokenKind::End,
+            ]
+        );
+        assert_eq!(
+            oracle_kinds("x .5"),
+            vec![
+                TokenKind::Word("x".into()),
+                TokenKind::Decimal(".5"),
+                TokenKind::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_percent_sign_is_its_own_token_for_attributes() {
+        assert_eq!(
+            oracle_kinds("emp.salary%TYPE"),
+            vec![
+                TokenKind::Word("emp".into()),
+                TokenKind::Dot,
+                TokenKind::Word("salary".into()),
+                TokenKind::Operator("%"),
+                TokenKind::Word("type".into()),
+                TokenKind::End,
+            ]
+        );
+    }
 
     #[test]
     fn uniform_case_names_swap_and_mixed_ones_stay() {

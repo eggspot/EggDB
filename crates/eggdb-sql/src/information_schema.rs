@@ -1553,7 +1553,7 @@ fn routines_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     "routine_body",
                     character_data(match definition.language {
                         RoutineLanguage::Sql | RoutineLanguage::Tsql => "SQL",
-                        RoutineLanguage::PlPgSql => "EXTERNAL",
+                        RoutineLanguage::PlPgSql | RoutineLanguage::PlSql => "EXTERNAL",
                     }),
                 )
                 .set("routine_definition", character_data(&definition.body))

@@ -13,6 +13,7 @@ const C_LANGUAGE: u32 = 13;
 const SQL_LANGUAGE: u32 = 14;
 const PLPGSQL_LANGUAGE: u32 = 13576;
 const TSQL_LANGUAGE: u32 = 13577;
+const PLSQL_LANGUAGE: u32 = 13578;
 const VOID_TYPE: u32 = 2278;
 const TRIGGER_TYPE: u32 = 2279;
 pub(crate) const ROUTINE_COST: f32 = 100.0;
@@ -25,7 +26,7 @@ pub(crate) struct Language {
     pub(crate) trusted: bool,
 }
 
-pub(crate) const LANGUAGES: [Language; 5] = [
+pub(crate) const LANGUAGES: [Language; 6] = [
     Language {
         oid: INTERNAL_LANGUAGE,
         name: "internal",
@@ -56,6 +57,12 @@ pub(crate) const LANGUAGES: [Language; 5] = [
         procedural: true,
         trusted: true,
     },
+    Language {
+        oid: PLSQL_LANGUAGE,
+        name: "plsql",
+        procedural: true,
+        trusted: true,
+    },
 ];
 
 pub(crate) fn language_oid(language: RoutineLanguage) -> u32 {
@@ -63,6 +70,7 @@ pub(crate) fn language_oid(language: RoutineLanguage) -> u32 {
         RoutineLanguage::Sql => SQL_LANGUAGE,
         RoutineLanguage::PlPgSql => PLPGSQL_LANGUAGE,
         RoutineLanguage::Tsql => TSQL_LANGUAGE,
+        RoutineLanguage::PlSql => PLSQL_LANGUAGE,
     }
 }
 

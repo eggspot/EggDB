@@ -111,6 +111,11 @@ pub(crate) fn invoke(
     let label = match definition.language {
         RoutineLanguage::PlPgSql => format!("PL/pgSQL function {}", definition.signature()),
         RoutineLanguage::Sql => format!("SQL function \"{}\"", base_name(&definition.name)),
+        RoutineLanguage::PlSql => format!(
+            "PL/SQL {} {}",
+            definition.kind.noun(),
+            display(&definition.name)
+        ),
         RoutineLanguage::Tsql => {
             return crate::tsql::invoke_function(
                 writer,
@@ -133,7 +138,7 @@ pub(crate) fn invoke(
     run.bind_parameters(arguments);
     match definition.language {
         RoutineLanguage::Sql | RoutineLanguage::Tsql => run.sql_body(),
-        RoutineLanguage::PlPgSql => {
+        RoutineLanguage::PlPgSql | RoutineLanguage::PlSql => {
             let program = crate::routines::compiled_program(run.tables, &definition)?;
             if let Some(trigger) = call.trigger {
                 run.bind_trigger(trigger);
@@ -168,6 +173,7 @@ fn inline_definition(code: &str) -> RoutineDefinition {
         body: code.to_owned(),
         text: String::new(),
         tsql: None,
+        plsql: None,
     }
 }
 

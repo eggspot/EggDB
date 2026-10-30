@@ -222,6 +222,7 @@ impl Parser<'_> {
             body,
             text,
             tsql: Some(Box::new(TsqlRoutine { returns })),
+            plsql: None,
         };
         Ok(Statement::CreateRoutine(Box::new(CreateRoutine {
             name,

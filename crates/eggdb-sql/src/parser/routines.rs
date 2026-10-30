@@ -211,6 +211,7 @@ impl<'t> Parser<'t> {
             body,
             text: self.slice(start, self.previous_end()),
             tsql: None,
+            plsql: None,
         };
         Ok(Statement::CreateRoutine(Box::new(CreateRoutine {
             name,
