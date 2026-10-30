@@ -1,15 +1,13 @@
 use super::sqlserver::BatchStep;
 use super::{Client, InfoMessage, NamedParameter, QueryResult, Session, reborrowed_rows};
 use crate::ast::{
-    AssignmentTarget, BinaryOperator, DynamicSql, Expr, ExprKind, FromClause, GeneratedTable,
-    InsertValue, Name, RaiseError, Select, SelectItem, Statement, TableReference, ThrowArguments,
+    AssignmentTarget, DynamicSql, Expr, Name, RaiseError, Select, Statement, ThrowArguments,
     VariableDeclaration, VariableSource,
 };
 use crate::bulk_load::BulkRows;
 use crate::copy::NoCopyChannel;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::eval::{Evaluator, Scope};
 use crate::lexer::{Token, TokenKind, tokenize_in};
 use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
@@ -17,8 +15,9 @@ use crate::store::KeyValueStore;
 use crate::table_variables::{TableVariable, TableVariables};
 use crate::triggers::{DELETED_TABLE, INSERTED_TABLE, StatementTriggerCall, TriggerAction};
 use crate::tsql::{
-    BatchContext, CaughtError, Declaration, DynamicBatch, Instruction, MAX_DYNAMIC_NESTING,
-    ProcedureRun, Program, ProgramEnd, ScalarVariable,
+    BatchContext, CaughtError, DynamicBatch, Instruction, MAX_DYNAMIC_NESTING, MatchingRow,
+    ProcedureRun, Program, ProgramEnd, ScalarVariable, columns_mismatch, combined, declare,
+    scalar_select, undeclared,
 };
 use crate::types::{SqlType, Value};
 use std::collections::HashMap;
@@ -74,23 +73,6 @@ enum NestedRun {
     Procedure(ProcedureRun),
 }
 
-fn undeclared(name: &str) -> SqlError {
-    SqlError::new(
-        SqlState::UNDEFINED_PARAMETER,
-        format!("Must declare the scalar variable \"{name}\"."),
-    )
-    .with_sqlserver_code(137)
-}
-
-fn columns_mismatch(position: usize) -> SqlError {
-    SqlError::new(
-        SqlState::SYNTAX_ERROR,
-        "Column name or number of supplied values does not match table definition.",
-    )
-    .with_sqlserver_code(213)
-    .at(position)
-}
-
 fn ends_sqlserver_batch(error: &SqlError) -> bool {
     error.ends_sqlserver_batch().unwrap_or_else(|| {
         !error
@@ -112,83 +94,10 @@ fn resolves_names(error: &SqlError) -> bool {
         .is_some_and(|code| NAME_RESOLUTION_ERRORS.contains(&code))
 }
 
-fn constant(value: Value) -> Expr {
-    Expr {
-        kind: ExprKind::Constant {
-            sql_type: value.sql_type(),
-            value,
-        },
-        position: 0,
-    }
-}
-
-fn combined(operator: BinaryOperator, left: Value, right: Value) -> SqlResult<Value> {
-    let expr = Expr {
-        kind: ExprKind::Binary(operator, Box::new(constant(left)), Box::new(constant(right))),
-        position: 0,
-    };
-    let evaluator = Evaluator {
-        scope: Scope::empty(),
-        row: &[],
-        correlation: None,
-    };
-    evaluator.eval(&expr, None)
-}
-
-fn scalar_select(items: Vec<Expr>, from: Option<TableReference>) -> Select {
-    Select {
-        distinct: false,
-        items: items
-            .into_iter()
-            .map(|expr| SelectItem::Expr { expr, alias: None })
-            .collect(),
-        from: from.map(|first| FromClause {
-            first,
-            joins: Vec::new(),
-        }),
-        filter: None,
-        group_by: Vec::new(),
-        having: None,
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-        source_row_limit: None,
-    }
-}
-
-fn variable_table(variable: &Name) -> TableReference {
-    TableReference {
-        name: variable.clone(),
-        alias: Some(variable.text.clone()),
-        derived: None,
-        generated: Some(Box::new(GeneratedTable::Variable(variable.text.clone()))),
-    }
-}
-
 fn text_value(value: Option<&Value>) -> SqlResult<String> {
     match value {
         None | Some(Value::Null) => Ok(String::new()),
         Some(value) => crate::sqlserver_conversion::text_of(value, None, None),
-    }
-}
-
-fn declare(context: &mut BatchContext, tables: &mut HashMap<String, TableVariable>, program: &Program) {
-    for declaration in &program.declarations {
-        match declaration {
-            Declaration::Scalar(variable) => {
-                if context.variable(&variable.name).is_none() {
-                    context.variables.push(variable.clone());
-                }
-            }
-            Declaration::Table { name, columns } => {
-                tables
-                    .entry(name.clone())
-                    .or_insert_with(|| TableVariable {
-                        columns: columns.clone(),
-                        rows: Vec::new(),
-                    });
-            }
-        }
     }
 }
 
@@ -771,6 +680,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         };
         self.read(|reader, tables| {
             binding.select(reader, tables, select)?;
+            if crate::routines::select_calls_marked_routine(select) {
+                crate::routines::prepare_select(
+                    &mut crate::plpgsql::ReadOnlyWrite { inner: reader },
+                    tables,
+                    &settings,
+                    select,
+                    crate::routines::Prefetch::NonVolatile,
+                )?;
+            }
             crate::execute::select(reader, tables, select, false)
         })
     }
@@ -786,6 +704,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 };
                 self.read(|reader, tables| {
                     binding.query(reader, tables, query)?;
+                    if crate::routines::query_calls_marked_routine(query) {
+                        crate::routines::prepare_query(
+                            &mut crate::plpgsql::ReadOnlyWrite { inner: reader },
+                            tables,
+                            &settings,
+                            query,
+                            crate::routines::Prefetch::NonVolatile,
+                        )?;
+                    }
                     crate::execute::query(reader, tables, query, false)
                 })
             }
@@ -1118,49 +1045,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         variable: &Name,
         columns: Option<&[Name]>,
     ) -> SqlResult<(Vec<(usize, SqlType)>, usize)> {
-        let Some(declared) = self.table_variables.get(&variable.text) else {
-            return Err(crate::table_variables::undeclared(&variable.text).at(variable.position));
-        };
-        let targets = match columns {
-            None => declared
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(at, column)| (at, column.sql_type.unwrap_or(SqlType::Text)))
-                .collect(),
-            Some(names) => names
-                .iter()
-                .map(|name| self.variable_column(variable, name))
-                .collect::<SqlResult<_>>()?,
-        };
-        Ok((targets, declared.columns.len()))
+        crate::tsql::variable_columns(&self.table_variables, variable, columns)
     }
 
     fn variable_column(&self, variable: &Name, column: &Name) -> SqlResult<(usize, SqlType)> {
-        self.table_variables
-            .get(&variable.text)
-            .and_then(|declared| {
-                declared
-                    .columns
-                    .iter()
-                    .position(|found| found.name == column.text)
-                    .map(|at| {
-                        let sql_type = declared
-                            .columns
-                            .get(at)
-                            .and_then(|found| found.sql_type)
-                            .unwrap_or(SqlType::Text);
-                        (at, sql_type)
-                    })
-            })
-            .ok_or_else(|| {
-                SqlError::new(
-                    SqlState::UNDEFINED_COLUMN,
-                    format!("Invalid column name '{}'.", column.text),
-                )
-                .with_sqlserver_code(207)
-                .at(column.position)
-            })
+        crate::tsql::variable_column(&self.table_variables, variable, column)
     }
 
     pub(super) fn insert_into_variable(
@@ -1199,29 +1088,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     if row.len() != targets.len() {
                         return Err(columns_mismatch(variable.position));
                     }
-                    let items = row
-                        .iter()
-                        .map(|value| match value {
-                            InsertValue::Expr(expr) => expr.clone(),
-                            InsertValue::Default => constant(Value::Null),
-                        })
-                        .collect();
-                    evaluated.push(self.evaluate_row(items)?);
+                    evaluated.push(self.evaluate_row(crate::tsql::value_items(row))?);
                 }
                 evaluated
             }
         };
-        let mut appended: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let mut full = vec![Value::Null; width];
-            for ((at, sql_type), value) in targets.iter().zip(row) {
-                let converted = crate::sqlserver_conversion::implicit(value, *sql_type)?;
-                if let Some(slot) = full.get_mut(*at) {
-                    *slot = converted;
-                }
-            }
-            appended.push(full);
-        }
+        let appended = crate::tsql::filled_rows(&targets, width, rows)?;
         let inserted = appended.len();
         if let Some(target) = self.writable_table_variables().get_mut(&variable.text) {
             target.rows.extend(appended);
@@ -1234,30 +1106,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         variable: &Name,
         filter: Option<&Expr>,
         values: &[Expr],
-    ) -> SqlResult<Vec<(usize, Vec<Value>)>> {
-        let mut items: Vec<Expr> = filter.into_iter().cloned().collect();
-        items.extend(values.iter().cloned());
-        if items.is_empty() {
+    ) -> SqlResult<Vec<MatchingRow>> {
+        let Some(mut select) = crate::tsql::matching_select(variable, filter, values) else {
             let count = self
                 .table_variables
                 .get(&variable.text)
                 .map_or(0, |declared| declared.rows.len());
-            return Ok((0..count).map(|index| (index, Vec::new())).collect());
-        }
-        let mut select = scalar_select(items, Some(variable_table(variable)));
+            return Ok(crate::tsql::every_row(count));
+        };
         let result = self.run_select(&mut select)?;
-        Ok(result
-            .rows
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, row)| {
-                let mut row = row.into_iter();
-                if filter.is_some() && !matches!(row.next(), Some(Value::Boolean(true))) {
-                    return None;
-                }
-                Some((index, row.collect()))
-            })
-            .collect())
+        Ok(crate::tsql::matching_of(result.rows, filter.is_some()))
     }
 
     pub(super) fn update_variable(
@@ -1275,25 +1133,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             .collect::<SqlResult<Vec<_>>>()?;
         let values: Vec<Expr> = assignments.iter().map(|(_, value)| value.clone()).collect();
         let matching = self.matching_rows(variable, filter, &values)?;
-        let mut changes: Vec<(usize, Vec<(usize, Value)>)> = Vec::with_capacity(matching.len());
-        for (index, row) in matching {
-            let mut changed = Vec::with_capacity(columns.len());
-            for ((at, sql_type), value) in columns.iter().zip(row) {
-                changed.push((*at, crate::sqlserver_conversion::implicit(value, *sql_type)?));
-            }
-            changes.push((index, changed));
-        }
+        let changes = crate::tsql::changed_rows(&columns, matching)?;
         let updated = changes.len();
         if let Some(target) = self.writable_table_variables().get_mut(&variable.text) {
-            for (index, changed) in changes {
-                if let Some(row) = target.rows.get_mut(index) {
-                    for (at, value) in changed {
-                        if let Some(slot) = row.get_mut(at) {
-                            *slot = value;
-                        }
-                    }
-                }
-            }
+            crate::tsql::apply_changes(&mut target.rows, changes);
         }
         Ok(QueryResult::command(format!("UPDATE {updated}")))
     }
@@ -1309,16 +1152,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let matching = self.matching_rows(variable, filter, &[])?;
         let deleted = matching.len();
         if let Some(target) = self.writable_table_variables().get_mut(&variable.text) {
-            let mut doomed = matching.into_iter().map(|(index, _)| index).peekable();
-            let mut index = 0usize;
-            target.rows.retain(|_| {
-                let keep = doomed.peek() != Some(&index);
-                if !keep {
-                    doomed.next();
-                }
-                index += 1;
-                keep
-            });
+            crate::tsql::remove_rows(&mut target.rows, matching);
         }
         Ok(QueryResult::command(format!("DELETE {deleted}")))
     }

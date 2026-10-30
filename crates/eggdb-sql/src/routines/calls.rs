@@ -1,6 +1,6 @@
 use super::{
-    ParameterMode, ReturnType, RoutineDefinition, RoutineKind, RoutineParameter, RoutineReturns,
-    Volatility, resolve,
+    ParameterMode, ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage, RoutineParameter,
+    RoutineReturns, Volatility, resolve,
 };
 use crate::arrays::ArrayValue;
 use crate::ast::{
@@ -24,6 +24,7 @@ use crate::types::{Conversion, DefinedValue, SqlType, Value, convert};
 use std::sync::Arc;
 
 pub(crate) const ROUTINE_CALL: &str = "*routine_call*";
+pub(crate) const DEFAULT_ARGUMENT: &str = "*default*";
 const NAME_SEPARATOR: &str = "\0";
 const ORDINALITY_COLUMN: &str = "ordinality";
 
@@ -75,6 +76,53 @@ pub(crate) fn marked_call(
             arguments: all,
         },
         position,
+    }
+}
+
+pub(crate) fn default_argument(position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Function {
+            name: DEFAULT_ARGUMENT.to_owned(),
+            arguments: Vec::new(),
+        },
+        position,
+    }
+}
+
+pub(crate) fn is_default_argument(expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::Function { name, arguments } if name == DEFAULT_ARGUMENT && arguments.is_empty())
+}
+
+pub(crate) fn select_calls_marked_routine(select: &Select) -> bool {
+    select
+        .from
+        .as_ref()
+        .is_some_and(|from| is_user_table_function(&from.first))
+        || crate::subquery::select_expressions(select)
+            .into_iter()
+            .any(mentions_routine_call)
+}
+
+pub(crate) fn query_calls_marked_routine(query: &Query) -> bool {
+    body_calls_marked_routine(&query.body)
+}
+
+pub(crate) fn insert_calls_marked_routine(insert: &mut Insert) -> bool {
+    let in_query = matches!(&insert.source, InsertSource::Query(query) if query_calls_marked_routine(query));
+    in_query || exprs_call_marked_routine(crate::execute::insert_exprs(insert))
+}
+
+pub(crate) fn exprs_call_marked_routine(exprs: Vec<&mut Expr>) -> bool {
+    exprs.into_iter().any(|expr| mentions_routine_call(expr))
+}
+
+fn body_calls_marked_routine(body: &SetExpr) -> bool {
+    match body {
+        SetExpr::Select(select) => select_calls_marked_routine(select),
+        SetExpr::Query(query) => query_calls_marked_routine(query),
+        SetExpr::Operation(operation) => {
+            body_calls_marked_routine(&operation.left) || body_calls_marked_routine(&operation.right)
+        }
     }
 }
 
@@ -554,10 +602,16 @@ impl Preparing<'_> {
         }
         let evaluator = constant_evaluator();
         let mut values = Vec::with_capacity(function.arguments.len());
+        let mut names = Vec::with_capacity(function.arguments.len());
         for argument in &function.arguments {
-            values.push(evaluator.eval(argument, None)?);
+            if is_default_argument(argument) {
+                values.push(Value::Null);
+                names.push(Some(DEFAULT_ARGUMENT.to_owned()));
+            } else {
+                values.push(evaluator.eval(argument, None)?);
+                names.push(None);
+            }
         }
-        let names = vec![None; values.len()];
         let position = function.position;
         let (returned, definition) = call_function(
             &mut *self.writer,
@@ -573,7 +627,20 @@ impl Preparing<'_> {
             Returned::Value(value) => vec![value],
         };
         let label = base_name(&function.name).to_owned();
-        let (mut columns, mut types) = output_columns(&definition, &elements, &label);
+        let (mut columns, mut types) = if elements.is_empty() && is_inline_tsql_table(&definition) {
+            let found = crate::tsql::inline_table_columns(
+                &mut *self.writer,
+                self.tables,
+                self.settings,
+                &definition,
+            )?;
+            (
+                found.iter().map(|column| column.name.clone()).collect(),
+                found.iter().map(|column| column.sql_type).collect(),
+            )
+        } else {
+            output_columns(&definition, &elements, &label)
+        };
         let mut rows: Vec<Vec<Value>> = elements.into_iter().map(row_of).collect();
         if function.ordinality {
             columns.push(ORDINALITY_COLUMN.to_owned());
@@ -631,6 +698,17 @@ fn choose(
     let routines: &[Arc<RoutineDefinition>] = found
         .as_deref()
         .map_or(&[], |named| named.routines.as_slice());
+    if let Some(routine) = routines
+        .iter()
+        .find(|routine| routine.language == RoutineLanguage::Tsql)
+    {
+        let definition = Arc::clone(routine);
+        let arguments = crate::tsql::function_arguments(reader, tables, &definition, names, values)?;
+        return Ok(Chosen {
+            definition,
+            arguments,
+        });
+    }
     let mut best: Option<(usize, &Arc<RoutineDefinition>, Vec<Option<Value>>)> = None;
     let mut tied = false;
     for routine in routines.iter().filter(|routine| routine.kind == kind) {
@@ -762,22 +840,32 @@ fn input_arguments(
     for (parameter, value) in given {
         arguments.push(match (value, &parameter.default) {
             (Some(value), _) => value,
-            (None, Some(default)) => default_value(reader, tables, default)?,
+            (None, Some(default)) => {
+                default_value(reader, tables, default, default_dialect(definition))?
+            }
             (None, None) => Value::Null,
         });
     }
     Ok(arguments)
 }
 
-fn default_value(
+fn default_dialect(definition: &RoutineDefinition) -> Dialect {
+    match definition.dialect {
+        Dialect::SqlServer => Dialect::SqlServer,
+        _ => Dialect::PostgreSql,
+    }
+}
+
+pub(crate) fn default_value(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
     text: &str,
+    dialect: Dialect,
 ) -> SqlResult<Value> {
     let query = format!("SELECT {text}");
-    let tokens = tokenize_in(&query, Dialect::PostgreSql)?;
+    let tokens = tokenize_in(&query, dialect)?;
     let Statement::Select(select) = Parser::new(&query, &tokens)
-        .in_dialect(Dialect::PostgreSql)
+        .in_dialect(dialect)
         .statement()?
     else {
         return Err(SqlError::new(
@@ -915,6 +1003,15 @@ fn output_columns(
         .and_then(|parameter| parameter.name.clone())
         .unwrap_or_else(|| label.to_owned());
     (vec![name], vec![declared_type(definition)])
+}
+
+fn is_inline_tsql_table(definition: &RoutineDefinition) -> bool {
+    matches!(
+        definition.tsql.as_deref(),
+        Some(crate::tsql::TsqlRoutine {
+            returns: crate::tsql::TsqlReturns::InlineTable,
+        })
+    )
 }
 
 fn row_of(element: Value) -> Vec<Value> {

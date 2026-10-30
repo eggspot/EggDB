@@ -1,7 +1,10 @@
 use super::Parser;
 use super::sqlserver::not_supported;
 use super::sqlserver_batch::already_declared;
-use crate::ast::{CreateRoutine, DropRoutine, Name, RoutineTarget, Statement};
+use crate::ast::{
+    CreateRoutine, DropRoutine, Expr, ExprKind, GeneratedTable, Name, RoutineTarget, Statement,
+    TableFunction, TableReference,
+};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -10,6 +13,7 @@ use crate::routines::{
     RoutineParameter, RoutineReturns, Volatility,
 };
 use crate::tsql::{Instruction, Program, ScalarVariable, TsqlReturns, TsqlRoutine};
+use crate::types::Value;
 
 const ROUTINE_OPTIONS: [&str; 5] = [
     "recompile",
@@ -422,6 +426,10 @@ impl Parser<'_> {
         let outer_variables = std::mem::take(&mut self.declared_variables);
         let outer_tables = std::mem::take(&mut self.declared_tables);
         let outer_returns = std::mem::replace(&mut self.returns_values, returns.returns_value());
+        let outer_function = std::mem::replace(
+            &mut self.function_body,
+            !matches!(returns, TsqlReturns::Status),
+        );
         self.declared_variables = parameters.iter().filter_map(parameter_variable).collect();
         if let TsqlReturns::Table { variable, .. } = returns {
             self.declared_tables.push(variable.clone());
@@ -430,6 +438,7 @@ impl Parser<'_> {
         self.declared_variables = outer_variables;
         self.declared_tables = outer_tables;
         self.returns_values = outer_returns;
+        self.function_body = outer_function;
         compiled
     }
 
@@ -459,5 +468,111 @@ impl Parser<'_> {
             if_exists,
             cascade: false,
         }))
+    }
+}
+
+fn routine_in_schema(schema: &str, name: &str) -> String {
+    if schema == "dbo" {
+        name.to_owned()
+    } else {
+        crate::schemas::written_qualified(schema, name)
+    }
+}
+
+impl Parser<'_> {
+    pub(super) fn sqlserver_user_function(&mut self, schema: Name, name: Name) -> SqlResult<Expr> {
+        let routine = routine_in_schema(&schema.text, &name.text);
+        let given = self.sqlserver_routine_arguments()?;
+        let mut names = Vec::with_capacity(given.len());
+        let mut arguments = Vec::with_capacity(given.len());
+        for argument in given {
+            if crate::routines::is_default_argument(&argument) {
+                names.push(Some(crate::routines::DEFAULT_ARGUMENT.to_owned()));
+                arguments.push(Expr {
+                    kind: ExprKind::Constant {
+                        value: Value::Null,
+                        sql_type: None,
+                    },
+                    position: argument.position,
+                });
+            } else {
+                names.push(None);
+                arguments.push(argument);
+            }
+        }
+        Ok(crate::routines::marked_call(
+            routine,
+            names,
+            arguments,
+            schema.position,
+        ))
+    }
+
+    pub(super) fn at_sqlserver_table_function(&self) -> bool {
+        let schema_of_catalog = matches!(self.peek_kind(), TokenKind::Word(word)
+            if word == "sys" || word == crate::schemas::INFORMATION_SCHEMA)
+            && self.peek_kind_at(1) == &TokenKind::Dot;
+        !schema_of_catalog && self.at_table_function()
+    }
+
+    pub(super) fn sqlserver_table_function(&mut self) -> SqlResult<TableReference> {
+        let position = self.position();
+        let first = self.name()?;
+        let (routine, label) = if self.take(&TokenKind::Dot) {
+            let name = self.name()?;
+            (routine_in_schema(&first.text, &name.text), name.text)
+        } else {
+            (first.text.clone(), first.text)
+        };
+        let arguments = self.sqlserver_routine_arguments()?;
+        let alias = if self.take_word("as") || self.at_bare_alias() {
+            Some(self.name()?.text)
+        } else {
+            None
+        };
+        Ok(TableReference {
+            name: Name {
+                text: alias.clone().unwrap_or(label),
+                position,
+            },
+            alias,
+            derived: None,
+            generated: Some(Box::new(GeneratedTable::Function(TableFunction {
+                name: routine,
+                arguments,
+                ordinality: false,
+                column_names: Vec::new(),
+                position,
+            }))),
+        })
+    }
+
+    fn sqlserver_routine_arguments(&mut self) -> SqlResult<Vec<Expr>> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut arguments = Vec::new();
+        if self.take(&TokenKind::RightParen) {
+            return Ok(arguments);
+        }
+        loop {
+            if arguments.len() >= MAX_PARAMETERS {
+                return Err(too_many_parameters(self.position()));
+            }
+            let defaulted = self.is_word("default")
+                && matches!(
+                    self.peek_kind_at(1),
+                    TokenKind::Comma | TokenKind::RightParen
+                );
+            if defaulted {
+                arguments.push(crate::routines::default_argument(self.position()));
+                self.at += 1;
+            } else {
+                arguments.push(self.expression()?);
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(arguments)
     }
 }

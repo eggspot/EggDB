@@ -288,6 +288,7 @@ pub(crate) struct Parser<'t> {
     trigger_frame: Option<&'t crate::triggers::TriggerFrame>,
     routine_frame: Option<&'t crate::plpgsql::RoutineFrame>,
     returns_values: bool,
+    function_body: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -410,6 +411,7 @@ impl<'t> Parser<'t> {
             trigger_frame: None,
             routine_frame: None,
             returns_values: false,
+            function_body: false,
         }
     }
 
@@ -2288,6 +2290,9 @@ impl<'t> Parser<'t> {
         if self.sqlserver() && self.at_string_split() {
             return self.sqlserver_string_split();
         }
+        if self.sqlserver() && self.at_sqlserver_table_function() {
+            return self.sqlserver_table_function();
+        }
         self.table_reference()
     }
 
@@ -3811,6 +3816,9 @@ impl<'t> Parser<'t> {
                 return Err(self.not_supported("a qualified * outside the select list"));
             }
             let column = self.name()?;
+            if self.sqlserver() && self.peek_kind() == &TokenKind::LeftParen {
+                return self.sqlserver_user_function(first, column);
+            }
             if self.postgresql() && self.peek_kind() == &TokenKind::LeftParen {
                 return self.function(Name {
                     text: crate::schemas::written_qualified(&first.text, &column.text),

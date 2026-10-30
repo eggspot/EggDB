@@ -177,8 +177,14 @@ impl Parser<'_> {
             }
         }
         let at = self.resume_point();
+        let first_word = self.first_word_upper();
         let chooses = if self.literal_rows().is_none() {
             let statement = self.statement()?;
+            if self.function_body
+                && let Some(refused) = crate::tsql::refused_in_function(&statement, &first_word, position)
+            {
+                return Err(refused);
+            }
             if let Statement::SqlServer(SqlServerStatement::DeclareTable { name, columns }) =
                 &statement
             {
@@ -205,6 +211,16 @@ impl Parser<'_> {
             .at(position));
         }
         Ok(chooses)
+    }
+
+    fn first_word_upper(&self) -> String {
+        if !self.function_body {
+            return String::new();
+        }
+        match self.peek_kind() {
+            TokenKind::Word(word) => word.to_uppercase(),
+            _ => String::new(),
+        }
     }
 
     fn throws_again(&self) -> bool {
@@ -303,6 +319,9 @@ impl Parser<'_> {
     }
 
     fn compile_try(&mut self, builder: &mut Builder, nested: bool) -> SqlResult<()> {
+        if self.function_body {
+            return Err(crate::tsql::side_effecting("BEGIN TRY", self.position()));
+        }
         self.at += 2;
         let index = builder.tries.len();
         builder.tries.push(TryBlock {

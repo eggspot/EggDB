@@ -20,9 +20,12 @@ mod calls;
 mod sqlserver;
 
 pub(crate) use calls::{
-    Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_outputs, called_name, evaluate, marked_call,
+    DEFAULT_ARGUMENT, Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_outputs,
+    called_name, default_argument, default_value, evaluate, exprs_call_marked_routine,
+    insert_calls_marked_routine, is_default_argument, marked_call,
     mentions_routine_call, prepare_delete, prepare_insert, prepare_query, prepare_select,
-    prepare_update, run_do, select_calls_volatile, select_may_write,
+    prepare_update, query_calls_marked_routine, run_do, select_calls_marked_routine,
+    select_calls_volatile, select_may_write,
 };
 
 pub(crate) const MAX_ROUTINE_TEXT: usize = 1 << 20;
@@ -246,6 +249,7 @@ pub(crate) struct NamedRoutines {
 pub(crate) struct RoutineCache {
     entries: HashMap<String, CachedRoutines>,
     programs: Vec<(Arc<RoutineDefinition>, Arc<crate::plpgsql::Program>)>,
+    tsql_programs: Vec<(Arc<RoutineDefinition>, Arc<crate::tsql::Program>)>,
 }
 
 struct CachedRoutines {
@@ -329,6 +333,26 @@ pub(crate) fn compiled_program(
         return Ok(Arc::clone(program));
     }
     let program = Arc::new(crate::plpgsql::compile_for_run(definition)?);
+    if programs.len() >= CACHED_PROGRAMS {
+        programs.clear();
+    }
+    programs.push((Arc::clone(definition), Arc::clone(&program)));
+    Ok(program)
+}
+
+pub(crate) fn compiled_tsql_program(
+    tables: &mut TableCache,
+    definition: &Arc<RoutineDefinition>,
+    compile: impl FnOnce() -> SqlResult<crate::tsql::Program>,
+) -> SqlResult<Arc<crate::tsql::Program>> {
+    let programs = &mut tables.routines.tsql_programs;
+    if let Some((_, program)) = programs
+        .iter()
+        .find(|(known, _)| Arc::ptr_eq(known, definition))
+    {
+        return Ok(Arc::clone(program));
+    }
+    let program = Arc::new(compile()?);
     if programs.len() >= CACHED_PROGRAMS {
         programs.clear();
     }

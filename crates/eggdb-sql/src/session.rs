@@ -2047,7 +2047,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             Statement::Select(select) => self.read(|reader, tables| {
                 binding.select(reader, tables, select)?;
-                if dialect == Dialect::PostgreSql {
+                if dialect == Dialect::PostgreSql
+                    || (dialect == Dialect::SqlServer
+                        && crate::routines::select_calls_marked_routine(select))
+                {
                     crate::routines::prepare_select(
                         &mut crate::plpgsql::ReadOnlyWrite { inner: reader },
                         tables,
@@ -2060,7 +2063,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Query(query) => self.read(|reader, tables| {
                 binding.query(reader, tables, query)?;
-                if dialect == Dialect::PostgreSql {
+                if dialect == Dialect::PostgreSql
+                    || (dialect == Dialect::SqlServer
+                        && crate::routines::query_calls_marked_routine(query))
+                {
                     crate::routines::prepare_query(
                         &mut crate::plpgsql::ReadOnlyWrite { inner: reader },
                         tables,
@@ -2187,21 +2193,30 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Insert(insert) => self.write_firing_triggers("INSERT", |writer, tables| {
                 binding.insert(writer, tables, insert)?;
-                if dialect == Dialect::PostgreSql {
+                if dialect == Dialect::PostgreSql
+                    || (dialect == Dialect::SqlServer
+                        && crate::routines::insert_calls_marked_routine(insert))
+                {
                     crate::routines::prepare_insert(writer, tables, &settings, insert)?;
                 }
                 execute::insert(writer, tables, insert)
             }),
             Statement::Update(update) => self.write_firing_triggers("UPDATE", |writer, tables| {
                 binding.update(writer, tables, update)?;
-                if dialect == Dialect::PostgreSql {
+                if dialect == Dialect::PostgreSql
+                    || (dialect == Dialect::SqlServer
+                        && crate::routines::exprs_call_marked_routine(crate::execute::update_exprs(update)))
+                {
                     crate::routines::prepare_update(writer, tables, &settings, update)?;
                 }
                 execute::update(writer, tables, update)
             }),
             Statement::Delete(delete) => self.write_firing_triggers("DELETE", |writer, tables| {
                 binding.delete(writer, tables, delete)?;
-                if dialect == Dialect::PostgreSql {
+                if dialect == Dialect::PostgreSql
+                    || (dialect == Dialect::SqlServer
+                        && crate::routines::exprs_call_marked_routine(crate::execute::delete_exprs(delete)))
+                {
                     crate::routines::prepare_delete(writer, tables, &settings, delete)?;
                 }
                 execute::delete(writer, tables, delete)
