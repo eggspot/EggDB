@@ -90,6 +90,45 @@ pub(crate) enum Statement {
         names: Option<Vec<Name>>,
         deferred: bool,
     },
+    CreateTrigger(Box<CreateTrigger>),
+    DropTrigger(DropTrigger),
+    EnableTrigger(EnableTrigger),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateTrigger {
+    pub(crate) name: Name,
+    pub(crate) table: Name,
+    pub(crate) replace: bool,
+    pub(crate) if_not_exists: bool,
+    pub(crate) placement: Option<TriggerPlacement>,
+    pub(crate) definition: crate::triggers::TriggerDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TriggerPlacement {
+    pub(crate) follows: bool,
+    pub(crate) other: Name,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TriggerName {
+    pub(crate) schema: Option<String>,
+    pub(crate) name: Name,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DropTrigger {
+    pub(crate) names: Vec<TriggerName>,
+    pub(crate) table: Option<Name>,
+    pub(crate) if_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EnableTrigger {
+    pub(crate) names: Option<Vec<Name>>,
+    pub(crate) table: Name,
+    pub(crate) enable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

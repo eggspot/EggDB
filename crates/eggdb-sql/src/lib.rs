@@ -105,6 +105,7 @@ mod temp_tables;
 mod temporal;
 mod temporary;
 mod time_zones;
+mod triggers;
 mod tsql;
 mod types;
 mod typing;

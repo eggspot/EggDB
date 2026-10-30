@@ -78,6 +78,8 @@ pub(crate) struct BatchContext {
     pub(crate) variables: Vec<ScalarVariable>,
     pub(crate) caught: Option<CaughtError>,
     pub(crate) last_error: u32,
+    pub(crate) transition_tables: Vec<String>,
+    pub(crate) updated_columns: Option<Vec<String>>,
 }
 
 impl BatchContext {

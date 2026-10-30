@@ -1303,6 +1303,7 @@ impl Evaluator<'_> {
                 return crate::records::construct(self.arguments(arguments)?);
             }
             crate::records::FIELD_FUNCTION => return self.field_selection(arguments),
+            crate::triggers::RAISE_FUNCTION => return crate::triggers::raise(self, arguments),
             "enum_first" | "enum_last" | "enum_range" => {
                 return crate::enums::function(self, name, arguments);
             }

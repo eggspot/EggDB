@@ -27,6 +27,7 @@ use crate::plan::{self, Access, OrderRequest, Path};
 use crate::session::{OutputColumn, QueryResult};
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::subquery::Correlation;
+use crate::triggers::{Firing, RowOutcome, TriggerEvent};
 use crate::types::{Conversion, SqlType, Value, compare_values, convert, equality_key};
 use crate::typing;
 use std::cmp::Ordering;
@@ -110,6 +111,7 @@ pub(crate) enum Relation {
 pub(crate) struct TableCache {
     entries: HashMap<String, CachedTable>,
     row_counts: RowCountHints,
+    pub(crate) triggers: crate::triggers::TriggerCache,
 }
 
 impl TableCache {
@@ -443,6 +445,7 @@ pub(crate) fn create_table(
         )?;
     }
     crate::comments::forget_owner(writer, &table.name)?;
+    crate::triggers::remove_table_triggers(writer, &table.name)?;
     crate::comments::store_created(writer, &table.name, create)?;
     writer.put(&table_key(&table.name), &table.encode())?;
     constraints::register_references(writer, tables, &table)?;
@@ -614,6 +617,7 @@ pub(crate) fn drop_tables(
         constraints::unregister_references(writer, tables, &table)?;
         crate::sequences::drop_owned_by(writer, tables, &table.name, None)?;
         crate::comments::forget_owner(writer, &table.name)?;
+        crate::triggers::remove_table_triggers(writer, &table.name)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)
@@ -1129,6 +1133,9 @@ pub(crate) fn insert(
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
     if crate::updatable_views::is_view(writer, tables, &insert.table)? {
+        if let Some(result) = crate::triggers::insert_instead_of_view(writer, tables, insert)? {
+            return Ok(result);
+        }
         return crate::updatable_views::insert(writer, tables, insert);
     }
     if let InsertSource::Query(query) = &insert.source {
@@ -1233,6 +1240,7 @@ pub(crate) fn insert(
         OnDuplicate::Update(assignments) => Some(resolved_updates(&table, scope, assignments)?),
         _ => None,
     };
+    let mut firing = Firing::for_table(&*writer, tables, &table, TriggerEvent::Insert, &[])?;
     let mut stored = StoredRows::new(&table);
     stored.checks = Some(&checks);
     stored.identity_insert = identity_insert;
@@ -1255,10 +1263,23 @@ pub(crate) fn insert(
                 None => default_value(&table, index)?,
             });
         }
+        if let Some(firing) = firing.as_mut()
+            && firing.has_before()
+        {
+            let outcome = firing.before_row(writer, tables, None, Some(&mut row))?;
+            stored.forget_generated_ids();
+            if outcome == RowOutcome::Skip {
+                continue;
+            }
+        }
         match stored.try_insert(writer, &mut row)? {
             None => {
                 affected += 1;
                 inserted_children.push(&row)?;
+                if let Some(firing) = firing.as_mut() {
+                    firing.after_row(writer, tables, None, Some(row.as_slice()))?;
+                    stored.forget_generated_ids();
+                }
             }
             Some(conflict) => match (&insert.on_duplicate, &updates) {
                 (OnDuplicate::Ignore, _) => warnings.push(Warning {
@@ -1284,6 +1305,10 @@ pub(crate) fn insert(
                     }
                     inserted_children.push(&row)?;
                     affected += 1;
+                    if let Some(firing) = firing.as_mut() {
+                        firing.after_row(writer, tables, None, Some(row.as_slice()))?;
+                        stored.forget_generated_ids();
+                    }
                 }
                 (OnDuplicate::Update(_), Some(updates)) => {
                     affected +=
@@ -1301,6 +1326,9 @@ pub(crate) fn insert(
     let last_rowid = stored.last_rowid;
     let last_identity = table.auto_increment_column().and(last_rowid);
     drop(stored);
+    if let Some(firing) = firing {
+        firing.finish();
+    }
     for change in &changes {
         if let Some(new) = &change.new {
             constraints::check_parents(writer, tables, &table, new, Some(&change.old))?;
@@ -1584,6 +1612,11 @@ impl<'a> StoredRows<'a> {
 
     pub(crate) fn set_identity_insert(&mut self, on: bool) {
         self.identity_insert = on;
+    }
+
+    pub(crate) fn forget_generated_ids(&mut self) {
+        self.next_row_id = NextRowId::Unknown;
+        self.next_auto_value = None;
     }
 
     pub(crate) fn new(table: &'a TableDefinition) -> Self {
@@ -1878,12 +1911,14 @@ pub(crate) fn insert_literals(
         crate::sequences::load_all(writer)?;
     }
     let checks = PreparedChecks::of(&table)?;
+    let mut firing = Firing::for_table(&*writer, tables, &table, TriggerEvent::Insert, &[])?;
     let mut stored = StoredRows::new(&table);
     stored.checks = Some(&checks);
     let mut children = ChildRows::new(&table);
     let mut literals = Vec::with_capacity(insert.width);
     let mut row = Vec::with_capacity(table.columns.len());
     let mut at = insert.first_row();
+    let mut inserted = 0usize;
     for _ in 0..insert.rows {
         insert.next_row(&mut at, &mut literals);
         row.clear();
@@ -1893,14 +1928,31 @@ pub(crate) fn insert_literals(
                 None => default_value(&table, index)?,
             });
         }
+        if let Some(firing) = firing.as_mut()
+            && firing.has_before()
+        {
+            let outcome = firing.before_row(writer, tables, None, Some(&mut row))?;
+            stored.forget_generated_ids();
+            if outcome == RowOutcome::Skip {
+                continue;
+            }
+        }
         stored.insert(writer, &mut row)?;
         children.push(&row)?;
+        inserted += 1;
+        if let Some(firing) = firing.as_mut() {
+            firing.after_row(writer, tables, None, Some(row.as_slice()))?;
+            stored.forget_generated_ids();
+        }
     }
     let first_generated = stored.first_generated;
     let last_rowid = stored.last_rowid;
     drop(stored);
+    if let Some(firing) = firing {
+        firing.finish();
+    }
     children.check(writer, tables)?;
-    let mut result = QueryResult::command(format!("INSERT 0 {}", insert.rows));
+    let mut result = QueryResult::command(format!("INSERT 0 {inserted}"));
     result.last_insert_id = first_generated;
     result.last_insert_rowid = last_rowid;
     Ok(result)
@@ -3347,6 +3399,9 @@ pub(crate) fn update(
     update: &Update,
 ) -> SqlResult<QueryResult> {
     if crate::updatable_views::is_view(writer, tables, &update.table)? {
+        if let Some(result) = crate::triggers::update_instead_of_view(writer, tables, update)? {
+            return Ok(result);
+        }
         return crate::updatable_views::update(writer, tables, update);
     }
     let (prepared, subqueries) = if update_mentions_subquery(update) {
@@ -3396,6 +3451,8 @@ pub(crate) fn update(
         }
     }
     check_updated_to_default(&table, &targets, &update.assignments)?;
+    let mut firing = Firing::for_table(&*writer, tables, &table, TriggerEvent::Update, &targets)?;
+    let keep_old = keep_old || firing.is_some();
     if let Some(filter) = &update.filter {
         reject_aggregates(filter, "WHERE")?;
         check_columns(filter, scope)?;
@@ -3449,7 +3506,48 @@ pub(crate) fn update(
         }
         returning.map(|projection| projection.columns)
     };
+    if let Some(firing) = firing.as_mut()
+        && firing.has_before()
+    {
+        let mut kept_changes = Vec::with_capacity(changes.len());
+        let mut kept_old = Vec::with_capacity(old_rows.len());
+        let mut kept_results = Vec::new();
+        let mut projected = std::mem::take(&mut result_rows).into_iter();
+        for ((old_key, _, mut new_row), old_row) in changes.into_iter().zip(old_rows) {
+            let result_row = if columns.is_some() {
+                projected.next()
+            } else {
+                None
+            };
+            if firing.before_row(writer, tables, Some(old_row.as_slice()), Some(&mut new_row))?
+                == RowOutcome::Skip
+            {
+                continue;
+            }
+            check_not_null(&table, &new_row)?;
+            if !checks.is_empty() {
+                checks.check(&table, &new_row)?;
+            }
+            let new_key = if table.primary_key.is_empty() {
+                old_key.clone()
+            } else {
+                row_key(&table, &new_row)
+            };
+            kept_changes.push((old_key, new_key, new_row));
+            kept_old.push(old_row);
+            kept_results.extend(result_row);
+        }
+        changes = kept_changes;
+        old_rows = kept_old;
+        result_rows = kept_results;
+    }
     write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
+    if let Some(mut firing) = firing {
+        for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
+            firing.after_row(writer, tables, Some(old_row.as_slice()), Some(new_row.as_slice()))?;
+        }
+        firing.finish();
+    }
     let tag = format!("UPDATE {}", changes.len());
     Ok(match columns {
         Some(columns) => QueryResult::rows(tag, columns, result_rows),
@@ -3578,7 +3676,7 @@ pub(crate) fn truncate(
         filter: None,
         returning: None,
     };
-    delete(writer, tables, &every_row)?;
+    delete_matching(writer, tables, &every_row, false)?;
     Ok(QueryResult::command("TRUNCATE TABLE".to_owned()))
 }
 
@@ -3587,7 +3685,21 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
+    delete_matching(writer, tables, delete, true)
+}
+
+fn delete_matching(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    delete: &Delete,
+    fires_triggers: bool,
+) -> SqlResult<QueryResult> {
     if crate::updatable_views::is_view(writer, tables, &delete.table)? {
+        if fires_triggers
+            && let Some(result) = crate::triggers::delete_instead_of_view(writer, tables, delete)?
+        {
+            return Ok(result);
+        }
         return crate::updatable_views::delete(writer, tables, delete);
     }
     let (prepared, subqueries) = if delete.filter.iter().any(crate::subquery::mentions_subquery)
@@ -3640,7 +3752,43 @@ pub(crate) fn delete(
         }
         returning.map(|projection| projection.columns)
     };
+    let mut firing = if fires_triggers {
+        Firing::for_table(&*writer, tables, &table, TriggerEvent::Delete, &[])?
+    } else {
+        None
+    };
+    if let Some(firing) = firing.as_mut()
+        && firing.has_before()
+    {
+        let mut kept = Vec::with_capacity(matched.len());
+        let mut kept_results = Vec::new();
+        let mut projected = std::mem::take(&mut result_rows).into_iter();
+        for (key, row) in matched {
+            let result_row = if columns.is_some() {
+                projected.next()
+            } else {
+                None
+            };
+            if firing.before_row(writer, tables, Some(row.as_slice()), None)? == RowOutcome::Skip {
+                continue;
+            }
+            kept.push((key, row));
+            kept_results.extend(result_row);
+        }
+        matched = kept;
+        result_rows = kept_results;
+    }
+    let deleted: Vec<Vec<Value>> = match &firing {
+        Some(_) => matched.iter().map(|(_, row)| row.clone()).collect(),
+        None => Vec::new(),
+    };
     let count = delete_rows(writer, tables, &table, matched, &mut |_| Ok(()))?;
+    if let Some(mut firing) = firing {
+        for row in &deleted {
+            firing.after_row(writer, tables, Some(row.as_slice()), None)?;
+        }
+        firing.finish();
+    }
     let tag = format!("DELETE {count}");
     Ok(match columns {
         Some(columns) => QueryResult::rows(tag, columns, result_rows),

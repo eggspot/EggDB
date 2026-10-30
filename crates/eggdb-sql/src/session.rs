@@ -3,6 +3,7 @@ mod oracle;
 mod restore;
 mod sqlite;
 pub(crate) mod sqlserver;
+mod triggers;
 mod tsql;
 
 pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration};
@@ -374,6 +375,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     deferred: crate::deferred_checks::DeferredState,
     pending_user_types: Option<Arc<crate::user_types::Registry>>,
     plan_cache: crate::plan_cache::PlanCache,
+    trigger_transaction: bool,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -437,6 +439,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             deferred: crate::deferred_checks::DeferredState::default(),
             pending_user_types: None,
             plan_cache: crate::plan_cache::PlanCache::default(),
+            trigger_transaction: false,
         }
     }
 
@@ -2136,25 +2139,46 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 binding.names(writer, tables, names)?;
                 execute::drop_tables(writer, tables, names, *if_exists, *cascade, dialect)
             }),
-            Statement::Insert(insert) => self.write("INSERT", |writer, tables| {
+            Statement::Insert(insert) => self.write_firing_triggers("INSERT", |writer, tables| {
                 binding.insert(writer, tables, insert)?;
                 execute::insert(writer, tables, insert)
             }),
-            Statement::Update(update) => self.write("UPDATE", |writer, tables| {
+            Statement::Update(update) => self.write_firing_triggers("UPDATE", |writer, tables| {
                 binding.update(writer, tables, update)?;
                 execute::update(writer, tables, update)
             }),
-            Statement::Delete(delete) => self.write("DELETE", |writer, tables| {
+            Statement::Delete(delete) => self.write_firing_triggers("DELETE", |writer, tables| {
                 binding.delete(writer, tables, delete)?;
                 execute::delete(writer, tables, delete)
             }),
-            Statement::With(with) => self.write("WITH", |writer, tables| {
+            Statement::With(with) => self.write_firing_triggers("WITH", |writer, tables| {
                 crate::with_statement::run(writer, tables, with, binding)
             }),
-            Statement::Merge(merge) => self.write("MERGE", |writer, tables| {
+            Statement::Merge(merge) => self.write_firing_triggers("MERGE", |writer, tables| {
                 binding.merge(writer, tables, merge)?;
                 crate::merge::merge(writer, tables, merge)
             }),
+            Statement::CreateTrigger(create) => self.write("CREATE TRIGGER", |writer, tables| {
+                binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
+                crate::triggers::create_trigger(writer, tables, create)
+            }),
+            Statement::DropTrigger(drop) => self.write("DROP TRIGGER", |writer, tables| {
+                if let Some(table) = &mut drop.table {
+                    binding.names(writer, tables, std::slice::from_mut(table))?;
+                }
+                crate::triggers::drop_triggers(writer, tables, drop, dialect)
+            }),
+            Statement::EnableTrigger(enable) => {
+                let tag = if enable.enable {
+                    "ENABLE TRIGGER"
+                } else {
+                    "DISABLE TRIGGER"
+                };
+                self.write(tag, |writer, tables| {
+                    binding.names(writer, tables, std::slice::from_mut(&mut enable.table))?;
+                    crate::triggers::enable_triggers(writer, tables, enable, dialect)
+                })
+            }
             Statement::AlterSession(settings) => self.alter_session(settings),
             Statement::CreateType(create) => self.write("CREATE TYPE", |writer, _| {
                 crate::user_types::create_type(writer, create)
@@ -2230,6 +2254,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     | Statement::DropView { .. }
                     | Statement::AlterView(_)
                     | Statement::Comment(_)
+                    | Statement::CreateTrigger(_)
+                    | Statement::DropTrigger(_)
             )
     }
 
@@ -2268,7 +2294,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             settings: &settings,
             walk_expressions: false,
         };
-        let result = self.write("INSERT", |writer, tables| {
+        let result = self.write_firing_triggers("INSERT", |writer, tables| {
             binding.target(writer, tables, &mut rows.table)?;
             execute::insert_literals(writer, tables, rows)
         });
@@ -2378,6 +2404,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 );
                 match outcome {
                     Ok(result)
+                        if !keep_open
+                            && !implicit
+                            && crate::triggers::statement_triggers_pending() =>
+                    {
+                        self.block = Block::Writing(writer);
+                        self.block_is_implicit = false;
+                        self.trigger_transaction = true;
+                        Ok(result)
+                    }
+                    Ok(result)
                         if keep_open
                             && (keeps_ddl_open
                                 || !matches!(
@@ -2398,6 +2434,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                                         | "DROP VIEW"
                                         | "ALTER VIEW"
                                         | "COMMENT"
+                                        | "CREATE TRIGGER"
+                                        | "DROP TRIGGER"
                                 )) =>
                     {
                         self.block = Block::Writing(writer);

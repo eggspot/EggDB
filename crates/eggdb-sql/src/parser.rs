@@ -12,6 +12,7 @@ mod sqlserver;
 mod sqlserver_batch;
 mod sqlserver_functions;
 mod sqlserver_logic;
+mod triggers;
 mod types;
 mod windows;
 
@@ -223,7 +224,8 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 24] = [
+const INTERNAL_FUNCTIONS: [&str; 25] = [
+    crate::triggers::RAISE_FUNCTION,
     "regclass_cast",
     "oracle_nextval",
     "oracle_currval",
@@ -277,6 +279,7 @@ pub(crate) struct Parser<'t> {
     variables_read: Vec<String>,
     select_targets: Option<Vec<(crate::ast::AssignmentTarget, Vec<String>)>>,
     select_windows: Option<Vec<(String, crate::window::WindowDefinition)>>,
+    trigger_frame: Option<&'t crate::triggers::TriggerFrame>,
 }
 
 #[derive(Clone, Copy)]
@@ -396,6 +399,7 @@ impl<'t> Parser<'t> {
             variables_read: Vec::new(),
             select_targets: None,
             select_windows: None,
+            trigger_frame: None,
         }
     }
 
@@ -754,6 +758,9 @@ impl<'t> Parser<'t> {
     }
 
     fn statement_body(&mut self) -> SqlResult<Statement> {
+        if let Some(statement) = self.trigger_statement()? {
+            return Ok(statement);
+        }
         if self.mysql()
             && let Some(statement) = self.mysql_statement()?
         {
@@ -2266,6 +2273,11 @@ impl<'t> Parser<'t> {
 
     fn table_reference(&mut self) -> SqlResult<TableReference> {
         if self.sqlserver()
+            && let Some(reference) = self.transition_table_reference()?
+        {
+            return Ok(reference);
+        }
+        if self.sqlserver()
             && matches!(self.peek_kind(), TokenKind::Variable(name) if !name.starts_with("@@"))
         {
             return self.table_variable_reference();
@@ -3410,6 +3422,9 @@ impl<'t> Parser<'t> {
     }
 
     fn primary(&mut self) -> SqlResult<Expr> {
+        if let Some(expr) = self.trigger_primary()? {
+            return Ok(expr);
+        }
         let token = self.peek();
         let position = token.start;
         if self.mysql()

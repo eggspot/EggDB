@@ -262,6 +262,7 @@ pub(crate) fn create_view(
         forget_dependencies(writer, existing)?;
     } else {
         crate::store::delete_prefix(writer, &comments_prefix(&internal))?;
+        crate::triggers::remove_table_triggers(writer, &internal)?;
     }
     let view = ViewDefinition {
         name: internal.clone(),
@@ -541,6 +542,7 @@ fn remove_view(
         crate::store::delete_prefix(writer, &dependencies_prefix(&view.name))?;
     }
     crate::store::delete_prefix(writer, &comments_prefix(&view.name))?;
+    crate::triggers::remove_table_triggers(writer, &view.name)?;
     writer.delete(&table_key(&view.name))?;
     Ok(())
 }
@@ -593,7 +595,8 @@ pub(crate) fn move_view(writer: &mut dyn KeyValueWrite, from: &str, to: &str) ->
     for reference in &view.references {
         writer.put(&dependency_key(reference, to), DEPENDENCY_VALUE)?;
     }
-    crate::comments::move_owner(writer, from, to)
+    crate::comments::move_owner(writer, from, to)?;
+    crate::triggers::move_table_triggers(writer, from, to)
 }
 
 pub(crate) fn alter_view(

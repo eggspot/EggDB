@@ -34,6 +34,11 @@ impl SqlState {
     pub const ADMIN_SHUTDOWN: Self = Self(*b"57P01");
     /// `0A000` feature_not_supported: valid SQL that this release does not run yet.
     pub const FEATURE_NOT_SUPPORTED: Self = Self(*b"0A000");
+    /// `09000` triggered_action_exception: a trigger's body ended the statement that fired
+    /// it, as SQLite's `RAISE(IGNORE)` does for the row being changed.
+    pub const TRIGGERED_ACTION_EXCEPTION: Self = Self(*b"09000");
+    /// `45000`: the SQLSTATE MySQL's `SIGNAL` uses for an unhandled user-defined condition.
+    pub const USER_DEFINED_CONDITION: Self = Self(*b"45000");
     /// `P0001` raise_exception: an error a statement raised on purpose, such as Transact-SQL's
     /// `THROW` and `RAISERROR`.
     pub const RAISE_EXCEPTION: Self = Self(*b"P0001");
@@ -210,6 +215,14 @@ impl SqlState {
     pub const MYSQL_GENERAL: Self = Self(*b"HY000");
     /// `08S01`: MySQL's communication link failure.
     pub const MYSQL_COMMUNICATION: Self = Self(*b"08S01");
+
+    pub(crate) fn from_text(code: &str) -> Option<Self> {
+        let bytes: [u8; 5] = code.as_bytes().try_into().ok()?;
+        bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+            .then_some(Self(bytes))
+    }
 
     /// The code as text, such as `"42601"`.
     pub fn code(&self) -> &str {

@@ -61,6 +61,12 @@ pub(crate) fn enter(
     ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
 }
 
+pub(crate) fn enter_with_dialect(dialect: Dialect) -> ContextGuard {
+    let mut context = context();
+    context.dialect = dialect;
+    ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
+}
+
 fn context() -> Context {
     CONTEXT.with(|context| {
         context.borrow().clone().unwrap_or(Context {

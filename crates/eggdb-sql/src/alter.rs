@@ -1095,6 +1095,7 @@ fn rename_table(
     }
     crate::sequences::rename_owner(writer, &old_name, None, &to.text)?;
     crate::comments::move_owner(writer, &old_name, &to.text)?;
+    crate::triggers::move_table_triggers(writer, &old_name, &to.text)?;
     constraints::refresh_flags(writer, tables, &to.text)
 }
 

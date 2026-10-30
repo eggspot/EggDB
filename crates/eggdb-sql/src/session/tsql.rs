@@ -15,6 +15,7 @@ use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
 use crate::store::KeyValueStore;
 use crate::table_variables::{TableVariable, TableVariables};
+use crate::triggers::{DELETED_TABLE, INSERTED_TABLE, StatementTriggerCall, TriggerAction};
 use crate::tsql::{
     BatchContext, CaughtError, Declaration, DynamicBatch, Instruction, MAX_DYNAMIC_NESTING,
     Program, ProgramEnd, ScalarVariable,
@@ -35,6 +36,17 @@ pub(super) struct BatchScope {
 }
 
 #[derive(Clone, Copy)]
+struct OuterStatement {
+    batch_resume: Option<(usize, usize)>,
+    condition_next: bool,
+    condition_holds: Option<bool>,
+    pending_dynamic: Option<DynamicBatch>,
+    set_error: Option<u32>,
+    statement_start: usize,
+    statement_walks_expressions: bool,
+    extra_results: Vec<QueryResult>,
+}
+
 struct Code<'p, 't> {
     text: &'t str,
     tokens: &'p [Token<'t>],
@@ -611,6 +623,113 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             ProgramEnd::Escaped(error) => DynamicEnd::Failed(error.without_position()),
             ProgramEnd::Finished | ProgramEnd::DialectChanged { .. } => DynamicEnd::Done,
         })
+    }
+
+    fn leave_statement_for_trigger(&mut self) -> OuterStatement {
+        OuterStatement {
+            batch_resume: self.batch_resume.take(),
+            condition_next: std::mem::take(&mut self.condition_next),
+            condition_holds: self.condition_holds.take(),
+            pending_dynamic: self.pending_dynamic.take(),
+            set_error: self.set_error.take(),
+            statement_start: self.statement_start,
+            statement_walks_expressions: self.statement_walks_expressions,
+            extra_results: std::mem::take(&mut self.extra_results),
+        }
+    }
+
+    fn return_to_statement(&mut self, outer: OuterStatement) {
+        self.batch_resume = outer.batch_resume;
+        self.condition_next = outer.condition_next;
+        self.condition_holds = outer.condition_holds;
+        self.pending_dynamic = outer.pending_dynamic;
+        self.set_error = outer.set_error;
+        self.statement_start = outer.statement_start;
+        self.statement_walks_expressions = outer.statement_walks_expressions;
+        self.extra_results = outer.extra_results;
+    }
+
+    pub(super) fn run_tsql_trigger(&mut self, call: StatementTriggerCall) -> SqlResult<()> {
+        let TriggerAction::Batch(text) = &call.trigger.action else {
+            return Ok(());
+        };
+        let _active = crate::triggers::enter_active(&call.table, &call.trigger)?;
+        let tokens = tokenize_in(text, Dialect::SqlServer)?;
+        let outer = self.leave_statement_for_trigger();
+        let outcome = self.in_trigger_dialect(Dialect::SqlServer, |session| {
+            session.run_trigger_program(text, &tokens, &call)
+        });
+        self.return_to_statement(outer);
+        let results = outcome?;
+        self.extra_results.extend(results);
+        Ok(())
+    }
+
+    fn run_trigger_program(
+        &mut self,
+        text: &str,
+        tokens: &[Token<'_>],
+        call: &StatementTriggerCall,
+    ) -> SqlResult<Vec<QueryResult>> {
+        let program = self.compile_batch(text, tokens, Parameters::Absent, true)?;
+        let scope = self.enter_batch_scope(&program, Parameters::Absent);
+        {
+            let context = Arc::make_mut(&mut self.batch_context);
+            context.transition_tables = vec![INSERTED_TABLE.to_owned(), DELETED_TABLE.to_owned()];
+            context.updated_columns = Some(call.updated.clone());
+        }
+        {
+            let columns = call.columns.as_ref().clone();
+            let tables = Arc::make_mut(&mut self.table_variables);
+            tables.insert(
+                INSERTED_TABLE.to_owned(),
+                TableVariable {
+                    columns: columns.clone(),
+                    rows: call.new_rows.clone(),
+                },
+            );
+            tables.insert(
+                DELETED_TABLE.to_owned(),
+                TableVariable {
+                    columns,
+                    rows: call.old_rows.clone(),
+                },
+            );
+        }
+        let mut failure: Option<SqlError> = None;
+        let mut results = Vec::new();
+        let mut forward = |step: BatchStep| match step.outcome {
+            Ok(result) => {
+                if result.columns.is_some() || !result.info_messages.is_empty() {
+                    results.push(result);
+                }
+                true
+            }
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        };
+        let code = Code {
+            text,
+            tokens,
+            program: &program,
+        };
+        let end = self.run_program(
+            code,
+            Parameters::Absent,
+            None,
+            &mut forward,
+            Level::Nested { in_try: false },
+        );
+        self.leave_batch_scope(scope);
+        if let ProgramEnd::Escaped(error) = end? {
+            return Err(error);
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(results),
+        }
     }
 
     fn run_select(&mut self, select: &mut Select) -> SqlResult<QueryResult> {
