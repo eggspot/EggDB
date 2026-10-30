@@ -192,8 +192,8 @@ impl TableSchema {
                 && dialect == crate::Dialect::PostgreSql
             {
                 statement.replacen(
-                    &format!(" ON {} (", quoted(&self.name)),
-                    &format!(" ON {} (", self.qualified_name()),
+                    &format!(" ON {} ", quoted(&self.name)),
+                    &format!(" ON {} ", self.qualified_name()),
                     1,
                 )
             } else {
