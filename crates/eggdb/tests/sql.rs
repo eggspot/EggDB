@@ -605,17 +605,19 @@ fn transact_sql_scripts_run_batch_by_batch_at_their_go_lines() {
     );
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     let db = Database::open(file.path()).unwrap();
-    let store = db.sql_store();
-    let mut session = store.session(eggdb::sql::Dialect::SqlServer);
     let mut counted = String::new();
-    session
-        .execute("SELECT N FROM dbo.Counted", &mut |result| {
-            if let Some(value) = result.rows.first().and_then(|row| row.first()) {
-                counted = value.to_text().unwrap_or_default();
-            }
-        })
-        .unwrap();
-    session.close().unwrap();
+    {
+        let store = db.sql_store();
+        let mut session = store.session(eggdb::sql::Dialect::SqlServer);
+        session
+            .execute("SELECT N FROM dbo.Counted", &mut |result| {
+                if let Some(value) = result.rows.first().and_then(|row| row.first()) {
+                    counted = value.to_text().unwrap_or_default();
+                }
+            })
+            .unwrap();
+        session.close().unwrap();
+    }
     db.close().unwrap();
     assert_eq!(counted, "3");
     let stopped = eggdb_sql(
