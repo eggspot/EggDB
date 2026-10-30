@@ -146,7 +146,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             Value::Text(text) => Value::Text(text.clone()),
             _ => Value::Null,
         }),
-        ("pg_get_triggerdef" | "pg_get_ruledef" | "pg_get_statisticsobjdef_columns", _) => {
+        ("pg_get_ruledef" | "pg_get_statisticsobjdef_columns", _) => {
             Ok(Value::Null)
         }
         ("shobj_description", _) => Ok(Value::Null),
@@ -230,6 +230,11 @@ fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<
             object,
             pretty(rest.first()),
         )),
+        ("pg_get_triggerdef", _) => text(
+            snapshot
+                .trigger(object)
+                .map(|trigger| trigger.definition.text.clone()),
+        ),
         ("pg_get_indexdef", [_]) => text(index_definition(&snapshot, object, 0, false)),
         ("pg_get_indexdef", [_, column, rest @ ..]) => text(index_definition(
             &snapshot,

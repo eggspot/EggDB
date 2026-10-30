@@ -674,6 +674,10 @@ pub(crate) enum MySqlStatement {
     },
     ShowCreateTable(Name),
     ShowCreateView(Name),
+    ShowCreateTrigger(Name),
+    ShowTriggers {
+        like: Option<String>,
+    },
     ShowIndex(Name),
     ShowVariables {
         like: Option<String>,

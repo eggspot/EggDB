@@ -7,6 +7,7 @@ use crate::mysql_variables::SetRefused;
 use crate::schema::{ColumnSchema, TableSchema, read_tables};
 use crate::store::KeyValueStore;
 use crate::time_zones::TimeZone;
+use crate::triggers::{TriggerAction, TriggerDefinition, TriggerTiming};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
 
@@ -166,6 +167,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Some(vec![text_column("Table"), text_column("Create Table")])
             }
             MySqlStatement::ShowCreateView(_) => Some(create_view_columns()),
+            MySqlStatement::ShowCreateTrigger(_) => Some(create_trigger_columns()),
+            MySqlStatement::ShowTriggers { .. } => Some(triggers_columns()),
             MySqlStatement::ShowIndex(_) => Some(index_columns()),
             MySqlStatement::ShowVariables { .. } | MySqlStatement::ShowStatus => {
                 Some(vec![text_column("Variable_name"), text_column("Value")])
@@ -244,6 +247,44 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         Value::Text(text),
                         Value::Text("utf8mb4".into()),
                         Value::Text("utf8mb4_0900_ai_ci".into()),
+                    ]],
+                ))
+            }
+            MySqlStatement::ShowTriggers { like } => {
+                let listed = self.read(|reader, _| crate::triggers::every_trigger(reader))?;
+                let mut rows = Vec::new();
+                for table in &listed {
+                    if !matches_pattern(crate::schemas::base_name(&table.table), like.as_deref())? {
+                        continue;
+                    }
+                    for trigger in &table.triggers {
+                        rows.push(show_triggers_row(&table.table, trigger));
+                    }
+                }
+                Ok(rows_result(triggers_columns(), rows))
+            }
+            MySqlStatement::ShowCreateTrigger(name) => {
+                let listed = self.read(|reader, _| crate::triggers::every_trigger(reader))?;
+                let found = listed.iter().flat_map(|table| &table.triggers).find(|trigger| {
+                    trigger
+                        .name
+                        .eq_ignore_ascii_case(crate::schemas::base_name(&name.text))
+                });
+                let Some(trigger) = found else {
+                    return Err(SqlError::new(SqlState::MYSQL_GENERAL, "Trigger does not exist")
+                        .with_vendor_code(1360)
+                        .at(name.position));
+                };
+                Ok(rows_result(
+                    create_trigger_columns(),
+                    vec![vec![
+                        Value::Text(trigger.name.clone()),
+                        Value::Text(String::new()),
+                        Value::Text(trigger.text.clone()),
+                        Value::Text("utf8mb4".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                        Value::Null,
                     ]],
                 ))
             }
@@ -600,6 +641,70 @@ fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
         }
     }
     rows
+}
+
+fn create_trigger_columns() -> Vec<OutputColumn> {
+    [
+        "Trigger",
+        "sql_mode",
+        "SQL Original Statement",
+        "character_set_client",
+        "collation_connection",
+        "Database Collation",
+        "Created",
+    ]
+    .into_iter()
+    .map(text_column)
+    .collect()
+}
+
+fn triggers_columns() -> Vec<OutputColumn> {
+    [
+        "Trigger",
+        "Event",
+        "Table",
+        "Statement",
+        "Timing",
+        "Created",
+        "sql_mode",
+        "Definer",
+        "character_set_client",
+        "collation_connection",
+        "Database Collation",
+    ]
+    .into_iter()
+    .map(text_column)
+    .collect()
+}
+
+fn show_triggers_row(table: &str, trigger: &TriggerDefinition) -> Vec<Value> {
+    let event = trigger
+        .events
+        .listed()
+        .first()
+        .map_or("", |event| event.keyword());
+    let timing = match trigger.timing {
+        TriggerTiming::Before => "BEFORE",
+        TriggerTiming::After => "AFTER",
+        TriggerTiming::InsteadOf => "INSTEAD OF",
+    };
+    let statement = match &trigger.action {
+        TriggerAction::Statements(body) | TriggerAction::Batch(body) => body.clone(),
+        TriggerAction::Function { name, .. } => format!("EXECUTE FUNCTION {name}()"),
+    };
+    vec![
+        Value::Text(trigger.name.clone()),
+        Value::Text(event.to_owned()),
+        Value::Text(crate::schemas::base_name(table).to_owned()),
+        Value::Text(statement),
+        Value::Text(timing.to_owned()),
+        Value::Null,
+        Value::Text(String::new()),
+        Value::Text("CURRENT_USER".into()),
+        Value::Text("utf8mb4".into()),
+        Value::Text("utf8mb4_0900_ai_ci".into()),
+        Value::Text("utf8mb4_0900_ai_ci".into()),
+    ]
 }
 
 fn create_view_columns() -> Vec<OutputColumn> {

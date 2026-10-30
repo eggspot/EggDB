@@ -4,7 +4,9 @@ use crate::pg_catalog::{
     CatalogColumn, CatalogSnapshot, CatalogType, ConstraintSource, RelationEntry, RelationSource,
     builtin_type, check_text, default_text, format_type, type_modifier, type_oid,
 };
+use crate::triggers::{TriggerAction, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming};
 use crate::types::{SqlType, Value};
+use std::collections::HashMap;
 
 #[cfg(test)]
 mod tests;
@@ -36,10 +38,11 @@ pub(crate) enum InformationRelation {
     CheckConstraints,
     Routines,
     Parameters,
+    Triggers,
 }
 
 impl InformationRelation {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Schemata,
         Self::Tables,
         Self::Columns,
@@ -52,6 +55,7 @@ impl InformationRelation {
         Self::CheckConstraints,
         Self::Routines,
         Self::Parameters,
+        Self::Triggers,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -68,6 +72,7 @@ impl InformationRelation {
             Self::CheckConstraints => "check_constraints",
             Self::Routines => "routines",
             Self::Parameters => "parameters",
+            Self::Triggers => "triggers",
         }
     }
 
@@ -99,6 +104,7 @@ impl InformationRelation {
             Self::CheckConstraints => CHECK_CONSTRAINTS_COLUMNS,
             Self::Routines => ROUTINES_COLUMNS,
             Self::Parameters => PARAMETERS_COLUMNS,
+            Self::Triggers => TRIGGERS_COLUMNS,
         }
     }
 }
@@ -186,6 +192,26 @@ const VIEWS_COLUMNS: &[CatalogColumn] = &[
     column("is_trigger_updatable", YES_OR_NO),
     column("is_trigger_deletable", YES_OR_NO),
     column("is_trigger_insertable_into", YES_OR_NO),
+];
+
+const TRIGGERS_COLUMNS: &[CatalogColumn] = &[
+    column("trigger_catalog", SQL_IDENTIFIER),
+    column("trigger_schema", SQL_IDENTIFIER),
+    column("trigger_name", SQL_IDENTIFIER),
+    column("event_manipulation", CHARACTER_DATA),
+    column("event_object_catalog", SQL_IDENTIFIER),
+    column("event_object_schema", SQL_IDENTIFIER),
+    column("event_object_table", SQL_IDENTIFIER),
+    column("action_order", CARDINAL_NUMBER),
+    column("action_condition", CHARACTER_DATA),
+    column("action_statement", CHARACTER_DATA),
+    column("action_orientation", CHARACTER_DATA),
+    column("action_timing", CHARACTER_DATA),
+    column("action_reference_old_table", SQL_IDENTIFIER),
+    column("action_reference_new_table", SQL_IDENTIFIER),
+    column("action_reference_old_row", SQL_IDENTIFIER),
+    column("action_reference_new_row", SQL_IDENTIFIER),
+    column("created", TIME_STAMP),
 ];
 
 const SEQUENCES_COLUMNS: &[CatalogColumn] = &[
@@ -442,6 +468,7 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: InformationRelation) ->
         InformationRelation::ConstraintColumnUsage => constraint_column_usage_rows(snapshot),
         InformationRelation::CheckConstraints => check_constraints_rows(snapshot),
         InformationRelation::Routines | InformationRelation::Parameters => Vec::new(),
+        InformationRelation::Triggers => triggers_rows(snapshot),
     }
 }
 
@@ -890,6 +917,81 @@ fn views_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             row.done()
         })
         .collect()
+}
+
+fn trigger_timing_name(timing: TriggerTiming) -> &'static str {
+    match timing {
+        TriggerTiming::Before => "BEFORE",
+        TriggerTiming::After => "AFTER",
+        TriggerTiming::InsteadOf => "INSTEAD OF",
+    }
+}
+
+fn trigger_statement(definition: &TriggerDefinition) -> String {
+    match &definition.action {
+        TriggerAction::Function { name, arguments } => {
+            format!("EXECUTE FUNCTION {name}({})", arguments.join(", "))
+        }
+        TriggerAction::Statements(body) | TriggerAction::Batch(body) => body.clone(),
+    }
+}
+
+fn triggers_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    let mut order: HashMap<(usize, &str, TriggerTiming, TriggerLevel), i64> = HashMap::new();
+    for trigger in &snapshot.triggers {
+        let Some(owner) = snapshot.relations.get(trigger.relation) else {
+            continue;
+        };
+        let definition = &trigger.definition;
+        let statement = trigger_statement(definition);
+        let row_level = definition.level == TriggerLevel::Row;
+        for event in definition.events.listed() {
+            if event == TriggerEvent::Truncate {
+                continue;
+            }
+            let position = order
+                .entry((
+                    trigger.relation,
+                    event.keyword(),
+                    definition.timing,
+                    definition.level,
+                ))
+                .or_insert(0);
+            *position += 1;
+            let mut row = InformationRow::new(InformationRelation::Triggers)
+                .set("trigger_catalog", identifier(&snapshot.database))
+                .set("trigger_schema", identifier(&owner.schema))
+                .set("trigger_name", identifier(&definition.name))
+                .set("event_manipulation", character_data(event.keyword()))
+                .set("event_object_catalog", identifier(&snapshot.database))
+                .set("event_object_schema", identifier(&owner.schema))
+                .set("event_object_table", identifier(&owner.name))
+                .set("action_order", cardinal(*position))
+                .set("action_statement", character_data(&statement))
+                .set(
+                    "action_orientation",
+                    character_data(if row_level { "ROW" } else { "STATEMENT" }),
+                )
+                .set(
+                    "action_timing",
+                    character_data(trigger_timing_name(definition.timing)),
+                )
+                .set("action_reference_old_row", identifier("OLD"))
+                .set("action_reference_new_row", identifier("NEW"));
+            if let Some(condition) = &definition.condition {
+                row = row.set("action_condition", character_data(&format!("({condition})")));
+            }
+            if let Some(name) = &definition.old_table {
+                row = row.set("action_reference_old_table", identifier(name));
+            }
+            if let Some(name) = &definition.new_table {
+                row = row.set("action_reference_new_table", identifier(name));
+            }
+            rows.push(row.done());
+        }
+    }
+    rows
 }
 
 fn sequences_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {

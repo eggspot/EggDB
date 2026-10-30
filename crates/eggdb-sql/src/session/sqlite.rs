@@ -427,10 +427,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             ));
         };
         let temporary = from.first.name.text.starts_with("sqlite_temp");
-        let tables = if temporary {
-            Vec::new()
+        let (tables, triggers) = if temporary {
+            (Vec::new(), Vec::new())
         } else {
-            self.read(|reader, _| read_tables(reader))?
+            self.read(|reader, _| {
+                Ok((
+                    read_tables(reader)?,
+                    crate::triggers::every_trigger(reader)?,
+                ))
+            })?
         };
         let name = from.first.name.text.clone();
         let mut scratch = Scratch::default();
@@ -474,7 +479,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             &create,
             crate::Dialect::PostgreSql,
         )?;
-        if !tables.is_empty() {
+        if !tables.is_empty() || !triggers.is_empty() {
             let mut rootpage = 1;
             let mut rows = Vec::new();
             for table in &tables {
@@ -501,6 +506,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         text_literal(table.name.clone()),
                         integer_literal(rootpage),
                         sql,
+                    ]);
+                }
+            }
+            for listed in &triggers {
+                for trigger in &listed.triggers {
+                    rows.push(vec![
+                        text_literal("trigger".to_owned()),
+                        text_literal(trigger.name.clone()),
+                        text_literal(listed.table.clone()),
+                        integer_literal(0),
+                        text_literal(trigger.text.clone()),
                     ]);
                 }
             }

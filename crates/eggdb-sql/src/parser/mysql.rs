@@ -288,6 +288,14 @@ impl<'t> Parser<'t> {
         } else if self.is_word("create") && self.is_word_at(1, "view") {
             self.at += 2;
             MySqlStatement::ShowCreateView(self.table_name()?)
+        } else if self.is_word("create") && self.is_word_at(1, "trigger") {
+            self.at += 2;
+            MySqlStatement::ShowCreateTrigger(self.table_name()?)
+        } else if self.take_word("triggers") {
+            self.skip_database_qualifier()?;
+            MySqlStatement::ShowTriggers {
+                like: self.like_pattern()?,
+            }
         } else if self.take_word("warnings") || self.take_word("errors") {
             let errors_only = self.tokens[self.at - 1].kind == TokenKind::Word("errors".into());
             if self.take_word("limit") {

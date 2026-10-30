@@ -490,3 +490,99 @@ fn inconsistent_trigger_definitions_are_refused() {
     );
     assert_eq!(error.state().code(), "42P17");
 }
+
+#[test]
+fn sqlite_schema_lists_triggers() {
+    let store = MemoryStore::default();
+    let mut session = sqlite_session(&store);
+    answer(
+        &mut session,
+        "CREATE TRIGGER t_added AFTER INSERT ON t BEGIN INSERT INTO log VALUES ('x', 1, 1); END",
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE type = 'trigger'"
+        ),
+        vec![
+            "trigger|t_added|t|CREATE TRIGGER t_added AFTER INSERT ON t BEGIN INSERT INTO log VALUES ('x', 1, 1); END"
+        ]
+    );
+}
+
+#[test]
+fn postgresql_catalogs_show_triggers_of_every_dialect() {
+    let store = MemoryStore::default();
+    let mut sqlite = sqlite_session(&store);
+    answer(
+        &mut sqlite,
+        "CREATE TRIGGER n_changed BEFORE UPDATE OF n ON t BEGIN SELECT 1; END",
+    );
+    drop(sqlite);
+    let mut session = Session::new(&store);
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT tgname, tgrelid::regclass, tgtype, tgenabled, tgattr::text
+             FROM pg_trigger"
+        ),
+        vec!["n_changed|t|19|O|2"]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT trigger_name, event_manipulation, event_object_table, action_timing,
+                    action_orientation
+             FROM information_schema.triggers"
+        ),
+        vec!["n_changed|UPDATE|t|BEFORE|ROW"]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT relhastriggers FROM pg_class WHERE relname = 't'"
+        ),
+        vec!["t"]
+    );
+}
+
+#[test]
+fn mysql_show_triggers_and_show_create_trigger() {
+    let store = MemoryStore::default();
+    let mut session = mysql_session(&store);
+    let create = "CREATE TRIGGER ins_sum BEFORE INSERT ON account FOR EACH ROW SET NEW.amount = NEW.amount";
+    answer(&mut session, create);
+    assert_eq!(
+        rows(&mut session, "SHOW TRIGGERS LIKE 'acc%'")
+            .first()
+            .map(|row| row.split('|').take(5).collect::<Vec<_>>().join("|")),
+        Some("ins_sum|INSERT|account|SET NEW.amount = NEW.amount|BEFORE".to_owned())
+    );
+    assert!(rows(&mut session, "SHOW TRIGGERS LIKE 'other'").is_empty());
+    assert_eq!(
+        rows(&mut session, "SHOW CREATE TRIGGER ins_sum")
+            .first()
+            .and_then(|row| row.split('|').nth(2).map(str::to_owned)),
+        Some(create.to_owned())
+    );
+}
+
+#[test]
+fn sqlserver_sys_triggers_lists_triggers() {
+    let store = MemoryStore::default();
+    let mut session = sqlserver_session(&store);
+    batch(
+        &mut session,
+        "CREATE TRIGGER soft_delete ON dbo.orders INSTEAD OF DELETE AS
+           UPDATE dbo.orders SET status = N'cancelled' WHERE id IN (SELECT id FROM deleted);",
+    );
+    batch(&mut session, "DISABLE TRIGGER soft_delete ON dbo.orders");
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT t.name, OBJECT_NAME(t.parent_id), t.is_disabled, t.is_instead_of_trigger, o.type
+             FROM sys.triggers AS t JOIN sys.objects AS o ON o.object_id = t.object_id"
+        ),
+        vec!["soft_delete|orders|1|1|TR"]
+    );
+}

@@ -33,7 +33,7 @@ pub(crate) const INSERTED_TABLE: &str = "inserted";
 pub(crate) const DELETED_TABLE: &str = "deleted";
 const CACHED_TABLES: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TriggerTiming {
     Before,
     After,
@@ -107,7 +107,7 @@ impl TriggerEvents {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TriggerLevel {
     Row,
     Statement,

@@ -1327,6 +1327,7 @@ fn object_type_description(kind: ObjectKind) -> &'static str {
         ObjectKind::ForeignKey => "foreign key cns",
         ObjectKind::Check => "check cns",
         ObjectKind::Default => "default (maybe cns)",
+        ObjectKind::Trigger => "trigger",
     }
 }
 
@@ -1631,7 +1632,7 @@ fn constraint_rows(scope: &Scope<'_>, object: &SqlServerObject) -> Vec<Vec<Value
                     }
                 }
             }
-            ObjectSource::Relation => {}
+            ObjectSource::Relation | ObjectSource::Trigger(_) => {}
         }
     }
     rows

@@ -1324,6 +1324,7 @@ pub(crate) enum Space {
     Constraint,
     Namespace,
     AttrDef,
+    Trigger,
     SqlServerObject,
 }
 
@@ -1334,6 +1335,7 @@ impl Space {
             Self::Constraint => b"constraint",
             Self::Namespace => b"namespace",
             Self::AttrDef => b"attrdef",
+            Self::Trigger => b"trigger",
             Self::SqlServerObject => b"sqlserver object",
         }
     }

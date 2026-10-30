@@ -9,6 +9,7 @@ use crate::pg_catalog::{
     index_is_unique, index_sort_options,
 };
 use crate::encoding::CommentKind;
+use crate::triggers::TriggerTiming;
 use crate::types::{SqlType, Value};
 
 const SYSNAME: SqlType = SqlType::Varchar(Some(128));
@@ -641,7 +642,8 @@ pub(super) fn rows(snapshot: &CatalogSnapshot, view: SystemView) -> Vec<Vec<Valu
         SystemView::Databases => vec![database_row(snapshot)],
         SystemView::SqlModules => sql_module_rows(snapshot, objects),
         SystemView::ExtendedProperties => extended_property_rows(snapshot, objects),
-        SystemView::Procedures | SystemView::Parameters | SystemView::Triggers => Vec::new(),
+        SystemView::Triggers => trigger_rows(snapshot, objects),
+        SystemView::Procedures | SystemView::Parameters => Vec::new(),
     }
 }
 
@@ -1315,7 +1317,67 @@ pub(super) fn database_row(snapshot: &CatalogSnapshot) -> Vec<Value> {
     .done()
 }
 
+fn trigger_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec<Value>> {
+    of_kind(objects, ObjectKind::Trigger)
+        .filter_map(|object| {
+            let ObjectSource::Trigger(at) = object.source else {
+                return None;
+            };
+            let definition = &snapshot.triggers.get(at)?.definition;
+            let row = object_row(TRIGGER_COLUMNS, object)
+                .set("parent_class", small(1))
+                .set("parent_class_desc", text("OBJECT_OR_COLUMN"))
+                .set("parent_id", Value::Integer(object.parent_object_id))
+                .set("is_disabled", bit(!definition.enabled))
+                .set("is_not_for_replication", bit(false))
+                .set(
+                    "is_instead_of_trigger",
+                    bit(definition.timing == TriggerTiming::InsteadOf),
+                );
+            Some(row.done())
+        })
+        .collect()
+}
+
+fn trigger_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec<Value>> {
+    of_kind(objects, ObjectKind::Trigger)
+        .filter_map(|object| {
+            let ObjectSource::Trigger(at) = object.source else {
+                return None;
+            };
+            let definition = &snapshot.triggers.get(at)?.definition;
+            let row = CatalogRow::new(SQL_MODULE_COLUMNS)
+                .set("object_id", Value::Integer(object.object_id))
+                .set("definition", text(&definition.text))
+                .set("uses_ansi_nulls", bit(true))
+                .set("uses_quoted_identifier", bit(true));
+            Some(
+                with_flags(
+                    row,
+                    &[
+                        "is_schema_bound",
+                        "uses_database_collation",
+                        "is_recompiled",
+                        "null_on_null_input",
+                        "uses_native_compilation",
+                        "inline_type",
+                        "is_inlineable",
+                    ],
+                    false,
+                )
+                .done(),
+            )
+        })
+        .collect()
+}
+
 fn sql_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec<Value>> {
+    let mut rows = view_module_rows(snapshot, objects);
+    rows.extend(trigger_module_rows(snapshot, objects));
+    rows
+}
+
+fn view_module_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<Vec<Value>> {
     of_kind(objects, ObjectKind::View)
         .filter_map(|object| {
             let RelationSource::View(view) = &snapshot.relations.get(object.relation)?.source

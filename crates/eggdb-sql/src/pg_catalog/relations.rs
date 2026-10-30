@@ -13,6 +13,7 @@ use crate::memory::WorkMemory;
 use crate::session::OutputColumn;
 use crate::set_returning::GeneratedRows;
 use crate::store::KeyValueRead;
+use crate::triggers::{TriggerAction, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming};
 use crate::types::{SqlType, Value};
 use std::collections::HashSet;
 
@@ -173,13 +174,13 @@ pub(crate) fn build(
         CatalogRelation::Sequence => sequence_rows(snapshot),
         CatalogRelation::Depend => depend_rows(snapshot),
         CatalogRelation::Tablespace => tablespace_rows(),
+        CatalogRelation::Trigger => trigger_rows(snapshot),
         CatalogRelation::Inherits
         | CatalogRelation::Policy
         | CatalogRelation::StatisticExt
         | CatalogRelation::Publication
         | CatalogRelation::PublicationRel
         | CatalogRelation::PublicationNamespace
-        | CatalogRelation::Trigger
         | CatalogRelation::Rewrite
         | CatalogRelation::AuthMembers
         | CatalogRelation::Opclass => Vec::new(),
@@ -260,7 +261,7 @@ fn identity_code(generation: Option<IdentityGeneration>) -> &'static str {
 fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let referenced = referenced_tables(snapshot);
     let mut rows = Vec::with_capacity(snapshot.relations.len());
-    for entry in &snapshot.relations {
+    for (at, entry) in snapshot.relations.iter().enumerate() {
         let mut kind = entry.kind.code();
         let natts;
         let mut has_index = false;
@@ -279,7 +280,8 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 checks = table.checks.len();
                 has_triggers = !table.foreign_keys.is_empty()
                     || table.referenced
-                    || referenced.contains(&table.name);
+                    || referenced.contains(&table.name)
+                    || snapshot.has_triggers(at);
                 am = oids::HEAP;
                 replident = "d";
             }
@@ -750,6 +752,97 @@ fn collation_of(table: &TableDefinition, column: usize) -> Value {
         .columns
         .get(column)
         .map_or(0, |column| facts(column.sql_type).collation))
+}
+
+fn trigger_type(definition: &TriggerDefinition) -> i64 {
+    let mut bits = 0;
+    if definition.level == TriggerLevel::Row {
+        bits |= 1;
+    }
+    match definition.timing {
+        TriggerTiming::Before => bits |= 2,
+        TriggerTiming::InsteadOf => bits |= 64,
+        TriggerTiming::After => {}
+    }
+    for (event, bit) in [
+        (TriggerEvent::Insert, 4),
+        (TriggerEvent::Delete, 8),
+        (TriggerEvent::Update, 16),
+        (TriggerEvent::Truncate, 32),
+    ] {
+        if definition.events.contains(event) {
+            bits |= bit;
+        }
+    }
+    bits
+}
+
+fn trigger_arguments(definition: &TriggerDefinition) -> Vec<String> {
+    match &definition.action {
+        TriggerAction::Function { arguments, .. } => arguments.clone(),
+        TriggerAction::Statements(_) | TriggerAction::Batch(_) => Vec::new(),
+    }
+}
+
+fn trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for trigger in &snapshot.triggers {
+        let Some(owner) = snapshot.relations.get(trigger.relation) else {
+            continue;
+        };
+        let definition = &trigger.definition;
+        let column_numbers: Vec<Value> = owner
+            .table()
+            .map(|table| {
+                definition
+                    .columns
+                    .iter()
+                    .filter_map(|name| {
+                        table
+                            .columns
+                            .iter()
+                            .position(|column| column.name.eq_ignore_ascii_case(name))
+                    })
+                    .map(|at| small(at as i64 + 1))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let arguments = trigger_arguments(definition);
+        let mut packed = Vec::new();
+        for argument in &arguments {
+            packed.extend_from_slice(argument.as_bytes());
+            packed.push(0);
+        }
+        rows.push(
+            Row::new(CatalogRelation::Trigger)
+                .set("oid", oid(trigger.oid))
+                .set("tgrelid", oid(owner.oid))
+                .set("tgparentid", oid(0))
+                .set("tgname", text(&definition.name))
+                .set("tgfoid", oid(0))
+                .set("tgtype", small(trigger_type(definition)))
+                .set("tgenabled", text(if definition.enabled { "O" } else { "D" }))
+                .set("tgisinternal", flag(false))
+                .set("tgconstrrelid", oid(0))
+                .set("tgconstrindid", oid(0))
+                .set("tgconstraint", oid(0))
+                .set("tgdeferrable", flag(false))
+                .set("tginitdeferred", flag(false))
+                .set("tgnargs", small(arguments.len() as i64))
+                .set("tgattr", vector(ArrayElement::Int2Vector, column_numbers))
+                .set("tgargs", Value::Bytea(packed))
+                .set(
+                    "tgoldtable",
+                    definition.old_table.as_deref().map_or(Value::Null, text),
+                )
+                .set(
+                    "tgnewtable",
+                    definition.new_table.as_deref().map_or(Value::Null, text),
+                )
+                .done(),
+        );
+    }
+    rows
 }
 
 fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {

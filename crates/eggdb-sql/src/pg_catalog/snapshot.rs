@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 15] = [
+const SNAPSHOT_FUNCTIONS: [&str; 16] = [
     "pg_get_serial_sequence",
     "to_regclass",
     "pg_table_is_visible",
@@ -26,6 +26,7 @@ const SNAPSHOT_FUNCTIONS: [&str; 15] = [
     "pg_get_constraintdef",
     "pg_get_indexdef",
     "pg_get_viewdef",
+    "pg_get_triggerdef",
     "obj_description",
     "col_description",
     "regtype",
@@ -316,6 +317,12 @@ pub(crate) struct SchemaEntry {
     pub(crate) owner: u32,
 }
 
+pub(crate) struct TriggerEntry {
+    pub(crate) oid: u32,
+    pub(crate) relation: usize,
+    pub(crate) definition: crate::triggers::TriggerDefinition,
+}
+
 pub(crate) struct CatalogSnapshot {
     pub(crate) user: String,
     pub(crate) database: String,
@@ -326,6 +333,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) constraints: Vec<ConstraintEntry>,
     pub(crate) defaults: Vec<DefaultEntry>,
     pub(crate) comments: Vec<StoredComment>,
+    pub(crate) triggers: Vec<TriggerEntry>,
     relation_oids: HashMap<u32, usize>,
     relation_names: HashMap<(String, String), usize>,
     constraint_oids: HashMap<u32, usize>,
@@ -540,6 +548,7 @@ impl CatalogSnapshot {
             constraints: Vec::new(),
             defaults: Vec::new(),
             comments: crate::comments::every_comment(reader)?,
+            triggers: Vec::new(),
             relation_oids: HashMap::new(),
             relation_names: HashMap::new(),
             constraint_oids: HashMap::new(),
@@ -552,7 +561,45 @@ impl CatalogSnapshot {
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();
+        snapshot.add_triggers(crate::triggers::every_trigger(reader)?);
         Ok(snapshot)
+    }
+
+    fn add_triggers(&mut self, stored: Vec<crate::triggers::TableTriggers>) {
+        let owners: HashMap<&str, usize> = self
+            .relations
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| matches!(entry.kind, RelationKind::Table | RelationKind::View))
+            .map(|(at, entry)| (entry.internal.as_str(), at))
+            .collect();
+        let mut pending = Vec::new();
+        for listed in stored {
+            let Some(&relation) = owners.get(listed.table.as_str()) else {
+                continue;
+            };
+            for definition in listed.triggers {
+                pending.push((relation, definition));
+            }
+        }
+        let requests: Vec<OidRequest> = pending
+            .iter()
+            .map(|(relation, definition)| OidRequest {
+                kind: b'T',
+                owner: self.relations[*relation].internal.clone(),
+                name: definition.name.clone(),
+            })
+            .collect();
+        let assigned = oids::assign(Space::Trigger, &requests);
+        self.triggers = pending
+            .into_iter()
+            .zip(assigned)
+            .map(|((relation, definition), oid)| TriggerEntry {
+                oid,
+                relation,
+                definition,
+            })
+            .collect();
     }
 
     fn index_relations(&mut self) {
@@ -692,6 +739,16 @@ impl CatalogSnapshot {
 
     pub(crate) fn relation_index(&self, oid: u32) -> Option<usize> {
         self.relation_oids.get(&oid).copied()
+    }
+
+    pub(crate) fn trigger(&self, oid: u32) -> Option<&TriggerEntry> {
+        self.triggers.iter().find(|trigger| trigger.oid == oid)
+    }
+
+    pub(crate) fn has_triggers(&self, relation: usize) -> bool {
+        self.triggers
+            .iter()
+            .any(|trigger| trigger.relation == relation)
     }
 
     pub(crate) fn table_named(&self, internal: &str) -> Option<usize> {

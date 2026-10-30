@@ -126,6 +126,7 @@ pub(crate) enum ObjectKind {
     ForeignKey,
     Check,
     Default,
+    Trigger,
 }
 
 impl ObjectKind {
@@ -139,6 +140,7 @@ impl ObjectKind {
             Self::ForeignKey => "F ",
             Self::Check => "C ",
             Self::Default => "D ",
+            Self::Trigger => "TR",
         }
     }
 
@@ -152,6 +154,7 @@ impl ObjectKind {
             Self::ForeignKey => "FOREIGN_KEY_CONSTRAINT",
             Self::Check => "CHECK_CONSTRAINT",
             Self::Default => "DEFAULT_CONSTRAINT",
+            Self::Trigger => "SQL_TRIGGER",
         }
     }
 
@@ -165,6 +168,7 @@ impl ObjectKind {
             Self::ForeignKey => b'F',
             Self::Check => b'C',
             Self::Default => b'D',
+            Self::Trigger => b'T',
         }
     }
 
@@ -190,6 +194,7 @@ pub(crate) enum ObjectSource {
     Relation,
     Constraint(usize),
     Default(usize),
+    Trigger(usize),
 }
 
 pub(crate) struct SqlServerSchema {
@@ -375,6 +380,28 @@ impl SqlServerObjects {
                 source: ObjectSource::Default(default.column),
             });
         }
+        for (at, trigger) in snapshot.triggers.iter().enumerate() {
+            let Some(&parent) = relation_objects.get(&trigger.relation) else {
+                continue;
+            };
+            let Some(owner) = snapshot.relations.get(trigger.relation) else {
+                continue;
+            };
+            let schema_id = pending[parent].schema_id;
+            pending.push(PendingObject {
+                request: OidRequest {
+                    kind: ObjectKind::Trigger.request_kind(),
+                    owner: owner.internal.clone(),
+                    name: trigger.definition.name.clone(),
+                },
+                name: trigger.definition.name.clone(),
+                schema_id,
+                parent: Some(parent),
+                kind: ObjectKind::Trigger,
+                relation: trigger.relation,
+                source: ObjectSource::Trigger(at),
+            });
+        }
         let requests: Vec<OidRequest> = pending
             .iter()
             .map(|object| OidRequest {
@@ -420,7 +447,7 @@ impl SqlServerObjects {
                 ObjectSource::Relation => {
                     built.by_relation.insert(object.relation, at);
                 }
-                ObjectSource::Constraint(_) => {}
+                ObjectSource::Constraint(_) | ObjectSource::Trigger(_) => {}
                 ObjectSource::Default(column) => {
                     built.by_default.insert((object.relation, column), at);
                 }
