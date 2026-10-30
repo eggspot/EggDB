@@ -16,6 +16,9 @@ pub(crate) const GROUP_BY: &str = "sqlite_compare.sql_group_by";
 pub(crate) const IN_SUBQUERY: &str = "sqlite_compare.sql_in_subquery";
 pub(crate) const CORRELATED_EXISTS: &str = "sqlite_compare.sql_correlated_exists";
 pub(crate) const UNION: &str = "sqlite_compare.sql_union";
+pub(crate) const VIEW_POINT_SELECT: &str = "sqlite_compare.sql_view_point_select";
+pub(crate) const CORRELATED_IN: &str = "sqlite_compare.sql_correlated_in";
+pub(crate) const SCALAR_AGGREGATE: &str = "sqlite_compare.sql_scalar_aggregate";
 
 const ROWS: u64 = 100_000;
 const KNOWN_GAP_TOLERANCE_PERCENT: u32 = 15;
@@ -80,17 +83,24 @@ fn sqlite_insert(sqlite: &Connection, first: u64, rows: u64) -> Result<(), Strin
     Ok(())
 }
 
-fn point_query(index: u64) -> String {
+const PEOPLE_VIEW: &str = "CREATE VIEW people_view AS SELECT id, name, score FROM people";
+
+fn point_query(relation: &str, index: u64) -> String {
     format!(
-        "SELECT name, score FROM people WHERE id = {}",
+        "SELECT name, score FROM {relation} WHERE id = {}",
         index.wrapping_mul(7919) % ROWS
     )
 }
 
-fn eggdb_select(session: &mut SqlSession<'_>, first: u64, count: u64) -> Result<usize, String> {
+fn eggdb_select(
+    session: &mut SqlSession<'_>,
+    relation: &str,
+    first: u64,
+    count: u64,
+) -> Result<usize, String> {
     let mut found = 0;
     for index in first..first + count {
-        found += eggdb_run(session, &point_query(index))?;
+        found += eggdb_run(session, &point_query(relation, index))?;
     }
     if found as u64 != count {
         return Err("EggDB missed a row".into());
@@ -98,44 +108,65 @@ fn eggdb_select(session: &mut SqlSession<'_>, first: u64, count: u64) -> Result<
     Ok(found)
 }
 
-fn sqlite_select(sqlite: &Connection, first: u64, count: u64) -> Result<usize, String> {
+fn sqlite_select(
+    sqlite: &Connection,
+    relation: &str,
+    first: u64,
+    count: u64,
+) -> Result<usize, String> {
     let mut folded = 0;
     for index in first..first + count {
         let name: String = sqlite
-            .query_row(&point_query(index), [], |row| row.get(0))
+            .query_row(&point_query(relation, index), [], |row| row.get(0))
             .map_err(failed("SQLite select"))?;
         folded ^= name.len();
     }
     Ok(folded)
 }
 
-pub(crate) fn point_select() -> Result<Vec<Metric>, String> {
-    let stores = Stores::open("sql-point-select", Durability::Normal, 0)?;
+fn point_selects(
+    benchmark: &'static str,
+    store_name: &str,
+    relation: &'static str,
+) -> Result<Vec<Metric>, String> {
+    let stores = Stores::open(store_name, Durability::Normal, 0)?;
     let store = DatabaseStore(&stores.eggdb);
     let mut session = Session::new(&store);
     eggdb_run(&mut session, EGGDB_TABLE)?;
     sqlite_run(&stores.sqlite, SQLITE_TABLE)?;
     eggdb_insert(&mut session, 0, ROWS)?;
     sqlite_insert(&stores.sqlite, 0, ROWS)?;
+    if relation != "people" {
+        eggdb_run(&mut session, PEOPLE_VIEW)?;
+        sqlite_run(&stores.sqlite, PEOPLE_VIEW)?;
+    }
     let (mut eggdb_next, mut sqlite_next) = (0, 0);
     let measured = measure::paired(
         &mut |count| {
-            black_box(eggdb_select(&mut session, eggdb_next, count)?);
+            black_box(eggdb_select(&mut session, relation, eggdb_next, count)?);
             eggdb_next += count;
             Ok(())
         },
         &mut |count| {
-            black_box(sqlite_select(&stores.sqlite, sqlite_next, count)?);
+            black_box(sqlite_select(&stores.sqlite, relation, sqlite_next, count)?);
             sqlite_next += count;
             Ok(())
         },
     )?;
     Ok(paired_metrics(
-        POINT_SELECT,
+        benchmark,
         measured,
         RatioGate::GatedWithin(KNOWN_GAP_TOLERANCE_PERCENT),
         ["ns_per_select", "sqlite_ns_per_select"],
     ))
+}
+
+pub(crate) fn point_select() -> Result<Vec<Metric>, String> {
+    point_selects(POINT_SELECT, "sql-point-select", "people")
+}
+
+pub(crate) fn view_point_select() -> Result<Vec<Metric>, String> {
+    point_selects(VIEW_POINT_SELECT, "sql-view-point-select", "people_view")
 }
 
 const NAME_INDEX: &str = "CREATE INDEX people_name ON people (name)";
@@ -244,6 +275,8 @@ const GROUP_BY_QUERY: &str =
     "SELECT bucket, count(*), sum(amount), min(amount), max(amount) FROM orders GROUP BY bucket";
 const IN_SUBQUERY_QUERY: &str = "SELECT count(*), sum(amount) FROM orders WHERE person_id IN (SELECT id FROM people WHERE score > 500)";
 const CORRELATED_EXISTS_QUERY: &str = "SELECT count(*) FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person_id = p.id AND o.amount > 900)";
+const CORRELATED_IN_QUERY: &str = "SELECT count(*) FROM people p WHERE 990 IN (SELECT o.amount FROM orders o WHERE o.person_id = p.id)";
+const SCALAR_AGGREGATE_QUERY: &str = "SELECT count(*) FROM people p WHERE (SELECT sum(o.amount) FROM orders o WHERE o.person_id = p.id) > 900";
 const UNION_QUERY: &str =
     "SELECT count(*) FROM (SELECT person_id FROM orders UNION SELECT id + 5000 FROM people) u";
 
@@ -338,6 +371,14 @@ pub(crate) fn correlated_exists() -> Result<Vec<Metric>, String> {
 
 pub(crate) fn union() -> Result<Vec<Metric>, String> {
     repeated(UNION_QUERY, UNION, 1)
+}
+
+pub(crate) fn correlated_in() -> Result<Vec<Metric>, String> {
+    repeated(CORRELATED_IN_QUERY, CORRELATED_IN, 1)
+}
+
+pub(crate) fn scalar_aggregate() -> Result<Vec<Metric>, String> {
+    repeated(SCALAR_AGGREGATE_QUERY, SCALAR_AGGREGATE, 1)
 }
 
 #[cfg(test)]

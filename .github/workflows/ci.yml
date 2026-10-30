@@ -197,7 +197,11 @@ jobs:
           if-no-files-found: warn
 
   compare:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
       COMPARE_MANIFEST: crates/eggdb-sqlite-compare/Cargo.toml
@@ -228,7 +232,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: sqlite-compare-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          name: sqlite-compare-${{ runner.os }}-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: compare-results/
           retention-days: 90
           overwrite: true

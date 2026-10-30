@@ -2354,9 +2354,11 @@ warning; in `INSERT ... SELECT` a text value goes into a non-text column only wi
 PostgreSQL types an untyped literal of the select list by the target column); `SET ROLE` to a
 role other than the session's user is `0A000`.
 
-Schemas and views (D116): a view is computed in full each time a statement uses it (no
-condition is pushed into it and its tables' indexes are not used through it), so a point lookup
-through a view over a large table reads the whole view; a view that is not automatically
+Schemas and views (D116): a view is computed each time a statement uses it; a `WHERE`
+condition on its plain columns is pushed into it (D155), so a lookup through a view uses its
+table's primary key and indexes, but a view with grouping, aggregates, `DISTINCT`, a limit, a
+window or a computed column used by the condition, or one on the NULL side of an outer join, is
+still computed in full before the condition filters it; a view that is not automatically
 updatable has no `INSTEAD OF` triggers or rules to make it so, there are no materialized or
 recursive views, renaming a table
 or view that a view uses is `0A000` (PostgreSQL follows the rename), a view resolves its names
@@ -2496,7 +2498,9 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   argument names only the outer query's columns (`SELECT (SELECT sum(t.b) FROM u) FROM t`), which
   belongs to the outer query in PostgreSQL and SQLite, answers `0A000`; a correlated subquery
   runs once per distinct outer value, so one over a million distinct values runs a million
-  times, with no statement timeout yet (item 19e); a derived table or `WITH` query cannot name
+  times, with no statement timeout yet, unless it is an `EXISTS`, `IN`, `= ANY`, `<> ALL` or an
+  aggregate subquery whose outer references are only `inner = outer_column` conditions, which
+  runs once and is looked up by key (D112, D155); a derived table or `WITH` query cannot name
   the outer query's columns (a `LATERAL` one can name the items before it, but not a query around
   its own `SELECT`, `0A000`), a set-returning or window function in the select list of a
   correlated subquery is `0A000`, and `INSERT ... VALUES` cannot have a subquery that names the
