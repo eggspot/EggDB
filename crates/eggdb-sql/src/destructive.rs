@@ -196,6 +196,9 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::EnableTrigger(_)
+        | Statement::CreateRoutine(_)
+        | Statement::DropRoutine(_)
+        | Statement::AlterRoutine(_)
         | Statement::SqlServer(_) => None,
         Statement::With(with) => crate::with_statement::classify(with),
         Statement::Merge(merge) => merge

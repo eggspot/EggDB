@@ -73,14 +73,14 @@ impl<'t> Parser<'t> {
         self
     }
 
-    fn previous_end(&self) -> usize {
+    pub(super) fn previous_end(&self) -> usize {
         self.at
             .checked_sub(1)
             .and_then(|index| self.tokens.get(index))
             .map_or(0, |token| token.end)
     }
 
-    fn slice(&self, start: usize, end: usize) -> String {
+    pub(super) fn slice(&self, start: usize, end: usize) -> String {
         self.text.get(start..end).unwrap_or_default().to_owned()
     }
 

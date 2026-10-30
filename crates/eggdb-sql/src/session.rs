@@ -2179,6 +2179,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     crate::triggers::enable_triggers(writer, tables, enable, dialect)
                 })
             }
+            Statement::CreateRoutine(create) => {
+                let tag = match create.definition.kind {
+                    crate::routines::RoutineKind::Function => "CREATE FUNCTION",
+                    crate::routines::RoutineKind::Procedure => "CREATE PROCEDURE",
+                };
+                self.write(tag, |writer, tables| {
+                    crate::routines::create_routine(writer, tables, create)
+                })
+            }
+            Statement::DropRoutine(drop) => self.write("DROP FUNCTION", |writer, tables| {
+                crate::routines::drop_routines(writer, tables, drop, dialect)
+            }),
+            Statement::AlterRoutine(alter) => self.write("ALTER FUNCTION", |writer, tables| {
+                crate::routines::alter_routine(writer, tables, alter)
+            }),
             Statement::AlterSession(settings) => self.alter_session(settings),
             Statement::CreateType(create) => self.write("CREATE TYPE", |writer, _| {
                 crate::user_types::create_type(writer, create)
@@ -2256,6 +2271,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     | Statement::Comment(_)
                     | Statement::CreateTrigger(_)
                     | Statement::DropTrigger(_)
+                    | Statement::CreateRoutine(_)
+                    | Statement::DropRoutine(_)
+                    | Statement::AlterRoutine(_)
             )
     }
 

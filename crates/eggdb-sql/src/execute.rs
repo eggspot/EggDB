@@ -112,6 +112,7 @@ pub(crate) struct TableCache {
     entries: HashMap<String, CachedTable>,
     row_counts: RowCountHints,
     pub(crate) triggers: crate::triggers::TriggerCache,
+    pub(crate) routines: crate::routines::RoutineCache,
 }
 
 impl TableCache {

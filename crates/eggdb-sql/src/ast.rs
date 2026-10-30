@@ -93,6 +93,44 @@ pub(crate) enum Statement {
     CreateTrigger(Box<CreateTrigger>),
     DropTrigger(DropTrigger),
     EnableTrigger(EnableTrigger),
+    CreateRoutine(Box<CreateRoutine>),
+    DropRoutine(DropRoutine),
+    AlterRoutine(AlterRoutine),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateRoutine {
+    pub(crate) name: Name,
+    pub(crate) replace: bool,
+    pub(crate) definition: crate::routines::RoutineDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RoutineTarget {
+    pub(crate) name: Name,
+    pub(crate) arguments: Option<Vec<SqlType>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DropRoutine {
+    pub(crate) kind: Option<crate::routines::RoutineKind>,
+    pub(crate) targets: Vec<RoutineTarget>,
+    pub(crate) if_exists: bool,
+    pub(crate) cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterRoutine {
+    pub(crate) kind: Option<crate::routines::RoutineKind>,
+    pub(crate) target: RoutineTarget,
+    pub(crate) action: AlterRoutineAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterRoutineAction {
+    RenameTo(Name),
+    SetSchema(Name),
+    Accepted,
 }
 
 #[derive(Debug, Clone, PartialEq)]

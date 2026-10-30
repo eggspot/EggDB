@@ -7,10 +7,12 @@ use crate::types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlT
 
 mod catalog;
 mod defined;
+mod routines;
 mod triggers;
 
 pub(crate) use catalog::*;
 pub(crate) use defined::*;
+pub(crate) use routines::{decode_routines, encode_routines, routine_key, routines_prefix};
 pub(crate) use triggers::{decode_triggers, encode_triggers, trigger_key, triggers_prefix};
 
 pub(crate) const NAMESPACE: &[u8] = &[0xFF, b'S', b'Q', b'L', 0x00];

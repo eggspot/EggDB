@@ -147,6 +147,10 @@ impl SqlState {
     pub const UNDEFINED_FUNCTION: Self = Self(*b"42883");
     /// `42725` ambiguous_function.
     pub const AMBIGUOUS_FUNCTION: Self = Self(*b"42725");
+    /// `42723` duplicate_function.
+    pub const DUPLICATE_FUNCTION: Self = Self(*b"42723");
+    /// `42P13` invalid_function_definition.
+    pub const INVALID_FUNCTION_DEFINITION: Self = Self(*b"42P13");
     /// `42P01` undefined_table.
     pub const UNDEFINED_TABLE: Self = Self(*b"42P01");
     /// `42P07` duplicate_table.

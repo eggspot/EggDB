@@ -80,6 +80,7 @@ mod regex;
 mod regexp_functions;
 mod relations;
 mod restore;
+mod routines;
 mod schema;
 mod schemas;
 mod sequences;

@@ -6,6 +6,7 @@ mod mysql;
 mod oracle;
 mod postgresql;
 mod query;
+mod routines;
 mod schemas;
 mod sqlite;
 mod sqlserver;
@@ -759,6 +760,11 @@ impl<'t> Parser<'t> {
 
     fn statement_body(&mut self) -> SqlResult<Statement> {
         if let Some(statement) = self.trigger_statement()? {
+            return Ok(statement);
+        }
+        if self.postgresql()
+            && let Some(statement) = self.routine_statement()?
+        {
             return Ok(statement);
         }
         if self.mysql()
