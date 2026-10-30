@@ -103,7 +103,7 @@ psql's `\d` family (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du`) reads 
 catalog: see [The PostgreSQL catalog](#the-postgresql-catalog).
 
 Not yet (each fails readably or is ignored harmlessly): TLS, `\d+`, `\df` and the other psql
-commands beyond the `\d` family, the catalog queries of GUI tools beyond it, `COPY` in the binary format, `LISTEN`/`NOTIFY`, stored
+commands beyond the `\d` family, the catalog queries of GUI tools beyond it, `LISTEN`/`NOTIFY`, stored
 users and roles, and non-ASCII passwords.
 
 ## The MySQL dialect
@@ -1865,11 +1865,11 @@ b ON ...) JOIN c ON ...)`) runs, `WITH CHECK OPTION` included. `CREATE MATERIALI
 ## COPY
 
 `COPY` loads a table from the client and unloads a table or a query to it, in PostgreSQL's
-text and CSV formats (D117, PostgreSQL dialect only; the other dialects refuse it with their own
-syntax error):
+text, CSV and binary formats (D117, D154, PostgreSQL dialect only; the other dialects refuse it
+with their own syntax error):
 
 ```sql
-COPY table [(column, ...)] FROM STDIN [[WITH] (option, ...)]
+COPY table [(column, ...)] FROM STDIN [[WITH] (option, ...)] [WHERE condition]
 COPY {table [(column, ...)] | (query)} TO STDOUT [[WITH] (option, ...)]
 ```
 
@@ -1879,7 +1879,7 @@ The older forms that `pg_dump` and psql write work too (`WITH CSV HEADER`, `DELI
 
 | Option | Meaning |
 |--------|---------|
-| `FORMAT text \| csv` | text (the default) or CSV; `binary` is `0A000` for now |
+| `FORMAT text \| csv \| binary` | text (the default), CSV, or PostgreSQL's binary format (below) |
 | `DELIMITER 'c'` | one one-byte character between columns: tab in text, comma in CSV |
 | `NULL 's'` | the text for NULL: `\N` in text, an unquoted empty field in CSV |
 | `DEFAULT 's'` | `COPY FROM` only: the text that stands for the column's default |
@@ -1887,8 +1887,10 @@ The older forms that `pg_dump` and psql write work too (`WITH CSV HEADER`, `DELI
 | `QUOTE 'c'`, `ESCAPE 'c'` | CSV only: the quote (`"`) and the character that escapes it inside quotes (the quote itself) |
 | `FORCE_QUOTE (cols) \| *` | CSV `TO` only: quote these columns' non-NULL values |
 | `FORCE_NOT_NULL (cols) \| *`, `FORCE_NULL (cols) \| *` | CSV `FROM` only: an unquoted null string is an empty string, or a quoted one is NULL |
-| `ENCODING 'UTF8'` | UTF-8 only; another encoding is `0A000` |
-| `FREEZE`, `ON_ERROR stop` | accepted; `ON_ERROR ignore` is `0A000` |
+| `ENCODING 'name'` | the encoding of the data the client sends or receives: `UTF8` (the default), `LATIN1`, `LATIN9`, `WIN1252`, and `UTF16` (`UTF16LE`, `UTF16BE`) beyond PostgreSQL; PostgreSQL's other encodings are `0A000`, an unknown name `22023` |
+| `ON_ERROR stop \| ignore` | `COPY FROM` only: `stop` (the default) fails the copy at the first bad value; `ignore` skips each row with a value its column's type does not accept and reports how many (text and CSV only) |
+| `LOG_VERBOSITY default \| verbose \| silent` | with `ON_ERROR ignore`: `verbose` adds a notice per skipped row, `silent` drops the count |
+| `FREEZE` | accepted and changes nothing |
 
 The text format is the manual's: one row per line ending in `\n` (`\r\n` and `\r` are read
 too, but one file uses one), columns separated by the delimiter, `\N` for NULL (matched before
@@ -1917,6 +1919,50 @@ The whole load is one transaction, so its pages must fit in the page cache: `egg
 --cache 1g` for large loads (`eggdb sql` and `eggdb import --csv` size the cache from the data
 they are given). `COPY TO` of a table streams its rows in primary-key order; `COPY (query) TO`
 runs the query first, with the memory bound of any query.
+
+**`WHERE`.** `COPY ... FROM STDIN ... WHERE condition` loads only the rows the condition is
+true for, as PostgreSQL does: each row is built first (columns the copy leaves out take their
+defaults, so a skipped row still uses up a `serial` value), then tested, then stored. The
+condition may use every column of the table, qualified with its name or not, and functions;
+aggregates (`42803`), window functions (`42P20`) and subqueries (`0A000`) are refused, and
+`COPY ... TO` takes no `WHERE` (`0A000`; copy a query instead).
+
+**`ON_ERROR ignore`.** A row with a value its column's type input refuses (a class `22` error
+such as `22P02`, `22003`, `22007` or `22001`) is skipped instead of failing the copy; the
+other rows load in the same single transaction, and `COPY n` counts only them. A notice says
+`N rows were skipped due to data type incompatibility`; with `LOG_VERBOSITY verbose` each
+skipped row also gets `skipping row due to data type incompatibility at line L for column "c":
+"value"`, and `silent` leaves out the count. Rows that break the format (`22P04`), bytes that
+are not valid in the encoding (`22021`) and constraint violations (`23505`, `23502`, ...) still
+fail the whole copy, as in PostgreSQL. `ON_ERROR ignore` is refused in the binary format.
+
+**Encodings.** `ENCODING` names the encoding of the data on the client's side; EggDB stores
+UTF-8, so `COPY FROM` converts the data to UTF-8 before reading it and `COPY TO` converts each
+row from UTF-8. `LATIN1` (ISO 8859-1), `LATIN9` (ISO 8859-15) and `WIN1252` (Windows code page
+1252) are converted by table, with PostgreSQL's names and aliases (`ISO_8859_1`, `Windows-1252`,
+`utf-8`, ...); a byte with no character (`WIN1252`'s `0x81`) or a character with no byte (`€` in
+`LATIN1`) is `22P05`, a NUL byte `22021`. `UTF16` reads a byte-order mark (little-endian without
+one, as Windows tools write it) and writes one; `UTF16LE` and `UTF16BE` are fixed and write none.
+The data of a `COPY` inside a script (`eggdb sql file.sql`, `eggdb restore`) is part of the
+script's text, which is already decoded, so `ENCODING` does not apply to it; the binary format
+carries text as UTF-8 and ignores `ENCODING`.
+
+**The binary format.** `FORMAT binary` (or the older `COPY BINARY table ...`) reads and writes
+the layout the PostgreSQL manual describes: the 11-byte signature `PGCOPY\n\377\r\n\0`, a
+flags word and a header extension (skipped when reading), then per row a 16-bit field count and
+each field as a 32-bit length (`-1` for NULL) and the value in its type's binary form (the same
+forms as binary results over the protocol: integers, `real` and `double precision`, `numeric`,
+`boolean`, text types, `bytea`, `uuid`, dates, times and time stamps, `interval`, `json` and
+`jsonb`, enums and one-dimensional arrays of these), and a 16-bit `-1` trailer. Each value read
+goes through its type's input as a text value would, so constraints, typmods and defaults
+behave as in the other formats. Errors follow PostgreSQL's: `COPY file signature not
+recognized`, `invalid COPY file header (WITH OIDS)`, `row field count is 1, expected 2`,
+`unexpected EOF in COPY data`, `received copy data after EOF marker` (`22P04`), and `incorrect
+binary data format` (`22P03`) with `COPY t, line 1, column a` as the context. `DELIMITER`,
+`NULL`, `DEFAULT` and `HEADER` are refused in this format (`42601`), a script cannot carry
+binary data inline (`0A000`; send it from psql's `\copy`, a driver or `Session::execute_with_copy`),
+and columns of composite, range and some catalog types are `0A000`. Drivers' binary copy works
+unchanged: psycopg's `copy.write_row`, Npgsql's `BeginBinaryImport`, pgx's `CopyFrom`.
 
 `COPY` never touches files or programs on the server: `COPY t FROM 'file'` and `... PROGRAM
 'cmd'` are refused with `42501`, as PostgreSQL refuses them to a role that is not allowed to
@@ -2327,10 +2373,15 @@ constraint's columns in `constraint_column_usage` are the column names its text 
 records them as dependencies); `pg_settings` shows `vartype` `string` and no `category`, unit or
 bounds.
 
-`COPY` (D117): the binary format and `ON_ERROR ignore` are `0A000`; `ENCODING` takes only
-UTF-8; `FREEZE` is accepted and changes nothing (PostgreSQL refuses it unless the table was
-created or truncated in the same transaction); `COPY ... WHERE` is `0A000`; files and programs
-on the server are always `42501`; a `\.` inside a text-format field reads as `.` where
+`COPY` (D117, D154): `ENCODING` takes `UTF8`, `LATIN1`, `LATIN9`, `WIN1252` and the `UTF16`
+forms, and PostgreSQL's other encodings are `0A000`; `UTF16` is EggDB's own (PostgreSQL has no
+such encoding); a script's inline data ignores `ENCODING`; `ON_ERROR ignore` skips rows with
+values their type refuses, but a domain's `CHECK` is tested with the row's constraints and fails
+the copy (PostgreSQL skips the row), and `REJECT_LIMIT` is not recognized yet; the binary format
+refuses composite and range columns and multidimensional arrays, and an incomplete row count at
+the end of the data is an error where PostgreSQL ends quietly; `FREEZE` is accepted and changes
+nothing (PostgreSQL refuses it unless the table was created or truncated in the same
+transaction); files and programs on the server are always `42501`; a `\.` inside a text-format field reads as `.` where
 PostgreSQL may refuse it; `COPY TO` of a table writes rows in primary-key order (PostgreSQL in
 storage order); and some option errors carry other SQLSTATEs or wording than PostgreSQL's.
 
@@ -2342,8 +2393,8 @@ expression whose display EggDB does not work out is shown as stored, where Postg
 print its own form.
 
 The correctness suite (`crates/eggdb-sql/correctness/postgresql.test`, [correctness.md](correctness.md))
-checks the PostgreSQL manual's documented behaviour; the two cases it marks as differing are
-`COPY` in the binary format and in an encoding other than UTF-8 (above). The other differences:
+checks the PostgreSQL manual's documented behaviour and marks no case as differing (the last
+two, `COPY` in the binary format and in another encoding, now match). The other differences:
 
 - One statement at a time is planned by simple rules without statistics ([Indexes](#indexes)):
   a `WHERE` that fixes every primary-key column with `=` reads one row (in a join, of the first
@@ -2795,4 +2846,4 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   (`stddev`, `variance`, hypothetical-set aggregates).
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
-  binary `COPY` and `LISTEN`/`NOTIFY` (M6a).
+  and `LISTEN`/`NOTIFY` (M6a).
