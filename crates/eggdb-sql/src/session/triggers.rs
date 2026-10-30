@@ -53,7 +53,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         for call in calls {
             match &call.trigger.action {
                 TriggerAction::Batch(_) => self.run_tsql_trigger(call)?,
-                TriggerAction::Function { .. } => self.run_function_trigger(&call)?,
+                TriggerAction::Function { .. } | TriggerAction::PlSql { .. } => {
+                    self.run_function_trigger(&call)?;
+                }
                 TriggerAction::Statements(_) => return Err(statement_level_statements()),
             }
             if was_in_block && !self.in_block() {

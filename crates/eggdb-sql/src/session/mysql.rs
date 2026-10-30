@@ -689,7 +689,9 @@ fn show_triggers_row(table: &str, trigger: &TriggerDefinition) -> Vec<Value> {
         TriggerTiming::InsteadOf => "INSTEAD OF",
     };
     let statement = match &trigger.action {
-        TriggerAction::Statements(body) | TriggerAction::Batch(body) => body.clone(),
+        TriggerAction::Statements(body)
+        | TriggerAction::Batch(body)
+        | TriggerAction::PlSql { body, .. } => body.clone(),
         TriggerAction::Function { name, .. } => format!("EXECUTE FUNCTION {name}()"),
     };
     vec![

@@ -63,6 +63,7 @@ pub(crate) struct PlsqlFrame {
     pub(crate) bulk_rowcounts: Option<Value>,
     pub(crate) bulk_exceptions: Option<Value>,
     pub(crate) package_functions: Vec<(String, String)>,
+    pub(crate) updated_columns: Option<Vec<String>>,
 }
 
 pub(crate) fn oracle_failure(state: SqlState, code: u16) -> SqlError {

@@ -1903,11 +1903,31 @@ it, and a statement that fails in a trigger leaves nothing behind.
   and returns `trigger` (`42P17`).
   `pg_trigger`, `pg_get_triggerdef` and `information_schema.triggers` list triggers of every
   dialect.
+- **Oracle:** `CREATE [OR REPLACE] [EDITIONABLE | NONEDITIONABLE] TRIGGER name {BEFORE | AFTER |
+  INSTEAD OF} {INSERT | UPDATE [OF columns] | DELETE} [OR ...] ON table | view [REFERENCING
+  {NEW | OLD | PARENT} [AS] name ...] [FOR EACH ROW] [FOLLOWS | PRECEDES other] [ENABLE |
+  DISABLE] [WHEN (condition)] {plsql_block | CALL routine(arguments)}`, `ALTER TRIGGER name
+  {ENABLE | DISABLE | COMPILE | RENAME TO new}`, `ALTER TABLE name {ENABLE | DISABLE} ALL
+  TRIGGERS` and `DROP TRIGGER [IF EXISTS] name`. The body is a PL/SQL block on the PL/SQL
+  interpreter with `:NEW` and `:OLD` (all `NULL` fields where the event has no such row),
+  `INSERTING`, `UPDATING`, `UPDATING('column')` and `DELETING`; a `BEFORE` row trigger changes
+  the row by assigning `:NEW.column`, an `INSTEAD OF` trigger makes a view writable, and a
+  trigger without `FOR EACH ROW` fires once per statement. Oracle's errors are kept:
+  `ORA-04081` for a second trigger of the same name without `OR REPLACE`, `ORA-04080` for a
+  missing one, `ORA-04077` for `WHEN` without `FOR EACH ROW`, `ORA-04082` for `:NEW`/`:OLD`
+  there, `ORA-04084` and `ORA-04085` for assigning `:NEW` after the row is written or `:OLD`,
+  `ORA-25001`/`ORA-25002` for the wrong timing on a view or table, `PLS-00049` for a `:NEW` or
+  `:OLD` column the table does not have, and `ORA-04092` for `COMMIT` or `ROLLBACK` in a
+  trigger. An error in a trigger reaches the client with `ORA-06512: at "TRIGGER", line N` and
+  `ORA-04088: error during execution of trigger 'TRIGGER'`; a trigger body that does not
+  compile is refused at `CREATE` (`ORA-06550`) instead of being kept invalid. Line numbers count
+  from the block's first line, as in Oracle. Compound, DDL, database event and crossedition
+  triggers are `0A000`, and a trigger does not fire itself again.
 
 Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash. Dropping
 a table or view drops its triggers, and renaming one keeps them. Not yet: temporary and
-constraint and event triggers, SQL Server DDL and logon triggers, Oracle triggers (3.16), and
-transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
+constraint and event triggers, SQL Server DDL and logon triggers, Oracle compound and event
+triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
 fire on `TRUNCATE` too.
 
 ## Functions, procedures and DO blocks

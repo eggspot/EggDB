@@ -636,7 +636,9 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   user-defined types are records of their own (catalog prefix, `0x0A`, the type's name), with
   record version 1. Both are described in [sql.md](sql.md) "How SQL is stored". Triggers are
   one record per table or view (catalog prefix, `0x0B`, the table's internal name) holding all
-  its triggers in firing order, with record version 1 (D157). Functions and procedures are one
+  its triggers in firing order, with record version 1 (D157); an Oracle trigger's action is
+  its PL/SQL block as written plus the names `REFERENCING` gives the new and old rows (action
+  code 4). Functions and procedures are one
   record per name (catalog prefix, `0x0C`, the routine's internal name) holding every overload's
   dialect, kind, identity and `CREATE` text, with record version 1 (D158); Transact-SQL
   procedures and functions are the same records with SQL Server's dialect code, one per name

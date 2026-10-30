@@ -113,7 +113,7 @@ fn row_operation(old: Option<&[Value]>, new: Option<&[Value]>) -> &'static str {
     }
 }
 
-fn returned_row(value: &Value, columns: &[OutputColumn]) -> SqlResult<Vec<Value>> {
+pub(super) fn returned_row(value: &Value, columns: &[OutputColumn]) -> SqlResult<Vec<Value>> {
     let record = match value {
         Value::Defined(defined) => match defined.as_ref() {
             DefinedValue::Record(record) => record,
@@ -200,6 +200,9 @@ pub(crate) fn run_statement_function(
     call: &StatementTriggerCall,
 ) -> SqlResult<()> {
     let trigger = &call.trigger;
+    if let TriggerAction::PlSql { .. } = &trigger.action {
+        return super::oracle::run_statement_trigger(writer, tables, settings, call);
+    }
     let _active = super::enter_active(&call.table, trigger)?;
     let _dialect = crate::constraints::enter_with_dialect(Dialect::PostgreSql);
     crate::cancel::check()?;

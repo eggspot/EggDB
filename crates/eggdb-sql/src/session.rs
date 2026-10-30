@@ -2290,6 +2290,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     crate::triggers::enable_triggers(writer, tables, enable, dialect)
                 })
             }
+            Statement::AlterTrigger(alter) => self.write("ALTER TRIGGER", |writer, tables| {
+                crate::triggers::alter_trigger(writer, tables, alter)
+            }),
             Statement::CreateRoutine(create) => {
                 let tag = match create.definition.kind {
                     crate::routines::RoutineKind::Function => "CREATE FUNCTION",
@@ -2414,6 +2417,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     | Statement::Comment(_)
                     | Statement::CreateTrigger(_)
                     | Statement::DropTrigger(_)
+                    | Statement::EnableTrigger(_)
+                    | Statement::AlterTrigger(_)
                     | Statement::CreateRoutine(_)
                     | Statement::DropRoutine(_)
                     | Statement::AlterRoutine(_)

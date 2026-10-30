@@ -30,6 +30,7 @@ const CURSOR_ALREADY_OPEN_CODE: u16 = 6511;
 const VALUE_ERROR_CODE: u16 = 6502;
 const APPLICATION_ERROR_RANGE_CODE: u16 = 21000;
 const TRANSACTION_IN_QUERY_CODE: u16 = 14552;
+const TRANSACTION_IN_TRIGGER_CODE: u16 = 4092;
 const MAX_APPLICATION_MESSAGE: usize = 2048;
 const MAX_LOCAL_ROUTINES: usize = 10_000;
 
@@ -791,6 +792,17 @@ impl Run<'_> {
                 "cannot perform a DDL, commit or rollback inside a query or DML",
             )
             .with_oracle_code(TRANSACTION_IN_QUERY_CODE));
+        }
+        if crate::triggers::trigger_depth() > 0 {
+            let verb = match end {
+                TransactionEnd::Commit => "COMMIT",
+                TransactionEnd::Rollback => "ROLLBACK",
+            };
+            return Err(SqlError::new(
+                SqlState::INVALID_TRANSACTION_TERMINATION,
+                format!("cannot {verb} in a trigger"),
+            )
+            .with_oracle_code(TRANSACTION_IN_TRIGGER_CODE));
         }
         TRANSACTION_END.with(|pending| pending.set(Some(end)));
         Ok(Flow::Next)

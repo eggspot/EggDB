@@ -18,8 +18,9 @@ pub(crate) use conditions::{condition_name, condition_states};
 pub(crate) use frame::{FrameVariable, RoutineFrame};
 pub(crate) use raise::take_raised_notices;
 pub(crate) use run::{
-    Call, OpenCursor, Returned, TransactionEnd, TriggerCall, invoke, invoke_read_only, local_program,
-    local_routines, run_anonymous_block, run_inline, take_transaction_end,
+    Call, OpenCursor, PlsqlTriggerCall, PlsqlTriggerEnd, Returned, TransactionEnd, TriggerCall,
+    invoke, invoke_read_only, local_program, local_routines, run_anonymous_block, run_inline,
+    run_plsql_trigger, take_transaction_end,
 };
 pub(crate) use writes::ReadOnlyWrite;
 

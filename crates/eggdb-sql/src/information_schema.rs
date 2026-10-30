@@ -934,7 +934,9 @@ fn trigger_statement(definition: &TriggerDefinition) -> String {
         TriggerAction::Function { name, arguments } => {
             format!("EXECUTE FUNCTION {name}({})", arguments.join(", "))
         }
-        TriggerAction::Statements(body) | TriggerAction::Batch(body) => body.clone(),
+        TriggerAction::Statements(body)
+        | TriggerAction::Batch(body)
+        | TriggerAction::PlSql { body, .. } => body.clone(),
     }
 }
 

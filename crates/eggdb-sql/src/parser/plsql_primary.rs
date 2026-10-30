@@ -77,6 +77,20 @@ impl<'t> Parser<'t> {
             };
             return Ok(Some(constant(text, position)));
         }
+        if word == "updating"
+            && let Some(updated) = frame
+                .plsql_frame()
+                .and_then(|plsql| plsql.updated_columns.as_ref())
+        {
+            self.at += 2;
+            let column = self.plsql_constant()?;
+            self.expect(&TokenKind::RightParen)?;
+            let listed = match column {
+                Value::Text(column) => updated.iter().any(|known| known.eq_ignore_ascii_case(&column)),
+                _ => false,
+            };
+            return Ok(Some(constant(Value::Boolean(listed), position)));
+        }
         if frame.index_of(word).is_some() {
             return Ok(None);
         }

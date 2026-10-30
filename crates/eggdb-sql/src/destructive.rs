@@ -199,6 +199,7 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::EnableTrigger(_)
+        | Statement::AlterTrigger(_)
         | Statement::CreateRoutine(_)
         | Statement::DropRoutine(_)
         | Statement::AlterRoutine(_)

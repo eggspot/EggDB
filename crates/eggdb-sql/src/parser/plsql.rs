@@ -390,6 +390,13 @@ impl<'t> Parser<'t> {
             crate::plsql::package_candidates(self.tokens.get(first..self.at).unwrap_or_default());
         Ok((program, self.slice(start, self.previous_end())))
     }
+
+    pub(crate) fn plsql_trigger_block(&mut self, records: &TriggerRecords) -> SqlResult<String> {
+        let start = self.position();
+        let compiled = Compiler::new(self, Some(records.clone()), false).anonymous_block();
+        compiled.map_err(|error| self.plsql_compilation_error(start, error))?;
+        Ok(self.slice(start, self.previous_end()))
+    }
 }
 
 struct Compiler<'p, 't> {
@@ -771,7 +778,7 @@ impl<'p, 't> Compiler<'p, 't> {
         if self.trigger.is_none() {
             return Vec::new();
         }
-        let mut variables = vec![Variable::value("new"), Variable::constant("old")];
+        let mut variables = vec![Variable::value("new"), Variable::value("old")];
         variables.extend(TRIGGER_PREDICATES.into_iter().map(Variable::constant));
         variables
     }

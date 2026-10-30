@@ -1,4 +1,7 @@
-use crate::ast::{CreateTrigger, DropTrigger, EnableTrigger, Name, TriggerPlacement};
+use crate::ast::{
+    AlterTrigger, AlterTriggerAction, CreateTrigger, DropTrigger, EnableTrigger, Name,
+    TriggerPlacement,
+};
 use crate::dialect::Dialect;
 use crate::encoding::{
     TableDefinition, ViewDefinition, decode_triggers, encode_triggers, prefix_end, trigger_key,
@@ -18,6 +21,7 @@ use std::sync::Arc;
 mod body;
 mod errors;
 mod functions;
+mod oracle;
 mod views;
 
 pub(crate) use body::{BodyStep, ConditionalBranch, SignalStep, StepTarget, TriggerFrame};
@@ -122,6 +126,13 @@ pub(crate) enum TriggerAction {
     Statements(String),
     Batch(String),
     Function { name: String, arguments: Vec<String> },
+    PlSql { body: String, new: String, old: String },
+}
+
+impl TriggerAction {
+    fn uses_routine_interpreter(&self) -> bool {
+        matches!(self, Self::Function { .. } | Self::PlSql { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +160,7 @@ impl TriggerDefinition {
                 Dialect::Sqlite | Dialect::MySql
             ) | (TriggerAction::Batch(_), Dialect::SqlServer)
                 | (TriggerAction::Function { .. }, Dialect::PostgreSql)
+                | (TriggerAction::PlSql { .. }, Dialect::Oracle)
         );
         let level_fits = match self.dialect {
             Dialect::SqlServer => {
@@ -158,7 +170,10 @@ impl TriggerDefinition {
             Dialect::PostgreSql => {
                 !(self.timing == TriggerTiming::InsteadOf && self.level == TriggerLevel::Statement)
             }
-            Dialect::Oracle => false,
+            Dialect::Oracle => {
+                !(self.timing == TriggerTiming::InsteadOf && self.level == TriggerLevel::Statement)
+                    && (self.condition.is_none() || self.level == TriggerLevel::Row)
+            }
         };
         let transition_tables_fit = (self.old_table.is_none() && self.new_table.is_none())
             || self.timing == TriggerTiming::After;
@@ -195,6 +210,7 @@ pub(crate) struct TableTriggers {
 #[derive(Default)]
 pub(crate) struct TriggerCache {
     entries: HashMap<String, CachedTriggers>,
+    plsql: oracle::CompiledTriggers,
 }
 
 struct CachedTriggers {
@@ -444,12 +460,15 @@ fn check_update_columns(
     definition: &TriggerDefinition,
     table: &Name,
 ) -> SqlResult<()> {
-    if definition.dialect != Dialect::PostgreSql {
+    if !matches!(definition.dialect, Dialect::PostgreSql | Dialect::Oracle) {
         return Ok(());
     }
     let columns = relation_columns(relation);
     for column in &definition.columns {
         if !columns.iter().any(|known| &known.name == column) {
+            if definition.dialect == Dialect::Oracle {
+                return Err(oracle::invalid_column(column).at(table.position));
+            }
             return Err(SqlError::new(
                 SqlState::UNDEFINED_COLUMN,
                 format!(
@@ -471,12 +490,16 @@ fn placed(
         triggers.push(definition);
         return Ok(());
     };
+    let oracle = definition.dialect == Dialect::Oracle;
     let other = triggers.iter().position(|trigger| {
         trigger.name.eq_ignore_ascii_case(&placement.other.text)
             && trigger.timing == definition.timing
-            && trigger.events == definition.events
+            && (oracle || trigger.events == definition.events)
     });
     let Some(other) = other else {
+        if oracle {
+            return Err(errors::missing_trigger(&placement.other, None, Dialect::Oracle));
+        }
         return Err(errors::missing_referenced_trigger(&placement.other.text)
             .at(placement.other.position));
     };
@@ -500,9 +523,15 @@ pub(crate) fn create_trigger(
     };
     check_target(&relation, definition, &create.table)?;
     check_update_columns(&relation, definition, &create.table)?;
-    if let TriggerAction::Function { name, .. } = &definition.action {
-        functions::check_trigger_function(&*writer, tables, name)
-            .map_err(|error| error.at(create.name.position))?;
+    match &definition.action {
+        TriggerAction::Function { name, .. } => {
+            functions::check_trigger_function(&*writer, tables, name)
+                .map_err(|error| error.at(create.name.position))?;
+        }
+        TriggerAction::PlSql { body, new, old } => {
+            oracle::check_bind_variables(body, new, old, &relation_columns(&relation))?;
+        }
+        TriggerAction::Statements(_) | TriggerAction::Batch(_) => {}
     }
     let mut result = QueryResult::command("CREATE TRIGGER");
     let mut triggers = stored(&*writer, &create.table.text)?;
@@ -517,7 +546,7 @@ pub(crate) fn create_trigger(
             return Err(errors::duplicate(&definition.name, &owner, dialect).at(create.name.position));
         }
         if owner != create.table.text {
-            if dialect == Dialect::SqlServer {
+            if matches!(dialect, Dialect::SqlServer | Dialect::Oracle) {
                 let mut other = stored(&*writer, &owner)?;
                 other
                     .triggers
@@ -642,6 +671,45 @@ pub(crate) fn enable_triggers(
     Ok(QueryResult::command(tag))
 }
 
+pub(crate) fn alter_trigger(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    alter: &AlterTrigger,
+) -> SqlResult<QueryResult> {
+    let missing = || errors::missing_trigger(&alter.name.name, None, Dialect::Oracle);
+    let found = find_by_name(
+        &*writer,
+        tables,
+        &alter.name.name,
+        alter.name.schema.as_deref(),
+        None,
+    )?;
+    let Some(found) = found else {
+        return Err(missing());
+    };
+    if let AlterTriggerAction::RenameTo(name) = &alter.action
+        && let Some(owner) = already_named(&*writer, &found.table, &name.text, Dialect::Oracle)?
+    {
+        return Err(errors::duplicate(&name.text, &owner, Dialect::Oracle).at(name.position));
+    }
+    let mut triggers = stored(&*writer, &found.table)?;
+    let Some(trigger) = triggers.triggers.get_mut(found.index) else {
+        return Err(missing());
+    };
+    match &alter.action {
+        AlterTriggerAction::Enable => trigger.enabled = true,
+        AlterTriggerAction::Disable => trigger.enabled = false,
+        AlterTriggerAction::RenameTo(name) => trigger.name = name.text.clone(),
+        AlterTriggerAction::Compile => {
+            if let TriggerAction::PlSql { body, new, old } = &trigger.action {
+                oracle::compile_body(body, new, old)?;
+            }
+        }
+    }
+    save(writer, &triggers)?;
+    Ok(QueryResult::command("ALTER TRIGGER"))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StatementTriggerCall {
     pub(crate) trigger: TriggerDefinition,
@@ -734,7 +802,7 @@ pub(crate) fn finish_nested_statement(
     drop(scope);
     let (calls, others): (Vec<_>, Vec<_>) = pending
         .into_iter()
-        .partition(|call| matches!(call.trigger.action, TriggerAction::Function { .. }));
+        .partition(|call| call.trigger.action.uses_routine_interpreter());
     queue_statement_calls(others);
     for call in &calls {
         functions::run_statement_function(writer, tables, settings, call)?;
@@ -847,6 +915,7 @@ pub(crate) enum RowOutcome {
 pub(crate) struct Firing {
     table: String,
     columns: Arc<Vec<OutputColumn>>,
+    updated: Vec<String>,
     before: Vec<TriggerDefinition>,
     after: Vec<TriggerDefinition>,
     instead: Vec<TriggerDefinition>,
@@ -904,7 +973,7 @@ impl Firing {
             .into_iter()
             .partition(|call| {
                 call.trigger.timing == TriggerTiming::Before
-                    && matches!(call.trigger.action, TriggerAction::Function { .. })
+                    && call.trigger.action.uses_routine_interpreter()
             });
         firing.calls = rest;
         if !before.is_empty() {
@@ -948,6 +1017,7 @@ impl Firing {
         let mut built = Self {
             table: table.to_owned(),
             columns: Arc::clone(&columns),
+            updated: updated.iter().map(|name| (*name).to_owned()).collect(),
             before: Vec::new(),
             after: Vec::new(),
             instead: Vec::new(),
@@ -983,6 +1053,14 @@ impl Firing {
         Ok(Some(built))
     }
 
+    fn fired_table(&self) -> body::FiredTable<'_> {
+        body::FiredTable {
+            name: &self.table,
+            columns: &self.columns,
+            updated: &self.updated,
+        }
+    }
+
     pub(crate) fn has_before(&self) -> bool {
         !self.before.is_empty() || self.replaces_writes
     }
@@ -1016,9 +1094,8 @@ impl Firing {
             let end = body::run_row_trigger(
                 writer,
                 tables,
-                &self.table,
+                &self.fired_table(),
                 trigger,
-                &self.columns,
                 old,
                 new.as_deref_mut(),
             )?;
@@ -1047,9 +1124,8 @@ impl Firing {
             let end = body::run_row_trigger(
                 writer,
                 tables,
-                &self.table,
+                &self.fired_table(),
                 trigger,
-                &self.columns,
                 old,
                 scratch.as_mut(),
             )?;
@@ -1073,9 +1149,8 @@ impl Firing {
             let end = body::run_row_trigger(
                 writer,
                 tables,
-                &self.table,
+                &self.fired_table(),
                 trigger,
-                &self.columns,
                 old,
                 scratch.as_mut(),
             )?;

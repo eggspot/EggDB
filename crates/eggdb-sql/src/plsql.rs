@@ -19,6 +19,8 @@ mod package_tests;
 mod run_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trigger_tests;
 
 pub(crate) use compiled_packages::{
     CompiledPackage, PackageCache, compiled_package, current_package_routines,
@@ -219,6 +221,16 @@ pub(crate) fn compile(definition: &RoutineDefinition) -> SqlResult<Program> {
         tokenize_in(body, Dialect::Oracle).map_err(|error| compilation_error(body, error))?;
     let trigger = is_trigger_function(definition).then(TriggerRecords::default);
     let mut program = crate::parser::plsql_program(body, &tokens, definition, trigger.as_ref())
+        .map_err(|error| compilation_error(body, error))?;
+    program.package_candidates = package_candidates(&tokens);
+    Ok(program)
+}
+
+pub(crate) fn compile_trigger(body: &str, records: &TriggerRecords) -> SqlResult<Program> {
+    let tokens =
+        tokenize_in(body, Dialect::Oracle).map_err(|error| compilation_error(body, error))?;
+    let definition = anonymous_block_definition(body);
+    let mut program = crate::parser::plsql_program(body, &tokens, &definition, Some(records))
         .map_err(|error| compilation_error(body, error))?;
     program.package_candidates = package_candidates(&tokens);
     Ok(program)

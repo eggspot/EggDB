@@ -93,6 +93,7 @@ pub(crate) enum Statement {
     CreateTrigger(Box<CreateTrigger>),
     DropTrigger(DropTrigger),
     EnableTrigger(EnableTrigger),
+    AlterTrigger(AlterTrigger),
     CreateRoutine(Box<CreateRoutine>),
     DropRoutine(DropRoutine),
     AlterRoutine(AlterRoutine),
@@ -215,6 +216,20 @@ pub(crate) struct DropTrigger {
     pub(crate) names: Vec<TriggerName>,
     pub(crate) table: Option<Name>,
     pub(crate) if_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterTrigger {
+    pub(crate) name: TriggerName,
+    pub(crate) action: AlterTriggerAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterTriggerAction {
+    Enable,
+    Disable,
+    Compile,
+    RenameTo(Name),
 }
 
 #[derive(Debug, Clone, PartialEq)]

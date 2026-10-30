@@ -148,15 +148,22 @@ fn single_value_select(expr: Expr) -> Select {
     }
 }
 
+pub(super) struct FiredTable<'f> {
+    pub(super) name: &'f str,
+    pub(super) columns: &'f Arc<Vec<OutputColumn>>,
+    pub(super) updated: &'f [String],
+}
+
 pub(super) fn run_row_trigger(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
-    table: &str,
+    fired: &FiredTable<'_>,
     trigger: &TriggerDefinition,
-    columns: &Arc<Vec<OutputColumn>>,
     old: Option<&[Value]>,
     new: Option<&mut Vec<Value>>,
 ) -> SqlResult<BodyEnd> {
+    let table = fired.name;
+    let columns = fired.columns;
     if let TriggerAction::Batch(_) = &trigger.action {
         return Err(SqlError::not_supported("row-level Transact-SQL triggers"));
     }
@@ -164,6 +171,15 @@ pub(super) fn run_row_trigger(
     let _dialect = crate::constraints::enter_with_dialect(trigger.dialect);
     crate::cancel::check()?;
     let settings = super::current_settings();
+    if let TriggerAction::PlSql { .. } = &trigger.action {
+        let row = super::functions::FiredRow {
+            table,
+            trigger,
+            columns: columns.as_slice(),
+            old,
+        };
+        return super::oracle::run_row_trigger(writer, tables, &settings, row, fired.updated, new);
+    }
     let frame = TriggerFrame {
         columns: Arc::clone(columns),
         old: old.map(<[Value]>::to_vec),

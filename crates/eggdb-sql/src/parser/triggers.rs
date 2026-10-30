@@ -35,7 +35,7 @@ fn too_many_steps(position: usize) -> SqlError {
     .at(position)
 }
 
-fn inconsistent(position: usize) -> SqlError {
+pub(super) fn inconsistent(position: usize) -> SqlError {
     SqlError::new(
         SqlState::INVALID_OBJECT_DEFINITION,
         "this combination of timing, events and FOR EACH is not a valid trigger",
@@ -172,7 +172,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn trigger_name(&mut self) -> SqlResult<(Option<String>, Name)> {
+    pub(super) fn trigger_name(&mut self) -> SqlResult<(Option<String>, Name)> {
         let first = self.name()?;
         if self.take(&TokenKind::Dot) {
             let name = self.name()?;
@@ -256,7 +256,7 @@ impl<'t> Parser<'t> {
         })))
     }
 
-    fn trigger_timing(&mut self) -> SqlResult<Option<TriggerTiming>> {
+    pub(super) fn trigger_timing(&mut self) -> SqlResult<Option<TriggerTiming>> {
         if self.take_word("before") {
             return Ok(Some(TriggerTiming::Before));
         }
@@ -270,7 +270,7 @@ impl<'t> Parser<'t> {
         Ok(None)
     }
 
-    fn trigger_event(&mut self, columns: &mut Vec<String>) -> SqlResult<TriggerEvent> {
+    pub(super) fn trigger_event(&mut self, columns: &mut Vec<String>) -> SqlResult<TriggerEvent> {
         let event = if self.take_word("insert") {
             TriggerEvent::Insert
         } else if self.take_word("update") {

@@ -15,6 +15,7 @@ const KNOWN_FLAGS: u8 = ENABLED_FLAG | CONDITION_FLAG | OLD_TABLE_FLAG | NEW_TAB
 const STATEMENTS_ACTION: u8 = 1;
 const BATCH_ACTION: u8 = 2;
 const FUNCTION_ACTION: u8 = 3;
+const PLSQL_ACTION: u8 = 4;
 const MAX_LISTED: usize = 1600;
 
 pub(crate) fn trigger_key(table: &str) -> Vec<u8> {
@@ -120,6 +121,12 @@ fn encode_trigger(out: &mut Vec<u8>, trigger: &TriggerDefinition) {
                 put_text(out, argument);
             }
         }
+        TriggerAction::PlSql { body, new, old } => {
+            out.push(PLSQL_ACTION);
+            put_text(out, body);
+            put_text(out, new);
+            put_text(out, old);
+        }
     }
     put_text(out, &trigger.text);
 }
@@ -180,6 +187,11 @@ fn decode_trigger(reader: &mut Reader<'_>) -> SqlResult<TriggerDefinition> {
             }
             TriggerAction::Function { name, arguments }
         }
+        PLSQL_ACTION => TriggerAction::PlSql {
+            body: bounded_text(reader)?,
+            new: reader.plain_name()?,
+            old: reader.plain_name()?,
+        },
         _ => return Err(reader.damaged()),
     };
     let text = bounded_text(reader)?;

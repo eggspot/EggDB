@@ -139,6 +139,11 @@ fn run_statement(
             }
             crate::triggers::drop_triggers(writer, tables, &drop, dialect)
         }
+        Statement::EnableTrigger(mut enable) => {
+            binding.names(&*writer, tables, std::slice::from_mut(&mut enable.table))?;
+            crate::triggers::enable_triggers(writer, tables, &enable, dialect)
+        }
+        Statement::AlterTrigger(alter) => crate::triggers::alter_trigger(writer, tables, &alter),
         Statement::CreateRoutine(create) => {
             let check = routines::BodyCheck::of_setting(
                 settings.get("check_function_bodies").ok().as_deref(),

@@ -8,6 +8,7 @@ mod plpgsql;
 mod plsql;
 mod plsql_primary;
 mod plsql_routines;
+mod plsql_triggers;
 mod postgresql;
 mod query;
 mod routines;

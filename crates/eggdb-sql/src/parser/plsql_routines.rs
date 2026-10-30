@@ -6,6 +6,7 @@ use crate::ast::{
 use crate::error::SqlResult;
 use crate::lexer::TokenKind;
 use crate::routines::{RoutineKind, RoutineLanguage};
+use crate::triggers::TriggerAction;
 
 const EDITIONING: [&str; 2] = ["editionable", "noneditionable"];
 
@@ -13,6 +14,9 @@ fn is_plsql_unit(statement: &Statement) -> bool {
     match statement {
         Statement::PlsqlBlock(_) | Statement::CreatePackage(_) => true,
         Statement::CreateRoutine(create) => create.definition.language == RoutineLanguage::PlSql,
+        Statement::CreateTrigger(create) => {
+            matches!(create.definition.action, TriggerAction::PlSql { .. })
+        }
         _ => false,
     }
 }
@@ -30,6 +34,9 @@ impl<'t> Parser<'t> {
             "create" => self.plsql_create(),
             "drop" if self.names_plsql_kind_at(1) => self.plsql_drop().map(Some),
             "alter" if self.names_plsql_kind_at(1) => self.plsql_alter().map(Some),
+            "drop" if self.is_word_at(1, "trigger") => self.plsql_drop_trigger().map(Some),
+            "alter" if self.is_word_at(1, "trigger") => self.plsql_alter_trigger().map(Some),
+            "alter" if self.alters_all_triggers() => self.plsql_enable_all_triggers().map(Some),
             "call" => self.call_routine().map(Some),
             _ => Ok(None),
         }
@@ -59,7 +66,7 @@ impl<'t> Parser<'t> {
             || self.is_word_at(ahead, "package")
     }
 
-    fn take_editioning(&mut self) -> bool {
+    pub(super) fn take_editioning(&mut self) -> bool {
         EDITIONING.iter().any(|word| self.take_word(word))
     }
 
@@ -96,6 +103,9 @@ impl<'t> Parser<'t> {
                 definition,
                 body_position: Some(body_position),
             }))));
+        }
+        if self.is_word("trigger") {
+            return self.plsql_create_trigger(start, replace).map(Some);
         }
         if self.is_word("package") {
             let package = self.plsql_package(None)?;
@@ -193,7 +203,7 @@ impl<'t> Parser<'t> {
         Ok(part)
     }
 
-    fn plsql_compiler_settings(&mut self) -> SqlResult<()> {
+    pub(super) fn plsql_compiler_settings(&mut self) -> SqlResult<()> {
         while matches!(self.peek_kind(), TokenKind::Word(_))
             && matches!(self.peek_kind_at(1), TokenKind::Operator(symbol) if *symbol == "=")
         {

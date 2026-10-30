@@ -860,7 +860,7 @@ fn collation_of(table: &TableDefinition, column: usize) -> Value {
 fn trigger_function_oid(snapshot: &CatalogSnapshot, definition: &TriggerDefinition) -> u32 {
     match &definition.action {
         TriggerAction::Function { name, .. } => snapshot.trigger_function_oid(name),
-        TriggerAction::Statements(_) | TriggerAction::Batch(_) => 0,
+        TriggerAction::Statements(_) | TriggerAction::Batch(_) | TriggerAction::PlSql { .. } => 0,
     }
 }
 
@@ -890,7 +890,9 @@ fn trigger_type(definition: &TriggerDefinition) -> i64 {
 fn trigger_arguments(definition: &TriggerDefinition) -> Vec<String> {
     match &definition.action {
         TriggerAction::Function { arguments, .. } => arguments.clone(),
-        TriggerAction::Statements(_) | TriggerAction::Batch(_) => Vec::new(),
+        TriggerAction::Statements(_) | TriggerAction::Batch(_) | TriggerAction::PlSql { .. } => {
+            Vec::new()
+        }
     }
 }
 

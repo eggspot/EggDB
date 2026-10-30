@@ -15,6 +15,10 @@ fn sqlite(message: String) -> SqlError {
     SqlError::new(SqlState::INVALID_OBJECT_DEFINITION, message).with_sqlite_code(1)
 }
 
+fn oracle_trigger_name(name: &str) -> String {
+    crate::plsql::shown_object(base_name(name))
+}
+
 pub(super) fn missing_table(table: &Name, dialect: Dialect) -> SqlError {
     let shown = base_name(&table.text);
     match dialect {
@@ -76,6 +80,11 @@ pub(super) fn view_needs_instead_of(table: &str, timing: TriggerTiming, dialect:
                 "AFTER"
             }
         )),
+        Dialect::Oracle => SqlError::new(
+            SqlState::WRONG_OBJECT_TYPE,
+            "cannot create this trigger type on this type of view",
+        )
+        .with_oracle_code(25001),
         _ => SqlError::new(SqlState::WRONG_OBJECT_TYPE, format!("\"{shown}\" is a view"))
             .with_detail("Views cannot have row-level BEFORE or AFTER triggers."),
     }
@@ -85,6 +94,11 @@ pub(super) fn table_cannot_be_instead_of(table: &str, dialect: Dialect) -> SqlEr
     let shown = base_name(table);
     match dialect {
         Dialect::Sqlite => sqlite(format!("cannot create INSTEAD OF trigger on table: {shown}")),
+        Dialect::Oracle => SqlError::new(
+            SqlState::WRONG_OBJECT_TYPE,
+            "cannot create INSTEAD OF triggers on tables",
+        )
+        .with_oracle_code(25002),
         _ => SqlError::new(SqlState::WRONG_OBJECT_TYPE, format!("\"{shown}\" is a table"))
             .with_detail("Tables cannot have INSTEAD OF triggers."),
     }
@@ -106,7 +120,12 @@ pub(super) fn duplicate(name: &str, table: &str, dialect: Dialect) -> SqlError {
             format!("There is already an object named '{name}' in the database."),
         )
         .with_sqlserver_code(2714),
-        Dialect::PostgreSql | Dialect::Oracle => SqlError::new(
+        Dialect::Oracle => SqlError::new(
+            SqlState::DUPLICATE_OBJECT,
+            format!("trigger '{}' already exists", oracle_trigger_name(name)),
+        )
+        .with_oracle_code(4081),
+        Dialect::PostgreSql => SqlError::new(
             SqlState::DUPLICATE_OBJECT,
             format!(
                 "trigger \"{name}\" for relation \"{}\" already exists",
@@ -144,7 +163,12 @@ pub(super) fn missing_trigger(name: &Name, table: Option<&Name>, dialect: Dialec
             ),
         )
         .with_sqlserver_code(3701),
-        Dialect::PostgreSql | Dialect::Oracle => SqlError::new(
+        Dialect::Oracle => SqlError::new(
+            SqlState::UNDEFINED_OBJECT,
+            format!("trigger '{}' does not exist", oracle_trigger_name(shown)),
+        )
+        .with_oracle_code(4080),
+        Dialect::PostgreSql => SqlError::new(
             SqlState::UNDEFINED_OBJECT,
             format!(
                 "trigger \"{shown}\" for table \"{}\" does not exist",
