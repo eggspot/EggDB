@@ -9,14 +9,6 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 const DATABASE: &str = include_str!("time_zones/tzdata.zi");
 const LONGEST_NAME: usize = 64;
 
-pub(crate) fn database_version() -> &'static str {
-    DATABASE
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("# version "))
-        .map_or("", |version| version.split('-').next().unwrap_or(version))
-}
-
 fn source() -> &'static Source {
     static SOURCE: OnceLock<Source> = OnceLock::new();
     SOURCE.get_or_init(|| Source::read(DATABASE))
@@ -225,9 +217,17 @@ mod tests {
         TimeZone::named(name).unwrap_or_else(|| panic!("{name} is in the database"))
     }
 
+    fn database_version() -> &'static str {
+        super::DATABASE
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("# version "))
+            .map_or("", |version| version.split('-').next().unwrap_or(version))
+    }
+
     #[test]
     fn the_database_is_the_one_the_docs_name() {
-        assert_eq!(super::database_version(), "2026e");
+        assert_eq!(database_version(), "2026e");
         assert!(super::region_names().len() > 500);
     }
 

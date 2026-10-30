@@ -143,7 +143,9 @@ What it reads, on top of the statements of "What runs today":
   (stored in UTC, shown in the session's time zone without an offset, as MySQL shows it; `fsp`
   defaults to 0), `JSON` is `jsonb` (MySQL also sorts keys by length and keeps the last
   duplicate), `CHAR(n)` and `VARCHAR(n)` are `varchar(n)`, the `TEXT` family is `text`,
-  `TIME(fsp)` is `time(fsp)` (with `TIME '...'` literals; `fsp` defaults to 0), and `BLOB`,
+  `TIME(fsp)` is `time(fsp)` (with `TIME '...'` literals; `fsp` defaults to 0) holding MySQL's
+  range, `-838:59:59` to `838:59:59`, read in MySQL's forms (`'100:00:00'`, `'-01:30'`, `'2
+  03:04:05'` with days, `'123456'`) and printed as MySQL prints it (D153), and `BLOB`,
   `TINYBLOB`, `MEDIUMBLOB`, `LONGBLOB`, `BINARY(n)` and `VARBINARY(n)` are `bytea` (D113);
   `YEAR` and `ENUM` answer error 1235. A value out of a `DECIMAL`'s range is error 1264
   and a malformed or impossible date error 1292. On the wire, `DECIMAL` columns are
@@ -206,8 +208,12 @@ What it reads, on top of the statements of "What runs today":
   (`double precision`), no type at all text; the rest (`NUMERIC` affinity) is a real, except
   `BOOLEAN` (an integer) and names containing `DATE` or `TIME` (text, as SQLite's date
   functions keep them: `DATE`, `DATETIME` and `TIMESTAMP` columns hold ISO 8601 text, as an
-  SQLite application writes it). `DECIMAL(p,s)` is a real, by the same rule. `BLOB` columns
-  wait for the blob type.
+  SQLite application writes it). `DECIMAL(p,s)` is a real, by the same rule. A column declared
+  `BLOB` holds every storage class as it is given, row by row (an integer, a real, text or a
+  blob, D153): `typeof()` tells which, `quote()` writes a blob as `X'0A0B'`, `length()` counts a
+  blob's bytes, and values of different classes compare and sort as SQLite orders them (numbers,
+  then text, then blobs). Blob literals are `x'0A0B'` (an even number of hexadecimal digits;
+  anything else is `unrecognized token`).
 - **Row ids**: a column declared exactly `INTEGER PRIMARY KEY` (on the column or as the table's
   one-column key) is the row id: a NULL or missing value takes one more than the largest in
   the table; `AUTOINCREMENT` is accepted on it (and refused elsewhere, as in SQLite);
@@ -344,8 +350,9 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   date (`ORA-01835`). The String-to-Date Conversion Rules (blanks ignored, punctuation left out
   or swapped, trailing time and zone fields left out, `MM`→`MON`→`MONTH`, `YY`→`YYYY`,
   `RR`→`RRRR`) and `FX`'s exact matching; `RR`'s century rule; years 4713 BC to 9999 AD. Zones
-  read as `TZH:TZM` or a `TZR` offset (`-08:00`) or `UTC`/`GMT` (another region is
-  `ORA-01882`); a value without one takes the session's time zone. The `nlsparam` accepts
+  read as `TZH:TZM`, a `TZR` offset (`-08:00`), `UTC`/`GMT` or a region of the time zone
+  database (`US/Pacific`, with its daylight saving time, D153; an unknown one is `ORA-01882`); a
+  value without one takes the session's time zone. The `nlsparam` accepts
   `NLS_DATE_LANGUAGE = American`.
 - **Number format models** (D126, D149): `TO_CHAR(n, fmt)` and `TO_NUMBER(char, fmt
   [, nlsparam])` with `9`, `0`, `.`, `D`, `,`, `G`, `$`, `L`, `C`, `U`, `B`, `S` (leading or
@@ -357,8 +364,9 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
 - **Session settings** (D126): `ALTER SESSION SET` `NLS_DATE_FORMAT`, `NLS_TIMESTAMP_FORMAT`,
   `NLS_TIMESTAMP_TZ_FORMAT`, `NLS_LANGUAGE`/`NLS_DATE_LANGUAGE` (American),
   `NLS_TERRITORY` (America, which resets the formats it implies), `NLS_NUMERIC_CHARACTERS='.,'`,
-  `NLS_SORT=BINARY`, `NLS_COMP=BINARY`, `TIME_ZONE` (an offset such as `'-08:00'`, `'UTC'`,
-  `LOCAL` or `DBTIMEZONE`, both `+00:00`, as the session's `TimeZone`; `SESSIONTIMEZONE` and
+  `NLS_SORT=BINARY`, `NLS_COMP=BINARY`, `TIME_ZONE` (an offset such as `'-08:00'`, `'UTC'`, a
+  region such as `'Europe/Paris'`, `LOCAL` or `DBTIMEZONE`, both `+00:00`, as the session's
+  `TimeZone`; `FROM_TZ` and `TZ_OFFSET` take regions too; `SESSIONTIMEZONE` and
   `DBTIMEZONE` show them, D149) and `CURRENT_SCHEMA` (as `search_path`; the Oracle
   dialect has no `CREATE SCHEMA` or `CREATE USER`, so it reaches schemas made in another dialect
   or by a restore, and `EGGDB.T`, the session user's own table, keeps naming it; `HR.T` names
@@ -1382,10 +1390,21 @@ types, and comparisons across them, use the session's time zone where one side h
 precision`) with `year`, `month`, `day`, `hour`, `minute`, `second`, `milliseconds`,
 `microseconds`, `dow`, `isodow`, `doy`, `week`, `isoyear`, `quarter`, `decade`, `century`,
 `millennium`, `julian`, `epoch` and the `timezone` fields; `date_trunc('field', value)` from
-`microseconds` to `millennium`. `TimeZone` takes `UTC` (and its aliases such as `Etc/UTC`) and
+`microseconds` to `millennium`. `TimeZone` takes `UTC` (and its aliases such as `Etc/UTC`),
 fixed offsets written as POSIX does (`UTC+3`, `EST5`, `+05:30`: the sign means west of
-Greenwich, as in PostgreSQL); a named region such as `Europe/Rome` is remembered and shown but
-acts as UTC until the time zone database comes (D111).
+Greenwich, as in PostgreSQL), a plain number of hours east (`SET TIME ZONE -7`), and every region
+and alias of the IANA time zone database in any letter case (`Europe/Paris`, `us/eastern`,
+`Asia/Kolkata`; shown as the database spells it), and refuses anything else with `22023` (D153).
+A region's offset follows its daylight saving time and its history (`1900-01-01 00:00:00+00:09:21`
+in Paris): `timestamptz` values print with the offset in force at that instant, a local time
+that a spring-forward gap skips takes the offset from before the change (`2026-03-29 02:30` in
+Paris is `03:30:00+02`) and one that a fall-back change repeats the offset from after it, as
+PostgreSQL documents; `timestamptz ± interval` adds months and days on the local calendar and
+the time part as elapsed time (`+ '1 day'` keeps the clock time across a change, `+ '24
+hours'` does not). Input may name a region (`2026-07-01 12:00:00 Europe/Paris`), and
+`pg_timezone_names` lists every region with its abbreviation, offset and daylight saving flag
+now. The database is IANA's 2026e release, compiled from its public-domain source when a region
+is first named.
 
 `time` reads `04:05:06.789`, `04:05 PM` and the time of a date-time string, and `timetz` the
 same with an offset (`04:05:06+02`; without one, the session's); both print in the ISO style,
@@ -1411,9 +1430,9 @@ or a time work. `make_date` (a negative year is BC), `make_time`, `make_timestam
 `make_timestamptz`, `make_interval` (also with PostgreSQL's named arguments, `make_interval(days
 => 10)`), `date_bin`, `isfinite` and `value AT TIME ZONE zone` (a `timestamp` read in the zone
 becomes a `timestamptz`, a `timestamptz` becomes the zone's local `timestamp`, a `time` or
-`timetz` becomes a `timetz`; the zone is `UTC`, a fixed offset written as POSIX does, or an
-`interval`) work as in PostgreSQL; a named region (`Europe/Rome`) is `22023` until the time zone
-database comes. `to_char` takes PostgreSQL's template patterns for dates, time stamps and
+`timetz` becomes a `timetz`; the zone is `UTC`, a fixed offset written as POSIX does, a region
+such as `America/New_York`, or an `interval`) work as in PostgreSQL; an unknown zone is `22023`.
+`to_char` takes PostgreSQL's template patterns for dates, time stamps and
 intervals (`YYYY`, `MM`, `Month`, `Mon`, `DD`, `Day`, `HH24`, `MI`, `SS`, `MS`, `US`, `AM`,
 `IYYY`, `IW`, `J`, `Q`, `RM`, `TZ`, `OF`, `FM`, `TH` and the rest, with quoted text) and numbers
 (`9`, `0`, `.`, `,`, `D`, `G`, `S`, `MI`, `PL`, `SG`, `PR`, `RN`, `TH`, `V`, `EEEE`, `FM`);
@@ -1941,8 +1960,8 @@ same fixture, and requires the same bytes; `scripts/pg-catalog/check.sh` does th
 relation X (`pg_catalog` is searched first unless `search_path` lists it after another schema):
 `pg_class`, `pg_attribute`, `pg_type`, `pg_namespace`, `pg_index`, `pg_constraint`,
 `pg_attrdef`, `pg_description`, `pg_database`, `pg_roles`, `pg_am`, `pg_collation`,
-`pg_sequence`, `pg_depend`, `pg_tablespace` and `pg_settings` (the session's settings, one row
-each), and the empty `pg_inherits`, `pg_policy`, `pg_statistic_ext`, `pg_publication`,
+`pg_sequence`, `pg_depend`, `pg_tablespace`, `pg_settings` (the session's settings, one row
+each) and `pg_timezone_names` (every region of the time zone database, D153), and the empty `pg_inherits`, `pg_policy`, `pg_statistic_ext`, `pg_publication`,
 `pg_publication_rel`, `pg_publication_namespace`, `pg_trigger`, `pg_rewrite`,
 `pg_auth_members`, `pg_opclass`, `pg_enum` and `pg_range`, and `pg_proc` with the array
 functions `array_in`, `array_out`, `array_recv` and `array_send` (D135), each with PostgreSQL
@@ -2364,8 +2383,10 @@ checks the PostgreSQL manual's documented behaviour; the two cases it marks as d
   would need more than 2,000 digits, is computed in double precision (15 significant digits).
 - `date` and time stamps take ISO 8601 and PostgreSQL's ISO style only: `infinity`, `epoch`,
   `now`, `today`, month names (`Feb 29 2024`) and `MDY`/`DMY` forms (`02/29/2024`) answer
-  `22007`, and so do `allballs`, `noon` and the other special `time` inputs. Named time zones
-  act as UTC (above), and `AT TIME ZONE` refuses them (`22023`). `now()` is the statement's
+  `22007`, and so do `allballs`, `noon` and the other special `time` inputs. Input reads a
+  region's name but not a time zone abbreviation (`PST`, `CEST`: `22007`), `TimeZone` takes no
+  POSIX rule strings (`EST5EDT,M3.2.0,M11.1.0`: `22023`), and `pg_timezone_abbrevs` is missing;
+  a `timetz` of a region takes the offset in force at the statement's start. `now()` is the statement's
   start time, where PostgreSQL's is the transaction's. `date_trunc` of an interval is missing.
   `to_char` writes `TZ` as `UTC` or the offset, `L` as a space and day and month names in
   English (the `C` locale's); `to_date` and `to_timestamp` ignore the day of the week and `Q`
@@ -2381,9 +2402,12 @@ checks the PostgreSQL manual's documented behaviour; the two cases it marks as d
 - `to_json`, `to_jsonb` and `json_build_*` take a whole row only as a `FROM` item's name;
   `jsonb_path_query` and the rest of SQL/JSON path, `json_populate_record`, `json_to_record`,
   `json_object(text[])` and `JSON_TABLE` are missing.
-- `interval` (D113): only the `postgres` `IntervalStyle` is printed; PostgreSQL 17's
-  `infinity` intervals are not supported, so `interval * 'Infinity'` and a NaN factor fail with
-  `22008`; text input longer than 4,096 bytes fails with `22007`. `DISTINCT`, `min` and `max` of
+- `interval` (D113): only the `postgres` `IntervalStyle` is printed. PostgreSQL 17's `infinity`
+  and `-infinity` intervals read, print, compare, add, multiply, divide, `justify`, and give
+  `isfinite` false and `date_part` an infinite double as PostgreSQL's do (D153), but a time stamp
+  plus an infinite interval fails with `22008` where PostgreSQL gives an infinite time stamp
+  (EggDB has none yet), and `extract` of a field that grows with the interval fails with `0A000`
+  (a `numeric` holds no infinity yet); a NaN factor fails with `22008` as in PostgreSQL; text input longer than 4,096 bytes fails with `22007`. `DISTINCT`, `min` and `max` of
   intervals that are equal but written differently (`'1 mon'`, `'30 days'`) return the first one
   read, which PostgreSQL leaves unspecified too. `time` and `timetz` cannot be compared with each
   other (`42883`), and `timetz` has no time zone functions yet.
@@ -2490,8 +2514,9 @@ Reference Manual's documented behaviour) marks these as differing until they are
 - `1 / 0` is error 1365 where MySQL's `SELECT` gives `NULL` with a warning.
 - Text compares byte by byte (`'a' = 'A'` is false) where `utf8mb4_0900_ai_ci` ignores case and
   accents; collations come with D30.
-- `TIME` holds PostgreSQL's range, `00:00:00` to `24:00:00`: MySQL's negative times and times
-  past a day (up to `838:59:59`, D113) fail with an error.
+- A `TIME` outside `-838:59:59` to `838:59:59` is an error (`22008`) where MySQL's non-strict
+  modes clip it with a warning, and `HOUR()`, `TIME_TO_SEC()` and the other `TIME` functions are
+  missing.
 
 And more, not in the suite yet:
 - Comparisons and `IS` tests are booleans, shown as `1` and `0`, but arithmetic on them (`TRUE +
@@ -2512,14 +2537,16 @@ And more, not in the suite yet:
   (`0x616263`); the wire carries its bytes (D113).
 - `UPDATE` reports rows matched, as with `CLIENT_FOUND_ROWS`, not rows changed.
 - `BIGINT UNSIGNED` is refused; `UNSIGNED` columns accept negative values.
-- `SET` remembers session variables without applying them (`sql_mode`, `time_zone`,
+- `SET` remembers session variables without applying them (`sql_mode`,
   `transaction_isolation`: every transaction is serializable); `SET GLOBAL` is refused.
+  `time_zone` is applied: `SYSTEM` (UTC), an offset such as `'+05:30'` or a named zone such as
+  `'Europe/Paris'` from the built-in time zone database (no `mysql.time_zone` tables to load);
+  another value is error 1298.
 - `DESCRIBE` shows the engine's types (`smallint` for `TINYINT`).
 - Dates and times: `DATE` and `DATETIME` take years 4714 BC to 5874897 (MySQL: 1000 to 9999),
   zero dates (`0000-00-00`) are refused, a `DATETIME(fsp)` prints without trailing zeros in its
-  fraction, `TIME`, `YEAR`, `DATE_FORMAT`, `STR_TO_DATE`, `DATE_ADD`, `UNIX_TIMESTAMP` and
-  `ON UPDATE CURRENT_TIMESTAMP` are not supported yet, and `time_zone` is not applied (the
-  session's time zone is UTC unless the PostgreSQL protocol's `TimeZone` sets it).
+  fraction, `YEAR`, `DATE_FORMAT`, `STR_TO_DATE`, `DATE_ADD`, `UNIX_TIMESTAMP` and
+  `ON UPDATE CURRENT_TIMESTAMP` are not supported yet.
 - A value rounded to fit a `DECIMAL(p,s)`'s scale gives no note 1265.
 - `EXTRACT` gives integers and accepts no `WEEK` mode but 0; `EXTRACT` of a negative compound
   value and of years before 1000 are not checked against MySQL.
@@ -2543,18 +2570,18 @@ fixed:
   on expressions answer an error; `ON CONFLICT (columns) DO ...` applies to a conflict on any
   unique key, not only the one named; `sqlite_schema.sql` of an index is regenerated from the
   catalog.
-- A column has one type: the affinity's. SQLite's columns may hold any storage class, so a
-  `NUMERIC` column given `7` keeps the integer `7` where EggDB keeps the real `7.0`, and an
-  `INTEGER` column given `'abc'` keeps the text where EggDB answers `datatype mismatch`.
-- A column declared `BLOB` is refused (`0A000`) where SQLite stores blobs: EggDB's `bytea` type
-  would refuse the other storage classes a SQLite column accepts (D113).
+- A column of `INTEGER`, `TEXT`, `REAL` or `NUMERIC` affinity has one type: the affinity's.
+  SQLite's columns may hold any storage class, so a `NUMERIC` column given `7` keeps the integer
+  `7` where EggDB keeps the real `7.0`, and an `INTEGER` column given `'abc'` keeps the text
+  where EggDB answers `datatype mismatch`. Only `BLOB` columns hold every class (D153), and
+  they cannot be in a key or an index yet (`0A000`).
 - Dates and times: `date()`, `time()`, `datetime()`, `julianday()`, `strftime()`,
   `unixepoch()` and `CURRENT_TIMESTAMP` are not supported yet; `DATE` and `DATETIME` columns
   keep their text, as SQLite's do.
 
 And more, not in the suite yet:
 - Columns without a declared type are text, so `typeof()` says `text` for numbers stored
-  there; `BLOB` columns and `x'...'` literals wait for columns that hold any storage class. A real given to an
+  there, where SQLite gives them `BLOB` affinity as a `BLOB` column has. A real given to an
   `INTEGER` column is rounded where SQLite keeps it as a real, and `CAST('abc' AS INTEGER)` is
   an error where SQLite gives 0.
 - Names fold to lower case: result columns and `PRAGMA table_info` show `id` for a column
