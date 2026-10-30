@@ -6,6 +6,8 @@ mod statements;
 mod writes;
 
 #[cfg(test)]
+mod manual_tests;
+#[cfg(test)]
 mod run_tests;
 #[cfg(test)]
 mod tests;

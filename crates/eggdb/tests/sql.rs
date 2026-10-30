@@ -274,6 +274,66 @@ fn a_killed_process_keeps_a_triggers_changes_with_its_statement() {
 }
 
 #[test]
+fn a_killed_process_keeps_a_procedures_writes_with_its_call() {
+    let mut setup = String::from(
+        "CREATE TABLE accounts (id integer PRIMARY KEY, balance integer);
+         CREATE TABLE ledger (account integer, amount integer);
+         CREATE PROCEDURE deposit(account integer, amount integer) LANGUAGE plpgsql AS $$
+         BEGIN
+           UPDATE accounts SET balance = balance + amount WHERE id = account;
+           INSERT INTO ledger VALUES (account, amount);
+         END $$;",
+    );
+    for id in 0..13 {
+        setup.push_str(&format!("INSERT INTO accounts VALUES ({id}, 0);"));
+    }
+    let mut script = String::new();
+    for call in 0..3_000 {
+        if call % 5 == 0 {
+            script.push_str(&format!("DO $$BEGIN CALL deposit({}, 1); END$$;\n", call % 13));
+        } else {
+            script.push_str(&format!("CALL deposit({}, 1);\n", call % 13));
+        }
+    }
+    for delay_ms in [0u64, 50, 150, 400] {
+        let file = TempPath::new("sql-procedure-killed");
+        Database::open(file.path()).unwrap().close().unwrap();
+        let prepared = eggdb_sql(file.path(), &["-c", &setup], b"");
+        assert_eq!(prepared.status.code(), Some(0), "{}", text(&prepared.stderr));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .arg("sql")
+            .arg(file.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let bytes = script.clone().into_bytes();
+        let writer = std::thread::spawn(move || {
+            let _ = input.write_all(&bytes);
+        });
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        let total = |query: &str| {
+            let output = eggdb_sql(file.path(), &["-c", query], b"");
+            assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+            text(&output.stdout)
+        };
+        assert_eq!(
+            total("SELECT sum(balance)::bigint AS total FROM accounts"),
+            total("SELECT count(*) AS total FROM ledger"),
+            "after {delay_ms} ms"
+        );
+        let db = Database::open(file.path()).unwrap();
+        assert_eq!(db.check().unwrap().leaked_pages, 0);
+        db.close().unwrap();
+    }
+}
+
+#[test]
 fn a_killed_process_never_leaves_an_index_that_disagrees_with_its_rows() {
     let mut script = String::from(
         "CREATE TABLE items (id bigint PRIMARY KEY, code text UNIQUE, grp integer);\nCREATE INDEX items_grp ON items (grp);\n",

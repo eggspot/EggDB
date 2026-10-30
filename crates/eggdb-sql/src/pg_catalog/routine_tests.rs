@@ -236,3 +236,23 @@ fn triggers_name_their_function_and_routines_know_their_oid() {
         ["t"]
     );
 }
+
+#[test]
+fn routine_catalog_functions_answer_null_for_unknown_objects() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    with_routines(&mut session);
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT pg_get_functiondef(0) IS NULL, pg_get_function_arguments(4294967295) IS NULL, \
+             pg_get_function_result(NULL) IS NULL, pg_function_is_visible(1259) IS NULL, \
+             pg_get_function_result(2401), pg_get_function_arguments(2401)"
+        ),
+        ["t|t|t|t|bytea|anyarray"]
+    );
+    match run(&mut session, "SELECT 'nothing_here'::regproc") {
+        Ok(outputs) => panic!("an unknown function resolved: {outputs:?}"),
+        Err(error) => assert_eq!(error.state(), crate::error::SqlState::UNDEFINED_FUNCTION),
+    }
+}
