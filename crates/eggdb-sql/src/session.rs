@@ -790,8 +790,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     /// Checks `text` as the text of a prepared statement: at most one statement, valid
-    /// syntax, and `$n` placeholders numbered 1 to 65535. Nothing runs and the catalog is not
-    /// read. `declared_types` are the parameter types the client gave.
+    /// syntax, and `$n` placeholders numbered 1 to 65535. Nothing runs, and the catalog is read
+    /// only for the definitions of the user-defined types the text names. `declared_types` are
+    /// the parameter types the client gave.
     pub fn prepare(
         &mut self,
         text: &str,
