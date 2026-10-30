@@ -11,8 +11,8 @@
 //! with `WHERE`, inner, left, right, full and cross joins, subqueries, `WITH` queries and set
 //! operations, `GROUP BY` with `count`, `sum`, `avg`, `min` and
 //! `max`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`, `UPDATE`, `DELETE`,
-//! transaction blocks, `COPY ... FROM STDIN` and `COPY ... TO STDOUT` in the text and CSV
-//! formats, and the integer, floating-point, exact `numeric`, boolean, text,
+//! transaction blocks, `COPY ... FROM STDIN` and `COPY ... TO STDOUT` in the text, CSV and
+//! binary formats, and the integer, floating-point, exact `numeric`, boolean, text,
 //! `character(n)`, `bytea`, `uuid`, `date`, `time`, `timetz`, `timestamp`, `timestamptz`,
 //! `interval`, `json` and `jsonb` types. Everything
 //! else answers SQLSTATE `0A000` (feature not supported). The guide is `docs/sql.md` in the
@@ -66,6 +66,7 @@ mod oracle_nls;
 mod oracle_number_model;
 mod oracle_numerals;
 mod parser;
+mod pg_binary;
 mod pg_catalog;
 mod pg_format;
 mod pg_keywords;
@@ -179,6 +180,7 @@ pub use numeric::Numeric;
 pub use parser::{
     ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION, SQLSERVER_COMPATIBLE_VERSION,
 };
+pub use pg_binary::{decode_pg_binary_text, encode_pg_binary};
 pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
 pub use random::{RandomSource, set_random_source};
 pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation};

@@ -1,9 +1,7 @@
 //! PostgreSQL's type OIDs for EggDB's SQL types, and values in their text and binary forms.
 
 use crate::messages::{ColumnDescription, Format};
-use eggdb_sql::{
-    ArrayElement, ArrayValue, Interval, OutputColumn, SqlError, SqlState, SqlType, TimeZone, Value,
-};
+use eggdb_sql::{ArrayElement, OutputColumn, SqlError, SqlState, SqlType, TimeZone, Value};
 
 /// `bool`.
 pub const BOOL_OID: u32 = 16;
@@ -114,14 +112,6 @@ const ARRAY_OIDS: [u32; 16] = [
     22,
     30,
 ];
-
-const MICROS_PER_DAY: i64 = 86_400_000_000;
-const MAX_OFFSET: i32 = 15 * 3600 + 59 * 60 + 59;
-const NUMERIC_POSITIVE: u16 = 0x0000;
-const NUMERIC_NEGATIVE: u16 = 0x4000;
-const NUMERIC_NAN: u16 = 0xC000;
-const MAX_NUMERIC_GROUPS: usize = 1000;
-const JSONB_VERSION: u8 = 1;
 
 /// The type OID PostgreSQL gives `sql_type`.
 pub fn oid_of(sql_type: SqlType) -> u32 {
@@ -236,16 +226,6 @@ pub fn format_at(formats: &[Format], index: usize) -> Format {
     }
 }
 
-fn cannot_send(value: &Value, oid: u32) -> SqlError {
-    SqlError::new(
-        SqlState::INTERNAL_ERROR,
-        format!(
-            "cannot send a {} value as type OID {oid}",
-            value.sql_type().map_or("NULL".to_owned(), SqlType::name)
-        ),
-    )
-}
-
 /// The bytes of `value` in a `DataRow`, for a column described with `oid` in `format`, with a
 /// `timestamp with time zone` shown in `zone`; `None` for NULL.
 pub fn encode_value(
@@ -254,266 +234,10 @@ pub fn encode_value(
     format: Format,
     zone: TimeZone,
 ) -> Result<Option<Vec<u8>>, SqlError> {
-    if format == Format::Binary && ARRAY_OIDS.contains(&oid) {
-        return match value {
-            Value::Null => Ok(None),
-            Value::Array(array) => array_binary(array, zone).map(Some),
-            _ => Err(cannot_send(value, oid)),
-        };
+    match format {
+        Format::Binary => eggdb_sql::encode_pg_binary(value, oid, zone),
+        Format::Text => Ok(value.to_text_in(zone).map(String::into_bytes)),
     }
-    let Some(text) = value.to_text_in(zone) else {
-        return Ok(None);
-    };
-    if format == Format::Text {
-        return Ok(Some(text.into_bytes()));
-    }
-    let bytes = match oid {
-        oid if IDENTIFIER_OIDS.contains(&oid) => match value {
-            Value::Oid(number) => number.to_be_bytes().to_vec(),
-            Value::Reg(reg) => reg.oid.to_be_bytes().to_vec(),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        BOOL_OID => match value {
-            Value::Boolean(flag) => vec![u8::from(*flag)],
-            _ => return Err(cannot_send(value, oid)),
-        },
-        INT2_OID | INT4_OID | INT8_OID => {
-            let number = match value {
-                Value::SmallInt(number) => i64::from(*number),
-                Value::Integer(number) => i64::from(*number),
-                Value::BigInt(number) => *number,
-                _ => return Err(cannot_send(value, oid)),
-            };
-            match oid {
-                INT2_OID => i16::try_from(number)
-                    .map_err(|_| cannot_send(value, oid))?
-                    .to_be_bytes()
-                    .to_vec(),
-                INT4_OID => i32::try_from(number)
-                    .map_err(|_| cannot_send(value, oid))?
-                    .to_be_bytes()
-                    .to_vec(),
-                _ => number.to_be_bytes().to_vec(),
-            }
-        }
-        FLOAT4_OID => match value {
-            Value::Real(number) => number.to_bits().to_be_bytes().to_vec(),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        FLOAT8_OID => match value {
-            Value::Real(number) => f64::from(*number).to_bits().to_be_bytes().to_vec(),
-            Value::Double(number) => number.to_bits().to_be_bytes().to_vec(),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        NUMERIC_OID => match value {
-            Value::Numeric(_) => numeric_binary(&text),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        DATE_OID => match value {
-            Value::Date(days) => days.to_be_bytes().to_vec(),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        TIMESTAMP_OID | TIMESTAMPTZ_OID => match value {
-            Value::Timestamp(micros) | Value::TimestampTz(micros) => micros.to_be_bytes().to_vec(),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        TIME_OID => match value {
-            Value::Time(micros) => micros.to_be_bytes().to_vec(),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        TIMETZ_OID => match value {
-            Value::TimeTz {
-                micros,
-                offset_seconds,
-            } => {
-                let mut bytes = micros.to_be_bytes().to_vec();
-                bytes.extend_from_slice(&offset_seconds.wrapping_neg().to_be_bytes());
-                bytes
-            }
-            _ => return Err(cannot_send(value, oid)),
-        },
-        INTERVAL_OID => match value {
-            Value::Interval(interval) => {
-                let mut bytes = interval.micros.to_be_bytes().to_vec();
-                bytes.extend_from_slice(&interval.days.to_be_bytes());
-                bytes.extend_from_slice(&interval.months.to_be_bytes());
-                bytes
-            }
-            _ => return Err(cannot_send(value, oid)),
-        },
-        BYTEA_OID => match value {
-            Value::Bytea(bytes) => bytes.clone(),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        UUID_OID => match value {
-            Value::Uuid(bytes) => bytes.to_vec(),
-            _ => return Err(cannot_send(value, oid)),
-        },
-        JSONB_OID => {
-            let mut bytes = Vec::with_capacity(text.len() + 1);
-            bytes.push(JSONB_VERSION);
-            bytes.extend_from_slice(text.as_bytes());
-            bytes
-        }
-        _ => text.into_bytes(),
-    };
-    Ok(Some(bytes))
-}
-
-fn array_binary(array: &ArrayValue, zone: TimeZone) -> Result<Vec<u8>, SqlError> {
-    let element_oid = oid_of(array.element.sql_type());
-    let too_long = || {
-        cannot_send(
-            &Value::Array(Box::new(array.clone())),
-            oid_of(SqlType::Array(array.element)),
-        )
-    };
-    let length = i32::try_from(array.items.len()).map_err(|_| too_long())?;
-    let mut out = Vec::with_capacity(20 + array.items.len() * 8);
-    let dimensions: i32 = if array.items.is_empty() { 0 } else { 1 };
-    out.extend_from_slice(&dimensions.to_be_bytes());
-    out.extend_from_slice(&i32::from(array.items.iter().any(Value::is_null)).to_be_bytes());
-    out.extend_from_slice(&element_oid.to_be_bytes());
-    if dimensions == 1 {
-        out.extend_from_slice(&length.to_be_bytes());
-        out.extend_from_slice(&array.lower_bound.to_be_bytes());
-    }
-    for item in &array.items {
-        match encode_value(item, element_oid, Format::Binary, zone)? {
-            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
-            Some(bytes) => {
-                let size = i32::try_from(bytes.len()).map_err(|_| too_long())?;
-                out.extend_from_slice(&size.to_be_bytes());
-                out.extend_from_slice(&bytes);
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn numeric_binary(text: &str) -> Vec<u8> {
-    if text == "NaN" {
-        let mut out = Vec::with_capacity(8);
-        out.extend_from_slice(&0i16.to_be_bytes());
-        out.extend_from_slice(&0i16.to_be_bytes());
-        out.extend_from_slice(&NUMERIC_NAN.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        return out;
-    }
-    let (sign, unsigned) = match text.strip_prefix('-') {
-        Some(rest) => (NUMERIC_NEGATIVE, rest),
-        None => (NUMERIC_POSITIVE, text),
-    };
-    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
-    let digit = |byte: u8| i16::from(byte - b'0');
-    let group = |chunk: &[u8]| {
-        chunk
-            .iter()
-            .fold(0i16, |total, &byte| total * 10 + digit(byte))
-    };
-    let whole = whole.trim_start_matches('0').as_bytes();
-    let lead = whole.len() % 4;
-    let mut groups: Vec<i16> = Vec::new();
-    if lead > 0 {
-        groups.push(group(&whole[..lead]));
-    }
-    groups.extend(whole[lead..].chunks(4).map(group));
-    let mut weight = groups.len() as i32 - 1;
-    for chunk in fraction.as_bytes().chunks(4) {
-        let mut value = group(chunk);
-        for _ in chunk.len()..4 {
-            value *= 10;
-        }
-        groups.push(value);
-    }
-    let leading_zeros = groups.iter().take_while(|&&group| group == 0).count();
-    groups.drain(..leading_zeros);
-    weight -= leading_zeros as i32;
-    while groups.last() == Some(&0) {
-        groups.pop();
-    }
-    if groups.is_empty() {
-        weight = 0;
-    }
-    let scale = fraction.len() as u16;
-    let mut out = Vec::with_capacity(8 + groups.len() * 2);
-    out.extend_from_slice(&(groups.len() as i16).to_be_bytes());
-    out.extend_from_slice(&(weight as i16).to_be_bytes());
-    out.extend_from_slice(
-        &(if groups.is_empty() {
-            NUMERIC_POSITIVE
-        } else {
-            sign
-        })
-        .to_be_bytes(),
-    );
-    out.extend_from_slice(&scale.to_be_bytes());
-    for group in groups {
-        out.extend_from_slice(&group.to_be_bytes());
-    }
-    out
-}
-
-fn numeric_text(bytes: &[u8]) -> Option<String> {
-    let header = bytes.get(..8)?;
-    let count = usize::try_from(i16::from_be_bytes([header[0], header[1]])).ok()?;
-    let weight = i32::from(i16::from_be_bytes([header[2], header[3]]));
-    let sign = u16::from_be_bytes([header[4], header[5]]);
-    let scale = usize::from(u16::from_be_bytes([header[6], header[7]]));
-    if count > MAX_NUMERIC_GROUPS || scale > 0x3FFF || bytes.len() != 8 + count * 2 {
-        return None;
-    }
-    if sign == NUMERIC_NAN {
-        return (count == 0).then(|| "NaN".to_owned());
-    }
-    if sign != NUMERIC_POSITIVE && sign != NUMERIC_NEGATIVE {
-        return None;
-    }
-    let mut groups = Vec::with_capacity(count);
-    for pair in bytes[8..].as_chunks::<2>().0 {
-        let group = i16::from_be_bytes(*pair);
-        if !(0..10_000).contains(&group) {
-            return None;
-        }
-        groups.push(group);
-    }
-    if weight.unsigned_abs() as usize > MAX_NUMERIC_GROUPS + count {
-        return None;
-    }
-    let mut whole = String::new();
-    let mut fraction = String::new();
-    let lowest = weight - count as i32 + 1;
-    for position in (lowest.min(0)..=weight.max(0)).rev() {
-        let index = weight - position;
-        let value = usize::try_from(index)
-            .ok()
-            .and_then(|index| groups.get(index))
-            .copied()
-            .unwrap_or(0);
-        let written = format!("{value:04}");
-        if position >= 0 {
-            whole.push_str(&written);
-        } else {
-            fraction.push_str(&written);
-        }
-    }
-    let whole = whole.trim_start_matches('0');
-    let whole = if whole.is_empty() { "0" } else { whole };
-    fraction.truncate(scale.min(fraction.len()));
-    while fraction.len() < scale {
-        fraction.push('0');
-    }
-    let negative = sign == NUMERIC_NEGATIVE && groups.iter().any(|&group| group != 0);
-    let mut out = String::new();
-    if negative {
-        out.push('-');
-    }
-    out.push_str(whole);
-    if scale > 0 {
-        out.push('.');
-        out.push_str(&fraction);
-    }
-    Some(out)
 }
 
 fn invalid_binary(number: usize, oid: u32) -> SqlError {
@@ -521,25 +245,6 @@ fn invalid_binary(number: usize, oid: u32) -> SqlError {
         SqlState::INVALID_BINARY_REPRESENTATION,
         format!("incorrect binary data format in bind parameter {number} (type OID {oid})"),
     )
-}
-
-const MAX_BYTEA_BYTES: usize = 1_000_000_000;
-
-fn bytea_text(bytes: &[u8]) -> Result<String, SqlError> {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    if bytes.len() > MAX_BYTEA_BYTES {
-        return Err(SqlError::new(
-            SqlState::PROGRAM_LIMIT_EXCEEDED,
-            format!("a bytea value cannot exceed {MAX_BYTEA_BYTES} bytes"),
-        ));
-    }
-    let mut out = String::with_capacity(2 + bytes.len() * 2);
-    out.push_str("\\x");
-    for &byte in bytes {
-        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        out.push(char::from(DIGITS[usize::from(byte & 0x0F)]));
-    }
-    Ok(out)
 }
 
 fn invalid_utf8() -> SqlError {
@@ -557,11 +262,6 @@ pub fn decode_parameter(
     format: Format,
     number: usize,
 ) -> Result<String, SqlError> {
-    let text = |bytes: &[u8]| {
-        std::str::from_utf8(bytes)
-            .map(str::to_owned)
-            .map_err(|_| invalid_utf8())
-    };
     if ARRAY_OIDS.contains(&oid) {
         return Err(SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,
@@ -569,125 +269,30 @@ pub fn decode_parameter(
         ));
     }
     if format == Format::Text {
-        return text(bytes);
+        return std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| invalid_utf8());
     }
-    let fixed = |length: usize| {
-        if bytes.len() == length {
-            Ok(bytes)
-        } else {
-            Err(invalid_binary(number, oid))
-        }
-    };
-    let value = match oid {
-        BOOL_OID => match fixed(1)?[0] {
-            0 => Value::Boolean(false),
-            1 => Value::Boolean(true),
-            _ => return Err(invalid_binary(number, oid)),
-        },
-        INT2_OID => {
-            let bytes = fixed(2)?;
-            Value::SmallInt(i16::from_be_bytes([bytes[0], bytes[1]]))
-        }
-        INT4_OID => {
-            let bytes = fixed(4)?;
-            Value::Integer(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        }
-        INT8_OID => {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(fixed(8)?);
-            Value::BigInt(i64::from_be_bytes(word))
-        }
-        FLOAT4_OID => {
-            let bytes = fixed(4)?;
-            Value::Real(f32::from_bits(u32::from_be_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-            ])))
-        }
-        FLOAT8_OID => {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(fixed(8)?);
-            Value::Double(f64::from_bits(u64::from_be_bytes(word)))
-        }
-        NUMERIC_OID => {
-            return numeric_text(bytes).ok_or_else(|| invalid_binary(number, oid));
-        }
-        DATE_OID => {
-            let bytes = fixed(4)?;
-            Value::Date(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        }
-        TIMESTAMP_OID | TIMESTAMPTZ_OID => {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(fixed(8)?);
-            let micros = i64::from_be_bytes(word);
-            if oid == TIMESTAMP_OID {
-                Value::Timestamp(micros)
-            } else {
-                Value::TimestampTz(micros)
-            }
-        }
-        TIME_OID => {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(fixed(8)?);
-            let micros = i64::from_be_bytes(word);
-            if !(0..=MICROS_PER_DAY).contains(&micros) {
-                return Err(invalid_binary(number, oid));
-            }
-            Value::Time(micros)
-        }
-        TIMETZ_OID => {
-            let bytes = fixed(12)?;
-            let mut word = [0u8; 8];
-            word.copy_from_slice(&bytes[..8]);
-            let micros = i64::from_be_bytes(word);
-            let west = i32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-            if !(0..=MICROS_PER_DAY).contains(&micros)
-                || !(-MAX_OFFSET..=MAX_OFFSET).contains(&west)
-            {
-                return Err(invalid_binary(number, oid));
-            }
-            Value::TimeTz {
-                micros,
-                offset_seconds: -west,
-            }
-        }
-        INTERVAL_OID => {
-            let bytes = fixed(16)?;
-            let mut word = [0u8; 8];
-            word.copy_from_slice(&bytes[..8]);
-            Value::Interval(Interval {
-                micros: i64::from_be_bytes(word),
-                days: i32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-                months: i32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
-            })
-        }
-        BYTEA_OID => return bytea_text(bytes),
-        UUID_OID => {
-            let mut uuid = [0u8; 16];
-            uuid.copy_from_slice(fixed(16)?);
-            Value::Uuid(uuid)
-        }
-        JSONB_OID => match bytes.split_first() {
-            Some((&JSONB_VERSION, rest)) => return text(rest),
-            _ => return Err(invalid_binary(number, oid)),
-        },
-        0 | JSON_OID | TEXT_OID | VARCHAR_OID | NAME_OID | BPCHAR_OID | UNKNOWN_OID => {
-            return text(bytes);
-        }
-        _ => {
-            return Err(SqlError::new(
+    eggdb_sql::decode_pg_binary_text(bytes, oid).map_err(|error| {
+        if error.state() == SqlState::INVALID_BINARY_REPRESENTATION {
+            invalid_binary(number, oid)
+        } else if error.state() == SqlState::FEATURE_NOT_SUPPORTED {
+            SqlError::new(
                 SqlState::FEATURE_NOT_SUPPORTED,
                 format!(
                     "the binary format of type OID {oid} (parameter ${number}) is not supported yet"
                 ),
-            ));
+            )
+        } else {
+            error
         }
-    };
-    Ok(value.to_text_in(TimeZone::UTC).unwrap_or_default())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eggdb_sql::{ArrayValue, Interval};
 
     #[test]
     fn binary_parameters_of_the_common_types_decode_to_their_text() {
