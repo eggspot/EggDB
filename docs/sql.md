@@ -377,7 +377,11 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   element in order, and `MODIFY (c CONSTRAINT n NOT NULL ENABLE)` works. A primary key named
   like an index of its table on the same columns takes that index over (the separate index is
   gone, and dropping the key later drops it), a unique constraint named like such a unique index
-  is that index, and a non-unique index with the name is `ORA-00955`. `CREATE INDEX "HR"."X" ON
+  is that index, and a non-unique index with the name is `ORA-00955`. `ADD CONSTRAINT ... PRIMARY
+  KEY | UNIQUE (...) USING INDEX [schema.]name` names the index to use (D150): one on exactly the
+  constraint's columns is taken over the same way, one with more columns stays beside the
+  constraint's own, a missing one is `ORA-01418` and one whose leading columns are not the
+  constraint's is `ORA-14196`. `CREATE INDEX "HR"."X" ON
   "HR"."T"` works; an index in another schema than its table's is `ORA-03001`. `ORGANIZATION
   EXTERNAL`, clusters, nested-table storage and `SHARD` are `ORA-03001`. `COPY` loads and
   unloads tables in the Oracle dialect too, an empty field loading as NULL. SQL*Plus commands
@@ -417,8 +421,19 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   (`INDEX_NAME`, `INDEX_TYPE`, `TABLE_NAME`, `UNIQUENESS`) and
   `USER_IND_COLUMNS`/`ALL_IND_COLUMNS`; `ORA-00001` for a duplicate, `ORA-01452` when `CREATE
   UNIQUE INDEX` finds one, `ORA-00955` for a name in use and `ORA-01418` for a missing index.
-- **Identity columns**: `GENERATED [ALWAYS | BY DEFAULT [ON NULL]] AS IDENTITY` on the first
-  column of the primary key, numbered as MySQL's `AUTO_INCREMENT` (D106).
+- **Identity columns**: `GENERATED [ALWAYS | BY DEFAULT [ON NULL [FOR INSERT ONLY | FOR INSERT
+  AND UPDATE]]] AS IDENTITY [(options)]` on the first column of the primary key (D106, D150).
+  `ALWAYS` is kept and enforced: a value given in `INSERT` is `ORA-32795` and an `UPDATE` of the
+  column `ORA-32796` (`DEFAULT` is allowed); `eggdb restore` and `COPY` keep the values they
+  bring. Options, in parentheses or bare as SQL Developer writes them: `START WITH` (default
+  `MINVALUE`, or `MAXVALUE` when descending) and `INCREMENT BY` set the first value and the step;
+  `CACHE`, `ORDER`, `KEEP`, `SCALE`, their `NO` forms, `NOCYCLE` and a `MINVALUE`/`MAXVALUE` that
+  does not end the identity inside its type's range have no effect. `INCREMENT BY 0` is
+  `ORA-04002`, `MINVALUE` not below `MAXVALUE` `ORA-04004`, a start outside them
+  `ORA-04006`/`ORA-04008`; a limit inside the type's range, `CYCLE` and `START WITH LIMIT VALUE`
+  are `ORA-03001`. New rows take the next value after the furthest one stored (D147).
+  `USER_TAB_IDENTITY_COLS` (with `ALL_` and `DBA_`) lists them with `GENERATION_TYPE`,
+  `SEQUENCE_NAME` (`ISEQ$$_` and the table's id) and `IDENTITY_OPTIONS`.
 - **Statements**: `CREATE TABLE` (also `IF NOT EXISTS`), `DROP TABLE [IF EXISTS] t [CASCADE
   CONSTRAINTS] [PURGE]`, `TRUNCATE TABLE`, `INSERT`, `UPDATE`, `DELETE [FROM]`, `COMMIT
   [WORK]`, `ROLLBACK [WORK]`.

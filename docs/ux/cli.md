@@ -3143,3 +3143,181 @@ core verb.
    to page through.`, with 25.4's `fix`; its cursor refusals are 25.1's messages with `after`.
 5. The cursor codec and its messages live in `eggdb-commands`, shared by the CLI and the MCP
    server; the rows come from `eggdb_sql::Session::read_stored_rows`, shared by both.
+
+## 26. `eggdb sql --dialect oracle`: SQL*Plus scripts (item 43b)
+
+`eggdb sql <file> <script.sql> --dialect oracle` (and `-` for stdin) reads the script as `eggdb
+restore --dialect oracle` reads it (D127): the same SQL*Plus reader, the same terminators, the
+same commands and abbreviations, the same limits (20 includes deep, 10,000 includes, 1,024
+variables, 240-byte values, statements of 1 GiB, UTF-8 or UTF-16LE with its byte-order mark). Each
+statement then runs as `eggdb sql` runs it today: no autocommit, the run commits at its end as
+SQL*Plus's `EXIT` does, the first failing statement stops the run with exit 3 and the `ORA-`
+error on stderr, and the statements before it stay. `-c` stays plain SQL: `-c "... 'Ada & Co'"`
+runs unchanged, with no substitution and no commands. Designed by Claude Fable (D15). Oracle and
+SQL*Plus are trademarks of their owner; EggDB is compatible with them.
+
+```
+eggdb sql <file> [-c <sql> | <script> | -] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--define <name>=<value>]... [--read-only | --create]
+```
+
+### What runs, what prints, what is silent
+Three kinds of command. A command that **did its job is silent**: there is nothing to say. A
+command that **changes what the user expects** (a file, a program, the exit code, a statement not
+run) gets **one `NOTICE:` line at once**. Every other command **has no effect and is counted**, in
+one line at the end, so a script with forty `SET` lines costs one line, and that line is honest.
+
+| Command | In `eggdb sql` |
+|------|----------|
+| `PROMPT text` | prints the text (substituted) and a newline on **stdout**, in order with the results; bare `PROMPT` prints an empty line |
+| `DEFINE n = v`, `UNDEFINE`, `SET DEFINE`, `SET SCAN`, `SET ESCAPE`, `SET CONCAT` | act, silent |
+| `DEFINE n`, `DEFINE` | silent: to see a value, select it (`SELECT '&n' FROM DUAL;`) |
+| `ACCEPT n ... DEFAULT v` | never prompts: `n` takes `v`, or stays undefined; silent |
+| `@f`, `START f`, `@@f` | include: `@` and `START` from the working directory, `@@` from the including script's folder, and from the working directory for a script on stdin; `.sql` added, regular files only, never a URL; silent |
+| `CONNECT user[/pw][@db]` | runs `ALTER SESSION SET CURRENT_SCHEMA = <user's schema>` (`sys`, `system` and `/` mean the default schema); no login is made, and the password is never shown. A missing schema is the engine's `ORA-01435: user does not exist`, which stops the run like any error |
+| `EXIT`, `QUIT` | end the run; the open transaction commits. `EXIT ROLLBACK` rolls it back instead. The status words (`FAILURE`, `WARNING`, `n`, `:var`) are not obeyed: one notice, exit 0 |
+| `WHENEVER SQLERROR EXIT ...`, `WHENEVER OSERROR ...` | silent: `eggdb sql` already stops at the first error |
+| `WHENEVER SQLERROR CONTINUE` (or `NONE`) | one notice: the run still stops at the first error |
+| `.` line | ends the statement unrun: one notice |
+| text left at the end of a script, no `;` or `/` | not run: one notice |
+| `/` after a statement ended by `;` | not run again (a second `INSERT` would double the rows; D127); counted as `/ after ;` |
+| `SET SQLTERMINATOR`, `SET BLOCKTERMINATOR`, `SET SQLPREFIX`, `SET SQLBLANKLINES OFF` | refused: they change how the script is read; an error, exit 3 |
+| `HOST ...`, `!...`, `$...` | **never runs a program**: one notice |
+| `SPOOL file` | **never writes a file**: one notice; `SPOOL OFF` is silent |
+| `EXECUTE p`, a PL/SQL block | reach the engine as statements; EggDB has no PL/SQL yet, so its `ORA-03001: unimplemented feature` error stops the run |
+| every other command (`SET PAGESIZE`, `COLUMN`, `TTITLE`, `BREAK`, `COMPUTE`, `TIMING`, `SHOW`, `DESCRIBE`, `VARIABLE`, `PRINT`, `PAUSE`, `CLEAR`, SQLcl's `UNLOAD`, `DDL`, `INFO`, ...) | no effect; counted |
+| a line that is neither SQL nor a command EggDB knows | not run: one notice |
+
+The notices (stderr, in text; `NOTICE:` is bold on a terminal, as `WARNING:` is):
+```
+NOTICE:  line 4: SPOOL hr.log never writes a file; redirect stdout instead (eggdb sql ... > hr.log)
+NOTICE:  line 9: HOST never runs a program; eggdb sql runs the SQL only
+NOTICE:  line 12: WHENEVER SQLERROR CONTINUE has no effect: eggdb sql stops at the first error (eggdb restore --keep-going runs on)
+NOTICE:  line 30: the statement before . was not run
+NOTICE:  line 41: EXIT FAILURE: the exit code stays 0; eggdb sql's exit codes mean what eggdb help sql says
+NOTICE:  line 57: TRUNC is not SQL or a SQL*Plus command EggDB knows; the line was not run
+NOTICE:  the text after line 60 was not run: no ; or / ends it
+```
+`!` and `$` name themselves (`line 9: ! never runs a program ...`). The count line, printed once
+when the run ends (after a stop too), only when something was counted:
+```
+NOTICE:  14 SQL*Plus commands had no effect: SET 9, COLUMN 3, TIMING 1, / after ; 1 (eggdb sql runs the SQL only)
+```
+Kinds come in order of first appearance, upper-cased as typed, at most eight, then `… and 2
+more kinds`; `1 SQL*Plus command had no effect: SET 1 (...)`. `REM` lines and `--`/`/* */`
+comments between statements are comments: never counted, never listed. In a script included
+with `@@`, a notice's line reads `hr_populate.sql line 61`, as the restore's report does.
+
+A worked run:
+```
+$ eggdb sql hr.db --dialect oracle load.sql --define region=Europe
+Loading Europe offices
+INSERT 0 3
+NOTICE:  line 2: SPOOL load.log never writes a file; redirect stdout instead (eggdb sql ... > load.log)
+ count
+-------
+     3
+(1 row)
+
+NOTICE:  5 SQL*Plus commands had no effect: SET 4, COLUMN 1 (eggdb sql runs the SQL only)
+```
+The script's line 1 was `PROMPT Loading &region offices`. Stdout holds the prompts and results
+in script order; stderr holds the notices.
+
+### Errors (stderr, exit 3)
+A SQL*Plus-side error has no `ORA-` number, so it prints in the form `eggdb sql` uses for an
+error that is not the dialect's own: `ERROR:`, then `HINT:` when there is one, then `SQLSTATE:`;
+in JSON, 23.3's form with code `sql_error` and the SQLSTATE. The run stops there, exit 3, and the
+statements before it are committed, as after any failing statement. Both commands print the same
+messages, so each is worded for both:
+
+| When | Message |
+|------|---------|
+| `&name` undefined in a statement that runs, a schema name or an include's name | `substitution variable &name has no value: add DEFINE name = ... before line 7, or SET DEFINE OFF` + `HINT:  EggDB never prompts for a value; --define name=value gives one from the command line.` (SQLSTATE 42P02) |
+| a refused `SET` | `line 3: SET SQLTERMINATOR changes how the script is read, which EggDB does not support` + `HINT:  Remove the SET line; EggDB reads ; and / as SQL*Plus does by default.` (SQLSTATE 0A000) |
+| an include that cannot be opened | `line 12: cannot include hr_cre.sql: No such file or directory (os error 2)`; a folder or device: `... : it is not a regular file (EggDB includes only script files)` (SQLSTATE 58030) |
+| a URL after `@` | `line 12: EggDB never fetches a script from a URL` + `HINT:  Download the script and include it by its file name.` |
+| too deep, too many | `line 12: scripts are nested more than 20 deep (SQL*Plus's SP2-0309 limit)`; `line 12: the run has opened 10,000 included scripts, its limit` |
+| `@file` or any command in `-c` | not a SQL*Plus error: `-c` is SQL, so the engine's own `ORA-00900: invalid SQL statement` stops the run |
+| a script in another encoding | `the script is not UTF-8 text (invalid byte at offset 912)` + the restore's `iconv` hint |
+
+The restore's own words (`eggdb restore never prompts`, `which eggdb restore does not support`,
+`the restore has opened`) become EggDB's or the run's, so one message serves both commands and
+the restore's report keeps its meaning.
+
+### `--define <name>=<value>`
+Repeatable; sets a substitution variable before the script's first line, as `DEFINE name =
+value` would. Only with `--dialect oracle` and a script. Usage errors, exit 2, in the shape of
+the restore's:
+- without `--dialect oracle`: `--define sets SQL*Plus substitution variables, so it goes with --dialect oracle`
+- with `-c`: `--define goes with a script: -c runs its SQL as written, with no substitution`
+- `--define foo` (no `=`): `--define takes name=value, not 'foo'`
+
+### `--json`
+Stdout stays one JSON line per statement (23.2). Two more line shapes, both without `tag`, so an
+agent tells them apart with `has("tag")`; stderr gets nothing but 23.3's error line:
+```
+{"prompt":"Loading Europe offices"}
+{"notices":["line 2: SPOOL load.log never writes a file; redirect stdout instead (eggdb sql ... > load.log)"]}
+{"tag":"INSERT 0 3"}
+{"notices":["5 SQL*Plus commands had no effect: SET 4, COLUMN 1 (eggdb sql runs the SQL only)"]}
+```
+`prompt` is the text printed, without the newline. A `notices` line carries the notice without
+its `NOTICE:  ` label, as 23.3 carries a message without `eggdb: `, one line per notice, in the
+place it happened; the count line is the last line of the run.
+
+### Help: `eggdb help sql`
+The main help's `sql` line and the summary stay. The usage line gains `[--define
+<name>=<value>]...` after `--dialect`'s bracket (above). This paragraph follows the `COPY`
+sentences, before `More types and the rest come next`:
+```
+With --dialect oracle a script (a file or stdin, not -c) is read as SQL*Plus reads it: statements
+end at ; or a / line, a PL/SQL block at a / line, DEFINE and &name substitute, @, @@ and START
+include other scripts, PROMPT prints its text, CONNECT user switches to the user's schema, and
+EXIT ends the run. Every other SQL*Plus command (SET, COLUMN, SPOOL, HOST, ...) has no effect and
+is counted in one NOTICE line on stderr; HOST never runs a program and SPOOL never writes a file.
+```
+The options gain, after `--dialect`:
+```
+      --define <n>=<v>  with --dialect oracle, a substitution variable the script starts with, as
+                        DEFINE n = v; repeat it for more
+```
+The examples gain, after `eggdb sql app.db --read-only -c "SELECT count(*) FROM users"`:
+```
+  eggdb sql hr.db --dialect oracle report.sql --define dept=50
+```
+
+### Decided by this design
+1. One reader for both commands, with the restore's three documented differences from SQL*Plus
+   (blank lines, `/` after `;`, `;` mid-line): a script that restores runs here, and the
+   migration docs describe both.
+2. Three tiers of output: silent when a command did its job, one notice when it changes what the
+   user expects, one count line for the rest. Dozens of `SET` lines cost one line; nothing is
+   dropped without a word.
+3. `PROMPT` goes to stdout: it is the script's output, and SQL*Plus users redirect it with the
+   results. Notices go to stderr, so `eggdb sql ... > out.txt` holds what the script printed.
+4. `CONNECT` is `ALTER SESSION SET CURRENT_SCHEMA`, nothing more: no schema is created in
+   passing (the restore does, for installers; `eggdb sql` is not an installer), and a missing
+   schema is the engine's own `ORA-01435`.
+5. `EXIT ROLLBACK` is obeyed (safe, and what its author meant); `EXIT`'s status words are not,
+   because exit codes 0 to 5 have fixed meanings (section 7).
+6. `HOST` never runs a program and `SPOOL` never writes a file, each with a notice: a script may
+   rely on them, and security forbids them.
+7. `-c` stays plain SQL, with `--define` refused there: a string on the command line is not a
+   script, and `&` in a value must keep working.
+8. SQL*Plus-side errors are statement errors (exit 3, the statements before stay committed), not
+   usage errors: the command line was right; the script was not.
+9. JSON adds two tag-less line shapes (`prompt`, `notices`) rather than attaching script events
+   to the next statement, so order is kept and 23.2's statement objects stay as shipped.
+10. The restore's messages are reworded to name EggDB, not `eggdb restore`, so one string serves
+    both commands and no message lies about which command printed it.
+
+### As built (item 43b, D150)
+1. The notice for text left at the end names where that text starts: `NOTICE:  the text from
+   line 60 was not run: no ; or / ends it` (the reader knows the start, not the last line). The
+   notice for a `.` line names the line where the unrun statement starts.
+2. `--define foo` keeps the restore's shipped wording, `--define takes name=value, such as
+   --define pass=secret`, so both commands say the same.
+3. `eggdb sql` still reads UTF-8 only, so a UTF-16 script is the existing usage error (`the SQL is
+   not UTF-8 text ...`, exit 2); `eggdb restore` reads UTF-16LE with its byte-order mark.
+4. The reader lives in `eggdb-sql` as the public `SqlPlusScript`, handing `eggdb sql` its steps;
+   the wording of every notice and the count line is the CLI's.

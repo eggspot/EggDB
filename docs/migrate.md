@@ -356,7 +356,19 @@ counts `GRANT`, users (*schema created, login not*), `COMMIT`, queries, storage 
 as `hr_populate.sql line 61`.
 
 A constraint disabled with `ALTER TABLE ... DISABLE CONSTRAINT` is dropped and added again by the
-matching `ENABLE` (HR loads its departments that way), checking the rows then. Known differences:
+matching `ENABLE` (HR loads its departments that way), checking the rows then. A constraint written
+`DISABLE` in `CREATE TABLE` or `ALTER TABLE ... ADD (...)`, at the table level or inside a column
+(`qty NUMBER CONSTRAINT qty_ck CHECK (qty > 0) DISABLE`), is remembered the same way and added at
+its `ENABLE`.
+
+Identity columns are kept with their kind: `GENERATED ALWAYS AS IDENTITY` refuses values given
+after the restore (`ORA-32795`), while the restore itself loads the values the export holds.
+`START WITH` and `INCREMENT BY` are kept; `CACHE`, `ORDER`, `KEEP`, `SCALE` and the default
+`MINVALUE`/`MAXVALUE` that SQL Developer writes have no effect. New rows take the next value after
+the largest one restored, where Oracle continues its sequence. A `PRIMARY KEY` or `UNIQUE`
+constraint added with `USING INDEX other_name` takes that index over when it is on the same
+columns (`user_indexes` then shows the constraint's name), and keeps it beside its own when the
+index has more columns. Known differences:
 
 ```
 known differences (restored, but not as the source had it)
@@ -373,20 +385,25 @@ known differences (restored, but not as the source had it)
   profiles and the other objects EggDB does not have; logins, passwords and grants; queries in
   scripts.
 - **Not kept:** storage clauses, `ORGANIZATION INDEX`, LOB storage and other physical properties
-  (accepted with no effect); a separate index taken over by a primary key (its name becomes the
-  key's); collations other than binary.
+  (accepted with no effect); the name of a separate index taken over by a primary key or a
+  unique constraint, by name or by `USING INDEX` (its name becomes the constraint's); collations
+  other than binary; where an identity's sequence had got to (new rows continue after the
+  largest value).
 - **Not kept, and listed as known differences:** constraints left disabled (not created);
-  disabled keys (enforced); `ENABLE NOVALIDATE` (rows are checked); identity columns with
-  options (the column and its values are kept, the identity is not); virtual columns (left out);
+  disabled keys (enforced); `ENABLE NOVALIDATE` (rows are checked); identity columns EggDB cannot
+  keep (a `MAXVALUE` or `MINVALUE` inside the column's range, `CYCLE`, or an identity that is not
+  the first column of the primary key: the column and its values are kept, the identity is not);
+  virtual columns (left out);
   partitioning (one unpartitioned table); `ROLLBACK` (the statements before it were committed).
 - **SQL*Plus behaviour:** `/` after a statement ended by `;` does not run it again; blank lines
   never end a statement (SQL*Plus's `SQLBLANKLINES ON`); a `/` line inside a string or a block
   comment is part of it; `WHENEVER` is decided by `--keep-going`; `ACCEPT` never prompts;
-  `SQLPATH` is not searched; scripts from URLs are never fetched; SQL*Plus commands do not work in
-  `eggdb sql` or `eggdb shell`.
+  `SQLPATH` is not searched; scripts from URLs are never fetched. The same reading runs scripts
+  in `eggdb sql --dialect oracle` (docs/cli.md), not in `eggdb shell`.
 - **Scripts:** UTF-8 or UTF-16LE with its byte-order mark; other encodings are refused with an
   `iconv` example. An anonymous block is one transaction, so one larger than the page cache fails
   at its commit.
 - **Taking over an index:** a primary key or unique constraint takes over an index of the same
-  name on the same columns; an index named differently in `USING INDEX` is not taken over yet
-  (the key gets its own index).
+  name, or the one its `USING INDEX` names, when it is on the same columns; `USING INDEX` naming a
+  missing index is `ORA-01418`, and one whose leading columns are not the constraint's is
+  `ORA-14196`.

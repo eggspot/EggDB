@@ -447,6 +447,19 @@ tests in `crates/eggdb-sql/src/restore/tests_oracle.rs`, with a seeded fuzz of 2
 scripts (`EGGDB_FUZZ_CASES`, `EGGDB_FUZZ_SEED`) through `MemoryIncludes`, so it never touches the
 disk. `crates/eggdb/tests/data/oracle-sample.sql` is the smoke test's sample.
 
+**Oracle restore follow-ups (item 43b, D150).** `shop-identity-sqldeveloper.sql` (ours, in SQL
+Developer's shape) restores a `GENERATED ALWAYS` identity with SQL Developer's bare options, two
+constraints disabled inside columns and a primary key added `USING INDEX` another index; the test
+checks the identity is kept (`ALL_TAB_IDENTITY_COLS`, `ORA-32795`, the next value 41), the index
+taken over, the foreign key enabled (`ORA-02291`) and the still-disabled `CHECK` listed. Unit
+tests in `tests_oracle.rs` cover the column-level rewrites, `ALTER TABLE ... ADD (...)`, the
+refused-identity retry, a restore with all three and `SqlPlusScript`'s steps; `oracle_tests.rs`
+covers identity options, `ORA-32795`/`ORA-32796` and `USING INDEX` in a session; the hostile
+Oracle fragments gained the identity and `USING INDEX` forms. `crates/eggdb/tests/sql.rs` runs a
+SQL*Plus script through `eggdb sql --dialect oracle` (an `@@` include, `--define`, `PROMPT`,
+`SPOOL`, `HOST`, `/` after `;`, `EXIT`, `--json`, the stopping errors and `-c` left plain), and
+the smoke test pipes a short script with `DEFINE`, `PROMPT` and a counted `SET`.
+
 ## Unchanged Java and Python apps (D131)
 `crates/eggdb/tests/clients/java/AppCheck.java` is a pgjdbc program: CRUD through prepared
 statements (run past the driver's threshold, so it switches to named server statements),

@@ -770,6 +770,31 @@ SQLSTATE:  42P01
   and its `Msg` counts lines from the batch's start, as sqlcmd does. sqlcmd's own commands
   (`:setvar`, `:r`, `!!`) are not run: a script with them fails with exit 3 and is restored with
   `eggdb restore --dialect sqlserver`, or run with `sqlcmd -i` against `eggdb serve`.
+- With `--dialect oracle`, a script (a file or stdin; `-c` stays plain SQL, so `'Ada & Co'`
+  runs as written) is read as `eggdb restore --dialect oracle` reads it (D127, D150): statements
+  end at `;` or a `/` line, a PL/SQL block at a `/` line, `DEFINE` and `&name` substitute
+  (`--define name=value`, repeatable, sets a variable before the first line), `@`, `@@` and
+  `START` include other scripts (`@@` from the script's folder, the others from the working
+  directory), `ACCEPT` takes its `DEFAULT` and never prompts, `PROMPT` prints its text on stdout
+  in order with the results, `CONNECT user` switches to the user's schema (`ORA-01435` when it
+  does not exist; no login is made), and `EXIT` or `QUIT` ends the run and commits (`EXIT
+  ROLLBACK` rolls back). `EXECUTE p` and PL/SQL blocks reach the engine, which has no PL/SQL yet
+  (`ORA-03001`). `SPOOL file` never writes a file, `HOST` never runs a program, and `WHENEVER
+  SQLERROR CONTINUE`, `EXIT` status words, a statement ended by `.`, text with no `;` or `/` at
+  the end and a line EggDB does not know each get one `NOTICE:` on stderr; every other command
+  (`SET`, `COLUMN`, `TIMING`, `/` after `;`, ...) has no effect and is counted in one closing
+  notice. With `--json`, `PROMPT` prints `{"prompt":"..."}` and a notice `{"notices":["..."]}` in
+  its place on stdout. An undefined variable, a refused `SET SQLTERMINATOR` and an include that
+  cannot be opened stop the run with exit 3, like a failing statement. The design is section 26
+  of [ux/cli.md](ux/cli.md).
+
+```
+$ eggdb sql hr.db --dialect oracle load.sql --define region=Europe
+Loading Europe offices
+INSERT 0 3
+NOTICE:  line 2: SPOOL load.log never writes a file; redirect stdout instead (eggdb sql ... > load.log)
+NOTICE:  5 SQL*Plus commands had no effect: SET 4, COLUMN 1 (eggdb sql runs the SQL only)
+```
 
 ### `sql --read-only`
 
