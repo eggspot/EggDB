@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage="usage: scripts/pg-functions/check.sh <eggdb binary> <work directory>
+usage="usage: scripts/pg-functions/check.sh <eggdb binary> <work directory> [cases file]
 
-Runs every statement of scripts/pg-functions/cases.sql with psql against a running PostgreSQL
-server and against eggdb serve on a new database file, and fails unless psql prints the same
-bytes for both. Errors go to separate files and are not compared: a statement that fails on one
-side and not on the other changes the printed rows, which are.
+Runs every statement of the cases file (scripts/pg-functions/cases.sql when none is given) with
+psql against a running PostgreSQL server and against eggdb serve on a new database file, and fails
+unless psql prints the same bytes for both. Errors go to separate files and are not compared: a
+statement that fails on one side and not on the other changes the printed rows, which are.
 
 psql runs inside the docker container named by PG_CONTAINER (on the host's network), or from
 PG_BIN (a directory), or from PATH; PGHOST, PGPORT, PGUSER and PGPASSWORD reach PostgreSQL."
 
-[ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
+[ $# -eq 2 ] || [ $# -eq 3 ] || { echo "$usage" >&2; exit 2; }
 eggdb=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 work=$2
 here=$(cd "$(dirname "$0")" && pwd)
+cases=${3:-$here/cases.sql}
+cases=$(cd "$(dirname "$cases")" && pwd)/$(basename "$cases")
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
 export PGTZ=UTC PGCLIENTENCODING=UTF8 PGDATABASE=postgres
@@ -49,10 +51,10 @@ done
 port=$(sed -n 's/.*"port":\([0-9]*\).*/\1/p' "$work/serve.out" | head -n 1)
 [ -n "$port" ] || fail "eggdb serve printed no port: $(cat "$work/serve.out") $(cat "$work/serve.err")"
 
-psql_run -X -A -v ON_ERROR_STOP=0 -f - < "$here/cases.sql" > "$work/postgres.out" 2> "$work/postgres.err" || true
+psql_run -X -A -v ON_ERROR_STOP=0 -f - < "$cases" > "$work/postgres.out" 2> "$work/postgres.err" || true
 (
   export PGHOST=127.0.0.1 PGPORT="$port" PGUSER=eggdb PGPASSWORD=functions-secret
-  psql_run -X -A -v ON_ERROR_STOP=0 -f - < "$here/cases.sql" > "$work/eggdb.out" 2> "$work/eggdb.err"
+  psql_run -X -A -v ON_ERROR_STOP=0 -f - < "$cases" > "$work/eggdb.out" 2> "$work/eggdb.err"
 ) || true
 
 kill -TERM "$server"
@@ -66,5 +68,5 @@ if ! cmp -s "$work/postgres.out" "$work/eggdb.out"; then
   head -n 40 "$work/eggdb.err" >&2
   fail "psql prints EggDB's answers differently from PostgreSQL's (whole diff in $work/output.diff)"
 fi
-statements=$(grep -c ';$' "$here/cases.sql")
+statements=$(grep -c ';$' "$cases")
 echo "pg-functions check passed: $statements statements print the same bytes on PostgreSQL $version and EggDB"

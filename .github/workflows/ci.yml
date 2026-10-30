@@ -358,6 +358,14 @@ jobs:
           PGPORT: "5432"
           PGUSER: postgres
         run: scripts/pg-functions/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-functions"
+      - name: Run the query cases (windows, LATERAL, data-modifying WITH, views, temporary tables) the same way
+        if: always()
+        env:
+          PG_CONTAINER: pg
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+        run: scripts/pg-functions/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-queries" scripts/pg-queries/cases.sql
       - name: Keep both outputs and any difference
         if: always()
         uses: actions/upload-artifact@v7
@@ -368,6 +376,9 @@ jobs:
             ${{ runner.temp }}/pg-functions/*.out
             ${{ runner.temp }}/pg-functions/*.err
             ${{ runner.temp }}/pg-functions/output.diff
+            ${{ runner.temp }}/pg-queries/*.out
+            ${{ runner.temp }}/pg-queries/*.err
+            ${{ runner.temp }}/pg-queries/output.diff
           retention-days: 7
           if-no-files-found: ignore
 

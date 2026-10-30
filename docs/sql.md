@@ -1126,24 +1126,31 @@ through pgjdbc with `-c eggdb.dialect=oracle`, comparing their output with
   `unnest(array)`, also written `pg_catalog.generate_series` and `pg_catalog.unnest`, with
   `WITH ORDINALITY` (a `bigint` column `ordinality`) and `[AS] alias [(column, ...)]`; without
   a column list a one-column function's column takes the alias (`FROM generate_series(1, 3) s`
-  makes `s` a column). The arguments are constants, parameters or, in a correlated subquery,
-  the outer query's columns (the rows are made again for each outer value); naming another item
-  of the same `FROM` (PostgreSQL's implicit `LATERAL`), with or without its name, whether it
-  comes before or after the function and also from a subquery in its arguments, is `0A000` ("a function in FROM that names another FROM
-  item (LATERAL) is not supported yet"). A `VALUES` list in `FROM` may name the outer query's
-  columns too and, as in PostgreSQL, does not see the other items of its `FROM`. One `generate_series` or
-  `unnest` call may also stand alone as an item of a select list, giving a row for each of its
-  values (none when it returns none); a second one, one inside an expression, and one in
-  `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` or an aggregate answer `0A000`, and the `ORDER BY` of
-  such a select takes output columns. The rows a function or `VALUES` list makes count against
-  the statement's 1 GiB, so `generate_series(1, 10^12)` ends with `53200`.
+  makes `s` a column). The arguments are constants, parameters, the outer query's columns in a
+  correlated subquery (the rows are made again for each outer value), or the columns of the
+  items before it in the same `FROM` (PostgreSQL's implicit `LATERAL`, below); naming an item
+  after it is `0A000`. A `VALUES` list in `FROM` may name the outer query's columns and the items
+  before it too. Set-returning functions may also stand as items of a select list, several in
+  lock-step (D131), each input row giving as many rows as the longest one; one inside an
+  expression and one in `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` or an aggregate answer `0A000`,
+  and the `ORDER BY` of such a select takes output columns. The rows a function or `VALUES` list
+  makes count against the statement's 1 GiB, so `generate_series(1, 10^12)` ends with `53200`.
+- **`LATERAL`** (D151): `FROM a, LATERAL (SELECT ... a.x ...) s`, `a [LEFT] JOIN LATERAL (...) s
+  ON cond`, `a CROSS JOIN LATERAL f(a.x)` and a function or `VALUES` list that names an earlier
+  item without the word. The lateral item runs once for each distinct set of the earlier items'
+  values it names (the earlier items, joined as written, give those sets) and its rows are joined
+  back on those values, NULLs matching NULLs, so a `LEFT JOIN LATERAL` keeps the left rows it gave
+  nothing to. A lateral item may hold subqueries of its own, correlated with it or with the items
+  before it. `RIGHT` and `FULL JOIN LATERAL` naming an earlier item are `42P10`, as in
+  PostgreSQL. Transact-SQL's `CROSS APPLY` and `OUTER APPLY` are lateral joins too.
 - **Joins**: `a [INNER] JOIN b ON cond`, `a LEFT [OUTER] JOIN b ON cond`, `a RIGHT [OUTER] JOIN
   b ON cond`, `a FULL [OUTER] JOIN b ON cond`, `JOIN ... USING (columns)`,
   `a CROSS JOIN b` and `FROM a, b`, chained left to right, each table with an optional alias.
   A right join keeps every row of its right table, a full join every row of both; the rows of
   the right table that matched nothing come after the others, extended with NULLs. With
-  `RIGHT JOIN ... USING`, the `USING` column is the right table's; `FULL JOIN ... USING`
-  answers `0A000` (write `ON` and `coalesce`).
+  `RIGHT JOIN ... USING`, the `USING` column is the right table's; with `FULL JOIN ... USING`
+  it is `coalesce(left.c, right.c)`, so `*`, `GROUP BY c` and `ORDER BY c` see the value of
+  whichever side had the row, as in PostgreSQL, and `left.c` and `right.c` stay apart.
   Columns are named `name` or `alias.name`; `alias.*` expands one table and `*` all of them,
   with a `USING` column once, first, as PostgreSQL does. A left join extends a left row that
   matches nothing with NULLs; conditions in `ON` decide the match, conditions in `WHERE`
@@ -1158,16 +1165,25 @@ through pgjdbc with `-c eggdb.dialect=oracle`, comparing their output with
   `(SELECT ...) [AS] alias [(column, ...)]`, is a derived table; the alias may be left out.
   A derived table or `WITH` query may have two columns of one name (`SELECT * FROM t x, t y`):
   `*` returns both, and naming that column is `42702` ("column reference "a" is ambiguous").
-  A subquery may name the columns of the query around it (a correlated subquery) in its own
-  select list, `WHERE`, `HAVING` and `JOIN ... ON`, and stand in that query's select list,
-  `WHERE` or `ORDER BY` (in a grouped query, in `WHERE` only); it then runs once for each
-  distinct set of the outer values it names, read by key or index where its conditions allow,
-  and the others run once per statement; an `EXISTS` whose outer references are only
-  `inner = outer` conditions in `WHERE` runs once, into a hash set the outer rows look up. `INSERT ... VALUES`, `UPDATE` and `DELETE` take subqueries
-  that do not name the changed table's columns.
+  A subquery may name the columns of any query around it, however many levels out (a correlated
+  subquery), in its own select list, `WHERE`, `HAVING` and `JOIN ... ON`, and stand in that
+  query's select list, `WHERE`, `HAVING` or `ORDER BY`; in a grouped query it may name the
+  `GROUP BY` columns and the columns they determine (otherwise `42803` "subquery uses ungrouped
+  column"). It runs once for each distinct set of the outer values it names, read by key or index
+  where its conditions allow, and the others run once per statement; an `EXISTS` whose outer
+  references are only `inner = outer` conditions in `WHERE` on the query directly around it runs
+  once, into a hash set the outer rows look up. `UPDATE` and `DELETE` take subqueries that name
+  the changed row in `SET`, `WHERE` and `RETURNING`, all read before the first row changes;
+  `INSERT ... VALUES` takes subqueries that stand alone.
 - **`WITH` queries**: `WITH name [(columns)] AS [[NOT] MATERIALIZED] (query), ...` before a
-  query or a subquery, each name visible to the ones after it and to the query; every `WITH`
-  query is run once and its rows kept for the statement, however often it is named.
+  query, a subquery, an `INSERT`, an `UPDATE` or a `DELETE`, each name visible to the ones after
+  it and to the statement; every `WITH` query is run once and its rows kept for the statement,
+  however often it is named. At the top of a statement a `WITH` query may also be an `INSERT`,
+  `UPDATE` or `DELETE` with `RETURNING` (`WITH moved AS (DELETE FROM a RETURNING *) INSERT INTO
+  b SELECT * FROM moved`, D151): each runs once, in order, before the statement, and the
+  statement reads what it returned; naming one without `RETURNING` and one inside a subquery
+  are `0A000`. They run one after the other on the same data, so the statement and later `WITH`
+  queries see their changes, where PostgreSQL runs them all on the same snapshot.
   `WITH RECURSIVE name (columns) AS (non-recursive-term UNION [ALL] recursive-term)` repeats the
   recursive term over the rows the last step added until a step adds none (`UNION` drops rows
   seen before); a recursion still adding rows after 1,000,000 steps fails with `54001`.
@@ -1206,6 +1222,33 @@ through pgjdbc with `-c eggdb.dialect=oracle`, comparing their output with
   scale, `avg` of 1 and 2 is `1.5000000000000000`), of a float `double precision`; `min` and
   `max` keep their argument's type and order NaN above every number, as `ORDER BY` does. `sum`
   and `avg` of text, and `min` and `max` of booleans and `json`, fail with `42883`, as there.
+  Every aggregate takes `FILTER (WHERE condition)`, which feeds it only the rows where the
+  condition is true (`count(*) FILTER (WHERE x > 1)`, D151).
+- **Ordered-set aggregates** (D151): `percentile_cont(fraction) WITHIN GROUP (ORDER BY expr)`
+  (`double precision`, interpolated between the two nearest values), `percentile_disc(fraction)
+  WITHIN GROUP (ORDER BY expr)` (the first value whose position reaches the fraction, in the
+  argument's type) and `mode() WITHIN GROUP (ORDER BY expr)` (the most frequent value, the first
+  in that order on a tie), skipping NULLs; a fraction outside 0 to 1 is `22003`. Also in Oracle
+  and Transact-SQL as aggregates.
+- **Window functions** (D151): `function(...) OVER (window)` and `OVER name` with `WINDOW name AS
+  (window), ...` after `HAVING`, where a window is `[existing name] [PARTITION BY expr, ...]
+  [ORDER BY ...] [frame]` and the frame is `{ROWS | RANGE | GROUPS} {start | BETWEEN start AND
+  end} [EXCLUDE {CURRENT ROW | GROUP | TIES | NO OTHERS}]` with `UNBOUNDED PRECEDING`, `n
+  PRECEDING`, `CURRENT ROW`, `n FOLLOWING` and `UNBOUNDED FOLLOWING`. The functions are
+  `row_number`, `rank`, `dense_rank` (`bigint`), `percent_rank`, `cume_dist` (`double
+  precision`), `ntile(n)` (`integer`), `lag` and `lead(value [, offset [, default]])`,
+  `first_value`, `last_value`, `nth_value(value, n)`, and every aggregate above with `FILTER`.
+  Without `ORDER BY` the frame is the whole partition; with it, the default frame runs from the
+  partition's start to the current row's last peer, as in PostgreSQL. `RANGE` with an offset
+  needs exactly one `ORDER BY` column (numbers, or dates and time stamps with an `interval`);
+  `GROUPS` needs an `ORDER BY`; offsets are constants or parameters, never negative or NULL
+  (`22013`, `22004`). Window calls stand anywhere in the select list, inside expressions
+  (`amount * 100 / sum(amount) OVER (PARTITION BY region)`), and in `ORDER BY`, and run after
+  `WHERE`, `GROUP BY` and `HAVING` (so `rank() OVER (ORDER BY sum(x))` ranks groups) and before
+  `DISTINCT`, `ORDER BY` and `LIMIT`; beside set-returning functions they are computed first. In
+  `WHERE`, `GROUP BY`, `HAVING`, `JOIN ... ON` or `LIMIT` they are `42P20`, nested ones are
+  `42P20`, and one inside an aggregate is `42803`, as PostgreSQL reports them. MySQL, SQLite,
+  Oracle and Transact-SQL take the same syntax.
 - `UPDATE name [[AS] alias] SET column = expr | DEFAULT, ... [WHERE expr] [RETURNING items]`.
   Changing a primary key moves the row; the uniqueness check runs after every row moved, so
   `UPDATE t SET id = id + 1` succeeds (PostgreSQL may refuse it, depending on the order it
@@ -1244,8 +1287,21 @@ through pgjdbc with `-c eggdb.dialect=oracle`, comparing their output with
   `42601` as in PostgreSQL. `INSERT ... OVERRIDING SYSTEM VALUE` keeps the given values, and
   `OVERRIDING USER VALUE` ignores the values given for identity columns and numbers them (D118,
   D146).
-- `CREATE UNLOGGED TABLE` makes an ordinary, logged table (D118); `TEMPORARY` tables answer
-  `0A000`.
+- `CREATE UNLOGGED TABLE` makes an ordinary, logged table (D118).
+- **Temporary tables and views** (D151): `CREATE TEMP | TEMPORARY TABLE name (...) [ON COMMIT
+  PRESERVE ROWS | DELETE ROWS | DROP]` and `CREATE TEMP VIEW`, in schema `pg_temp`, seen only by
+  the session that made them and gone when it closes; an unqualified name finds a temporary
+  relation before the search path, so one may hide an ordinary table of the same name, and a
+  view that reads a temporary relation becomes temporary itself (`NOTICE: view "v" will be a
+  temporary view`). They have keys, indexes, constraints and sequences like any table, take part
+  in the session's transactions (a `ROLLBACK` undoes their changes too), and `DISCARD TEMP` or
+  `DISCARD ALL` drops them all. They are held in the session's memory, at most 1 GiB per session
+  (`53200`), never written to the database file, so they cost no disk writes; changing one still
+  takes the database's write transaction, so a read-only file cannot have them. A temporary table
+  cannot reference an ordinary one with a foreign key, nor the other way round (`42P16`), nor
+  move to another schema (`0A000`). `pg_class` and the other catalogs do not list them yet.
+  MySQL's `CREATE TEMPORARY TABLE` and `DROP TEMPORARY TABLE`, SQLite's `CREATE TEMP TABLE` and
+  `temp.name`, and Transact-SQL's `#name` tables are the same session tables.
 - `x = ANY (ARRAY[a, b])`, `x <> ALL (ARRAY[a, b])` and the other comparisons with `ANY`, `SOME`
   or `ALL` over a constant `ARRAY[...]` list, also in parentheses and with a cast such as
   `::text[]` (how `pg_dump` writes the `IN` lists of `CHECK` constraints): `= ANY` is `IN`, `<> ALL`
@@ -1665,15 +1721,28 @@ schema of the path that exists, in order; `pg_catalog` is searched first for fun
 (`pg_catalog.nextval`, `pg_catalog.set_config` and the other functions that exist). New objects
 are created in the first schema of the path that exists (`3F000 no schema has been selected to
 create in` when there is none). The other dialects have one schema: SQLite's `main.t` (`temp.t`
-is `0A000`: no temporary tables yet), Oracle's `USER.t` for the session's user's own tables and
+is the session's temporary schema), Oracle's `USER.t` for the session's user's own tables and
 `hr.t` for schema `hr` (D127), MySQL's `db.t` for the connected database.
 
 **Views**, in every dialect: `CREATE [OR REPLACE] VIEW name [(columns)] AS query`, `DROP VIEW
 [IF EXISTS] name [, ...] [CASCADE | RESTRICT]`, and in PostgreSQL `ALTER VIEW [IF EXISTS] name
 RENAME TO new | SET SCHEMA s | OWNER TO role`. A view may use joins, groups, subqueries, `WITH`,
-set operations and other views; it is read-only (`INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` on
-it are `0A000`). Its query is checked when it is created and expanded where it is used, as a
-derived table. `SELECT *` is expanded when the view is created, so columns added to the table
+set operations and other views. Its query is checked when it is created and expanded where it is
+used, as a derived table.
+
+A view that selects from one table or one such view, without `WITH`, `DISTINCT`, `GROUP BY`,
+`HAVING`, `LIMIT`, `OFFSET`, set operations, aggregates, window or set-returning functions, is
+automatically updatable, as PostgreSQL's rules say (D151): `INSERT`, `UPDATE` and `DELETE` on it
+change its table, with `RETURNING` in the view's columns. Its columns that are plain columns of
+the table can be given values (others are `0A000` "cannot update column "c" of view "v""); an
+`UPDATE` or `DELETE` reaches only the rows the view shows; an `INSERT` gives the table's other
+columns their defaults. Any other view is `55000` ("cannot update view "v"", with the reason in
+the detail). `CREATE VIEW ... WITH [CASCADED | LOCAL] CHECK OPTION` (and `WITH CHECK OPTION` in
+MySQL, Oracle and Transact-SQL, cascaded) refuses an inserted or updated row the view would not
+show with `44000` ("new row violates check option for view "v""); `CASCADED` also checks the
+views it reads, `LOCAL` only its own condition and the check options below it. The check option
+is kept in the view's definition; a release before this one refuses such a view as damaged.
+`TRUNCATE`, `COPY ... FROM` and `MERGE` into a view are `0A000`. `SELECT *` is expanded when the view is created, so columns added to the table
 later do not appear. `OR REPLACE` keeps the existing columns' names and types and may add
 columns at the end (`42P16` otherwise); a view that would refer to itself, directly or through
 other views, is `42P17`. Views nest to 32 query levels and 1,024 `SELECT`s for a statement and
@@ -1706,8 +1775,8 @@ statements. A comment goes with its object when the object is dropped or renamed
 are accepted with a warning and ignored (EggDB has no roles yet), `CREATE EXTENSION [IF NOT
 EXISTS] plpgsql [WITH SCHEMA ...]` does nothing (another extension is `0A000`), the `SET`
 parameters of its scripts are accepted, and view text with parenthesized joins (`FROM ((a JOIN
-b ON ...) JOIN c ON ...)`) runs. `CREATE MATERIALIZED VIEW`, `CREATE TYPE`, `CREATE DOMAIN` and
-`WITH CHECK OPTION` are `0A000` with a message naming them.
+b ON ...) JOIN c ON ...)`) runs, `WITH CHECK OPTION` included. `CREATE MATERIALIZED VIEW`,
+`CREATE TYPE` and `CREATE DOMAIN` are `0A000` with a message naming them.
 
 ## COPY
 
@@ -1991,8 +2060,8 @@ they are read-only (`42501`). What the rows say:
 
 - `tables` and `columns` list your tables and views and the catalog's own relations (the
   `pg_catalog` relations as `BASE TABLE`, `pg_roles`, `pg_settings` and `information_schema`'s
-  relations as `VIEW`); views are not insertable or updatable (`NO`), as EggDB's views are
-  read-only.
+  relations as `VIEW`); views are listed as not insertable or updatable (`NO`), even those
+  EggDB can change (D151).
 - `columns` gives each column's `data_type` as `format_type` names it (`character varying`,
   `timestamp with time zone`, `ARRAY` for arrays), `character_maximum_length`,
   `character_octet_length` (four bytes a character, 1073741824 without a limit),
@@ -2130,8 +2199,9 @@ role other than the session's user is `0A000`.
 
 Schemas and views (D116): a view is computed in full each time a statement uses it (no
 condition is pushed into it and its tables' indexes are not used through it), so a point lookup
-through a view over a large table reads the whole view; views are read-only (no automatically updatable views, `WITH CHECK
-OPTION` is `0A000`), there are no materialized, temporary or recursive views, renaming a table
+through a view over a large table reads the whole view; a view that is not automatically
+updatable has no `INSTEAD OF` triggers or rules to make it so, there are no materialized or
+recursive views, renaming a table
 or view that a view uses is `0A000` (PostgreSQL follows the rename), a view resolves its names
 with the search path it was created with when it is used, where PostgreSQL binds them once, a
 column `DEFAULT nextval('s')` finds an unqualified `s` through the search path when it runs, and
@@ -2254,38 +2324,43 @@ checks the PostgreSQL manual's documented behaviour; the two cases it marks as d
   owns a sequence (format version 6), but it does not know sequences: on a file this release
   wrote, it ignores them, so it could create a table under a sequence's name or call a dropped
   table's sequence a stranger's. Open such a file with this release or a newer one.
-- Subqueries and `WITH` (item 30, D112): a correlated subquery may name only the query
-  directly around it (a name two or more levels out is `0A000`), and stand only in the select
-  list, `WHERE` or `ORDER BY`, and in a query with `GROUP BY` or aggregates only in `WHERE`
-  (elsewhere `0A000`); an aggregate inside a subquery whose argument names only the outer
-  query's columns (`SELECT (SELECT sum(t.b) FROM u) FROM t`), which belongs to the outer query
-  in PostgreSQL and SQLite, answers `0A000`; a correlated subquery runs once per distinct outer
-  value, so one over a million distinct values runs a million times, with no statement timeout
-  yet (item 19e); a derived table
-  or `WITH` query cannot name the outer query's columns, and `UPDATE`, `DELETE` and `INSERT`
-  cannot have a correlated subquery (`0A000`). Subqueries nest at most 32 levels and a statement
-  holds at most 1,024 `SELECT`s (`54001`). Every `WITH` query runs, even one nothing names, and
-  `MATERIALIZED` and `NOT MATERIALIZED` change nothing; data-modifying `WITH` queries, `SEARCH`
-  and `CYCLE`, row constructors (`(a, b) IN (SELECT ...)`),
-  `LATERAL`, `FULL JOIN ... USING` and `EXPLAIN` of a query with subqueries answer `0A000`. A
-  derived table, a `WITH` query and the operands of a set operation are held in memory, counted
-  with the statement's other rows against the 1 GiB limit, and a correlated subquery keeps up
-  to 32 MiB of results by outer value. An `IN` list of constants is compared item by item (a list of
+- Subqueries and `WITH` (item 30, D112, D151): a correlated subquery may not stand in `GROUP BY`
+  or a `JOIN ... ON` of the query it names (`0A000`); an aggregate inside a subquery whose
+  argument names only the outer query's columns (`SELECT (SELECT sum(t.b) FROM u) FROM t`), which
+  belongs to the outer query in PostgreSQL and SQLite, answers `0A000`; a correlated subquery
+  runs once per distinct outer value, so one over a million distinct values runs a million
+  times, with no statement timeout yet (item 19e); a derived table or `WITH` query cannot name
+  the outer query's columns (a `LATERAL` one can name the items before it, but not a query around
+  its own `SELECT`, `0A000`), a set-returning or window function in the select list of a
+  correlated subquery is `0A000`, and `INSERT ... VALUES` cannot have a subquery that names the
+  inserted row. Subqueries nest at most 32 levels and a statement holds at most 1,024 `SELECT`s
+  (`54001`). Every `WITH` query runs, even one nothing names, and `MATERIALIZED` and `NOT
+  MATERIALIZED` change nothing; `SEARCH` and `CYCLE`, row constructors (`(a, b) IN (SELECT
+  ...)`), a data-modifying `WITH` query that resolves conflicts, and `EXPLAIN` of a query with
+  subqueries answer `0A000`. A derived table, a `WITH` query, a `LATERAL` item and the operands of
+  a set operation are held in memory, counted with the statement's other rows against the 1 GiB
+  limit, and a correlated subquery keeps up to 32 MiB of results by outer value. A `LATERAL` item
+  runs once per distinct set of the values it names, like a correlated subquery, and its join
+  back to them compares with `IS NOT DISTINCT FROM` (no hash join) when one of those values is
+  NULL. `LATERAL ... USING` and a `LATERAL` item after a comma and a `RIGHT` or `FULL` join answer
+  `0A000`; `FULL JOIN ... USING` columns cannot be named unqualified from a subquery (`42702`). An `IN` list of constants is compared item by item (a list of
   more than 256 items is not used to choose a key range either), so a very long list against
   many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
-- `NATURAL` joins, `DISTINCT ON`, `GROUPING SETS`, `ROLLUP` and `CUBE`, `FILTER`, ordered-set
-  aggregates (`WITHIN GROUP`) and the other aggregates fail with `0A000`. Window functions run
-  as select-list items only, and only `row_number()`, `rank()` and `dense_rank()` with
-  `OVER ([PARTITION BY ...] [ORDER BY ...])` (D131); window frames, named windows (`OVER w`),
-  aggregates and other functions over windows, a window call inside an expression or outside the
-  select list, and a window call beside a set-returning function are `0A000`.
+- `NATURAL` joins, `DISTINCT ON`, `GROUPING SETS`, `ROLLUP` and `CUBE`, hypothetical-set
+  aggregates (`rank(x) WITHIN GROUP (...)`), `percentile_cont` and `percentile_disc` over an array
+  of fractions, `percentile_cont` between two `interval` values, and the other aggregates
+  (`stddev`, `variance`, ...) fail with `0A000`. Window functions (D151) do not take `DISTINCT`
+  or `ORDER BY` inside an aggregate's parentheses (`0A000`, as in PostgreSQL); a window whose
+  frame does not start at `UNBOUNDED PRECEDING`, or that excludes rows, recomputes its aggregate
+  for each row, so a long sliding frame costs its length per row; a correlated subquery cannot
+  hold a window function in its select list (`0A000`).
 - Arrays and set-returning functions (D128): arrays cannot be stored in a table or a view, have
   one dimension, and take the element types above; `x[1:2]`, `'[1:2]={1,2}'`, `ARRAY[[1, 2]]`
   and array parameters answer `0A000`. Set-returning functions run in `FROM` and as select-list
   items; several of them in one select list run in lock-step, each input row giving as many rows
   as the longest one, the others padded with NULL, as in PostgreSQL 10 and later (D131); one
-  inside an expression is `0A000`, and a function in `FROM` cannot name another item of the same
-  `FROM` (PostgreSQL's implicit `LATERAL`). `COLLATE` takes only the `C`-like collations.
+  inside an expression is `0A000`, and a function in `FROM` cannot name an item after it in the
+  same `FROM`. `COLLATE` takes only the `C`-like collations.
   When the output stops being read (`eggdb sql ... | head`), the command stops before the next
   statement.
 - `UPDATE` and `DELETE` collect the rows they change before changing them, in memory.
@@ -2408,7 +2483,7 @@ And more, not in the suite yet:
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
   generated columns, views, triggers, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
-  window functions, `group_concat` and `total`, the JSON and math functions, `GLOB` character
+  `group_concat` and `total`, the JSON and math functions, `GLOB` character
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
@@ -2520,7 +2595,8 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   ...)` counts microseconds times 1,000. `STRING_SPLIT`'s `enable_ordinal` is an integer
   constant. The `float` style 3 is error 40517.
 - Not yet: `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.` in `UPDATE`,
-  `SELECT ... INTO` and `#temporary` tables.
+  `SELECT ... INTO` and global `##temporary` tables (`##name` is the session's own table, like
+  `#name`).
 - An identity column that is not the first column of the primary key. The next identity number
   follows the largest one in the table (the smallest for a negative increment), so a deleted
   largest value is used again and an emptied table starts again at its seed, where SQL Server
@@ -2531,7 +2607,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   the statements before it in the batch ran (SQL Server finds it when the batch compiles).
 - A `DEFAULT` that names a column or holds a subquery is `0A000` (SQL Server's 128 and 1046
   not yet), and a Transact-SQL default's implicit conversions inside the expression follow the
-  dialect of the inserting statement, as a view's and a `CHECK`'s do (D124). `WITH ENCRYPTION` and `WITH CHECK OPTION` on views are 40517,
+  dialect of the inserting statement, as a view's and a `CHECK`'s do (D124). `WITH ENCRYPTION` on views is 40517,
   and `SCHEMABINDING` does not stop a table from being changed under the view. Unnamed `CHECK`
   constraints are named `ck__<table>__<column>`, not with SQL Server's random digits.
 - A view or `CHECK` written in Transact-SQL and used from another dialect (or one written in
@@ -2593,12 +2669,11 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   temporal tables are Msg 40517.
 
 ## Next parts (roadmap)
-- SQL/JSON path (`jsonb_path_query`, `@?`, `@@`), `json_populate_record` and `JSON_TABLE`; `ORDER
-  BY` inside aggregate calls.
+- SQL/JSON path (`jsonb_path_query`, `@?`, `@@`), `json_populate_record` and `JSON_TABLE`.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
-- `LATERAL`, `FULL JOIN ... USING`, correlated subqueries in grouped queries, and the other
-  aggregates.
+- `GROUPING SETS`, `ROLLUP` and `CUBE`, `DISTINCT ON`, `NATURAL` joins and the other aggregates
+  (`stddev`, `variance`, hypothetical-set aggregates).
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
   binary `COPY` and `LISTEN`/`NOTIFY` (M6a).
