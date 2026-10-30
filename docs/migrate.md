@@ -87,15 +87,14 @@ restored app.sql into app.db (1,204 statements, 2.3 s)
   indexes         21
   constraints     17
   comments        4
-  skipped         3 (function 1, trigger 1, materialized view 1)
+  skipped         2 (function 1, materialized view 1)
   consequences    1
   ignored         61 (OWNER TO 38, GRANT 20, SET 3)
 rows per table
   public.orders  1,180,002
   public.users      12,480
 skipped (not in EggDB yet; docs/roadmap.md)
-  line 23     function public.set_updated_at()          functions come later
-  line 310    trigger users_updated on public.users     triggers come later
+  line 23     function public.slugify(text)             routines in languages other than SQL and PL/pgSQL come later
   line 2,114  materialized view public.daily            materialized views come later
 consequences (fail only because of a skipped object)
   line 2,240  REFRESH MATERIALIZED VIEW public.daily;   uses materialized view public.daily
@@ -103,16 +102,17 @@ ignored
   OWNER TO    38 statements (EggDB has no roles yet)
   GRANT       20 statements
   SET         3 statements: default_toast_compression (not EggDB parameters)
-ok: every table and row of the dump is in app.db; 3 objects skipped and 1 consequence, listed above.
+ok: every table and row of the dump is in app.db; 2 objects skipped and 1 consequence, listed above.
 ```
 
 - **Created**: schemas, tables and their rows, views, sequences (identity columns included),
   indexes, constraints (primary keys, unique, check and foreign keys with their actions,
   `DEFERRABLE INITIALLY DEFERRED` and `NOT VALID` ones kept as such), enum, composite and range
-  types, domains with their checks and defaults, array columns, and comments.
+  types, domains with their checks and defaults, array columns, comments, functions and
+  procedures in `sql` and `plpgsql` (D158), and triggers, which then run as on PostgreSQL.
 - **Skipped**: what EggDB cannot create yet, each with its line in the dump (`sed -n '23p'
-  app.sql` shows it) and the reason: functions, procedures and aggregates, triggers and event
-  triggers, rules, row-level security policies, base and shell types (`CREATE TYPE name` and
+  app.sql` shows it) and the reason: functions and procedures in other languages (C, Python,
+  Perl), aggregates, constraint and event triggers, rules, row-level security policies, base and shell types (`CREATE TYPE name` and
   `CREATE TYPE ... (INPUT = ...)`), materialized views, partitioned tables (and their rows; partitions dumped as tables of their
   own are restored), tables with inheritance, publications and subscriptions, extensions other
   than `plpgsql`, collations, text search objects, operators, casts, foreign data, roles and
@@ -152,8 +152,9 @@ yet; [sql.md](sql.md#the-postgresql-catalog) has the details.
 
 ### Limits
 
-- Functions, procedures and triggers are not run in this release (D110): a database whose rules
-  live in triggers keeps its data, without the triggers.
+- Functions and procedures in languages other than `sql` and `plpgsql`, and constraint and event
+  triggers, are not created (D110, D158): a database whose rules live in them keeps its data,
+  without them.
 - One database per file: a `pg_dumpall` script restores, its globals going to the report
   (`CREATE ROLE` and `CREATE DATABASE` skipped, `ALTER ROLE` and `ALTER DATABASE` ignored,
   `\connect` listed as a meta-command), and the tables of all its databases land in the one file;

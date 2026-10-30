@@ -867,7 +867,7 @@ restored app.sql into app.db (1,204 statements, 2.3 s)
   indexes         21
   constraints     17
   comments        4
-  skipped         7 (functions 3, triggers 2, types 1, extensions 1)
+  skipped         5 (functions 3, types 1, extensions 1)
   consequences    2
   ignored         61 (OWNER TO 38, GRANT 20, SET 3)
 rows per table
@@ -875,18 +875,17 @@ rows per table
   public.users              12,480
   public.items               1,329
 skipped (not in EggDB yet; docs/roadmap.md)
-  line 23     function public.set_updated_at()            plpgsql functions come later
-  line 310    trigger users_updated on public.users       triggers come later
+  line 23     function public.slugify(text)               routines in languages other than SQL and PL/pgSQL come later
   line 2,114  table public.events (partitioned), 40,120 rows   partitioned tables come later
 consequences (fail only because of a skipped object)
-  line 412    ALTER TABLE public.orders ADD CONSTRAINT …  uses function public.set_updated_at()
+  line 412    ALTER TABLE public.orders ADD CONSTRAINT …  uses function public.slugify(text)
 ignored
   OWNER TO    38 statements (EggDB has no roles yet)
   GRANT       20 statements
   SET         3 statements: default_table_access_method, default_toast_compression, xmloption
   \connect    line 5 (one database per file)
   \!          line 9, never run
-ok: every table and row of the dump is in app.db; 7 objects skipped and 2 consequences, listed above.
+ok: every table and row of the dump is in app.db; 5 objects skipped and 2 consequences, listed above.
 ```
 Rules: `rows per table` is sorted by rows, largest first, at most 20 lines, then `  … and 34
 more tables (12,002 rows); --format json lists every table`. `skipped`, `consequences` and
@@ -921,12 +920,12 @@ text labels. `ok` is true exactly when the exit code is 0.
  "schemas":2,"tables":14,"rows":1204311,"views":3,"sequences":9,"indexes":21,"constraints":17,
  "comments":4,"tables_skipped":1,"rows_skipped":40120,
  "rows_per_table":[{"table":"public.orders","rows":1180002},{"table":"public.users","rows":12480}],
- "skipped":[{"line":23,"kind":"function","name":"public.set_updated_at()","reason":"plpgsql functions come later"},
+ "skipped":[{"line":23,"kind":"function","name":"public.slugify(text)","reason":"routines in languages other than SQL and PL/pgSQL come later"},
             {"line":2114,"kind":"table","name":"public.events","detail":"partitioned","rows":40120,"reason":"partitioned tables come later"}],
- "consequences":[{"line":412,"statement":"ALTER TABLE public.orders ADD CONSTRAINT …","uses":"function public.set_updated_at()","error":"function public.set_updated_at() does not exist","sqlstate":"42883"}],
+ "consequences":[{"line":412,"statement":"ALTER TABLE public.orders ADD CONSTRAINT …","uses":"function public.slugify(text)","error":"function public.slugify(text) does not exist","sqlstate":"42883"}],
  "ignored":{"owner_to":38,"grant":20,"revoke":0,"set":["default_table_access_method","default_toast_compression","xmloption"],
             "meta_commands":[{"line":5,"command":"\\connect","reason":"one database per file"},{"line":9,"command":"\\!","reason":"never run"}]},
- "errors":[],"error":null,"verdict":"every table and row of the dump is in app.db; 7 objects skipped and 2 consequences, listed above."}
+ "errors":[],"error":null,"verdict":"every table and row of the dump is in app.db; 5 objects skipped and 2 consequences, listed above."}
 ```
 `dump` is `"-"` for stdin. `rows_per_table` holds every table, in the text order. `kind` is
 pg_dump's lower-case object kind (`function`, `procedure`, `aggregate`, `trigger`, `rule`,
@@ -2894,7 +2893,7 @@ restored app.sql into a copy of app.db, then removed the copy (1,204 statements,
   schemas         2
   tables          14, 1,204,311 rows
   …
-ok: every table and row of the dump would be in app.db; 7 objects skipped and 2 consequences, listed above.
+ok: every table and row of the dump would be in app.db; 5 objects skipped and 2 consequences, listed above.
 ```
 
 With `--create` and no file the first line reads `restored app.sql into a scratch file for

@@ -1815,15 +1815,60 @@ it, and a statement that fails in a trigger leaves nothing behind.
   ...] ON table [REFERENCING {OLD | NEW} TABLE AS name] [FOR EACH {ROW | STATEMENT}] [WHEN
   (condition)] EXECUTE {FUNCTION | PROCEDURE} name(arguments)`, `DROP TRIGGER [IF EXISTS] name ON
   table` and `ALTER TABLE ... {ENABLE | DISABLE} TRIGGER`. A trigger function is a PL/pgSQL
-  function (`RETURNS trigger`; PostgreSQL has no `LANGUAGE sql` trigger functions), which
-  arrives with 3.14: until then `CREATE TRIGGER` reports the function as missing (`42883`).
+  function (`RETURNS trigger`; PostgreSQL has no `LANGUAGE sql` trigger functions, see
+  [Functions, procedures and DO blocks](#functions-procedures-and-do-blocks)) with `NEW`, `OLD`
+  and the `TG_*` variables: a `BEFORE` row trigger returning `NULL` skips the row and one
+  returning a record changes it, and `CREATE TRIGGER` checks that the function exists (`42883`)
+  and returns `trigger` (`42P17`).
   `pg_trigger`, `pg_get_triggerdef` and `information_schema.triggers` list triggers of every
   dialect.
 
 Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash. Dropping
 a table or view drops its triggers, and renaming one keeps them. Not yet: temporary and
-constraint triggers, SQL Server DDL and logon triggers, Oracle triggers (3.16), and triggers on
-`TRUNCATE` (PostgreSQL only, with 3.14's trigger functions).
+constraint and event triggers, SQL Server DDL and logon triggers, Oracle triggers (3.16), and
+transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
+fire on `TRUNCATE` too.
+
+## Functions, procedures and DO blocks
+
+In the PostgreSQL dialect (D158), users create and call their own functions and procedures in
+`LANGUAGE sql` and `LANGUAGE plpgsql`:
+
+- `CREATE [OR REPLACE] FUNCTION name([[IN | OUT | INOUT | VARIADIC] [name] type [DEFAULT
+  expression], ...]) RETURNS type | SETOF type | TABLE(column type, ...) LANGUAGE {sql |
+  plpgsql} [IMMUTABLE | STABLE | VOLATILE] [STRICT] [SECURITY DEFINER] [SET setting = value]
+  AS 'body' | $$body$$`, also `RETURN expression` and `BEGIN ATOMIC ... END` bodies for `sql`;
+  `CREATE [OR REPLACE] PROCEDURE` the same without `RETURNS`; overloads by input types;
+  `DROP {FUNCTION | PROCEDURE | ROUTINE} [IF EXISTS] name[(types)], ... [CASCADE]` (`CASCADE`
+  drops the triggers using a function); `ALTER {FUNCTION | PROCEDURE} ... RENAME TO | SET SCHEMA`
+  (owner and attribute changes are accepted and change nothing).
+- Calls: `SELECT f(...)` and `f(...)` anywhere in an expression, `SELECT * FROM f(...) [WITH
+  ORDINALITY] [AS alias(columns)]` for set-returning functions, `CALL p(...)` (its result row is
+  the `OUT` and `INOUT` values), `DO [LANGUAGE plpgsql] $$...$$`, named arguments (`a => 1`),
+  defaults and `VARIADIC`. Overloads are chosen by argument types (`42725` when ambiguous,
+  `42883` when none fits, `42809` for a procedure called as a function and back).
+- PL/pgSQL: `DECLARE` (types, `%TYPE`, `%ROWTYPE`, `record`, `CONSTANT`, `NOT NULL`, defaults,
+  `ALIAS FOR`, cursors), nested blocks with labels, `:=` and `=` assignments to variables, record
+  fields and array elements, `SELECT ... INTO [STRICT]`, DML with `RETURNING ... INTO`,
+  `PERFORM`, `EXECUTE ... [INTO] [USING]` dynamic SQL, `GET [CURRENT | STACKED] DIAGNOSTICS`,
+  `FOUND`, `IF`/`ELSIF`, both `CASE` forms, `LOOP`, `WHILE`, `FOR` over integers, queries,
+  cursors and `EXECUTE`, `FOREACH ... IN ARRAY [SLICE]`, `EXIT`/`CONTINUE [label] [WHEN]`,
+  `RETURN`, `RETURN NEXT`, `RETURN QUERY [EXECUTE]`, `RAISE` with levels, condition names,
+  `SQLSTATE` and `USING` options (notices reach the client as PostgreSQL's notices), `ASSERT`,
+  `BEGIN ... EXCEPTION WHEN condition THEN ...` with `SQLSTATE`/`SQLERRM` (the block's writes are
+  undone when a handler catches the error), `OPEN`/`FETCH`/`MOVE`/`CLOSE` with scrollable
+  cursors, and `CALL` with `INOUT` variables assigned back. Errors name their place as PostgreSQL
+  does (`PL/pgSQL function f(integer) line 3 at RAISE`).
+- Bodies are checked at `CREATE` (unless `check_function_bodies` is off, as `pg_dump` sets it),
+  with PostgreSQL's messages; the SQL statements inside run when they are reached.
+
+Limits (D45): calls nest at most 100 deep (`54001`), every loop and statement can be cancelled,
+a body nests at most 64 levels and holds at most 100,000 statements, a routine's text is at most
+1 MiB, and a routine holds at most 1000 open cursors. Not yet: `COMMIT` and `ROLLBACK` in
+procedures (`0A000`), refcursors returned to the caller, polymorphic types (`anyelement`),
+`regprocedure`, functions that write when called once per row (`0A000`; call them on their
+own), set-returning functions other than as a `FROM` item or in a `SELECT` without `FROM`, and
+languages other than `sql` and `plpgsql`.
 
 ## Schemas, views and comments
 
@@ -2053,9 +2098,13 @@ relation X (`pg_catalog` is searched first unless `search_path` lists it after a
 each), `pg_timezone_names` (every region of the time zone database, D153) and `pg_trigger`
 (every trigger, of any dialect, with `tgtype`, `tgenabled`, `tgattr` and `tgargs`), and the empty `pg_inherits`, `pg_policy`, `pg_statistic_ext`, `pg_publication`,
 `pg_publication_rel`, `pg_publication_namespace`, `pg_rewrite`,
-`pg_auth_members`, `pg_opclass`, `pg_enum` and `pg_range`, and `pg_proc` with the array
-functions `array_in`, `array_out`, `array_recv` and `array_send` (D135), each with PostgreSQL
-16's columns and column types. `information_schema`'s views are catalog relations too: see
+`pg_auth_members`, `pg_opclass`, `pg_enum` and `pg_range`, `pg_proc` with the array
+functions `array_in`, `array_out`, `array_recv` and `array_send` (D135) and every user function
+and procedure (D158), and `pg_language` (`internal`, `c`, `sql`, `plpgsql`), each with PostgreSQL
+16's columns and column types. `pg_get_functiondef`, `pg_get_function_arguments`,
+`pg_get_function_identity_arguments`, `pg_get_function_result`, `pg_function_is_visible` and
+`regproc` name user routines, `pg_trigger.tgfoid` is the trigger's function, and
+`information_schema.routines` and `parameters` list them, so psql's `\df` shows them. `information_schema`'s views are catalog relations too: see
 [Java and Python apps](#java-and-python-apps-and-information_schema). A statement that names them builds their rows from the stored tables, views, sequences,
 schemas and comments once, however often it reads them (correlated subqueries included); a
 statement that names none costs nothing; a stored default, `CHECK` constraint or view that uses
@@ -2359,6 +2408,14 @@ name and its arguments) and the whole `CREATE TRIGGER` text. A record whose trig
 its dialect (a Transact-SQL row trigger, say) is damaged, and a damaged record is an error naming
 it, never a panic.
 
+A routine name's functions and procedures are one record under the catalog prefix, `0x0C` and
+the routine's internal name (D158): record version `1`, the count of overloads (1 to 256), then
+for each its dialect code, its kind (`1` function, `2` procedure), its identity (the input
+argument type names joined by `, `, typmods left out) and the whole `CREATE` text (at most
+1 MiB). Loading parses the `CREATE` text again and checks that kind and identity match; a record
+that does not, or holds two overloads with one identity, is damaged, and a damaged record is an
+error naming it, never a panic.
+
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
 point is IEEE 754 with the sign handled so negatives sort first (`-0` stored as `0`, every NaN as
@@ -2415,7 +2472,7 @@ condition on its plain columns is pushed into it (D155), so a lookup through a v
 table's primary key and indexes, but a view with grouping, aggregates, `DISTINCT`, a limit, a
 window or a computed column used by the condition, or one on the NULL side of an outer join, is
 still computed in full before the condition filters it; a view that is not automatically
-updatable has no rules to make it so (its `INSTEAD OF` triggers run PL/pgSQL functions, 3.14),
+updatable has no rules to make it so (its `INSTEAD OF` triggers make it writable),
 there are no materialized or
 recursive views, renaming a table
 or view that a view uses is `0A000` (PostgreSQL follows the rename), a view resolves its names

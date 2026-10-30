@@ -1136,14 +1136,14 @@ restored app.sql into app.db (1,204 statements, 2.3 s)
   indexes         21
   constraints     17
   comments        4
-  skipped         3 (function 1, trigger 1, materialized view 1)
+  skipped         2 (function 1, materialized view 1)
   consequences    1
   ignored         61 (OWNER TO 38, GRANT 20, SET 3)
 rows per table
   public.orders  1,180,002
   public.users      12,480
 …
-ok: every table and row of the dump is in app.db; 3 objects skipped and 1 consequence, listed above.
+ok: every table and row of the dump is in app.db; 2 objects skipped and 1 consequence, listed above.
 ```
 
 ## `eggdb mcp`
