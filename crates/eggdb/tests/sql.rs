@@ -224,6 +224,56 @@ fn a_killed_process_leaves_the_whole_transaction_or_none_of_it() {
 }
 
 #[test]
+fn a_killed_process_keeps_a_triggers_changes_with_its_statement() {
+    let setup = "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);
+                 CREATE TABLE log (id INTEGER, n INTEGER);
+                 CREATE TRIGGER t_logged AFTER INSERT ON t BEGIN
+                   INSERT INTO log VALUES (NEW.id, NEW.n);
+                 END;";
+    let mut script = String::new();
+    for id in 0..4_000 {
+        script.push_str(&format!("INSERT INTO t VALUES ({id}, {});\n", id % 13));
+    }
+    for delay_ms in [0u64, 50, 150, 400] {
+        let file = TempPath::new("sql-trigger-killed");
+        Database::open(file.path()).unwrap().close().unwrap();
+        let prepared = eggdb_sql(file.path(), &["--dialect", "sqlite", "-c", setup], b"");
+        assert_eq!(prepared.status.code(), Some(0), "{}", text(&prepared.stderr));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .arg("sql")
+            .arg(file.path())
+            .args(["--dialect", "sqlite"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let bytes = script.clone().into_bytes();
+        let writer = std::thread::spawn(move || {
+            let _ = input.write_all(&bytes);
+        });
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        let count = |table: &str| {
+            let output = eggdb_sql(
+                file.path(),
+                &["--dialect", "sqlite", "-c", &format!("SELECT count(*) AS rows FROM {table}")],
+                b"",
+            );
+            assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+            text(&output.stdout)
+        };
+        assert_eq!(count("t"), count("log"), "after {delay_ms} ms");
+        let db = Database::open(file.path()).unwrap();
+        assert_eq!(db.check().unwrap().leaked_pages, 0);
+        db.close().unwrap();
+    }
+}
+
+#[test]
 fn a_killed_process_never_leaves_an_index_that_disagrees_with_its_rows() {
     let mut script = String::from(
         "CREATE TABLE items (id bigint PRIMARY KEY, code text UNIQUE, grp integer);\nCREATE INDEX items_grp ON items (grp);\n",

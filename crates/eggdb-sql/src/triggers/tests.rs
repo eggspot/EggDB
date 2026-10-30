@@ -5,7 +5,7 @@ use super::{
 use crate::dialect::Dialect;
 use crate::encoding::{decode_triggers, encode_triggers};
 use crate::memory_store::MemoryStore;
-use crate::tests::render;
+use crate::tests::{fuzz, render};
 use crate::{Session, SqlError};
 
 fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
@@ -585,4 +585,76 @@ fn sqlserver_sys_triggers_lists_triggers() {
         ),
         vec!["soft_delete|orders|1|1|TR"]
     );
+}
+
+#[test]
+fn hostile_trigger_statements_never_panic() {
+    let fragments = [
+        "CREATE TRIGGER g",
+        "CREATE OR REPLACE TRIGGER g",
+        "CREATE OR ALTER TRIGGER g",
+        "CREATE TRIGGER IF NOT EXISTS g",
+        "ALTER TRIGGER g",
+        "DROP TRIGGER g",
+        "DROP TRIGGER IF EXISTS g ON t",
+        "ENABLE TRIGGER g ON t",
+        "DISABLE TRIGGER ALL ON t",
+        "ALTER TABLE t DISABLE TRIGGER ALL",
+        "BEFORE",
+        "AFTER",
+        "INSTEAD OF",
+        "FOR",
+        "INSERT",
+        "UPDATE OF a",
+        "DELETE",
+        "TRUNCATE",
+        "OR",
+        "ON t",
+        "ON v",
+        "FOR EACH ROW",
+        "FOR EACH STATEMENT",
+        "REFERENCING NEW TABLE AS n OLD TABLE AS o",
+        "WHEN (NEW.a > 1)",
+        "WHEN NEW.a IS NULL",
+        "EXECUTE FUNCTION f()",
+        "FOLLOWS g",
+        "PRECEDES h",
+        "AS",
+        "BEGIN",
+        "END",
+        "END IF",
+        "IF NEW.a > 0 THEN",
+        "ELSEIF",
+        "ELSE",
+        "WHILE 0 DO",
+        "END WHILE",
+        "DECLARE x INT DEFAULT 1",
+        "SET NEW.a = 2",
+        "SET x = x + 1",
+        "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'no'",
+        "SELECT RAISE(ABORT, 'no')",
+        "SELECT RAISE(IGNORE)",
+        "RAISE(ROLLBACK, 'x')",
+        "INSERT INTO t VALUES (NEW.a + 1, OLD.b)",
+        "INSERT INTO t SELECT * FROM inserted",
+        "DELETE FROM t WHERE a IN (SELECT a FROM deleted)",
+        "IF UPDATE(a)",
+        "UPDATE t SET b = b + 1",
+        "INSERT INTO t VALUES (1, 2)",
+        "DELETE FROM t",
+        "NEW.a",
+        "OLD.b",
+        "(",
+        ")",
+        ",",
+        ";",
+    ];
+    for dialect in Dialect::ALL {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, dialect);
+        let _ = run(&mut session, "CREATE TABLE t (a int PRIMARY KEY, b int)");
+        let _ = run(&mut session, "CREATE VIEW v AS SELECT a, b FROM t");
+        fuzz(&mut session, &fragments);
+        session.check_indexes().unwrap();
+    }
 }
