@@ -402,14 +402,17 @@ pub fn restore_dump<S: KeyValueStore>(
                     return failed_before_start(error);
                 }
             }
-            Restore::new(
+            session.keep_identity_values(true);
+            let report = Restore::new(
                 session,
                 &mut reader,
                 RestoreRules::oracle(),
                 options,
                 progress,
             )
-            .run()
+            .run();
+            session.keep_identity_values(false);
+            report
         }
         _ => failed_before_start(SqlError::not_supported(
             "restoring a dump in a dialect other than PostgreSQL, SQL Server and Oracle",

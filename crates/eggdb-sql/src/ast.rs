@@ -369,6 +369,7 @@ pub(crate) struct ConstraintSpec {
     pub(crate) kind: ConstraintKind,
     pub(crate) position: usize,
     pub(crate) column: Option<Name>,
+    pub(crate) using_index: Option<Name>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

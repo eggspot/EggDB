@@ -26,6 +26,7 @@ struct Context {
     database: String,
     owner: String,
     identity_insert_table: Option<String>,
+    keeps_identity_values: bool,
 }
 
 thread_local! {
@@ -47,6 +48,7 @@ pub(crate) fn enter(
     database: String,
     owner: String,
     identity_insert_table: Option<String>,
+    keeps_identity_values: bool,
 ) -> ContextGuard {
     let context = Context {
         dialect,
@@ -54,6 +56,7 @@ pub(crate) fn enter(
         database,
         owner,
         identity_insert_table,
+        keeps_identity_values,
     };
     ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
 }
@@ -66,6 +69,7 @@ fn context() -> Context {
             database: String::new(),
             owner: String::new(),
             identity_insert_table: None,
+            keeps_identity_values: false,
         })
     })
 }
@@ -86,6 +90,15 @@ pub(crate) fn identity_insert_is_on(table: &str) -> bool {
             .as_ref()
             .and_then(|context| context.identity_insert_table.as_deref())
             == Some(table)
+    })
+}
+
+pub(crate) fn keeps_identity_values() -> bool {
+    CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .is_some_and(|context| context.keeps_identity_values)
     })
 }
 

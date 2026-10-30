@@ -1,4 +1,4 @@
-use crate::error::SqlError;
+use crate::error::{SqlError, SqlState};
 use crate::lexer::swap_uniform_case;
 
 fn quoted_names(message: &str) -> Vec<&str> {
@@ -156,6 +156,14 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
             "resource busy and acquire with NOWAIT specified or timeout expired".to_owned(),
         )),
         "42P02" => Some((1008, "not all variables bound".to_owned())),
+        "428C9" if message.starts_with("cannot insert") => Some((
+            32795,
+            "cannot insert into a generated always identity column".to_owned(),
+        )),
+        "428C9" => Some((
+            32796,
+            "cannot update a generated always identity column".to_owned(),
+        )),
         "54000" => Some((
             1489,
             "result of string concatenation is too long".to_owned(),
@@ -166,7 +174,9 @@ pub(crate) fn translate(error: SqlError, text: &str, user: &str) -> SqlError {
         return error;
     };
     let mut result = SqlError::new(error.state(), wording).with_oracle_code(code);
-    if let Some(hint) = error.hint() {
+    if let Some(hint) = error.hint()
+        && error.state() != SqlState::GENERATED_ALWAYS
+    {
         result = result.with_hint(hint);
     }
     match error.position() {
@@ -240,5 +250,35 @@ mod tests {
             "EGGDB",
         );
         assert_eq!(unknown.to_string(), "ORA-00900: invalid SQL statement");
+    }
+
+    #[test]
+    fn generated_always_identities_take_oracle_numbers_without_postgresql_hints() {
+        let inserted = translate(
+            SqlError::new(
+                SqlState::GENERATED_ALWAYS,
+                "cannot insert a non-DEFAULT value into column \"id\"",
+            )
+            .with_hint("Use OVERRIDING SYSTEM VALUE to override."),
+            "INSERT INTO t VALUES (1)",
+            "EGGDB",
+        );
+        assert_eq!(
+            inserted.to_string(),
+            "ORA-32795: cannot insert into a generated always identity column"
+        );
+        assert_eq!(inserted.hint(), None);
+        let updated = translate(
+            SqlError::new(
+                SqlState::GENERATED_ALWAYS,
+                "column \"id\" can only be updated to DEFAULT",
+            ),
+            "UPDATE t SET id = 2",
+            "EGGDB",
+        );
+        assert_eq!(
+            updated.to_string(),
+            "ORA-32796: cannot update a generated always identity column"
+        );
     }
 }

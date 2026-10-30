@@ -537,6 +537,7 @@ fn add_column(
                 kind: ConstraintKind::Unique(vec![definition.name.clone()]),
                 position: definition.name.position,
                 column: Some(definition.name.clone()),
+                using_index: None,
             },
             dialect,
         )?;
@@ -1540,6 +1541,7 @@ fn redefine(
                 kind: ConstraintKind::Unique(vec![column.name.clone()]),
                 position: column.name.position,
                 column: Some(column.name.clone()),
+                using_index: None,
             },
             dialect,
         )?;
@@ -1554,6 +1556,7 @@ fn redefine(
                 kind: ConstraintKind::PrimaryKey(vec![column.name.clone()]),
                 position: column.name.position,
                 column: Some(column.name.clone()),
+                using_index: None,
             },
             dialect,
         )?;
@@ -1576,6 +1579,11 @@ fn add_constraint(
         && take_over_index(writer, tables, name, spec, given, dialect)?
     {
         return Ok(());
+    }
+    if dialect == Dialect::Oracle
+        && let Some(using) = &spec.using_index
+    {
+        use_named_index(writer, tables, name, spec, using, dialect)?;
     }
     let mut table = current(writer, tables, name)?;
     if let Some(given) = &spec.name
@@ -1743,6 +1751,64 @@ fn take_over_index(
         }
         _ => Ok(false),
     }
+}
+
+fn use_named_index(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    spec: &ConstraintSpec,
+    using: &Name,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let index_name = crate::schemas::base_name(&using.text);
+    if spec
+        .name
+        .as_ref()
+        .is_some_and(|given| given.text == index_name)
+    {
+        return Ok(());
+    }
+    let (ConstraintKind::PrimaryKey(columns) | ConstraintKind::Unique(columns)) = &spec.kind else {
+        return Ok(());
+    };
+    let table = current(writer, tables, name)?;
+    let Some(index) = table.index_named(index_name).cloned() else {
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_OBJECT,
+            "specified index does not exist",
+        )
+        .with_oracle_code(1418)
+        .at(using.position));
+    };
+    let mut wanted = Vec::with_capacity(columns.len());
+    for column in columns {
+        wanted.push(column_index(&table, column, dialect)?);
+    }
+    let enforces = index
+        .columns
+        .get(..wanted.len())
+        .is_some_and(|leading| wanted.iter().all(|column| leading.contains(column)));
+    if !enforces {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "specified index cannot be used to enforce the constraint",
+        )
+        .with_oracle_code(14196)
+        .at(using.position));
+    }
+    if index.columns.len() != wanted.len() || index.backs_unique_constraint {
+        return Ok(());
+    }
+    let drop = crate::ast::DropIndex {
+        names: vec![using.clone()],
+        table: Some(Name {
+            text: table.name.clone(),
+            position: using.position,
+        }),
+        if_exists: false,
+    };
+    indexes::drop_index(writer, tables, &drop, dialect).map(|_| ())
 }
 
 fn drop_primary_key(

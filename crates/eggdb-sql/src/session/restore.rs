@@ -7,6 +7,10 @@ use crate::store::KeyValueStore;
 use std::sync::Arc;
 
 impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+    pub(crate) fn keep_identity_values(&mut self, keep: bool) {
+        self.keeps_identity_values = keep;
+    }
+
     pub(crate) fn ensure_schema(&mut self, name: &str) -> SqlResult<bool> {
         if name == crate::schemas::DEFAULT_SCHEMA {
             return Ok(false);

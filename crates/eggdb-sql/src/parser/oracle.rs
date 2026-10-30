@@ -966,7 +966,8 @@ impl<'t> Parser<'t> {
 
     pub(super) fn oracle_identity(&mut self, column: &mut ColumnDefinition) -> SqlResult<()> {
         self.at += 1;
-        if !self.take_word("always") && self.take_word("by") {
+        let by_default = !self.take_word("always") && self.take_word("by");
+        if by_default {
             self.expect_word("default")?;
             if self.take_word("on") {
                 self.expect_word("null")?;
@@ -984,6 +985,7 @@ impl<'t> Parser<'t> {
             column.sql_type = SqlType::BigInt;
         }
         column.auto_increment = true;
+        column.generated_always = !by_default;
         Ok(())
     }
 
@@ -1462,10 +1464,12 @@ impl Parser<'_> {
             .any(|word| self.is_word(word))
     }
 
-    pub(super) fn oracle_using_index(&mut self) -> SqlResult<()> {
+    pub(super) fn oracle_using_index(&mut self) -> SqlResult<Option<Name>> {
         if self.peek_kind() == &TokenKind::LeftParen {
-            return self.skip_balanced();
+            self.skip_balanced()?;
+            return Ok(None);
         }
+        let mut named = None;
         if matches!(
             self.peek_kind(),
             TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
@@ -1490,7 +1494,7 @@ impl Parser<'_> {
             .iter()
             .any(|word| self.is_word(word))
         {
-            self.table_name()?;
+            named = Some(self.table_name()?);
         }
         while self.take_word("local") || self.take_word("global") {
             if self.is_word("partition") && self.is_word_at(1, "by") {
@@ -1499,16 +1503,24 @@ impl Parser<'_> {
                 self.skip_balanced()?;
             }
         }
-        self.skip_physical_properties()
+        self.skip_physical_properties()?;
+        Ok(named)
     }
 
     pub(super) fn oracle_constraint_states(&mut self) -> SqlResult<bool> {
-        let mut enabled = true;
+        Ok(self.oracle_constraint_state_list()?.enabled)
+    }
+
+    pub(super) fn oracle_constraint_state_list(&mut self) -> SqlResult<ConstraintStates> {
+        let mut states = ConstraintStates {
+            enabled: true,
+            using_index: None,
+        };
         loop {
             if self.take_word("enable") {
-                enabled = true;
+                states.enabled = true;
             } else if self.take_word("disable") {
-                enabled = false;
+                states.enabled = false;
             } else if self.take_word("validate")
                 || self.take_word("novalidate")
                 || self.take_word("rely")
@@ -1516,10 +1528,17 @@ impl Parser<'_> {
             {
             } else if self.is_word("using") && self.is_word_at(1, "index") {
                 self.at += 2;
-                self.oracle_using_index()?;
+                if let Some(index) = self.oracle_using_index()? {
+                    states.using_index = Some(index);
+                }
             } else {
-                return Ok(enabled);
+                return Ok(states);
             }
         }
     }
+}
+
+pub(super) struct ConstraintStates {
+    pub(super) enabled: bool,
+    pub(super) using_index: Option<Name>,
 }

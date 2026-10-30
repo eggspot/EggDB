@@ -1174,7 +1174,7 @@ fn check_generated_always(
     rows: &[Vec<InsertValue>],
     overriding: Option<Overriding>,
 ) -> SqlResult<()> {
-    if overriding.is_some() {
+    if overriding.is_some() || constraints::keeps_identity_values() {
         return Ok(());
     }
     for (slot, &target) in targets.iter().enumerate() {
@@ -1717,7 +1717,9 @@ pub(crate) fn insert_literals(
             insert.table.name.position,
         ));
     }
-    if let Some(column) = (0..insert.width).find(|&column| table.is_generated_always(column)) {
+    if !constraints::keeps_identity_values()
+        && let Some(column) = (0..insert.width).find(|&column| table.is_generated_always(column))
+    {
         return Err(generated_always_given(&table, column));
     }
     if crate::sequences::mentions_nextval(&table) {

@@ -259,27 +259,161 @@ fn disable_span(lexemes: &[Lexeme], depth: u32) -> Option<Range<usize>> {
     Some(lexemes[at].span.start..lexemes[end - 1].span.end)
 }
 
-pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
-    let lexemes = lexemes(text);
-    let table_at = lexemes
+struct ColumnConstraint {
+    span: Range<usize>,
+    name: String,
+    kind_at: usize,
+    disable: Range<usize>,
+}
+
+fn is_constraint_kind(lexeme: Option<&Lexeme>) -> bool {
+    ["check", "references", "unique", "primary"]
         .iter()
-        .position(|lexeme| lexeme.depth == 0 && is_word(Some(lexeme), "table"))?;
-    let open = lexemes
+        .any(|word| is_word(lexeme, word))
+}
+
+fn starts_column_part(lexemes: &[Lexeme], at: usize) -> bool {
+    let lexeme = &lexemes[at];
+    if lexeme.depth != 1 {
+        return false;
+    }
+    let previous = at.checked_sub(1).and_then(|before| lexemes.get(before));
+    let after_constraint_name = at
+        .checked_sub(2)
+        .is_some_and(|before| is_word(lexemes.get(before), "constraint"));
+    if is_constraint_kind(Some(lexeme)) {
+        return !after_constraint_name;
+    }
+    if is_word(Some(lexeme), "not") {
+        return is_word(lexemes.get(at + 1), "null");
+    }
+    if is_word(Some(lexeme), "null") {
+        return !["not", "set", "default", "on"]
+            .iter()
+            .any(|word| is_word(previous, word));
+    }
+    ["constraint", "default", "generated", "collate", "visible", "invisible"]
         .iter()
-        .skip(table_at)
-        .position(|lexeme| lexeme.piece == Piece::Open && lexeme.depth == 0)?
-        + table_at;
-    let table_start = lexemes.get(table_at + 1)?.span.start;
-    let table = text
-        .get(table_start..lexemes[open].span.start)?
-        .trim()
-        .to_owned();
-    let close = lexemes
-        .iter()
-        .skip(open + 1)
-        .position(|lexeme| lexeme.piece == Piece::Close && lexeme.depth == 0)?
-        + open
-        + 1;
+        .any(|word| is_word(Some(lexeme), word))
+}
+
+fn disabled_column_constraints(element: &Element) -> Vec<ColumnConstraint> {
+    let lexemes = &element.lexemes;
+    let starts: Vec<usize> = (1..lexemes.len())
+        .filter(|&at| starts_column_part(lexemes, at))
+        .collect();
+    let mut found = Vec::new();
+    for (number, &start) in starts.iter().enumerate() {
+        let end = starts.get(number + 1).copied().unwrap_or(lexemes.len());
+        let named = is_word(lexemes.get(start), "constraint");
+        let kind_at = if named { start + 2 } else { start };
+        if kind_at >= end || !is_constraint_kind(lexemes.get(kind_at)) {
+            continue;
+        }
+        let part = &lexemes[start..end];
+        let Some(disable) = disable_span(part, 1) else {
+            continue;
+        };
+        let name = if named {
+            name_of(lexemes.get(start + 1)).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        found.push(ColumnConstraint {
+            span: lexemes[start].span.start..lexemes[end - 1].span.end,
+            name,
+            kind_at,
+            disable,
+        });
+    }
+    found
+}
+
+fn without_span(text: &str, from: usize, to: usize, removed: &Range<usize>) -> String {
+    if removed.start < from || removed.end > to {
+        return text.get(from..to).unwrap_or("").trim().to_owned();
+    }
+    let before = text.get(from..removed.start).unwrap_or("");
+    let after = text.get(removed.end..to).unwrap_or("");
+    format!("{}{}", before.trim_end(), after).trim().to_owned()
+}
+
+fn table_level_clause(
+    text: &str,
+    element: &Element,
+    constraint: &ColumnConstraint,
+) -> String {
+    let lexemes = &element.lexemes;
+    let column = lexemes
+        .first()
+        .and_then(|lexeme| text.get(lexeme.span.clone()))
+        .unwrap_or("");
+    let kind = &lexemes[constraint.kind_at];
+    let named = text
+        .get(constraint.span.start..kind.span.start)
+        .unwrap_or("");
+    let end = constraint.span.end;
+    let rest_after = |at: usize| {
+        let from = lexemes.get(at).map_or(end, |lexeme| lexeme.span.end);
+        without_span(text, from, end, &constraint.disable)
+    };
+    let joined = |head: String, rest: String| {
+        if rest.is_empty() {
+            head
+        } else {
+            format!("{head} {rest}")
+        }
+    };
+    let body = if is_word(Some(kind), "references") {
+        format!(
+            "FOREIGN KEY ({column}) {}",
+            without_span(text, kind.span.start, end, &constraint.disable)
+        )
+    } else if is_word(Some(kind), "unique") {
+        joined(format!("UNIQUE ({column})"), rest_after(constraint.kind_at))
+    } else if is_word(Some(kind), "primary") {
+        let key_at = if is_word(lexemes.get(constraint.kind_at + 1), "key") {
+            constraint.kind_at + 1
+        } else {
+            constraint.kind_at
+        };
+        joined(format!("PRIMARY KEY ({column})"), rest_after(key_at))
+    } else {
+        without_span(text, kind.span.start, end, &constraint.disable)
+    };
+    format!("{named}{body}")
+}
+
+fn without_spans(text: &str, whole: &Range<usize>, removed: &mut [Range<usize>]) -> String {
+    removed.sort_by_key(|span| span.start);
+    let mut out = String::new();
+    let mut cursor = whole.start;
+    for span in removed.iter() {
+        if span.start < cursor || span.end > whole.end {
+            continue;
+        }
+        out.push_str(text.get(cursor..span.start).unwrap_or("").trim_end());
+        cursor = span.end;
+    }
+    out.push_str(text.get(cursor..whole.end).unwrap_or(""));
+    out
+}
+
+struct RewrittenElements {
+    kept: Vec<String>,
+    notes: Vec<DifferenceNote>,
+    disabled: Vec<DisabledElement>,
+    changed: bool,
+}
+
+fn rewritten_elements(
+    text: &str,
+    lexemes: &[Lexeme],
+    open: usize,
+    close: usize,
+    table: &str,
+    table_name: &str,
+) -> RewrittenElements {
     let mut elements = Vec::new();
     let mut element_start = open + 1;
     for index in open + 1..=close {
@@ -306,15 +440,12 @@ pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
         });
         element_start = index + 1;
     }
-    let table_name = lexemes[table_at + 1..open]
-        .iter()
-        .rev()
-        .find_map(|lexeme| name_of(Some(lexeme)))
-        .unwrap_or_default();
-    let mut kept: Vec<String> = Vec::new();
-    let mut notes = Vec::new();
-    let mut disabled = Vec::new();
-    let mut changed = false;
+    let mut rewritten = RewrittenElements {
+        kept: Vec::new(),
+        notes: Vec::new(),
+        disabled: Vec::new(),
+        changed: false,
+    };
     for element in &elements {
         let element_text = text.get(element.span.clone()).unwrap_or("");
         let first = element.lexemes.first();
@@ -327,48 +458,133 @@ pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
                 };
                 let before = text.get(element.span.start..span.start).unwrap_or("");
                 let after = text.get(span.end..element.span.end).unwrap_or("");
-                disabled.push(DisabledElement {
-                    table: table.clone(),
+                rewritten.disabled.push(DisabledElement {
+                    table: table.to_owned(),
                     name,
                     clause: format!("{}{}", before.trim_end(), after).trim().to_owned(),
                 });
-                changed = true;
+                rewritten.changed = true;
                 continue;
             }
-            kept.push(element_text.to_owned());
+            rewritten.kept.push(element_text.to_owned());
             continue;
         }
         let column = name_of(first).unwrap_or_default();
         if is_virtual(element) {
-            notes.push(DifferenceNote::new(
+            rewritten.notes.push(DifferenceNote::new(
                 format!("{table_name}.{column}"),
                 "virtual column not kept: Oracle computes it, so it is left out here",
             ));
-            changed = true;
+            rewritten.changed = true;
             continue;
         }
+        let mut removed = Vec::new();
         if let Some(span) = identity_span(element) {
-            let before = text.get(element.span.start..span.start).unwrap_or("");
-            let after = text.get(span.end..element.span.end).unwrap_or("");
-            kept.push(format!("{}{}", before.trim_end(), after));
-            notes.push(DifferenceNote::new(
+            removed.push(span);
+            rewritten.notes.push(DifferenceNote::new(
                 format!("{table_name}.{column}"),
                 "identity not kept: values restored, new rows need explicit values",
             ));
-            changed = true;
+        }
+        for constraint in disabled_column_constraints(element) {
+            rewritten.disabled.push(DisabledElement {
+                table: table.to_owned(),
+                name: constraint.name.clone(),
+                clause: table_level_clause(text, element, &constraint),
+            });
+            removed.push(constraint.span);
+        }
+        if removed.is_empty() {
+            rewritten.kept.push(element_text.to_owned());
             continue;
         }
-        kept.push(element_text.to_owned());
+        rewritten.changed = true;
+        rewritten
+            .kept
+            .push(without_spans(text, &element.span, &mut removed));
     }
-    if !changed || kept.is_empty() {
+    rewritten
+}
+
+fn closing_paren(lexemes: &[Lexeme], open: usize) -> Option<usize> {
+    lexemes
+        .iter()
+        .skip(open + 1)
+        .position(|lexeme| lexeme.piece == Piece::Close && lexeme.depth == 0)
+        .map(|offset| offset + open + 1)
+}
+
+pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
+    let lexemes = lexemes(text);
+    let table_at = lexemes
+        .iter()
+        .position(|lexeme| lexeme.depth == 0 && is_word(Some(lexeme), "table"))?;
+    let open = lexemes
+        .iter()
+        .skip(table_at)
+        .position(|lexeme| lexeme.piece == Piece::Open && lexeme.depth == 0)?
+        + table_at;
+    let table_start = lexemes.get(table_at + 1)?.span.start;
+    let table = text
+        .get(table_start..lexemes[open].span.start)?
+        .trim()
+        .to_owned();
+    let close = closing_paren(&lexemes, open)?;
+    let table_name = lexemes[table_at + 1..open]
+        .iter()
+        .rev()
+        .find_map(|lexeme| name_of(Some(lexeme)))
+        .unwrap_or_default();
+    let rewritten = rewritten_elements(text, &lexemes, open, close, &table, &table_name);
+    if !rewritten.changed || rewritten.kept.is_empty() {
         return None;
     }
     let head = text.get(..lexemes[open].span.end)?;
     let tail = text.get(lexemes[close].span.start..)?;
     Some(TableRewrite {
-        text: format!("{head}{}{tail}", kept.join(", ")),
-        notes,
-        disabled,
+        text: format!("{head}{}{tail}", rewritten.kept.join(", ")),
+        notes: rewritten.notes,
+        disabled: rewritten.disabled,
+    })
+}
+
+pub(crate) fn rewritten_added(text: &str) -> Option<TableRewrite> {
+    let lexemes = lexemes(text);
+    if !is_word(lexemes.first(), "alter") || !is_word(lexemes.get(1), "table") {
+        return None;
+    }
+    let add_at = lexemes
+        .iter()
+        .position(|lexeme| lexeme.depth == 0 && is_word(Some(lexeme), "add"))?;
+    let open = add_at + 1;
+    if lexemes.get(open)?.piece != Piece::Open || add_at < 3 {
+        return None;
+    }
+    let close = closing_paren(&lexemes, open)?;
+    let table = text
+        .get(lexemes[2].span.start..lexemes[add_at - 1].span.end)?
+        .trim()
+        .to_owned();
+    let table_name = lexemes[2..add_at]
+        .iter()
+        .rev()
+        .find_map(|lexeme| name_of(Some(lexeme)))
+        .unwrap_or_default();
+    let rewritten = rewritten_elements(text, &lexemes, open, close, &table, &table_name);
+    if !rewritten.changed {
+        return None;
+    }
+    let text = if rewritten.kept.is_empty() {
+        String::new()
+    } else {
+        let head = text.get(..lexemes[open].span.end)?;
+        let tail = text.get(lexemes[close].span.start..)?;
+        format!("{head}{}{tail}", rewritten.kept.join(", "))
+    };
+    Some(TableRewrite {
+        text,
+        notes: rewritten.notes,
+        disabled: rewritten.disabled,
     })
 }
 

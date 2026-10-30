@@ -350,6 +350,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     sqlserver_status: crate::sqlserver_functions::SessionStatus,
     oracle_nls: Arc<crate::oracle_nls::NlsParameters>,
     identity_insert_table: Option<String>,
+    keeps_identity_values: bool,
     statement_start: usize,
     table_variables: crate::table_variables::TableVariables,
     extra_results: Vec<QueryResult>,
@@ -406,6 +407,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             sqlserver_status: crate::sqlserver_functions::SessionStatus::default(),
             oracle_nls: Arc::new(crate::oracle_nls::NlsParameters::default()),
             identity_insert_table: None,
+            keeps_identity_values: false,
             statement_start: 0,
             table_variables: crate::table_variables::TableVariables::default(),
             extra_results: Vec::new(),
@@ -1436,6 +1438,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 String::new()
             },
             self.identity_insert_table.clone(),
+            self.keeps_identity_values,
         )
     }
 

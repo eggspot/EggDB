@@ -42,28 +42,33 @@ impl Parser<'_> {
             ConstraintKind::PrimaryKey(columns)
         } else if self.is_word("unique") {
             let spec = self.unique_constraint(None, position)?;
-            if self.oracle() {
-                self.constraint_tail()?;
-            }
+            let using_index = if self.oracle() {
+                self.constraint_tail()?
+            } else {
+                None
+            };
             return Ok(ConstraintSpec {
                 name: name.or(spec.name),
                 kind: ConstraintKind::Unique(spec.columns),
                 position,
                 column: None,
+                using_index,
             });
         } else {
             return Err(self.unexpected());
         };
-        self.constraint_tail()?;
+        let using_index = self.constraint_tail()?;
         Ok(ConstraintSpec {
             name,
             kind,
             position,
             column: None,
+            using_index,
         })
     }
 
-    pub(super) fn constraint_tail(&mut self) -> SqlResult<()> {
+    pub(super) fn constraint_tail(&mut self) -> SqlResult<Option<Name>> {
+        let mut using_index = None;
         loop {
             if self.is_word("not") && self.is_word_at(1, "deferrable") {
                 self.at += 2;
@@ -88,14 +93,18 @@ impl Parser<'_> {
                     || self.is_word("norely")
                     || (self.is_word("using") && self.is_word_at(1, "index")))
             {
-                if !self.oracle_constraint_states()? {
+                let states = self.oracle_constraint_state_list()?;
+                if !states.enabled {
                     return Err(self.not_supported("disabled constraints"));
+                }
+                if states.using_index.is_some() {
+                    using_index = states.using_index;
                 }
             } else if self.sqlite() && self.is_word("on") && self.is_word_at(1, "conflict") {
                 self.sqlite_conflict_clause()?;
             } else if self.skip_not_for_replication() {
             } else {
-                return Ok(());
+                return Ok(using_index);
             }
         }
     }
@@ -204,6 +213,7 @@ impl Parser<'_> {
             kind,
             position,
             column: Some(column.name.clone()),
+            using_index: None,
         });
         Ok(true)
     }

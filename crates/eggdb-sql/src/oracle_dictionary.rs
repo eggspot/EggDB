@@ -55,6 +55,7 @@ pub(crate) enum DictionaryView {
     Objects,
     TabComments,
     ColComments,
+    TabIdentityCols,
     Users,
 }
 
@@ -117,6 +118,9 @@ static NAMED: &[(&str, OracleRelation)] = &[
     ("user_col_comments", user(DictionaryView::ColComments)),
     ("all_col_comments", all(DictionaryView::ColComments)),
     ("dba_col_comments", dba(DictionaryView::ColComments)),
+    ("user_tab_identity_cols", user(DictionaryView::TabIdentityCols)),
+    ("all_tab_identity_cols", all(DictionaryView::TabIdentityCols)),
+    ("dba_tab_identity_cols", dba(DictionaryView::TabIdentityCols)),
     ("user_users", user(DictionaryView::Users)),
     ("all_users", all(DictionaryView::Users)),
     ("dba_users", dba(DictionaryView::Users)),
@@ -183,6 +187,7 @@ fn dictionary_columns(scope: DictionaryScope, view: DictionaryView) -> &'static 
         DictionaryView::Objects => without_owner(OBJECTS_COLUMNS),
         DictionaryView::TabComments => without_owner(TAB_COMMENTS_COLUMNS),
         DictionaryView::ColComments => without_owner(COL_COMMENTS_COLUMNS),
+        DictionaryView::TabIdentityCols => without_owner(TAB_IDENTITY_COLS_COLUMNS),
         DictionaryView::Users if scope == DictionaryScope::All => ALL_USERS_COLUMNS,
         DictionaryView::Users => ACCOUNT_COLUMNS,
     }
@@ -396,6 +401,15 @@ static COL_COMMENTS_COLUMNS: &[CatalogColumn] = &[
     column("table_name", VARCHAR2),
     column("column_name", VARCHAR2),
     column("comments", VARCHAR2),
+];
+
+static TAB_IDENTITY_COLS_COLUMNS: &[CatalogColumn] = &[
+    column("owner", VARCHAR2),
+    column("table_name", VARCHAR2),
+    column("column_name", VARCHAR2),
+    column("generation_type", VARCHAR2),
+    column("sequence_name", VARCHAR2),
+    column("identity_options", VARCHAR2),
 ];
 
 static ALL_USERS_COLUMNS: &[CatalogColumn] = &[
@@ -772,6 +786,7 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: OracleRelation) -> Vec<
             DictionaryView::Objects => object_rows(&dictionary),
             DictionaryView::TabComments => table_comment_rows(&dictionary),
             DictionaryView::ColComments => column_comment_rows(&dictionary),
+            DictionaryView::TabIdentityCols => identity_column_rows(&dictionary),
             DictionaryView::Users => user_rows(&dictionary),
         },
     }
@@ -1291,6 +1306,46 @@ fn column_comment_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
         }
     }
     rows
+}
+
+fn identity_column_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for (_, entry, table) in dictionary.tables() {
+        for (position, column) in table.columns.iter().enumerate() {
+            let Some(generation) = table.identity_of(position) else {
+                continue;
+            };
+            let generation = match generation {
+                crate::encoding::IdentityGeneration::Always => "ALWAYS",
+                crate::encoding::IdentityGeneration::ByDefault => "BY DEFAULT",
+            };
+            let seed = table.identity_seed();
+            rows.push(
+                dictionary
+                    .row()
+                    .set("owner", dictionary.owner(&entry.schema))
+                    .set("table_name", shown(&entry.name))
+                    .set("column_name", shown(&column.name))
+                    .set("generation_type", text(generation))
+                    .set("sequence_name", Value::Text(format!("ISEQ$$_{}", table.id)))
+                    .set("identity_options", Value::Text(identity_options(seed)))
+                    .done(),
+            );
+        }
+    }
+    rows
+}
+
+fn identity_options(seed: crate::encoding::IdentitySeed) -> String {
+    let (maximum, minimum) = if seed.increment > 0 {
+        ("9999999999999999999999999999".to_owned(), "1".to_owned())
+    } else {
+        ("-1".to_owned(), "-999999999999999999999999999".to_owned())
+    };
+    format!(
+        "START WITH: {}, INCREMENT BY: {}, MAX_VALUE: {maximum}, MIN_VALUE: {minimum}, CYCLE_FLAG: N, CACHE_SIZE: 20, ORDER_FLAG: N, SCALE_FLAG: N, EXTEND_FLAG: N, SESSION_FLAG: N, KEEP_VALUE: N",
+        seed.seed, seed.increment
+    )
 }
 
 fn user_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
