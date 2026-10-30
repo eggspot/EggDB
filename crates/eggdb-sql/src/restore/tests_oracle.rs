@@ -13,8 +13,8 @@ use super::table_rewrite_oracle::{
 };
 use super::words::{Token, Words, plain_qualified_name};
 use super::{
-    IncludeOpener, IncludeRequest, RestoreOptions, RestoreReport, SqlPlusCommand, SqlPlusScript,
-    SqlPlusStep, restore_dump,
+    IncludeOpener, IncludeRequest, RestoreOptions, RestoreReport, ServerOutputSetting,
+    SqlPlusCommand, SqlPlusScript, SqlPlusStep, restore_dump, starts_plsql_unit,
 };
 use crate::constraints::ConstraintClauseKind;
 use crate::dialect::Dialect;
@@ -1090,4 +1090,119 @@ fn ignored_effects_are_reported_in_oracle_words() {
         classify_oracle("WITH x AS (SELECT 1 FROM dual) SELECT * FROM x", &|_| false),
         Action::Ignore(Ignored::Other(QUERIES))
     ));
+}
+
+fn script_steps(text: &str) -> Result<Vec<SqlPlusStep>, SqlError> {
+    let mut input = text.as_bytes();
+    let mut script = SqlPlusScript::new(&mut input, None, &[])?;
+    let mut steps = Vec::new();
+    while let Some(step) = script.next_step()? {
+        steps.push(step);
+    }
+    Ok(steps)
+}
+
+#[test]
+fn set_serveroutput_reaches_the_caller_as_its_own_step() {
+    let steps = script_steps(
+        "SET SERVEROUTPUT ON\nset serverout on size 5000 format wrapped\nSET SERVEROUTPUT ON SIZE UNLIMITED\nSET SERVEROUTPUT OFF\nSET SERVEROUTPUT OFF SIZE 3000\n",
+    )
+    .unwrap();
+    assert_eq!(
+        steps,
+        vec![
+            SqlPlusStep::ServerOutput(ServerOutputSetting::On { buffer_bytes: None }),
+            SqlPlusStep::ServerOutput(ServerOutputSetting::On {
+                buffer_bytes: Some(5000)
+            }),
+            SqlPlusStep::ServerOutput(ServerOutputSetting::On { buffer_bytes: None }),
+            SqlPlusStep::ServerOutput(ServerOutputSetting::Off),
+            SqlPlusStep::ServerOutput(ServerOutputSetting::Off),
+        ]
+    );
+    assert_eq!(
+        script_steps("SET SERVER ON\n").unwrap(),
+        vec![command("set", "SET SERVER", "", "line 1")]
+    );
+}
+
+#[test]
+fn a_bad_set_serveroutput_stops_the_script_with_its_line() {
+    let error = script_steps("PROMPT x\n\nSET SERVEROUTPUT ON SIZE 500\n").unwrap_err();
+    assert_eq!(error.state(), SqlState::INVALID_PARAMETER_VALUE);
+    assert_eq!(
+        error.message(),
+        "line 3: SET SERVEROUTPUT SIZE 500 is out of range: SIZE is 2000 to 1000000, or UNLIMITED"
+    );
+    assert_eq!(
+        error.hint(),
+        Some("SET SERVEROUTPUT ON alone keeps every line, up to EggDB's 1 MiB buffer.")
+    );
+    let error = script_steps("SET SERVEROUTPUT MAYBE\n").unwrap_err();
+    assert_eq!(error.state(), SqlState::SYNTAX_ERROR);
+    assert!(
+        error
+            .message()
+            .starts_with("line 1: SET SERVEROUTPUT does not take 'MAYBE': the form is SET SERVEROUTPUT ON|OFF"),
+        "{error}"
+    );
+}
+
+#[test]
+fn server_output_settings_read_like_sqlplus() {
+    assert_eq!(
+        ServerOutputSetting::parse("on").unwrap(),
+        ServerOutputSetting::On { buffer_bytes: None }
+    );
+    assert_eq!(
+        ServerOutputSetting::parse("ON FOR TRU SIZE 1000000").unwrap(),
+        ServerOutputSetting::On {
+            buffer_bytes: Some(1_000_000)
+        }
+    );
+    assert_eq!(
+        ServerOutputSetting::parse("ON SIZE unl").unwrap(),
+        ServerOutputSetting::On { buffer_bytes: None }
+    );
+    assert_eq!(
+        ServerOutputSetting::parse("off").unwrap(),
+        ServerOutputSetting::Off
+    );
+    for (argument, state, part) in [
+        ("", SqlState::SYNTAX_ERROR, "does not take nothing after SERVEROUTPUT"),
+        ("ON SIZE", SqlState::SYNTAX_ERROR, "does not take nothing after SIZE"),
+        ("ON FORMAT WIDE", SqlState::SYNTAX_ERROR, "does not take 'WIDE'"),
+        ("ON SIZE lots", SqlState::INVALID_PARAMETER_VALUE, "SIZE lots is out of range"),
+        ("ON SIZE 1000001", SqlState::INVALID_PARAMETER_VALUE, "out of range"),
+        ("ON SIZE 1999", SqlState::INVALID_PARAMETER_VALUE, "out of range"),
+        ("ON WRAPPED", SqlState::SYNTAX_ERROR, "does not take 'WRAPPED'"),
+        ("YES", SqlState::SYNTAX_ERROR, "does not take 'YES'"),
+    ] {
+        let error = ServerOutputSetting::parse(argument).unwrap_err();
+        assert_eq!(error.state(), state, "{argument}");
+        assert!(error.message().contains(part), "{argument}: {error}");
+        assert!(error.hint().is_some(), "{argument}");
+    }
+}
+
+#[test]
+fn a_plsql_unit_is_told_from_sql_by_its_first_words() {
+    assert_eq!(starts_plsql_unit("BEGIN"), Some(true));
+    assert_eq!(starts_plsql_unit("  declare\n  n NUMBER;"), Some(true));
+    assert_eq!(starts_plsql_unit("<<outer>> BEGIN NULL; END;"), Some(true));
+    assert_eq!(
+        starts_plsql_unit("CREATE OR REPLACE EDITIONABLE PROCEDURE p AS"),
+        Some(true)
+    );
+    assert_eq!(starts_plsql_unit("create package body pkg is"), Some(true));
+    assert_eq!(starts_plsql_unit("CREATE TABLE t (n NUMBER);"), Some(false));
+    assert_eq!(starts_plsql_unit("SELECT 1 FROM dual;"), Some(false));
+    assert_eq!(starts_plsql_unit("CREATE OR REPLACE"), None);
+    assert_eq!(starts_plsql_unit(""), None);
+}
+
+#[test]
+fn a_restore_lists_set_serveroutput_as_a_client_command() {
+    let reason = super::classify_oracle::sqlplus_command_reason("set serveroutput");
+    assert_eq!(reason, "a restore prints no server output");
 }

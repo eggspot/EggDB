@@ -758,7 +758,10 @@ fn oracle_scripts_run_their_sqlplus_commands() {
     for (script, expected) in [
         (&b"SELECT &missing FROM dual;\n"[..], "substitution variable &missing has no value"),
         (&b"SET SQLTERMINATOR !\n"[..], "which EggDB does not support"),
-        (&b"BEGIN\n  NULL;\nEND;\n/\n"[..], "ORA-03001"),
+        (
+            &b"BEGIN\n  RAISE_APPLICATION_ERROR(-20001, 'stop here');\nEND;\n/\n"[..],
+            "ORA-20001: stop here",
+        ),
         (&b"CONNECT nobody/secret\n"[..], "ORA-01435"),
     ] {
         let failed = eggdb_sql(file.path(), &["--dialect", "oracle"], script);
@@ -791,6 +794,82 @@ fn oracle_scripts_run_their_sqlplus_commands() {
         assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
         assert!(text(&refused.stderr).contains("--define"));
     }
+}
+
+#[test]
+fn oracle_scripts_print_server_output_after_set_serveroutput_on() {
+    let file = TempPath::new("sql-serveroutput");
+    let script = b"CREATE OR REPLACE PROCEDURE greet(who IN VARCHAR2) AS\nBEGIN\n  DBMS_OUTPUT.PUT_LINE('Hello ' || who);\nEND;\n/\nEXECUTE greet('Nobody')\nSET SERVEROUTPUT ON SIZE 10000\nEXECUTE greet('Ada')\nBEGIN\n  DBMS_OUTPUT.PUT_LINE('one');\n  DBMS_OUTPUT.PUT('t');\n  DBMS_OUTPUT.PUT_LINE('wo');\nEND;\n/\nSET SERVEROUT OFF\nEXEC greet('Grace')\n";
+    let output = eggdb_sql(file.path(), &["--create", "--dialect", "oracle"], script);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "CREATE PROCEDURE\nPL/SQL BLOCK\nHello Ada\nPL/SQL BLOCK\none\ntwo\nPL/SQL BLOCK\nPL/SQL BLOCK\n"
+    );
+    assert_eq!(text(&output.stderr), "");
+
+    let json = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle", "--json"],
+        b"SET SERVEROUTPUT ON\nEXECUTE greet('Ada')\nEXECUTE greet('\"Bo\"')\nSELECT 1 AS one FROM dual;\n",
+    );
+    assert_eq!(json.status.code(), Some(0), "{}", text(&json.stderr));
+    let printed = text(&json.stdout);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(
+        lines[..4],
+        [
+            r#"{"server_output":["Hello Ada"]}"#,
+            r#"{"tag":"PL/SQL BLOCK"}"#,
+            r#"{"server_output":["Hello \"Bo\""]}"#,
+            r#"{"tag":"PL/SQL BLOCK"}"#,
+        ],
+        "{printed}"
+    );
+    assert!(!lines[4].contains("server_output"), "{printed}");
+
+    let command = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle", "-c", "BEGIN greet('Ada'); END;"],
+        b"",
+    );
+    assert_eq!(command.status.code(), Some(0), "{}", text(&command.stderr));
+    assert_eq!(text(&command.stdout), "Hello Ada\nPL/SQL BLOCK\n");
+
+    let failed = eggdb_sql(
+        file.path(),
+        &[
+            "--dialect",
+            "oracle",
+            "-c",
+            "BEGIN DBMS_OUTPUT.PUT_LINE('before'); RAISE_APPLICATION_ERROR(-20002, 'after'); END;",
+        ],
+        b"",
+    );
+    assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
+    assert_eq!(text(&failed.stdout), "before\n");
+    assert!(
+        text(&failed.stderr).contains("ORA-20002: after"),
+        "{}",
+        text(&failed.stderr)
+    );
+
+    let refused = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle"],
+        b"PROMPT start\nSET SERVEROUTPUT ON SIZE 500\nEXECUTE greet('Never')\n",
+    );
+    assert_eq!(refused.status.code(), Some(3), "{}", text(&refused.stderr));
+    assert_eq!(text(&refused.stdout), "start\n");
+    let stderr = text(&refused.stderr);
+    assert!(
+        stderr.contains("line 2: SET SERVEROUTPUT SIZE 500 is out of range: SIZE is 2000 to 1000000, or UNLIMITED"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("SET SERVEROUTPUT ON alone keeps every line, up to EggDB's 1 MiB buffer."),
+        "{stderr}"
+    );
 }
 
 #[test]

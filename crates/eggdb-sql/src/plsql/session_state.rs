@@ -108,6 +108,41 @@ impl PlsqlSession {
     }
 }
 
+/// Takes the server output of a [`Session`](crate::Session) without borrowing the session, so a
+/// client's result callback can print the `DBMS_OUTPUT` lines of the statement that just ended
+/// while the session still runs the rest of its text. Made by
+/// [`Session::server_output_reader`](crate::Session::server_output_reader).
+#[derive(Clone)]
+pub struct ServerOutputReader {
+    shared: SharedPlsqlSession,
+}
+
+impl ServerOutputReader {
+    pub(crate) fn new(shared: &SharedPlsqlSession) -> Self {
+        Self {
+            shared: Arc::clone(shared),
+        }
+    }
+
+    /// The complete lines written since the last take, oldest first, as
+    /// [`Session::take_server_output`](crate::Session::take_server_output) gives them.
+    #[must_use]
+    pub fn take_lines(&self) -> Vec<String> {
+        self.shared
+            .lock()
+            .map(|mut state| state.output.take_lines())
+            .unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for ServerOutputReader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerOutputReader")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ServerOutput {
     limit: Option<usize>,

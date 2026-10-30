@@ -236,3 +236,78 @@ fn collection_mistakes_name_the_problem() {
     assert_eq!(none.exit, 0);
     assert_eq!(text(&none.stdout), "* default key space\nno collections\n");
 }
+
+#[test]
+fn the_oracle_shell_ends_plsql_units_at_a_slash_line_and_prints_server_output() {
+    let directory = TempDirectory::new("shell-plsql");
+    let file = created(&directory);
+    let script = "create table emp (id number(4), sal number(8));\n\
+        insert into emp values (1, 100);\n\
+        create or replace procedure raise_sal(p_pct number) as\n\
+        begin\n  \
+          update emp set sal = sal * (1 + p_pct / 100);\n  \
+          dbms_output.put_line(sql%rowcount || ' rows raised');\n\
+        end;\n\
+        /\n\
+        exec raise_sal(10)\n\
+        set serveroutput off;\n\
+        execute raise_sal(10);\n\
+        SET SERVEROUT ON SIZE UNLIMITED\n\
+        begin\n  \
+          dbms_output.put_line('a;b');\n\
+        end;\n\
+        /\n\
+        /\n";
+    let ran = shell(&file, &["--dialect", "oracle"], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "CREATE TABLE\n\
+         INSERT 0 1\n\
+         CREATE PROCEDURE\n\
+         1 rows raised\n\
+         PL/SQL BLOCK\n\
+         PL/SQL BLOCK\n\
+         a;b\n\
+         PL/SQL BLOCK\n"
+    );
+    assert_eq!(
+        text(&ran.stderr),
+        "eggdb: nothing to run: / ends a PL/SQL unit here; Up then Enter repeats the last statement\n"
+    );
+}
+
+#[test]
+fn the_oracle_shell_refuses_a_bad_set_serveroutput_and_prints_lines_before_an_error() {
+    let directory = TempDirectory::new("shell-serveroutput");
+    let file = created(&directory);
+    let refused = shell(
+        &file,
+        &["--dialect", "oracle"],
+        "set serveroutput on size 10\n",
+    );
+    assert_eq!(refused.exit, 3);
+    let stderr = text(&refused.stderr);
+    assert!(
+        stderr.contains("SET SERVEROUTPUT SIZE 10 is out of range"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("line 1:"), "{stderr}");
+    let failed = shell(
+        &file,
+        &[
+            "--dialect",
+            "oracle",
+            "-c",
+            "begin dbms_output.put_line('first'); raise_application_error(-20005, 'then this'); end;",
+        ],
+        "",
+    );
+    assert_eq!(failed.exit, 3);
+    assert_eq!(text(&failed.stdout), "first\n");
+    assert!(
+        text(&failed.stderr).contains("ORA-20005: then this"),
+        "{}",
+        text(&failed.stderr)
+    );
+}

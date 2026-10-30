@@ -8,8 +8,8 @@ use crate::cli::render::{JsonObject, json_string};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_commands::Category;
 use eggdb_sql::{
-    CopyChannel, Dialect, IncludeOpener, QueryResult, SqlError, SqlPlusCommand, SqlPlusScript,
-    SqlPlusStep, SqlState, TransactionStatus, Value,
+    CopyChannel, Dialect, IncludeOpener, QueryResult, ServerOutputSetting,
+    SqlError, SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlState, TransactionStatus, Value,
 };
 use std::cell::{Cell, RefCell};
 use std::io::Read;
@@ -30,6 +30,10 @@ impl Session<'_> {
         let store = DatabaseStore(&db);
         let dialect = self.request.dialect;
         let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
+        if dialect == Dialect::Oracle && !script {
+            session.enable_server_output(None);
+        }
+        let server_output = session.server_output_reader();
         let printed = RefCell::new(Ok(()));
         let mut failed_batch: Option<String> = None;
         let copied_out = Cell::new(false);
@@ -62,6 +66,16 @@ impl Session<'_> {
                     }
                 }
                 let mut out = out.borrow_mut();
+                if dialect == Dialect::Oracle {
+                    let lines = server_output.take_lines();
+                    if !lines.is_empty() {
+                        out.text(&server_output_text(&lines, json));
+                        if let Err(error) = out.line_done() {
+                            *printed.borrow_mut() = Err(error);
+                            return false;
+                        }
+                    }
+                }
                 if !(copied_out.replace(false) && result.tag.starts_with("COPY ")) {
                     if json {
                         out.text(&statement_json(&result, dialect));
@@ -133,6 +147,14 @@ impl Session<'_> {
         let exit = match outcome {
             Ok(()) => Exit::Done,
             Err(error) => {
+                let lines = server_output.take_lines();
+                if !lines.is_empty() {
+                    self.out.text(&server_output_text(&lines, json));
+                    let done = self.out.line_done();
+                    if done.is_err() {
+                        *printed.borrow_mut() = done;
+                    }
+                }
                 let shown = failed_batch.as_deref().unwrap_or(&text);
                 report_error(&mut self.messages, &error, shown, json);
                 exit_for(&error)
@@ -225,6 +247,21 @@ fn run_sqlserver_batches(
 enum ScriptEvent {
     Prompt(String),
     Notice(String),
+}
+
+fn server_output_text(lines: &[String], json: bool) -> String {
+    if json {
+        let quoted: Vec<String> = lines.iter().map(|line| json_string(line)).collect();
+        return JsonObject::new()
+            .raw("server_output", &format!("[{}]", quoted.join(",")))
+            .line();
+    }
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
 }
 
 fn event_json(event: &ScriptEvent) -> String {
@@ -392,6 +429,10 @@ fn run_sqlplus_steps(
                 }
             }
             SqlPlusStep::Prompt(text) => on_event(ScriptEvent::Prompt(text)),
+            SqlPlusStep::ServerOutput(ServerOutputSetting::On { buffer_bytes }) => {
+                session.enable_server_output(buffer_bytes);
+            }
+            SqlPlusStep::ServerOutput(ServerOutputSetting::Off) => session.disable_server_output(),
             SqlPlusStep::Connect { statement } => session.execute(&statement, &mut |_| {})?,
             SqlPlusStep::Exit {
                 rollback,

@@ -778,8 +778,11 @@ SQLSTATE:  42P01
   directory), `ACCEPT` takes its `DEFAULT` and never prompts, `PROMPT` prints its text on stdout
   in order with the results, `CONNECT user` switches to the user's schema (`ORA-01435` when it
   does not exist; no login is made), and `EXIT` or `QUIT` ends the run and commits (`EXIT
-  ROLLBACK` rolls back). `EXECUTE p` and PL/SQL blocks reach the engine, which has no PL/SQL yet
-  (`ORA-03001`). `SPOOL file` never writes a file, `HOST` never runs a program, and `WHENEVER
+  ROLLBACK` rolls back). `EXECUTE p`, PL/SQL blocks and `CREATE PROCEDURE`, `FUNCTION` and
+  `PACKAGE` run in the engine (tag `PL/SQL BLOCK` for a block), and `SET SERVEROUTPUT ON [SIZE
+  n|UNLIMITED]` prints the `DBMS_OUTPUT` lines of each statement on stdout before its result (off
+  until then, as in SQL*Plus; `-c` and the shell have it on; `--json` prints
+  `{"server_output":["..."]}` before the statement's line). `SPOOL file` never writes a file, `HOST` never runs a program, and `WHENEVER
   SQLERROR CONTINUE`, `EXIT` status words, a statement ended by `.`, text with no `;` or `/` at
   the end and a line EggDB does not know each get one `NOTICE:` on stderr; every other command
   (`SET`, `COLUMN`, `TIMING`, `/` after `;`, ...) has no effect and is counted in one closing
@@ -895,7 +898,9 @@ One prompt for everything this page and [sql.md](sql.md) do with a file: the key
 commands without their `eggdb <command> <file>` prefix, SQL in the PostgreSQL dialect (or
 MySQL's, SQLite's or Oracle's with `--dialect mysql`, `sqlite` or `oracle`; `.schema` then prints
 that dialect's `CREATE TABLE`, and in Oracle's the open transaction is committed when the shell
-ends, as SQL*Plus does), and a
+ends, as SQL*Plus does; a PL/SQL block or `CREATE PROCEDURE` ends at a line holding `/`,
+`EXEC p` runs a procedure, `SET SERVEROUTPUT ON|OFF` switches the `DBMS_OUTPUT` lines printed
+before each result, on from the start), and a
 few `.` commands. The file stays open for writing while the shell runs (`--read-only`: open
 read-only), so other writers get the busy message meanwhile. The design is
 [ux/cli.md](ux/cli.md), section 15.

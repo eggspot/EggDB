@@ -2920,8 +2920,7 @@ And more, not in the suite yet:
   made for the user later is used from the next connection).
 - `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
   is accepted and ignored.
-- Not supported yet: `CONNECT BY`, outer joins with `(+)`, PL/SQL (`BEGIN ... END`,
-  procedures, packages), `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms, database
+- Not supported yet: `CONNECT BY`, outer joins with `(+)`, `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms, database
   links, `ROWID`, the regular-expression, analytic and XML functions, and views `WITH CHECK
   OPTION` (refused).
 - `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where

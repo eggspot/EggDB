@@ -12,7 +12,9 @@ use crate::cli::{Console, Terminal, help, report};
 use eggdb::Database;
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_platform::user_files;
-use eggdb_sql::{QueryResult, TableSchema, TransactionStatus};
+use eggdb_sql::{
+    Dialect, QueryResult, ServerOutputSetting, TableSchema, TransactionStatus, starts_plsql_unit,
+};
 use eggdb_ui::{Completion, InlineTerminal, LineEnd, LineReader, LineTerminal};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -22,6 +24,9 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+const SERVEROUTPUT_SHORTEST: usize = "serverout".len();
+const NOTHING_TO_RUN: &str =
+    "eggdb: nothing to run: / ends a PL/SQL unit here; Up then Enter repeats the last statement\n";
 const KEY_VALUE_COMMANDS: [&str; 13] = [
     "put", "get", "del", "scan", "check", "stats", "backup", "ttl", "expire", "persist", "incr",
     "decr", "cas",
@@ -227,7 +232,7 @@ impl<'s> Shell<'s> {
             (None, None)
         };
         let dialect = request.dialect;
-        Self {
+        let mut shell = Self {
             mode: request.shell.mode.unwrap_or(ResultMode::Table),
             color_out: interactive && uses_color(request.color, terminal.stdout_color),
             color_err: interactive && uses_color(request.color, terminal.stderr_color),
@@ -246,7 +251,11 @@ impl<'s> Shell<'s> {
             pending: VecDeque::new(),
             line_reader: None,
             collection: None,
+        };
+        if dialect == Dialect::Oracle {
+            shell.sql.enable_server_output(None);
         }
+        shell
     }
 
     fn batch(&mut self, console: &mut Console<'_>) -> Result<Exit, Failure> {
@@ -392,8 +401,13 @@ impl<'s> Shell<'s> {
         } else {
             format!(" ({})", parts.join(", "))
         };
+        let endings = if self.sql.dialect() == Dialect::Oracle {
+            "SQL ends with ; and a PL/SQL block with a / line;"
+        } else {
+            "SQL ends with ; and"
+        };
         let text = format!(
-            "EggDB {}: {}, open {access}{counts}\nType .help for help. SQL ends with ; and .quit or Ctrl-D quits.\n",
+            "EggDB {}: {}, open {access}{counts}\nType .help for help. {endings} .quit or Ctrl-D quits.\n",
             eggdb::VERSION,
             self.file
         );
@@ -452,6 +466,11 @@ impl<'s> Shell<'s> {
             if KEY_VALUE_COMMANDS.contains(&first) {
                 return self.key_value(console, trimmed);
             }
+            if self.sql.dialect() == Dialect::Oracle
+                && let Some(step) = self.sqlplus_command(console, trimmed)
+            {
+                return step;
+            }
             if trimmed.is_empty() {
                 return Step::Continue(Exit::Done);
             }
@@ -459,6 +478,11 @@ impl<'s> Shell<'s> {
             self.buffer.push('\n');
         }
         self.buffer.push_str(line);
+        if self.sql.dialect() == Dialect::Oracle
+            && let Some(step) = self.plsql_unit_line(console, line)
+        {
+            return step;
+        }
         let pending = self.pending();
         if pending.complete_to == 0 {
             return Step::Continue(Exit::Done);
@@ -468,6 +492,64 @@ impl<'s> Shell<'s> {
             self.buffer.clear();
         }
         self.run_sql(console, &statements)
+    }
+
+    fn sqlplus_command(&mut self, console: &mut Console<'_>, line: &str) -> Option<Step> {
+        let line = line.trim_end();
+        if line == "/" {
+            let mut messages = Output::new(&mut *console.stderr, false);
+            messages.text(NOTHING_TO_RUN);
+            let _ = messages.finish();
+            return Some(Step::Continue(Exit::Done));
+        }
+        let line = line.strip_suffix(';').unwrap_or(line).trim_end();
+        let (first, rest) = match line.split_once(char::is_whitespace) {
+            Some((first, rest)) => (first, rest.trim()),
+            None => (line, ""),
+        };
+        let first = first.to_ascii_lowercase();
+        if first == "exec" || first == "execute" {
+            return Some(self.run_sql(console, &format!("BEGIN {rest}; END;")));
+        }
+        if first != "set" {
+            return None;
+        }
+        let (option, value) = match rest.split_once(char::is_whitespace) {
+            Some((option, value)) => (option, value.trim()),
+            None => (rest, ""),
+        };
+        let option = option.to_ascii_lowercase();
+        if option.len() < SERVEROUTPUT_SHORTEST || !"serveroutput".starts_with(option.as_str()) {
+            return None;
+        }
+        Some(match ServerOutputSetting::parse(value) {
+            Ok(ServerOutputSetting::On { buffer_bytes }) => {
+                self.sql.enable_server_output(buffer_bytes);
+                Step::Continue(Exit::Done)
+            }
+            Ok(ServerOutputSetting::Off) => {
+                self.sql.disable_server_output();
+                Step::Continue(Exit::Done)
+            }
+            Err(error) => {
+                self.print_sql_error(console, &error, line);
+                Step::Continue(exit_for(&error))
+            }
+        })
+    }
+
+    fn plsql_unit_line(&mut self, console: &mut Console<'_>, line: &str) -> Option<Step> {
+        match starts_plsql_unit(&self.buffer) {
+            Some(false) => None,
+            None => Some(Step::Continue(Exit::Done)),
+            Some(true) if line.trim() != "/" => Some(Step::Continue(Exit::Done)),
+            Some(true) => {
+                let end = self.buffer.len().saturating_sub(line.len());
+                let unit = self.buffer.get(..end).unwrap_or_default().trim_end().to_owned();
+                self.buffer.clear();
+                Some(self.run_sql(console, &unit))
+            }
+        }
     }
 
     fn flush(&mut self, console: &mut Console<'_>) -> Step {
@@ -491,6 +573,7 @@ impl<'s> Shell<'s> {
         let started = Instant::now();
         let (width, mode, color_err) = (self.width, self.mode, self.color_err);
         let dialect = self.sql.dialect();
+        let server_output = (dialect == Dialect::Oracle).then(|| self.sql.server_output_reader());
         let Self {
             sql,
             pending,
@@ -518,6 +601,9 @@ impl<'s> Shell<'s> {
                 for notice in &result.notices {
                     print_notice(&mut *stderr, color_err, notice);
                 }
+                if let Some(reader) = &server_output {
+                    print_server_output(&mut stdout.borrow_mut(), &reader.take_lines());
+                }
                 if copied_out.replace(false)
                     && result.tag.starts_with("COPY ")
                     && !files.show_copy_tag
@@ -532,6 +618,11 @@ impl<'s> Shell<'s> {
             &mut copy,
         );
         drop(copy);
+        if outcome.is_err()
+            && let Some(reader) = &server_output
+        {
+            print_server_output(&mut stdout.borrow_mut(), &reader.take_lines());
+        }
         if stdout.into_inner().finish().is_err() || closed {
             return Step::Quit;
         }
@@ -852,7 +943,7 @@ impl<'s> Shell<'s> {
   backup <copy>                write a consistent copy of {file} to a new file, while open here
   -C <name> on a key command   work in that collection for this line
 SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
-  (docs/sql.md); BEGIN spans prompts:
+  (docs/sql.md; in Oracle's a PL/SQL block or CREATE PROCEDURE ends at a line holding /); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
   'delete' starts a DELETE statement here; the key-value command is 'del'.
 Shell commands:
@@ -1170,6 +1261,13 @@ fn print_sql_error(
         messages.text("\n");
     }
     let _ = messages.finish();
+}
+
+fn print_server_output(stdout: &mut Output<'_>, lines: &[String]) {
+    for line in lines {
+        stdout.text(line);
+        stdout.text("\n");
+    }
 }
 
 fn print_notice(stderr: &mut dyn Write, color: bool, notice: &str) {

@@ -3182,7 +3182,8 @@ one line at the end, so a script with forty `SET` lines costs one line, and that
 | `SET SQLTERMINATOR`, `SET BLOCKTERMINATOR`, `SET SQLPREFIX`, `SET SQLBLANKLINES OFF` | refused: they change how the script is read; an error, exit 3 |
 | `HOST ...`, `!...`, `$...` | **never runs a program**: one notice |
 | `SPOOL file` | **never writes a file**: one notice; `SPOOL OFF` is silent |
-| `EXECUTE p`, a PL/SQL block | reach the engine as statements; EggDB has no PL/SQL yet, so its `ORA-03001: unimplemented feature` error stops the run |
+| `EXEC[UTE] p`, a PL/SQL block (`DECLARE`/`BEGIN` ... `/`), `CREATE [OR REPLACE] PROCEDURE`, `FUNCTION`, `PACKAGE [BODY]` ... `/` | run by the engine as statements and answered with their tag (`PL/SQL BLOCK`, `CALL`, `CREATE PROCEDURE`, ...); the lines a block writes with `DBMS_OUTPUT` print on stdout before its tag once `SET SERVEROUTPUT ON` was given (off until then, as in SQL*Plus; section 28); a PL/SQL error (`ORA-06550` with its `PLS-` lines, a runtime `ORA-` with `ORA-06512: at line n`) stops the run like any error |
+| `SET SERVEROUTPUT ON\|OFF [SIZE n\|UNLIMITED] [FORMAT ...]` (`SET SERVEROUT`) | acts, silent; a bad value is an error (section 28) |
 | every other command (`SET PAGESIZE`, `COLUMN`, `TTITLE`, `BREAK`, `COMPUTE`, `TIMING`, `SHOW`, `DESCRIBE`, `VARIABLE`, `PRINT`, `PAUSE`, `CLEAR`, SQLcl's `UNLOAD`, `DDL`, `INFO`, ...) | no effect; counted |
 | a line that is neither SQL nor a command EggDB knows | not run: one notice |
 
@@ -3272,8 +3273,10 @@ sentences, before `More types and the rest come next`:
 With --dialect oracle a script (a file or stdin, not -c) is read as SQL*Plus reads it: statements
 end at ; or a / line, a PL/SQL block at a / line, DEFINE and &name substitute, @, @@ and START
 include other scripts, PROMPT prints its text, CONNECT user switches to the user's schema, and
-EXIT ends the run. Every other SQL*Plus command (SET, COLUMN, SPOOL, HOST, ...) has no effect and
-is counted in one NOTICE line on stderr; HOST never runs a program and SPOOL never writes a file.
+EXIT ends the run. SET SERVEROUTPUT ON prints the DBMS_OUTPUT lines of each PL/SQL block before
+its result (off until then, as in SQL*Plus). Every other SQL*Plus command (SET, COLUMN, SPOOL,
+HOST, ...) has no effect and is counted in one NOTICE line on stderr; HOST never runs a program
+and SPOOL never writes a file.
 ```
 The options gain, after `--dialect`:
 ```
@@ -3595,3 +3598,233 @@ here, `--time-limit 30` when given), so what was tried by hand can be pasted int
 - The gap is waited for by every `tools/call` and `resources/read` that reaches a tool, including
   one refused before the file opens (such as `limited_to_tables`); `ping`, `initialize` and
   `tools/list` never wait.
+
+## 28. PL/SQL at the CLI: server output, blocks in the shell (part 3.16)
+
+EggDB runs PL/SQL in Oracle-dialect sessions: anonymous blocks, `CREATE [OR REPLACE] PROCEDURE`,
+`FUNCTION` and `PACKAGE [BODY]`, `CALL` and `EXECUTE`. There is no Oracle wire protocol, so PL/SQL
+is reached through `eggdb sql <file> --dialect oracle <script>` (section 26's SQL*Plus reader),
+`eggdb sql -c` and `eggdb shell --dialect oracle`. This design settles the three things those
+entry points still lacked: `SET SERVEROUTPUT`, where the lines a block writes with `DBMS_OUTPUT`
+print, and how the shell reads a block that holds `;` inside. Designed by Claude Fable (D15).
+Oracle, SQL*Plus and PL/SQL are trademarks of their owner; EggDB is compatible with them.
+
+The engine's side is fixed and small: `DBMS_OUTPUT.PUT_LINE`, `PUT` and `NEW_LINE` write to a
+per-session buffer that is off by default (the calls are ignored, as in an Oracle session whose
+client never enabled it); the client turns it on with a size or with none (none is EggDB's 1 MiB
+cap, SQL*Plus's `UNLIMITED`), turns it off, and takes the complete lines written since it last
+took them. `DBMS_OUTPUT.ENABLE` inside a block turns it on too. A block that writes past the cap
+fails with the engine's `ORA-20000: ORU-10027` error. The CLI does one thing with it: **after
+every statement, it takes the lines and prints them**, before the statement's own result or tag.
+
+### `SET SERVEROUTPUT` (`SET SERVEROUT`)
+Section 26's tier 1: it acts and is silent, and it is **not counted** among the `SET` lines that
+have no effect (as `SET DEFINE` is not). The form, as SQL*Plus takes it:
+```
+SET SERVEROUT[PUT] ON|OFF [SIZE n|UNLIMITED] [FORMAT WRAPPED|WORD_WRAPPED|TRUNCATED]
+```
+
+| Written | Does |
+|---------|------|
+| `SET SERVEROUTPUT ON` | turns server output on with no size: every line up to EggDB's 1 MiB buffer (SQL*Plus's default `SIZE UNLIMITED`) |
+| `SET SERVEROUTPUT ON SIZE 20000` | on, with the buffer capped at `n` bytes; `n` is 2000 to 1000000 as in SQL*Plus |
+| `SET SERVEROUTPUT ON SIZE UNLIMITED` | on, no size: the same as `ON` alone (`UNL` is accepted too) |
+| `SET SERVEROUTPUT OFF` | off: the block's calls are ignored again; lines already written and not yet printed are printed first |
+| `FORMAT WRAPPED`, `WORD_WRAPPED`, `TRUNCATED` (`WRA`, `WOR`, `TRU`) | accepted, no effect: EggDB prints each line whole; nothing is wrapped or cut, since `SET LINESIZE` has no effect either |
+| options after `OFF` | checked like the others, nothing to act on |
+
+Keywords and values are case-insensitive. A bad line is a SQL*Plus-side error in section 26's
+form (`ERROR:`, `HINT:`, `SQLSTATE:`; exit 3, the run stops, the statements before it stay):
+
+| When | Message |
+|------|---------|
+| a `SIZE` out of range or not a number (`SIZE 500`, `SIZE lots`) | `line 3: SET SERVEROUTPUT SIZE 500 is out of range: SIZE is 2000 to 1000000, or UNLIMITED` + `HINT:  SET SERVEROUTPUT ON alone keeps every line, up to EggDB's 1 MiB buffer.` (SQLSTATE 22023) |
+| anything else wrong (`SET SERVEROUTPUT MAYBE`, `SET SERVEROUTPUT`, `FORMAT WIDE`, `ON SIZE`) | `line 3: SET SERVEROUTPUT does not take 'MAYBE': the form is SET SERVEROUTPUT ON\|OFF [SIZE 2000..1000000\|UNLIMITED] [FORMAT WRAPPED\|WORD_WRAPPED\|TRUNCATED]` + the same hint (SQLSTATE 42601); a missing word reads `does not take nothing after SERVEROUTPUT` |
+
+`SHOW SERVEROUTPUT` stays what section 26 makes of `SHOW`: no effect, counted.
+
+### Where the lines print
+**Text.** The lines go to **stdout**, in order with the results, with **no prefix**: they are the
+script's output, as `PROMPT`'s text is, and a SQL*Plus user redirects them with the results. They
+print right after the statement that wrote them and **before its tag or result**, which is where
+SQL*Plus puts them (the output, then `PL/SQL procedure successfully completed.`). A statement that
+fails prints the lines it wrote before the error, then the error on stderr: nothing written is
+lost. An empty line written with `NEW_LINE` prints as an empty line. The only separator is the
+one the result printer already adds after a result (the empty line after `(1 row)`).
+
+```
+$ eggdb sql hr.db --dialect oracle payroll.sql
+Raising Europe salaries
+KING: 5000 -> 5500
+BLAKE: 2850 -> 3135
+PL/SQL BLOCK
+ count
+-------
+     2
+(1 row)
+
+```
+The script was `PROMPT Raising &region salaries`, `SET SERVEROUTPUT ON`, a block with two
+`DBMS_OUTPUT.PUT_LINE` calls ended by `/`, then `SELECT count(*) FROM emp WHERE sal > 3000;`.
+Without the `SET SERVEROUTPUT ON` line the run prints the same without the two salary lines.
+
+**`--json`.** Stdout stays one JSON line per statement (23.2); the lines get a **third tag-less
+line shape, `server_output`**, next to 26's `prompt` and `notices`, so `has("tag")` still tells a
+statement from a script event. One `server_output` line per statement that wrote anything,
+holding the lines in order as an array of strings without their newlines (an empty line is `""`),
+placed right before that statement's `tag` line (or, after a failure, before 23.3's error line on
+stderr). A statement that wrote nothing adds no line.
+```
+{"prompt":"Raising Europe salaries"}
+{"server_output":["KING: 5000 -> 5500","BLAKE: 2850 -> 3135"]}
+{"tag":"PL/SQL BLOCK"}
+{"columns":["COUNT"],"rows":[[2]],"tag":"SELECT 1"}
+```
+
+**`-c`.** `-c` has no SQL*Plus commands (section 26, decision 7), so there is no `SET
+SERVEROUTPUT ON` to give: server output is **on from the start, with no size** (EggDB's 1 MiB
+cap), and the lines print as above, in text and `--json`. A person who runs `-c "BEGIN
+dbms_output.put_line('hi'); END;"` means to see `hi`. A block that calls `DBMS_OUTPUT.DISABLE`
+turns it off for the rest of the run, as it would in any session.
+
+**A script.** Off until the script says `SET SERVEROUTPUT ON`, as in SQL*Plus. Two reasons, both
+about scripts written for SQL*Plus: a script that never turned it on prints nothing from
+`DBMS_OUTPUT` there, and must not print it here (people diff the output); and a block that writes
+past 1 MiB with the buffer off succeeds in SQL*Plus, where turning it on by default would make
+it fail with `ORA-20000`.
+
+**The shell.** On from the start, as for `-c`, in the interactive prompt and in batch (`-c` or
+stdin): what a person types at a prompt, they want to see. `SET SERVEROUT[PUT] ...` is accepted
+at the prompt in the Oracle dialect, as one line (a trailing `;` is allowed and dropped), with
+the same meaning and the same messages as in a script, minus the `line 3: ` prefix (the shell
+has no script lines), printed as the shell prints a SQL error (`ERROR:`, `HINT:`, `SQLSTATE:`;
+exit 3 in batch). It is silent when it worked, as every `SET` is. The lines print before the
+tag, exactly as in text mode; `.timer on`'s `Time:` line still comes last. In other dialects
+`SET SERVEROUTPUT ON` stays the SQL it is, and the engine's error.
+
+### The tag of a block: `PL/SQL BLOCK` stays
+An anonymous block, and `EXECUTE p` (which the engine runs as `BEGIN p; END;`), answer with the
+tag `PL/SQL BLOCK`, in text and as JSON's `tag`; `CALL p()` answers `CALL`; `CREATE PROCEDURE`,
+`CREATE FUNCTION`, `CREATE PACKAGE`, `CREATE PACKAGE BODY` and their `DROP` and `ALTER` answer
+with the statement's own words, as every DDL tag does. SQL*Plus's sentence, `PL/SQL procedure
+successfully completed.`, is **not** used: section 26 already prints PostgreSQL-style tags
+(`INSERT 0 3`, not `3 rows created.`) for every Oracle statement, so one SQL*Plus sentence among
+them would be the odd line out, the tag names what ran as every other tag does, and JSON's `tag`
+stays a short constant an agent can match. Whoever needs SQL*Plus's exact feedback lines needs
+all of them (`SET FEEDBACK`), which is a later item, not this one.
+
+### Blocks in the Oracle shell
+Today `eggdb shell --dialect oracle` ends every statement at `;`, which cuts `BEGIN x; END;` into
+pieces. In the Oracle dialect the shell now reads a unit as SQL*Plus does:
+
+| The statement's first words (after comments) | Ends at |
+|------|---------|
+| `DECLARE`, `BEGIN`, `<<label>>`, `CREATE [OR REPLACE] [EDITIONABLE\|NONEDITIONABLE] PROCEDURE\|FUNCTION\|PACKAGE [BODY]\|TRIGGER\|TYPE [BODY]` | a line holding only `/` (spaces around it allowed); every `;` before it is part of the unit, and the `/` is not |
+| `EXEC` or `EXECUTE` | the end of the line; a trailing `;` is dropped |
+| `SET SERVEROUT[PUT]` | the end of the line; a trailing `;` is dropped |
+| anything else | `;` outside quotes and comments, as today |
+
+The prompt inside a unit is the continuation prompt the shell already has (`app-> `, with
+`app'> ` and `app"> ` inside an open quote, and `*`/`!` as the transaction states show them): a
+block is a statement that is not finished yet, and nothing more needs saying. `Ctrl-C` drops the
+unfinished unit as it drops a statement. A pasted script with its `/` lines runs as it would in
+SQL*Plus. The `/` is not stored in history, and a unit recalled with `↑` comes back as one line,
+as every multi-line entry does (section 15), and runs on `Enter` because the shell ends a
+recalled unit at the end of that line.
+
+`EXEC p` and `EXECUTE p` at the prompt run as the engine runs `EXECUTE` (`EXEC` is spelled out
+to `EXECUTE` before sending), one line, tag `PL/SQL BLOCK`. The continuation hyphen SQL*Plus
+allows at the end of an `EXEC` line is left out: a longer call is a `BEGIN ... END;` block ended
+by `/`.
+
+A lone `/` at `app=> ` (an empty buffer: SQL*Plus would re-run its buffer) runs nothing and says
+so once, on stderr, not an error and not counted against a batch's exit code:
+```
+app=> /
+eggdb: nothing to run: / ends a PL/SQL unit here; Up then Enter repeats the last statement
+```
+That covers `/` typed after a statement already ended by `;`, the case section 26 refuses to run
+twice. A `.` line is not a terminator in the shell (left out, as in the reader it is a notice).
+
+In Oracle's dialect `BEGIN` at the prompt always opens a PL/SQL block, never a transaction: the
+transaction is open from the first statement and ends at `COMMIT`, `ROLLBACK` or the shell's end
+(committed, as SQL*Plus does, docs/cli.md). A psql habit of typing `begin;` leaves the shell at
+`app-> ` waiting for `/`; `Ctrl-C` gets out, and the banner says why.
+
+The banner's second line in the Oracle dialect (section 15's banner, one word more):
+```
+Type .help for help. SQL ends with ; and a PL/SQL block with a / line; .quit or Ctrl-D quits.
+```
+The help text's one changed line (the second line of its `SQL:` entry):
+```
+SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
+  (docs/sql.md; in Oracle's a PL/SQL block or CREATE PROCEDURE ends at a line holding /); BEGIN spans prompts:
+```
+
+An example session:
+```
+$ eggdb shell hr.db --dialect oracle
+EggDB 0.4.0: hr.db, open read-write (1 table)
+Type .help for help. SQL ends with ; and a PL/SQL block with a / line; .quit or Ctrl-D quits.
+hr=> create or replace procedure raise_sal(p_pct number) as
+hr-> begin
+hr->   update emp set sal = sal * (1 + p_pct / 100);
+hr->   dbms_output.put_line(sql%rowcount || ' rows raised');
+hr-> end;
+hr-> /
+CREATE PROCEDURE
+hr=> exec raise_sal(10)
+2 rows raised
+PL/SQL BLOCK
+hr=> set serveroutput off
+hr=> exec raise_sal(10)
+PL/SQL BLOCK
+hr=> begin
+hr->   raise_sal('ten');
+hr-> end;
+hr-> /
+ERROR:  ORA-06550: line 2, column 3:
+PLS-00306: wrong number or types of arguments in call to 'RAISE_SAL'
+hr=> /
+eggdb: nothing to run: / ends a PL/SQL unit here; Up then Enter repeats the last statement
+hr=> .quit
+```
+The error prints as the shell prints every Oracle error today (the engine's `ORA-` text after
+`ERROR:`, its `PLS-` and `ORA-06512` lines following); nothing in this design changes an error's
+shape.
+
+### Decided by this design
+1. The CLI prints what the engine hands it after each statement, before the statement's tag or
+   result, on stdout with no prefix: it is the script's output, as `PROMPT`'s is, and it lands
+   where a SQL*Plus user expects it. Nothing is buffered across statements, and a failing
+   statement's lines print before its error.
+2. `SET SERVEROUTPUT` is tier 1 (acts, silent, not counted): the one `SET` that changes what the
+   user sees. `SIZE` keeps SQL*Plus's range and `FORMAT` is accepted without effect, because
+   EggDB never wraps or cuts a line.
+3. Off in a script, on in `-c` and the shell. A script written for SQL*Plus must print the same
+   lines here and fail on the same blocks; a one-liner or a prompt has no `SET` before it and a
+   person who writes `DBMS_OUTPUT` wants to read it.
+4. JSON gets a third tag-less shape, `server_output`, one line per statement that wrote, placed
+   before the statement's `tag`: order is kept, 23.2's statement objects stay as shipped, and the
+   name is the setting's own word.
+5. The tag stays `PL/SQL BLOCK`, for text and JSON: the Oracle dialect already answers with
+   PostgreSQL-style tags, and one SQL*Plus sentence among them would be inconsistent; a faithful
+   `SET FEEDBACK` is a later item.
+6. The shell follows SQL*Plus's terminator rule to the letter for PL/SQL units (`/` on its own
+   line, `;` for the rest), with the existing continuation prompt: a pasted SQL*Plus script runs,
+   and nothing new has to be learned to read the prompt.
+7. `EXEC` is one line, as in SQL*Plus; a lone `/` runs nothing and says so once, rather than
+   re-running a buffer the shell does not keep.
+8. Left out, said plainly: SQL*Plus's other commands at the prompt (`SET PAGESIZE`, `DESCRIBE`,
+   `SHOW ERRORS`), the `EXEC` continuation hyphen, the `.` block terminator, `SET FEEDBACK`, and
+   any wrapping of output lines.
+
+### As built (part 3.16, slice 5c)
+1. The engine answers `EXECUTE p` as the block `BEGIN p; END;`, so the shell sends that block for
+   `EXEC p` and `EXECUTE p`, as the script reader does; the tag is the same `PL/SQL BLOCK`.
+2. A PL/SQL unit recalled from history with `↑` comes back as one line and still waits for its `/`
+   line before it runs: the shell does not know that a recalled line was a whole unit.
+3. `SET SERVEROUTPUT`'s parsing is shared by the script reader and the shell (the public
+   `ServerOutputSetting::parse` in `eggdb-sql`), so both print the same message; the shell's has
+   no `line N: ` prefix. The CLI takes each statement's lines through
+   `Session::server_output_reader`, which a result callback can hold while the session runs.

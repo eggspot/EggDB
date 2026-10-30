@@ -997,6 +997,20 @@ impl<'r> SqlPlusReader<'r> {
                 number,
             )));
         }
+        if named("serveroutput", 9) {
+            let shown = "SET SERVEROUTPUT".to_owned();
+            return Ok(Some(match super::ServerOutputSetting::parse(value) {
+                Ok(_) => self.command_item("set serveroutput", shown, value.to_owned(), number),
+                Err(error) => {
+                    let message = format!("line {number}: {}", error.message());
+                    let mut located = SqlError::new(error.state(), message);
+                    if let Some(hint) = error.hint() {
+                        located = located.with_hint(hint);
+                    }
+                    self.failure(number, shown, located)
+                }
+            }));
+        }
         let changes_reading = (named("sqlterminator", 4)
             && !matches!(value_word.as_str(), "on" | ";"))
             || (named("blockterminator", 3) && !matches!(value_word.as_str(), "on" | "."))

@@ -193,13 +193,14 @@ pub use parser::{
 };
 pub use pg_binary::{decode_pg_binary_text, encode_pg_binary};
 pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
+pub use plsql::ServerOutputReader;
 pub use random::{RandomSource, set_random_source};
 pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation};
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, IncludeBase, IncludeOpener, IncludeRequest,
     KnownDifference, MAX_LISTED, RestoreError, RestoreOptions, RestoreProgress, RestoreReport,
-    SkippedObject, SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlServerBatch, TableRows,
-    restore_dump, sqlserver_batches,
+    ServerOutputSetting, SkippedObject, SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlServerBatch,
+    TableRows, restore_dump, sqlserver_batches, starts_plsql_unit,
 };
 pub use schema::{
     ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,

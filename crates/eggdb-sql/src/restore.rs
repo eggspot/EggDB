@@ -21,7 +21,9 @@ use classify::{Action, Effect, Ignored, Skip, ToggledConstraint};
 use reader::DumpReader;
 use script::{ClientCommand, DifferenceNote, ScriptItem, ScriptSource, ScriptStatement};
 use sqlplus_reader::SqlPlusReader;
-pub use sqlplus_script::{SqlPlusCommand, SqlPlusScript, SqlPlusStep};
+pub use sqlplus_script::{
+    ServerOutputSetting, SqlPlusCommand, SqlPlusScript, SqlPlusStep, starts_plsql_unit,
+};
 use statement_spans::SqlServerScript;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;

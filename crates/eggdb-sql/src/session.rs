@@ -683,6 +683,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             .unwrap_or_default()
     }
 
+    /// A reader of this session's server output that a result callback can hold while the
+    /// session runs: it takes the lines [`Session::take_server_output`] would.
+    #[must_use]
+    pub fn server_output_reader(&self) -> crate::plsql::ServerOutputReader {
+        crate::plsql::ServerOutputReader::new(&self.plsql)
+    }
+
     /// The value of the run-time parameter `name`, as `SHOW name` gives it.
     pub fn parameter(&self, name: &str) -> SqlResult<String> {
         self.settings.get(name)

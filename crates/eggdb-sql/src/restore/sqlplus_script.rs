@@ -1,7 +1,7 @@
 use super::IncludeOpener;
 use super::script::{ClientCommand, ScriptItem, ScriptSource};
-use super::sqlplus_reader::SqlPlusReader;
-use crate::error::SqlResult;
+use super::sqlplus_reader::{SqlPlusReader, StatementMode, mode_of};
+use crate::error::{SqlError, SqlResult, SqlState};
 use std::io::BufRead;
 
 /// A SQL*Plus command a [`SqlPlusScript`] hands to its caller as it is, to act on or report.
@@ -51,8 +51,130 @@ pub enum SqlPlusStep {
         /// Where the command is.
         place: String,
     },
+    /// `SET SERVEROUTPUT`: whether the caller prints the `DBMS_OUTPUT` lines of each
+    /// statement, with [`Session::enable_server_output`](crate::Session::enable_server_output)
+    /// or [`Session::disable_server_output`](crate::Session::disable_server_output).
+    ServerOutput(ServerOutputSetting),
     /// Every other SQL*Plus command, and statements the reader leaves unrun.
     Command(SqlPlusCommand),
+}
+
+/// What SQL*Plus's `SET SERVEROUTPUT ON|OFF [SIZE n|UNLIMITED] [FORMAT ...]` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerOutputSetting {
+    /// `ON`: keep the lines PL/SQL writes, up to `buffer_bytes` (`None` for `SIZE UNLIMITED`
+    /// or no `SIZE`, which EggDB caps at 1 MiB).
+    On {
+        /// `SIZE n`, from 2,000 to 1,000,000 bytes.
+        buffer_bytes: Option<usize>,
+    },
+    /// `OFF`: PL/SQL's `DBMS_OUTPUT` calls are ignored again.
+    Off,
+}
+
+const SERVER_OUTPUT_FORM: &str =
+    "the form is SET SERVEROUTPUT ON|OFF [SIZE 2000..1000000|UNLIMITED] [FORMAT WRAPPED|WORD_WRAPPED|TRUNCATED]";
+const SERVER_OUTPUT_HINT: &str =
+    "SET SERVEROUTPUT ON alone keeps every line, up to EggDB's 1 MiB buffer.";
+const SMALLEST_SERVER_OUTPUT_SIZE: usize = 2_000;
+const LARGEST_SERVER_OUTPUT_SIZE: usize = 1_000_000;
+
+impl ServerOutputSetting {
+    /// Reads what follows `SET SERVEROUTPUT` (or `SET SERVEROUT`): `ON` or `OFF`, then `SIZE`
+    /// and `FORMAT` in any order. `FORMAT` is accepted and has no effect, since EggDB never
+    /// wraps a line.
+    ///
+    /// # Errors
+    /// A `SIZE` that is not a number from 2,000 to 1,000,000 or `UNLIMITED` (SQLSTATE 22023),
+    /// and any other word or a missing one (42601), each with a hint.
+    pub fn parse(argument: &str) -> SqlResult<Self> {
+        let words: Vec<&str> = argument.split_whitespace().collect();
+        let Some(first) = words.first() else {
+            return Err(server_output_word_error(None, "SERVEROUTPUT"));
+        };
+        let mut setting = match first.to_ascii_lowercase().as_str() {
+            "on" => Self::On { buffer_bytes: None },
+            "off" => Self::Off,
+            _ => return Err(server_output_word_error(Some(first), "SERVEROUTPUT")),
+        };
+        let mut index = 1;
+        while let Some(word) = words.get(index) {
+            let value = words.get(index + 1).copied();
+            let lowered = word.to_ascii_lowercase();
+            if lowered == "size" {
+                let Some(value) = value else {
+                    return Err(server_output_word_error(None, "SIZE"));
+                };
+                let bytes = server_output_size(value)?;
+                if let Self::On { buffer_bytes } = &mut setting {
+                    *buffer_bytes = bytes;
+                }
+            } else if abbreviates(&lowered, "format", 3) {
+                let Some(value) = value else {
+                    return Err(server_output_word_error(None, "FORMAT"));
+                };
+                let format = value.to_ascii_lowercase();
+                let known = ["wrapped", "word_wrapped", "truncated"]
+                    .iter()
+                    .any(|name| abbreviates(&format, name, 3));
+                if !known {
+                    return Err(server_output_word_error(Some(value), "FORMAT"));
+                }
+            } else {
+                return Err(server_output_word_error(Some(word), "SERVEROUTPUT"));
+            }
+            index += 2;
+        }
+        Ok(setting)
+    }
+}
+
+fn abbreviates(word: &str, name: &str, minimum: usize) -> bool {
+    word.len() >= minimum && name.starts_with(word)
+}
+
+fn server_output_size(value: &str) -> SqlResult<Option<usize>> {
+    if abbreviates(&value.to_ascii_lowercase(), "unlimited", 3) {
+        return Ok(None);
+    }
+    match value.parse::<usize>() {
+        Ok(bytes) if (SMALLEST_SERVER_OUTPUT_SIZE..=LARGEST_SERVER_OUTPUT_SIZE).contains(&bytes) => {
+            Ok(Some(bytes))
+        }
+        _ => Err(SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!(
+                "SET SERVEROUTPUT SIZE {value} is out of range: SIZE is 2000 to 1000000, or UNLIMITED"
+            ),
+        )
+        .with_hint(SERVER_OUTPUT_HINT)),
+    }
+}
+
+fn server_output_word_error(word: Option<&str>, after: &str) -> SqlError {
+    let taken = match word {
+        Some(word) => format!("'{word}'"),
+        None => format!("nothing after {after}"),
+    };
+    SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        format!("SET SERVEROUTPUT does not take {taken}: {SERVER_OUTPUT_FORM}"),
+    )
+    .with_hint(SERVER_OUTPUT_HINT)
+}
+
+/// Whether `text`, the start of a statement in Oracle's dialect, is a PL/SQL unit, which
+/// SQL*Plus ends only at a line holding `/`: `Some(true)` for an anonymous block (`DECLARE`,
+/// `BEGIN`, `<<label>>`) and `CREATE [OR REPLACE] PROCEDURE`, `FUNCTION`, `PACKAGE`,
+/// `TRIGGER` or `TYPE`; `Some(false)` for SQL, which ends at `;`; `None` while too few words
+/// have been typed to tell.
+#[must_use]
+pub fn starts_plsql_unit(text: &str) -> Option<bool> {
+    match mode_of(text) {
+        StatementMode::Undecided => None,
+        StatementMode::Sql => Some(false),
+        StatementMode::PlSql => Some(true),
+    }
 }
 
 /// Reads a SQL*Plus script step by step for a caller that runs it itself, such as `eggdb sql
@@ -118,6 +240,15 @@ impl<'r> SqlPlusScript<'r> {
         let name = command.name.clone();
         match name.as_str() {
             "prompt" => SqlPlusStep::Prompt(command.argument),
+            "set serveroutput" => match ServerOutputSetting::parse(&command.argument) {
+                Ok(setting) => SqlPlusStep::ServerOutput(setting),
+                Err(_) => SqlPlusStep::Command(SqlPlusCommand {
+                    name: command.name,
+                    shown: command.shown,
+                    argument: command.argument,
+                    place,
+                }),
+            },
             "connect" => SqlPlusStep::Connect {
                 statement: format!(
                     "ALTER SESSION SET CURRENT_SCHEMA = {}",

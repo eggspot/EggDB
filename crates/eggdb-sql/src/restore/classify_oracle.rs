@@ -56,6 +56,7 @@ pub(crate) fn oracle_name_key(name: &str) -> String {
 pub(crate) fn sqlplus_command_reason(name: &str) -> &'static str {
     match name {
         "set define" => "used for substitution variables",
+        "set serveroutput" => "a restore prints no server output",
         "define" | "undefine" => "used for substitution variables",
         "accept" => "never prompts; the variable keeps its DEFAULT or stays undefined",
         "connect" => "objects after it go into the user's schema; no login is made",

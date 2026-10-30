@@ -177,8 +177,10 @@ COPY ... TO STDOUT prints the rows.
 With --dialect oracle a script (a file or stdin, not -c) is read as SQL*Plus reads it: statements
 end at ; or a / line, a PL/SQL block at a / line, DEFINE and &name substitute, @, @@ and START
 include other scripts, PROMPT prints its text, CONNECT user switches to the user's schema, and
-EXIT ends the run. Every other SQL*Plus command (SET, COLUMN, SPOOL, HOST, ...) has no effect and
-is counted in one NOTICE line on stderr; HOST never runs a program and SPOOL never writes a file.
+EXIT ends the run. SET SERVEROUTPUT ON prints the DBMS_OUTPUT lines of each PL/SQL block before
+its result (off until then, as in SQL*Plus). Every other SQL*Plus command (SET, COLUMN, SPOOL,
+HOST, ...) has no effect and is counted in one NOTICE line on stderr; HOST never runs a program
+and SPOOL never writes a file.
 More types and the rest come next (docs/sql.md).
 
   -c, --command <sql>   the statements to run
