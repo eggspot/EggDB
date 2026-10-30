@@ -1,11 +1,16 @@
+use super::column_rewrite;
 use super::script::DifferenceNote;
+use crate::error::{SqlError, SqlState};
 use std::ops::Range;
+
+const IDENTITY_NOT_KEPT: &str = "identity not kept: values restored, new rows need explicit values";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DisabledElement {
     pub(crate) table: String,
     pub(crate) name: String,
     pub(crate) clause: String,
+    pub(crate) in_column: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +199,6 @@ fn identity_span(element: &Element) -> Option<Range<usize>> {
         .position(|lexeme| is_word(Some(lexeme), "identity"))?
         + start;
     let mut end = identity + 1;
-    let mut options = false;
     if matches!(
         lexemes.get(end).map(|lexeme| &lexeme.piece),
         Some(Piece::Open)
@@ -207,7 +211,6 @@ fn identity_span(element: &Element) -> Option<Range<usize>> {
             end += 1;
         }
         end += 1;
-        options = true;
     } else {
         while let Some(lexeme) = lexemes.get(end) {
             let option = match &lexeme.piece {
@@ -221,12 +224,8 @@ fn identity_span(element: &Element) -> Option<Range<usize>> {
             if !option {
                 break;
             }
-            options = true;
             end += 1;
         }
-    }
-    if !options {
-        return None;
     }
     let from = lexemes[start].span.start;
     let to = lexemes
@@ -338,11 +337,7 @@ fn without_span(text: &str, from: usize, to: usize, removed: &Range<usize>) -> S
     format!("{}{}", before.trim_end(), after).trim().to_owned()
 }
 
-fn table_level_clause(
-    text: &str,
-    element: &Element,
-    constraint: &ColumnConstraint,
-) -> String {
+fn table_level_clause(text: &str, element: &Element, constraint: &ColumnConstraint) -> String {
     let lexemes = &element.lexemes;
     let column = lexemes
         .first()
@@ -406,14 +401,7 @@ struct RewrittenElements {
     changed: bool,
 }
 
-fn rewritten_elements(
-    text: &str,
-    lexemes: &[Lexeme],
-    open: usize,
-    close: usize,
-    table: &str,
-    table_name: &str,
-) -> RewrittenElements {
+fn elements_between(lexemes: &[Lexeme], open: usize, close: usize) -> Vec<Element> {
     let mut elements = Vec::new();
     let mut element_start = open + 1;
     for index in open + 1..=close {
@@ -440,6 +428,18 @@ fn rewritten_elements(
         });
         element_start = index + 1;
     }
+    elements
+}
+
+fn rewritten_elements(
+    text: &str,
+    lexemes: &[Lexeme],
+    open: usize,
+    close: usize,
+    table: &str,
+    table_name: &str,
+) -> RewrittenElements {
+    let elements = elements_between(lexemes, open, close);
     let mut rewritten = RewrittenElements {
         kept: Vec::new(),
         notes: Vec::new(),
@@ -462,6 +462,7 @@ fn rewritten_elements(
                     table: table.to_owned(),
                     name,
                     clause: format!("{}{}", before.trim_end(), after).trim().to_owned(),
+                    in_column: false,
                 });
                 rewritten.changed = true;
                 continue;
@@ -479,18 +480,12 @@ fn rewritten_elements(
             continue;
         }
         let mut removed = Vec::new();
-        if let Some(span) = identity_span(element) {
-            removed.push(span);
-            rewritten.notes.push(DifferenceNote::new(
-                format!("{table_name}.{column}"),
-                "identity not kept: values restored, new rows need explicit values",
-            ));
-        }
         for constraint in disabled_column_constraints(element) {
             rewritten.disabled.push(DisabledElement {
                 table: table.to_owned(),
                 name: constraint.name.clone(),
                 clause: table_level_clause(text, element, &constraint),
+                in_column: true,
             });
             removed.push(constraint.span);
         }
@@ -514,8 +509,14 @@ fn closing_paren(lexemes: &[Lexeme], open: usize) -> Option<usize> {
         .map(|offset| offset + open + 1)
 }
 
-pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
-    let lexemes = lexemes(text);
+struct CreatedTable {
+    table: String,
+    table_name: String,
+    open: usize,
+    close: usize,
+}
+
+fn created_table(text: &str, lexemes: &[Lexeme]) -> Option<CreatedTable> {
     let table_at = lexemes
         .iter()
         .position(|lexeme| lexeme.depth == 0 && is_word(Some(lexeme), "table"))?;
@@ -529,22 +530,91 @@ pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
         .get(table_start..lexemes[open].span.start)?
         .trim()
         .to_owned();
-    let close = closing_paren(&lexemes, open)?;
+    let close = closing_paren(lexemes, open)?;
     let table_name = lexemes[table_at + 1..open]
         .iter()
         .rev()
         .find_map(|lexeme| name_of(Some(lexeme)))
         .unwrap_or_default();
-    let rewritten = rewritten_elements(text, &lexemes, open, close, &table, &table_name);
+    Some(CreatedTable {
+        table,
+        table_name,
+        open,
+        close,
+    })
+}
+
+fn with_elements(
+    text: &str,
+    lexemes: &[Lexeme],
+    open: usize,
+    close: usize,
+    kept: &[String],
+) -> Option<String> {
+    let head = text.get(..lexemes[open].span.end)?;
+    let tail = text.get(lexemes[close].span.start..)?;
+    Some(format!("{head}{}{tail}", kept.join(", ")))
+}
+
+pub(crate) fn rewritten_table(text: &str) -> Option<TableRewrite> {
+    let lexemes = lexemes(text);
+    let created = created_table(text, &lexemes)?;
+    let rewritten = rewritten_elements(
+        text,
+        &lexemes,
+        created.open,
+        created.close,
+        &created.table,
+        &created.table_name,
+    );
     if !rewritten.changed || rewritten.kept.is_empty() {
         return None;
     }
-    let head = text.get(..lexemes[open].span.end)?;
-    let tail = text.get(lexemes[close].span.start..)?;
     Some(TableRewrite {
-        text: format!("{head}{}{tail}", rewritten.kept.join(", ")),
+        text: with_elements(text, &lexemes, created.open, created.close, &rewritten.kept)?,
         notes: rewritten.notes,
         disabled: rewritten.disabled,
+    })
+}
+
+pub(crate) fn without_refused_identity(
+    text: &str,
+    error: &SqlError,
+) -> Option<column_rewrite::TableRewrite> {
+    let refused = error.state() == SqlState::FEATURE_NOT_SUPPORTED
+        || error.state() == SqlState::INVALID_TABLE_DEFINITION;
+    if !refused {
+        return None;
+    }
+    let lexemes = lexemes(text);
+    let created = created_table(text, &lexemes)?;
+    let mut kept = Vec::new();
+    let mut notes = Vec::new();
+    for element in elements_between(&lexemes, created.open, created.close) {
+        let element_text = text.get(element.span.clone()).unwrap_or("");
+        let identity = if starts_constraint(element.lexemes.first()) {
+            None
+        } else {
+            identity_span(&element)
+        };
+        let Some(span) = identity else {
+            kept.push(element_text.to_owned());
+            continue;
+        };
+        let column = name_of(element.lexemes.first()).unwrap_or_default();
+        notes.push(DifferenceNote::new(
+            format!("{}.{column}", created.table_name),
+            IDENTITY_NOT_KEPT,
+        ));
+        kept.push(without_spans(text, &element.span, &mut [span]));
+    }
+    if notes.is_empty() {
+        return None;
+    }
+    Some(column_rewrite::TableRewrite {
+        text: with_elements(text, &lexemes, created.open, created.close, &kept)?,
+        notes,
+        identity_not_kept: true,
     })
 }
 
@@ -577,9 +647,7 @@ pub(crate) fn rewritten_added(text: &str) -> Option<TableRewrite> {
     let text = if rewritten.kept.is_empty() {
         String::new()
     } else {
-        let head = text.get(..lexemes[open].span.end)?;
-        let tail = text.get(lexemes[close].span.start..)?;
-        format!("{head}{}{tail}", rewritten.kept.join(", "))
+        with_elements(text, &lexemes, open, close, &rewritten.kept)?
     };
     Some(TableRewrite {
         text,

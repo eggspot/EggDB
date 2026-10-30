@@ -1,8 +1,9 @@
 use super::Parser;
 use crate::ast::{
     AggregateFunction, BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal, Name, OrderItem,
-    SelectItem, Statement, TableReference, UnaryOperator,
+    SelectItem, SequenceOptions, Statement, TableReference, UnaryOperator,
 };
+use crate::encoding::{IdentitySeed, integer_type_range};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children;
 use crate::lexer::{TokenKind, swap_uniform_case};
@@ -971,26 +972,36 @@ impl<'t> Parser<'t> {
             self.expect_word("default")?;
             if self.take_word("on") {
                 self.expect_word("null")?;
+                if self.take_word("for") {
+                    self.expect_word("insert")?;
+                    if !self.take_word("only") {
+                        self.expect_word("and")?;
+                        self.expect_word("update")?;
+                    }
+                }
             }
         }
         self.expect_word("as")?;
         self.expect_word("identity")?;
-        if self.is(&TokenKind::LeftParen) {
-            return Err(self.not_supported("identity options"));
-        }
+        let position = self.position();
+        let options = if self.take(&TokenKind::LeftParen) {
+            let options = self.sequence_options(false)?;
+            self.expect(&TokenKind::RightParen)?;
+            options
+        } else {
+            self.sequence_options(false)?
+        };
         if !matches!(
             column.sql_type,
             SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
         ) {
             column.sql_type = SqlType::BigInt;
         }
+        column.identity_seed =
+            oracle_identity_seed(&options, column.sql_type).map_err(|error| error.at(position))?;
         column.auto_increment = true;
         column.generated_always = !by_default;
         Ok(())
-    }
-
-    fn is(&self, kind: &TokenKind) -> bool {
-        self.peek_kind() == kind
     }
 
     pub(super) fn oracle_primary(
@@ -1490,6 +1501,14 @@ impl Parser<'_> {
                 "invisible",
                 "noparallel",
                 "parallel",
+                "nosort",
+                "sort",
+                "validate",
+                "novalidate",
+                "rely",
+                "norely",
+                "segment",
+                "indexing",
             ]
             .iter()
             .any(|word| self.is_word(word))
@@ -1501,6 +1520,15 @@ impl Parser<'_> {
                 self.skip_partitioning()?;
             } else if self.peek_kind() == &TokenKind::LeftParen {
                 self.skip_balanced()?;
+            }
+        }
+        loop {
+            if self.take_word("indexing") {
+                if !self.take_word("partial") {
+                    self.expect_word("full")?;
+                }
+            } else if !(self.take_word("nosort") || self.take_word("sort")) {
+                break;
             }
         }
         self.skip_physical_properties()?;
@@ -1536,6 +1564,54 @@ impl Parser<'_> {
             }
         }
     }
+}
+
+fn oracle_identity_seed(
+    options: &SequenceOptions,
+    sql_type: SqlType,
+) -> SqlResult<Option<IdentitySeed>> {
+    let invalid = |code: u16, message: &str| {
+        SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message).with_oracle_code(code)
+    };
+    let (low, high) = integer_type_range(sql_type).unwrap_or((i64::MIN, i64::MAX));
+    let increment = options.increment.unwrap_or(1);
+    if increment == 0 {
+        return Err(invalid(4002, "INCREMENT must be a nonzero integer"));
+    }
+    let ascending = increment > 0;
+    let min = options.min.flatten();
+    let max = options.max.flatten();
+    if let (Some(min), Some(max)) = (min, max)
+        && min >= max
+    {
+        return Err(invalid(4004, "MINVALUE must be less than MAXVALUE"));
+    }
+    let start = options.start.unwrap_or(if ascending {
+        min.unwrap_or(1)
+    } else {
+        max.unwrap_or(-1)
+    });
+    if start < min.unwrap_or(low) {
+        return Err(invalid(4006, "START WITH cannot be less than MINVALUE"));
+    }
+    if start > max.unwrap_or(high) {
+        return Err(invalid(4008, "START WITH cannot be more than MAXVALUE"));
+    }
+    let limited = if ascending {
+        max.is_some_and(|max| max < high)
+    } else {
+        min.is_some_and(|min| min > low)
+    };
+    if limited || options.cycle == Some(true) {
+        return Err(SqlError::not_supported(
+            "identity options that end or cycle the identity before its type's range (MAXVALUE, MINVALUE, CYCLE) are not supported yet",
+        ));
+    }
+    let seed = IdentitySeed {
+        seed: start,
+        increment,
+    };
+    Ok((seed != IdentitySeed::ONE_BY_ONE).then_some(seed))
 }
 
 pub(super) struct ConstraintStates {

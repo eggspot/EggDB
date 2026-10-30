@@ -166,7 +166,8 @@ pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, IncludeBase, IncludeOpener, IncludeRequest,
     KnownDifference, MAX_LISTED, RestoreError, RestoreOptions, RestoreProgress, RestoreReport,
-    SkippedObject, SqlServerBatch, TableRows, restore_dump, sqlserver_batches,
+    SkippedObject, SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlServerBatch, TableRows,
+    restore_dump, sqlserver_batches,
 };
 pub use schema::{
     ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,

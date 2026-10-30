@@ -494,13 +494,19 @@ fn alter_table(tokens: &[Token], text: &str) -> Action {
                 identity_sequences: Vec::new(),
             })
         }
-        "add" => add(tokens, at + 1, table, text),
+        "add" => add(tokens, at + 1, table),
         word if STORAGE_WORDS.contains(&word) => ignore(STORAGE_SETTINGS),
         _ => Action::Run(Effect::AlterTable {
             constraints: 0,
             identity_sequences: Vec::new(),
         }),
     }
+}
+
+pub(crate) fn altered_table(text: &str) -> String {
+    let tokens: Vec<Token> = Words::oracle(text).collect();
+    let mut at = 2;
+    name_at(&tokens, &mut at)
 }
 
 fn starts_constraint(tokens: &[Token], at: usize) -> bool {
@@ -524,7 +530,7 @@ fn disabled_at_top(tokens: &[Token], from: usize) -> bool {
     false
 }
 
-fn add(tokens: &[Token], at: usize, table: String, text: &str) -> Action {
+fn add(tokens: &[Token], at: usize, table: String) -> Action {
     if is(tokens, at, "supplemental") {
         return ignore(STORAGE_SETTINGS);
     }
@@ -544,16 +550,8 @@ fn add(tokens: &[Token], at: usize, table: String, text: &str) -> Action {
         return Action::Run(Effect::AddConstraint { table, name });
     }
     if tokens.get(at).is_some_and(|token| token.is_symbol(b'(')) {
-        let constraints = parenthesized_constraints(tokens, at);
-        if disabled_at_top(tokens, at) && constraints > 0 {
-            return skip_statement(
-                "statement",
-                text,
-                "constraints disabled in ADD (...) come later",
-            );
-        }
         return Action::Run(Effect::AlterTable {
-            constraints,
+            constraints: parenthesized_constraints(tokens, at),
             identity_sequences: Vec::new(),
         });
     }

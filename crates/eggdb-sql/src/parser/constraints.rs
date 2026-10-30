@@ -97,9 +97,7 @@ impl Parser<'_> {
                 if !states.enabled {
                     return Err(self.not_supported("disabled constraints"));
                 }
-                if states.using_index.is_some() {
-                    using_index = states.using_index;
-                }
+                using_index = states.using_index.or(using_index);
             } else if self.sqlite() && self.is_word("on") && self.is_word_at(1, "conflict") {
                 self.sqlite_conflict_clause()?;
             } else if self.skip_not_for_replication() {
@@ -250,7 +248,7 @@ impl Parser<'_> {
         }
     }
 
-    fn sequence_options(&mut self, alter: bool) -> SqlResult<SequenceOptions> {
+    pub(super) fn sequence_options(&mut self, alter: bool) -> SqlResult<SequenceOptions> {
         let mut options = SequenceOptions::default();
         loop {
             if !self.oracle() && self.take_word("as") {
@@ -287,6 +285,9 @@ impl Parser<'_> {
                 options.cycle = Some(false);
             } else if self.take_word("start") {
                 self.take_word("with");
+                if self.oracle() && self.is_word("limit") {
+                    return Err(self.not_supported("START WITH LIMIT VALUE"));
+                }
                 options.start = Some(self.signed_integer()?);
             } else if alter && self.take_word("restart") {
                 let with = self.take_word("with");

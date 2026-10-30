@@ -7,6 +7,7 @@ mod script;
 mod script_reader;
 mod script_text;
 mod sqlplus_reader;
+mod sqlplus_script;
 mod statement_spans;
 mod table_rewrite_oracle;
 mod words;
@@ -20,6 +21,7 @@ use classify::{Action, Effect, Ignored, Skip, ToggledConstraint};
 use reader::DumpReader;
 use script::{ClientCommand, DifferenceNote, ScriptItem, ScriptSource, ScriptStatement};
 use sqlplus_reader::SqlPlusReader;
+pub use sqlplus_script::{SqlPlusCommand, SqlPlusScript, SqlPlusStep};
 use statement_spans::SqlServerScript;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
@@ -495,7 +497,7 @@ impl RestoreRules {
             client_command_reason: classify_oracle::sqlplus_command_reason,
             differences: classify_oracle::oracle_differences,
             not_supported: classify_oracle::refused_as_not_supported,
-            rewrite_refused_table: |_, _| None,
+            rewrite_refused_table: table_rewrite_oracle::without_refused_identity,
             psql_meta_commands: false,
             index_names_per_table: false,
             default_schema: "public",
@@ -783,6 +785,7 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             return self.execute(statement, effect, true);
         }
         let adjusted;
+        let altered;
         let mut effect = effect;
         let schema = match effect {
             Effect::Table { name, .. } | Effect::View(name) | Effect::Sequence(name) => {
@@ -822,6 +825,36 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
                 };
                 effect = &adjusted;
             }
+        }
+        if let Effect::AlterTable {
+            constraints,
+            identity_sequences,
+        } = effect
+            && let Some(rewrite) = table_rewrite_oracle::rewritten_added(&statement.text)
+        {
+            let table = classify_oracle::altered_table(&statement.text);
+            let mut table_level = 0u64;
+            for element in rewrite.disabled {
+                if !element.in_column {
+                    table_level += 1;
+                }
+                self.remember_disabled(
+                    &table,
+                    &element.name,
+                    format!("ALTER TABLE {} ADD {}", element.table, element.clause),
+                );
+            }
+            statement.differences.extend(rewrite.notes);
+            if rewrite.text.is_empty() {
+                self.note_differences(&statement);
+                return Flow::Continue;
+            }
+            statement.text = rewrite.text;
+            altered = Effect::AlterTable {
+                constraints: constraints.saturating_sub(table_level),
+                identity_sequences: identity_sequences.clone(),
+            };
+            effect = &altered;
         }
         let owner = match effect {
             Effect::View(name) => name

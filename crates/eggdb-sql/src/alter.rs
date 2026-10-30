@@ -1580,11 +1580,6 @@ fn add_constraint(
     {
         return Ok(());
     }
-    if dialect == Dialect::Oracle
-        && let Some(using) = &spec.using_index
-    {
-        use_named_index(writer, tables, name, spec, using, dialect)?;
-    }
     let mut table = current(writer, tables, name)?;
     if let Some(given) = &spec.name
         && table.constraint_name_taken(&given.text)
@@ -1609,6 +1604,12 @@ fn add_constraint(
             ),
         }
         .at(given.position));
+    }
+    if dialect == Dialect::Oracle
+        && let Some(using) = &spec.using_index
+        && drop_index_taken_over(writer, tables, name, spec, using, dialect)?
+    {
+        table = current(writer, tables, name)?;
     }
     match &spec.kind {
         ConstraintKind::Check { expr, text } => {
@@ -1753,24 +1754,24 @@ fn take_over_index(
     }
 }
 
-fn use_named_index(
+fn drop_index_taken_over(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     name: &str,
     spec: &ConstraintSpec,
     using: &Name,
     dialect: Dialect,
-) -> SqlResult<()> {
+) -> SqlResult<bool> {
     let index_name = crate::schemas::base_name(&using.text);
     if spec
         .name
         .as_ref()
         .is_some_and(|given| given.text == index_name)
     {
-        return Ok(());
+        return Ok(false);
     }
     let (ConstraintKind::PrimaryKey(columns) | ConstraintKind::Unique(columns)) = &spec.kind else {
-        return Ok(());
+        return Ok(false);
     };
     let table = current(writer, tables, name)?;
     let Some(index) = table.index_named(index_name).cloned() else {
@@ -1798,17 +1799,21 @@ fn use_named_index(
         .at(using.position));
     }
     if index.columns.len() != wanted.len() || index.backs_unique_constraint {
-        return Ok(());
+        return Ok(false);
     }
     let drop = crate::ast::DropIndex {
-        names: vec![using.clone()],
+        names: vec![Name {
+            text: index_name.to_owned(),
+            position: using.position,
+        }],
         table: Some(Name {
             text: table.name.clone(),
             position: using.position,
         }),
         if_exists: false,
     };
-    indexes::drop_index(writer, tables, &drop, dialect).map(|_| ())
+    indexes::drop_index(writer, tables, &drop, dialect)?;
+    Ok(true)
 }
 
 fn drop_primary_key(

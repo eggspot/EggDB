@@ -327,7 +327,7 @@ pub(crate) fn unresolved_error(name: &str, line: u64) -> SqlError {
             "substitution variable &{name} has no value: add DEFINE {name} = ... before line {line}, or SET DEFINE OFF"
         ),
     )
-    .with_hint("eggdb restore never prompts; --define name=value gives a value from the command line.")
+    .with_hint("EggDB never prompts for a value; --define name=value gives one from the command line.")
 }
 
 fn first_word(text: &str) -> String {
@@ -904,7 +904,7 @@ impl<'r> SqlPlusReader<'r> {
                 Ok(Some(self.command_item(
                     "exit",
                     command.to_ascii_uppercase(),
-                    String::new(),
+                    argument,
                     number,
                 )))
             }
@@ -913,10 +913,16 @@ impl<'r> SqlPlusReader<'r> {
                 Ok(Some(self.command_item(
                     "whenever",
                     format!("WHENEVER {what}"),
-                    String::new(),
+                    argument,
                     number,
                 )))
             }
+            "prompt" | "spool" => Ok(Some(self.command_item(
+                command,
+                command.to_ascii_uppercase(),
+                argument,
+                number,
+            ))),
             other => Ok(Some(self.command_item(
                 other,
                 other.to_ascii_uppercase(),
@@ -1003,10 +1009,10 @@ impl<'r> SqlPlusReader<'r> {
                 SqlError::new(
                     SqlState::FEATURE_NOT_SUPPORTED,
                     format!(
-                        "line {number}: {shown} changes how the script is read, which eggdb restore does not support"
+                        "line {number}: {shown} changes how the script is read, which EggDB does not support"
                     ),
                 )
-                .with_hint("Remove the SET line; eggdb restore reads ; and / as SQL*Plus does by default."),
+                .with_hint("Remove the SET line; EggDB reads ; and / as SQL*Plus does by default."),
             )));
         }
         Ok(Some(self.command_item("set", shown, String::new(), number)))
@@ -1175,7 +1181,7 @@ impl<'r> SqlPlusReader<'r> {
                     shown,
                     SqlError::new(
                         SqlState::FEATURE_NOT_SUPPORTED,
-                        format!("line {number}: eggdb restore never fetches a script from a URL"),
+                        format!("line {number}: EggDB never fetches a script from a URL"),
                     )
                     .with_hint("Download the script and include it by its file name."),
                 ),
@@ -1206,7 +1212,7 @@ impl<'r> SqlPlusReader<'r> {
                 SqlError::new(
                     SqlState::PROGRAM_LIMIT_EXCEEDED,
                     format!(
-                        "line {number}: the restore has opened {MAX_INCLUDES_OPENED} included scripts, its limit"
+                        "line {number}: the run has opened {MAX_INCLUDES_OPENED} included scripts, its limit"
                     ),
                 ),
             )));
