@@ -12,6 +12,7 @@ mod sqlserver;
 mod sqlserver_batch;
 mod sqlserver_functions;
 mod sqlserver_logic;
+mod windows;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
@@ -245,6 +246,8 @@ const INTERNAL_FUNCTIONS: [&str; 24] = [
     crate::json_functions::WHOLE_ROW,
     crate::json_functions::ROW_OBJECT,
     crate::aggregate::ORDERED_ARGUMENTS,
+    crate::aggregate::FILTERED_ARGUMENTS,
+    crate::aggregate::ORDERED_SET_ARGUMENTS,
     crate::window::WINDOW_CALL,
 ];
 
@@ -272,6 +275,7 @@ pub(crate) struct Parser<'t> {
     declared_tables: Vec<String>,
     variables_read: Vec<String>,
     select_targets: Option<Vec<(crate::ast::AssignmentTarget, Vec<String>)>>,
+    select_windows: Option<Vec<(String, crate::window::WindowDefinition)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -390,6 +394,7 @@ impl<'t> Parser<'t> {
             declared_tables: Vec::new(),
             variables_read: Vec::new(),
             select_targets: None,
+            select_windows: None,
         }
     }
 
@@ -2439,9 +2444,17 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
-        if self.is_word("window") {
-            return Err(self.not_supported("WINDOW"));
+        let windows = if self.take_word("window") {
+            self.window_clause()?
+        } else {
+            Vec::new()
+        };
+        for item in &mut items {
+            if let SelectItem::Expr { expr, .. } = item {
+                crate::window::resolve_references(expr, &windows)?;
+            }
         }
+        self.select_windows = Some(windows);
         if self.oracle() && (self.is_word("connect") || self.is_word("start")) {
             return Err(self.not_supported("hierarchical queries (CONNECT BY)"));
         }
@@ -3582,6 +3595,12 @@ impl<'t> Parser<'t> {
     }
 
     fn function(&mut self, name: Name) -> SqlResult<Expr> {
+        let shown = name.text.clone();
+        let expr = self.function_call(name)?;
+        self.call_clauses(expr, &shown)
+    }
+
+    fn function_call(&mut self, name: Name) -> SqlResult<Expr> {
         if name.text == "extract" && !self.sqlite() {
             return self.extract(name);
         }
@@ -3652,6 +3671,12 @@ impl<'t> Parser<'t> {
                 expr
             });
         }
+        if !self.mysql()
+            && !self.sqlite()
+            && let Some(function) = AggregateFunction::ordered_set_named(&name.text)
+        {
+            return self.ordered_set_aggregate(name, function);
+        }
         if AGGREGATES.contains(&name.text.as_str()) {
             return Err(SqlError::not_supported(format!(
                 "aggregate functions such as {}() are not supported yet",
@@ -3685,14 +3710,18 @@ impl<'t> Parser<'t> {
             self.expect(&TokenKind::RightParen)?;
         }
         if self.is_word("over")
-            && arguments.is_empty()
             && named.is_empty()
             && let Some(function) = crate::window::WindowFunction::named(&name.text)
         {
-            return self.window_call(function, name.position);
+            return self.window_call(function, arguments, None, &name);
         }
-        if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
-            return Err(self.not_supported("window and aggregate clauses"));
+        if self.is_word("filter")
+            && self.peek_kind_at(1) == &TokenKind::LeftParen
+            && named.is_empty()
+            && let Some(function) = crate::window::WindowFunction::named(&name.text)
+        {
+            let filter = self.aggregate_filter()?;
+            return self.window_call(function, arguments, Some(filter), &name);
         }
         if !named.is_empty() {
             arguments = named_arguments(&name, arguments, named)?;
@@ -3704,42 +3733,6 @@ impl<'t> Parser<'t> {
             },
             position: name.position,
         })
-    }
-
-    fn window_call(
-        &mut self,
-        function: crate::window::WindowFunction,
-        position: usize,
-    ) -> SqlResult<Expr> {
-        self.expect_word("over")?;
-        if self.peek_kind() != &TokenKind::LeftParen {
-            return Err(self.not_supported("named windows"));
-        }
-        self.expect(&TokenKind::LeftParen)?;
-        let mut partition = Vec::new();
-        if self.take_word("partition") {
-            self.expect_word("by")?;
-            loop {
-                partition.push(self.expression()?);
-                if !self.take(&TokenKind::Comma) {
-                    break;
-                }
-            }
-        }
-        let order = if self.take_word("order") {
-            self.expect_word("by")?;
-            self.order_items()?
-        } else {
-            Vec::new()
-        };
-        if ["rows", "range", "groups"]
-            .iter()
-            .any(|word| self.is_word(word))
-        {
-            return Err(self.not_supported("window frames"));
-        }
-        self.expect(&TokenKind::RightParen)?;
-        Ok(crate::window::call(function, partition, order, position))
     }
 
     fn named_argument_name(&mut self) -> SqlResult<Option<Name>> {
@@ -3848,9 +3841,6 @@ impl<'t> Parser<'t> {
             (Some(Box::new(self.aggregate_order(first)?)), distinct)
         };
         self.expect(&TokenKind::RightParen)?;
-        if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
-            return Err(self.not_supported("window and aggregate clauses"));
-        }
         Ok(Expr {
             kind: ExprKind::Aggregate {
                 function,

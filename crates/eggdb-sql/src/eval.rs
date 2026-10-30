@@ -410,6 +410,9 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Function { name, .. } if name == "array_any" || name == "array_all" => {
             ("?column?".into(), false)
         }
+        ExprKind::Function { name, arguments } if name == crate::window::WINDOW_CALL => {
+            (crate::window::function_name(arguments), true)
+        }
         ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }

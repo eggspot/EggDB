@@ -612,7 +612,15 @@ pub(crate) struct TableFunction {
 pub(crate) struct SelectListExpansion {
     pub(crate) query: Query,
     pub(crate) items: Vec<ExpandedItem>,
+    pub(crate) order: Vec<(ExpansionKey, crate::types::SortDirection)>,
+    pub(crate) hidden: usize,
     pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExpansionKey {
+    Ordinal { number: i64, position: usize },
+    Output { item: usize, offset: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -627,6 +635,12 @@ pub(crate) enum ExpandedItem {
     Window {
         spec: crate::window::WindowSpec,
         keys: usize,
+        output_name: String,
+    },
+    Computed {
+        expr: Expr,
+        inputs: usize,
+        windows: Vec<(crate::window::WindowSpec, usize)>,
         output_name: String,
     },
 }
@@ -995,9 +1009,45 @@ pub(crate) enum AggregateFunction {
     BoolAnd,
     BoolOr,
     Every,
+    PercentileCont,
+    PercentileDisc,
+    Mode,
 }
 
 impl AggregateFunction {
+    pub(crate) const ALL: [Self; 17] = [
+        Self::Count,
+        Self::Sum,
+        Self::Avg,
+        Self::Min,
+        Self::Max,
+        Self::StringAgg,
+        Self::JsonAgg,
+        Self::JsonbAgg,
+        Self::JsonObjectAgg,
+        Self::JsonbObjectAgg,
+        Self::ArrayAgg,
+        Self::BoolAnd,
+        Self::BoolOr,
+        Self::Every,
+        Self::PercentileCont,
+        Self::PercentileDisc,
+        Self::Mode,
+    ];
+
+    pub(crate) fn ordered_set_named(name: &str) -> Option<Self> {
+        Some(match name {
+            "percentile_cont" => Self::PercentileCont,
+            "percentile_disc" => Self::PercentileDisc,
+            "mode" => Self::Mode,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_ordered_set(self) -> bool {
+        matches!(self, Self::PercentileCont | Self::PercentileDisc | Self::Mode)
+    }
+
     pub(crate) fn named(name: &str) -> Option<Self> {
         Some(match name {
             "count" => Self::Count,
@@ -1039,6 +1089,9 @@ impl AggregateFunction {
             Self::BoolAnd => "bool_and",
             Self::BoolOr => "bool_or",
             Self::Every => "every",
+            Self::PercentileCont => "percentile_cont",
+            Self::PercentileDisc => "percentile_disc",
+            Self::Mode => "mode",
         }
     }
 
@@ -1179,6 +1232,7 @@ pub(crate) enum ExprKind {
     OuterColumn {
         index: usize,
         sql_type: Option<SqlType>,
+        depth: usize,
     },
     Constant {
         value: Value,

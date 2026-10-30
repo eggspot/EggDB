@@ -142,6 +142,8 @@ mod sqlserver_tests;
 mod subquery_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod window_tests;
 
 pub use arrays::{ArrayElement, ArrayValue};
 pub use bulk_load::{BcpCharacterReader, BcpTerminators, BulkRows};

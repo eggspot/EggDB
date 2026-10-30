@@ -116,6 +116,7 @@ impl Parser<'_> {
             return Err(self.not_supported("WITH before INSERT, UPDATE or DELETE"));
         }
         let body = self.set_expression()?;
+        let windows = self.select_windows.take();
         let top = self.pending_top.take();
         let mut tail = self.query_tail()?;
         if self.ignored_view_top && self.at_view_top_level() {
@@ -157,6 +158,11 @@ impl Parser<'_> {
                     )?;
                 }
                 select.order_by = tail.order_by;
+                if let Some(windows) = &windows {
+                    for item in &mut select.order_by {
+                        crate::window::resolve_references(&mut item.expr, windows)?;
+                    }
+                }
                 select.limit = tail.limit;
                 select.offset = tail.offset;
                 (SetExpr::Select(select), QueryTail::default())

@@ -339,13 +339,12 @@ fn window_ranking_functions_number_rows_and_describe_as_bigint() {
         .map(|column| column.sql_type)
         .collect();
     assert_eq!(types, [Some(SqlType::Integer), Some(SqlType::BigInt)]);
-    for sql in [
-        "SELECT row_number() OVER () + 1 FROM t",
-        "SELECT id FROM t ORDER BY row_number() OVER ()",
-        "SELECT row_number() OVER (ROWS UNBOUNDED PRECEDING) FROM t",
-        "SELECT row_number() OVER w FROM t",
-        "SELECT row_number() OVER (), generate_series(1, 2) FROM t",
-    ] {
-        assert_eq!(state(&mut session, sql), "0A000", "{sql}");
-    }
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT row_number() OVER (ORDER BY id) AS n, generate_series(1, 2) AS s FROM t ORDER BY 1, 2"
+        )
+        .unwrap(),
+        "n|s\n1|1\n1|2\n2|1\n2|2\n3|1\n3|2\nSELECT 6"
+    );
 }

@@ -536,9 +536,6 @@ impl Parser<'_> {
             Vec::new()
         };
         self.expect(&TokenKind::RightParen)?;
-        if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
-            return Err(self.not_supported("window and aggregate clauses"));
-        }
         let Some(aggregate) = AggregateFunction::postgresql_named(&name.text) else {
             return Err(self.unexpected());
         };
@@ -583,9 +580,6 @@ impl Parser<'_> {
             Vec::new()
         };
         self.expect(&TokenKind::RightParen)?;
-        if self.is_word("over") || self.is_word("filter") || self.is_word("within") {
-            return Err(self.not_supported("window and aggregate clauses"));
-        }
         if arguments.len() != 2 {
             let unknown = vec!["unknown"; arguments.len()].join(", ");
             return Err(SqlError::new(

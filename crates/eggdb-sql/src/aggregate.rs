@@ -29,6 +29,50 @@ struct Call {
 }
 
 pub(crate) const ORDERED_ARGUMENTS: &str = "ordered_aggregate_arguments";
+pub(crate) const FILTERED_ARGUMENTS: &str = "filtered_aggregate_arguments";
+pub(crate) const ORDERED_SET_ARGUMENTS: &str = "ordered_set_arguments";
+
+pub(crate) fn filtered(expr: Expr, condition: Expr) -> Expr {
+    let ExprKind::Aggregate {
+        function,
+        argument,
+        distinct,
+    } = expr.kind
+    else {
+        return expr;
+    };
+    let position = expr.position;
+    let mut arguments = vec![condition];
+    arguments.extend(argument.map(|argument| *argument));
+    Expr {
+        kind: ExprKind::Aggregate {
+            function,
+            argument: Some(Box::new(Expr {
+                kind: ExprKind::Function {
+                    name: FILTERED_ARGUMENTS.to_owned(),
+                    arguments,
+                },
+                position,
+            })),
+            distinct,
+        },
+        position,
+    }
+}
+
+fn filtered_parts(argument: &Expr) -> (Option<&Expr>, Option<&Expr>) {
+    if let ExprKind::Function { name, arguments } = &argument.kind
+        && name == FILTERED_ARGUMENTS
+        && let [condition, rest @ ..] = arguments.as_slice()
+    {
+        return (Some(condition), rest.first());
+    }
+    (None, Some(argument))
+}
+
+fn unfiltered(argument: &Expr) -> Option<&Expr> {
+    filtered_parts(argument).1
+}
 
 pub(crate) fn ordered_arguments(argument: Expr, order: Vec<OrderItem>) -> Expr {
     let position = argument.position;
@@ -62,6 +106,7 @@ fn ordered_parts(argument: &Expr) -> (&Expr, Option<(&str, &[Expr])>) {
     (argument, None)
 }
 
+#[derive(Clone)]
 struct OrderedInput {
     keys: Vec<Value>,
     value: Value,
@@ -345,13 +390,39 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
         AggregateFunction::BoolAnd | AggregateFunction::BoolOr | AggregateFunction::Every => {
             Some(SqlType::Boolean)
         }
+        AggregateFunction::PercentileCont => match argument {
+            Some(SqlType::Interval { .. }) => argument,
+            _ => Some(SqlType::Double),
+        },
+        AggregateFunction::PercentileDisc | AggregateFunction::Mode => {
+            argument.map(SqlType::without_modifier)
+        }
+    }
+}
+
+pub(crate) fn window_result_type(
+    function: AggregateFunction,
+    argument: Option<SqlType>,
+) -> Option<SqlType> {
+    result_type(function, argument)
+}
+
+pub(crate) fn check_window_argument(
+    function: AggregateFunction,
+    argument: Option<SqlType>,
+) -> SqlResult<()> {
+    match argument {
+        Some(sql_type) => check_argument_type(function, sql_type),
+        None => Ok(()),
     }
 }
 
 fn joined_parts(argument: &Expr) -> Option<(&Expr, &Expr)> {
     match &argument.kind {
         ExprKind::Function { name, arguments }
-            if name == "string_agg_arguments" || name == "object_agg_arguments" =>
+            if name == "string_agg_arguments"
+                || name == "object_agg_arguments"
+                || name == ORDERED_SET_ARGUMENTS =>
         {
             match arguments.as_slice() {
                 [value, delimiter] => Some((value, delimiter)),
@@ -367,10 +438,16 @@ fn argument_type(
     argument: &Expr,
     scope: Scope<'_>,
 ) -> Option<SqlType> {
-    let (argument, _) = ordered_parts(argument);
+    let (argument, _) = ordered_parts(unfiltered(argument)?);
     match (function, joined_parts(argument)) {
         (AggregateFunction::StringAgg, Some((value, _))) => {
             static_type(value, scope).or_else(|| crate::typing::static_type(value, scope))
+        }
+        (function, Some((value, _))) if function.is_ordered_set() => {
+            static_type(value, scope).or_else(|| crate::typing::static_type(value, scope))
+        }
+        (function, None) if function.is_ordered_set() => {
+            static_type(argument, scope).or_else(|| crate::typing::static_type(argument, scope))
         }
         _ => static_type(argument, scope),
     }
@@ -415,6 +492,14 @@ fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlRes
             if crate::arrays::ArrayElement::of(sql_type.without_modifier()).is_none() =>
         {
             Err(crate::arrays::unsupported_element(sql_type))
+        }
+        AggregateFunction::PercentileCont
+            if !sql_type.is_numeric() && !matches!(sql_type, SqlType::Interval { .. }) =>
+        {
+            Err(undefined_aggregate(
+                function,
+                &format!("double precision ORDER BY {}", name()),
+            ))
         }
         _ => Ok(()),
     }
@@ -786,6 +871,7 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
     })
 }
 
+#[derive(Clone)]
 enum Sum {
     Empty,
     Integer { total: i128, wide: bool },
@@ -794,6 +880,7 @@ enum Sum {
     Numeric(Numeric),
 }
 
+#[derive(Clone)]
 enum Accumulator {
     Count(i64),
     Sum(Sum),
@@ -847,10 +934,12 @@ fn add_float(total: f64, value: f64) -> SqlResult<f64> {
 
 impl Call {
     fn start(&self) -> Accumulator {
-        if self
-            .argument
-            .as_ref()
-            .is_some_and(|argument| ordered_parts(argument).1.is_some())
+        if self.function.is_ordered_set()
+            || self
+                .argument
+                .as_ref()
+                .and_then(unfiltered)
+                .is_some_and(|argument| ordered_parts(argument).1.is_some())
         {
             return Accumulator::Ordered(Vec::new());
         }
@@ -875,6 +964,9 @@ impl Call {
             AggregateFunction::BoolAnd | AggregateFunction::BoolOr | AggregateFunction::Every => {
                 Accumulator::Truth(None)
             }
+            AggregateFunction::PercentileCont
+            | AggregateFunction::PercentileDisc
+            | AggregateFunction::Mode => Accumulator::Ordered(Vec::new()),
         }
     }
 
@@ -896,18 +988,90 @@ impl Call {
     }
 
     fn finish_ordered(&self, mut inputs: Vec<OrderedInput>) -> SqlResult<Value> {
-        let Some((argument, Some((directions, _)))) = self.argument.as_ref().map(ordered_parts)
+        let Some((argument, Some((directions, _)))) = self
+            .argument
+            .as_ref()
+            .and_then(unfiltered)
+            .map(ordered_parts)
         else {
             return Ok(Value::Null);
         };
         let directions = decode_directions(directions);
         inputs.sort_by(|left, right| compare_in_directions(&directions, &left.keys, &right.keys));
+        if self.function.is_ordered_set() {
+            return self.ordered_set_result(inputs);
+        }
         let whole_row = crate::json_functions::is_whole_row(argument);
         let mut accumulator = self.start_unordered();
         for input in inputs {
             self.feed(&mut accumulator, input.value, input.extra, whole_row)?;
         }
         self.finish(accumulator)
+    }
+
+    fn ordered_set_result(&self, inputs: Vec<OrderedInput>) -> SqlResult<Value> {
+        if inputs.is_empty() {
+            return Ok(Value::Null);
+        }
+        if self.function == AggregateFunction::Mode {
+            let mut best: Option<(usize, usize)> = None;
+            let mut run_start = 0;
+            for at in 1..=inputs.len() {
+                let ends_run = at == inputs.len()
+                    || compare_values(&inputs[at].value, &inputs[run_start].value)
+                        != Ordering::Equal;
+                if ends_run {
+                    let length = at - run_start;
+                    if best.is_none_or(|(_, longest)| length > longest) {
+                        best = Some((run_start, length));
+                    }
+                    run_start = at;
+                }
+            }
+            return Ok(best
+                .and_then(|(at, _)| inputs.into_iter().nth(at))
+                .map_or(Value::Null, |input| input.value));
+        }
+        let fraction = match inputs.first().and_then(|input| input.extra.as_ref()) {
+            None | Some(Value::Null) => return Ok(Value::Null),
+            Some(value) => value.as_float().ok_or_else(|| {
+                undefined_aggregate(self.function, &value.type_name())
+            })?,
+        };
+        if !(0.0..=1.0).contains(&fraction) {
+            return Err(SqlError::new(
+                SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+                format!("percentile value {fraction} is not between 0 and 1"),
+            ));
+        }
+        let count = inputs.len();
+        if self.function == AggregateFunction::PercentileDisc {
+            let wanted = (fraction * count as f64).ceil() as usize;
+            let at = wanted.saturating_sub(1).min(count - 1);
+            return Ok(inputs
+                .into_iter()
+                .nth(at)
+                .map_or(Value::Null, |input| input.value));
+        }
+        let place = fraction * (count - 1) as f64;
+        let lower = place.floor() as usize;
+        let upper = place.ceil() as usize;
+        let value_at = |at: usize| inputs.get(at).map(|input| &input.value);
+        let (Some(low), Some(high)) = (value_at(lower), value_at(upper)) else {
+            return Ok(Value::Null);
+        };
+        if let (Value::Interval(_), Value::Interval(_)) = (low, high) {
+            if lower == upper {
+                return Ok(low.clone());
+            }
+            return Err(SqlError::not_supported(
+                "percentile_cont between two interval values is not supported yet",
+            ));
+        }
+        let (Some(low), Some(high)) = (low.as_float(), high.as_float()) else {
+            return Err(undefined_aggregate(self.function, &low.type_name()));
+        };
+        Ok(Value::Double(low + (place - lower as f64) * (high - low)))
     }
 
     fn append_json(
@@ -1192,6 +1356,58 @@ impl Call {
     }
 }
 
+pub(crate) struct WindowAggregate {
+    call: Call,
+    accumulator: Accumulator,
+}
+
+impl WindowAggregate {
+    pub(crate) fn new(
+        function: AggregateFunction,
+        argument_type: Option<SqlType>,
+        position: usize,
+    ) -> Self {
+        let call = Call {
+            function,
+            argument: None,
+            argument_type,
+            distinct: false,
+            position,
+            shape: Expr {
+                kind: ExprKind::Literal(Literal::Null),
+                position: 0,
+            },
+        };
+        let accumulator = call.start_unordered();
+        Self { call, accumulator }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.accumulator = self.call.start_unordered();
+    }
+
+    pub(crate) fn add_row(&mut self) {
+        if let Accumulator::Count(count) = &mut self.accumulator {
+            *count += 1;
+        }
+    }
+
+    pub(crate) fn add(&mut self, value: Value, extra: Option<Value>) -> SqlResult<()> {
+        if value.is_null() && !self.call.function.keeps_nulls() {
+            return Ok(());
+        }
+        self.call
+            .feed(&mut self.accumulator, value, extra, false)
+            .map_err(|error| error.at_if_unplaced(self.call.position))
+    }
+
+    pub(crate) fn current(&self) -> SqlResult<Value> {
+        self.call
+            .finish(self.accumulator.clone())
+            .map_err(|error| error.at_if_unplaced(self.call.position))
+    }
+}
+
 impl Grouping {
     pub(crate) fn run(
         &self,
@@ -1280,7 +1496,16 @@ impl Grouping {
             };
             let group = &mut groups[at];
             for (number, call) in self.calls.iter().enumerate() {
-                let Some(argument) = &call.argument else {
+                let (condition, argument) = match &call.argument {
+                    Some(argument) => filtered_parts(argument),
+                    None => (None, None),
+                };
+                if let Some(condition) = condition
+                    && evaluator.boolean(condition, "FILTER")? != Some(true)
+                {
+                    continue;
+                }
+                let Some(argument) = argument else {
                     if let Accumulator::Count(count) = &mut group.accumulators[number] {
                         *count += 1;
                     }
@@ -1288,6 +1513,10 @@ impl Grouping {
                 };
                 let (argument, order) = ordered_parts(argument);
                 let (value, delimiter) = match joined_parts(argument) {
+                    Some((value, fraction)) if call.function.is_ordered_set() => (
+                        evaluator.eval(value, None)?,
+                        Some(evaluator.eval(fraction, Some(SqlType::Double))?),
+                    ),
                     Some((value, delimiter)) if call.function == AggregateFunction::StringAgg => {
                         let value = evaluator.eval(value, Some(SqlType::Text))?;
                         let hint = if matches!(value, Value::Bytea(_)) {

@@ -1687,8 +1687,6 @@ fn grouping_errors_follow_postgresql() {
         ("SELECT DISTINCT ON (person_id) amount FROM orders", "0A000"),
         ("SELECT age FROM people GROUP BY ROLLUP (age)", "0A000"),
         ("SELECT age FROM people GROUP BY ()", "0A000"),
-        ("SELECT count(*) OVER () FROM people", "0A000"),
-        ("SELECT count(*) FILTER (WHERE true) FROM people", "0A000"),
         ("UPDATE people SET age = count(*)", "42803"),
         ("UPDATE people SET age = 1 WHERE count(*) > 1", "42803"),
         ("DELETE FROM people WHERE count(*) > 1", "42803"),

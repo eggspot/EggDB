@@ -145,6 +145,16 @@ impl SqlState {
     pub const INVALID_COLUMN_REFERENCE: Self = Self(*b"42P10");
     /// `42P19` invalid_recursion.
     pub const INVALID_RECURSION: Self = Self(*b"42P19");
+    /// `42P20` windowing_error.
+    pub const WINDOWING_ERROR: Self = Self(*b"42P20");
+    /// `22013` invalid_preceding_or_following_size.
+    pub const INVALID_PRECEDING_OR_FOLLOWING_SIZE: Self = Self(*b"22013");
+    /// `22014` invalid_argument_for_ntile_function.
+    pub const INVALID_ARGUMENT_FOR_NTILE: Self = Self(*b"22014");
+    /// `22016` invalid_argument_for_nth_value_function.
+    pub const INVALID_ARGUMENT_FOR_NTH_VALUE: Self = Self(*b"22016");
+    /// `44000` with_check_option_violation.
+    pub const WITH_CHECK_OPTION_VIOLATION: Self = Self(*b"44000");
     /// `42P16` invalid_table_definition.
     pub const INVALID_TABLE_DEFINITION: Self = Self(*b"42P16");
     /// `42P06` duplicate_schema.

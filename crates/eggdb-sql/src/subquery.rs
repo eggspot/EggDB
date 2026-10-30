@@ -655,7 +655,10 @@ fn generated_rows(query: &mut Query) -> SqlResult<Option<TempTables>> {
 }
 
 fn substitute(expr: &mut Expr, row: &[Value]) {
-    if let ExprKind::OuterColumn { index, sql_type } = &expr.kind {
+    if let ExprKind::OuterColumn {
+        index, sql_type, ..
+    } = &expr.kind
+    {
         expr.kind = ExprKind::Constant {
             value: row.get(*index).cloned().unwrap_or(Value::Null),
             sql_type: *sql_type,
@@ -1664,7 +1667,7 @@ fn prepare_generated(
             .map_err(|error| {
                 if parent.is_some() && is_missing(&error) {
                     SqlError::not_supported(
-                        "a set-returning function in the select list of a subquery that names the outer query is not supported yet",
+                        "a set-returning or window function in the select list of a subquery that names the outer query is not supported yet",
                     )
                     .at(expansion.position)
                 } else {
@@ -1822,6 +1825,7 @@ fn rewrite(
                 expr.kind = ExprKind::OuterColumn {
                     index,
                     sql_type: outer.scope.column_type(index),
+                    depth: 1,
                 };
                 *correlated = true;
                 return Ok(());
