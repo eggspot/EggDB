@@ -38,6 +38,7 @@ struct RoutineAttributes {
     security_definer: bool,
     settings: Vec<(String, String)>,
     body: Option<String>,
+    body_position: Option<usize>,
 }
 
 impl<'t> Parser<'t> {
@@ -135,6 +136,7 @@ impl<'t> Parser<'t> {
             name,
             replace,
             definition,
+            body_position: attributes.body_position,
         })))
     }
 
@@ -263,6 +265,7 @@ impl<'t> Parser<'t> {
             security_definer: false,
             settings: Vec::new(),
             body: None,
+            body_position: None,
         };
         loop {
             if kind == RoutineKind::Function && self.take_word("returns") {
@@ -318,7 +321,9 @@ impl<'t> Parser<'t> {
             } else if self.take_word("set") {
                 attributes.settings.push(self.routine_setting()?);
             } else if self.take_word("as") {
-                attributes.body = Some(self.routine_source()?);
+                let (body, body_position) = self.routine_source()?;
+                attributes.body = Some(body);
+                attributes.body_position = body_position;
             } else if self.is_word("return") {
                 self.at += 1;
                 let start = self.peek().start;
@@ -356,8 +361,9 @@ impl<'t> Parser<'t> {
         Ok((name, value))
     }
 
-    fn routine_source(&mut self) -> SqlResult<String> {
-        let TokenKind::String(text) = self.peek_kind() else {
+    fn routine_source(&mut self) -> SqlResult<(String, Option<usize>)> {
+        let token = self.peek();
+        let TokenKind::String(text) = &token.kind else {
             return Err(self.unexpected());
         };
         let text = text.as_ref().to_owned();
@@ -365,7 +371,16 @@ impl<'t> Parser<'t> {
         if self.peek_kind() == &TokenKind::Comma {
             return Err(self.not_supported("a routine in a loadable object file (AS 'file', 'symbol')"));
         }
-        Ok(text)
+        let position = self.source_position(token.start, token.end, &text);
+        Ok((text, position))
+    }
+
+    fn source_position(&self, start: usize, end: usize, source: &str) -> Option<usize> {
+        let written = self.text.get(start..end)?;
+        let quoting = written.len().checked_sub(source.len())?;
+        let opening = quoting / 2;
+        (quoting % 2 == 0 && written.get(opening..opening + source.len()) == Some(source))
+            .then_some(start + opening)
     }
 
     fn atomic_body(&mut self) -> SqlResult<String> {

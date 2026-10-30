@@ -58,7 +58,7 @@ const KNOWN: &[Known] = &[
         default: fixed_text!("on"),
         change: Change::Free,
         reported: false,
-        description: "Remembered; EggDB does not run function bodies yet.",
+        description: "Checks the bodies of PL/pgSQL functions and procedures at CREATE.",
     },
     Known {
         name: "client_encoding",

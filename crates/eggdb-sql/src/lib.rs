@@ -72,6 +72,7 @@ mod pg_format;
 mod pg_keywords;
 mod plan;
 mod plan_cache;
+mod plpgsql;
 mod pushdown;
 mod random;
 mod ranges;

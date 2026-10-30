@@ -103,6 +103,7 @@ pub(crate) struct CreateRoutine {
     pub(crate) name: Name,
     pub(crate) replace: bool,
     pub(crate) definition: crate::routines::RoutineDefinition,
+    pub(crate) body_position: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

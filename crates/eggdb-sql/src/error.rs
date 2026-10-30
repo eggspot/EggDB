@@ -42,6 +42,20 @@ impl SqlState {
     /// `P0001` raise_exception: an error a statement raised on purpose, such as Transact-SQL's
     /// `THROW` and `RAISERROR`.
     pub const RAISE_EXCEPTION: Self = Self(*b"P0001");
+    /// `P0002` no_data_found: a PL/pgSQL `INTO STRICT` that found no row.
+    pub const NO_DATA_FOUND: Self = Self(*b"P0002");
+    /// `P0003` too_many_rows: a PL/pgSQL `INTO STRICT` that found more than one row.
+    pub const TOO_MANY_ROWS: Self = Self(*b"P0003");
+    /// `P0004` assert_failure: a PL/pgSQL `ASSERT` whose condition was not true.
+    pub const ASSERT_FAILURE: Self = Self(*b"P0004");
+    /// `20000` case_not_found: a PL/pgSQL `CASE` statement with no matching branch and no `ELSE`.
+    pub const CASE_NOT_FOUND: Self = Self(*b"20000");
+    /// `22005` error_in_assignment, such as assigning to a `CONSTANT` PL/pgSQL variable.
+    pub const ERROR_IN_ASSIGNMENT: Self = Self(*b"22005");
+    /// `2F005` function_executed_no_return_statement: a function's body ended without `RETURN`.
+    pub const FUNCTION_EXECUTED_NO_RETURN_STATEMENT: Self = Self(*b"2F005");
+    /// `0Z002` stacked_diagnostics_accessed_without_active_handler.
+    pub const STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER: Self = Self(*b"0Z002");
     /// `21000` cardinality_violation.
     pub const CARDINALITY_VIOLATION: Self = Self(*b"21000");
     /// `22001` string_data_right_truncation.

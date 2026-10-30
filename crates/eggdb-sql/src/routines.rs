@@ -475,10 +475,28 @@ fn check_returns(
     }
 }
 
-fn check_body(definition: &RoutineDefinition) -> SqlResult<()> {
+fn check_body(definition: &RoutineDefinition, body_position: Option<usize>) -> SqlResult<()> {
     match definition.language {
         RoutineLanguage::Sql => tokenize_in(&definition.body, definition.dialect).map(drop),
-        RoutineLanguage::PlPgSql => crate::plpgsql::check(definition),
+        RoutineLanguage::PlPgSql => crate::plpgsql::check(definition, body_position),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyCheck {
+    Checked,
+    Skipped,
+}
+
+impl BodyCheck {
+    pub(crate) fn of_setting(value: Option<&str>) -> Self {
+        let off = value.is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "off" | "of" | "false" | "fa" | "fal" | "fals" | "f" | "no" | "n" | "0"
+            )
+        });
+        if off { Self::Skipped } else { Self::Checked }
     }
 }
 
@@ -486,6 +504,7 @@ pub(crate) fn create_routine(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     create: &CreateRoutine,
+    body_check: BodyCheck,
 ) -> SqlResult<QueryResult> {
     let mut definition = create.definition.clone();
     crate::constraints::check_identifier(&Name {
@@ -501,7 +520,9 @@ pub(crate) fn create_routine(
         .at(create.name.position));
     }
     check_returns(&*writer, tables, &definition)?;
-    check_body(&definition)?;
+    if body_check == BodyCheck::Checked {
+        check_body(&definition, create.body_position)?;
+    }
     let mut routines = stored(&*writer, &definition.name)?;
     let identity = definition.identity();
     let tag = format!("CREATE {}", definition.kind.keyword());

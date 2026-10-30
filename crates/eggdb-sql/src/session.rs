@@ -2184,8 +2184,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     crate::routines::RoutineKind::Function => "CREATE FUNCTION",
                     crate::routines::RoutineKind::Procedure => "CREATE PROCEDURE",
                 };
+                let body_check = crate::routines::BodyCheck::of_setting(
+                    self.settings.get("check_function_bodies").ok().as_deref(),
+                );
                 self.write(tag, |writer, tables| {
-                    crate::routines::create_routine(writer, tables, create)
+                    crate::routines::create_routine(writer, tables, create, body_check)
                 })
             }
             Statement::DropRoutine(drop) => self.write("DROP FUNCTION", |writer, tables| {

@@ -4,6 +4,7 @@ mod indexes;
 mod merge;
 mod mysql;
 mod oracle;
+mod plpgsql;
 mod postgresql;
 mod query;
 mod routines;
@@ -19,6 +20,7 @@ mod windows;
 
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
+pub(crate) use plpgsql::plpgsql_program;
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
 pub(crate) use sqlserver::{
     is_reserved as is_sqlserver_reserved, kept_default as sqlserver_kept_default,
