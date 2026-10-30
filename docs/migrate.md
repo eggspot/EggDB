@@ -68,7 +68,7 @@ psql "host=127.0.0.1 user=eggdb dbname=app" -f app.sql
 
 psql runs the statements one by one and prints an error for each object EggDB cannot create yet,
 then goes on, as it does against PostgreSQL; `eggdb restore` lists the same objects in its report
-instead. When a table cannot be created (a column of an enum type, a partitioned table), psql
+instead. When a table cannot be created (a partitioned table, a typed table), psql
 reads its `COPY` data as SQL and may lose the statements after it, as it would against
 PostgreSQL: restore such a dump with `eggdb restore`, which skips that data, or take it with
 `pg_dump --inserts` for `psql -f`.
@@ -107,18 +107,19 @@ ok: every table and row of the dump is in app.db; 3 objects skipped and 1 conseq
 ```
 
 - **Created**: schemas, tables and their rows, views, sequences (identity columns included),
-  indexes, constraints (primary keys, unique, check and foreign keys with their actions) and
-  comments.
+  indexes, constraints (primary keys, unique, check and foreign keys with their actions,
+  `DEFERRABLE INITIALLY DEFERRED` and `NOT VALID` ones kept as such), enum, composite and range
+  types, domains with their checks and defaults, array columns, and comments.
 - **Skipped**: what EggDB cannot create yet, each with its line in the dump (`sed -n '23p'
   app.sql` shows it) and the reason: functions, procedures and aggregates, triggers and event
-  triggers, rules, row-level security policies, types (enums, composites, ranges), domains,
-  materialized views, partitioned tables (and their rows; partitions dumped as tables of their
+  triggers, rules, row-level security policies, base and shell types (`CREATE TYPE name` and
+  `CREATE TYPE ... (INPUT = ...)`), materialized views, partitioned tables (and their rows; partitions dumped as tables of their
   own are restored), tables with inheritance, publications and subscriptions, extensions other
   than `plpgsql`, collations, text search objects, operators, casts, foreign data, roles and
   tablespaces. They come with later items of the [roadmap](roadmap.md).
 - **Consequences**: statements that failed only because they use a skipped object, such as a
-  table with a column of a skipped enum type (its rows are then counted as not restored) or a
-  `REFRESH` of a skipped materialized view.
+  `REFRESH` of a skipped materialized view or the identity of a skipped partitioned table (a
+  table whose `CREATE TABLE` failed this way has its rows counted as not restored).
 - **Ignored**: `GRANT`, `REVOKE` and `OWNER TO` (EggDB has one user per server and no roles yet),
   `ALTER DEFAULT PRIVILEGES`, `SET` of parameters EggDB does not have, storage settings with no
   meaning in EggDB (`REPLICA IDENTITY`, `SET STATISTICS`, `CLUSTER ON`), and psql meta-commands:
@@ -153,10 +154,14 @@ yet; [sql.md](sql.md#the-postgresql-catalog) has the details.
 
 - Functions, procedures and triggers are not run in this release (D110): a database whose rules
   live in triggers keeps its data, without the triggers.
-- One database per file: `pg_dumpall`'s roles and several databases are not restored; restore
-  each database's `pg_dump` into its own file.
-- `pg_dump --clean` is not supported (EggDB's `public` schema cannot be dropped); restore into a
-  new file instead.
+- One database per file: a `pg_dumpall` script restores, its globals going to the report
+  (`CREATE ROLE` and `CREATE DATABASE` skipped, `ALTER ROLE` and `ALTER DATABASE` ignored,
+  `\connect` listed as a meta-command), and the tables of all its databases land in the one file;
+  restore each database's `pg_dump` into its own file to keep them apart.
+- `pg_dump --clean` (with or without `--if-exists`) restores, into a new file or over an earlier
+  restore of the same dump: its `DROP` statements and `ALTER TABLE ... DROP CONSTRAINT` run, one
+  naming an object that is not there is ignored as "nothing to drop", and `DROP SCHEMA public`,
+  `DROP EXTENSION plpgsql`, `DROP DATABASE` and `DROP ROLE` are ignored.
 - Large objects (`lo_*`), and dumps in encodings other than UTF-8, are not restored.
 
 ## SQL Server

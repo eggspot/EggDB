@@ -335,11 +335,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA app GRANT SELECT ON TABLES 
         code(&mut session, "CREATE MATERIALIZED VIEW m AS SELECT 1"),
         "0A000"
     );
-    assert_eq!(
-        code(&mut session, "CREATE TYPE mood AS ENUM ('a')"),
-        "0A000"
-    );
-    assert_eq!(code(&mut session, "CREATE DOMAIN d AS int"), "0A000");
     assert_eq!(code(&mut session, "CREATE EXTENSION hstore"), "0A000");
 }
 

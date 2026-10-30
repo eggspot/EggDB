@@ -386,7 +386,7 @@ one more than twice its line fails ([benchmarks.md](benchmarks.md)).
 sequences, identity columns, foreign keys with actions, check and unique constraints, views over
 joins, indexes, comments, and awkward values: tabs, newlines, backslashes, `\.`, quotes, `NULL`
 and empty strings, Unicode, large text and every byte value, and one more table with a column of
-an enum type and an identity column, which EggDB skips), with `expected.txt`, each table's sorted
+an enum type and an identity column), with `expected.txt`, each table's sorted
 `COPY` output and each sequence's next value from PostgreSQL itself. They were made with 300 rows by
 `scripts/pg-restore/check.sh target/debug/eggdb <work> --rows 300 --fixtures
 crates/eggdb/tests/data/pg_dump pg16` against PostgreSQL 16.13 and with `pg18` against 18 (`PG_BIN`

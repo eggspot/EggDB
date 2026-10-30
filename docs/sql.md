@@ -1277,8 +1277,12 @@ through pgjdbc with `-c eggdb.dialect=oracle`, comparing their output with
   a non-DEFAULT value into column "id"` unless it says `OVERRIDING SYSTEM VALUE`, and `UPDATE`
   may only set it to `DEFAULT` (`428C9`); `COPY` and bulk loads keep the values they bring, as in
   PostgreSQL (D146). The column must be the first column of the primary key; a named sequence and
-  `DEFAULT nextval('s')` have no such limit; identity options (`START WITH ...`) in `CREATE TABLE`
-  and generated columns (`GENERATED ALWAYS AS (expr) STORED`) answer `0A000`. `ALTER TABLE t
+  `DEFAULT nextval('s')` have no such limit. Identity options in `CREATE TABLE` (`GENERATED ...
+  AS IDENTITY (START WITH 100 INCREMENT BY 5)`) are kept; `MINVALUE`, `MAXVALUE` and `CYCLE`
+  that end the identity before its type's range answer `0A000`. `ALTER COLUMN c SET GENERATED
+  {ALWAYS | BY DEFAULT}`, `SET INCREMENT BY`, `SET START WITH`, `RESTART [WITH n]` (on an identity
+  backed by a sequence) and `DROP IDENTITY [IF EXISTS]` change it later (`55000` on a column that
+  is not an identity). Generated columns (`GENERATED ALWAYS AS (expr) STORED`) answer `0A000`. `ALTER TABLE t
   ALTER COLUMN c ADD GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(SEQUENCE NAME s START WITH
   ...)]`, as `pg_dump` writes identity columns, makes a sequence owned by the column (`s`, or
   `t_c_seq`) and the default `nextval('s'::regclass)`, so `setval('s', ...)` works and the column
@@ -1470,9 +1474,11 @@ arrays give NULL),
 different element types are `42883`), `IS [NULL]` and the functions `array_to_string(a, sep [,
 null_text])`, `array_length(a, 1)`, `array_upper`, `array_lower`, `array_ndims` and
 `cardinality`. They print as PostgreSQL prints them (`{1,2}`, `{a,"b c",NULL,"\"q\""}`) and travel
-with PostgreSQL's array type OIDs in its text and binary forms. Arrays cannot be stored yet: an
-array column in `CREATE TABLE`, `ALTER TABLE` or a view is `0A000`, and an array given to a text
-column is stored as its text. Multidimensional arrays, slices (`a[1:2]`), bounds in literals
+with PostgreSQL's array type OIDs in its text and binary forms. Array columns (`text[]`, `integer
+ARRAY`, in `CREATE TABLE`, `ALTER TABLE ... ADD COLUMN` and views) store one-dimensional arrays
+of every element type above; arrays of `name`, `oid`, `"char"`, `aclitem`, `int2vector` and
+`oidvector` stay catalog-only (`0A000` as a column). An array given to a text column is stored as
+its text. Multidimensional arrays, slices (`a[1:2]`), bounds in literals
 (`[1:2]={...}`), arrays of other element types and array parameters answer `0A000`. An array may
 hold at most 2^27 elements (`54000`) and counts against the session's value limit.
 
@@ -1559,6 +1565,52 @@ writing is refused (exit code 5) while it runs.
 a block rolls the block back at once and the session answers `25P02` until `ROLLBACK`; `COMMIT`
 of a failed block reports `ROLLBACK`, as PostgreSQL does. DDL is transactional: a rolled-back
 block that created a table leaves no table.
+
+## User-defined types and domains
+
+In the PostgreSQL dialect (D152), as PostgreSQL's manual describes them:
+
+- **Enums**: `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`. Values compare and sort in the
+  order the labels were listed; a label not in the list is `22P02 invalid input value for enum
+  mood: "x"`. `ALTER TYPE mood ADD VALUE [IF NOT EXISTS] 'meh' [BEFORE | AFTER 'ok']` places a
+  label without moving the others (stored rows keep their values), `RENAME VALUE 'a' TO 'b'`
+  renames one; `enum_first`, `enum_last` and `enum_range` answer as PostgreSQL's. At most 100,000
+  labels of at most 63 bytes.
+- **Composite types**: `CREATE TYPE complex AS (r double precision, i double precision)`. Values
+  are built with `ROW(1.5, -2)` or `(1.5, -2)` with more than one field, read from text as
+  `'(1.5,-2)'`, print as PostgreSQL prints them (`(1,"a b",)`), and give a field with
+  `(value).field` (`42703` for a field the type does not have). A `record` value (an anonymous
+  row) can be selected and compared, not stored (`42P16 column cannot be of type record`).
+- **Range types**: the built-in `int4range`, `int8range`, `numrange`, `daterange`, `tsrange` and
+  `tstzrange`, and `CREATE TYPE r AS RANGE (subtype = float8)` (`subtype_diff`,
+  `multirange_type_name`, `collation` and `subtype_opclass` accepted; `canonical` is `0A000`).
+  Constructors `int4range(1, 5 [, '[]'])`, literals `'[1,5)'`, `'empty'`, unbounded sides; discrete
+  ranges take PostgreSQL's canonical `[)` form; a lower bound above the upper is `22000`. Operators
+  `@>`, `<@`, `&&`, `<<`, `>>`, `&<`, `&>`, `-|-`, `+`, `*`, `-`, and `lower`, `upper`,
+  `isempty`, `lower_inc`, `upper_inc`, `lower_inf`, `upper_inf`.
+- **Domains**: `CREATE DOMAIN posint AS integer [DEFAULT expr] [NOT NULL] [CONSTRAINT name] CHECK
+  (VALUE > 0) ...`. A column of a domain stores its base type and checks the domain's `NOT NULL`
+  (`23502 domain posint does not allow null values`) and checks (`23514 value for domain posint
+  violates check constraint "posint_check"`) on every insert, update, `COPY` and cast; the
+  domain's default fills a column that has none of its own. `ALTER DOMAIN` takes `SET DEFAULT`,
+  `DROP DEFAULT`, `SET NOT NULL`, `DROP NOT NULL`, `ADD CONSTRAINT ... [NOT VALID]` (existing
+  columns are checked unless `NOT VALID`), `VALIDATE CONSTRAINT`, `DROP CONSTRAINT [IF EXISTS]`,
+  `RENAME CONSTRAINT`, `RENAME TO` and `SET SCHEMA`. A domain may be over another domain.
+- `DROP TYPE` / `DROP DOMAIN [IF EXISTS] name, ... [CASCADE]`: a type used by a column or by
+  another type is `2BP01`; `CASCADE` drops the columns that use it. `ALTER TYPE ... RENAME TO`,
+  `SET SCHEMA` and `OWNER TO` work on every kind.
+- Types are schema objects: they resolve through `search_path`, may be written `schema.name`,
+  and share their names with tables (`42710 type "t" already exists`). `pg_type` lists them
+  (`typtype` `e`, `c`, `r`, `d`, the domain's base type, `NOT NULL` and default), `pg_enum` lists
+  the labels with their sort order, `pg_range` the ranges, `format_type` and
+  `pg_type_is_visible` know them, and `information_schema.columns` names a column's domain
+  (`domain_name`) and its type (`udt_name`).
+
+Not yet: arrays of enums, composites and ranges, composite types as attributes of a domain or
+another composite type's array, multiranges, a table's own row type as a value (`SELECT t FROM
+t`), typed tables (`CREATE TABLE ... OF type`), `ALTER TYPE ... ADD/DROP/ALTER ATTRIBUTE`, and
+keys or indexes on array, composite or range columns (`0A000`; enum columns may be keys and
+indexed, in label order).
 
 ## Indexes
 
@@ -1654,8 +1706,14 @@ a parent key runs `ON DELETE` / `ON UPDATE`: `NO ACTION` (the default) and `REST
 while children remain, `CASCADE` deletes or updates them, `SET NULL` and `SET DEFAULT` change
 their keys (a default must itself be in the parent). Cascades go any depth, self-references
 included, through a queue charged to the statement's 1 GiB work memory. Foreign keys are
-checked when the statement ends, so a multi-row `INSERT` may insert a child before its parent;
-`DEFERRABLE` and `INITIALLY DEFERRED` are accepted and behave as `IMMEDIATE`. A child is found
+checked when the statement ends, so a multi-row `INSERT` may insert a child before its parent.
+A foreign key declared `DEFERRABLE INITIALLY DEFERRED`, or `DEFERRABLE` and deferred with `SET
+CONSTRAINTS {name, ... | ALL} DEFERRED`, is checked at `COMMIT` instead (`23503` there rolls the
+transaction back), or when `SET CONSTRAINTS ... IMMEDIATE` names it; in autocommit it is checked
+when the statement ends. `SET CONSTRAINTS` naming a missing constraint is `42704`, one that is
+not deferrable `42809`, and outside a transaction block it warns and does nothing. A transaction
+holds at most 4,194,304 deferred checks (`54000`). `DEFERRABLE` unique keys and primary keys are
+recorded and checked immediately. A child is found
 through an index on its key columns when there is one: create one on large children, as in
 PostgreSQL. `TRUNCATE` of a referenced table is `0A000`. At most 1,024 checks and 1,024 foreign
 keys a table, a foreign key of at most 32 columns. In SQLite foreign keys are enforced only after
@@ -1681,6 +1739,12 @@ and `CHECK constraint failed: name` (an unnamed check is named by its text); MyS
   ...`: existing rows are checked first (`could not create unique index "t_pkey"`, `check
   constraint "c" of relation "t" is violated by some row`). `DROP CONSTRAINT [IF EXISTS] name
   [CASCADE | RESTRICT]` drops a check, foreign key, unique constraint or the primary key.
+- A check or foreign key added with `NOT VALID` skips the existing rows and holds for new and
+  changed ones; `pg_constraint.convalidated` is false and `pg_get_constraintdef` ends with `NOT
+  VALID`. `VALIDATE CONSTRAINT name` checks the existing rows (the same `23514` or `23503` as
+  adding it) and marks it valid. `RENAME CONSTRAINT a TO b` renames a check, foreign key, unique
+  constraint or primary key (and the index of a key), `42704` when there is none, `42710` when
+  the new name is taken.
 - `OWNER TO role` is accepted and does nothing, as `pg_dump` writes it.
 
 In MySQL a `REFERENCES` clause on a column is parsed and ignored, as MySQL does; write `FOREIGN
@@ -1775,8 +1839,9 @@ statements. A comment goes with its object when the object is dropped or renamed
 are accepted with a warning and ignored (EggDB has no roles yet), `CREATE EXTENSION [IF NOT
 EXISTS] plpgsql [WITH SCHEMA ...]` does nothing (another extension is `0A000`), the `SET`
 parameters of its scripts are accepted, and view text with parenthesized joins (`FROM ((a JOIN
-b ON ...) JOIN c ON ...)`) runs, `WITH CHECK OPTION` included. `CREATE MATERIALIZED VIEW`,
-`CREATE TYPE` and `CREATE DOMAIN` are `0A000` with a message naming them.
+b ON ...) JOIN c ON ...)`) runs, `WITH CHECK OPTION` included. `CREATE MATERIALIZED VIEW` is
+`0A000` with a message naming it; `CREATE TYPE` and `CREATE DOMAIN` are described in
+[User-defined types and domains](#user-defined-types-and-domains).
 
 ## COPY
 
@@ -1859,7 +1924,8 @@ with `CHECK` constraints written as `= ANY (ARRAY[...])`, sequences and `OWNED B
 columns added with `ALTER COLUMN ... ADD GENERATED`, `DEFAULT nextval(...)`, `COPY ... FROM
 stdin` data, `--inserts` and `--column-inserts` (with `OVERRIDING SYSTEM VALUE`), `setval`,
 `ALTER TABLE ONLY ... ADD CONSTRAINT`, `CREATE INDEX`, views, `COMMENT ON`, `OWNER TO`,
-`GRANT` and `CREATE EXTENSION plpgsql`. Functions, triggers, types, domains, materialized views,
+`GRANT`, `CREATE EXTENSION plpgsql`, enum, composite and range types, domains, array columns,
+deferred foreign keys and `NOT VALID` constraints. Functions, triggers, materialized views,
 partitioned tables and other extensions are not created yet: `eggdb restore` lists them in its
 report, and over the protocol they fail with an error that psql prints before going on.
 
@@ -2046,9 +2112,10 @@ statements, transactions, `DatabaseMetaData` (`getSchemas`, `getTables`, `getCol
 CI's `pg-apps` job restores the catalog fixture's `pg_dump`, runs the same pgjdbc program and the
 same psycopg 3 and SQLAlchemy program against EggDB and against PostgreSQL 17 holding the same
 fixture, and requires the same bytes; `scripts/pg-apps/check.sh` does the same locally.
-pgjdbc's `getPrimaryKeys` and `getIndexInfo` call `information_schema._pg_expandarray`, which
-returns a composite value: it comes with user-defined types (roadmap 3.08) and is `0A000` until
-then.
+pgjdbc's `getPrimaryKeys` and `getIndexInfo` call `information_schema._pg_expandarray(anyarray)`,
+a set-returning function of records `(x, n)` (each element and its position), read as
+`(information_schema._pg_expandarray(i.indkey)).n` in a select list and as `(result.KEYS).x` from
+a derived table's column; EggDB answers both (D152).
 
 **`information_schema`.** `information_schema.schemata`, `tables`, `columns`, `views`,
 `sequences`, `table_constraints`, `key_column_usage`, `referential_constraints`,
@@ -2145,6 +2212,31 @@ an auto-increment column with its seed and increment as two 64-bit little-endian
 PostgreSQL default and `2` an auto-increment column counting from 1 by 1 keep their meaning.
 Every other table keeps its version and bytes, and an older release refuses a version 9 table by
 name.
+
+Version 10 (D152) is written only for a table with an array, enum, composite or range column, a
+column of a domain, a `NOT VALID` check or foreign key, or an `INITIALLY DEFERRED` foreign key: the
+version 9 layout, whose column types may now be `21` an array (then its element code) or `23` a
+defined type (then its kind, `1` enum, `2` composite, `3` range, `4` domain, and its 32-bit
+little-endian type OID; a column's own type is never a domain), then the columns of a domain
+(count; each its column number, ascending, and the domain's OID, at least 16384; the column holds
+the domain's base type) and the constraint statuses (count; each a constraint's name, ascending,
+naming a check or foreign key of the table, and a flag byte, never `0`: `1` not validated, `2`
+initially deferred, only for a `DEFERRABLE` foreign key). In rows, an enum value is tag `24` and
+its label's sort order as a 64-bit float, a composite value tag `25` (field count, a byte `1` when
+field names follow, the names, then each field as a nested value), a range tag `26` (a flag byte,
+`1` empty, `2`/`4` lower bound present/inclusive, `8`/`16` upper bound present/inclusive, then
+the present bounds as nested values); a nested value is a row value whose enum, composite, range
+and array forms also carry their type OID or element code. In keys an enum orders by its sort
+order. An older release refuses a version 10 table by name.
+
+A user-defined type is a record under the catalog prefix, `0x0A` and the type's schema-qualified
+name: record version `1`, its kind (as above), its 32-bit OID (16384 to 2^31-1, picked from a hash
+of its name and never reused while it exists), then an enum's labels (count; each its 64-bit sort
+order, strictly ascending, and its label of 1 to 63 bytes), a composite type's attributes (count;
+each its name and type, never the type itself), a range's subtype, or a domain's base type, a `NOT
+NULL` flag byte, an optional default text (`0`, or `1` and the text), and its checks (count; each
+its name, its expression text over `VALUE`, and a byte `1` when validated). Every statement that
+names a type loads them once, and a damaged record is an error naming it, never a panic.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
@@ -2308,11 +2400,11 @@ checks the PostgreSQL manual's documented behaviour; the two cases it marks as d
   `pg_dump` writes `serial` and identity columns) has none of these limits. `OVERRIDING USER
   VALUE` also ignores a value given for a `serial` column, which EggDB keeps as an identity
   column.
-- Constraints are checked when each statement ends: `INITIALLY DEFERRED` waits for nothing, and
-  `RESTRICT` behaves as `NO ACTION`, so a statement that changes a referenced key and puts it
+- Constraints are checked when each statement ends, except deferred foreign keys (checked at
+  `COMMIT`); `RESTRICT` behaves as `NO ACTION`, so a statement that changes a referenced key and puts it
   back, such as the key swap `UPDATE p SET id = 3 - id` over ids 1 and 2, passes where
-  PostgreSQL's immediate `RESTRICT` refuses it. `NOT VALID`, `RENAME CONSTRAINT`, `ALTER COLUMN ... TYPE ... USING` and
-  `ADD COLUMN` of a `serial` or identity column answer `0A000`.
+  PostgreSQL's immediate `RESTRICT` refuses it. `ALTER COLUMN ... TYPE ... USING` and `ADD
+  COLUMN` of a `serial` or identity column answer `0A000`.
 - A sequence's `CACHE` is remembered, not used: every value is saved. A value handed out by a
   transaction that rolled back can be handed out once more if another connection's writer starts
   between the rollback and the re-saving of the sequence (D114); a committed value never is.

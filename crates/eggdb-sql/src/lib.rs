@@ -149,6 +149,8 @@ mod sqlserver_tests;
 #[cfg(test)]
 mod subquery_tests;
 #[cfg(test)]
+mod user_type_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod lateral_tests;

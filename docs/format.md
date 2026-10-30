@@ -631,7 +631,10 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   9, written only for tables with an index method other than `btree`, a column order other than
   `ASC`, a unique index that is not a constraint or a recorded identity column (D146), a
   Transact-SQL `DEFAULT` kept as written or an `IDENTITY` seed and increment other than (1, 1)
-  (D147).
+  (D147). Version 10 (D152) is written only for tables with an array, enum, composite or range
+  column, a column of a domain, a `NOT VALID` constraint or an `INITIALLY DEFERRED` foreign key;
+  user-defined types are records of their own (catalog prefix, `0x0A`, the type's name), with
+  record version 1. Both are described in [sql.md](sql.md) "How SQL is stored".
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.

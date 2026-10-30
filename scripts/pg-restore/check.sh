@@ -47,8 +47,6 @@ fail() {
   exit 1
 }
 
-unsupported_column="EXISTS (SELECT 1 FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid
-  WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND ty.typtype IN ('e', 'd', 'c'))"
 user_tables="FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'"
 tables_query="SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '|' || coalesce(
@@ -58,13 +56,10 @@ tables_query="SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) || 
     WHERE i.indrelid = c.oid AND i.indisprimary),
   (SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) FROM pg_attribute a
     WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.atttypid <> 'json'::regtype))
-  $user_tables AND NOT $unsupported_column ORDER BY 1"
-skipped_query="SELECT count(*) $user_tables AND $unsupported_column"
+  $user_tables ORDER BY 1"
 sequences_query="SELECT quote_ident(n.nspname) || '.' || quote_ident(s.relname)
   FROM pg_class s JOIN pg_namespace n ON n.oid = s.relnamespace
-  WHERE s.relkind = 'S' AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_class c ON c.oid = d.refobjid
-    WHERE d.classid = 'pg_class'::regclass AND d.objid = s.oid AND d.refclassid = 'pg_class'::regclass
-      AND d.deptype IN ('a', 'i') AND $unsupported_column)
+  WHERE s.relkind = 'S'
   ORDER BY 1"
 
 table_query() {
@@ -92,7 +87,7 @@ sequences=()
 while IFS= read -r sequence; do
   sequences+=("$sequence")
 done < <(pg psql -v ON_ERROR_STOP=1 -At -c "$sequences_query")
-expected_skipped=$(pg psql -v ON_ERROR_STOP=1 -At -c "$skipped_query")
+expected_skipped=0
 [ "${#tables[@]}" -gt 0 ] || fail "the fixture database has no tables"
 echo "${#tables[@]} tables and ${#sequences[@]} sequences to compare; tables expected to be skipped: $expected_skipped"
 

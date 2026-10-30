@@ -130,8 +130,8 @@ fn every_committed_pg_dump_fixture_restores_and_matches_postgresql_table_for_tab
     let expected = expected_tables();
     assert_eq!(
         expected.len(),
-        18,
-        "the fixture has twelve tables EggDB restores and six sequences"
+        20,
+        "the fixture has thirteen tables EggDB restores and seven sequences"
     );
     let directory = TempDirectory::new("fixtures");
     for name in FIXTURES {
@@ -156,21 +156,17 @@ fn every_committed_pg_dump_fixture_restores_and_matches_postgresql_table_for_tab
         );
         assert!(report.starts_with("{\"ok\":true,"), "{name}: {report}");
         for skipped in [
-            "\"kind\":\"type\",\"name\":\"public.mood\"",
-            "\"kind\":\"domain\",\"name\":\"public.positive_amount\"",
             "\"kind\":\"function\",\"name\":\"public.touch_note()\"",
             "\"kind\":\"materialized view\",\"name\":\"public.daily_orders\"",
             "\"kind\":\"trigger\",\"name\":\"customers_touch on public.customers\"",
         ] {
             assert!(report.contains(skipped), "{name}: {skipped} in {report}");
         }
-        assert!(report.contains("\"tables\":12,"), "{name}: {report}");
+        assert!(report.contains("\"tables\":13,"), "{name}: {report}");
         assert!(report.contains("\"views\":3,"), "{name}: {report}");
-        assert!(report.contains("\"tables_skipped\":1,"), "{name}: {report}");
-        assert!(
-            report.contains("\"uses\":\"sequence public.tasks_id_seq\""),
-            "{name}: {report}"
-        );
+        assert!(report.contains("\"tables_skipped\":0,"), "{name}: {report}");
+        assert!(!report.contains("public.mood"), "{name}: {report}");
+        assert!(!report.contains("public.positive_amount"), "{name}: {report}");
         let db = Database::open(&target).unwrap();
         for (query, rows) in &expected {
             let found = copied_out(&db, query);

@@ -137,15 +137,23 @@ fn arrays_compare_element_by_element_with_nulls_last() {
 }
 
 #[test]
-fn arrays_are_values_of_expressions_and_intermediate_results_but_not_of_tables() {
+fn arrays_are_values_of_expressions_columns_views_and_intermediate_results() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     assert_eq!(
-        state(&mut session, "CREATE TABLE stored (a integer[])"),
-        "0A000"
+        run(&mut session, "CREATE TABLE stored (a integer[])").unwrap(),
+        "CREATE TABLE"
     );
     assert_eq!(
-        state(&mut session, "CREATE TABLE stored (a text ARRAY)"),
+        run(&mut session, "CREATE TABLE stored_text (a text ARRAY)").unwrap(),
+        "CREATE TABLE"
+    );
+    assert_eq!(
+        run(&mut session, "ALTER TABLE stored ADD COLUMN tags text[]").unwrap(),
+        "ALTER TABLE"
+    );
+    assert_eq!(
+        state(&mut session, "CREATE TABLE stored_names (a name[])"),
         "0A000"
     );
     run(
@@ -153,10 +161,6 @@ fn arrays_are_values_of_expressions_and_intermediate_results_but_not_of_tables()
         "CREATE TABLE plain (id integer PRIMARY KEY, n integer, t text)",
     )
     .unwrap();
-    assert_eq!(
-        state(&mut session, "ALTER TABLE plain ADD COLUMN tags text[]"),
-        "0A000"
-    );
     assert_eq!(
         state(&mut session, "INSERT INTO plain VALUES (1, ARRAY[1], NULL)"),
         "42804"
@@ -171,11 +175,12 @@ fn arrays_are_values_of_expressions_and_intermediate_results_but_not_of_tables()
         "t\n{a,\"b c\"}\nSELECT 1"
     );
     assert_eq!(
-        state(
+        run(
             &mut session,
             "CREATE VIEW arrays_view AS SELECT ARRAY[1, 2] AS a"
-        ),
-        "0A000"
+        )
+        .unwrap(),
+        "CREATE VIEW"
     );
     assert_eq!(
         run(

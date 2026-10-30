@@ -587,7 +587,6 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "SELECT age FROM people GROUP BY ROLLUP (age)",
         "SELECT DISTINCT ON (age) age FROM people",
         "SELECT '{{1}}'::int[]",
-        "ALTER TABLE people RENAME CONSTRAINT a TO b",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",
         "SAVEPOINT a",
