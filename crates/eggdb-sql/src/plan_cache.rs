@@ -98,7 +98,7 @@ fn hash_of(key: &[u8]) -> u64 {
     hash
 }
 
-pub(crate) fn literal_of(kind: &TokenKind<'_>) -> Option<Literal> {
+fn literal_of(kind: &TokenKind<'_>) -> Option<Literal> {
     Some(match kind {
         TokenKind::Integer(digits) => match digits.parse::<i64>() {
             Ok(value) => Literal::Integer(value),
@@ -314,12 +314,6 @@ impl PlanCache {
         }
         self.next_replaced = (self.next_replaced + 1) % MOST_ENTRIES;
     }
-
-    /// Forgets every cached statement.
-    pub(crate) fn clear(&mut self) {
-        self.entries.clear();
-        self.next_replaced = 0;
-    }
 }
 
 #[cfg(test)]
@@ -499,8 +493,6 @@ mod tests {
             let text = format!("SELECT {}", "9".repeat(width));
             cached(&mut cache, &text, Dialect::PostgreSql, &settings);
         }
-        assert!(cache.entries.len() <= super::MOST_ENTRIES);
-        cache.clear();
-        assert!(cache.entries.is_empty());
+        assert_eq!(cache.entries.len(), super::MOST_ENTRIES);
     }
 }
