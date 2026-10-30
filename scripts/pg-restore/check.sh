@@ -6,7 +6,7 @@ usage="usage: scripts/pg-restore/check.sh <eggdb binary> <work directory> [--row
 Fills a database of a running PostgreSQL server with scripts/pg-restore/fixture.sql, dumps it
 plain, with --inserts, with --column-inserts and as a custom-format archive converted by
 pg_restore -f, restores every dump with eggdb restore and the --inserts one with psql -f against
-eggdb serve, and compares every table's sorted COPY output and every sequence's next value with
+eggdb serve, runs the fixture's PL/pgSQL trigger on both sides, and compares every table's sorted COPY output and every sequence's next value with
 PostgreSQL's. psql -f reads the --inserts dump: with a plain dump, psql reads the COPY data of a
 table that could not be created as SQL, against EggDB as against PostgreSQL.
 
@@ -109,6 +109,23 @@ for sequence in "${sequences[@]}"; do
   pg psql -v ON_ERROR_STOP=1 -q -c "$query" >> "$work/expected.txt"
 done
 
+touched="UPDATE public.customers SET name = name WHERE id IN (1, 2)"
+touched_rows="COPY (SELECT id, note FROM public.customers WHERE id IN (1, 2) ORDER BY id) TO STDOUT"
+pg psql -v ON_ERROR_STOP=1 -q -c "BEGIN" -c "$touched" -c "$touched_rows" -c "ROLLBACK" > "$work/expected-trigger.txt"
+
+check_trigger() {
+  local form=$1 db=$2
+  "$eggdb" sql "$db" -c "$touched" > /dev/null ||
+    fail "$form: the restored trigger function failed"
+  "$eggdb" sql "$db" -c "$touched_rows" > "$work/$form.trigger" ||
+    fail "$form: eggdb could not read the rows the trigger changed"
+  if ! cmp -s "$work/expected-trigger.txt" "$work/$form.trigger"; then
+    diff "$work/expected-trigger.txt" "$work/$form.trigger" >&2 || true
+    fail "$form: the restored PL/pgSQL trigger changed rows differently from PostgreSQL's"
+  fi
+  echo "ok   $form: the restored PL/pgSQL trigger runs as on PostgreSQL"
+}
+
 compare() {
   local form=$1 db=$2
   : > "$work/$form.found"
@@ -145,6 +162,7 @@ for form in plain inserts column-inserts custom; do
   grep -q "\"tables_skipped\":$expected_skipped," "$work/$form.report.json" ||
     fail "$form: expected $expected_skipped skipped tables: $(cat "$work/$form.report.json")"
   compare "$form" "$work/$form.db"
+  check_trigger "$form" "$work/$form.db"
 done
 
 if [ "${OS:-}" != Windows_NT ]; then
