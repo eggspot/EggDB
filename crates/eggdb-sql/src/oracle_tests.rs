@@ -37,7 +37,7 @@ fn a_text_constant_meets_a_date_through_the_nls_format_under_the_statement_guard
         None,
         false,
     );
-    let _clock = crate::datetime::enter_statement(0);
+    let _clock = crate::datetime::enter_statement(crate::time_zones::TimeZone::UTC);
     let _nls = enter(Arc::new(NlsParameters::default()));
     let june = days_from_civil(2003, 6, 17) * MICROS_PER_DAY;
     assert_eq!(

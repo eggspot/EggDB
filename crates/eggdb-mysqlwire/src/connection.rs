@@ -596,9 +596,11 @@ fn packed_temporal(text: &str) -> Result<Vec<u8>, SqlError> {
 }
 
 fn packed_time(micros: i64) -> Vec<u8> {
-    const MICROS_PER_SECOND: i64 = 1_000_000;
-    let seconds = micros / MICROS_PER_SECOND;
-    let fraction = (micros % MICROS_PER_SECOND) as u32;
+    const MICROS_PER_SECOND: u64 = 1_000_000;
+    let negative = micros < 0;
+    let magnitude = micros.unsigned_abs();
+    let seconds = magnitude / MICROS_PER_SECOND;
+    let fraction = (magnitude % MICROS_PER_SECOND) as u32;
     let days = (seconds / 86_400) as u32;
     let (hour, minute, second) = (
         (seconds / 3600 % 24) as u8,
@@ -608,7 +610,7 @@ fn packed_time(micros: i64) -> Vec<u8> {
     if micros == 0 {
         return vec![0];
     }
-    let mut out = vec![0u8, 0];
+    let mut out = vec![0u8, u8::from(negative)];
     out.extend_from_slice(&days.to_le_bytes());
     out.extend_from_slice(&[hour, minute, second]);
     if fraction != 0 {

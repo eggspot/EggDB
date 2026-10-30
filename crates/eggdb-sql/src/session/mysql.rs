@@ -6,6 +6,7 @@ use crate::eval::{Evaluator, Scope, like};
 use crate::mysql_variables::SetRefused;
 use crate::schema::{ColumnSchema, TableSchema, read_tables};
 use crate::store::KeyValueStore;
+use crate::time_zones::TimeZone;
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
 
@@ -415,6 +416,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Ok(())
             }
             VariableTarget::System(name) => {
+                let zone = if name.eq_ignore_ascii_case("time_zone") {
+                    Some(mysql_time_zone(value.as_ref())?)
+                } else {
+                    None
+                };
                 let shown = value
                     .as_ref()
                     .and_then(|value| Dialect::MySql.value_text(value))
@@ -435,6 +441,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         )
                         .with_vendor_code(1231),
                     })?;
+                if let Some(zone) = zone {
+                    Arc::make_mut(&mut self.settings).time_zone = zone;
+                }
                 if !was_autocommit
                     && self.autocommit()
                     && let Block::Writing(_) = self.block
@@ -445,6 +454,48 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
         }
     }
+}
+
+fn mysql_time_zone(value: Option<&Value>) -> SqlResult<TimeZone> {
+    let Some(text) = value.and_then(Value::character_text) else {
+        return Ok(TimeZone::UTC);
+    };
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("system") {
+        return Ok(TimeZone::UTC);
+    }
+    let zone = match trimmed.as_bytes().first() {
+        Some(b'+' | b'-') => mysql_offset(trimmed),
+        _ => TimeZone::region(trimmed),
+    };
+    zone.ok_or_else(|| {
+        SqlError::new(
+            SqlState::MYSQL_GENERAL,
+            format!("Unknown or incorrect time zone: '{trimmed}'"),
+        )
+        .with_vendor_code(1298)
+    })
+}
+
+fn mysql_offset(text: &str) -> Option<TimeZone> {
+    let negative = text.starts_with('-');
+    let (hours, minutes) = text.get(1..)?.split_once(':')?;
+    let digits = |part: &str, longest: usize| -> Option<i32> {
+        if part.is_empty() || part.len() > longest || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let (hours, minutes) = (digits(hours, 2)?, digits(minutes, 2)?);
+    if minutes > 59 {
+        return None;
+    }
+    let magnitude = hours * 3600 + minutes * 60;
+    let east = if negative { -magnitude } else { magnitude };
+    if !(-(13 * 3600 + 59 * 60)..=14 * 3600).contains(&east) {
+        return None;
+    }
+    TimeZone::fixed(east)
 }
 
 fn unquoted(default: &str) -> String {

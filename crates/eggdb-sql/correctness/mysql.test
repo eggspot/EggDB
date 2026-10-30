@@ -1098,3 +1098,60 @@ SELECT * FROM w33
 
 ok
 DROP TABLE t33
+
+chapter "The TIME Type": negative times and times past a day, up to 838:59:59, and "MySQL Server Time Zone Support": time_zone as an offset or a named zone
+ok
+CREATE TABLE durations31 (id INT PRIMARY KEY, spent TIME)
+
+rows
+INSERT INTO durations31 VALUES (1, '100:00:00'), (2, '-01:30:00'), (3, '838:59:59'), (4, '2 03:04:05'), (5, '123456')
+----
+INSERT 0 5
+
+rows
+SELECT id, spent FROM durations31 ORDER BY spent
+----
+id|spent
+2|-01:30:00
+5|12:34:56
+4|51:04:05
+1|100:00:00
+3|838:59:59
+SELECT 5
+
+error 22008
+INSERT INTO durations31 VALUES (6, '839:00:00')
+
+ok
+CREATE TABLE stamped31 (id INT PRIMARY KEY, at TIMESTAMP)
+
+rows
+INSERT INTO stamped31 VALUES (1, '2026-07-01 12:00:00')
+----
+INSERT 0 1
+
+ok
+SET time_zone = 'Europe/Paris'
+
+rows
+SELECT at, @@time_zone FROM stamped31
+----
+at|@@time_zone
+2026-07-01 14:00:00|Europe/Paris
+SELECT 1
+
+ok
+SET time_zone = '-05:00'
+
+rows
+SELECT at FROM stamped31
+----
+at
+2026-07-01 07:00:00
+SELECT 1
+
+error HY000 1298
+SET time_zone = 'Mars/Olympus'
+
+ok
+SET time_zone = 'SYSTEM'

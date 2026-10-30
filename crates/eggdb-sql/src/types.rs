@@ -658,7 +658,11 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
             assign_string(text.to_owned(), sql_type, Conversion::Assignment)
         }
         SqlType::Time(precision) => {
-            let (micros, _) = datetime::parse_time_of_day(text, false)?;
+            let micros = if crate::constraints::current_dialect() == crate::Dialect::MySql {
+                datetime::parse_mysql_time(text)?
+            } else {
+                datetime::parse_time_of_day(text, false)?.0
+            };
             Ok(Value::Time(time_value(micros, precision)))
         }
         SqlType::TimeTz(precision) => {

@@ -573,19 +573,117 @@ pub(crate) fn parse_time_of_day(text: &str, with_zone: bool) -> SqlResult<(i64, 
     Ok((micros, offset))
 }
 
+fn mysql_time_error(text: &str) -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_DATETIME_FORMAT,
+        format!("Incorrect TIME value: '{text}'"),
+    )
+}
+
+fn mysql_fraction(digits: &str) -> Option<i64> {
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut value = 0i64;
+    for position in 0..7 {
+        let digit = digits
+            .as_bytes()
+            .get(position)
+            .map_or(0, |digit| i64::from(digit - b'0'));
+        value = value * 10 + digit;
+    }
+    Some((value + 5) / 10)
+}
+
+fn small_number(text: &str, longest: usize) -> Option<i64> {
+    if text.is_empty() || text.len() > longest || !text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    text.parse().ok()
+}
+
+fn mysql_clock(days: i64, clock: &str) -> Option<i64> {
+    let (whole, fraction) = match clock.split_once('.') {
+        Some((whole, fraction)) => (whole, mysql_fraction(fraction)?),
+        None => (clock, 0),
+    };
+    let (hours, minutes, seconds) = if whole.contains(':') {
+        let parts: Vec<&str> = whole.split(':').collect();
+        match parts.as_slice() {
+            [hours, minutes] => (small_number(hours, 3)?, small_number(minutes, 2)?, 0),
+            [hours, minutes, seconds] => (
+                small_number(hours, 3)?,
+                small_number(minutes, 2)?,
+                small_number(seconds, 2)?,
+            ),
+            _ => return None,
+        }
+    } else if days != 0 {
+        (small_number(whole, 3)?, 0, 0)
+    } else {
+        let digits = small_number(whole, 7)?;
+        (digits / 10_000, digits / 100 % 100, digits % 100)
+    };
+    if minutes > 59 || seconds > 59 {
+        return None;
+    }
+    let total_seconds = (days * 24 + hours) * 3600 + minutes * 60 + seconds;
+    Some(total_seconds * MICROS_PER_SECOND + fraction)
+}
+
+pub(crate) fn parse_mysql_time(text: &str) -> SqlResult<i64> {
+    let trimmed = text.trim();
+    let year_digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if year_digits >= 4 && trimmed.as_bytes().get(year_digits) == Some(&b'-') {
+        return parse_time_of_day(text, false).map(|(micros, _)| micros);
+    }
+    let (negative, body) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, trimmed),
+    };
+    let (days, clock) = match body.split_once(' ') {
+        Some((days, clock)) => (
+            small_number(days, 2).ok_or_else(|| mysql_time_error(text))?,
+            clock.trim(),
+        ),
+        None => (0, body),
+    };
+    let micros = mysql_clock(days, clock).ok_or_else(|| mysql_time_error(text))?;
+    if micros > MYSQL_TIME_LIMIT {
+        return Err(SqlError::new(
+            SqlState::DATETIME_FIELD_OVERFLOW,
+            format!("Incorrect TIME value: '{text}'"),
+        ));
+    }
+    Ok(if negative { -micros } else { micros })
+}
+
 pub(crate) fn round_time(micros: i64, precision: u8) -> i64 {
     if precision >= 6 {
         return micros;
+    }
+    if micros < 0 {
+        return -round_time(micros.saturating_neg(), precision);
     }
     let unit = 10i64.pow(u32::from(6 - precision));
     (micros + unit / 2) / unit * unit
 }
 
+pub(crate) const MYSQL_TIME_LIMIT: i64 = (838 * 3600 + 59 * 60 + 59) * MICROS_PER_SECOND;
+
+pub(crate) fn valid_stored_time(micros: i64) -> bool {
+    (-MYSQL_TIME_LIMIT..=MYSQL_TIME_LIMIT).contains(&micros)
+}
+
 pub(crate) fn format_time(micros: i64) -> String {
-    let seconds = micros / MICROS_PER_SECOND;
-    let fraction = micros % MICROS_PER_SECOND;
+    let sign = if micros < 0 { "-" } else { "" };
+    let magnitude = micros.unsigned_abs();
+    let micros_per_second = MICROS_PER_SECOND.unsigned_abs();
+    let seconds = magnitude / micros_per_second;
+    let fraction = magnitude % micros_per_second;
     let mut out = format!(
-        "{:02}:{:02}:{:02}",
+        "{sign}{:02}:{:02}:{:02}",
         seconds / 3600,
         seconds / 60 % 60,
         seconds % 60

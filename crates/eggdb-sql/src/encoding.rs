@@ -2029,7 +2029,7 @@ pub(crate) fn decode_row_into(
             9 => Value::Numeric(reader.numeric()?),
             15 => {
                 let micros = i64::from_le_bytes(reader.array()?);
-                if !datetime::valid_time(micros) {
+                if !datetime::valid_stored_time(micros) {
                     return Err(reader.damaged());
                 }
                 Value::Time(micros)
@@ -2446,7 +2446,7 @@ impl<'b> Reader<'b> {
             }
             SqlType::Time(_) => {
                 let micros = (u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64;
-                if !datetime::valid_time(micros) {
+                if !datetime::valid_stored_time(micros) {
                     return Err(self.damaged());
                 }
                 Value::Time(micros)
@@ -2633,7 +2633,7 @@ impl<'b> Reader<'b> {
             14 => Value::Jsonb(self.json(true)?),
             15 => {
                 let micros = i64::from_le_bytes(self.array()?);
-                if !datetime::valid_time(micros) {
+                if !datetime::valid_stored_time(micros) {
                     return Err(self.damaged());
                 }
                 Value::Time(micros)
@@ -3460,11 +3460,17 @@ mod tests {
         for cut in 0..encoded.len() {
             assert!(decode_row(&encoded[..cut], &columns).is_err());
         }
+        let mut mysql_range = values.clone();
+        mysql_range[1] = Value::Time(-crate::datetime::MYSQL_TIME_LIMIT);
+        assert_eq!(
+            decode_row(&encode_row(&mysql_range), &columns),
+            Ok(mysql_range.clone())
+        );
         let mut late = values.clone();
-        late[1] = Value::Time(crate::datetime::MICROS_PER_DAY + 1);
+        late[1] = Value::Time(crate::datetime::MYSQL_TIME_LIMIT + 1);
         assert!(decode_row(&encode_row(&late), &columns).is_err());
         let mut early = values.clone();
-        early[1] = Value::Time(-1);
+        early[1] = Value::Time(-crate::datetime::MYSQL_TIME_LIMIT - 1);
         assert!(decode_row(&encode_row(&early), &columns).is_err());
         let mut far = values.clone();
         far[2] = Value::TimeTz {
