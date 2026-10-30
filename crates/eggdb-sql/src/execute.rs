@@ -1241,6 +1241,13 @@ pub(crate) fn insert(
         _ => None,
     };
     let mut firing = Firing::for_table(&*writer, tables, &table, TriggerEvent::Insert, &[])?;
+    let mut update_firing = match &updates {
+        Some(updates) => {
+            let assigned: Vec<usize> = updates.iter().map(|(index, _)| *index).collect();
+            Firing::for_table(&*writer, tables, &table, TriggerEvent::Update, &assigned)?
+        }
+        None => None,
+    };
     let mut stored = StoredRows::new(&table);
     stored.checks = Some(&checks);
     stored.identity_insert = identity_insert;
@@ -1311,8 +1318,14 @@ pub(crate) fn insert(
                     }
                 }
                 (OnDuplicate::Update(_), Some(updates)) => {
-                    affected +=
-                        stored.update_existing(writer, scope, updates, &row, &conflict.row_key)?;
+                    let upsert = Upsert {
+                        updates,
+                        inserted: &row,
+                        existing_key: &conflict.row_key,
+                    };
+                    let fired = update_firing.as_mut().map(|firing| (firing, &mut *tables));
+                    affected += stored.update_existing(writer, scope, upsert, fired)?;
+                    stored.forget_generated_ids();
                 }
                 _ => return Err(conflict.error(&table, &row)),
             },
@@ -1327,6 +1340,9 @@ pub(crate) fn insert(
     let last_identity = table.auto_increment_column().and(last_rowid);
     drop(stored);
     if let Some(firing) = firing {
+        firing.finish();
+    }
+    if let Some(firing) = update_firing {
         firing.finish();
     }
     for change in &changes {
@@ -1712,10 +1728,14 @@ impl<'a> StoredRows<'a> {
         &mut self,
         writer: &mut dyn KeyValueWrite,
         scope: Scope<'_>,
-        updates: &[(usize, Expr)],
-        inserted: &[Value],
-        existing_key: &[u8],
+        upsert: Upsert<'_>,
+        mut firing: Option<(&mut Firing, &mut TableCache)>,
     ) -> SqlResult<usize> {
+        let Upsert {
+            updates,
+            inserted,
+            existing_key,
+        } = upsert;
         let table = self.table;
         let existing_bytes = writer
             .get(existing_key)?
@@ -1735,7 +1755,17 @@ impl<'a> StoredRows<'a> {
                 assign(value, column).map_err(|error| error.at_if_unplaced(expr.position))?;
         }
         combined.truncate(table.columns.len());
+        if let Some((firing, tables)) = firing.as_mut()
+            && firing.has_before()
+            && firing.before_row(writer, tables, Some(existing.as_slice()), Some(&mut combined))?
+                == RowOutcome::Skip
+        {
+            return Ok(0);
+        }
         if combined == existing {
+            if let Some((firing, tables)) = firing {
+                firing.after_row(writer, tables, Some(existing.as_slice()), Some(combined.as_slice()))?;
+            }
             return Ok(0);
         }
         check_not_null(table, &combined)?;
@@ -1763,16 +1793,19 @@ impl<'a> StoredRows<'a> {
                 }
             }
             put_row_checked(writer, table, &combined, &new_key)?;
-            return Ok(2);
-        }
-        let encoded = encode_row(&combined);
-        if new_key == existing_key {
-            writer.put(existing_key, &encoded)?;
         } else {
-            writer.delete(existing_key)?;
-            if !writer.put_if_absent(&new_key, &encoded)? {
-                return Err(duplicate_key(table, &combined));
+            let encoded = encode_row(&combined);
+            if new_key == existing_key {
+                writer.put(existing_key, &encoded)?;
+            } else {
+                writer.delete(existing_key)?;
+                if !writer.put_if_absent(&new_key, &encoded)? {
+                    return Err(duplicate_key(table, &combined));
+                }
             }
+        }
+        if let Some((firing, tables)) = firing {
+            firing.after_row(writer, tables, Some(existing.as_slice()), Some(combined.as_slice()))?;
         }
         Ok(2)
     }
@@ -3556,6 +3589,12 @@ pub(crate) fn update(
 }
 
 pub(crate) type RowUpdate = (Vec<u8>, Vec<u8>, Vec<Value>);
+
+struct Upsert<'u> {
+    updates: &'u [(usize, Expr)],
+    inserted: &'u [Value],
+    existing_key: &'u [u8],
+}
 
 pub(crate) fn write_updated_rows(
     writer: &mut dyn KeyValueWrite,
