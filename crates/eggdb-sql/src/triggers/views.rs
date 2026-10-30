@@ -112,7 +112,7 @@ pub(crate) fn insert_instead_of_view(
     let Some(view) = view_of(&*writer, tables, &insert.table)? else {
         return Ok(None);
     };
-    let Some(mut firing) = Firing::for_view(&*writer, tables, &view, TriggerEvent::Insert, &[])?
+    let Some(mut firing) = Firing::for_view(&mut *writer, tables, &view, TriggerEvent::Insert, &[])?
     else {
         return Ok(None);
     };
@@ -166,7 +166,7 @@ pub(crate) fn update_instead_of_view(
     let targets = column_positions(&view, &names)?;
     let updated: Vec<&str> = names.iter().map(|name| name.text.as_str()).collect();
     let Some(mut firing) =
-        Firing::for_view(&*writer, tables, &view, TriggerEvent::Update, &updated)?
+        Firing::for_view(&mut *writer, tables, &view, TriggerEvent::Update, &updated)?
     else {
         return Ok(None);
     };
@@ -203,7 +203,7 @@ pub(crate) fn delete_instead_of_view(
     let Some(view) = view_of(&*writer, tables, &delete.table)? else {
         return Ok(None);
     };
-    let Some(mut firing) = Firing::for_view(&*writer, tables, &view, TriggerEvent::Delete, &[])?
+    let Some(mut firing) = Firing::for_view(&mut *writer, tables, &view, TriggerEvent::Delete, &[])?
     else {
         return Ok(None);
     };

@@ -80,6 +80,10 @@ pub(crate) enum Effect {
         table: String,
         name: String,
     },
+    Routine {
+        kind: &'static str,
+        name: String,
+    },
     Drop,
     Data,
     OtherDdl,
@@ -101,6 +105,7 @@ impl Effect {
                 | Self::AddConstraint { .. }
                 | Self::SetDefault { .. }
                 | Self::Comment
+                | Self::Routine { .. }
                 | Self::Drop
                 | Self::OtherDdl
         )
@@ -115,6 +120,7 @@ impl Effect {
             Self::Index(name) if !name.is_empty() => Some(("index", name)),
             Self::Type(name) => Some(("type", name)),
             Self::Domain(name) => Some(("domain", name)),
+            Self::Routine { kind, name } => Some((kind, name)),
             _ => None,
         }
     }
@@ -301,6 +307,28 @@ fn routine_name(tokens: &[Token], at: &mut usize) -> String {
     }
 }
 
+fn routine_language(tokens: &[Token]) -> Option<&str> {
+    tokens
+        .windows(2)
+        .find(|pair| pair[0].is_word("language"))
+        .and_then(|pair| match &pair[1] {
+            Token::Word(language) | Token::Quoted(language) => Some(language.as_str()),
+            _ => None,
+        })
+}
+
+fn routine(tokens: &[Token], mut at: usize, kind: &'static str) -> Action {
+    let name = routine_name(tokens, &mut at);
+    match routine_language(tokens) {
+        Some(language) if !matches!(language, "sql" | "plpgsql") => skip(
+            kind,
+            name,
+            "routines in languages other than SQL and PL/pgSQL come later",
+        ),
+        _ => Action::Run(Effect::Routine { kind, name }),
+    }
+}
+
 fn skip(kind: &'static str, name: String, reason: &'static str) -> Action {
     Action::Skip(Skip {
         kind,
@@ -397,22 +425,14 @@ fn create(tokens: &[Token]) -> Action {
                 )
             }
         }
-        "function" => skip(
-            "function",
-            routine_name(tokens, &mut at),
-            "functions come later",
-        ),
-        "procedure" => skip(
-            "procedure",
-            routine_name(tokens, &mut at),
-            "procedures come later",
-        ),
+        "function" => routine(tokens, at, "function"),
+        "procedure" => routine(tokens, at, "procedure"),
         "aggregate" => skip(
             "aggregate",
             routine_name(tokens, &mut at),
             "user-defined aggregates come later",
         ),
-        "trigger" => on_table(tokens, at, "trigger", "on", "triggers come later"),
+        "trigger" => Action::Run(Effect::OtherDdl),
         "constraint" if tokens.get(at).is_some_and(|token| token.is_word("trigger")) => {
             on_table(tokens, at + 1, "trigger", "on", "triggers come later")
         }
@@ -759,6 +779,12 @@ fn alter_table(tokens: &[Token]) -> Action {
         return Action::Ignore(Ignored::Other("storage settings"));
     }
     if !kinds.is_empty() && kinds.iter().all(|kind| *kind == AlterKind::Trigger) {
+        let toggles_one_trigger = is_table
+            && actions.len() == 1
+            && actions[0].iter().any(|token| token.is_word("trigger"));
+        if toggles_one_trigger {
+            return Action::Run(Effect::OtherDdl);
+        }
         return Action::Ignore(Ignored::Other("ENABLE and DISABLE TRIGGER"));
     }
     if is_table && !actions.is_empty() && actions.iter().all(|action| drops(action)) {

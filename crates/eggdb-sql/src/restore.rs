@@ -1451,6 +1451,7 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             | Effect::AnonymousBlock { .. }
             | Effect::ToggleConstraint { .. }
             | Effect::DisabledConstraint { .. }
+            | Effect::Routine { .. }
             | Effect::Drop
             | Effect::Data
             | Effect::OtherDdl

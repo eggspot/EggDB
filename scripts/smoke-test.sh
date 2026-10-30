@@ -249,9 +249,10 @@ pass "copy: a script with inline data, COPY TO STDOUT, import --csv and an error
 
 expect_exit 0 "$eggdb" restore --create bakery.db "$samples/pg_dump-sample.sql" --format text
 grep -q '^ok: every table and row of the dump is in bakery.db; ' last.out || fail "restore said $(cat last.out)"
-grep -q 'function bakery.touch_order()' last.out || fail "restore did not list the skipped function: $(cat last.out)"
 expect_output "$(printf 'rye\t2\t7\nsourdough\t2\t3')" "$eggdb" sql bakery.db -c "COPY (SELECT b.name, count(*), sum(o.quantity) FROM bakery.breads b JOIN bakery.orders o ON o.bread_id = b.id GROUP BY b.name ORDER BY b.name) TO STDOUT"
 expect_output "$(printf 'rye\t7')" "$eggdb" sql bakery.db -c "COPY (SELECT * FROM bakery.best_sellers ORDER BY 1 LIMIT 1) TO STDOUT"
+expect_exit 0 "$eggdb" sql bakery.db -c "INSERT INTO bakery.orders (id, bread_id, quantity) VALUES (5, 1, 1)"
+expect_output "$(printf '5\tt')" "$eggdb" sql bakery.db -c "COPY (SELECT id, note = '' FROM bakery.orders WHERE id = 5) TO STDOUT"
 expect_exit 3 "$eggdb" restore bakery.db "$samples/pg_dump-sample.sql" --format text
 grep -q 'failed: line ' last.out || fail "a second restore into the same file said $(cat last.out)"
 printf 'PGDMP\001\016\000\004\010' > bakery.dump
@@ -262,7 +263,7 @@ printf 'CREATE TABLE t (id integer PRIMARY KEY);\nCOPY t (id) FROM stdin;\n1\n1\
 expect_exit 3 "$eggdb" restore --create broken.db broken.sql
 grep -q 'line 4: duplicate key value' last.err || fail "a broken restore said $(cat last.err)"
 [ ! -e broken.db ] && [ ! -e broken.db.restoring ] || fail "a failed restore with --create left a file"
-pass "restore: a pg_dump sample with its report, a second restore stopped, an archive refused, a failed --create leaves no file"
+pass "restore: a pg_dump sample with its report and its running trigger function, a second restore stopped, an archive refused, a failed --create leaves no file"
 
 expect_exit 0 "$eggdb" restore --dialect sqlserver --create ssms.db "$samples/ssms-sample.sql" --format text
 grep -q '^ok: every table and row of the script is in ssms.db; ' last.out || fail "the SQL Server restore said $(cat last.out)"

@@ -14,10 +14,8 @@ fn transaction_ended_in_trigger() -> SqlError {
     .with_sqlserver_code(3609)
 }
 
-fn statement_trigger_function() -> SqlError {
-    SqlError::not_supported("PostgreSQL statement-level trigger functions").with_hint(
-        "PostgreSQL triggers run PL/pgSQL functions from the PL/pgSQL milestone on (docs/roadmap.md).",
-    )
+fn statement_level_statements() -> SqlError {
+    SqlError::not_supported("statement-level triggers with a statement body")
 }
 
 impl<'s, S: KeyValueStore + 's> Session<'s, S> {
@@ -55,14 +53,23 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         for call in calls {
             match &call.trigger.action {
                 TriggerAction::Batch(_) => self.run_tsql_trigger(call)?,
-                TriggerAction::Function { .. } | TriggerAction::Statements(_) => {
-                    return Err(statement_trigger_function());
-                }
+                TriggerAction::Function { .. } => self.run_function_trigger(&call)?,
+                TriggerAction::Statements(_) => return Err(statement_level_statements()),
             }
             if was_in_block && !self.in_block() {
                 return Err(transaction_ended_in_trigger());
             }
         }
+        Ok(())
+    }
+
+    fn run_function_trigger(&mut self, call: &StatementTriggerCall) -> SqlResult<()> {
+        let settings = Arc::clone(&self.settings);
+        let tag = call.event.keyword();
+        self.write_firing_triggers(tag, |writer, tables| {
+            crate::triggers::run_statement_function(writer, tables, &settings, call)?;
+            Ok(QueryResult::command(tag))
+        })?;
         Ok(())
     }
 

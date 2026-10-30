@@ -17,11 +17,15 @@ use std::sync::Arc;
 
 mod body;
 mod errors;
+mod functions;
 mod views;
 
 pub(crate) use body::{BodyStep, ConditionalBranch, SignalStep, StepTarget, TriggerFrame};
+pub(crate) use functions::run_statement_function;
 pub(crate) use views::{delete_instead_of_view, insert_instead_of_view, update_instead_of_view};
 
+#[cfg(test)]
+mod function_tests;
 #[cfg(test)]
 mod tests;
 
@@ -481,10 +485,6 @@ fn placed(
     Ok(())
 }
 
-pub(crate) fn function_exists(_reader: &dyn KeyValueRead, _name: &str) -> SqlResult<bool> {
-    Ok(false)
-}
-
 pub(crate) fn create_trigger(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -500,10 +500,9 @@ pub(crate) fn create_trigger(
     };
     check_target(&relation, definition, &create.table)?;
     check_update_columns(&relation, definition, &create.table)?;
-    if let TriggerAction::Function { name, .. } = &definition.action
-        && !function_exists(&*writer, name)?
-    {
-        return Err(errors::missing_function(name).at(create.name.position));
+    if let TriggerAction::Function { name, .. } = &definition.action {
+        functions::check_trigger_function(&*writer, tables, name)
+            .map_err(|error| error.at(create.name.position))?;
     }
     let mut result = QueryResult::command("CREATE TRIGGER");
     let mut triggers = stored(&*writer, &create.table.text)?;
@@ -721,6 +720,28 @@ pub(crate) fn enter_statement(settings: Arc<Settings>) -> StatementScope {
     StatementScope { depth }
 }
 
+pub(crate) fn enter_nested_statement() -> StatementScope {
+    enter_statement(current_settings())
+}
+
+pub(crate) fn finish_nested_statement(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    scope: StatementScope,
+) -> SqlResult<()> {
+    let pending = scope.take_pending();
+    drop(scope);
+    let (calls, others): (Vec<_>, Vec<_>) = pending
+        .into_iter()
+        .partition(|call| matches!(call.trigger.action, TriggerAction::Function { .. }));
+    queue_statement_calls(others);
+    for call in &calls {
+        functions::run_statement_function(writer, tables, settings, call)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn statement_triggers_pending() -> bool {
     STATE.with(|state| {
         state.try_borrow().is_ok_and(|state| {
@@ -835,38 +856,64 @@ pub(crate) struct Firing {
 
 impl Firing {
     pub(crate) fn for_table(
-        reader: &dyn KeyValueRead,
+        writer: &mut dyn KeyValueWrite,
         tables: &mut TableCache,
         table: &TableDefinition,
         event: TriggerEvent,
         updated: &[usize],
     ) -> SqlResult<Option<Self>> {
-        let Some(listed) = of_table(reader, tables, &table.name)? else {
+        let Some(listed) = of_table(&*writer, tables, &table.name)? else {
             return Ok(None);
         };
         let updated: Vec<&str> = updated
             .iter()
             .filter_map(|&index| table.columns.get(index).map(|column| column.name.as_str()))
             .collect();
-        Self::build(&table.name, &listed, event, &updated, || {
+        let firing = Self::build(&table.name, &listed, event, &updated, || {
             table_columns(table)
-        })
+        })?;
+        Self::fire_before_statement(writer, tables, firing)
     }
 
     pub(crate) fn for_view(
-        reader: &dyn KeyValueRead,
+        writer: &mut dyn KeyValueWrite,
         tables: &mut TableCache,
         view: &ViewDefinition,
         event: TriggerEvent,
         updated: &[&str],
     ) -> SqlResult<Option<Self>> {
-        let Some(listed) = of_table(reader, tables, &view.name)? else {
+        let Some(listed) = of_table(&*writer, tables, &view.name)? else {
             return Ok(None);
         };
         let firing = Self::build(&view.name, &listed, event, updated, || view_columns(view))?;
-        Ok(firing.filter(|firing| {
+        let firing = firing.filter(|firing| {
             !firing.instead.is_empty() || firing.replaces_writes
-        }))
+        });
+        Self::fire_before_statement(writer, tables, firing)
+    }
+
+    fn fire_before_statement(
+        writer: &mut dyn KeyValueWrite,
+        tables: &mut TableCache,
+        firing: Option<Self>,
+    ) -> SqlResult<Option<Self>> {
+        let Some(mut firing) = firing else {
+            return Ok(None);
+        };
+        let (before, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut firing.calls)
+            .into_iter()
+            .partition(|call| {
+                call.trigger.timing == TriggerTiming::Before
+                    && matches!(call.trigger.action, TriggerAction::Function { .. })
+            });
+        firing.calls = rest;
+        if !before.is_empty() {
+            let settings = current_settings();
+            for call in &before {
+                functions::run_statement_function(writer, tables, &settings, call)?;
+            }
+        }
+        Ok(Some(firing))
     }
 
     fn build(

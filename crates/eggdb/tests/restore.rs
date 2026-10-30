@@ -155,13 +155,12 @@ fn every_committed_pg_dump_fixture_restores_and_matches_postgresql_table_for_tab
             text(&output.stderr)
         );
         assert!(report.starts_with("{\"ok\":true,"), "{name}: {report}");
-        for skipped in [
-            "\"kind\":\"function\",\"name\":\"public.touch_note()\"",
-            "\"kind\":\"materialized view\",\"name\":\"public.daily_orders\"",
-            "\"kind\":\"trigger\",\"name\":\"customers_touch on public.customers\"",
-        ] {
-            assert!(report.contains(skipped), "{name}: {skipped} in {report}");
-        }
+        assert!(
+            report.contains("\"kind\":\"materialized view\",\"name\":\"public.daily_orders\""),
+            "{name}: {report}"
+        );
+        assert!(!report.contains("touch_note"), "{name}: {report}");
+        assert!(!report.contains("customers_touch"), "{name}: {report}");
         assert!(report.contains("\"tables\":13,"), "{name}: {report}");
         assert!(report.contains("\"views\":3,"), "{name}: {report}");
         assert!(report.contains("\"tables_skipped\":0,"), "{name}: {report}");
@@ -190,6 +189,18 @@ fn every_committed_pg_dump_fixture_restores_and_matches_postgresql_table_for_tab
         assert!(
             ids.iter().all(|id| id.as_deref() != Some("1")),
             "{name}: the sequences continue after the restored rows: {ids:?}"
+        );
+        let mut notes = Vec::new();
+        session
+            .execute(
+                "UPDATE customers SET note = 'x' WHERE id = 1; SELECT note FROM customers WHERE id = 1",
+                &mut |result| notes.extend(result.rows.into_iter().map(|row| row[0].to_text())),
+            )
+            .unwrap();
+        assert_eq!(
+            notes,
+            [Some("x;".to_owned())],
+            "{name}: the restored trigger runs its PL/pgSQL function"
         );
         session.close().unwrap();
         assert_eq!(db.check().unwrap().leaked_pages, 0);
@@ -385,7 +396,7 @@ fn files_the_restore_cannot_use_are_refused() {
 fn the_text_report_counts_lists_and_gives_a_verdict() {
     let directory = TempDirectory::new("text-report");
     let target = directory.join("app.db");
-    let dump = "\\connect app\nCREATE SCHEMA app;\nCREATE TABLE app.t (id integer PRIMARY KEY, note text);\nCOMMENT ON TABLE app.t IS 'x';\nCOPY app.t (id, note) FROM stdin;\n1\tone\n2\ttwo\n\\.\nCREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\nALTER TABLE app.t OWNER TO someone;\nGRANT ALL ON TABLE app.t TO someone;\nSET default_toast_compression = 'lz4';\n";
+    let dump = "\\connect app\nCREATE SCHEMA app;\nCREATE TABLE app.t (id integer PRIMARY KEY, note text);\nCOMMENT ON TABLE app.t IS 'x';\nCOPY app.t (id, note) FROM stdin;\n1\tone\n2\ttwo\n\\.\nCREATE FUNCTION f() RETURNS int LANGUAGE c AS 'lib', 'f';\nALTER TABLE app.t OWNER TO someone;\nGRANT ALL ON TABLE app.t TO someone;\nSET default_toast_compression = 'lz4';\n";
     let output = eggdb(
         &[&"restore", &"--create", &target, &"-", &"--format", &"text"],
         dump.as_bytes(),
@@ -400,7 +411,7 @@ fn the_text_report_counts_lists_and_gives_a_verdict() {
         "  skipped         1 (function 1)\n",
         "  ignored         4 (OWNER TO 1, GRANT 1, SET 1, meta-commands 1)\n",
         "rows per table\n  app.t  2\n",
-        "skipped (not in EggDB yet; docs/roadmap.md)\n  line 9  function f()   functions come later\n",
+        "skipped (not in EggDB yet; docs/roadmap.md)\n  line 9  function f()   routines in languages other than SQL and PL/pgSQL come later\n",
         "  OWNER TO    1 statement (EggDB has no roles yet)\n",
         "  \\connect    line 1 (one database per file)\n",
         "ok: every table and row of the dump is in ",

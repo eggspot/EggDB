@@ -2001,10 +2001,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             {
                 self.select_schema(select, false)
             }
-            Statement::Truncate(table) => self.write("TRUNCATE TABLE", |writer, tables| {
-                binding.target(writer, tables, table)?;
-                execute::truncate(writer, tables, table)
-            }),
+            Statement::Truncate(table) => {
+                self.write_firing_triggers("TRUNCATE TABLE", |writer, tables| {
+                    binding.target(writer, tables, table)?;
+                    execute::truncate(writer, tables, table)
+                })
+            }
             Statement::Select(select) if self.statement_uses_sequences => {
                 self.write("nextval()", |writer, tables| {
                     binding.select(writer, tables, select)?;

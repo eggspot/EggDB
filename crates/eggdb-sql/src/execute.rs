@@ -1241,11 +1241,11 @@ pub(crate) fn insert(
         OnDuplicate::Update(assignments) => Some(resolved_updates(&table, scope, assignments)?),
         _ => None,
     };
-    let mut firing = Firing::for_table(&*writer, tables, &table, TriggerEvent::Insert, &[])?;
+    let mut firing = Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Insert, &[])?;
     let mut update_firing = match &updates {
         Some(updates) => {
             let assigned: Vec<usize> = updates.iter().map(|(index, _)| *index).collect();
-            Firing::for_table(&*writer, tables, &table, TriggerEvent::Update, &assigned)?
+            Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Update, &assigned)?
         }
         None => None,
     };
@@ -1945,7 +1945,7 @@ pub(crate) fn insert_literals(
         crate::sequences::load_all(writer)?;
     }
     let checks = PreparedChecks::of(&table)?;
-    let mut firing = Firing::for_table(&*writer, tables, &table, TriggerEvent::Insert, &[])?;
+    let mut firing = Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Insert, &[])?;
     let mut stored = StoredRows::new(&table);
     stored.checks = Some(&checks);
     let mut children = ChildRows::new(&table);
@@ -3485,7 +3485,7 @@ pub(crate) fn update(
         }
     }
     check_updated_to_default(&table, &targets, &update.assignments)?;
-    let mut firing = Firing::for_table(&*writer, tables, &table, TriggerEvent::Update, &targets)?;
+    let mut firing = Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Update, &targets)?;
     let keep_old = keep_old || firing.is_some();
     if let Some(filter) = &update.filter {
         reject_aggregates(filter, "WHERE")?;
@@ -3711,12 +3711,16 @@ pub(crate) fn truncate(
             }
         }
     }
+    let firing = Firing::for_table(&mut *writer, tables, &definition, TriggerEvent::Truncate, &[])?;
     let every_row = Delete {
         table: table.clone(),
         filter: None,
         returning: None,
     };
     delete_matching(writer, tables, &every_row, false)?;
+    if let Some(firing) = firing {
+        firing.finish();
+    }
     Ok(QueryResult::command("TRUNCATE TABLE".to_owned()))
 }
 
@@ -3793,7 +3797,7 @@ fn delete_matching(
         returning.map(|projection| projection.columns)
     };
     let mut firing = if fires_triggers {
-        Firing::for_table(&*writer, tables, &table, TriggerEvent::Delete, &[])?
+        Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Delete, &[])?
     } else {
         None
     };

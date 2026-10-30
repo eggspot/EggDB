@@ -49,7 +49,7 @@ pub(super) fn missing_function(name: &str) -> SqlError {
         format!("function {name}() does not exist"),
     )
     .with_hint(
-        "A PostgreSQL trigger runs a trigger function; EggDB runs PL/pgSQL functions from the PL/pgSQL milestone on (docs/roadmap.md). Until then, write the trigger in SQLite's, MySQL's or Transact-SQL's syntax.",
+        "A PostgreSQL trigger runs a function without arguments that returns trigger: create it first with CREATE FUNCTION name() RETURNS trigger LANGUAGE plpgsql AS $$ ... $$.",
     )
 }
 

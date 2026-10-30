@@ -344,7 +344,7 @@ pub(crate) fn merge(
         let mut old_rows = Vec::with_capacity(pairs.len());
         let mut updated_pairs = Vec::with_capacity(pairs.len());
         let mut firing =
-            Firing::for_table(&*writer, tables, &table, TriggerEvent::Update, &updated_columns)?;
+            Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Update, &updated_columns)?;
         for &(target_index, source_index) in &pairs {
             let (old_key, old_row) = &target_rows[target_index];
             let row = joined.row(old_row, &source.rows[source_index]);

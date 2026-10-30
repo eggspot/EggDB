@@ -32,6 +32,18 @@ pub(crate) fn run_sql(
     settings: &Settings,
     statement: Statement,
 ) -> SqlResult<QueryResult> {
+    let scope = crate::triggers::enter_nested_statement();
+    let result = run_statement(writer, tables, settings, statement)?;
+    crate::triggers::finish_nested_statement(writer, tables, settings, scope)?;
+    Ok(result)
+}
+
+fn run_statement(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    statement: Statement,
+) -> SqlResult<QueryResult> {
     crate::cancel::check()?;
     let binding = Binding {
         settings,

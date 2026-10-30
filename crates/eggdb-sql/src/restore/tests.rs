@@ -738,12 +738,12 @@ fn meta_commands_other_than_restrict_are_listed_and_never_run() {
 fn every_kind_eggdb_cannot_create_yet_is_reported_with_its_name() {
     let cases = [
         (
-            "CREATE OR REPLACE FUNCTION s.f(a integer) RETURNS integer LANGUAGE sql AS $$ SELECT a; $$;",
+            "CREATE OR REPLACE FUNCTION s.f(a integer) RETURNS integer LANGUAGE c AS 'lib', 'f';",
             "function",
             "s.f(…)",
         ),
         (
-            "CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC SELECT 1; END;",
+            "CREATE PROCEDURE p() LANGUAGE plperl AS $$ return; $$;",
             "procedure",
             "p()",
         ),
@@ -853,7 +853,7 @@ fn rows_of_a_skipped_table_are_counted_for_copy_and_inserts() {
 #[test]
 fn a_statement_failing_on_a_name_it_shares_with_a_skipped_object_is_still_an_error() {
     let store = MemoryStore::default();
-    let dump = "CREATE FUNCTION public.total() RETURNS integer LANGUAGE sql AS 'SELECT 1';\nCREATE TABLE t (total integer PRIMARY KEY);\nINSERT INTO t (total) VALUES (1);\nINSERT INTO t (total) VALUES (1);\n";
+    let dump = "CREATE FUNCTION public.total() RETURNS integer LANGUAGE c AS 'lib', 'total';\nCREATE TABLE t (total integer PRIMARY KEY);\nINSERT INTO t (total) VALUES (1);\nINSERT INTO t (total) VALUES (1);\n";
     let report = restore(&store, dump, false);
     let error = report.error.expect("the duplicate is an error");
     assert_eq!((error.line, error.error.state().code()), (4, "23505"));
@@ -1099,7 +1099,7 @@ fn a_data_statement_naming_a_skipped_object_is_still_an_error() {
     let store = MemoryStore::default();
     let report = restore(
         &store,
-        "CREATE FUNCTION public.f() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;\nCREATE TABLE public.t (a integer);\nINSERT INTO public.t (a) VALUES (public.f());\n",
+        "CREATE FUNCTION public.f() RETURNS integer LANGUAGE c AS 'lib', 'f';\nCREATE TABLE public.t (a integer);\nINSERT INTO public.t (a) VALUES (public.f());\n",
         false,
     );
     let error = report.error.expect("the INSERT is an error");
@@ -1246,4 +1246,57 @@ INSERT INTO public.t VALUES ('calm');
     );
     assert_eq!(report.ignored.meta_commands.len(), 3, "{report:#?}");
     assert_eq!(query(&store, "SELECT a FROM t"), "a\ncalm\nSELECT 1");
+}
+
+#[test]
+fn postgresql_functions_procedures_and_triggers_are_restored_and_run() {
+    let store = MemoryStore::default();
+    let dump = "SET check_function_bodies = false;
+CREATE TABLE public.t (id integer PRIMARY KEY, note text, hits integer DEFAULT 0);
+CREATE FUNCTION public.touch() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.hits := NEW.hits + 1;
+    RETURN NEW;
+END;
+$$;
+ALTER FUNCTION public.touch() OWNER TO postgres;
+CREATE PROCEDURE public.reset_hits(IN target integer)
+    LANGUAGE sql
+    AS $$ UPDATE public.t SET hits = 0 WHERE id = target $$;
+CREATE FUNCTION public.native() RETURNS integer LANGUAGE c AS 'lib', 'native';
+COPY public.t (id, note, hits) FROM stdin;
+1\tone\t5
+\\.
+CREATE TRIGGER t_touch BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION public.touch();
+CREATE TRIGGER t_off BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION public.touch();
+ALTER TABLE public.t DISABLE TRIGGER t_off;
+";
+    let report = restore(&store, dump, false);
+    assert!(report.succeeded(), "{report:#?}");
+    let skipped: Vec<(&str, &str)> = report
+        .skipped
+        .iter()
+        .map(|object| (object.kind.as_str(), object.name.as_str()))
+        .collect();
+    assert_eq!(skipped, [("function", "public.native()")]);
+    assert_eq!(report.rows, 1);
+    let mut session = Session::new(&store);
+    let mut found = Vec::new();
+    session
+        .execute(
+            "UPDATE public.t SET note = 'two'; SELECT hits FROM public.t",
+            &mut |result| found.extend(result.rows.into_iter().map(|row| row[0].to_text())),
+        )
+        .unwrap();
+    assert_eq!(found, [Some("6".to_owned())]);
+    found.clear();
+    session
+        .execute(
+            "CALL public.reset_hits(1); SELECT hits FROM public.t",
+            &mut |result| found.extend(result.rows.into_iter().map(|row| row[0].to_text())),
+        )
+        .unwrap();
+    assert_eq!(found, [Some("1".to_owned())]);
 }

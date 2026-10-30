@@ -157,11 +157,9 @@ pub(super) fn run_row_trigger(
     old: Option<&[Value]>,
     new: Option<&mut Vec<Value>>,
 ) -> SqlResult<BodyEnd> {
-    let TriggerAction::Statements(text) = &trigger.action else {
-        return Err(SqlError::not_supported("a PostgreSQL trigger function").with_hint(
-            "PostgreSQL triggers run PL/pgSQL functions from the PL/pgSQL milestone on (docs/roadmap.md).",
-        ));
-    };
+    if let TriggerAction::Batch(_) = &trigger.action {
+        return Err(SqlError::not_supported("row-level Transact-SQL triggers"));
+    }
     let _active = super::enter_active(table, trigger)?;
     let _dialect = crate::constraints::enter_with_dialect(trigger.dialect);
     crate::cancel::check()?;
@@ -180,6 +178,27 @@ pub(super) fn run_row_trigger(
         dialect: trigger.dialect,
         timing: trigger.timing,
         frame,
+    };
+    let text = match &trigger.action {
+        TriggerAction::Statements(text) => text,
+        _ => {
+            if !run.condition_holds(trigger.condition.as_deref())? {
+                return Ok(BodyEnd::Finished);
+            }
+            let fired = super::functions::FiredRow {
+                table,
+                trigger,
+                columns: columns.as_slice(),
+                old,
+            };
+            return super::functions::run_row_function(
+                &mut *run.writer,
+                &mut *run.tables,
+                &settings,
+                fired,
+                new,
+            );
+        }
     };
     match run.whole(trigger.condition.as_deref(), text) {
         Ok(()) => {}
@@ -203,14 +222,43 @@ struct Run<'r> {
     frame: TriggerFrame,
 }
 
+pub(super) fn statement_condition_holds(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    trigger: &TriggerDefinition,
+    columns: &Arc<Vec<OutputColumn>>,
+) -> SqlResult<bool> {
+    let mut run = Run {
+        writer,
+        tables,
+        settings,
+        dialect: trigger.dialect,
+        timing: trigger.timing,
+        frame: TriggerFrame {
+            columns: Arc::clone(columns),
+            old: None,
+            new: None,
+            locals: Vec::new(),
+            dialect: trigger.dialect,
+        },
+    };
+    run.condition_holds(trigger.condition.as_deref())
+}
+
 impl Run<'_> {
+    fn condition_holds(&mut self, condition: Option<&str>) -> SqlResult<bool> {
+        let Some(condition) = condition else {
+            return Ok(true);
+        };
+        let tokens = tokenize_in(condition, self.dialect)?;
+        let value = self.value(condition, &tokens, 0)?;
+        Ok(truth(&value))
+    }
+
     fn whole(&mut self, condition: Option<&str>, text: &str) -> SqlResult<()> {
-        if let Some(condition) = condition {
-            let tokens = tokenize_in(condition, self.dialect)?;
-            let value = self.value(condition, &tokens, 0)?;
-            if !truth(&value) {
-                return Ok(());
-            }
+        if !self.condition_holds(condition)? {
+            return Ok(());
         }
         let tokens = tokenize_in(text, self.dialect)?;
         let steps = Parser::new(text, &tokens)
