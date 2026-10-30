@@ -547,7 +547,11 @@ fn clock_parts(text: &str) -> Result<(i64, Option<i64>), Failure> {
         }
     }
     scan.spaces();
-    let offset = parse_zone(&mut scan)?;
+    let offset = match parse_zone(&mut scan)? {
+        WrittenZone::Absent => None,
+        WrittenZone::Offset(seconds) => Some(seconds),
+        WrittenZone::Region(zone) => Some(i64::from(zone.offset_at(statement_now()))),
+    };
     scan.spaces();
     if !scan.done() {
         return Err(Failure::Syntax);

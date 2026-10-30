@@ -72,7 +72,7 @@ fn region(name: &str) -> Option<&'static Region> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if let Some(found) = regions.get(canonical) {
+    if let Some(found) = regions.get(canonical).copied() {
         return Some(found);
     }
     let compiled = compile::compile(source, first)?;

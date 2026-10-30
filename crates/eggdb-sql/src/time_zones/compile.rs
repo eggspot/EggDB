@@ -39,10 +39,10 @@ impl Source {
                     .insert(name.to_ascii_lowercase(), (name, index));
             } else if kind.eq_ignore_ascii_case("r") || kind.eq_ignore_ascii_case("rule") {
                 source.rules.entry(name).or_default().push(index);
-            } else if kind.eq_ignore_ascii_case("l") || kind.eq_ignore_ascii_case("link") {
-                if let Some(alias) = fields.next() {
-                    links.push((name, alias));
-                }
+            } else if (kind.eq_ignore_ascii_case("l") || kind.eq_ignore_ascii_case("link"))
+                && let Some(alias) = fields.next()
+            {
+                links.push((name, alias));
             }
         }
         for _ in 0..MAX_LINKS_FOLLOWED {

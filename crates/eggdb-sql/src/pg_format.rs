@@ -1357,11 +1357,11 @@ fn read_field(
                 .take_while(|character| !character.is_whitespace())
                 .collect();
             reader.at += zone.chars().count();
-            if datetime::time_zone_offset(&zone).is_none() {
-                if let Some(region) = crate::time_zones::TimeZone::region(&zone) {
-                    parts.region = Some(region);
-                    return Ok(());
-                }
+            if datetime::time_zone_offset(&zone).is_none()
+                && let Some(region) = crate::time_zones::TimeZone::region(&zone)
+            {
+                parts.region = Some(region);
+                return Ok(());
             }
             let east = datetime::time_zone_offset(&zone)
                 .map(i64::from)
