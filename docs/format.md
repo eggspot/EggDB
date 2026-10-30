@@ -640,7 +640,12 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   record per name (catalog prefix, `0x0C`, the routine's internal name) holding every overload's
   dialect, kind, identity and `CREATE` text, with record version 1 (D158); Transact-SQL
   procedures and functions are the same records with SQL Server's dialect code, one per name
-  (D159).
+  (D159), and so are PL/SQL procedures and functions, with Oracle's dialect code, one per name,
+  whose identity is their parameters' declared types as written (`EMPLOYEES.EMPLOYEE_ID%TYPE`).
+  PL/SQL packages are one record per package (catalog prefix, `0x0D`, the package's internal
+  name) with record version 1: a shape byte (0 specification only, 1 with a body), then the
+  specification's `CREATE` text and, with a body, the body's `CREATE` text, each a varint
+  length and UTF-8 bytes.
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.

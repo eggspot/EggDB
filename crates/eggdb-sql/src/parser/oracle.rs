@@ -456,7 +456,7 @@ impl<'t> Parser<'t> {
 
     pub(super) fn oracle_statement(&mut self) -> SqlResult<Option<Statement>> {
         let TokenKind::Word(word) = self.peek_kind() else {
-            return Ok(None);
+            return self.plsql_statement();
         };
         let statement = match word.as_ref() {
             "drop" if self.is_word_at(1, "table") => self.oracle_drop_table()?,
@@ -488,11 +488,6 @@ impl<'t> Parser<'t> {
             {
                 return Ok(None);
             }
-            "begin" | "declare" => {
-                return Err(self.not_supported(
-                    "PL/SQL blocks (Oracle starts a transaction with the first change)",
-                ));
-            }
             "start" | "end" | "abort" | "show" | "reset" | "values" | "table" | "listen"
             | "notify" | "unlisten" | "vacuum" | "discard" => {
                 return Err(self.unexpected());
@@ -500,7 +495,7 @@ impl<'t> Parser<'t> {
             "insert" if self.is_word_at(1, "all") || self.is_word_at(1, "first") => {
                 return Err(self.not_supported("INSERT ALL and INSERT FIRST"));
             }
-            _ => return Ok(None),
+            _ => return self.plsql_statement(),
         };
         Ok(Some(statement))
     }

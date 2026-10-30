@@ -1,13 +1,20 @@
 mod exceptions;
+mod packages;
 
 #[cfg(test)]
 mod compile_tests;
+#[cfg(test)]
+mod ddl_tests;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use exceptions::{
     APPLICATION_ERROR_HIGHEST, APPLICATION_ERROR_LOWEST, NO_DATA_FOUND_CODE, PredefinedException,
     USER_EXCEPTION_CODE, application_error_code, predefined_by_code, predefined_by_name, sqlcode_of,
+};
+pub(crate) use packages::{
+    StoredPackage, alter_package, create_package, drop_package, parse_package, resolve_package,
+    stored_package,
 };
 
 use crate::ast::Name;
@@ -18,6 +25,7 @@ use crate::plpgsql::{Block, Program, is_trigger_function};
 use crate::routines::{
     RoutineDefinition, RoutineKind, RoutineLanguage, RoutineParameter, RoutineReturns, Volatility,
 };
+use crate::schemas::{base_name, is_qualified, schema_of};
 use crate::types::SqlType;
 
 pub(crate) const COMPILATION_ERROR_CODE: u16 = 6550;
@@ -122,6 +130,33 @@ impl Default for TriggerRecords {
             old: "old".to_owned(),
         }
     }
+}
+
+pub(crate) fn shown_object(internal: &str) -> String {
+    let name = swap_uniform_case(base_name(internal));
+    if is_qualified(internal) {
+        format!("{}.{name}", swap_uniform_case(schema_of(internal)))
+    } else {
+        name
+    }
+}
+
+pub(crate) fn name_in_use(position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::DUPLICATE_OBJECT,
+        "name is already used by an existing object",
+    )
+    .with_oracle_code(955)
+    .at(position)
+}
+
+pub(crate) fn object_missing(internal: &str, position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::UNDEFINED_OBJECT,
+        format!("object {} does not exist", shown_object(internal)),
+    )
+    .with_oracle_code(4043)
+    .at(position)
 }
 
 pub(crate) fn is_ref_cursor(declared: &DeclaredType) -> bool {

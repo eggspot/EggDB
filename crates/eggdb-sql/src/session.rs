@@ -307,6 +307,7 @@ fn inline_data_start(text: &str, ranges: &[std::ops::Range<usize>], stop: CopySt
 }
 
 const NO_TRANSACTION_WARNING: &str = "WARNING:  there is no transaction in progress";
+const PLSQL_BLOCK_TAG: &str = "PL/SQL BLOCK";
 
 fn aborted_block() -> SqlError {
     SqlError::new(
@@ -2265,7 +2266,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 crate::routines::drop_routines(writer, tables, drop, dialect)
             }),
             Statement::AlterRoutine(alter) => self.write("ALTER FUNCTION", |writer, tables| {
-                crate::routines::alter_routine(writer, tables, alter)
+                crate::routines::alter_routine(writer, tables, alter, dialect)
             }),
             Statement::Call(call) => self.write("CALL", |writer, tables| {
                 for argument in &mut call.arguments {
@@ -2275,6 +2276,26 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Do(block) => self.write("DO", |writer, tables| {
                 crate::routines::run_do(writer, tables, &settings, &block.code)
+            }),
+            Statement::PlsqlBlock(block) => self.write(PLSQL_BLOCK_TAG, |writer, tables| {
+                crate::plpgsql::run_anonymous_block(writer, tables, &settings, block)?;
+                Ok(QueryResult::command(PLSQL_BLOCK_TAG))
+            }),
+            Statement::CreatePackage(create) => {
+                let tag = if create.package.body {
+                    "CREATE PACKAGE BODY"
+                } else {
+                    "CREATE PACKAGE"
+                };
+                self.write(tag, |writer, tables| {
+                    crate::plsql::create_package(writer, tables, create)
+                })
+            }
+            Statement::DropPackage(drop) => self.write("DROP PACKAGE", |writer, _| {
+                crate::plsql::drop_package(writer, drop)
+            }),
+            Statement::AlterPackage(alter) => self.write("ALTER PACKAGE", |writer, _| {
+                crate::plsql::alter_package(&*writer, alter)
             }),
             Statement::AlterSession(settings) => self.alter_session(settings),
             Statement::CreateType(create) => self.write("CREATE TYPE", |writer, _| {
@@ -2356,6 +2377,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     | Statement::CreateRoutine(_)
                     | Statement::DropRoutine(_)
                     | Statement::AlterRoutine(_)
+                    | Statement::CreatePackage(_)
+                    | Statement::DropPackage(_)
+                    | Statement::AlterPackage(_)
             )
     }
 

@@ -57,7 +57,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn call_routine(&mut self) -> SqlResult<Statement> {
+    pub(super) fn call_routine(&mut self) -> SqlResult<Statement> {
         self.at += 1;
         let name = self.table_name()?;
         self.expect(&TokenKind::LeftParen)?;

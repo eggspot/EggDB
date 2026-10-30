@@ -192,6 +192,20 @@ pub(crate) fn run_inline(
     run.program(&program).map(drop)
 }
 
+pub(crate) fn run_anonymous_block(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    block: &crate::ast::PlsqlBlock,
+) -> SqlResult<()> {
+    let _depth = enter_routine()?;
+    let definition = crate::plsql::anonymous_block_definition(&block.code);
+    let label = crate::plsql::ANONYMOUS_BLOCK_NAME.to_owned();
+    let mut run = Run::new(writer, tables, settings, &definition, label);
+    run.bind_parameters(Vec::new());
+    run.program(&block.program).map(drop)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Flow {
     Next,

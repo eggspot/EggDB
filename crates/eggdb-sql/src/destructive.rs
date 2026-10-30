@@ -202,6 +202,9 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::CreateRoutine(_)
         | Statement::DropRoutine(_)
         | Statement::AlterRoutine(_)
+        | Statement::CreatePackage(_)
+        | Statement::DropPackage(_)
+        | Statement::AlterPackage(_)
         | Statement::SqlServer(_) => None,
         Statement::Call(call) => Some(DestructiveStatement::new(
             DestructiveKind::RunCode,
@@ -211,6 +214,11 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         Statement::Do(_) => Some(DestructiveStatement::new(
             DestructiveKind::RunCode,
             vec!["DO".to_owned()],
+            false,
+        )),
+        Statement::PlsqlBlock(_) => Some(DestructiveStatement::new(
+            DestructiveKind::RunCode,
+            vec![crate::plsql::ANONYMOUS_BLOCK_NAME.to_owned()],
             false,
         )),
         Statement::With(with) => crate::with_statement::classify(with),

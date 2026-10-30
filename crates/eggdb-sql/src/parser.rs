@@ -6,6 +6,7 @@ mod mysql;
 mod oracle;
 mod plpgsql;
 mod plsql;
+mod plsql_routines;
 mod postgresql;
 mod query;
 mod routines;
@@ -595,6 +596,9 @@ impl<'t> Parser<'t> {
 
     pub(crate) fn statement(&mut self) -> SqlResult<Statement> {
         let statement = self.statement_body()?;
+        if self.oracle() && self.ended_plsql_unit(&statement) {
+            return Ok(statement);
+        }
         match self.peek_kind() {
             TokenKind::Semicolon => {
                 self.at += 1;
@@ -4071,7 +4075,7 @@ impl<'t> Parser<'t> {
     }
 
     fn named_argument_name(&mut self) -> SqlResult<Option<Name>> {
-        if !self.postgresql() || self.peek_kind_at(1) != &TokenKind::Operator("=>") {
+        if !(self.postgresql() || self.oracle()) || self.peek_kind_at(1) != &TokenKind::Operator("=>") {
             return Ok(None);
         }
         let parameter = self.name()?;

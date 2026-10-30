@@ -98,6 +98,44 @@ pub(crate) enum Statement {
     AlterRoutine(AlterRoutine),
     Call(CallRoutine),
     Do(DoBlock),
+    PlsqlBlock(Box<PlsqlBlock>),
+    CreatePackage(Box<CreatePackage>),
+    DropPackage(DropPackage),
+    AlterPackage(AlterPackage),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlsqlBlock {
+    pub(crate) code: String,
+    pub(crate) program: crate::plpgsql::Program,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreatePackage {
+    pub(crate) replace: bool,
+    pub(crate) text: String,
+    pub(crate) package: crate::plsql::PlsqlPackage,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DropPackage {
+    pub(crate) name: Name,
+    pub(crate) body: bool,
+    pub(crate) if_exists: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackagePart {
+    Whole,
+    Specification,
+    Body,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterPackage {
+    pub(crate) name: Name,
+    pub(crate) part: PackagePart,
 }
 
 #[derive(Debug, Clone, PartialEq)]

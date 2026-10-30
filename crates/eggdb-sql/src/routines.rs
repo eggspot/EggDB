@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod calls;
+mod oracle;
 mod sqlserver;
 
 pub(crate) use calls::{
@@ -436,6 +437,10 @@ pub(crate) fn every_routine(reader: &dyn KeyValueRead) -> SqlResult<Vec<NamedRou
     }
 }
 
+pub(crate) fn has_routines(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
+    Ok(reader.get(&routine_key(name))?.is_some())
+}
+
 fn stored(reader: &dyn KeyValueRead, name: &str) -> SqlResult<Vec<StoredRoutine>> {
     match reader.get(&routine_key(name))? {
         Some(bytes) => decode_routines(name, &bytes),
@@ -584,8 +589,10 @@ pub(crate) fn create_routine(
         )
         .at(create.name.position));
     }
-    if definition.dialect == Dialect::SqlServer {
-        return sqlserver::create_routine(writer, tables, create, definition);
+    match definition.dialect {
+        Dialect::SqlServer => return sqlserver::create_routine(writer, tables, create, definition),
+        Dialect::Oracle => return oracle::create_routine(writer, tables, create, definition),
+        _ => {}
     }
     check_returns(&*writer, tables, &definition)?;
     if body_check == BodyCheck::Checked {
@@ -711,8 +718,10 @@ pub(crate) fn drop_routines(
     drop: &DropRoutine,
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
-    if dialect == Dialect::SqlServer {
-        return sqlserver::drop_routines(writer, tables, drop);
+    match dialect {
+        Dialect::SqlServer => return sqlserver::drop_routines(writer, tables, drop),
+        Dialect::Oracle => return oracle::drop_routines(writer, tables, drop),
+        _ => {}
     }
     let keyword = drop.kind.map_or("ROUTINE", RoutineKind::keyword);
     let mut result = QueryResult::command(format!("DROP {keyword}"));
@@ -777,7 +786,11 @@ pub(crate) fn alter_routine(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     alter: &AlterRoutine,
+    dialect: Dialect,
 ) -> SqlResult<QueryResult> {
+    if dialect == Dialect::Oracle {
+        return oracle::alter_routine(&*writer, tables, alter);
+    }
     let keyword = alter.kind.map_or("ROUTINE", RoutineKind::keyword);
     let result = QueryResult::command(format!("ALTER {keyword}"));
     let located = locate(&*writer, tables, alter.kind, &alter.target)??;

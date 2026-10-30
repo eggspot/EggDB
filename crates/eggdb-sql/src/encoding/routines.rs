@@ -44,7 +44,7 @@ pub(crate) fn encode_routines(routines: &[StoredRoutine]) -> Vec<u8> {
     out
 }
 
-fn bounded_text(reader: &mut Reader<'_>) -> SqlResult<String> {
+pub(super) fn bounded_text(reader: &mut Reader<'_>) -> SqlResult<String> {
     let text = reader.text()?;
     if text.len() > MAX_ROUTINE_TEXT {
         return Err(reader.damaged());
